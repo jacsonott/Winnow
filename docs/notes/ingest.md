@@ -55,6 +55,15 @@ see [docs/notes/README.md](README.md) for the whole set.
   file-count and nesting-depth caps → `truncated: true` with a valid
   partial tree. Inner archives are deleted after expanding — the tree
   holds only real files; the original archive is never touched.
+  A member the filesystem won't CREATE (a name past NAME_MAX, a file
+  where a later member needs a directory) is skipped and reported, not
+  the end of the expansion — it used to raise out of the loop and take
+  every later member with it, unreported. Member names are made to fit
+  the OS they land on (`_member_name_for_os`): a no-op on POSIX, but on
+  Windows a `:` would write an alternate data stream of the file before
+  it and `?*<>|"` raise, so those, trailing dots/spaces and reserved
+  device names (`aux.log` included) are rewritten with `_`. Tested with
+  the Windows rules forced, since the suite runs on POSIX.
 - Plaso ingest (`ingest_plaso`, plasoread.py) reads a `.plaso` storage
   file — a SQLite db of serialized attribute containers — as ONE flat
   timeline table, no plaso install involved. Both on-disk generations are

@@ -148,3 +148,68 @@ def test_upload_route_extracts_beside_the_case(client, store, tmp_path):
     assert os.path.dirname(rep["root"]) == os.path.dirname(os.path.abspath(store.path))
     assert os.path.basename(rep["root"]).startswith("uac-host-extracted")
     assert _tree(rep["root"]) == ["log/shell.log"]
+
+
+def test_one_unwritable_member_is_skipped_and_the_rest_still_extract(tmp_path):
+    """A member whose name the filesystem refuses (a component past
+    NAME_MAX) or that clashes with one already written (a FILE named like
+    a later member's directory) used to raise out of the whole expansion,
+    so every member after it was silently missing from the tree. Each is
+    one member's problem: skipped, reported, and the rest extract."""
+    bundle = tmp_path / "b.zip"
+    with zipfile.ZipFile(bundle, "w") as zf:
+        zf.writestr("a.log", "first\n")
+        zf.writestr("x" * 300 + ".log", "too long a name\n")
+        zf.writestr("dir", "a file where a directory is about to be needed\n")
+        zf.writestr("dir/inner.log", "clashes with the file above\n")
+        zf.writestr("z.log", "last\n")
+    rep = archive.expand_archive(str(bundle))
+    assert _tree(rep["root"]) == ["a.log", "dir", "z.log"]
+    reasons = {s["path"][:5]: s["reason"] for s in rep["skipped"]}
+    assert set(reasons) == {"x" * 5, "dir/i"}
+    assert all("could not be written" in r for r in reasons.values())
+    assert rep["files"] == 3
+
+
+def test_an_unwritable_tar_member_does_not_stop_the_tar_either(tmp_path):
+    tgz = tmp_path / "b.tgz"
+    _write_tgz(tgz, {"a.log": "1\n", "y" * 300: "2\n", "b.log": "3\n"})
+    rep = archive.expand_archive(str(tgz))
+    assert _tree(rep["root"]) == ["a.log", "b.log"]
+    assert [s["path"] for s in rep["skipped"]] == ["y" * 300]
+
+
+def test_a_destination_that_cannot_be_created_is_a_clean_error(tmp_path, monkeypatch):
+    """_fresh_dest ran outside the error handling, so a read-only mount
+    or a name past the filesystem's limit was a 500 from the route."""
+    bundle = tmp_path / ("n" * 250 + ".zip")   # fits; "<stem>-extracted" does not
+    _write_zip(bundle, {"a.log": "1\n"})
+    with pytest.raises(archive.ArchiveError, match="Could not create"):
+        archive.expand_archive(str(bundle))
+
+
+def test_expand_route_is_a_400_when_the_destination_cannot_be_made(client, tmp_path):
+    bundle = tmp_path / ("n" * 250 + ".zip")   # fits; "<stem>-extracted" does not
+    _write_zip(bundle, {"a.log": "1\n"})
+    r = client.post("/api/ingest/archive/expand", json={"path": str(bundle)})
+    assert r.status_code == 400 and "Could not create" in r.json()["detail"]
+
+
+@pytest.mark.parametrize("member,expected", [
+    ("logs/evil.txt:hidden", "logs/evil.txt_hidden"),     # an NTFS alternate data stream
+    ("a?b*c<d>e|f\"g.log", "a_b_c_d_e_f_g.log"),          # refused outright by Windows
+    ("dir./trailing .log ", "dir_/trailing .log_"),       # Windows silently drops these
+    ("CON/aux.log", "_CON/_aux.log"),                     # reserved device names
+    ("plain/name.log", "plain/name.log"),
+])
+def test_member_names_are_made_safe_for_windows(member, expected):
+    """On Windows a ':' in a member name writes an alternate data stream
+    of the file before it, and ?*<>|" raise — which stopped the whole
+    expansion. Names are sanitised for the OS they land on; the check is
+    run here with the Windows rules forced, since the suite runs on POSIX
+    where every one of those characters is a legal name."""
+    assert archive._member_name_for_os(member, windows=True) == expected
+
+
+def test_posix_member_names_are_left_alone():
+    assert archive._member_name_for_os("a:b?c.log", windows=False) == "a:b?c.log"

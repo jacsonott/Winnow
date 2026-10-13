@@ -28,6 +28,13 @@ Untrusted-input rules, all enforced here rather than assumed:
   devices and FIFOs are skipped and reported (a hostile tarball's
   symlink-then-write dance never gets its first step).
 - **Encrypted zip members** are skipped and reported by name.
+- **One member's problem is one member's**: a name the filesystem
+  refuses (past NAME_MAX, or a file where a later member needs a
+  directory) is skipped and reported, never the end of the expansion.
+- **Names fit the OS they land on**: on Windows a ``:`` in a member name
+  would write an NTFS alternate data stream of the file before it, and
+  ``?*<>|"`` raise — so each path component is sanitised there
+  (``_member_name_for_os``).
 
 Stdlib only (zipfile/tarfile/gzip/shutil), per the airgap rule.
 """
@@ -55,6 +62,11 @@ _TAR_SUFFIXES = (".tar", ".tgz", ".tar.gz", ".tar.bz2", ".tar.xz", ".tbz2", ".tx
 
 class ArchiveError(ValueError):
     pass
+
+
+class _MemberUnwritable(Exception):
+    """The filesystem refused to CREATE one member's file — distinct from
+    a corrupt stream, which the callers already handle their own way."""
 
 
 def looks_like_archive(name: str) -> bool:
@@ -112,6 +124,36 @@ class _Budget:
             self.skipped.append({"path": path, "reason": reason})
 
 
+# Characters Windows refuses in a file name (and ':' which it doesn't
+# refuse but reads as "alternate data stream of the file before it"),
+# control characters included; and the device names that are reserved
+# with or without an extension (`aux.log` is the AUX device).
+_WINDOWS_BAD_CHARS = set('<>:"|?*') | {chr(i) for i in range(32)}
+_WINDOWS_RESERVED = ({"CON", "PRN", "AUX", "NUL"}
+                     | {f"COM{i}" for i in range(1, 10)} | {f"LPT{i}" for i in range(1, 10)})
+
+
+def _member_name_for_os(rel: str, windows: bool) -> str:
+    """`rel` (a member's normalised relative path, '/'-separated) made
+    writable as itself on this OS. A no-op on POSIX, where every one of
+    these is a legal name. On Windows, each component: bad characters
+    become '_'; a trailing dot or space (which Windows silently drops, so
+    `a.` and `a` would collide) becomes '_'; a reserved device name gets a
+    '_' prefix. Taking the parameter rather than reading os.name is what
+    lets the POSIX suite check the Windows rules."""
+    if not windows:
+        return rel
+    out = []
+    for comp in rel.split("/"):
+        comp = "".join("_" if ch in _WINDOWS_BAD_CHARS else ch for ch in comp)
+        kept = comp.rstrip(". ")
+        comp = kept + "_" * (len(comp) - len(kept))
+        if comp.split(".")[0].upper() in _WINDOWS_RESERVED:
+            comp = "_" + comp
+        out.append(comp)
+    return "/".join(out)
+
+
 def _safe_target(dest: str, member_name: str, budget: _Budget) -> str | None:
     # Zips written by Windows tools sometimes carry backslash separators.
     name = member_name.replace("\\", "/").lstrip("/")
@@ -121,14 +163,18 @@ def _safe_target(dest: str, member_name: str, budget: _Budget) -> str | None:
     if norm.startswith("..") or os.path.isabs(norm) or (len(norm) > 1 and norm[1] == ":"):
         budget.skip(member_name, "path escapes the extraction directory")
         return None
-    return os.path.join(dest, norm)
+    return os.path.join(dest, _member_name_for_os(norm.replace(os.sep, "/"), windows=os.name == "nt"))
 
 
 def _copy_stream(src, dst_path: str, budget: _Budget) -> bool:
     """Copy with the byte budget enforced DURING the copy — a bomb's real
     size is discovered as it decompresses, not read from its headers."""
-    os.makedirs(os.path.dirname(dst_path), exist_ok=True)
-    with open(dst_path, "wb") as out:
+    try:
+        os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+        out = open(dst_path, "wb")
+    except OSError as e:
+        raise _MemberUnwritable(e) from e
+    with out:
         while True:
             chunk = src.read(_COPY_CHUNK)
             if not chunk:
@@ -156,9 +202,13 @@ def _expand_zip(path: str, dest: str, budget: _Budget) -> bool:
             target = _safe_target(dest, info.filename, budget)
             if not target:
                 continue
-            with zf.open(info) as src:
-                if not _copy_stream(src, target, budget):
-                    return False
+            try:
+                with zf.open(info) as src:
+                    if not _copy_stream(src, target, budget):
+                        return False
+            except _MemberUnwritable as e:
+                budget.skip(info.filename, f"could not be written here: {e}")
+                continue
             budget.files += 1
     return True
 
@@ -180,9 +230,13 @@ def _expand_tar(path: str, dest: str, budget: _Budget) -> bool:
             if src is None:
                 budget.skip(member.name, "unreadable tar member")
                 continue
-            with src:
-                if not _copy_stream(src, target, budget):
-                    return False
+            try:
+                with src:
+                    if not _copy_stream(src, target, budget):
+                        return False
+            except _MemberUnwritable as e:
+                budget.skip(member.name, f"could not be written here: {e}")
+                continue
             budget.files += 1
     return True
 
@@ -193,6 +247,9 @@ def _expand_gz(path: str, dest_file: str, budget: _Budget) -> bool:
             ok = _copy_stream(src, dest_file, budget)
         except (OSError, EOFError) as e:
             budget.skip(path, f"corrupt gzip stream: {e}")
+            return True
+        except _MemberUnwritable as e:
+            budget.skip(path, f"could not be written here: {e}")
             return True
         if ok:
             budget.files += 1
@@ -226,7 +283,14 @@ def expand_archive(path: str, dest_root: str | None = None) -> dict:
         raise ArchiveError(f"{os.path.basename(path)} is not a zip, tar or gzip archive")
 
     budget = _Budget()
-    dest = _fresh_dest(path, dest_root)
+    try:
+        dest = _fresh_dest(path, dest_root)
+    except OSError as e:
+        # A read-only mount, or "<name>-extracted" past the filesystem's
+        # name limit: nothing was written, and the route can say why
+        # (this ran outside every handler, so it was a 500).
+        raise ArchiveError(f"Could not create a folder to expand "
+                           f"{os.path.basename(path)} into: {e}") from e
     budget.archives += 1
     try:
         cont = _expand_one(path, dest, budget)
