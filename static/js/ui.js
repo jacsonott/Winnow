@@ -789,6 +789,31 @@ export function closeModal() {
   document.dispatchEvent(new CustomEvent('winnow:modalclose'));
 }
 
+/* An async click handler that runs one at a time: `btn.onclick =
+   oneAtATime(btn, async () => { ... })`. The button is disabled from the
+   first click until the handler settles, and a click that still gets
+   through is dropped. For any button whose handler awaits a POST before
+   its dialog closes — the second click of a double-click used to run the
+   whole handler again: every file of a folder import queued twice, two
+   cases created on one path, two merges, a second copy into a case the
+   first had locked. The disabled state is put back afterwards, so a
+   handler that failed and left its dialog open can be clicked again. */
+export function oneAtATime(btn, handler) {
+  let running = false;
+  return async (e) => {
+    if (running) return undefined;
+    running = true;
+    const was = btn.disabled;
+    btn.disabled = true;
+    try {
+      return await handler(e);
+    } finally {
+      running = false;
+      btn.disabled = was;
+    }
+  };
+}
+
 /* DOM wiring for this module, called once by main.js. Handlers can't
    fire during load, so the order these run in doesn't matter — the
    startup steps that DO depend on order live in main.js instead. */

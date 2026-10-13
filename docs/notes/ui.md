@@ -1500,3 +1500,17 @@ see [docs/notes/README.md](README.md) for the whole set.
   carried the Tables manager's `kind='tables'` into the next dialog, so
   that poll's "is Tables still open?" check never said no.
   `tests/ui/test_modal_body_per_dialog.py`.
+
+- **A button whose handler awaits a write before its dialog closes takes
+  `oneAtATime`** (ui.js): disabled from the first click until the handler
+  settles, and a click that still gets through is dropped. Without it the
+  second click of a double-click ran the whole handler again — every file
+  of a folder import queued twice ("Import checked (N)"), two cases
+  created on one path (new-case Create), two merges, and a second "Copy
+  into this case" that found the target locked by the first copy and
+  called it "open in another Winnow". Handlers that hide the dialog
+  *before* their first await (the import previews) were never exposed,
+  since the second click lands on whatever is underneath; anything new
+  that awaits first should take the wrapper.
+  `tests/ui/test_double_click_submits_once.py` holds each POST in flight
+  until the double-click is over and counts them.

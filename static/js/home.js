@@ -24,7 +24,7 @@ import { S } from './state.js';
 import { fmtBytes } from './tables.js';
 import { updateTimeRangeButton } from './timeframe.js';
 import { loadTimelineTemplates } from './timeline.js';
-import { confirmDialog, modal, promptDialog } from './ui.js';
+import { confirmDialog, modal, oneAtATime, promptDialog } from './ui.js';
 
 /* -------------------------------------------------------------- home screen */
 
@@ -585,7 +585,7 @@ export function openNewCaseModal(state = {}) {
 
     const actions = el('div', 'row-actions');
     const create = el('button', 'btn', 'Create case');
-    create.onclick = async () => {
+    create.onclick = oneAtATime(create, async () => {
       const name = nameInput.value.trim();
       if (!name) { toast('Name the case first'); return; }
       const path = pathInput.value.trim();
@@ -617,7 +617,7 @@ export function openNewCaseModal(state = {}) {
           toast('Case created, but the profile failed to apply: ' + e.message, 6000);
         }
       }
-    };
+    });
     const cancel = el('button', 'btn ghost', 'Cancel');
     cancel.onclick = () => { $('modal').hidden = true; };
     actions.append(create, cancel);
@@ -695,7 +695,7 @@ export function openExistingCasePrompt(state = {}) {
 
     const actions = el('div', 'row-actions');
     const openBtn = el('button', 'btn', 'Open');
-    openBtn.onclick = async () => {
+    openBtn.onclick = oneAtATime(openBtn, async () => {
       const trimmed = pathInput.value.trim();
       if (!trimmed) { toast('Enter or browse to a case file'); return; }
       const name = trimmed.split(/[\\/]/).pop().replace(/\.db-winnow$|\.db$/i, '');
@@ -707,7 +707,7 @@ export function openExistingCasePrompt(state = {}) {
       }
       $('modal').hidden = true;
       await openCase(trimmed);
-    };
+    });
     const cancel = el('button', 'btn ghost', 'Cancel');
     cancel.onclick = () => { $('modal').hidden = true; };
     actions.append(openBtn, cancel);
@@ -1005,7 +1005,7 @@ export function tempCopyModal({ thenDiscard = false } = {}) {
         row.append(el('span', 'session-name', c.name),
                    el('span', 'count', c.path));
         const go = el('button', 'btn ghost', 'Copy into this case');
-        go.onclick = async () => {
+        go.onclick = oneAtATime(go, async () => {
           const ids = S.sources.filter((s) => s.id > 0 && !s.error).map((s) => s.id);
           if (!ids.length) { toast('Nothing here to copy yet'); return; }
           setBusy(true);
@@ -1016,7 +1016,7 @@ export function tempCopyModal({ thenDiscard = false } = {}) {
           $('modal').hidden = true;
           toast(`Copied ${res.copied.length} table${res.copied.length === 1 ? '' : 's'} into "${c.name}"`, 8000);
           if (thenDiscard) await tempDiscard({ confirm: false });
-        };
+        });
         row.append(go);
         list.append(row);
       }

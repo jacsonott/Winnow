@@ -11,7 +11,7 @@ import { renderPluginTabs, renderPluginPanelButtons } from './plugins.js';
 import { fmtBytes } from './tables.js';
 import { loadSources } from './sources.js';
 import { S } from './state.js';
-import { confirmDialog, modal, promptDialog } from './ui.js';
+import { confirmDialog, modal, oneAtATime, promptDialog } from './ui.js';
 
 /* ------------------------------------------------------------- plugins */
 
@@ -937,7 +937,7 @@ export async function openDirectoryImportModal(state = {}) {
 
     const cancelBtn = el('button', 'btn ghost', 'Cancel');
     cancelBtn.onclick = () => { $('modal').hidden = true; };
-    importBtn.onclick = async () => {
+    importBtn.onclick = oneAtATime(importBtn, async () => {
       const toImport = scanResult.matched.filter((_, i) => checked.has(i));
       if (!toImport.length) return;
       // The files are already on the server's disk, so there's no upload
@@ -980,7 +980,7 @@ export async function openDirectoryImportModal(state = {}) {
       startJobsPoll();
       $('modal').hidden = true;
       toast(`Queued ${ok} import${ok === 1 ? '' : 's'}${failed ? ` — ${failed} failed to queue` : ''} — progress in the corner panel`, 4000);
-    };
+    });
     // Save-as-profile on the left, the import on the right: the profile
     // is the last thing done with these choices, the import the first.
     importBtn.style.marginLeft = 'auto';
