@@ -43,7 +43,7 @@ from winnow import userenv
 from winnow import version
 from winnow import archive
 from winnow import workspace as WS
-from winnow.store import (CASE_SUFFIX, DEFAULT_IMPORT_EXTENSIONS, PLASO_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, MissingTable, OpCancelled, Store, ViewExpired,
+from winnow.store import (CASE_SUFFIX, DEFAULT_IMPORT_EXTENSIONS, PLASO_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, MissingTable, OpCancelled, RecordGone, Store, ViewExpired,
                    describe_case_lock, probe_case_lock, q, rows_to_xlsx, sweep_orphan_views)
 
 HERE = paths.INSTALL_ROOT  # static/, plugins/, examples/plugins/ all hang off the install root
@@ -463,6 +463,16 @@ async def closed_database_handler(request: Request, exc: sqlite3.ProgrammingErro
             status_code=409,
         )
     return JSONResponse({"detail": f"Internal error: {exc}"}, status_code=500)
+
+
+# A write that names a table, tag or row this case no longer has — a
+# second window acting on something the first deleted. The Store raises it
+# before writing anything, so this is a clean refusal, not an error after
+# the fact; 404 rather than 409 because no rebuild brings the thing back,
+# and worded without "expired" for the reason the handler above gives.
+@app.exception_handler(RecordGone)
+async def record_gone_handler(request: Request, exc: RecordGone):
+    return JSONResponse({"detail": str(exc)}, status_code=404)
 
 
 @app.exception_handler(OpCancelled)
@@ -1801,9 +1811,19 @@ def api_cases_update(case_id: int, body: CaseUpdate):
 
 
 @app.delete("/api/cases/{case_id}")
-def api_cases_delete(case_id: int, delete_file: bool = False):
+def api_cases_delete(case_id: int, delete_file: bool = False, path: str | None = None):
+    """`path` is the file the client means — the one its list showed under
+    this id. An id is only a pointer into the registry as it was when that
+    list was painted; registry ids are never reused now, but a home screen
+    painted before this server started can still hold one that meant
+    something else. Deleting a FILE on the strength of a bare id is the one
+    step here that cannot be taken back, so when the client says which file
+    it means and the id now names another, nothing is touched at all."""
+    rec = WS.cases.get(case_id)
+    if path is not None and rec is not None and os.path.abspath(path) != os.path.abspath(rec["path"]):
+        raise HTTPException(409, "That case list is out of date — it has changed since this window "
+                                 "showed it. Nothing was removed; reload the case list and try again.")
     if delete_file:
-        rec = WS.cases.get(case_id)
         if rec and os.path.isfile(rec["path"]):
             if STORE is not None and os.path.abspath(STORE.path) == os.path.abspath(rec["path"]):
                 raise HTTPException(400, "Close this case before deleting its file")
@@ -2803,7 +2823,11 @@ def api_plugin_bundles_apply(bundle_id: int, body: BundleApplyBody | None = None
         for ind in bundle["watchlist"]:
             val = (ind.get("value") or "").strip()
             if val and val not in have:
-                STORE.add_indicator(val, ind.get("kind", "other"), ind.get("note"), ind.get("auto_tag_id"))
+                # No auto-tag, whatever the profile says: a profile is a
+                # cross-case template, and a tag id means something only
+                # in the case that numbered it — the rule
+                # import_watchlist_from_case follows for the same reason.
+                STORE.add_indicator(val, ind.get("kind", "other"), ind.get("note"))
                 have.add(val)
                 seeded += 1
         if seeded:
@@ -3677,7 +3701,10 @@ def api_watchlist_import(body: WatchlistImportBody):
         value = value.strip()
         if not value or value in have:
             continue
-        added_ids.append(store().add_indicator(value, (kind.strip() or body.kind), None, body.auto_tag_id)["id"])
+        try:
+            added_ids.append(store().add_indicator(value, (kind.strip() or body.kind), None, body.auto_tag_id)["id"])
+        except ValueError as e:   # an auto-tag that isn't a tag here fails the first line, before any write
+            raise HTTPException(400, str(e))
         have.add(value)
     # `added_ids` is what the client scans for — the new entries only,
     # not the whole list again.

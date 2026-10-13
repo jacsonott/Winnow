@@ -41,16 +41,49 @@ see [docs/notes/README.md](README.md) for the whole set.
   that vanishes surfaces as a `KeyError` when the merge is opened
   (`_merge_source_dict`) rather than as a merge that silently changed
   shape. That is the right way to report a missing member and the wrong
-  thing to let anyone do by accident, because **source ids are reused by
-  the next import**. Dropping a member does not merely break the merge,
-  it arms it: the next file imported takes the freed id and becomes part
-  of a merge nobody added it to, and nothing anywhere would say so.
+  thing to let anyone do by accident. (It was worse while source ids were
+  reused by the next import — dropping a member armed the merge, the next
+  file imported taking the freed id and joining a merge nobody added it
+  to. Ids are never reused now; next entry.)
   So the drop raises `ValueError` naming the merges, `DELETE
   /api/source/{id}` maps that to **409** (well-formed, and it will
   succeed once the merge is gone), and deleting the merge first is one
   click that leaves every table intact. The internal callers are all
   ingest cancels dropping a partial import created seconds earlier,
   which cannot be a member of anything.
+- **An id a case hands out is never handed out again.** `sources`,
+  `tag_defs`, `merges` and `sql_tabs` are `AUTOINCREMENT`. As plain
+  `INTEGER PRIMARY KEY`s they gave a deleted newest row's id to the next
+  insert, and every one of those ids outlives its row somewhere — a view
+  handle or tag list in another window, an undo entry, an indicator's
+  `auto_tag_id`, a widget's `src_N`, a SQL result keyed by tab id. Reuse
+  turned "gone" into "a different table": a stale window tagged the next
+  import, Ctrl+Z after dropping a merge member tagged a file nobody had
+  touched, a deleted auto-tag's matches came back as "Benign".
+  `CREATE TABLE IF NOT EXISTS` cannot change an existing table, so
+  `_migrate_ids_never_reused` rebuilds the four in an older case file on
+  open, once, in one transaction (copy out, recreate from META_SCHEMA's
+  definition, copy back BY COLUMN NAME with ids intact — after the
+  `ALTER`s in `__init__` every file has the canonical columns, and one the
+  canonical DDL doesn't know is carried across, not dropped). The counter is seeded
+  from `_ID_HIGH_WATER_SQL`, the highest id still MENTIONED anywhere
+  (orphaned `row_tags`, a leftover `drv_9`, `src_9` in a widget), not
+  `MAX(id)`, which would hand the deleted newest id straight back. The same
+  pass deletes what reuse had already left: tag assignments and notes for a
+  missing table or tag, and an `auto_tag_id` naming a deleted tag.
+  Not relying on ids alone, the writes check their targets too:
+  `_apply_tag_change` (every tag write) and `set_note` refuse a missing
+  tag, table or row with `RecordGone` **inside** the transaction, before
+  writing — they used to commit and then 500 on the way out — and
+  server.py maps it to **404** globally (not 409: no rebuild brings a
+  deleted tag back). `drop_source` and `delete_merge` evict the views
+  built over them (`_evict_views_of`), `delete_tag` clears any
+  `watchlist.auto_tag_id` naming it, `add_indicator` refuses an
+  `auto_tag_id` that is not a tag here, and `_drop_undo_for_source` drops
+  an entry by the ROWS it recorded, not the id it was filed under — a
+  merge's entry holds member rows. `tests/test_ids_never_reused.py` builds
+  the old file from the old DDL rather than through a Store, which would
+  migrate it before the test could look.
 
 - **A Timeline row leads with what happened, not with the source row.**
   Beside `body` (still the pipe-joined columns, unchanged) each row

@@ -417,7 +417,12 @@ see [docs/notes/README.md](README.md) for the whole set.
   writes into whichever store is current, so a save that fired after the
   `/api/case/open` swap would attach the previous case's `{source_id, rid}`
   to an unrelated row of the new one — `openCase` blanks the rid before
-  the POST (and puts it back if the open fails). `openSource` hides the
+  the POST (and puts it back if the open fails). The tag list is the same
+  kind of per-case state: `openCase` (and `boot`) call `loadCaseTags`
+  before `loadSources`, because `loadTags` only ran by way of opening a
+  table — an empty case never did, and kept the previous case's
+  definitions in `S.tags`, which the Watchlist's auto-tag picker and the
+  Timeline's tag chips read (tests/ui/test_case_switch.py). `openSource` hides the
   pane only when it is actually **leaving** a table (`leaving = S.sourceId
   !== id`, decided before `S.sourceId` is overwritten): every refresh idiom
   — `loadSources()` with no select after a column add, a sidebar folder

@@ -22,6 +22,7 @@ import { openSettings, syncAppearanceFromServer } from './settings.js';
 import { drawWordmark } from './splash.js';
 import { S } from './state.js';
 import { fmtBytes } from './tables.js';
+import { loadCaseTags } from './tags.js';
 import { updateTimeRangeButton } from './timeframe.js';
 import { loadTimelineTemplates } from './timeline.js';
 import { confirmDialog, modal, promptDialog } from './ui.js';
@@ -208,6 +209,9 @@ export async function openCase(path, opts = {}) {
   // ts_format lives in the case file, so it's per-case state like sql_tabs
   // — reload it rather than carrying the last case's setting over.
   await loadCaseSettings();
+  // Tag definitions are per case too (see loadCaseTags), and an empty case
+  // never opens a table to reload them on the way in.
+  await loadCaseTags();
   await loadSources();
 }
 
@@ -747,7 +751,12 @@ export function openEditCaseModal(c) {
 
 export async function removeCaseFromList(c) {
   if (!(await confirmDialog(`Remove "${c.name}" from this list? The case file itself is left untouched on disk.`, { danger: true, okLabel: 'Remove' }))) return;
-  await api(`/api/cases/${c.id}`, { method: 'DELETE' });
+  // `path` says which case this list meant — see deleteCaseFile.
+  try {
+    await api(`/api/cases/${c.id}?path=${encodeURIComponent(c.path)}`, { method: 'DELETE' });
+  } catch (e) {
+    toast('Could not remove: ' + e.message, 6000);
+  }
   refreshCases();
 }
 
@@ -756,8 +765,11 @@ export async function deleteCaseFile(c) {
     `Permanently delete the case file for "${c.name}"?\n\n${c.path}\n\nThis cannot be undone — all tags, notes and imported data in it will be lost.`,
     { danger: true, okLabel: 'Delete permanently' },
   ))) return;
+  // The path as well as the id: this list can be older than the registry
+  // (another window forgot this case and registered a new one), and the
+  // server refuses rather than delete whichever file the id names now.
   try {
-    await api(`/api/cases/${c.id}?delete_file=true`, { method: 'DELETE' });
+    await api(`/api/cases/${c.id}?delete_file=true&path=${encodeURIComponent(c.path)}`, { method: 'DELETE' });
   } catch (e) {
     toast('Could not delete: ' + e.message, 6000);
     return;
@@ -1065,6 +1077,7 @@ export async function boot() {
     paintTempBanner(!!cur.temp);
     showApp();
     await loadCaseSettings();
+    await loadCaseTags();   // same reason as openCase: an empty case opens no table
     await loadSources();
     startJobsPoll(); // an import (or index build) from before a reload shows back up
   } else {

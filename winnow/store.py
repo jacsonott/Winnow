@@ -143,8 +143,16 @@ DEFAULT_TAGS = [
 PLUGIN_UI_STATE_MAX_BYTES = 64 * 1024
 
 META_SCHEMA = """
+-- sources, tag_defs, merges and sql_tabs are AUTOINCREMENT: an id they
+-- hand out is never handed out again. A plain INTEGER PRIMARY KEY gives
+-- the newest row's id to the next insert once that row is deleted, and
+-- every one of these ids is held somewhere that outlives the row — a view
+-- handle or a tag list in another window, an undo entry, an indicator's
+-- auto-tag, a widget's src_N — so a reused id turns "this no longer
+-- exists" into "this is now a different table". Case files from before
+-- this are rebuilt in place on open; see _migrate_ids_never_reused.
 CREATE TABLE IF NOT EXISTS sources (
-    id          INTEGER PRIMARY KEY,
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
     name        TEXT NOT NULL,
     path        TEXT,
     table_name  TEXT NOT NULL,
@@ -158,7 +166,7 @@ CREATE TABLE IF NOT EXISTS sources (
     origin_meta TEXT                    -- json, per origin: {sql} / {parent_source_id, parent_name, spec, ...} — see save_view_as_source
 );
 CREATE TABLE IF NOT EXISTS tag_defs (
-    id     INTEGER PRIMARY KEY,
+    id     INTEGER PRIMARY KEY AUTOINCREMENT,
     name   TEXT NOT NULL,
     color  TEXT NOT NULL,
     hotkey TEXT
@@ -211,7 +219,7 @@ CREATE TABLE IF NOT EXISTS filter_presets (
 );
 CREATE INDEX IF NOT EXISTS ix_filter_presets_sig ON filter_presets(col_sig);
 CREATE TABLE IF NOT EXISTS merges (
-    id         INTEGER PRIMARY KEY,
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
     name       TEXT NOT NULL,
     source_ids TEXT NOT NULL,          -- json array of real source ids, creation order
     created_at TEXT
@@ -227,7 +235,7 @@ CREATE TABLE IF NOT EXISTS open_tabs (
 -- only ever SELECTs the analyst typed, so this stays within invariant #1:
 -- no source table is touched.
 CREATE TABLE IF NOT EXISTS sql_tabs (
-    id   INTEGER PRIMARY KEY,
+    id   INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     sql  TEXT NOT NULL DEFAULT '',
     pos  INTEGER NOT NULL DEFAULT 0     -- left-to-right strip order; ties break by id
@@ -993,6 +1001,17 @@ class ViewExpired(KeyError):
     """
 
 
+class RecordGone(LookupError):
+    """A write named a table, tag or row that is not in this case (any
+    more) — almost always a second window acting on something the first
+    one deleted. server.py answers 404.
+
+    Raised from inside the write's own transaction, before anything is
+    written, so the request fails with nothing committed behind it. Not a
+    KeyError: the view routes map KeyError to 409 "rebuild and retry",
+    and no rebuild brings a deleted tag back."""
+
+
 class OpCancelled(Exception):
     """A registered cancellable operation (view/timeline build, group
     summary) was interrupted via cancel_op. server.py maps it to HTTP 499 —
@@ -1610,6 +1629,8 @@ class Store:
                     self.db.executemany(
                         "INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", [(i,) for i in ids]
                     )
+        # Before _seed_tags, which is the first thing that can hand out an id.
+        self._migrate_ids_never_reused()
         self._seed_tags()
         self._view_seq = 0
         # Its own lock for the same reason _search_job_lock exists: handing
@@ -2176,6 +2197,136 @@ class Store:
         # over millions of rows is one big external sort, and this is the
         # one knob that parallelises it (default is 0 = single-threaded).
         conn.execute("PRAGMA threads=4")
+
+    # The tables whose ids must never come round again (see the comment at
+    # the top of META_SCHEMA), each with every place in a case file that can
+    # still hold one of its ids after the row itself is gone. A case file
+    # from before AUTOINCREMENT only knows its CURRENT highest id, so the
+    # migration seeds the counter past every id still mentioned anywhere —
+    # an orphaned row_tags entry, a widget's `src_7`, a leftover drv_9 —
+    # rather than past MAX(id) alone, which would hand a deleted newest
+    # table's id straight back to the next import.
+    #
+    # Signed source ids (negative = merge) share open_tabs/layouts/
+    # saved_views/source_folder_map, so the positive half counts for
+    # sources and the negated negative half for merges.
+    _ID_HIGH_WATER_SQL = {
+        "sources": [
+            "SELECT MAX(id) FROM sources",
+            *(f"SELECT MAX(source_id) FROM {t}" for t in (
+                "row_tags", "row_notes", "layouts", "saved_views", "open_tabs",
+                "derived_columns", "subset_rids", "source_folder_map",
+                "watchlist_hits", "watchlist_scans")),
+            "SELECT MAX(parent_source_id) FROM subset_rids",
+        ],
+        "tag_defs": [
+            "SELECT MAX(id) FROM tag_defs",
+            "SELECT MAX(tag_id) FROM row_tags",
+            "SELECT MAX(auto_tag_id) FROM watchlist",
+        ],
+        "merges": [
+            "SELECT MAX(id) FROM merges",
+            *(f"SELECT -MIN(source_id) FROM {t}" for t in (
+                "layouts", "saved_views", "open_tabs", "source_folder_map")),
+        ],
+        "sql_tabs": ["SELECT MAX(id) FROM sql_tabs"],
+    }
+
+    def _id_high_water(self, table: str) -> int:
+        """The highest id `table` has ever been seen to hand out, as far as
+        this case file can still tell (see _ID_HIGH_WATER_SQL)."""
+        hw = 0
+        for sql in self._ID_HIGH_WATER_SQL[table]:
+            v = self.db.execute(sql).fetchone()[0]
+            if isinstance(v, int):
+                hw = max(hw, v)
+        if table == "sources":
+            # A source's own tables and views, and the text that names
+            # them by id: merge member lists, widget queries, saved SQL.
+            # A dropped table cleans up after itself, but a crash between
+            # its statements, or a dashboard written against src_7 that
+            # was deleted since, still names the id.
+            ids = [int(m.group(1)) for (name,) in self.db.execute("SELECT name FROM sqlite_master")
+                   if (m := re.match(r"(?:src|fts|drv)_(\d+)", name or ""))]
+            for sql in ("SELECT widgets FROM dashboards", "SELECT sql FROM sql_tabs"):
+                for (text,) in self.db.execute(sql):
+                    ids += [int(n) for n in re.findall(r"\bsrc_(\d+)\b", text or "")]
+            for (text,) in self.db.execute("SELECT source_ids FROM merges"):
+                with contextlib.suppress(TypeError, ValueError):
+                    ids += [n for n in json.loads(text) if isinstance(n, int)]
+            hw = max([hw, *ids])
+        return hw
+
+    def _migrate_ids_never_reused(self) -> None:
+        """Rebuild sources/tag_defs/merges/sql_tabs as AUTOINCREMENT in a
+        case file created before they were, once.
+
+        SQLite cannot add AUTOINCREMENT to an existing table, so each one
+        is copied out, recreated from META_SCHEMA's definition, and copied
+        back by column name with its ids intact. By name, and from the
+        canonical DDL rather than the file's own: Store.__init__ has just
+        ALTERed in any column an older file lacked, so the canonical
+        column set is the one every file now has, in whatever order the
+        ALTERs left it — and a column the canonical DDL does not know is
+        carried across rather than dropped. Its sqlite_sequence row is
+        then set to the high-water mark, never lower than what the
+        copy-back itself recorded.
+
+        The same pass clears what reuse already left behind in such a
+        file, because the next id is no longer coming to claim it: tag
+        assignments and notes for a table or tag that no longer exists
+        (a stale window's write, an auto-tag scan after its tag was
+        deleted), and an indicator's auto-tag naming a deleted tag. They
+        are unreachable from anywhere in the app, but row_tags rows still
+        count toward a table's tagged-row total.
+
+        One transaction for the lot: a crash between a DROP and its
+        copy-back would otherwise lose the case's table list."""
+        todo = []
+        for table in self._ID_HIGH_WATER_SQL:
+            row = self.db.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
+            if row and not re.search(r"\bAUTOINCREMENT\b", row[0], re.I):
+                todo.append((table, row[0]))
+        if not todo:
+            return
+        with self.lock:
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                marks = {table: self._id_high_water(table) for table, _ in todo}
+                for table, _ in todo:
+                    ddl = re.search(rf"CREATE TABLE IF NOT EXISTS {table} \(.*?\n\);", META_SCHEMA, re.S)
+                    old_cols = [(r[1], r[2]) for r in self.db.execute(f"PRAGMA main.table_info({q(table)})")]
+                    keep = f"_keep_{table}"
+                    self.db.execute(f"CREATE TEMP TABLE {q(keep)} AS SELECT * FROM main.{q(table)}")
+                    self.db.execute(f"DROP TABLE main.{q(table)}")
+                    self.db.execute(ddl.group(0))
+                    have = {r[1] for r in self.db.execute(f"PRAGMA main.table_info({q(table)})")}
+                    for name, decl in old_cols:
+                        if name not in have:
+                            self.db.execute(f"ALTER TABLE main.{q(table)} ADD COLUMN {q(name)} {decl}")
+                    cols = ", ".join(q(name) for name, _ in old_cols)
+                    self.db.execute(f"INSERT INTO main.{q(table)} ({cols}) SELECT {cols} FROM temp.{q(keep)}")
+                    self.db.execute(f"DROP TABLE temp.{q(keep)}")
+                    seq = self.db.execute(
+                        "SELECT seq FROM sqlite_sequence WHERE name=?", (table,)).fetchone()
+                    if seq is None:
+                        self.db.execute("INSERT INTO sqlite_sequence(name, seq) VALUES (?,?)",
+                                        (table, marks[table]))
+                    elif seq[0] < marks[table]:
+                        self.db.execute("UPDATE sqlite_sequence SET seq=? WHERE name=?",
+                                        (marks[table], table))
+                if "tag_defs" in marks:
+                    self.db.execute("DELETE FROM row_tags WHERE tag_id NOT IN (SELECT id FROM tag_defs)")
+                    self.db.execute("UPDATE watchlist SET auto_tag_id=NULL "
+                                    "WHERE auto_tag_id NOT IN (SELECT id FROM tag_defs)")
+                if "sources" in marks:
+                    for t in ("row_tags", "row_notes"):
+                        self.db.execute(f"DELETE FROM {t} WHERE source_id NOT IN (SELECT id FROM sources)")
+            except BaseException:
+                self.db.rollback()
+                raise
+            self.db.commit()
 
     def _seed_tags(self) -> None:
         with self.lock, self.db:
@@ -4750,6 +4901,9 @@ class Store:
             # live on the member rows (invariant #9) and survive on purpose.
             for t in ("open_tabs", "layouts", "saved_views"):
                 self.db.execute(f"DELETE FROM {t} WHERE source_id=?", (-merge_id,))
+            # Its views too, for drop_source's reason: a window still
+            # holding one would otherwise page and tag a merge nobody has.
+            self._evict_views_of(-merge_id)
 
     def merges_using(self, source_id: int) -> list[dict]:
         """The merges this table is a member of, as {id, name}.
@@ -4779,12 +4933,13 @@ class Store:
     def drop_source(self, source_id: int) -> None:
         """Delete a table and every sidecar keyed by its id.
 
-        Refuses a table that a merge is built on. Source ids are REUSED by
-        the next import (see the id reset below), so dropping a member
-        does not merely break that merge — it arms it: the next file
-        imported takes the freed id and silently becomes part of a merge
-        nobody added it to. Deleting the merge first is one click, and it
-        is the only order in which neither outcome is possible.
+        Refuses a table that a merge is built on: the merge would be left
+        naming a member that is not there, and it is the analyst who should
+        decide what becomes of it. Deleting the merge first is one click,
+        and it keeps the other tables. (Source ids used to be REUSED by the
+        next import, which made this worse — the next file imported took
+        the freed id and silently became part of a merge nobody added it
+        to. Ids are AUTOINCREMENT now, and the refusal stands on its own.)
 
         The internal callers are all ingest cancels dropping a partial
         import created seconds earlier, which cannot be a member of
@@ -4799,13 +4954,18 @@ class Store:
                 + " first — a merge is only a view over its tables, so deleting it keeps them.")
         src = self.get_source(source_id)
         with self.lock, self.db:
+            # Its views go first. A view id outlives the table in whatever
+            # window built it, and paging or tagging through one after the
+            # drop reads rows of a table that is gone — or, back when ids
+            # were reused, of the next import. Evicted, it answers 409 and
+            # the window rebuilds against what is actually there.
+            self._evict_views_of(source_id)
             self.db.execute(f"DROP TABLE IF EXISTS {q(src['table_name'])}")
             self.db.execute(f"DROP TABLE IF EXISTS {q('fts_' + str(source_id))}")
             self.db.execute(f"DROP VIEW IF EXISTS {q(src['table_name'] + '_doc')}")
-            # The watchlist's two per-table sidecars too: the id is reused by
-            # the next import (below), so a hit left keyed by it would sit
-            # under that file's name, and a scan record left behind would
-            # claim a table nothing has ever read was scanned clean.
+            # The watchlist's two per-table sidecars too: a hit left keyed
+            # by the id would be listed under a table that is not there,
+            # and a scan record left behind would say it was scanned clean.
             for t in ("row_tags", "row_notes", "watchlist_hits", "watchlist_scans"):
                 self.db.execute(f"DELETE FROM {t} WHERE source_id=?", (source_id,))
             self.db.execute("DELETE FROM layouts WHERE source_id=?", (source_id,))
@@ -4815,15 +4975,25 @@ class Store:
             self.db.execute(f"DROP TABLE IF EXISTS {q(self._derived_table(source_id))}")
             self.db.execute("DELETE FROM derived_columns WHERE source_id=?", (source_id,))
             # The subset provenance map, in BOTH directions: this table's
-            # own rows, and every subset that named it as the parent. The
-            # id gets reused (below), and a map left behind would point a
-            # subset's rows at whatever file lands on it next.
+            # own rows, and every subset that named it as the parent — a
+            # map left behind would point a subset's rows at a table that
+            # is not there.
             self.db.execute("DELETE FROM subset_rids WHERE source_id=? OR parent_source_id=?",
                             (source_id, source_id))
-        # SQLite reuses this id on the next import, so anything still keyed
-        # by it would silently attach to a different file.
-        self._drop_undo_for_source(source_id)
+            # Undo entries with rows in it: replaying one would write tags
+            # for rows that no longer exist.
+            self._drop_undo_for_source(source_id)
         self._maxlen_cache.pop(source_id, None)
+
+    def _evict_views_of(self, source_id: int) -> None:
+        """Evict every view built over this (signed) source id — root and
+        virtual, held or adopted, with their group sub-views. Caller holds
+        self.lock inside a self.db transaction, as for
+        _evict_view_and_children."""
+        for vid in list(self._views):
+            handle = self._views.get(vid)
+            if handle and handle.get("source_id") == source_id:
+                self._evict_view_and_children(vid)
 
     # -------------------------------------------------------- derived columns
 
@@ -7978,11 +8148,17 @@ class Store:
             # would be crying wolf.
             if tag_id:
                 was = self.db.execute("SELECT name FROM tag_defs WHERE id=?", (tag_id,)).fetchone()
+                if was is None:
+                    # Edited from a window that still lists a tag another
+                    # one deleted. Creating it again under the old id is
+                    # not an option (ids are never reused), and a new id
+                    # would be a tag nobody asked for.
+                    raise RecordGone(f"Tag {tag_id} no longer exists in this case")
                 self.db.execute(
                     "UPDATE tag_defs SET name=?, color=?, hotkey=? WHERE id=?",
                     (name, color, hotkey, tag_id),
                 )
-                if was is None or was["name"] != name:
+                if was["name"] != name:
                     self._bump_state_generation()
             else:
                 cur = self.db.execute(
@@ -7997,10 +8173,16 @@ class Store:
     def delete_tag(self, tag_id: int) -> None:
         """Drops every assignment of the tag with it — a direct row_tags
         write rather than a recorded delta (there is nothing to undo once
-        the tag itself is gone), so it bumps the state generation itself."""
+        the tag itself is gone), so it bumps the state generation itself.
+
+        An indicator that auto-tags with it stops auto-tagging rather than
+        keep the id: the next scan would otherwise write assignments for a
+        tag that does not exist, invisible in every list and still counted
+        in a table's tagged-row total."""
         with self.lock, self.db:
             self._drop_undo_for_tag(tag_id)
             self.db.execute("DELETE FROM row_tags WHERE tag_id=?", (tag_id,))
+            self.db.execute("UPDATE watchlist SET auto_tag_id=NULL WHERE auto_tag_id=?", (tag_id,))
             self.db.execute("DELETE FROM tag_defs WHERE id=?", (tag_id,))
             self._bump_state_generation()
 
@@ -8059,7 +8241,19 @@ class Store:
         CLAUDE.md invariant #7 — every tag write goes through here; nothing
         INSERTs or DELETEs row_tags directly.
 
-        Caller must hold self.lock and be inside a self.db transaction."""
+        Caller must hold self.lock and be inside a self.db transaction.
+
+        Both ends of the write are checked first, in that same transaction:
+        the tag, and every real table the rows belong to (the pairs' own
+        ids, or `count_ids` — the members — on the whole-view paths). A
+        window can still be showing a table or a tag another window has
+        deleted, and its write used to land anyway: committed rows for an
+        id nothing names any more, behind a request that then failed on
+        the way out. RecordGone here means nothing was written."""
+        if not self.db.execute("SELECT 1 FROM tag_defs WHERE id=?", (tag_id,)).fetchone():
+            raise RecordGone(f"Tag {tag_id} no longer exists in this case")
+        self._require_sources({int(sid) for sid, _ in pairs} if pairs is not None
+                              else {int(i) for i in (count_ids or ())})
         self._undo_seq += 1
         table = f"undo_{self._undo_seq}"
         if pairs is not None:
@@ -8111,6 +8305,19 @@ class Store:
             # undo" — so drop it rather than record it.
             self.db.execute(f"DROP TABLE IF EXISTS v.{q(table)}")
         return changed
+
+    def _require_sources(self, source_ids: Iterable[int]) -> None:
+        """RecordGone unless every id names a real table in this case. On
+        whichever connection the caller is writing with (self.db), so it
+        sees the same state the write that follows will."""
+        ids = sorted(set(source_ids))
+        if not ids:
+            return
+        have = {r[0] for r in self.db.execute(
+            f"SELECT id FROM sources WHERE id IN ({','.join('?' * len(ids))})", ids)}
+        missing = [i for i in ids if i not in have]
+        if missing:
+            raise RecordGone(f"Table {missing[0]} no longer exists in this case")
 
     def _write_tag_delta(self, table: str, tag_id: int, on: bool) -> None:
         """Apply (or re-apply) one delta table's rows in the given
@@ -8463,6 +8670,16 @@ class Store:
 
     def set_note(self, source_id: int, rid: int, note: str) -> None:
         with self.lock, self.db:
+            # The row has to be there, for the reason _apply_tag_change
+            # checks its targets: a note posted from a window still showing
+            # a deleted table was committed against an id nothing names.
+            # A merge's notes live on its member rows (invariant #9), so
+            # only a real table is a place a note can go.
+            src = self.db.execute("SELECT table_name FROM sources WHERE id=?", (source_id,)).fetchone()
+            if src is None:
+                raise RecordGone(f"Table {source_id} no longer exists in this case")
+            if not self.db.execute(f"SELECT 1 FROM {q(src['table_name'])} WHERE rid=?", (rid,)).fetchone():
+                raise RecordGone(f"Table {source_id} has no row {rid}")
             if note.strip():
                 self.db.execute(
                     "INSERT INTO row_notes(source_id, rid, note) VALUES (?,?,?) "
@@ -8687,6 +8904,13 @@ class Store:
             # the same hits, and nothing ever told the analyst.
             if self.db.execute("SELECT 1 FROM watchlist WHERE value=?", (value,)).fetchone():
                 raise ValueError(f"{value} is already on the watchlist")
+            # Checked under the same lock as the insert. An id from a tag
+            # list another case painted (or a tag deleted a moment ago) is
+            # otherwise stored as-is, and every scan writes assignments
+            # for it that no list shows.
+            if auto_tag_id is not None and not self.db.execute(
+                    "SELECT 1 FROM tag_defs WHERE id=?", (auto_tag_id,)).fetchone():
+                raise ValueError(f"Auto-tag {auto_tag_id} is not a tag in this case")
             cur = self.db.execute(
                 "INSERT INTO watchlist(value, kind, note, auto_tag_id, created_at)"
                 " VALUES (?,?,?,?,?)",
@@ -8807,12 +9031,17 @@ class Store:
                 return None
             with self.db:
                 # The source too can have gone between the match and here:
-                # drop_source deletes its hits, and its id is the next
-                # import's, so a write for it now would file this value's
-                # rows under whatever table takes the id.
+                # drop_source deletes its hits, so a write for it now would
+                # file this value's rows under a table that is not there.
                 if not self.db.execute("SELECT 1 FROM sources WHERE id=?", (source_id,)).fetchone():
                     return None
-                row = self.db.execute("SELECT value, auto_tag_id FROM watchlist WHERE id=?", (wid,)).fetchone()
+                # The auto-tag through a join, so an indicator still naming
+                # a tag that is gone (delete_tag clears it; this is the
+                # belt to that brace) scans without tagging rather than
+                # failing the unit.
+                row = self.db.execute(
+                    "SELECT w.value, t.id AS auto_tag_id FROM watchlist w "
+                    "LEFT JOIN tag_defs t ON t.id = w.auto_tag_id WHERE w.id=?", (wid,)).fetchone()
                 if row is None or row["value"] != value:
                     return None
                 # What this unit is replacing, for the state generation
@@ -11184,14 +11413,31 @@ class Store:
         return {"saved": saved, "tags_cleared": tags, "notes_cleared": notes}
 
     def _drop_undo_for_source(self, source_id: int) -> None:
-        """Undo entries naming a source that no longer exists. SQLite reuses
-        a deleted row id, so the next import can land on the same source_id
-        and inherit them — replaying one then tags rows of an unrelated
-        file. Mirrors _drop_undo_for_tag."""
+        """Undo entries with any row in a source that no longer exists.
+        Mirrors _drop_undo_for_tag.
+
+        By the rows the entry recorded, not by the source it was made
+        from: an entry made on a merge (or from a Timeline selection) is
+        filed under the merge's id but holds member rows, so dropping a
+        member after deleting the merge used to leave it behind — and with
+        ids reused, Ctrl+Z then tagged rows of the next file imported.
+        `count_ids` (the real tables a change could touch) rules most
+        entries out without reading them."""
         with self.lock:
             keep = []
             for entry in self._undo:
-                if entry.get("source_id") == source_id:
+                ids = entry.get("count_ids")
+                if ids is None:
+                    ids = [entry.get("source_id")]
+                touches = entry.get("source_id") == source_id
+                if not touches and source_id in ids:
+                    try:
+                        touches = self.db.execute(
+                            f"SELECT 1 FROM v.{q(entry['table'])} WHERE source_id=? LIMIT 1",
+                            (source_id,)).fetchone() is not None
+                    except sqlite3.Error:
+                        touches = True   # can't tell: drop it rather than risk replaying it
+                if touches:
                     with contextlib.suppress(sqlite3.Error):
                         self.db.execute(f"DROP TABLE IF EXISTS v.{q(entry['table'])}")
                     continue

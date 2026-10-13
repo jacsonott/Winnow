@@ -67,19 +67,21 @@ def test_route_answers_the_grouped_shape(client, store, write_csv):
 
 
 def test_a_dropped_table_takes_its_hits_with_it(store, write_csv):
-    """drop_source reuses the table's id on the next import, so hits left
-    keyed by it would show up under the next file's name as a phantom
-    group with a count nothing in that file explains."""
+    """drop_source used to hand the table's id to the next import, so hits
+    left keyed by it showed up under the next file's name as a phantom
+    group with a count nothing in that file explains. Ids are never reused
+    now (tests/test_ids_never_reused.py), and the hits still go with the
+    table: a hit for a table that is not there is listed under nothing."""
     a = store.ingest_csv(write_csv(_rows(4, "needle"), name="a.csv"), name="a.csv", build_fts=False)["id"]
     b = store.ingest_csv(write_csv(_rows(1, "needle"), name="b.csv"), name="b.csv", build_fts=False)["id"]
     wid = store.add_indicator("needle", "other")["id"]
     store.scan_all()
     assert [s["source_id"] for s in store.indicator_hits(wid)["sources"]] == [a, b]
-    # The newest table is the one whose id the next import takes.
+    # The newest table: the one whose id the next import used to take.
     store.drop_source(b)
     assert store.indicator_hits(wid)["sources"] == [
         {"source_id": a, "source_name": "a.csv", "count": 4, "shown": 4}]
     assert store.list_indicators()[0]["hit_count"] == 4
     again = store.ingest_csv(write_csv([["A"], ["clean"]], name="c.csv"), name="c.csv", build_fts=False)["id"]
-    assert again == b   # the id came back around
+    assert again != b   # the id does not come back around
     assert [s["source_id"] for s in store.indicator_hits(wid)["sources"]] == [a]   # no phantom "c.csv" group

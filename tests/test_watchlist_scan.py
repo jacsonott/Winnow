@@ -624,3 +624,34 @@ def test_a_running_scan_holds_idle_shutdown(client, store, write_csv):
     finally:
         gate.set()
         del store._scan_unit
+
+
+def test_deleting_the_auto_tag_stops_the_indicator_auto_tagging(store, write_csv):
+    """delete_tag left watchlist.auto_tag_id naming the dead tag. The next
+    scan wrote assignments for it — invisible in every list, still counted
+    in the table's tagged rows — and the next tag created took the id over
+    and with it every one of those rows: matches showed up as "Benign"."""
+    sid = _ingest(store, write_csv, "ev.csv", [["Cmd"], ["mimikatz.exe"], ["notepad"], ["mimikatz -x"]])
+    ioc = store.upsert_tag(None, "IOC hit", "#ff0000", None)["id"]
+    wid = store.add_indicator("mimikatz", auto_tag_id=ioc)["id"]
+    store.delete_tag(ioc)
+    assert store.list_indicators()[0]["auto_tag_id"] is None
+    assert store.scan_source(sid)["matched"] == {wid: 2}       # still a hit…
+    assert store.db.execute("SELECT count(*) FROM row_tags").fetchone()[0] == 0   # …but no tag
+    benign = store.upsert_tag(None, "Benign2", "#00ff00", None)["id"]
+    assert store.tag_counts(sid)["counts"].get(str(benign)) is None
+
+
+def test_an_auto_tag_that_is_not_a_tag_in_this_case_is_refused(client, store):
+    """The Watchlist's picker was painted from whatever tag list the client
+    held — after a case switch, the PREVIOUS case's. The id it sent was
+    stored as-is, and every scan then wrote rows for it."""
+    with pytest.raises(ValueError, match="not a tag in this case"):
+        store.add_indicator("evil.exe", auto_tag_id=999)
+    r = client.post("/api/watchlist", json={"value": "evil.exe", "auto_tag_id": 999})
+    assert r.status_code == 400 and "not a tag" in r.json()["detail"]
+    r = client.post("/api/watchlist/import", json={"text": "a.exe\nb.exe\n", "auto_tag_id": 999})
+    assert r.status_code == 400
+    assert store.list_indicators() == []
+    ok = store.list_tags()[0]["id"]
+    assert client.post("/api/watchlist", json={"value": "evil.exe", "auto_tag_id": ok}).status_code == 200
