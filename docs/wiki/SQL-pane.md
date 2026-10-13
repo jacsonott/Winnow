@@ -148,14 +148,13 @@ Points that catch people out:
 ## Results
 
 The result appears as a table under the editor. The line above it reads
-*N rows · M ms*, followed by *truncated* when the row limit was reached and
-*tags joined via rid* when the rows can be tagged (below).
+*N rows · M ms*, followed by *truncated* when the query had more rows than
+the limit, and *tags joined via rid* when the rows can be tagged (below).
 
 **The pane shows at most 5,000 rows.** When a query returns more, the first
-5,000 are shown and the status line says *truncated*. A result of exactly
-5,000 rows is marked *truncated* too, because the pane can't tell the
-difference. Count and group in the query rather than scrolling, and use
-**Save as table…** when you need every row.
+5,000 are shown and the status line says *truncated*; a result of exactly
+5,000 rows is complete and isn't marked. Count and group in the query
+rather than scrolling, and use **Save as table…** when you need every row.
 
 Click a column header to sort the rows on screen by that column; click again
 to reverse. Sorting doesn't run the query again: it orders the rows already

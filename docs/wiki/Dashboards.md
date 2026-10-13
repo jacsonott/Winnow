@@ -414,7 +414,7 @@ which one to open (see
 - **A widget built on this case's table doesn't travel.** Use the portable
   tables for boards you'll save to the Library or a profile.
 - **Derived columns** aren't offered in the widget editor or the Add to
-  dashboard menus.
+  dashboard menus, though a widget's own SQL can still name one.
 - **Hand-editing a widget's SQL removes its click-through to rows.**
 - **Adding a Library board replaces a same-named board** in the case without
   asking.

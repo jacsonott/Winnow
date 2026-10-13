@@ -12,7 +12,7 @@ A new case starts with three tags:
 | Suspicious | `2` | orange |
 | Benign | `3` | green |
 
-They come from the default tag template, which you edit under **⚙ Settings → Default tags for new cases**: change a name, colour or key, add one with **+ tag**, remove one with **✕**, then press **Save template**. The template is kept per machine (`workspace/tags.json` in the Winnow folder) and only seeds cases created after you save it. To bring an existing case up to date, open **Edit tags** in that case and press **Apply default template**: it adds every template tag the case doesn't already have, matching by name and ignoring case.
+They come from the default tag template, which you edit under **⚙ Settings → Default tags for new cases**: change a name, colour or key, add one with **+ tag**, remove one with **✕**, then press **Save template**. The template is kept per machine (`workspace/tags.json` in the Winnow folder) and seeds every case created after you save it, however it is created. To bring an existing case up to date, open **Edit tags** in that case and press **Apply default template**: it adds every template tag the case doesn't already have, matching by name and ignoring case.
 
 A case that has no tags at all when it is opened gets the template again, so deleting every tag does not leave a case permanently tagless.
 

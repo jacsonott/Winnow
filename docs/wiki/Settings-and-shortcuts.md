@@ -253,8 +253,9 @@ covered in [Tagging and notes](Tagging-and-notes.md).
 ## Filter & search syntax
 
 A quick reference to the filter-row syntax (`svchost`, `!svchost`, `=4624`,
-`^C:\Users`, `>1000`, `/regex/`, `""`, `*`, `a|b|c`), the value picker, the
-search box modes and the timeframe filter. The full explanation is in
+`!=4624`, `^C:\Users`, `>1000`, `<1000`, `>=1000`, `<=1000`, `/regex/`, `""`,
+`*`, `a|b|c`), the value picker, the search box modes and the timeframe
+filter. The full explanation is in
 [Filtering and searching](Filtering-and-searching.md).
 
 ## Timestamps
@@ -281,7 +282,7 @@ kept until you press **Save template**. Winnow ships with three:
 | Suspicious | `2` | orange |
 | Benign | `3` | green |
 
-The template does not change cases that already exist. To bring a case up to
+The template does not change a case that already has tags. To bring a case up to
 date, open its tag editor and press **Apply default template**, which adds
 any template tag the case does not have (matched by name).
 
