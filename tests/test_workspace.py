@@ -358,3 +358,180 @@ def test_plugin_data_roundtrips_and_is_traversal_safe(tmp_path, monkeypatch):
     import pytest
     with pytest.raises(ValueError):
         WS.PluginData("x").set(["not a dict"])
+
+
+# ---------------------------------------------------------------- damaged files
+#
+# Every file in workspace/ is meant to be human-readable and hand-editable,
+# so "an analyst opened it in Notepad" is an ordinary event, not an attack.
+# Each of these was a real outcome before: a UTF-8 BOM or a trailing comma
+# read as an EMPTY store and the next write replaced the file (three custom
+# filters became the 28 defaults on a plain list()); a cp1252 save or a
+# wrong-shaped document raised out of every route that touched the store;
+# a wrong-shaped plugins.json raised out of server.py's import, so Winnow
+# would not start.
+
+def _ws_file(name):
+    WS._ensure_dir()
+    return WS.WORKSPACE_DIR / name
+
+
+def _set_aside(name):
+    return sorted(WS.WORKSPACE_DIR.glob(name + ".corrupt-*"))
+
+
+def _case_doc():
+    return {"cases": [{"id": 1, "path": "/cases/apt29.db-winnow", "name": "APT29 été",
+                       "group": "", "notes": "", "created_at": "x", "last_opened": None}]}
+
+
+def test_a_bom_saved_workspace_file_still_reads_and_keeps_its_records():
+    """Notepad's "UTF-8 with BOM" is a valid save of a valid file."""
+    import json
+    _ws_file("cases.json").write_bytes(
+        b"\xef\xbb\xbf" + json.dumps(_case_doc(), ensure_ascii=False).encode("utf-8"))
+    assert [c["name"] for c in WS.cases.list()] == ["APT29 été"]
+    WS.cases.create("/cases/new.db-winnow", "new")
+    on_disk = json.loads(_ws_file("cases.json").read_text(encoding="utf-8"))
+    assert [c["name"] for c in on_disk["cases"]] == ["APT29 été", "new"]
+    assert _set_aside("cases.json") == []
+
+
+def test_an_unparseable_filters_file_is_set_aside_not_overwritten():
+    """The reported shape: a hand edit leaves a trailing comma in a
+    filters.json holding three custom filters, and opening the filter list
+    replaced it with the shipped defaults. The defaults may come back — the
+    store needs SOMETHING to read — but the analyst's file must still exist,
+    byte for byte, where they can find it."""
+    custom = ('{"seeded_version": 1, "filters": [' + ",".join(
+        f'{{"id": {i}, "name": "my filter {i}", "col_names": ["a"], "payload": {{}}, '
+        f'"created_at": "x"}}' for i in (1, 2, 3)) + ",]}").encode()
+    _ws_file("filters.json").write_bytes(custom)
+
+    names = [f["name"] for f in WS.filters.list()]
+    assert "my filter 1" not in names          # unreadable, so not offered...
+    aside = _set_aside("filters.json")
+    assert len(aside) == 1                     # ...but kept, untouched
+    assert aside[0].read_bytes() == custom
+    # A write afterwards goes to a fresh file and leaves the set-aside one be.
+    WS.filters.create("after", ["a"], {})
+    assert aside[0].read_bytes() == custom
+
+    from winnow import log as wlog
+    assert any("filters.json" in e["message"] and e["level"] == "error"
+               for e in wlog.entries())
+
+
+def test_a_cp1252_workspace_file_is_set_aside_instead_of_raising():
+    import json
+    raw = json.dumps(_case_doc(), ensure_ascii=False).encode("cp1252")
+    _ws_file("cases.json").write_bytes(raw)
+    assert WS.cases.list() == []
+    assert [p.read_bytes() for p in _set_aside("cases.json")] == [raw]
+    WS.cases.create("/cases/new.db-winnow", "new")      # and the store still works
+    assert [c["name"] for c in WS.cases.list()] == ["new"]
+
+
+@pytest.mark.parametrize("raw", [b"null", b"[]", b"{}", b'{"cases": null}', b'"cases"'])
+def test_a_wrong_shaped_cases_file_is_set_aside_instead_of_raising(raw):
+    _ws_file("cases.json").write_bytes(raw)
+    assert WS.cases.list() == []
+    assert [p.read_bytes() for p in _set_aside("cases.json")] == [raw]
+
+
+@pytest.mark.parametrize("name, call, expected", [
+    ("plugins.json", lambda: WS.plugin_prefs.disabled(), set()),
+    ("plugins.json", lambda: WS.plugin_prefs.machine_enabled("x", default_on=True), True),
+    ("prefs.json", lambda: WS.machine_prefs.get("cases_dir"), None),
+    ("app_settings.json", lambda: WS.app_settings.get()["default_ts_format"], "iso"),
+    ("dashboards.json", lambda: WS.dashboard_library.list(), []),
+    ("import_profiles.json", lambda: WS.import_profiles.list(), []),
+])
+def test_wrong_shaped_machine_stores_fall_back_to_their_defaults(name, call, expected):
+    _ws_file(name).write_bytes(b"[]")
+    assert call() == expected
+    assert len(_set_aside(name)) == 1
+
+
+def test_plugins_json_with_a_wrong_typed_list_does_not_stop_plugin_loading():
+    """plugins.json is read by the module-level _reload_plugins() in
+    server.py, so anything that raises here is a server that won't start.
+    `"disabled": null` used to raise out of set(None)."""
+    _ws_file("plugins.json").write_bytes(b'{"disabled": null}')
+    assert WS.plugin_prefs.disabled() == set()
+    # enabled_bundled is younger than the file, so it is checked by the
+    # store rather than required: a bare string must not become one
+    # plugin per letter, and a null must not raise.
+    for raw in (b'{"disabled": [], "enabled_bundled": "mft_usn"}',
+                b'{"disabled": [], "enabled_bundled": null}'):
+        _ws_file("plugins.json").write_bytes(raw)
+        assert WS.plugin_prefs.enabled_bundled() == set()
+        assert WS.plugin_prefs.machine_enabled("mft_usn", default_on=False) is False
+    # ...and a file from before enabled_bundled existed still reads.
+    _ws_file("plugins.json").write_bytes(b'{"disabled": ["pivot"]}')
+    assert WS.plugin_prefs.disabled() == {"pivot"}
+    assert WS.plugin_prefs.enabled_bundled() == set()
+
+
+def test_a_damaged_tag_template_reseeds_the_default_tags():
+    """tags.json seeds every new case's tag set: falling back to [] would
+    create cases with no tags at all."""
+    _ws_file("tags.json").write_bytes(b'{"not": "a list"}')
+    assert [t["name"] for t in WS.tags.get()] == [n for n, _c, _h in DEFAULT_TAGS]
+    assert len(_set_aside("tags.json")) == 1
+
+
+def test_a_failed_lock_file_open_does_not_wedge_the_workspace(monkeypatch):
+    """_WorkspaceLock took its in-process RLock and only then opened
+    workspace/.lock; one failed open (EMFILE, a read-only install) left the
+    RLock held by that thread forever, so every other worker thread blocked
+    on its next workspace call — the whole server, since nearly every
+    route touches one."""
+    import errno
+    import os
+    import threading
+
+    real_open = os.open
+    fail = {"once": True}
+
+    def flaky_open(path, *a, **kw):
+        if str(path).endswith(".lock") and fail["once"]:
+            fail["once"] = False
+            raise OSError(errno.EMFILE, "Too many open files")
+        return real_open(path, *a, **kw)
+
+    monkeypatch.setattr(os, "open", flaky_open)
+    # A lock of this test's own: if the leak is back, the one it wedges is
+    # thrown away with the test instead of hanging every test after it.
+    monkeypatch.setattr(WS, "_LOCK", WS._WorkspaceLock())
+
+    # Two DIFFERENT, simultaneously live threads, as uvicorn's worker pool
+    # has: an RLock is re-entrant, and a thread started after the first
+    # one exits can be handed the same ident — either way the second call
+    # would sail through a leaked lock and the test would prove nothing.
+    first_done, release_first = threading.Event(), threading.Event()
+    out = {}
+
+    def first():
+        try:
+            WS.cases.list()
+        except OSError as e:
+            out["first"] = e
+        first_done.set()
+        release_first.wait(timeout=30)   # stay alive, holding whatever leaked
+
+    def second():
+        out["second"] = WS.cases.list()
+
+    t1 = threading.Thread(target=first, daemon=True)
+    t1.start()
+    assert first_done.wait(timeout=10)
+    try:
+        assert isinstance(out.get("first"), OSError)
+        t2 = threading.Thread(target=second, daemon=True)   # daemon: a hang fails
+        t2.start()                                          # this test, not the run
+        t2.join(timeout=10)
+        assert not t2.is_alive(), "workspace call hung: the failed open leaked the lock"
+        assert out["second"] == []
+    finally:
+        release_first.set()
