@@ -9,7 +9,7 @@ import { headH, rScroll, render, spacerPx, vScroll } from './grid.js';
 import { drawRail, rebuildGroupPrefix, renderGrouped } from './grouping.js';
 import { syncHistogramPanel } from './histogram.js';
 import { shutdownWinnow } from './home.js';
-import { ACTION_LABELS, defaultKeymap, findKeyConflict, keySpecFromEvent, saveKeymap } from './keymap.js';
+import { ACTION_LABELS, defaultKeymap, findKeyConflict, keyLabel, keySpecFromEvent, saveKeymap } from './keymap.js';
 import { buildPluginsPanel } from './pluginmanager.js';
 import { listBundles, openPluginBundlesModal } from './bundles.js';
 import { buildAssocPanel } from './assoc.js';
@@ -992,7 +992,7 @@ export function openSettings() {
         const chips = el('div', 'settings-key-chips');
         keys.forEach((k, i) => {
           const chip = el('span', 'settings-key-chip');
-          chip.append(el('kbd', null, k));
+          chip.append(el('kbd', null, keyLabel(k)));
           const rm = el('button', 'btn ghost', '✕');
           rm.title = 'Remove this binding';
           rm.onclick = () => { keys.splice(i, 1); keymapChanged(); };
@@ -1034,7 +1034,7 @@ export function openSettings() {
             }
             done();
             const conflict = findKeyConflict(spec, action);
-            if (conflict) { toast(`"${spec}" is already used by ${conflict}`, 4000); return; }
+            if (conflict) { toast(`"${keyLabel(spec)}" is already used by ${conflict}`, 4000); return; }
             keys.push(spec);
             keymapChanged();
           };

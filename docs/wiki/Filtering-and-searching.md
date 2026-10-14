@@ -75,6 +75,8 @@ The ▾ buttons appear automatically on tables under 250,000 rows, because readi
 
 Right-click a column header and choose **Stack values (rarest first)…** to see the column's values as a bar chart of counts for the current view. **Rarest first** is where one-off command lines and odd hosts show up; **Most common** reverses it. It shows up to 60 bars. Click a bar to filter the grid to that value.
 
+To take every value away as a list instead, **Copy unique values** in the same menu puts the column's distinct values for the current view on the clipboard, one per line (see [Copying](Working-with-tables.md#copying)).
+
 ## The filter builder
 
 The filter builder is for logic the filter row can't express, such as "EventId is 4624 or 4625, and LogonType is not 3". Open it from **Filters ▾ → Filter builder…** or press `e`.

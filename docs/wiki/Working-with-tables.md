@@ -72,7 +72,7 @@ Fitting is capped so that a single long value, such as a base64 command line, ca
 
 Right-click a datetime column's header to choose how its values are shown, for example **As stored**, **YYYY-MM-DD HH:MM:SS** or **MM/DD/YYYY HH:MM:SS**. This is display only: filters and exports always use the text the file came with, although copying from the grid gives the value as displayed. A format picked on a column beats the case's default in **Case ▾ → Case settings…**, which beats the machine-wide one in **Settings → Timestamps**.
 
-The same right-click menu has **Stack values (rarest first)…** (see [Filtering and searching](Filtering-and-searching.md#stacking-a-column)) and **Derive a column from this…**.
+The same right-click menu has **Stack values (rarest first)…** (see [Filtering and searching](Filtering-and-searching.md#stacking-a-column)), **Copy unique values** (see [Copying](#copying)) and **Derive a column from this…**.
 
 ### Layouts
 
@@ -131,6 +131,14 @@ While rows are picked, a bar above the grid says how many, with a button per tag
 ### Copying
 
 `Ctrl+C` copies the cell range if you made one, otherwise the picked rows, otherwise the cursor row. `Ctrl+Shift+C` does the same with a header line. The copy is tab-separated, uses the visible columns in their current order, and gives values as displayed. Up to 20,000 rows can be copied at once. The cell right-click menu has the same choices under **Copy**.
+
+**Copy unique values** copies one column's distinct values, one per line, for pasting into a lookup, a filter or a report. Press `Ctrl+Shift+U` with the cell cursor in the column, choose it under **Copy** in the cell right-click menu, or right-click the column header. Which rows it reads:
+
+- A cell range spanning several rows, or the picked rows: the values in those rows, in the order they first appear in the grid. Up to 20,000 rows.
+- Nothing narrower than that (one clicked cell, or every row picked): every value in the view, sorted the way the column sorts, so numbers in number order and timestamps in time order.
+- From the column header: always the whole view.
+
+The menu item's second line says which, for example "of Host in the whole view". Values are copied as displayed, empty values are left out, and a column with more than 100,000 distinct values in the view is refused rather than copied in part; filter the view down first.
 
 ## Grouping rows
 
@@ -202,6 +210,7 @@ Remove a saved table from the Tables manager like any other.
 | `x` / `X` | Remove grouping / turn grouping off and on |
 | `Ctrl+A` | Pick every row in the view |
 | `Ctrl+C` / `Ctrl+Shift+C` | Copy / copy with headers |
+| `Ctrl+Shift+U` | Copy the unique values of the cursor's column |
 | `j`/`k` or arrows, `g`/`G`, `PageUp`/`PageDown`, `Ctrl+Arrow` | Move the cell cursor |
 
 Every key can be changed; see [Settings and shortcuts](Settings-and-shortcuts.md).
