@@ -335,6 +335,24 @@ export function openFilterColumnPicker(anchorEl) {
   });
 }
 
+/* For the merge on screen: each column only some of its tables have
+   (folded name -> labels of the tables that have it), and `total`, the
+   table count. Empty for a plain table. Read from the merge's `members`,
+   which the server fills with what each one lacks. */
+function partialMergeColumns() {
+  const out = new Map();
+  const src = S.sources.find((s) => s.id === S.sourceId);
+  if (!src || !src.is_merge || !src.members) return out;
+  out.total = src.members.length;
+  const missing = src.members.map((m) => new Set(m.missing.map((n) => n.trim().toLowerCase())));
+  for (const c of src.columns) {
+    const k = c.name.trim().toLowerCase();
+    const owners = src.members.filter((m, i) => !missing[i].has(k)).map((m) => m.label);
+    if (owners.length < src.members.length) out.set(k, owners);
+  }
+  return out;
+}
+
 export function renderHead() {
   /* The RECTANGLE goes: c0/c1 are indices into visibleCols(), and this
      runs precisely when that list changes — a hide, a reorder, a pin, a
@@ -405,6 +423,7 @@ export function renderHead() {
   filt.append(gf);
 
   const pins = pinnedOffsets();
+  const partial = partialMergeColumns();
   for (const name of visibleCols()) {
     const w = colWidth(name);
     const h = el('div', 'hcell');
@@ -463,6 +482,15 @@ export function renderHead() {
         toggleColumnFilter(name);
       };
       h.append(fo);
+    }
+    const owners = partial.get(name.trim().toLowerCase());
+    if (owners) {
+      // On a merge, a column not every table has: its empty cells there
+      // mean "that file has no such field", not missing data.
+      const mark = el('span', 'hcell-partial', `${owners.length}/${partial.total}`);
+      mark.title = `Only in ${owners.length === 1 ? owners[0] : `${owners.slice(0, -1).join(', ')} and ${owners[owners.length - 1]}`}. `
+        + 'Rows from the other tables are empty here.';
+      h.append(mark);
     }
     if (colMetaEntry) {
       // Column options (display format, "Derive a column from this…",

@@ -3608,6 +3608,17 @@ def api_set_source_folder(source_id: int, body: SourceFolderReq):
 class MergeCreate(BaseModel):
     name: str
     source_ids: list[int]
+    # 'all' keeps every member's columns (empty where a member lacks one),
+    # 'shared' only those every member has — see Store._merge_columns.
+    col_mode: str = "all"
+    source_column: bool = False
+
+
+class MergeUpdate(BaseModel):
+    name: str | None = None
+    source_ids: list[int] | None = None
+    col_mode: str | None = None
+    source_column: bool | None = None
 
 
 @app.get("/api/merges")
@@ -3618,7 +3629,35 @@ def api_merges_list():
 @app.post("/api/merges")
 def api_merges_create(body: MergeCreate):
     try:
-        return store().create_merge(body.name, body.source_ids)
+        return store().create_merge(body.name, body.source_ids, body.col_mode, body.source_column)
+    except (ValueError, KeyError) as e:
+        raise HTTPException(400, str(e))
+
+
+class MergePreview(BaseModel):
+    source_ids: list[int]
+    col_mode: str = "all"
+    source_column: bool = False
+
+
+@app.post("/api/merges/preview")
+def api_merges_preview(body: MergePreview):
+    """The merge builder's live preview: columns, who has them, a few rows."""
+    try:
+        return store().merge_preview(body.source_ids, body.col_mode, body.source_column)
+    except (ValueError, KeyError) as e:
+        raise HTTPException(400, str(e))
+
+
+@app.put("/api/merges/{merge_id}")
+def api_merges_update(merge_id: int, body: MergeUpdate):
+    st = store()
+    try:
+        st._merge_row(merge_id)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    try:
+        return st.update_merge(merge_id, body.name, body.source_ids, body.col_mode, body.source_column)
     except (ValueError, KeyError) as e:
         raise HTTPException(400, str(e))
 

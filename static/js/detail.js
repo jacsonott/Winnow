@@ -7,7 +7,7 @@ import { ellipsize, setColumnFilter, setSearchMode } from './filters.js';
 import { clearPageCache, render, rowAt } from './grid.js';
 import { writeClipboardText } from './grouping.js';
 import { syncSearchExpansion } from './search.js';
-import { clearAllFilters } from './sources.js';
+import { clearAllFilters, sourceLabel } from './sources.js';
 import { S } from './state.js';
 import { displayCell } from './tsformat.js';
 import { contextMenu } from './ui.js';
@@ -371,7 +371,11 @@ export function showDetail(pos) {
   if (!r) { hideDetailPane(); return; }
   d.hidden = false;
   $('detailResize').hidden = false;
-  $('detailTitle').textContent = `Line ${r.rid}`;
+  // Line numbers restart in every table of a merge, so on a merge the
+  // title says which table this line is from.
+  const cur = S.sources.find((s) => s.id === S.sourceId);
+  const from = cur && cur.is_merge ? S.sources.find((s) => s.id === r.source_id) : null;
+  $('detailTitle').textContent = from ? `Line ${r.rid} · ${sourceLabel(from)}` : `Line ${r.rid}`;
   // Opening a row is the gesture the grid had no way of announcing, so
   // the announcement stops the moment it has been used — from anywhere:
   // the gutter affordance, a double-click, or the hotkey.
