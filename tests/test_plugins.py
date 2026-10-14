@@ -1562,6 +1562,23 @@ def test_pivot_detail_on_a_merge_is_deterministic(pivot_client, store, write_csv
     assert len(out["rows"]) == store.get_source(mid)["row_count"]
 
 
+def test_pivot_over_a_merge_with_mismatched_columns(pivot_client, store, write_csv):
+    """A member without a merge column reads it as blank — so it counts
+    toward bare Count but not Count-of-that-field, and groups under the
+    blank row label rather than under the column's name."""
+    client, source_id = pivot_client
+    other = store.ingest_csv(write_csv([["HOST", "User"], ["SRV3", "dave"], ["SRV3", "erin"]],
+                                       "pmm.csv"), name="pmm", build_fts=False)["id"]
+    mid = store.create_merge("pivmismatch", [source_id, other])["id"]
+    out = _agg(client, mid, values=[{"agg": "count"}, {"agg": "count", "column": "Channel"}],
+               group_sets=[["Host"], ["Channel"]])
+    per_host = {r[0]: r[1:] for r in out["sets"][0]["rows"]}
+    assert per_host["SRV3"] == [2, 0]
+    per_channel = {r[0]: r[1] for r in out["sets"][1]["rows"]}
+    assert "Channel" not in per_channel
+    assert per_channel[None] == 2
+
+
 # ============================================================ first_last plugin
 
 FL_ROWS = [
@@ -1839,6 +1856,22 @@ def test_first_last_merge_row_json_carries_the_exposed_columns(fl_client, store,
               columns=[], template="{which}", row_json=True)
     zed = next(r for r in out["rows"] if '"zed"' in r[1])
     assert set(_json.loads(zed[1]).keys()) == {"When", "Host", "User", "EventId"}
+
+
+def test_first_last_over_a_merge_with_mismatched_columns(fl_client, store, write_csv):
+    """A member missing a carried column contributes its rows with that
+    column blank; one spelling the header differently still lines up."""
+    client, sid = fl_client
+    sid2 = store.ingest_csv(write_csv(
+        [["WHEN", "Host", "User"], ["2026-03-16 08:00:00", "SRV7", "fay"],
+         ["2026-03-16 09:00:00", "SRV7", "fay"]], "flmm.csv"), name="flmm", build_fts=False)["id"]
+    mid = store.create_merge("flmm", [sid, sid2])["id"]
+    out = _fl(client, "preview", source_id=mid, group_by=["User"], sort_column="When",
+              columns=["User", "EventId"], template="{which} {EventId}")
+    fay = [r for r in out["rows"] if r[1] == "fay"]
+    assert [r[0] for r in fay] == ["2026-03-16 08:00:00", "2026-03-16 09:00:00"]
+    assert {r[2] for r in fay} == {""}   # the plugin renders a blank as ""
+    assert "EventId" not in {r[2] for r in out["rows"]}
 
 
 # ============================================= shipped KAPE profile

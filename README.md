@@ -38,9 +38,11 @@ another analyst. The evidence files themselves are **never modified**.
 - **Zipped bundles** — drop in an ESXi support bundle or UAC collection
   (`.zip`/`.tar`/`.tgz`/`.gz`) and Winnow expands it, nested archives and
   rotated logs included, then imports the files inside.
-- **One view over several tables** — merge same-shaped exports from a
-  fleet of hosts and filter, sort, tag and export them as one, with each
-  row still knowing which file it came from.
+- **One view over several tables** — merge exports from a fleet of hosts
+  and filter, sort, tag and export them as one, with each row still
+  knowing which file it came from. The tables don't need identical
+  columns: a column only some have is empty for the rest, or keep just
+  the shared ones.
 - **Work across cases** — sweep an IOC through every case you have
   registered, run one query over several at once, or read their timelines
   side by side, without opening each in turn.

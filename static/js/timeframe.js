@@ -9,6 +9,7 @@ import { hasActiveFilterTree, openFilterBuilder } from './filterbuilder.js';
 import { VALUE_FILTER_AUTO_MAX, setColumnValueFilter, setValueFilterMode, valueFilterAutoOn, valueFilterEnabled } from './filters.js';
 import { moveCursor, render } from './grid.js';
 import { drawRail } from './grouping.js';
+import { openMergeBuilder } from './merge.js';
 import { applyPreset, filtersForCurrentSource, headerSig, loadSavedFilters, matchingSavedFilters, nicknameFor, setNicknameFor } from './savedfilters.js';
 import { clearAllFilters, closeTab, editSourceNickname, openSource, sourceLabel, wireDragReorder } from './sources.js';
 import { normalizeTree, S } from './state.js';
@@ -708,6 +709,17 @@ export function buildTableActionsPanel(container, refresh) {
     if (!src) return;
     if (await editSourceNickname(src)) refresh();
   };
+  // The merge builder, started from this table: ticked, with the tables
+  // that fit it listed first — or, on a merge, opened on its own tables
+  // to change them in place.
+  const merge = el('button', 'btn ghost', src && src.is_merge ? 'Edit merge…' : 'Merge with other tables…');
+  merge.title = src && src.is_merge
+    ? 'Add or remove tables, or change which columns this merge keeps. Its layout and saved views stay.'
+    : 'One table across this and others, matched by column name';
+  merge.onclick = () => {
+    if (!src) return;
+    openMergeBuilder(src.is_merge ? { edit: src } : { preselect: [src.id] });
+  };
   const tables = el('button', 'btn ghost', 'Tables manager…');
   tables.title = 'Every table in the case — indexes, row counts, dropping a source';
   tables.onclick = () => openTablesManager();
@@ -720,7 +732,7 @@ export function buildTableActionsPanel(container, refresh) {
     saveLayout();
     await clearAllFilters();
   };
-  acts.append(dflt, nick, nickTable, tables, reset);
+  acts.append(dflt, nick, nickTable, merge, tables, reset);
   container.append(acts);
   if (src && src.is_open) {
     const close = el('button', 'btn ghost', 'Close this tab');

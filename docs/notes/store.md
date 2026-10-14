@@ -96,6 +96,24 @@ see [docs/notes/README.md](README.md) for the whole set.
   rather than the raw column name, since a column name is arbitrary CSV-
   header text and this sidesteps identifier-safety entirely rather than
   leaning on `q()` for a human-readable name nobody needs to read.
+- **Merge members don't share the merge's columns.** `_merge_columns`
+  exposes every member's base columns (matched by `_col_key`, first member
+  to have one decides its spelling and type), or only the shared ones in
+  `col_mode='shared'`. A member that lacks a column, or spells it in a way
+  SQLite's ASCII-only case folding doesn't bridge (`Größe`/`GRÖßE`), is
+  read through `_member_projection`: `(SELECT rid, <exprs> FROM src_N)`
+  with `NULL AS "col"` / `"actual" AS "col"` / the label as the Source
+  table column. That subquery is flattened by SQLite — EXPLAIN QUERY PLAN
+  still shows `SEARCH src_N USING INDEX` on each member, under the
+  member's own spelling. Same-shaped members return None and keep the
+  exact SQL they always had. The trap this closes: a quoted name the
+  member lacks isn't an error in an unqualified read, it's SQLite's
+  double-quoted-string fallback, so every cell came back as the column's
+  name. Every merge read goes through `_member_from`,
+  `_member_join_target`, `_member_rows_from` or `merge_select_list`;
+  nothing may write a merge column into a member table directly.
+  `_ensure_purpose_index_building` resolves the member's own spelling
+  through a `_reader()`, because group_summary calls it on a read path.
 - Column types are **inferred from a 500-row sample and stored as metadata only**;
   every value is stored TEXT. Don't "fix" this by typing the columns — mixed-type
   forensic CSVs then silently coerce, and evidence fidelity matters more than
