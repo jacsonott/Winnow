@@ -269,9 +269,10 @@ def test_csv_export_pads_missing_columns(store, abc):
     v = _view(store, mid, sort=[{"column": "Time", "dir": "asc"}])
     body = "".join(store.export_view_csv(v["view_id"]))
     rows = list(csv.reader(io.StringIO(body)))
-    assert rows[0][3:] == ["Time", "EventId", "Host", "Msg", "Extra", "Other"]
-    assert rows[1][3:] == ["2024-01-01 10:00:00", "4624", "WS01", "alpha logon", "", ""]
-    assert rows[6][3:] == ["2024-01-03 09:00:00", "", "", "zeta note", "", "needle"]
+    assert rows[0][:4] == ["Line", "Table", "Tags", "Note"]
+    assert rows[0][4:] == ["Time", "EventId", "Host", "Msg", "Extra", "Other"]
+    assert rows[1][4:] == ["2024-01-01 10:00:00", "4624", "WS01", "alpha logon", "", ""]
+    assert rows[6][4:] == ["2024-01-03 09:00:00", "", "", "zeta note", "", "needle"]
 
 
 def test_spec_sql_runs_in_the_pane(store, abc):
@@ -292,6 +293,45 @@ def test_sql_pane_merge_view_pads_missing_columns(store, abc):
                            ["4625", "y", None], ["4624", "x", None], [None, None, "needle"]]
 
 
+def test_save_view_as_table_pads_missing_columns(store, abc):
+    a, b, c = abc
+    mid = store.create_merge("m", [a, b, c], source_column=True)["id"]
+    v = _view(store, mid, sort=[{"column": "Time", "dir": "asc"}])
+    new = store.get_source(store.save_view_as_source(v["view_id"], "copy", build_fts=False)["source"]["id"])
+    assert [col["name"] for col in new["columns"]] == [
+        "Source table", "Time", "EventId", "Host", "Msg", "Extra", "Other"]
+    rows = [tuple(r) for r in store.db.execute(
+        f'SELECT "Source table", "Time", "EventId", "Extra", "Other" FROM "{new["table_name"]}" ORDER BY rid')]
+    assert rows == [("a.csv", "2024-01-01 10:00:00", "4624", "", ""),
+                    ("a.csv", "2024-01-01 11:00:00", "4688", "", ""),
+                    ("b.csv", "2024-01-02 10:00:00", "4624", "x", ""),
+                    ("b.csv", "2024-01-02 11:00:00", "4625", "y", ""),
+                    ("b.csv", "2024-01-02 12:00:00", "4624", "x", ""),
+                    ("c.csv", "2024-01-03 09:00:00", "", "", "needle")]
+
+
+def test_deriving_from_a_column_only_some_tables_have_is_refused_up_front(store, abc):
+    """add_derived_column on a merge makes the column on every member, so
+    it refuses one a member lacks; the previews before it say so too,
+    rather than "no such column" or a preview of a column it won't make."""
+    a, b, c = abc
+    mid = store.create_merge("m", [a, b, c])["id"]
+    v = _view(store, mid, filters=[{"column": "Msg", "op": "contains", "value": "o"}])
+    for attempt in (lambda: store.detect_timestamp_format(mid, "Extra"),
+                    lambda: store.preview_derived(mid, "Extra", "iso8601"),
+                    lambda: store.preview_derived(mid, "Extra", "iso8601", view_id=v["view_id"]),
+                    lambda: store.add_derived_column(mid, "When", "Extra", "iso8601")):
+        with pytest.raises(ValueError, match="has no column 'Extra'"):
+            attempt()
+    # One every table has (B spells it "TIME") previews from every table
+    # in the view: "delta failed" is the one row the filter leaves out.
+    res = store.preview_derived(mid, "Time", "iso8601", view_id=v["view_id"])
+    assert (res["scope"], res["failures"]) == ("view", 0)
+    assert [p["input"] for p in res["preview"]] == [
+        "2024-01-01 10:00:00", "2024-01-01 11:00:00", "2024-01-02 10:00:00",
+        "2024-01-02 12:00:00", "2024-01-03 09:00:00"]
+
+
 # ---------------------------------------------------------- source column
 
 def test_source_column_names_each_row_table(store, abc):
@@ -310,7 +350,7 @@ def test_source_column_names_each_row_table(store, abc):
     assert groups == {"a.csv": 2, "WS02 Security": 3, "c.csv": 1}
     assert {r["value"] for r in store.column_values(mid, "Source table")} == {"a.csv", "WS02 Security", "c.csv"}
     body = "".join(store.export_view_csv(v["view_id"]))
-    assert list(csv.reader(io.StringIO(body)))[1][3] == "a.csv"
+    assert list(csv.reader(io.StringIO(body)))[1][4] == "a.csv"
 
 
 def test_source_column_steps_aside_for_a_real_column_of_that_name(store, write_csv):
@@ -380,18 +420,6 @@ def test_same_shaped_merge_sql_is_unchanged(store, write_csv):
     assert "SELECT rid," not in sql
 
 
-def test_headers_differing_in_non_ascii_case_merge_and_read(store, write_csv):
-    """Python folds Größe/GRÖßE together; SQLite's ASCII-only folding
-    doesn't, which used to make every read of such a merge fail (or read
-    the header name as data)."""
-    a = _ingest(store, write_csv, [["Größe", "Öffnen"], ["1", "x"]], "a")
-    b = _ingest(store, write_csv, [["GRÖßE", "öffnen"], ["2", "y"]], "b")
-    mid = store.create_merge("m", [a, b])["id"]
-    v = _view(store, mid, sort=[{"column": "Größe", "dir": "asc"}])
-    assert _cells(store, mid, v, "Größe") == ["1", "2"]
-    assert {r["value"] for r in store.column_values(mid, "Öffnen")} == {"x", "y"}
-
-
 # ----------------------------------------------------------------- preview
 
 def test_preview_matches_the_merge_it_previews(store, abc):
@@ -418,6 +446,15 @@ def test_preview_of_shared_with_nothing_in_common_is_empty_not_an_error(store, w
     assert pv["columns"] == [] and len(pv["rows"]) == 3
     with pytest.raises(ValueError):
         store.merge_preview([a, -1])
+
+
+def test_preview_is_a_read_and_never_waits_on_the_writer(store, abc):
+    """The builder re-asks for the preview on every tick, so it must not
+    queue behind an import or a big view build (CLAUDE.md invariant #4)."""
+    from test_concurrency import _run_with_lock_held
+    a, b, c = abc
+    pv = _run_with_lock_held(store, lambda: store.merge_preview([a, b, c], sample_rows=6))
+    assert [r["source_id"] for r in pv["rows"]] == [a, a, b, b, c]
 
 
 def test_preview_route(client, store, abc):

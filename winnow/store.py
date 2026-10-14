@@ -6146,7 +6146,7 @@ class Store:
         merge_src = {"id": 0, "is_merge": True, "columns": cols}
         per = max(1, min(4, sample_rows // len(members)))
         rows: list[dict] = []
-        with self.lock:
+        with self._reader() as ro:
             for m in members:
                 if len(rows) >= sample_rows:
                     break
@@ -6155,7 +6155,7 @@ class Store:
                     frm += f" LEFT JOIN {q(self._derived_table(m['id']))} d ON d.rid = s.rid"
                 sql = (f"SELECT {self.merge_select_list(merge_src, m) if cols else 's.rid'} FROM {frm} "
                        f"ORDER BY s.rid LIMIT {min(per, sample_rows - len(rows))}")
-                rows += [{"source_id": m["id"], "cells": list(r) if cols else []} for r in self.db.execute(sql)]
+                rows += [{"source_id": m["id"], "cells": list(r) if cols else []} for r in ro.execute(sql)]
         return {
             "columns": [{**c, "in": {} if c.get("source_column") else {
                 str(m["id"]): {"name": o[_col_key(c["name"])]["name"], "type": o[_col_key(c["name"])]["type"]}
@@ -7355,15 +7355,19 @@ class Store:
         per = max(1, -(-want // len(members)))
 
         def branch(m: dict) -> str:
-            ref = self._col_ref(src, column, "s", None if direct else "d")
+            # A member read through its projection (a merge of tables with
+            # different columns) has the column, padded or renamed, as a
+            # plain column of `s`.
+            rsrc = self._ref_src_for(src, m)
+            ref = self._col_ref(rsrc, column, "s", None if direct else "d")
             if direct:
                 scope = f"FROM {self._member_from(src, m, 's')}"
                 order = "s.rid"
             else:
                 scope = (f"FROM v.{q(view_id)} vv "
-                         f"JOIN {q(m['table_name'])} s ON s.rid = vv.rid "
+                         f"JOIN {self._member_join_target(src, m)} s ON s.rid = vv.rid "
                          f"AND vv.source_id = {int(m['source_id'])}"
-                         f"{self._member_derived_join(src, m, 's')}")
+                         f"{self._member_derived_join(rsrc, m, 's')}")
                 # The view's own order, which is what the analyst is
                 # looking at, and free: pos is the view table's rowid.
                 order = "vv.pos"
@@ -7375,6 +7379,18 @@ class Store:
         with self._reader() as ro, self._dropped_view_is_expired():
             return [r[0] for r in ro.execute(f"SELECT v FROM ({union}) LIMIT ?", (want,))]
 
+    def _derive_preview_member(self, merge_id: int, columns: list[str]) -> int:
+        """The member a derive preview on a merge samples: its first. A
+        column only some members have can't be derived on the merge —
+        add_derived_column refuses it, member by member — so the preview
+        refuses it the same way, rather than as an unknown column."""
+        members = self._resolve_members(merge_id)
+        for m in members:
+            for col in columns:
+                if self._find_column(m["src"], col) is None:
+                    raise ValueError(f"Member table {m['src']['name']!r} has no column {col!r}")
+        return members[0]["source_id"]
+
     def detect_timestamp_format(self, source_id: int, column: str) -> list[dict]:
         """Which operations can read this column, best first. Same
         sample-and-round-trip shape preview_sqlite_tables uses to pre-check
@@ -7383,7 +7399,7 @@ class Store:
         vs unix seconds) legitimately return several — the caller's preview
         of actual converted values is what settles it."""
         if source_id < 0:  # a merge samples its first (canonical) member
-            source_id = self._resolve_members(source_id)[0]["source_id"]
+            source_id = self._derive_preview_member(source_id, [column])
         src = self._source_lite(source_id)
         if self._find_column(src, column) is None:
             raise KeyError(column)
@@ -7471,6 +7487,8 @@ class Store:
             raise ValueError(f"Unknown operation: {op_id}")
         params = timeparse.validate_params(op_id, params)
         if view_id and not op["multi_input"]:
+            if source_id < 0:
+                self._derive_preview_member(source_id, [column])   # refuses a partial column
             samples = self._sample_column_in_view(view_id, column)
             return self._derived_preview_from(samples, op_id, params, limit, scope="view")
         # A multi-input operation reads several columns of the SAME row, so
@@ -7486,7 +7504,8 @@ class Store:
         if source_id < 0:
             # Preview against the first member — representative, and the
             # only side with a real table to sample.
-            source_id = self._resolve_members(source_id)[0]["source_id"]
+            source_id = self._derive_preview_member(
+                source_id, timeparse.op_inputs(op_id, column, params) if op["multi_input"] else [column])
         src = self._source_lite(source_id)
         if self._find_column(src, column) is None:
             raise KeyError(column)
@@ -7550,7 +7569,7 @@ class Store:
         work is pure Python over those values — no new query shape."""
         names = structparse.regex_group_names(pattern)
         if source_id < 0:
-            source_id = self._resolve_members(source_id)[0]["source_id"]
+            source_id = self._derive_preview_member(source_id, [column])
         src = self._source_lite(source_id)
         if self._find_column(src, column) is None:
             raise KeyError(column)
@@ -15497,7 +15516,7 @@ class Store:
                     for chunk in self._iter_subset_keys(ro, view_id, handle, picks, skip, op_token):
                         if copy["cancelled"]:   # close() — read once per batch, ingest_csv's cadence
                             raise OpCancelled("The case is closing — the copy was cancelled")
-                        cells = self._subset_cells(ro, cols, chunk, op_token)
+                        cells = self._subset_cells(ro, cols, chunk, op_token, parent)
                         rows: list[tuple] = []
                         mapping: list[tuple] = []
                         for pair in chunk:
@@ -15646,13 +15665,14 @@ class Store:
                 yield [(r["source_id"], r["rid"]) for r in rows if (r["source_id"], r["rid"]) not in skip]
 
     def _subset_cells(self, ro: sqlite3.Connection, cols: list[str], chunk: list[tuple[int, int]],
-                      op_token: str | None) -> dict[tuple[int, int], tuple]:
+                      op_token: str | None, parent: dict | None = None) -> dict[tuple[int, int], tuple]:
         """{(source_id, rid): cells} for one batch of keys, each row read
         through ITS member's _from_clause — derived sidecar joined
         USING(rid), so base and derived columns are both addressable bare
-        — the fetch_rows shape, which is what lets a merge's canonical
-        column list run unchanged against every member. NULL → '' as
-        ingest_rows stores it."""
+        — the fetch_rows shape. A member of a merge `parent` that doesn't
+        carry the merge's columns as-is is read through its projection
+        (_member_rows_from), which pads and renames it to that column
+        list. NULL → '' as ingest_rows stores it."""
         by_source: dict[int, list[int]] = {}
         for s, r in chunk:
             by_source.setdefault(s, []).append(r)
@@ -15660,7 +15680,9 @@ class Store:
         out: dict[tuple[int, int], tuple] = {}
         with self._interruptible(op_token, ro):
             for s, rids in by_source.items():
-                frm = self._from_clause(self._source_lite_on(ro, s))
+                msrc = self._source_lite_on(ro, s)
+                frm = (self._member_rows_from(parent, msrc) if parent and parent.get("is_merge")
+                       else self._from_clause(msrc))
                 for i in range(0, len(rids), 900):
                     part = rids[i:i + 900]
                     for row in ro.execute(

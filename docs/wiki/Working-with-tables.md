@@ -42,7 +42,7 @@ Press `C`, right-click a tab, or right-click a table in the sidebar to open the 
 
 - **Columns**: show, hide, pin and reorder columns (see below), plus **Add derived column…** (see [Derived columns](Derived-columns.md)).
 - **Value filter dropdowns**: when the ▾ value picker appears on this table's filter boxes (see [Filtering and searching](Filtering-and-searching.md#the-value-picker)).
-- **This table**: **Save layout as default for these columns**, **Name this header set…** and **Nickname this table…**.
+- **This table**: **Save layout as default for these columns**, **Name this header set…**, **Nickname this table…** and **Merge with other tables…** (on a merge, **Edit merge…**; see [Merging tables](#merging-tables)).
 
 ## Columns
 
@@ -148,15 +148,24 @@ Right-click a group heading to expand or collapse it, **Select these *N* rows** 
 
 ## Merging tables
 
-A merge shows several tables with the same columns as one table: the same event log exported from five hosts, for example. Nothing is copied. Each row stays in its own table, and so do its tags and notes, so a tag added in the merge is also there when you open the original table, and the reverse.
+A merge shows several tables as one table: the same event log exported from five hosts, for example. Nothing is copied. Each row stays in its own table, and so do its tags and notes, so a tag added in the merge is also there when you open the original table, and the reverse.
 
 To merge tables:
 
-1. Choose **Case ▾ → Merge tables…**.
-2. Tables are grouped by their column names. The names must match, but the order doesn't matter, and case is ignored for A–Z. Tick two or more tables from one group, or use **Select all**.
-3. Type a name, or keep the suggested one, and click **Create merge**. Each merge needs a different name.
+1. Choose **Case ▾ → Merge tables…**, or open one of the tables and choose **Merge with other tables…** in the **This table** section of the table menu, which starts with that table ticked.
+2. Tick two or more tables. Tables with the same columns are listed together, with **Select all** for each group. Once a table is ticked, the others are marked with how they fit: **same columns**, **+N columns** when a table has columns the ticked ones don't, **N of M columns** when it lacks some, or **no shared columns**. Started from a table, the groups that fit it best come first. The first table you tick decides the column order.
+3. Choose **Keep every column** or **Only shared columns**, and whether to add a **Source table** column.
+4. Check the preview, type a name or keep the suggested one, and click **Create merged table**. Each merge needs a different name.
 
-Only the columns the tables were imported with are compared, so a derived column you have added to one of them doesn't stop it being offered.
+Columns are matched by name. The order doesn't matter, and case is ignored for A–Z, so `EventID` in one table and `EventId` in another are one column. The preview's **Columns** tab shows which tables have each column, and **Sample rows** shows a few rows from each table as the merge would show them. Notes above the preview point out anything worth checking, such as a table that shares no columns with the others.
+
+- **Keep every column** shows every column any of the tables has. A column only some tables have is empty in the rows from the others, and its header in the grid has a mark you can hover over to see which tables have it.
+- **Only shared columns** shows just the columns every table has.
+- The **Source table** column shows which table each row came from, by its nickname if it has one. You can filter, sort and group by it like any other column.
+
+Only the columns the tables were imported with are compared. A derived column appears in a merge when every table in it has one of that name. To add one to a merge, its input column has to be in every table.
+
+To change a merge, open it and choose **Edit merge…** in the **This table** section of the table menu. You can add or remove tables, switch between every column and shared columns, turn the Source table column on or off, and rename it. The merge keeps its tab, layout and saved views.
 
 A merge shows ⛓ before its name and works like any other table: filtering, searching, sorting, tagging, notes, grouping, the value picker, derived columns and exports all work on it. The exceptions:
 

@@ -75,10 +75,12 @@ see [docs/notes/README.md](README.md) for the whole set.
   paged its own header names as cell values. Now: `validate_where_fragment`
   checks every double-quoted name against the columns (folded the SQLite
   way, `_ascii_fold`) and says a text value takes single quotes;
-  `column_signature` folds ASCII only; and `_merge_columns` re-checks a
-  merge's members on every open, so one the old rule let into a case file
-  is a `KeyError` like a dropped member (listed as broken, offered for
-  deletion) rather than read wrong. On Python 3.12+ the writer, the
+  `column_signature` folds ASCII only; and `_merge_columns` matches a
+  merge's columns with `_col_key` (ASCII fold too), so "Größe" and
+  "GRÖßE" are two columns of the merge, each `NULL` on the member without
+  it (see "Merge members don't share the merge's columns" below) — which
+  is also how a merge the old rule let into a case file now reads. On
+  Python 3.12+ the writer, the
   reader pool and the fragment dry-run also switch the fallback off
   (`_no_dq_strings`), so anything that slips past those checks fails
   loudly — an extra layer only, since `Connection.setconfig` doesn't
@@ -364,8 +366,8 @@ see [docs/notes/README.md](README.md) for the whole set.
   exposes every member's base columns (matched by `_col_key`, first member
   to have one decides its spelling and type), or only the shared ones in
   `col_mode='shared'`. A member that lacks a column, or spells it in a way
-  SQLite's ASCII-only case folding doesn't bridge (`Größe`/`GRÖßE`), is
-  read through `_member_projection`: `(SELECT rid, <exprs> FROM src_N)`
+  SQLite won't resolve to the merge's name (surrounding spaces, which
+  `_col_key` strips), is read through `_member_projection`: `(SELECT rid, <exprs> FROM src_N)`
   with `NULL AS "col"` / `"actual" AS "col"` / the label as the Source
   table column. That subquery is flattened by SQLite — EXPLAIN QUERY PLAN
   still shows `SEARCH src_N USING INDEX` on each member, under the
@@ -376,8 +378,11 @@ see [docs/notes/README.md](README.md) for the whole set.
   name. Every merge read goes through `_member_from`,
   `_member_join_target`, `_member_rows_from` or `merge_select_list`;
   nothing may write a merge column into a member table directly.
-  `_ensure_purpose_index_building` resolves the member's own spelling
-  through a `_reader()`, because group_summary calls it on a read path.
+  `_ensure_purpose_index_building` builds under the member's own spelling
+  (`_table_own_spelling`) and skips a member that lacks the column. A
+  derived column is the exception that still needs every member: one is
+  made on the merge by making it on each member, so `add_derived_column`
+  and the previews before it refuse an input only some members have.
 - Column types are **inferred from a 500-row sample and stored as metadata only**;
   every value is stored TEXT. Don't "fix" this by typing the columns — mixed-type
   forensic CSVs then silently coerce, and evidence fidelity matters more than

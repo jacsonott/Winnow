@@ -483,8 +483,10 @@ export function openMergeBuilder(opts = {}) {
     const clash = takenNames.has(nameInput.value.trim().toLowerCase());
     nameHint.textContent = clash ? 'A merge with this name already exists. Pick another.' : '';
     const rows = state.sel.reduce((sum, id) => sum + byId.get(id).row_count, 0);
+    // Not held for the preview: a slow or failed one shouldn't block the
+    // merge, and the server checks everything the preview would.
     const nothingLeft = res && !res.kept.some((c) => !c.source_column);
-    createBtn.disabled = state.sel.length < 2 || clash || !res || nothingLeft;
+    createBtn.disabled = state.sel.length < 2 || clash || nothingLeft;
     createBtn.textContent = state.sel.length < 2 ? 'Pick at least 2 tables'
       : `${edit ? 'Save changes' : 'Create merged table'} · ${fmt(rows)} rows`;
   }
