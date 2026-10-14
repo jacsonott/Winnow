@@ -9,6 +9,7 @@ import { hasActiveFilterTree, openFilterBuilder } from './filterbuilder.js';
 import { VALUE_FILTER_AUTO_MAX, setColumnValueFilter, setValueFilterMode, valueFilterAutoOn, valueFilterEnabled } from './filters.js';
 import { moveCursor, render } from './grid.js';
 import { drawRail, regroupIfGroupedByTag } from './grouping.js';
+import { openMergeBuilder } from './merge.js';
 import { applyPreset, filtersForCurrentSource, headerSig, loadSavedFilters, matchingSavedFilters, nicknameFor, setNicknameFor } from './savedfilters.js';
 import { clearAllFilters, closeTab, editSourceNickname, openSource, sourceLabel, wireDragReorder } from './sources.js';
 import { normalizeTree, S } from './state.js';
@@ -783,7 +784,18 @@ export function buildTableActionsPanel(container, refresh) {
     if (!src) return;
     if (await editSourceNickname(src)) refresh();
   };
-  acts.append(dflt, nick, nickTable);
+  // The merge builder, started from this table: ticked, with the tables
+  // that fit it listed first — or, on a merge, opened on its own tables
+  // to change them in place.
+  const merge = el('button', 'btn ghost', src && src.is_merge ? 'Edit merge…' : 'Merge with other tables…');
+  merge.title = src && src.is_merge
+    ? 'Add or remove tables, or change which columns this merge keeps. Its layout and saved views stay.'
+    : 'One table across this and others, matched by column name';
+  merge.onclick = () => {
+    if (!src) return;
+    openMergeBuilder(src.is_merge ? { edit: src } : { preselect: [src.id] });
+  };
+  acts.append(dflt, nick, nickTable, merge);
   container.append(acts);
 }
 

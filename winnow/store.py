@@ -244,10 +244,17 @@ CREATE TABLE IF NOT EXISTS filter_presets (
 );
 CREATE INDEX IF NOT EXISTS ix_filter_presets_sig ON filter_presets(col_sig);
 CREATE TABLE IF NOT EXISTS merges (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    name       TEXT NOT NULL,
-    source_ids TEXT NOT NULL,          -- json array of real source ids, creation order
-    created_at TEXT
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    name          TEXT NOT NULL,
+    source_ids    TEXT NOT NULL,       -- json array of real source ids, creation order
+    created_at    TEXT,
+    -- Which columns a merge of differently shaped tables exposes: 'all'
+    -- (every member's columns, empty where a member lacks one) or
+    -- 'shared' (only those every member has). Moot for same-shaped
+    -- members, which is every merge made before mismatched ones existed.
+    col_mode      TEXT NOT NULL DEFAULT 'all',
+    -- 1 = expose MERGE_SOURCE_COLUMN, each member's label as a constant.
+    source_column INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS open_tabs (
     source_id INTEGER PRIMARY KEY      -- signed, same convention as elsewhere: negative = merge id
@@ -1192,6 +1199,31 @@ def _first_nonblank_row(reader: Iterable[list[str]]) -> list[str]:
         if any(c.strip() for c in row):
             return row
     raise ValueError("File is empty")
+
+
+def _col_key(name: str) -> str:
+    """A column's identity across a merge's members: its name, ignoring
+    ASCII case — "EventId" in one export and "EventID" in another are one
+    column. The same folding column_signature uses, and the one SQLite
+    applies to quoted names, so "Größe" and "GRÖßE" stay two columns."""
+    return _ascii_fold(name.strip())
+
+
+def _sqlite_same_ident(a: str, b: str) -> bool:
+    """Whether SQLite resolves quoted identifier `a` to a column named `b`.
+    Stricter than _col_key, which also ignores surrounding whitespace: a
+    member's " EventId" is the merge's "EventId" but needs an alias."""
+    return _ascii_fold(a) == _ascii_fold(b)
+
+
+def _sql_text_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+# The merged view's optional "which table did this row come from" column.
+# Not stored anywhere: every member projects its own label as a constant.
+MERGE_SOURCE_COLUMN = "From table"
+MERGE_COLUMN_MODES = ("all", "shared")
 
 
 def infer_type(values: Iterable[str]) -> str:
@@ -2384,6 +2416,12 @@ class Store:
             # That is the safe direction to be wrong in.
             if not any(r[1] == "origin" for r in self.db.execute("PRAGMA table_info(dashboards)")):
                 self.db.execute("ALTER TABLE dashboards ADD COLUMN origin TEXT")
+            # And merges' column mode / source column (mismatched merges).
+            merge_cols = {r[1] for r in self.db.execute("PRAGMA table_info(merges)")}
+            if "col_mode" not in merge_cols:
+                self.db.execute("ALTER TABLE merges ADD COLUMN col_mode TEXT NOT NULL DEFAULT 'all'")
+            if "source_column" not in merge_cols:
+                self.db.execute("ALTER TABLE merges ADD COLUMN source_column INTEGER NOT NULL DEFAULT 0")
             # The single-row `dashboard` becomes one named "Dashboard" entry
             # the first time a case with that older shape is opened.
             has_named = self.db.execute("SELECT 1 FROM dashboards LIMIT 1").fetchone()
@@ -2733,19 +2771,32 @@ class Store:
         "Host". Anything named after the column has to use the member's
         own spelling — the index name hashes it, and list_column_indexes/
         drop_column_index look indexes up by the member's names."""
-        folded = _ascii_fold(column)
+        own = self._table_own_spelling(table_name, column)
+        return column if own is None else own
+
+    def _table_own_spelling(self, table_name: str, column: str) -> str | None:
+        """_table_spelling, or None when `table_name` has no such column —
+        a member of a merge whose tables have different columns lacks some
+        of the merge's. Matched as _col_key does, so a member's " Host" is
+        the merge's "Host" too."""
+        key = _col_key(column)
         with self._reader() as ro:
-            for (name,) in ro.execute("SELECT name FROM pragma_table_info(?)", (table_name,)):
-                if name == column:
-                    return name
-                if _ascii_fold(name) == folded:
-                    return name
-        return column
+            names = [name for (name,) in ro.execute("SELECT name FROM pragma_table_info(?)", (table_name,))]
+        if column in names:
+            return column
+        return next((name for name in names if _col_key(name) == key), None)
 
     def _ensure_purpose_index_building(self, source_id: int, column: str, purpose: str,
                                         table_name: str | None = None) -> None:
         table_name = table_name or self._source_lite(source_id)["table_name"]
-        column = self._table_spelling(table_name, column)
+        # Callers pass a merge's spelling of the column, once per member.
+        # Index the member's own spelling (the name list_column_indexes
+        # hashes), and nothing at all on a member that lacks the column:
+        # a merge of tables with different columns asks every member for
+        # every one of its columns.
+        column = self._table_own_spelling(table_name, column)
+        if column is None:
+            return
         key = (source_id, column, purpose)
         with self._threads_lock:
             existing = self._index_threads.get(key)
@@ -5728,12 +5779,14 @@ class Store:
                 "path": None,
                 "table_name": None,
                 "row_count": sum(m["row_count"] for m in members),
-                "columns": self._merge_columns(row["name"], members),
+                "columns": self._merge_columns(row, members),
                 "file_hash": None,
                 "imported_at": row["created_at"],
                 "has_fts": 1 if all(m["has_fts"] for m in members) else 0,
                 "is_merge": True,
                 "member_source_ids": member_ids,
+                "col_mode": row["col_mode"],
+                "source_column": bool(row["source_column"]),
             }
         row = conn.execute("SELECT * FROM sources WHERE id=?", (source_id,)).fetchone()
         if not row:
@@ -5745,52 +5798,6 @@ class Store:
             d["columns"].append(self._derived_col_entry(dr))
             d["has_derived"] = True
         return d
-
-    @staticmethod
-    def _merge_columns(name: str, members: list[dict]) -> list[dict]:
-        """A merge's columns: the lowest-id (first-created) member's, plus
-        every derived column present on ALL members under the same name
-        (each member reads it from its own drv_ sidecar; a column missing
-        on any member would need NULL-padding nothing here does, so it
-        simply isn't exposed until it exists everywhere).
-
-        Every member is read through these names, so "the same name" means
-        what SQLite means by it — ASCII case only (_ascii_fold). A merge
-        whose members no longer agree on that is a KeyError, the contract
-        a dropped member already has: the merge rule used to fold with
-        str.lower, so a case file can hold one whose second member would
-        page its own header names as cell values."""
-        base = {column_signature([c["name"] for c in m["columns"] if not c.get("derived")])
-                for m in members}
-        if len(base) > 1:
-            raise KeyError(
-                f'The tables in merge "{name}" do not have matching columns as SQLite reads them '
-                "(names that differ only in a non-ASCII letter's case, such as Ö and ö, are two "
-                "different columns to it). Delete the merge; its tables are unaffected.")
-        first = members[0]["columns"]
-        out = [c for c in first if not c.get("derived")]
-        for c in first:
-            if not c.get("derived"):
-                continue
-            twins = [next((mc for mc in m["columns"] if mc.get("derived")
-                           and _ascii_fold(mc["name"]) == _ascii_fold(c["name"])), None)
-                     for m in members[1:]]
-            if any(t is None for t in twins):
-                continue
-            # One column over every member, so it says what all of them
-            # hold: still building if any member is (a re-derive on the
-            # merge runs a job per member), and the failures summed — the
-            # "Show N unparsed rows" filter it offers matches rows in every
-            # member. The id stays the first member's; the remove and
-            # re-derive routes take the merge's id beside it and act on
-            # every member's definition (_derived_scope).
-            every = [c] + twins
-            failures = [x.get("parse_failures") for x in every]
-            out.append({**c,
-                        "derived_status": max((x.get("derived_status") for x in every),
-                                              key=lambda s: _DERIVED_STATUS_RANK.get(s, 4)),
-                        "parse_failures": None if None in failures else sum(failures)})
-        return out
 
     def _merge_row(self, merge_id: int) -> sqlite3.Row:
         with self._reader() as ro:
@@ -5813,7 +5820,17 @@ class Store:
             "path": None,
             "table_name": None,
             "row_count": sum(m["row_count"] for m in members),
-            "columns": self._merge_columns(row["name"], members),
+            "columns": self._merge_columns(row, members),
+            "col_mode": row["col_mode"],
+            "source_column": bool(row["source_column"]),
+            # Per member, which merge columns it lacks — what the builder's
+            # Edit view and the grid's "only in some tables" markers read.
+            "members": [
+                {"id": m["id"], "label": m.get("nickname") or m["name"], "name": m["name"],
+                 "row_count": m["row_count"],
+                 "missing": self._member_missing_columns(row, members, m)}
+                for m in members
+            ],
             "file_hash": None,
             "imported_at": row["created_at"],
             "has_fts": 1 if all(m["has_fts"] for m in members) else 0,
@@ -5827,14 +5844,184 @@ class Store:
             "note_count": sum(m["note_count"] for m in members),
         }
 
+    @staticmethod
+    def _merge_columns(row: sqlite3.Row | dict, members: list[dict]) -> list[dict]:
+        """A merge's column list, computed live from its members' current
+        columns. Base columns are matched by _col_key across members:
+        members[0]'s in its order, then each column a later member adds, in
+        that member's order. The first member to have a column decides its
+        spelling and type — for same-shaped members (every merge from
+        before mismatched ones) that is exactly members[0]'s list, as it
+        always was. col_mode 'shared' keeps only the columns every member
+        has; a member lacking an exposed column reads it as NULL (see
+        _member_projection).
+
+        "The same column" ignores ASCII case only, as SQLite does when it
+        reads a quoted name: "Größe" and "GRÖßE" are two columns, each empty
+        on the member that lacks it, never one member's header read as the
+        other's data.
+
+        Derived columns keep their older, stricter rule: exposed only when
+        present on ALL members under the same name, each read from its own
+        drv_ sidecar. The source column, when on, comes first."""
+        seen: dict[str, dict] = {}
+        counts: dict[str, int] = {}
+        for m in members:
+            for c in m["columns"]:
+                if c.get("derived"):
+                    continue
+                k = _col_key(c["name"])
+                if k not in seen:
+                    seen[k] = c
+                counts[k] = counts.get(k, 0) + 1
+        keys = list(seen)
+        if row["col_mode"] == "shared":
+            keys = [k for k in keys if counts[k] == len(members)]
+        cols = [seen[k] for k in keys]
+        taken = set(keys)
+        for c in members[0]["columns"]:
+            if not c.get("derived") or _col_key(c["name"]) in taken:
+                continue
+            twins = [next((mc for mc in m["columns"] if mc.get("derived")
+                           and _col_key(mc["name"]) == _col_key(c["name"])), None)
+                     for m in members[1:]]
+            if any(t is None for t in twins):
+                continue
+            # One column over every member, so it says what all of them
+            # hold: still building if any member is (a re-derive on the
+            # merge runs a job per member), and the failures summed — the
+            # "Show N unparsed rows" filter it offers matches rows in every
+            # member. The id stays the first member's; the remove and
+            # re-derive routes take the merge's id beside it and act on
+            # every member's definition (_derived_scope).
+            every = [c] + twins
+            failures = [x.get("parse_failures") for x in every]
+            cols.append({**c,
+                         "derived_status": max((x.get("derived_status") for x in every),
+                                               key=lambda s: _DERIVED_STATUS_RANK.get(s, 4)),
+                         "parse_failures": None if None in failures else sum(failures)})
+        if row["source_column"]:
+            name = MERGE_SOURCE_COLUMN
+            n = 2
+            while any(_col_key(c["name"]) == _col_key(name) for c in cols):
+                name = f"{MERGE_SOURCE_COLUMN} {n}"
+                n += 1
+            cols.insert(0, {"name": name, "type": "text", "source_column": True})
+        return cols
+
+    def _member_missing_columns(self, row: sqlite3.Row, members: list[dict], member: dict) -> list[str]:
+        have = {_col_key(c["name"]) for c in member["columns"]}
+        return [c["name"] for c in self._merge_columns(row, members)
+                if not c.get("source_column") and _col_key(c["name"]) not in have]
+
+    @staticmethod
+    def _member_projection(merge_src: dict, msrc: dict) -> list[str] | None:
+        """How one member of a merge must be read so that it exposes the
+        merge's columns under the merge's spelling: a SELECT list over the
+        member's own FROM, or None when the member's table already does
+        (every merge column present under a name SQLite resolves to it) —
+        which keeps same-shaped merges on exactly the SQL they always ran.
+
+        A column the member lacks is NULL; one spelled differently beyond
+        what SQLite's ASCII-only case folding bridges is aliased; the source
+        column is the member's label as a constant. The member's own
+        columns the merge doesn't expose (col_mode 'shared') are kept too,
+        so the search blob — always the member's own base columns — still
+        resolves inside the projection."""
+        have: dict[str, str] = {}
+        for c in msrc["columns"]:
+            have.setdefault(_col_key(c["name"]), c["name"])
+        exprs: list[str] = []
+        plain = True
+        used: set[str] = set()
+        for c in merge_src["columns"]:
+            name = c["name"]
+            if c.get("source_column"):
+                exprs.append(f"{_sql_text_literal(msrc.get('nickname') or msrc['name'])} AS {q(name)}")
+                plain = False
+                continue
+            actual = have.get(_col_key(name))
+            if actual is None:
+                exprs.append(f"NULL AS {q(name)}")
+                plain = False
+            elif actual == name:
+                exprs.append(q(name))
+            else:
+                exprs.append(f"{q(actual)} AS {q(name)}")
+                if not _sqlite_same_ident(actual, name):
+                    plain = False
+            used.add(_col_key(name))
+        if plain:
+            return None
+        for c in msrc["columns"]:
+            if not c.get("derived") and _col_key(c["name"]) not in used:
+                exprs.append(q(c["name"]))
+        return exprs
+
+    def _member_read_src(self, merge_src: dict, msrc: dict) -> dict:
+        """The src dict a merge member's own WHERE (filters, search, tags,
+        timeframe) compiles against: the member's own columns, renamed to
+        the merge's spelling, plus has_fts/id for its own FTS index. Every
+        name in it resolves inside _member_from's projection."""
+        # merge_id: raw filter fragments are validated once against the
+        # merge (identifiers against its columns, a dry run per member's
+        # projection), not per member against that member's own columns —
+        # where a column only some members have would be "Unknown".
+        if self._member_projection(merge_src, msrc) is None:
+            return {**msrc, "merge_id": merge_src["id"]}
+        rename = {_col_key(c["name"]): c["name"] for c in merge_src["columns"] if not c.get("source_column")}
+        return {**msrc, "merge_id": merge_src["id"],
+                "columns": [{**c, "name": rename.get(_col_key(c["name"]), c["name"])}
+                            for c in msrc["columns"]]}
+
+    def _member_ref_src(self, merge_src: dict, msrc: dict) -> dict:
+        """The src dict to resolve a merge's column references against for
+        one member, in the query shapes that join a member's table by
+        alias (`s."col"`, derived values via `d."col"`). A projected member
+        exposes every column — derived ones included — as a plain column of
+        the projection, so its references all go through the table alias
+        and no separate sidecar join is chained (_member_derived_join on
+        this src emits nothing)."""
+        if self._member_projection(merge_src, msrc) is None:
+            return merge_src
+        return {**merge_src, "columns": [{k: v for k, v in c.items() if k != "derived"}
+                                         for c in merge_src["columns"]]}
+
+    def _member_join_target(self, merge_src: dict, m: dict) -> str:
+        """The table text a view-join shape puts after `JOIN` for one
+        member: its table, or its projection (see _member_projection) when
+        the member doesn't carry the merge's columns as-is."""
+        if not merge_src.get("is_merge"):
+            return q(m["table_name"])
+        msrc = m.get("src") or self._source_lite(m["source_id"])
+        exprs = self._member_projection(merge_src, msrc)
+        if exprs is None:
+            return q(m["table_name"])
+        return f"(SELECT rid, {', '.join(exprs)} FROM {self._from_clause(msrc)})"
+
+    def _member_rows_from(self, src: dict, member_src: dict) -> str:
+        """FROM text for reading cells of one member's rows by rid (the
+        page/export readers): the member's own FROM, or its projection when
+        `src` is a merge the member doesn't carry the columns of as-is."""
+        if src.get("is_merge") and self._member_projection(src, member_src) is not None:
+            return self._member_join_target(src, {"source_id": member_src["id"], "src": member_src,
+                                                  "table_name": member_src["table_name"]})
+        return self._from_clause(member_src)
+
+    def _ref_src_for(self, src: dict, m: dict) -> dict:
+        """_member_ref_src for member `m` of `src`, or `src` itself when it
+        isn't a merge."""
+        if not src.get("is_merge"):
+            return src
+        return self._member_ref_src(src, m.get("src") or self._source_lite(m["source_id"]))
+
     def _resolve_members(self, source_id: int) -> list[dict]:
         """Real source -> single identity-mapped element. Merge -> one
-        element per member. SQLite resolves quoted identifiers
-        case-insensitively (A-Z only), so canonical column names work
-        directly against every member's table without needing per-member
-        name translation — the locked-in 'exact column match' rule
-        (column_signature, re-checked by _merge_columns) guarantees members
-        share the same names modulo ASCII case."""
+        element per member, carrying the member's own src dict. Members no
+        longer share the merge's columns, so nothing may write a merge
+        column name straight into a member's table: read a member through
+        _member_from / _member_join_target / merge_select_list, which pad
+        and rename it (see _member_projection)."""
         with self._reader() as ro:
             return self._resolve_members_on(ro, source_id)
 
@@ -5845,10 +6032,11 @@ class Store:
             src = self._source_lite_on(conn, source_id)
             return [{"source_id": source_id, "table_name": src["table_name"]}]
         merge = self._source_lite_on(conn, source_id)
-        return [
-            {"source_id": sid, "table_name": self._source_lite_on(conn, sid)["table_name"]}
-            for sid in merge["member_source_ids"]
-        ]
+        out = []
+        for sid in merge["member_source_ids"]:
+            msrc = self._source_lite_on(conn, sid)
+            out.append({"source_id": sid, "table_name": msrc["table_name"], "src": msrc})
+        return out
 
     def _merge_name_taken(self, name: str, exclude_id: int | None = None) -> bool:
         """Case-insensitive: two merges named "EVTX" and "evtx" are one
@@ -5862,28 +6050,120 @@ class Store:
             ).fetchone()
         return row is not None
 
-    def create_merge(self, name: str, source_ids: list[int]) -> dict:
+    def _check_merge_members(self, source_ids: list[int], col_mode: str) -> None:
+        """What a merge's member list must satisfy, for create and edit
+        alike. Columns no longer have to match: a member lacking one of the
+        merge's columns reads it as empty (see _member_projection). Only
+        'shared' mode needs something in common, or it exposes nothing."""
+        if col_mode not in MERGE_COLUMN_MODES:
+            raise ValueError(f"Unknown column mode {col_mode!r}")
+        ids = [int(i) for i in source_ids]
+        if len(ids) < 2:
+            raise ValueError("A merge needs at least 2 sources")
+        if len(set(ids)) != len(ids):
+            raise ValueError("A table can only be in a merge once")
+        if any(i <= 0 for i in ids):
+            raise ValueError("A merge can only include tables, not other merges")
+        sources = [self.get_source(sid) for sid in ids]
+        for s in sources:
+            self._require_columns(s)
+        if col_mode == "shared":
+            # Base columns only: adding a derived column to one member must
+            # not change what a merge of two same-format files can do.
+            common = set.intersection(*({_col_key(c["name"]) for c in self._base_cols(s)} for s in sources))
+            if not common:
+                raise ValueError("These tables have no columns in common — keep every column instead")
+
+    def create_merge(self, name: str, source_ids: list[int], col_mode: str = "all",
+                     source_column: bool = False) -> dict:
         name = (name or "").strip()
         if not name:
             raise ValueError("A merge needs a name")
         if self._merge_name_taken(name):
             raise ValueError(f'A merge named "{name}" already exists')
-        if len(source_ids) < 2:
-            raise ValueError("A merge needs at least 2 tables")
-        sources = [self.get_source(sid) for sid in source_ids]
-        # Base columns only: adding a derived column to one member must not
-        # change whether two files of the same format can merge.
-        sigs = {column_signature([c["name"] for c in s["columns"] if not c.get("derived")]) for s in sources}
-        if len(sigs) > 1:
-            raise ValueError("Selected tables don't have matching columns")
+        self._check_merge_members(source_ids, col_mode)
         with self.lock, self.db:
             cur = self.db.execute(
-                "INSERT INTO merges(name, source_ids, created_at) VALUES (?,?,?)",
-                (name, json.dumps(source_ids), time.strftime("%Y-%m-%dT%H:%M:%S")),
+                "INSERT INTO merges(name, source_ids, created_at, col_mode, source_column) VALUES (?,?,?,?,?)",
+                (name, json.dumps([int(i) for i in source_ids]), time.strftime("%Y-%m-%dT%H:%M:%S"),
+                 col_mode, 1 if source_column else 0),
             )
             merge_id = cur.lastrowid
             self.db.execute("INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", (-merge_id,))
         return self.get_source(-merge_id)
+
+    def update_merge(self, merge_id: int, name: str | None = None, source_ids: list[int] | None = None,
+                     col_mode: str | None = None, source_column: bool | None = None) -> dict:
+        """Edit a merge in place — its tables, column mode, source column
+        or name. In place matters: everything keyed by the merge's negative
+        id (its tab, layout, saved views, folder) stays with it, which
+        deleting and recreating would lose. Tags and notes live on member
+        rows and never depended on the merge at all.
+
+        Live views of the merge are dropped: their rows were drawn from the
+        old member list, and paging one now would mix the two."""
+        row = self._merge_row(merge_id)
+        new_name = row["name"] if name is None else (name or "").strip()
+        if not new_name:
+            raise ValueError("A merge needs a name")
+        if new_name != row["name"] and self._merge_name_taken(new_name, exclude_id=merge_id):
+            raise ValueError(f'A merge named "{new_name}" already exists')
+        ids = json.loads(row["source_ids"]) if source_ids is None else [int(i) for i in source_ids]
+        mode = row["col_mode"] if col_mode is None else col_mode
+        src_col = bool(row["source_column"]) if source_column is None else bool(source_column)
+        self._check_merge_members(ids, mode)
+        with self.lock, self.db:
+            self.db.execute(
+                "UPDATE merges SET name=?, source_ids=?, col_mode=?, source_column=? WHERE id=?",
+                (new_name, json.dumps(ids), mode, 1 if src_col else 0, merge_id),
+            )
+            self._evict_root_views(-merge_id)
+        self._maxlen_cache.pop(-merge_id, None)
+        return self.get_source(-merge_id)
+
+    def merge_preview(self, source_ids: list[int], col_mode: str = "all",
+                      source_column: bool = False, sample_rows: int = 12) -> dict:
+        """What create_merge would make of these tables, without making it:
+        the builder's preview. The column list is _merge_columns itself, so
+        the preview can't disagree with the merge it previews; each column
+        also says which tables have it, under what name and type. A few
+        rows are read from each table (the first ones, split evenly, at
+        least one per table while they last) through merge_select_list, so
+        empty cells show exactly where the merge would have them.
+
+        'shared' with nothing in common previews as no columns rather than
+        an error: the builder says why in words, and create_merge refuses."""
+        if col_mode not in MERGE_COLUMN_MODES:
+            raise ValueError(f"Unknown column mode {col_mode!r}")
+        ids = list(dict.fromkeys(int(i) for i in source_ids))
+        if any(i <= 0 for i in ids):
+            raise ValueError("A merge can only include tables, not other merges")
+        members = [self._source_lite(sid) for sid in ids]
+        if not members:
+            return {"columns": [], "members": [], "rows": []}
+        cols = self._merge_columns({"col_mode": col_mode, "source_column": source_column}, members)
+        own = [{_col_key(c["name"]): c for c in m["columns"]} for m in members]
+        merge_src = {"id": 0, "is_merge": True, "columns": cols}
+        per = max(1, min(4, sample_rows // len(members)))
+        rows: list[dict] = []
+        with self._reader() as ro:
+            for m in members:
+                if len(rows) >= sample_rows:
+                    break
+                frm = f"{q(m['table_name'])} s"
+                if any(c.get("derived") for c in m["columns"]):
+                    frm += f" LEFT JOIN {q(self._derived_table(m['id']))} d ON d.rid = s.rid"
+                sql = (f"SELECT {self.merge_select_list(merge_src, m) if cols else 's.rid'} FROM {frm} "
+                       f"ORDER BY s.rid LIMIT {min(per, sample_rows - len(rows))}")
+                rows += [{"source_id": m["id"], "cells": list(r) if cols else []} for r in ro.execute(sql)]
+        return {
+            "columns": [{**c, "in": {} if c.get("source_column") else {
+                str(m["id"]): {"name": o[_col_key(c["name"])]["name"], "type": o[_col_key(c["name"])]["type"]}
+                for m, o in zip(members, own) if _col_key(c["name"]) in o}} for c in cols],
+            "members": [{"id": m["id"], "label": m.get("nickname") or m["name"], "name": m["name"],
+                         "row_count": m["row_count"]} for m in members],
+            "rows": rows,
+        }
 
     def list_merges(self) -> list[dict]:
         with self._reader() as ro:
@@ -6064,8 +6344,13 @@ class Store:
         and rid references stay legal."""
         if not src.get("is_merge") and m["source_id"] == src["id"]:
             return self._from_clause(src, alias)
-        if src.get("is_merge") and any(c.get("derived") for c in src["columns"]):
-            return self._from_clause(self._source_lite(m["source_id"]), alias)
+        if src.get("is_merge"):
+            msrc = m.get("src") or self._source_lite(m["source_id"])
+            if self._member_projection(src, msrc) is not None:
+                t = self._member_join_target(src, {**m, "src": msrc})
+                return f"{t} {alias}" if alias else t
+            if any(c.get("derived") for c in src["columns"]):
+                return self._from_clause(msrc, alias)
         t = q(m["table_name"])
         return f"{t} {alias}" if alias else t
 
@@ -7070,15 +7355,19 @@ class Store:
         per = max(1, -(-want // len(members)))
 
         def branch(m: dict) -> str:
-            ref = self._col_ref(src, column, "s", None if direct else "d")
+            # A member read through its projection (a merge of tables with
+            # different columns) has the column, padded or renamed, as a
+            # plain column of `s`.
+            rsrc = self._ref_src_for(src, m)
+            ref = self._col_ref(rsrc, column, "s", None if direct else "d")
             if direct:
                 scope = f"FROM {self._member_from(src, m, 's')}"
                 order = "s.rid"
             else:
                 scope = (f"FROM v.{q(view_id)} vv "
-                         f"JOIN {q(m['table_name'])} s ON s.rid = vv.rid "
+                         f"JOIN {self._member_join_target(src, m)} s ON s.rid = vv.rid "
                          f"AND vv.source_id = {int(m['source_id'])}"
-                         f"{self._member_derived_join(src, m, 's')}")
+                         f"{self._member_derived_join(rsrc, m, 's')}")
                 # The view's own order, which is what the analyst is
                 # looking at, and free: pos is the view table's rowid.
                 order = "vv.pos"
@@ -7090,6 +7379,18 @@ class Store:
         with self._reader() as ro, self._dropped_view_is_expired():
             return [r[0] for r in ro.execute(f"SELECT v FROM ({union}) LIMIT ?", (want,))]
 
+    def _derive_preview_member(self, merge_id: int, columns: list[str]) -> int:
+        """The member a derive preview on a merge samples: its first. A
+        column only some members have can't be derived on the merge —
+        add_derived_column refuses it, member by member — so the preview
+        refuses it the same way, rather than as an unknown column."""
+        members = self._resolve_members(merge_id)
+        for m in members:
+            for col in columns:
+                if self._find_column(m["src"], col) is None:
+                    raise ValueError(f"Member table {m['src']['name']!r} has no column {col!r}")
+        return members[0]["source_id"]
+
     def detect_timestamp_format(self, source_id: int, column: str) -> list[dict]:
         """Which operations can read this column, best first. Same
         sample-and-round-trip shape preview_sqlite_tables uses to pre-check
@@ -7098,7 +7399,7 @@ class Store:
         vs unix seconds) legitimately return several — the caller's preview
         of actual converted values is what settles it."""
         if source_id < 0:  # a merge samples its first (canonical) member
-            source_id = self._resolve_members(source_id)[0]["source_id"]
+            source_id = self._derive_preview_member(source_id, [column])
         src = self._source_lite(source_id)
         if self._find_column(src, column) is None:
             raise KeyError(column)
@@ -7186,6 +7487,8 @@ class Store:
             raise ValueError(f"Unknown operation: {op_id}")
         params = timeparse.validate_params(op_id, params)
         if view_id and not op["multi_input"]:
+            if source_id < 0:
+                self._derive_preview_member(source_id, [column])   # refuses a partial column
             samples = self._sample_column_in_view(view_id, column)
             return self._derived_preview_from(samples, op_id, params, limit, scope="view")
         # A multi-input operation reads several columns of the SAME row, so
@@ -7201,7 +7504,8 @@ class Store:
         if source_id < 0:
             # Preview against the first member — representative, and the
             # only side with a real table to sample.
-            source_id = self._resolve_members(source_id)[0]["source_id"]
+            source_id = self._derive_preview_member(
+                source_id, timeparse.op_inputs(op_id, column, params) if op["multi_input"] else [column])
         src = self._source_lite(source_id)
         if self._find_column(src, column) is None:
             raise KeyError(column)
@@ -7265,7 +7569,7 @@ class Store:
         work is pure Python over those values — no new query shape."""
         names = structparse.regex_group_names(pattern)
         if source_id < 0:
-            source_id = self._resolve_members(source_id)[0]["source_id"]
+            source_id = self._derive_preview_member(source_id, [column])
         src = self._source_lite(source_id)
         if self._find_column(src, column) is None:
             raise KeyError(column)
@@ -7357,13 +7661,15 @@ class Store:
         )
 
         if src.get("is_merge"):
+            for frag in self._raw_fragments(spec.get("filter_tree")):
+                self.validate_where_fragment(source_id, frag)
             collist = ", ".join(q(c) for c in colnames)
             sid_col = q(self._member_id_alias(colnames))
             branches = []
             params: list[Any] = []
             for m in self._resolve_members(source_id):
-                msrc = self._source_lite(m["source_id"])
-                where, p = self._compile_where(m["source_id"], msrc, spec, colnames)
+                msrc = m["src"]
+                where, p = self._compile_where(m["source_id"], self._member_read_src(src, msrc), spec, colnames)
                 for col in sort_cols:
                     self._ensure_sort_index_building(
                         m["source_id"], col,
@@ -7991,12 +8297,13 @@ class Store:
         # direct shape joins it with USING(rid) (bare column refs), the view
         # shape chains a second ON join (refs go through the `d` alias) — so
         # the value expression and the path conditions are built per branch.
-        def _val_expr(derived_alias: str | None) -> str:
-            ref = self._col_ref(src, column, "s", derived_alias)
+        def _val_expr(m: dict, derived_alias: str | None) -> str:
+            ref = self._col_ref(self._ref_src_for(src, m), column, "s", derived_alias)
             return f"DAY_BUCKET({ref})" if is_datetime else ref
 
         def _path_for(m: dict, derived_alias: str | None) -> tuple[str, list]:
-            clauses, p = self._path_where(path, colnames, "s", src, derived_alias, m["source_id"])
+            clauses, p = self._path_where(path, colnames, "s", self._ref_src_for(src, m),
+                                          derived_alias, m["source_id"])
             return "".join(f" AND {c}" for c in clauses), p
 
         has_path = bool(path)
@@ -8033,11 +8340,11 @@ class Store:
                 else:
                     scope = (
                         f"FROM v.{q(view_id)} vv "
-                        f"JOIN {q(m['table_name'])} s ON s.rid = vv.rid AND vv.source_id = {int(m['source_id'])}"
-                        f"{self._member_derived_join(src, m, 's')} "
+                        f"JOIN {self._member_join_target(src, m)} s ON s.rid = vv.rid AND vv.source_id = {int(m['source_id'])}"
+                        f"{self._member_derived_join(self._ref_src_for(src, m), m, 's')} "
                         f"WHERE 1=1{extra_where}"
                     )
-                branches.append(f"SELECT {_val_expr(derived_alias)} AS val, count(*) AS n {scope} GROUP BY 1")
+                branches.append(f"SELECT {_val_expr(m, derived_alias)} AS val, count(*) AS n {scope} GROUP BY 1")
                 params.extend(path_params)
         union_sql = " UNION ALL ".join(branches)
         if direction is None:
@@ -8111,15 +8418,16 @@ class Store:
 
         def branch(m: dict, select: str) -> str:
             derived_alias = None if direct else "d"
-            ref = self._col_ref(src, column, "s", derived_alias)
+            rsrc = self._ref_src_for(src, m)
+            ref = self._col_ref(rsrc, column, "s", derived_alias)
             ts = ref if is_derived else f"TS_NORMALIZE({ref})"
             epoch = f"CAST(strftime('%s', {ts}) AS INTEGER)"
             if direct:
                 scope = f"FROM {self._member_from(src, m, 's')}"
             else:
                 scope = (f"FROM v.{q(view_id)} vv "
-                         f"JOIN {q(m['table_name'])} s ON s.rid = vv.rid AND vv.source_id = {int(m['source_id'])}"
-                         f"{self._member_derived_join(src, m, 's')}")
+                         f"JOIN {self._member_join_target(src, m)} s ON s.rid = vv.rid AND vv.source_id = {int(m['source_id'])}"
+                         f"{self._member_derived_join(rsrc, m, 's')}")
             return f"SELECT {select.replace('EPOCH', epoch)} {scope}"
 
         span_union = " UNION ALL ".join(branch(m, "EPOCH AS e") for m in members)
@@ -8340,13 +8648,14 @@ class Store:
             """This group's predicate for one member. Per member because
             both halves can be: a tag test is keyed by source_id (row_tags
             is), and so is any tag level in the nested path."""
+            rsrc = self._ref_src_for(src, m)
             if by_tag:
                 c, v = self._tag_condition("s", m["source_id"], value)
             else:
                 c, v = self._eq_condition(
-                    self._col_ref(src, column, "s", d_alias), value, colnames[column] == "datetime"
+                    self._col_ref(rsrc, column, "s", d_alias), value, colnames[column] == "datetime"
                 )
-            pc, pp = self._path_where(path, colnames, "s", src, d_alias, m["source_id"])
+            pc, pp = self._path_where(path, colnames, "s", rsrc, d_alias, m["source_id"])
             return f"{c}" + "".join(f" AND {x}" for x in pc), [*v, *pp]
 
         # Both locked blocks below read v.<parent view>, whose handle was
@@ -8364,8 +8673,8 @@ class Store:
                     ).fetchone()[0]
                 else:
                     n = self.db.execute(
-                        f"SELECT count(*) FROM v.{q(view_id)} vv JOIN {q(m['table_name'])} s "
-                        f"ON s.rid = vv.rid AND vv.source_id = ?{self._member_derived_join(src, m, 's')} WHERE {where_sql}",
+                        f"SELECT count(*) FROM v.{q(view_id)} vv JOIN {self._member_join_target(src, m)} s "
+                        f"ON s.rid = vv.rid AND vv.source_id = ?{self._member_derived_join(self._ref_src_for(src, m), m, 's')} WHERE {where_sql}",
                         [m["source_id"], *where_params],
                     ).fetchone()[0]
                 total += n
@@ -8410,7 +8719,7 @@ class Store:
                 else:
                     branches.append(
                         f"SELECT vv.pos AS root_pos, vv.source_id, vv.rid FROM v.{q(view_id)} vv "
-                        f"JOIN {q(m['table_name'])} s ON s.rid = vv.rid AND vv.source_id = ?{self._member_derived_join(src, m, 's')} "
+                        f"JOIN {self._member_join_target(src, m)} s ON s.rid = vv.rid AND vv.source_id = ?{self._member_derived_join(self._ref_src_for(src, m), m, 's')} "
                         f"WHERE {where_sql}"
                     )
                     params.extend([m["source_id"], *where_params])
@@ -8551,6 +8860,16 @@ class Store:
         return "", []
 
     @staticmethod
+    def _raw_fragments(node: dict | None) -> list[str]:
+        if not node:
+            return []
+        if node.get("type") == "raw":
+            return [node.get("sql", "")]
+        if node.get("type") == "group":
+            return [f for c in node.get("children", []) for f in Store._raw_fragments(c)]
+        return []
+
+    @staticmethod
     def _tree_has_raw(node: dict | None) -> bool:
         """True if any node in the filter tree is a raw-SQL fragment. Raw
         nodes assume a single table_name for their EXPLAIN QUERY PLAN
@@ -8599,7 +8918,10 @@ class Store:
             sql = node.get("sql", "")
             # Re-validated on every compile, not just at authoring time — a
             # stored preset may be replayed later against a different schema.
-            self.validate_where_fragment(source_id, sql)
+            # A merge member's compile skips it: build_view/spec_sql validate
+            # each fragment once against the merge itself (_member_read_src).
+            if "merge_id" not in src:
+                self.validate_where_fragment(source_id, sql)
             return f"({sql})", []
         if kind == "cond":
             col, op = node.get("column"), node.get("op")
@@ -8690,8 +9012,7 @@ class Store:
         # into each member's branch, so the dry-run below must pass against
         # every member (invariant #9 — its identifier check above already
         # ran against the merge's exposed column set).
-        froms = ([self._from_clause(self._source_lite(m["source_id"]))
-                  for m in self._resolve_members(source_id)]
+        froms = ([self._member_from(src, m) for m in self._resolve_members(source_id)]
                  if source_id < 0 else [self._from_clause(src)])
         ro = _no_dq_strings(sqlite3.connect(sqlite_ro_uri(self.path), uri=True,
                                             check_same_thread=False))
@@ -8818,10 +9139,13 @@ class Store:
             # a row counts as in-range if *any* of its timestamps is —
             # the "timestomped creation date, but a real modified date"
             # case the timeframe filter exists for in the first place.
-            if col and colnames.get(col) == "datetime":
+            # `src` is this member's own (merge-spelled) column list, so a
+            # merge column the member lacks never counts as "has it".
+            present = {_col_key(c["name"]) for c in src["columns"]}
+            if col and colnames.get(col) == "datetime" and _col_key(col) in present:
                 ts_cols = [col]
             else:
-                ts_cols = [c for c, t in colnames.items() if t == "datetime"]
+                ts_cols = [c for c, t in colnames.items() if t == "datetime" and _col_key(c) in present]
             if ts_cols and (start_norm or end_norm):
                 parts = []
                 for c in ts_cols:
@@ -8974,16 +9298,24 @@ class Store:
         colnames = {c["name"]: c["type"] for c in src["columns"]}
         order = self._compile_order(spec, colnames)
         if src.get("is_merge"):
+            for frag in self._raw_fragments(spec.get("filter_tree")):
+                self.validate_where_fragment(source_id, frag)
             collist = ", ".join(q(c) for c in colnames)
             sid_col = q(self._member_id_alias(colnames))
             branches = []
             params: list[Any] = []
             for m in self._resolve_members(source_id):
-                msrc = self._source_lite(m["source_id"])
-                where, p = self._compile_where(m["source_id"], msrc, spec, colnames)
+                msrc = m["src"]
+                where, p = self._compile_where(m["source_id"], self._member_read_src(src, msrc), spec, colnames)
+                # The pane's own src_<id> name, projected when the member
+                # doesn't carry the merge's columns as-is — run_sql's shadow
+                # view supplies any derived columns the projection names.
+                exprs = self._member_projection(src, msrc)
+                from_sql = (q(m["table_name"]) if exprs is None
+                            else f"(SELECT rid, {', '.join(exprs)} FROM {q(m['table_name'])})")
                 branches.append(
                     f"SELECT {int(m['source_id'])} AS {sid_col}, rid, {collist}\n"
-                    f"FROM {q(m['table_name'])}"
+                    f"FROM {from_sql}"
                     + (f"\nWHERE {where}" if where else "")
                 )
                 params.extend(p)
@@ -9054,7 +9386,7 @@ class Store:
                 member_src = self._source_lite_on(ro, sid)
                 ph = ",".join("?" * len(rids))
                 for row in ro.execute(
-                    f"SELECT rid, {sel} FROM {self._from_clause(member_src)} WHERE rid IN ({ph})", rids
+                    f"SELECT rid, {sel} FROM {self._member_rows_from(src, member_src)} WHERE rid IN ({ph})", rids
                 ):
                     # positional: the SELECT puts rid first, then cols in
                     # order — tuple(row) is one C-level copy, vs a
@@ -9374,11 +9706,12 @@ class Store:
             members = self._resolve_members_on(ro, handle["source_id"])
             for m in members:
                 msrc = self._source_lite_on(ro, m["source_id"])
-                # Matched as SQLite resolves the name (ASCII case): a member
-                # spelling it "TIME" under a merge's "Time" has the column.
-                member_names = {_ascii_fold(cc["name"]) for cc in msrc["columns"]}
-                for c in ts_cols:
-                    if _ascii_fold(c) not in member_names:
+                for want in ts_cols:
+                    # The member's own spelling — a merge matches columns
+                    # ignoring case, so "TIME" on one member is "Time" here.
+                    c = next((cc["name"] for cc in msrc["columns"]
+                              if _col_key(cc["name"]) == _col_key(want)), None)
+                    if c is None:
                         continue  # merge member without this column
                     if kind == "root_virtual":
                         ts_expr = f"TS_NORMALIZE({q(c)})"
@@ -9529,11 +9862,10 @@ class Store:
         with self._reader() as ro:
             for m in self._resolve_members_on(ro, source_id):
                 msrc = self._source_lite_on(ro, m["source_id"])
-                # ASCII case-folded, as SQLite resolves the quoted name below
-                # — see find_nearest_timestamp.
-                member_names = {_ascii_fold(c["name"]) for c in msrc["columns"]}
-                for c in ts_cols:
-                    if _ascii_fold(c) not in member_names:
+                member_names = {_col_key(c["name"]): c["name"] for c in msrc["columns"]}
+                for want in ts_cols:
+                    c = member_names.get(_col_key(want))  # the member's own spelling
+                    if c is None:
                         continue
                     row = ro.execute(
                         f"SELECT MIN(TS_NORMALIZE({q(c)})), MAX(TS_NORMALIZE({q(c)})) "
@@ -13953,7 +14285,7 @@ class Store:
                     member_src = self._source_lite_on(ro, sid)
                     ph = ",".join("?" * len(rids))
                     for row in ro.execute(
-                        f"SELECT rid, {sel} FROM {self._from_clause(member_src)} WHERE rid IN ({ph})", rids
+                        f"SELECT rid, {sel} FROM {self._member_rows_from(src, member_src)} WHERE rid IN ({ph})", rids
                     ):
                         cellmap[(sid, row["rid"])] = tuple(row[c] for c in cols)
                     for rid, tid in ro.execute(
@@ -14764,6 +15096,26 @@ class Store:
 
     SQL_PANE_FORBIDDEN_RE = re.compile(r"\b(attach|detach|pragma|vacuum)\b", re.IGNORECASE)
 
+    def merge_select_list(self, merge_src: dict, member_src: dict) -> str:
+        """One member's SELECT list in a hand-built UNION ALL over a merge:
+        every merge column, in the merge's order, `AS` the merge's name —
+        read as `s."col"` (`d."col"` for a derived column) over
+        `src_<id> s LEFT JOIN drv_<id> d ON d.rid = s.rid`. The union is
+        positional, so a member lacking a column pads it with NULL, and the
+        source column is the member's label. Public: the bundled plugins
+        build their merge scopes with it."""
+        own = {_col_key(c["name"]): c["name"] for c in member_src["columns"]}
+
+        def _cell(c: dict) -> str:
+            if c.get("source_column"):
+                return f"{_sql_text_literal(member_src.get('nickname') or member_src['name'])} AS {q(c['name'])}"
+            actual = own.get(_col_key(c["name"]))
+            if actual is None:
+                return f"NULL AS {q(c['name'])}"
+            return f"{self._col_ref(member_src, actual, 's', 'd')} AS {q(c['name'])}"
+
+        return ", ".join(_cell(c) for c in merge_src["columns"])
+
     def _merge_union_sql(self, conn: sqlite3.Connection, merge_id: int) -> str:
         """SELECT text behind the pane's merge_<id> TEMP VIEW: a UNION ALL
         of the members carrying source_id, rid and every exposed column
@@ -14781,7 +15133,7 @@ class Store:
             frm = f"main.{q(m['table_name'])} s"
             if has_drv:
                 frm += f" LEFT JOIN main.{q(self._derived_table(mid))} d ON d.rid = s.rid"
-            sel = ", ".join(f"{self._col_ref(m, c, 's', 'd')} AS {q(c)}" for c in cols)
+            sel = self.merge_select_list(msrc, m)
             taken = {c.lower() for c in cols}
             branches.append(
                 f"SELECT {int(mid)} AS source_id, s.rid AS rid, {sel}, "
@@ -15164,7 +15516,7 @@ class Store:
                     for chunk in self._iter_subset_keys(ro, view_id, handle, picks, skip, op_token):
                         if copy["cancelled"]:   # close() — read once per batch, ingest_csv's cadence
                             raise OpCancelled("The case is closing — the copy was cancelled")
-                        cells = self._subset_cells(ro, cols, chunk, op_token)
+                        cells = self._subset_cells(ro, cols, chunk, op_token, parent)
                         rows: list[tuple] = []
                         mapping: list[tuple] = []
                         for pair in chunk:
@@ -15313,13 +15665,14 @@ class Store:
                 yield [(r["source_id"], r["rid"]) for r in rows if (r["source_id"], r["rid"]) not in skip]
 
     def _subset_cells(self, ro: sqlite3.Connection, cols: list[str], chunk: list[tuple[int, int]],
-                      op_token: str | None) -> dict[tuple[int, int], tuple]:
+                      op_token: str | None, parent: dict | None = None) -> dict[tuple[int, int], tuple]:
         """{(source_id, rid): cells} for one batch of keys, each row read
         through ITS member's _from_clause — derived sidecar joined
         USING(rid), so base and derived columns are both addressable bare
-        — the fetch_rows shape, which is what lets a merge's canonical
-        column list run unchanged against every member. NULL → '' as
-        ingest_rows stores it."""
+        — the fetch_rows shape. A member of a merge `parent` that doesn't
+        carry the merge's columns as-is is read through its projection
+        (_member_rows_from), which pads and renames it to that column
+        list. NULL → '' as ingest_rows stores it."""
         by_source: dict[int, list[int]] = {}
         for s, r in chunk:
             by_source.setdefault(s, []).append(r)
@@ -15327,7 +15680,9 @@ class Store:
         out: dict[tuple[int, int], tuple] = {}
         with self._interruptible(op_token, ro):
             for s, rids in by_source.items():
-                frm = self._from_clause(self._source_lite_on(ro, s))
+                msrc = self._source_lite_on(ro, s)
+                frm = (self._member_rows_from(parent, msrc) if parent and parent.get("is_merge")
+                       else self._from_clause(msrc))
                 for i in range(0, len(rids), 900):
                     part = rids[i:i + 900]
                     for row in ro.execute(

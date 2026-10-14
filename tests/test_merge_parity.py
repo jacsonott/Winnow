@@ -80,18 +80,23 @@ def test_member_only_derived_stays_invisible_to_merge_raw_sql(store, write_csv):
 
 
 
-def test_members_differing_only_in_non_ascii_case_do_not_merge(store, write_csv):
+def test_members_differing_only_in_non_ascii_case_merge_as_two_columns(store, write_csv):
     """SQLite folds identifier case for ASCII only, so to it "Größe" and
-    "GRÖßE" are two columns. The merge rule folded with str.lower and let
-    them merge; every read then quoted the first member's name against the
-    second, which SQLite's double-quoted-string fallback turned into the
-    literal — the second member's rows showed the header names as data."""
+    "GRÖßE" are two columns. The merge rule once folded with str.lower and
+    quoted the first member's name against the second, which SQLite's
+    double-quoted-string fallback turned into the literal — the second
+    member's rows showed the header names as data. Now that tables with
+    different columns merge, they are two columns, each empty on the
+    member without it."""
     a = store.ingest_csv(write_csv([["Größe", "Öffnen"], ["1", "x"]], "a.csv"), build_fts=False)["id"]
     b = store.ingest_csv(write_csv([["GRÖßE", "öffnen"], ["2", "y"]], "b.csv"), build_fts=False)["id"]
-    with pytest.raises(ValueError, match="matching columns"):
-        store.create_merge("m", [a, b])
-    # ASCII case is one column to SQLite, so those still merge, and every
-    # member reads its own values.
+    m = store.create_merge("m", [a, b])
+    assert [c["name"] for c in m["columns"]] == ["Größe", "Öffnen", "GRÖßE", "öffnen"]
+    v = store.build_view(m["id"], {"source_id": m["id"], "sort": []})
+    cells = [r["cells"] for r in store.fetch_rows(v["view_id"], 0, 10)["rows"]]
+    assert sorted(cells, key=repr) == sorted([["1", "x", None, None], [None, None, "2", "y"]], key=repr)
+    # ASCII case is one column to SQLite, so those are one column of the
+    # merge, and every member reads its own values.
     c = store.ingest_csv(write_csv([["SIZE", "open"], ["3", "z"]], "c.csv"), build_fts=False)["id"]
     d = store.ingest_csv(write_csv([["size", "OPEN"], ["4", "w"]], "d.csv"), build_fts=False)["id"]
     mid = store.create_merge("ascii", [c, d])["id"]
@@ -101,20 +106,21 @@ def test_members_differing_only_in_non_ascii_case_do_not_merge(store, write_csv)
     assert sorted(x["value"] for x in store.column_values(mid, "SIZE")) == ["3", "4"]
 
 
-def test_a_merge_saved_under_the_old_rule_is_refused_not_read_wrong(store, write_csv):
-    """A case file can already hold a merge the old rule allowed. Opening
-    it must say so, as a merge whose member went missing does, rather than
-    page header names as cell values."""
+def test_a_merge_saved_under_the_old_rule_reads_right(store, write_csv):
+    """A case file can already hold a merge the old str.lower rule allowed.
+    It opens as two columns rather than paging header names as cell
+    values (or, as it briefly did, refusing to open)."""
     a = store.ingest_csv(write_csv([["Größe"], ["1"]], "a.csv"), build_fts=False)["id"]
     b = store.ingest_csv(write_csv([["GRÖßE"], ["2"]], "b.csv"), build_fts=False)["id"]
     with store.lock, store.db:
         store.db.execute("INSERT INTO merges(name, source_ids, created_at) VALUES ('old', ?, '')",
                          (f"[{a}, {b}]",))
     mid = -store.db.execute("SELECT id FROM merges WHERE name='old'").fetchone()[0]
-    with pytest.raises(KeyError, match="matching columns"):
-        store.build_view(mid, {"source_id": mid, "sort": []})
+    v = store.build_view(mid, {"source_id": mid, "sort": []})
+    cells = [r["cells"] for r in store.fetch_rows(v["view_id"], 0, 10)["rows"]]
+    assert sorted(cells, key=repr) == sorted([["1", None], [None, "2"]], key=repr)
     [entry] = [m for m in store.list_merges() if m["id"] == mid]
-    assert "matching columns" in entry["error"]
+    assert "error" not in entry and [c["name"] for c in entry["columns"]] == ["Größe", "GRÖßE"]
 
 
 

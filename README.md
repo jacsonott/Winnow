@@ -138,8 +138,10 @@ Notes and dashboards.
   another table, VLOOKUP-style.
 - **Grouping** — drag a header into the Group by strip; nest levels, group
   by tag, tag a whole group without expanding it.
-- **One view over several tables** — merge exports with the same columns
-  from a fleet and filter, sort, tag and export them as one.
+- **One view over several tables** — merge exports from a fleet and
+  filter, sort, tag and export them as one. The tables don't need
+  identical columns: a column only some have is empty for the rest, or
+  keep just the shared ones.
 - **Keep what matters** — save a filtered view, or just the rows you
   picked, as a new table of the case.
 - **Sessions** — save named snapshots of your tags and notes inside the

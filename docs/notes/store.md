@@ -75,10 +75,12 @@ see [docs/notes/README.md](README.md) for the whole set.
   paged its own header names as cell values. Now: `validate_where_fragment`
   checks every double-quoted name against the columns (folded the SQLite
   way, `_ascii_fold`) and says a text value takes single quotes;
-  `column_signature` folds ASCII only; and `_merge_columns` re-checks a
-  merge's members on every open, so one the old rule let into a case file
-  is a `KeyError` like a dropped member (listed as broken, offered for
-  deletion) rather than read wrong. On Python 3.12+ the writer, the
+  `column_signature` folds ASCII only; and `_merge_columns` matches a
+  merge's columns with `_col_key` (ASCII fold too), so "Größe" and
+  "GRÖßE" are two columns of the merge, each `NULL` on the member without
+  it (see "Merge members don't share the merge's columns" below) — which
+  is also how a merge the old rule let into a case file now reads. On
+  Python 3.12+ the writer, the
   reader pool and the fragment dry-run also switch the fallback off
   (`_no_dq_strings`), so anything that slips past those checks fails
   loudly — an extra layer only, since `Connection.setconfig` doesn't
@@ -360,6 +362,27 @@ see [docs/notes/README.md](README.md) for the whole set.
   megabyte cell) — slow rather than exponential, and refusing `.*x.*y`
   would refuse ordinary searches. That is also why the cancel tests' slow
   build is now `a*a*a*a*a*a*b` (tens of ms a row) rather than `(a+)+$`.
+- **Merge members don't share the merge's columns.** `_merge_columns`
+  exposes every member's base columns (matched by `_col_key`, first member
+  to have one decides its spelling and type), or only the shared ones in
+  `col_mode='shared'`. A member that lacks a column, or spells it in a way
+  SQLite won't resolve to the merge's name (surrounding spaces, which
+  `_col_key` strips), is read through `_member_projection`: `(SELECT rid, <exprs> FROM src_N)`
+  with `NULL AS "col"` / `"actual" AS "col"` / the label as the From
+  table column. That subquery is flattened by SQLite — EXPLAIN QUERY PLAN
+  still shows `SEARCH src_N USING INDEX` on each member, under the
+  member's own spelling. Same-shaped members return None and keep the
+  exact SQL they always had. The trap this closes: a quoted name the
+  member lacks isn't an error in an unqualified read, it's SQLite's
+  double-quoted-string fallback, so every cell came back as the column's
+  name. Every merge read goes through `_member_from`,
+  `_member_join_target`, `_member_rows_from` or `merge_select_list`;
+  nothing may write a merge column into a member table directly.
+  `_ensure_purpose_index_building` builds under the member's own spelling
+  (`_table_own_spelling`) and skips a member that lacks the column. A
+  derived column is the exception that still needs every member: one is
+  made on the merge by making it on each member, so `add_derived_column`
+  and the previews before it refuse an input only some members have.
 - Column types are **inferred from a 500-row sample and stored as metadata only**;
   every value is stored TEXT. Don't "fix" this by typing the columns — mixed-type
   forensic CSVs then silently coerce, and evidence fidelity matters more than

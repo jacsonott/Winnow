@@ -1028,7 +1028,15 @@ A source dict:
 Two things to know about ids: a **negative** `source_id` is a *merge*
 (a virtual union of several sources) with no single backing table — if
 your feature needs `table_name`, reject negatives with a `ValueError`
-rather than building broken SQL. And the sidecar tables are queryable
+rather than building broken SQL, or read every member yourself. A
+merge's members **don't all have its columns** (a column only some
+tables have is empty for the rest), so never write a merge's column
+names straight into a member's SELECT: an unknown double-quoted name is
+a string literal in SQLite, and every cell would read as the column's
+name. `req.store.merge_select_list(merge_src, member_src)` gives one
+member's SELECT list over `src_<id> s LEFT JOIN drv_<id> d ON d.rid =
+s.rid`, padding what it lacks with NULL — the bundled pivot, first/last
+and lateral movement plugins build their merge unions with it. And the sidecar tables are queryable
 too: `row_tags(source_id, rid, tag_id)`, `row_notes(source_id, rid,
 note)`, `tag_defs(id, name, color, hotkey)` — that's how you join
 analyst findings to evidence rows.

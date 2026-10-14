@@ -103,7 +103,7 @@ def test_merge_dialog_groups_by_the_files_own_columns(page, api, tmp_path):
             box.check()
         # One group holds both — it is titled by the file's columns, not
         # the analyst's derived one.
-        head = page.locator("#modal h4", has_text="DmWhen").first.inner_text()
+        head = page.locator("#modal .mb-ghead", has_text="DmWhen").first.inner_text()
         assert "DmUser" not in head
         page.locator("#modal button", has_text="Create merge").click()
         page.wait_for_function("() => __winnow.S.sourceId < 0", timeout=10_000)

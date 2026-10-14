@@ -1,7 +1,7 @@
-"""Creating a merge through the UI — the builder modal groups sources by
-matching columns and 'Create merge' opens the merged table. The merge
-*engine* is tested to death (test_merge_parity et al); the modal flow an
-analyst actually clicks through had nothing."""
+"""Creating and editing a merge through the UI — the builder lists every
+table with a fit chip, previews the merge, and 'Create merged table' opens
+it. The merge *engine* is tested to death (test_merge_parity,
+test_merge_mismatched et al); this is the flow an analyst clicks through."""
 
 from __future__ import annotations
 
@@ -35,18 +35,36 @@ def _wait_for_source(page, name, timeout=25.0):
     pytest.fail(f"{name} never appeared in S.sources")
 
 
-def test_merge_builder_creates_and_opens_a_merge(page, tmp_path):
-    """Imports BOTH of its own sources rather than pairing one with the
-    shared fixture table. The builder groups by column set, and an earlier
-    test adding a derived column to that table was once enough to change
-    its key (it no longer is — test_derived_merge_ui.py), which left this
-    test with no eligible pair and a checkbox wait that timed out with
-    nothing to say."""
-    names = ("merge_a.csv", "merge_b.csv")
+def _cleanup(page, merge_id, names, before):
+    page.evaluate(
+        """([mid, ns]) => (async () => {
+             if (mid) await __winnow.api('/api/merges/' + (-mid), { method: 'DELETE' });
+             for (const n of ns) {
+               const s = __winnow.S.sources.find((x) => x.name === n);
+               if (s) await __winnow.api('/api/source/' + s.id, { method: 'DELETE' });
+             }
+             __winnow.S.sourceId = null;
+             await __winnow.loadSources();
+           })()""",
+        [merge_id, list(names)])
+    page.wait_for_function("(n) => __winnow.S.sources.length === n", arg=before, timeout=15_000)
+    page.wait_for_selector(".row")
+
+
+def test_merge_builder_merges_mismatched_tables_and_edits_in_place(page, tmp_path):
+    """Imports its own three tables rather than leaning on the shared
+    fixture: anything an earlier test does to that one (a derived column is
+    enough) would change what the builder shows. merge_c has an extra
+    column, which the old builder hid it for; now it merges, with the
+    column empty for the other two."""
+    names = ("merge_a.csv", "merge_b.csv", "merge_c.csv")
     before = page.evaluate("() => __winnow.S.sources.length")
     for n in names:
         f = tmp_path / n
-        f.write_text(HEADER + f"\n2026-03-15 09:00:00,4624,H9,v,cmd.exe\n", encoding="utf-8")
+        extra = n == "merge_c.csv"
+        f.write_text(HEADER + (",Extra" if extra else "")
+                     + "\n2026-03-15 09:00:00,4624,H9,v,cmd.exe" + (",only-c" if extra else "") + "\n",
+                     encoding="utf-8")
         _import_csv(page, f, n)
     for n in names:
         _wait_for_source(page, n)
@@ -54,36 +72,40 @@ def test_merge_builder_creates_and_opens_a_merge(page, tmp_path):
     merge_id = None
     try:
         page.evaluate("() => __winnow.openMergeBuilder()")
-        page.wait_for_selector("#modal:not([hidden])")
-        # Check exactly OUR two, by their labels: the case may hold other
-        # eligible groups, and a merge is only valid within one group.
-        page.wait_for_selector("#modal input[type=checkbox]", timeout=10_000)
-        for n in names:
-            box = page.locator("#modal label", has_text=n).locator("input[type=checkbox]")
+        page.wait_for_selector("#modal .mb")
+        for n in ("merge_a.csv", "merge_c.csv"):
+            box = page.locator("#modal label.mb-trow", has_text=n).locator("input[type=checkbox]")
             assert box.count() == 1, f"the builder did not offer {n}"
             box.check()
-        create = page.locator("#modal button", has_text="Create merge")
-        assert create.count() == 1, "the merge builder offered no eligible source group"
+        # The preview is the server's: Extra is named as only in merge_c.
+        page.wait_for_selector(".mb-notes li:has-text('Extra is only in merge_c.csv')", timeout=10_000)
+        assert page.locator(".mb-stat b").nth(2).text_content() == "7"  # 5 + Extra + From table
+        create = page.locator("#modal button.mb-create")
+        assert "Create merged table" in create.text_content()
         create.click()
 
         page.wait_for_selector(".tab-merge", timeout=10_000)
         merge = page.evaluate("() => __winnow.S.sources.find((s) => s.is_merge)")
         assert merge, "merge missing from the source list"
         merge_id = merge["id"]
-        assert merge_id < 0
+        assert [c["name"] for c in merge["columns"]][:1] == ["From table"]
+        assert "Extra" in [c["name"] for c in merge["columns"]]
+        page.wait_for_function("(id) => __winnow.S.sourceId === id", arg=merge_id, timeout=10_000)
+        page.wait_for_selector(".hcell-partial", state="attached")
+
+        # Edit it from the table menu: add merge_b, drop the source column.
+        page.evaluate("(id) => __winnow.openTableMenu(id)", merge_id)
+        page.locator("#modal button", has_text="Edit merge").click()
+        page.wait_for_selector("#modal .mb")
+        page.locator("#modal label.mb-trow", has_text="merge_b.csv").locator("input").check()
+        page.locator("#modal .mb-check input").uncheck()
+        save = page.locator("#modal button.mb-create")
+        page.wait_for_function("() => !document.querySelector('#modal button.mb-create').disabled")
+        assert "Save changes" in save.text_content()
+        save.click()
         page.wait_for_function(
-            "(id) => __winnow.S.sourceId === id", arg=merge_id, timeout=10_000)
+            """(id) => { const s = __winnow.S.sources.find((x) => x.id === id);
+                         return s && s.member_source_ids.length === 3 && !s.source_column; }""",
+            arg=merge_id, timeout=10_000)
     finally:
-        page.evaluate(
-            """([mid, ns]) => (async () => {
-                 if (mid) await __winnow.api('/api/merges/' + (-mid), { method: 'DELETE' });
-                 for (const n of ns) {
-                   const s = __winnow.S.sources.find((x) => x.name === n);
-                   if (s) await __winnow.api('/api/source/' + s.id, { method: 'DELETE' });
-                 }
-                 __winnow.S.sourceId = null;
-                 await __winnow.loadSources();
-               })()""",
-            [merge_id, list(names)])
-        page.wait_for_function("(n) => __winnow.S.sources.length === n", arg=before, timeout=15_000)
-        page.wait_for_selector(".row")
+        _cleanup(page, merge_id, names, before)
