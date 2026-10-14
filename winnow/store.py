@@ -1222,7 +1222,7 @@ def _sql_text_literal(value: str) -> str:
 
 # The merged view's optional "which table did this row come from" column.
 # Not stored anywhere: every member projects its own label as a constant.
-MERGE_SOURCE_COLUMN = "Source table"
+MERGE_SOURCE_COLUMN = "From table"
 MERGE_COLUMN_MODES = ("all", "shared")
 
 

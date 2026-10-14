@@ -368,7 +368,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   `col_mode='shared'`. A member that lacks a column, or spells it in a way
   SQLite won't resolve to the merge's name (surrounding spaces, which
   `_col_key` strips), is read through `_member_projection`: `(SELECT rid, <exprs> FROM src_N)`
-  with `NULL AS "col"` / `"actual" AS "col"` / the label as the Source
+  with `NULL AS "col"` / `"actual" AS "col"` / the label as the From
   table column. That subquery is flattened by SQLite — EXPLAIN QUERY PLAN
   still shows `SEARCH src_N USING INDEX` on each member, under the
   member's own spelling. Same-shaped members return None and keep the

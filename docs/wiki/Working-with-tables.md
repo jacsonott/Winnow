@@ -154,18 +154,18 @@ To merge tables:
 
 1. Choose **Case ▾ → Merge tables…**, or open one of the tables and choose **Merge with other tables…** in the **This table** section of the table menu, which starts with that table ticked.
 2. Tick two or more tables. Tables with the same columns are listed together, with **Select all** for each group. Once a table is ticked, the others are marked with how they fit: **same columns**, **+N columns** when a table has columns the ticked ones don't, **N of M columns** when it lacks some, or **no shared columns**. Started from a table, the groups that fit it best come first. The first table you tick decides the column order.
-3. Choose **Keep every column** or **Only shared columns**, and whether to add a **Source table** column.
+3. Choose **Keep every column** or **Only shared columns**, and whether to add a **From table** column.
 4. Check the preview, type a name or keep the suggested one, and click **Create merged table**. Each merge needs a different name.
 
 Columns are matched by name. The order doesn't matter, and case is ignored for A–Z, so `EventID` in one table and `EventId` in another are one column. The preview's **Columns** tab shows which tables have each column, and **Sample rows** shows a few rows from each table as the merge would show them. Notes above the preview point out anything worth checking, such as a table that shares no columns with the others.
 
 - **Keep every column** shows every column any of the tables has. A column only some tables have is empty in the rows from the others, and its header in the grid has a mark you can hover over to see which tables have it.
 - **Only shared columns** shows just the columns every table has.
-- The **Source table** column shows which table each row came from, by its nickname if it has one. You can filter, sort and group by it like any other column.
+- The **From table** column shows which table each row came from, by its nickname if it has one. You can filter, sort and group by it like any other column.
 
 Only the columns the tables were imported with are compared. A derived column appears in a merge when every table in it has one of that name. To add one to a merge, its input column has to be in every table.
 
-To change a merge, open it and choose **Edit merge…** in the **This table** section of the table menu. You can add or remove tables, switch between every column and shared columns, turn the Source table column on or off, and rename it. The merge keeps its tab, layout and saved views.
+To change a merge, open it and choose **Edit merge…** in the **This table** section of the table menu. You can add or remove tables, switch between every column and shared columns, turn the From table column on or off, and rename it. The merge keeps its tab, layout and saved views.
 
 A merge shows ⛓ before its name and works like any other table: filtering, searching, sorting, tagging, notes, grouping, the value picker, derived columns and exports all work on it. The exceptions:
 

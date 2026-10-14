@@ -79,7 +79,7 @@ def test_merge_builder_merges_mismatched_tables_and_edits_in_place(page, tmp_pat
             box.check()
         # The preview is the server's: Extra is named as only in merge_c.
         page.wait_for_selector(".mb-notes li:has-text('Extra is only in merge_c.csv')", timeout=10_000)
-        assert page.locator(".mb-stat b").nth(2).text_content() == "7"  # 5 + Extra + Source table
+        assert page.locator(".mb-stat b").nth(2).text_content() == "7"  # 5 + Extra + From table
         create = page.locator("#modal button.mb-create")
         assert "Create merged table" in create.text_content()
         create.click()
@@ -88,7 +88,7 @@ def test_merge_builder_merges_mismatched_tables_and_edits_in_place(page, tmp_pat
         merge = page.evaluate("() => __winnow.S.sources.find((s) => s.is_merge)")
         assert merge, "merge missing from the source list"
         merge_id = merge["id"]
-        assert [c["name"] for c in merge["columns"]][:1] == ["Source table"]
+        assert [c["name"] for c in merge["columns"]][:1] == ["From table"]
         assert "Extra" in [c["name"] for c in merge["columns"]]
         page.wait_for_function("(id) => __winnow.S.sourceId === id", arg=merge_id, timeout=10_000)
         page.wait_for_selector(".hcell-partial", state="attached")

@@ -299,9 +299,9 @@ def test_save_view_as_table_pads_missing_columns(store, abc):
     v = _view(store, mid, sort=[{"column": "Time", "dir": "asc"}])
     new = store.get_source(store.save_view_as_source(v["view_id"], "copy", build_fts=False)["source"]["id"])
     assert [col["name"] for col in new["columns"]] == [
-        "Source table", "Time", "EventId", "Host", "Msg", "Extra", "Other"]
+        "From table", "Time", "EventId", "Host", "Msg", "Extra", "Other"]
     rows = [tuple(r) for r in store.db.execute(
-        f'SELECT "Source table", "Time", "EventId", "Extra", "Other" FROM "{new["table_name"]}" ORDER BY rid')]
+        f'SELECT "From table", "Time", "EventId", "Extra", "Other" FROM "{new["table_name"]}" ORDER BY rid')]
     assert rows == [("a.csv", "2024-01-01 10:00:00", "4624", "", ""),
                     ("a.csv", "2024-01-01 11:00:00", "4688", "", ""),
                     ("b.csv", "2024-01-02 10:00:00", "4624", "x", ""),
@@ -339,25 +339,25 @@ def test_source_column_names_each_row_table(store, abc):
     store.set_source_nickname(b, "WS02 Security")
     m = store.create_merge("m", [a, b, c], source_column=True)
     mid = m["id"]
-    assert m["columns"][0] == {"name": "Source table", "type": "text", "source_column": True}
+    assert m["columns"][0] == {"name": "From table", "type": "text", "source_column": True}
     v = _view(store, mid, sort=[{"column": "Time", "dir": "asc"}])
-    assert _cells(store, mid, v, "Source table") == ["a.csv", "a.csv"] + ["WS02 Security"] * 3 + ["c.csv"]
+    assert _cells(store, mid, v, "From table") == ["a.csv", "a.csv"] + ["WS02 Security"] * 3 + ["c.csv"]
     # A real column: filter, group, value list.
-    assert _view(store, mid, filters=[{"column": "Source table", "op": "equals",
+    assert _view(store, mid, filters=[{"column": "From table", "op": "equals",
                                        "value": "WS02 Security"}])["row_count"] == 3
     v = _view(store, mid, sort=[{"column": "Time", "dir": "asc"}])   # a new root view replaces the last
-    groups = {g["value"]: g["count"] for g in store.group_summary(v["view_id"], "Source table")["groups"]}
+    groups = {g["value"]: g["count"] for g in store.group_summary(v["view_id"], "From table")["groups"]}
     assert groups == {"a.csv": 2, "WS02 Security": 3, "c.csv": 1}
-    assert {r["value"] for r in store.column_values(mid, "Source table")} == {"a.csv", "WS02 Security", "c.csv"}
+    assert {r["value"] for r in store.column_values(mid, "From table")} == {"a.csv", "WS02 Security", "c.csv"}
     body = "".join(store.export_view_csv(v["view_id"]))
     assert list(csv.reader(io.StringIO(body)))[1][4] == "a.csv"
 
 
 def test_source_column_steps_aside_for_a_real_column_of_that_name(store, write_csv):
-    a = _ingest(store, write_csv, [["Source table", "Msg"], ["evtx", "1"]], "a")
+    a = _ingest(store, write_csv, [["From table", "Msg"], ["evtx", "1"]], "a")
     b = _ingest(store, write_csv, [["Msg"], ["2"]], "b")
     m = store.create_merge("m", [a, b], source_column=True)
-    assert [c["name"] for c in m["columns"]] == ["Source table 2", "Source table", "Msg"]
+    assert [c["name"] for c in m["columns"]] == ["From table 2", "From table", "Msg"]
 
 
 def test_source_column_on_same_shaped_tables(store, write_csv):
@@ -365,7 +365,7 @@ def test_source_column_on_same_shaped_tables(store, write_csv):
     a2 = _ingest(store, write_csv, A_ROWS, "a2")
     mid = store.create_merge("m", [a, a2], source_column=True)["id"]
     v = _view(store, mid)
-    assert sorted(set(_cells(store, mid, v, "Source table"))) == ["a.csv", "a2.csv"]
+    assert sorted(set(_cells(store, mid, v, "From table"))) == ["a.csv", "a2.csv"]
 
 
 # ----------------------------------------------------------------- editing
@@ -378,7 +378,7 @@ def test_edit_merge_keeps_its_id_layout_and_saved_views(store, abc):
     old = _view(store, mid)
     out = store.update_merge(-mid, source_ids=[a, b, c], col_mode="all", source_column=True)
     assert out["id"] == mid and out["row_count"] == 6
-    assert out["columns"][0]["name"] == "Source table"
+    assert out["columns"][0]["name"] == "From table"
     assert store.get_layout(mid)["order"] == ["Msg"]
     assert [sv["name"] for sv in store.list_saved_views(mid)] == ["logons"]
     with pytest.raises(KeyError):
@@ -435,7 +435,7 @@ def test_preview_matches_the_merge_it_previews(store, abc):
     assert [r["source_id"] for r in pv["rows"]] == [a, a, b, b, b, c]
     c_row = pv["rows"][-1]["cells"]
     names = [col["name"] for col in pv["columns"]]
-    assert c_row[names.index("Source table")] == "Other tool"
+    assert c_row[names.index("From table")] == "Other tool"
     assert c_row[names.index("EventId")] is None and c_row[names.index("Other")] == "needle"
 
 

@@ -214,7 +214,7 @@ export function openMergeBuilder(opts = {}) {
     cb.checked = state.srcCol;
     cb.onchange = () => { state.srcCol = cb.checked; refresh(); };
     const srcText = el('span', null, 'Add a ');
-    srcText.append(el('b', null, 'Source table'), document.createTextNode(' column that says which table each row came from'));
+    srcText.append(el('b', null, 'From table'), document.createTextNode(' column that says which table each row came from'));
     check.append(cb, srcText);
     foot.append(field, createBtn, check);
 
