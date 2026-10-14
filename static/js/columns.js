@@ -30,7 +30,15 @@ export function colWidth(name) {
    lone base column takes the viewport instead (the gutter and a little
    for the scrollbar excepted). A dragged width still wins (S.layout), and
    columns the analyst derives from it keep their own defaults. */
-export function fillsGrid(c) { return !!c && !c.derived && baseColumns().length === 1; }
+export function fillsGrid(c) {
+  if (!c || c.derived) return false;
+  // Counted with an early exit rather than baseColumns().length: colWidth
+  // asks this for every text column on every paint, and a filtered copy of
+  // a 400-column list per column was O(columns²) to learn "more than one".
+  let n = 0;
+  for (const x of S.columns) if (!x.derived && ++n > 1) return false;
+  return n === 1;
+}
 
 export function fillWidth() {
   const body = $('body');
