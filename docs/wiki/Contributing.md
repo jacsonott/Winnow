@@ -140,6 +140,11 @@ once, so two runs of identical code report nothing.
 
 - A change a user would notice updates the relevant [wiki page](Home.md),
   and the [README](../../README.md) if it changes the front-page story.
+  Edit the pages in `docs/wiki/`, not in the GitHub wiki: a merge to
+  `develop` republishes the wiki from them and overwrites it. A new page
+  goes in the list under **Pages** on [Home](Home.md), which is also the
+  wiki's sidebar, and `tests/test_build_wiki.py` fails if one is missing or
+  a link doesn't resolve.
 - Anything a plugin author can call or receive is documented in the same
   commit, both in the `winnow/plugin_api.py` module docstring and in
   [`docs/writing-plugins.md`](../writing-plugins.md).
