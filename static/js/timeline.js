@@ -128,6 +128,19 @@ export async function buildTimeline() {
   S.timeline.view = v;
   $('timelineSpacerY').style.height = spacerPx(v.row_count) + 'px';
   $('timelineStats').innerHTML = `<b>${v.row_count.toLocaleString()}</b> tagged row${v.row_count === 1 ? '' : 's'}`;
+  // A table too wide to join into one body keeps its first N columns
+  // (Store._fit_body_cols). Said here, so the columns past N aren't taken
+  // for columns that were empty.
+  const trimmed = v.body_trimmed || [];
+  if (trimmed.length) {
+    const label = (t) => sourceLabel(S.sources.find((s) => s.id === t.source_id)) || t.source_name;
+    const note = el('span', null, trimmed.length === 1
+      ? ` · ${label(trimmed[0])}: body shows ${trimmed[0].shown} of ${trimmed[0].total} columns`
+      : ` · ${trimmed.length} tables: body shows their first ${trimmed[0].shown} columns`);
+    note.title = trimmed.map((t) => `${label(t)}: first ${t.shown} of ${t.total} columns`).join('\n')
+      + '\nPick body columns in Configure tables… to choose which ones.';
+    $('timelineStats').append(note);
+  }
   $('timelineBody').scrollTop = 0;
   renderTimelineRows();
 }

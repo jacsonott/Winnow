@@ -45,6 +45,18 @@ see [docs/notes/README.md](README.md) for the whole set.
   Same materialize-into-`v.`-then-page-by-pos pattern as `build_view`
   (invariant #2) — only one timeline view is ever alive at a time, rebuilt
   (and the old one evicted) on every tag-filter change.
+  **The body join is capped at what SQLite's expression depth allows**
+  (`_fit_body_cols`, 495 columns at the default limit of 1000). The flat
+  `a || ' | ' || b || ...` chain is two tree levels per column, so a
+  500-column table used to raise "Expression tree is too large" and take
+  every other table's findings off the Timeline with it (and the
+  Watchlist's latest hits, which joins the same body). A wider table now
+  keeps its first 495 body columns, in body order; `build_timeline`
+  returns those sources in `body_trimmed` and the tab header says so. The
+  cap is read off the connection's `getlimit`, falling back to 1000 on
+  Pythons before 3.11. `_sql_chain` (search's balanced-tree fix for the
+  same limit) is the alternative if the body should ever keep every
+  column.
 - **A table a merge is built on cannot be dropped** (`drop_source`, via
   `merges_using`). `merges.source_ids` is a JSON array of real source
   ids — a holder of source ids exactly like `row_tags` or `layouts` —
