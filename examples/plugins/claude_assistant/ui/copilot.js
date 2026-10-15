@@ -53,7 +53,9 @@ export default function mount(container, winnow) {
         try {
           await winnow.sqlPage.setText(p.sql);
           const r = await winnow.sqlPage.run();
-          status.textContent = `${r.rows.length.toLocaleString()} rows${r.truncated ? ' (truncated)' : ''} · ${r.elapsed_ms} ms`;
+          // `total`, not rows.length: rows is the first page (API 12).
+          const n = r.total ?? r.rows.length;
+          status.textContent = `${n.toLocaleString()} rows${r.stopped ? ' (stopped)' : ''} · ${r.elapsed_ms} ms`;
         } catch (e) {
           status.textContent = '';
           chat.line('error', e.message);   // the SQL error, in the conversation where the query came from

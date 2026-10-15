@@ -56,6 +56,7 @@ from . import rxguard
 from . import xlsxread
 from . import log as wlog
 from .paths import sqlite_ro_uri
+from .sqlresults import SqlResults, js_str as _sql_js_str, pane_cell_json, pane_cell_text  # noqa: F401 — server.py imports pane_cell_json from here
 
 BATCH = 20_000
 SAMPLE_ROWS = 500
@@ -2672,6 +2673,17 @@ class Store:
         # and would otherwise land one behind the snapshot.
         self._subset_copies: dict[int, dict] = {}
         self._closing = False
+        # The SQL pane's runs in flight (run_sql_result), token →
+        # {"rows", "done"}, under the jobs lock and on the copies' terms:
+        # _sql_run refuses once `_closing` is set, and close() waits on
+        # `done` before deleting the results file. Stopping one is
+        # _pane_query's business, not this registry's — this is what the
+        # pane's "Running… N rows" reads.
+        self._sql_runs: dict[str, dict] = {}
+        # The pane's results, held server-side and paged out
+        # (winnow/sqlresults.py). Its scratch file is made on the first
+        # run, not here — most sessions never open the pane.
+        self.sql_results = SqlResults()
 
         # Cancellable-op registry (see _interruptible/cancel_op): token →
         # the connection running that op, so a cancel can interrupt() it.
@@ -3430,6 +3442,16 @@ class Store:
         # lands at the query's next VM step, so this is milliseconds.
         with self._pane_gone:
             self._pane_gone.wait_for(lambda: not self._pane_conns, timeout=15)
+        # A pane run (run_sql_result) still writes to the results scratch
+        # file for a moment after its connection goes — its last batch,
+        # its summary. Wait for each to finish, then delete the file and
+        # every result in it. No new run can start: _sql_run refuses once
+        # `_closing` is set.
+        with self._ingest_jobs_lock:
+            sql_runs = list(self._sql_runs.values())
+        for run in sql_runs:
+            run["done"].wait(15)
+        self.sql_results.close()
         # Immediately before the writer closes, and not before the cleanup
         # above: an idle reader still holding the case file open at that
         # moment stops SQLite checkpointing the -wal on the writer's close,
@@ -15892,7 +15914,12 @@ class Store:
         return out
 
     def run_sql(self, sql: str, limit: int = 5000, *, op_token: str | None = None) -> dict:
-        """Read-only ad-hoc query against the case file.
+        """Read-only ad-hoc query against the case file, its rows inline:
+        the shape plugins (winnow.api.sql) and dashboards draw from, each
+        passing a limit sized to what it draws. The SQL pane's Run does not
+        come through here — run_sql_result holds its rows server-side,
+        because the pane has no cap and an uncapped answer in one response
+        is gigabytes.
 
         This intentionally allows arbitrary SELECT/EXPLAIN — that's the
         point of the pane — unlike validate_where_fragment's tight allowlist
@@ -15907,8 +15934,8 @@ class Store:
         sqlite3 already refuses to execute more than one statement per call.
 
         Runs on a _pane_query connection, so a query that never ends can
-        still be stopped — `op_token` is the pane's own run, for the busy
-        chip's Cancel.
+        still be stopped — `op_token` through cancel_op, every query by
+        stop_pane_queries (close(), and the server's shutdown).
         """
         structural = _blank_string_literals(_strip_sql_comments(sql))
         if self.SQL_PANE_FORBIDDEN_RE.search(structural):
@@ -15926,54 +15953,108 @@ class Store:
                 "elapsed_ms": int((time.time() - t0) * 1000),
             }
 
+    def run_sql_result(self, sql: str, op_token: str | None = None, release=()) -> dict:
+        """The SQL pane's Run: every row of the answer, held server-side.
 
-# The largest integer a JavaScript number holds exactly.
-_JS_MAX_SAFE_INT = 2 ** 53 - 1
+        The query runs on a _pane_query connection exactly as run_sql's
+        does (same forbidden-statement check, same authorizer, stopped by
+        the same things); its cursor is handed to SqlResults.materialise,
+        which copies the rows a batch at a time into the scratch database
+        and returns the result's id, count and column widths. The response
+        carries the first SqlResults.PREVIEW_ROWS rows; the pane pages the
+        rest by id, sorts through it, and exports from it — see
+        winnow/sqlresults.py for why nothing holds the whole answer in
+        memory any more.
 
+        `op_token` is the pane's Stop (cancel_op): stopped mid-fetch, the
+        rows so far are kept and `stopped` says "cancelled"; stopped
+        before the first row, it is OpCancelled (499). stop_pane_queries
+        (close(), shutdown) ends it the same way. `release` names the
+        result(s) this run replaces — the tab's last one — so a re-run
+        frees its scratch space before taking more."""
+        structural = _blank_string_literals(_strip_sql_comments(sql))
+        if self.SQL_PANE_FORBIDDEN_RE.search(structural):
+            raise ValueError("ATTACH, DETACH, PRAGMA and VACUUM aren't allowed in the SQL pane")
+        _check_regexp_literals(sql)
+        if release:
+            self.sql_results.release(release)
+        token = op_token or f"sqlr_{time.time_ns():x}"
+        with self._sql_run(token) as run:
+            with self._pane_query(token) as ro:
+                t0 = time.time()
+                cur = ro.cursor()
+                cur.row_factory = None
+                cur.execute(sql)
+                meta = self.sql_results.materialise(
+                    cur, cancelled=lambda: self._op_was_cancelled(token),
+                    progress=lambda n: run.__setitem__("rows", n))
+                elapsed = int((time.time() - t0) * 1000)
+            out = self.sql_results.summary(meta["id"])
+        out["elapsed_ms"] = elapsed
+        return out
 
-def _blob_text(b: bytes) -> str:
-    """A BLOB as the SQL pane shows it: its text when it is UTF-8 (what
-    CAST('abc' AS BLOB) holds, and what the grid already showed), else
-    SQLite's own literal for it, X'00FF' — what quote() prints."""
-    try:
-        return b.decode("utf-8")
-    except UnicodeDecodeError:
-        return "X'" + b.hex().upper() + "'"
+    @contextlib.contextmanager
+    def _sql_run(self, token: str) -> Iterator[dict]:
+        """Registers a pane run as in flight for the block — what
+        sql_run_progress reads, and what close() waits on before it
+        deletes the results file. Refused once close() has begun."""
+        run = {"rows": 0, "done": threading.Event()}
+        with self._ingest_jobs_lock:
+            if self._closing:
+                raise OpCancelled("The case is closing")
+            self._sql_runs[token] = run
+        try:
+            yield run
+        finally:
+            with self._ingest_jobs_lock:
+                self._sql_runs.pop(token, None)
+            run["done"].set()
 
+    def _op_was_cancelled(self, token: str) -> bool:
+        with self._op_lock:
+            return token in self._op_cancelled
 
-def _nonfinite_text(f: float) -> str:
-    """Inf/-Inf/NaN spelled the way SQLite's CAST(… AS TEXT) spells them."""
-    return "NaN" if f != f else ("Inf" if f > 0 else "-Inf")
+    def sql_run_progress(self, token: str) -> dict:
+        """Rows landed so far by the run under `token` — the pane's
+        "Running… N rows" while it waits."""
+        with self._ingest_jobs_lock:
+            run = self._sql_runs.get(token)
+            return {"running": run is not None, "rows": run["rows"] if run else 0}
 
+    def sql_result_csv(self, result_id: str, sort: int | None = None, order: str = "asc") -> Iterator[str]:
+        """A held result as CSV text chunks, in displayed order, streamed
+        off the scratch table. Values as the pane shows them (js_str);
+        text — the column names included, which are just as much the
+        query's output — through _csv_safe like every other export of case
+        data. A number stays a number: -5 is not a formula, and an
+        apostrophe in front of it would make it text in the spreadsheet."""
+        cols, rows = self.sql_results.iter_rows(result_id, sort, order)
 
-def pane_cell_json(v: Any) -> Any:
-    """One SQL pane cell as JSON can carry it to the browser without
-    changing what it says. A non-UTF-8 BLOB (SELECT x'00ff') and a
-    non-finite REAL (SELECT 1e999) both made /api/sql a 500 — JSON has no
-    bytes and no Infinity — and an integer past 2^53 arrived rounded, so
-    the grid, Copy, CSV and Excel all showed a different number from the
-    one in the case (a FILETIME or a 64-bit id is exactly that size).
-    Those three become text; everything else passes through as it was."""
-    if isinstance(v, bytes):
-        return _blob_text(v)
-    if isinstance(v, float) and not math.isfinite(v):
-        return _nonfinite_text(v)
-    if isinstance(v, int) and not isinstance(v, bool) and abs(v) > _JS_MAX_SAFE_INT:
-        return str(v)
-    return v
+        def cell(v):
+            text = _sql_js_str(v)
+            return text if isinstance(v, (int, float)) else _csv_safe(text)
 
+        def gen():
+            buf = io.StringIO()
+            w = csv.writer(buf, lineterminator="\n")
+            w.writerow([_csv_safe(c) for c in cols])
+            n = 0
+            for row in rows:
+                w.writerow([cell(v) for v in row])
+                n += 1
+                if n % 2000 == 0:
+                    yield buf.getvalue()
+                    buf.seek(0), buf.truncate(0)
+            yield buf.getvalue()
+        return gen()
 
-def pane_cell_text(v: Any) -> str:
-    """The same cell as the TEXT "Save as table" stores — the same spelling
-    the pane showed, not Python's repr (a BLOB used to land as "b'abc'")."""
-    if v is None:
-        return ""
-    if isinstance(v, bytes):
-        return _blob_text(v)
-    if isinstance(v, float) and not math.isfinite(v):
-        return _nonfinite_text(v)
-    return str(v)
-
+    def sql_result_xlsx(self, result_id: str, path: str, sort: int | None = None, order: str = "asc",
+                        sheet: str = "Query") -> dict:
+        """A held result as a workbook written to `path`, in displayed
+        order, continuing past one worksheet the way rows_to_xlsx does.
+        Numbers stay numbers; text goes through _xlsx_safe."""
+        cols, rows = self.sql_results.iter_rows(result_id, sort, order)
+        return write_rows_xlsx(path, cols, rows, sheet)
 
 _CSV_FORMULA_LEAD = ("=", "+", "-", "@", "\t", "\r")
 
@@ -16099,29 +16180,48 @@ _XLSX_SHEET_INVALID = re.compile(r"[\\/?*\[\]:\x00-\x1f\x7f]")
 XLSX_MAX_ROWS = 1_048_576
 
 
-def rows_to_xlsx(columns: list, rows: list, sheet_name: str = "Query") -> io.BytesIO:
-    """A result set as a one-sheet workbook, in memory.
-
-    A module function rather than a Store method because it touches no
-    database: the SQL pane has already run the query and holds the rows
-    the analyst is looking at, sorted the way they sorted them, so the
-    export is a pure formatting step over what is on screen. Keeping it
-    off Store is also what lets its tests run without a case file.
-    """
-    if len(rows) + 1 > XLSX_MAX_ROWS:
-        raise ValueError(
-            f"{len(rows):,} rows is more than one worksheet holds "
-            f"({XLSX_MAX_ROWS - 1:,}) — narrow the query or save it as a table instead")
-    wb = Workbook()
-    ws = wb.active
-    ws.title = _xlsx_sheet_name(sheet_name, set())
-    ws.append([_xlsx_safe(c) for c in columns])
-    for row in rows:
-        ws.append([_xlsx_safe(v) for v in row])
+def rows_to_xlsx(columns: list, rows: Iterable, sheet_name: str = "Query") -> io.BytesIO:
+    """A result set as a workbook, in memory — write_rows_xlsx into a
+    BytesIO. A module function rather than a Store method because it
+    touches no database, which is also what lets its tests run without a
+    case file."""
     buf = io.BytesIO()
-    wb.save(buf)
+    write_rows_xlsx(buf, columns, rows, sheet_name)
     buf.seek(0)
     return buf
+
+
+def write_rows_xlsx(target, columns: list, rows: Iterable, sheet_name: str = "Query") -> dict:
+    """Rows (any iterable — the SQL pane's export streams them off its
+    scratch table) as a workbook saved to `target`, a path or a file
+    object; returns {"rows", "sheets"}.
+
+    The pane has no row cap, so a result can be past Excel's per-sheet
+    limit: it continues on "Query (2)", "Query (3)"…, header re-emitted,
+    the way export_all_xlsx does — every row lands rather than the export
+    being refused. Write-only for the same reason that one is: a million
+    rows as openpyxl cell objects is gigabytes.
+    """
+    per = XLSX_MAX_ROWS - 1   # one row is the header
+    header = [_xlsx_safe(c) for c in columns]
+    used: set[str] = set()
+    first = _xlsx_sheet_name(sheet_name, used)
+    wb = Workbook(write_only=True)
+    ws = wb.create_sheet(first)
+    ws.append(header)
+    sheets, on_sheet, total = 1, 0, 0
+    for row in rows:
+        if on_sheet == per:
+            sheets += 1
+            suffix = f" ({sheets})"
+            ws = wb.create_sheet(_xlsx_sheet_name(first[: 31 - len(suffix)] + suffix, used))
+            ws.append(header)
+            on_sheet = 0
+        ws.append([_xlsx_safe(pane_cell_json(v)) for v in row])
+        on_sheet += 1
+        total += 1
+    wb.save(target)
+    return {"rows": total, "sheets": sheets}
 
 
 def _xlsx_sheet_name(name: str, used: set[str]) -> str:

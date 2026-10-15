@@ -376,6 +376,25 @@ def test_sql_route_runs_select(client, ingested):
     assert r.json()["rows"] == [[4]]
 
 
+_SEVEN_THOUSAND = ("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 7000) "
+                   "SELECT i FROM n")
+
+
+def test_sql_route_honours_an_explicit_limit(client, ingested):
+    """winnow.api.sql (plugins) sends one; the pane uses /api/sql/run."""
+    r = client.post("/api/sql", json={"sql": _SEVEN_THOUSAND, "limit": 5000})
+    assert len(r.json()["rows"]) == 5000
+    assert r.json()["truncated"] is True
+
+
+def test_sql_route_still_returns_a_blob_as_text(client, ingested):
+    """The fast JSONResponse path can't encode bytes; such a result falls
+    back to FastAPI's encoder, which is what returned it before."""
+    r = client.post("/api/sql", json={"sql": "SELECT CAST('abc' AS BLOB) AS b"})
+    assert r.status_code == 200
+    assert r.json()["rows"] == [["abc"]]
+
+
 def test_view_route_400s_an_analyst_fixable_filter_error(client, ingested):
     _, source_id = ingested
     r = client.post("/api/view", json={
@@ -1126,11 +1145,13 @@ def test_downloads_take_any_filename_rather_than_500(client, store, write_csv):
                            name="журнал_событий.csv", build_fts=False)["id"]
     store.set_tags(sid, [1], store.list_tags()[0]["id"], True)
     view = store.build_view(sid, {"source_id": sid, "filters": [], "sort": []})["view_id"]
+    held = client.post("/api/sql/run", json={"sql": "SELECT 1 AS a"}).json()["id"]
 
     for base in names:
         responses = {
-            "sql xlsx": client.post("/api/sql/export_xlsx", json={
-                "columns": ["a"], "rows": [[1]], "filename": base + ".xlsx", "sheet": "Query"}),
+            "sql xlsx": client.get(f"/api/sql/result/{held}/export.xlsx",
+                                   params={"filename": base + ".xlsx", "sheet": "Query"}),
+            "sql csv": client.get(f"/api/sql/result/{held}/export.csv", params={"filename": base + ".csv"}),
             "view csv": client.get("/api/export", params={"view_id": view, "filename": base + ".csv"}),
             "tagged xlsx": client.get("/api/export/tagged_xlsx", params={"filename": base + ".xlsx"}),
             "all xlsx": client.get("/api/export/all_xlsx", params={"filename": base + ".xlsx"}),
@@ -1152,8 +1173,9 @@ def test_downloads_take_any_filename_rather_than_500(client, store, write_csv):
 def test_a_download_name_cannot_split_the_header(client, store, write_csv):
     """CR/LF in a typed name would end the header line (uvicorn refuses
     the response outright); the name keeps its text, never its line break."""
-    r = client.post("/api/sql/export_xlsx", json={
-        "columns": ["a"], "rows": [[1]], "filename": "a\r\nSet-Cookie: x=1.xlsx", "sheet": "Q"})
+    held = client.post("/api/sql/run", json={"sql": "SELECT 1 AS a"}).json()["id"]
+    r = client.get(f"/api/sql/result/{held}/export.xlsx",
+                   params={"filename": "a\r\nSet-Cookie: x=1.xlsx", "sheet": "Q"})
     assert r.status_code == 200
     header = r.headers["content-disposition"]
     assert "\r" not in header and "\n" not in header
