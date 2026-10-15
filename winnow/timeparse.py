@@ -53,6 +53,20 @@ MONTHS = {
     "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
 }
 
+# An English month name, abbreviated or in full ("Sept" too), for patterns
+# compiled case-insensitively. Strict, so a weekday or a word that only
+# starts like a month is not one; its first three letters are its MONTHS
+# key. store.py's month-name family (DATE_RE, _TS_MONTH_RE) is built on
+# this same alternation, and tsformat.js mirrors it.
+MONTH_NAME = (r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?"
+              r"|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)")
+
+# The ordinal suffix a day of the month may be written with, "Jul 28th
+# 2026", for patterns compiled case-insensitively; optional. Which suffix
+# goes with which number is not checked: "21th" still names the 21st, and
+# refusing it would turn a typo into a missing timestamp.
+ORDINAL = r"(?:st|nd|rd|th)?"
+
 # Same plausibility window store.py's _webkit_to_iso uses: a numeric value
 # only counts as a timestamp in some unit if the resulting date is one an
 # analyst could plausibly be looking at. This is also what makes epoch
@@ -751,6 +765,40 @@ register_op({
     "params": [_UTC_OFFSET_PARAM],
     "subsecond": False,
     "parse": _parse_dd_mmm,
+})
+
+
+# Month first, as US-English writes a date out in words. The year must be
+# four digits, so a year-less syslog line ("Jul 28 01:02:22") is not one.
+_MMM_DD_RE = re.compile(
+    r"^(" + MONTH_NAME + r")\.?\s+(\d{1,2})" + ORDINAL + r"\s*,?\s*(\d{4})[ ,]+"
+    r"(\d{1,2}):(\d{2})(?::(\d{2})(?:[.,](\d+))?)?\s*(?:" + MERIDIEM + r")?",
+    re.IGNORECASE)
+
+
+def _parse_mmm_dd(value: Any, params: dict, state: dict) -> str | None:
+    s = str(value).strip()
+    m = _MMM_DD_RE.match(s)
+    if not m:
+        return None
+    name, d, y, h, mi, sec, frac, ampm = m.groups()
+    try:
+        dt = datetime(int(y), MONTHS[name[:3].lower()], int(d), hour24(int(h), ampm),
+                      int(mi), int(sec or 0), int(frac[:6].ljust(6, "0")) if frac else 0)
+    except ValueError:
+        return None
+    dt = _zoned(dt, s[m.end():], params)
+    return None if dt is None else _fmt(dt, subsecond=bool(frac))
+
+
+register_op({
+    "id": "mmm_dd_yyyy",
+    "label": "Mmm dd yyyy hh:mm:ss",
+    "description": "e.g. \"Jul 28th 2026 01:02:22\" or \"July 28, 2026 1:02 PM\". English month names, abbreviated or in full; "
+                   "the day may carry 1st/2nd/3rd/th. Optional AM/PM. A trailing offset (+0200, UTC) is converted to UTC.",
+    "params": [_UTC_OFFSET_PARAM],
+    "subsecond": True,
+    "parse": _parse_mmm_dd,
 })
 
 

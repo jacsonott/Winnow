@@ -115,7 +115,7 @@ UTC by definition. A value that carries its own offset (`Z`, `UTC`, `GMT`,
 exactly as written, unless you fill in **Source UTC offset** (`-05:00`,
 `+0530`, `+5`), a fixed offset Winnow subtracts to reach UTC. An offset in
 the value wins over the setting. Winnow never guesses daylight saving: in
-the ISO 8601, dd Mmm yyyy and US formats, a value ending in a zone it
+the ISO 8601, dd Mmm yyyy, Mmm dd yyyy and US formats, a value ending in a zone it
 can't convert, such as `EST` or `Europe/Paris`, counts as unparsed rather
 than being read as if it were UTC. RFC 2822 dates convert the zones that
 standard defines (`UT`, `GMT`, `Z`, `EST`/`EDT`, `CST`/`CDT`, `MST`/`MDT`,
@@ -132,6 +132,7 @@ time is UTC and the sender's own zone is unknown, so it is kept as UTC and
 | **BSD syslog (Mmm dd hh:mm:ss)** | Year-less syslog lines. **Year of first line** is required | `Dec 31 23:59:59 host sshd[2]: …` → `2023-12-31 23:59:59` |
 | **ISO 8601** | `YYYY-MM-DDThh:mm[:ss]`, `T` or a space, fraction with `.` or `,`, optional zone | `2024-01-05T13:22:01+02:00` → `2024-01-05 11:22:01`<br>`2024-01-05T13:22:01.5Z` → `2024-01-05 13:22:01.500000` |
 | **dd Mmm yyyy hh:mm:ss** | `05 Jan 2024 13:22:01` or `5-Jan-2024 …`, English month names, optional zone | `5-Jan-2024 13:22:01 +0200` → `2024-01-05 11:22:01` |
+| **Mmm dd yyyy hh:mm:ss** | Month first, abbreviated or in full, the day plain or with `st`/`nd`/`rd`/`th`, optional comma, seconds and fraction optional, optional AM/PM and optional zone | `Jul 28th 2026 01:02:22` → `2026-07-28 01:02:22`<br>`July 28, 2026 1:02 PM` → `2026-07-28 13:02:00` |
 | **Compact YYYYMMDDhhmmss** | 14 run-together digits | `20240105132201` → `2024-01-05 13:22:01` |
 | **Mac absolute (Cocoa) time** | Seconds since 2001-01-01; negative for earlier dates; `0` counts as unparsed | `726153721` → `2024-01-05 13:22:01` |
 | **Excel serial date** | Days since 1899-12-30, fraction = time of day, rounded to the second | `45296.5576` → `2024-01-05 13:22:57` |

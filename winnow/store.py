@@ -509,12 +509,12 @@ NUM_RE = re.compile(r"^-?\d+(\.\d+)?$")
 # Anything that looks like a leading ISO-ish or US date; used only to pick a
 # default sort column and to hint the UI, never to rewrite the stored value.
 # Month-name timestamps ("JUN 23 2026 00:11:00", "23 Jun 2026", "June 23,
-# 2026 5:11 PM") — the third recognized family, name-first and day-first
-# both, since exporters disagree. The alternation is strict (a weekday or a
-# random word never matches) and _TS_MONTHS is the number lookup the
-# parsers share; it's a superset of the alternation only by "sept".
-_TS_MONTH_NAME = (r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?"
-                  r"|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)")
+# 2026 5:11 PM", "Jul 28th 2026 01:02:22") — the third recognized family,
+# name-first and day-first both, since exporters disagree, with the day's
+# ordinal suffix optional. The alternation is timeparse.MONTH_NAME, strict
+# (a weekday or a random word never matches), and _TS_MONTHS is the number
+# lookup the parsers share; it's a superset of the alternation only by "sept".
+_TS_MONTH_NAME = timeparse.MONTH_NAME
 _TS_MONTHS = {
     "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
     "jul": 7, "aug": 8, "sep": 9, "sept": 9, "oct": 10, "nov": 11, "dec": 12,
@@ -524,8 +524,8 @@ _TS_MONTHS = {
 }
 DATE_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}[ T]|^\d{1,2}/\d{1,2}/\d{4}"
-    r"|^" + _TS_MONTH_NAME + r"\s+\d{1,2}\s*,?\s*\d{4}"
-    r"|^\d{1,2}\s+" + _TS_MONTH_NAME + r"\s*,?\s*\d{4}",
+    r"|^" + _TS_MONTH_NAME + r"\s+\d{1,2}" + timeparse.ORDINAL + r"\s*,?\s*\d{4}"
+    r"|^\d{1,2}" + timeparse.ORDINAL + r"\s+" + _TS_MONTH_NAME + r"\s*,?\s*\d{4}",
     re.IGNORECASE)
 
 
@@ -687,7 +687,8 @@ _TS_ISO_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{
 _TS_US_RE = re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{4})(?:[ ,]+(\d{1,2}):(\d{2})(?::(\d{2})(?:[.,]\d+)?)?"
                        r"\s*(?:" + timeparse.MERIDIEM + r")?)?")
 _TS_MONTH_RE = re.compile(
-    r"^(?:(" + _TS_MONTH_NAME + r")\s+(\d{1,2})|(\d{1,2})\s+(" + _TS_MONTH_NAME + r"))"
+    r"^(?:(" + _TS_MONTH_NAME + r")\s+(\d{1,2})" + timeparse.ORDINAL
+    + r"|(\d{1,2})" + timeparse.ORDINAL + r"\s+(" + _TS_MONTH_NAME + r"))"
     r"\s*,?\s*(\d{4})"
     r"(?:[ ,]+(\d{1,2}):(\d{2})(?::(\d{2})(?:[.,]\d+)?)?\s*(?:" + timeparse.MERIDIEM + r")?)?",
     re.IGNORECASE)
