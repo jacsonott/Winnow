@@ -566,7 +566,7 @@ export function openSearchAllModal() {
           : 'All of those are already on the watchlist', 5000);
       } catch (e) { toast('Could not add to the watchlist: ' + e.message, 6000); }
     };
-    const searchBtn = el('button', 'btn', `Search  ${MOD_ENTER}`);
+    const searchBtn = el('button', 'btn primary', `Search  ${MOD_ENTER}`);
     const cancelBtn = el('button', 'btn ghost', 'Stop');
     cancelBtn.title = 'Stop the sweep — tables already counted keep their results';
     cancelBtn.onclick = async () => {

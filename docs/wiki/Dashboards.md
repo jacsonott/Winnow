@@ -79,8 +79,8 @@ Others say that the table the card read is no longer in the case, or that
 the case has no watchlist entries or no tags yet.
 
 **Show them** puts the folded cards back on the board so you can edit or
-remove them; **Fold them back** collapses them again. A `stat` card is never
-folded, because 0 is an answer.
+remove them; **Fold them back** collapses them again. A **Number** card is
+never folded, because 0 is an answer.
 
 ## Cached numbers and Refresh
 
@@ -101,33 +101,64 @@ being marked.
 
 Tick **Run every time the dashboard opens** only for cheap widgets whose
 number has to be current the moment the board appears, such as a watchlist
-or tag count. The editor shows how long the widget took on its last run to
-help you decide.
+or tag count. The editor shows how long the widget took on its last run,
+and the preview's **ran in** how long the draft takes, to help you decide.
 
 ## Adding widgets
 
 ### The widget editor
 
 **＋ Add widget** (in the bar, or the card of that name at the end of the board)
-opens the editor; `✎` on a card opens it for that widget. You pick what to
-show and which table it comes from, and the editor writes the query.
+opens the editor; `✎` on a card opens it for that widget. It has two sides.
+On the left, **The question**: what to show and which table it comes from,
+and the editor writes the query. On the right, **How it looks**, above a
+preview card that answers the draft as you change it. In a narrow window
+the two sides stack, the question first.
+
+**The question**
 
 | Field | What it does |
 | --- | --- |
-| **Title** | The card's heading. Filled in from the template until you type your own |
-| **Data from** | `sql` (a query against the case), `watchlist`, `tags`, or `cells` (a signals card, below) |
+| **Data from** | **A query** (against the case), **Watchlist hits**, **Tag counts**, or **Signals card** (below) |
 | **What to show** | A template, below. **Blank — write my own SQL** opens the SQL for you to write |
-| **Table** | One of this case's tables, or a portable entry such as **Event logs (EvtxECmd) — any case (portable)**; see [Portable tables](#portable-tables-placeholders) |
+| **Table** | One of this case's tables, by name, or a portable entry such as **Event logs (EvtxECmd) — any case (portable)**; see [Portable tables](#portable-tables-placeholders) |
 | **Column**, **Match**, **Value**, **Bucket** | Shown when the template needs them |
-| **Advanced — the SQL** | The query the template wrote. You can change it |
-| **Render as** | How the answer is drawn; see [Render kinds](#render-kinds) |
-| **Sub-label (optional, for stat)** | A line under a stat's number |
-| **Width** | 1 to 4 columns |
+| **Advanced — the SQL** | The query the template wrote. You can change it. While the box is empty, the example in it names the table picked under **Table**, both as the SQL has to write it (`src_3`, say) and by its name |
+| **Title** | The card's heading. Filled in from the template until you type your own |
+
+**How it looks**
+
+| Field | What it does |
+| --- | --- |
+| **Render as** | How the answer is drawn, one button per kind; see [Render kinds](#render-kinds) |
+| **Sub-label (optional)** | A line under a **Number**'s number, or under a **Signals** grid |
+| **Width** | **1 column** to **4 columns** of the board |
 | **Run every time the dashboard opens** | See [Cached numbers and Refresh](#cached-numbers-and-refresh) |
 
-**Preview** runs the draft without saving it. **Save widget** saves it.
-**Run now** and **Remove widget…** appear when you are editing an existing
-widget.
+**The preview** runs the draft by itself about half a second after you stop
+typing or picking, and says how long it took (**ran in** *time*). There is
+no button to press, and nothing is saved:
+
+- Changing only how the card looks (**Render as**, **Title**, **Sub-label**,
+  **Width**) redraws the answer that is already there, without running the
+  query again.
+- While a changed draft is running, the previous answer stays on the card,
+  dimmed. An answer that comes back for a draft you have changed since is
+  thrown away, so a slow query can't replace the answer to the one you are
+  looking at. It is not stopped on the server, though: a query that takes
+  minutes still runs to the end.
+- A draft that can't run yet says what's missing in one line: no query yet,
+  or no column to pick on the chosen table.
+- An empty answer says what the board will say about it, because a card
+  with nothing to show folds into the board's empty-cards line (see
+  [Working with a board](#working-with-a-board)).
+- The preview never touches the board's cached numbers. Until you save,
+  the card on the board keeps its own.
+
+**Save widget** saves it. **Run now** and **Remove widget…** appear when you
+are editing an existing widget. **Run now** re-runs the *saved* widget and
+keeps its result; the preview shows that result too, unless you have changed
+the question since.
 
 Editing the SQL by hand makes the widget yours: the template stops applying,
 and so does the click-through to rows. A widget with its own SQL and no
@@ -141,13 +172,13 @@ and the editor's column lists leave out derived columns.
 
 | What to show | Renders as | Asks for | Clicking it opens |
 | --- | --- | --- | --- |
-| **Row count** | stat | — | The whole table |
-| **Count of rows matching a value** | stat | Column, Match (`equals` / `contains`), Value. An empty value counts rows where the column is empty | The matching rows |
-| **Distinct count of a column** | stat | Column (empty values are not counted) | Rows where the column is not empty |
-| **Top values of a column (bar chart)** | bar, 2 wide | Column. The ten commonest non-empty values | Click a bar: rows with that value |
-| **Rarest values of a column (list)** | list, 2 wide | Column. The ten rarest non-empty values | Click a row: rows with that value |
-| **Events over time (histogram)** | histogram, 2 wide | Column (only datetime columns are listed when the table has any), Bucket (`per day` / `per hour`). Rows whose timestamp can't be read are left out | Click a bar: that day or hour |
-| **Activity window (first / last)** | kv, 2 wide | Column (as for the histogram) | The whole table |
+| **Row count** | Number | — | The whole table |
+| **Count of rows matching a value** | Number | Column, Match (`equals` / `contains`), Value. An empty value counts rows where the column is empty | The matching rows |
+| **Distinct count of a column** | Number | Column (empty values are not counted) | Rows where the column is not empty |
+| **Top values of a column (bar chart)** | Bar chart, 2 columns | Column. The ten commonest non-empty values | Click a bar: rows with that value |
+| **Rarest values of a column (list)** | List, 2 columns | Column. The ten rarest non-empty values | Click a row: rows with that value |
+| **Events over time (histogram)** | Histogram, 2 columns | Column (only datetime columns are listed when the table has any), Bucket (`per day` / `per hour`). Rows whose timestamp can't be read are left out | Click a bar: that day or hour |
+| **Activity window (first / last)** | Key / value, 2 columns | Column (as for the histogram) | The whole table |
 
 ### From what you're looking at
 
@@ -177,30 +208,35 @@ the editor instead.
 **To dashboard…** in the [SQL pane](SQL-pane.md)'s toolbar turns the query
 in the editor into a widget: pick a board (or **＋ New dashboard…**), and the
 widget editor opens on it with your query, titled after the query tab and
-rendered as `kv`. Adjust the render kind and save.
+rendered as **Key / value**. The preview shows the answer straight away; pick
+how it renders and save.
 
 ## Widget reference
 
+The editor shows each source and render kind by name. A board, a Library
+entry or a profile file stores the value in the **Stored as** column, which
+is what to write when you edit a profile's JSON by hand.
+
 ### Data sources
 
-| Data from | Answers with |
-| --- | --- |
-| `sql` | Your query's result, up to its first 200 rows |
-| `watchlist` | One row per indicator with its hit count; as a stat, the total of all hits |
-| `tags` | One row per tag with how many rows carry it; as a stat, the total |
-| `cells` | A signals card: several small questions, each with its own answer and click-through |
+| Data from | Stored as | Answers with |
+| --- | --- | --- |
+| **A query** | `sql` | Your query's result, up to its first 200 rows |
+| **Watchlist hits** | `watchlist` | One row per indicator with its hit count; as a **Number**, the total of all hits |
+| **Tag counts** | `tags` | One row per tag with how many rows carry it; as a **Number**, the total |
+| **Signals card** | `cells` | Several small questions, each with its own answer and click-through |
 
 ### Render kinds
 
-| Render as | Draws | Expects |
-| --- | --- | --- |
-| `stat` | One big number | The last column of the first row (or the watchlist/tags total) |
-| `kv` | Label and value pairs | Two columns: label, value |
-| `chips` | Yes/no pills: ✓ when the value is above 0 or `true`, ✗ otherwise | Two columns: label, value |
-| `list` | A ranked list, first 12 rows | Label first, count last |
-| `bar` | A horizontal bar chart | Label first, count last |
-| `histogram` | Bars over time | Bucket label first, count last |
-| `signals` | A grid of labelled numbers, some optionally as yes/no pills, each opening its own rows | `cells` |
+| Render as | Stored as | Draws | Expects |
+| --- | --- | --- | --- |
+| **Number** | `stat` | One big number | The last column of the first row (or the watchlist/tags total) |
+| **Key / value** | `kv` | Label and value pairs | Two columns: label, value |
+| **Yes / no chips** | `chips` | Yes/no pills: ✓ when the value is above 0 or `true`, ✗ otherwise | Two columns: label, value |
+| **List** | `list` | A ranked list, first 12 rows | Label first, count last |
+| **Bar chart** | `bar` | A horizontal bar chart | Label first, count last |
+| **Histogram** | `histogram` | Bars over time | Bucket label first, count last |
+| **Signals** | `signals` | A grid of labelled numbers, some optionally as yes/no pills, each opening its own rows | Data from **Signals card** |
 
 A signals card is how the shipped KAPE board fits ten numbers in one card
 without losing any of their click-throughs. A cell whose table isn't in the
@@ -213,13 +249,14 @@ board or profile that already has one.
 
 Clicking a number opens its table filtered to exactly the rows it counted:
 
-- **stat, kv and chips**: click the card body, or `⤴`.
-- **bar and list**: click a bar or a row to open the rows with that value;
-  `⤴` opens the table with no value picked.
-- **histogram**: click a bar to open that day or hour. On a datetime column
+- **Number**, **Key / value** and **Yes / no chips**: click the card body,
+  or `⤴`.
+- **Bar chart** and **List**: click a bar or a row to open the rows with that
+  value; `⤴` opens the table with no value picked.
+- **Histogram**: click a bar to open that day or hour. On a datetime column
   this sets the timeframe filter; on a text column that merely holds dates,
   it filters on the bucket's prefix instead.
-- **signals**: each cell and pill opens its own rows.
+- **Signals**: each cell and pill opens its own rows.
 
 The table opens fresh: the header filters, search, tag filter and timeframe
 you had on it are cleared first, because they would hide rows the widget
@@ -321,7 +358,7 @@ open, the watchlist and the variables.
 
 | Button | Does |
 | --- | --- |
-| **＋ New profile…** | Build one from scratch: pick plugins, boards (from the Library or the open case) and variables |
+| **＋ New profile…** | Build one from scratch: pick plugins, boards (from the Library or the open case) and variables (see [Building a profile](#building-a-profile)) |
 | **Import…** / **Export…** | Read or write one profile as a single `.json` file. An imported profile whose name is taken is saved with **(imported)** added |
 | **Save current plugins…** | Save just the plugins switched on now, under a name |
 | **Copy to edit** | Shipped profiles are read-only; this starts an editable copy that remembers where it came from |
@@ -333,6 +370,62 @@ one line saying so and **See what changed**. **Take the shipped version**
 replaces your copy with it, and your edits to the copy are lost; **Keep
 mine** leaves it alone.
 Nothing is updated automatically.
+
+### Building a profile
+
+**＋ New profile…**, **Edit…** and **Copy to edit** open the profile
+builder, titled *New profile*, *Edit profile — name* or *New profile from
+“name”*. A shipped profile is read-only, so copying one starts a profile of
+your own called **name (copy)**.
+
+The left side, **What the profile turns on**, has the **Profile name** and
+**Description**, then two lists to tick:
+
+- **Plugins**: every installed plugin, the bundled examples marked
+  **example**. Applying the profile turns the ticked ones on for the case
+  and every other plugin off. A plugin the profile names that this machine
+  doesn't have stays in the list, ticked and marked **not installed**, so
+  saving the profile here doesn't drop it.
+- **Dashboards**: boards from the dashboard Library (a board's **Save to
+  library…** puts it there), boards in the open case, and the profile's own,
+  marked **library**, **open case** or **in this profile**. Each is created
+  in the case under its own name. A board saved with **Save as profile…** is
+  the profile's own board and is created under the profile's name.
+
+The right side, **What a case gets**, opens with one line saying what
+applying the profile does, such as *Turns on 3 plugins · opens 2 dashboards ·
+asks for 2 values (1 required)*, kept current as you tick and type. Under it,
+notes name any ticked plugin that isn't installed here, and the profile's
+watchlist, which the builder carries over unchanged (it has no watchlist
+editor).
+
+**Variables** are the values a case of this type carries, such as the
+engagement name, a backend URL or a link to the scoping document. **＋ Add
+variable** adds one as a card, and `✕` removes it:
+
+| Box | Means |
+| --- | --- |
+| **Name** | How plugins read the value (`req.variables`). A letter, then up to 63 letters, digits, `_`, `.` or `-`, and not used by another variable in the profile |
+| **Label** | What the analyst is shown. Left empty, the name is shown |
+| **What it’s for** | A line shown under the label |
+| **Default** | Already typed into the box when the analyst is asked |
+| **Required at case creation** | The case can't be created until it has a value |
+
+A name that breaks the rule, or repeats another, is flagged under its box,
+and **Create profile** (**Save changes** when editing) refuses it. Variables
+are case data and travel with the case file, so never a token or password:
+those go in **Settings → Environment** (see
+[Settings and shortcuts](Settings-and-shortcuts.md#environment)).
+
+**Asked when a case is created** shows the variables the way the analyst
+will be asked for them, required ones marked `*`: in the **New case** dialog,
+or after applying the profile to a case that has no value for a required one.
+It is a preview, so you can't type into it.
+
+The **Profile name** is checked as you type as well. Profiles are saved by
+name, so a name you already use says **Saving replaces your profile “…”**,
+and renaming a profile while editing it says the original stays as it is and
+the new name is saved as a second profile.
 
 ### Applying a profile
 
@@ -423,5 +516,5 @@ which one to open (see
   case.
 - **Cached numbers can be out of date.** Check the age on the card, and use
   ↻ Refresh all before quoting a number.
-- A `sql` widget reads at most the first 200 rows of its query, and a `list`
-  shows the first 12.
+- A widget whose data is **A query** reads at most the first 200 rows of
+  it, and a **List** shows the first 12.

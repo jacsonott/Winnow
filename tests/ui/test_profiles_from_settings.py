@@ -15,10 +15,11 @@ pytestmark = pytest.mark.ui
 def _open_settings_profiles(page):
     page.evaluate("() => __winnow.openSettings()")
     page.wait_for_selector("#modal:not([hidden])")
+    # Picked from Settings' section list, the way an analyst gets there.
     page.evaluate("""() => {
-      const heads = [...document.querySelectorAll('#modal .settings-section-head')];
-      const h = heads.find((x) => x.querySelector('.settings-section-title').textContent.trim() === 'Profiles');
-      if (h && h.getAttribute('aria-expanded') !== 'true') h.click();
+      const items = [...document.querySelectorAll('#modal .settings-nav-item')];
+      const it = items.find((x) => x.textContent.trim() === 'Profiles');
+      if (it) it.click();
     }""")
     # The section paints an empty line first and fills in the count when
     # listBundles() resolves, so wait for the count itself: any
@@ -97,6 +98,9 @@ def test_opened_from_settings_it_goes_back_to_settings(page):
     page.wait_for_function("() => document.getElementById('modalTitle').textContent === 'Settings'",
                            timeout=5_000)
     assert page.evaluate("() => document.getElementById('modal').hidden") is False
+    # Back to the section it came from, not the top of Settings.
+    assert page.evaluate("""() => document.querySelector('#modalBody .settings-pane:not([hidden])')
+      .dataset.section""") == "profiles"
 
 
 def test_the_back_button_goes_back_too(page):

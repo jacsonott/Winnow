@@ -174,6 +174,58 @@ def test_dd_mmm_yyyy():
     assert parse("dd_mmm_yyyy", "05 Foo 2024 13:22:01") is None
 
 
+@pytest.mark.parametrize("value, want", [
+    # The value that asked for it, and the rest of the ordinal suffixes.
+    ("Jul 28th 2026 01:02:22", "2026-07-28 01:02:22"),
+    ("Jul 1st 2026 01:02:22", "2026-07-01 01:02:22"),
+    ("Jul 2nd 2026 01:02:22", "2026-07-02 01:02:22"),
+    ("Jul 3rd 2026 01:02:22", "2026-07-03 01:02:22"),
+    ("Jul 21st 2026 01:02:22", "2026-07-21 01:02:22"),
+    ("Jul 22nd 2026 01:02:22", "2026-07-22 01:02:22"),
+    ("Jul 23rd 2026 01:02:22", "2026-07-23 01:02:22"),
+    ("Jul 11th 2026 01:02:22", "2026-07-11 01:02:22"),
+    ("JUL 28TH 2026 01:02:22", "2026-07-28 01:02:22"),
+    # No suffix, full names, Sept., commas, 12-hour times, a fraction.
+    ("Jun 23 2026 00:11:00", "2026-06-23 00:11:00"),
+    ("July 28, 2026 1:02 PM", "2026-07-28 13:02:00"),
+    ("Sept. 21st, 2026, 23:59:59", "2026-09-21 23:59:59"),
+    ("September 1st 2026 12:00:00 a.m.", "2026-09-01 00:00:00"),
+    ("Jul 28th 2026 01:02:22.5", "2026-07-28 01:02:22.500000"),
+    ("Jul 28th 2026 01:02:22.123 PM", "2026-07-28 13:02:22.123000"),
+    # A trailing zone is applied; trailing text that names none is left alone.
+    ("Jul 28th 2026 01:02:22 +02:00", "2026-07-27 23:02:22"),
+    ("Jul 28th 2026 01:02:22 UTC", "2026-07-28 01:02:22"),
+    ("Jul 28th 2026 01:02:22 sshd[42]: Accepted", "2026-07-28 01:02:22"),
+])
+def test_mmm_dd_yyyy(value, want):
+    assert parse("mmm_dd_yyyy", value) == want
+
+
+@pytest.mark.parametrize("value", [
+    "Jul 28 01:02:22",              # syslog: no year, and that op's job
+    "Jul 28th 2026",                # date-only: same rule as ISO's
+    "Feb 29th 2026 00:00:00",       # not a leap year
+    "Jul 32nd 2026 01:02:22",
+    "Marathon 28th 2026 01:02:22",  # only starts like a month
+    "Monday 28th 2026 01:02:22",
+    "28th Jul 2026 01:02:22",       # day first is dd_mmm_yyyy's shape
+    "Jul 28th 2026 01:02:22 EST",   # a zone it cannot apply
+])
+def test_mmm_dd_yyyy_refuses(value):
+    assert parse("mmm_dd_yyyy", value) is None
+
+
+def test_mmm_dd_yyyy_utc_offset_shifts_naive_values():
+    got = parse("mmm_dd_yyyy", "Jul 28th 2026 01:02:22", {"utc_offset": "-05:00"})
+    assert got == "2026-07-28 06:02:22"
+
+
+def test_detect_offers_mmm_dd_yyyy_first_for_ordinal_dates():
+    got = timeparse.detect(["Jul 28th 2026 01:02:22", "Aug 1st 2026 10:00:00", "Aug 2nd 2026 9:15 PM"])
+    assert got[0]["op_id"] == "mmm_dd_yyyy"
+    assert got[0]["confidence"] == 1.0
+
+
 def test_compact_ymd():
     assert parse("compact_ymd", "20240105132201") == "2024-01-05 13:22:01"
     assert parse("compact_ymd", "20241305132201") is None  # month 13
@@ -330,6 +382,31 @@ def test_detect_hides_multi_input_ops_and_zero_confidence():
     assert all(r["op_id"] != "duration_delta" for r in got)
 
 
+def test_a_counter_is_not_offered_as_a_timestamp():
+    """EvtxECmd's RecordNumber — 1, 2, 3… — was suggested as "Mac absolute
+    (Cocoa) time" with every value parsing: Mac time's epoch is inside the
+    plausible window, so each small number is a moment just after
+    2001-01-01. Excel serial dates catch whole numbers one range up
+    (record ids, ephemeral ports). Detection offers neither now."""
+    record_number = [str(i) for i in range(1, 201)]
+    assert timeparse.detect(record_number) == []
+    for sample in ([str(100000 + i) for i in range(200)],          # EventRecordId
+                   ["4624", "4625", "4688", "1"],                  # EventId
+                   [str(49152 + 7 * i) for i in range(200)],       # ephemeral ports
+                   ["0.25", "12.5", "3600.75"]):                   # a duration in seconds
+        assert timeparse.detect(sample) == [], sample
+
+    # Only the guess changed. Picked by hand, both still read every value.
+    assert parse("mac_absolute", "1") == "2001-01-01 00:00:01"
+    assert parse("excel_serial", "49152") == "2034-07-27 00:00:00"
+
+    # And real values are still offered: Cocoa time from this decade,
+    # with or without a fraction, and an Excel serial with a time of day.
+    for sample in (["726153721", "726153781"], ["726153721.5"]):
+        assert "mac_absolute" in [r["op_id"] for r in timeparse.detect(sample)], sample
+    assert timeparse.detect(["45296.5576", "45297.25"])[0]["op_id"] == "excel_serial"
+
+
 # ----------------------------------------------------------- params
 
 def test_validate_params():
@@ -361,6 +438,8 @@ def test_every_output_matches_the_shapes_store_already_recognizes():
         parse("syslog_bsd", "Nov 14 22:13:20", {"base_year": 2023}, {}),
         parse("iso8601", "2024-01-05T13:22:01.123456+05:00"),
         parse("dd_mmm_yyyy", "05 Jan 2024 13:22:01"),
+        parse("mmm_dd_yyyy", "Jul 28th 2026 01:02:22"),
+        parse("mmm_dd_yyyy", "Jul 28th 2026 01:02:22.5 PM"),
         parse("mac_absolute", "700000000"),
         parse("excel_serial", "45296.5"),
         parse("apache_clf", "10/Oct/2000:13:55:36 -0700"),
@@ -414,10 +493,24 @@ def test_month_name_timestamps_normalize_natively():
     assert _day_bucket("23 Jun 2026 08:00:00") == "2026-06-23"
 
 
+def test_ordinal_days_normalize_natively():
+    """"Jul 28th 2026 01:02:22" — the month-name family with the day's
+    ordinal suffix, either order, any suffix, any case."""
+    assert _ts_normalize("Jul 28th 2026 01:02:22") == "2026-07-28 01:02:22"
+    assert _ts_normalize("July 1st, 2026 5:11 PM") == "2026-07-01 17:11:00"
+    assert _ts_normalize("Aug 2ND 2026") == "2026-08-02 00:00:00"
+    assert _ts_normalize("3rd September 2026 12:00 AM") == "2026-09-03 00:00:00"
+    assert _ts_normalize("Jul 28xx 2026") is None    # not a suffix
+    assert _day_bucket("Jul 28th 2026 01:02:22") == "2026-07-28"
+    assert _day_bucket("23rd Jun 2026") == "2026-06-23"
+
+
 def test_month_name_columns_type_as_datetime_at_ingest():
     from winnow.store import DATE_RE
 
     assert DATE_RE.match("JUN 23 2026 00:11:00")
+    assert DATE_RE.match("Jul 28th 2026 01:02:22")
+    assert DATE_RE.match("28th Jul 2026")
     assert DATE_RE.match("23 June, 2026")
     assert not DATE_RE.match("word salad 2026")
     assert not DATE_RE.match("mayhem 5 2026")  # 'may' must be the whole word
@@ -492,6 +585,7 @@ def test_iso_offsets_it_can_apply(value, want):
     ("iso8601", "2024-01-05T13:22:01+25:00"),
     ("iso8601", "2024-01-05T13:22:01+5:3"),
     ("dd_mmm_yyyy", "05 Jan 2024 13:22:01 PST"),
+    ("mmm_dd_yyyy", "Jan 5th 2024 1:22:01 PM Europe/Paris"),
     ("us_datetime", "1/5/2024 1:22:01 PM CEST"),
 ])
 def test_a_zone_it_cannot_apply_is_refused_not_dropped(op, value):
@@ -539,6 +633,8 @@ def test_dd_mmm_and_us_apply_a_trailing_offset(op, value, want):
     ("us_datetime", "1/1/0001 12:00:00 AM", {"utc_offset": "+01:00"}),
     ("us_datetime", "12/31/9999 23:59:59", {"utc_offset": "-01:00"}),
     ("dd_mmm_yyyy", "01 Jan 0001 00:00:00", {"utc_offset": "+14:00"}),
+    ("mmm_dd_yyyy", "Jan 1st 0001 00:00:00", {"utc_offset": "+14:00"}),
+    ("mmm_dd_yyyy", "Dec 31st 9999 23:59:59 -01:00", {}),
     # Digits that are not decimal digits, and decimal strings int() refuses.
     ("windows_filetime", "²", {}),
     ("windows_filetime", "¹²³", {}),

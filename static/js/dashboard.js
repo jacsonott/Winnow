@@ -10,7 +10,7 @@
 import { drawBars, drawHistogram, pickBar } from './charts.js';
 import { renderHead } from './columns.js';
 import { $, api, el, nameMap, post, toast } from './core.js';
-import { WIDGET_TEMPLATES, bucketRange, columnsForTable, recipeSql, tableOf, templateById, widgetFrom } from './dashwidgets.js';
+import { WIDGET_RENDERS, WIDGET_SOURCES, WIDGET_TEMPLATES, bucketRange, columnsForTable, recipeSql, tableOf, templateById, widgetFrom } from './dashwidgets.js';
 import { currentSpec, renderAdvancedChips, updateSearchHint } from './filters.js';
 import { openImportModal } from './importer.js';
 import { syncSearchExpansion } from './search.js';
@@ -19,7 +19,7 @@ import { openSource, renderPageTabs, renderSidebar, sourceLabel, syncTabSelectio
 import { showGridTab, showMainView, showSqlTab, syncTabChrome } from './sql.js';
 import { S } from './state.js';
 import { updateFiltersButton, updateTimeRangeButton } from './timeframe.js';
-import { dropdownMenu, modal, promptDialog, confirmDialog } from './ui.js';
+import { dropdownMenu, modal, oneAtATime, promptDialog, confirmDialog } from './ui.js';
 import { rebuildView } from './view.js';
 
 let widgets = [];   // the CURRENT board's widgets (the one with S.dashboardId)
@@ -394,7 +394,7 @@ export async function createDashboard() {
       + 'events over time (when it has a timestamp), and the top values of its low-cardinality columns. '
       + 'Every widget it makes opens the rows behind it when clicked, and can be edited or removed.'));
     const acts = el('div', 'row-actions');
-    const create = el('button', 'btn', 'Create');
+    const create = el('button', 'btn primary', 'Create');
     const cancel = el('button', 'btn ghost', 'Cancel');
     cancel.onclick = () => { $('modal').hidden = true; };
     create.onclick = async () => {
@@ -607,7 +607,7 @@ function pickTable(ids) {
       }
       b.append(sel);
       const acts = el('div', 'row-actions');
-      const ok = el('button', 'btn', 'Open');
+      const ok = el('button', 'btn primary', 'Open');
       ok.onclick = () => { $('modal').hidden = true; finish(Number(sel.value)); };
       const cancel = el('button', 'btn ghost', 'Cancel');
       cancel.onclick = () => { $('modal').hidden = true; finish(null); };
@@ -982,8 +982,8 @@ function render() {
     const e = el('div', 'dash-empty');
     e.append(el('p', null, 'No widgets yet. A dashboard is a grid of small summaries of the case.'));
     e.append(el('p', null, 'Click “＋ Add widget”, pick a template (row count, top values, events '
-      + 'over time…) and a table, and it writes the query for you — tweak it, preview it, choose how '
-      + 'it renders (number, chart, list, chips), and save.'));
+      + 'over time…) and a table, and it writes the query for you — tweak it, choose how it renders '
+      + '(number, chart, list, chips) and watch the preview answer as you go, then save.'));
     e.append(el('p', null, 'Built one you like? “Save as profile…” keeps this dashboard (plus the '
       + 'enabled plugins) to apply on the next case of the same type — the shipped KAPE triage '
       + 'profile is exactly that.'));
@@ -1064,12 +1064,13 @@ export function emptyReason(w, state) {
    layout before paintWidget runs, or its chart measures a hidden
    element; see the unhide below. */
 function noteEmpty(w, cardEl, data, err) {
-  // Cards on the BOARD only. The editor's Preview runs an unsaved draft
-  // through this same runWidget, into a `.dash-card.dash-preview` inside
-  // the modal — which wants its own error text, not a line in a strip it
-  // is not on. Tested by the class rather than by the parent node: the
-  // cached paint happens while the card is still being built, before
-  // render() has appended it to the grid.
+  // Cards on the BOARD only. The editor's preview card (a
+  // `.dash-card.dash-preview` inside the modal) paints its own line for
+  // an empty answer — it is not on the strip — and is never handed here;
+  // the guard keeps it that way for whoever is tempted next. Tested by
+  // the class rather than by the parent node: the cached paint happens
+  // while the card is still being built, before render() has appended it
+  // to the grid.
   if (!cardEl || cardEl.classList.contains('dash-preview')) return;
   const state = emptyStateOf(w, data, err);
   if (state) {
@@ -1234,15 +1235,16 @@ function card(w, i) {
 }
 
 /* Run one widget and paint it. `boardId` files the result in the case
-   file under this widget — omitted (the editor's Preview, which runs an
-   unsaved draft) it caches nothing, because a Preview that answered from
-   the cache would not be previewing anything. `quiet` keeps whatever is
-   already on the card while the query runs, instead of blanking a good
-   number to say "Loading…". */
+   file under this widget — omitted it caches nothing. The editor's live
+   preview does not come through here at all: it sends widgetRequest()
+   bare, because it runs an unsaved draft, and a preview that answered
+   from the cache (or filed a draft's answer in it) would not be
+   previewing anything. `quiet` keeps whatever is already on the card
+   while the query runs, instead of blanking a good number to say
+   "Loading…". */
 async function runWidget(w, body, opts = {}) {
   const gen = boardGen;
-  const req = { source: w.source, query: w.query || {} };
-  if (w.cells) req.cells = w.cells;   // a signals card: one request, one answer per cell
+  const req = widgetRequest(w);
   if (opts.boardId != null && w.id) { req.dashboard_id = opts.boardId; req.widget_id = w.id; }
   if (!opts.quiet) body.replaceChildren(el('div', 'note-status', 'Loading…'));
   const mine = () => gen === boardGen && S.dashboardId === opts.boardId;
@@ -1461,16 +1463,17 @@ function wireSignal(node, w, s) {
 
 /* The FROM options: this case's own tables (src_<id>), plus portable
    header-set placeholders that resolve on any case — so a widget built
-   here survives being saved into a profile and applied elsewhere. */
+   here survives being saved into a profile and applied elsewhere. `name`
+   is the table on its own, for a sentence; `label` is the picker's line. */
 function dashTableOptions() {
   const opts = [];
   for (const s of (S.sources || [])) {
     if (s.is_merge || s.error) continue;
-    opts.push({ value: `src_${s.id}`, label: (s.nickname || s.name) });
+    opts.push({ value: `src_${s.id}`, label: sourceLabel(s), name: sourceLabel(s) });
   }
   for (const [ph, lbl] of [['{{evtx}}', 'Event logs (EvtxECmd)'], ['{{mft}}', 'MFT (MFTECmd)'],
     ['{{registry}}', 'Registry (RECmd)'], ['{{amcache}}', 'Amcache'], ['{{prefetch}}', 'Prefetch']]) {
-    opts.push({ value: ph, label: `${lbl} — any case (portable)` });
+    opts.push({ value: ph, label: `${lbl} — any case (portable)`, name: lbl });
   }
   return opts;
 }
@@ -1481,48 +1484,139 @@ async function ensureHeaderSets() {
   catch { S.headerSets = { shorthands: {}, sets: [] }; }
 }
 
+/* What a widget sends to /api/dashboard/widget/preview: its question and
+   nothing about where to file the answer. runWidget adds the cache keys
+   for a card on the board; the editor's live preview sends exactly this,
+   because a draft is not the widget the cache holds an answer for. */
+function widgetRequest(w) {
+  const req = { source: w.source, query: w.query || {} };
+  if (w.cells) req.cells = w.cells;   // a signals card: one request, one answer per cell
+  return req;
+}
+
+/* How long the editor's preview waits after the last edit before it
+   asks. Long enough that typing a query is one request rather than one
+   per key; short enough to read as live. */
+const PREVIEW_DELAY_MS = 500;
+
 /* The widget editor, guided: pick what to show (a template), where from
    (a table), and the column or value it needs, and the SQL is written —
    and shown, under Advanced, for anyone who wants to change it. A widget
    built this way carries its recipe (`build`) so it reopens guided, and a
    drill so clicking it opens its rows. Hand-edited SQL is respected as
    is: the recipe and the drill are dropped rather than left describing a
-   query they no longer match. */
+   query they no longer match.
+
+   Laid out the way the merge and movement-event builders are: the
+   question on the left, how it looks on the right above a card that
+   answers the draft as it changes. There is no Preview button; the
+   notes above `shown` below say what "as it changes" has to mean when a
+   query is slow. */
 function openWidgetEditor(existing, prefill = null) {
   modal(existing ? 'Edit widget' : 'Add widget', (b) => {
-    const form = el('div', 'dash-form');
-    const mk = (label, node, into = form) => {
+    // Escape hides the modal without replacing its body, so a node still
+    // in the document is not enough: a timer that fires after the dialog
+    // closed must not send a query nobody will see.
+    const alive = () => b.isConnected && !$('modal').hidden;
+    const mk = (label, node, into) => {
       const field = el('div', 'dash-field');
-      field.append(el('label', null, label), node);
+      const cap = el('label', null, label);
+      if (node.id) cap.htmlFor = node.id;
+      field.append(cap, node);
       into.append(field);
       return field;
     };
-    const title = el('input'); title.className = 'confirm-input'; title.value = existing?.title || prefill?.title || '';
-    const source = el('select');
-    for (const o of ['sql', 'watchlist', 'tags', 'cells']) source.append(new Option(o, o));
-    source.value = existing?.source || 'sql';
-    const templ = el('select'); templ.className = 'dash-template';
+
+    // ---- the controls
+    const title = el('input', 'confirm-input dash-title-input');
+    title.id = 'dashEdTitle';
+    title.value = existing?.title || prefill?.title || '';
+    const source = el('select', 'dash-source');
+    source.id = 'dashEdSource';
+    for (const [v, label, tip] of WIDGET_SOURCES) {
+      const o = new Option(label, v);
+      o.title = tip;
+      source.append(o);
+    }
+    // A source this version has no name for (a newer profile's) is offered
+    // under its own value, so Save keeps it rather than storing the empty
+    // string a select with no matching option answers with.
+    const source0 = existing?.source || 'sql';
+    if (![...source.options].some((o) => o.value === source0)) source.append(new Option(source0, source0));
+    source.value = source0;
+    const templ = el('select', 'dash-template');
+    templ.id = 'dashEdTemplate';
     for (const t of WIDGET_TEMPLATES) templ.append(new Option(t.label, t.id));
-    const tableSel = el('select'); tableSel.className = 'dash-table';
-    for (const o of dashTableOptions()) tableSel.append(new Option(o.label, o.value));
-    const colSel = el('select'); colSel.className = 'dash-column';
-    const valueIn = el('input'); valueIn.className = 'confirm-input dash-value'; valueIn.placeholder = 'value';
-    const matchSel = el('select'); matchSel.className = 'dash-match';
+    const tableSel = el('select', 'dash-table');
+    tableSel.id = 'dashEdTable';
+    for (const o of dashTableOptions()) {
+      const opt = new Option(o.label, o.value);
+      opt.dataset.name = o.name;
+      tableSel.append(opt);
+    }
+    const colSel = el('select', 'dash-column');
+    colSel.id = 'dashEdColumn';
+    const valueIn = el('input', 'confirm-input dash-value');
+    valueIn.id = 'dashEdValue';
+    valueIn.placeholder = 'value';
+    const matchSel = el('select', 'dash-match');
+    matchSel.id = 'dashEdMatch';
     matchSel.append(new Option('equals', 'equals'), new Option('contains', 'contains'));
-    const bucketSel = el('select'); bucketSel.className = 'dash-bucket';
+    const bucketSel = el('select', 'dash-bucket');
+    bucketSel.id = 'dashEdBucket';
     bucketSel.append(new Option('per day', 'day'), new Option('per hour', 'hour'));
-    const renderSel = el('select');
-    for (const o of ['stat', 'kv', 'chips', 'list', 'bar', 'histogram', 'signals']) renderSel.append(new Option(o, o));
-    renderSel.value = existing?.render || prefill?.render || 'stat';
-    const span = el('select');
-    for (const o of [1, 2, 3, 4]) span.append(new Option(`${o} column${o === 1 ? '' : 's'}`, String(o)));
-    span.value = String(existing?.span || 1);
-    const sql = el('textarea'); sql.rows = 5; sql.className = 'dash-sql';
+    const sql = el('textarea', 'dash-sql');
+    sql.rows = 6;
+    sql.spellcheck = false;
+    sql.setAttribute('aria-label', 'The SQL');
     sql.value = existing?.query?.sql || prefill?.sql || '';
-    sql.placeholder = 'SELECT COUNT(DISTINCT RemoteHost) AS hosts FROM src_1';
-    const sub = el('input'); sub.className = 'confirm-input'; sub.value = existing?.sub || '';
-    const live = el('input'); live.type = 'checkbox'; live.className = 'dash-live-box';
+    const sub = el('input', 'confirm-input dash-sub-input');
+    sub.id = 'dashEdSub';
+    sub.placeholder = 'Shown under a Number or a Signals card';
+    sub.value = existing?.sub || '';
+    const live = el('input', 'dash-live-box');
+    live.type = 'checkbox';
     live.checked = !!existing?.live;
+
+    // Render as: a chip per kind, so the choices are all in sight and one
+    // click repaints the preview. The stored value is the kind; the chip
+    // is only what the analyst reads.
+    let renderKind = existing?.render || prefill?.render || 'stat';
+    const kinds = el('div', 'dash-kinds');
+    kinds.setAttribute('role', 'group');
+    kinds.setAttribute('aria-label', 'Render as');
+    const kindBtns = WIDGET_RENDERS.map(([v, label, tip]) => {
+      const btn = el('button', null, label);
+      btn.type = 'button';
+      btn.dataset.render = v;
+      btn.title = tip;
+      btn.onclick = () => { setRender(v); changed(); };
+      kinds.append(btn);
+      return btn;
+    });
+    const setRender = (v) => {
+      renderKind = v;
+      for (const k of kindBtns) k.setAttribute('aria-pressed', String(k.dataset.render === v));
+    };
+    setRender(renderKind);
+    let spanN = Number(existing?.span) || 1;
+    const widthSeg = el('div', 'dash-seg dash-width');
+    widthSeg.setAttribute('role', 'group');
+    widthSeg.setAttribute('aria-label', 'Width');
+    const spanBtns = [1, 2, 3, 4].map((n) => {
+      const btn = el('button', null, `${n} column${n === 1 ? '' : 's'}`);
+      btn.type = 'button';
+      btn.dataset.span = String(n);
+      btn.title = `${n} of the board's 4 columns`;
+      btn.onclick = () => { setSpan(n); changed(); };
+      widthSeg.append(btn);
+      return btn;
+    });
+    const setSpan = (n) => {
+      spanN = n;
+      for (const s of spanBtns) s.setAttribute('aria-pressed', String(Number(s.dataset.span) === n));
+    };
+    setSpan(spanN);
 
     // The recipe this widget was built from, if it was.
     const build0 = existing?.build || prefill?.build || null;
@@ -1535,6 +1629,7 @@ function openWidgetEditor(existing, prefill = null) {
     let autoTitle = build0 ? templateById(build0.template).title(build0) : '';
     const picks = () => ({ template: templ.value, table: tableSel.value, column: colSel.value,
       value: valueIn.value.trim(), match: matchSel.value, bucket: bucketSel.value });
+    const tableName = () => (tableSel.selectedOptions[0] && tableSel.selectedOptions[0].dataset.name) || 'this table';
     const fillColumns = (want) => {
       const t = templateById(templ.value);
       const cols = columnsForTable(tableSel.value);
@@ -1552,7 +1647,16 @@ function openWidgetEditor(existing, prefill = null) {
       fValue.hidden = !needs.has('value');
       fMatch.hidden = !needs.has('match');
       fBucket.hidden = !needs.has('bucket');
+      detail.hidden = !needs.size;
       advanced.open = t.id === 'blank' || advanced.dataset.custom === '1';
+    };
+    // The example in an empty SQL box names the table the picker is on,
+    // by its src_N (what the SQL has to say) AND its label (what the
+    // analyst knows it as) — "src_1" alone named a table that might not
+    // even be in this case.
+    const syncPlaceholder = () => {
+      sql.placeholder = `SELECT COUNT(*) AS n\nFROM ${tableSel.value || 'src_1'}`
+        + (tableSel.value ? `   -- ${tableName()}` : '');
     };
     // Rewrite the SQL from the picks — never over a hand edit.
     const regenerate = () => {
@@ -1564,25 +1668,27 @@ function openWidgetEditor(existing, prefill = null) {
       if (s == null) { sql.value = ''; return; }
       sql.value = s;
       advanced.dataset.custom = '';
-      renderSel.value = t.render;
-      if (t.span) span.value = String(t.span);
+      setRender(t.render);
+      if (t.span) setSpan(t.span);
       const nt = t.title(picks());
       if (!title.value.trim() || title.value === autoTitle) title.value = nt;
       autoTitle = nt;
     };
-    templ.onchange = () => { fillColumns(colSel.value); syncFields(); regenerate(); };
-    tableSel.onchange = () => { fillColumns(colSel.value); regenerate(); };
-    colSel.onchange = regenerate;
-    valueIn.oninput = regenerate;
-    matchSel.onchange = regenerate;
-    bucketSel.onchange = regenerate;
-    sql.oninput = () => { advanced.dataset.custom = '1'; };
+    templ.onchange = () => { fillColumns(colSel.value); syncFields(); regenerate(); changed(); };
+    tableSel.onchange = () => { fillColumns(colSel.value); syncPlaceholder(); regenerate(); changed(); };
+    colSel.onchange = () => { regenerate(); changed(); };
+    valueIn.oninput = () => { regenerate(); changed(); };
+    matchSel.onchange = () => { regenerate(); changed(); };
+    bucketSel.onchange = () => { regenerate(); changed(); };
+    sql.oninput = () => { advanced.dataset.custom = '1'; changed(); };
+    title.oninput = () => changed();
+    sub.oninput = () => changed();
 
-    // What Preview and Save both build — so they can't disagree.
+    // What the preview and Save both build — so they can't disagree.
     const draft = () => {
       const w = {
-        title: title.value.trim() || '(untitled)', source: source.value, render: renderSel.value,
-        span: Number(span.value), sub: sub.value.trim() || undefined,
+        title: title.value.trim() || '(untitled)', source: source.value, render: renderKind,
+        span: spanN, sub: sub.value.trim() || undefined,
         query: source.value === 'sql' ? { sql: sql.value.trim() } : {},
       };
       // A signals card's questions live in its cells, which this editor
@@ -1602,13 +1708,17 @@ function openWidgetEditor(existing, prefill = null) {
       return w;
     };
 
-    b.append(el('p', 'fb-help', 'Pick what to show and which table it comes from; the query is written for you '
-      + 'and sits under Advanced if you want to change it. A widget built this way opens the rows behind it when clicked.'));
-    b.append(form);
-    const top = el('div', 'dash-form-row');
-    mk('Title', title, top); mk('Data from', source, top);
-    form.append(top);
-    const sqlWrap = el('div');
+    // ---- the layout
+    const root = el('div', 'dash-ed');
+    root.append(el('p', 'fb-help dash-ed-intro', 'Pick what to show and where it comes from; '
+      + 'the query is written for you, and the preview answers as you go.'));
+    const panes = el('div', 'dash-ed-panes');
+    // Left: the question. `.dash-form` is the field styling the New
+    // dashboard dialog shares.
+    const form = el('div', 'dash-ed-pane dash-form');
+    form.append(el('div', 'dash-ed-head', 'The question'));
+    mk('Data from', source, form);
+    const sqlWrap = el('div', 'dash-ed-group');
     const pick = el('div', 'dash-form-row');
     mk('What to show', templ, pick); mk('Table', tableSel, pick);
     sqlWrap.append(pick);
@@ -1642,9 +1752,14 @@ function openWidgetEditor(existing, prefill = null) {
         + 'This editor writes one question per widget, so a new one is built by saving '
         + 'a board that already has one — or by hand in the profile JSON.'));
     form.append(cellsNote);
-    const look = el('div', 'dash-form-row dash-form-row-3');
-    mk('Render as', renderSel, look); mk('Sub-label (optional, for stat)', sub, look); mk('Width', span, look);
-    form.append(look);
+    mk('Title', title, form);
+
+    // Right: how it looks, and what it answers.
+    const look = el('div', 'dash-ed-pane dash-look');
+    look.append(el('div', 'dash-ed-head', 'How it looks'));
+    mk('Render as', kinds, look);
+    mk('Sub-label (optional)', sub, look);
+    mk('Width', widthSeg, look);
     // Run-every-time, and what it costs. The number beside it is this
     // widget's own last runtime, because "is this one expensive?" is the
     // only question that decides the checkbox, and nothing else in the app
@@ -1658,51 +1773,149 @@ function openWidgetEditor(existing, prefill = null) {
       + 'moment the board is opened — a watchlist or tag count, say.'
       + (hit ? ` This one took ${runtimeLabel(hit.elapsed_ms)} last run.` : '')));
     liveRow.append(live, liveText);
-    // Outside .dash-form: its `label` rule is the uppercase field caption,
-    // and this label is a checkbox row, not a caption.
-    b.append(liveRow);
+    look.append(liveRow);
     const liveNow = widgets.filter((w) => w.live).length;
     const st = boardStamp();
     const cost = el('div', 'dash-cost');
     cost.append('This dashboard: ', el('b', null, `${widgets.length} widget${widgets.length === 1 ? '' : 's'}`),
       ' · ', el('b', null, String(liveNow)), ' run every time',
       st ? ` · oldest result ${clockOf(st.ran_at)} (${longAge(st.ran_at)})` : ' · nothing cached yet');
-    b.append(cost);
+    look.append(cost);
+    // The preview: one card, drawn by the board's own painter, so what it
+    // shows is what Save puts on the board.
+    const pvHead = el('div', 'dash-ed-head dash-preview-head');
+    const pvMeta = el('span', 'dash-preview-meta');
+    pvHead.append(el('span', null, 'Preview'), pvMeta);
+    const pvCard = el('div', 'dash-card dash-preview');
+    const pvCardHead = el('div', 'dash-head');
+    const pvTitle = el('h4');
+    pvCardHead.append(pvTitle);
+    const pvBody = el('div', 'dash-widget-body');
+    pvCard.append(pvCardHead, pvBody);
+    look.append(pvHead, pvCard);
+    panes.append(form, look);
+    root.append(panes);
+
     const syncSql = () => {
       sqlWrap.style.display = source.value === 'sql' ? '' : 'none';
       cellsNote.style.display = source.value === 'cells' ? '' : 'none';
     };
-    source.onchange = syncSql; syncSql();
+    source.onchange = () => { syncSql(); changed(); };
+    syncSql();
+
+    /* ---- the live preview.
+
+       It runs the same draft() Save stores, on its own, PREVIEW_DELAY_MS
+       after the last edit. Three things it has to get right:
+
+       - An answer is filed under the QUESTION it answers (questionOf —
+         source, query, cells), not under "the latest request". One that
+         lands after the draft has moved on to another question is
+         dropped rather than painted over it: a slow query typed half a
+         minute ago must not replace the answer to the one on screen. The
+         preview route has no cancel (a draft's query runs to the end on
+         the server), so dropping is the whole defence; nothing waits on
+         it, so typing never does.
+       - An edit that changes only how the card LOOKS (render, title,
+         sub-label, width) repaints the answer already here at once,
+         without asking again — the question has not changed.
+       - It never names a board or a widget, so the server files nothing
+         and the card on the board keeps its cached number: a draft is
+         not that widget until it is saved (docs/notes/ui.md, the board
+         cache entry). */
+    let shown = null;      // { key, why } | { key, data, err, ms } — what the card is showing
+    let asking = null;     // the question in flight, if one is
+    let pvTimer = 0;
+    // Why this draft cannot be asked yet, in one line — '' when it can.
+    const whyNot = (w) => {
+      if (w.source === 'cells') {
+        return (w.cells || []).length ? '' : 'No signals on this card yet — they come from the board or profile a signals card is built in.';
+      }
+      if (w.source !== 'sql' || w.query.sql) return '';
+      const t = templateById(templ.value);
+      if (t.id === 'blank') return 'Write a query under Advanced — the SQL, and its answer shows here.';
+      if ((t.needs || []).includes('column') && !colSel.value) {
+        return !S.headerSets && !/^src_\d+$/.test(tableSel.value)
+          ? `Reading the columns of ${tableName()}…`
+          : `${tableName()} has no column to pick for this — choose another table.`;
+      }
+      return 'No query yet — pick what to show, or write one under Advanced — the SQL.';
+    };
+    const keyOf = (w) => { const why = whyNot(w); return why ? `?${why}` : questionOf(w); };
+    const paintPreview = (w) => {
+      pvCard.classList.remove('busy');
+      pvTitle.textContent = w.title;
+      pvBody.style.height = '';
+      const line = (text, cls = 'dash-empty-note') => pvBody.replaceChildren(el('div', cls, text));
+      if (!shown) { pvMeta.textContent = ''; pvBody.replaceChildren(); return; }
+      if (shown.why) { pvMeta.textContent = ''; line(shown.why); return; }
+      // What the board would make of this answer: a card that resolves to
+      // nothing folds into the empty-cards line there, so say that here
+      // rather than drawing an empty box the board will never show.
+      const empty = emptyStateOf(w, shown.data, shown.err);
+      const folds = empty ? `${emptyReason(w, empty)} — on the board this card folds into the empty-cards line.` : '';
+      if (shown.err) {
+        pvMeta.textContent = '';
+        if (folds) line(folds);
+        else line(shown.err.message, 'dash-empty-note bad');
+        return;
+      }
+      pvMeta.textContent = `ran in ${runtimeLabel(shown.ms)}`;
+      if (folds) { line(folds); return; }
+      paintWidget(w, pvBody, shown.data);
+    };
+    const runPreview = async () => {
+      clearTimeout(pvTimer);
+      if (!alive()) return;
+      const w = draft();
+      const key = keyOf(w);
+      if (shown && shown.key === key) { paintPreview(w); return; }
+      const why = whyNot(w);
+      if (why) { shown = { key, why }; paintPreview(w); return; }
+      if (asking === key) return;   // already out; it paints when it lands
+      asking = key;
+      pvCard.classList.add('busy');
+      pvMeta.textContent = 'running…';
+      let data = null;
+      let err = null;
+      try { data = await post('/api/dashboard/widget/preview', widgetRequest(w)); }
+      catch (e) { err = e; }
+      if (asking === key) asking = null;
+      // The dialog closed, or the draft asks something else by now: this
+      // answer is to a question nobody is looking at.
+      if (!alive() || keyOf(draft()) !== key) return;
+      shown = { key, data, err, ms: data ? data.elapsed_ms : null };
+      paintPreview(draft());
+    };
+    // Every edit lands here. One that leaves the question alone repaints
+    // now; one that changes it waits for the typing to stop.
+    const changed = () => {
+      clearTimeout(pvTimer);
+      if (!alive()) return;
+      const w = draft();
+      if (shown && shown.key === keyOf(w)) { paintPreview(w); return; }
+      pvTimer = setTimeout(runPreview, PREVIEW_DELAY_MS);
+    };
 
     fillColumns(build0 ? build0.column : null);
     if (!build0 && sql.value.trim()) advanced.dataset.custom = '1';
     syncFields();
+    syncPlaceholder();
     // A portable {{…}} table's columns come from the header sets, fetched once.
     ensureHeaderSets().then(() => {
       if (colSel.options.length) return;
       fillColumns(build0 ? build0.column : null);
       if (!build0) regenerate();
+      changed();
     });
 
-    // Live preview — see the widget's output before committing it.
-    const previewWrap = el('div', 'dash-preview-wrap');
-    previewWrap.append(el('label', null, 'Preview'));
-    const previewCard = el('div', 'dash-card dash-preview');
-    const previewBody = el('div', 'dash-widget-body');
-    previewCard.append(previewBody);
-    previewWrap.append(previewCard);
-    b.append(previewWrap);
-
+    // ---- actions
     const acts = el('div', 'row-actions');
-    const previewBtn = el('button', 'btn ghost', 'Preview');
-    previewBtn.onclick = () => {
-      if (source.value === 'sql' && !sql.value.trim()) { toast('SQL widget needs a query'); return; }
-      runWidget(draft(), previewBody);
-    };
-    const save = el('button', 'btn', 'Save widget');
-    save.onclick = async () => {
+    const save = el('button', 'btn primary', 'Save widget');
+    save.onclick = oneAtATime(save, async () => {
       if (!title.value.trim()) { toast('Give the widget a title'); return; }
       if (source.value === 'sql' && !sql.value.trim()) { toast('SQL widget needs a query'); return; }
+      clearTimeout(pvTimer);
       const w = draft();
       w.title = title.value.trim();   // draft() defaulted to "(untitled)"; keep the real one on save
       if (existing) {
@@ -1720,8 +1933,8 @@ function openWidgetEditor(existing, prefill = null) {
       await persist();
       document.getElementById('modal').hidden = true;
       render();
-    };
-    acts.append(previewBtn, save);
+    });
+    acts.append(save);
     if (existing && existing.id) {
       // The per-card ↻. It lives here rather than as a third icon on the
       // card head, which already carries ⠿, ⤴ and ✎ — the editor is
@@ -1732,6 +1945,7 @@ function openWidgetEditor(existing, prefill = null) {
       now.onclick = async () => {
         now.disabled = true;
         try {
+          const asked = questionOf(existing);
           const r = await post(`/api/dashboards/${S.dashboardId}/refresh`, { widget_id: existing.id });
           const res = (r.results || {})[existing.id] || {};
           if (res.error) { toast(res.error, 6000); return; }
@@ -1743,7 +1957,13 @@ function openWidgetEditor(existing, prefill = null) {
             cache[existing.id] = { payload: res.payload, ran_at: res.ran_at,
               elapsed_ms: res.elapsed_ms, stale: false };
           }
-          paintWidget(existing, previewBody, res.payload);
+          // This ran the SAVED widget. The preview shows it only while
+          // the draft still asks that same question; a draft with unsaved
+          // edits keeps its own answer rather than the saved one's.
+          if (alive() && keyOf(draft()) === asked) {
+            shown = { key: asked, data: res.payload, err: null, ms: res.elapsed_ms };
+            paintPreview(draft());
+          }
           const cards = [...$('dashGrid').querySelectorAll('.dash-card:not(.dash-add)')];
           const onBoard = cards[widgets.indexOf(existing)];
           if (onBoard) {
@@ -1775,8 +1995,12 @@ function openWidgetEditor(existing, prefill = null) {
       };
       acts.append(rm);
     }
-    b.append(acts);
-  }, { wide: true });
+    root.append(acts);
+    b.append(root);
+    // The first answer, as soon as the dialog is on screen — after
+    // modal() has unhidden it, which is why this is not called inline.
+    setTimeout(runPreview, 0);
+  }, { wide: 'x' });
 }
 
 async function saveAsProfile() {

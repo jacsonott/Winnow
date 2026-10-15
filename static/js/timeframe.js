@@ -15,12 +15,23 @@ import { saveAppearance } from './settings.js';
 import { clearAllFilters, closeTab, editSourceNickname, openSource, sourceLabel, wireDragReorder } from './sources.js';
 import { normalizeTree, S } from './state.js';
 import { openTablesManager } from './tables.js';
-import { clearRowCaches, loadTags } from './tags.js';
+import { clearRowCaches, loadTags, tagEditRow } from './tags.js';
 import { baseColumns, columnMeta, parseTimestamp } from './tsformat.js';
-import { datePickerButton, markModalAction, confirmDialog, modal, promptDialog } from './ui.js';
+import { datePickerButton, dropdownMenu, markModalAction, confirmDialog, modal, oneAtATime, promptDialog } from './ui.js';
 import { rebuildView } from './view.js';
 
 /* ------------------------------------------------------ jump to timestamp */
+
+/* A timestamp box with its label above and the 📅 picker beside it — the
+   builders' field shape (.dlg-field), shared by Jump and Timeframe so the
+   two dialogs' boxes look and line up the same. */
+function timestampField(label, input) {
+  const field = el('div', 'dlg-field');
+  const row = el('div', 'dlg-input');
+  row.append(input, datePickerButton(input));
+  field.append(el('label', null, label), row);
+  return field;
+}
 
 /* Scroll to the row whose timestamp is closest to a given moment. The
    target is saved in S.jumpTs and deliberately survives switching tables —
@@ -36,10 +47,9 @@ export function openJumpTsModal() {
       'Scrolls to the row whose timestamp is closest to this moment. The value is remembered '
       + `across tables — press "${jumpKey}" in any table to jump straight to it again.`));
 
-    b.append(el('label', null, 'Column'));
+    const colField = el('div', 'dlg-field');
+    colField.append(el('label', null, 'Column'));
     const colSel = el('select');
-    colSel.style.cssText = 'display:block;width:100%;background:var(--ink);color:var(--text);'
-      + 'border:1px solid var(--line-2);padding:6px 8px;font:inherit;margin-bottom:10px';
     const allOpt = document.createElement('option');
     allOpt.value = '';
     allOpt.textContent = 'Nearest across all datetime columns';
@@ -51,18 +61,15 @@ export function openJumpTsModal() {
       colSel.append(opt);
     }
     colSel.value = dtCols.includes(S.jumpTs.column) ? S.jumpTs.column : '';
-    b.append(colSel);
+    colField.append(colSel);
+    b.append(colField);
     if (!dtCols.length) b.append(el('p', 'fb-help', 'This table has no datetime columns — the jump will have nothing to measure against here.'));
 
-    const row = el('div', 'row-actions');
-    const input = el('input');
+    const input = el('input', 'confirm-input mono');
     input.type = 'text';
     input.placeholder = 'YYYY-MM-DD HH:MM:SS';
-    input.style.cssText = 'flex:1;background:var(--ink);color:var(--text);border:1px solid var(--line-2);'
-      + 'padding:6px 8px;font:inherit;font-family:var(--mono)';
     input.value = S.jumpTs.value || '';
-    row.append(el('span', null, 'Moment'), input, datePickerButton(input));
-    b.append(row);
+    b.append(timestampField('Moment', input));
     b.append(el('p', 'fb-help', '24-hour time — the date alone, or date plus HH:MM, also work.'));
 
     const go = () => {
@@ -75,7 +82,7 @@ export function openJumpTsModal() {
     };
     input.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); go(); } };
     const actions = el('div', 'row-actions');
-    const jumpBtn = el('button', 'btn', 'Jump');
+    const jumpBtn = el('button', 'btn primary', 'Jump');
     jumpBtn.onclick = go;
     const cancel = el('button', 'btn ghost', 'Cancel');
     cancel.onclick = () => { $('modal').hidden = true; };
@@ -245,29 +252,30 @@ export function toggleTimeRange() {
 export function openTimeRangeModal() {
   markModalAction('openTimeRange');
   modal('Timeframe filter', (b) => {
+    // No Enabled box. Apply always turns the filter on, and the two ways
+    // off are Clear (forget the range) and the toggle key (keep it): with
+    // a box as well, a range typed in with the box left unticked was
+    // saved but not applied, and Apply looked as if it had done nothing.
     const toggleKey = S.keymap.toggleTimeRange[0] || '(unbound)';
-    const openKey = S.keymap.openTimeRange[0] || '(unbound)';
+    // One line, and it follows the across-tables switch below: with it
+    // off the range is per table, and the line must not say otherwise.
     const intro = el('p');
     const paintIntro = () => {
       intro.textContent = (timeframeAcrossTables()
-        ? 'Stays applied across filter/preset changes and table switches, unlike the regular filters — '
-        : 'Stays applied across filter/preset changes, unlike the regular filters, and each table keeps its own — ')
-        + `toggle it on/off quickly with "${toggleKey}", or jump straight back to this dialog with "${openKey}".`;
+        ? 'Survives filters and table switches'
+        : 'Survives filters; each table keeps its own')
+        + ` — "${toggleKey}" turns it off without clearing it.`;
     };
     paintIntro();
     b.append(intro);
-
-    const enabledLabel = el('label', 'tf-enabled');
-    const enabledCb = el('input');
-    enabledCb.type = 'checkbox';
-    enabledCb.checked = S.timeRange.enabled;
-    enabledLabel.append(enabledCb, document.createTextNode(' Enabled'));
-    b.append(enabledLabel);
+    if (!S.timeRange.enabled && (S.timeRange.start || S.timeRange.end)) {
+      b.append(el('p', 'fb-help tf-off', 'Off right now — Apply turns it back on.'));
+    }
 
     // A preference rather than part of the range, so it saves as it is
     // clicked — Cancel below discards the range edits, not this. The same
     // switch is in Settings → Filter & search syntax.
-    const acrossLabel = el('label', 'tf-enabled');
+    const acrossLabel = el('label', 'tf-check');
     const acrossCb = el('input');
     acrossCb.type = 'checkbox';
     acrossCb.id = 'tfAcrossTables';
@@ -278,10 +286,9 @@ export function openTimeRangeModal() {
     acrossLabel.append(acrossCb, document.createTextNode(' Keep applied when switching tables'));
     b.append(acrossLabel);
 
-    b.append(el('label', null, 'Column'));
+    const colField = el('div', 'dlg-field');
+    colField.append(el('label', null, 'Column'));
     const colSel = el('select');
-    colSel.style.cssText = 'display:block;width:100%;background:var(--ink);color:var(--text);'
-      + 'border:1px solid var(--line-2);padding:6px 8px;font:inherit;margin-bottom:10px';
     const allOpt = document.createElement('option');
     allOpt.value = '';
     allOpt.textContent = 'All datetime columns (catches a match on any of them)';
@@ -294,7 +301,8 @@ export function openTimeRangeModal() {
       colSel.append(opt);
     }
     colSel.value = cols.includes(S.timeRange.column) ? S.timeRange.column : '';
-    b.append(colSel);
+    colField.append(colSel);
+    b.append(colField);
     if (!cols.length) b.append(el('p', 'fb-help', "This table has no datetime columns yet, so the range below doesn't narrow it — the timeframe hides none of its rows, and applies on the tables that have one."));
 
     // Plain text, not <input type="datetime-local"> — that widget's native
@@ -305,26 +313,19 @@ export function openTimeRangeModal() {
     // separator is TS_ISO_RE's own shape (it accepts 'T' too, for values
     // coming from elsewhere, but the field asks for the one the rest of the
     // app displays: formatTimestamp's 'iso' option, the timeline, exports).
-    const inputStyle = 'flex:1;background:var(--ink);color:var(--text);border:1px solid var(--line-2);'
-      + 'padding:6px 8px;font:inherit;font-family:var(--mono)';
-
-    const startRow = el('div', 'row-actions');
-    const startInput = el('input');
+    const startInput = el('input', 'confirm-input mono');
     startInput.type = 'text';
     startInput.placeholder = 'YYYY-MM-DD HH:MM:SS';
-    startInput.style.cssText = inputStyle;
     startInput.value = S.timeRange.start || '';
-    startRow.append(el('span', null, 'Start'), startInput, datePickerButton(startInput));
-    b.append(startRow);
-
-    const endRow = el('div', 'row-actions');
-    const endInput = el('input');
+    const endInput = el('input', 'confirm-input mono');
     endInput.type = 'text';
     endInput.placeholder = 'YYYY-MM-DD HH:MM:SS';
-    endInput.style.cssText = inputStyle;
     endInput.value = S.timeRange.end || '';
-    endRow.append(el('span', null, 'End'), endInput, datePickerButton(endInput));
-    b.append(endRow);
+    // Side by side, so the two boxes line up (a label beside each put them
+    // at different x positions, "Start" and "End" being different widths).
+    const range = el('div', 'dlg-pair');
+    range.append(timestampField('Start', startInput), timestampField('End', endInput));
+    b.append(range);
     b.append(el('p', 'fb-help', '24-hour time, e.g. 2024-01-05 13:22:01 — the date alone, or date plus HH:MM, also work.'));
 
     // Free-text, so it's validated the same way a value has to be
@@ -342,8 +343,9 @@ export function openTimeRangeModal() {
     // Fill the range from what's already been triaged: earliest/latest
     // timestamp among tagged rows — any tag, or just the ones toggled on.
     if (S.sourceId && S.tags.length) {
-      b.append(el('label', null, 'From tagged rows'));
-      const tagRow = el('div', 'row-actions tr-tag-row');
+      const tagField = el('div', 'dlg-field');
+      tagField.append(el('label', null, 'From tagged rows'));
+      const tagRow = el('div', 'dlg-chips tr-tag-row');
       const selectedTags = new Set();
       for (const t of S.tags) {
         const chip = el('button', 'tag-chip');
@@ -369,23 +371,23 @@ export function openTimeRangeModal() {
           if (!res.start && !res.end) { toast('No tagged rows with a usable timestamp'); return; }
           startInput.value = res.start || '';
           endInput.value = res.end || '';
-          enabledCb.checked = true;
           toast('Range set from tagged rows — Apply to use it');
         } catch (e) {
           toast('Could not read tagged range: ' + e.message, 4000);
         }
       };
       tagRow.append(fillBtn);
-      b.append(tagRow);
+      tagField.append(tagRow);
+      b.append(tagField);
     }
 
     const actions = el('div', 'row-actions');
-    const apply = el('button', 'btn', 'Apply');
+    const apply = el('button', 'btn primary', 'Apply');
     apply.onclick = () => {
       if (!startInput.value.trim() && !endInput.value.trim()) { toast('Set a start and/or end'); return; }
       if (!validateTimeInput(startInput, 'Start') || !validateTimeInput(endInput, 'End')) return;
       S.timeRange = {
-        enabled: enabledCb.checked,
+        enabled: true,
         column: colSel.value || null,
         start: startInput.value.trim(),
         end: endInput.value.trim(),
@@ -462,6 +464,11 @@ export function openSavedFiltersModal({ returnTo = null } = {}) {
       if (back) { const row = el('div', 'row-actions'); row.append(back); b.append(row); }
       return;
     }
+    // One line on what the list is for; the rest (Edit's round trip
+    // through the builder, cycling past the ends) is on the wiki.
+    b.append(el('p', 'fb-help',
+      `Click a name to apply it. Drag to set the ${S.keymap.cyclePrevFilter[0] || '['} / `
+      + `${S.keymap.cycleNextFilter[0] || ']'} cycle order.`));
     const search = el('input');
     search.type = 'search';
     search.placeholder = 'Search by name, nickname, or column…';
@@ -481,77 +488,133 @@ export function openSavedFiltersModal({ returnTo = null } = {}) {
       return cols.size === curCols.size && [...cols].every((c) => curCols.has(c));
     };
 
-    function filterRow(f, matches, colText) {
-      const row = el('div', 'sf-row');
-      const applyBtn = el('button', 'btn' + (matches ? '' : ' ghost') + ' sf-apply', f.name);
-      applyBtn.setAttribute('aria-pressed', String(!!(active && active.id === f.id)));
-      applyBtn.title = matches
-        ? `Apply "${f.name}"`
-        : `Built for different columns (${colText}) — click to apply anyway`;
-      applyBtn.onclick = async () => {
-        if (!matches && !(await confirmDialog(`"${f.name}" was built for a different column set (${colText}). Apply anyway?`))) return;
-        $('modal').hidden = true;
-        applyPreset(f);
-      };
-      // Editing routes through the real grid: apply the filter, then open
-      // the builder pre-loaded with its payload, so the match count behind
-      // the modal is live feedback on the change being made. Needs a table
-      // open to apply against — without one there's nothing to preview.
-      const editBtn = el('button', 'btn ghost sf-mini', 'Edit');
-      editBtn.title = S.sourceId
-        ? `Apply "${f.name}" to the open table and edit its conditions`
-        : 'Open a table first — editing applies the filter so you can see what it matches';
-      editBtn.disabled = !S.sourceId;
-      editBtn.onclick = async () => {
-        if (!matches && !(await confirmDialog(
-          `"${f.name}" was built for a different column set (${colText}). Edit it against the open table anyway? `
-          + `It stays saved for its original columns.`))) return;
-        $('modal').hidden = true;
-        applyPreset(f);
-        openFilterBuilder(f);
-      };
-      const renBtn = el('button', 'btn ghost sf-mini', 'Rename');
-      renBtn.onclick = async () => {
-        const name = await promptDialog('New name:', f.name);
-        if (!name || !name.trim()) return;
+    // A name is text that applies the filter on click (Enter or Space
+    // from the keyboard); everything else about the filter is in its ⋯.
+    async function applyFilter(f, matches, colText) {
+      if (!matches && !(await confirmDialog(`"${f.name}" was built for a different column set (${colText}). Apply anyway?`))) return;
+      $('modal').hidden = true;
+      applyPreset(f);
+    }
+
+    // Editing routes through the real grid: apply the filter, then open
+    // the builder pre-loaded with its payload, so the match count behind
+    // the modal is live feedback on the change being made. Needs a table
+    // open to apply against — without one there's nothing to preview.
+    async function editFilter(f, matches, colText) {
+      if (!matches && !(await confirmDialog(
+        `"${f.name}" was built for a different column set (${colText}). Edit it against the open table anyway? `
+        + `It stays saved for its original columns.`))) return;
+      $('modal').hidden = true;
+      applyPreset(f);
+      openFilterBuilder(f);
+    }
+
+    async function renameFilter(f) {
+      const name = await promptDialog('New name:', f.name);
+      if (!name || !name.trim()) return;
+      try {
         await api(`/api/saved_filters/${f.id}`, {
           method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name.trim() }),
         });
-        f.name = name.trim();
-        render();
-        updateFiltersButton();
+      } catch (e) { toast(`Could not rename "${f.name}": ${e.message}`, 6000); return; }
+      f.name = name.trim();
+      render();
+      focusMore(f.id);
+      updateFiltersButton();
+    }
+
+    async function moveFilter(f, dir) {
+      try { await moveSavedFilter(f, dir); } catch (e) { toast(`Could not move "${f.name}": ${e.message}`, 6000); return; }
+      render();
+      // Back on the same filter's ⋯, so a second Move up is Enter and
+      // an arrow away — reordering without a mouse is a row of keys.
+      focusMore(f.id);
+    }
+
+    async function deleteFilter(f) {
+      if (!(await confirmDialog(`Delete saved filter "${f.name}"?`, { danger: true, okLabel: 'Delete' }))) return;
+      try { await api(`/api/saved_filters/${f.id}`, { method: 'DELETE' }); }
+      catch (e) { toast(`Could not delete "${f.name}": ${e.message}`, 6000); return; }
+      S.savedFilters = S.savedFilters.filter((x) => x.id !== f.id);
+      render();
+      updateFiltersButton();
+    }
+
+    function focusMore(id) {
+      const btn = list.querySelector(`.sf-row[data-id="${id}"] .sf-more`);
+      if (btn) btn.focus();
+    }
+
+    // Built from live state each time it opens: the move entries read the
+    // filter's place in its header set as it is now, not as it was drawn.
+    function rowMenu(f, matches, colText) {
+      const ids = sameGroupFilterIds(f.col_names);
+      const at = ids.indexOf(f.id);
+      return [
+        {
+          label: 'Edit…',
+          disabled: !S.sourceId,
+          desc: S.sourceId ? null : 'Open a table first',
+          title: S.sourceId
+            ? `Apply "${f.name}" to the open table and edit its conditions`
+            : 'Editing applies the filter so you can see what it matches, which needs a table open',
+          onclick: () => editFilter(f, matches, colText),
+        },
+        { label: 'Rename…', onclick: () => renameFilter(f) },
+        '-',
+        {
+          label: 'Move up', disabled: at <= 0,
+          title: 'Earlier in the cycle order for this header set',
+          onclick: () => moveFilter(f, -1),
+        },
+        {
+          label: 'Move down', disabled: at < 0 || at >= ids.length - 1,
+          title: 'Later in the cycle order for this header set',
+          onclick: () => moveFilter(f, 1),
+        },
+        '-',
+        { label: 'Delete…', onclick: () => deleteFilter(f) },
+      ];
+    }
+
+    function filterRow(f, matches, colText) {
+      const row = el('div', 'sf-row' + (matches ? '' : ' sf-other'));
+      row.dataset.id = String(f.id);
+      const grip = el('span', 'sf-grip', '⠿');
+      grip.title = 'Drag to change the cycle order';
+      grip.setAttribute('aria-hidden', 'true');
+      const name = el('span', 'sf-name', f.name);
+      name.setAttribute('role', 'button');
+      name.tabIndex = 0;
+      if (active && active.id === f.id) name.setAttribute('aria-current', 'true');
+      name.title = matches
+        ? `Apply "${f.name}"`
+        : `Built for different columns (${colText}) — click to apply anyway`;
+      name.onclick = () => applyFilter(f, matches, colText);
+      name.onkeydown = (e) => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        e.preventDefault();
+        applyFilter(f, matches, colText);
       };
-      const groupIds = sameGroupFilterIds(f.col_names);
-      const gIdx = groupIds.indexOf(f.id);
-      const upBtn = el('button', 'btn ghost sf-mini', '▲');
-      upBtn.title = 'Move earlier in the cycle order for this header set';
-      upBtn.disabled = gIdx <= 0;
-      upBtn.onclick = async () => { await moveSavedFilter(f, -1); render(); };
-      const downBtn = el('button', 'btn ghost sf-mini', '▼');
-      downBtn.title = 'Move later in the cycle order for this header set';
-      downBtn.disabled = gIdx >= groupIds.length - 1;
-      downBtn.onclick = async () => { await moveSavedFilter(f, 1); render(); };
-      const del = el('button', 'btn ghost sf-mini', '✕');
-      del.title = 'Delete this saved filter';
-      del.onclick = async () => {
-        if (!(await confirmDialog(`Delete saved filter "${f.name}"?`, { danger: true, okLabel: 'Delete' }))) return;
-        await api(`/api/saved_filters/${f.id}`, { method: 'DELETE' });
-        S.savedFilters = S.savedFilters.filter((x) => x.id !== f.id);
-        render();
-        updateFiltersButton();
-      };
-      row.append(applyBtn, editBtn, renBtn, upBtn, downBtn, del);
-      // Drag to reorder as well — same one DnD implementation the tab
-      // strip and SQL sub-tabs use. currentIds scopes the drop to this
-      // filter's own header set, so dragging across sets is a no-op
-      // (wireDragReorder's own from === -1 guard).
+      const more = el('button', 'btn ghost row-more sf-more', '⋯');
+      more.title = 'Edit, rename, move or delete';
+      more.setAttribute('aria-label', `Actions for "${f.name}"`);
+      more.setAttribute('aria-haspopup', 'menu');
+      more.setAttribute('aria-expanded', 'false');
+      more.onclick = () => dropdownMenu(more, () => rowMenu(f, matches, colText));
+      row.append(grip, name, more);
+      // Drag to reorder — same one DnD implementation the tab strip and
+      // SQL sub-tabs use. currentIds scopes the drop to this filter's own
+      // header set, so dragging across sets is a no-op (wireDragReorder's
+      // own from === -1 guard).
       wireDragReorder(row, f.id, {
         containerSelector: '.sf-list',
         rowSelector: '.sf-row',
         horizontal: false,
         currentIds: () => sameGroupFilterIds(f.col_names),
         onReorder: async (ids) => {
-          S.savedFilters = await post('/api/saved_filters/reorder', { ids });
+          try { S.savedFilters = await post('/api/saved_filters/reorder', { ids }); }
+          catch (e) { toast(`Could not reorder: ${e.message}`, 6000); return; }
           render();
         },
       });
@@ -622,13 +685,6 @@ export function openSavedFiltersModal({ returnTo = null } = {}) {
     const back = backBtn();
     if (back) acts.append(back);
     b.append(acts);
-
-    b.append(el('p', null,
-      `Cycle filters that match the open table's columns with `
-      + `${S.keymap.cyclePrevFilter[0] || '['} / ${S.keymap.cycleNextFilter[0] || ']'} — cycling past either `
-      + `end drops the filters entirely rather than wrapping. ▲/▼ (or drag) set the cycle order within a `
-      + `header set. "Edit" applies a filter to the open table and reopens it in the Filter builder, where `
-      + `"Update" saves your changes back over it.`));
   });
 }
 
@@ -814,6 +870,9 @@ export function buildValueFilterPanel(container, refresh) {
 export function buildTableActionsPanel(container, refresh) {
   const src = S.sources.find((s) => s.id === S.sourceId);
   const acts = el('div', 'row-actions');
+  // Four long labels don't fit one row of the dialog; squeezed, each one
+  // folded onto two lines. Wrap the row instead of the labels.
+  acts.style.flexWrap = 'wrap';
   const dflt = el('button', 'btn ghost', 'Save layout as default for these columns');
   dflt.title = 'Reuse this column order/visibility for any table imported with the same headers';
   dflt.onclick = () => saveDefaultLayout();
@@ -878,10 +937,13 @@ export function buildTableStripPanel(container) {
    adding one should be adding an entry. `build` gets (container, refresh)
    and may render nothing at all.
 
-   It lives behind a right-click on the tab or the sidebar row (and the
-   openTableMenu keybind) rather than a visible ▦ button, which is the icon
-   this replaced — a menu that's going to keep growing needs a home that
-   doesn't cost tab-strip width per entry. */
+   It lives behind the openTableMenu keybind, the Tables manager's
+   Settings… and Columns… on a table's right-click menu (tableMenuItems in
+   sources.js) rather than a visible ▦ button, which is the icon this
+   replaced — a menu that's going to keep growing needs a home that doesn't
+   cost tab-strip width per entry. The right-click opened this dialog
+   directly until it got a short menu of its own: a full-height modal was a
+   lot to put up for closing or renaming a tab. */
 export const TABLE_MENU_SECTIONS = [
   { id: 'strip', title: null, build: buildTableStripPanel },
   { id: 'columns', title: 'Columns', build: buildColumnsPanel },
@@ -889,8 +951,9 @@ export const TABLE_MENU_SECTIONS = [
   { id: 'table', title: 'This table', build: buildTableActionsPanel },
 ];
 
-/* `sourceId` is optional — the tab/sidebar entry points pass the table that
-   was right-clicked, which may not be the one on screen. The panels all
+/* `sourceId` is optional — the right-click menu's Columns… and the Tables
+   manager pass the table they were opened on, which may not be the one on
+   screen. The panels all
    read S.layout/S.order/S.columns (this table's live state), so opening
    that source first isn't a convenience, it's the precondition. */
 export async function openTableMenu(sourceId) {
@@ -910,46 +973,64 @@ export async function openTableMenu(sourceId) {
   });
 }
 
-export function openTagEditor() {
+/* The case's tags, saved as they change (tagEditRow, in tags.js — the
+   template editor in Settings is the same row). `focusId` puts the caret
+   in that tag's name, selected: Add tag reopens the editor on the tag it
+   just made, so "New tag" is typed over rather than clicked into. */
+export function openTagEditor({ focusId = null } = {}) {
+  let focusRow = null;
   modal('Tags', (b) => {
+    b.append(el('p', 'fb-help', 'Changes save as you make them. Keys 1–9 tag the selection.'));
+    const list = el('div', 'tag-edit-list');
+    b.append(list);
+    const rows = [];
+    // Anything that redraws the dialog sends a name still waiting on its
+    // pause first, so the redraw shows it and a later edit builds on it.
+    const settle = () => Promise.all(rows.map((r) => r.flush()));
     for (const t of S.tags) {
-      const row = el('div', 'row-actions');
-      const color = el('input'); color.type = 'color'; color.value = t.color;
-      const name = el('input'); name.value = t.name;
-      name.style.cssText = 'flex:1;background:var(--ink);color:var(--text);border:1px solid var(--line-2);padding:4px 7px;font:inherit';
-      const key = el('input'); key.value = t.hotkey || ''; key.maxLength = 1;
-      key.style.cssText = 'width:34px;text-align:center;background:var(--ink);color:var(--text);border:1px solid var(--line-2);padding:4px;font-family:var(--mono)';
-      const save = el('button', 'btn', 'Save');
-      save.onclick = async () => {
-        await post('/api/tags', { id: t.id, name: name.value, color: color.value, hotkey: key.value || null });
-        await loadTags(); openTagEditor();
-      };
-      const del = el('button', 'btn ghost', 'Delete');
-      del.onclick = async () => {
-        if (!(await confirmDialog(`Delete "${t.name}" and remove it from every row?`, { danger: true, okLabel: 'Delete' }))) return;
-        await api(`/api/tags/${t.id}`, { method: 'DELETE' });
-        await loadTags();
-        // The server took the tag off every row, but the cached rows (flat
-        // and grouped) still carry its id, which buildDataRow paints as a
-        // grey stripe for a tag it can't name. Same rule as a bulk tag —
-        // drop both — and a grouping by tag has just lost a bucket.
-        clearRowCaches();
-        regroupIfGroupedByTag();
-        render(); drawRail(); openTagEditor();
-      };
-      row.append(color, name, key, save, del);
-      b.append(row);
+      const r = tagEditRow(t, {
+        save: async (want) => {
+          await post('/api/tags', { id: t.id, ...want });
+          await loadTags();
+          // A recolour shows on the rows' stripes and the rail at once,
+          // not on the next scroll.
+          render(); drawRail();
+        },
+        removeLabel: 'Delete',
+        removeTitle: 'Delete this tag and take it off every row',
+        remove: async () => {
+          if (!(await confirmDialog(`Delete "${t.name}" and remove it from every row?`, { danger: true, okLabel: 'Delete' }))) return;
+          await settle();
+          try { await api(`/api/tags/${t.id}`, { method: 'DELETE' }); }
+          catch (e) { toast(`Could not delete "${t.name}": ${e.message}`, 6000); return; }
+          await loadTags();
+          // The server took the tag off every row, but the cached rows (flat
+          // and grouped) still carry its id, which buildDataRow paints as a
+          // grey stripe for a tag it can't name. Same rule as a bulk tag —
+          // drop both — and a grouping by tag has just lost a bucket.
+          clearRowCaches();
+          regroupIfGroupedByTag();
+          render(); drawRail(); openTagEditor();
+        },
+      });
+      rows.push(r);
+      list.append(r.row);
+      if (t.id === focusId) focusRow = r;
     }
+    const acts = el('div', 'row-actions');
     const add = el('button', 'btn', 'Add tag');
-    add.style.marginTop = '14px';
-    add.onclick = async () => {
-      await post('/api/tags', { name: 'New tag', color: '#7f9bb5', hotkey: null });
-      await loadTags(); openTagEditor();
-    };
+    add.onclick = oneAtATime(add, async () => {
+      await settle();
+      let made;
+      try { made = await post('/api/tags', { name: 'New tag', color: '#7f9bb5', hotkey: null }); }
+      catch (e) { toast(`Could not add a tag: ${e.message}`, 6000); return; }
+      await loadTags();
+      openTagEditor({ focusId: made.id });
+    });
     const applyTemplate = el('button', 'btn ghost', 'Apply default template');
-    applyTemplate.style.marginTop = '14px';
     applyTemplate.title = "Add any tags from the default template (Settings) that this case doesn't already have";
-    applyTemplate.onclick = async () => {
+    applyTemplate.onclick = oneAtATime(applyTemplate, async () => {
+      await settle();
       const template = await api('/api/settings/default_tags');
       const existing = new Set(S.tags.map((t) => t.name.toLowerCase()));
       const missing = template.filter((t) => !existing.has((t.name || '').toLowerCase()));
@@ -957,7 +1038,8 @@ export function openTagEditor() {
       for (const t of missing) await post('/api/tags', { name: t.name, color: t.color, hotkey: t.hotkey || null });
       await loadTags(); openTagEditor();
       toast(`Added ${missing.length} tag${missing.length > 1 ? 's' : ''} from the default template`);
-    };
-    b.append(add, applyTemplate);
-  });
+    });
+    acts.append(add, applyTemplate);
+    b.append(acts);
+  }, { focus: () => (focusRow ? focusRow.name : null) });
 }

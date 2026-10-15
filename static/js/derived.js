@@ -14,7 +14,7 @@ import { startJobsPoll } from './jobs.js';
 import { loadSources, openSource } from './sources.js';
 import { S, dashboardCreatorMode } from './state.js';
 import { updateFiltersButton } from './timeframe.js';
-import { TS_FORMATS, baseColumns, columnMeta, tsFormatFor } from './tsformat.js';
+import { TS_FORMATS, baseColumns, columnMeta, parseTimestamp, tsFormatFor } from './tsformat.js';
 import { confirmDialog, modal, promptDialog } from './ui.js';
 import { rebuildView } from './view.js';
 
@@ -452,6 +452,49 @@ export async function openFlattenModal(column) {
   }, { wide: true });
 }
 
+/* Which column the add dialog starts on when nothing named one — the
+   Table dialog's "Add derived column…". It used to be the first column,
+   which on an EvtxECmd table is RecordNumber: a counter, which the format
+   guess then called Mac absolute time (timeparse's _MAC_DETECT_FLOOR is
+   the other half of that fix). Opened from a table rather than from a
+   column, the dialog is most often after a timestamp, so it starts on the
+   first column that looks like one: typed datetime at import, else one
+   whose values (the rows already in the page cache — no fetch) or whose
+   name say time. The first column only when nothing does. */
+export const TIME_NAME_WORDS = new Set(['time', 'timestamp', 'date', 'datetime', 'epoch', 'ts', 'when',
+  'created', 'modified', 'accessed', 'written']);
+// A word that turns a time-ish name into something else: TimeZone,
+// UtcOffset, DateFormat, ModifiedBy.
+export const NOT_TIME_WORDS = new Set(['zone', 'tz', 'offset', 'bias', 'format', 'by']);
+
+export function columnNameLooksLikeTime(name) {
+  // Words out of camelCase, snake_case and anything else that separates
+  // them — TimeCreated, visit_time, @timestamp, Created0x10.
+  const words = String(name).replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase().split(/[^a-z]+/);
+  return words.some((w) => TIME_NAME_WORDS.has(w)) && !words.some((w) => NOT_TIME_WORDS.has(w));
+}
+
+export function cachedValuesLookLikeTime(name) {
+  const idx = S.columns.findIndex((c) => c.name === name);
+  if (idx === -1) return false;
+  let seen = 0;
+  let hits = 0;
+  for (const r of S.rowsByPos.values()) {
+    const v = r && r.cells ? r.cells[idx] : null;
+    if (v == null || v === '') continue;
+    if (parseTimestamp(v)) hits++;
+    if (++seen >= 50) break;
+  }
+  return seen > 0 && hits * 2 >= seen;
+}
+
+export function defaultParseColumn(cols) {
+  const pick = cols.find((c) => c.type === 'datetime')
+    || cols.find((c) => cachedValuesLookLikeTime(c.name) || columnNameLooksLikeTime(c.name))
+    || cols[0];
+  return pick ? pick.name : null;
+}
+
 /* The add/re-derive modal. `prefill` is the column to parse; `editing` is
    the existing definition when re-deriving (the column and operation are
    then fixed — only the parameters are in play, which is the actual use
@@ -470,7 +513,7 @@ export async function openDerivedColumnModal(prefill, editing) {
     ...S.columns.filter((c) => c.derived && c.derived_status === 'ready')];
   if (!textCols.length) return;
   const state = {
-    column: editing ? editing.derived_from : (prefill || textCols[0].name),
+    column: editing ? editing.derived_from : (prefill || defaultParseColumn(textCols)),
     opId: editing ? editing.derived_op : null,
     params: {},
     name: editing ? editing.name : '',
@@ -978,7 +1021,7 @@ export async function openDerivedColumnModal(prefill, editing) {
     }
 
     const actions = el('div', 'row-actions');
-    const go = el('button', 'btn', editing ? 'Re-derive' : 'Add column');
+    const go = el('button', 'btn primary', editing ? 'Re-derive' : 'Add column');
     /* The one place the button's label, its enabled state and the single
        name field agree about what is being made: one column, or the
        ticked named groups. Declared after `go` and called from the group

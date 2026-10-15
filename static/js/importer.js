@@ -193,12 +193,11 @@ export function queueFilesForFormat(fmt, files) {
    of which parser ends up handling a given one. */
 export function openImportModal() {
   modal('Import', (b) => {
-    b.append(el('p', null,
-      'Queue CSV/TSV, JSON/JSONL, SQLite, Excel (.xlsx/.xlsm), Plaso or archive (zip/tar/gz) '
-      + 'files — any other log imports as text, one line per row — then import them all, or '
-      + 'import a whole folder at once. A SQLite file needs its tables picked first, an Excel '
-      + 'workbook its sheets. Imports run in the background, so you can keep working while the '
-      + 'corner panel tracks progress.'));
+    // One line, and it still names every kind the queue takes (a .plaso or
+    // a support bundle must not read as unwelcome). Which ones need tables
+    // or sheets picked first, and that imports run in the background, are
+    // on the wiki's Cases and importing page.
+    b.append(el('p', null, 'Queue CSV, JSON, SQLite, Excel, Plaso, archives or any text log to import.'));
 
     const queueList = el('div', 'session-queue');
 
@@ -314,7 +313,7 @@ export function openImportModal() {
     const folderBtn = el('button', 'btn ghost', 'Import a whole folder…');
     folderBtn.title = 'Scan a directory (e.g. KAPE output) against extension + glob patterns';
     folderBtn.onclick = () => openDirectoryImportModal();
-    const importAll = el('button', 'btn', 'Import all queued');
+    const importAll = el('button', 'btn primary', 'Import all queued');
     // The one primary action in the row, pushed to the far right so it
     // isn't the neighbour of "Import a whole folder…".
     importAll.style.marginLeft = 'auto';
@@ -519,7 +518,7 @@ function openUnitPicker(src, { initial, onConfirm, onCancel } = {}, cfg) {
     b.append(tableList);
 
     const actions = el('div', 'row-actions');
-    const importBtn = el('button', 'btn', cfg.confirm);
+    const importBtn = el('button', 'btn primary', cfg.confirm);
     const cancel = el('button', 'btn ghost', 'Cancel');
     cancel.onclick = () => { if (onCancel) onCancel(); else $('modal').hidden = true; };
     actions.append(importBtn, cancel);
@@ -741,7 +740,7 @@ export async function openDirectoryImportModal(state = {}) {
 
     const resultsBox = el('div', 'search-all-results');
     const actions = el('div', 'row-actions');
-    const importBtn = el('button', 'btn', 'Import checked (0)');
+    const importBtn = el('button', 'btn primary', 'Import checked (0)');
     importBtn.disabled = true;
 
     async function runScan() {

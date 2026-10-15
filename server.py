@@ -5080,6 +5080,32 @@ def api_timeline_rows(view_id: str, start: int = 0, count: int = 200):
         raise HTTPException(409, str(e))
 
 
+class TimelinePreview(BaseModel):
+    """What Configure tables… has on screen for a header set, not yet
+    saved — the same three fields a timeline template holds."""
+    source_id: int
+    timestamp_column: str | None = None
+    body_columns: list[str] = []
+    type_label: str | None = None
+    limit: int | None = None
+
+
+@app.post("/api/timeline/preview")
+def api_timeline_preview(body: TimelinePreview):
+    """A few rows of one table rendered the Timeline's way under unsaved
+    settings (Store.timeline_preview). Writes nothing; a POST because the
+    settings are a body, like /api/derived/preview. A merge or a table
+    still importing is the request's fault (400); a table that is gone is
+    gone_table_handler's 404, and any other KeyError stays the 500 it
+    would be."""
+    cfg = {"timestamp_column": body.timestamp_column, "body_columns": body.body_columns,
+           "type_label": body.type_label}
+    try:
+        return store().timeline_preview(body.source_id, cfg, limit=body.limit)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
 class SavedFilterCreate(BaseModel):
     name: str
     col_names: list[str]

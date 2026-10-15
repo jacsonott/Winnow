@@ -23,6 +23,27 @@ see [docs/notes/README.md](README.md) for the whole set.
   "Remove the tag"), so a test that clicks it should find it by role
   (`.confirm-actions .btn:not(.ghost)`), not by the label.
 
+- **The tag editors save as they change, and never send an empty name.**
+  Edit tags and Settings → Default tags for new cases are the same row
+  (`tagEditRow` in tags.js): the colour and the key save at once, the name
+  after `TAG_NAME_SAVE_MS` of quiet or on leaving the box, and the row's
+  own slot says "Saving…"/"Saved" (the row note's idiom) — a refusal is a
+  toast with the server's words and "Not saved" left on the row. Three
+  things are load-bearing. An empty name is held, not sent: the template's
+  server side (`TagTemplate.save`) silently drops nameless entries, so a
+  pause while retyping a name used to be one debounce away from deleting
+  the row being edited; leaving the box empty puts the last saved name
+  back. The template is one file written as a whole list, so its saves
+  are chained one at a time and `tags` holds only what each row has
+  *committed* — another row's save must not send a name still being typed.
+  And anything that redraws a list (Add tag, Delete, Apply default
+  template, the template's + tag and ✕) awaits every row's `flush()` first,
+  or the redraw paints the old name and the next edit to that row builds
+  on it. The pending timer outlives the dialog on purpose: a name typed
+  and closed straight away still lands. The editor never checked for two
+  tags on one digit and still doesn't — the wiki documents that the
+  higher one in the list wins (`tests/ui/test_tag_editors_save_on_change.py`).
+
 - **A background refresh must not navigate.** `loadSources()` re-opens
   the current source as a side effect of picking a tab, and `openSource()`
   switches to the grid and resets that source's filters and search. That
@@ -81,10 +102,18 @@ see [docs/notes/README.md](README.md) for the whole set.
   into a one-chip column. The header bar has the same shape:
   `.bar-actions` never shrinks and its buttons never wrap, `#sourceTabs`
   keeps `SOURCE_TABS_MIN` (140px) and it is `#pageTabs` — which scrolls —
-  that shrinks (`flex: 0 1 auto`, 60px floor). A pressed segment (`.vp-seg`, `.segmented`)
-  is the filled accent with `--accent-fg` text; accent text on the dim
-  accent fill measured 1.4–2.7:1 across the skins, and accent-on-panel
-  fails in Phosphor light.
+  that shrinks (`flex: 0 1 auto`, 60px floor). A pressed segment in a
+  dialog or panel (`.vp-seg`, `.segmented`, `.pl-scope`, the search
+  dialog's Paste/Advanced) is the builders' tint — 16% accent over a
+  transparent unpressed row, `--text` on it — and not accent text, which
+  is what failed: accent on the dim accent fill measured 1.4–2.7:1 across
+  the skins, and accent on the panel fails in Phosphor light. It was the
+  filled accent for a while, which read but outshouted each dialog's one
+  `.btn.primary`. The unpressed buttons have to be transparent for the
+  tint to show: on `--panel-2` it sat 3.7 ΔE from them in Harvest light.
+  Toolbar toggles (`.btn[aria-pressed]`) keep the accent-dim fill.
+  `tests/ui/test_visual_pass.py` measures text contrast and the
+  pressed/unpressed gap in every skin and theme.
 
 - The **timeframe filter** (`S.timeRange`, `static/js/timeframe.js`, `time_range` on
   `ViewSpec`, compiled in `_compile_where` via the registered SQL function
@@ -95,7 +124,11 @@ see [docs/notes/README.md](README.md) for the whole set.
   on purpose (see the comments at each site). It's
   meant to stay pinned while everything else changes underneath it, and
   toggles on/off via its own keybind (`toggleTimeRange`) rather than
-  needing its config modal reopened. `column: null` means "every datetime
+  needing its config modal reopened. **Apply always turns it on**; the
+  dialog has no Enabled box. It had one, and a range typed in with the box
+  unticked was saved but not applied, so Apply looked broken. Off is
+  Clear (range gone) or the toggle key (range kept); the dialog says so
+  when it is opened on a range that is off. `column: null` means "every datetime
   column on whichever table is open, OR'd together" — the MFT case this
   exists for: a timestomped Created date shouldn't hide a row whose
   Modified date is genuinely in range. `TS_NORMALIZE(x)` (a zero-padded
@@ -305,7 +338,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   folder* (`wireTableDrag` + `wireFolderDrop`, its own `draggedTableId`),
   not reorders the strip.
 - **Editing a saved filter** goes through the real grid, not a
-  self-contained dialog: the Saved filters modal's "Edit" applies that
+  self-contained dialog: "Edit…" in a Saved filters row's ⋯ applies that
   filter (`applyPreset`) and *then* opens `openFilterBuilder(f)` with the
   record, so the row count behind the modal is live feedback on the change
   being made. The only thing the `editing` argument adds is an `Update
@@ -320,7 +353,26 @@ see [docs/notes/README.md](README.md) for the whole set.
   None-means-leave-alone partial-update convention `CaseRegistry.update`
   already used, so one method serves both a rename and a conditions
   re-save. Edit needs a table open (it applies the filter to preview it),
-  hence the disabled button and its explanatory title when none is.
+  hence the disabled entry, with "Open a table first" under it, when none is.
+
+- **A list's per-row actions are a ⋯, built with `dropdownMenu`** — Saved
+  filters and the Tables manager (`.btn.row-more`, borderless until
+  pointed at). Five buttons a row was the complaint: the actions an
+  analyst reaches for once in a while went into the menu, and only the
+  everyday one stayed visible (the name itself in Saved filters, which
+  applies the filter; Open/Close in the Tables manager). Pass the items as
+  a *function* so a menu reads the row's state when it opens, not when the
+  list was drawn — Move up/Move down are disabled at the ends of their
+  header set. Those two exist so the order can still be changed without a
+  mouse, which only works because a move puts the focus back on the same
+  row's ⋯ after the redraw (closing a menu restores no focus by itself):
+  Enter, arrows, Enter again. A list that **redraws on a timer** must not
+  redraw under its own open menu — the Tables manager's 1.5 s poll
+  replaced every row, which left the menu anchored to a detached button
+  (and dropped a keyboard user's focus each tick). It now skips a tick
+  while `openMenuAnchor` is inside the list, and any tick whose sources
+  and indexes match what was last painted
+  (`tests/ui/test_tables_manager_row_menu.py`).
 - **Two tab strips share the header bar**: `#sourceTabs` (tables, ordered
   by `S.tabOrder`) and `#pageTabs` (SQL, Timeline and plugin tabs, ordered
   by `S.pageTabPrefs.order`), split by the `#tabSplit` divider. Page tabs
@@ -706,8 +758,8 @@ see [docs/notes/README.md](README.md) for the whole set.
   The note over a comparison of sessions that cover different tables
   says those tables ARE counted (diff_sessions keys every tagged row and
   note of both sides); it said the counts covered "what they share".
-- **The right-click surfaces** (row menu, column-header menu, table menu,
-  header value picker) all hang off one floating-menu implementation in `static/js/ui.js` —
+- **The right-click surfaces** (row menu, column-header menu, a table's
+  tab/sidebar menu, header value picker) all hang off one floating-menu implementation in `static/js/ui.js` —
   `showFloating`/`placeFloating` plus the single `openMenuEl`/`openMenuAnchor`
   pair, with `dropdownMenu` (anchored under a button), `contextMenu`
   (positioned at the pointer) and `anchoredPanel` (a card with real
@@ -838,18 +890,56 @@ see [docs/notes/README.md](README.md) for the whole set.
     those) rather than by a marker field, because `openFilterBuilder`
     round-trips the tree through SQL text and would drop any marker we
     invented.
-- **Settings' sections are collapsed on open, every time**
-  (`settingsSection`, one wrapper per `h4` the modal used to append
-  straight into its body). Seven sections had grown to ~900px of scroll,
-  so the setting you came for was rarely the one on screen. Two
-  deliberate non-features: state isn't remembered between opens ("open
-  where I left it" and "collapsed by default" are different promises, and
-  the second is the one that was asked for), and opening one doesn't
-  close the others. A section's own code is unchanged apart from what it
-  appends into — which is also what keeps a section that fills itself
-  later (`buildPluginsPanel`'s async listing) landing inside its own
-  section rather than at the end of the modal. That section is now one
-  line and a button — see the plugins manager below.
+- **Settings is two panes, one section at a time, and it opens where it
+  was left** (`settingsPanes` in settings.js; the plugins and profiles
+  managers' shape). It was a column of collapsible sections
+  (`settingsSection`, which survives only for the profile builder):
+  thirteen of them, only one readable at once anyway, the last few a long
+  scroll down. Things that are decisions, not accidents:
+  - **Fixed size.** `.settings-panes` has a fixed height and the card is
+    `.tall` (top-anchored), so Shut down's one button and the keymap's
+    forty rows are the same box; each pane scrolls on its own and
+    `#modalBody` never does. The column of sections had settled on
+    "sized to content, grows downward" because a fixed 82vh left an
+    all-collapsed Settings mostly empty panel — in two panes a short
+    section leaves room under it in the right pane instead, which is the
+    managers' trade too, and the one asked for.
+  - **Every section is built on open; switching flips `hidden`.** A
+    section's code is unchanged apart from what it appends into, which is
+    what keeps a section that fills itself later (the plugins count, the
+    version, the associations list) landing in its own pane — and since
+    nothing rebuilds, a pane keeps its scroll and anything half-typed. A
+    lazily built pane would also defer those fetches, which is the one
+    thing to weigh before changing it.
+  - **Remembered, per browser** (`winnow.settingsSection`, try/catch'd
+    like every per-viewer pref). The collapsible version deliberately did
+    NOT remember; this one was asked to. An unknown stored id (a section
+    renamed or removed by a later build) opens the first section.
+  - **`openSettings(id)` is the deep link, and a hand-off back names its
+    section** — `returnTo: () => openSettings('plugins')`, not
+    `returnTo: openSettings`. The remembered section is shared by every
+    window on the origin, so a second Winnow window that showed Keyboard
+    shortcuts in the meantime would otherwise decide where the plugins
+    manager's × lands. `openSettings` is also a bare click handler, so it
+    reads its argument only when it is a string — a MouseEvent is not a
+    section.
+  - **The list is a vertical tablist**: one tab stop (the chosen
+    section, which takes the focus on open), ↑/↓ wrap and Home/End jump,
+    each showing what it lands on; `aria-selected` marks the chosen one.
+    The keymap already ignores everything but Escape and the opening key
+    while a dialog is up, so the arrows never reach the grid behind it.
+  `tests/ui/test_settings_two_pane.py`.
+- **Appearance is the look; Grid & layout and Remote session took the
+  rest.** The always-on filter row, Pages as a dropdown and the autofit
+  limit change what is on screen and where, not how it looks, so they are
+  Grid & layout; Remote session mode is about the display Winnow is drawn
+  on (wheel quantization, animations off for a remote encoder), so it is a
+  small section of its own — and the first-run offer points there. Row
+  density, striped rows, the launch animation and the Windows hidden-start
+  box stayed in Appearance. In Grid & layout the checkboxes come before
+  the autofit block, because a box after a `.settings-sub-label` reads as
+  belonging to that heading — which is how Remote session mode's heading
+  used to sit over the launch animation and the filter row.
 - **On Windows, `prefers-reduced-motion` is not a preference.** Chromium
   derives it from the Animation effects switch, which VM images, RDP
   profiles and "best performance" leave off, so a launch animation that
@@ -901,7 +991,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   the opt-in rather than the default because typing straight into a column
   box without looking is the Timeline Explorer reflex and the analysts who
   have it are not wrong — so a fresh install gets the row and Settings →
-  Appearance's "Always-on filter row" is the switch between them.
+  Grid & layout's "Always-on filter row" is the switch between them.
   `S.appearance.filterUi` picks the surface at runtime and
   `FILTER_UI_DEFAULT` (settings.js) is the single value deciding which one
   a fresh install gets; nothing else compares against a side, so a future
@@ -956,7 +1046,7 @@ see [docs/notes/README.md](README.md) for the whole set.
     it by itself — a column already in view scrolls nowhere, so no scroll
     event fires, and folding a box away rebuilds nothing at all. Three
     paths resize the head this way: the `⌕`/chip/picker reveal, the fold,
-    and the Appearance switch between the two surfaces.
+    and the Grid & layout switch between the two surfaces.
 - **`.fcell` needs its `min-width: 0`, and it's not tidying.** Giving the
   filter cell `display: flex` (to seat the value picker's ▾ next to the
   input) also made its own automatic minimum size content-based — and a
@@ -982,7 +1072,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   isn't clipped, both terms stop changing — and returns 0 for a column
   with no header on screen, where callers fall back to the old estimate.
 - **The autofit cap is a user setting** (`S.appearance.autofitMax`,
-  Settings → Appearance, default `AUTOFIT_MAX_W_DEFAULT` = 900px, `0`
+  Settings → Grid & layout, default `AUTOFIT_MAX_W_DEFAULT` = 900px, `0`
   meaning uncapped), not the old hardcoded 480. A cap still exists by
   default because the rows are `width: max-content`: one column of
   base64 command lines fits to ~3,600px uncapped (measured) and every
@@ -994,13 +1084,36 @@ see [docs/notes/README.md](README.md) for the whole set.
   look-and-feel prefs rather than in the layout — it's a statement about
   this screen, not about this table's columns.
 - **The table menu replaced the tab strip's `▦` column-chooser button**
-  (`TABLE_MENU_SECTIONS`/`openTableMenu`, right-click a tab or a sidebar
-  row, or press `C`). Same registry reasoning as the row menu: it's where
-  per-table features land, and the tab strip can't grow an icon per
-  feature. `openTableMenu(sourceId)` opens that source first when it isn't
-  the one on screen — not a convenience, a precondition, since every panel
-  reads the live `S.layout`/`S.order`/`S.columns` rather than the record it
-  was handed.
+  (`TABLE_MENU_SECTIONS`/`openTableMenu`: press `C`, the Tables manager's
+  Settings…, or Columns… on a table's right-click menu). Same registry
+  reasoning as the row menu: it's where per-table features land, and the
+  tab strip can't grow an icon per feature. `openTableMenu(sourceId)`
+  opens that source first when it isn't the one on screen — not a
+  convenience, a precondition, since every panel reads the live
+  `S.layout`/`S.order`/`S.columns` rather than the record it was handed.
+- **Right-clicking a table is a short menu, not the table menu**
+  (`tableMenuItems`/`openTableContextMenu` in sources.js, one handler for
+  the tab and both kinds of sidebar row). The right-click used to open the
+  full-height dialog above, for what was most often a close or a rename;
+  now it is a `contextMenu` at the pointer holding Close this tab (open
+  tables only), the nickname, Columns… (the dialog, unchanged), the merge
+  builder and Remove…. Each entry calls what the Table dialog or the
+  Tables manager already calls, under their label, so there is still one
+  implementation of each. Three things to keep: **items are built from
+  `S.sources` on every paint**, by id — a background `loadSources()` can
+  land while the menu is up and the record the row was drawn from is
+  stale by then. **A keyboard opening anchors under the node**: the
+  ContextMenu key and `Shift+F10` fire the same `contextmenu` event, which
+  Chromium places at the focused node's centre with `button === -1` (other
+  engines have used 0,0), so taking its coordinates dropped the menu over
+  the tab it was about; `button === -1` or a point off the node means
+  "place it like a dropdown". And **Remove…'s refusal is one predicate**
+  (`mergesUsing`/`removeRefusal` in tables.js): the manager's button
+  refuses with an alert, the menu greys its entry out and names the merge
+  in the `desc` line, and both read the same rule — the menu can say it
+  before the click, which a button in a list of buttons can't. Errored
+  rows (a broken merge) still get no menu; the Tables manager is where
+  those are removed. tests/ui/test_table_context_menu.py.
 - **"Hide empty rows" is a view predicate, not a layout edit.** Unlike
   its neighbour "Hide empty columns" (a one-shot client-side sample that
   writes `S.layout`), the row toggle is `S.hideEmptyRows` →
@@ -1503,6 +1616,49 @@ see [docs/notes/README.md](README.md) for the whole set.
   findings sends the analyst looking for work they have already done.
   `tests/ui/test_timeline_tag_chips.py`.
 
+- **Configure tables… is per HEADER SET, so it lists header sets, not
+  tables** (`openTimelineSourceConfig`, `timelineHeaderSets`). A timeline
+  template is keyed by a table's own columns (derived ones left out —
+  the key `_resolve_timeline_configs` looks up), so one setting serves
+  every table of that shape. The dialog it replaced drew one block per
+  TABLE, each with a Save: in a case with two EvtxECmd tables, saving one
+  rewrote the other's Timeline lines, and nothing on screen said so. Now
+  each header set is one entry naming every table it covers, and the
+  right side says "Applies to A and B — and to any table with these N
+  columns". Things that are easy to undo by accident:
+  - **The saved/default mark mirrors the server's lookup**
+    (`headerSetTemplate`): the template under the set's own columns,
+    else one an older release saved under a table's every column. A
+    client that only checked the first would call a set "default" while
+    the Timeline still applied the old template.
+  - **A blank Type saves as blank**, not as the first table's file name
+    (what the per-table dialog sent). The template is shared, so that
+    name went on every other table's badges; blank lets `build_timeline`
+    fall back to each table's own name.
+  - **Edits are kept per header set until saved** (`state.drafts`):
+    switching sets keeps them, the list marks each `unsaved`, and the
+    footer names the others, because Save writes only the set shown.
+    Closing the dialog still drops them, as the old dialog did.
+  - **Save is disabled until something changed, and its state is put
+    back AFTER `oneAtATime` settles** (`renderFoot` in the click handler,
+    around the guarded call). `oneAtATime` restores the `disabled` it
+    found when the click landed — "enabled" — so setting it from inside
+    the handler is undone on the way out, leaving a just-saved set's Save
+    clickable.
+  - **The preview is the server's, not a re-implementation**:
+    `POST /api/timeline/preview` runs `_timeline_parts` (the code
+    `build_timeline` uses) over a few rows under the UNSAVED settings, and
+    the rows are painted by `timelineRowNode`/`paintTimelineBody`, the
+    Timeline's own row code, minus the raw/summary toggle (that state is
+    the Timeline's, `S.timeline.raw`). Debounced, with a sequence number
+    so a slow answer for the previous set can't paint over the current
+    one.
+  - **Saving rebuilds the Timeline when it is the page showing**
+    (`S.activeTab === 'timeline'`), so the analyst closes the dialog onto
+    what they saved. It used to apply only on the next build.
+  `tests/ui/test_timeline_config_builder.py`, and
+  `tests/test_timeline_preview.py` for the preview matching the Timeline.
+
 - **IOC watchlist tab** (watchlist.js) — case-level indicators (Store.watchlist / watchlist_hits, in the .db) scanned across every table; matches are counted, listed, and optionally auto-tagged through the normal tag path. **The scan is a background job** (`runScan`, the one helper behind Add, Scan all, the file import, From a case, the jobs.js source-done hook and Search-all's "Add to watchlist"): `POST /api/watchlist/scan/start`, a jobs-panel row with the tables-scanned progress (its ✕ and its Cancel both stop the scan), a 400 ms poll with the search-all rule that a **404 means stop** (superseded from another window, or the case closed) and a bound on any other failure (three in a row — the server exited or crashed — settle the row and the markers rather than polling forever), `#wlStatus` mirroring "Scanning 3/12 tables…" while the tab shows. Starts from one window go out one at a time, and **a newer scan folds the running one**: the server widens the new job to the old one's remaining scope, so the row being followed settles as "folded into the newer scan" (never orphaned in the running state with a Cancel that reaches nothing) and its "…" markers stay until the job that covers them lands — `finishScan` clears only the markers in the finished job's `watchlist_ids` (all of them when it was unscoped). **A new entry is in the list the moment the server has it** — the add/import responses already carry the indicator(s), so the row renders from them with "…" for a count (the in-flight ids live in a module-level Set, not on the row object: any `load()` mid-scan replaces `indicators` wholesale and would drop a flag carried there) and the scan that follows is scoped to the new ids. When the job lands: `load()` if the tab is showing, else the badge refresh and — when it found something — the row turns into the sticky "Watchlist: N hits · Open watchlist" alert; and when an auto-tag landed on the OPEN table — or on a member of the open merge, whose rows are the member's (invariant #9) — both row caches are cleared and the ribbon counts refreshed, or the tags would not paint until something else refreshed the grid. A grouping BY TAG is regrouped with it (`regroupIfGroupedByTag`, the same trio every other tag path ends in), or the auto-tagged rows would sit in "(untagged)" with the pre-tag counts until the analyst regrouped by hand. The repaint itself waits for the grid to be showing: `render()` against a grid a page tab hides measures a zero-height viewport and paints the first rows at the top, and the return to the tab restores the real scroll position over an empty viewport — so `finishScan` sets `S.gridRepaintPending` and `showGridTab` (the Alt+1, tab-history and mouse-thumb return paths) pays it on the way back, rail and regroup included. "Showing" is `gridIsShowing()` (sql.js), not `S.activeTab === 'grid'`: the home screen hides `#app` wholesale with the grid still the active tab. `showGridTab` consumes the flag whether or not it repaints — `openSource` and `openCase` pass `repaint: false` precisely because S.view/S.sourceId are still the OLD table's there, and they satisfy the owed repaint themselves once they have swapped (`installView`, or the cached-view path's own render/rail/regroup). A duplicate value is refused by the server (400 → toast). **The hits pane groups by table**: `/api/watchlist/hits` answers `{sources, hits}` with an exact per-table count and up to 200 rows per table in rid order; one sticky `.wl-hit-group-head` per table (label via `sourceLabel`, arrow and count styled like `.group-header-row`/`.group-header-count`), folding is client state, and a table past the cap ends in "…and N more — open the table" (jumpToTimelineRow). **The tab opens on the latest hits across every indicator**, not on "Select an indicator to see its hits": `renderLatestHits` paints `/api/watchlist/latest` — one line per flagged ROW naming the indicators that matched it, the table, the row and when, newest first — because a case with thousands of findings spent half the page on an instruction, and "which of these fired most recently" could only be answered by clicking every entry in turn. Clicking an indicator's name in a hit line, or a row on the left, narrows to the grouped-by-table pane; clicking the selected row again, or `← all indicators`, goes back. Every `load()` repaints the pane now, not only the one where the selection died under it — a scan that just landed changed what "latest" means. **The count cell is not always a count**: the same `.wl-count` cell takes a `.wl-state` variant that says `clean` (every table read, nothing matched — the one an analyst can quote), `not scanned` or `N/M tables`, off `scanned_sources`/`scan_targets` from `/api/watchlist/overview`. The slot class stays on whatever the answer is — stylesheet and tests find the cell the one way — and the variant only drops the pill geometry a number wanted. **Indicators covering the same rows carry a `.wl-dup` marker** and the summary leads with distinct rows flagged, naming the hit total for what it is ("counted across indicators") — `mimikatz` and `mimikatz.exe` both reported 2,323 hits and the summary added them. The marker opens a dialog that merges the pair through `POST /api/watchlist/merge`, and only ever offers the direction that loses no rows. See docs/design/analysis-suite.md and the scan entry in store.md.
 - **Importing a list of indicators asks about the list**
   (`openWatchlistImport`). "Import…" read the ADD row's two selects — at
@@ -1549,9 +1705,37 @@ see [docs/notes/README.md](README.md) for the whole set.
 
 - **A card that resolved to nothing is a line, not a panel** (dashboard.js `empties`/`renderEmpties`, `.dash-empties`). Walked against a real KAPE collection, the first screen of the shipped triage board was two full-width cards reading "(no host facts in this RECmd output)" and "(no Defender alert events in the logs)". Nothing was wrong — neither artefact was in that collection — but the board spent its best space saying so and never said what would change it. Empty cards now fold into one dashed strip at the top of the grid, a line each, and the card itself is hidden rather than removed (`.dash-card.is-empty`) because `paintAges`, `refreshBoard` and the editor's Run now all reach a card by its INDEX among the grid's cards. Five things to know before touching it. **The two kinds of empty are not the same answer and the strip has to say which**: a `{{registry}}` placeholder that binds to nothing is a gap in the collection an import would fill, and a query that ran and matched nothing is a finding ("no Defender alerts in these logs") with nothing to import — an analyst about to write "not present" in a report needs to know whether anything looked. The distinction comes off the wire, not off the message text: `Store.MissingTable` (a ValueError subclass, so every `except ValueError` on the widget paths is unchanged) carries the header-set name, and `/api/dashboard/widget/preview` answers `400 {"message", "missing_table"}` — core.js already unwraps a structured `detail.message`, so nothing else had to change. Sniffing for "table in this case yet" would have worked until somebody reworded it. **A `stat` is never folded**: 0 is an answer, and folding "0 failed logons" away hides the reassuring half of a triage board. Nor is a `signals` card that answered any cell — a cell that could not answer already reports in its own place. **The shipped queries no longer UNION a sentinel row in.** The Host and Defender cards each appended a literal "(no …)" row so the card would not render as a blank box, and that one line is what held the full-width card; they answer with NO ROWS now and the board says why (tests/test_kape_host_widgets.py, tests/test_kape_host_overview.py pin it). A shipped or profile widget that adds a sentinel row back becomes un-foldable, by construction. **Emptiness is decided per answer, not per render**: `noteEmpty` is called from the cache paint, from every run that lands and from the editor's Run now, keyed by the card ELEMENT (a widget has no id until the store mints one, and the answers arrive out of order), and the strip repaint is rAF-coalesced for the same reason `scheduleBar` is. **The fold is lifted BEFORE the paint, not a frame after it.** `noteEmpty` is asked first and returns the empty state, so a caller paints only what it says has something to paint, and a card leaving the strip has `is-empty` taken off it synchronously there rather than on `renderEmpties`'s rAF. A folded card is `display:none`, and `bar`/`histogram` measure their canvas inside a `requestAnimationFrame` of their own — unfold a frame late and a card that finally got its rows (the RECmd batch imported, then ↻ Refresh all, which runs quiet and never calls `render()`) comes back with a chart drawn at `fit()`'s 300×150 fallback and stretched across a span-2 card, whose `drawBars` boxes `pickBar` then tests against real click offsets: clicks past ~300px drill nothing at all, and the ones that land are a row out, because the row height is the canvas height over the row count. Nothing repaints a card on resize, so it lasts until the next full `render()`. tests/ui/test_dashboard_empty_cards.py.
 
-- **A board paints from its last results, it does not re-run itself** (dashboard.js `cache`, Store `dashboard_widget_cache`) — the shipped KAPE board was 26 widgets, and opening it used to be 26 `POST /api/dashboard/widget/preview` calls, every open, every card drag and every edit of any other card (measured: 26 previews per reopen; the consolidated 10-card board is 1, the live Findings card). `GET /api/dashboards/{id}` returns the widget definitions AND the cached payloads, `render()` paints them at once and runs only the widgets carrying `"live": true`, and `↻ Refresh all` (or Run now in one widget's editor) is what re-runs the rest. Traps, in the order they bite: **widgets had no ids** — position in a JSON list was the only identity and a drag rewrites it, so `Store._mint_widget_ids` assigns one on write and `get_dashboard` back-fills one DETERMINISTICALLY on read (a random back-fill would hand a board that nobody has edited a new key on every open, and it would never see a hit). **The cache cannot live in the widget dict**: `saveToLibrary`, `saveAsProfile` and `upsert_dashboard_by_name` copy widget dicts verbatim into workspace JSON and into other cases, and `set_dashboard_widgets` clears `origin` on every write — so a payload in there would carry case A's numbers into case B and silently un-stamp a plugin-offered board. **The editor's Preview must not read the cache** (it runs an unsaved draft, and a Preview that answered from the cache is not previewing), which is why caching keys off `dashboard_id`+`widget_id` in the request rather than off `runWidget`. **A cached number with no date on it reads as a live one** — hence the bar's "As of 10:42 · 3 minutes ago", the per-card age in `.dash-mark`, and `Store.data_generation` (source count + row total + max id, read off `sources`, plus `STATE_GENERATION_KEY`, a counter the conclusion writes bump because `row_tags` and `watchlist_hits` are both WITHOUT ROWID and too big to count on every board open), which marks a result stale rather than hiding it. The counter is the half that can be FORGOTTEN, so every writer of those tables bumps it inside its own transaction — the tag delta path and its undo, but also the three writes that replace tag state wholesale and bypass that path (`delete_tag`, `import_session`, `start_new_session`), `upsert_tag` (a tags widget lists one row per definition), and the watchlist's add/delete/scan (a watchlist widget's number is the sum of the hit counts). What it does NOT cover is stated in its docstring rather than left to be discovered. **Staleness is only computed when a board loads**, so a board left open through a twenty-minute import would go on claiming to be current: `markDashboardStale()` is called from the jobs poll and the watchlist scan, and it ASKS the server rather than assuming, so a re-scan that changed nothing does not redden a board that is fine. **A board switch mid-flight** would file the old board's answers under this one's widget ids, so `boardGen` guards the write the way `S.pageGen` guards the page cache — and it guards the board's own load too: `loadWidgets` compares it after its await and tells `showDashboard` not to paint, because for months it only bumped it, and board A answering after board B had been clicked put A's cards under B's name. **What is written back goes to the board it was read from** (`widgetsBoard`), never to `S.dashboardId`: that moves at the click, while the cards on screen — the ones a drag or an edit acts on — are still the previous board's until the new widgets land, so `persist()` saving to `S.dashboardId` wrote board A's cards over board B's own with one drag (`tests/ui/test_dashboard_edit_mode.py`). **A failed ↻ Refresh keeps the numbers**: blanking every card because the server blinked throws away the only thing the cache was for, so a quiet run that fails leaves the card alone and marks it `!3m`. **A card that answered in part is not filed at all**: a widget that fails is reported and not cached so the next open retries it, and `Store._answered_in_full` applies that same rule to a `cells` payload carrying any `cell_errors` entry — cached, one cell that blinked would paint its em dash out of the case file until somebody pressed ↻. Both writers check it (`cache_widget_result`, `refresh_dashboard`) and both say "not filed" the same way, by answering without a `ran_at` — which is already the flag `runWidget` and the editor's Run now key their own cache write off. The cost is a card that can never answer in full (the five registry cells of Logging posture on a case with no RECmd batch) running again on every open, which is what a whole widget in that state already costs.
+- **A board paints from its last results, it does not re-run itself** (dashboard.js `cache`, Store `dashboard_widget_cache`) — the shipped KAPE board was 26 widgets, and opening it used to be 26 `POST /api/dashboard/widget/preview` calls, every open, every card drag and every edit of any other card (measured: 26 previews per reopen; the consolidated 10-card board is 1, the live Findings card). `GET /api/dashboards/{id}` returns the widget definitions AND the cached payloads, `render()` paints them at once and runs only the widgets carrying `"live": true`, and `↻ Refresh all` (or Run now in one widget's editor) is what re-runs the rest. Traps, in the order they bite: **widgets had no ids** — position in a JSON list was the only identity and a drag rewrites it, so `Store._mint_widget_ids` assigns one on write and `get_dashboard` back-fills one DETERMINISTICALLY on read (a random back-fill would hand a board that nobody has edited a new key on every open, and it would never see a hit). **The cache cannot live in the widget dict**: `saveToLibrary`, `saveAsProfile` and `upsert_dashboard_by_name` copy widget dicts verbatim into workspace JSON and into other cases, and `set_dashboard_widgets` clears `origin` on every write — so a payload in there would carry case A's numbers into case B and silently un-stamp a plugin-offered board. **The editor's preview must not read the cache** (it runs an unsaved draft, and a preview that answered from the cache is not previewing), which is why caching keys off `dashboard_id`+`widget_id` in the request rather than off `runWidget` — and why the live preview sends `widgetRequest(w)` bare (see the widget-editor entry below). **A cached number with no date on it reads as a live one** — hence the bar's "As of 10:42 · 3 minutes ago", the per-card age in `.dash-mark`, and `Store.data_generation` (source count + row total + max id, read off `sources`, plus `STATE_GENERATION_KEY`, a counter the conclusion writes bump because `row_tags` and `watchlist_hits` are both WITHOUT ROWID and too big to count on every board open), which marks a result stale rather than hiding it. The counter is the half that can be FORGOTTEN, so every writer of those tables bumps it inside its own transaction — the tag delta path and its undo, but also the three writes that replace tag state wholesale and bypass that path (`delete_tag`, `import_session`, `start_new_session`), `upsert_tag` (a tags widget lists one row per definition), and the watchlist's add/delete/scan (a watchlist widget's number is the sum of the hit counts). What it does NOT cover is stated in its docstring rather than left to be discovered. **Staleness is only computed when a board loads**, so a board left open through a twenty-minute import would go on claiming to be current: `markDashboardStale()` is called from the jobs poll and the watchlist scan, and it ASKS the server rather than assuming, so a re-scan that changed nothing does not redden a board that is fine. **A board switch mid-flight** would file the old board's answers under this one's widget ids, so `boardGen` guards the write the way `S.pageGen` guards the page cache — and it guards the board's own load too: `loadWidgets` compares it after its await and tells `showDashboard` not to paint, because for months it only bumped it, and board A answering after board B had been clicked put A's cards under B's name. **What is written back goes to the board it was read from** (`widgetsBoard`), never to `S.dashboardId`: that moves at the click, while the cards on screen — the ones a drag or an edit acts on — are still the previous board's until the new widgets land, so `persist()` saving to `S.dashboardId` wrote board A's cards over board B's own with one drag (`tests/ui/test_dashboard_edit_mode.py`). **A failed ↻ Refresh keeps the numbers**: blanking every card because the server blinked throws away the only thing the cache was for, so a quiet run that fails leaves the card alone and marks it `!3m`. **A card that answered in part is not filed at all**: a widget that fails is reported and not cached so the next open retries it, and `Store._answered_in_full` applies that same rule to a `cells` payload carrying any `cell_errors` entry — cached, one cell that blinked would paint its em dash out of the case file until somebody pressed ↻. Both writers check it (`cache_widget_result`, `refresh_dashboard`) and both say "not filed" the same way, by answering without a `ran_at` — which is already the flag `runWidget` and the editor's Run now key their own cache write off. The cost is a card that can never answer in full (the five registry cells of Logging posture on a case with no RECmd batch) running again on every open, which is what a whole widget in that state already costs.
+
+- **The widget editor's preview is live, and an answer belongs to a QUESTION, not to a request** (dashboard.js `openWidgetEditor`: `runPreview`, `changed`, `shown`/`asking`). The editor is in the builders' shape now — the question on the left (Data from, What to show, Table, the recipe's picks, Advanced — the SQL, Title), how it looks on the right (Render as chips, Sub-label, a Width segmented control, Run every time and the cost line) above a `.dash-card.dash-preview` that runs the same `draft()` Save stores, `PREVIEW_DELAY_MS` (500) after the last edit, with no Preview button. Things that bite. **Stale answers are dropped by comparing the answer's `questionOf` with the CURRENT draft's**, not by a sequence number bumped per edit: an edit that only changes the look (render, title, sub-label, width) does not ask again — `changed()` repaints the answer already on the card at once — so a counter bumped by that edit would discard the in-flight answer that is still right, and nothing would ever ask for it again. `asking` dedupes the one question already out (edit away and back inside the pause and the answer still paints when it lands). **There is no cancel**: `/api/dashboard/widget/preview` is a sync route with no `op_token`, so a half-typed runaway (a cross join before its WHERE) runs to the end on a server thread; the client only refuses to paint it. Making it stoppable is the SQL pane's recipe — an async route through `_run_pane_query` and an `AbortController` on the fetch — and has not been done. **The preview names no board and no widget**, so the server files nothing and an unsaved draft never replaces the number the board's card is showing (tests/ui/test_widget_editor_preview.py reads the case file's cache back after an Escape). **"Is this dialog still open?" is `b.isConnected && !#modal.hidden`**: Escape hides the modal and leaves its body in the document until the next `modal()` replaces it, so `isConnected` alone says yes to a timer that fires after the dialog closed. The first run is a `setTimeout(…, 0)` for the same reason in reverse — `modal()` unhides only after the builder returns. **A draft that cannot run says why and asks nothing** (`whyNot`: no query, a template whose column the table cannot offer, header sets still loading, a signals card with no cells); an empty answer says what the board will do with it (fold into the empty-cards line, via `emptyStateOf`/`emptyReason`) rather than drawing a box the board never shows. **Run now runs the SAVED widget**, so it repaints the preview only when the draft still asks the saved question. **Names**: `WIDGET_SOURCES` / `WIDGET_RENDERS` (dashwidgets.js) map the stored values to what the editor shows ("A query", "Signals card"; "Number", "Key / value", "Yes / no chips"…); the stored values never change, a source this version has no name for is kept as an extra option rather than becoming "A query" on Save, and an unknown render stays the widget's render with no chip pressed. **Title moved to the bottom of the left pane**, so `#modal .confirm-input` first is the recipe's Value box now — tests select the title by `.dash-title-input`, Render as by `.dash-kinds [data-render]` and Width by `.dash-width [data-span]`. Save widget is `oneAtATime` (it awaits `persist()` before closing, and a double-click pushed the widget twice). tests/ui/test_widget_editor_preview.py.
 
 - **Profiles: a two-pane manager, and a sheet in front of Apply** (bundles.js; `WS.plugin_bundles`, `/api/plugin_bundles/*`). A profile is a kind of case — plugins, boards, a starter watchlist, variable definitions — and the list this replaced was one ellipsised row per profile, with the shipped description pushing Apply and Copy off the end of it. The manager (M) is `.pm` : profiles left with a one-line count summary, the whole selected profile right — every plugin, every board with EVERY widget's render kind and whether it is `live`, the watchlist, the variables. Sections carry `data-sec` (plugins/board/watchlist/variables) because a board section is headed with the board's NAME and "Watchlist" is also the start of a widget title on the shipped board. **The sheet is the point.** Apply sets an explicit on/off override for every installed plugin (so everything not in the profile is turned OFF), upserts boards BY NAME, seeds indicators and starts a scan, and said none of it first. `GET /api/plugin_bundles/{id}/plan` counts each of those against the OPEN CASE — which plugins go on and off and how many stay off, what each board replaces and by how many widgets, which indicators are new and how many tables seeding them scans (`Store.watchlist_scan_sources`, the scan's own predicate, so the number cannot disagree with the scan), which variables are required and unset (a required one with a declared DEFAULT is not among them: the apply creates the row carrying the default, so nothing prompts for it) — and `POST .../apply` takes `parts` from `APPLY_PARTS`, so a board can be taken without the watchlist. The plugins part stays ticked even when the case's set already matches the profile, because applying writes an explicit override per installed plugin and that write is what pins the case against a later machine-wide toggle. **No body still means all four parts**: the new-case dialog's Profile select and every script predate the sheet. **"You have edited this board" is answered by `origin`**, which the profile apply now stamps `profile:<name>` — any hand edit clears it (`set_dashboard_widgets`), a board stamped by this profile is its own untouched copy and worth no warning, and a plugin offering a board of the same name still asks, because a profile stamp is not a plugin stamp. A board applied before the stamp existed reads as edited, which errs toward warning. **Which profiles this case has had applied** is a `profiles_applied` case setting (a name → timestamp map) — the badge cannot be inferred from a board of the same name, which the analyst may have built by hand. **One profile exports as one file** (`winnow-profile/1`, `{format, profile}`) the way saved filters already do, minus the id and the `shipped` flag; a SHIPPED profile exports as a copy that records its ancestry. Import REFUSES a key it does not understand rather than dropping it, and refuses a KNOWN key holding the wrong kind of value for the same reason (`PluginBundles.IMPORT_SHAPE`; `save` is permissive by design, so `"plugins": "lateral_movement"` would store one plugin per letter and a string `dashboard` would reach the manager as a board whose widgets cannot be iterated). It never upserts by name either — a file from outside must not overwrite an afternoon's work, so a taken name is suffixed `(imported)`, from a base trimmed to leave room for the suffix, since a 100-character name plus a suffix truncates back to itself and the search for a free name never ends. **Lineage**: a copy records `from_profile`/`from_version` (written by "Copy to edit" and carried through every later edit, since a content comparison would lose the thread on the first edit), `profiles.json` carries a per-profile `version`, `list()` answers `update_available` when the shipped one is newer, and the manager shows one line offering the diff. Taking it is `POST .../take_update`: always a button, never a merge — an analyst's copy and a revised shipped profile can disagree about any part of a board, and a three-way merge of SQL widgets produces a board neither of them wrote. tests/test_profile_export.py and tests/ui/test_profile_manager.py.
+
+- **The profile builder is the builders' two panes, and its Save waits
+  for its lists** (profilebuilder.js, `.pb-*`). It was one column of three
+  collapsible Settings sections, each variable a row of five boxes whose
+  only captions were placeholders — gone the moment anything was typed.
+  Left is what the profile turns on (name, Plugins, Dashboards), right is
+  what a case gets: one sentence saying what Apply will do, the variables
+  as captioned cards, and the values prompt. Four things to keep.
+  **The frame is drawn before `/api/plugins` and the board lists answer**
+  (so `modal()`'s `focus` finds the name box), which means Save exists
+  before there is anything to save: it stays disabled, and its handler
+  unwired, until the lists land — live in that gap, a click would save a
+  profile with no plugins and no boards. It used to be safe by accident,
+  since the button was only drawn after the awaits. **The preview IS the
+  prompt**: `variablePromptFields` (settings.js) builds the fields for both
+  `promptForVariables` and the builder, which renders them under `inert` —
+  a look-alike drawn here would drift the first time the prompt changed,
+  and an inert copy takes no focus and no typing. **The summary counts what Apply does, not what
+  is ticked**: a ticked plugin this machine lacks is not "turned on" (it
+  is a note instead — apply skips it), and no plugins ticked reads "Turns
+  every plugin off", because that is what the plugins part does. **The
+  name hint is about upsert-by-name**: `PluginBundles.save` matches on
+  name, so a taken name replaces that profile and renaming one while
+  editing saves a second beside it; both are said under the name box
+  before Save rather than discovered in the manager afterwards.
+  tests/ui/test_profile_builder_ui.py.
 
 - **Save a view, or a selection, as a table** (subset.js, `POST
   /api/view/save_as_table`). Two entry points, one helper: the row menu's
@@ -1680,7 +1864,8 @@ see [docs/notes/README.md](README.md) for the whole set.
   plugins…" *replaces* Settings rather than stacking on it, and the ✕ hid
   the whole thing — one level up, not where the analyst came from, for a
   dialog reached through two clicks of another one. Three dialogs now take
-  the same `returnTo` hand-off (plugins manager, Profiles, Saved filters):
+  the same `returnTo` hand-off (plugins manager, Profiles, Saved filters),
+  each naming the Settings section it came from (see the two-pane entry):
   a one-shot `winnow:modalclose` listener armed per opening, guarded by
   BOTH the title and a `pmReturn` flag on the body, plus a `‹ Settings`
   button in the foot. Both guards are load-bearing. The title, because the
@@ -1750,3 +1935,17 @@ see [docs/notes/README.md](README.md) for the whole set.
   that awaits first should take the wrapper.
   `tests/ui/test_double_click_submits_once.py` holds each POST in flight
   until the double-click is over and counts them.
+
+- **Older dialogs borrow the builders' look through two shared classes,
+  not inline styles.** The merge and lateral-movement builders set the
+  look (dim uppercase section heads, labels above fields, one accent-filled
+  main button); the older dialogs drifted from it one inline `cssText` at
+  a time — Timeframe's Start and End boxes started at different x because
+  each label sat beside its box, and every dialog's Apply looked like its
+  Cancel. `.btn.primary` is a dialog's main action (one per dialog — the
+  prompt/confirm OK, Apply, Create, Import…); `.dlg-field` is a label
+  above a full-width control, `.dlg-pair` two of them side by side,
+  `.dlg-input` a box plus its 📅. `.modal-body h4` is dim like the
+  builders' heads; the collapsible section heads (`settingsSection`, the
+  profile builder's) stay accent because they are buttons. A new dialog uses these rather than restyling a select or an
+  input inline.

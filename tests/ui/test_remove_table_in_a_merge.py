@@ -66,7 +66,8 @@ def test_removing_a_merged_table_is_refused_and_names_the_merge(page, merged):
     page.evaluate("() => __winnow.openTablesManager()")
     page.wait_for_selector("#modal:not([hidden]) .tables-row", timeout=10_000)
     row = page.locator("#modal .tables-row", has_text="second.csv").first
-    row.locator("button", has_text="Remove").click()
+    row.locator(".tables-more").click()
+    page.locator(".menu .menu-item", has_text="Remove…").click()
 
     dlg = page.locator(".confirm-overlay")
     dlg.wait_for(state="visible", timeout=10_000)

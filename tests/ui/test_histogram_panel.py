@@ -219,7 +219,7 @@ def test_the_button_tooltips_follow_a_rebinding(page):
     assert '"r" to toggle' in tr.get_attribute("title")
     page.keyboard.press("?")
     page.wait_for_selector("#modal:not([hidden])")
-    page.click(".settings-section-head:has-text('Keyboard shortcuts')")
+    page.click("#modalBody .settings-nav-item:has-text('Keyboard shortcuts')")
     hrow = page.locator(".settings-key-row", has_text="histogram")
     trow = page.locator(".settings-key-row", has_text="Toggle the timeframe filter")
     assert hrow.count() == 1 and trow.count() == 1

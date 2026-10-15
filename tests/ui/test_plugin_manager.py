@@ -73,7 +73,7 @@ def test_settings_keeps_one_line_and_a_button(page):
     a list of seven rows inside an accordion inside a shared dialog."""
     page.evaluate("() => __winnow.openSettings()")
     page.wait_for_selector("#modal:not([hidden])")
-    page.click(".settings-section-head:has-text('Plugins')")
+    page.click("#modalBody .settings-nav-item:has-text('Plugins')")
     page.wait_for_selector("#modalBody .settings-line", state="attached")
     line = page.evaluate("() => document.querySelector('#modalBody .settings-line-text').textContent")
     assert "installed" in line and " on of " in line, line

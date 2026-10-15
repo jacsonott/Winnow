@@ -125,7 +125,7 @@ def test_resetting_the_keymap_actually_resets_it(page):
     now-polluted defaults straight back."""
     page.keyboard.press("?")
     page.wait_for_selector("#modal:not([hidden])")
-    page.click(".settings-section-head:has-text('Keyboard shortcuts')")
+    page.click("#modalBody .settings-nav-item:has-text('Keyboard shortcuts')")
     row = page.locator(".settings-key-row").first
     before = row.inner_text()
 
@@ -220,6 +220,11 @@ def test_month_name_timestamps_parse_client_side(page):
     assert page.evaluate("() => __winnow.parseTimestamp('June 23, 2026 5:11 PM').h") == 17
     assert page.evaluate("() => __winnow.parseTimestamp('23 Jun 2026').d") == 23
     assert page.evaluate("() => __winnow.parseTimestamp('Monday 23 2026')") is None
+    # The day as an ordinal, either order, read as TS_NORMALIZE reads it.
+    got = page.evaluate("() => __winnow.parseTimestamp('Jul 28th 2026 01:02:22')")
+    assert got == {"y": 2026, "mo": 7, "d": 28, "h": 1, "mi": 2, "s": 22, "frac": ""}
+    assert page.evaluate("() => __winnow.parseTimestamp('July 1ST, 2026 5:11 PM').h") == 17
+    assert page.evaluate("() => __winnow.parseTimestamp('3rd Sep 2026').d") == 3
 
 
 def test_a_fractional_or_dotted_pm_is_an_afternoon_client_side(page):
@@ -305,8 +310,8 @@ def test_settings_no_longer_duplicates_the_saved_filters_list(page):
     alone."""
     page.keyboard.press("?")
     page.wait_for_selector("#modal:not([hidden])")
-    page.click(".settings-section-head:has-text('Saved filters')")
-    sec = page.locator(".settings-section:has(.settings-section-head:has-text('Saved filters'))")
+    page.click("#modalBody .settings-nav-item:has-text('Saved filters')")
+    sec = page.locator("#modalBody .settings-pane[data-section='filters']")
     assert sec.locator(".session-row, .sf-row").count() == 0
     sec.locator(".btn", has_text="Open saved filters").click()
     page.wait_for_selector(".sf-group-head")

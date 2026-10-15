@@ -173,7 +173,7 @@ def test_a_tag_deleted_from_the_editor_leaves_no_stripe_on_its_rows(page, api):
         page.evaluate("() => __winnow.render()")
         assert page.locator(".row[data-pos='1'] .gutter .stripe").count() == 1
         page.evaluate("() => __winnow.openTagEditor()")
-        rows = page.locator("#modalBody .row-actions")
+        rows = page.locator("#modalBody .tag-edit-row")
         mine = next(i for i in range(rows.count()) if rows.nth(i).locator("input").nth(1).input_value() == name)
         rows.nth(mine).locator("button", has_text="Delete").click()
         page.wait_for_selector(".confirm-overlay")

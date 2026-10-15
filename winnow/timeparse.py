@@ -53,6 +53,20 @@ MONTHS = {
     "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
 }
 
+# An English month name, abbreviated or in full ("Sept" too), for patterns
+# compiled case-insensitively. Strict, so a weekday or a word that only
+# starts like a month is not one; its first three letters are its MONTHS
+# key. store.py's month-name family (DATE_RE, _TS_MONTH_RE) is built on
+# this same alternation, and tsformat.js mirrors it.
+MONTH_NAME = (r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?"
+              r"|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)")
+
+# The ordinal suffix a day of the month may be written with, "Jul 28th
+# 2026", for patterns compiled case-insensitively; optional. Which suffix
+# goes with which number is not checked: "21th" still names the 21st, and
+# refusing it would turn a typo into a missing timestamp.
+ORDINAL = r"(?:st|nd|rd|th)?"
+
 # Same plausibility window store.py's _webkit_to_iso uses: a numeric value
 # only counts as a timestamp in some unit if the resulting date is one an
 # analyst could plausibly be looking at. This is also what makes epoch
@@ -754,6 +768,40 @@ register_op({
 })
 
 
+# Month first, as US-English writes a date out in words. The year must be
+# four digits, so a year-less syslog line ("Jul 28 01:02:22") is not one.
+_MMM_DD_RE = re.compile(
+    r"^(" + MONTH_NAME + r")\.?\s+(\d{1,2})" + ORDINAL + r"\s*,?\s*(\d{4})[ ,]+"
+    r"(\d{1,2}):(\d{2})(?::(\d{2})(?:[.,](\d+))?)?\s*(?:" + MERIDIEM + r")?",
+    re.IGNORECASE)
+
+
+def _parse_mmm_dd(value: Any, params: dict, state: dict) -> str | None:
+    s = str(value).strip()
+    m = _MMM_DD_RE.match(s)
+    if not m:
+        return None
+    name, d, y, h, mi, sec, frac, ampm = m.groups()
+    try:
+        dt = datetime(int(y), MONTHS[name[:3].lower()], int(d), hour24(int(h), ampm),
+                      int(mi), int(sec or 0), int(frac[:6].ljust(6, "0")) if frac else 0)
+    except ValueError:
+        return None
+    dt = _zoned(dt, s[m.end():], params)
+    return None if dt is None else _fmt(dt, subsecond=bool(frac))
+
+
+register_op({
+    "id": "mmm_dd_yyyy",
+    "label": "Mmm dd yyyy hh:mm:ss",
+    "description": "e.g. \"Jul 28th 2026 01:02:22\" or \"July 28, 2026 1:02 PM\". English month names, abbreviated or in full; "
+                   "the day may carry 1st/2nd/3rd/th. Optional AM/PM. A trailing offset (+0200, UTC) is converted to UTC.",
+    "params": [_UTC_OFFSET_PARAM],
+    "subsecond": True,
+    "parse": _parse_mmm_dd,
+})
+
+
 _COMPACT_RE = re.compile(r"^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})$")
 
 
@@ -799,11 +847,25 @@ def _parse_mac(value: Any, params: dict, state: dict) -> str | None:
     return _fmt(dt, subsecond="." in s)
 
 
+# Detection only: the smallest value detection will call Cocoa time,
+# 2004-03-03. Mac time is the one numeric encoding whose epoch sits INSIDE
+# the plausible window, so every small number parses as a moment just
+# after 2001-01-01 — and in evidence a column of small numbers is a record
+# number, an event id, a process id or a duration in seconds far more often
+# than a Cocoa timestamp from the first three years of OS X. EvtxECmd's
+# RecordNumber (1, 2, 3…) was offered as "Mac absolute (Cocoa) time — 100%
+# of sampled values parse". Floored by magnitude rather than by "is it a
+# whole number" because durations carry fractions.
+_MAC_DETECT_FLOOR = 100_000_000
+
+
 def _parse_mac_for_detect(value: Any, params: dict, state: dict) -> str | None:
-    # Detection still scores negatives as misses: a column of small negative
-    # integers is a -1 sentinel far more often than 1990s Cocoa time, and a
-    # post-import "this looks like Mac time" hint for it would be noise.
-    if str(value).strip().startswith("-"):
+    # Below the floor is a miss, and that includes every negative: a column
+    # of small negative integers is a -1 sentinel far more often than 1990s
+    # Cocoa time. The parser itself still reads all of these — an analyst
+    # who picks the operation for such a column gets what they asked for.
+    v = _finite(str(value).strip())
+    if v is None or v < _MAC_DETECT_FLOOR:
         return None
     return _parse_mac(value, params, state)
 
@@ -835,6 +897,19 @@ def _parse_excel(value: Any, params: dict, state: dict) -> str | None:
     return _fmt(_shift_naive(dt, params), subsecond=False)
 
 
+def _parse_excel_for_detect(value: Any, params: dict, state: dict) -> str | None:
+    # Detection only, the same trap as _MAC_DETECT_FLOOR: Excel's whole
+    # plausible window is 32874–73050, and a whole number in it is an
+    # event record id, a process id or an ephemeral port (49152–65535 is
+    # 2034–2079) far more often than a date-only serial — a spreadsheet
+    # date that reaches a CSV with no time of day usually arrives as text.
+    # A serial with a fraction is still a candidate, and the parser still
+    # reads a whole one for an analyst who picks the operation.
+    if _WHOLE_RE.match(str(value).strip()):
+        return None
+    return _parse_excel(value, params, state)
+
+
 register_op({
     "id": "excel_serial",
     "label": "Excel serial date",
@@ -842,6 +917,7 @@ register_op({
     "params": [_UTC_OFFSET_PARAM],
     "subsecond": False,
     "parse": _parse_excel,
+    "detect": _success_rate_detect({"parse": _parse_excel_for_detect}),
 })
 
 

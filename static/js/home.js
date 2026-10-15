@@ -318,7 +318,7 @@ export function openFolderBrowser(startPath, onSelect, onCancel, { mode = 'folde
     b.append(status);
 
     const actions = el('div', 'row-actions');
-    const useBtn = el('button', 'btn', filesMode ? 'Add selected' : 'Use this folder');
+    const useBtn = el('button', 'btn primary', filesMode ? 'Add selected' : 'Use this folder');
     const paintUse = () => {
       if (!filesMode) return;
       useBtn.disabled = !picked.size;
@@ -594,7 +594,7 @@ export function openNewCaseModal(state = {}) {
 
 
     const actions = el('div', 'row-actions');
-    const create = el('button', 'btn', saving ? 'Save case' : 'Create case');
+    const create = el('button', 'btn primary', saving ? 'Save case' : 'Create case');
     create.onclick = oneAtATime(create, async () => {
       const name = nameInput.value.trim();
       if (!name) { toast('Name the case first'); return; }
@@ -727,7 +727,7 @@ export function openExistingCasePrompt(state = {}) {
     b.append(el('p', 'fb-help', 'Registers the case on this machine\u2019s list and opens it.'));
 
     const actions = el('div', 'row-actions');
-    const openBtn = el('button', 'btn', 'Open');
+    const openBtn = el('button', 'btn primary', 'Open');
     openBtn.onclick = oneAtATime(openBtn, async () => {
       const trimmed = pathInput.value.trim();
       if (!trimmed) { toast('Enter or browse to a case file'); return; }
@@ -775,7 +775,7 @@ export function openEditCaseModal(c) {
     b.append(el('div', 'note-status', c.path));
 
     const actions = el('div', 'row-actions');
-    const save = el('button', 'btn', 'Save');
+    const save = el('button', 'btn primary', 'Save');
     save.onclick = async () => {
       try {
         await api(`/api/cases/${c.id}`, {
@@ -1107,7 +1107,7 @@ export function openQuickLookExitDialog() {
       'Quick looks never appear in the case list, so there is no way back to this one '
       + 'from the home screen. Choose what happens to it first:'));
     const acts = el('div', 'row-actions');
-    const save = el('button', 'btn', 'Save as a case…');
+    const save = el('button', 'btn primary', 'Save as a case…');
     // The save dialog replaces this one; Cancel there comes back here.
     save.onclick = () => tempSaveAs({
       onSaved: async () => { showHome(); await refreshCases(); },

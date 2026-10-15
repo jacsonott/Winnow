@@ -167,10 +167,10 @@ Contains and Advanced search use a substring index that builds in the
 background after a table is imported, or the first time you search it.
 Until it's ready, search still gives the right answers, just by scanning
 every row, and the hint in the search box reads `substring · index
-building`. **Case ▾ → Tables…** shows each table's index as **⏳ Building…**
-or **✓ Ready**. Regex search always scans.
+building`. **Case ▾ → Tables…** shows each table's index as **indexing…**
+or **index ready**. Regex search always scans.
 
-If an index never builds and **Tables…** keeps saying **Not started**, the
+If an index never builds and **Tables…** keeps saying **not indexed yet**, the
 Python running Winnow has a SQLite older than 3.45, which can't use the
 index. Search still works at scanning speed. Check the version with:
 
@@ -193,7 +193,7 @@ importing](Cases-and-importing.md) explains each.
 
 ### Scrolling is slow over Remote Desktop
 
-Turn on **Settings → Appearance → Remote session mode**. It scrolls the
+Turn on **Settings → Remote session → Remote session mode**. It scrolls the
 grid a whole row at a time and stops animations and hover effects, so the
 remote display has far less to send. It's saved for the machine.
 

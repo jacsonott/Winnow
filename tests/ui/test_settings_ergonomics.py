@@ -1,6 +1,6 @@
-"""Settings, the small things: Shut down arrives open, the card is no
-taller than its sections, the skin tile is clickable, and Saved filters
-opened from here comes back here."""
+"""Settings, the small things: one section shown and the list says which,
+the card holds still while sections change, the skin tile is clickable,
+and Saved filters opened from here comes back here."""
 
 from __future__ import annotations
 
@@ -12,42 +12,53 @@ pytestmark = pytest.mark.ui
 def _open_settings(page):
     page.keyboard.press("?")
     page.wait_for_selector("#modal:not([hidden])")
-    page.wait_for_selector("#modalBody .settings-section")
+    page.wait_for_selector("#modalBody .settings-nav-item")
 
 
-def test_shut_down_is_open_on_arrival_and_everything_else_is_not(page):
+def test_one_section_is_shown_and_the_list_says_which(page):
     _open_settings(page)
-    heads = page.locator("#modalBody .settings-section-head")
-    states = {heads.nth(i).locator(".settings-section-title").inner_text().strip().lower():
-              heads.nth(i).get_attribute("aria-expanded") for i in range(heads.count())}
-    assert states["shut down"] == "true", states
-    assert all(v == "false" for k, v in states.items() if k != "shut down"), states
+    items = page.locator("#modalBody .settings-nav-item")
+    states = {items.nth(i).inner_text().strip().lower(): items.nth(i).get_attribute("aria-selected")
+              for i in range(items.count())}
+    assert list(states.values()).count("true") == 1, states
+    assert all(v in ("true", "false") for v in states.values()), states
+    # The pane on screen is the one the selected item names.
+    shown = page.locator("#modalBody .settings-pane:not([hidden])")
+    assert shown.count() == 1
+    assert shown.get_attribute("aria-labelledby") == \
+        page.locator("#modalBody .settings-nav-item[aria-selected='true']").get_attribute("id")
+    # Shut down — the thing Settings is often opened for on the way out —
+    # is one click away, at the bottom of the list.
+    page.locator("#modalBody .settings-nav-item", has_text="Shut down").click()
     assert page.locator("#modalBody .btn.danger", has_text="Shut down Winnow").is_visible()
     page.keyboard.press("Escape")
 
 
-def test_the_card_is_sized_to_its_content_not_to_the_viewport(page):
+def test_the_card_holds_still_while_sections_change(page):
+    """A card sized to its content re-centres (or regrows) on every
+    change, so the header jumped. The panes are a fixed height instead:
+    from Shut down's one button to the keymap's forty rows, the card is
+    the same box, and the long section scrolls inside its own pane."""
     _open_settings(page)
-    card = page.locator(".modal-card").bounding_box()
     vh = page.evaluate("() => window.innerHeight")
-    # Eleven collapsed headers and one open section fit without a scroll
-    # — the card ends at its content, not at the 82vh it used to be pinned to.
-    assert card["height"] < vh * 0.82 - 20, (card["height"], vh)
+    page.locator("#modalBody .settings-nav-item", has_text="Shut down").click()
+    short = page.locator(".modal-card").bounding_box()
+    page.locator("#modalBody .settings-nav-item", has_text="Keyboard shortcuts").click()
+    page.wait_for_selector(".settings-pane[data-section='keys'] .settings-keys")
+    long = page.locator(".modal-card").bounding_box()
+    for k in ("x", "y", "width", "height"):
+        assert abs(long[k] - short[k]) < 1, (k, short, long)
+    assert long["height"] <= vh * 0.82 + 1
+    # The body itself never scrolls; the section's pane does.
     assert page.evaluate("() => { const b = document.getElementById('modalBody'); return b.scrollHeight <= b.clientHeight + 1; }")
-    top_before = card["y"]
-    # Opening a section grows the card downward; the top edge stays put.
-    page.click(".settings-section-head:has-text('Keyboard shortcuts')")
-    page.wait_for_selector(".settings-keys")
-    after = page.locator(".modal-card").bounding_box()
-    assert after["height"] > card["height"]
-    assert abs(after["y"] - top_before) < 2, (after["y"], top_before)
-    assert after["height"] <= vh * 0.82 + 1
+    assert page.evaluate("""() => { const p = document.querySelector('#modalBody .settings-pane:not([hidden])');
+      return p.scrollHeight > p.clientHeight + 50 && getComputedStyle(p).overflowY === 'auto'; }""")
     page.keyboard.press("Escape")
 
 
 def test_clicking_the_skin_tile_opens_the_picker(page):
     _open_settings(page)
-    page.click(".settings-section-head:has-text('Appearance')")
+    page.click("#modalBody .settings-nav-item:has-text('Appearance')")
     tile = page.locator(".appearance-current .style-card-static")
     assert tile.count() == 1
     assert page.evaluate("() => getComputedStyle(document.querySelector('.appearance-current .style-card-static')).cursor") == "pointer"
@@ -58,12 +69,13 @@ def test_clicking_the_skin_tile_opens_the_picker(page):
     assert abs(page.locator(".modal-card").bounding_box()["y"] - top_before) < 2
     page.locator("#modalBody .btn", has_text="Done").click()
     page.wait_for_function("() => document.getElementById('modalTitle').textContent === 'Settings'")
+    assert page.locator("#modalBody .settings-pane:not([hidden])").get_attribute("data-section") == "appearance"
     page.keyboard.press("Escape")
 
 
 def test_saved_filters_opened_from_settings_returns_to_settings(page):
     _open_settings(page)
-    page.click(".settings-section-head:has-text('Saved filters')")
+    page.click("#modalBody .settings-nav-item:has-text('Saved filters')")
     page.locator("#modalBody .btn", has_text="Open saved filters…").click()
     page.wait_for_function("() => document.getElementById('modalTitle').textContent === 'Saved filters'")
     # A way back in the footer...
@@ -72,6 +84,7 @@ def test_saved_filters_opened_from_settings_returns_to_settings(page):
     page.click("#modalClose")
     page.wait_for_function("() => document.getElementById('modalTitle').textContent === 'Settings'")
     assert page.locator("#modal").is_visible()
+    assert page.locator("#modalBody .settings-pane:not([hidden])").get_attribute("data-section") == "filters"
     # Closing Settings itself closes for real — the hook was one-shot.
     page.click("#modalClose")
     page.wait_for_selector("#modal", state="hidden")
@@ -91,7 +104,7 @@ def test_escape_on_a_confirm_inside_saved_filters_stays_there(page):
     """The confirm's own Escape closes the confirm; the keymap's must not
     also close the modal behind it (and so bounce to Settings)."""
     _open_settings(page)
-    page.click(".settings-section-head:has-text('Saved filters')")
+    page.click("#modalBody .settings-nav-item:has-text('Saved filters')")
     page.locator("#modalBody .btn", has_text="Open saved filters…").click()
     page.wait_for_function("() => document.getElementById('modalTitle').textContent === 'Saved filters'")
     page.evaluate("() => { __winnow.confirmDialog('Keep going?'); }")   # not awaited: it resolves when the dialog closes

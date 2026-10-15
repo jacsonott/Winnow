@@ -1,12 +1,13 @@
 /* First/Last tab — group events, keep each group's bookends.
 
    The pivot tab's interaction model, applied here: drag fields from the
-   list into Group rows on / Ordered by / Include columns / Filters (click
-   works too — placeMenu is the keyboard/trackpad path), several bookend
-   sheets live as sub-tabs so two groupings can be compared without saving
-   either, and the result actions sit top-right on the bar. The preview
-   table is a working surface, not a printout: drag its included-column
-   headers to reorder the output, click/Shift/Ctrl rows to select, Ctrl+C
+   list into Group rows on / Ordered by / Include columns / Filters (or
+   click one: placeMenu, a small menu under the field, is the keyboard and
+   trackpad path), several bookend sheets live as sub-tabs so two
+   groupings can be compared without saving either, and the result
+   actions sit top-right on the bar. The preview table is a working
+   surface, not a printout: drag its included-column headers to reorder
+   the output, click/Shift/Ctrl rows to select, Ctrl+C
    copies the selection as TSV. "Copy result" copies the ENTIRE result
    (the backend's rows route — the preview shows only the first few
    groups); "Create table…" lands it as a normal Winnow source and can
@@ -827,13 +828,11 @@ export default function mount(container, winnow) {
     fieldList.replaceChildren();
     for (const col of cols) {
       if (needle && !col.name.toLowerCase().includes(needle)) continue;
-      const c = chip(col.name, { title: `${col.name} — ${col.type}` });
+      const c = chip(col.name, { title: `${col.name} — ${col.type} · click to place it, or drag it to a zone` });
       const type = el('span', 'count', col.type === 'number' ? '#' : col.type === 'datetime' ? '🕑' : '');
       c.insertBefore(type, c.firstChild);
       wireDragSource(c, { from: 'list', name: col.name });
-      // Click-to-place: drag isn't reachable from a keyboard and is fiddly
-      // on a trackpad.
-      c.onclick = () => placeMenu(col.name);
+      wirePlace(c, col.name);
       fieldList.append(c);
     }
     if (!fieldList.children.length) {
@@ -915,20 +914,73 @@ export default function mount(container, winnow) {
     });
   }
 
-  function placeMenu(name) {
-    modal(`Place ${name}`, (b) => {
-      b.append(el('p', 'note-status', 'Drag works too — this is the click-only path.'));
-      const acts = el('div', 'row-actions');
-      for (const [id, label] of ZONES) {
-        const btn = el('button', 'btn ghost', label);
-        btn.onclick = () => {
-          document.getElementById('modal').hidden = true;
-          addField({ from: 'list', name }, id);
-        };
-        acts.append(btn);
-      }
-      b.append(acts);
+  /* Click-to-place: drag isn't reachable from a keyboard and is fiddly
+     on a trackpad. The field is focusable, and Enter or Space opens the
+     same menu a click does. */
+  function wirePlace(c, name) {
+    c.tabIndex = 0;
+    c.setAttribute('role', 'button');
+    c.setAttribute('aria-haspopup', 'menu');
+    c.onclick = () => placeMenu(c, name);
+    c.addEventListener('keydown', (e) => {
+      if ((e.key !== 'Enter' && e.key !== ' ') || e.target !== c) return;
+      e.preventDefault();   // Space would scroll the rail
+      if (!e.repeat) placeMenu(c, name, { fromKey: true });
     });
+  }
+
+  /* Why a zone will not take this field, or null — only the rules addField
+     (and the backend behind it) already apply, said before the click
+     rather than after it: a zone the field is already in is a no-op, Total
+     up refuses a column that is not a number (addField's toast), and Group
+     rows on stops at the backend's group-column limit (a 400 on the next
+     preview otherwise). */
+  function placeBlocked(name, zone) {
+    if (zone === 'sort') return state.sortColumn === name ? 'Already there' : null;
+    if (zone === 'filters') return state.filters.some((f) => f.column === name) ? 'Already there' : null;
+    if (state[zone].includes(name)) return 'Already there';
+    if (zone === 'sums') {
+      const col = (currentSource()?.columns || []).find((c) => c.name === name);
+      if (!col || col.type !== 'number') return 'Not a number column';
+    }
+    const most = state.meta?.limits?.group_cols;
+    if (zone === 'groupBy' && most && state.groupBy.length >= most) return `Full — ${most} columns at most`;
+    return null;
+  }
+
+  /* The zones as a small menu under the field — the app's own dropdown
+     (winnow.dropdownMenu), so Escape, an outside click and the arrow keys
+     behave as every other menu in Winnow does. It was a modal titled
+     "Place <field>", which is a whole dialog for one click and covered the
+     zones being arranged. Each item does exactly what dropping the field
+     on that zone does (addField). */
+  function placeMenu(anchor, name, { fromKey = false } = {}) {
+    const items = ZONES.map(([id, label, hint]) => {
+      const why = placeBlocked(name, id);
+      const item = {
+        label,
+        title: hint,
+        disabled: !!why,
+        onclick: () => {
+          addField({ from: 'list', name }, id);
+          // renderControls rebuilt the list, so the focused field is a new
+          // node; a keyboard pick goes back to it rather than to <body>
+          // (unless the pick opened a dialog — Filters does).
+          if (fromKey) refocusField(name);
+        },
+      };
+      if (why) item.desc = why;
+      // Ordered by is one slot: a pick replaces what is there.
+      else if (id === 'sort' && state.sortColumn) item.desc = `Replaces ${state.sortColumn}`;
+      return item;
+    });
+    winnow.dropdownMenu(anchor, [{ header: 'Place in' }, ...items]);
+  }
+
+  function refocusField(name) {
+    if (!document.getElementById('modal').hidden) return;
+    const again = [...fieldList.children].find((n) => n.dataset.field === name);
+    if (again) again.focus();
   }
 
   /* Tag filter — its own control rather than a column filter, because tags
@@ -1024,7 +1076,7 @@ export default function mount(container, winnow) {
         renderControls();
         schedule();
       };
-      const apply = el('button', 'btn', 'Apply');
+      const apply = el('button', 'btn primary', 'Apply');
       apply.style.marginTop = '12px';
       apply.onclick = applyNow;
       b.append(apply);
@@ -1390,7 +1442,11 @@ export default function mount(container, winnow) {
       const defaultName = src ? `First-Last of ${labelOf(src)}` : 'First-Last';
       const name = el('input', 'confirm-input');
       name.placeholder = defaultName;
-      b.append(el('label', null, 'Table name'), name);
+      // Label above a full-width box (the host's .dlg-field), so the default
+      // name in the placeholder isn't cut off by a box sized to share a row.
+      const nameField = el('div', 'dlg-field');
+      nameField.append(el('label', null, 'Table name'), name);
+      b.append(nameField);
 
       const tlRow = el('label');
       tlRow.style.cssText = 'display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;margin-top:10px';
@@ -1399,17 +1455,19 @@ export default function mount(container, winnow) {
       tlRow.append(tlCb, el('span', null, 'Add these rows to the Timeline (tags every row)'));
       b.append(tlRow);
       const tagName = el('input', 'confirm-input');
-      tagName.style.display = 'none';
-      b.append(tagName);
+      const tagField = el('div', 'dlg-field');
+      tagField.style.display = 'none';
+      tagField.append(tagName);
+      b.append(tagField);
       tlCb.onchange = () => {
-        tagName.style.display = tlCb.checked ? '' : 'none';
+        tagField.style.display = tlCb.checked ? '' : 'none';
         if (tlCb.checked && !tagName.value) tagName.value = name.value.trim() || defaultName;
       };
       b.append(el('p', 'fb-help', 'The Timeline shows every tagged row across the case — the tag '
         + '(created if needed) is what places these bookends on it, and the rail/tag ribbon pick it up too.'));
 
       const acts = el('div', 'row-actions');
-      const go = el('button', 'btn', 'Create table');
+      const go = el('button', 'btn primary', 'Create table');
       go.onclick = async () => {
         go.disabled = true;
         try {

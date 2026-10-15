@@ -12,7 +12,7 @@ If nothing is left, the grid shows **No rows match** with a **Clear filters** bu
 
 By default every column has a filter box under its header. Type into one and the grid updates as you type. `Enter` commits the filter and puts the focus back on the grid. `Escape` clears that box.
 
-If you prefer a less crowded header, turn off **Settings → Appearance → Always-on filter row**. A filter bar then appears above the grid. It shows only the filters you have set, as chips you can click to edit or remove with ✕. To filter a new column, click the ⌕ on its header, or use **+ filter a column…**, which lists every visible column and lets you type to find one.
+If you prefer a less crowded header, turn off **Settings → Grid & layout → Always-on filter row**. A filter bar then appears above the grid. It shows only the filters you have set, as chips you can click to edit or remove with ✕. To filter a new column, click the ⌕ on its header, or use **+ filter a column…**, which lists every visible column and lets you type to find one.
 
 To filter from a cell, select it and press `f` to filter its column to that value. `F` does the same but drops every other filter first. Right-click a cell for the same choices, worded **Narrow to this value**, **Reset to this value** and **Exclude this value**, plus **Filter by values…**, which opens the value picker. **Reset to this value** keeps the timeframe.
 
@@ -43,7 +43,7 @@ Equals (`=`), not-equals (`!=`) and lists (`a|b|c`) compare the exact text, case
 
 ### Numbers, dates and text
 
-When a table is imported, Winnow decides each column's type from its first 500 rows. A column is a number column if every non-empty value in that sample is a plain number such as `-12` or `3.5`. It is a datetime column if at least 80% of the sampled values look like dates. Every other column is text. You can see each column's type in the table menu (`C`, or right-click a tab).
+When a table is imported, Winnow decides each column's type from its first 500 rows. A column is a number column if every non-empty value in that sample is a plain number such as `-12` or `3.5`. It is a datetime column if at least 80% of the sampled values look like dates. Every other column is text. You can see each column's type in the table menu (`C`, or right-click a tab and choose **Columns…**).
 
 The comparison filters (`>`, `>=`, `<`, `<=`) compare numbers only on number columns. On a text column they compare text, character by character, so `>1000` counts `30` and `N/A` as greater than `1000`. On a number column, a cell that isn't a number (such as `N/A` or a blank) never matches a comparison, and typing something that isn't a number after the operator shows a "Filter error" message.
 
@@ -110,7 +110,14 @@ To step through the saved filters made for exactly this table's columns, press `
 
 Applying a saved filter replaces the builder's conditions, the search and the grouping. It leaves the column boxes, the tag filter and the timeframe as they were, so a host filter in a column box keeps narrowing each saved filter you step through.
 
-**Filters ▾ → Saved filters…** opens the full list, grouped by column set, with the open table's set first. From there you can apply, **Edit** (opens it in the builder, where `Update "name"` saves over it and **Save as new…** keeps both), **Rename**, reorder with ▲/▼ or by dragging, and delete with ✕. **Export filters…** and **Import filters…** move them between machines as a JSON file. The same buttons are in **Settings → Saved filters**.
+**Filters ▾ → Saved filters…** opens the full list, grouped by column set, with the open table's set first. Click a filter's name to apply it. Drag a filter up or down within its column set to change the order `[` and `]` step through. Each filter's **⋯** menu has:
+
+- **Edit…**: applies the filter to the open table and opens it in the builder, where `Update "name"` saves over it and **Save as new…** keeps both. It needs a table open.
+- **Rename…**
+- **Move up** and **Move down**: the same reordering as dragging, from the keyboard.
+- **Delete…**, which asks first.
+
+**Export filters…** and **Import filters…** move them between machines as a JSON file. The same buttons are in **Settings → Saved filters**.
 
 ### Shipped triage filters
 
@@ -126,19 +133,18 @@ A few of them also group the result: `EVTX — PowerShell` and `EVTX — BITS tr
 
 ## The timeframe filter
 
-The timeframe filter keeps rows whose timestamp falls inside a range. Click **⏱ Timeframe** or press `R` to set it:
+The timeframe filter keeps rows whose timestamp falls inside a range. Click **⏱ Timeframe** or press `R` to set it, then click **Apply**, which always turns it on:
 
-- **Enabled** turns it on or off.
 - **Keep applied when switching tables** decides whether the timeframe follows you to the next table (see below). It is on by default and is saved as soon as you click it.
 - **Column** is one datetime column, or **All datetime columns (catches a match on any of them)**. With all columns, a row is kept if any of its timestamps is in range, which catches a file whose creation time was changed but whose modified time wasn't.
 - **Start** and **End** take `YYYY-MM-DD HH:MM:SS` in 24-hour time. A date alone, or a date with `HH:MM`, also works, and you can set only one end. The 📅 button opens a date picker.
-- **From tagged rows** with **Fill range** sets the range to the earliest and latest timestamps among your tagged rows (all tags, or only the tags you toggle).
+- **From tagged rows** with **Fill range** sets the range to the earliest and latest timestamps among your tagged rows (all tags, or only the tags you toggle). It only fills the boxes; **Apply** still turns the filter on.
 
 Both ends are inclusive. A date without a time means midnight at the start of that day, so an end of `2024-01-05` stops at `2024-01-05 00:00:00`. To include the whole day, end at `2024-01-05 23:59:59`.
 
-The timeframe understands timestamps written as `2024-01-05 13:22:01` (or with a `T`), US-style `1/5/2024 1:22:01 PM`, and month names such as `Jan 5 2024`. Fractions of a second and time-zone offsets in the data are ignored: the comparison uses the date and time as written. Rows whose timestamp can't be read are left out while the timeframe is on.
+The timeframe understands timestamps written as `2024-01-05 13:22:01` (or with a `T`), US-style `1/5/2024 1:22:01 PM`, and month names such as `Jan 5 2024` or `Jan 5th, 2024 1:22 PM`. Fractions of a second and time-zone offsets in the data are ignored: the comparison uses the date and time as written. Rows whose timestamp can't be read are left out while the timeframe is on.
 
-The timeframe stays on when you clear filters, apply a saved filter or reset the view, and the button shows ⏱ followed by the column name while it is active. Press `r` to toggle it off and on without losing the range. **Clear** in the dialog removes it. A table with no datetime column is not narrowed by it at all.
+The timeframe stays on when you clear filters, apply a saved filter or reset the view, and the button shows ⏱ followed by the column name while it is active. Press `r` to turn it off without losing the range, and `r` again to turn it back on; opened while it is off, the dialog says *Off right now — Apply turns it back on.* **Clear** in the dialog removes it. A table with no datetime column is not narrowed by it at all.
 
 What happens when you switch tables depends on **Keep applied when switching tables**:
 

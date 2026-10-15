@@ -41,7 +41,7 @@ Things to know before you rely on one:
 | From | Do this |
 | --- | --- |
 | A column header | Right-click the header → **Derive a column from this…** |
-| The table menu | Right-click the table's tab (or press `C`, that is Shift+C) → **Columns** → **Add derived column…** |
+| The table menu | Press `C` (that is Shift+C), or right-click the table's tab and choose **Columns…**, then **Columns** → **Add derived column…** |
 | The detail pane | Right-click a field inside a JSON or XML document → **Add as a column** |
 | After an import | When a column looks like a timestamp Winnow can't already read, a notice says so; click **Add datetime column** |
 | A whole document | Right-click the header → **Flatten JSON/XML into columns…**, or right-click a document node in the detail pane → **Flatten this document into columns…** |
@@ -58,7 +58,11 @@ Work down the dialog from the top:
    **Join from another table**, **Compare (elapsed time)** or **Combine
    columns**.
 2. **Operation** — the specific conversion, listed in the tables below.
-3. **Parse column** — the column to read.
+3. **Parse column** — the column to read. Opened from a header it is that
+   column. Opened from the table menu it starts on the first column that
+   looks like a timestamp: a datetime column, else one whose values or
+   name (`visit_time`, `Created`, `Epoch`) suggest a time, else the first
+   column.
 4. The operation's own settings, if any (required ones are marked `*`).
 5. **New column name** — prefilled as `Column (parsed)`, `Column
    (extract)`, `Column elapsed` and so on. A name the table already has, in
@@ -68,7 +72,10 @@ Work down the dialog from the top:
 When the type is **Timestamp**, Winnow tries every format against the
 column and picks the best one for you: *Suggested: Unix epoch — 100% of
 sampled values parse.* Check the preview anyway. Some numbers are valid in
-two formats (see [Ambiguous numbers](#ambiguous-numbers)).
+two formats (see [Ambiguous numbers](#ambiguous-numbers)). A column of small
+numbers, such as a record number or an event ID, gets *No format detected —
+pick one below to see what it produces.* instead of a suggestion (see
+[Counters are not suggested](#counters-are-not-suggested)).
 
 The preview shows up to ten real values and what each becomes; a value
 that won't convert shows *can't parse*. The verdict under it counts the
@@ -108,7 +115,7 @@ UTC by definition. A value that carries its own offset (`Z`, `UTC`, `GMT`,
 exactly as written, unless you fill in **Source UTC offset** (`-05:00`,
 `+0530`, `+5`), a fixed offset Winnow subtracts to reach UTC. An offset in
 the value wins over the setting. Winnow never guesses daylight saving: in
-the ISO 8601, dd Mmm yyyy and US formats, a value ending in a zone it
+the ISO 8601, dd Mmm yyyy, Mmm dd yyyy and US formats, a value ending in a zone it
 can't convert, such as `EST` or `Europe/Paris`, counts as unparsed rather
 than being read as if it were UTC. RFC 2822 dates convert the zones that
 standard defines (`UT`, `GMT`, `Z`, `EST`/`EDT`, `CST`/`CDT`, `MST`/`MDT`,
@@ -125,6 +132,7 @@ time is UTC and the sender's own zone is unknown, so it is kept as UTC and
 | **BSD syslog (Mmm dd hh:mm:ss)** | Year-less syslog lines. **Year of first line** is required | `Dec 31 23:59:59 host sshd[2]: …` → `2023-12-31 23:59:59` |
 | **ISO 8601** | `YYYY-MM-DDThh:mm[:ss]`, `T` or a space, fraction with `.` or `,`, optional zone | `2024-01-05T13:22:01+02:00` → `2024-01-05 11:22:01`<br>`2024-01-05T13:22:01.5Z` → `2024-01-05 13:22:01.500000` |
 | **dd Mmm yyyy hh:mm:ss** | `05 Jan 2024 13:22:01` or `5-Jan-2024 …`, English month names, optional zone | `5-Jan-2024 13:22:01 +0200` → `2024-01-05 11:22:01` |
+| **Mmm dd yyyy hh:mm:ss** | Month first, abbreviated or in full, the day plain or with `st`/`nd`/`rd`/`th`, optional comma, seconds and fraction optional, optional AM/PM and optional zone | `Jul 28th 2026 01:02:22` → `2026-07-28 01:02:22`<br>`July 28, 2026 1:02 PM` → `2026-07-28 13:02:00` |
 | **Compact YYYYMMDDhhmmss** | 14 run-together digits | `20240105132201` → `2024-01-05 13:22:01` |
 | **Mac absolute (Cocoa) time** | Seconds since 2001-01-01; negative for earlier dates; `0` counts as unparsed | `726153721` → `2024-01-05 13:22:01` |
 | **Excel serial date** | Days since 1899-12-30, fraction = time of day, rounded to the second | `45296.5576` → `2024-01-05 13:22:57` |
@@ -156,6 +164,18 @@ overlap, and so do nanosecond Unix epochs and .NET ticks. Both formats
 then report a high match rate, and the suggestion is only the first of
 them. Compare the preview with a time you already know for one row before
 you add the column.
+
+### Counters are not suggested
+
+Mac absolute time counts seconds from 2001-01-01, which is inside the
+1990–2100 window, so any small number converts: `1` becomes
+`2001-01-01 00:00:01`. A record number, an event ID, a process ID or a
+duration would all match it completely. The suggestion, and the notice
+after an import, therefore skip Mac absolute time for values below
+`100000000` (March 2004), and skip Excel serial dates for whole numbers,
+which in a log are far more often IDs or ports than dates. Both formats
+still convert those values when you choose them yourself under
+**Operation**.
 
 ### Year-less syslog
 

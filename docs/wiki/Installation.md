@@ -100,7 +100,7 @@ off) and asks two questions, once each:
 
 - whether you are working over RDP or another remote desktop. **Enable
   remote mode** switches the grid to whole-row scrolling and stops
-  animations; you can change it later in **Settings → Appearance**.
+  animations; you can change it later in **Settings → Remote session**.
 - where case files should live. **Use the default** puts them in the
   `cases` folder inside the Winnow folder (the prompt shows its full path);
   **Choose a folder…** lets you pick one.

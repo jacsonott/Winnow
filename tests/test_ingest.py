@@ -195,6 +195,16 @@ def test_month_name_timestamp_column_types_as_datetime(store, write_csv):
     assert col["type"] == "datetime"
 
 
+def test_ordinal_month_name_timestamp_column_types_as_datetime(store, write_csv):
+    """"Jul 28th 2026 01:02:22" — the same family with the day written as
+    an ordinal, so the column filters by timeframe and groups by day."""
+    sfx = {1: "st", 2: "nd", 3: "rd", 21: "st", 22: "nd", 23: "rd"}
+    rows = [["When", "What"]] + [[f"Jul {d}{sfx.get(d, 'th')} 2026 01:02:22", "x"] for d in range(1, 29)]
+    rec = store.ingest_csv(write_csv(rows, "ord.csv"), name="ord", build_fts=False)
+    col = next(c for c in store.get_source(rec["id"])["columns"] if c["name"] == "When")
+    assert col["type"] == "datetime"
+
+
 def test_leading_blank_lines_are_skipped_to_reach_the_header(store, tmp_path):
     """A CSV that starts with a blank line (a tool that writes a banner and
     then an empty line, or a hand-trimmed export) read the blank line as
