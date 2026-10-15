@@ -193,12 +193,11 @@ export function queueFilesForFormat(fmt, files) {
    of which parser ends up handling a given one. */
 export function openImportModal() {
   modal('Import', (b) => {
-    b.append(el('p', null,
-      'Queue CSV/TSV, JSON/JSONL, SQLite, Excel (.xlsx/.xlsm), Plaso or archive (zip/tar/gz) '
-      + 'files — any other log imports as text, one line per row — then import them all, or '
-      + 'import a whole folder at once. A SQLite file needs its tables picked first, an Excel '
-      + 'workbook its sheets. Imports run in the background, so you can keep working while the '
-      + 'corner panel tracks progress.'));
+    // One line, and it still names every kind the queue takes (a .plaso or
+    // a support bundle must not read as unwelcome). Which ones need tables
+    // or sheets picked first, and that imports run in the background, are
+    // on the wiki's Cases and importing page.
+    b.append(el('p', null, 'Queue CSV, JSON, SQLite, Excel, Plaso, archives or any text log to import.'));
 
     const queueList = el('div', 'session-queue');
 
