@@ -305,9 +305,9 @@ def test_guided_editor_writes_the_sql_from_a_template_and_a_column(page):
         page.locator("#modal .dash-template").select_option("top")
         page.locator("#modal .dash-column").select_option("Host")
         assert 'GROUP BY "Host"' in page.locator("#modal .dash-sql").input_value()
-        assert page.locator("#modal .confirm-input").first.input_value() == "Top Host"
+        assert page.locator("#modal .dash-title-input").input_value() == "Top Host"
         assert not page.evaluate("() => document.querySelector('#modal .dash-advanced').open")
-        page.locator("#modal button", has_text="Preview").click()
+        # the preview draws the chart by itself, nothing pressed
         page.wait_for_selector("#modal .dash-preview canvas")
         page.locator("#modal button", has_text="Save widget").click()
         page.wait_for_selector("#modal[hidden]", state="attached")
@@ -466,7 +466,7 @@ def test_a_missing_pick_leaves_no_query_behind(page):
         # a tick after the change — that part was always real.
         page.wait_for_function(
             "() => document.querySelector('#modal .dash-sql').value === ''")
-        page.locator("#modal .confirm-input").first.fill("Nothing")
+        page.locator("#modal .dash-title-input").fill("Nothing")
         page.locator("#modal button", has_text="Save widget").click()
         page.wait_for_selector("#toast:not([hidden])")
         assert "needs a query" in page.locator("#toast").inner_text()
@@ -515,7 +515,7 @@ def test_editing_width_keeps_a_hand_written_drill_with_a_trailing_newline(page):
         page.wait_for_selector("#dashGrid .dash-edit")
         page.locator("#dashGrid .dash-edit").first.click()
         page.wait_for_selector("#modal:not([hidden]) .dash-template")
-        page.locator("#modal select").last.select_option("2")     # Width
+        page.locator("#modal .dash-width button[data-span='2']").click()     # Width
         page.locator("#modal button", has_text="Save widget").click()
         page.wait_for_selector("#modal[hidden]", state="attached")
         (w,) = _wait_widgets(page, did, 1)

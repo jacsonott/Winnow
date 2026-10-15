@@ -93,7 +93,7 @@ def test_sql_query_becomes_a_widget(page):
     page.locator(".menu .menu-item", has_text="SQL board").click()
     page.wait_for_selector("#modal:not([hidden])")
     assert f"src_{src}" in page.locator("#modal .dash-sql").input_value()
-    page.locator("#modal .confirm-input").first.fill("Rows via SQL")
+    page.locator("#modal .dash-title-input").fill("Rows via SQL")
     page.locator("#modal button", has_text="Save widget").click()
     page.wait_for_selector("#modal[hidden]", state="attached")
     page.wait_for_function(

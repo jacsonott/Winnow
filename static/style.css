@@ -3313,9 +3313,6 @@ html.remote .row.selected:hover { background: var(--row-selected); }
 .dash-card[draggable="true"] { cursor: grab; }
 .dash-card.dragging { opacity: .4; }
 .dash-card.drop-target { box-shadow: inset 0 0 0 2px var(--accent); }
-/* Preview pane in the widget editor — one card's worth of output before
-   committing it. */
-.dash-preview-wrap { margin-top: 8px; }
 .dash-form label { display: block; font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .05em; margin: 0 0 4px; }
 .dash-field { margin-top: 10px; min-width: 0; }
 .dash-form .confirm-input, .dash-form select { width: 100%; box-sizing: border-box; }
@@ -3326,6 +3323,68 @@ html.remote .row.selected:hover { background: var(--row-selected); }
 .dash-advanced { margin-top: 10px; border: 1px dashed var(--line-2); border-radius: var(--radius-sm); padding: 4px 8px; }
 .dash-advanced summary { cursor: pointer; font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .05em; }
 .dash-advanced .dash-field { margin-top: 6px; }
+/* The widget editor, in the builders' shape (the merge builder's .mb-*,
+   the movement-event builder's .lm-eb-*): the question on the left, how
+   it looks on the right above a card that answers the draft as it
+   changes. Its own classes, so a change to either builder can't reflow
+   it. Section heads are the builders' dim uppercase; field labels sit
+   above their control in plain 12px text, as .dlg-field's do, so the
+   two levels read apart. Fixed-height panes that scroll on their own,
+   so Save widget stays on screen however tall Advanced gets. */
+.dash-ed { display: grid; gap: 12px; }
+.dash-ed .fb-help.dash-ed-intro { margin: 0; }
+.dash-ed-panes { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  height: max(360px, min(660px, calc(82vh - 170px)));
+  border: var(--border-w) solid var(--line); border-radius: var(--radius-md); overflow: hidden; }
+.dash-ed-pane { padding: 12px 14px; min-width: 0; min-height: 0; overflow: auto;
+  display: flex; flex-direction: column; gap: 12px; }
+.dash-ed-pane > * { flex: 0 0 auto; }
+.dash-ed-pane + .dash-ed-pane { border-left: var(--border-w) solid var(--line);
+  background: color-mix(in srgb, var(--panel) 70%, var(--ink)); }
+.dash-ed-head { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--dim); }
+.dash-ed-group { display: grid; gap: 12px; }
+.dash-ed .dash-field { margin-top: 0; }
+.dash-ed .dash-field > label { display: block; margin: 0 0 4px; font-size: 12px; color: var(--text);
+  text-transform: none; letter-spacing: normal; }
+.dash-ed .confirm-input, .dash-ed select { width: 100%; box-sizing: border-box; }
+.dash-ed .dash-advanced { margin-top: 0; }
+.dash-ed .dash-advanced[open] { padding-bottom: 8px; }
+.dash-ed .dash-advanced .fb-help { margin-bottom: 0; }
+.dash-ed .dash-cells-note { margin-top: 0; }
+.dash-ed .dash-cells-note .fb-help { margin: 0; }
+.dash-ed .dash-live-row, .dash-ed .dash-cost { margin-top: 0; }
+.dash-ed > .row-actions { margin-top: 0; }
+/* Render as: every kind in sight as a chip, so one click repaints the
+   preview; Width a segmented control. Pressed is the builders' 16%
+   accent tint with the text colour, not accent text on a tint. */
+.dash-kinds { display: flex; flex-wrap: wrap; gap: 5px; }
+.dash-kinds button { font: inherit; font-size: 12px; color: var(--dim); background: transparent; cursor: pointer;
+  border: var(--border-w) solid var(--line-2); border-radius: 10px; padding: 2px 10px; white-space: nowrap; }
+.dash-kinds button:hover { color: var(--text); border-color: var(--accent-dim, var(--accent)); }
+.dash-kinds button[aria-pressed="true"] { color: var(--text); border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent); }
+.dash-seg { display: inline-flex; max-width: 100%; border: var(--border-w) solid var(--line-2);
+  border-radius: var(--radius-sm); overflow: hidden; }
+.dash-seg button { font: inherit; font-size: 12px; color: var(--dim); background: transparent; cursor: pointer;
+  border: 0; padding: 4px 10px; white-space: nowrap; }
+.dash-seg button + button { border-left: var(--border-w) solid var(--line-2); }
+.dash-seg button:hover { color: var(--text); }
+.dash-seg button[aria-pressed="true"] { color: var(--text); background: color-mix(in srgb, var(--accent) 16%, transparent); }
+.dash-seg button:focus-visible { outline-offset: -2px; }
+/* The preview: one card, drawn by the board's own painter. Dimmed, not
+   blanked, while a newer draft is being asked — the last answer stays
+   readable until the next one lands. */
+.dash-preview-head { display: flex; align-items: baseline; gap: 10px; }
+.dash-preview-head > span:first-child { flex: 1; }
+.dash-preview-meta { font: 11px var(--mono); letter-spacing: 0; text-transform: none; }
+.dash-ed .dash-card.dash-preview { min-height: 120px; }
+.dash-preview .dash-widget-body { transition: opacity .15s; }
+.dash-preview.busy .dash-widget-body { opacity: .5; }
+.dash-empty-note.bad { color: var(--danger); overflow-wrap: anywhere; }
+@media (max-width: 860px) {
+  .dash-ed-panes { grid-template-columns: minmax(0, 1fr); height: auto; }
+  .dash-ed-pane + .dash-ed-pane { border-left: 0; border-top: var(--border-w) solid var(--line); }
+}
 /* Drilldown: the number, a bar, a list row — each a way back to the rows. */
 .dash-drill { background: none; border: none; color: var(--line-2); cursor: pointer; font: inherit; margin-right: 2px; }
 .dash-card:hover .dash-drill { color: var(--accent); }
@@ -3333,7 +3392,6 @@ html.remote .row.selected:hover { background: var(--row-selected); }
 .dash-widget-body.drillable:hover .dash-stat { text-decoration: underline; text-decoration-color: var(--accent-dim); text-underline-offset: 6px; }
 .dash-list-row.drillable:hover { background: var(--sel); }
 .dash-pick-board, .dash-start-from { width: 100%; }
-.dash-form-row-3 { grid-template-columns: 1fr 1fr 1fr; }
 .dash-card.dash-preview { cursor: default; min-height: 60px; }
 .dash-widget-body { flex: 1 1 auto; min-height: 0; }
 .dash-stat { font-size: 34px; color: var(--accent); line-height: 1; }

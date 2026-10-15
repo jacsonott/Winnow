@@ -302,7 +302,7 @@ def test_dashboard_sidebar_count_follows_saved_widgets(page):
     try:
         src = page.evaluate("() => __winnow.S.sources[0].id")
         page.locator("#dashBar button", has_text="Add widget").click()
-        page.locator("#modal .confirm-input").first.fill("Rows")
+        page.locator("#modal .dash-title-input").fill("Rows")
         page.locator("#modal select").first.select_option("sql")
         page.locator("#modal .dash-sql").fill(f"SELECT COUNT(*) AS n FROM src_{src}")
         page.locator("#modal button", has_text="Save widget").click()
