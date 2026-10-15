@@ -28,7 +28,9 @@ number wins neither end (`_order_keys`).
 
 **The description is rendered server-side, per row.** `{ColumnName}` takes
 that row's value (so the first row shows the first event's user),
-`{count}` the group's row count, `{which}` the literal First/Last. Unknown
+`{count}` the group's row count, `{which}` the literal First/Last, and
+`{which:number}` the row's position in its group instead (1 for the first,
+the group size for the last). Unknown
 placeholders are a ValueError naming the offender — a template typo should
 fail the preview, not silently emit `{Usre}` into 400 descriptions. Any
 column of the source can be named: the windowed pass projects whatever the
@@ -39,6 +41,16 @@ named like one of the pass's own aliases (`_reserved_aliases`): that is
 never projected on the template's behalf, so `{count}` and the Sum column
 keep reading the window's numbers rather than the file's.
 
+**Distinct values are a second, separate pass** (`_group_values`). A
+column under List values, or named by `{values:Column}`, becomes each
+group's distinct non-blank values, sorted, in one cell. It cannot ride the
+bookend window: SQLite refuses DISTINCT inside a window aggregate, and a
+plain group_concat OVER would build the whole list once per ROW. So it is
+one GROUP BY per column over the same filtered rows, keyed back onto the
+bookends by their group values, and capped at MAX_LISTED_VALUES per cell
+(the rest counted, not dropped silently). The preview asks only for the
+groups it shows.
+
 The filter helpers (_where/_esc_like/OPERATORS) are copied from the pivot
 example rather than imported — plugins are deliberately standalone
 (plugin_api gives them no way to import each other), and each example is
@@ -46,6 +58,7 @@ meant to be readable alone.
 """
 
 import json
+import re
 
 from winnow.store import q
 
@@ -64,6 +77,12 @@ PREVIEW_GROUPS = 8
 # "Copy result" returns the whole result to the clipboard; past this it
 # stops being something a clipboard (or the analyst) wants.
 MAX_COPY_ROWS = 20_000
+# A List values cell names at most this many values and counts the rest:
+# past a few dozen a cell stops being read, and a column of ids grouped by
+# host would otherwise put a whole column into every bookend.
+MAX_LISTED_VALUES = 50
+# The description used when the analyst leaves the box empty.
+DEFAULT_TEMPLATE = "{which} of {count}"
 # The auto-created timeline tag's colour — fixed so every bookend tag
 # reads the same across cases (amber, matching the app's accent family).
 TIMELINE_TAG_COLOR = "#d2a04a"
@@ -161,6 +180,7 @@ def _esc_like(value):
 
 
 NUM_RE_SQL = r"^-?\d+(\.\d+)?$"
+_NUM_RE = re.compile(NUM_RE_SQL)
 
 
 def _is_number_column(src, col):
@@ -327,7 +347,10 @@ def _validated(req, body):
     sums = body.get("sum_columns") or []
     if not isinstance(sums, list):
         raise ValueError("sum_columns must be a list of column names")
-    _check_columns(src, group_cols + [sort_col] + carry + sums)
+    listed = body.get("value_columns") or []
+    if not isinstance(listed, list):
+        raise ValueError("value_columns must be a list of column names")
+    _check_columns(src, group_cols + [sort_col] + carry + sums + listed)
     for c in sums:
         # SUM over text is 0 in SQLite, and a 0 that looks like a real
         # total is the kind of number that ends up in a report. _numeric
@@ -341,9 +364,14 @@ def _validated(req, body):
     tag_clause = _tag_where(src, body.get("tags"))
     if tag_clause:
         where = f"{where} AND {tag_clause}" if where else f" WHERE {tag_clause}"
-    template = body.get("template") or "{which} of {count}"
+    template = body.get("template") or DEFAULT_TEMPLATE
+    # {values:Column} takes any column, like {Column} does, so it is checked
+    # here by name rather than waiting for _render to find nothing.
+    for col in _template_value_columns(template):
+        if col not in {c["name"] for c in src["columns"]}:
+            raise ValueError(f"{{values:{col}}} names no column of {src['name']}")
     row_json = bool(body.get("row_json"))
-    return src, group_cols, sort_col, carry, sums, where, params, template, row_json
+    return src, group_cols, sort_col, carry, sums, listed, where, params, template, row_json
 
 
 def _sum_alias(col):
@@ -460,11 +488,121 @@ def _bookend_rows(req, src, group_cols, sort_col, carry, where, params, limit,
     return [dict(zip(cols, r)) for r in res["rows"]], res["truncated"]
 
 
+def _values_alias(col):
+    """The List values output column's name, prefixed like the Sum column
+    so it cannot collide with a carried column of the same name."""
+    return f"Values of {col}"
+
+
+def _template_value_columns(template):
+    """The columns `{values:Column}` names, in first-mention order —
+    tokenised the way _render does it."""
+    out, i, n = [], 0, len(template or "")
+    while i < n:
+        if template[i] != "{":
+            i += 1
+            continue
+        j = template.find("}", i + 1)
+        if j == -1:
+            break
+        key = template[i + 1:j]
+        if key.startswith("values:"):
+            col = key.split(":", 1)[1].strip()
+            if col not in out:
+                out.append(col)
+        i = j + 1
+    return out
+
+
+# Joins a group's values inside SQLite and splits them back apart in
+# Python. A unit separator, because commas, tabs and newlines all turn up
+# in real cells; this one does not.
+_VALUE_SEP = "\x1f"
+
+
+def _group_values(req, src, group_cols, where, params, cols, bookends):
+    """{column: {group key: cell}} — each group's distinct, non-blank values
+    of each column, sorted (numbers by value), at most MAX_LISTED_VALUES
+    named and the rest counted. A group key is the tuple of the bookend's
+    own group values, so it matches the row it is attached to whatever the
+    group columns hold, NULL included.
+
+    Only the groups in `bookends` are needed. A handful (the preview) are
+    asked for by value, which keeps the preview from listing every group in
+    the table; a whole result reads every group, and a cap hit there is an
+    error rather than a silently empty cell."""
+    if not cols or not bookends:
+        return {}
+    keys = {tuple(r.get(g) for g in group_cols) for r in bookends}
+    gexprs = [_col(src, g) for g in group_cols]
+    kcols = ", ".join(f"k{i}" for i in range(len(group_cols)))
+    restrict, rparams = "", []
+    if len(keys) <= 4 * PREVIEW_GROUPS:
+        ors = []
+        for key in keys:
+            parts = []
+            for expr, v in zip(gexprs, key):
+                if v is None:
+                    parts.append(f"{expr} IS NULL")
+                else:
+                    parts.append(f"{expr} = ?")
+                    rparams.append(v)
+            ors.append("(" + " AND ".join(parts) + ")")
+        restrict = "(" + " OR ".join(ors) + ")"
+    out = {}
+    for col in cols:
+        ident = _col(src, col)
+        conds = [f"{ident} IS NOT NULL", f"{ident} != ''"] + ([restrict] if restrict else [])
+        scoped = f"{where} AND " if where else " WHERE "
+        number = _is_number_column(src, col)
+        # Sorted in SQL too, so the values a capped cell names are the
+        # first ones in order rather than whichever came up first.
+        order = (f"({_numeric_of('v')} IS NULL), {_numeric_of('v')}, v" if number
+                 else "v COLLATE NOCASE, v")
+        sel = ", ".join(f"{e} AS k{i}" for i, e in enumerate(gexprs))
+        sql = (
+            f"SELECT {kcols}, group_concat(v, char(31)), MAX(n) FROM ("
+            f"SELECT {kcols}, v, COUNT(*) OVER (PARTITION BY {kcols}) AS n,"
+            f" ROW_NUMBER() OVER (PARTITION BY {kcols} ORDER BY {order}) AS rn"
+            f" FROM (SELECT DISTINCT {sel}, {ident} AS v FROM {_scope(req, src)}"
+            f"{scoped}{' AND '.join(conds)})"
+            f") WHERE rn <= {MAX_LISTED_VALUES} GROUP BY {kcols}"
+        )
+        res = req.store.run_sql(_inline(sql, params + rparams), limit=MAX_GROUPS)
+        cells = {}
+        for row in res["rows"]:
+            key = tuple(row[:len(group_cols)])
+            joined, total = row[len(group_cols)], row[len(group_cols) + 1]
+            vals = [] if joined is None else str(joined).split(_VALUE_SEP)
+            vals.sort(key=_value_sort_key(number))
+            cell = ", ".join(vals)
+            if total and total > len(vals):
+                cell += f" … (+{total - len(vals):,} more)"
+            cells[key] = cell
+        if res["truncated"] and not keys.issubset(cells):
+            raise ValueError(f"More than {MAX_GROUPS:,} groups — too many to list "
+                             f"{col} for; narrow the grouping or add a filter")
+        out[col] = cells
+    return out
+
+
+def _value_sort_key(number):
+    """The SQL ORDER BY above, again in Python — group_concat's order is
+    not one SQLite promises."""
+    def key(v):
+        if number:
+            return (0, float(v), v) if _NUM_RE.match(v) else (1, 0.0, v)
+        return (v.casefold(), v)
+    return key
+
+
 def _render(template, row, which, sums=()):
     """{ColumnName} → the row's value, {count} → group size, {which} →
-    First/Last/Only, {sum:Column} / {min:Column} / {max:Column} → that
-    Total-up column's group total, smallest and largest, formatted like
-    the Sum column. Unknown names raise, naming the offender.
+    First/Last/Only, {which:number} → the row's position in its group,
+    {sum:Column} / {min:Column} / {max:Column} → that Total-up column's
+    group total, smallest and largest, formatted like the Sum column,
+    {values:Column} → the group's distinct values of any column (attached
+    by _attach_values). Unknown names raise, naming the offender.
 
     The colon form is the namespace for anything computed rather than
     read: a plain name is always a field, so no column name can shadow a
@@ -479,6 +617,13 @@ def _render(template, row, which, sums=()):
             key = template[i + 1:j]
             if key == "which":
                 out.append(which)
+            elif key == "which:number":
+                # rn_first IS the position: 1 for the first, the group size
+                # for the last. Not group_n for the last — a number column's
+                # non-number cells sort after it, and then it is not Nth.
+                out.append(str(row.get("rn_first", "")))
+            elif key.startswith("values:"):
+                out.append(row.get(("values", key.split(":", 1)[1].strip()), ""))
             elif key == "count":
                 out.append(str(row.get("group_n", "")))
             elif ":" in key and key.split(":", 1)[0] in AGGREGATES:
@@ -494,7 +639,8 @@ def _render(template, row, which, sums=()):
                 out.append("" if val is None else str(val))
             else:
                 raise ValueError(f"Unknown placeholder {{{key}}} — use a column name, {{count}}, {{which}}, "
-                                 f"{{sum:Column}}, {{min:Column}} or {{max:Column}}")
+                                 f"{{which:number}}, {{values:Column}}, {{sum:Column}}, {{min:Column}} "
+                                 f"or {{max:Column}}")
             i = j + 1
             continue
         out.append(ch)
@@ -513,13 +659,32 @@ def _fmt_sum(v):
     return str(int(v)) if float(v).is_integer() else f"{float(v):g}"
 
 
-def _emit(rows, sort_col, carry, template, json_cols=None, sums=()):
+def _attach_values(bookends, group_cols, listed):
+    """Hang each group's List values cells (from _group_values) on its
+    bookends, under a tuple key no column name can be."""
+    for r in bookends:
+        key = tuple(r.get(g) for g in group_cols)
+        for col, cells in listed.items():
+            r[("values", col)] = cells.get(key, "")
+
+
+def _header(sort_col, carry, sums, listed, row_json):
+    """The output columns, in the order _emit fills them. The description
+    sits before the JSON cell: it is the line an analyst reads, and the
+    JSON is the long cell they open when they need it."""
+    return ([sort_col] + carry + [_sum_alias(c) for c in sums]
+            + [_values_alias(c) for c in listed] + ["Description"]
+            + ([ROW_JSON_COLUMN] if row_json else []))
+
+
+def _emit(rows, sort_col, carry, template, json_cols=None, sums=(), listed=()):
     """The output rows: one per bookend. A single-row group is both its own
     first and its last — emitted once, labelled Only (a story with one
     event has no separate ending, and "First of 1" read as if a Last had
     gone missing). `json_cols` non-None adds a cell with the bookend's
     ENTIRE row as a JSON object — the synthetic window columns
-    (rn_first/rn_last/group_n) never appear in it."""
+    (rn_first/rn_last/group_n) and the attached value lists never appear
+    in it."""
     out = []
     for r in rows:
         labels = []
@@ -533,10 +698,12 @@ def _emit(rows, sort_col, carry, template, json_cols=None, sums=()):
             desc = _render(template, r, which, sums)
             row = ([r.get(sort_col, "")]
                    + [("" if r.get(c) is None else str(r.get(c))) for c in carry]
-                   + [_fmt_sum(r.get(_sum_alias(c))) for c in sums])
+                   + [_fmt_sum(r.get(_sum_alias(c))) for c in sums]
+                   + [r.get(("values", c), "") for c in listed]
+                   + [desc])
             if json_cols is not None:
                 row.append(json.dumps({c: r.get(c) for c in json_cols}, ensure_ascii=False))
-            out.append(row + [desc])
+            out.append(row)
     return out
 
 
@@ -547,7 +714,8 @@ def meta(req):
     return {
         "operators": [{"id": k, "label": v[0], "value_kind": v[1]} for k, v in OPERATORS.items()],
         "limits": {"groups": MAX_GROUPS, "group_cols": MAX_GROUP_COLS, "preview_groups": PREVIEW_GROUPS},
-        "placeholders": ["which", "count", "sum:<column>", "min:<column>", "max:<column>"],
+        "placeholders": ["which", "which:number", "count", "values:<column>",
+                         "sum:<column>", "min:<column>", "max:<column>"],
         "which_values": ["First", "Last", "Only"],
     }
 
@@ -565,38 +733,46 @@ def values(req):
             "truncated": res["truncated"]}
 
 
+def _result(req, body, limit, *, whole=False):
+    """What preview, rows and create share: validate, run the windowed
+    pass, list the distinct values it asks for, render. `whole` is create's
+    rule that a result cut short by `limit` is refused, not written."""
+    (src, group_cols, sort_col, carry, sums, listed,
+     where, params, template, row_json) = _validated(req, body)
+    bookends, truncated = _bookend_rows(req, src, group_cols, sort_col, carry, where, params,
+                                        limit=limit, row_json=row_json, sums=sums, template=template)
+    if whole and truncated:
+        raise ValueError(f"More than {MAX_GROUPS:,} groups — narrow the grouping or add a filter")
+    wanted = list(dict.fromkeys(listed + _template_value_columns(template)))
+    _attach_values(bookends, group_cols,
+                   _group_values(req, src, group_cols, where, params, wanted, bookends))
+    json_cols = [c["name"] for c in src["columns"]] if row_json else None
+    return {
+        "src": src, "group_cols": group_cols, "where": where, "params": params,
+        "columns": _header(sort_col, carry, sums, listed, row_json),
+        "rows": _emit(bookends, sort_col, carry, template, json_cols, sums, listed),
+        "truncated": truncated,
+    }
+
+
 def preview(req):
     """POST .../preview — the first PREVIEW_GROUPS groups' bookends, plus the
     total group count, so 'Create table' says what it will make before it
     makes it."""
-    body = req.body or {}
-    src, group_cols, sort_col, carry, sums, where, params, template, row_json = _validated(req, body)
-    part = ", ".join(_col(src, c) for c in group_cols)
-    count_sql = f"SELECT COUNT(*) FROM (SELECT 1 FROM {_scope(req, src)}{where} GROUP BY {part})"
-    total_groups = req.store.run_sql(_inline(count_sql, params), limit=1)["rows"][0][0]
-
-    rows, _ = _bookend_rows(req, src, group_cols, sort_col, carry, where, params,
-                            limit=PREVIEW_GROUPS * 2 + 2, row_json=row_json, sums=sums, template=template)
-    json_cols = [c["name"] for c in src["columns"]] if row_json else None
-    header = ([sort_col] + carry + [_sum_alias(c) for c in sums]
-              + ([ROW_JSON_COLUMN] if row_json else []) + ["Description"])
-    return {"columns": header, "rows": _emit(rows, sort_col, carry, template, json_cols, sums),
-            "total_groups": total_groups}
+    res = _result(req, req.body or {}, PREVIEW_GROUPS * 2 + 2)
+    src = res["src"]
+    part = ", ".join(_col(src, c) for c in res["group_cols"])
+    count_sql = f"SELECT COUNT(*) FROM (SELECT 1 FROM {_scope(req, src)}{res['where']} GROUP BY {part})"
+    total_groups = req.store.run_sql(_inline(count_sql, res["params"]), limit=1)["rows"][0][0]
+    return {"columns": res["columns"], "rows": res["rows"], "total_groups": total_groups}
 
 
 def rows(req):
     """POST .../rows — the ENTIRE result as rows, for "Copy result": the
     preview shows only the first few groups, and copying should hand over
     what Create would have made, not what happened to be on screen."""
-    body = req.body or {}
-    src, group_cols, sort_col, carry, sums, where, params, template, row_json = _validated(req, body)
-    bookends, truncated = _bookend_rows(req, src, group_cols, sort_col, carry, where, params,
-                                        limit=MAX_COPY_ROWS, row_json=row_json, sums=sums, template=template)
-    json_cols = [c["name"] for c in src["columns"]] if row_json else None
-    header = ([sort_col] + carry + [_sum_alias(c) for c in sums]
-              + ([ROW_JSON_COLUMN] if row_json else []) + ["Description"])
-    return {"columns": header, "rows": _emit(bookends, sort_col, carry, template, json_cols, sums),
-            "truncated": truncated}
+    res = _result(req, req.body or {}, MAX_COPY_ROWS)
+    return {"columns": res["columns"], "rows": res["rows"], "truncated": res["truncated"]}
 
 
 def create(req):
@@ -610,16 +786,11 @@ def create(req):
     like any other tag write. Rids are contiguous from 1 on every ingest
     path (invariant #2), which is what makes range(1, n+1) exact."""
     body = req.body or {}
-    src, group_cols, sort_col, carry, sums, where, params, template, row_json = _validated(req, body)
-    bookends, truncated = _bookend_rows(req, src, group_cols, sort_col, carry, where, params,
-                                        limit=MAX_GROUPS * 2, row_json=row_json, sums=sums, template=template)
-    if truncated:
-        raise ValueError(f"More than {MAX_GROUPS:,} groups — narrow the grouping or add a filter")
-    json_cols = [c["name"] for c in src["columns"]] if row_json else None
-    out_rows = _emit(bookends, sort_col, carry, template, json_cols, sums)
-    name = (body.get("name") or "").strip() or f"First-Last of {src['name']}"
-    header = ([sort_col] + carry + [_sum_alias(c) for c in sums]
-              + ([ROW_JSON_COLUMN] if row_json else []) + ["Description"])
+    res = _result(req, body, MAX_GROUPS * 2, whole=True)
+    src, header, out_rows = res["src"], res["columns"], res["rows"]
+    # The table's label as the analyst knows it — its nickname when it has
+    # one, as everywhere else in the app.
+    name = (body.get("name") or "").strip() or f"First-Last of {src.get('nickname') or src['name']}"
     rec = req.store.ingest_rows(header, out_rows, name=name)
     out = {"source": {"id": rec["id"], "name": rec["name"], "row_count": rec["row_count"]}}
     tag_name = (body.get("timeline_tag") or "").strip()

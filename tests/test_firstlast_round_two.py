@@ -99,5 +99,6 @@ def test_single_row_groups_say_only_everywhere(fl_client):
 def test_meta_advertises_the_syntax(fl_client):
     client, _ = fl_client
     meta = client.get(f"/api/plugin/{PLUGIN}/meta").json()
-    assert meta["placeholders"] == ["which", "count", "sum:<column>", "min:<column>", "max:<column>"]
+    assert meta["placeholders"] == ["which", "which:number", "count", "values:<column>",
+                                    "sum:<column>", "min:<column>", "max:<column>"]
     assert meta["which_values"] == ["First", "Last", "Only"]

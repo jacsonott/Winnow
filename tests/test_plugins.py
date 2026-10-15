@@ -2553,9 +2553,11 @@ def test_first_last_row_json_cell_carries_the_entire_row(fl_client):
     client, sid = fl_client
     out = _fl(client, "preview", source_id=sid, group_by=["Host", "User"],
               sort_column="When", columns=["User"], template="{which}", row_json=True)
-    assert out["columns"] == ["When", "User", "Row (JSON)", "Description"]
-    first = next(r for r in out["rows"] if r[-1] == "First" and r[1] == "alice")
-    row = _json.loads(r_json := first[2])
+    # The description reads before the JSON: it is the line, the JSON is
+    # the long cell opened when needed.
+    assert out["columns"] == ["When", "User", "Description", "Row (JSON)"]
+    first = next(r for r in out["rows"] if r[2] == "First" and r[1] == "alice")
+    row = _json.loads(r_json := first[3])
     assert row == {"When": "2026-03-14 08:00:00", "Host": "SRV1",
                    "User": "alice", "EventId": "4624"}
     # the synthetic window columns never leak into the JSON
@@ -2666,8 +2668,8 @@ def test_first_last_merge_row_json_carries_the_exposed_columns(fl_client, store,
     mid = store.create_merge("flj", [sid, sid2])["id"]
     out = _fl(client, "preview", source_id=mid, group_by=["User"], sort_column="When",
               columns=[], template="{which}", row_json=True)
-    zed = next(r for r in out["rows"] if '"zed"' in r[1])
-    assert set(_json.loads(zed[1]).keys()) == {"When", "Host", "User", "EventId"}
+    zed = next(r for r in out["rows"] if '"zed"' in r[-1])
+    assert set(_json.loads(zed[-1]).keys()) == {"When", "Host", "User", "EventId"}
 
 
 def test_first_last_over_a_merge_with_mismatched_columns(fl_client, store, write_csv):
