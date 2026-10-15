@@ -346,6 +346,13 @@ def test_run_now_re_runs_one_widget_and_restamps_it(page):
         prev.bodies.clear()
         page.locator("#dashGrid .dash-card .dash-edit").first.click()
         page.wait_for_selector("#modal:not([hidden])", timeout=10_000)
+        # The editor's live preview asks once on open. It runs the DRAFT,
+        # so it names no board and no widget — the server files nothing
+        # for it. Let it land before counting what Run now sends.
+        page.wait_for_selector("#modal .dash-preview .dash-stat", timeout=15_000)
+        assert len(prev.bodies) == 1, prev.bodies
+        assert "dashboard_id" not in prev.bodies[0] and "widget_id" not in prev.bodies[0]
+        prev.bodies.clear()
         with page.expect_response(re.compile(r".*/refresh$"), timeout=15_000) as got:
             page.locator("#modal button", has_text="Run now").click()
         # One widget, named — not the whole board, and not through the
