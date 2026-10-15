@@ -6,8 +6,9 @@ that used to send its result to the wrong place:
 * run again in the same tab — a slow first run landing after a fast
   second one replaced it on screen, and Copy / CSV / Excel then took the
   slow run's rows;
-* close the tab and open a new one — sql_tabs ids are reused, so the
-  closed tab's result appeared in the new, empty tab;
+* close the tab and open a new one — sql_tabs ids were reused, so the
+  closed tab's result appeared in the new, empty tab (ids are never
+  reused now, but the closed tab's query still has to stop);
 * open another case — the result painted under the new case's "Query 1",
   and tagging rows in it wrote tags into the wrong case.
 
@@ -144,7 +145,7 @@ def test_a_rerun_is_not_overwritten_by_the_run_it_replaced(sql):
     assert not _progress(page, first["token"])["running"]
 
 
-def test_a_closed_tabs_run_does_not_land_in_the_next_new_tab(sql):
+def test_a_closed_tabs_run_stops_and_lands_nowhere(sql):
     page = sql
     tabs = page.evaluate("() => __winnow.S.sqlTabs.length")
     page.locator("#sqlTabs .sql-tab-add").click()
@@ -158,13 +159,11 @@ def test_a_closed_tabs_run_does_not_land_in_the_next_new_tab(sql):
     page.wait_for_function("(n) => __winnow.S.sqlTabs.length === n", arg=tabs + 1)
     new_id = page.evaluate("() => __winnow.S.sqlTabId")
     try:
-        # The closed tab was the newest, so SQLite hands its id straight
-        # back — the case that used to go wrong.
-        assert new_id == run["tabId"], "the scenario needs the closed tab's id reused"
         landed = page.evaluate("() => window.__run")
         assert landed.get("error")
         assert page.locator(".sql-result-bar").count() == 0, "the closed tab's result is in the new tab"
-        assert not page.evaluate("(id) => __winnow.S.sqlResults.has(id)", new_id)
+        for tab in (new_id, run["tabId"]):
+            assert not page.evaluate("(id) => __winnow.S.sqlResults.has(id)", tab)
         assert not _progress(page, run["token"])["running"], "closing the tab left its query running"
     finally:
         # The new tab is empty, so closing it asks nothing.

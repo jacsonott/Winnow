@@ -382,9 +382,8 @@ export async function closeSqlTab(t) {
   }
   const idx = S.sqlTabs.findIndex((x) => x.id === t.id);
   S.sqlTabs = S.sqlTabs.filter((x) => x.id !== t.id);
-  // Its run, if one is out, stops; its result is let go. Tab ids are
-  // reused, so a run left to finish would otherwise land in the next new
-  // tab that happens to get this one's id.
+  // Its run, if one is out, stops — nobody will read what it lands — and
+  // its result is let go.
   abandonSqlRuns(t.id);
   const gone = S.sqlResults.get(t.id);
   if (gone && gone.id) releaseSqlResults([gone.id]);

@@ -1578,7 +1578,14 @@ textarea:focus { border-color: var(--accent); outline: none; }
    TABLE and stay put while a sticky th scrolls, which is exactly the
    "rows showing through the header" artifact — and the th needs a
    z-index so cell content can never paint over it. */
-.sql-result table { border-collapse: separate; border-spacing: 0; font-family: var(--mono); font-size: 12px; }
+/* width:max-content because the header cells carry each column's width
+   (its longest value across every row, which the server measured) and a
+   table squeezed to its container treats those as negotiable: a 150-column
+   result shrank each column to the cells that happened to be built, so a
+   rid column was "60" wide at the top and "1500" wide further down, and
+   every column after it moved as you scrolled. At max-content nothing
+   squeezes, and the scroller scrolls instead. */
+.sql-result table { border-collapse: separate; border-spacing: 0; font-family: var(--mono); font-size: 12px; width: max-content; }
 /* A px line-height, so every row is exactly SQL_ROW_H (plugins.js):
    15 + 2×2 padding + 1 border. The virtualized window counts rows by
    height, and a row that grew would push everything under it off by that

@@ -594,8 +594,9 @@ see [docs/notes/README.md](README.md) for the whole set.
   waiting on** (`S.sqlRuns`, `runSql`). The run is awaited, and while it
   is out the analyst can re-run (a slow first run landing after a fast
   second one overwrote it, and the exports then took the wrong rows),
-  close the tab (`sql_tabs` ids are reused, so the result came back in the
-  next new tab), or open another case — the result painted under the new
+  close the tab (when `sql_tabs` ids were reused, the result came back in
+  the next new tab; a closed tab's query has to stop either way), or open
+  another case — the result painted under the new
   case's "Query 1", and tagging rows in it wrote tags into the wrong case.
   A re-run, a tab close and a case switch (`resetSqlPane`) all end the
   run they replace through `abandonSqlRuns`, which aborts its request —

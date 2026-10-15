@@ -47,6 +47,11 @@ def test_the_views_tags_column_hosts_the_chips_instead_of_a_second_column(page):
         _run(page, f"SELECT * FROM src_1 WHERE rid = {rid}")
         heads = _headers(page)
         assert heads.count("Tags") == 1, heads
+        # Tags sits past a 300-character CommandLine, and the pane builds
+        # only the columns on screen: bring it into view, then count.
+        page.evaluate("""() => [...document.querySelectorAll('#sqlResult th')]
+            .find((h) => h.textContent === 'Tags').scrollIntoView({ block: 'nearest', inline: 'center' })""")
+        page.wait_for_selector("#sqlResult tr[data-i] .sql-tag-chip")
         assert page.locator(".sql-tag-chip").count() == 1
 
         # Without the view's column in the result the chips still get their own.
