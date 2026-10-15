@@ -176,6 +176,7 @@ with the action names Settings uses.
 | Filter by selected cell's value, dropping every other filter | `F` |
 | Clear all filters, search and tag filter | `c` |
 | Select every row in the current view (same as the header checkbox) | `Ctrl+a` |
+| Copy the unique values of the cursor's column — from the selected rows, else the whole view | `Ctrl+Shift+U`, `Meta+Shift+U` |
 | Open Tables manager | `t` |
 | Show/hide the table sidebar | `` ` `` |
 | Open the table menu (columns, value dropdowns) — also right-click a tab | `C` |

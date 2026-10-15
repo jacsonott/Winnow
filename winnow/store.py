@@ -857,6 +857,13 @@ def _webkit_to_iso(value: Any) -> str | None:
 # actually see.
 TAG_GROUP_COLUMN = "__tag__"
 
+# The most distinct values distinct_values hands back — the grid's "Copy
+# unique values" over a whole view. Generous enough for a case's hashes or
+# image paths; past it the answer is a filter first, not a clipboard holding
+# a few megabytes nobody will read. Over it, the call says so (truncated)
+# rather than handing back a list that silently stops partway.
+DISTINCT_VALUES_MAX = 100_000
+
 # Column names that can't be used as-is: "rid" collides with every src_<id>
 # table's own primary-key column, and "rank"/"rowid" are FTS5-reserved \u2014
 # CREATE VIRTUAL TABLE ... USING fts5(...) rejects a column literally named
@@ -8418,6 +8425,33 @@ class Store:
         truncated = len(rows) > limit
         rows = rows[:limit]
         return {"groups": [{"value": r["val"], "count": r["n"]} for r in rows], "truncated": truncated}
+
+    def distinct_values(self, view_id: str, column: str, limit: int = DISTINCT_VALUES_MAX,
+                        op_token: str | None = None) -> dict:
+        """Every distinct non-empty value of one column across the view, in
+        the column's own sort order — what "Copy unique values" puts on the
+        clipboard when no rows are picked.
+
+        It is the header value picker's call to group_summary: the STORED
+        value (bucket_datetime=False), because the list is meant to be
+        pasted somewhere else and a day bucket is not a value the column
+        holds, and order="value" so a number column sorts as numbers and a
+        timestamp column chronologically. Merges and derived columns come
+        with it, since group_summary already resolves both per member.
+
+        NULL and '' are dropped — "(empty)" is not something anyone pastes
+        into a lookup. They are separate groups to SQLite, so the aggregate
+        asks for two past the cap to keep a list that is exactly `limit`
+        long once they're gone from reading as truncated. `truncated` is
+        the caller's cue to refuse rather than copy a list that stops
+        partway."""
+        if column == TAG_GROUP_COLUMN:
+            # Grouping's sentinel, not a column — its "values" are tag ids.
+            raise KeyError(column)
+        res = self.group_summary(view_id, column, order="value", direction="asc", limit=limit + 2,
+                                 op_token=op_token, bucket_datetime=False)
+        values = [g["value"] for g in res["groups"] if g["value"] is not None and g["value"] != ""]
+        return {"values": values[:limit], "truncated": res["truncated"] or len(values) > limit}
 
     # Bucket widths a histogram may pick from, seconds — chosen so the
     # view's span fits in max_buckets bars. Human-shaped (minute, hour,

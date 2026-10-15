@@ -7,7 +7,7 @@ import { displayValue, ellipsize, filterByValue } from './filters.js';
 import { buildDataRow, ensurePage, headH, moveCursor, render, renderTagToolbar, rowAt, rowPaintContext, rowsPaintY, schedulePrefetch, setCellRange, spacerPx, syncRowsTop, syncRowsWidth, titleClippedCells, vScroll } from './grid.js';
 import { armOpCancel, opToken } from './jobs.js';
 import { openRowContextMenu } from './rowmenu.js';
-import { S, cellInRange, cellRangeRows, clearCellSelection, selClear, selCount, selHas, selPositions, selRemap, selSetRange, selSnapshot } from './state.js';
+import { S, cellInRange, cellRangeRows, clearCellSelection, selClear, selCount, selHas, selPositions, selRemap, selSetRange, selSnapshot, selViewRows } from './state.js';
 import { BULK_TAG_CONFIRM_AT, clearRowCaches, refreshTagCounts, refreshUndoState, renderTagRibbon } from './tags.js';
 import { confirmDialog, contextMenu, dropdownMenu } from './ui.js';
 import { displayCell } from './tsformat.js';
@@ -987,9 +987,15 @@ export async function writeClipboardText(textPromise, successMsg) {
     } else {
       await navigator.clipboard.writeText(await textPromise);
     }
-    toast(successMsg);
+    // A function when the message depends on what the text turned out to
+    // be (how many unique values) — only known once textPromise settles.
+    toast(typeof successMsg === 'function' ? successMsg() : successMsg);
   } catch (e) {
-    toast('Copy failed: ' + e.message, 4000);
+    // When the text itself failed, say why: clipboard.write() rejects with
+    // its own error for a ClipboardItem whose promise rejected, and "Copy
+    // failed: NotAllowedError" hides a reason the analyst can act on.
+    const cause = await textPromise.then(() => null, (err) => err);
+    toast('Copy failed: ' + (cause || e).message, 5000);
   }
 }
 
@@ -1091,6 +1097,103 @@ export async function handleCopyShortcut(withHeaders) {
   const positions = count ? selPositions() : cursorRow ? [S.cursor] : [];
   if (!positions.length) return;
   await copyRowsAsText(positions, withHeaders);
+}
+
+/* "Copy unique values": one column's distinct values, one per line — the
+   hosts, users or hashes a set of rows touches, ready to paste into a
+   lookup, a filter or a report.
+
+   `positions` is the rows to read, or null for the whole view. Callers
+   pass null when nothing narrower than the view is picked: one row has
+   one value, which is not a question anyone needs this to answer.
+
+   - Rows: read through the page cache like every other copy, under the
+     same 20,000-row ceiling, and listed in the order they first appear —
+     the grid's own sort, so a timeline-sorted selection lists processes
+     in the order they first ran.
+   - The view: /api/distinct_values, in the column's sort order (numbers
+     as numbers, timestamps chronologically). Past its cap the server says
+     `truncated`, and this refuses rather than copy a list that stops
+     partway without saying so.
+
+   Either way the text is what the grid shows (displayCell, so a chosen
+   timestamp format applies), unique by that text, and empty values are
+   left out. */
+export async function copyUniqueValues(column, positions = null) {
+  if (positions && uniqueRowsTooMany(positions.length)) return;
+  const from = positions
+    ? `${positions.length.toLocaleString()} row${positions.length === 1 ? '' : 's'}`
+    : 'this view';
+  if (positions && positions.length && positionsNeedLoading(positions)) toast(`Reading ${from}…`, 8000);
+  const seen = new Set();
+  const add = (v) => {
+    const text = String(displayCell(column, v ?? ''));
+    if (text !== '') seen.add(text);
+  };
+  const textPromise = (async () => {
+    if (positions) {
+      await loadRowsForPositions(positions);
+      const idx = S.columns.findIndex((c) => c.name === column);
+      if (idx < 0) throw new Error(`no column named ${column}`);
+      for (const pos of positions) {
+        if (S.groupByCols.length && !groupCoordAt(pos)) continue;   // a heading, never a row
+        const r = rowAt(pos);
+        if (!r) throw new Error(`row ${pos + 1} could not be loaded`);
+        add(r.cells[idx]);
+      }
+    } else {
+      if (!S.view || !S.view.view_id) throw new Error('open a table first');
+      const token = opToken();
+      const disarmCancel = armOpCancel(token);
+      let res;
+      try {
+        res = await api(`/api/distinct_values?view_id=${encodeURIComponent(S.view.view_id)}`
+          + `&column=${encodeURIComponent(column)}&op_token=${encodeURIComponent(token)}`);
+      } catch (e) {
+        throw e.status === 499 ? new Error('cancelled') : e;
+      } finally {
+        disarmCancel();
+      }
+      if (res.truncated) {
+        throw new Error(`${column} has more than ${res.values.length.toLocaleString()} unique values in this view — filter it down first`);
+      }
+      for (const v of res.values) add(v);
+    }
+    if (!seen.size) throw new Error(`every ${column} value in ${from} is empty`);
+    return [...seen].join('\n');
+  })();
+  await writeClipboardText(textPromise,
+    () => `Copied ${seen.size.toLocaleString()} unique value${seen.size === 1 ? '' : 's'} of ${column} from ${from}`);
+}
+
+/* The keyboard's way in (Ctrl+Shift+U by default). The column is the one
+   the cell cursor is in; the rows are a cell range spanning several rows,
+   else the picked rows — Ctrl+C's precedence, minus its fall back to one
+   row — and the whole view when neither narrows anything, which is the
+   plain "click a cell in the column, press the key" case. A select-all
+   with nothing unchecked IS the whole view, and goes to the server as
+   that rather than as every position materialised. */
+export function copyUniqueValuesShortcut() {
+  const column = (S.cellFocus && S.cellFocus.name) || (S.cellRange ? visibleCols()[S.cellRange.c0] : null);
+  if (!column) { toast('Click a cell in the column first'); return; }
+  const picked = selCount();
+  const range = S.cellRange && (S.cellRangeExplicit || !picked) ? cellRangeRows() : [];
+  if (range.length > 1) return copyUniqueValues(column, range);
+  if (!picked || wholeViewPicked(picked)) return copyUniqueValues(column, null);
+  // Checked before materialising, as handleCopyShortcut does.
+  if (uniqueRowsTooMany(picked)) return;
+  return copyUniqueValues(column, selPositions());
+}
+
+/* A select-all with nothing unchecked: the picks ARE the view. */
+export const wholeViewPicked = (picked) => S.selectAll && picked === selViewRows();
+
+/* Copy's 20,000-row ceiling, said in this action's terms — with the way
+   round it, since the whole view has no such ceiling here. */
+export function uniqueRowsTooMany(n) {
+  if (n <= 20000) return false;
+  toast('Too many rows to copy unique values from (max 20,000) — clear the selection to copy them from the whole view', 5000);
+  return true;
 }
 
 /* DOM wiring for this module, called once by main.js. Handlers can't

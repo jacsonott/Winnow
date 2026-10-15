@@ -1263,6 +1263,26 @@ see [docs/notes/README.md](README.md) for the whole set.
   effect worth knowing: a bare-key binding no longer fires when
   Ctrl/Alt/Meta is held (matchAction used to look at e.key alone, so
   Ctrl+T opened the Tables manager).
+  The same rule means a Ctrl+Shift+letter chord is STORED as
+  `Ctrl+<capital>` (copyUniqueValues' default is `'Ctrl+U'`), which next
+  to a modifier reads as plain Ctrl+U — a different chord, and the one
+  Chromium opens view-source on. `keyLabel` is the display side: Settings'
+  chips, the conflict toast and the row menu's hint spell the Shift back
+  out (`Ctrl+Shift+U`). Store the spec, show the label; a stored
+  `'Ctrl+Shift+U'` would never match anything.
+- **Copy unique values reads one of two places, by scope**
+  (`copyUniqueValues`). Rows — a multi-row cell range or the picks, by
+  Ctrl+C's precedence — go through the page cache under copy's 20,000-row
+  ceiling and keep first-appearance order. Anything wider — one clicked
+  cell, a select-all with nothing unchecked, the header menu — asks
+  `/api/distinct_values` for the whole view: group_summary with
+  `bucket_datetime=False` (a day bucket is not a value to paste) and
+  `order=value`, capped at `DISTINCT_VALUES_MAX` and refused past it
+  rather than copied in part. "One row" is deliberately NOT a scope here,
+  unlike every other row-menu action: one row has one value, so the
+  menu's "this row" means the whole view, and its second line says so.
+  It is on Ctrl+Shift+U because Ctrl+Shift+C was asked for and is taken:
+  the copy handler reads Shift there as "with headers".
 - **Ctrl+Shift+Arrow needs no binding of its own**, which is the same
   Shift fallback at work: it is spelled
   `Ctrl+Shift+ArrowDown`, matches nothing, gets Shift stripped, and lands

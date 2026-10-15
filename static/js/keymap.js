@@ -9,7 +9,7 @@ import { toggleDetailPane } from './detail.js';
 import { toggleHistogram } from './histogram.js';
 import { filterBySelectedCell, openValuePickerForColumn, selectedCellTarget } from './filters.js';
 import { headH, moveCell, render, selectCellRangeRows, toggleCellRangeRows, toggleCursorRow } from './grid.js';
-import { dropGrouping, handleCopyShortcut, toggleGrouping } from './grouping.js';
+import { copyUniqueValuesShortcut, dropGrouping, handleCopyShortcut, toggleGrouping } from './grouping.js';
 import { openPluginBundlesModal } from './bundles.js';
 import { cycleSavedFilter, openFilterSqlTab } from './savedfilters.js';
 import { expandSearch, openSearchAllModal } from './search.js';
@@ -86,6 +86,11 @@ export const DEFAULT_KEYMAP = {
   // keeps it native inside inputs; grouped mode no-ops (the header
   // checkbox is disabled there for the same reason).
   selectAllRows: ['Ctrl+a'],
+  // Ctrl+Shift+U — U for unique. Ctrl+Shift+C was the obvious chord and is
+  // taken: the copy handler reads Shift there as "with headers". Spelled
+  // 'Ctrl+U' because Shift lives in the capital (keySpecFromEvent), and
+  // ⌘ alongside it for the reason focusSearch carries it.
+  copyUniqueValues: ['Ctrl+U', 'Meta+U'],
   openTables: ['t'],
   toggleSidebar: ['`'],
   openTableMenu: ['C'],
@@ -125,6 +130,7 @@ export const ACTION_LABELS = {
   filterBySelectedCellOnly: "Filter by selected cell's value, dropping every other filter",
   clearFilters: 'Clear all filters, search and tag filter',
   selectAllRows: 'Select every row in the current view (same as the header checkbox)',
+  copyUniqueValues: "Copy the unique values of the cursor's column — from the selected rows, else the whole view",
   openTables: 'Open Tables manager',
   toggleSidebar: 'Show/hide the table sidebar',
   openTableMenu: 'Open the table menu (columns, value dropdowns) — also right-click a tab',
@@ -316,6 +322,16 @@ export function keySpecFromEvent(e) {
   return mods + e.key;
 }
 
+/* A stored binding as an analyst reads it. 'Ctrl+U' is how
+   keySpecFromEvent spells Ctrl+Shift+U — the Shift lives in the capital,
+   the way 'G' is Shift+g — and beside a modifier that reads as plain
+   Ctrl+U, which is a different chord. So a capital letter after a
+   modifier gets its Shift spelled out; everything else is shown as is. */
+export function keyLabel(spec) {
+  const m = /^((?:Ctrl\+|Alt\+|Meta\+)+)([A-Z])$/.exec(spec || '');
+  return m ? `${m[1]}Shift+${m[2]}` : (spec || '');
+}
+
 export function matchAction(e) {
   const spec = keySpecFromEvent(e);
   if (spec == null) return null;
@@ -423,6 +439,7 @@ export const ACTION_HANDLERS = {
   openSettings: () => openSettings(),
   resetColumnWidths: () => resetAllColumnWidths(),
   autofitColumnWidths: () => autofitAllColumnWidths(),
+  copyUniqueValues: () => copyUniqueValuesShortcut(),
   selectAllRows: () => {
     if (S.groupByCols.length || !S.view || !S.view.row_count) return;
     selSnapshot();

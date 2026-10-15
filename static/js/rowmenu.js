@@ -6,7 +6,8 @@ import { quickAddWidget } from './dashboard.js';
 import { tableOf, widgetFrom } from './dashwidgets.js';
 import { displayValue, ellipsize, filterByValue, openValuePickerForColumn } from './filters.js';
 import { rowAt } from './grid.js';
-import { copyRowsAsText, loadRowsForPositions, writeClipboardText } from './grouping.js';
+import { copyRowsAsText, copyUniqueValues, loadRowsForPositions, uniqueRowsTooMany, wholeViewPicked, writeClipboardText } from './grouping.js';
+import { keyLabel } from './keymap.js';
 import { showPluginTab } from './plugins.js';
 import { S, cellRangeRows, dashboardCreatorMode, selCount, selHas, selPositions } from './state.js';
 import { saveCurrentViewAsTable, saveRowsAsTable, saveSelectAllAsTable } from './subset.js';
@@ -315,8 +316,35 @@ export function rowMenuClipboardItems(ctx) {
       },
       { label: `Copy ${rows}`, pinId: 'copy:rows', onclick: () => copyRowsAsText(positions(), false) },
       { label: `Copy ${rows} with headers`, pinId: 'copy:rows-headers', onclick: () => copyRowsAsText(positions(), true) },
+      rowMenuUniqueItem(ctx),
     ],
   }];
+}
+
+/* The clicked column's distinct values, one per line (copyUniqueValues).
+   Over the menu's own scope when that is several rows — the picks it was
+   opened inside, or the cell range it was opened on — and over the whole
+   view when it is one row, since one row has one value. The second line
+   says which, because the same click means a different list in each. */
+export function rowMenuUniqueItem(ctx) {
+  const { count, positions, scope, inSelection } = rowMenuTargets(ctx);
+  const whole = count <= 1 || (inSelection && wholeViewPicked(count));
+  const key = (S.keymap.copyUniqueValues || [])[0];
+  return {
+    label: 'Copy unique values',
+    desc: ctx.colName ? `of ${ctx.colName} in ${whole ? 'the whole view' : scope}` : undefined,
+    hint: key ? keyLabel(key) : '',
+    pinId: 'copy:unique',
+    disabled: !ctx.colName,
+    title: !ctx.colName ? 'Right-click a cell to pick the column'
+      : whole ? `Every distinct ${ctx.colName} value the current filters show, one per line, sorted`
+      : `The distinct ${ctx.colName} values in ${scope}, one per line, in the order they appear`,
+    onclick: () => {
+      if (whole) return copyUniqueValues(ctx.colName, null);
+      if (uniqueRowsTooMany(count)) return undefined;
+      return copyUniqueValues(ctx.colName, positions());
+    },
+  };
 }
 
 /* "Keep these rows": the selection (or the clicked row), or the whole

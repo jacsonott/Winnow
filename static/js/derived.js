@@ -9,6 +9,7 @@ import { tableOf, widgetFrom } from './dashwidgets.js';
 import { $, api, el, post, setBusy, toast, toastAction } from './core.js';
 import { ellipsize } from './filters.js';
 import { render } from './grid.js';
+import { copyUniqueValues } from './grouping.js';
 import { startJobsPoll } from './jobs.js';
 import { loadSources, openSource } from './sources.js';
 import { S, dashboardCreatorMode } from './state.js';
@@ -94,11 +95,21 @@ export function columnMenuItems(name) {
     }
   }
   if (items.length) items.push('-');
-  // Three verbs, in the order they get used: Stack, Derive, and — only
-  // when the column actually holds documents — Flatten. The derive modal
+  // The verbs, in the order they get used: Stack (and its clipboard
+  // twin), Derive, and — only when the column actually holds documents —
+  // Flatten. The derive modal
   // is type-first (timestamp / extract / join / compare), so one entry
   // covers what used to be spelled out as "add a datetime column".
   items.push({ label: 'Stack values (rarest first)…', onclick: () => openStack(name) });
+  // Stack's list with the counts taken off, onto the clipboard: every
+  // distinct value the view holds, sorted. Always the whole view from
+  // here — a header is about the column, not about which rows are picked
+  // (the row menu's copy of this item is the one that follows the picks).
+  items.push({
+    label: 'Copy unique values',
+    title: `Every distinct ${name} value the current filters show, one per line, sorted`,
+    onclick: () => copyUniqueValues(name, null),
+  });
   items.push({ label: 'Derive a column from this…', onclick: () => openDerivedColumnModal(name) });
   if (!c.derived && S.sourceId >= 0 && columnLooksStructured(name)) {
     items.push({ label: 'Flatten JSON/XML into columns…', onclick: () => openFlattenModal(name) });

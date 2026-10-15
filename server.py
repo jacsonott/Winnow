@@ -3818,6 +3818,20 @@ def api_group_summary(view_id: str, column: str, order: str = "count", direction
         raise HTTPException(409, str(e))
 
 
+@app.get("/api/distinct_values")
+def api_distinct_values(view_id: str, column: str, op_token: str | None = None):
+    """One column's distinct non-empty values over the current view, sorted
+    — "Copy unique values" when nothing narrower than the view is picked
+    (Store.distinct_values). Its own route rather than group_summary with a
+    bigger limit: that one's 5,000 cap is sized for a group strip, and this
+    list is meant to be complete or refused (`truncated`), with no counts
+    to carry along."""
+    try:
+        return JSONResponse(store().distinct_values(view_id, column, op_token=op_token))
+    except KeyError as e:
+        raise HTTPException(409, str(e))
+
+
 @app.get("/api/histogram")
 def api_histogram(view_id: str, column: str, max_buckets: int = 160, op_token: str | None = None,
                   stack: str | None = None):
