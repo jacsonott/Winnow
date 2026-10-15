@@ -1331,6 +1331,73 @@ def test_lateral_movement_edges_over_a_merge(lateral_client, store, write_csv):
     assert merged[("WKS1", "SRV1")] == single.get(("WKS1", "SRV1"), 0) + 1
 
 
+def test_lateral_movement_preview_counts_what_a_graph_would_draw(lateral_client):
+    """The event builder's preview: rows the conditions match, then the
+    links and hosts those rows draw once empty, '-' and self endpoints
+    drop out — the same rows Build would turn into edges."""
+    client, source_id = lateral_client
+    r = client.post("/api/plugin/lateral_movement/preview", json={
+        "selection": _sel(source_id, label_col="User")})
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["matched"] == 5          # every row; no conditions
+    assert out["hops"] == 3             # the self-loop and the '-' source draw nothing
+    assert (out["links"], out["hosts"]) == (2, 3)
+    assert out["top"] == [{"src": "WS1", "dst": "SRV1", "n": 2, "labels": 2},
+                          {"src": "WS2", "dst": "SRV1", "n": 1, "labels": 1}]
+    assert out["first"] is None and out["links_capped"] is False
+
+    sel = _sel(source_id, conditions=[{"column": "User", "op": "equals", "value": "alice"}])
+    out = client.post("/api/plugin/lateral_movement/preview", json={"selection": sel}).json()
+    assert (out["matched"], out["hops"]) == (3, 2)   # alice's self-loop matches, draws nothing
+    edges = client.post("/api/plugin/lateral_movement/edges", json={"selections": [sel]}).json()["edges"]
+    assert out["hops"] == sum(e["n"] for e in edges)
+
+
+def test_lateral_movement_preview_refuses_what_build_would(lateral_client):
+    client, source_id = lateral_client
+    for sel in (_sel(source_id, dst_col="SourceHost"),
+                _sel(source_id, dst_col="Nope"),
+                _sel(source_id, conditions=[{"column": "User", "op": "in", "value": " , "}])):
+        r = client.post("/api/plugin/lateral_movement/preview", json={"selection": sel})
+        assert r.status_code == 400, sel
+
+
+def test_lateral_movement_preview_time_span(timed_client):
+    client, sid = timed_client
+    r = client.post("/api/plugin/lateral_movement/preview", json={"selection": {
+        "source_id": sid, "src_col": "SourceHost", "dst_col": "DestHost", "time_col": "When"}})
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["first"].startswith("2026-03-14 08:00") and out["last"].startswith("2026-03-15 09:00")
+
+
+def test_lateral_movement_preview_over_a_merge(lateral_client, store, write_csv):
+    client, source_id = lateral_client
+    src = store.get_source(source_id)
+    header = [c["name"] for c in src["columns"] if not c.get("derived")]
+    row = {c: "" for c in header}
+    row.update({"SourceHost": "WKS1", "DestHost": "SRV1"})
+    other = store.ingest_csv(write_csv([header, [row[c] for c in header]], "lm3.csv"),
+                             name="lm3", build_fts=False)["id"]
+    mid = store.create_merge("lmmerge2", [source_id, other])["id"]
+    r = client.post("/api/plugin/lateral_movement/preview", json={"selection": _sel(mid)})
+    assert r.status_code == 200, r.text
+    assert (r.json()["matched"], r.json()["hops"]) == (6, 4)
+
+
+def test_lateral_movement_values_suggest_the_commonest(lateral_client):
+    client, source_id = lateral_client
+    r = client.post("/api/plugin/lateral_movement/values",
+                    json={"source_id": source_id, "column": "User"})
+    assert r.status_code == 200, r.text
+    assert r.json()["values"] == [{"value": "alice", "n": 3}, {"value": "bob", "n": 1},
+                                  {"value": "carol", "n": 1}]
+    bad = client.post("/api/plugin/lateral_movement/values",
+                      json={"source_id": source_id, "column": "Nope"})
+    assert bad.status_code == 400 and "Nope" in bad.json()["detail"]
+
+
 def test_lateral_movement_tab_asset(lateral_client):
     client, _ = lateral_client
     r = client.get("/plugin_assets/lateral_movement/ui/tab.js")
@@ -1422,6 +1489,10 @@ def test_lateral_movement_saved_defs_persist_machine_side(lateral_client):
     r = client.post("/api/plugin/lateral_movement/defs", json={"saved": [mine]})
     assert r.status_code == 200, r.text
     assert [d["name"] for d in r.json()["saved"]] == ["WinRM"]
+    # The tab replaces its copy with this reply; without the header sets
+    # in it, every header-set binding resolved against nothing until the
+    # next GET.
+    assert "Event logs (EvtxECmd)" in r.json()["header_sets"]
     # A fresh GET (new request, same machine storage) still has it.
     assert client.get("/api/plugin/lateral_movement/defs").json()["saved"][0]["name"] == "WinRM"
     # A malformed definition is refused as a 400, not stored.

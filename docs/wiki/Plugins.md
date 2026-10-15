@@ -318,12 +318,25 @@ arrows show direction, and a node's size is its total events. Drag nodes to arra
 pan. Brush the histogram under the graph to narrow it to a time window.
 Double-click a host to open the first selected event's table filtered to
 that host. **Apply case timeframe** (on by default) limits the graph to the
-timeframe filter set in the grid. **Events…** manages saved definitions.
+timeframe filter set in the grid.
 
-**+ New event type** defines your own movement event (source and
-destination columns plus conditions), for firewall or netflow tables, say.
-Your definitions are saved on this machine and offered in every case. A
-graph takes up to 20 selections and 8,000 edge rows.
+**+ New event type** defines your own movement event, for firewall or
+netflow tables, say, or a narrower version of a shipped one. The builder
+reads its columns from one table (**Read columns from**) and guesses the
+**Source host**, **Destination host**, **User column** and **Time column**
+from their names. Under **Only rows where**, add conditions such as
+EventId is 4624; the chips under each condition are the column's most
+common values, and clicking one fills it in. As you change anything, the
+right side shows what the event finds in that table: how many rows match,
+how many links and hosts they make, and the busiest links. **Start from**
+copies an existing event as a starting point, and **Offer it on** chooses
+between every table of the same kind (Event logs (EvtxECmd) tables, say)
+and any table that has the columns the event reads. Names must be unique.
+
+Your definitions are saved on this machine and offered in every case.
+**Events…** lists every event: **Edit** and **Delete** change yours, and
+**Copy to edit** opens a shipped one in the builder as a new event. A graph
+takes up to 20 selections and 8,000 edge rows.
 
 The shipped **KAPE triage** profile turns this plugin on.
 
