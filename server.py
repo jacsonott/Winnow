@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import errno
 import functools
 import anyio
 import heapq
@@ -1678,15 +1679,40 @@ def api_assoc_asked(request: Request, body: AssocExtsBody):
 
 class CaseSaveAsBody(BaseModel):
     name: str
+    # What + New case asks for, so saving a quick look is the same dialog.
+    # No path keeps the old shape: the name, slugged, in the cases folder.
+    path: str | None = None
+    group: str = ""
+    notes: str = ""
 
 
 @app.post("/api/case/save_as")
-def api_case_save_as(body: CaseSaveAsBody):
+def api_case_save_as(request: Request, body: CaseSaveAsBody):
     with _CASE_SWITCH:
-        return _case_save_as(body)
+        return _case_save_as(request, body)
 
 
-def _case_save_as(body: CaseSaveAsBody):
+def _move_case_file(src: str, dest: str) -> None:
+    """Rename, or copy-then-delete when `dest` is on another drive or mount
+    (a case saved to D:\\Cases from a Winnow on C:), which a rename can't
+    cross. A copy that fails leaves no half-written file at `dest`."""
+    try:
+        os.replace(src, dest)
+        return
+    except OSError as e:
+        if e.errno != errno.EXDEV:
+            raise
+    try:
+        shutil.copy2(src, dest)
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.remove(dest)
+        raise
+    with contextlib.suppress(OSError):
+        os.remove(src)
+
+
+def _case_save_as(request: Request, body: CaseSaveAsBody):
     """Promote the open quick-look case to a real one: move the file out of
     quicklook/, register it on the home screen under the given name.
 
@@ -1713,23 +1739,44 @@ def _case_save_as(body: CaseSaveAsBody):
     name = (body.name or "").strip()
     if not name:
         raise HTTPException(400, "Give the case a name")
-    slug = re.sub(r"[^A-Za-z0-9._ -]+", "_", name).strip() or "case"
-    dest = os.path.join(_cases_dir(), f"{slug}{CASE_SUFFIX}")
-    if os.path.exists(dest):
-        raise HTTPException(400, f"A case file named {os.path.basename(dest)} already exists")
+    if body.path and body.path.strip():
+        dest = os.path.abspath(os.path.expanduser(body.path.strip()))
+        if _is_temp_case(dest):
+            # Saved into quicklook/, it would still be a quick look: off
+            # the home screen, and the startup sweep's to delete.
+            raise HTTPException(400, "That folder holds quick looks — pick another one for the case")
+        if os.path.exists(dest):
+            raise HTTPException(400, f"Something is already at {dest} — pick another path")
+        parent = os.path.dirname(dest)
+        _refuse_remote_mkdir(request, parent)
+        try:
+            os.makedirs(parent, exist_ok=True)
+        except OSError as e:
+            raise HTTPException(400, f"Could not create the folder: {e}")
+    else:
+        slug = re.sub(r"[^A-Za-z0-9._ -]+", "_", name).strip() or "case"
+        dest = os.path.join(_cases_dir(), f"{slug}{CASE_SUFFIX}")
+        if os.path.exists(dest):
+            raise HTTPException(400, f"A case file named {os.path.basename(dest)} already exists")
 
     old_path = STORE.path
     STORE.close()
     try:
-        os.replace(old_path, dest)
+        _move_case_file(old_path, dest)
     except OSError as e:
-        STORE = _open_store(old_path)   # failed rename leaves everything as it was
+        STORE = _open_store(old_path)   # failed move leaves everything as it was
         raise HTTPException(400, f"Could not move the case file: {e}")
     for suffix in ("-wal", "-shm", ".winnow-lock"):
         with contextlib.suppress(OSError):
             os.remove(old_path + suffix)
     STORE = _open_store(dest)
-    rec = WS.cases.create(dest, name=name)
+    group = (body.group or "").strip()
+    rec = WS.cases.create(dest, name=name, group=group, notes=body.notes or "")
+    if (rec.get("name"), rec.get("group") or "") != (name, group):
+        # create() hands back a record already listed under this path (one
+        # whose file was deleted outside Winnow) as it was; the dialog's
+        # name and group are what the analyst just typed.
+        rec = WS.cases.update(rec["id"], name=name, group=group)
     WS.cases.touch_opened(rec["id"])
     with contextlib.suppress(Exception):
         instances.set_case(dest)
