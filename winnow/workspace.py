@@ -55,7 +55,7 @@ stores longer than it was true:
                            first run rather than silently defaulting
 
 Never holds evidence data — only UI/workflow bookkeeping. Analyst work
-(tags, notes, layouts, saved views) lives in the case file instead, so it
+(tags, notes, layouts) lives in the case file instead, so it
 travels with the evidence; that split is deliberate.
 
 Human-readable means hand-editable, so a damaged file is expected, not

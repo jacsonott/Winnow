@@ -241,13 +241,9 @@ CREATE TABLE IF NOT EXISTS layouts (
     source_id INTEGER PRIMARY KEY,
     payload   TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS saved_views (
-    id        INTEGER PRIMARY KEY,
-    source_id INTEGER NOT NULL,
-    name      TEXT NOT NULL,
-    payload   TEXT NOT NULL,
-    saved_at  TEXT
-);
+-- No saved_views table any more: it backed an API nothing in the app ever
+-- called, and was removed with it. A case file made before then still has
+-- one; nothing reads it, and it is left alone rather than dropped.
 -- Legacy — presets are saved filters now (workspace-level, cross-case; see
 -- Store.pop_legacy_presets and CLAUDE.md). Table kept only so a case file
 -- from before that change has somewhere for its old presets to still be
@@ -337,7 +333,7 @@ CREATE TABLE IF NOT EXISTS derived_columns (
 -- Named session snapshots, IN the case file rather than beside it.
 --
 -- A session is a point-in-time copy of the analysis layer — tags, notes,
--- layouts, saved views, derived-column definitions — for every source,
+-- layouts, derived-column definitions — for every source,
 -- open in a tab or not. Keeping them here means work an analyst saved (or
 -- received from someone else and loaded) travels with the case instead of
 -- living in a sessions/ directory that gets left behind the moment the .db
@@ -2401,7 +2397,6 @@ def session_document_problem(doc: Any) -> str | None:
         _list_of_dicts_problem(doc, "tag_defs", {"id": _is_int64, "name": is_str})
         or _list_of_dicts_problem(doc, "row_tags", {"rid": _is_int64, "tag_id": _is_int64})
         or _list_of_dicts_problem(doc, "row_notes", {"rid": _is_int64, "note": is_str})
-        or _list_of_dicts_problem(doc, "saved_views", {"name": is_str})
         # A derived column's own fields are checked as it is created — a
         # bad one is a per-column warning there, never a failed import.
         or _list_of_dicts_problem(doc, "derived_columns", {})
@@ -2534,8 +2529,9 @@ class Store:
             if not any(r[1] == "nickname" for r in self.db.execute("PRAGMA table_info(sources)")):
                 self.db.execute("ALTER TABLE sources ADD COLUMN nickname TEXT")
             # ...and sources.origin / origin_meta (where a derived table came
-            # from — a SQL-pane save, a saved view or selection). NULL reads
-            # as "an imported file", which every pre-existing row is.
+            # from — a SQL-pane save, or Save as table on a view or
+            # selection). NULL reads as "an imported file", which every
+            # pre-existing row is.
             # ...and sources.ingest (how the file was parsed; NULL on a
             # table from before it was recorded, which session re-import
             # treats as "guess, then check the shape").
@@ -3234,13 +3230,13 @@ class Store:
     # table's id straight back to the next import.
     #
     # Signed source ids (negative = merge) share open_tabs/layouts/
-    # saved_views/source_folder_map, so the positive half counts for
+    # source_folder_map, so the positive half counts for
     # sources and the negated negative half for merges.
     _ID_HIGH_WATER_SQL = {
         "sources": [
             "SELECT MAX(id) FROM sources",
             *(f"SELECT MAX(source_id) FROM {t}" for t in (
-                "row_tags", "row_notes", "layouts", "saved_views", "open_tabs",
+                "row_tags", "row_notes", "layouts", "open_tabs",
                 "derived_columns", "subset_rids", "source_folder_map",
                 "watchlist_hits", "watchlist_scans")),
             "SELECT MAX(parent_source_id) FROM subset_rids",
@@ -3253,7 +3249,7 @@ class Store:
         "merges": [
             "SELECT MAX(id) FROM merges",
             *(f"SELECT -MIN(source_id) FROM {t}" for t in (
-                "layouts", "saved_views", "open_tabs", "source_folder_map")),
+                "layouts", "open_tabs", "source_folder_map")),
         ],
         "sql_tabs": ["SELECT MAX(id) FROM sql_tabs"],
     }
@@ -6264,7 +6260,7 @@ class Store:
                      col_mode: str | None = None, source_column: bool | None = None) -> dict:
         """Edit a merge in place — its tables, column mode, source column
         or name. In place matters: everything keyed by the merge's negative
-        id (its tab, layout, saved views, folder) stays with it, which
+        id (its tab, layout, folder) stays with it, which
         deleting and recreating would lose. Tags and notes live on member
         rows and never depended on the merge at all.
 
@@ -6356,7 +6352,7 @@ class Store:
             # Everything keyed by the merge's NEGATIVE source id. Tags and
             # notes aren't here because a merge has none of its own — they
             # live on the member rows (invariant #9) and survive on purpose.
-            for t in ("open_tabs", "layouts", "saved_views"):
+            for t in ("open_tabs", "layouts"):
                 self.db.execute(f"DELETE FROM {t} WHERE source_id=?", (-merge_id,))
             # Its views too, for drop_source's reason: a window still
             # holding one would otherwise page and tag a merge nobody has.
@@ -6426,7 +6422,6 @@ class Store:
             for t in ("row_tags", "row_notes", "watchlist_hits", "watchlist_scans"):
                 self.db.execute(f"DELETE FROM {t} WHERE source_id=?", (source_id,))
             self.db.execute("DELETE FROM layouts WHERE source_id=?", (source_id,))
-            self.db.execute("DELETE FROM saved_views WHERE source_id=?", (source_id,))
             self.db.execute("DELETE FROM open_tabs WHERE source_id=?", (source_id,))
             self.db.execute("DELETE FROM sources WHERE id=?", (source_id,))
             self.db.execute(f"DROP TABLE IF EXISTS {q(self._derived_table(source_id))}")
@@ -10751,25 +10746,6 @@ class Store:
             ).fetchone()
         return json.loads(row["payload"]) if row else None
 
-    def save_view(self, source_id: int, name: str, payload: dict) -> dict:
-        with self.lock, self.db:
-            cur = self.db.execute(
-                "INSERT INTO saved_views(source_id, name, payload, saved_at) VALUES (?,?,?,?)",
-                (source_id, name, json.dumps(payload), time.strftime("%Y-%m-%dT%H:%M:%S")),
-            )
-        return {"id": cur.lastrowid, "name": name, "payload": payload}
-
-    def list_saved_views(self, source_id: int) -> list[dict]:
-        with self._reader() as ro:
-            rows = ro.execute(
-                "SELECT * FROM saved_views WHERE source_id=? ORDER BY id DESC", (source_id,)
-            ).fetchall()
-        return [{"id": r["id"], "name": r["name"], "payload": json.loads(r["payload"])} for r in rows]
-
-    def delete_saved_view(self, view_id: int) -> None:
-        with self.lock, self.db:
-            self.db.execute("DELETE FROM saved_views WHERE id=?", (view_id,))
-
     # ------------------------------------------------------- sql pane sub-tabs
 
     def list_sql_tabs(self) -> list[dict]:
@@ -12559,7 +12535,7 @@ class Store:
         each write's own transaction (_bump_state_generation).
 
         What it is not: exact. A widget reading something else about the
-        case — case notes, a saved view, a derived column's values — can
+        case — case notes, a derived column's values — can
         still go quietly out of date, and a marker that moved for those
         would mark every board stale every time anyone did anything. Its
         job is to let a stale number be SHOWN AND LABELLED, not to be
@@ -13032,7 +13008,6 @@ class Store:
             "row_tags": rt,
             "row_notes": notes,
             "layout": self.get_layout(source_id),
-            "saved_views": self.list_saved_views(source_id),
             # Definitions, not values: a derived column is a deterministic
             # function of data the receiving case already has, so importing
             # re-runs the backfill rather than shipping a second copy of
@@ -13173,24 +13148,13 @@ class Store:
 
     def _restore_session_reading(self, source_id: int, session: dict,
                                  warnings: list[str]) -> tuple[int, list[str]]:
-        """The half of a session that is how the evidence is READ — layout,
-        saved views, derived columns — rather than what was concluded about
+        """The half of a session that is how the evidence is READ — layout
+        and derived columns — rather than what was concluded about
         it. Returns (derived columns added, their backfill job ids)."""
         if session.get("layout"):
             self.save_layout(source_id, session["layout"])
-        # A view the table already holds — same name, same spec — is not
-        # added again. saved_views has no unique name (two specs may share
-        # one), so every load used to append the session's views anew: one
-        # became sixteen after a few save/load cycles. Only an exact match
-        # is skipped; a same-named view with a different spec is someone's
-        # work and is kept beside the local one, not written over it.
-        have = {(v["name"], json.dumps(v["payload"], sort_keys=True))
-                for v in self.list_saved_views(source_id)}
-        for sv in session.get("saved_views", []):
-            key = (sv["name"], json.dumps(sv["payload"], sort_keys=True))
-            if key not in have:
-                self.save_view(source_id, sv["name"], sv["payload"])
-                have.add(key)
+        # A session saved before saved views were removed can still carry a
+        # `saved_views` list; it is ignored, since nothing could open one.
 
         # Derived columns arrive as definitions and are recomputed here —
         # each starts its own backfill job. A name that's already taken
@@ -13555,7 +13519,7 @@ class Store:
     # ------------------------------------------------ copying into another case
 
     def copy_sources_to(self, target_path: str, source_ids: list[int]) -> dict:
-        """Copy sources — rows, tags, notes, layout, saved views, derived
+        """Copy sources — rows, tags, notes, layout, derived
         columns and their values — from this case into another case file.
 
         The flow this serves: a file opened by double-click lands in a
@@ -13680,10 +13644,6 @@ class Store:
                     t.db.execute(
                         "INSERT OR REPLACE INTO layouts(source_id, payload) "
                         "SELECT ?, payload FROM srccase.layouts WHERE source_id=?",
-                        (new_id, sid))
-                    t.db.execute(
-                        "INSERT INTO saved_views(source_id, name, payload, saved_at) "
-                        "SELECT ?, name, payload, saved_at FROM srccase.saved_views WHERE source_id=?",
                         (new_id, sid))
 
                     # Derived columns: definitions re-pointed, values table
@@ -13909,7 +13869,7 @@ class Store:
         """Clear the live tags and notes for a fresh pass over the same
         evidence, optionally saving what's there first.
 
-        Clears conclusions only. Layouts, saved views, derived columns, SQL
+        Clears conclusions only. Layouts, derived columns, SQL
         tabs and the tag palette all stay — they are how the evidence is
         READ, and starting a second pass doesn't mean re-deriving timestamps
         or re-hiding columns.

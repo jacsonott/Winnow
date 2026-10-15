@@ -12,7 +12,7 @@ scrolling stays smooth however deep you are.
 Everything runs on your machine — one Python server, no cloud, no build
 step, works on an airgapped analysis box. A case is a single SQLite file
 holding a copy of the rows you import and everything you do with them
-(tags, notes, saved views, the watchlist, dashboards), so handing an
+(tags, notes, the watchlist, dashboards), so handing an
 investigation to another analyst means handing over one file. **The
 evidence files themselves are never modified.**
 

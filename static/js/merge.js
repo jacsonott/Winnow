@@ -34,7 +34,7 @@ const listNames = (arr) => (arr.length <= 1 ? (arr[0] || '') : `${arr.slice(0, -
    `opts.preselect` ticks tables up front (the table menu's "Merge with
    other tables…"), and the groups that fit them best are listed first.
    `opts.edit` is a merge to change in place — PUT keeps its id, so its
-   tab, layout and saved views stay with it. */
+   tab and layout stay with it. */
 export function openMergeBuilder(opts = {}) {
   const edit = opts.edit || null;
   const real = S.sources.filter((s) => !s.is_merge && !s.error);

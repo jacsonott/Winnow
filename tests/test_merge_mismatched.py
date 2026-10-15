@@ -370,17 +370,15 @@ def test_source_column_on_same_shaped_tables(store, write_csv):
 
 # ----------------------------------------------------------------- editing
 
-def test_edit_merge_keeps_its_id_layout_and_saved_views(store, abc):
+def test_edit_merge_keeps_its_id_and_layout(store, abc):
     a, b, c = abc
     mid = store.create_merge("m", [a, b])["id"]
     store.save_layout(mid, {"order": ["Msg"], "columns": {}})
-    store.save_view(mid, "logons", {"filters": [{"column": "Msg", "op": "contains", "value": "logon"}]})
     old = _view(store, mid)
     out = store.update_merge(-mid, source_ids=[a, b, c], col_mode="all", source_column=True)
     assert out["id"] == mid and out["row_count"] == 6
     assert out["columns"][0]["name"] == "From table"
     assert store.get_layout(mid)["order"] == ["Msg"]
-    assert [sv["name"] for sv in store.list_saved_views(mid)] == ["logons"]
     with pytest.raises(KeyError):
         store.fetch_rows(old["view_id"], 0, 10)   # drawn from the old member list
     assert _view(store, mid)["row_count"] == 6

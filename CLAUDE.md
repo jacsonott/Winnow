@@ -367,10 +367,10 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
 
 1. **Source tables are never mutated.** Each import is `src_<id>` with an
    explicit `rid INTEGER PRIMARY KEY`. Tags and notes live in sidecar tables
-   keyed by `(source_id, rid)`; layouts and saved views are sidecars too, keyed
-   per source rather than per row — a layout is one row per source, a saved view
-   one row per saved spec. The CSV on disk is never written to. This is what
-   makes a session portable and re-import non-destructive.
+   keyed by `(source_id, rid)`; layouts are sidecars too, keyed per source
+   rather than per row — one row per source. The CSV on disk is never
+   written to. This is what makes a session portable and re-import
+   non-destructive.
 
 2. **Never page with `LIMIT/OFFSET` over a filtered sort.** Filter/sort changes
    materialise once into a temp-attached `v.view_N(pos, rid)` table; the grid
@@ -622,12 +622,7 @@ A new trap goes in the file for its subsystem, not back here — see
    finding means seeing the rows nobody has tagged yet. The extension is a
    timeline scoped by time window or by source instead of by `row_tags`,
    without materialising every row in the case to get there.
-4. **Saved views UI.** Endpoints (`/api/saved_views`) exist and work; nothing in
-   the frontend calls them yet. (Related but not it: "Save as table" —
-   `Store.save_view_as_source` — records the spec that produced a subset
-   in `sources.origin_meta`, the first place a view spec is persisted per
-   result; a saved *view* would replay one, a subset copies its rows.)
-5. `.tle_sess` import, so existing Timeline Explorer sessions carry over.
+4. `.tle_sess` import, so existing Timeline Explorer sessions carry over.
 
 ## Plugin-facing changes ship with their docs
 

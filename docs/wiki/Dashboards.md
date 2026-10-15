@@ -409,8 +409,9 @@ which one to open (see
   placeholder never resolves to one. SQL you write yourself can read a merge
   by the name the SQL pane gives it (`merge_N`), but clicking that widget
   opens its query in the SQL pane, not rows.
-- **Saved views are left out of `{{all:…}}` unions** and of the table picker
-  a union widget shows.
+- **Tables made with Save as table are left out of `{{all:…}}` unions** and
+  of the table picker a union widget shows: their rows are already counted
+  in the table they were saved from.
 - **A widget built on this case's table doesn't travel.** Use the portable
   tables for boards you'll save to the Library or a profile.
 - **Derived columns** aren't offered in the widget editor or the Add to
