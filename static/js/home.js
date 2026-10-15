@@ -598,7 +598,7 @@ export function openNewCaseModal(state = {}) {
 
 
     const actions = el('div', 'row-actions');
-    const create = el('button', 'btn', saving ? 'Save case' : 'Create case');
+    const create = el('button', 'btn primary', saving ? 'Save case' : 'Create case');
     create.onclick = oneAtATime(create, async () => {
       const name = nameInput.value.trim();
       if (!name) { toast('Name the case first'); return; }
@@ -779,7 +779,7 @@ export function openEditCaseModal(c) {
     b.append(el('div', 'note-status', c.path));
 
     const actions = el('div', 'row-actions');
-    const save = el('button', 'btn', 'Save');
+    const save = el('button', 'btn primary', 'Save');
     save.onclick = async () => {
       try {
         await api(`/api/cases/${c.id}`, {
@@ -1111,7 +1111,7 @@ export function openQuickLookExitDialog() {
       'Quick looks never appear in the case list, so there is no way back to this one '
       + 'from the home screen. Choose what happens to it first:'));
     const acts = el('div', 'row-actions');
-    const save = el('button', 'btn', 'Save as a case…');
+    const save = el('button', 'btn primary', 'Save as a case…');
     // The save dialog replaces this one; Cancel there comes back here.
     save.onclick = () => tempSaveAs({
       onSaved: async () => { showHome(); await refreshCases(); },
