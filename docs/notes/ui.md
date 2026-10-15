@@ -1505,6 +1505,32 @@ see [docs/notes/README.md](README.md) for the whole set.
 
 - **Profiles: a two-pane manager, and a sheet in front of Apply** (bundles.js; `WS.plugin_bundles`, `/api/plugin_bundles/*`). A profile is a kind of case — plugins, boards, a starter watchlist, variable definitions — and the list this replaced was one ellipsised row per profile, with the shipped description pushing Apply and Copy off the end of it. The manager (M) is `.pm` : profiles left with a one-line count summary, the whole selected profile right — every plugin, every board with EVERY widget's render kind and whether it is `live`, the watchlist, the variables. Sections carry `data-sec` (plugins/board/watchlist/variables) because a board section is headed with the board's NAME and "Watchlist" is also the start of a widget title on the shipped board. **The sheet is the point.** Apply sets an explicit on/off override for every installed plugin (so everything not in the profile is turned OFF), upserts boards BY NAME, seeds indicators and starts a scan, and said none of it first. `GET /api/plugin_bundles/{id}/plan` counts each of those against the OPEN CASE — which plugins go on and off and how many stay off, what each board replaces and by how many widgets, which indicators are new and how many tables seeding them scans (`Store.watchlist_scan_sources`, the scan's own predicate, so the number cannot disagree with the scan), which variables are required and unset (a required one with a declared DEFAULT is not among them: the apply creates the row carrying the default, so nothing prompts for it) — and `POST .../apply` takes `parts` from `APPLY_PARTS`, so a board can be taken without the watchlist. The plugins part stays ticked even when the case's set already matches the profile, because applying writes an explicit override per installed plugin and that write is what pins the case against a later machine-wide toggle. **No body still means all four parts**: the new-case dialog's Profile select and every script predate the sheet. **"You have edited this board" is answered by `origin`**, which the profile apply now stamps `profile:<name>` — any hand edit clears it (`set_dashboard_widgets`), a board stamped by this profile is its own untouched copy and worth no warning, and a plugin offering a board of the same name still asks, because a profile stamp is not a plugin stamp. A board applied before the stamp existed reads as edited, which errs toward warning. **Which profiles this case has had applied** is a `profiles_applied` case setting (a name → timestamp map) — the badge cannot be inferred from a board of the same name, which the analyst may have built by hand. **One profile exports as one file** (`winnow-profile/1`, `{format, profile}`) the way saved filters already do, minus the id and the `shipped` flag; a SHIPPED profile exports as a copy that records its ancestry. Import REFUSES a key it does not understand rather than dropping it, and refuses a KNOWN key holding the wrong kind of value for the same reason (`PluginBundles.IMPORT_SHAPE`; `save` is permissive by design, so `"plugins": "lateral_movement"` would store one plugin per letter and a string `dashboard` would reach the manager as a board whose widgets cannot be iterated). It never upserts by name either — a file from outside must not overwrite an afternoon's work, so a taken name is suffixed `(imported)`, from a base trimmed to leave room for the suffix, since a 100-character name plus a suffix truncates back to itself and the search for a free name never ends. **Lineage**: a copy records `from_profile`/`from_version` (written by "Copy to edit" and carried through every later edit, since a content comparison would lose the thread on the first edit), `profiles.json` carries a per-profile `version`, `list()` answers `update_available` when the shipped one is newer, and the manager shows one line offering the diff. Taking it is `POST .../take_update`: always a button, never a merge — an analyst's copy and a revised shipped profile can disagree about any part of a board, and a three-way merge of SQL widgets produces a board neither of them wrote. tests/test_profile_export.py and tests/ui/test_profile_manager.py.
 
+- **The profile builder is the builders' two panes, and its Save waits
+  for its lists** (profilebuilder.js, `.pb-*`). It was one column of three
+  collapsible Settings sections, each variable a row of five boxes whose
+  only captions were placeholders — gone the moment anything was typed.
+  Left is what the profile turns on (name, Plugins, Dashboards), right is
+  what a case gets: one sentence saying what Apply will do, the variables
+  as captioned cards, and the values prompt. Four things to keep.
+  **The frame is drawn before `/api/plugins` and the board lists answer**
+  (so `modal()`'s `focus` finds the name box), which means Save exists
+  before there is anything to save: it stays disabled, and its handler
+  unwired, until the lists land — live in that gap, a click would save a
+  profile with no plugins and no boards. It used to be safe by accident,
+  since the button was only drawn after the awaits. **The preview IS the
+  prompt**: `variablePromptFields` (settings.js) builds the fields for both
+  `promptForVariables` and the builder, which renders them under `inert` —
+  a look-alike drawn here would drift the first time the prompt changed,
+  and an inert copy takes no focus and no typing. **The summary counts what Apply does, not what
+  is ticked**: a ticked plugin this machine lacks is not "turned on" (it
+  is a note instead — apply skips it), and no plugins ticked reads "Turns
+  every plugin off", because that is what the plugins part does. **The
+  name hint is about upsert-by-name**: `PluginBundles.save` matches on
+  name, so a taken name replaces that profile and renaming one while
+  editing saves a second beside it; both are said under the name box
+  before Save rather than discovered in the manager afterwards.
+  tests/ui/test_profile_builder_ui.py.
+
 - **Save a view, or a selection, as a table** (subset.js, `POST
   /api/view/save_as_table`). Two entry points, one helper: the row menu's
   **Save as table ▸** fold ("Save N selected rows as new table…" for the
