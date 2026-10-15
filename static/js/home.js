@@ -510,14 +510,14 @@ export function openNewCaseModal(state = {}) {
     nameInput.placeholder = 'Case name';
     const nameRow = el('div', 'row-actions');
     nameRow.append(nameInput);
-    b.append(el('label', null, 'Name'), nameRow);
+    b.append(el('label', 'field-label', 'Name'), nameRow);
 
     const groupInput = fieldInput(state.group || '');
     groupInput.placeholder = 'Group (optional) — e.g. an IR engagement name';
     groupInput.setAttribute('list', 'home-new-case-groups');
     const groupRow = el('div', 'row-actions');
     groupRow.append(groupInput, groupOptionsDatalist('home-new-case-groups'));
-    b.append(el('label', null, 'Group'), groupRow);
+    b.append(el('label', 'field-label', 'Group'), groupRow);
 
     let chosenDir = state.chosenDir || S.casesDir || S.defaultCasesDir || 'cases';
     const pathInput = fieldInput(state.path || joinPath(chosenDir, slugify(state.name || '') + CASE_EXT));
@@ -543,7 +543,7 @@ export function openNewCaseModal(state = {}) {
     };
     const pathRow = el('div', 'row-actions');
     pathRow.append(pathInput, browseBtn);
-    b.append(el('label', null, 'Case file path'), pathRow);
+    b.append(el('label', 'field-label', 'Case file path'), pathRow);
 
     // The profile, applied right after the case opens, so a Triage case
     // starts with the triage plugins on — no settings trip. (The record is
@@ -594,7 +594,7 @@ export function openNewCaseModal(state = {}) {
     typeSel.onchange = renderProfileVars;
     const typeRow = el('div', 'row-actions');
     typeRow.append(typeSel);
-    b.append(el('label', null, 'Profile'), typeRow, varsBox);
+    b.append(el('label', 'field-label', 'Profile'), typeRow, varsBox);
 
 
     const actions = el('div', 'row-actions');
@@ -727,7 +727,7 @@ export function openExistingCasePrompt(state = {}) {
     };
     const row = el('div', 'row-actions');
     row.append(pathInput, browseBtn);
-    b.append(el('label', null, 'Case file'), row);
+    b.append(el('label', 'field-label', 'Case file'), row);
     b.append(el('p', 'fb-help', 'Registers the case on this machine\u2019s list and opens it.'));
 
     const actions = el('div', 'row-actions');
@@ -761,20 +761,20 @@ export function openEditCaseModal(c) {
     const nameInput = fieldInput(c.name);
     const nameRow = el('div', 'row-actions');
     nameRow.append(nameInput);
-    b.append(el('label', null, 'Name'), nameRow);
+    b.append(el('label', 'field-label', 'Name'), nameRow);
 
     const groupInput = fieldInput(c.group || '');
     groupInput.setAttribute('list', 'home-edit-case-groups');
     const groupRow = el('div', 'row-actions');
     groupRow.append(groupInput, groupOptionsDatalist('home-edit-case-groups'));
-    b.append(el('label', null, 'Group'), groupRow);
+    b.append(el('label', 'field-label', 'Group'), groupRow);
 
     const notesArea = el('textarea');
     notesArea.rows = 4;
     notesArea.value = c.notes || '';
     notesArea.placeholder = 'Notes about this case…';
     notesArea.style.width = '100%';
-    b.append(el('label', null, 'Notes'), notesArea);
+    b.append(el('label', 'field-label', 'Notes'), notesArea);
 
     b.append(el('div', 'note-status', c.path));
 
