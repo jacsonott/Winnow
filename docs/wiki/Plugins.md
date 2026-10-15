@@ -244,20 +244,30 @@ start and end rows that read as a story.
 | **Ordered by** | The column that decides first and last; defaults to the table's first datetime column |
 | **Include columns** | Columns carried onto each result row |
 | **Total up** | Numeric columns to total per group |
+| **List values** | Columns whose distinct values each group lists in one cell, as a `Values of <column>` column |
 | Filters | Which source rows take part |
-| Description | A template for each row's description, by default `{which} of {count}` |
+| Description | A template for each row's description; left empty, it reads `{which} of {count}` |
 
 The description template accepts `{which}` (`First`, `Last` or `Only`),
-`{count}` (rows in the group), `{ColumnName}` (that row's value, any
-column), and `{sum:Column}`, `{min:Column}`, `{max:Column}` (the group's
-total, smallest and largest of a **Total up** column). A misspelt
-placeholder is reported in the preview rather than written into the
-result.
+`{which:number}` (the row's position in its group: `1` for the first, the
+group's size for the last), `{count}` (rows in the group), `{ColumnName}`
+(that row's value, any column), `{values:Column}` (the group's distinct
+values of any column, sorted, blanks left out), and `{sum:Column}`,
+`{min:Column}`, `{max:Column}` (the group's total, smallest and largest of
+a **Total up** column). A list names at most 50 values and says how many
+more there were. A new sheet starts with the description empty. A
+misspelt placeholder is reported in the preview rather than written into
+the result.
+
+The result's columns are the ordering column, the included columns, any
+`Sum of` and `Values of` columns, the description, and last the
+**Add the whole row as a JSON cell** column when that is ticked. The table
+picker shows a table's nickname when it has one.
 
 The preview shows 8 groups and follows your changes (**Auto-update**, or
 **Refresh**). **Copy result** copies the whole result as tab-separated text
 (up to 20,000 rows). **Create table…** writes it into the case as a new
-table, named `First-Last of <table>` by default, which you can tag, put on
+table, named `First-Last of <table>` by default (the nickname, if it has one), which you can tag, put on
 the Timeline and export like any other; tick **Add these rows to the
 Timeline (tags every row)** to do the first two at once. A result is
 limited to 100,000 groups. Merged tables work, and sheets are kept per case

@@ -62,13 +62,22 @@ const STATE_VERSION = 1;
 // anyone builds and still nowhere near winnow.tabState's cap.
 const MAX_SAVED_SHEETS = 24;
 const TAG_MODES = ['', 'any', 'none', 'ids'];
+/* What the backend renders when the description box is empty. A sheet
+   starts with the box empty — this shows in it, greyed, as the placeholder
+   — so a new sheet's description is the analyst's to write rather than
+   one to delete first. */
+const DEFAULT_TEMPLATE = '{which} of {count}';
+
+/* A table's name as the analyst knows it: the nickname when one is set,
+   as the app's own sourceLabel does it (plugins cannot import that). */
+const labelOf = (s) => (s && (s.nickname || s.name)) || '';
 
 const emptySpec = (name) => ({
   name,
   sourceId: null,
-  groupBy: [], carry: [], sums: [], filters: [],
+  groupBy: [], carry: [], sums: [], values: [], filters: [],
   tags: { mode: '', ids: [] }, rowJson: false,
-  sortColumn: null, colWidths: {}, template: '{which} of {count}',
+  sortColumn: null, colWidths: {}, template: '',
 });
 
 /* How a sheet names its table, and it takes two shapes because tables come
@@ -97,7 +106,7 @@ export function sheetSpec(sh, sources) {
   return {
     name: sh.name,
     source: savedSource(src),
-    groupBy: sh.groupBy, carry: sh.carry, sums: sh.sums, filters: sh.filters,
+    groupBy: sh.groupBy, carry: sh.carry, sums: sh.sums, values: sh.values, filters: sh.filters,
     tags: sh.tags, rowJson: sh.rowJson, sortColumn: sh.sortColumn,
     colWidths: sh.colWidths, template: sh.template,
   };
@@ -166,6 +175,7 @@ export function planRestore(payload, sources, tags) {
     spec.groupBy = kept(sh.groupBy);
     spec.carry = kept(sh.carry);
     spec.sums = kept(sh.sums);
+    spec.values = kept(sh.values);
     spec.filters = (Array.isArray(sh.filters) ? sh.filters : []).filter((f) => {
       if (!f || typeof f !== 'object' || !f.column) return false;
       if (cols.has(f.column)) return true;
@@ -205,7 +215,7 @@ export function planRestore(payload, sources, tags) {
         if (typeof w === 'number' && w > 0) spec.colWidths[c] = w;
       }
     }
-    if (gone.length) notes.push(`${name}: dropped ${[...new Set(gone)].join(', ')} — not in ${src.name} any more`);
+    if (gone.length) notes.push(`${name}: dropped ${[...new Set(gone)].join(', ')} — not in ${labelOf(src)} any more`);
     sheets.push(spec);
   }
   if (!sheets.length) return null;
@@ -229,10 +239,10 @@ export default function mount(container, winnow) {
   const newSheet = (name) => ({
     name,
     sourceId: null,
-    groupBy: [], carry: [], sums: [], filters: [], tags: { mode: '', ids: [] }, rowJson: false,
+    groupBy: [], carry: [], sums: [], values: [], filters: [], tags: { mode: '', ids: [] }, rowJson: false,
     sortColumn: null,
     colWidths: {},        // preview column name -> px, dragged on the header's edge
-    template: '{which} of {count}',
+    template: '',         // empty renders DEFAULT_TEMPLATE; see its comment
     meta: sharedMeta, preview: null, error: null, loading: false, stale: false,
     selRows: new Set(), selAnchor: null,
   });
@@ -250,9 +260,9 @@ export default function mount(container, winnow) {
      is also how an analyst says "forget this", and a null payload is how
      that reaches the case file. */
   const worthKeeping = () => sheets.length > 1 || sheets.some((sh) => (
-    sh.groupBy.length || sh.carry.length || sh.sums.length || sh.filters.length
+    sh.groupBy.length || sh.carry.length || sh.sums.length || sh.values.length || sh.filters.length
     || sh.tags.mode || sh.rowJson || Object.keys(sh.colWidths).length
-    || sh.template !== '{which} of {count}'));
+    || (sh.template && sh.template !== DEFAULT_TEMPLATE)));
   function saveState() {
     if (!saveOn || !winnow.tabState) return;   // an older Winnow has no tabState
     winnow.tabState.set(worthKeeping() ? {
@@ -539,6 +549,7 @@ export default function mount(container, winnow) {
     ['sort', 'Ordered by', 'The column that orders each group; first/last are meaningless without one'],
     ['carry', 'Include columns', 'Columns carried into the result — drag chips (or the preview headers) to set their order'],
     ['sums', 'Total up', 'Number columns summed over each WHOLE group — bytes moved in a session, not just the two bookends'],
+    ['values', 'List values', 'Each group’s distinct values of a column, in one cell — every user seen on a host, not just the two bookends’ users'],
     ['filters', 'Filters', 'Only rows matching these are grouped'],
   ];
   const zoneBodies = {};
@@ -578,14 +589,19 @@ export default function mount(container, winnow) {
   const tmplInput = el('input');
   tmplInput.style.cssText = 'background:var(--ink);color:var(--text);border:1px solid var(--line-2);'
     + 'padding:5px 8px;font:12px var(--mono);width:100%';
+  tmplInput.placeholder = DEFAULT_TEMPLATE;
+  tmplInput.title = `Left empty, each row reads ${DEFAULT_TEMPLATE}`;
   tmplInput.oninput = () => { state.template = tmplInput.value; schedule(); acRefresh(); };
   const chipRow = el('div');
   chipRow.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px';
   tmplWrap.append(tmplInput, chipRow, el('div', 'note-status',
-    'Free text plus placeholders — {which} is First/Last (Only, for a one-row group), {count} the '
-    + 'group size, {Column} that row’s value (any column — it need not be grouped or included), '
+    'Free text plus placeholders — {which} is First/Last (Only, for a one-row group) and '
+    + '{which:number} the row’s position in its group instead (1, or the group size for the last), '
+    + '{count} the group size, {Column} that row’s value (any column — it need not be grouped or '
+    + 'included), {values:Column} the group’s distinct values of any column, '
     + '{sum:Column} / {min:Column} / {max:Column} a Total-up column’s group total, smallest and '
-    + 'largest. Click a chip to insert it, or type { in the box to complete a name.'));
+    + 'largest. Left empty, it reads ' + DEFAULT_TEMPLATE + '. Click a chip to insert it, or type '
+    + '{ in the box to complete a name.'));
   side.append(tmplWrap);
 
   /* ------------------------------------------- placeholder completion */
@@ -609,14 +625,17 @@ export default function mount(container, winnow) {
   hideCompletion = acHide;
   function acCandidates(partial) {
     const needle = partial.toLowerCase();
-    const all = [{ name: 'which', kind: 'First/Last' }, { name: 'count', kind: 'group size' }];
+    const all = [{ name: 'which', kind: 'First/Last' }, { name: 'count', kind: 'group size' },
+      { name: 'which:number', kind: 'position' }];
     for (const c of state.sums) for (const k of ['sum', 'min', 'max']) all.push({ name: `${k}:${c}`, kind: 'total' });
     const src = currentSource();
-    for (const c of (src ? src.columns : [])) {
-      // A brace inside a column name cannot be a placeholder at all — the
-      // renderer stops at the first `}` — so it is not offered.
-      if (!/[{}]/.test(c.name)) all.push({ name: c.name, kind: c.derived ? 'derived' : 'column' });
-    }
+    // A brace inside a column name cannot be a placeholder at all — the
+    // renderer stops at the first `}` — so it is not offered.
+    const named = (src ? src.columns : []).filter((c) => !/[{}]/.test(c.name));
+    for (const c of named) all.push({ name: c.name, kind: c.derived ? 'derived' : 'column' });
+    // After the plain names, so a bare `{` still opens on the columns;
+    // typing `{val` narrows to these.
+    for (const c of named) all.push({ name: `values:${c.name}`, kind: 'distinct values' });
     return all.filter((it) => it.name.toLowerCase().includes(needle)).slice(0, 12);
   }
   function acPaint() {
@@ -737,6 +756,8 @@ export default function mount(container, winnow) {
         return;
       }
       if (!state.sums.includes(name)) state.sums.push(name);
+    } else if (zone === 'values') {
+      if (!state.values.includes(name)) state.values.push(name);
     } else if (zone === 'groupBy' || zone === 'carry') {
       const list = state[zone];
       if (from !== zone && !list.includes(name)) list.push(name);
@@ -854,10 +875,13 @@ export default function mount(container, winnow) {
     // Totals first among the computed ones: a chip per Total-up column,
     // in the colon form that keeps functions and fields from colliding.
     const sumChips = state.sums.flatMap((c) => [`{sum:${c}}`, `{min:${c}}`, `{max:${c}}`]);
+    // A chip per List values column too; any other column's list is a
+    // `{values:` away in the completion.
+    const valueChips = state.values.map((c) => `{values:${c}}`);
     // The column chips follow the field search above, so a wide table is
     // not sixty buttons; typing { in the input completes the same names.
     const colChips = cols.filter((c) => !needle || c.name.toLowerCase().includes(needle)).map((c) => `{${c.name}}`);
-    for (const ph of ['{which}', '{count}', ...sumChips, ...colChips]) {
+    for (const ph of ['{which}', '{which:number}', '{count}', ...sumChips, ...valueChips, ...colChips]) {
       const chipBtn = el('button', 'btn ghost', ph);
       chipBtn.style.cssText = 'font-size:10px;padding:1px 5px;font-family:var(--mono)';
       chipBtn.onclick = () => insert(ph);
@@ -1118,6 +1142,7 @@ export default function mount(container, winnow) {
       sort_column: state.sortColumn,
       columns: state.carry,
       sum_columns: state.sums,
+      value_columns: state.values,
       filters: state.filters,
       tags: state.tags.mode ? state.tags : null,
       row_json: state.rowJson,
@@ -1362,7 +1387,7 @@ export default function mount(container, winnow) {
     if (!ready()) { toast('Build a grouping first'); return; }
     const src = currentSource();
     modal('Create table', (b) => {
-      const defaultName = src ? `First-Last of ${src.name}` : 'First-Last';
+      const defaultName = src ? `First-Last of ${labelOf(src)}` : 'First-Last';
       const name = el('input', 'confirm-input');
       name.placeholder = defaultName;
       b.append(el('label', null, 'Table name'), name);
@@ -1416,8 +1441,11 @@ export default function mount(container, winnow) {
     const previous = srcSel.value;
     srcSel.replaceChildren();
     for (const s of real) {
-      const o = el('option', null, `${s.name} (${s.row_count.toLocaleString()})`);
+      // The nickname, as the tab strip and sidebar show it; the file it
+      // came from stays a hover away.
+      const o = el('option', null, `${labelOf(s)} (${s.row_count.toLocaleString()})`);
       o.value = String(s.id);
+      o.title = s.nickname ? `${s.nickname} — from ${s.name}` : s.name;
       srcSel.append(o);
     }
     if (!real.length) { state.sourceId = null; return; }
@@ -1435,6 +1463,7 @@ export default function mount(container, winnow) {
     state.groupBy = [];
     state.carry = [];
     state.sums = [];      // a total from the old table would 400 on the new one
+    state.values = [];
     state.colWidths = {};
     state.filters = [];
     state.tags = { mode: '', ids: [] };
