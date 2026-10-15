@@ -27,7 +27,7 @@ import { openLog } from './errlog.js';
 import { S, clearCellSelection, selClear, selCount, selFirst, specKey } from './state.js';
 import { compactCaseFile, mergesUsing, openTablesManager, removeRefusal, removeSource } from './tables.js';
 import { loadTags, refreshTagCounts, renderTagRibbon } from './tags.js';
-import { openTableMenu, updateFiltersButton, updateTimeRangeButton } from './timeframe.js';
+import { openTableMenu, timeframeAcrossTables, updateFiltersButton, updateTimeRangeButton } from './timeframe.js';
 import { baseColumns } from './tsformat.js';
 import { confirmDialog, contextMenu, dropdownMenu, modal, promptDialog } from './ui.js';
 import { dropPendingSelection, pendingViewStatsText, rebuildView, syncNoRows, writeStatsLine } from './view.js';
@@ -833,9 +833,11 @@ export async function loadSources(select, { navigate = true, openOpts = undefine
    filter, so coming back to a table lost what the analyst was looking at.
    Keyed by source id, in-memory only — a reload starts clean, which is
    also the escape hatch if a stashed filter ever misbehaves. The
-   timeframe filter isn't in here because it deliberately survives
-   globally (see clearAllFilters); the layout/sort aren't because the
-   server already persists those per source. */
+   timeframe is recorded but only put back when the analyst has turned
+   "Keep applied when switching tables" off (timeframeAcrossTables): on,
+   it is one case-wide range that survives the switch untouched (see
+   clearAllFilters). The layout/sort aren't here because the server
+   already persists those per source. */
 const viewStateStash = new Map();
 
 export function clearViewStateStash() { viewStateStash.clear(); }
@@ -862,6 +864,7 @@ function stashViewState() {
     groupSort: S.groupSort,
     groupSortDir: S.groupSortDir,
     hideEmptyRows: S.hideEmptyRows,
+    timeRange: { ...S.timeRange },
     scroll: $('body').scrollTop,
   });
 }
@@ -903,6 +906,16 @@ export async function openSource(id, { skipBuild = false } = {}) {
   S.sort = [];
   S.tagFilter = [];
   S.hideEmptyRows = false;
+  // Per table only when the analyst asked for that; otherwise the case-wide
+  // range rides along untouched. Only on a real switch: every refresh idiom
+  // re-enters here for the table already open, and that must not drop a
+  // timeframe just set on it. Before the build below, whose spec carries it.
+  if (leaving && !timeframeAcrossTables()) {
+    const back = viewStateStash.get(id);
+    S.timeRange = back && back.timeRange
+      ? { ...back.timeRange } : { enabled: false, column: null, start: '', end: '' };
+    updateTimeRangeButton();
+  }
   S.cursor = -1;
   if (leaving) hideDetailPane();   // it showed a row of the table being left (hide only — see detail.js)
   selClear();
@@ -1776,7 +1789,8 @@ export async function replaceFilters(tree, { clearTimeframe = false } = {}) {
 async function landOnFilters(filters, tree, { clearTimeframe = false } = {}) {
   // Deliberately doesn't touch S.timeRange — the timeframe filter is meant
   // to survive exactly this ("apply/clear filters shouldn't lose my
-  // timeframe"), same as it survives applyPreset() and a tab switch. Use
+  // timeframe"), same as it survives applyPreset() and — unless the analyst
+  // turned that off (timeframeAcrossTables) — a tab switch. Use
   // the Timeframe filter's own "Clear" button, or toggleTimeRange, for that.
   //
   // Landing on the same row afterwards is rebuildView's job now (keepRow)
