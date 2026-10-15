@@ -199,7 +199,7 @@ def _reduced_motion_ctx(browser, appearance, windows=False):
 def _splash_box(pg):
     pg.evaluate("() => __winnow.openSettings()")
     pg.wait_for_selector("#modal:not([hidden])")
-    pg.click("#modal .settings-section-head:has-text('Appearance')")
+    pg.click("#modal .settings-nav-item:has-text('Appearance')")
     box = pg.locator("#modal label.check-row", has_text="Launch animation").locator("input")
     box.wait_for()
     return box

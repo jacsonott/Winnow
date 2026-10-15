@@ -15,7 +15,7 @@ pytestmark = pytest.mark.ui
 def _open_updates(page):
     page.evaluate("() => __winnow.openSettings()")
     page.wait_for_selector("#modal:not([hidden])")
-    page.locator(".settings-section-head", has_text="Updates").click()
+    page.locator("#modalBody .settings-nav-item", has_text="Updates").click()
     page.locator(".btn", has_text="Check for updates").wait_for(state="visible")
     # The panel renders "Version: …" and fills it in when /api/version
     # resolves, so waiting on the button alone races that fetch. It lost
@@ -40,7 +40,7 @@ def test_panel_shows_the_version_and_checks_only_when_asked(page):
     _open_updates(page)
 
     # The installed version is shown...
-    panel = page.locator(".settings-section-body").filter(has=page.locator(".btn", has_text="Check for updates"))
+    panel = page.locator(".settings-pane-body").filter(has=page.locator(".btn", has_text="Check for updates"))
     assert panel.inner_text().strip().startswith("Winnow ")
     # ...and merely opening Settings contacted nothing.
     assert page.evaluate("() => window.__updateCalls") == []

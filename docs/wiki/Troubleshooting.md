@@ -193,7 +193,7 @@ importing](Cases-and-importing.md) explains each.
 
 ### Scrolling is slow over Remote Desktop
 
-Turn on **Settings → Appearance → Remote session mode**. It scrolls the
+Turn on **Settings → Remote session → Remote session mode**. It scrolls the
 grid a whole row at a time and stops animations and hover effects, so the
 remote display has far less to send. It's saved for the machine.
 

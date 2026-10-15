@@ -12,7 +12,7 @@ If nothing is left, the grid shows **No rows match** with a **Clear filters** bu
 
 By default every column has a filter box under its header. Type into one and the grid updates as you type. `Enter` commits the filter and puts the focus back on the grid. `Escape` clears that box.
 
-If you prefer a less crowded header, turn off **Settings → Appearance → Always-on filter row**. A filter bar then appears above the grid. It shows only the filters you have set, as chips you can click to edit or remove with ✕. To filter a new column, click the ⌕ on its header, or use **+ filter a column…**, which lists every visible column and lets you type to find one.
+If you prefer a less crowded header, turn off **Settings → Grid & layout → Always-on filter row**. A filter bar then appears above the grid. It shows only the filters you have set, as chips you can click to edit or remove with ✕. To filter a new column, click the ⌕ on its header, or use **+ filter a column…**, which lists every visible column and lets you type to find one.
 
 To filter from a cell, select it and press `f` to filter its column to that value. `F` does the same but drops every other filter first. Right-click a cell for the same choices, worded **Narrow to this value**, **Reset to this value** and **Exclude this value**, plus **Filter by values…**, which opens the value picker. **Reset to this value** keeps the timeframe.
 

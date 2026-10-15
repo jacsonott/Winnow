@@ -1,18 +1,23 @@
 # Settings and shortcuts
 
-Settings is where Winnow's look, its keyboard, and its machine-level
-preferences live: the skin and theme, every rebindable key, the default
-tags for new cases, file associations, plugins and updates. This page walks
-through each section in the order Settings shows them, then gives the full
-default keyboard map.
+Settings is where Winnow's look, its layout, its keyboard, and its
+machine-level preferences live: the skin and theme, the filter row and the
+page tabs, every rebindable key, the default tags for new cases, file
+associations, plugins and updates. This page walks through each section in
+the order Settings shows them, then gives the full default keyboard map.
 
 ## Opening Settings
 
 - Inside a case: the **⚙** button at the right of the top bar, or `?`.
 - On the home screen: **⚙ Settings**.
 
-Every section starts collapsed except **Shut down**; click a heading to open
-it, and open as many as you like at once. **Close**, `Esc`, or `?` again
+Settings lists its sections on the left; click one and its settings fill
+the right-hand side, which scrolls on its own. Settings opens on the section
+you last looked at in this browser (**Appearance** the first time). From the
+keyboard, `↑` and `↓` move through the list and show each section as they
+reach it, and `Home` and `End` jump to the first and last. A dialog you open
+from a section, such as **Manage plugins…** or **Change skin…**, brings you
+back to that section when you close it. **Close**, `Esc`, or `?` again
 closes the panel.
 
 Settings is about this machine and this browser. Choices that belong to one
@@ -62,7 +67,7 @@ skin uses its own accent, with a separate shade for its light theme. Once you
 pick a colour yourself, it stays when you change skin; Settings has no button
 to go back to the skin's own accent.
 
-### Row density, striped rows and the autofit limit
+### Row density and striped rows
 
 - **Row density**: **Comfortable** (the default, 24-pixel rows) or
   **Compact** (20-pixel rows). Switching keeps the same row at the top of the
@@ -71,18 +76,6 @@ to go back to the skin's own accent.
   It is remembered per skin, so turning it off in one skin and switching to
   another can bring it back; the note under the box names the skin it is
   currently about.
-- **Autofit column width limit**: how wide fitting a column to its content
-  (the `=` key, or double-clicking a column's right edge) may make it.
-  Default 900 px, anything from 80 to 20,000, or **No limit**. A column whose
-  header name needs more room still gets room for its name.
-
-### Remote session (RDP)
-
-**Remote session mode** is for running Winnow inside RDP, VNC or another
-remote desktop: the mouse wheel scrolls the grid by whole rows, and
-animations and hover effects stop, so the remote display has far less to
-send. Winnow asks about this once on first run. It is a machine setting, so
-it holds for every browser and port.
 
 ### Start Winnow hidden (Windows only)
 
@@ -105,12 +98,9 @@ many managed and virtual machines turn that off as a performance setting
 rather than a preference; untick the box if you don't want it. The note
 under the box says what happened at the last launch and why.
 
-### Pages as a dropdown
+## Grid & layout
 
-Off by default. On, the page tabs (SQL, Timeline, Notes, Watchlist and any
-plugin tabs) collapse into one **Pages ▾** button, giving the table tabs the
-width; while a page is showing, the button carries that page's name. The
-pages and their counts then live in that button's menu.
+How the grid and the tab strip above it are laid out.
 
 ### Always-on filter row
 
@@ -118,6 +108,28 @@ On by default: every column has a filter box under its header at all times,
 as in Timeline Explorer. Off, a filter bar above the grid shows only the
 filters you have set, as removable chips, and the **⌕** on a column header
 opens that column's box. See [Filtering and searching](Filtering-and-searching.md).
+
+### Pages as a dropdown
+
+Off by default. On, the page tabs (SQL, Timeline, Notes, Watchlist and any
+plugin tabs) collapse into one **Pages ▾** button, giving the table tabs the
+width; while a page is showing, the button carries that page's name. The
+pages and their counts then live in that button's menu.
+
+### Autofit column width limit
+
+How wide fitting a column to its content (the `=` key, or double-clicking a
+column's right edge) may make it. Default 900 px, anything from 80 to
+20,000, or **No limit**. A column whose header name needs more room still
+gets room for its name.
+
+## Remote session
+
+**Remote session mode** is for running Winnow inside RDP, VNC or another
+remote desktop: the mouse wheel scrolls the grid by whole rows, and
+animations and hover effects stop, so the remote display has far less to
+send. Winnow asks about this once on first run. It is a machine setting, so
+it holds for every browser and port.
 
 ## Imports
 

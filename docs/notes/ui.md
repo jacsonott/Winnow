@@ -771,18 +771,56 @@ see [docs/notes/README.md](README.md) for the whole set.
     those) rather than by a marker field, because `openFilterBuilder`
     round-trips the tree through SQL text and would drop any marker we
     invented.
-- **Settings' sections are collapsed on open, every time**
-  (`settingsSection`, one wrapper per `h4` the modal used to append
-  straight into its body). Seven sections had grown to ~900px of scroll,
-  so the setting you came for was rarely the one on screen. Two
-  deliberate non-features: state isn't remembered between opens ("open
-  where I left it" and "collapsed by default" are different promises, and
-  the second is the one that was asked for), and opening one doesn't
-  close the others. A section's own code is unchanged apart from what it
-  appends into — which is also what keeps a section that fills itself
-  later (`buildPluginsPanel`'s async listing) landing inside its own
-  section rather than at the end of the modal. That section is now one
-  line and a button — see the plugins manager below.
+- **Settings is two panes, one section at a time, and it opens where it
+  was left** (`settingsPanes` in settings.js; the plugins and profiles
+  managers' shape). It was a column of collapsible sections
+  (`settingsSection`, which survives only for the profile builder):
+  thirteen of them, only one readable at once anyway, the last few a long
+  scroll down. Things that are decisions, not accidents:
+  - **Fixed size.** `.settings-panes` has a fixed height and the card is
+    `.tall` (top-anchored), so Shut down's one button and the keymap's
+    forty rows are the same box; each pane scrolls on its own and
+    `#modalBody` never does. The column of sections had settled on
+    "sized to content, grows downward" because a fixed 82vh left an
+    all-collapsed Settings mostly empty panel — in two panes a short
+    section leaves room under it in the right pane instead, which is the
+    managers' trade too, and the one asked for.
+  - **Every section is built on open; switching flips `hidden`.** A
+    section's code is unchanged apart from what it appends into, which is
+    what keeps a section that fills itself later (the plugins count, the
+    version, the associations list) landing in its own pane — and since
+    nothing rebuilds, a pane keeps its scroll and anything half-typed. A
+    lazily built pane would also defer those fetches, which is the one
+    thing to weigh before changing it.
+  - **Remembered, per browser** (`winnow.settingsSection`, try/catch'd
+    like every per-viewer pref). The collapsible version deliberately did
+    NOT remember; this one was asked to. An unknown stored id (a section
+    renamed or removed by a later build) opens the first section.
+  - **`openSettings(id)` is the deep link, and a hand-off back names its
+    section** — `returnTo: () => openSettings('plugins')`, not
+    `returnTo: openSettings`. The remembered section is shared by every
+    window on the origin, so a second Winnow window that showed Keyboard
+    shortcuts in the meantime would otherwise decide where the plugins
+    manager's × lands. `openSettings` is also a bare click handler, so it
+    reads its argument only when it is a string — a MouseEvent is not a
+    section.
+  - **The list is a vertical tablist**: one tab stop (the chosen
+    section, which takes the focus on open), ↑/↓ wrap and Home/End jump,
+    each showing what it lands on; `aria-selected` marks the chosen one.
+    The keymap already ignores everything but Escape and the opening key
+    while a dialog is up, so the arrows never reach the grid behind it.
+  `tests/ui/test_settings_two_pane.py`.
+- **Appearance is the look; Grid & layout and Remote session took the
+  rest.** The always-on filter row, Pages as a dropdown and the autofit
+  limit change what is on screen and where, not how it looks, so they are
+  Grid & layout; Remote session mode is about the display Winnow is drawn
+  on (wheel quantization, animations off for a remote encoder), so it is a
+  small section of its own — and the first-run offer points there. Row
+  density, striped rows, the launch animation and the Windows hidden-start
+  box stayed in Appearance. In Grid & layout the checkboxes come before
+  the autofit block, because a box after a `.settings-sub-label` reads as
+  belonging to that heading — which is how Remote session mode's heading
+  used to sit over the launch animation and the filter row.
 - **On Windows, `prefers-reduced-motion` is not a preference.** Chromium
   derives it from the Animation effects switch, which VM images, RDP
   profiles and "best performance" leave off, so a launch animation that
@@ -834,7 +872,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   the opt-in rather than the default because typing straight into a column
   box without looking is the Timeline Explorer reflex and the analysts who
   have it are not wrong — so a fresh install gets the row and Settings →
-  Appearance's "Always-on filter row" is the switch between them.
+  Grid & layout's "Always-on filter row" is the switch between them.
   `S.appearance.filterUi` picks the surface at runtime and
   `FILTER_UI_DEFAULT` (settings.js) is the single value deciding which one
   a fresh install gets; nothing else compares against a side, so a future
@@ -889,7 +927,7 @@ see [docs/notes/README.md](README.md) for the whole set.
     it by itself — a column already in view scrolls nowhere, so no scroll
     event fires, and folding a box away rebuilds nothing at all. Three
     paths resize the head this way: the `⌕`/chip/picker reveal, the fold,
-    and the Appearance switch between the two surfaces.
+    and the Grid & layout switch between the two surfaces.
 - **`.fcell` needs its `min-width: 0`, and it's not tidying.** Giving the
   filter cell `display: flex` (to seat the value picker's ▾ next to the
   input) also made its own automatic minimum size content-based — and a
@@ -915,7 +953,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   isn't clipped, both terms stop changing — and returns 0 for a column
   with no header on screen, where callers fall back to the old estimate.
 - **The autofit cap is a user setting** (`S.appearance.autofitMax`,
-  Settings → Appearance, default `AUTOFIT_MAX_W_DEFAULT` = 900px, `0`
+  Settings → Grid & layout, default `AUTOFIT_MAX_W_DEFAULT` = 900px, `0`
   meaning uncapped), not the old hardcoded 480. A cap still exists by
   default because the rows are `width: max-content`: one column of
   base64 command lines fits to ~3,600px uncapped (measured) and every
@@ -1613,7 +1651,8 @@ see [docs/notes/README.md](README.md) for the whole set.
   plugins…" *replaces* Settings rather than stacking on it, and the ✕ hid
   the whole thing — one level up, not where the analyst came from, for a
   dialog reached through two clicks of another one. Three dialogs now take
-  the same `returnTo` hand-off (plugins manager, Profiles, Saved filters):
+  the same `returnTo` hand-off (plugins manager, Profiles, Saved filters),
+  each naming the Settings section it came from (see the two-pane entry):
   a one-shot `winnow:modalclose` listener armed per opening, guarded by
   BOTH the title and a `pmReturn` flag on the body, plus a `‹ Settings`
   button in the foot. Both guards are load-bearing. The title, because the
@@ -1694,6 +1733,6 @@ see [docs/notes/README.md](README.md) for the whole set.
   prompt/confirm OK, Apply, Create, Import…); `.dlg-field` is a label
   above a full-width control, `.dlg-pair` two of them side by side,
   `.dlg-input` a box plus its 📅. `.modal-body h4` is dim like the
-  builders' heads; Settings' section heads stay accent because they are
-  buttons. A new dialog uses these rather than restyling a select or an
+  builders' heads; the collapsible section heads (`settingsSection`, the
+  profile builder's) stay accent because they are buttons. A new dialog uses these rather than restyling a select or an
   input inline.

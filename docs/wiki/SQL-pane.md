@@ -9,7 +9,7 @@ you run there can change the case.
 ## Opening the SQL pane
 
 Click **SQL** in the page tabs at the top of the window. If you turned on
-**Settings → Appearance → Pages as a dropdown**, it is in the **Pages ▾**
+**Settings → Grid & layout → Pages as a dropdown**, it is in the **Pages ▾**
 menu instead. If you closed the tab, reopen it from the **Pages** section of
 the tables sidebar.
 

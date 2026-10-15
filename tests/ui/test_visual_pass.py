@@ -139,23 +139,22 @@ def test_blueprint_paints_close_and_tab_count_in_the_accent_foreground(page):
         page.evaluate("(s) => document.documentElement.setAttribute('data-style', s)", prev)
 
 
-def test_settings_dialog_holds_still_while_sections_expand(page):
+def test_settings_dialog_holds_still_while_sections_switch(page):
     page.locator("#btnSettings").click()
     page.wait_for_selector("#modal:not([hidden])")
-    heads = page.locator("#modal .settings-section-head")
+    items = page.locator("#modal .settings-nav-item")
     before = _rect(page, ".modal-card")
     vh = page.evaluate("() => window.innerHeight")
-    # The card is sized to content and anchored at the top: a section
-    # opening grows it DOWNWARD, so the top edge (and everything above the
-    # click) stays put, and it never passes the 82vh it used to be pinned to.
-    prev_h = before["h"]
-    for i in (3, 5, 8):
-        heads.nth(i).click()
+    # The panes are a fixed height and the card is anchored at the top, so
+    # picking a short section after a long one (or the reverse) moves
+    # nothing — not the top edge, not the size — and the card never passes
+    # the 82vh .tall allows.
+    for i in (3, 5, 8, items.count() - 1, 0):
+        items.nth(i).click()
         page.wait_for_timeout(100)
         after = _rect(page, ".modal-card")
-        assert after["y"] == before["y"], (i, before, after)
-        assert after["h"] >= prev_h and after["h"] <= vh * 0.82 + 1, (i, prev_h, after)
-        prev_h = after["h"]
+        assert after == before, (i, before, after)
+        assert after["h"] <= vh * 0.82 + 1, (i, after)
     page.keyboard.press("Escape")
 
 

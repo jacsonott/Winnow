@@ -157,7 +157,7 @@ export function wireColumnDrag(h, name) {
 /* Two surfaces, one setting. The classic always-on filter ROW — a box
    under every column, forever — is what ships: typing straight into a
    column box without looking is the Timeline Explorer reflex, and the
-   analysts who have it are not wrong. Settings → Appearance switches to
+   analysts who have it are not wrong. Settings → Grid & layout switches to
    the filter BAR: a strip above the grid carrying only the filters
    actually set, as chips, plus the way to add one — and there a column's
    box appears under its header only when the header's ⌕ (or a chip, or
