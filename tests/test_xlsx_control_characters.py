@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import io
 
-import pytest
 from openpyxl import load_workbook
 
 from winnow.store import XLSX_MAX_ROWS, _xlsx_safe, rows_to_xlsx
@@ -84,13 +83,28 @@ def test_a_sheet_name_excel_would_refuse_is_cleaned():
     assert len(ws.title) <= 31
 
 
-def test_more_rows_than_a_worksheet_holds_is_refused_with_a_reason(monkeypatch):
-    """Refused up front rather than written as a corrupt file. Shrink the
-    cap rather than build a million rows."""
-    monkeypatch.setattr("winnow.store.XLSX_MAX_ROWS", 5)
-    with pytest.raises(ValueError, match="more than one worksheet holds"):
-        rows_to_xlsx(["a"], [[i] for i in range(5)])
+def test_more_rows_than_a_worksheet_holds_continue_on_the_next_sheet(monkeypatch):
+    """The SQL pane no longer caps a result, so a result past Excel's
+    per-sheet limit is reachable from the Excel button. Every row lands:
+    the overflow continues on "Name (2)", header repeated, in order.
+    Shrink the cap rather than build a million rows."""
+    monkeypatch.setattr("winnow.store.XLSX_MAX_ROWS", 5)   # 4 data rows per sheet
+    buf = rows_to_xlsx(["a"], [[i] for i in range(10)], "Logons")
+    wb = load_workbook(io.BytesIO(buf.read()))
+    assert wb.sheetnames == ["Logons", "Logons (2)", "Logons (3)"]
+    got = []
+    for ws in wb.worksheets:
+        values = [r[0] for r in ws.iter_rows(values_only=True)]
+        assert values[0] == "a", "each continuation repeats the header"
+        got += values[1:]
+    assert got == list(range(10)), "every row, once, in order"
     assert XLSX_MAX_ROWS == 1_048_576, "the real cap is Excel's, not the test's"
+
+
+def test_an_empty_result_is_still_a_workbook_with_its_header():
+    wb = load_workbook(io.BytesIO(rows_to_xlsx(["a", "b"], []).read()))
+    assert wb.sheetnames == ["Query"]
+    assert [c.value for c in wb.active[1]] == ["a", "b"]
 
 
 # --------------------------------------------- the exports that crashed
@@ -131,28 +145,45 @@ def test_the_stored_value_is_never_touched(store, tmp_path):
 
 # ------------------------------------------------------------- the route
 
+def _held(client, sql):
+    """Run in the pane and return the held result's id — the SQL pane's
+    Excel… exports from there now, not from rows the browser posts up."""
+    r = client.post("/api/sql/run", json={"sql": sql})
+    assert r.status_code == 200, r.text
+    return r.json()["id"]
+
+
 def test_the_route_returns_a_workbook(client):
-    r = client.post("/api/sql/export_xlsx", json={
-        "columns": ["Computer", "EventId"],
-        "rows": [["DC01", 4624]],
-        "filename": "logons.xlsx", "sheet": "Logons"})
+    rid = _held(client, "SELECT 'DC01' AS Computer, 4624 AS EventId")
+    r = client.get(f"/api/sql/result/{rid}/export.xlsx?filename=logons.xlsx&sheet=Logons")
     assert r.status_code == 200
     assert r.headers["content-type"].startswith(
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     assert 'filename="logons.xlsx"' in r.headers["content-disposition"]
-    ws = load_workbook(io.BytesIO(r.content)).active
-    assert [c.value for c in ws[1]] == ["Computer", "EventId"]
+    wb = load_workbook(io.BytesIO(r.content))
+    assert wb.sheetnames == ["Logons"]
+    assert [c.value for c in wb.active[1]] == ["Computer", "EventId"]
+    assert [c.value for c in wb.active[2]] == ["DC01", 4624], "a number stays a number"
 
 
 def test_the_route_escapes_rather_than_500s(client):
-    r = client.post("/api/sql/export_xlsx", json={"columns": ["c"], "rows": [[NASTY]]})
+    rid = _held(client, "SELECT 'cmd.exe /c echo ' || char(7) || char(1) || ' done' AS c")
+    r = client.get(f"/api/sql/result/{rid}/export.xlsx")
     assert r.status_code == 200
     ws = load_workbook(io.BytesIO(r.content)).active
     assert "\\x07" in ws.cell(row=2, column=1).value
 
 
-def test_the_route_refuses_an_oversized_result(client, monkeypatch):
+def test_the_route_spills_an_oversized_result_onto_more_sheets(client, monkeypatch):
     monkeypatch.setattr("winnow.store.XLSX_MAX_ROWS", 3)
-    r = client.post("/api/sql/export_xlsx", json={"columns": ["a"], "rows": [[1], [2], [3]]})
-    assert r.status_code == 400
-    assert "worksheet" in r.json()["detail"]
+    rid = _held(client, "SELECT 1 AS a UNION ALL SELECT 2 UNION ALL SELECT 3")
+    r = client.get(f"/api/sql/result/{rid}/export.xlsx")
+    assert r.status_code == 200
+    wb = load_workbook(io.BytesIO(r.content))
+    assert wb.sheetnames == ["Query", "Query (2)"]
+    assert [c.value for c in wb["Query (2)"]["A"]] == ["a", 3]
+
+
+def test_the_route_404s_a_result_that_is_gone(client):
+    r = client.get("/api/sql/result/nope/export.xlsx")
+    assert r.status_code == 404

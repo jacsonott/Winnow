@@ -87,7 +87,7 @@ export const S = {
   groupPageGen: 0,         // bumped by clearGroupPageCache so an in-flight fetch can't repopulate stale rows
   savedFilters: [],        // cross-case cyclable filters, loaded from workspace/filters.json
   headerNicknames: [],     // [{id, col_names, nickname}] — friendly names for a header set
-  timeRange: { enabled: false, column: null, start: '', end: '' }, // survives filter/preset/tab changes on purpose — see toggleTimeRange
+  timeRange: { enabled: false, column: null, start: '', end: '' }, // survives filter/preset/tab changes on purpose — see toggleTimeRange; tab changes only while timeframeAcrossTables is on
   timelineTemplates: [], // [{id, col_names, type_label, timestamp_column, body_columns}] — workspace/timeline_templates.json
   importProfiles: [],    // [{id, name, extensions, include_patterns, exclude_patterns, recursive}] — workspace/import_profiles.json
   plugins: [],           // loaded plugin records from GET /api/plugins — name/version/error, for the Plugins modal
@@ -133,7 +133,8 @@ export const S = {
   caseVariables: [],       // the open case's variables [{name, value, description, required}] — Case settings → Variables
   sqlTabs: [],             // [{id, name, sql, pos}] from the case file's sql_tabs table (see showSqlTab)
   sqlTabId: null,          // which sql tab the editor/result pane is currently showing
-  sqlResults: new Map(),   // sql tab id -> last {columns, rows, elapsed_ms, truncated} | {error}, in memory only
+  sqlResults: new Map(),   // sql tab id -> last {id, columns, rows (first page), total, elapsed_ms, stopped} | {error}, in memory only — the rows live on the server (sqlresults.py)
+  sqlRuns: new Map(),      // sql tab id -> the op token of the run it is waiting on; a result whose token is not here any more is dropped (see runSql)
   searchAll: null,         // in-flight/finished Search-all job — see searchAllState(); survives closing the modal
   pendingViews: new Map(), // source_id -> a search-box build left to finish in the background — see view.js detach/applyPendingView
 };

@@ -18,7 +18,7 @@ import { loadCaseVariables, loadSavedFilters } from './savedfilters.js';
 import { applyPageTabsSize, renderPageTabs, syncTabOverflow } from './sources.js';
 import { lastSplash, osSkipsSplash, reducedMotion } from './splash.js';
 import { S, gridRowCount, dashboardCreatorMode } from './state.js';
-import { openSavedFiltersModal, updateFiltersButton, updateTimeRangeButton } from './timeframe.js';
+import { openSavedFiltersModal, setTimeframeAcrossTables, timeframeAcrossTables, updateFiltersButton, updateTimeRangeButton } from './timeframe.js';
 import { TS_FORMATS } from './tsformat.js';
 import { markModalAction, confirmDialog, modal, promptDialog } from './ui.js';
 
@@ -89,6 +89,10 @@ export function defaultAppearance() {
     // leaves the analyst where they are (see jobs.js). On, the first table
     // of an import batch to finish opens; the rest land quietly.
     openNewTables: false,
+    // On unless turned off: the timeframe filter is one case-wide range that
+    // follows the analyst between tables. Off, each table keeps its own —
+    // see timeframeAcrossTables in timeframe.js.
+    timeframeAcrossTables: true,
     // 'bar' | 'row' — see FILTER_UI_DEFAULT. An install that predates this
     // has no key and therefore gets the default, like every other switch here.
     filterUi: FILTER_UI_DEFAULT,
@@ -637,12 +641,15 @@ export function promptForVariables(defs, { title = 'This profile needs a few val
         inp.dataset.var = d.name;
         inp.placeholder = d.required ? 'required' : 'optional';
         inp.value = d.default || '';
-        b.append(el('label', null, (d.label || d.name) + (d.required ? ' *' : '')), inp);
-        if (d.description) b.append(el('p', 'fb-help', d.description));
+        const field = el('div', 'dlg-field');
+        field.append(el('label', null, (d.label || d.name) + (d.required ? ' *' : '')));
+        if (d.description) field.append(el('small', null, d.description));
+        field.append(inp);
+        b.append(field);
         inputs.set(d.name, inp);
       }
       const acts = el('div', 'row-actions');
-      const save = el('button', 'btn', 'Save');
+      const save = el('button', 'btn primary', 'Save');
       save.onclick = async () => {
         const missing = defs.filter((d) => d.required && !(inputs.get(d.name).value || '').trim());
         if (missing.length) { toast(`Fill in: ${missing.map((d) => d.label || d.name).join(', ')}`); return; }
@@ -1114,7 +1121,19 @@ export function openSettings() {
     secSyntax.append(el('p', null,
       'The ⏱ Timeframe button pins a start/end range against one datetime column, or every datetime '
       + "column at once (catches a row via its Modified time even if its Created time was timestomped) — "
-      + 'unlike the other filters, it stays applied when you clear filters, apply a saved filter, or switch tables.'));
+      + 'unlike the other filters, it stays applied when you clear filters or apply a saved filter.'));
+    // The same switch as the Timeframe dialog's — both write the one pref.
+    const tfLabel = el('label', 'check-row');
+    const tfCb = el('input');
+    tfCb.type = 'checkbox';
+    tfCb.id = 'settingsTimeframeAcrossTables';
+    tfCb.checked = timeframeAcrossTables();
+    tfCb.onchange = () => setTimeframeAcrossTables(tfCb.checked);
+    tfLabel.append(tfCb, el('span', null, 'Keep the timeframe applied when switching tables'));
+    secSyntax.append(tfLabel);
+    secSyntax.append(el('p', 'fb-help',
+      'On: one timeframe for the whole case, applied to whichever table you open. '
+      + 'Off: each table keeps its own, the way it keeps its own filters, and a table you have not set one on opens without one.'));
 
     const secTs = settingsSection(b, 'Timestamps');
     secTs.append(el('p', null,

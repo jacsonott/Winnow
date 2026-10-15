@@ -79,13 +79,17 @@ def test_sql_run_button_shares_the_row_with_the_others(page):
 
 
 def test_timeframe_enabled_and_column_are_separate_rows(page):
+    # The checkboxes above Column each get a row of their own, and Column
+    # one below them — the defect was a checkbox and the label after it
+    # sharing a line.
     page.evaluate("() => __winnow.openTimeRangeModal()")
     page.wait_for_selector("#modal:not([hidden])")
     tops = page.evaluate(
-        "() => [...document.querySelectorAll('#modalBody label')].slice(0, 2).map(l => [l.textContent.trim(), l.getBoundingClientRect().top])")
+        "() => [...document.querySelectorAll('#modalBody label')].slice(0, 3).map(l => [l.textContent.trim(), l.getBoundingClientRect().top])")
     page.keyboard.press("Escape")
-    assert [t[0] for t in tops] == ["Enabled", "Column"]
+    assert [t[0] for t in tops] == ["Enabled", "Keep applied when switching tables", "Column"]
     assert tops[1][1] - tops[0][1] >= 10, tops
+    assert tops[2][1] - tops[1][1] >= 10, tops
 
 
 def test_regex_hint_sits_outside_the_typed_text(page):
@@ -165,9 +169,10 @@ def test_help_text_clears_the_focus_ring(page):
     page.evaluate("() => __winnow.openJumpTsModal()")
     page.wait_for_selector("#modal:not([hidden])")
     gap = page.evaluate(
-        """() => { const row = document.querySelector('#modalBody .row-actions');
-             const help = row.nextElementSibling;
-             return help.getBoundingClientRect().top - row.getBoundingClientRect().bottom; }""")
+        """() => { const box = document.querySelector('#modalBody input[placeholder="YYYY-MM-DD HH:MM:SS"]');
+             const help = [...document.querySelectorAll('#modalBody .fb-help')]
+               .find((p) => p.textContent.startsWith('24-hour'));
+             return help.getBoundingClientRect().top - box.getBoundingClientRect().bottom; }""")
     page.keyboard.press("Escape")
     assert gap >= 4, gap
 

@@ -217,7 +217,7 @@ export function openPluginBundlesModal(opts = {}) {
       const add = el('button', 'btn ghost', '＋ New profile…');
       add.title = 'Pick plugins and boards, and declare the variables a case of this type needs';
       add.onclick = () => openProfileBuilder(null, { onSaved: (rec) => reopen(rec.name) });
-      const imp = el('label', 'btn ghost pm-mini', 'Import…');
+      const imp = el('label', 'btn ghost', 'Import…');
       imp.title = 'Read a profile exported from another machine';
       const impInput = el('input');
       impInput.type = 'file';
@@ -236,7 +236,7 @@ export function openPluginBundlesModal(opts = {}) {
         }
       };
       imp.append(impInput);
-      const snap = el('button', 'btn ghost pm-mini', 'Save current plugins…');
+      const snap = el('button', 'btn ghost', 'Save current plugins…');
       snap.title = 'Snapshot the plugins currently enabled (for this case, if one is open) under a name';
       snap.onclick = async () => {
         const name = await promptDialog('Profile name (e.g. Triage, BEC):');
@@ -609,7 +609,7 @@ export function openProfileApplySheet(bd, { returnTo } = {}) {
     }, { enabled: !!plan.variables.length });
 
     const acts = el('div', 'row-actions');
-    const go = el('button', 'btn', 'Apply');
+    const go = el('button', 'btn primary', 'Apply');
     go.onclick = async () => {
       const parts = Object.keys(boxes).filter((k) => boxes[k].checked);
       if (!parts.length) { toast('Nothing is ticked — there is nothing to apply'); return; }

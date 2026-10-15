@@ -129,7 +129,7 @@ def test_a_query_still_running_does_not_land_in_the_next_case(own_page, own_serv
     page.wait_for_selector("#sqlview:not([hidden])")
     page.wait_for_function("() => __winnow.S.sqlTabs.length > 0 && !document.getElementById('sqlText').disabled")
     held = []
-    pattern = re.compile(r".*/api/sql$")
+    pattern = re.compile(r".*/api/sql/run$")
     page.route(pattern, lambda route: held.append(route) if not held else route.continue_())
     try:
         page.locator("#sqlText").fill("SELECT 'from case A' AS stale_col")
@@ -147,7 +147,8 @@ def test_a_query_still_running_does_not_land_in_the_next_case(own_page, own_serv
 
         try:
             held[0].fulfill(status=200, content_type="application/json", body=json.dumps(
-                {"columns": ["stale_col"], "rows": [["from case A"]], "elapsed_ms": 1, "truncated": False}))
+                {"id": "stale", "columns": ["stale_col"], "rows": [["from case A"]], "total": 1,
+                 "widths": [11], "stopped": None, "elapsed_ms": 1}))
         except Exception:
             pass   # the page already let go of it
         page.wait_for_timeout(500)

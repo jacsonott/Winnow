@@ -451,7 +451,7 @@ export function renderValuePicker(panel, column, state, actions) {
   none.onclick = () => { for (const r of pickerRows(state)) state.checked.delete(r.value); paintList(); };
   const cancel = el('button', 'btn ghost', 'Cancel');
   cancel.onclick = () => actions.close();
-  const applyBtn = el('button', 'btn', 'Apply');
+  const applyBtn = el('button', 'btn primary', 'Apply');
   applyBtn.onclick = () => actions.apply();
   acts.append(all, none, el('span', 'spacer'), cancel, applyBtn);
   panel.append(acts);

@@ -259,10 +259,11 @@ see [docs/notes/README.md](README.md) for the whole set.
   file and tag names arrive in adopted sessions, and openpyxl writes any
   string opening with `=` as a formula — a column called `=HYPERLINK(...)`
   was a live link in the hand-over workbook while every cell under it was
-  neutralised. The SQL pane's CSV is built in the browser
-  (`sqlResultCsv`) and applies the same two rules by hand — the prefix,
-  and quoting a bare CR the way Python's csv module does — so its CSV and
-  Excel buttons cannot disagree about one result. **Worksheet exports go
+  neutralised. The SQL pane's CSV (`Store.sql_result_csv`) follows the
+  same rules — column names through `_csv_safe`, text cells too, numbers
+  left as numbers (`-5` is not a formula, and `'-5` would be text in the
+  spreadsheet) — so its CSV and Excel buttons cannot disagree about one
+  result. **Worksheet exports go
   through `_xlsx_safe()` instead**,
   which is `_csv_safe` plus the C0 control characters XML 1.0 cannot hold:
   ingest keeps those in cell values on purpose (names must be quotable,
@@ -280,16 +281,45 @@ see [docs/notes/README.md](README.md) for the whole set.
   nickname or name): `Line` is a rid within one member, so without it two
   rows of a merge both read "Line 1" with nothing saying where either is.
   A single table's export keeps the old header.
-- **`/api/sql` encodes three kinds of cell at the JSON boundary**
-  (`pane_cell_json`), not in `Store.run_sql`, whose raw values plugins
-  are owed: a non-UTF-8 BLOB becomes SQLite's `X'00FF'` (a UTF-8 one
-  its text, as before), a non-finite REAL `Inf`/`-Inf`/`NaN`, and an
-  integer past ±2^53 its decimal string. The first two were a 500 (JSON
-  has neither); the third arrived rounded, so grid, Copy, CSV and Excel
-  all disagreed with the case for a FILETIME-sized number. "Save as
-  table" stores the same spellings (`pane_cell_text`) — it stored
-  Python's `b'…'` repr — and re-runs the query that produced the result
-  on screen (`r.sql`, kept by `runSql`), not the editor's text by then.
+- **The SQL pane's results are held server-side** (`winnow/sqlresults.py`,
+  `POST /api/sql/run` and the `/api/sql/result/{id}/…` routes). The pane
+  has no row cap, and "every row" as one JSON response was every row in
+  Python, then in the response, then in the browser: no memory bound at
+  all. A run now copies its rows in `BATCH`-sized `fetchmany`s into a
+  scratch SQLite file (`winnow-views-sqlres-*`, in the platform tempdir
+  rather than /dev/shm, since a result is every cell of every row; the
+  views prefix means `sweep_orphan_views` collects one a hard kill left
+  behind, and the same flock keeps a live one safe) and answers with the
+  first page, the total and each column's widest value. The rest is paged by position,
+  click-sorted by the server into a per-result order table (rows → rowid
+  → `pos`, never `LIMIT/OFFSET`), and exported by streaming: CSV through
+  a generator, XLSX from a temp file the response deletes after sending
+  (a workbook can't be streamed before it is finished), both in the
+  displayed sort, both spilling nothing into memory. Copy is `pick`, which
+  answers 413 past `COPY_MAX_BYTES` rather than build a clipboard string
+  of hundreds of MB. Things that bite: **the sort has to reproduce the
+  one the browser used to do** (NULLs first, numbers — including numeric
+  text — numerically, then text) or a click-sort and its export disagree
+  — `WINNOW_SORT_NUM` is a UDF for that reason; **a result is a handle
+  the client must let go of** (a re-run sends the old id in `release`,
+  closing a tab releases, and the store keeps at most `KEEP` anyway); and
+  a run **stops on a nearly full disk** (`MIN_FREE_BYTES`) with the rows
+  it has, rather than filling the tempdir. `/api/sql` itself is
+  unchanged for Python callers and `winnow.api.sql`: rows inline,
+  `limit` 5,000 by default.
+- **Every SQL pane cell is encoded at the JSON boundary**
+  (`pane_cell_json`, in `winnow/sqlresults.py`), not in `Store.run_sql`,
+  whose raw values plugins are owed: a non-UTF-8 BLOB becomes SQLite's
+  `X'00FF'` (a UTF-8 one its text, as before), a non-finite REAL
+  `Inf`/`-Inf`/`NaN`, and an integer past ±2^53 its decimal string. The
+  first two were a 500 (JSON has neither); the third arrived rounded, so
+  grid, Copy, CSV and Excel all disagreed with the case for a
+  FILETIME-sized number. A held result's pages, picks and workbook go
+  through it, `/api/sql`'s inline rows do, and its CSV and clipboard text
+  (`js_str`) spell the same three the same way. "Save as table" stores
+  the same spellings (`pane_cell_text`) — it stored Python's `b'…'` repr
+  — and re-runs the query that produced the result on screen (`r.sql`,
+  kept by `runSql`), not the editor's text by then.
 - **A pane query has to be stoppable, because some of what gets typed
   never ends** — a recursive CTE with no stop condition, a cross join of
   two 2M-row tables. One used to run at 100% CPU through everything: the
@@ -300,19 +330,26 @@ see [docs/notes/README.md](README.md) for the whole set.
   shutdown waits for every in-flight request *before* it runs the
   lifespan's shutdown half, so `_lifespan`'s `Store.close()` never got
   the chance, and the process cannot exit while a worker thread is inside
-  `sqlite3_step` anyway. Three ways in now, all ending in
-  `Connection.interrupt()` on the pane's own connection
-  (`Store._pane_query`):
-  - **the busy chip.** `runSql` arms `armOpCancel` with an `op_token` on
-    `/api/sql`, like a view build; the 499 paints as "Query cancelled".
-  - **the client hanging up.** `/api/sql` and `/api/sql/to_table` are
-    `async` for this alone (`_run_pane_query`): a sync route never reads
-    its socket again, so it cannot notice. They wait on the worker thread
-    and on the ASGI receive channel together — after the body, the only
-    message left is `http.disconnect` — and turn a hang-up into
-    `cancel_op`, with a made-up token when the client sent none. That
-    also keeps a closed window's query from holding the idle shutdown off
-    (it is an in-flight request).
+  `sqlite3_step` anyway. Every way in ends in `Connection.interrupt()` on
+  the pane's own connection (`Store._pane_query`, which `run_sql`,
+  `run_sql_result` and `sql_to_table` all run on):
+  - **the pane's Stop, and the busy chip.** `runSql` sends an `op_token`
+    with `/api/sql/run` and arms `armOpCancel` with it, like a view
+    build; the running result shows "Running… N rows so far" (polled
+    from `/api/sql/run/progress`) beside a Stop button that cancels the
+    same token. Stopped after rows have landed, the result keeps them and
+    says "stopped"; stopped before the first one, it is the 499, which
+    paints as "Query cancelled". A run that is overtaken (Run again, its
+    tab closed, another case opened) is cancelled the same way
+    (`abandonSqlRuns`), so it stops rather than finishing for nobody.
+  - **the client hanging up.** `/api/sql`, `/api/sql/run` and
+    `/api/sql/to_table` are `async` for this alone (`_run_pane_query`): a
+    sync route never reads its socket again, so it cannot notice. They
+    wait on the worker thread and on the ASGI receive channel together —
+    after the body, the only message left is `http.disconnect` — and turn
+    a hang-up into `cancel_op`, with a made-up token when the client sent
+    none. That also keeps a closed window's query from holding the idle
+    shutdown off (it is an in-flight request).
   - **shutdown.** `main()` runs a `uvicorn.Server` subclass whose
     `handle_exit` — the signal handler, which is where Shut down's
     SIGINT, Ctrl+C and SIGTERM all land — calls `stop_pane_queries()`
@@ -327,13 +364,6 @@ see [docs/notes/README.md](README.md) for the whole set.
   No deadline: a GROUP BY over a few million rows legitimately takes
   minutes, and the analyst is better placed than a timer to say which
   query is runaway. `tests/test_sql_runaway.py` covers each way in.
-- **`POST /api/sql/export_xlsx`** takes the result the pane is SHOWING
-  (columns + rows, up from the client) rather than the query, so the
-  workbook matches the screen including a click-sort — which lives only in
-  the browser — and including the preview cap, so the file cannot disagree
-  with the row count printed above it. `Save as table` remains the one
-  action that re-runs the query in full. Refuses a result taller than one
-  worksheet (`XLSX_MAX_ROWS`) with a 400 rather than writing a bad file.
 - **`POST /api/shutdown`** (the home screen's ⏻ button and Session → "Shut
   down Winnow…") stops the server from the UI — the server usually lives
   in a forgotten terminal, and closing the browser tab leaving it running
@@ -344,7 +374,9 @@ see [docs/notes/README.md](README.md) for the whole set.
   `Store.close()`, views scratch files are deleted. `_trigger_shutdown`
   is a separate function *so tests can monkeypatch it* — calling the real
   one under pytest kills pytest. The CSRF header gate is what stops a
-  hostile page in another tab from turning the server off.
+  hostile page in another tab from turning the server off. A SQL pane
+  query in flight is stopped by that SIGINT (`handle_exit` →
+  `stop_pane_queries`, above), not by this route.
 
 - **Idle shutdown rides the presence stream, not request traffic.** An
   analyst reading the grid makes no requests for hours, so "last request

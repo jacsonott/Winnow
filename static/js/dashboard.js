@@ -394,7 +394,7 @@ export async function createDashboard() {
       + 'events over time (when it has a timestamp), and the top values of its low-cardinality columns. '
       + 'Every widget it makes opens the rows behind it when clicked, and can be edited or removed.'));
     const acts = el('div', 'row-actions');
-    const create = el('button', 'btn', 'Create');
+    const create = el('button', 'btn primary', 'Create');
     const cancel = el('button', 'btn ghost', 'Cancel');
     cancel.onclick = () => { $('modal').hidden = true; };
     create.onclick = async () => {
@@ -607,7 +607,7 @@ function pickTable(ids) {
       }
       b.append(sel);
       const acts = el('div', 'row-actions');
-      const ok = el('button', 'btn', 'Open');
+      const ok = el('button', 'btn primary', 'Open');
       ok.onclick = () => { $('modal').hidden = true; finish(Number(sel.value)); };
       const cancel = el('button', 'btn ghost', 'Cancel');
       cancel.onclick = () => { $('modal').hidden = true; finish(null); };
@@ -1699,7 +1699,7 @@ function openWidgetEditor(existing, prefill = null) {
       if (source.value === 'sql' && !sql.value.trim()) { toast('SQL widget needs a query'); return; }
       runWidget(draft(), previewBody);
     };
-    const save = el('button', 'btn', 'Save widget');
+    const save = el('button', 'btn primary', 'Save widget');
     save.onclick = async () => {
       if (!title.value.trim()) { toast('Give the widget a title'); return; }
       if (source.value === 'sql' && !sql.value.trim()) { toast('SQL widget needs a query'); return; }

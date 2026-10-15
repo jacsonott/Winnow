@@ -195,6 +195,13 @@ def test_the_arrow_keys_walk_into_columns_that_were_never_built(wide):
 
 # ---------------------------------------------------------------- SQL pane
 
+def _landed(page):
+    """Until every row the pane has built holds its row: the result is the
+    server's, and a scroll past the rows fetched so far paints them empty
+    for the moment it takes to fetch them."""
+    page.wait_for_function("() => !document.querySelector('#sqlResult tr.sql-row-pending')")
+
+
 def _run_sql(page, sql):
     page.click("#tabSql")
     page.wait_for_selector("#sqlview:not([hidden])")
@@ -209,7 +216,7 @@ def _run_sql(page, sql):
 # of the pane: its rid against the one its place in the table means, the
 # cells it built, and any on-screen header with no cell under it.
 _SQL_ROW = """() => {
-  const sc = document.getElementById('sqlResult');
+  const sc = document.querySelector('#sqlResult .sql-result-scroll');
   const box = sc.getBoundingClientRect();
   const ths = [...sc.querySelectorAll('th')];
   const mid = (box.top + box.bottom) / 2;
@@ -246,8 +253,9 @@ def test_a_large_sql_result_builds_only_what_the_pane_shows(wide):
     # 3,000 rows x 152 columns is 456,000 cells; the pane shows a few hundred.
     assert top["tds"] < 5000, f"{top['tds']} cells built for one screen of result"
     for where in ("sc.scrollHeight / 2", "sc.scrollHeight"):
-        wide.evaluate(f"() => {{ const sc = document.getElementById('sqlResult'); sc.scrollTop = {where}; }}")
+        wide.evaluate(f"() => {{ const sc = document.querySelector('#sqlResult .sql-result-scroll'); sc.scrollTop = {where}; }}")
         _settle(wide)
+        _landed(wide)
         got = wide.evaluate(_SQL_ROW)
         assert got["rid"] == got["index"] + 1, f"row {got['index']} on screen holds rid {got['rid']}"
         assert got["drift"] == 0, f"row {got['index']} is painted {got['drift']} rows from its place"
@@ -255,7 +263,7 @@ def test_a_large_sql_result_builds_only_what_the_pane_shows(wide):
         # The columns are sized from the whole result, not from whichever
         # rows happen to be built — scrolling must not re-size them.
         assert got["widths"] == top["widths"]
-    wide.evaluate("() => { const sc = document.getElementById('sqlResult'); sc.scrollLeft = sc.scrollWidth / 2; }")
+    wide.evaluate("() => { const sc = document.querySelector('#sqlResult .sql-result-scroll'); sc.scrollLeft = sc.scrollWidth / 2; }")
     _settle(wide)
     got = wide.evaluate(_SQL_ROW)
     assert got["cells"] < N_COLS / 3, f"a scrolled row built {got['cells']} cells"
@@ -281,8 +289,9 @@ def test_a_row_click_in_a_large_result_moves_the_highlight_and_nothing_else(wide
         "the click rebuilt the result's rows"
     # A Shift range reaches rows that were not built when it started, and
     # it is the whole range that the selection holds.
-    wide.evaluate("() => { document.getElementById('sqlResult').scrollTop = 20000; }")
+    wide.evaluate("() => { document.querySelector('#sqlResult .sql-result-scroll').scrollTop = 20000; }")
     _settle(wide)
+    _landed(wide)
     far = wide.evaluate("() => Number(document.querySelectorAll('#sqlResult tr[data-i]')[30].dataset.i)")
     _click_row(wide, far, shift=True)
     assert wide.locator("#sqlResult .sql-row-sel").count() > 20
@@ -292,7 +301,7 @@ def test_a_row_click_in_a_large_result_moves_the_highlight_and_nothing_else(wide
     clip = wide.evaluate("() => navigator.clipboard.readText()")
     assert len(clip.strip().splitlines()) == 1 + (far - 3 + 1), "header + every row of the range"
     # ...and the rows scrolled back to come up picked.
-    wide.evaluate("() => { document.getElementById('sqlResult').scrollTop = 0; }")
+    wide.evaluate("() => { document.querySelector('#sqlResult .sql-result-scroll').scrollTop = 0; }")
     _settle(wide)
     picked = wide.evaluate("() => [...document.querySelectorAll('#sqlResult tr[data-i]')].slice(0, 6)"
                            ".map((t) => t.classList.contains('sql-row-sel'))")

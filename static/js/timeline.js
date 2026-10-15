@@ -380,6 +380,7 @@ export function openTimelineSourceConfig() {
 
       const saveBtn = el('button', 'btn', 'Save');
       saveBtn.style.marginTop = '6px';
+      saveBtn.style.alignSelf = 'flex-start';   // the row stretches its children; a button needn't
       saveBtn.onclick = async () => {
         try {
           await post('/api/timeline_templates', {
