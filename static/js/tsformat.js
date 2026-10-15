@@ -22,9 +22,11 @@ export const TS_ISO_RE = /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{
 export const TS_US_RE = /^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:[ ,]+(\d{1,2}):(\d{2})(?::(\d{2})(?:[.,](\d+))?)?\s*(?:([AaPp])\.?[Mm]\.?(?![A-Za-z]))?)?/;
 
 /* Month-name family ("JUN 23 2026 00:11:00", "23 Jun 2026", "June 23,
-   2026 5:11 PM") — the word is captured loose and validated against
-   MONTH_NO below, mirroring store.py's third recognized shape. */
-export const TS_MONTH_RE = /^(?:([A-Za-z]{3,9}) +(\d{1,2})|(\d{1,2}) +([A-Za-z]{3,9})) *,? *(\d{4})(?:[ ,]+(\d{1,2}):(\d{2})(?::(\d{2})(?:[.,](\d+))?)?\s*(?:([AaPp])\.?[Mm]\.?(?![A-Za-z]))?)?/;
+   2026 5:11 PM", "Jul 28th 2026 01:02:22") — the word is captured loose
+   and validated against MONTH_NO below, mirroring store.py's third
+   recognized shape; the day's ordinal suffix (timeparse.ORDINAL) is
+   optional and, as there, not checked against the number. */
+export const TS_MONTH_RE = /^(?:([A-Za-z]{3,9}) +(\d{1,2})(?:[Ss][Tt]|[Nn][Dd]|[Rr][Dd]|[Tt][Hh])?|(\d{1,2})(?:[Ss][Tt]|[Nn][Dd]|[Rr][Dd]|[Tt][Hh])? +([A-Za-z]{3,9})) *,? *(\d{4})(?:[ ,]+(\d{1,2}):(\d{2})(?::(\d{2})(?:[.,](\d+))?)?\s*(?:([AaPp])\.?[Mm]\.?(?![A-Za-z]))?)?/;
 
 const MONTH_NO = {
   jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,

@@ -142,7 +142,7 @@ Points that catch people out:
 | Function | What it does |
 | --- | --- |
 | `x REGEXP 'pattern'` | True when the pattern matches anywhere in `x`. Python regular-expression syntax, case-insensitive. A pattern that can backtrack catastrophically is refused before the query runs, as in the [search box](Filtering-and-searching.md#regular-expressions-that-are-refused) |
-| `DAY_BUCKET(x)` | The calendar day, `YYYY-MM-DD`, of a timestamp written ISO-style (`2024-01-05 13:22:01`), US-style (`1/5/2024 1:22 PM`) or with a month name (`Jan 5, 2024`). NULL for anything else, including epoch numbers |
+| `DAY_BUCKET(x)` | The calendar day, `YYYY-MM-DD`, of a timestamp written ISO-style (`2024-01-05 13:22:01`), US-style (`1/5/2024 1:22 PM`) or with a month name (`Jan 5, 2024`, `5th Jan 2024`). NULL for anything else, including epoch numbers |
 | `TS_NORMALIZE(x)` | The same three shapes as `YYYY-MM-DD HH:MM:SS`, so they sort and compare correctly. It reads the time as written: a `+02:00` or `Z` on the end is ignored, not converted |
 
 ## Results

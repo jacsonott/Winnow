@@ -251,7 +251,7 @@ see [docs/notes/README.md](README.md) for the whole set.
     offset (ISO `Z`/`±HH:MM`, CLF, RFC 2822) are converted to UTC, and
     naive text is kept exactly as written unless the analyst sets the
     op's optional fixed `utc_offset` — never a TZ database, never DST
-    inference. The ISO, `dd_mmm_yyyy` and US ops read whatever follows the
+    inference. The ISO, `dd_mmm_yyyy`, `mmm_dd_yyyy` and US ops read whatever follows the
     time through one function, `timeparse._trailing_zone`: Z/UTC/GMT,
     `GMT+02:00`, `±HH:MM`/`±HHMM`/`±HH` (U+2212 as a minus too) are
     applied and win over `utc_offset`; a zone it *cannot* apply — an
@@ -278,11 +278,17 @@ see [docs/notes/README.md](README.md) for the whole set.
     before the year) and cross-checked against what the stdlib parsed,
     so a future divergence fails values rather than misplacing them. The
     12-hour marker is `timeparse.MERIDIEM` everywhere a US or month-name
-    time is read (`_US_RE`, store.py's `_TS_US_RE`/`_TS_MONTH_RE` behind
+    time is read (`_US_RE`, `_MMM_DD_RE`, store.py's `_TS_US_RE`/`_TS_MONTH_RE` behind
     TS_NORMALIZE and DAY_BUCKET, tsformat.js's twins): `PM`, `Pm`,
     `p.m.`, after an optional fraction. `\s*(AM|PM|am|pm)?` straight after
     the seconds read `1:22:01.123 PM` as 01:22 — twelve hours early in
     the derived column, the Timeline and the timeframe filter at once.
+    The month-name alternation and the day's ordinal suffix ("Jul 28th
+    2026") are shared the same way: `timeparse.MONTH_NAME` and
+    `timeparse.ORDINAL` build `_MMM_DD_RE` and store.py's `DATE_RE`/
+    `_TS_MONTH_RE`, and tsformat.js's `TS_MONTH_RE` mirrors both by hand.
+    The suffix isn't checked against the number — "21th" is still the
+    21st, and refusing it would turn a typo into a missing timestamp.
     Unparseable input is NULL, not `''`: it drops out of
     comparisons and the timeframe filter instead of pretending to be data,
     and the count of non-empty inputs that produced NULL is surfaced per
