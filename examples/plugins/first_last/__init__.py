@@ -68,7 +68,7 @@ PLUGIN = {
     "description": "Bookend each group of events: first and last row per group, with a templated description, as a new table.",
 }
 
-WINNOW_API_VERSION = 1
+WINNOW_API_VERSION = 12   # winnow.dropdownMenu: the click-to-place menu under a field
 
 MAX_GROUP_COLS = 6
 # Two output rows per group; beyond this the result stops being a summary.

@@ -304,6 +304,35 @@ see [docs/notes/README.md](README.md) for the whole set.
     is what keeps a table switch from rewriting an edited event's columns
     while it is only being previewed elsewhere.
 
+- **A plugin's menu is the app's menu** (`winnow.dropdownMenu`, plugin
+  API 12 / context `apiVersion` 6). Pivot's and First/Last's
+  click-to-place used to be a modal titled "Place <field>" — a whole
+  dialog for one click, over the board being arranged. Both open the
+  ui.js singleton under the field now, so they are one-at-a-time with
+  every app menu, Escape is swallowed in the capture phase (it can't
+  also clear the grid's selection underneath), and an outside mousedown
+  closes it. Three things bite:
+  - **The helper never moves focus.** It doesn't focus an item on open
+    (Down/Up step in) and doesn't put focus back on close. Both tabs
+    re-render their field list on a pick, so the field that opened the
+    menu is a new node and a keyboard user ends on `<body>`;
+    `refocusField` focuses the new one — only for a menu opened from the
+    keyboard, and never while `#modal` is up, because First/Last's
+    Filters pick opens the filter editor and its search box must keep
+    the focus it takes when the values arrive.
+  - **Greyed means a rule `addField` already applies, said before the
+    click** — already there; Total up needs a number column (addField's
+    toast); Group rows on stops at `meta.limits.group_cols` (the
+    backend's 400 on the next preview). The reason goes in `desc`, the
+    visible second line, not only in `title`. The group-column limit is
+    the one the menu applies and a drag does not: a drag past it still
+    lands and the preview reports the 400, as before.
+  - **A hand-built `.menu` div gets the look and none of the behaviour**
+    — not one-at-a-time with the app's menus, no shared Escape or
+    outside-click. Fine for a completion popup tied to an input
+    (First/Last's `fl-ac` owns its keys on purpose); not for a menu.
+  `tests/ui/test_field_place_menu.py` pins all of it against both tabs.
+
 - **Plugin enablement is two-layer, and the defaults point opposite ways.**
   Machine level (workspace/plugins.json): installed plugins are on unless
   in the `disabled` list; bundled examples (examples/plugins/, always in
