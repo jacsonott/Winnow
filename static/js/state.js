@@ -87,7 +87,7 @@ export const S = {
   groupPageGen: 0,         // bumped by clearGroupPageCache so an in-flight fetch can't repopulate stale rows
   savedFilters: [],        // cross-case cyclable filters, loaded from workspace/filters.json
   headerNicknames: [],     // [{id, col_names, nickname}] — friendly names for a header set
-  timeRange: { enabled: false, column: null, start: '', end: '' }, // survives filter/preset/tab changes on purpose — see toggleTimeRange
+  timeRange: { enabled: false, column: null, start: '', end: '' }, // survives filter/preset/tab changes on purpose — see toggleTimeRange; tab changes only while timeframeAcrossTables is on
   timelineTemplates: [], // [{id, col_names, type_label, timestamp_column, body_columns}] — workspace/timeline_templates.json
   importProfiles: [],    // [{id, name, extensions, include_patterns, exclude_patterns, recursive}] — workspace/import_profiles.json
   plugins: [],           // loaded plugin records from GET /api/plugins — name/version/error, for the Plugins modal

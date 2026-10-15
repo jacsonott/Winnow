@@ -15,6 +15,8 @@ DIALOGS = [
     ("Case settings", "() => __winnow.openCaseSettings()"),
     ("Import", "() => __winnow.openImportModal()"),
     ("Timeframe filter", "() => __winnow.openTimeRangeModal()"),
+    # Its line changes with "Keep applied when switching tables".
+    ("Timeframe filter", "() => { __winnow.setTimeframeAcrossTables(false); __winnow.openTimeRangeModal(); }"),
 ]
 
 LINES = """() => {
@@ -31,11 +33,13 @@ LINES = """() => {
 @pytest.fixture(autouse=True)
 def _restore_skin(page):
     yield
-    page.evaluate("() => { __winnow.applyStyle('harvest'); __winnow.applyThemeMode('dark'); }")
+    page.evaluate("""() => { __winnow.applyStyle('harvest'); __winnow.applyThemeMode('dark');
+                       __winnow.setTimeframeAcrossTables(true); }""")
 
 
 @pytest.mark.parametrize("skin", ["harvest", "phosphor"])
-@pytest.mark.parametrize("title,opener", DIALOGS, ids=[d[0] for d in DIALOGS])
+@pytest.mark.parametrize("title,opener", DIALOGS,
+                         ids=["Sessions", "Case settings", "Import", "Timeframe", "Timeframe per table"])
 def test_the_intro_is_one_line(page, skin, title, opener):
     page.evaluate("(s) => __winnow.applyStyle(s)", skin)
     page.evaluate(opener)

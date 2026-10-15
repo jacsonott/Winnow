@@ -39,7 +39,9 @@ def test_a_first_range_applies_on_apply(page):
     page.locator("#btnTimeRange").click()
     page.wait_for_selector("#modal:not([hidden])")
     # Nothing in the dialog stands between typing a range and using it.
-    assert page.locator("#modalBody input[type=checkbox]").count() == 0
+    # (The one box left, "Keep applied when switching tables", is a saved
+    # preference about table switches, not an on switch.)
+    assert page.locator("#modalBody label", has_text="Enabled").count() == 0
     page.locator("#modalBody .dlg-pair input").first.fill("2026-03-14 08:01:00")
     _apply(page)
     assert page.evaluate("() => __winnow.S.timeRange.enabled") is True

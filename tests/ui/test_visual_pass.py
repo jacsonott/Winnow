@@ -79,17 +79,19 @@ def test_sql_run_button_shares_the_row_with_the_others(page):
 
 
 def test_timeframe_dialog_labels_sit_on_rows_of_their_own(page):
-    """The dialog's first two labels were glued into "EnabledColumn". The
-    Enabled box has gone since (Apply turns the filter on), so the labels
-    that lead are Column and the range's Start — and they still have to
-    sit one above the other, not run together on one line."""
+    """The dialog's first labels were glued into "EnabledColumn": a
+    checkbox and the label after it sharing a line. The Enabled box has
+    gone since (Apply turns the filter on); what leads now is the "Keep
+    applied when switching tables" box, then Column, then the range's
+    Start, and each still has to sit on a row of its own."""
     page.evaluate("() => __winnow.openTimeRangeModal()")
     page.wait_for_selector("#modal:not([hidden])")
     tops = page.evaluate(
-        "() => [...document.querySelectorAll('#modalBody label')].slice(0, 2).map(l => [l.textContent.trim(), l.getBoundingClientRect().top])")
+        "() => [...document.querySelectorAll('#modalBody label')].slice(0, 3).map(l => [l.textContent.trim(), l.getBoundingClientRect().top])")
     page.keyboard.press("Escape")
-    assert [t[0] for t in tops] == ["Column", "Start"]
+    assert [t[0] for t in tops] == ["Keep applied when switching tables", "Column", "Start"]
     assert tops[1][1] - tops[0][1] >= 10, tops
+    assert tops[2][1] - tops[1][1] >= 10, tops
 
 
 def test_regex_hint_sits_outside_the_typed_text(page):
