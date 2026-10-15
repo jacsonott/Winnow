@@ -2318,7 +2318,6 @@ textarea:focus { border-color: var(--accent); outline: none; }
 
 /* 6px on top so the focused input's ring doesn't sit on the help text. */
 .fb-help { margin: 6px 0 10px; font-size: 12px; color: var(--dim); }
-.tf-enabled { display: flex; align-items: center; gap: 6px; margin: 4px 0 10px; }
 /* A labelled field in the older dialogs, in the builders' shape
    (.lm-eb-field): label above, control full width under it, an optional
    note under that. A label beside its box put each box at a different x

@@ -126,18 +126,17 @@ A few of them also group the result: `EVTX — PowerShell` and `EVTX — BITS tr
 
 ## The timeframe filter
 
-The timeframe filter keeps rows whose timestamp falls inside a range. Click **⏱ Timeframe** or press `R` to set it:
+The timeframe filter keeps rows whose timestamp falls inside a range. Click **⏱ Timeframe** or press `R` to set it, then click **Apply**, which always turns it on:
 
-- **Enabled** turns it on or off.
 - **Column** is one datetime column, or **All datetime columns (catches a match on any of them)**. With all columns, a row is kept if any of its timestamps is in range, which catches a file whose creation time was changed but whose modified time wasn't.
 - **Start** and **End** take `YYYY-MM-DD HH:MM:SS` in 24-hour time. A date alone, or a date with `HH:MM`, also works, and you can set only one end. The 📅 button opens a date picker.
-- **From tagged rows** with **Fill range** sets the range to the earliest and latest timestamps among your tagged rows (all tags, or only the tags you toggle).
+- **From tagged rows** with **Fill range** sets the range to the earliest and latest timestamps among your tagged rows (all tags, or only the tags you toggle). It only fills the boxes; **Apply** still turns the filter on.
 
 Both ends are inclusive. A date without a time means midnight at the start of that day, so an end of `2024-01-05` stops at `2024-01-05 00:00:00`. To include the whole day, end at `2024-01-05 23:59:59`.
 
 The timeframe understands timestamps written as `2024-01-05 13:22:01` (or with a `T`), US-style `1/5/2024 1:22:01 PM`, and month names such as `Jan 5 2024`. Fractions of a second and time-zone offsets in the data are ignored: the comparison uses the date and time as written. Rows whose timestamp can't be read are left out while the timeframe is on.
 
-The timeframe is global. It stays on when you switch tables, clear filters, apply a saved filter or reset the view, and the button shows ⏱ followed by the column name while it is active. Press `r` to toggle it off and on without losing the range. **Clear** in the dialog removes it. A table with no datetime column is not narrowed by it at all.
+The timeframe is global. It stays on when you switch tables, clear filters, apply a saved filter or reset the view, and the button shows ⏱ followed by the column name while it is active. Press `r` to turn it off without losing the range, and `r` again to turn it back on; opened while it is off, the dialog says *Off right now — Apply turns it back on.* **Clear** in the dialog removes it. A table with no datetime column is not narrowed by it at all.
 
 **Jump to timestamp…** in the same dialog (or `J`) scrolls to the row closest to a moment instead of filtering. Press `.` in any table to jump to the same moment again.
 

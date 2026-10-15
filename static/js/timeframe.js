@@ -229,18 +229,16 @@ export function toggleTimeRange() {
 export function openTimeRangeModal() {
   markModalAction('openTimeRange');
   modal('Timeframe filter', (b) => {
+    // No Enabled box. Apply always turns the filter on, and the two ways
+    // off are Clear (forget the range) and the toggle key (keep it): with
+    // a box as well, a range typed in with the box left unticked was
+    // saved but not applied, and Apply looked as if it had done nothing.
     const toggleKey = S.keymap.toggleTimeRange[0] || '(unbound)';
-    const openKey = S.keymap.openTimeRange[0] || '(unbound)';
     b.append(el('p', null,
-      `Stays applied across filter/preset changes and table switches, unlike the regular filters — `
-      + `toggle it on/off quickly with "${toggleKey}", or jump straight back to this dialog with "${openKey}".`));
-
-    const enabledLabel = el('label', 'tf-enabled');
-    const enabledCb = el('input');
-    enabledCb.type = 'checkbox';
-    enabledCb.checked = S.timeRange.enabled;
-    enabledLabel.append(enabledCb, document.createTextNode(' Enabled'));
-    b.append(enabledLabel);
+      `Stays on when filters or tables change — "${toggleKey}" turns it off without clearing it.`));
+    if (!S.timeRange.enabled && (S.timeRange.start || S.timeRange.end)) {
+      b.append(el('p', 'fb-help tf-off', 'Off right now — Apply turns it back on.'));
+    }
 
     const colField = el('div', 'dlg-field');
     colField.append(el('label', null, 'Column'));
@@ -327,7 +325,6 @@ export function openTimeRangeModal() {
           if (!res.start && !res.end) { toast('No tagged rows with a usable timestamp'); return; }
           startInput.value = res.start || '';
           endInput.value = res.end || '';
-          enabledCb.checked = true;
           toast('Range set from tagged rows — Apply to use it');
         } catch (e) {
           toast('Could not read tagged range: ' + e.message, 4000);
@@ -344,7 +341,7 @@ export function openTimeRangeModal() {
       if (!startInput.value.trim() && !endInput.value.trim()) { toast('Set a start and/or end'); return; }
       if (!validateTimeInput(startInput, 'Start') || !validateTimeInput(endInput, 'End')) return;
       S.timeRange = {
-        enabled: enabledCb.checked,
+        enabled: true,
         column: colSel.value || null,
         start: startInput.value.trim(),
         end: endInput.value.trim(),

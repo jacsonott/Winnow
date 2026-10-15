@@ -78,13 +78,17 @@ def test_sql_run_button_shares_the_row_with_the_others(page):
     assert page.evaluate(tops)[0] == page.evaluate(tops)[1]
 
 
-def test_timeframe_enabled_and_column_are_separate_rows(page):
+def test_timeframe_dialog_labels_sit_on_rows_of_their_own(page):
+    """The dialog's first two labels were glued into "EnabledColumn". The
+    Enabled box has gone since (Apply turns the filter on), so the labels
+    that lead are Column and the range's Start — and they still have to
+    sit one above the other, not run together on one line."""
     page.evaluate("() => __winnow.openTimeRangeModal()")
     page.wait_for_selector("#modal:not([hidden])")
     tops = page.evaluate(
         "() => [...document.querySelectorAll('#modalBody label')].slice(0, 2).map(l => [l.textContent.trim(), l.getBoundingClientRect().top])")
     page.keyboard.press("Escape")
-    assert [t[0] for t in tops] == ["Enabled", "Column"]
+    assert [t[0] for t in tops] == ["Column", "Start"]
     assert tops[1][1] - tops[0][1] >= 10, tops
 
 

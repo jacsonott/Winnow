@@ -94,7 +94,11 @@ see [docs/notes/README.md](README.md) for the whole set.
   written to skip it on purpose (see the comments at each site). It's
   meant to stay pinned while everything else changes underneath it, and
   toggles on/off via its own keybind (`toggleTimeRange`) rather than
-  needing its config modal reopened. `column: null` means "every datetime
+  needing its config modal reopened. **Apply always turns it on**; the
+  dialog has no Enabled box. It had one, and a range typed in with the box
+  unticked was saved but not applied, so Apply looked broken. Off is
+  Clear (range gone) or the toggle key (range kept); the dialog says so
+  when it is opened on a range that is off. `column: null` means "every datetime
   column on whichever table is open, OR'd together" — the MFT case this
   exists for: a timestomped Created date shouldn't hide a row whose
   Modified date is genuinely in range. `TS_NORMALIZE(x)` (a zero-padded
