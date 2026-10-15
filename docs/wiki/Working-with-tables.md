@@ -66,7 +66,7 @@ A pinned column stays visible while you scroll sideways. Alt-click a header to p
 
 Drag the right edge of a header to resize a column, and double-click the edge to fit the column to its contents. Press `=` to fit every column, and `0` to reset every width to its default.
 
-Fitting is capped so that a single long value, such as a base64 command line, can't make a column enormous. The cap is set in **Settings → Appearance → Autofit column width limit** (900 pixels by default, or no limit). A column whose header needs more room than the cap still gets room for its name. A table with only one column, such as a log imported one line per row, fills the grid's width.
+Fitting is capped so that a single long value, such as a base64 command line, can't make a column enormous. The cap is set in **Settings → Grid & layout → Autofit column width limit** (900 pixels by default, or no limit). A column whose header needs more room than the cap still gets room for its name. A table with only one column, such as a log imported one line per row, fills the grid's width.
 
 ### Timestamp display
 

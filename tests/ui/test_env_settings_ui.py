@@ -11,16 +11,14 @@ pytestmark = pytest.mark.ui
 def _open_env_section(page):
     page.evaluate("() => __winnow.openSettings()")
     page.wait_for_selector("#modal:not([hidden])")
-    head = page.locator(".settings-section-head", has_text="Environment")
-    if head.get_attribute("aria-expanded") != "true":
-        head.click()
+    page.locator("#modalBody .settings-nav-item", has_text="Environment").click()
     page.wait_for_selector("#modalBody .env-add")
 
 
 def test_environment_panel_adds_lists_and_removes_without_showing_values(page, api):
     try:
         _open_env_section(page)
-        body = page.locator("#modalBody .settings-section", has_text="Environment")
+        body = page.locator("#modalBody .settings-pane[data-section='env']")
         assert "WINNOW_* names" in body.inner_text()
         assert body.locator(".env-value-in").get_attribute("type") == "password"
 
@@ -49,7 +47,7 @@ def test_environment_panel_adds_lists_and_removes_without_showing_values(page, a
 def test_a_reserved_name_is_refused_with_a_toast(page, api):
     try:
         _open_env_section(page)
-        body = page.locator("#modalBody .settings-section", has_text="Environment")
+        body = page.locator("#modalBody .settings-pane[data-section='env']")
         body.locator(".env-name-in").fill("WINNOW_WORKSPACE_DIR")
         body.locator(".env-value-in").fill("/tmp/elsewhere")
         body.locator(".env-add .btn", has_text="Save").click()

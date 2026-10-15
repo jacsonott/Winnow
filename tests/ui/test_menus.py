@@ -130,18 +130,18 @@ def test_value_picker_routes_unspellable_values_to_the_filter_tree(page):
     assert applied["marked"], "the column's picker button should show the filter lives in the tree"
 
 
-def test_settings_sections_start_collapsed_and_expand_on_click(page):
+def test_settings_shows_one_section_at_a_time_and_switches_on_click(page):
     page.keyboard.press("?")
     page.wait_for_selector("#modal:not([hidden])")
-    assert page.locator(".settings-section-head").count() >= 6
-    # Everything collapsed on arrival except Shut down, the one section
-    # that is a single button and the thing Settings is opened for on the
-    # way out.
-    open_titles = page.evaluate("""() => [...document.querySelectorAll('.settings-section')]
-        .filter((s) => !s.querySelector('.settings-section-body').hidden)
-        .map((s) => s.querySelector('.settings-section-title').textContent.trim().toLowerCase())""")
-    assert open_titles == ["shut down"], open_titles
-    page.click(".settings-section-head:has-text('Appearance')")
-    page.wait_for_timeout(200)
-    assert page.locator(".settings-section-body:not([hidden])").count() == 2
+    assert page.locator(".settings-nav-item").count() >= 6
+    # One section on screen, and it is the one the list marks. A profile
+    # that has never opened Settings lands on the first, Appearance.
+    shown = page.evaluate("""() => [...document.querySelectorAll('.settings-pane')]
+        .filter((p) => !p.hidden).map((p) => p.dataset.section)""")
+    assert shown == ["appearance"], shown
+    assert page.locator(".settings-nav-item[aria-selected='true']").inner_text().strip() == "Appearance"
     assert page.locator(".style-card").first.is_visible()
+    page.click(".settings-nav-item:has-text('Keyboard shortcuts')")
+    assert page.locator(".settings-pane:not([hidden])").count() == 1
+    assert page.locator(".settings-pane[data-section='keys'] .settings-keys").is_visible()
+    assert not page.locator(".style-card").first.is_visible()

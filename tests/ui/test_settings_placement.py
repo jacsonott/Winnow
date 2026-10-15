@@ -37,8 +37,8 @@ def test_settings_has_no_case_scoped_controls_left(page):
     'this case' would be describing nothing."""
     page.evaluate("() => __winnow.openSettings()")
     page.wait_for_selector("#modal:not([hidden])")
-    page.locator(".settings-section-head", has_text="Timestamps").click()
-    body = page.locator(".settings-section-body").filter(
+    page.locator("#modalBody .settings-nav-item", has_text="Timestamps").click()
+    body = page.locator("#modalBody .settings-pane").filter(
         has=page.locator("text=Every case on this machine"))
     # Asserted structurally: the section has ONE control, the machine-wide
     # one. Checking prose would trip over the pointer text, which quite

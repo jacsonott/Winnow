@@ -1123,7 +1123,7 @@ section.page-with-panels { flex-direction: row; }
 
 /* ------------------------------------------------------------ filter bar */
 
-/* The other filter surface, the one Settings → Appearance turns on in
+/* The other filter surface, the one Settings → Grid & layout turns on in
    place of the always-on row: one thin strip naming only the filters that
    are actually set. It sits OUTSIDE the grid's scroll
    container (see index.html) so the chips never scroll away with the
@@ -1953,13 +1953,12 @@ textarea:focus { border-color: var(--accent); outline: none; }
   width: min(680px, 92vw); max-height: 82vh; display: flex; flex-direction: column;
 }
 .modal-card.wide { width: min(920px, 96vw); }
-/* Settings: eleven collapsible sections. A card that grows re-centres
-   itself on every click, so the header jumped up to 165px. It used to be a
-   fixed height, which kept it still — and also kept an all-collapsed
-   Settings at 82vh of mostly empty panel. Now it's sized to content and
-   anchored to the top of the viewport instead: it grows downward from a
-   fixed edge, so nothing above the click moves, and stops at the same
-   82vh, scrolling the body from there. */
+/* Anchored to the top of the viewport rather than centred: a card that
+   changes height re-centres itself, so its header jumps (Settings' did, by
+   up to 165px, while it was a column of collapsible sections). Settings
+   is tall — its panes are a fixed height now, see .settings-panes — and so
+   is the skin picker it opens, so going between the two keeps the top
+   edge where it was. Stops at 82vh, scrolling the body from there. */
 .modal-card.tall { max-height: 82vh; align-self: start; margin-top: 9vh; }
 /* The read-only skin tile in Settings opens the picker on click. */
 .style-card-static.style-card-link { cursor: pointer; }
@@ -2459,7 +2458,8 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .accent-swatch { width: 20px; height: 20px; border-radius: 50%; border: 1px solid var(--line-2); background: var(--sw); cursor: pointer; padding: 0; }
 .accent-swatch[aria-pressed="true"] { box-shadow: 0 0 0 2px var(--panel), 0 0 0 3px var(--sw); }
 #appearanceAccentCustom { width: 24px; height: 24px; border: 1px solid var(--line-2); border-radius: var(--radius-sm); background: none; padding: 0; cursor: pointer; }
-/* Collapsible Settings sections. The header carries .modal-body h4's type
+/* Collapsible sections (settingsSection — the profile builder's; Settings
+   itself is two panes, below). The header carries .modal-body h4's type
    treatment (uppercase, tracked) so collapsing them didn't change what a
    section *looks* like, only whether it's open — but stays accent where
    the h4 is now dim, because this one is a button you click. */
@@ -2476,6 +2476,41 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .settings-section-caret { flex: 0 0 auto; font-size: 9px; color: var(--dim); }
 .settings-section-head[aria-expanded="true"] .settings-section-caret { color: var(--accent); }
 .settings-section-body { padding: 0 4px 14px; }
+
+/* Settings as two panes (settingsPanes in settings.js): the sections
+   listed on the left, the chosen one on the right, one at a time — the
+   plugins and profiles managers' shape, and their list styling (.pm-item).
+   The height is FIXED rather than sized to the section, so going from
+   Shut down's one button to the keymap's forty rows moves nothing: the
+   card is .tall (anchored at the top), the panes are the same height
+   every time, and each pane scrolls on its own. The calc keeps the card
+   inside .tall's 82vh with room for the head and the body's padding; the
+   max() floor means a very short window scrolls the body instead of
+   squashing the list to nothing. */
+.settings-panes {
+  display: grid; grid-template-columns: 188px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr);
+  gap: 14px; height: max(320px, min(640px, calc(82vh - 80px)));
+}
+.settings-nav {
+  grid-column: 1; grid-row: 1; min-height: 0; overflow: auto;
+  display: flex; flex-direction: column; gap: 2px;
+  border-right: 1px solid var(--line); padding-right: 12px;
+}
+.settings-nav-item {
+  flex: 0 0 auto; text-align: left; background: none; border: 0; border-radius: var(--radius-sm);
+  padding: 6px 8px; font: inherit; font-size: 12px; color: var(--text); cursor: pointer;
+}
+.settings-nav-item:hover { background: var(--panel-2); }
+.settings-nav-item[aria-selected="true"] { background: var(--panel-2); box-shadow: inset 2px 0 0 var(--accent); }
+/* Drawn inside the item: the list is a scroller and clips the global ring. */
+.settings-nav-item:focus-visible { outline-offset: -2px; }
+.settings-pane { grid-column: 2; grid-row: 1; min-width: 0; min-height: 0; overflow: auto; padding-right: 4px; }
+.settings-pane-title { margin: 0 0 10px; font-size: 15px; font-weight: 600; color: var(--text); }
+.settings-pane-body > p:first-child { margin-top: 0; }
+/* A sub-heading that is a pane's first div is still not its first line
+   (Grid & layout opens with checkboxes), so it keeps the gap above it that
+   :first-of-type below takes away. */
+.settings-pane-body .settings-sub-label:not(:first-child) { margin-top: 14px; }
 
 .settings-sub-label { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .05em; margin-top: 14px; }
 .settings-sub-label:first-of-type { margin-top: 0; }
@@ -2757,7 +2792,7 @@ html[data-style="studio"] #search:focus, html[data-style="studio"] textarea:focu
 
 /* ------------------------------------------------- remote session mode */
 
-/* Settings → Appearance → "Remote session mode". RDP-class protocols
+/* Settings → Remote session → "Remote session mode". RDP-class protocols
    encode screen changes, so an infinite animation (busy sweep, job slide,
    the SQL cursor blink) keeps the encoder busy around the clock, and the
    row-hover repaint fires on every mousemove. Animations get the same
