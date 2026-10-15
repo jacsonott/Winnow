@@ -6,8 +6,15 @@ fixtures built byte-by-byte here (no real evidence files in the repo)."""
 from __future__ import annotations
 
 import json
+import os
+import socket
 import struct
+import subprocess
+import sys
 import textwrap
+import time
+import urllib.error
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 
@@ -133,8 +140,46 @@ def test_duplicate_format_id_is_a_plugin_error(plug_dir):
     reg.load([plug_dir])
     (rec,) = reg.describe()
     assert "Duplicate" in rec["error"]
-    # The first registration survives; the plugin just can't add more.
-    assert reg.get_format("dupe.x").label == "X"
+    # Not even the first registration survives: a plugin listed as failed
+    # must not leave a working format behind (see the partial-register
+    # test below — this assertion used to pin the opposite).
+    with pytest.raises(KeyError):
+        reg.get_format("dupe.x")
+
+
+def test_a_register_that_raises_partway_keeps_nothing_it_registered(plug_dir):
+    """register() writes straight into the live tables, so a plugin that
+    failed on its fourth call kept the first three — a format offered in
+    the import dialog, a route answering, a row action in the menu — while
+    the panel listed it as failed. A plugin loaded after it is unaffected."""
+    _write_plugin(plug_dir, "aaa_half", """
+        def register(api):
+            api.register_ingest_format(id="half", label="Half", extensions=[".half"],
+                                       parse=lambda path, options: {"columns": ["A"], "rows": []})
+            api.register_api("ping", lambda req: {"pong": True})
+            api.register_row_action(id="look", label="Look", handler=lambda req: {})
+            raise RuntimeError("config file missing")
+    """)
+    _write_plugin(plug_dir, "demo", GOOD_PLUGIN)
+    reg = PluginRegistry()
+    reg.load([plug_dir])
+    by_name = {p["fs_name"]: p for p in reg.describe()}
+    assert "config file missing" in by_name["aaa_half"]["error"]
+    assert by_name["aaa_half"]["formats"] == []
+    with pytest.raises(KeyError):
+        reg.get_format("aaa_half.half")
+    assert reg.get_api("aaa_half", "ping") is None
+    assert not [a for a in reg.list_row_actions() if a["plugin_fs"] == "aaa_half"]
+    assert by_name["demo"]["error"] is None and reg.get_format("demo.lines")
+
+
+def test_rollback_covers_every_registration_table():
+    """_snapshot/_rollback work from a list of table names, so a new
+    register_* hook whose table isn't on it would keep its registrations
+    after a failed register() again. Every dict a load fills is on it."""
+    from winnow.plugin_api import _Loaded
+    tables = {k for k, v in vars(_Loaded()).items() if isinstance(v, dict)}
+    assert tables == set(_Loaded._TABLES)
 
 
 def test_underscore_and_hidden_entries_are_skipped(plug_dir):
@@ -425,6 +470,115 @@ def test_one_plugin_exiting_does_not_take_the_others_with_it(plug_dir):
     assert reg.get_format("demo.lines") is not None
 
 
+# ------------------------------------------------------- reloads and races
+
+class _ImportGate:
+    """Lets a test hold a plugin's import open mid-reload, so "during a
+    reload" is a state the test is IN rather than a race it hopes to hit.
+    The plugin finds it in sys.modules — its source can't import the test."""
+    NAME = "_winnow_test_import_gate"
+
+    def __init__(self):
+        import threading
+        self.block = False
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.imports = 0
+
+
+GATED_PLUGIN = """
+    import sys
+    gate = sys.modules["_winnow_test_import_gate"]
+    gate.imports += 1
+    if gate.block:
+        gate.entered.set()
+        gate.release.wait(10)   # an import that takes a while: pandas, an SDK
+
+    def register(api):
+        api.register_api("ping", lambda req: "{name}", methods=["GET"])
+"""
+
+
+@pytest.fixture
+def gated(plug_dir, monkeypatch):
+    import sys
+    gate = _ImportGate()
+    monkeypatch.setitem(sys.modules, _ImportGate.NAME, gate)
+    # a_slow sorts first, so a reload held inside it has registered
+    # nothing new yet — the moment the old code had nothing at all.
+    for name in ("a_slow", "b_ok", "c_ok"):
+        _write_plugin(plug_dir, name, GATED_PLUGIN.replace("{name}", name))
+    reg = PluginRegistry()
+    reg.load([plug_dir])
+    yield gate, reg
+    gate.release.set()      # never leave a reload thread parked
+
+
+def test_plugin_routes_keep_answering_while_a_reload_runs(gated, plug_dir):
+    """load() cleared the live registry and refilled it as each plugin
+    imported, so every plugin route 404'd (and the listing was empty) for
+    as long as a reload took — and Settings toggles, installs and every
+    case open reload."""
+    import threading
+    gate, reg = gated
+    gate.block = True
+    t = threading.Thread(target=reg.load, args=([plug_dir],), daemon=True)
+    t.start()
+    assert gate.entered.wait(10)
+    try:
+        assert reg.get_api("c_ok", "ping") is not None
+        assert [p["fs_name"] for p in reg.describe()] == ["a_slow", "b_ok", "c_ok"]
+    finally:
+        gate.release.set()
+        t.join(10)
+    assert reg.get_api("c_ok", "ping") is not None
+
+
+def test_overlapping_reloads_are_serialised(gated, plug_dir):
+    """Two reloads at once (a toggle in one window while a case opens in
+    another; both are threadpooled routes) filled the same dicts: each
+    plugin's register() collided with its own registration from the
+    other load, so healthy plugins were listed twice and marked failed
+    with "Duplicate API route"."""
+    import threading
+    import time
+    gate, reg = gated
+    gate.block = True
+    imports_before = gate.imports
+    first = threading.Thread(target=reg.load, args=([plug_dir],), daemon=True)
+    first.start()
+    assert gate.entered.wait(10)
+    second = threading.Thread(target=reg.load, args=([plug_dir],), daemon=True)
+    second.start()
+    time.sleep(0.3)
+    # The second load is waiting its turn, not importing alongside.
+    assert gate.imports == imports_before + 1
+    gate.block = False
+    gate.release.set()
+    first.join(10)
+    second.join(10)
+    assert not first.is_alive() and not second.is_alive()
+
+    listing = reg.describe()
+    assert [p["fs_name"] for p in listing] == ["a_slow", "b_ok", "c_ok"]
+    assert [p["error"] for p in listing] == [None, None, None]
+    assert all(reg.get_api(fs, "ping") for fs in ("a_slow", "b_ok", "c_ok"))
+
+
+def test_a_reload_that_fails_leaves_the_previous_set_running(gated, plug_dir):
+    gate, reg = gated
+
+    def policy_that_breaks(fs_name, directory):
+        if fs_name == "b_ok":
+            raise OSError("plugins.json unreadable")
+        return True
+
+    with pytest.raises(OSError):
+        reg.load([plug_dir], enabled_for=policy_that_breaks)
+    assert [p["fs_name"] for p in reg.describe()] == ["a_slow", "b_ok", "c_ok"]
+    assert all(reg.get_api(fs, "ping") for fs in ("a_slow", "b_ok", "c_ok"))
+
+
 def test_installing_a_plugin_that_exits_answers_instead_of_hanging(plugin_client, plug_dir):
     """The reported symptom. The install route reloads the registry in a
     worker thread; a BaseException escaping that thread means the request
@@ -456,6 +610,60 @@ def test_install_rejects_traversal_and_absolute_paths(plugin_client, plug_dir):
     assert r.status_code == 400
 
 
+# What the check has to refuse on Windows, where `\\x` and `C:x` are not
+# absolute to pathlib and have no "..": a root, a drive, a drive-relative
+# name, a UNC path, an NTFS alternate stream. Checked on every platform,
+# so a Linux CI run proves what a Windows install relies on.
+WINDOWS_ESCAPES = [r"\Windows\Tasks\x.py", r"\__init__.py", "C:__init__.py",
+                   r"C:Users\Public\x.py", r"C:\evil.py", "c:/evil.py",
+                   r"\\server\share\x.py", "plug.py:hidden", "pkg/__init__.py:ads",
+                   "D:pkg/__init__.py"]
+
+
+@pytest.mark.parametrize("rel", WINDOWS_ESCAPES)
+def test_install_path_check_refuses_windows_escapes(rel):
+    import server
+    assert server._plugin_upload_parts(rel) is None
+
+
+@pytest.mark.parametrize("rel,parts", [("kplug.py", ("kplug.py",)),
+                                        ("pkg/__init__.py", ("pkg", "__init__.py")),
+                                        (r"pkg\sub\x.py", ("pkg", "sub", "x.py"))])
+def test_install_path_check_keeps_ordinary_paths(rel, parts):
+    import server
+    assert server._plugin_upload_parts(rel) == parts
+
+
+@pytest.mark.parametrize("name,paths", [
+    ("C:__init__.py", None),                          # single file: fs_name "C:__init__"
+    ("__init__.py", ["C:pkg/__init__.py"]),           # folder: fs_name "C:pkg"
+    ("x.py", ["plug.py:hidden"]),
+])
+def test_install_refuses_drive_relative_and_stream_names(plugin_client, plug_dir, name, paths):
+    """Through the route: these were ACCEPTED (on Linux too — a colon is an
+    ordinary character there), and on Windows each one writes somewhere
+    other than plugins/."""
+    before = sorted(p.name for p in plug_dir.iterdir())
+    data = {"paths": json.dumps(paths)} if paths else None
+    r = plugin_client.post("/api/plugins/install",
+                           files=[("files", (name, INSTALLABLE.encode()))], data=data)
+    assert r.status_code == 400, r.text
+    assert sorted(p.name for p in plug_dir.iterdir()) == before
+
+
+def test_install_refuses_a_symlink_out_of_plugins(plugin_client, plug_dir, tmp_path):
+    """The resolved destination must stay under plugins/ — a link already
+    in there pointing elsewhere is a way out that no string check sees."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (plug_dir / "linked").symlink_to(outside, target_is_directory=True)
+    r = plugin_client.post("/api/plugins/install",
+                           files=[("files", ("__init__.py", INSTALLABLE.encode()))],
+                           data={"paths": json.dumps(["linked/__init__.py"]), "overwrite": "true"})
+    assert r.status_code == 400
+    assert outside.is_dir() and list(outside.iterdir()) == []
+
+
 def test_install_folder_requires_init(plugin_client):
     r = plugin_client.post("/api/plugins/install",
                            files=[("files", ("helper.py", b"x = 1"))],
@@ -478,6 +686,32 @@ def test_install_overwrite_flow(plugin_client, plug_dir):
     # The replacement registers nothing, so the format from the first
     # install must be gone after the reload.
     assert "kplug.k" not in {fm["id"] for fm in out["formats"]}
+
+
+@pytest.mark.parametrize("first,second", [("folder", "file"), ("file", "folder")])
+def test_install_over_the_other_form_of_the_same_plugin(plugin_client, plug_dir, first, second):
+    """foo.py and foo/ are one plugin to the loader (the folder sorts first
+    and wins). The collision check looked at the destination PATH, so
+    installing foo.py beside foo/ answered "Installed foo" and the new
+    file never ran. Same name is taken, whichever form; overwrite replaces
+    both, so what was installed is what loads."""
+    def install(form, version, **data):
+        body = (f'PLUGIN = {{"name": "foo", "version": "{version}"}}\n'
+                'def register(api):\n    pass\n').encode()
+        if form == "file":
+            return plugin_client.post("/api/plugins/install",
+                                      files=[("files", ("foo.py", body))], data=data or None)
+        return plugin_client.post("/api/plugins/install", files=[("files", ("__init__.py", body))],
+                                  data={"paths": json.dumps(["foo/__init__.py"]), **data})
+
+    assert install(first, "1.0").status_code == 200
+    assert install(second, "2.0").status_code == 409
+    r = install(second, "2.0", overwrite="true")
+    assert r.status_code == 200, r.text
+    rec = next(p for p in r.json()["plugins"] if p["fs_name"] == "foo")
+    assert rec["version"] == "2.0"
+    assert (plug_dir / "foo.py").exists() == (second == "file")
+    assert (plug_dir / "foo").exists() == (second == "folder")
 
 
 def test_install_broken_plugin_reports_load_error(plugin_client, plug_dir):
@@ -666,6 +900,23 @@ def example_registry() -> PluginRegistry:
     return reg
 
 
+def test_filetime_keeps_every_microsecond_and_never_rounds_up(tmp_path):
+    """filetime_to_iso divided ticks by 10 as a float. At 2024 magnitudes
+    that is past a float's exact range, and timedelta rounds the fraction
+    it is handed — so 01.9999999 printed as 02.000000, manufacturing the
+    zeroed subseconds a timestomping check looks for."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "mft_usn_common_under_test", EXAMPLES / "mft_usn" / "common.py")
+    common = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(common)
+    base = ft(datetime(2024, 1, 5, 13, 22, 1, 123456))
+    assert common.filetime_to_iso(base + 7) == "2024-01-05 13:22:01.123456"
+    almost = ft(datetime(2024, 1, 5, 13, 22, 1, 999999)) + 9
+    assert common.filetime_to_iso(almost) == "2024-01-05 13:22:01.999999"
+
+
 def test_example_plugin_loads_and_matches(example_registry):
     mft = example_registry.get_format("mft-usn.mft")
     usn = example_registry.get_format("mft-usn.usn")
@@ -732,6 +983,56 @@ def test_usn_record_straddling_chunk_boundary(example_registry, tmp_path, monkey
     j.write_bytes(blob)
     rows = list(fmt.parse(str(j), {})["rows"])
     assert [r[1] for r in rows] == [f"file{i:02d}.txt" for i in range(20)]
+
+
+def test_usn_short_v3_slot_is_skipped_not_raised(example_registry, tmp_path, monkeypatch):
+    """A slot claiming V3 with a 64-byte length passed the 60-byte minimum,
+    but a V3 header is 76 bytes: _record unpacked past the slot's end, and
+    at the end of the file (or of a read chunk) struct.error escaped the
+    generator and failed the whole ingest over one torn slot. Mid-file it
+    read the next record's bytes as its own. A slot shorter than its own
+    version's header is carved past like any other non-record."""
+    import sys
+
+    fmt = example_registry.get_format("mft-usn.usn")
+    t = ft(datetime(2024, 6, 1, 12, 0, 0))
+    good = [usn_v2(t, f"f{i}.txt", entry=300 + i, usn=i) for i in range(3)]
+    short_v3 = struct.pack("<IHH", 64, 3, 0) + b"\x01" * 56
+
+    tail = tmp_path / "tail.usn"
+    tail.write_bytes(b"".join(good) + short_v3)
+    assert [r[1] for r in fmt.parse(str(tail), {})["rows"]] == ["f0.txt", "f1.txt", "f2.txt"]
+
+    mid = tmp_path / "mid.usn"
+    mid.write_bytes(good[0] + short_v3 + good[1] + short_v3 + good[2])
+    assert [r[1] for r in fmt.parse(str(mid), {})["rows"]] == ["f0.txt", "f1.txt", "f2.txt"]
+
+    # The same slot ending exactly on a read chunk's edge, mid-file.
+    usn_mod = sys.modules[fmt.parse.__module__]
+    monkeypatch.setattr(usn_mod, "CHUNK", len(good[0]) + len(short_v3))
+    assert [r[1] for r in fmt.parse(str(mid), {})["rows"]] == ["f0.txt", "f1.txt", "f2.txt"]
+
+
+def test_usn_garbage_is_scanned_in_linear_time(example_registry, tmp_path):
+    """Every 8-byte slot whose first u32 is zero was treated as the start
+    of a sparse run, and measuring the run sliced off the rest of the
+    chunk: garbage whose slots start with a zero u32 without being zero
+    runs scanned the chunk once per slot. 1 MiB took ~5 s, 2 MiB ~20 s,
+    and one 8 MiB chunk would take minutes. Linear, 2 MiB is ~0.1 s; the
+    bound leaves an order of magnitude for a slow runner on either side.
+    The record after the garbage proves the skip lands on it, not past it."""
+    import time
+
+    fmt = example_registry.get_format("mft-usn.usn")
+    t = ft(datetime(2024, 6, 1, 12, 0, 0))
+    j = tmp_path / "garbage.usn"
+    j.write_bytes(b"\x00\x00\x00\x00\x01\x00\x00\x00" * (2 * 1024 * 1024 // 8)
+                  + usn_v2(t, "after.txt"))
+    t0 = time.monotonic()
+    rows = list(fmt.parse(str(j), {})["rows"])
+    elapsed = time.monotonic() - t0
+    assert [r[1] for r in rows] == ["after.txt"]
+    assert elapsed < 4, f"2 MiB of garbage took {elapsed:.1f}s — the zero-run skip is quadratic again"
 
 
 # ----------------------------------------------------------- MFT fixtures
@@ -1030,6 +1331,73 @@ def test_lateral_movement_edges_over_a_merge(lateral_client, store, write_csv):
     assert merged[("WKS1", "SRV1")] == single.get(("WKS1", "SRV1"), 0) + 1
 
 
+def test_lateral_movement_preview_counts_what_a_graph_would_draw(lateral_client):
+    """The event builder's preview: rows the conditions match, then the
+    links and hosts those rows draw once empty, '-' and self endpoints
+    drop out — the same rows Build would turn into edges."""
+    client, source_id = lateral_client
+    r = client.post("/api/plugin/lateral_movement/preview", json={
+        "selection": _sel(source_id, label_col="User")})
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["matched"] == 5          # every row; no conditions
+    assert out["hops"] == 3             # the self-loop and the '-' source draw nothing
+    assert (out["links"], out["hosts"]) == (2, 3)
+    assert out["top"] == [{"src": "WS1", "dst": "SRV1", "n": 2, "labels": 2},
+                          {"src": "WS2", "dst": "SRV1", "n": 1, "labels": 1}]
+    assert out["first"] is None and out["links_capped"] is False
+
+    sel = _sel(source_id, conditions=[{"column": "User", "op": "equals", "value": "alice"}])
+    out = client.post("/api/plugin/lateral_movement/preview", json={"selection": sel}).json()
+    assert (out["matched"], out["hops"]) == (3, 2)   # alice's self-loop matches, draws nothing
+    edges = client.post("/api/plugin/lateral_movement/edges", json={"selections": [sel]}).json()["edges"]
+    assert out["hops"] == sum(e["n"] for e in edges)
+
+
+def test_lateral_movement_preview_refuses_what_build_would(lateral_client):
+    client, source_id = lateral_client
+    for sel in (_sel(source_id, dst_col="SourceHost"),
+                _sel(source_id, dst_col="Nope"),
+                _sel(source_id, conditions=[{"column": "User", "op": "in", "value": " , "}])):
+        r = client.post("/api/plugin/lateral_movement/preview", json={"selection": sel})
+        assert r.status_code == 400, sel
+
+
+def test_lateral_movement_preview_time_span(timed_client):
+    client, sid = timed_client
+    r = client.post("/api/plugin/lateral_movement/preview", json={"selection": {
+        "source_id": sid, "src_col": "SourceHost", "dst_col": "DestHost", "time_col": "When"}})
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["first"].startswith("2026-03-14 08:00") and out["last"].startswith("2026-03-15 09:00")
+
+
+def test_lateral_movement_preview_over_a_merge(lateral_client, store, write_csv):
+    client, source_id = lateral_client
+    src = store.get_source(source_id)
+    header = [c["name"] for c in src["columns"] if not c.get("derived")]
+    row = {c: "" for c in header}
+    row.update({"SourceHost": "WKS1", "DestHost": "SRV1"})
+    other = store.ingest_csv(write_csv([header, [row[c] for c in header]], "lm3.csv"),
+                             name="lm3", build_fts=False)["id"]
+    mid = store.create_merge("lmmerge2", [source_id, other])["id"]
+    r = client.post("/api/plugin/lateral_movement/preview", json={"selection": _sel(mid)})
+    assert r.status_code == 200, r.text
+    assert (r.json()["matched"], r.json()["hops"]) == (6, 4)
+
+
+def test_lateral_movement_values_suggest_the_commonest(lateral_client):
+    client, source_id = lateral_client
+    r = client.post("/api/plugin/lateral_movement/values",
+                    json={"source_id": source_id, "column": "User"})
+    assert r.status_code == 200, r.text
+    assert r.json()["values"] == [{"value": "alice", "n": 3}, {"value": "bob", "n": 1},
+                                  {"value": "carol", "n": 1}]
+    bad = client.post("/api/plugin/lateral_movement/values",
+                      json={"source_id": source_id, "column": "Nope"})
+    assert bad.status_code == 400 and "Nope" in bad.json()["detail"]
+
+
 def test_lateral_movement_tab_asset(lateral_client):
     client, _ = lateral_client
     r = client.get("/plugin_assets/lateral_movement/ui/tab.js")
@@ -1071,6 +1439,30 @@ def test_lateral_movement_time_bucketing_and_filter(timed_client):
     assert {(e["src"], e["dst"]) for e in edges} == {("WS1", "SRV1")}
 
 
+@pytest.mark.parametrize("start,end", [
+    ("2026-03-14 00:00:00", "2026-03-14 23:59:59"),
+    ("2026-03-14T00:00:00", "2026-03-14T23:59:59"),
+    ("3/14/2026 0:00", "3/14/2026 23:59"),
+    ("2026-03-14", None),          # an open end, in the date-only spelling
+])
+def test_lateral_movement_timeframe_matches_the_grid_in_any_spelling(timed_client, start, end):
+    """The bounds were compared to TS_NORMALIZE(col) verbatim, while the
+    core normalises both sides — so any spelling the Timeframe dialog
+    accepts other than the canonical one cut the graph to a different row
+    set from the grid (US dates: nothing at all) under "timeframe
+    applied". The graph's rows must be the grid's rows."""
+    client, sid = timed_client
+    time = {"start": start, "end": end}
+    view = client.post("/api/view", json={"source_id": sid, "time_range": {
+        "enabled": True, "column": "When", **time}})
+    assert view.status_code == 200, view.text
+    r = client.post("/api/plugin/lateral_movement/edges", json={"selections": [
+        {"source_id": sid, "src_col": "SourceHost", "dst_col": "DestHost", "time_col": "When"}],
+        "time": time})
+    assert r.status_code == 200, r.text
+    assert sum(e["n"] for e in r.json()["edges"]) == view.json()["row_count"]
+
+
 def test_lateral_movement_defaults_ship_tied_to_a_header_set(lateral_client):
     """The shipped KAPE defaults are served, each tied to a header set
     (the app's own EvtxECmd nickname) so it only offers itself on a real
@@ -1097,6 +1489,10 @@ def test_lateral_movement_saved_defs_persist_machine_side(lateral_client):
     r = client.post("/api/plugin/lateral_movement/defs", json={"saved": [mine]})
     assert r.status_code == 200, r.text
     assert [d["name"] for d in r.json()["saved"]] == ["WinRM"]
+    # The tab replaces its copy with this reply; without the header sets
+    # in it, every header-set binding resolved against nothing until the
+    # next GET.
+    assert "Event logs (EvtxECmd)" in r.json()["header_sets"]
     # A fresh GET (new request, same machine storage) still has it.
     assert client.get("/api/plugin/lateral_movement/defs").json()["saved"][0]["name"] == "WinRM"
     # A malformed definition is refused as a 400, not stored.
@@ -1264,6 +1660,50 @@ def test_claude_refusal_is_a_400_with_category(claude_client, monkeypatch):
     monkeypatch.setitem(sys.modules, "anthropic", _fake_anthropic(record, _claude_msg(stop_reason="refusal")))
     r = claude_client.post("/api/plugin/claude_assistant/ask", json={"question": "q"})
     assert r.status_code == 400 and "cyber" in r.json()["detail"]
+
+
+def _fake_anthropic_raising(exc: Exception, at: str) -> types.ModuleType:
+    """The fake SDK, refusing with `exc` either when the client is built or
+    when the request is made."""
+    mod = _fake_anthropic({}, _claude_msg())
+    real = mod.Anthropic
+
+    def refuse(*a, **kw):
+        raise exc
+
+    def client(*a, **kw):
+        if at == "construct":
+            refuse()
+        c = real(*a, **kw)
+        c.beta.messages.stream = refuse
+        return c
+
+    mod.Anthropic = client
+    return mod
+
+
+@pytest.mark.parametrize("at", ["construct", "request"])
+def test_claude_with_no_credentials_at_all_says_where_to_put_a_key(claude_client, monkeypatch, at):
+    """No key anywhere is not a 401: the SDK refuses before sending, with a
+    TypeError from its header validation. That fell past the handler's
+    AuthenticationError mapping and reached the analyst as a 500 — the one
+    setup mistake the friendly message was written for."""
+    refusal = TypeError('"Could not resolve authentication method. Expected either api_key '
+                        'or auth_token to be set. Or for one of the `X-Api-Key` or '
+                        '`Authorization` headers to be explicitly omitted"')
+    monkeypatch.setitem(sys.modules, "anthropic", _fake_anthropic_raising(refusal, at))
+    monkeypatch.delenv("WINNOW_ANTHROPIC_API_KEY", raising=False)
+    r = claude_client.post("/api/plugin/claude_assistant/ask", json={"question": "q"})
+    assert r.status_code == 400 and "WINNOW_ANTHROPIC_API_KEY" in r.json()["detail"]
+
+
+def test_claude_an_unrelated_type_error_is_not_called_missing_credentials(claude_client, monkeypatch):
+    """The mapping above is keyed on what the SDK says, not on TypeError —
+    a bug in the plugin must still surface as one."""
+    bug = TypeError("stream() got an unexpected keyword argument 'fallbacks'")
+    monkeypatch.setitem(sys.modules, "anthropic", _fake_anthropic_raising(bug, "request"))
+    with pytest.raises(TypeError, match="fallbacks"):
+        claude_client.post("/api/plugin/claude_assistant/ask", json={"question": "q"})
 
 
 def test_claude_missing_sdk_is_actionable(claude_client, monkeypatch):
@@ -1703,6 +2143,142 @@ def test_legacy_toggle_body_still_means_everywhere(scoped_client):
     assert scoped_client.post("/api/plugins/toggle", json={"fs_name": "demo"}).status_code == 400
 
 
+# A plugin that says so the moment any of its code runs: "off in this case"
+# promises the module is never imported at all, not merely unlisted after.
+MARKING_PLUGIN = """
+    import os, pathlib
+    pathlib.Path(os.environ["PLUGIN_MARK_DIR"], "NAME").touch()
+    PLUGIN = {"name": "NAME"}
+
+    def register(api):
+        api.register_api("ping", lambda req: {"alive": True}, methods=["GET"])
+"""
+
+
+def _serve(tmp_path, case_path, plug_dir):
+    """`python server.py --case` for real. What is under test is the state
+    main() leaves the registry in, and no in-process client goes through
+    main()."""
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    env = {**os.environ,
+           "WINNOW_WORKSPACE_DIR": str(tmp_path / "ws"),
+           "WINNOW_ENV_FILE": str(tmp_path / "userenv"),
+           "WINNOW_CASES_DIR": str(tmp_path / "cases"),
+           "WINNOW_PLUGINS_DIR": str(plug_dir),
+           "PLUGIN_MARK_DIR": str(tmp_path / "marks"),
+           "XDG_DATA_HOME": str(tmp_path / "xdg-data"),
+           "XDG_CONFIG_HOME": str(tmp_path / "xdg-config")}
+    proc = subprocess.Popen(
+        [sys.executable, str(REPO / "server.py"), "--case", case_path, "--port", str(port),
+         "--host", "127.0.0.1", "--no-browser", "--no-fts", "--no-idle-shutdown"],
+        cwd=str(tmp_path), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    base = f"http://127.0.0.1:{port}"
+
+    def get(route):
+        """(status, json body or None)"""
+        try:
+            with urllib.request.urlopen(base + route, timeout=15) as r:
+                return r.status, json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            return e.code, None
+
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            pytest.fail("server exited during startup:\n" + proc.stdout.read().decode(errors="replace"))
+        try:
+            get("/api/version")
+            return proc, get
+        except OSError:
+            time.sleep(0.15)
+    proc.kill()
+    pytest.fail("server never came up")
+
+
+def test_a_case_opened_at_startup_gets_its_own_plugin_set(tmp_path, plug_dir):
+    """`--case` (and double-clicking a case file, which is the same
+    path) loaded plugins before any case was open and never again: a
+    plugin the case switched off ran and served its routes, and one it
+    switched on stayed off, until the analyst happened to open some other
+    case."""
+    from winnow.store import Store
+
+    (tmp_path / "marks").mkdir()
+    for name in ("probe", "wanted"):
+        _write_plugin(plug_dir, name, MARKING_PLUGIN.replace("NAME", name))
+    (tmp_path / "ws").mkdir()
+    # Machine default: probe on (installed), wanted off.
+    (tmp_path / "ws" / "plugins.json").write_text(json.dumps({"disabled": ["wanted"]}))
+    case = str(tmp_path / "case.db-winnow")
+    s = Store(case)
+    s.set_case_setting("plugin_overrides", json.dumps({"probe": False, "wanted": True}))
+    s.close()
+
+    proc, get = _serve(tmp_path, case, plug_dir)
+    try:
+        states = {p["fs_name"]: p for p in get("/api/plugins")[1]["plugins"]}
+        assert (states["probe"]["case_override"], states["probe"]["enabled"]) == (False, False)
+        assert (states["wanted"]["case_override"], states["wanted"]["enabled"]) == (True, True)
+        assert get("/api/plugin/probe/ping")[0] == 404
+        assert get("/api/plugin/wanted/ping") == (200, {"alive": True})
+        # Not imported and then unloaded: never imported.
+        assert sorted(os.listdir(tmp_path / "marks")) == ["wanted"]
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+def test_reopening_the_open_case_reapplies_its_plugin_settings(scoped_client, store):
+    """Re-opening the case that is already open skips the store swap, and
+    it skipped the plugin reload along with it — so a registry that did not
+    match the case stayed that way however often the analyst re-opened it.
+    The client resets its plugin tabs on that request and refetches the
+    list on the strength of the server having reloaded."""
+    import server
+
+    # Written behind the registry's back, the way --case startup used to
+    # leave it: the case says off, the loaded set says on.
+    store.set_case_setting("plugin_overrides", json.dumps({"demo": False}))
+    assert _states(scoped_client)[0]["demo"]["enabled"] is True
+
+    r = scoped_client.post("/api/case/open", json={"path": store.path})
+    assert r.status_code == 200
+    assert server.STORE is store          # still the fast path, not a reopen
+    assert _states(scoped_client)[0]["demo"]["enabled"] is False
+
+
+def test_discarding_a_quicklook_drops_the_plugins_it_switched_on(scoped_client, tmp_path, monkeypatch):
+    """Discard leaves no case open, so the machine defaults apply again —
+    but the registry was not reloaded, and a plugin switched on only for
+    the quick look stayed imported, routed and listed as on."""
+    import server
+    from winnow.store import Store
+
+    _write_plugin(server.BUNDLED_PLUGIN_DIR, "looker", """
+        PLUGIN = {"name": "looker"}
+
+        def register(api):
+            api.register_api("ping", lambda req: {"alive": True}, methods=["GET"])
+    """)
+    qdir = tmp_path / server.QUICKLOOK_DIRNAME
+    qdir.mkdir()
+    monkeypatch.setattr(server, "STORE", Store(str(qdir / f"quicklook{server.CASE_SUFFIX}")))
+    server._reload_plugins()
+    scoped_client.post("/api/plugins/toggle", json={"fs_name": "looker", "scope": "on_case"})
+    assert scoped_client.get("/api/plugin/looker/ping").status_code == 200
+
+    assert scoped_client.post("/api/case/discard").status_code == 200
+    states, listing = _states(scoped_client)
+    assert listing["case_open"] is False
+    assert states["looker"]["enabled"] is False and states["looker"]["machine_enabled"] is False
+    assert scoped_client.get("/api/plugin/looker/ping").status_code == 404
+
+
 def test_pivot_aggregates_over_a_merge(pivot_client, store, write_csv):
     """Invariant #9: the pivot reads a merge through a UNION ALL of its
     members — counts must cover every member."""
@@ -1732,6 +2308,23 @@ def test_pivot_detail_on_a_merge_is_deterministic(pivot_client, store, write_csv
     out = r.json()
     assert out["columns"][0] == "Line"
     assert len(out["rows"]) == store.get_source(mid)["row_count"]
+
+
+def test_pivot_over_a_merge_with_mismatched_columns(pivot_client, store, write_csv):
+    """A member without a merge column reads it as blank — so it counts
+    toward bare Count but not Count-of-that-field, and groups under the
+    blank row label rather than under the column's name."""
+    client, source_id = pivot_client
+    other = store.ingest_csv(write_csv([["HOST", "User"], ["SRV3", "dave"], ["SRV3", "erin"]],
+                                       "pmm.csv"), name="pmm", build_fts=False)["id"]
+    mid = store.create_merge("pivmismatch", [source_id, other])["id"]
+    out = _agg(client, mid, values=[{"agg": "count"}, {"agg": "count", "column": "Channel"}],
+               group_sets=[["Host"], ["Channel"]])
+    per_host = {r[0]: r[1:] for r in out["sets"][0]["rows"]}
+    assert per_host["SRV3"] == [2, 0]
+    per_channel = {r[0]: r[1] for r in out["sets"][1]["rows"]}
+    assert "Channel" not in per_channel
+    assert per_channel[None] == 2
 
 
 # ============================================================ first_last plugin
@@ -2031,9 +2624,11 @@ def test_first_last_row_json_cell_carries_the_entire_row(fl_client):
     client, sid = fl_client
     out = _fl(client, "preview", source_id=sid, group_by=["Host", "User"],
               sort_column="When", columns=["User"], template="{which}", row_json=True)
-    assert out["columns"] == ["When", "User", "Row (JSON)", "Description"]
-    first = next(r for r in out["rows"] if r[-1] == "First" and r[1] == "alice")
-    row = _json.loads(r_json := first[2])
+    # The description reads before the JSON: it is the line, the JSON is
+    # the long cell opened when needed.
+    assert out["columns"] == ["When", "User", "Description", "Row (JSON)"]
+    first = next(r for r in out["rows"] if r[2] == "First" and r[1] == "alice")
+    row = _json.loads(r_json := first[3])
     assert row == {"When": "2026-03-14 08:00:00", "Host": "SRV1",
                    "User": "alice", "EventId": "4624"}
     # the synthetic window columns never leak into the JSON
@@ -2047,6 +2642,40 @@ def test_first_last_row_json_lands_in_the_created_table(fl_client, store):
               name="bookends-json")
     src = store.get_source(out["source"]["id"])
     assert "Row (JSON)" in [c["name"] for c in src["columns"]]
+
+
+def test_first_last_orders_a_number_column_by_value(fl_client, store):
+    """Cells are TEXT, so ordering a number column by its text put "10"
+    before "9": a group of record ids came back First=10, Last=9, while
+    the grid sorted the same column numerically. A number column orders by
+    value, and a cell that isn't a number (blank, "n/a") wins neither end.
+    The result's own row order follows the same rule. A merge orders the
+    same way (invariant #9)."""
+    client, _ = fl_client
+    rows = [["WS1", "9"], ["WS1", "10"], ["WS1", "100"], ["WS1", "55"], ["WS1", ""], ["WS1", "n/a"],
+            ["WS2", "n/a"], ["WS2", "-3"], ["WS2", "20"],
+            ["WS3", ""], ["WS3", "x"]]                  # nothing numeric: file order decides
+    sid = store.ingest_rows(["Host", "RecordId"], rows[:6], name="evts",
+                            column_types=["text", "number"], build_fts=False)["id"]
+    sid2 = store.ingest_rows(["Host", "RecordId"], rows[6:], name="evts2",
+                             column_types=["text", "number"], build_fts=False)["id"]
+    mid = store.create_merge("evtsm", [sid, sid2])["id"]
+
+    def bookends(source_id):
+        out = _fl(client, "preview", source_id=source_id, group_by=["Host"],
+                  sort_column="RecordId", columns=["Host"], template="{which}")
+        return [(r[1], r[2], r[0]) for r in out["rows"]]
+
+    assert bookends(sid) == [("WS1", "First", "9"), ("WS1", "Last", "100")]
+    assert bookends(mid) == [("WS2", "First", "-3"), ("WS1", "First", "9"), ("WS2", "Last", "20"),
+                             ("WS1", "Last", "100"), ("WS3", "First", ""), ("WS3", "Last", "x")]
+    # A text column is still ordered as text.
+    store.ingest_rows(["Host", "Label"], [["A", "10"], ["A", "9"]], name="txt",
+                      column_types=["text", "text"], build_fts=False)
+    tid = next(x["id"] for x in store.list_sources() if x["name"] == "txt")
+    out = _fl(client, "preview", source_id=tid, group_by=["Host"], sort_column="Label",
+              columns=[], template="{which}")
+    assert [(r[0], r[-1]) for r in out["rows"]] == [("10", "First"), ("9", "Last")]
 
 
 def test_first_last_works_on_a_merge(fl_client, store, write_csv):
@@ -2110,8 +2739,24 @@ def test_first_last_merge_row_json_carries_the_exposed_columns(fl_client, store,
     mid = store.create_merge("flj", [sid, sid2])["id"]
     out = _fl(client, "preview", source_id=mid, group_by=["User"], sort_column="When",
               columns=[], template="{which}", row_json=True)
-    zed = next(r for r in out["rows"] if '"zed"' in r[1])
-    assert set(_json.loads(zed[1]).keys()) == {"When", "Host", "User", "EventId"}
+    zed = next(r for r in out["rows"] if '"zed"' in r[-1])
+    assert set(_json.loads(zed[-1]).keys()) == {"When", "Host", "User", "EventId"}
+
+
+def test_first_last_over_a_merge_with_mismatched_columns(fl_client, store, write_csv):
+    """A member missing a carried column contributes its rows with that
+    column blank; one spelling the header differently still lines up."""
+    client, sid = fl_client
+    sid2 = store.ingest_csv(write_csv(
+        [["WHEN", "Host", "User"], ["2026-03-16 08:00:00", "SRV7", "fay"],
+         ["2026-03-16 09:00:00", "SRV7", "fay"]], "flmm.csv"), name="flmm", build_fts=False)["id"]
+    mid = store.create_merge("flmm", [sid, sid2])["id"]
+    out = _fl(client, "preview", source_id=mid, group_by=["User"], sort_column="When",
+              columns=["User", "EventId"], template="{which} {EventId}")
+    fay = [r for r in out["rows"] if r[1] == "fay"]
+    assert [r[0] for r in fay] == ["2026-03-16 08:00:00", "2026-03-16 09:00:00"]
+    assert {r[2] for r in fay} == {""}   # the plugin renders a blank as ""
+    assert "EventId" not in {r[2] for r in out["rows"]}
 
 
 # ============================================= shipped KAPE profile
@@ -2223,3 +2868,40 @@ def test_claude_prefers_the_winnow_named_key(claude_client, monkeypatch):
     monkeypatch.setenv("WINNOW_ANTHROPIC_API_KEY", "sk-from-settings")
     claude_client.post("/api/plugin/claude_assistant/ask", json={"question": "q"})
     assert record["api_key"] == "sk-from-settings"
+
+
+def test_plugin_upload_spool_is_removed_and_named_like_the_upload(plugin_client, store, registry,
+                                                                  tmp_path, monkeypatch):
+    """The upload route spooled to a mkstemp file and never deleted it:
+    every uploaded $MFT stayed in the temp folder, a full copy each time,
+    and the table's recorded path pointed at it. And a parser that reads
+    meaning from the file NAME (esxi_logs' log type, $MFT/$J matching)
+    was handed tmpk3j2_x.log. The spool now carries the upload's own name
+    inside a private directory that is gone when the route returns —
+    failed or not — and the table records the name the browser sent."""
+    import tempfile
+    systmp = tmp_path / "systmp"
+    systmp.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(systmp))
+    seen = []
+
+    def parse(path, options):
+        seen.append(os.path.basename(path))
+        with open(path, encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+        return {"columns": ["Line"], "rows": [[ln] for ln in lines]}
+
+    fmt = plugin_api.IngestFormat(plugin="demo", local_id="named", label="Named", parse=parse)
+    registry._add_format(fmt)
+    r = plugin_client.post("/api/ingest/plugin/upload", files={"file": ("hostd.log", b"a\nb\n")},
+                           data={"format_id": "demo.named", "build_fts": "false"})
+    assert r.status_code == 200, r.text
+    assert seen == ["hostd.log"]
+    assert os.listdir(systmp) == []
+    assert store.get_source(r.json()["id"])["path"] == "hostd.log"
+    assert store.get_source(r.json()["id"])["file_hash"]     # still hashed from the bytes
+    # A parse that fails leaves nothing behind either.
+    r = plugin_client.post("/api/ingest/plugin/upload", files={"file": ("x.boom", b"data")},
+                           data={"format_id": "demo.boom"})
+    assert r.status_code == 400
+    assert os.listdir(systmp) == []

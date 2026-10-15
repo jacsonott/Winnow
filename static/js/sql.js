@@ -7,7 +7,7 @@ import { $, MOD_ENTER, api, debounce, el, post, toast } from './core.js';
 import { hideDetailPane } from './detail.js';
 import { render, renderTagToolbar } from './grid.js';
 import { drawRail, regroupIfGroupedByTag } from './grouping.js';
-import { abandonSqlRun, hidePluginViews, runSql, sqlResultNodes, sqlRunningNodes, syncPluginPanels } from './plugins.js';
+import { abandonSqlRuns, hidePluginViews, runSql, sqlResultNodes, sqlRunningNodes, syncPluginPanels } from './plugins.js';
 import { syncHistogramPanel } from './histogram.js';
 import { quoteIdent, releaseSqlResults, setActiveSqlResult } from './sqlassist.js';
 import { checkPresets } from './savedfilters.js';
@@ -229,15 +229,15 @@ export async function loadSqlTabs() {
    switch calls this — sql_tabs is a per-case table, and its ids restart
    in the next case. Left empty rather than reloaded here; showSqlTab
    loads lazily. A query still running belongs to the case that just
-   closed (closing its Store stopped it): forgetting its token is what
-   keeps it from landing in this case's tab of the same id when its
+   closed (closing its Store stopped it): abandoning it is what keeps it
+   from landing in this case's tab of the same id when its
    request returns, and from being what Ctrl+C or a tag hotkey then acts
    on. */
 export function resetSqlPane() {
   S.sqlTabs = [];
   S.sqlTabId = null;
   S.sqlResults.clear();
-  S.sqlRuns.clear();
+  abandonSqlRuns();
   setActiveSqlResult(null);
 }
 
@@ -385,7 +385,7 @@ export async function closeSqlTab(t) {
   // Its run, if one is out, stops; its result is let go. Tab ids are
   // reused, so a run left to finish would otherwise land in the next new
   // tab that happens to get this one's id.
-  abandonSqlRun(t.id);
+  abandonSqlRuns(t.id);
   const gone = S.sqlResults.get(t.id);
   if (gone && gone.id) releaseSqlResults([gone.id]);
   S.sqlResults.delete(t.id);

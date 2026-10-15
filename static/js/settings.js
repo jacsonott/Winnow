@@ -9,14 +9,14 @@ import { headH, rScroll, render, spacerPx, vScroll } from './grid.js';
 import { drawRail, rebuildGroupPrefix, renderGrouped } from './grouping.js';
 import { syncHistogramPanel } from './histogram.js';
 import { shutdownWinnow } from './home.js';
-import { ACTION_LABELS, defaultKeymap, findKeyConflict, keySpecFromEvent, saveKeymap } from './keymap.js';
+import { ACTION_LABELS, defaultKeymap, findKeyConflict, keyLabel, keySpecFromEvent, saveKeymap } from './keymap.js';
 import { buildPluginsPanel } from './pluginmanager.js';
 import { listBundles, openPluginBundlesModal } from './bundles.js';
 import { buildAssocPanel } from './assoc.js';
 import { buildEnvPanel } from './userenv.js';
 import { loadCaseVariables, loadSavedFilters } from './savedfilters.js';
 import { applyPageTabsSize, renderPageTabs, syncTabOverflow } from './sources.js';
-import { lastSplash, reducedMotion } from './splash.js';
+import { lastSplash, osSkipsSplash, reducedMotion } from './splash.js';
 import { S, gridRowCount, dashboardCreatorMode } from './state.js';
 import { openSavedFiltersModal, updateFiltersButton, updateTimeRangeButton } from './timeframe.js';
 import { TS_FORMATS } from './tsformat.js';
@@ -868,12 +868,16 @@ export function openSettings() {
 
     /* The winnowing animation on launch. On by default and skippable with
        any key or click while it runs — this switch is for someone who opens
-       Winnow all day and doesn't want it at all. prefers-reduced-motion is
-       honoured without needing this turned off. */
+       Winnow all day and doesn't want it at all. The box says whether it
+       will actually play: left at the default where the OS asks for reduced
+       motion (anywhere but Windows — splash.osSkipsSplash) it is skipped,
+       so it shows unticked. A ticked box over an animation that never
+       played is what had analysts unticking and re-ticking it to get it. */
     const splashLabel = el('label', 'check-row');
     const splashCb = el('input');
     splashCb.type = 'checkbox';
-    splashCb.checked = S.appearance.splash !== false;
+    splashCb.checked = S.appearance.splash === 'always'
+      || (S.appearance.splash !== false && !osSkipsSplash());
     splashCb.onchange = () => {
       // Ticked by hand means "play it" — including on a machine whose OS
       // asks for reduced motion (see splash.splashEnabled).
@@ -888,10 +892,14 @@ export function openSettings() {
       const last = lastSplash();
       const parts = ['The winnowing animation Winnow starts with. Any key or click skips it.'];
       if (reducedMotion()) {
-        parts.push(S.appearance.splash === 'always'
-          ? 'Your system asks for reduced motion; it plays anyway because you ticked this yourself.'
-          : 'Your system asks for reduced motion (Windows: Accessibility → Visual effects → Animation effects), '
-            + 'so it is skipped — tick the box to play it regardless.');
+        if (S.appearance.splash === 'always') {
+          parts.push('Your system asks for reduced motion; it plays anyway because you ticked this yourself.');
+        } else if (S.appearance.splash !== false) {
+          parts.push(osSkipsSplash()
+            ? 'Your system asks for reduced motion, so it is skipped — tick the box to play it anyway.'
+            : 'Windows has Animation effects off (Accessibility → Visual effects), as VM images and '
+              + 'performance settings often leave it; that does not skip it — untick the box if you would rather not see it.');
+        }
       }
       if (last && last.result) {
         parts.push(`Last launch: ${last.result}${last.reason ? ` — ${last.reason}` : ''}.`);
@@ -992,7 +1000,7 @@ export function openSettings() {
         const chips = el('div', 'settings-key-chips');
         keys.forEach((k, i) => {
           const chip = el('span', 'settings-key-chip');
-          chip.append(el('kbd', null, k));
+          chip.append(el('kbd', null, keyLabel(k)));
           const rm = el('button', 'btn ghost', '✕');
           rm.title = 'Remove this binding';
           rm.onclick = () => { keys.splice(i, 1); keymapChanged(); };
@@ -1034,7 +1042,7 @@ export function openSettings() {
             }
             done();
             const conflict = findKeyConflict(spec, action);
-            if (conflict) { toast(`"${spec}" is already used by ${conflict}`, 4000); return; }
+            if (conflict) { toast(`"${keyLabel(spec)}" is already used by ${conflict}`, 4000); return; }
             keys.push(spec);
             keymapChanged();
           };
@@ -1064,8 +1072,10 @@ export function openSettings() {
     fixedKeys.append(el('kbd', null, 'Shift + Space'),
       el('span', null, 'Turn the cell selection into picked rows, for tagging'));
     fixedKeys.append(el('kbd', null, '1 – 9'), el('span', null, 'Toggle the tag with that hotkey on the selection'));
-    fixedKeys.append(el('kbd', null, 'Shift + 1 – 9'), el('span', null, 'Apply that tag to every row in the current view'));
+    fixedKeys.append(el('kbd', null, 'Shift + 1 – 9'), el('span', null, 'Apply that tag to every row in the current view — or, when every row already has it, remove it from them all (asks first)'));
     fixedKeys.append(el('kbd', null, 'Alt + 1 – 0'), el('span', null, 'Switch tabs — 1 is the table you were last in, 2 – 0 the page tabs in strip order'));
+    fixedKeys.append(el('kbd', null, 'Ctrl/⌘ + C'), el('span', null, 'Copy the selected cells, or the picked rows (the cursor row if none are picked), as tab-separated text'));
+    fixedKeys.append(el('kbd', null, 'Ctrl/⌘ + Shift + C'), el('span', null, 'The same, with a header row'));
     fixedKeys.append(el('kbd', null, 'Ctrl/⌘ + Z'), el('span', null, 'Undo the last tag applied or removed (repeat to keep stepping back)'));
     fixedKeys.append(el('kbd', null, 'Esc'), el('span', null, 'Clear selection, or close a panel'));
     fixedKeys.append(el('kbd', null, 'Right-click a row'), el('span', null, 'Tag it, filter to or exclude that cell’s value, copy'));
@@ -1077,8 +1087,12 @@ export function openSettings() {
       ['svchost', 'contains'],
       ['!svchost', 'does not contain'],
       ['=4624', 'exact match'],
+      ['!=4624', 'anything but this exact value'],
       ['^C:\\Users', 'starts with'],
-      ['>1000', 'greater than (numeric columns)'],
+      ['>1000', 'greater than — as numbers on a numeric column, in text order on any other'],
+      ['<1000', 'less than'],
+      ['>=1000', 'greater than or equal to'],
+      ['<=1000', 'less than or equal to'],
       ['/regex/', 'regular expression'],
       ['""', 'empty'],
       ['*', 'not empty'],
@@ -1094,7 +1108,9 @@ export function openSettings() {
       + 'right-click menu can open it for any column.'));
     secSyntax.append(el('p', null,
       'Search box — Contains is always a true substring match; Regex is a full scan; Advanced supports '
-      + 'multiple AND / OR / NOT terms and uses the FTS5 index when one was built at import.'));
+      + 'multiple AND / OR / NOT terms. Contains and Advanced (and Search tables) use the substring index, '
+      + 'which builds in the background after import — until it is ready, or for a term under 3 characters '
+      + 'or holding % or _, they scan instead, with the same results.'));
     secSyntax.append(el('p', null,
       'The ⏱ Timeframe button pins a start/end range against one datetime column, or every datetime '
       + "column at once (catches a row via its Modified time even if its Created time was timestomped) — "
@@ -1132,8 +1148,9 @@ export function openSettings() {
 
     const secTags = settingsSection(b, 'Default tags for new cases');
     secTags.append(el('p', null,
-      "Seeds a brand-new case's tag set when you create one from the home screen. Doesn't change tags in "
-      + 'any case that already exists — use "Apply default template" in Edit tags for that.'));
+      "Seeds the tag set of every new case, however it's made — the home screen, a dropped or double-clicked "
+      + 'file, --case on the command line — and of a case left with no tags at all, the next time it opens. '
+      + "Doesn't change tags in a case that has any — use \"Apply default template\" in Edit tags for that."));
     const dtList = el('div', 'settings-keys');
     let defaultTags = [];
 
@@ -1247,8 +1264,10 @@ export function openSettings() {
    Updating replaces the files Winnow ships and nothing else — workspace/,
    installed plugins, sessions and case files are never touched (see
    updater.PROTECTED) — and the previous version is backed up first, so a
-   bad update is one button (or `python update.py --rollback`) away from
-   undone. */
+   bad update is `python update.py --rollback` away from undone. That is
+   the way back: this panel has no rollback button (/api/updates/rollback
+   exists, but nothing in the UI calls it), and the CLI still works when
+   an update has broken the UI. */
 export function buildUpdatesPanel(b) {
   const status = el('div', 'fb-help');
   const notes = el('pre', 'update-notes');

@@ -151,3 +151,63 @@ def test_autocomplete_marks_and_completes_derived_columns(page):
         page.evaluate("""(id) => fetch('/api/derived/' + id, { method: 'DELETE',
           headers: { 'X-Timeline-Lite-Client': '1' } })""", rec["definition"]["id"])
         page.evaluate("() => __winnow.loadSources()")
+
+
+def _hold_first_sql_run(page):
+    """Intercept /api/sql/run: the first run is held (its route returned for
+    the test to answer whenever it likes), later ones go straight through.
+    That makes "a slow run is still in flight" a state the test controls
+    rather than a query it hopes is slow enough (test_search_supersede.py's
+    idiom)."""
+    import re
+
+    held = []
+
+    def handler(route):
+        if not held:
+            held.append(route)
+        else:
+            route.continue_()
+
+    pattern = re.compile(r".*/api/sql/run$")
+    page.route(pattern, handler)
+    return held, pattern
+
+
+def _answer_late(route, column):
+    """Answer a held run with a one-cell result naming `column` — or
+    nothing, if the page already gave up on it (which is the fix)."""
+    import json
+
+    try:
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(
+            {"id": "late", "columns": [column], "rows": [[1]], "total": 1, "widths": [1],
+             "stopped": None, "elapsed_ms": 1}))
+    except Exception:
+        pass
+
+
+def test_a_slow_run_does_not_paint_over_the_run_after_it(page):
+    """runSql painted by the tab id it started from and nothing else, so a
+    slow run that came back after a quicker re-run in the same tab put
+    its rows over the newer result — and Copy/CSV/tagging then took the
+    old query's rows."""
+    _open_sql(page)
+    held, pattern = _hold_first_sql_run(page)
+    try:
+        page.locator("#sqlText").fill("SELECT 1 AS slow_one")
+        page.click("#btnRunSql")
+        page.wait_for_function("() => document.getElementById('sqlResult').textContent.startsWith('Running')")
+        assert held, "the first run was not intercepted"
+        page.locator("#sqlText").fill("SELECT 2 AS quick_one")
+        page.click("#btnRunSql")
+        page.wait_for_function("() => /quick_one/.test(document.getElementById('sqlResult').textContent)")
+
+        _answer_late(held[0], "slow_one")
+        page.wait_for_timeout(500)
+        assert "quick_one" in page.locator("#sqlResult").inner_text()
+        assert "slow_one" not in page.locator("#sqlResult").inner_text()
+        assert page.evaluate("() => __winnow.S.sqlResults.get(__winnow.S.sqlTabId).columns") == ["quick_one"]
+        assert page.evaluate("() => __winnow.busyCount") == 0
+    finally:
+        page.unroute(pattern)

@@ -487,7 +487,8 @@ export function renderValuePicker(panel, column, state, actions) {
     if (state.error) status.append(el('div', 'vp-warn', state.error));
     if (state.truncated) {
       status.append(el('div', 'vp-warn',
-        `Showing the ${VALUE_PICKER_LIMIT.toLocaleString()} most common values — type above to find others, or filter the column first.`));
+        `Showing the ${VALUE_PICKER_LIMIT.toLocaleString()} most common values — Find only searches these. `
+        + `To reach others, narrow the column with a text filter first.`));
     }
     status.append(el('div', null, `${checked.toLocaleString()} of ${rows.length.toLocaleString()} shown values ticked`));
     applyBtn.disabled = state.loading || !checked;

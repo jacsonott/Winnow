@@ -72,11 +72,19 @@ function hide() {
 
    `persisted` means the page is heading into the back/forward cache and
    may be restored, which is not a goodbye. keepalive lets the request
-   outlive the page; a plain fetch here is cancelled on unload. */
+   outlive the page; a plain fetch here is cancelled on unload.
+
+   Both requests name this page load (PAGE_ID), because with two windows
+   open the server has to know WHOSE goodbye it heard: the goodbye and the
+   stream's end arrive in either order, and one window's goodbye standing
+   when the other later went quiet put that survivor on the closed-window
+   fuse (server.py _presence_close). */
+const PAGE_ID = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+
 function sayGoodbye(e) {
   if (e && e.persisted) return;
   try {
-    fetch('/api/goodbye', {
+    fetch(`/api/goodbye?page=${PAGE_ID}`, {
       method: 'POST', keepalive: true,
       headers: { 'X-Timeline-Lite-Client': '1' },
     }).catch(() => {});
@@ -86,7 +94,7 @@ function sayGoodbye(e) {
 export function wireConnection() {
   onConnectionChange((up) => (up ? hide() : show()));
   window.addEventListener('pagehide', sayGoodbye);
-  stream = new EventSource('/api/presence');
+  stream = new EventSource(`/api/presence?page=${PAGE_ID}`);
   stream.onopen = hide;
   stream.onerror = () => {
     // readyState CLOSED means it gave up; CONNECTING means it is retrying,

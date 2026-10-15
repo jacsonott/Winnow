@@ -13,7 +13,10 @@ import { rebuildView } from './view.js';
 /* ----------------------------------------------------------------- tags */
 
 export async function loadTags() {
-  const d = await api(`/api/tags?source_id=${S.sourceId}`);
+  // No table open (an empty case) is still a case with tags: ask for the
+  // definitions alone rather than send "source_id=null", which the route
+  // refuses (422) and which left the previous case's list in S.tags.
+  const d = await api(S.sourceId == null ? '/api/tags' : `/api/tags?source_id=${S.sourceId}`);
   S.tags = d.tags;
   // Whole-table counts. The ribbon shows the *view*-scoped ones the moment
   // there's a view to scope to (refreshTagCounts, below); until then these
@@ -25,6 +28,23 @@ export async function loadTags() {
   refreshTagCounts();
   // Deleting a tag takes its history with it server-side, and opening a
   // different case swaps the Store (and so the whole stack) underneath us.
+  refreshUndoState();
+}
+
+/* The tag definitions of the case just opened, before anything else reads
+   them. Tag ids are numbered per case file, so the previous case's list is
+   not this one's: the Watchlist's auto-tag picker and the Timeline's tag
+   chips both read S.tags, and an id picked from the old list was stored
+   here as an auto-tag naming nothing — or the wrong tag. loadSources only
+   reloads them by opening a table, which an empty case never does. Counts
+   are cleared rather than fetched: they are per table, and S.sourceId
+   still names the previous case's table at this point (see loadSources). */
+export async function loadCaseTags() {
+  S.tags = (await api('/api/tags')).tags;
+  S.tagCountsAll = {};
+  S.tagCounts = {};
+  renderTagRibbon();
+  renderTimelineTagFilter();
   refreshUndoState();
 }
 
@@ -256,9 +276,11 @@ export async function tagRowsAtPositions(tag, positions, on) {
   if (rows.some((r) => !r)) { toast('Could not tag: some selected rows could not be loaded', 5000); return; }
   // A merged view's selected rows can each belong to a different real
   // source — send their own (source_id, rid) pairs rather than the merge's
-  // synthetic negative id, so tags land on the row's actual origin.
+  // synthetic negative id, so tags land on the row's actual origin. The
+  // merge's id rides along so the counts that come back are the whole
+  // merge's, which is what tagCountsAll holds below.
   const body = S.sourceId < 0
-    ? { pairs: rows.map((r) => [r.source_id, r.rid]), tag_id: tag.id, on }
+    ? { pairs: rows.map((r) => [r.source_id, r.rid]), source_id: S.sourceId, tag_id: tag.id, on }
     : { source_id: S.sourceId, rids: rows.map((r) => r.rid), tag_id: tag.id, on };
   setBusy(true);
   let res;

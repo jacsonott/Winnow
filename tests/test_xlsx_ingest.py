@@ -188,3 +188,64 @@ def test_http_routing(store, write_xlsx, monkeypatch):
     done = store.wait_for_ingest_job(res.json()["job_id"], timeout=30)
     assert done["status"] == "done"
     assert "uploaded" in [s["name"] for s in store.list_sources()]
+
+
+def test_an_out_of_range_date_cell_keeps_its_number(tmp_path):
+    """openpyxl turns a date-styled cell whose serial no datetime can hold
+    (year 10000 and on) into the string "#VALUE!", and the number
+    is gone — a value the workbook stores imported as an error. The reader
+    does the date conversion itself now and keeps the number when the
+    date can't be made; real dates and [h]:mm durations convert as before."""
+    import warnings
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["when", "elapsed", "n"])
+    ws.append([datetime.datetime(2024, 5, 1, 13, 7, 0), datetime.timedelta(hours=26, minutes=5), 1])
+    ws.cell(row=3, column=1, value=99999999).number_format = "yyyy-mm-dd"
+    ws.cell(row=4, column=1, value=2958466).number_format = "yyyy-mm-dd hh:mm"   # 10000-01-01
+    ws.cell(row=3, column=3, value=7)
+    path = tmp_path / "range.xlsx"
+    wb.save(path)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        rows = list(xlsxread.iter_sheet_rows(str(path), ws.title))
+    assert rows[1] == ["2024-05-01 13:07:00", "26:05:00", "1"]
+    assert rows[2][0] == "99999999" and rows[2][2] == "7"
+    assert rows[3][0] == "2958466"
+    assert "#VALUE!" not in [c for r in rows for c in r]
+
+
+def _with_declared_dimension(path, ref, out):
+    """A copy of the workbook at `path` whose first sheet declares
+    <dimension ref=`ref`> — stale or defaulted, as several writers emit."""
+    import re
+    import zipfile
+
+    with zipfile.ZipFile(path) as zin, zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zout:
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            if item.filename == "xl/worksheets/sheet1.xml":
+                data = re.sub(rb'<dimension ref="[^"]*"', b'<dimension ref="' + ref.encode() + b'"', data)
+            zout.writestr(item, data)
+    return str(out)
+
+
+def test_a_stale_declared_dimension_does_not_cut_the_sheet(store, write_xlsx, tmp_path):
+    """openpyxl's read-only mode trusts the sheet's own <dimension> as the
+    edge of the data: a workbook declaring A1:B10 but holding 3 columns
+    and 101 rows imported 2 columns and 9 rows, ragged 0 — no sign that
+    anything was left behind."""
+    good = write_xlsx({"Data": [["Time", "User", "Action"]]
+                               + [[f"t{i}", f"u{i}", f"a{i}"] for i in range(1, 101)]})
+    stale = _with_declared_dimension(good, "A1:B10", tmp_path / "stale.xlsx")
+
+    sheets = store.preview_xlsx_sheets(stale)["tables"]
+    assert [c["name"] for c in sheets[0]["columns"]] == ["Time", "User", "Action"]
+
+    rec = store.ingest_xlsx_sheet(stale, "Data", build_fts=False)
+    assert rec["row_count"] == 100
+    assert [c["name"] for c in rec["columns"]] == ["Time", "User", "Action"]
+    v = store.build_view(rec["id"], {"source_id": rec["id"]})
+    assert store.fetch_rows(v["view_id"], 99, 1)["rows"][0]["cells"] == ["t100", "u100", "a100"]

@@ -6,7 +6,8 @@ import { quickAddWidget } from './dashboard.js';
 import { tableOf, widgetFrom } from './dashwidgets.js';
 import { displayValue, ellipsize, filterByValue, openValuePickerForColumn } from './filters.js';
 import { rowAt } from './grid.js';
-import { copyRowsAsText, loadRowsForPositions, writeClipboardText } from './grouping.js';
+import { copyRowsAsText, copyUniqueValues, loadRowsForPositions, uniqueRowsTooMany, wholeViewPicked, writeClipboardText } from './grouping.js';
+import { keyLabel } from './keymap.js';
 import { showPluginTab } from './plugins.js';
 import { S, cellRangeRows, dashboardCreatorMode, selCount, selHas, selPositions } from './state.js';
 import { saveCurrentViewAsTable, saveRowsAsTable, saveSelectAllAsTable } from './subset.js';
@@ -279,8 +280,9 @@ export function rowMenuDashboardItems(ctx) {
   // for a reader of boards the entry was a submenu they never wanted.
   if (!dashboardCreatorMode()) return [];
   const merged = S.sourceId == null || S.sourceId < 0;
-  // A derived column's values live in the drv_<id> sidecar, and a widget
-  // queries src_<id> — counting one would produce "no such column".
+  // Boards don't offer derived columns anywhere (dashwidgets.js's
+  // widgetable), though a widget's own SQL can read one — run_sql's
+  // src_<id> view joins the drv_<id> sidecar.
   const derived = !!(S.columns || []).find((c) => c.name === ctx.colName && c.derived);
   const ok = !!ctx.colName && !merged && !derived;
   const shown = ok ? ellipsize(displayValue(ctx.value)) : '';
@@ -292,7 +294,7 @@ export function rowMenuDashboardItems(ctx) {
       disabled: !ok,
       title: !ctx.colName ? 'Right-click a cell to count its value'
         : merged ? 'A merged view is not one table a widget can count'
-        : derived ? 'A derived column is computed per row, not stored in the table a widget queries'
+        : derived ? 'Dashboard menus don’t offer derived columns — a widget’s own SQL can still use one'
         : 'A number on a dashboard that opens these rows when clicked',
       onclick: () => quickAddWidget(widgetFrom({
         template: 'countwhere', table: tableOf(S.sourceId), column: ctx.colName,
@@ -314,8 +316,35 @@ export function rowMenuClipboardItems(ctx) {
       },
       { label: `Copy ${rows}`, pinId: 'copy:rows', onclick: () => copyRowsAsText(positions(), false) },
       { label: `Copy ${rows} with headers`, pinId: 'copy:rows-headers', onclick: () => copyRowsAsText(positions(), true) },
+      rowMenuUniqueItem(ctx),
     ],
   }];
+}
+
+/* The clicked column's distinct values, one per line (copyUniqueValues).
+   Over the menu's own scope when that is several rows — the picks it was
+   opened inside, or the cell range it was opened on — and over the whole
+   view when it is one row, since one row has one value. The second line
+   says which, because the same click means a different list in each. */
+export function rowMenuUniqueItem(ctx) {
+  const { count, positions, scope, inSelection } = rowMenuTargets(ctx);
+  const whole = count <= 1 || (inSelection && wholeViewPicked(count));
+  const key = (S.keymap.copyUniqueValues || [])[0];
+  return {
+    label: 'Copy unique values',
+    desc: ctx.colName ? `of ${ctx.colName} in ${whole ? 'the whole view' : scope}` : undefined,
+    hint: key ? keyLabel(key) : '',
+    pinId: 'copy:unique',
+    disabled: !ctx.colName,
+    title: !ctx.colName ? 'Right-click a cell to pick the column'
+      : whole ? `Every distinct ${ctx.colName} value the current filters show, one per line, sorted`
+      : `The distinct ${ctx.colName} values in ${scope}, one per line, in the order they appear`,
+    onclick: () => {
+      if (whole) return copyUniqueValues(ctx.colName, null);
+      if (uniqueRowsTooMany(count)) return undefined;
+      return copyUniqueValues(ctx.colName, positions());
+    },
+  };
 }
 
 /* "Keep these rows": the selection (or the clicked row), or the whole

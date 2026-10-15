@@ -155,3 +155,44 @@ def test_the_route_answers_400_for_a_pattern_that_will_not_compile(client, store
     r = client.post("/api/derived/regex_groups",
                     json={"source_id": src["id"], "column": "Line", "pattern": "(?P<a>unclosed"})
     assert r.status_code == 400
+
+
+# ------------------------------------------------- catastrophic backtracking
+
+# Nested repetition with nothing pinning where one pass ends: each of these
+# takes minutes on a ~30-character value that almost matches, inside one
+# re.search a backfill cannot cancel and a preview cannot time out.
+CATASTROPHIC = [r"^(\w+\s?)*$", r"(a+)+$", r"(\d+,?)+$", r"^(\w+\.?)*$", r'^(?:"[^"]*"|[^,])*$',
+                r"^(\w+\s?){0,50}$",   # bounding the outer repeat does not help: 50 > the value's length
+                r"^(\w+\.\w+)+$",      # a delimiter with variable parts on BOTH sides pins nothing
+                r"^(\d+\d*,)+$",       # two variable parts that share digits: k ways through each pass
+                r"^(,a+.\s+)+$"]        # pinned by the comma, yet the . takes an a or a space: 2 ways a pass
+# The everyday shapes that nest too, but can split a value between their
+# passes only one way — these must keep working.
+FINE = [r"[a-z]+(\.[a-z]+)*", r"([a-z0-9-]+\.)+[a-z]{2,}", r"(?:[^,]*,)*", r"(\w+\s)*$",
+        r"(\w+=\w+;)*$", r"(\w+\s){0,50}$", r"(\d{1,3}\.){3}\d{1,3}", IIS,
+        r"^(\S+\s+){3}\S+$"]   # field N of a command line: no fixed delimiter, still one way
+
+
+@pytest.mark.parametrize("pattern", CATASTROPHIC)
+def test_a_pattern_that_can_backtrack_for_minutes_is_refused_up_front(pattern, client, store, tmp_path):
+    with pytest.raises(ValueError, match="can backtrack catastrophically"):
+        structparse.regex_group_names(pattern)
+    with pytest.raises(ValueError, match="can backtrack catastrophically"):
+        structparse._validate_regex_params({"pattern": pattern})
+    p = tmp_path / "r.csv"
+    p.write_text("Line\nx\n", encoding="utf-8")
+    src = store.ingest_csv(str(p))
+    r = client.post("/api/derived/regex_groups", json={"source_id": src["id"], "column": "Line", "pattern": pattern})
+    assert r.status_code == 400 and "backtrack" in r.json()["detail"]
+
+
+@pytest.mark.parametrize("pattern", FINE)
+def test_the_nesting_analysts_write_every_day_still_passes_and_stays_fast(pattern):
+    structparse._validate_regex_params({"pattern": pattern})
+    rx = __import__("re").compile(pattern)
+    for probe in ["a" * 28 + "!", " " * 28 + "!", ".a" * 14 + "!", "a," * 14 + "!", "a=b;" * 7 + "!",
+                  "aaaa." * 14 + "aaaa!", "a " * 14 + "!"]:
+        t0 = time.perf_counter()
+        rx.search(probe)
+        assert time.perf_counter() - t0 < 1.0, (pattern, probe)

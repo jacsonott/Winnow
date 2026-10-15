@@ -121,3 +121,85 @@ def test_the_stream_points_at_the_null_device(monkeypatch):
     _no_console(monkeypatch)
     server._ensure_console_streams()
     assert os.path.samefile(sys.stdout.name, os.devnull)
+
+
+# ----------------------------------------------- consoles that can't spell →
+
+def _ansi_open(real_open):
+    """open() as it behaves on a Windows box whose ANSI code page is
+    cp1252 — the locale encoding a text-mode open() with no encoding=
+    picks up there, and what pythonw's replacement streams were opened
+    with."""
+    def _open(file, mode="r", buffering=-1, encoding=None, *a, **kw):
+        if "b" not in mode and encoding is None:
+            encoding = "cp1252"
+        return real_open(file, mode, buffering, encoding, *a, **kw)
+    return _open
+
+
+class _Served(Exception):
+    """Stands in for uvicorn.Server.run: reaching it means startup got as
+    far as binding. (main() builds the Server itself rather than calling
+    uvicorn.run, so that it can hook the signal handler — see
+    server._stop_pane_queries.)"""
+
+
+def _start(monkeypatch):
+    """main() up to the bind. Startup prints a line per bundled example
+    plugin, and they ship switched off: "Plugin disabled: … (toggle in
+    Settings → Plugins)". That arrow is not in cp1252."""
+    import uvicorn
+    from winnow import instances
+
+    def _serve(*a, **k):
+        raise _Served()
+
+    monkeypatch.setattr(uvicorn.Server, "run", _serve)
+    monkeypatch.setattr(instances, "register", lambda *a, **k: None)
+    monkeypatch.setattr(sys, "argv", ["server.py", "--no-browser"])
+    assert any(not p["enabled"] for p in server.PLUGINS.describe()), \
+        "no disabled plugin, so startup prints no arrow and this proves nothing"
+    with pytest.raises(_Served):
+        server.main()
+
+
+def test_a_cp1252_machine_with_no_console_still_starts(monkeypatch):
+    """The association launch on a typical Windows box: pythonw (no
+    console) plus a cp1252 locale. The null stream used to be opened in
+    the locale encoding, so the first → killed the server before it bound
+    and the analyst saw nothing at all."""
+    import builtins
+
+    monkeypatch.setattr(server, "open", _ansi_open(builtins.open), raising=False)
+    _no_console(monkeypatch)
+    _start(monkeypatch)
+    print("Settings → Plugins, and a lone surrogate \udc80")   # must not raise
+
+
+def test_the_log_survives_the_null_stream_too(monkeypatch):
+    """log.record prints every entry to stderr — which, with no console,
+    is the same null stream."""
+    import builtins
+
+    from winnow import log as wlog
+
+    monkeypatch.setattr(server, "open", _ansi_open(builtins.open), raising=False)
+    _no_console(monkeypatch)
+    server._ensure_console_streams()
+    wlog.record("error", "Plugin FAILED: café → 日本")
+
+
+def test_a_cp1252_console_still_starts_and_keeps_its_stream(monkeypatch):
+    """`python server.py > winnow.log` on the same box, or
+    PYTHONIOENCODING=cp1252: a real stream, but one in the locale
+    encoding with strict errors, so the same print raised there too. It
+    keeps its encoding (whatever reads the log expects it) and spells
+    what it can't as an escape, which is what Python's own stderr does."""
+    buf = io.BytesIO()
+    out = io.TextIOWrapper(buf, encoding="cp1252", line_buffering=True)
+    monkeypatch.setattr(sys, "stdout", out)
+    _start(monkeypatch)
+    assert sys.stdout is out
+    print("Settings → Plugins")
+    out.flush()
+    assert b"Settings \\u2192 Plugins" in buf.getvalue()

@@ -53,13 +53,21 @@ export function timelineTemplateFor(colNames) {
    here.
 
    Pressed means "on the timeline", and every tag starts pressed: a
-   timeline is every tagged row until it is narrowed. */
+   timeline is every tagged row until it is narrowed. That includes a tag
+   created after the case was opened, which is why what is remembered is
+   the tags switched OFF (S.timeline.tagsOff) rather than the ones on: a
+   list of the tags that were on, snapshotted when the case opened, left
+   every later tag off — its rows missing from the timeline, with nothing
+   to say why, until its chip was clicked or the case reopened. */
+export function timelineTagIds() {
+  return S.tags.filter((t) => !S.timeline.tagsOff.has(t.id)).map((t) => t.id);
+}
+
 export function renderTimelineTagFilter() {
   const wrap = $('timelineTagFilter');
   wrap.replaceChildren();
-  if (S.timeline.tagFilter === null) S.timeline.tagFilter = S.tags.map((t) => t.id);
   for (const t of S.tags) {
-    const on = S.timeline.tagFilter.includes(t.id);
+    const on = !S.timeline.tagsOff.has(t.id);
     const chip = el('button', 'tag-chip');
     chip.setAttribute('aria-pressed', String(on));
     // Inline, over the stylesheet's pressed colour, exactly as the ribbon
@@ -72,9 +80,7 @@ export function renderTimelineTagFilter() {
       ? `On the timeline. Click to take ${t.name} off it.`
       : `Off the timeline. Click to put ${t.name} back on it.`;
     chip.onclick = () => {
-      S.timeline.tagFilter = on
-        ? S.timeline.tagFilter.filter((id) => id !== t.id)
-        : [...S.timeline.tagFilter, t.id];
+      if (on) S.timeline.tagsOff.add(t.id); else S.timeline.tagsOff.delete(t.id);
       // Repainted here, not by the DOM: a chip's state is an attribute
       // this function writes, where a checkbox kept its own.
       renderTimelineTagFilter();
@@ -85,7 +91,7 @@ export function renderTimelineTagFilter() {
 }
 
 export async function buildTimeline() {
-  if (S.timeline.tagFilter === null) S.timeline.tagFilter = S.tags.map((t) => t.id);
+  const tagIds = timelineTagIds();
   S.timeline.pages.clear();
   S.timeline.pending.clear();
   // Which rows are showing their raw text is per-build state: the rows a
@@ -93,7 +99,7 @@ export async function buildTimeline() {
   // build would grow for the life of the tab.
   S.timeline.raw.clear();
   const reqId = ++S.timeline.reqId;
-  if (!S.timeline.tagFilter.length) {
+  if (!tagIds.length) {
     // Every tag unchecked -> nothing can match; skip the round trip and
     // show the empty state directly rather than asking the server for
     // "no tag filter," which would mean the opposite (every tagged row).
@@ -107,7 +113,7 @@ export async function buildTimeline() {
     const token = opToken();
     const disarmCancel = armOpCancel(token);
     try {
-      v = await post('/api/timeline', { tag_ids: S.timeline.tagFilter, op_token: token });
+      v = await post('/api/timeline', { tag_ids: tagIds, op_token: token });
     } finally {
       disarmCancel();
     }
@@ -122,6 +128,19 @@ export async function buildTimeline() {
   S.timeline.view = v;
   $('timelineSpacerY').style.height = spacerPx(v.row_count) + 'px';
   $('timelineStats').innerHTML = `<b>${v.row_count.toLocaleString()}</b> tagged row${v.row_count === 1 ? '' : 's'}`;
+  // A table too wide to join into one body keeps its first N columns
+  // (Store._fit_body_cols). Said here, so the columns past N aren't taken
+  // for columns that were empty.
+  const trimmed = v.body_trimmed || [];
+  if (trimmed.length) {
+    const label = (t) => sourceLabel(S.sources.find((s) => s.id === t.source_id)) || t.source_name;
+    const note = el('span', null, trimmed.length === 1
+      ? ` · ${label(trimmed[0])}: body shows ${trimmed[0].shown} of ${trimmed[0].total} columns`
+      : ` · ${trimmed.length} tables: body shows their first ${trimmed[0].shown} columns`);
+    note.title = trimmed.map((t) => `${label(t)}: first ${t.shown} of ${t.total} columns`).join('\n')
+      + '\nPick body columns in Configure tables… to choose which ones.';
+    $('timelineStats').append(note);
+  }
   $('timelineBody').scrollTop = 0;
   renderTimelineRows();
 }
@@ -152,7 +171,7 @@ export function timelineRowAt(pos) {
    already done. Said in terms of the control above, since that is where
    the answer is. */
 function emptyReason() {
-  const on = (S.timeline.tagFilter || []).length;
+  const on = timelineTagIds().length;
   if (S.tags.length && !on) return 'Every tag is switched off — turn one back on above to see its rows.';
   if (on && on < S.tags.length) return 'No rows carry the tags switched on above.';
   return 'No tagged rows yet — tag some rows in any table, then come back here.';
@@ -251,19 +270,35 @@ export function fillTimelineBody(cell, r) {
    steps are the ones search-all's "Open ↦" already takes: POST the
    source open, then reload the listing so the tab strip and sidebar are
    built from the new answer. loadSources() opens the table itself (it is
-   in the open tabs by then), so this is not an extra switch. */
+   in the open tabs by then), so this is not an extra switch.
+
+   Every caller is a bare click handler, so a failure is caught here or
+   nowhere — and it can fail for a reason nobody did wrong: the hit was
+   listed before its table was removed (another window, or a moment ago
+   in this one). That answers 404; the listing is reloaded so the grid
+   lands on a table that exists rather than the half-opened ghost. */
 export async function jumpToTimelineRow(sourceId, rid) {
-  const src = S.sources.find((s) => s.id === sourceId);
-  if (src && !src.is_open) {
-    // A failure here is not a reason to refuse the navigation — the grid
-    // can still show the row, which is what was asked for.
-    try { await post(`/api/source/${sourceId}/open`, { open: true }); } catch { /* best effort */ }
-    await loadSources(sourceId);
-  } else {
-    await openSource(sourceId);
+  try {
+    const src = S.sources.find((s) => s.id === sourceId);
+    if (src && !src.is_open) {
+      // A failure here is not a reason to refuse the navigation — the grid
+      // can still show the row, which is what was asked for.
+      try { await post(`/api/source/${sourceId}/open`, { open: true }); } catch { /* best effort */ }
+      await loadSources(sourceId);
+    } else {
+      await openSource(sourceId);
+    }
+    showGridTab();
+    await recenterOnRow({ source_id: sourceId, rid });
+  } catch (e) {
+    if (e && e.aborted) return;
+    if (e && e.status === 404) {
+      toast('That row\'s table is no longer in this case', 6000);
+      await loadSources().catch(() => {});
+      return;
+    }
+    toast('Could not open that row: ' + ((e && e.message) || e), 6000);
   }
-  showGridTab();
-  await recenterOnRow({ source_id: sourceId, rid });
 }
 
 // Guarded like #body's own scroll handler below: scroll can fire several
@@ -293,7 +328,10 @@ export function openTimelineSourceConfig() {
     for (const src of realSources) {
       // Header-set key: the file's own columns (see baseColumns). A derived
       // column can still be *picked* as the timestamp below — it just isn't
-      // part of what identifies this source type.
+      // part of what identifies this source type. server.py's
+      // _resolve_timeline_configs looks the config up by this same set;
+      // the two disagreeing is how adding a derived column used to drop a
+      // table's config without a word.
       const colNames = src.columns.filter((c) => !c.derived).map((c) => c.name);
       const dtCols = src.columns.filter((c) => c.type === 'datetime').map((c) => c.name);
       const existing = timelineTemplateFor(colNames);
@@ -343,12 +381,14 @@ export function openTimelineSourceConfig() {
       const saveBtn = el('button', 'btn', 'Save');
       saveBtn.style.marginTop = '6px';
       saveBtn.onclick = async () => {
-        await post('/api/timeline_templates', {
-          col_names: colNames,
-          type_label: typeInput.value.trim() || src.name,
-          timestamp_column: tsSel.value || null,
-          body_columns: bodyOrder,
-        });
+        try {
+          await post('/api/timeline_templates', {
+            col_names: colNames,
+            type_label: typeInput.value.trim() || src.name,
+            timestamp_column: tsSel.value || null,
+            body_columns: bodyOrder,
+          });
+        } catch (e) { toast(`Could not save the timeline config for ${src.name}: ${e.message}`, 6000); return; }
         await loadTimelineTemplates();
         toast(`Saved timeline config for ${src.name}`);
       };

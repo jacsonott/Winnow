@@ -3,6 +3,8 @@ identifier quoting, view expiry, and the guided filter tree."""
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 
@@ -126,6 +128,43 @@ def test_view_expires_after_close(ingested):
     store.close_view(view["view_id"])
     with pytest.raises(KeyError):
         store.fetch_rows(view["view_id"], 0, 10)
+
+
+def test_dropping_a_table_evicts_its_views(store, write_csv):
+    """A view id outlives its table in whatever window built it. drop_source
+    left the handle registered, so that window kept paging and tagging
+    through it — and with source ids reused, the next import's rows were
+    the ones it read, tagged and exported."""
+    from winnow.store import ViewExpired
+
+    a = store.ingest_csv(write_csv([["proc"], ["evil1"], ["benign"], ["evil3"]], "a.csv"),
+                         build_fts=False)["id"]
+    filtered = store.build_view(a, {"filters": [{"column": "proc", "op": "contains", "value": "evil"}]})
+    group = store.expand_group(filtered["view_id"], "proc", "evil1")
+    tag = store.upsert_tag(None, "Malware", "#ff0000", None)["id"]
+    store.drop_source(a)
+    c = store.ingest_csv(write_csv([["proc"], ["benign1"], ["benign2"], ["benign3"]], "c.csv"),
+                         build_fts=False)["id"]
+    for vid in (filtered["view_id"], group["view_id"]):
+        with pytest.raises(ViewExpired):
+            store.fetch_rows(vid, 0, 10)
+        with pytest.raises(ViewExpired):
+            store.tag_view(vid, tag, True)
+    assert store.tag_counts(c)["counts"] == {}
+    assert filtered["view_id"] not in _v_table_names(store)
+
+    # The unfiltered (virtual) view and a merge's views go the same way.
+    root = store.build_view(c, {"filters": []})
+    assert root["kind"] == "root_virtual"
+    d = store.ingest_csv(write_csv([["proc"], ["x"]], "d.csv"), build_fts=False)["id"]
+    merge = store.create_merge("CD", [c, d])["id"]
+    merged = store.build_view(merge, {"filters": []})
+    store.delete_merge(-merge)
+    with pytest.raises(ViewExpired):
+        store.fetch_rows(merged["view_id"], 0, 10)
+    store.drop_source(c)
+    with pytest.raises(ViewExpired):
+        store.tag_view(root["view_id"], tag, True)
 
 
 def _v_table_names(store):
@@ -395,6 +434,31 @@ def test_validate_where_fragment_rejects_select_and_unknown_identifier(ingested)
     with pytest.raises(ValueError):
         store.validate_where_fragment(source_id, "NotAColumn = '1'")
     store.validate_where_fragment(source_id, "EventId = '4624'")  # doesn't raise
+
+
+
+def test_a_raw_fragment_refuses_a_quoted_column_the_table_does_not_have(store, write_csv):
+    """SQLite's double-quoted-string fallback reads a quoted name that is
+    not a column as a string literal, so a typo'd column was accepted and
+    compared as text: `"Event Id " <> '4624'` (trailing space) matched
+    every row, `"EventID" = '4624'` matched none, and neither said why."""
+    sid = store.ingest_csv(write_csv([["Event ID", "User"], ["4624", "bob"], ["4625", "alice"],
+                                      ["1", "eve"]], "e.csv"), build_fts=False)["id"]
+
+    def rows(frag):
+        return store.build_view(sid, {"source_id": sid, "sort": [],
+                                      "filter_tree": {"type": "raw", "sql": frag}})["row_count"]
+
+    for frag, missing in (("\"Event Id \" <> '4624'", "Event Id "),
+                          ("\"EventID\" = '4624'", "EventID"),
+                          ("\"Event ID\" = \"4624\"", "4624")):
+        with pytest.raises(ValueError, match=re.escape(f'"{missing}"')):
+            rows(frag)
+    # What SQLite itself resolves still works: ASCII case, a doubled quote
+    # spelled out, and a double quote inside a single-quoted value.
+    assert rows("\"Event ID\" = '4624'") == 1
+    assert rows("\"event id\" = '4624'") == 1
+    assert rows("\"User\" <> 'say \"hi\"'") == 3
 
 
 # --------------------------------------------------------------- time_range

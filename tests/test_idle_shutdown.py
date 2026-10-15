@@ -8,6 +8,7 @@ would demonstrate the feature, since the whole point is process exit."""
 
 from __future__ import annotations
 
+import asyncio
 import http.client
 import os
 import socket
@@ -212,3 +213,134 @@ def test_goodbye_needs_the_csrf_header():
     from fastapi.testclient import TestClient
     bare = TestClient(srv.app)
     assert bare.post("/api/goodbye").status_code == 403
+
+
+def test_a_streaming_download_counts_as_in_flight_until_its_body_ends(client, ingested):
+    """The in-flight hold is what keeps auto-exit from killing a CSV export
+    that outlives its tab. It was counted in a BaseHTTPMiddleware, whose
+    call_next returns when the HEADERS exist — so the count dropped back
+    the moment the download started and every body chunk went out with the
+    hold already released.
+
+    Driven as raw ASGI so each body chunk can be looked at as it is sent:
+    TestClient collects the whole response before handing it over, which
+    would hide exactly the window this is about."""
+    import asyncio
+
+    store, sid = ingested
+    vid = client.post("/api/view", json={"source_id": sid}).json()["view_id"]
+
+    async def run():
+        chunks: list[int] = []
+        request = [{"type": "http.request", "body": b"", "more_body": False}]
+
+        async def receive():
+            if request:
+                return request.pop()
+            await asyncio.sleep(3600)   # the client never goes away mid-test
+
+        async def send(message):
+            if message["type"] == "http.response.body":
+                chunks.append(srv.PRESENCE.inflight)
+
+        scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+                 "method": "GET", "scheme": "http", "path": "/api/export",
+                 "raw_path": b"/api/export", "root_path": "",
+                 "query_string": f"view_id={vid}".encode(),
+                 "headers": [(b"host", b"127.0.0.1")],
+                 "client": ("127.0.0.1", 50000), "server": ("127.0.0.1", 8000)}
+        before = srv.PRESENCE.inflight
+        await srv.app(scope, receive, send)
+        return before, chunks, srv.PRESENCE.inflight
+
+    before, chunks, after = asyncio.run(run())
+    assert len(chunks) >= 2, "expected the export to stream in more than one chunk"
+    assert all(n == before + 1 for n in chunks), (before, chunks)
+    assert after == before
+
+
+# ------------------------------------------------ several windows, one closes
+
+@pytest.fixture
+def presence(monkeypatch):
+    """A fresh presence record driven through the real hooks — the SSE
+    route's open/close and the goodbye route — rather than one built by
+    hand, since what broke was the bookkeeping between them."""
+    p = srv._Presence()
+    monkeypatch.setattr(srv, "PRESENCE", p)
+    return p
+
+
+def _fuse(p, at):
+    return srv._idle_exit_reason(at, p, busy=False)
+
+
+def _goodbye_now(page=""):
+    """The goodbye route, called as the event loop would (it is async so
+    that it shares a thread with the stream hooks)."""
+    return asyncio.run(srv.api_goodbye(page=page))
+
+
+def test_closing_one_of_two_windows_leaves_the_survivor_on_the_long_fuse(presence):
+    """Two windows; A is closed (its goodbye arrives, then its stream is
+    noticed gone), B stays open and is later suspended. said_goodbye was
+    only ever cleared by a NEW stream, so A's goodbye was still standing
+    when B went quiet, and the server exited two minutes later under a
+    window that was still there."""
+    srv._presence_open()             # window A
+    srv._presence_open()             # window B
+    _goodbye_now()                   # A's pagehide
+    srv._presence_close()            # A's stream noticed gone
+    srv._presence_close()            # later: B suspended, no goodbye
+    now = presence.last_zero
+    assert _fuse(presence, now + srv.IDLE_EXIT_S + 1) is None
+    assert "no browser has been connected" in _fuse(presence, now + srv.SUSPENDED_EXIT_S + 1)
+
+
+def test_a_goodbye_heard_after_its_own_stream_closed_is_still_not_the_survivor_s(presence):
+    """The same two windows with the other arrival order, which is the
+    likelier one: a stream's close is noticed on the event loop the moment
+    the socket drops, while the goodbye POST queues for a worker thread. By
+    the time A's goodbye lands, A's stream is gone and only B's is open —
+    clearing on close alone cannot tell that goodbye from B's own."""
+    srv._presence_open("A")
+    srv._presence_open("B")
+    srv._presence_close("A")
+    _goodbye_now(page="A")
+    srv._presence_close("B")         # B suspended, no goodbye
+    now = presence.last_zero
+    assert _fuse(presence, now + srv.IDLE_EXIT_S + 1) is None
+
+
+def test_the_last_window_to_close_still_gets_the_short_fuse_in_either_order(presence):
+    srv._presence_open("A")
+    srv._presence_open("B")
+    srv._presence_close("B")         # B suspended first — no goodbye
+    _goodbye_now(page="A")        # then A is closed, goodbye first
+    srv._presence_close("A")
+    assert "the last window closed" in _fuse(presence, presence.last_zero + srv.IDLE_EXIT_S + 1)
+
+    srv._presence_open("C")          # a new window, closed the other way round
+    srv._presence_close("C")
+    _goodbye_now(page="C")
+    assert "the last window closed" in _fuse(presence, presence.last_zero + srv.IDLE_EXIT_S + 1)
+
+
+def test_a_page_s_goodbye_does_not_outlive_its_page(presence):
+    """Bookkeeping per page is bounded by the pages that are OPEN: a closed
+    page leaves nothing behind for a later one to inherit."""
+    srv._presence_open("A")
+    _goodbye_now(page="A")
+    srv._presence_close("A")
+    srv._presence_open("B")
+    srv._presence_close("B")         # B never said goodbye
+    assert _fuse(presence, presence.last_zero + srv.IDLE_EXIT_S + 1) is None
+    assert not presence.pages and not presence.farewells
+
+
+def test_the_page_id_rides_on_both_presence_requests():
+    """connection.js names its page on the stream and on the goodbye; the
+    server can only match the two up if both carry the same id."""
+    js = (ROOT / "static" / "js" / "connection.js").read_text(encoding="utf-8")
+    assert "/api/presence?page=" in js
+    assert "/api/goodbye?page=" in js

@@ -294,8 +294,8 @@ def test_eviction_mid_copy_is_409_shaped_and_drops_the_partial_source(store, wri
     v = _view(store, sid, sort=BY_HOST)
     real = Store._subset_cells
 
-    def evicting(self, ro, cols, chunk, op_token):
-        out = real(self, ro, cols, chunk, op_token)
+    def evicting(self, *args):
+        out = real(self, *args)
         store.close_view(v["view_id"])   # a filter change on the parent, mid-copy
         return out
     monkeypatch.setattr(Store, "_subset_cells", evicting)
@@ -364,11 +364,11 @@ def test_close_with_a_copy_in_flight_drops_the_partial_source(case_path, write_c
     real = Store._subset_cells
     started = threading.Event()
 
-    def stalling(self, ro, cols, chunk, op_token):
+    def stalling(self, *args):
         # The first batch is read, then held until close() has flagged the
         # copy — so the cancel lands mid-copy, after one committed batch,
         # every time rather than when the scheduler feels like it.
-        out = real(self, ro, cols, chunk, op_token)
+        out = real(self, *args)
         started.set()
         deadline = time.time() + 10
         while time.time() < deadline:
@@ -528,7 +528,9 @@ def test_sql_to_table_records_its_query_as_origin(store, write_csv):
     res = store.sql_to_table(f"SELECT Host FROM src_{sid} WHERE EventId = '4624'", "logon hosts")
     src = store.get_source(res["source"]["id"])
     assert src["origin"] == "sql" and src["origin_meta"] == {"sql": f"SELECT Host FROM src_{sid} WHERE EventId = '4624'"}
-    assert src["file_hash"] is None
+    # No file behind it, so an identity of its own rather than none: a NULL
+    # hash is what made a session skip it (test_case_sessions.py, made inside Winnow).
+    assert src["file_hash"].startswith("made:") and src["path"] is None
     imported = store.get_source(sid)
     assert imported["origin"] is None and imported["origin_meta"] is None
 

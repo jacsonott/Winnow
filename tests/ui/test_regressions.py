@@ -222,6 +222,21 @@ def test_month_name_timestamps_parse_client_side(page):
     assert page.evaluate("() => __winnow.parseTimestamp('Monday 23 2026')") is None
 
 
+def test_a_fractional_or_dotted_pm_is_an_afternoon_client_side(page):
+    """"1/5/2024 1:22:01.123 PM" read as 01:22 — the AM/PM group came
+    straight after the seconds, so a fraction in between (or "p.m.", or
+    "Pm") left it unmatched. Display and the client's time math have to
+    read the value the way TS_NORMALIZE now does."""
+    got = page.evaluate("() => __winnow.parseTimestamp('1/5/2024 1:22:01.123 PM')")
+    assert got == {"y": 2024, "mo": 1, "d": 5, "h": 13, "mi": 22, "s": 1, "frac": "123"}
+    for value in ("1/5/2024 1:22:01 p.m.", "1/5/2024 1:22:01 Pm", "June 23, 2026 1:22:01.5 P.M."):
+        assert page.evaluate("(v) => __winnow.parseTimestamp(v).h", value) == 13, value
+    assert page.evaluate("() => __winnow.parseTimestamp('1/5/2024 12:30:00 a.m.').h") == 0
+    assert page.evaluate("() => __winnow.parseTimestamp('1/5/2024 1:22:01 Amsterdam').h") == 1
+    assert page.evaluate("() => __winnow.formatTimestamp('1/5/2024 1:22:01.123 PM', 'iso_ms')") \
+        == "2024-01-05 13:22:01.123"
+
+
 def test_jump_to_timestamp_is_reachable_from_the_timeframe_dialog(page):
     page.evaluate("() => __winnow.openTimeRangeModal()")
     page.wait_for_selector("#modal:not([hidden])")

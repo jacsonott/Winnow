@@ -103,8 +103,12 @@ def test_widths_come_from_every_row(store):
 
 
 def test_values_that_json_cannot_carry_still_page(store):
-    res = store.run_sql_result("SELECT CAST('abc' AS BLOB) AS b, X'FF00' AS raw, 1e999 AS big, -1e999 AS small")
-    assert res["rows"] == [["abc", "�\x00", "Infinity", "-Infinity"]]
+    """Spelled as /api/sql spells them (pane_cell_json): a held result and
+    an inline one must not show the same cell two ways."""
+    res = store.run_sql_result("SELECT CAST('abc' AS BLOB) AS b, X'FF00' AS raw, 1e999 AS big, "
+                               "-1e999 AS small, 9007199254740993 AS ft")
+    assert res["rows"] == [["abc", "X'FF00'", "Inf", "-Inf", "9007199254740993"]]
+    assert store.sql_results.page(res["id"], 0, 1)["rows"] == res["rows"]
 
 
 def test_the_pane_is_still_read_only(store):
@@ -144,17 +148,16 @@ def test_stop_before_the_first_row_is_a_cancel(store):
     assert isinstance(out.get("error"), OpCancelled)
 
 
-def test_shut_down_stops_a_runaway_query(client, store, monkeypatch):
+def test_shut_down_stops_a_runaway_run(store):
     """The repro: a runaway query, then Shut down. uvicorn waits for the
     request, the request never ends, Winnow stays up holding the case
-    lock. The route now stops every query in flight first."""
-    import server
-
-    monkeypatch.setattr(server, "_trigger_shutdown", lambda: None)
-    t, out = _in_thread(store.run_sql, RUNAWAY_COUNT)
-    assert _wait(lambda: bool(store._sql_runs))
+    lock. Shut down's signal handler stops every pane query
+    (stop_pane_queries — tests/test_sql_runaway.py drives that end to
+    end); the pane's own runs have to be among them."""
+    t, out = _in_thread(store.run_sql_result, RUNAWAY_COUNT, op_token="tok-shutdown")
+    assert _wait(lambda: store.sql_run_progress("tok-shutdown")["running"])
     time.sleep(0.2)
-    assert client.post("/api/shutdown").status_code == 200
+    assert store.stop_pane_queries() == 1
     t.join(10)
     assert not t.is_alive(), "the query outlived Shut down"
     assert isinstance(out.get("error"), OpCancelled)
@@ -325,6 +328,16 @@ def test_the_csv_export_streams_every_row_in_displayed_order(client):
     assert rows[0] == ["i", "f", "x"]
     assert len(rows) == 7_001
     assert rows[1] == ["7000", "'=cmd", "7000"], "as shown, sorted, and formula-safe"
+
+
+def test_the_csv_guards_column_names_but_leaves_numbers_alone(client):
+    """A column named =HYPERLINK(...) was a live formula in the header
+    while every cell under it was neutralised; and -5 is a number, which
+    an apostrophe would have turned into text in the spreadsheet."""
+    rid = client.post("/api/sql/run", json={
+        "sql": """SELECT '=1+1' AS "=HYPERLINK(x)", -5 AS n, -2.5 AS r, '-5' AS s"""}).json()["id"]
+    rows = list(csv.reader(io.StringIO(client.get(f"/api/sql/result/{rid}/export.csv").text)))
+    assert rows == [["'=HYPERLINK(x)", "n", "r", "s"], ["'=1+1", "-5", "-2.5", "'-5"]]
 
 
 def test_the_xlsx_export_spills_onto_more_sheets(client, monkeypatch):

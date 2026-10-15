@@ -28,7 +28,7 @@ from winnow.store import q
 
 PLUGIN = {
     "name": "lateral-movement",
-    "version": "2.0.0",
+    "version": "2.1.0",
     "description": "Visualize lateral movement over time: multiple movement events across multiple tables on one graph, with defaults for KAPE/EvtxECmd output.",
 }
 
@@ -36,6 +36,9 @@ WINNOW_API_VERSION = 1
 
 MAX_ROWS = 8000          # (src, dst, bucket) rows across every selection
 MAX_SELECTIONS = 20
+PREVIEW_TOP = 12         # busiest links the event builder lists
+PREVIEW_LINKS = 50000    # distinct (src, dst) pairs a preview counts before saying "or more"
+VALUES_TOP = 40          # suggestions per condition column
 _DEFAULTS_FILE = os.path.join(os.path.dirname(__file__), "defaults.json")
 
 OPS = {
@@ -58,6 +61,8 @@ def register(api):
         ),
     )
     api.register_api("edges", edges, methods=["POST"])
+    api.register_api("preview", preview, methods=["POST"])
+    api.register_api("values", values, methods=["POST"])
     api.register_api("defs", defs, methods=["GET", "POST"])
 
 
@@ -95,7 +100,12 @@ def defs(req):
     if req.storage is None:
         raise ValueError("No storage available")
     req.storage.set({"saved": saved})
-    return {"shipped": _shipped_defaults(), "saved": saved}
+    # header_sets too: the tab replaces its whole copy with this response,
+    # and a reply without them left every header-set binding (and the
+    # builder's "Offer it on" choice) resolving against nothing until the
+    # next GET.
+    return {"shipped": _shipped_defaults(), "saved": saved,
+            "header_sets": _header_sets()}
 
 
 def _validate_def_shape(d):
@@ -142,11 +152,10 @@ def _scope(req, src):
     UNION ALL of its members aliased `s` (invariant #9)."""
     if not src.get("is_merge"):
         return _from_clause(src)
-    cols = [c["name"] for c in src["columns"]]
     branches = []
     for mid in src["member_source_ids"]:
         m = req.store.get_source(mid)
-        sel = ", ".join(f"{_col(m, c)} AS {q(c)}" for c in cols)
+        sel = req.store.merge_select_list(src, m)  # NULL-pads columns a member lacks
         branches.append(f"SELECT s.rid AS rid, {sel} FROM {_from_clause(m)}")
     return "(" + " UNION ALL ".join(branches) + ") s"
 
@@ -206,6 +215,128 @@ def _pick_bucket(req, spans):
     return _BUCKETS[-1]
 
 
+def _normalized_bounds(req, start, end):
+    """The timeframe's bounds in the shape TS_NORMALIZE(col) compares
+    against — the core runs both through the same function before its
+    range check, and so must this. Compared verbatim, any bound the
+    Timeframe dialog accepts in another spelling (1/5/2024 8:00, a 'T'
+    separator) cut the graph to a different row set from the grid while
+    the status line said "timeframe applied". A bound that doesn't parse
+    is dropped, which is what the core does with it too."""
+    if not (start or end):
+        return None, None
+    row = req.store.run_sql(
+        f"SELECT TS_NORMALIZE({_lit(start or '')}), TS_NORMALIZE({_lit(end or '')})", limit=1)["rows"]
+    lo, hi = (row[0][0], row[0][1]) if row else (None, None)
+    return (lo if start else None), (hi if end else None)
+
+
+# EVTX "not present" spellings, and loopback — a host talking to itself
+# (127.0.0.1, ::1, LOCAL, '- (127.0.0.1)') is not movement.
+_NOISE = "('', '-', '- (-)', '- (127.0.0.1)', '- (::1)', 'LOCAL', 'localhost', '127.0.0.1', '::1')"
+
+
+def _source(req, source_id):
+    try:
+        return req.store.get_source(int(source_id))
+    except (TypeError, ValueError, KeyError):
+        raise ValueError(f"No table {source_id!r}")
+
+
+def _prepare(req, sel, start=None, end=None):
+    """One selection as SQL pieces, validated against its table. `cond` is
+    the event's own conditions; `where` adds the endpoint-noise filter and
+    the timeframe on top — the rows that actually draw an edge. edges and
+    preview both build on this, so the builder's preview counts exactly
+    the rows a graph would."""
+    if req.store is None:
+        raise ValueError("Open a case first")
+    src = _source(req, sel.get("source_id"))
+    names = {c["name"] for c in src["columns"]}
+    sc_name, dc_name = sel.get("src_col"), sel.get("dst_col")
+    label = sel.get("label_col") or None
+    time_col = sel.get("time_col") or None
+    for col in (sc_name, dc_name) + tuple(x for x in (label, time_col) if x):
+        if col not in names:
+            raise ValueError(f"No column {col!r} in {src['name']}")
+    if sc_name == dc_name:
+        raise ValueError("Source and destination must be different columns")
+    cond = _conditions_sql(src, sel.get("conditions"))
+    sc = _endpoint(_col(src, sc_name), sel.get("strip_prefix"))
+    dc = _endpoint(_col(src, dc_name), sel.get("strip_prefix"))
+    where = cond + [f"{sc} NOT IN {_NOISE}", f"{dc} NOT IN {_NOISE}", f"{sc} != {dc}"]
+    ts = f"TS_NORMALIZE({_col(src, time_col)})" if time_col else None
+    if ts and start:
+        where.append(f"{ts} >= {_lit(start)}")
+    if ts and end:
+        where.append(f"{ts} <= {_lit(end)}")
+    return {"src": src, "sc": sc, "dc": dc, "label": label, "ts": ts,
+            "cond": cond, "where": where}
+
+
+def preview(req):
+    """POST /api/plugin/lateral_movement/preview
+    body: {selection: {source_id, src_col, dst_col, label_col?, time_col?,
+                       strip_prefix?, conditions?}}
+    -> {matched, hops, links, hosts, links_capped, first, last,
+        top: [{src, dst, n, labels}]}
+
+    What the event builder shows while an analyst defines an event: how
+    many rows its conditions match (`matched`), how many of those draw an
+    edge once empty, loopback and self endpoints drop out (`hops`), how
+    many distinct src→dst links and hosts that makes, the busiest links,
+    and the span of its time column (null when it has none, or when no
+    matching value reads as a timestamp). No case timeframe: this is about
+    the definition, not about today's window."""
+    sel = (req.body or {}).get("selection") or {}
+    p = _prepare(req, sel)
+    src, scope = p["src"], _scope(req, p["src"])
+    cond = " AND ".join(p["cond"]) or "1"
+    matched = req.store.run_sql(f"SELECT COUNT(*) FROM {scope} WHERE {cond}", limit=1)["rows"][0][0]
+    label_sel = f"COUNT(DISTINCT {_col(src, p['label'])})" if p["label"] else "NULL"
+    span_sel = f"MIN({p['ts']}), MAX({p['ts']})" if p["ts"] else "NULL, NULL"
+    res = req.store.run_sql(
+        f"SELECT {p['sc']} AS src, {p['dc']} AS dst, COUNT(*) AS n, {label_sel} AS labels, {span_sel}"
+        f" FROM {scope} WHERE {' AND '.join(p['where'])}"
+        f" GROUP BY 1, 2 ORDER BY n DESC", limit=PREVIEW_LINKS)
+    rows = res["rows"]
+    hosts = {r[0] for r in rows} | {r[1] for r in rows}
+    firsts = [r[4] for r in rows if r[4]]
+    lasts = [r[5] for r in rows if r[5]]
+    return {
+        "matched": matched,
+        "hops": sum(r[2] for r in rows),
+        "links": len(rows),
+        "hosts": len(hosts),
+        "links_capped": res["truncated"],
+        "first": min(firsts) if firsts else None,
+        "last": max(lasts) if lasts else None,
+        "top": [{"src": r[0], "dst": r[1], "n": r[2], "labels": r[3]} for r in rows[:PREVIEW_TOP]],
+    }
+
+
+def values(req):
+    """POST /api/plugin/lateral_movement/values  body: {source_id, column}
+    -> {values: [{value, n}], truncated}
+    The commonest values of one column, for a condition's suggestions —
+    the hard part of "EventId is 4624" on a fresh export is knowing that
+    the logon type lives in PayloadData2 and reads "LogonType 3"."""
+    if req.store is None:
+        raise ValueError("Open a case first")
+    b = req.body or {}
+    src = _source(req, b.get("source_id"))
+    column = b.get("column")
+    if column not in {c["name"] for c in src["columns"]}:
+        raise ValueError(f"No column {column!r} in {src['name']}")
+    col = _col(src, column)
+    res = req.store.run_sql(
+        f"SELECT {col} AS v, COUNT(*) AS n FROM {_scope(req, src)}"
+        f" WHERE {col} IS NOT NULL AND {col} != '' GROUP BY 1 ORDER BY n DESC, v",
+        limit=VALUES_TOP)
+    return {"values": [{"value": "" if r[0] is None else str(r[0]), "n": r[1]} for r in res["rows"]],
+            "truncated": res["truncated"]}
+
+
 def edges(req):
     """POST /api/plugin/lateral_movement/edges
     body: {selections: [{source_id, src_col, dst_col, label_col?, time_col?,
@@ -224,38 +355,16 @@ def edges(req):
     if len(selections) > MAX_SELECTIONS:
         raise ValueError(f"At most {MAX_SELECTIONS} selections per build")
     time_range = b.get("time") or {}
-    start, end = time_range.get("start") or None, time_range.get("end") or None
+    start, end = _normalized_bounds(req, time_range.get("start") or None,
+                                    time_range.get("end") or None)
     limit = min(int(b.get("limit") or MAX_ROWS), MAX_ROWS)
 
     prepared = []
     spans = []
     for sel in selections:
-        try:
-            src = req.store.get_source(int(sel.get("source_id")))
-        except (TypeError, ValueError, KeyError):
-            raise ValueError(f"No table {sel.get('source_id')!r}")
-        names = {c["name"] for c in src["columns"]}
-        sc_name, dc_name = sel.get("src_col"), sel.get("dst_col")
-        label = sel.get("label_col") or None
-        time_col = sel.get("time_col") or None
-        for col in (sc_name, dc_name) + tuple(x for x in (label, time_col) if x):
-            if col not in names:
-                raise ValueError(f"No column {col!r} in {src['name']}")
-        if sc_name == dc_name:
-            raise ValueError("Source and destination must be different columns")
-        where = _conditions_sql(src, sel.get("conditions"))
-        sc = _endpoint(_col(src, sc_name), sel.get("strip_prefix"))
-        dc = _endpoint(_col(src, dc_name), sel.get("strip_prefix"))
-        # EVTX "not present" spellings, and loopback — a host talking to
-        # itself (127.0.0.1, ::1, LOCAL, '- (127.0.0.1)') is not movement.
-        noise = "('', '-', '- (-)', '- (127.0.0.1)', '- (::1)', 'LOCAL', 'localhost', '127.0.0.1', '::1')"
-        where += [f"{sc} NOT IN {noise}", f"{dc} NOT IN {noise}", f"{sc} != {dc}"]
-        ts = f"TS_NORMALIZE({_col(src, time_col)})" if time_col else None
-        if ts and start:
-            where.append(f"{ts} >= {_lit(start)}")
-        if ts and end:
-            where.append(f"{ts} <= {_lit(end)}")
-        prepared.append((src, sc, dc, label, ts, where))
+        p = _prepare(req, sel, start, end)
+        src, ts, where = p["src"], p["ts"], p["where"]
+        prepared.append((src, p["sc"], p["dc"], p["label"], ts, where))
         if ts:
             span_sql = f"SELECT min({ts}), max({ts}) FROM {_scope(req, src)} WHERE {' AND '.join(where)}"
             row = req.store.run_sql(span_sql, limit=1)["rows"]

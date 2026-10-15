@@ -1,7 +1,7 @@
 /* Column layout: header rendering, drag-to-reorder, widths and autofit.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
-import { $, AUTOFIT_MAX_W_DEFAULT, GUTTER_W, api, debounce, el, post, toast } from './core.js';
+import { $, AUTOFIT_MAX_W_DEFAULT, GUTTER_W, api, debounce, el, nameMap, post, toast } from './core.js';
 import { columnMenuItems, opLabel } from './derived.js';
 import { columnFilterChips, openValuePicker, pickerTreeNode, removeColumnFilter, valueFilterEnabled } from './filters.js';
 import { render, setCellRange } from './grid.js';
@@ -30,7 +30,15 @@ export function colWidth(name) {
    lone base column takes the viewport instead (the gutter and a little
    for the scrollbar excepted). A dragged width still wins (S.layout), and
    columns the analyst derives from it keep their own defaults. */
-export function fillsGrid(c) { return !!c && !c.derived && baseColumns().length === 1; }
+export function fillsGrid(c) {
+  if (!c || c.derived) return false;
+  // Counted with an early exit rather than baseColumns().length: colWidth
+  // asks this for every text column on every paint, and a filtered copy of
+  // a 400-column list per column was O(columns²) to learn "more than one".
+  let n = 0;
+  for (const x of S.columns) if (!x.derived && ++n > 1) return false;
+  return n === 1;
+}
 
 export function fillWidth() {
   const body = $('body');
@@ -52,7 +60,7 @@ export const isPinned = (name) => !!(S.layout[name] || {}).pinned;
    behaviour you want and costs nothing. Reordering would also have
    silently changed export column order, which follows the arrangement. */
 export function pinnedOffsets() {
-  const out = {};
+  const out = nameMap();   // keyed by column name — a `toString` column must not read as pinned
   let left = GUTTER_W;
   for (const name of visibleCols()) {
     if (!isPinned(name)) continue;
@@ -327,6 +335,24 @@ export function openFilterColumnPicker(anchorEl) {
   });
 }
 
+/* For the merge on screen: each column only some of its tables have
+   (folded name -> labels of the tables that have it), and `total`, the
+   table count. Empty for a plain table. Read from the merge's `members`,
+   which the server fills with what each one lacks. */
+function partialMergeColumns() {
+  const out = new Map();
+  const src = S.sources.find((s) => s.id === S.sourceId);
+  if (!src || !src.is_merge || !src.members) return out;
+  out.total = src.members.length;
+  const missing = src.members.map((m) => new Set(m.missing.map((n) => n.trim().toLowerCase())));
+  for (const c of src.columns) {
+    const k = c.name.trim().toLowerCase();
+    const owners = src.members.filter((m, i) => !missing[i].has(k)).map((m) => m.label);
+    if (owners.length < src.members.length) out.set(k, owners);
+  }
+  return out;
+}
+
 export function renderHead() {
   /* The RECTANGLE goes: c0/c1 are indices into visibleCols(), and this
      runs precisely when that list changes — a hide, a reorder, a pin, a
@@ -397,6 +423,7 @@ export function renderHead() {
   filt.append(gf);
 
   const pins = pinnedOffsets();
+  const partial = partialMergeColumns();
   for (const name of visibleCols()) {
     const w = colWidth(name);
     const h = el('div', 'hcell');
@@ -418,7 +445,10 @@ export function renderHead() {
       const dstatus = colMetaEntry.derived_status;
       mark.title = `Derived from "${colMetaEntry.derived_from}" — ${opLabel(colMetaEntry.derived_op)}`
         + (dstatus === 'building' ? ' (building…)' : '')
-        + (dstatus === 'partial' ? ' (incomplete — re-derive to finish)' : '');
+        + (dstatus === 'partial' ? ' (incomplete — re-derive to finish)' : '')
+        // A re-derive that stopped part-way clears what it wrote rather
+        // than leave two runs' values mixed (Store._fail_derive_backfill).
+        + (dstatus === 'error' ? ' (failed — values cleared; re-derive to retry)' : '');
       if (dstatus !== 'ready') mark.classList.add('pending');
       h.append(mark);
     }
@@ -452,6 +482,15 @@ export function renderHead() {
         toggleColumnFilter(name);
       };
       h.append(fo);
+    }
+    const owners = partial.get(name.trim().toLowerCase());
+    if (owners) {
+      // On a merge, a column not every table has: its empty cells there
+      // mean "that file has no such field", not missing data.
+      const mark = el('span', 'hcell-partial', `${owners.length}/${partial.total}`);
+      mark.title = `Only in ${owners.length === 1 ? owners[0] : `${owners.slice(0, -1).join(', ')} and ${owners[owners.length - 1]}`}. `
+        + 'Rows from the other tables are empty here.';
+      h.append(mark);
     }
     if (colMetaEntry) {
       // Column options (display format, "Derive a column from this…",
@@ -624,7 +663,7 @@ export async function saveDefaultLayout() {
 
 export async function fetchColumnMaxLens() {
   if (!S.sourceId) return null;
-  try { return await api(`/api/column_maxlen?source_id=${S.sourceId}`); }
+  try { return nameMap(await api(`/api/column_maxlen?source_id=${S.sourceId}`)); }
   catch (e) { toast('Could not measure column widths: ' + e.message); return null; }
 }
 

@@ -142,6 +142,50 @@ def test_a_target_open_in_another_winnow_is_refused_by_name(store, write_csv, ta
     assert target.list_sources() == []
 
 
+def test_a_second_copy_into_the_same_case_is_not_called_another_winnow(store, write_csv, target, client, monkeypatch):
+    """A double-clicked "Copy into this case": the second request found the
+    target locked by the first copy's Store — in this very process — and
+    told the analyst the case was open in another Winnow, naming our own
+    pid. The first copy is held mid-write here, deterministically, while
+    the second is asked for."""
+    import threading
+
+    sid = _fill(store, write_csv)
+    target_path = target.path
+    target.close()
+
+    inside, release = threading.Event(), threading.Event()
+    real = Store._copy_sources_into
+
+    def held(self, t, source_ids):
+        inside.set()
+        assert release.wait(10)
+        return real(self, t, source_ids)
+
+    monkeypatch.setattr(Store, "_copy_sources_into", held)
+    first: dict = {}
+    th = threading.Thread(target=lambda: first.update(store.copy_sources_to(target_path, [sid])))
+    th.start()
+    try:
+        assert inside.wait(10)
+        r = client.post("/api/case/copy_sources", json={"target_path": target_path, "source_ids": [sid]})
+        assert r.status_code == 409
+        assert "another Winnow" not in r.json()["detail"]
+        assert "Already copying" in r.json()["detail"]
+    finally:
+        release.set()
+        th.join(10)
+
+    # The first copy landed, once; the target is free again afterwards.
+    assert len(first["copied"]) == 1
+    t = Store(target_path)
+    try:
+        assert len(t.list_sources()) == 1
+    finally:
+        t.close()
+    assert store.copy_sources_to(target_path, [sid])["copied"]
+
+
 def test_copying_into_yourself_is_refused(store, write_csv):
     sid = _fill(store, write_csv)
     with pytest.raises(ValueError, match="this case"):
@@ -161,7 +205,12 @@ def test_merges_are_refused_with_a_pointer(store, write_csv, target):
 
 def test_an_old_schema_target_is_migrated_before_the_write(store, write_csv, tmp_path):
     """A case created by an older Winnow may lack newer tables; opening the
-    target as a full Store is what runs its migrations first."""
+    target as a full Store is what runs its migrations first.
+
+    The three tables every case has had since the first schema are here
+    (row_tags among them): without them the file is not recognisably a
+    case, and copying into it is refused before anything writes
+    (tests/test_not_a_case_file.py). Everything newer is missing."""
     import sqlite3
     old = tmp_path / "old.db"
     conn = sqlite3.connect(old)
@@ -172,6 +221,8 @@ def test_an_old_schema_target_is_migrated_before_the_write(store, write_csv, tmp
         has_fts INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE tag_defs (id INTEGER PRIMARY KEY, name TEXT NOT NULL,
         color TEXT NOT NULL, hotkey TEXT);
+      CREATE TABLE row_tags (source_id INTEGER NOT NULL, rid INTEGER NOT NULL,
+        tag_id INTEGER NOT NULL, PRIMARY KEY (source_id, rid, tag_id)) WITHOUT ROWID;
     """)
     conn.commit()
     conn.close()
@@ -247,3 +298,89 @@ def test_copy_refuses_while_an_import_runs(store, write_csv, target, monkeypatch
                     json={"target_path": target_path, "source_ids": [sid]})
     assert r.status_code == 409
     assert "importing" in r.json()["detail"].lower()
+
+
+def _lookup_case(store, write_csv):
+    owners = store.ingest_csv(write_csv([["Host", "Owner"], ["h1", "alice"]], "owners.csv"),
+                              name="owners.csv", build_fts=False)["id"]
+    ev = _fill(store, write_csv)
+    r = store.add_derived_column(ev, "Owner", "Host", "lookup",
+                                 {"other_source_id": owners, "match_column": "Host",
+                                  "value_column": "Owner"})
+    store.wait_for_ingest_job(r["job_id"], timeout=30)
+    return owners, ev
+
+
+def _rederive_owner(t, new_id):
+    d = next(d for d in t.list_derived_columns(new_id) if d["name"] == "Owner")
+    out = t.rederive_column(d["id"])
+    t.wait_for_ingest_job(out["job_id"], timeout=30)
+    return [r[0] for r in t.db.execute(f'SELECT "Owner" FROM drv_{new_id} ORDER BY rid')]
+
+
+def test_a_copied_lookup_follows_its_table_into_the_target(store, write_csv, target):
+    """The lookup definition copies with this case's source id in it. In
+    the target that id is whatever table took it there, so a re-derive
+    filled the column from an unrelated table. Copied together, the lookup
+    follows its table to its new id."""
+    target.ingest_csv(write_csv([["Host", "Owner"], ["h1", "mallory"]], "other.csv"),
+                      name="other.csv", build_fts=False)
+    target_path = target.path
+    target.close()
+    owners, ev = _lookup_case(store, write_csv)
+
+    res = store.copy_sources_to(target_path, [owners, ev])
+
+    new_ev = next(c["id"] for c in res["copied"] if c["name"] == "quick.csv")
+    t = Store(target_path)
+    try:
+        assert _rederive_owner(t, new_ev) == ["alice", None, None]
+    finally:
+        t.close()
+
+
+def test_a_copied_lookup_without_its_table_does_not_bind_to_another(store, write_csv, target):
+    """Its table stayed behind and the target has nothing with that
+    fingerprint: the values copied as they were, and a re-derive is refused
+    (asks for the table) instead of reading whichever table holds the id."""
+    target.ingest_csv(write_csv([["Host", "Owner"], ["h1", "mallory"]], "other.csv"),
+                      name="other.csv", build_fts=False)
+    target_path = target.path
+    target.close()
+    _owners, ev = _lookup_case(store, write_csv)
+
+    res = store.copy_sources_to(target_path, [ev])
+
+    new_ev = res["copied"][0]["id"]
+    t = Store(target_path)
+    try:
+        assert [r[0] for r in t.db.execute(f'SELECT "Owner" FROM drv_{new_ev} ORDER BY rid')] == [
+            "alice", None, None]
+        with pytest.raises(ValueError, match="table"):
+            _rederive_owner(t, new_ev)
+    finally:
+        t.close()
+
+
+def test_tag_names_pair_by_the_rule_session_load_uses(store, write_csv, target):
+    """One rule for copy, load and diff (store.pair_tag_names): exact name
+    first, a name differing only in case when that is unambiguous."""
+    sid = _fill(store, write_csv)
+    _tag(store, sid, [1], "Malware")
+    _tag(store, sid, [2], "Lateral")
+    target.upsert_tag(None, "MALWARE", "#000000", None)
+    target.upsert_tag(None, "lateral", "#000000", None)
+    target.upsert_tag(None, "LATERAL", "#000000", None)
+    target_path = target.path
+    target.close()
+    new = store.copy_sources_to(target_path, [sid])["copied"][0]["id"]
+    t = Store(target_path)
+    try:
+        names = {x["id"]: x["name"] for x in t.list_tags()}
+        got = sorted((r, names[tid]) for r, tid in t.db.execute(
+            "SELECT rid, tag_id FROM row_tags WHERE source_id=?", (new,)))
+    finally:
+        t.close()
+    # "Malware" is the target's one MALWARE; "Lateral" matches two target
+    # tags ignoring case, so it is its own tag rather than a guess.
+    assert got == [(1, "MALWARE"), (2, "Lateral")]

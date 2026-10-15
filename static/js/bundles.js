@@ -17,7 +17,7 @@
      A copy records which shipped profile it came from and at what
      version; when the shipped one moves on, the manager offers the diff
      and a button. Taking an update is always the button. */
-import { $, api, el, post, toast } from './core.js';
+import { $, api, el, nameMap, post, toast } from './core.js';
 import { loadPlugins } from './importer.js';
 import { loadSources, renderPageTabs } from './sources.js';
 import { openProfileBuilder } from './profilebuilder.js';
@@ -181,8 +181,9 @@ export function openPluginBundlesModal(opts = {}) {
       listPane.append(el('div', 'note-status', 'Could not load profiles: ' + e.message));
       return;
     }
-    let appliedAt = {};
-    try { appliedAt = JSON.parse(settings.profiles_applied || '{}') || {}; } catch { appliedAt = {}; }
+    // Keyed by profile NAME, which the analyst chooses — see nameMap.
+    let appliedAt = nameMap();
+    try { appliedAt = nameMap(JSON.parse(settings.profiles_applied || '{}')); } catch { appliedAt = nameMap(); }
     const caseOpen = !$('app').hidden;
     const want = opts.select != null ? String(opts.select).toLowerCase() : null;
     let selected = (bundles.find((x) => x.name.toLowerCase() === want) || bundles[0] || {}).id;
@@ -291,7 +292,9 @@ export function openPluginBundlesModal(opts = {}) {
         del.title = 'Delete this profile (cases it was applied to keep their plugins)';
         del.onclick = async () => {
           if (!(await confirmDialog(`Delete profile “${bd.name}”?`, { danger: true, okLabel: 'Delete' }))) return;
-          await api(`/api/plugin_bundles/${bd.id}`, { method: 'DELETE' });
+          try {
+            await api(`/api/plugin_bundles/${bd.id}`, { method: 'DELETE' });
+          } catch (e) { toast('Could not delete the profile: ' + e.message, 6000); return; }
           bundles = bundles.filter((x) => x.id !== bd.id);
           selected = (bundles[0] || {}).id;
           renderList();

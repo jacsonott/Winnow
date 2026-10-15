@@ -2,6 +2,7 @@
 helpers that are the only sanctioned way to touch S.selection/S.selectAll.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
+import { nameMap } from './core.js';
 import { rowAt } from './grid.js';
 import { groupCoordAt } from './grouping.js';
 
@@ -24,11 +25,11 @@ export const S = {
   columns: [],          // [{name, type}] plus, for analyst-added derived columns, {derived, derived_from, derived_op, derived_status, derived_id, parse_failures}
   appSettings: {},      // system-wide prefs (workspace/app_settings.json) — currently default_ts_format
   caseSettings: {},     // this case's own overrides (case_settings table) — currently ts_format
-  layout: {},           // name -> {w, hidden, pinned, tsFormat, durFormat, valuePicker}
+  layout: nameMap(),    // name -> {w, hidden, pinned, tsFormat, durFormat, valuePicker} — keyed by column name, so always a nameMap (core.js)
   order: [],            // column names in display order
   valueFilterMode: 'auto', // 'auto' (on under VALUE_FILTER_AUTO_MAX rows) | 'on' | 'off' — this table's value-picker default, per-column overrides live in S.layout
   hideEmptyRows: false, // the table menu's "Hide empty rows" — a per-table view preference, saved in the layout like valueFilterMode
-  filters: {},          // name -> raw filter text
+  filters: nameMap(),   // name -> raw filter text — a nameMap too, for the same reason
   filterOpen: [],       // column names whose filter box is revealed under the filter bar — transient, per table, never persisted
   sort: [],             // [{column, dir}]
   search: '',
@@ -113,7 +114,7 @@ export const S = {
   collapsedFolders: new Set(), // folder ids collapsed in the sidebar — a per-browser view pref (localStorage)
   timeline: {
     view: null, pages: new Map(), pending: new Set(), reqId: 0,
-    tagFilter: null, // tag ids currently checked; null = not yet initialized (defaults to "every known tag" on first load)
+    tagsOff: new Set(), // tag ids the analyst switched OFF the timeline; every other tag is on (timelineTagIds), including one created after the case opened
     raw: new Set(),  // "<source_id>:<rid>" for rows showing the raw source row instead of their summary — see fillTimelineBody
   },
   savedFilterCursor: -1,   // index into filtersForCurrentSource(), for [ and ] cycling

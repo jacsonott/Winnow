@@ -400,20 +400,78 @@ export function titleClippedCells() {
    grouped painters so a change to either lands in both. */
 export function rowPaintContext() {
   const cols = visibleCols();
+  const widths = Object.fromEntries(cols.map((name) => [name, colWidth(name)]));
+  // Hoisted with the widths: pinned placement is identical for every row
+  // in a pass, and recomputing it per row would walk the column list once
+  // per painted row.
+  const pins = pinnedOffsets();
   return {
     cols,
     colMeta: Object.fromEntries(S.columns.map((c) => [c.name, c])),
     idx: Object.fromEntries(S.columns.map((c, i) => [c.name, i])),
     tagColor: Object.fromEntries(S.tags.map((t) => [t.id, t.color])),
-    widths: Object.fromEntries(cols.map((name) => [name, colWidth(name)])),
-    // Hoisted with the widths: pinned placement is identical for every row
-    // in a pass, and recomputing it per row would walk the column list once
-    // per painted row.
-    pins: pinnedOffsets(),
+    widths,
+    pins,
+    span: paintedColumns(cols, widths, pins),
     needle: S.search.trim().toLowerCase(),
     // A pivoted session comparison's rows, when they are this table's.
     diffRows: S.diffMarks && S.diffMarks.sourceId === S.sourceId ? S.diffMarks.rows : null,
   };
+}
+
+/* The columns a paint pass actually builds cells for: the ones inside the
+   horizontal viewport, COL_OVERSCAN_PX either side of it, and every pinned
+   column wherever it is. Invariant #6 for the other axis.
+
+   Every row used to carry a cell for every visible column. That is free
+   on a 20-column EVTX table and the whole cost of a wide one: a
+   150-column table painted 8,550 cells per scroll frame for the ~10 on
+   screen across, and each frame took ~470 ms to the 20-column table's
+   ~75 (measured, headless Chromium) — scrolling, arrow keys and a cell
+   click all wait on that paint. Built cells now follow the viewport, so a
+   paint costs what the screen shows, not how wide the table is.
+
+   Returns the run in column order, as `{ ci, name }` for a column that
+   gets a cell and `{ gap }` for a run of skipped columns between two that
+   do — the row is a flex line, so a gap keeps every painted cell at the x
+   it would have had with all of them present. `ci` is still the column's
+   index in visibleCols(), which is what dataset.col and the cell range
+   address, so nothing downstream knows a column was skipped. No trailing
+   gap: #rows already has the full width (syncRowsWidth) and the row
+   fills it.
+
+   A pinned column is kept even when its natural place has scrolled away:
+   it is `position: sticky`, so it has to be in the row, after the gap
+   that stands for the columns before it, for the stickiness to hold it at
+   its offset. The header and the filter row are untouched — they hold
+   every column, which is what gives the scroller its width and keeps an
+   off-screen filter box reachable.
+
+   A grid that is not laid out (a page tab is up, or the home screen) has
+   no viewport to window to, so it gets every column rather than a guess;
+   nothing hidden is laid out, so that costs the build and no more. The
+   ResizeObserver in wireGrid repaints when a viewport grows past what the
+   last paint built. */
+export const COL_OVERSCAN_PX = 600;
+let paintedRight = Infinity;   // content x the last pass built cells out to
+export function paintedColumns(cols, widths, pins) {
+  const body = $('body');
+  const all = !body || !body.clientWidth;
+  const from = all ? -Infinity : body.scrollLeft - COL_OVERSCAN_PX;
+  const to = all ? Infinity : body.scrollLeft + body.clientWidth + COL_OVERSCAN_PX;
+  paintedRight = to;
+  const span = [];
+  let x = GUTTER_W;
+  let gap = 0;
+  cols.forEach((name, ci) => {
+    const w = widths[name];
+    if ((x + w > from && x < to) || pins[name] !== undefined) {
+      if (gap) { span.push({ gap }); gap = 0; }
+      span.push({ ci, name });
+    } else gap += w;
+    x += w;
+  });
+  return span;
 }
 
 /* A session comparison's mark on a row: A, the left session only; B, the
@@ -452,7 +510,7 @@ function diffMarkTitle(dm) {
    mark and the cell-range highlight can't be present in one mode and
    quietly missing in the other. */
 export function buildDataRow(pos, r, ctx) {
-  const { cols, colMeta, idx, tagColor, widths, pins, needle } = ctx;
+  const { colMeta, idx, tagColor, widths, pins, needle } = ctx;
   const row = el('div', 'row' + (r ? '' : ' pending'));
   row.dataset.pos = pos;
   if (pos === S.cursor) row.classList.add('cursor');
@@ -516,7 +574,13 @@ export function buildDataRow(pos, r, ctx) {
   }
   row.append(g);
 
-  cols.forEach((name, ci) => {
+  for (const { ci, name, gap } of ctx.span) {
+    if (gap) {
+      const sp = el('div', 'cell-gap');
+      sp.style.flexBasis = gap + 'px';
+      row.append(sp);
+      continue;
+    }
     const c = el('div', 'cell' + (colMeta[name] && colMeta[name].type === 'number' ? ' num' : ''));
     c.style.flexBasis = widths[name] + 'px';
     applyPin(c, name, pins);
@@ -534,7 +598,7 @@ export function buildDataRow(pos, r, ctx) {
       else c.textContent = displayCell(name, val);
     }
     row.append(c);
-  });
+  }
   return row;
 }
 
@@ -938,6 +1002,19 @@ export function wireGrid() {
 $('body').addEventListener('scroll', () => {
   if (!bodyScrollRaf) bodyScrollRaf = requestAnimationFrame(() => { bodyScrollRaf = null; render(); });
 }, { passive: true });
+
+/* The rows only hold the columns the last paint could see (paintedColumns),
+   so a viewport that GROWS past them owes a paint — and plenty of things
+   widen #body without a scroll or a window resize: closing the detail
+   pane, folding the sidebar, dragging its edge. Only growth past the
+   painted edge, so the many resizes that change nothing about which
+   columns are on screen (a height change, a narrower pane) cost nothing. */
+if (typeof ResizeObserver !== 'undefined') {
+  new ResizeObserver(() => {
+    const b = $('body');
+    if (b.clientWidth && b.scrollLeft + b.clientWidth > paintedRight) render();
+  }).observe($('body'));
+}
 
 /* Remote session mode: replace the browser's smooth pixel scrolling with
    whole-row jumps. Smooth scrolling animates a wheel notch through a dozen

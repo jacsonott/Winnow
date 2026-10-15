@@ -73,8 +73,9 @@ def test_a_brace_offers_names_and_enter_inserts_a_placeholder_that_renders(fl_pa
     tmpl.fill("{which} of {count} — ")
     pg.keyboard.type("{Eve")
     pg.wait_for_selector(ITEMS, timeout=5_000)
-    # What follows the brace narrows the list to the one name containing it.
-    assert _items(pg) == ["EventId"]
+    # What follows the brace narrows the list to the names containing it:
+    # the column, then its distinct-values form.
+    assert _items(pg) == ["EventId", "values:EventId"]
     pg.keyboard.press("Enter")
     pg.wait_for_function("() => !document.querySelector('.fl-ac')")
     assert _value(pg) == "{which} of {count} — {EventId}"

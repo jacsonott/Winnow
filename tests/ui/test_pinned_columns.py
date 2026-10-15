@@ -20,17 +20,14 @@ def _widen(page):
     targets both clamp to the same place — which silently made a
     "did it move?" assertion compare a value with itself.
 
-    What it changed is remembered for _unpin_all to put back: "without
-    saving" stops being true the moment anything saves the layout — a pin
-    does, and so does _unpin_all — and a shared case left with every
-    column 600px wide pushed test_space_over_a_cell_range's drag target
-    off the right edge of the viewport whenever the two shared a server."""
+    "Without saving" only holds until something saves: an Alt-click pin
+    and _unpin_all both persist the WHOLE layout, widths included. So the
+    layout as found is kept on the page, and _unpin_all puts the widths
+    and hidden flags back before its save."""
     page.evaluate("""() => {
-      window.__preWiden = {};
+      if (!window.__preWiden) window.__preWiden = JSON.stringify(__winnow.S.layout);
       for (const c of __winnow.S.columns) {
-        const was = __winnow.S.layout[c.name];
-        window.__preWiden[c.name] = was ? { has: true, w: was.w, hidden: was.hidden } : { has: false };
-        __winnow.S.layout[c.name] = { ...(was || {}), hidden: false, w: 600 };
+        __winnow.S.layout[c.name] = { ...(__winnow.S.layout[c.name] || {}), hidden: false, w: 600 };
       }
       __winnow.renderHead(); __winnow.render();
     }""")
@@ -41,18 +38,21 @@ def _unpin_all(page):
     """Clear pins AND persist the clearing. Pinning is a layout property
     saved server-side, and the UI suite shares one case file — an in-memory
     reset would be undone by the next test's page reloading the layout,
-    which is what made these pass alone and fail together. Puts back the
-    widths _widen changed before it saves, for the same reason."""
+    which is what made these pass alone and fail together.
+
+    The same save would persist _widen's 600px columns onto the shared
+    case, so those go back first — they did, and the next module in the
+    shard dragged to a cell 1524px across a 1500px viewport."""
     page.evaluate("""() => {
-      for (const [name, was] of Object.entries(window.__preWiden || {})) {
-        const cur = __winnow.S.layout[name];
-        if (!cur) continue;
-        for (const key of ['w', 'hidden']) {
-          if (was.has && was[key] !== undefined) cur[key] = was[key];
-          else delete cur[key];
+      if (window.__preWiden) {
+        const pre = JSON.parse(window.__preWiden);
+        for (const [k, v] of Object.entries(__winnow.S.layout)) {
+          const was = pre[k] || {};
+          if ('w' in was) v.w = was.w; else delete v.w;
+          if ('hidden' in was) v.hidden = was.hidden; else delete v.hidden;
         }
+        window.__preWiden = null;
       }
-      window.__preWiden = null;
       for (const k of Object.keys(__winnow.S.layout)) {
         if (__winnow.S.layout[k].pinned) __winnow.S.layout[k].pinned = false;
       }

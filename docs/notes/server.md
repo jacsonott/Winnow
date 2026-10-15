@@ -18,7 +18,14 @@ see [docs/notes/README.md](README.md) for the whole set.
   Two constraints worth knowing. SQLite attaches at most **10**
   databases (`MAX_ATTACHED`), and `v` already uses one — so the query
   path caps at 8 cases and everything else opens one reader at a time,
-  which is why the sweep and timeline have no case limit. And the routes
+  which is why the sweep and timeline have no case limit. Two more that
+  each produced a confident wrong answer: the timeline orders and
+  windows by `TS_NORMALIZE`, like the case's own timeframe filter (raw
+  text put `1/5/2024` before `12/31/2023`), and every SOURCE gets the
+  whole `limit + 1`, merged as they arrive — reading each with "the
+  limit minus rows so far" let the first table spend it all on its
+  latest rows while reporting `truncated: False`. The sweep's values are
+  LIKE-escaped: `svc_backup` matched `svcXbackup`. And the routes
   only read **registered** cases: a path arrives from the browser, and
   the case list is the analyst's own statement of what they work on.
   These views are read-only BY DESIGN, not pending work: tags and notes
@@ -56,6 +63,18 @@ see [docs/notes/README.md](README.md) for the whole set.
   write still serialises other writes, which is invariant #4's job, not
   this one's.
 
+- **A stale id must not act on something else.** Two windows on one
+  server see the same store, and either can delete what the other is
+  showing. Two rules keep the slower window honest. Case-file writes that
+  name a table, tag or row this case no longer has raise `RecordGone`
+  inside their transaction, before writing, and the global handler answers
+  **404** (store.md has the store side; ids are never reused there either).
+  And the case REGISTRY never reuses an id (`CaseRegistry` keeps `next_id`
+  in cases.json), while `DELETE /api/cases/{id}` takes the `path` the
+  client's list showed and refuses with **409**, touching nothing, when the
+  id now names another file — a home screen painted before the server
+  restarted can hold an id from the old numbering, and "delete with file"
+  on a bare id is the one step here that cannot be undone.
 - **One case file, one Winnow.** SQLite's WAL keeps the *file* consistent
   across processes, but nothing in this app invalidates a second process's
   caches or its frontend's row counts, `compact()` holds the writer for
@@ -78,6 +97,15 @@ see [docs/notes/README.md](README.md) for the whole set.
   and names the holder, `--force` overrides). Biased toward *reporting* a
   conflict, the opposite of `_views_file_is_orphaned`'s bias — there a
   wrong answer deletes a live process's file, here it costs one click.
+  The marker is named from the case's **realpath**, not its abspath: one
+  marker per file however the path was spelled, or a case opened through
+  a symlink holds a marker that nobody opening it by its real name ever
+  probes (`_same_case_path` is the matching comparison for "is this the
+  case that's already open"). **Deleting** a case file (`DELETE
+  /api/cases/{id}?delete_file=true`) is the one place the probe is a
+  refusal rather than a prompt — 409 `case_in_use`, no "anyway" — since
+  there is no version of deleting a case somebody has open that they
+  would want; it takes the -wal/-shm and a stale marker with it.
 - `/api/case/open` short-circuits when the requested path is **already the
   open case** — necessary, because the open-before-close ordering would
   otherwise make the process probe its own lock and refuse itself. Guarded
@@ -85,6 +113,18 @@ see [docs/notes/README.md](README.md) for the whole set.
   `Store.close()` on both the case-switch path and the legacy-preset
   migration, so "same path" alone is not "already open" and short-cutting
   there serves rows off a closed connection.
+- **Every route that replaces `STORE` holds `_CASE_SWITCH` for the whole
+  swap** — case open, the quick-look save-as and discard, the association
+  open (each is a thin wrapper around a private `_case_open` & co.). A
+  double-click on a case card is two `/api/case/open` POSTs on two worker
+  threads; unserialised, both read the same `old` and both opened, and the
+  Store whose assignment lost was never closed — its lock held for the
+  life of the process, so the case read as "open in another Winnow"
+  naming this one — and on one path both passed the already-open check
+  and the case got two writer Stores. A new route that swaps `STORE` takes
+  the lock too. The client has its own guard (`openCase` hands a second
+  call the in-flight one's promise), but the server cannot rely on it: two
+  windows, or a script, race just the same. `tests/test_case_lock.py`.
 - Static assets (`/`, `/static/*`) get an explicit `Cache-Control: no-cache`
   from a middleware in server.py — FastAPI's `StaticFiles` only sends
   `ETag`/`Last-Modified`, and without an explicit `Cache-Control` the
@@ -107,6 +147,17 @@ see [docs/notes/README.md](README.md) for the whole set.
   `post()` won't have it and will get 403'd. GET stays exempt on purpose (the
   Export/session/filters download links are plain navigations, which can't set
   custom headers at all).
+- **A name the analyst typed cannot be a plain `{name}` path segment.** The
+  ASGI path is percent-decoded before routing, so `encodeURIComponent`'s
+  `%2F` arrives as a real `/` and a one-segment parameter never matches:
+  a case session saved as "before 12/05" could never be loaded, renamed,
+  downloaded or deleted. The case-session routes take `{name:path}`
+  (greedy, so a name ending in "/load" still resolves); the plugin-state
+  key went the other way and travels as a parameter. Either works — what
+  does not is a segment. The one residue is "." and "..": a browser
+  resolves those (and their `%2E` spellings) out of the URL before it is
+  sent, so `Store._session_name` refuses them at save, rename and adopt
+  rather than storing a session nothing can reach.
 - `api_view` maps only `ValueError`/`KeyError` to 400; everything else is a
   500. It used to catch bare `Exception`, so an internal defect surfaced as
   "Filter error: …" — blaming the analyst's filter for something they can't
@@ -114,6 +165,23 @@ see [docs/notes/README.md](README.md) for the whole set.
   callers can tell the two apart. Nothing that a user can actually type
   reaches the 500 path: `validate_where_fragment` converts SQL errors to
   `ValueError`, and `_regexp` swallows `re.error`.
+- **A 500 means Winnow is broken; input it can't act on is a 4xx.** A
+  route fuzz found ~50 routes answering 500 for the request's own fault,
+  and the fixes follow three rules. An int past SQLite's 64-bit range
+  (any path/query/body id) is ONE handler, `int_out_of_range_handler`,
+  keyed on sqlite3's own OverflowError message rather than a bound on
+  every int parameter — any other OverflowError is still the bug it
+  would be. A structured parameter is checked at the door: a typed
+  pydantic shape where one fits (`tag_view`'s `exclude` pairs → 422),
+  an explicit check where it arrives as text (`group_summary`'s JSON
+  `path`) or as a file (`session_document_problem` /
+  `case_session_document_problem` in store.py, `_filters_file_problem`
+  here) — and a whole case session is checked before its FIRST table is
+  applied, so a bad tenth table can't leave nine written. A missing
+  table is a 404, a table still importing is the 400
+  `Store._require_columns` raises, and no open case is a 400 — nothing
+  is broken, there's just no case yet. `tests/test_api_routes.py`'s
+  last section pins each one through a client that doesn't re-raise.
 - **The background-search routes** — `POST /api/view/start`, `GET
   /api/view/job`, `POST /api/view/job/cancel`, `POST /api/view/adopt`
   (the search box's build, run as a job that builds a *held* view; see
@@ -169,20 +237,50 @@ see [docs/notes/README.md](README.md) for the whole set.
   beside it; export sets `Content-Disposition` with the profile name
   slugged through a `[^A-Za-z0-9._-]` filter, since profile names are free
   text.
+- **Every download's `Content-Disposition` comes from `_attachment()`**,
+  never an f-string. Starlette encodes header values as Latin-1, so
+  `filename="{name}"` was a 500 — and no file — for one en dash or
+  Cyrillic letter, and the names that reach these headers are exactly the
+  text that carries them: a SQL tab's name, an evidence file's own name,
+  what the analyst typed in the save prompt. The helper writes the real
+  name as RFC 6266 `filename*=UTF-8''…` beside an ASCII `filename="…"`
+  fallback (non-ASCII, `"` and `\` replaced), and turns control
+  characters into `_` in both, since a CR/LF would end the header line.
+  `FileResponse` gets it through `headers=` rather than its own
+  `filename=`, so there is one rule.
 - `run_sql` (the SQL pane) allows arbitrary SELECT/EXPLAIN on purpose, but
   blacklists `ATTACH`/`DETACH`/`PRAGMA`/`VACUUM` as defense-in-depth — none of
   those serve a read-only ad-hoc query pane. CSV export runs every cell through
   `_csv_safe()` (OWASP formula-injection prefixing for `=+-@`/tab/CR-leading
   values) since exports are explicitly meant to be opened in Excel and handed
   to other analysts; this only touches the exported copy, never the stored
-  case-file value. **Worksheet exports go through `_xlsx_safe()` instead**,
+  case-file value. **The header row and the Tags column go through it too**
+  (`_export_header`): column names are header text out of the evidence
+  file and tag names arrive in adopted sessions, and openpyxl writes any
+  string opening with `=` as a formula — a column called `=HYPERLINK(...)`
+  was a live link in the hand-over workbook while every cell under it was
+  neutralised. The SQL pane's CSV (`Store.sql_result_csv`) follows the
+  same rules — column names through `_csv_safe`, text cells too, numbers
+  left as numbers (`-5` is not a formula, and `'-5` would be text in the
+  spreadsheet) — so its CSV and Excel buttons cannot disagree about one
+  result. **Worksheet exports go
+  through `_xlsx_safe()` instead**,
   which is `_csv_safe` plus the C0 control characters XML 1.0 cannot hold:
   ingest keeps those in cell values on purpose (names must be quotable,
   cells are evidence), openpyxl refuses them, and it refuses the whole
   workbook rather than the one cell — so one BEL in one command line used
   to take down the entire tagged export. They are escaped to `\x07` rather
   than dropped, because a silently shortened string in a hand-over artifact
-  is worse than a visible escape.
+  is worse than a visible escape. Length is the same rule: openpyxl cuts a
+  value at Excel's 32,767-character cell limit without saying so, so
+  `_xlsx_safe` cuts first and ends the cell with a marker naming the full
+  length. Sheet names (`_xlsx_sheet_name`) are XML text too — a control
+  character in a source name wrote a workbook nothing would reopen — and
+  the apostrophe rule is applied after the 31-character cut, not before.
+  A merged view's CSV carries a `Table` column after `Line` (the member's
+  nickname or name): `Line` is a rid within one member, so without it two
+  rows of a merge both read "Line 1" with nothing saying where either is.
+  A single table's export keeps the old header.
 - **The SQL pane's results are held server-side** (`winnow/sqlresults.py`,
   `POST /api/sql/run` and the `/api/sql/result/{id}/…` routes). The pane
   has no row cap, and "every row" as one JSON response was every row in
@@ -204,13 +302,68 @@ see [docs/notes/README.md](README.md) for the whole set.
   text — numerically, then text) or a click-sort and its export disagree
   — `WINNOW_SORT_NUM` is a UDF for that reason; **a result is a handle
   the client must let go of** (a re-run sends the old id in `release`,
-  closing a tab releases, and the store keeps at most `KEEP` anyway); a
-  run **stops on a nearly full disk** (`MIN_FREE_BYTES`) with the rows it
-  has, rather than filling `/dev/shm`; and a value that isn't JSON (a
-  non-UTF-8 blob, ±Inf) is converted per cell in `cell()`, since one used
-  to make the whole response a 500. `/api/sql` itself is unchanged for
-  Python callers and `winnow.api.sql`: `limit` defaults to 5,000, and an
-  explicit `null` still means every row.
+  closing a tab releases, and the store keeps at most `KEEP` anyway); and
+  a run **stops on a nearly full disk** (`MIN_FREE_BYTES`) with the rows
+  it has, rather than filling the tempdir. `/api/sql` itself is
+  unchanged for Python callers and `winnow.api.sql`: rows inline,
+  `limit` 5,000 by default.
+- **Every SQL pane cell is encoded at the JSON boundary**
+  (`pane_cell_json`, in `winnow/sqlresults.py`), not in `Store.run_sql`,
+  whose raw values plugins are owed: a non-UTF-8 BLOB becomes SQLite's
+  `X'00FF'` (a UTF-8 one its text, as before), a non-finite REAL
+  `Inf`/`-Inf`/`NaN`, and an integer past ±2^53 its decimal string. The
+  first two were a 500 (JSON has neither); the third arrived rounded, so
+  grid, Copy, CSV and Excel all disagreed with the case for a
+  FILETIME-sized number. A held result's pages, picks and workbook go
+  through it, `/api/sql`'s inline rows do, and its CSV and clipboard text
+  (`js_str`) spell the same three the same way. "Save as table" stores
+  the same spellings (`pane_cell_text`) — it stored Python's `b'…'` repr
+  — and re-runs the query that produced the result on screen (`r.sql`,
+  kept by `runSql`), not the editor's text by then.
+- **A pane query has to be stoppable, because some of what gets typed
+  never ends** — a recursive CTE with no stop condition, a cross join of
+  two 2M-row tables. One used to run at 100% CPU through everything: the
+  analyst had no Stop, a closed window or reload left it running, a case
+  switch left it running, and **Shut down, Ctrl+C and SIGTERM left the
+  process running** with the case lock held. That last is a uvicorn trap
+  worth knowing for anything else that can run unbounded: graceful
+  shutdown waits for every in-flight request *before* it runs the
+  lifespan's shutdown half, so `_lifespan`'s `Store.close()` never got
+  the chance, and the process cannot exit while a worker thread is inside
+  `sqlite3_step` anyway. Every way in ends in `Connection.interrupt()` on
+  the pane's own connection (`Store._pane_query`, which `run_sql`,
+  `run_sql_result` and `sql_to_table` all run on):
+  - **the pane's Stop, and the busy chip.** `runSql` sends an `op_token`
+    with `/api/sql/run` and arms `armOpCancel` with it, like a view
+    build; the running result shows "Running… N rows so far" (polled
+    from `/api/sql/run/progress`) beside a Stop button that cancels the
+    same token. Stopped after rows have landed, the result keeps them and
+    says "stopped"; stopped before the first one, it is the 499, which
+    paints as "Query cancelled". A run that is overtaken (Run again, its
+    tab closed, another case opened) is cancelled the same way
+    (`abandonSqlRuns`), so it stops rather than finishing for nobody.
+  - **the client hanging up.** `/api/sql`, `/api/sql/run` and
+    `/api/sql/to_table` are `async` for this alone (`_run_pane_query`): a
+    sync route never reads its socket again, so it cannot notice. They
+    wait on the worker thread and on the ASGI receive channel together —
+    after the body, the only message left is `http.disconnect` — and turn
+    a hang-up into `cancel_op`, with a made-up token when the client sent
+    none. That also keeps a closed window's query from holding the idle
+    shutdown off (it is an in-flight request).
+  - **shutdown.** `main()` runs a `uvicorn.Server` subclass whose
+    `handle_exit` — the signal handler, which is where Shut down's
+    SIGINT, Ctrl+C and SIGTERM all land — calls `stop_pane_queries()`
+    first, on a thread of its own (a handler can run inside
+    `Store.close()` holding the lock that takes). That is why `main()`
+    builds the server itself instead of calling `uvicorn.run`; it keeps
+    `run`'s KeyboardInterrupt suppression and its exit code 3 when the
+    server never started. **A test that drives `main()` up to the bind
+    stands in for `uvicorn.Server.run`, not `uvicorn.run`** — patching
+    the latter no longer stops anything, so the test starts a real server
+    and hangs (tests/test_no_console_launch.py, test_not_a_case_file.py).
+  No deadline: a GROUP BY over a few million rows legitimately takes
+  minutes, and the analyst is better placed than a timer to say which
+  query is runaway. `tests/test_sql_runaway.py` covers each way in.
 - **`POST /api/shutdown`** (the home screen's ⏻ button and Session → "Shut
   down Winnow…") stops the server from the UI — the server usually lives
   in a forgotten terminal, and closing the browser tab leaving it running
@@ -221,22 +374,23 @@ see [docs/notes/README.md](README.md) for the whole set.
   `Store.close()`, views scratch files are deleted. `_trigger_shutdown`
   is a separate function *so tests can monkeypatch it* — calling the real
   one under pytest kills pytest. The CSRF header gate is what stops a
-  hostile page in another tab from turning the server off. **It stops
-  every SQL query in flight first** (`Store.cancel_sql_runs`): graceful
-  shutdown waits for open requests, and a runaway query (a recursive CTE
-  with no stop condition) is a request that never ends — Shut down used
-  to leave Winnow at full CPU, still holding the case lock. Every SQL run
-  registers its op token for this (`Store._sql_run`), with or without the
-  pane's own Stop button.
+  hostile page in another tab from turning the server off. A SQL pane
+  query in flight is stopped by that SIGINT (`handle_exit` →
+  `stop_pane_queries`, above), not by this route.
 
 - **Idle shutdown rides the presence stream, not request traffic.** An
   analyst reading the grid makes no requests for hours, so "last request
   time" would reap a live session; instead every page holds an EventSource
   open to `/api/presence` and the count of live streams is the signal.
   Three holds stop it destroying work: open streams, in-flight HTTP
-  (counted in the no-cache middleware, `/api/presence` itself excluded or
-  it would read busy forever — a CSV download outliving its tab is exactly
-  what this hold protects), and running/queued ingest jobs. A server
+  (counted by `_InflightCounter`, `/api/presence` itself excluded or it
+  would read busy forever — a CSV download outliving its tab is exactly
+  what this hold protects), and running/queued ingest jobs. The counter
+  is **raw ASGI on purpose**: it used to live in a `@app.middleware`
+  (BaseHTTPMiddleware), whose `call_next` returns when the headers exist
+  and streams the body afterwards, so a download stopped counting the
+  moment it started. Anything that has to span a whole response body
+  can't be a BaseHTTPMiddleware. A server
   nothing ever connected to gets a 15-minute fuse rather than the 2-minute
   one — `--no-browser` plus a slow manual visit is legitimate, but an
   association-spawned server whose window failed to open still gets
@@ -266,6 +420,17 @@ see [docs/notes/README.md](README.md) for the whole set.
   case — a fresh install's first double-click must not stack the
   cases-dir setup prompt on top of the file the analyst opened.
 
+- **The default cases folder is the install's, never the working
+  directory's.** `_default_cases_dir()` is `INSTALL_ROOT/cases` — what
+  `_cases_dir()` falls back to, what `GET /api/prefs` reports as
+  `default_cases_dir`, what the first-run prompt names and what its "Use
+  the default" stores. It used to post `'cases'`, which `POST /api/prefs`
+  made absolute against the server's cwd, so `python /opt/winnow/
+  server.py` run from a home directory filed every case under ~/cases.
+  A relative `cases_dir` is now resolved against `INSTALL_ROOT`, and New
+  case falls back to `default_cases_dir` (not a relative `cases/`) on an
+  install that has cases but never set a folder.
+
 - **The quick-look sweep must recognise every kind of work.** It deletes
   abandoned temp cases after 7 days, and judged "no analysis" from tags,
   notes and sessions alone — so a quick-look whose content was a
@@ -275,6 +440,12 @@ see [docs/notes/README.md](README.md) for the whole set.
   case holds except what it is BORN with (`open_tabs`, the seeded
   `tag_defs`) and incidental UI state. Add new case tables to that list
   when they can hold something an analyst would miss.
+  Two more guards, same bias: the sweep only considers files
+  `is_winnow_case_file` accepts (a History.db dropped in `quicklook/`
+  has none of the work tables either, which read as "empty" and got it
+  deleted), and a file it can't read is skipped rather than ending the
+  sweep — a corrupt one used to raise `sqlite3.DatabaseError` past the
+  per-file `except OSError` and strand every file listed after it.
 
 - **A dropped presence stream is not a closed window.** Idle shutdown
   used to fire `IDLE_EXIT_S` after the last stream ended, which is right
@@ -286,8 +457,22 @@ see [docs/notes/README.md](README.md) for the whole set.
   outlives the unload; skipped when `persisted` says the page is only
   going into the bfcache), and the short fuse applies only when that
   arrived. A stream that merely stopped gets `SUSPENDED_EXIT_S` instead.
-  `_presence_open()` clears the flag, so closing one of two windows
-  cannot put the survivor on the short fuse.
+  **The goodbye has to be the LAST window's.** This note used to say a new
+  stream clearing the flag was enough to keep closing one of two windows
+  from putting the survivor on the short fuse; it was not — nothing new
+  connects, the closed window's goodbye stood, and when the survivor later
+  went quiet the server exited two minutes on. Clearing the flag whenever
+  a stream ends with others still open covers a goodbye that arrives
+  before its stream's end, but the two arrive in either order (the close
+  is noticed on the loop the moment the socket drops; the goodbye is a
+  separate request), and a goodbye landing after its own stream has gone
+  looks just like the survivor's. So both carry a per-page-load id
+  (`?page=` from `connection.js`), and `_presence_close` decides at the
+  moment the count reaches zero, by whether the page that just went said
+  goodbye; `api_goodbye` is `async` so the presence record is only touched
+  from the event loop. A goodbye with no page id (an older client, the
+  integration tests' raw requests) keeps the old meaning.
+  `tests/test_idle_shutdown.py`.
 
 - **Tests that spawn a real `server.py` must isolate it by env, not
   fixture.** The autouse `isolate_workspace` monkeypatch can't reach a
@@ -350,7 +535,20 @@ see [docs/notes/README.md](README.md) for the whole set.
   unchanged, because `is_winnow_case_file` and the open path sniff
   CONTENT (SQLite header + the sources/tag_defs/row_tags tables), never
   the extension — only NEW cases take the new suffix, nothing is
-  migrated. In the association catalogue `.db-winnow` is
+  migrated. The same sniff is the gate on every door that names an
+  EXISTING path as a case — `/api/case/open`, `POST /api/cases`
+  registration, `/api/case/copy_sources`' target, `--case` on the
+  command line, and `_open_store` behind all of them — because opening a
+  Store is a write (META_SCHEMA, WAL): before the gate covered all four,
+  a Chrome `History` registered as a case and then picked in "Copy into
+  this case" gained Winnow's tables and changed hash. A path that does
+  not exist is a new case and is created as before
+  (tests/test_not_a_case_file.py) — except from "Open existing case
+  file…", which registers with `must_exist` and is refused ("No case
+  file at …") instead: it used to create an empty case at a mistyped
+  path and open it, which looks exactly like the analyst's case with
+  its tables gone. Creating is + New case's job; `--case FILE` still
+  creates a missing case, as documented. In the association catalogue `.db-winnow` is
   `default_ok`, alongside the formats nothing else contests — `.csv`,
   `.tsv`, `.jsonl`, `.ndjson`. What is particular about it is the
   ownership: nothing on the system claims `.db-winnow` at all, so Winnow
@@ -423,3 +621,17 @@ see [docs/notes/README.md](README.md) for the whole set.
   `tests/test_no_console_launch.py` pins it, and carries a test that the
   unfixed call really does raise, so a future uvicorn that stops asking
   cannot quietly turn the rest of the file into a tautology.
+
+  **The stream also has to be able to spell what startup prints.** The
+  first version opened the null device in the locale encoding — cp1252
+  on a typical Windows box — and startup prints "Plugin disabled: …
+  (toggle in Settings → Plugins)" for every bundled example, which all
+  ship off. `→` is not in cp1252, so the same double-click died the same
+  silent death one line later. The null stream is opened UTF-8 with
+  `errors="replace"`, and a real stream that is strict in the locale
+  encoding (`python server.py > winnow.log`, `PYTHONIOENCODING=cp1252`)
+  is reconfigured to `errors="backslashreplace"` — encoding kept, since
+  whatever reads it expects that one. That is what Python's own stderr
+  does already, which is why log.record (stderr) only broke through the
+  null stream. Anything new that opens a text stream to print through
+  needs an explicit encoding for the same reason.

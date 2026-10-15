@@ -123,7 +123,7 @@ def test_stop_before_the_first_row_says_so(sql):
     page.wait_for_selector(".sql-running .btn")
     page.locator(".sql-running .btn", has_text="Stop").click()
     page.wait_for_selector("#sqlResult .sql-error")
-    assert page.locator("#sqlResult .sql-error").inner_text() == "Stopped before the query returned any rows."
+    assert page.locator("#sqlResult .sql-error").inner_text() == "Query cancelled"
     assert not _progress(page, token)["running"]
 
 

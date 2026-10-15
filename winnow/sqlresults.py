@@ -56,7 +56,7 @@ import threading
 import time
 from collections import OrderedDict
 from pathlib import Path
-from typing import Callable, Iterator
+from typing import Any, Callable, Iterator
 
 try:  # POSIX only — see store._views_file_is_orphaned
     import fcntl
@@ -109,17 +109,56 @@ def _sort_num(v):
     return f if math.isfinite(f) else None
 
 
-def cell(v):
-    """A stored value as it goes out in JSON. bytes can't (a BLOB reads
-    as text, as /api/sql always returned it, but never as a 500 on bytes
-    that aren't UTF-8) and neither can a non-finite float, which
-    json.dumps writes as `Infinity` — not JSON, and JSON.parse refuses
-    the whole page for it."""
+# The largest integer a JavaScript number holds exactly.
+_JS_MAX_SAFE_INT = 2 ** 53 - 1
+
+
+def _blob_text(b: bytes) -> str:
+    """A BLOB as the SQL pane shows it: its text when it is UTF-8 (what
+    CAST('abc' AS BLOB) holds, and what the grid already showed), else
+    SQLite's own literal for it, X'00FF' — what quote() prints."""
+    try:
+        return b.decode("utf-8")
+    except UnicodeDecodeError:
+        return "X'" + b.hex().upper() + "'"
+
+
+def _nonfinite_text(f: float) -> str:
+    """Inf/-Inf/NaN spelled the way SQLite's CAST(… AS TEXT) spells them."""
+    return "NaN" if f != f else ("Inf" if f > 0 else "-Inf")
+
+
+def pane_cell_json(v: Any) -> Any:
+    """One SQL pane cell as JSON can carry it to the browser without
+    changing what it says. A non-UTF-8 BLOB (SELECT x'00ff') and a
+    non-finite REAL (SELECT 1e999) both made /api/sql a 500 — JSON has no
+    bytes and no Infinity — and an integer past 2^53 arrived rounded, so
+    the grid, Copy, CSV and Excel all showed a different number from the
+    one in the case (a FILETIME or a 64-bit id is exactly that size).
+    Those three become text; everything else passes through as it was.
+
+    Every way a held result leaves the server goes through here — a page,
+    a pick, the workbook — and /api/sql's inline rows do too, so the pane
+    says the same thing whichever route a value took."""
     if isinstance(v, bytes):
-        return v.decode("utf-8", "replace")
+        return _blob_text(v)
     if isinstance(v, float) and not math.isfinite(v):
-        return "NaN" if v != v else ("Infinity" if v > 0 else "-Infinity")
+        return _nonfinite_text(v)
+    if isinstance(v, int) and not isinstance(v, bool) and abs(v) > _JS_MAX_SAFE_INT:
+        return str(v)
     return v
+
+
+def pane_cell_text(v: Any) -> str:
+    """The same cell as the TEXT "Save as table" stores — the same spelling
+    the pane showed, not Python's repr (a BLOB used to land as "b'abc'")."""
+    if v is None:
+        return ""
+    if isinstance(v, bytes):
+        return _blob_text(v)
+    if isinstance(v, float) and not math.isfinite(v):
+        return _nonfinite_text(v)
+    return str(v)
 
 
 def js_str(v) -> str:
@@ -132,7 +171,7 @@ def js_str(v) -> str:
         return v
     if isinstance(v, float):
         if not math.isfinite(v):
-            return cell(v)
+            return _nonfinite_text(v)
         if v.is_integer() and abs(v) < 1e21:
             return str(int(v))
         s = repr(v)
@@ -144,7 +183,7 @@ def js_str(v) -> str:
             return f"{mant}e{'+' if n >= 0 else '-'}{abs(n)}"
         return s
     if isinstance(v, bytes):
-        return cell(v)
+        return _blob_text(v)
     return str(v)
 
 
@@ -490,7 +529,7 @@ class SqlResults:
                 cur = self._ordered(conn, meta, self._sort(sort, order), start=start,
                                     stop=min(meta["total"], start + count))
                 for row in cur:
-                    out = [cell(v) for v in row]
+                    out = [pane_cell_json(v) for v in row]
                     rows.append(out)
                     budget += sum(len(v) if isinstance(v, str) else 8 for v in out) + 4 * len(out)
                     if budget > self.PAGE_BYTES:
@@ -593,5 +632,5 @@ class SqlResults:
                 size += sum(len(v) if isinstance(v, str) else 8 for v in row)
                 if size > limit:
                     raise TooBig(f"Too many rows selected to hand over ({meta['total']:,} in the result)")
-                rows.append([cell(v) for v in row])
+                rows.append([pane_cell_json(v) for v in row])
             return {"columns": meta["columns"], "rows": rows}

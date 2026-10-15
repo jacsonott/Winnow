@@ -204,3 +204,67 @@ def test_cancel_drops_the_partial_source(store, tmp_path):
     with pytest.raises(IngestCancelled):
         store.ingest_plaso(str(plaso), build_fts=False, cancel=lambda: True)
     assert {s["id"] for s in store.list_sources()} == before
+
+
+@pytest.mark.parametrize("bad", [b"not zlib at all", None, _zc([1, 2])])
+def test_an_unreadable_event_row_is_kept_as_a_row_saying_so(store, tmp_path, bad):
+    """A serialized event whose blob wouldn't decode was skipped with a
+    bare `continue` — the table came up one row short and nothing said
+    so — and a NULL `_data` raised TypeError out of json.loads and failed
+    the whole import. Either way the event now lands as a row: its
+    timestamp from the event table, and an `_winnow_error` note in the
+    Attributes cell, the shape an unreadable event_data row already
+    degrades to."""
+    plaso = tmp_path / "bad.plaso"
+    make_old_plaso(plaso)
+    db = sqlite3.connect(plaso)
+    db.execute("INSERT INTO event(_timestamp, _data) VALUES (?, ?)", (1_700_000_090_000_000, bad))
+    db.commit()
+    db.close()
+
+    rec = store.ingest_plaso(str(plaso), build_fts=False)
+    assert rec["row_count"] == 3                     # every event in the file, the broken one too
+    rows = store.run_sql(f"SELECT * FROM src_{rec['id']} ORDER BY rid")["rows"]
+    broken = rows[1]                                 # chronological: between the two good ones
+    assert broken[1] == "2023-11-14 22:14:50.000000"
+    assert "unreadable event row" in json.loads(broken[8])["_winnow_error"]
+
+
+def test_a_null_event_data_blob_degrades_to_an_error_note(store, tmp_path):
+    plaso = tmp_path / "nulldata.plaso"
+    make_old_plaso(plaso)
+    db = sqlite3.connect(plaso)
+    db.execute("UPDATE event_data SET _data = NULL WHERE _identifier = 1")
+    db.commit()
+    db.close()
+    rec = store.ingest_plaso(str(plaso), build_fts=False)
+    assert rec["row_count"] == 2
+    rows = store.run_sql(f"SELECT * FROM src_{rec['id']} ORDER BY rid")["rows"]
+    assert "unreadable event_data row 1" in json.loads(rows[0][8])["_winnow_error"]
+
+
+def test_a_lone_surrogate_in_an_event_does_not_stop_the_import(store, tmp_path):
+    """Plaso's serializer escapes an unpaired-surrogate NTFS name as
+    "\\udc80"; the decoded string couldn't be stored as UTF-8 and the
+    whole import stopped at that event's batch."""
+    path = str(tmp_path / "s.plaso")
+    make_old_plaso(path)
+    db = sqlite3.connect(path)
+    doc = json.dumps({"__container_type__": "event_data", "__type__": "AttributeContainer",
+                      "data_type": "fs:stat", "parser": "filestat",
+                      "display_name": "OS:/tmp/evil.txt", "filename": "/tmp/evil.txt",
+                      "note": "x"}).replace("evil.txt", "evil\\udc80.txt").replace('"x"', '"\\udc81"')
+    db.execute("INSERT INTO event_data(_data) VALUES (?)", (zlib.compress(doc.encode()),))
+    db.execute("INSERT INTO event(_timestamp, _data) VALUES (?,?)", (1_700_000_180_000_000, _zc({
+        "__container_type__": "event", "__type__": "AttributeContainer",
+        "timestamp": 1_700_000_180_000_000, "timestamp_desc": "Creation Time",
+        "_event_data_row_identifier": 3})))
+    db.commit()
+    db.close()
+
+    rec = store.ingest_plaso(path, build_fts=False)
+    assert rec["row_count"] == 3
+    v = store.build_view(rec["id"], {"source_id": rec["id"]})
+    row = store.fetch_rows(v["view_id"], 2, 1)["rows"][0]["cells"]
+    assert "OS:/tmp/evil\\udc80.txt" in row
+    assert json.loads(row[-1])["note"] == "\udc81"        # Attributes stays valid JSON

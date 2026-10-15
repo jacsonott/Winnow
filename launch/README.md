@@ -3,8 +3,11 @@
 These are double-click launchers for people who'd rather not open a terminal
 and type `python server.py`. Each one just finds Python and starts Winnow
 from the install root (the folder above this one) — no build step, nothing
-installed, so they're airgap-safe. Winnow still needs Python 3 and its
-runtime deps (`pip install -r requirements.txt`), same as running it by hand.
+installed, so they're airgap-safe. Winnow still needs Python 3.10 or newer
+and its runtime deps (`pip install -r requirements.txt`), same as running it
+by hand. The launchers run whichever Python they find on your PATH and
+don't look for a virtual environment, so if you installed the deps into one,
+start Winnow with that environment's Python instead.
 
 | OS | File | Notes |
 | --- | --- | --- |
@@ -29,8 +32,10 @@ an absolute `Exec=` path.
 
 ## A Linux desktop entry (optional)
 
-For an app-menu / dock icon, create `~/.local/share/applications/winnow.desktop`
-with the absolute path to your install:
+For an app-menu / dock icon, create
+`~/.local/share/applications/winnow-launcher.desktop` with the absolute path to
+your install. Don't call it `winnow.desktop`: that is the entry Winnow's own
+file associations write, and unregistering the last file type deletes it.
 
 ```ini
 [Desktop Entry]

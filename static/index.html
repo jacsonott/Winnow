@@ -124,8 +124,8 @@ try {
     <span class="hint" id="searchMode">substring</span>
   </div>
   <div class="search-mode-toggle" id="searchModeToggle" hidden>
-    <button class="btn ghost" data-mode="contains" aria-pressed="true">Contains</button>
-    <button class="btn ghost" data-mode="regex">Regex</button>
+    <button class="btn ghost" data-mode="contains" aria-pressed="true" title="Substring match. Ignores case for A–Z only — use Regex to ignore case in other scripts (Cyrillic, accented letters)">Contains</button>
+    <button class="btn ghost" data-mode="regex" title="Regular expression (Python syntax). Ignores case in every script">Regex</button>
     <button class="btn ghost" data-mode="advanced">Advanced</button>
   </div>
   <div id="advancedSearchBar" class="advanced-search-bar" hidden></div>
@@ -373,7 +373,7 @@ Markdown: # headings, - bullets, **bold**, `code`, tables. Link ▾ points at a 
 <div class="toast" id="toast" role="status" hidden></div>
 
 <!-- Cancel chip for a long-running cancellable op (view/timeline build,
-     group summary) — armOpCancel() shows it only once the op has been in
+     group summary, SQL pane query) — armOpCancel() shows it only once the op has been in
      flight long enough to be worth cancelling. -->
 <button class="busy-cancel" id="busyCancel" hidden>✕ Cancel</button>
 
@@ -382,7 +382,7 @@ Markdown: # headings, - bullets, **bold**, `code`, tables. Link ▾ points at a 
 <div class="jobs-panel" id="jobsPanel" hidden aria-live="polite"></div>
 <div class="tag-toolbar" id="tagToolbar" hidden></div>
 <div class="drop-overlay" id="dropOverlay" hidden aria-hidden="true">
-  <div class="drop-overlay-card">Drop to import — CSV/TSV/JSON, or a single SQLite file</div>
+  <div class="drop-overlay-card">Drop to import — CSV/TSV, JSON, SQLite, Excel, Plaso, archives, or any log as text</div>
 </div>
 
 <!-- type="module" so the app can be split across static/js/*.js with real

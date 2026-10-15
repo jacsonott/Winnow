@@ -11,7 +11,7 @@ import { renderPluginTabs, renderPluginPanelButtons } from './plugins.js';
 import { fmtBytes } from './tables.js';
 import { loadSources } from './sources.js';
 import { S } from './state.js';
-import { confirmDialog, modal, promptDialog } from './ui.js';
+import { confirmDialog, modal, oneAtATime, promptDialog } from './ui.js';
 
 /* ------------------------------------------------------------- plugins */
 
@@ -194,9 +194,10 @@ export function queueFilesForFormat(fmt, files) {
 export function openImportModal() {
   modal('Import', (b) => {
     b.append(el('p', null,
-      'Queue CSV/TSV, JSON/JSONL, Excel, or SQLite files (a SQLite file needs its tables picked '
-      + 'first, an Excel workbook its sheets), '
-      + 'then import them all — imports run in the background, so you can keep working while the '
+      'Queue CSV/TSV, JSON/JSONL, SQLite, Excel (.xlsx/.xlsm), Plaso or archive (zip/tar/gz) '
+      + 'files — any other log imports as text, one line per row — then import them all, or '
+      + 'import a whole folder at once. A SQLite file needs its tables picked first, an Excel '
+      + 'workbook its sheets. Imports run in the background, so you can keep working while the '
       + 'corner panel tracks progress.'));
 
     const queueList = el('div', 'session-queue');
@@ -352,9 +353,18 @@ export function openImportModal() {
                   return uploadWithProgress('/api/ingest/archive/upload', fd, item.name);
                 })();
               expanded.push({ name: item.name, ...rep });
+              // Skipped members (damaged, unwritable, refused as unsafe) and
+              // renamed ones (two wanted one name) are things the analyst
+              // needs to know before trusting the tree; the first of each is
+              // named, the full list is in the log.
+              const skipped = rep.skipped || [];
+              const renamed = rep.renamed || [];
               toast(`Expanded ${item.name}: ${rep.files.toLocaleString()} file${rep.files === 1 ? '' : 's'}`
                 + (rep.archives > 1 ? ` from ${rep.archives} nested archives` : '')
-                + (rep.truncated ? ' (stopped at a safety cap — partial)' : ''), 6000);
+                + (renamed.length ? ` · ${renamed.length} renamed, the name was taken (${renamed[0].path} → ${renamed[0].as})` : '')
+                + (skipped.length ? ` · ${skipped.length} skipped (${skipped[0].path}: ${skipped[0].reason})` : '')
+                + (rep.truncated ? ' (stopped at a safety cap — partial)' : ''),
+              skipped.length || renamed.length ? 12000 : 6000);
             } catch (e) {
               if (!e.cancelled) toast(`Could not expand ${item.name}: ` + e.message, 8000);
             }
@@ -530,7 +540,12 @@ function openUnitPicker(src, { initial, onConfirm, onCancel } = {}, cfg) {
         cb.onchange = () => { cb.checked ? included.add(t.name) : included.delete(t.name); };
         const lab = el('label');
         lab.style.cssText = 'display:flex;align-items:center;gap:8px;flex:1';
-        lab.append(cb, el('span', 'session-name', t.name), el('span', 'count', `${t.row_count.toLocaleString()} rows`));
+        // A table the server could not read (a virtual table whose module
+        // this SQLite lacks) is shown, with why, but can't be picked —
+        // the file's other tables still import.
+        if (t.error) cb.disabled = true;
+        lab.append(cb, el('span', 'session-name', t.name),
+          el('span', 'count', t.error ? `can't be read: ${t.error}` : `${t.row_count.toLocaleString()} rows`));
         head.append(lab);
         row.append(head);
         if (t.likely_timestamp_columns.length) {
@@ -585,7 +600,7 @@ function openUnitPicker(src, { initial, onConfirm, onCancel } = {}, cfg) {
         // Re-opening the picker restores the previous choices; a fresh file
         // defaults to converting every detected timestamp column.
         if (prior) {
-          if (prior.has(t.name)) included.add(t.name);
+          if (prior.has(t.name) && !t.error) included.add(t.name);
           selected.set(t.name, prior.get(t.name) || new Set(t.likely_timestamp_columns));
         } else {
           selected.set(t.name, new Set(t.likely_timestamp_columns));
@@ -843,7 +858,9 @@ export async function openDirectoryImportModal(state = {}) {
       delBtn.onclick = async () => {
         const name = S.importProfiles.find((p) => p.id === st.profileId)?.name || 'this profile';
         if (!(await confirmDialog(`Delete the "${name}" profile?`, { danger: true, okLabel: 'Delete' }))) return;
-        await api(`/api/import_profiles/${st.profileId}`, { method: 'DELETE' });
+        try {
+          await api(`/api/import_profiles/${st.profileId}`, { method: 'DELETE' });
+        } catch (e) { toast(`Could not delete the "${name}" profile: ${e.message}`, 6000); return; }
         openDirectoryImportModal({ ...st, profileId: null });
       };
       profileRow.append(delBtn);
@@ -937,7 +954,7 @@ export async function openDirectoryImportModal(state = {}) {
 
     const cancelBtn = el('button', 'btn ghost', 'Cancel');
     cancelBtn.onclick = () => { $('modal').hidden = true; };
-    importBtn.onclick = async () => {
+    importBtn.onclick = oneAtATime(importBtn, async () => {
       const toImport = scanResult.matched.filter((_, i) => checked.has(i));
       if (!toImport.length) return;
       // The files are already on the server's disk, so there's no upload
@@ -980,7 +997,7 @@ export async function openDirectoryImportModal(state = {}) {
       startJobsPoll();
       $('modal').hidden = true;
       toast(`Queued ${ok} import${ok === 1 ? '' : 's'}${failed ? ` — ${failed} failed to queue` : ''} — progress in the corner panel`, 4000);
-    };
+    });
     // Save-as-profile on the left, the import on the right: the profile
     // is the last thing done with these choices, the import the first.
     importBtn.style.marginLeft = 'auto';

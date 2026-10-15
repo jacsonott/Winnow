@@ -13,21 +13,28 @@ Design notes
 
 from __future__ import annotations
 
+import codecs
 import contextlib
 import csv
 import datetime
 import errno
 import fnmatch
+import functools
 import getpass
 import hashlib
 import io
 import itertools
 import json
+import math
 import os
 import re
+import secrets
 import shutil
 import socket
 import sqlite3
+import stat
+import string
+import sys
 import tempfile
 import threading
 import time
@@ -45,12 +52,30 @@ from . import combine  # noqa: F401 — registers the multi-column ops (coalesce
 from . import structparse  # noqa: F401 — registers the JSON/XML extraction ops into timeparse.OPERATIONS
 from . import timeparse
 from . import plasoread
+from . import rxguard
 from . import xlsxread
 from . import log as wlog
-from .sqlresults import SqlResults, cell as _sql_cell, js_str as _sql_js_str
+from .paths import sqlite_ro_uri
+from .sqlresults import SqlResults, js_str as _sql_js_str, pane_cell_json, pane_cell_text  # noqa: F401 — server.py imports pane_cell_json from here
 
 BATCH = 20_000
 SAMPLE_ROWS = 500
+# The csv module's own field limit is 131072 characters, and one field
+# past it stopped the import at that line — an EvtxECmd payload carrying a
+# PowerShell script block, or a base64 blob some tool put in a column, is
+# routinely bigger. Raised rather than removed, because the limit is also
+# what bounds a stray quote with no partner: csv folds the rest of the FILE
+# into that one field, built in memory at four bytes a character, and on a
+# multi-GB export "unlimited" means the analyst's machine runs out of
+# memory instead of the import stopping with a line number. 64 Mi
+# characters is far past any real field and caps that at a few hundred MB.
+# A number rather than sys.maxsize: field_size_limit takes a C long, which
+# is 32 bits on Windows, and sys.maxsize overflows it there. Set once, for
+# the process (it is module state in _csv), so the import preview and the
+# import itself read a file the same way. A swallow that stays under the
+# cap no longer errors at all — suspect_quote_rows is what flags it now.
+CSV_FIELD_LIMIT = 64 * 1024 * 1024
+csv.field_size_limit(CSV_FIELD_LIMIT)
 TRIGRAM_MIN_LEN = 3  # the trigram FTS5 tokenizer can't index anything shorter — see _fts_like_pattern
 SARGABLE_OPS = {"equals", "in"}  # ops a plain single-column B-tree index actually accelerates (see _ensure_column_index_building)
 # SQLite gained LIKE/GLOB pushdown onto fts5 trigram tables in 3.45.0 —
@@ -75,6 +100,22 @@ SEARCH_ALL_COUNT_CAP = 1000
 # paste — it exists to bound an accident (a whole wordlist pasted in), not
 # to ration normal use.
 SEARCH_ALL_TERM_BREAKDOWN_MAX = 250
+# The unified Timeline (and the Watchlist's Latest hits, which reads the
+# same per-source config) joins a source's body columns with `a || ' | ' ||
+# b || ...`, which SQLite parses as one left-deep tree two levels deeper per
+# column — so a ~500-column table used to fail the whole query ("Expression
+# tree is too large (maximum depth 1000)") and nothing rendered at all. Both
+# now keep only as many body columns as fit (see Store._fit_body_cols). The
+# depth limit is read off the linked SQLite; this is the fallback for
+# Pythons before 3.11, whose Connection has no getlimit(). 1000 is SQLite's
+# compiled-in default.
+SQLITE_DEFAULT_EXPR_DEPTH = 1000
+# Depth a timeline branch spends around the body chain itself (COALESCE
+# and the column ref). Measured at limits 200 and 1000: N columns need
+# 2*N + 2, so 499 builds and 500 fails at the default. The extra margin is
+# for a SQLite that nests a little differently, or a later change that
+# wraps the body in a function.
+TIMELINE_BODY_DEPTH_HEADROOM = 10
 
 # The extensions a directory import (scan_import_directory) recognizes by
 # default — every format ingest_csv/ingest_json already know how to read.
@@ -144,8 +185,16 @@ DEFAULT_TAGS = [
 PLUGIN_UI_STATE_MAX_BYTES = 64 * 1024
 
 META_SCHEMA = """
+-- sources, tag_defs, merges and sql_tabs are AUTOINCREMENT: an id they
+-- hand out is never handed out again. A plain INTEGER PRIMARY KEY gives
+-- the newest row's id to the next insert once that row is deleted, and
+-- every one of these ids is held somewhere that outlives the row — a view
+-- handle or a tag list in another window, an undo entry, an indicator's
+-- auto-tag, a widget's src_N — so a reused id turns "this no longer
+-- exists" into "this is now a different table". Case files from before
+-- this are rebuilt in place on open; see _migrate_ids_never_reused.
 CREATE TABLE IF NOT EXISTS sources (
-    id          INTEGER PRIMARY KEY,
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
     name        TEXT NOT NULL,
     path        TEXT,
     table_name  TEXT NOT NULL,
@@ -156,10 +205,11 @@ CREATE TABLE IF NOT EXISTS sources (
     has_fts     INTEGER NOT NULL DEFAULT 0,
     nickname    TEXT,                   -- analyst display name; `name` stays the imported file's identity
     origin      TEXT,                   -- NULL = an imported file; 'sql' = saved from the SQL pane; 'subset' = saved from a view/selection
-    origin_meta TEXT                    -- json, per origin: {sql} / {parent_source_id, parent_name, spec, ...} — see save_view_as_source
+    origin_meta TEXT,                   -- json, per origin: {sql} / {parent_source_id, parent_name, spec, ...} — see save_view_as_source; an imported file not read as plain UTF-8: {encoding, cp1252_bytes?} — see _encoding_report
+    ingest      TEXT                    -- json: how the file was read, {kind, ...options} — what a session re-imports with
 );
 CREATE TABLE IF NOT EXISTS tag_defs (
-    id     INTEGER PRIMARY KEY,
+    id     INTEGER PRIMARY KEY AUTOINCREMENT,
     name   TEXT NOT NULL,
     color  TEXT NOT NULL,
     hotkey TEXT
@@ -212,10 +262,17 @@ CREATE TABLE IF NOT EXISTS filter_presets (
 );
 CREATE INDEX IF NOT EXISTS ix_filter_presets_sig ON filter_presets(col_sig);
 CREATE TABLE IF NOT EXISTS merges (
-    id         INTEGER PRIMARY KEY,
-    name       TEXT NOT NULL,
-    source_ids TEXT NOT NULL,          -- json array of real source ids, creation order
-    created_at TEXT
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    name          TEXT NOT NULL,
+    source_ids    TEXT NOT NULL,       -- json array of real source ids, creation order
+    created_at    TEXT,
+    -- Which columns a merge of differently shaped tables exposes: 'all'
+    -- (every member's columns, empty where a member lacks one) or
+    -- 'shared' (only those every member has). Moot for same-shaped
+    -- members, which is every merge made before mismatched ones existed.
+    col_mode      TEXT NOT NULL DEFAULT 'all',
+    -- 1 = expose MERGE_SOURCE_COLUMN, each member's label as a constant.
+    source_column INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS open_tabs (
     source_id INTEGER PRIMARY KEY      -- signed, same convention as elsewhere: negative = merge id
@@ -228,7 +285,7 @@ CREATE TABLE IF NOT EXISTS open_tabs (
 -- only ever SELECTs the analyst typed, so this stays within invariant #1:
 -- no source table is touched.
 CREATE TABLE IF NOT EXISTS sql_tabs (
-    id   INTEGER PRIMARY KEY,
+    id   INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     sql  TEXT NOT NULL DEFAULT '',
     pos  INTEGER NOT NULL DEFAULT 0     -- left-to-right strip order; ties break by id
@@ -280,12 +337,13 @@ CREATE TABLE IF NOT EXISTS derived_columns (
 -- Named session snapshots, IN the case file rather than beside it.
 --
 -- A session is a point-in-time copy of the analysis layer — tags, notes,
--- layouts, saved views, derived-column definitions — for every open
--- source. Keeping them here means work an analyst saved (or received from
--- someone else and loaded) travels with the case instead of living in a
--- sessions/ directory that gets left behind the moment the .db is copied
--- anywhere. A JSON file is now only produced when handing work to another
--- analyst, which is the one case that genuinely needs a separate artifact.
+-- layouts, saved views, derived-column definitions — for every source,
+-- open in a tab or not. Keeping them here means work an analyst saved (or
+-- received from someone else and loaded) travels with the case instead of
+-- living in a sessions/ directory that gets left behind the moment the .db
+-- is copied anywhere. A JSON file is now only produced when handing work to
+-- another analyst, which is the one case that genuinely needs a separate
+-- artifact.
 --
 -- Deliberately a SNAPSHOT table, not a session dimension on row_tags. Tags
 -- stay single-valued per (source_id, rid, tag_id) — that is a WITHOUT
@@ -476,6 +534,27 @@ def q(ident: str) -> str:
     return '"' + ident.replace('"', '""') + '"'
 
 
+# Longest run of one operator _sql_chain writes flat. A flat `a OP b OP c`
+# parses into a left-deep tree one level per operator, and SQLite refuses
+# a statement deeper than SQLITE_MAX_EXPR_DEPTH (1000 by default) — which
+# a search over a 500-column table (flattened JSON gets there easily)
+# used to hit. 64 keeps every table short of that width on exactly the
+# SQL it always had.
+_SQL_CHAIN_FLAT = 64
+
+
+def _sql_chain(parts: list[str], op: str) -> str:
+    """`parts` joined by `op` — which must be associative (OR, AND, the
+    `|| ' ' ||` of _blob_expr) — as the flat chain it always was when it is
+    short, and as a balanced tree of parenthesised halves when it is not,
+    so depth grows with the log of the column count instead of linearly.
+    Same value either way: only the grouping changes."""
+    if len(parts) <= _SQL_CHAIN_FLAT:
+        return op.join(parts)
+    mid = len(parts) // 2
+    return f"({_sql_chain(parts[:mid], op)}){op}({_sql_chain(parts[mid:], op)})"
+
+
 def _blob_expr(cols: list[str]) -> str:
     """Every column concatenated into one search target — the same
     expression backs both sides of substring search: the src_<id>_doc view
@@ -484,8 +563,9 @@ def _blob_expr(cols: list[str]) -> str:
     Advanced mode's whole-query LIKE fallback, and a single Advanced-mode
     term _fts_like_pattern can't route through the index). Keeping them
     the same expression is what makes the indexed and fallback paths
-    return identical results."""
-    return " || ' ' || ".join(f"COALESCE({q(c)},'')" for c in cols)
+    return identical results. Built by _sql_chain, so a wide table's
+    search is not refused for depth."""
+    return _sql_chain([f"COALESCE({q(c)},'')" for c in cols], " || ' ' || ")
 
 
 def _fts_like_pattern(term: str) -> str | None:
@@ -528,25 +608,88 @@ def _numeric_expr(sql_expr: str) -> str:
     return f"(CASE WHEN {sql_expr} REGEXP '{NUM_RE.pattern}' THEN CAST({sql_expr} AS REAL) ELSE NULL END)"
 
 
+def _sqlite_has_json_each() -> bool:
+    """JSON1 is built in from SQLite 3.38 and compiled into Python's own
+    builds well before that, but a distro SQLite can still lack it."""
+    try:
+        with contextlib.closing(sqlite3.connect(":memory:")) as c:
+            c.execute("SELECT value FROM json_each('[1]')").fetchall()
+        return True
+    except sqlite3.Error:
+        return False
+
+
+# An `in` filter binds its whole list as ONE JSON parameter and reads it
+# back with json_each, rather than one `?` per item: a pasted list of a few
+# thousand IOCs on a merge (the WHERE compiles once per member) is past
+# stock SQLite's 32,766-variable limit, and a 999-line list already is on
+# SQLite before 3.32. `x IN (SELECT value FROM json_each(?))` still uses a
+# column index (EXPLAIN: SEARCH ... USING INDEX (x=?), LIST SUBQUERY), and
+# applies the column's affinity to the values exactly as the list did.
+_HAS_JSON_EACH = _sqlite_has_json_each()
+
+
 def _regexp(pattern: str, value: Any) -> bool:
+    """SQLite's REGEXP. An unusable pattern RAISES (SQLite reports it as a
+    failed statement): it used to swallow re.error per row, so `C:\\Users`
+    in regex mode (\\U is a bad escape in Python re) answered 0 rows — "not
+    in this table" — instead of saying the pattern was broken. The filter,
+    search and raw-fragment paths check the pattern before the build
+    (_compiled_regex) for a readable 400; this is the backstop for SQL the
+    analyst typed into the SQL pane."""
     if value is None:
         return False
+    return _compiled_regex(pattern).search(str(value)) is not None
+
+
+def _check_regexp_literals(sql: str) -> None:
+    """A REGEXP against a literal pattern — `"Cmd" REGEXP '…'` or
+    regexp('…', "Cmd") — gets the check the regex filter and search get
+    (_compiled_regex) before the statement runs: a broken pattern is a
+    ValueError naming it rather than SQLite's bare "user-defined function
+    raised exception", and a catastrophic one is refused before a crafted
+    cell can freeze the process. A pattern that only exists at run time
+    (a column, a concatenation) still meets _regexp's own check."""
+    for m in re.finditer(r"\bREGEXP\s*\(?\s*'((?:[^']|'')*)'", sql, re.IGNORECASE):
+        _compiled_regex(m.group(1).replace("''", "'"))
+
+
+@functools.lru_cache(maxsize=256)
+def _compiled_regex(pattern: str) -> re.Pattern:
+    """`pattern` compiled the way REGEXP runs it (case-insensitive), or a
+    ValueError saying why it will not be run: it does not compile, or it
+    has a shape that can backtrack catastrophically (rxguard, whose
+    comment says why that is refused rather than bounded). Cached —
+    REGEXP asks once per row."""
     try:
-        return re.search(pattern, str(value), re.IGNORECASE) is not None
-    except re.error:
-        return False
+        rx = re.compile(pattern, re.IGNORECASE)
+    except re.error as e:
+        raise ValueError(f"Not a valid regular expression ({e}): {pattern}") from None
+    hazard = rxguard.regex_hazard(pattern)
+    if hazard:
+        raise ValueError(
+            f"Not a usable regular expression: {pattern} has {hazard}, which can backtrack "
+            "catastrophically — one crafted cell would freeze Winnow until it finished, and "
+            "nothing can interrupt it. End each part of the repetition at a character it cannot "
+            r"match ((\w+\.)+ or (\S+\s+)+ rather than (\w+\.?)+ or (\w+\s*)+), use a "
+            "class such as [ab] rather than (a|b), or search with Contains.")
+    return rx
 
 
 # Same two shapes DATE_RE recognizes at ingest, capturing time-of-day too
 # (all optional groups — a bare date still matches). Kept in sync with
-# app.js's TS_ISO_RE/TS_US_RE (parseTimestamp) by hand — there's no shared
-# module between the two, just the same two format families.
+# tsformat.js's TS_ISO_RE/TS_US_RE/TS_MONTH_RE (parseTimestamp) by hand —
+# there's no shared module between the two, just the same format families.
+# The 12-hour marker is timeparse.MERIDIEM, after optional fraction digits
+# (not captured: TS_NORMALIZE is whole seconds) — see MERIDIEM for what
+# `\s*(AM|PM|am|pm)?` straight after the seconds got wrong.
 _TS_ISO_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?")
-_TS_US_RE = re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{4})(?:[ ,]+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM|am|pm)?)?")
+_TS_US_RE = re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{4})(?:[ ,]+(\d{1,2}):(\d{2})(?::(\d{2})(?:[.,]\d+)?)?"
+                       r"\s*(?:" + timeparse.MERIDIEM + r")?)?")
 _TS_MONTH_RE = re.compile(
     r"^(?:(" + _TS_MONTH_NAME + r")\s+(\d{1,2})|(\d{1,2})\s+(" + _TS_MONTH_NAME + r"))"
     r"\s*,?\s*(\d{4})"
-    r"(?:[ ,]+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM|am|pm)?)?",
+    r"(?:[ ,]+(\d{1,2}):(\d{2})(?::(\d{2})(?:[.,]\d+)?)?\s*(?:" + timeparse.MERIDIEM + r")?)?",
     re.IGNORECASE)
 
 
@@ -555,13 +698,7 @@ def _month_parts(m):
     identical to the US branch's."""
     mo = _TS_MONTHS[(m.group(1) or m.group(4)).lower()]
     d = int(m.group(2) or m.group(3))
-    hh = int(m.group(6) or 0)
-    ampm = m.group(9)
-    if ampm:
-        if ampm.lower() == "pm" and hh < 12:
-            hh += 12
-        if ampm.lower() == "am" and hh == 12:
-            hh = 0
+    hh = timeparse.hour24(int(m.group(6) or 0), m.group(9))
     return int(m.group(5)), mo, d, hh, int(m.group(7) or 0), int(m.group(8) or 0)
 
 
@@ -612,12 +749,7 @@ def _ts_normalize(raw: Any) -> str | None:
     m = _TS_US_RE.match(s)
     if m:
         mo, d, y, h, mi, sec, ampm = m.groups()
-        hh = int(h) if h else 0
-        if ampm:
-            if ampm.lower() == "pm" and hh < 12:
-                hh += 12
-            if ampm.lower() == "am" and hh == 12:
-                hh = 0
+        hh = timeparse.hour24(int(h) if h else 0, ampm)
         return f"{int(y):04d}-{int(mo):02d}-{int(d):02d} {hh:02d}:{int(mi or 0):02d}:{int(sec or 0):02d}"
     m = _TS_MONTH_RE.match(s)
     if m:
@@ -727,6 +859,13 @@ def _webkit_to_iso(value: Any) -> str | None:
 # actually see.
 TAG_GROUP_COLUMN = "__tag__"
 
+# The most distinct values distinct_values hands back — the grid's "Copy
+# unique values" over a whole view. Generous enough for a case's hashes or
+# image paths; past it the answer is a filter first, not a clipboard holding
+# a few megabytes nobody will read. Over it, the call says so (truncated)
+# rather than handing back a list that silently stops partway.
+DISTINCT_VALUES_MAX = 100_000
+
 # Column names that can't be used as-is: "rid" collides with every src_<id>
 # table's own primary-key column, and "rank"/"rowid" are FTS5-reserved \u2014
 # CREATE VIRTUAL TABLE ... USING fts5(...) rejects a column literally named
@@ -735,12 +874,47 @@ TAG_GROUP_COLUMN = "__tag__"
 # and its rows were already committed \u2014 a CSV with a plausible header like
 # "Rank" (a real column name in e.g. some log formats) failed the *entire*
 # import with a confusing error, even though the data itself was fine.
-RESERVED_COLUMN_NAMES = {"rid", "rank", "rowid", TAG_GROUP_COLUMN}
+#
+# "__line__" is the sort key the grid sends for file order (the gutter
+# header's toggle) — a real header of that name was shadowed by it, so
+# sorting that column returned the rows in file order.
+LINE_SORT_COLUMN = "__line__"
+RESERVED_COLUMN_NAMES = {"rid", "rank", "rowid", TAG_GROUP_COLUMN, LINE_SORT_COLUMN}
+
+# A derived column on a merge is one definition per member; the merge
+# reports the least finished of them (_merge_columns). Anything unknown
+# outranks them all, so it is shown rather than hidden behind 'ready'.
+_DERIVED_STATUS_RANK = {"ready": 0, "partial": 1, "error": 2, "building": 3}
 
 # sources.origin values for tables that were not imported from a file.
 # NULL is an import; these two are derived from what is already in the case.
 SQL_ORIGIN = "sql"          # sql_to_table — origin_meta = {sql}
 SUBSET_ORIGIN = "subset"    # save_view_as_source — origin_meta names the parent and the selection
+
+# sources.file_hash for a table with no file behind it. The hash is what a
+# session matches a table by (_match_session_sources), so a table without
+# one was never given its tags back — and a replacing load cleared them. A
+# subset's is derived from its parent and spec (save_view_as_source);
+# anything else made in-process — a SQL-pane save, a plugin's ingest_rows
+# with no file — gets MADE_HASH_PREFIX and random digits, deliberately not
+# derived from what it holds: the same query over the same evidence in
+# another case makes a table with the same name, columns and rows, and it
+# is still not this table, so a session from there must not tag it. A copy
+# (copy_sources_to) keeps the hash, so a copy does match. The prefixes keep
+# a synthetic hash from ever reading as a _quick_hash of a file on disk.
+MADE_HASH_PREFIX = "made:"
+SUBSET_HASH_PREFIX = "subset:"
+
+
+def _made_table_hash() -> str:
+    return MADE_HASH_PREFIX + secrets.token_hex(16)
+
+
+def _is_file_hash(h) -> bool:
+    """True for a fingerprint of a file on disk; False for a table made
+    inside Winnow (a synthetic hash) and for no hash at all — a session
+    record from before made tables had one."""
+    return bool(h) and not str(h).startswith((MADE_HASH_PREFIX, SUBSET_HASH_PREFIX))
 
 # The one column a raw-text import has (ingest_text): every physical line
 # of the file, verbatim, one row each. Not "Line" — the grid's own row-
@@ -765,22 +939,154 @@ def looks_binary(path: str) -> bool:
     return b"\x00" in head
 
 
+def _text_line(line: str) -> str:
+    r"""One raw-text row from one line read with newline="\n": the \n
+    and ONE \r before it (a CRLF file's) come off, nothing else does.
+
+    Universal newlines — Python's default for text files, and what
+    str.splitlines() does — also end a line at a lone \r. A log line
+    carries attacker-chosen text (the username of a failed login), so a
+    \r in it forged a row of its own: "Failed password for x\rAccepted
+    password for root" imported as two lines, the second reading like a
+    real entry, and every row id after it stopped being the line number.
+    A \r that is not part of the line ending is the line's own text."""
+    if line.endswith("\n"):
+        line = line[:-1]
+    if line.endswith("\r"):
+        line = line[:-1]
+    return line
+
+
+# Bytes as Windows-1252 reads them, the five it leaves undefined (0x81,
+# 0x8D, 0x8F, 0x90, 0x9D) as the Latin-1 control characters of the same
+# value — so every byte maps to a character of its own and none is lost.
+def _cp1252_char(b: int) -> str:
+    try:
+        return bytes([b]).decode("cp1252")
+    except UnicodeDecodeError:
+        return chr(b)
+
+
+_CP1252_CHARS = "".join(_cp1252_char(b) for b in range(256))
+_decode_fallback = threading.local()
+
+
+def _cp1252_fallback(exc: UnicodeError) -> tuple[str, int]:
+    """The `errors=` every text evidence read uses instead of "replace".
+    Bytes that are not valid in the file's encoding are read as the
+    Windows-1252 characters they would be, rather than as U+FFFD: a UTF-8
+    log with one line pasted in from a cp1252 tool keeps that line's
+    accents, and the byte is still there to see. Counted per thread
+    (_cp1252_fallback_count), so an import can say how many it read this
+    way — decoding happens on the thread iterating the file. UTF-16 errors
+    (a truncated last code unit) are not cp1252 bytes and still read as
+    U+FFFD."""
+    if not isinstance(exc, UnicodeDecodeError):
+        raise exc
+    if exc.encoding.startswith("utf-16"):
+        return "\ufffd", exc.end
+    bad = exc.object[exc.start:exc.end]
+    _decode_fallback.n = getattr(_decode_fallback, "n", 0) + len(bad)
+    return "".join([_CP1252_CHARS[b] for b in bad]), exc.end
+
+
+TEXT_DECODE_ERRORS = "winnow-cp1252"
+codecs.register_error(TEXT_DECODE_ERRORS, _cp1252_fallback)
+
+
+def _cp1252_fallback_count() -> int:
+    return getattr(_decode_fallback, "n", 0)
+
+
+# How much of a file sniff_text_encoding looks at to tell UTF-8 from
+# Windows-1252. Cheap to read, and enough rows of an Excel export that
+# a name with an accent in it has turned up; past it, _cp1252_fallback
+# still reads a stray byte right and the count still reports it.
+ENCODING_PROBE_BYTES = 1 << 20
+# A well-formed multi-byte UTF-8 sequence. Windows-1252 text almost never
+# contains one by accident (an accented capital followed by a symbol from
+# 0x80-0xBF), so its presence is what says "UTF-8 with a few bad bytes".
+_UTF8_MULTIBYTE = re.compile(rb"[\xc2-\xdf][\x80-\xbf]|[\xe0-\xef][\x80-\xbf]{2}|[\xf0-\xf4][\x80-\xbf]{3}")
+# The names an import reports, per codec it opened the file with.
+ENCODING_LABELS = {"utf-8-sig": "utf-8", "utf-16": "utf-16", "cp1252": "cp1252"}
+
+
+def _encoding_for_head(head: bytes, complete: bool) -> str:
+    if head[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return "utf-16"   # codec reads the BOM itself and picks LE/BE
+    try:
+        # final=False unless the probe is the whole file: a multi-byte
+        # character cut in half at the probe's edge is not an error.
+        codecs.getincrementaldecoder("utf-8")().decode(head, final=complete)
+        return "utf-8-sig"
+    except UnicodeDecodeError:
+        pass
+    # Not valid UTF-8. A file that also holds real multi-byte UTF-8 is UTF-8
+    # with a few bad bytes (a corrupt line, a paste from elsewhere): reading
+    # it all as cp1252 would turn every genuine "é" in it into "Ã©", and the
+    # fallback handles the bad bytes one by one. Only text with no UTF-8 in
+    # it at all is a legacy 8-bit file.
+    if _UTF8_MULTIBYTE.search(head):
+        return "utf-8-sig"
+    return "cp1252"
+
+
 def sniff_text_encoding(path: str) -> str:
-    """The encoding to open a text evidence file with — utf-8-sig unless a
-    UTF-16 byte-order mark says otherwise. Windows PowerShell 5.1's
-    Out-File and `>` write UTF-16LE by default, so UTF-16 CSVs are routine
-    DFIR inputs; decoded as UTF-8-with-replacement they turn into headers
-    full of NULs (which used to kill CREATE TABLE with "the query contains
-    a null character") and unreadable cells. BOM-less UTF-16 is left
-    alone — guessing without a BOM mislabels legitimate binary-ish text."""
+    """The encoding to open a text evidence file with — open it with
+    errors=TEXT_DECODE_ERRORS. utf-8-sig unless a UTF-16 byte-order mark
+    says otherwise, or the start of the file is not UTF-8 and has no
+    UTF-8 in it at all, which is Windows-1252.
+
+    Windows PowerShell 5.1's Out-File and `>` write UTF-16LE by default,
+    so UTF-16 CSVs are routine DFIR inputs; decoded as UTF-8-with-
+    replacement they turn into headers full of NULs (which used to kill
+    CREATE TABLE with "the query contains a null character") and
+    unreadable cells. BOM-less UTF-16 is left alone — guessing without a
+    BOM mislabels legitimate binary-ish text. Excel on Windows saves
+    "CSV" in the ANSI code page, Windows-1252 in the west, and so do older
+    tools: read as UTF-8 every accented letter became U+FFFD with no
+    warning ("José" -> "Jos\ufffd"), and the byte was gone. Windows-1252
+    rather than Latin-1 because it is what those files are — the two
+    differ only in 0x80-0x9F, where cp1252 has the euro sign, dashes and
+    curly quotes and Latin-1 has control characters nobody writes."""
     try:
         with open(path, "rb") as f:
-            head = f.read(2)
+            head = f.read(ENCODING_PROBE_BYTES)
+            complete = len(head) < ENCODING_PROBE_BYTES or not f.read(1)
     except OSError:
         return "utf-8-sig"
-    if head in (b"\xff\xfe", b"\xfe\xff"):
-        return "utf-16"   # codec reads the BOM itself and picks LE/BE
-    return "utf-8-sig"
+    return _encoding_for_head(head, complete)
+
+
+def decode_text_sample(raw: bytes, complete: bool = False, encoding: str | None = None) -> tuple[str, str]:
+    """The first bytes of a text file -> (text, encoding label), decoded
+    exactly as an import of the whole file would decode them, because the
+    preview an analyst approves has to be the table they get. `complete`
+    is whether `raw` is the whole file (a character cut at the end of a
+    sample is not an error). Pass `encoding` (sniff_text_encoding's
+    answer) when the file itself is at hand: it probes more than a
+    preview's sample holds."""
+    enc = encoding or _encoding_for_head(raw[:ENCODING_PROBE_BYTES],
+                                         complete and len(raw) <= ENCODING_PROBE_BYTES)
+    text = codecs.getincrementaldecoder(enc)(errors=TEXT_DECODE_ERRORS).decode(raw, final=complete)
+    return text, ENCODING_LABELS[enc]
+
+
+def _encoding_report(enc: str, fallback_bytes: int) -> dict:
+    """What an import says about how it read its bytes: `encoding` is the
+    label for the codec, `cp1252_bytes` how many bytes of a UTF-8 file
+    were not UTF-8 and were read as Windows-1252 instead. `meta` is what
+    is kept on the source (sources.origin_meta, NULL for an import that
+    needs no note) — the toast is gone in seconds, and how evidence bytes
+    were interpreted belongs with the table they became."""
+    label = ENCODING_LABELS[enc]
+    n = fallback_bytes if label == "utf-8" else 0
+    meta = None
+    if label == "cp1252":
+        meta = {"encoding": "cp1252"}
+    elif n:
+        meta = {"encoding": "utf-8", "cp1252_bytes": n}
+    return {"encoding": label, "cp1252_bytes": n, "meta": meta}
 
 
 def sanitize_columns(raw: list[str]) -> list[str]:
@@ -799,8 +1105,8 @@ def sanitize_columns(raw: list[str]) -> list[str]:
     for i, name in enumerate(raw):
         # Strip C0 control characters (NUL and friends): they reach here
         # from mis-decoded files, and a NUL in a header aborts CREATE TABLE
-        # with an error no analyst can act on. errors="replace" cells are
-        # data and stay as-is; a *name* must be printable and quotable.
+        # with an error no analyst can act on. Mis-decoded cells are data
+        # and stay as-is; a *name* must be printable and quotable.
         name = "".join(ch for ch in (name or "") if ch >= " " or ch in "\t")
         clean = name.strip().lstrip("\ufeff") or f"col_{i + 1}"
         if clean.lower() in RESERVED_COLUMN_NAMES:
@@ -814,10 +1120,191 @@ def sanitize_columns(raw: list[str]) -> list[str]:
     return out
 
 
+_ASCII_FOLD = str.maketrans(string.ascii_uppercase, string.ascii_lowercase)
+
+
+def _ascii_fold(name: str) -> str:
+    """Case-fold the way SQLite resolves identifiers: A-Z only. str.lower
+    folds far more ("Ö" -> "ö"), so two names it calls equal can be two
+    different columns to SQLite — and quoting one against a table that
+    only has the other is not an error but, through SQLite's
+    double-quoted-string fallback, the column's NAME as a string literal."""
+    return name.translate(_ASCII_FOLD)
+
+
+def _no_dq_strings(conn: sqlite3.Connection) -> sqlite3.Connection:
+    """Turn off SQLite's double-quoted-string fallback on a connection
+    that runs Winnow's own SQL, where it can only ever hide a bug: every
+    column name reaches SQL through q(), so a quoted name that isn't a
+    column is a wrong name, and with the fallback on it reads as the
+    name's text — header names paged as cell values, a filter comparing
+    against a constant — instead of failing. An extra layer, not the fix:
+    Connection.setconfig is Python 3.12+, so on 3.10/3.11 the checks that
+    keep a wrong name from getting this far (validate_where_fragment's
+    quoted-name check, _merge_columns) are what hold. The SQL pane keeps
+    the fallback — `WHERE Channel = "Security"` is an ordinary habit there,
+    and the analyst sees what came back."""
+    if hasattr(conn, "setconfig") and hasattr(sqlite3, "SQLITE_DBCONFIG_DQS_DML"):
+        conn.setconfig(sqlite3.SQLITE_DBCONFIG_DQS_DML, False)
+    return conn
+
+
+def _ingest_record(kind: str, **options) -> str:
+    """sources.ingest for a table read from a file: which reader, and every
+    option that decides which rows and columns it produced. It is what a
+    session load re-imports a missing table with (import_case_session) —
+    a session names rows by rid, so the re-import has to produce the same
+    rows in the same order, and the defaults do not (a headerless CSV
+    gains a header and every rid slides by one). `kind` names a Store
+    reader: csv, text, json, sqlite, xlsx, plaso — or rows, for a table
+    produced in-process (a plugin's parser, a SQL save), which nothing
+    here can re-run."""
+    return json.dumps({"kind": kind, **{k: v for k, v in options.items() if v is not None}})
+
+
+def _is_network_path(path: str) -> bool:
+    r"""A UNC or device path (\\host\share, //host/share, \\?\UNC\...).
+    On Windows, even asking whether one exists connects to the host and
+    offers it the analyst's credentials — so a path that came out of a
+    file someone else wrote is refused on its shape, before anything
+    touches the filesystem. Windows treats / and \ alike, hence either."""
+    return len(path) >= 2 and path[0] in "\\/" and path[1] in "\\/"
+
+
+def pair_tag_names(incoming: Iterable[str], local: Iterable[str]) -> dict[str, str]:
+    """{incoming tag name -> the local tag name it is}, for every incoming
+    name that has one: the one rule session load, copying tables between
+    cases and the session diff all match tag names by.
+
+    The exact name first. Failing that, the local tag whose name differs
+    only in case — but only when that is unambiguous on BOTH sides: one
+    local tag folds to it, and no other incoming tag does. tag_defs.name
+    is not unique by case, so "Malware" and "malware" can be two tags an
+    analyst keeps apart on purpose; matching by name.lower() alone (what
+    session load did) collapsed them, so reloading your own session moved
+    rows from one to the other, while copy and diff matched exactly and
+    the three disagreed. An incoming name with no partner is absent from
+    the result — the caller creates it, or reports it as different."""
+    local = set(local)
+    incoming = list(dict.fromkeys(incoming))
+    in_folds: dict[str, int] = {}
+    for n in incoming:
+        in_folds[n.casefold()] = in_folds.get(n.casefold(), 0) + 1
+    by_fold: dict[str, list[str]] = {}
+    for n in local:
+        by_fold.setdefault(n.casefold(), []).append(n)
+    out = {}
+    for n in incoming:
+        if n in local:
+            out[n] = n
+            continue
+        fold = n.casefold()
+        if in_folds[fold] == 1 and len(by_fold.get(fold, ())) == 1:
+            out[n] = by_fold[fold][0]
+    return out
+
+
 def column_signature(cols: list[str]) -> str:
     """Order/case-independent fingerprint of a column-name set — used to
-    check two sources have "the same" columns for merge eligibility."""
-    return hashlib.sha256("\x1f".join(sorted(c.strip().lower() for c in cols)).encode()).hexdigest()
+    check two sources have "the same" columns for merge eligibility. Case
+    folds as SQLite does (_ascii_fold), because the merge reads every
+    member through the first member's names: members whose names differ
+    only in non-ASCII case would read each other's header names as data."""
+    return hashlib.sha256("\x1f".join(sorted(_ascii_fold(c.strip()) for c in cols)).encode()).hexdigest()
+
+
+# Python 3.10's csv refuses any line holding a NUL ("line contains NUL");
+# 3.11 reads one into its cell like any other character. NULs are ordinary
+# in DFIR exports (UTF-16 debris, registry data), and 3.10 is the minimum
+# the README promises, so there _csv_rows escapes them past the parser.
+_CSV_READS_NUL = sys.version_info >= (3, 11)
+_NUL_ESC, _NUL_MARK = "\uffff", "\ufffe"     # noncharacters: rare, never special to csv
+_NUL_UNESCAPE = re.compile(f"{_NUL_ESC}[{_NUL_ESC}{_NUL_MARK}]")
+
+
+def _nul_unescape(m: re.Match) -> str:
+    return _NUL_ESC if m.group()[1] == _NUL_ESC else "\0"
+
+
+def _csv_rows(lines: Iterable[str], delimiter: str, *, escape_nul: bool | None = None):
+    """`(reader, rows)`: a csv.reader over `lines`, and what to iterate for
+    its rows — the reader itself wherever csv reads NUL. The reader is
+    returned for its line_num.
+
+    Where it does not (3.10, or `escape_nul=True`, which is how the tests
+    reach this path on every version), a line holding a NUL goes in with
+    each NUL written as ESC MARK and each ESC already there doubled, and the
+    row comes out with that undone: the same cells 3.11 reads. Exact, not
+    "rare enough": anything that was an ESC in the file comes back as one.
+    Only rows that took an escaped line pay for the unescape. That is
+    sound because csv asks for exactly the lines its record needs and no
+    more, so the flag a line sets belongs to the row read next, and a line
+    that needed no escaping holds no NUL and no ESC, so unescaping a cell
+    that spans both kinds of line touches only the escaped part. Every
+    line still passes through one generator here, which is why 3.11+
+    skips all of it."""
+    if escape_nul is None:
+        escape_nul = not _CSV_READS_NUL
+    if not escape_nul:
+        reader = csv.reader(lines, delimiter=delimiter)
+        return reader, reader
+    escaped = [False]
+
+    def escape():
+        for line in lines:
+            if "\0" in line or _NUL_ESC in line:
+                escaped[0] = True
+                line = line.replace(_NUL_ESC, _NUL_ESC * 2).replace("\0", _NUL_ESC + _NUL_MARK)
+            yield line
+
+    reader = csv.reader(escape(), delimiter=delimiter)
+
+    def rows():
+        for row in reader:
+            if escaped[0]:
+                escaped[0] = False
+                row = [_NUL_UNESCAPE.sub(_nul_unescape, c) for c in row]
+            yield row
+
+    return reader, rows()
+
+
+def _first_nonblank_row(reader: Iterable[list[str]]) -> list[str]:
+    """The first row with anything in it — the header, or (without one)
+    the row that fixes the table's width. Leading blank rows are skipped:
+    a blank line read as the header gave a table of ZERO columns, and
+    `CREATE TABLE ... (rid INTEGER PRIMARY KEY, )` failed the import with
+    a raw syntax error. Same rule as the Excel import's header (the first
+    non-empty row). ValueError when there is no such row."""
+    for row in reader:
+        if any(c.strip() for c in row):
+            return row
+    raise ValueError("File is empty")
+
+
+def _col_key(name: str) -> str:
+    """A column's identity across a merge's members: its name, ignoring
+    ASCII case — "EventId" in one export and "EventID" in another are one
+    column. The same folding column_signature uses, and the one SQLite
+    applies to quoted names, so "Größe" and "GRÖßE" stay two columns."""
+    return _ascii_fold(name.strip())
+
+
+def _sqlite_same_ident(a: str, b: str) -> bool:
+    """Whether SQLite resolves quoted identifier `a` to a column named `b`.
+    Stricter than _col_key, which also ignores surrounding whitespace: a
+    member's " EventId" is the merge's "EventId" but needs an alias."""
+    return _ascii_fold(a) == _ascii_fold(b)
+
+
+def _sql_text_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+# The merged view's optional "which table did this row come from" column.
+# Not stored anywhere: every member projects its own label as a constant.
+MERGE_SOURCE_COLUMN = "From table"
+MERGE_COLUMN_MODES = ("all", "shared")
 
 
 def infer_type(values: Iterable[str]) -> str:
@@ -831,22 +1318,305 @@ def infer_type(values: Iterable[str]) -> str:
     return "text"
 
 
+def _sqlite_header_is_wal(path: str) -> bool:
+    try:
+        with open(path, "rb") as f:
+            head = f.read(20)
+    except OSError:
+        return False
+    return len(head) == 20 and head.startswith(b"SQLite format 3\x00") and head[18] == 2
+
+
+def _open_evidence_sqlite(path: str) -> tuple[sqlite3.Connection, Callable[[], None]]:
+    """A read-only connection to an external SQLite file that writes
+    nothing beside it. Returns (connection, cleanup): close the
+    connection, then call cleanup.
+
+    `mode=ro` alone is not that for a WAL-mode database: opening one still
+    creates its `-shm` (and a `-wal` when there isn't one) next to the
+    file — in the analyst's evidence folder for a path import, and as
+    litter in the temp folder beside an upload's spool, which outlived the
+    spool. Two cases:
+    - no `-wal` beside it: there is nothing un-checkpointed to read, and
+      no connection can be writing it (a live WAL database always has its
+      -wal), so `immutable=1` reads the file as it is and creates nothing.
+    - a `-wal` beside it: rows that exist only there are evidence, and
+      reading them needs the -shm SQLite would create. So the pair is
+      copied into a private temp directory and THAT is opened; cleanup
+      removes the directory. The evidence folder is never written to,
+      read-only media included.
+    A rollback-journal database creates nothing under `mode=ro` and opens
+    as it always did. Every case builds its URI with sqlite_ro_uri, like
+    every other read-only open here, so a `#` or `%` in an evidence path
+    and a file on a share open the same way they do everywhere else."""
+    tmpdir = None
+    target, extra = path, ""
+    if _sqlite_header_is_wal(path):
+        if os.path.exists(path + "-wal"):
+            tmpdir = tempfile.mkdtemp(prefix="winnow-sqlite-")
+            target = os.path.join(tmpdir, "evidence.db")
+            shutil.copyfile(path, target)
+            shutil.copyfile(path + "-wal", target + "-wal")
+        else:
+            extra = "&immutable=1"
+
+    def cleanup() -> None:
+        if tmpdir:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    try:
+        conn = sqlite3.connect(sqlite_ro_uri(target) + extra, uri=True, check_same_thread=False)
+    except BaseException:
+        cleanup()
+        raise
+    return conn, cleanup
+
+
+def _sqlite_table_columns(conn: sqlite3.Connection, table: str) -> list:
+    """An external table's columns as `PRAGMA table_xinfo` sees them,
+    GENERATED columns included. `table_info` leaves those out, so an
+    import silently dropped every generated column (a computed `full_url`,
+    a decoded timestamp the application derives) — data the evidence
+    file shows its own users. Hidden columns of a virtual table (hidden
+    = 1, e.g. an FTS table's own name column) are not data and stay out;
+    2 and 3 are the virtual and stored generated kinds."""
+    return [c for c in conn.execute(f"PRAGMA table_xinfo({q(table)})").fetchall()
+            if c["hidden"] in (0, 2, 3)]
+
+
+class _JsonNumber(str):
+    """A JSON number, kept as the literal text the file wrote it as.
+
+    json.loads turns numbers into floats, and the cell then said what
+    float() made of them rather than what the evidence said: 1.10 became
+    1.1, 1e5 became 100000.0, 1E400 became inf, and nineteen significant
+    digits became seventeen. An integer is no safer — past Python's
+    4,300-digit conversion limit json.loads raised, and the whole file
+    failed. Every cell is TEXT anyway (the CSV convention), so the number
+    is never converted at all: this is what parse_float/parse_int/
+    parse_constant build, and it is a str, so a cell is just the text.
+    The one place it must not act like one is inside a container written
+    back out as JSON text — _json_text writes it unquoted."""
+    __slots__ = ()
+
+
+class _JsonObjectWithDuplicates(dict):
+    """An object that names one key more than once. json.loads keeps the
+    last value and the first vanishes without a trace — an evidence
+    record that said user=alice and user=root showed only root. The dict
+    holds what json.loads would have (anything reading it as a dict sees
+    the usual thing); `pairs` keeps every (key, value) in document order,
+    which is what _flatten_json and _json_text read."""
+    __slots__ = ("pairs",)
+
+
+def _json_object(pairs: list) -> dict:
+    obj = dict(pairs)
+    if len(obj) != len(pairs):
+        obj = _JsonObjectWithDuplicates(obj)
+        obj.pairs = pairs
+    return obj
+
+
+# Every JSON evidence read goes through these two, never bare json.load(s).
+_JSON_READ = {"parse_float": _JsonNumber, "parse_int": _JsonNumber,
+              "parse_constant": _JsonNumber, "object_pairs_hook": _json_object}
+
+
+# json's C scanner spends the interpreter's recursion limit on nesting
+# before Python 3.12 (1,000 frames by default), so a document nested about
+# 1,000 deep raised RecursionError on 3.10 and 3.11 where 3.12, whose C
+# code has a budget of its own, reads at least 8,000. On those two a parse
+# that runs out is tried once more under this limit. Measured, they spend
+# about 150 bytes of C stack a level, so 3,000 levels is under half a
+# megabyte, inside the 1 MB that is the smallest default thread stack on
+# the platforms Winnow supports. 0 = no retry.
+_JSON_DEEP_RECURSION_LIMIT = 3000 if sys.version_info < (3, 12) else 0
+_recursion_lock = threading.Lock()
+_recursion_raisers = 0
+_recursion_saved = 0
+
+
+@contextlib.contextmanager
+def _deep_json_recursion_limit():
+    """sys.setrecursionlimit is process-wide, so concurrent deep reads
+    share one raise: the first saves the limit, the last puts it back."""
+    global _recursion_raisers, _recursion_saved
+    with _recursion_lock:
+        if _recursion_raisers == 0:
+            _recursion_saved = sys.getrecursionlimit()
+            sys.setrecursionlimit(max(_recursion_saved, _JSON_DEEP_RECURSION_LIMIT))
+        _recursion_raisers += 1
+    try:
+        yield
+    finally:
+        with _recursion_lock:
+            _recursion_raisers -= 1
+            if _recursion_raisers == 0:
+                sys.setrecursionlimit(_recursion_saved)
+
+
+def _json_loads(text: str) -> Any:
+    """Past what the running Python can nest at all, a JSONDecodeError
+    rather than the RecursionError json raises: every caller handles the
+    first, and a JSONL import counts the line as bad and keeps the rest."""
+    try:
+        return json.loads(text, **_JSON_READ)
+    except RecursionError:
+        pass
+    if _JSON_DEEP_RECURSION_LIMIT:
+        try:
+            with _deep_json_recursion_limit():
+                return json.loads(text, **_JSON_READ)
+        except RecursionError:
+            pass
+    raise json.JSONDecodeError("Nested too deeply to read", text, 0)
+
+
+def _json_load(fh) -> Any:
+    return _json_loads(fh.read())     # what json.load does, through the retry above
+
+
+def _json_items(obj: dict):
+    return obj.pairs if isinstance(obj, _JsonObjectWithDuplicates) else obj.items()
+
+
+# What json.dumps(..., ensure_ascii=False) quotes a string with — the C
+# function itself, without building a JSONEncoder per call.
+_json_quote = json.encoder.encode_basestring
+_JSON_SCALAR = {None: "null", True: "true", False: "false"}
+# How deep _json_text recurses before handing the rest to the iterative
+# writer: two frames a level (the comprehension is its own frame before
+# 3.12), well inside the interpreter's limit from wherever ingest calls it.
+_JSON_TEXT_RECURSE = 200
+
+
+def _json_text(value: Any, depth: int = 0) -> str:
+    """json.dumps(value, ensure_ascii=False), character for character,
+    except that a _JsonNumber is written as its literal rather than quoted
+    as the str it is, and a duplicated key is written as many times as the
+    file had it. json.dumps has no hook for writing a value raw, hence a
+    writer of our own — recursive because that measured twice as fast as
+    an explicit stack (and faster than the json.dumps call it replaced,
+    which built a JSONEncoder every time), and _json_text_deep below the
+    first 200 levels, because what reaches here is whatever lies under
+    _flatten_json's depth cap, and a document json accepted can be
+    thousands of levels deep."""
+    t = type(value)
+    if t is str:
+        return _json_quote(value)
+    if t is _JsonNumber:
+        return str.__str__(value)
+    if depth >= _JSON_TEXT_RECURSE:
+        return _json_text_deep(value)
+    if t is list:
+        return "[" + ", ".join([_json_text(v, depth + 1) for v in value]) + "]"
+    if isinstance(value, dict):
+        return "{" + ", ".join([_json_quote(k if type(k) is str else str(k)) + ": " + _json_text(v, depth + 1)
+                               for k, v in _json_items(value)]) + "}"
+    if value is None or value is True or value is False:
+        return _JSON_SCALAR[value]
+    return json.dumps(value)   # a Python number handed in by a caller
+
+
+_JSON_END = object()
+
+
+def _json_text_deep(value: Any) -> str:
+    """_json_text's output for a value nested too deep to recurse into —
+    the same writer as an explicit stack."""
+    parts: list[str] = []
+    append = parts.append
+    stack: list[list] = []
+
+    def emit(v: Any) -> None:
+        if isinstance(v, (dict, list)):
+            if isinstance(v, dict):
+                append("{")
+                stack.append([iter(_json_items(v)), "}", True])
+            else:
+                append("[")
+                stack.append([iter(v), "]", True])
+        else:
+            append(_json_text(v))   # a scalar: no recursion
+
+    emit(value)
+    while stack:
+        frame = stack[-1]
+        item = next(frame[0], _JSON_END)
+        if item is _JSON_END:
+            append(frame[1])
+            stack.pop()
+            continue
+        if frame[2]:
+            frame[2] = False
+        else:
+            append(", ")
+        if frame[1] == "}":
+            key, item = item
+            append(_json_quote(key if type(key) is str else str(key)))
+            append(": ")
+        emit(item)
+    return "".join(parts)
+
+
+# JSON's "\udc80" (legal, and how Plaso's serializer writes an NTFS name
+# holding an unpaired surrogate) decodes to a lone surrogate, which has no
+# UTF-8 encoding: the batch insert raised "surrogates not allowed" and the
+# import stopped there — in a key, before the first row. Written back as
+# the six characters of the escape the file had: exactly what was in the
+# evidence, and still valid inside JSON text. See structparse.utf8_text.
+_utf8_text = structparse.utf8_text
+
+
+def _lenient_text_factory(undecodable: list[int] | None = None):
+    """sqlite3 text_factory for an EXTERNAL database's TEXT values. The
+    default decodes strictly, and one stored value that isn't UTF-8 (a
+    careless writer, a truncated multi-byte character) raised "Could not
+    decode to UTF-8" mid-read: the batch it was in and every row after it
+    were lost. Decoded with U+FFFD instead, the same rule CSV ingest's
+    errors="replace" follows, and counted in `undecodable[0]` so the
+    import can say how many values that touched. BLOBs never come
+    through here — sqlite3 only calls a text_factory for TEXT."""
+    def decode(b: bytes) -> str:
+        try:
+            return b.decode("utf-8")
+        except UnicodeDecodeError:
+            if undecodable is not None:
+                undecodable[0] += 1
+            return b.decode("utf-8", "replace")
+    return decode
+
+
 def _json_leaf_text(value: Any) -> str:
     """A JSON value at a point flattening stops (see _flatten_json) ->
     TEXT, same all-values-are-TEXT convention as CSV ingest. An object or
     array is JSON-stringified whole rather than dropped or half-flattened —
     evidence fidelity over tidiness, same reasoning CLAUDE.md gives for not
-    typing columns at ingest."""
+    typing columns at ingest. A number is the text the file wrote
+    (_JsonNumber)."""
     if value is None:
         return ""
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, (dict, list)):
-        return json.dumps(value, ensure_ascii=False)
-    return str(value)
+        return _utf8_text(_json_text(value))
+    return _utf8_text(str(value))
 
 
-def _flatten_json(obj: dict, max_depth: int | None) -> dict[str, str]:
+def _storable_cell(value: Any) -> Any:
+    """A derived value SQLite can bind: what it already takes as is, and
+    anything else as text with any lone surrogate (half a UTF-16 pair,
+    which UTF-8 cannot spell) written as its escape (_utf8_text — the
+    same rule JSON import and structparse's extraction follow). Only
+    reached when a batch's first write was refused — see
+    backfill_derived_columns — so the common path never pays for it."""
+    if value is None or isinstance(value, (int, float, bytes)):
+        return value
+    return _utf8_text(str(value))
+
+
+def _flatten_json(obj: dict, max_depth: int | None, clashes: dict | None = None) -> dict[str, str]:
     """Flattens nested OBJECTS into dot-notation keys — {"user": {"name":
     "a"}} -> {"user.name": "a"} — but never arrays: a list value is always
     JSON-stringified as one column's text, at whatever depth it's found,
@@ -859,8 +1629,18 @@ def _flatten_json(obj: dict, max_depth: int | None) -> dict[str, str]:
     flattens without limit ("full"). Any other int is how many levels of
     *object* nesting to unfold before stringifying whatever's left ("depth
     N") — e.g. max_depth=1 unfolds `user.name` but leaves `user.address`
-    (a further-nested object) as one JSON-text column."""
+    (a further-nested object) as one JSON-text column.
+
+    Two values can want one column: {"process": {"name": "evil.exe"},
+    "process.name": "svchost.exe"} flattens both to `process.name`, and so
+    does a key the object names twice. The dict used to keep whichever came
+    last, so whoever wrote the record chose which one the analyst saw. The
+    first now keeps the name and each later one takes the next free
+    `_1`, `_2`… (sanitize_columns' suffix for a duplicated CSV header);
+    `clashes`, when given, counts the records it happened in."""
     out: dict[str, str] = {}
+    next_suffix: dict[str, int] = {}
+    clashed = False
 
     # 64: far past any real log format, far short of the interpreter's
     # recursion limit — a pathological 3,000-level document used to walk
@@ -868,20 +1648,66 @@ def _flatten_json(obj: dict, max_depth: int | None) -> dict[str, str]:
     # cap the remainder is stringified, same as "depth N" mode's leftovers.
     FULL_DEPTH_CAP = 64
 
+    def put(key: str, text: str) -> None:
+        nonlocal clashed
+        if key in out:
+            clashed = True
+            # Remembered per key, so a record naming one key 100,000 times
+            # costs 100,000 steps rather than a scan from _1 each time.
+            n = next_suffix.get(key, 1)
+            while f"{key}_{n}" in out:
+                n += 1
+            next_suffix[key] = n + 1
+            key = f"{key}_{n}"
+        out[key] = text
+
     def walk(value: Any, key_path: str, depth: int) -> None:
         if isinstance(value, dict) and (depth < max_depth if max_depth is not None
                                         else depth < FULL_DEPTH_CAP):
             if not value:
-                out[key_path] = "{}"
+                put(key_path, "{}")
                 return
-            for k, v in value.items():
-                walk(v, f"{key_path}.{k}" if key_path else str(k), depth + 1)
+            # _utf8_text on keys as _json_leaf_text does on values: a lone
+            # surrogate in a key failed the import before the first row.
+            for k, v in _json_items(value):
+                walk(v, f"{key_path}.{_utf8_text(str(k))}" if key_path else _utf8_text(str(k)), depth + 1)
         else:
-            out[key_path] = _json_leaf_text(value)
+            put(key_path, _json_leaf_text(value))   # UTF-8-safe, as keys are above
 
-    for k, v in obj.items():
-        walk(v, str(k), 0)
+    for k, v in _json_items(obj):
+        walk(v, _utf8_text(str(k)), 0)
+    if clashed and clashes is not None:
+        clashes["count"] += 1
     return out
+
+
+# SQLite refuses a table past 2,000 columns, and one record with more keys
+# than that (attacker-chosen header names, an environment dump) used to
+# fail the WHOLE import with "too many columns". A JSON file keeps its
+# first JSON_MAX_COLUMNS - 1 keys (first-seen order) as columns and folds
+# every key past them into one JSON-object cell per record, so no value is
+# lost and the structparse ops can lift any of them out — the Plaso
+# import's `Attributes (JSON)` shape. 1,000, not 1,999: a derived-column
+# sidecar joins its own columns on, and a grid of a thousand columns is
+# already past what anyone reads.
+JSON_MAX_COLUMNS = 1000
+JSON_OVERFLOW_COLUMN = "Other fields (JSON)"
+
+
+def _json_column_plan(keys: list[str]) -> tuple[list[str], Callable[[dict], list[str]]]:
+    """(column names, row_of) for the flattened keys a JSON file holds,
+    where row_of(flat_record) is that record's cells in column order. One
+    plan for preview and ingest, so the two show the same table."""
+    if len(keys) <= JSON_MAX_COLUMNS:
+        return sanitize_columns(keys), lambda flat: [flat.get(k, "") for k in keys]
+    kept = keys[:JSON_MAX_COLUMNS - 1]
+    kept_set = set(kept)
+
+    def row_of(flat: dict) -> list[str]:
+        rest = {k: v for k, v in flat.items() if k not in kept_set}
+        return [flat.get(k, "") for k in kept] + [json.dumps(rest, ensure_ascii=False) if rest else ""]
+
+    return sanitize_columns(kept + [JSON_OVERFLOW_COLUMN]), row_of
 
 
 def _iter_json_records(path: str, bad: dict | None = None) -> Iterable[dict]:
@@ -898,13 +1724,13 @@ def _iter_json_records(path: str, bad: dict | None = None) -> Iterable[dict]:
     without extra tooling)."""
     ext = os.path.splitext(path)[1].lower()
     if ext in (".jsonl", ".ndjson"):
-        with open(path, "r", encoding=sniff_text_encoding(path), errors="replace") as f:
+        with open(path, "r", encoding=sniff_text_encoding(path), errors=TEXT_DECODE_ERRORS) as f:
             for lineno, line in enumerate(f, start=1):
                 line = line.strip()
                 if not line:
                     continue
                 try:
-                    obj = json.loads(line)
+                    obj = _json_loads(line)
                 except json.JSONDecodeError as e:
                     # Same philosophy as CSV's ragged rows: one broken line
                     # (a truncated write, a log rotation seam) must not cost
@@ -921,8 +1747,8 @@ def _iter_json_records(path: str, bad: dict | None = None) -> Iterable[dict]:
                     continue
                 yield obj if isinstance(obj, dict) else {"value": obj}
         return
-    with open(path, "r", encoding=sniff_text_encoding(path), errors="replace") as f:
-        data = json.load(f)
+    with open(path, "r", encoding=sniff_text_encoding(path), errors=TEXT_DECODE_ERRORS) as f:
+        data = _json_load(f)
     if isinstance(data, list):
         for obj in data:
             yield obj if isinstance(obj, dict) else {"value": obj}
@@ -930,6 +1756,26 @@ def _iter_json_records(path: str, bad: dict | None = None) -> Iterable[dict]:
         yield data
     else:
         yield {"value": data}
+
+
+def _allow_everything(*_args) -> int:
+    return sqlite3.SQLITE_OK
+
+
+def _clear_authorizer(conn: sqlite3.Connection) -> None:
+    """Take an authorizer back off `conn`. set_authorizer(None) only means
+    "none" from Python 3.11; on 3.10 it installs None AS the callback, the
+    call fails on every statement, and SQLite reads that as a denial — so
+    one plugin table write left the writer connection refusing every
+    write, view build and import ("not authorized") until Winnow
+    restarted. 3.10 has no way to remove one, so it gets a callback that
+    allows everything instead. SQLite consults it only while preparing a
+    statement (once per table and column the statement names), never per
+    row, and a statement served from sqlite3's cache is not prepared again."""
+    if sys.version_info >= (3, 11):
+        conn.set_authorizer(None)
+    else:
+        conn.set_authorizer(_allow_everything)
 
 
 class IngestCancelled(Exception):
@@ -992,6 +1838,17 @@ class ViewExpired(KeyError):
     The type carries the distinction instead, where no import can spell
     it wrong.
     """
+
+
+class RecordGone(LookupError):
+    """A write named a table, tag or row that is not in this case (any
+    more) — almost always a second window acting on something the first
+    one deleted. server.py answers 404.
+
+    Raised from inside the write's own transaction, before anything is
+    written, so the request fails with nothing committed behind it. Not a
+    KeyError: the view routes map KeyError to 409 "rebuild and retry",
+    and no rebuild brings a deleted tag back."""
 
 
 class OpCancelled(Exception):
@@ -1259,8 +2116,38 @@ CASE_LOCK_HEARTBEAT_SEC = 30
 CASE_LOCK_STALE_AFTER_SEC = 150
 
 
+def is_winnow_case_file(path: str) -> bool:
+    """Distinguish a Winnow case from a generic SQLite file — double-
+    clicking a case should OPEN it, not ingest it as data. Read-only,
+    tolerant of anything unreadable.
+
+    Also the gate in front of every Store opened on a path that already
+    exists (server.py's _open_store, case registration, copy_sources_to):
+    Store.__init__ runs META_SCHEMA against whatever it is handed and
+    switches the file to WAL, so opening evidence AS a case writes into
+    it. Lives here rather than in server.py for copy_sources_to's sake."""
+    try:
+        with open(path, "rb") as f:
+            if f.read(16) != b"SQLite format 3\x00":
+                return False
+        conn = sqlite3.connect(sqlite_ro_uri(path), uri=True)
+        try:
+            names = {r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+        finally:
+            conn.close()
+        return {"sources", "tag_defs", "row_tags"} <= names
+    except Exception:  # noqa: BLE001 — unreadable means "not a case"
+        return False
+
+
 def case_lock_path(case_path: str) -> str:
-    return os.path.abspath(case_path) + CASE_LOCK_SUFFIX
+    # realpath, not abspath: the marker has to be ONE file per case however
+    # the path to it was spelled. With abspath, a case opened through a
+    # symlink (a case folder linked onto a share, say) got a marker of its
+    # own beside the link, and a second Winnow opening the same file by its
+    # real path probed a marker nobody held and walked straight in.
+    return os.path.realpath(case_path) + CASE_LOCK_SUFFIX
 
 
 def _read_lock_record(path: str) -> dict:
@@ -1473,6 +2360,71 @@ def _current_user() -> str:
         return "unknown"
 
 
+def _is_int64(v: Any) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool) and -(1 << 63) <= v < (1 << 63)
+
+
+def _list_of_dicts_problem(doc: dict, key: str, fields: dict[str, Any]) -> str | None:
+    """`doc[key]`, when present, must be a list of objects whose `fields`
+    (name -> type check) hold the right kind of value."""
+    items = doc.get(key)
+    if items is None:
+        return None
+    if not isinstance(items, list):
+        return f"{key!r} should be a list"
+    for i, item in enumerate(items):
+        if not isinstance(item, dict):
+            return f"{key}[{i}] should be an object"
+        for name, ok in fields.items():
+            if not ok(item.get(name)):
+                return f"{key}[{i}].{name} is missing or the wrong type"
+    return None
+
+
+def session_document_problem(doc: Any) -> str | None:
+    """What is wrong with the SHAPE of one table's session (the
+    `winnow-session/1` export_session writes), or None if import_session
+    can read it. A session file is another analyst's — foreign input — and
+    a valid-JSON document of the wrong shape used to reach the importer
+    and die there as a 500 ("'list' object has no attribute 'get'"),
+    sometimes after writing part of itself. Checked before anything is
+    written instead; only the fields the importer reads, so a newer
+    exporter's extra keys still pass."""
+    if not isinstance(doc, dict):
+        return "a session should be a JSON object"
+    if doc.get("source") is not None and not isinstance(doc["source"], dict):
+        return "'source' should be an object"
+    if doc.get("layout") is not None and not isinstance(doc["layout"], dict):
+        return "'layout' should be an object"
+    is_str = lambda v: isinstance(v, str)  # noqa: E731
+    return (
+        _list_of_dicts_problem(doc, "tag_defs", {"id": _is_int64, "name": is_str})
+        or _list_of_dicts_problem(doc, "row_tags", {"rid": _is_int64, "tag_id": _is_int64})
+        or _list_of_dicts_problem(doc, "row_notes", {"rid": _is_int64, "note": is_str})
+        or _list_of_dicts_problem(doc, "saved_views", {"name": is_str})
+        # A derived column's own fields are checked as it is created — a
+        # bad one is a per-column warning there, never a failed import.
+        or _list_of_dicts_problem(doc, "derived_columns", {})
+    )
+
+
+def case_session_document_problem(doc: Any) -> str | None:
+    """The same check for a whole-case session (`winnow-case-session/1`):
+    every table's session in it, before the first one is applied."""
+    if not isinstance(doc, dict):
+        return "a case session should be a JSON object"
+    sources = doc.get("sources")
+    if sources is None:
+        return None
+    if not isinstance(sources, list):
+        return "'sources' should be a list"
+    for i, s in enumerate(sources):
+        problem = session_document_problem(s)
+        if problem:
+            return f"sources[{i}]: {problem}"
+    return None
+
+
 class Store:
     FTS_BUILD_CONCURRENCY = 2  # trigram builds are CPU/writer-bound; more just thrash
 
@@ -1480,7 +2432,7 @@ class Store:
         self.path = path
         self._default_tags = default_tags or DEFAULT_TAGS
         self.lock = threading.RLock()
-        self.db = sqlite3.connect(path, check_same_thread=False)
+        self.db = _no_dq_strings(sqlite3.connect(path, check_same_thread=False))
         self.db.row_factory = sqlite3.Row
         self.db.create_function("REGEXP", 2, _regexp, deterministic=True)
         self.db.create_function("DAY_BUCKET", 1, _day_bucket, deterministic=True)
@@ -1537,7 +2489,9 @@ class Store:
                 os.close(fd)
         else:  # pragma: no cover - Windows
             os.close(fd)
-        self.db.execute(f"ATTACH DATABASE '{self._views_path}' AS v")
+        # Bound, not pasted in: the tempdir is the analyst's profile on
+        # Windows, and C:\Users\O'Brien\... would end the string literal.
+        self.db.execute("ATTACH DATABASE ? AS v", (self._views_path,))
         # WAL on the views db is what lets _reader() connections read a
         # view concurrently with the writer materialising the next one.
         self.db.execute("PRAGMA v.journal_mode=WAL")
@@ -1582,10 +2536,24 @@ class Store:
             # ...and sources.origin / origin_meta (where a derived table came
             # from — a SQL-pane save, a saved view or selection). NULL reads
             # as "an imported file", which every pre-existing row is.
+            # ...and sources.ingest (how the file was parsed; NULL on a
+            # table from before it was recorded, which session re-import
+            # treats as "guess, then check the shape").
             have = {r[1] for r in self.db.execute("PRAGMA table_info(sources)")}
-            for col in ("origin", "origin_meta"):
+            for col in ("origin", "origin_meta", "ingest"):
                 if col not in have:
                     self.db.execute(f"ALTER TABLE sources ADD COLUMN {col} TEXT")
+            # A table made inside Winnow before such tables were given an
+            # identity (MADE_HASH_PREFIX) has a NULL hash, which no session
+            # can match — so a replacing load cleared its tags and never
+            # put them back. Each gets one now, once. randomblob() runs per
+            # row, so no two share one, and nothing outside this case has
+            # it. A session saved before this has no hash for such a table
+            # and stays unmatched: import_case_session leaves the tables it
+            # could be as they are rather than guess.
+            self.db.execute(
+                "UPDATE sources SET file_hash = ? || lower(hex(randomblob(16))) "
+                "WHERE file_hash IS NULL OR file_hash = ''", (MADE_HASH_PREFIX,))
             # Same for dashboards.pinned (a board promoted into the page strip).
             if not any(r[1] == "pinned" for r in self.db.execute("PRAGMA table_info(dashboards)")):
                 self.db.execute("ALTER TABLE dashboards ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
@@ -1595,6 +2563,12 @@ class Store:
             # That is the safe direction to be wrong in.
             if not any(r[1] == "origin" for r in self.db.execute("PRAGMA table_info(dashboards)")):
                 self.db.execute("ALTER TABLE dashboards ADD COLUMN origin TEXT")
+            # And merges' column mode / source column (mismatched merges).
+            merge_cols = {r[1] for r in self.db.execute("PRAGMA table_info(merges)")}
+            if "col_mode" not in merge_cols:
+                self.db.execute("ALTER TABLE merges ADD COLUMN col_mode TEXT NOT NULL DEFAULT 'all'")
+            if "source_column" not in merge_cols:
+                self.db.execute("ALTER TABLE merges ADD COLUMN source_column INTEGER NOT NULL DEFAULT 0")
             # The single-row `dashboard` becomes one named "Dashboard" entry
             # the first time a case with that older shape is opened.
             has_named = self.db.execute("SELECT 1 FROM dashboards LIMIT 1").fetchone()
@@ -1611,6 +2585,8 @@ class Store:
                     self.db.executemany(
                         "INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", [(i,) for i in ids]
                     )
+        # Before _seed_tags, which is the first thing that can hand out an id.
+        self._migrate_ids_never_reused()
         self._seed_tags()
         self._view_seq = 0
         # Its own lock for the same reason _search_job_lock exists: handing
@@ -1629,8 +2605,9 @@ class Store:
         # changed. Scratch, not evidence — it lives in the views database
         # (invariant #3) and dies with the process, same as a view.
         self._undo: list[dict] = []
-        self._maxlen_cache: dict[int, tuple[int, dict[str, int]]] = {}
+        self._maxlen_cache: dict[int, tuple[tuple, dict[str, int]]] = {}
         self._fts_threads: dict[int, threading.Thread] = {}
+        self._fts_failures: set[tuple[int, str]] = set()   # logged once each (_build_fts_worker)
         self._index_threads: dict[tuple[int, str], threading.Thread] = {}
         # Caps how many trigram builds run at once. A broad action — a
         # search-all sweep over a case with many unindexed sources — calls
@@ -1656,6 +2633,10 @@ class Store:
         self._search_job: dict | None = None
         self._search_job_thread: threading.Thread | None = None
         self._search_job_seq = 0
+        # Case files copy_sources_to is writing into right now. Its lock
+        # covers the set's add/discard only, never the copy itself.
+        self._copying_into: set[str] = set()
+        self._copying_lock = threading.Lock()
         # View builds run in the background (start_view_job): one live job
         # per source, each building a *held* view that evicts nothing until
         # the client adopts it — see build_view(hold=True) / adopt_view.
@@ -1692,14 +2673,12 @@ class Store:
         # and would otherwise land one behind the snapshot.
         self._subset_copies: dict[int, dict] = {}
         self._closing = False
-        # SQL pane queries in flight — run_sql_result, and run_sql too (a
-        # plugin's winnow.api.sql can be a runaway CTE as easily as the
-        # pane can) — token → {"rows", "done"}, under the jobs lock and on
-        # the copies' terms: _sql_run refuses once `_closing` is set, and
-        # close() interrupts each one (cancel_op) and waits on `done`.
-        # cancel_sql_runs is the same stop for the UI's Shut down, which
-        # otherwise waits on the request forever while the query holds
-        # the case lock.
+        # The SQL pane's runs in flight (run_sql_result), token →
+        # {"rows", "done"}, under the jobs lock and on the copies' terms:
+        # _sql_run refuses once `_closing` is set, and close() waits on
+        # `done` before deleting the results file. Stopping one is
+        # _pane_query's business, not this registry's — this is what the
+        # pane's "Running… N rows" reads.
         self._sql_runs: dict[str, dict] = {}
         # The pane's results, held server-side and paged out
         # (winnow/sqlresults.py). Its scratch file is made on the first
@@ -1712,6 +2691,15 @@ class Store:
         self._op_lock = threading.Lock()
         self._op_conns: dict[str, sqlite3.Connection] = {}
         self._op_cancelled: set[str] = set()
+        # The SQL pane's connections while each runs a query, and whether
+        # this Store has stopped taking them (see _pane_query). Same lock:
+        # stop_pane_queries interrupts under it, and a connection leaves
+        # the set and closes under it, so an interrupt never lands on a
+        # connection that is already closed. _pane_gone is how close()
+        # waits for the interrupted ones to let go of the case file.
+        self._pane_conns: set[sqlite3.Connection] = set()
+        self._pane_stopped = False
+        self._pane_gone = threading.Condition(self._op_lock)
         # Preemption (see _yield_the_writer): which build currently holds
         # the writer lock, which tokens were interrupted to make way for
         # another table rather than cancelled outright, and how many times
@@ -1827,8 +2815,21 @@ class Store:
         with self._fts_build_sem:
             try:
                 self.build_fts(source_id)
-            except Exception:
-                pass  # best-effort background upgrade — the next search attempt retries
+            except Exception as e:  # noqa: BLE001
+                # Best-effort background upgrade — the next search attempt
+                # retries, and searches scan the table meanwhile. But said
+                # once in the log: this used to be silent, which is how a
+                # build that could never succeed (a table too wide for the
+                # doc view's expression) went unnoticed.
+                # Not when the case is closing under the build — that is
+                # the build being stopped, not failing.
+                key = (source_id, str(e))
+                with self._threads_lock:
+                    first = key not in self._fts_failures
+                    self._fts_failures.add(key)
+                if first and not self._closing:
+                    wlog.record("warn", f"Search index for table {source_id} not built: {e} — "
+                                        "searches of it scan the table instead")
 
     def _is_fts_building(self, source_id: int) -> bool:
         with self._threads_lock:
@@ -1921,14 +2922,44 @@ class Store:
         colnames[col] != 'number' before calling this."""
         self._ensure_purpose_index_building(source_id, column, "sort", table_name)
 
+    def _table_spelling(self, table_name: str, column: str) -> str:
+        """`column` as `table_name` itself spells it. A merge reads every
+        member through its first member's names, which SQLite resolves
+        case-insensitively (A-Z), so a member's "HOST" is asked for as
+        "Host". Anything named after the column has to use the member's
+        own spelling — the index name hashes it, and list_column_indexes/
+        drop_column_index look indexes up by the member's names."""
+        own = self._table_own_spelling(table_name, column)
+        return column if own is None else own
+
+    def _table_own_spelling(self, table_name: str, column: str) -> str | None:
+        """_table_spelling, or None when `table_name` has no such column —
+        a member of a merge whose tables have different columns lacks some
+        of the merge's. Matched as _col_key does, so a member's " Host" is
+        the merge's "Host" too."""
+        key = _col_key(column)
+        with self._reader() as ro:
+            names = [name for (name,) in ro.execute("SELECT name FROM pragma_table_info(?)", (table_name,))]
+        if column in names:
+            return column
+        return next((name for name in names if _col_key(name) == key), None)
+
     def _ensure_purpose_index_building(self, source_id: int, column: str, purpose: str,
                                         table_name: str | None = None) -> None:
+        table_name = table_name or self._source_lite(source_id)["table_name"]
+        # Callers pass a merge's spelling of the column, once per member.
+        # Index the member's own spelling (the name list_column_indexes
+        # hashes), and nothing at all on a member that lacks the column:
+        # a merge of tables with different columns asks every member for
+        # every one of its columns.
+        column = self._table_own_spelling(table_name, column)
+        if column is None:
+            return
         key = (source_id, column, purpose)
         with self._threads_lock:
             existing = self._index_threads.get(key)
             if existing and existing.is_alive():
                 return
-        table_name = table_name or self._source_lite(source_id)["table_name"]
         if self._column_index_exists(table_name, column, purpose):
             return
         with self._threads_lock:
@@ -1954,12 +2985,14 @@ class Store:
         """Blocks until a background index build for (source_id, column,
         purpose) finishes (or `timeout` elapses). Used by tests. Returns
         whether the index exists by the time it returns."""
+        src = self.get_source(source_id)
+        table = self._index_table_for(src, column)
+        column = self._table_spelling(table, column)
         with self._threads_lock:
             t = self._index_threads.get((source_id, column, purpose))
         if t:
             t.join(timeout)
-        src = self.get_source(source_id)
-        return self._column_index_exists(src["table_name"], column, purpose)
+        return self._column_index_exists(table, column, purpose)
 
     def list_column_indexes(self, source_id: int) -> list[dict]:
         """Which of this source's columns currently have one of the
@@ -2191,6 +3224,136 @@ class Store:
         # one knob that parallelises it (default is 0 = single-threaded).
         conn.execute("PRAGMA threads=4")
 
+    # The tables whose ids must never come round again (see the comment at
+    # the top of META_SCHEMA), each with every place in a case file that can
+    # still hold one of its ids after the row itself is gone. A case file
+    # from before AUTOINCREMENT only knows its CURRENT highest id, so the
+    # migration seeds the counter past every id still mentioned anywhere —
+    # an orphaned row_tags entry, a widget's `src_7`, a leftover drv_9 —
+    # rather than past MAX(id) alone, which would hand a deleted newest
+    # table's id straight back to the next import.
+    #
+    # Signed source ids (negative = merge) share open_tabs/layouts/
+    # saved_views/source_folder_map, so the positive half counts for
+    # sources and the negated negative half for merges.
+    _ID_HIGH_WATER_SQL = {
+        "sources": [
+            "SELECT MAX(id) FROM sources",
+            *(f"SELECT MAX(source_id) FROM {t}" for t in (
+                "row_tags", "row_notes", "layouts", "saved_views", "open_tabs",
+                "derived_columns", "subset_rids", "source_folder_map",
+                "watchlist_hits", "watchlist_scans")),
+            "SELECT MAX(parent_source_id) FROM subset_rids",
+        ],
+        "tag_defs": [
+            "SELECT MAX(id) FROM tag_defs",
+            "SELECT MAX(tag_id) FROM row_tags",
+            "SELECT MAX(auto_tag_id) FROM watchlist",
+        ],
+        "merges": [
+            "SELECT MAX(id) FROM merges",
+            *(f"SELECT -MIN(source_id) FROM {t}" for t in (
+                "layouts", "saved_views", "open_tabs", "source_folder_map")),
+        ],
+        "sql_tabs": ["SELECT MAX(id) FROM sql_tabs"],
+    }
+
+    def _id_high_water(self, table: str) -> int:
+        """The highest id `table` has ever been seen to hand out, as far as
+        this case file can still tell (see _ID_HIGH_WATER_SQL)."""
+        hw = 0
+        for sql in self._ID_HIGH_WATER_SQL[table]:
+            v = self.db.execute(sql).fetchone()[0]
+            if isinstance(v, int):
+                hw = max(hw, v)
+        if table == "sources":
+            # A source's own tables and views, and the text that names
+            # them by id: merge member lists, widget queries, saved SQL.
+            # A dropped table cleans up after itself, but a crash between
+            # its statements, or a dashboard written against src_7 that
+            # was deleted since, still names the id.
+            ids = [int(m.group(1)) for (name,) in self.db.execute("SELECT name FROM sqlite_master")
+                   if (m := re.match(r"(?:src|fts|drv)_(\d+)", name or ""))]
+            for sql in ("SELECT widgets FROM dashboards", "SELECT sql FROM sql_tabs"):
+                for (text,) in self.db.execute(sql):
+                    ids += [int(n) for n in re.findall(r"\bsrc_(\d+)\b", text or "")]
+            for (text,) in self.db.execute("SELECT source_ids FROM merges"):
+                with contextlib.suppress(TypeError, ValueError):
+                    ids += [n for n in json.loads(text) if isinstance(n, int)]
+            hw = max([hw, *ids])
+        return hw
+
+    def _migrate_ids_never_reused(self) -> None:
+        """Rebuild sources/tag_defs/merges/sql_tabs as AUTOINCREMENT in a
+        case file created before they were, once.
+
+        SQLite cannot add AUTOINCREMENT to an existing table, so each one
+        is copied out, recreated from META_SCHEMA's definition, and copied
+        back by column name with its ids intact. By name, and from the
+        canonical DDL rather than the file's own: Store.__init__ has just
+        ALTERed in any column an older file lacked, so the canonical
+        column set is the one every file now has, in whatever order the
+        ALTERs left it — and a column the canonical DDL does not know is
+        carried across rather than dropped. Its sqlite_sequence row is
+        then set to the high-water mark, never lower than what the
+        copy-back itself recorded.
+
+        The same pass clears what reuse already left behind in such a
+        file, because the next id is no longer coming to claim it: tag
+        assignments and notes for a table or tag that no longer exists
+        (a stale window's write, an auto-tag scan after its tag was
+        deleted), and an indicator's auto-tag naming a deleted tag. They
+        are unreachable from anywhere in the app, but row_tags rows still
+        count toward a table's tagged-row total.
+
+        One transaction for the lot: a crash between a DROP and its
+        copy-back would otherwise lose the case's table list."""
+        todo = []
+        for table in self._ID_HIGH_WATER_SQL:
+            row = self.db.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
+            if row and not re.search(r"\bAUTOINCREMENT\b", row[0], re.I):
+                todo.append((table, row[0]))
+        if not todo:
+            return
+        with self.lock:
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                marks = {table: self._id_high_water(table) for table, _ in todo}
+                for table, _ in todo:
+                    ddl = re.search(rf"CREATE TABLE IF NOT EXISTS {table} \(.*?\n\);", META_SCHEMA, re.S)
+                    old_cols = [(r[1], r[2]) for r in self.db.execute(f"PRAGMA main.table_info({q(table)})")]
+                    keep = f"_keep_{table}"
+                    self.db.execute(f"CREATE TEMP TABLE {q(keep)} AS SELECT * FROM main.{q(table)}")
+                    self.db.execute(f"DROP TABLE main.{q(table)}")
+                    self.db.execute(ddl.group(0))
+                    have = {r[1] for r in self.db.execute(f"PRAGMA main.table_info({q(table)})")}
+                    for name, decl in old_cols:
+                        if name not in have:
+                            self.db.execute(f"ALTER TABLE main.{q(table)} ADD COLUMN {q(name)} {decl}")
+                    cols = ", ".join(q(name) for name, _ in old_cols)
+                    self.db.execute(f"INSERT INTO main.{q(table)} ({cols}) SELECT {cols} FROM temp.{q(keep)}")
+                    self.db.execute(f"DROP TABLE temp.{q(keep)}")
+                    seq = self.db.execute(
+                        "SELECT seq FROM sqlite_sequence WHERE name=?", (table,)).fetchone()
+                    if seq is None:
+                        self.db.execute("INSERT INTO sqlite_sequence(name, seq) VALUES (?,?)",
+                                        (table, marks[table]))
+                    elif seq[0] < marks[table]:
+                        self.db.execute("UPDATE sqlite_sequence SET seq=? WHERE name=?",
+                                        (marks[table], table))
+                if "tag_defs" in marks:
+                    self.db.execute("DELETE FROM row_tags WHERE tag_id NOT IN (SELECT id FROM tag_defs)")
+                    self.db.execute("UPDATE watchlist SET auto_tag_id=NULL "
+                                    "WHERE auto_tag_id NOT IN (SELECT id FROM tag_defs)")
+                if "sources" in marks:
+                    for t in ("row_tags", "row_notes"):
+                        self.db.execute(f"DELETE FROM {t} WHERE source_id NOT IN (SELECT id FROM sources)")
+            except BaseException:
+                self.db.rollback()
+                raise
+            self.db.commit()
+
     def _seed_tags(self) -> None:
         with self.lock, self.db:
             n = self.db.execute("SELECT count(*) FROM tag_defs").fetchone()[0]
@@ -2214,6 +3377,11 @@ class Store:
                 conn.close()
 
     def close(self) -> None:
+        # SQL pane queries first: one can run for ever, and it has no job
+        # record or thread of its own to stop cooperatively, so it is
+        # interrupted outright — now, so it unwinds while the waits below
+        # run. Waited for further down.
+        self.stop_pane_queries()
         # Stop any running ingest job, and any view-as-table copy, before
         # the connection goes away — a worker mid-batch would otherwise die
         # on a closed database, and a copy would strand a half-filled
@@ -2267,15 +3435,21 @@ class Store:
                 t.join(15)
         for c in copies:
             c["done"].wait(15)
-        # SQL pane runs: interrupt each one's private read-only connection
-        # (a run mid-fetch stops at its next batch; one still in its first
-        # step raises OpCancelled), wait for it to come off the scratch
-        # writer, then delete the scratch file and every result in it.
+        # The pane queries interrupted at the top. Each holds the case file
+        # open on a connection of its own, which is the trap the drain below
+        # exists for: open at the writer's close, it stops the -wal being
+        # checkpointed, and save_as then deletes the -wal. An interrupt
+        # lands at the query's next VM step, so this is milliseconds.
+        with self._pane_gone:
+            self._pane_gone.wait_for(lambda: not self._pane_conns, timeout=15)
+        # A pane run (run_sql_result) still writes to the results scratch
+        # file for a moment after its connection goes — its last batch,
+        # its summary. Wait for each to finish, then delete the file and
+        # every result in it. No new run can start: _sql_run refuses once
+        # `_closing` is set.
         with self._ingest_jobs_lock:
-            sql_runs = list(self._sql_runs.items())
-        for token, _ in sql_runs:
-            self.cancel_op(token)
-        for _, run in sql_runs:
+            sql_runs = list(self._sql_runs.values())
+        for run in sql_runs:
             run["done"].wait(15)
         self.sql_results.close()
         # Immediately before the writer closes, and not before the cleanup
@@ -2321,7 +3495,8 @@ class Store:
         writer (a group_virtual WHERE can contain DAY_BUCKET(...); a raw
         filter fragment echoed into an export can contain REGEXP), so a
         query compiled against one connection never fails on the other."""
-        ro = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, check_same_thread=False)
+        ro = _no_dq_strings(sqlite3.connect(sqlite_ro_uri(self.path), uri=True,
+                                            check_same_thread=False))
         ro.row_factory = sqlite3.Row
         ro.create_function("REGEXP", 2, _regexp, deterministic=True)
         ro.create_function("DAY_BUCKET", 1, _day_bucket, deterministic=True)
@@ -2332,7 +3507,7 @@ class Store:
         # even a reader can see SQLITE_BUSY briefly.
         ro.execute("PRAGMA mmap_size=1073741824")
         ro.execute("PRAGMA busy_timeout=5000")
-        ro.execute(f"ATTACH DATABASE 'file:{self._views_path}?mode=ro' AS v")
+        ro.execute("ATTACH DATABASE ? AS v", (sqlite_ro_uri(self._views_path),))
         return ro
 
     @contextlib.contextmanager
@@ -2650,44 +3825,52 @@ class Store:
 
         # 1 MB read buffer: the default 8 KB means a 20 GB file is ~2.5M
         # read() syscalls before the csv layer even sees a byte.
-        fh = open(path, "r", encoding=sniff_text_encoding(path), errors="replace",
+        encoding = sniff_text_encoding(path)
+        fh = open(path, "r", encoding=encoding, errors=TEXT_DECODE_ERRORS,
                   newline="", buffering=1 << 20)
         head = fh.read(64 * 1024)
         fh.seek(0)
+        fallback0 = _cp1252_fallback_count()   # after the seek: the head is read twice
         if delimiter is None:
             # `path`, not `name`: the display name is the caller's to
             # override and may carry no extension at all, and the
             # extension is the whole point here.
             delimiter = self._sniff(head, path)
-        reader = csv.reader(fh, delimiter=delimiter)
+        reader, rows = _csv_rows(fh, delimiter)
 
+        # Everything up to the row loop's own try/finally closes the file
+        # on the way out too — a failure here used to leak the handle.
         try:
-            first_row = next(reader)
-        except StopIteration:
-            fh.close()
-            raise ValueError("File is empty")
-        if has_header:
-            cols = sanitize_columns(first_row)
-            ncols = len(cols)
-            leftover_row = None
-        else:
-            ncols = len(first_row)
-            cols = sanitize_columns([None] * ncols)
-            leftover_row = first_row  # not a header — it's the first data row
+            first_row = _first_nonblank_row(rows)
+            if has_header:
+                cols = sanitize_columns(first_row)
+                ncols = len(cols)
+                leftover_row = None
+            else:
+                ncols = len(first_row)
+                cols = sanitize_columns([None] * ncols)
+                leftover_row = first_row  # not a header — it's the first data row
 
-        with self.lock, self.db:
-            cur = self.db.execute(
-                "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at)"
-                " VALUES (?,?,?,?,?,?)",
-                (name, os.path.abspath(path), "", "[]", file_hash,
-                 time.strftime("%Y-%m-%dT%H:%M:%S")),
-            )
-            source_id = cur.lastrowid
-            self.db.execute("INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", (source_id,))
-            table = f"src_{source_id}"
-            coldefs = ", ".join(f"{q(c)} TEXT" for c in cols)
-            self.db.execute(f"CREATE TABLE {q(table)} (rid INTEGER PRIMARY KEY, {coldefs})")
-            self.db.execute("UPDATE sources SET table_name=? WHERE id=?", (table, source_id))
+            with self.lock, self.db:
+                cur = self.db.execute(
+                    "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at, ingest)"
+                    " VALUES (?,?,?,?,?,?,?)",
+                    (name, os.path.abspath(path), "", "[]", file_hash,
+                     time.strftime("%Y-%m-%dT%H:%M:%S"),
+                     # The delimiter actually used, not the None that asked for
+                     # a sniff: a re-import must split the same way.
+                     _ingest_record("csv", delimiter=delimiter, has_header=has_header,
+                                    column_types=column_types)),
+                )
+                source_id = cur.lastrowid
+                self.db.execute("INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", (source_id,))
+                table = f"src_{source_id}"
+                coldefs = ", ".join(f"{q(c)} TEXT" for c in cols)
+                self.db.execute(f"CREATE TABLE {q(table)} (rid INTEGER PRIMARY KEY, {coldefs})")
+                self.db.execute("UPDATE sources SET table_name=? WHERE id=?", (table, source_id))
+        except BaseException:
+            fh.close()
+            raise
 
         placeholders = ",".join("?" * ncols)
         insert = f"INSERT INTO {q(table)} ({','.join(q(c) for c in cols)}) VALUES ({placeholders})"
@@ -2709,14 +3892,14 @@ class Store:
         with self._ingest_synchronous_off():
             try:
                 prev_line = 0
-                for row in itertools.chain(rows_iter, reader):
+                for row in itertools.chain(rows_iter, rows):
                     if len(row) != ncols:
                         # Ragged row: pad or trim rather than dropping evidence.
                         ragged += 1
                         row = (row + [""] * ncols)[:ncols]
                     # An unbalanced quote makes csv silently swallow every
                     # following line into one field until the next quote (or
-                    # a hard error at the 128KB field limit) — dozens of
+                    # a hard error at CSV_FIELD_LIMIT) — dozens of
                     # evidence lines vanish from the grid with the ragged
                     # counter reading zero. The reader's line_num counts
                     # PHYSICAL lines consumed, so a row that swallowed its
@@ -2789,8 +3972,8 @@ class Store:
             types = [(column_types[i] if i < len(column_types) and column_types[i] in ("text", "number", "datetime") else t)
                      for i, t in enumerate(types)]
         colmeta = [{"name": c, "type": t} for c, t in zip(cols, types)]
-        with self.lock, self.db:
-            self.db.execute("UPDATE sources SET columns=? WHERE id=?", (json.dumps(colmeta), source_id))
+        decoded = _encoding_report(encoding, _cp1252_fallback_count() - fallback0)
+        self._finish_source_columns(source_id, colmeta, decoded, name)
 
         if error is not None:
             if total == 0:
@@ -2813,11 +3996,12 @@ class Store:
         rec["rows_per_sec"] = int(total / elapsed) if elapsed > 0 else 0
         rec["ragged_rows"] = ragged
         rec["suspect_quote_rows"] = suspect_quotes
+        rec["encoding"], rec["cp1252_bytes"] = decoded["encoding"], decoded["cp1252_bytes"]
         return rec
 
     def ingest_text(self, path: str, name: str | None = None, build_fts: bool = True,
                     progress=None, cancel=None) -> dict:
-        """Import a file as raw text: one row per physical line, the whole
+        r"""Import a file as raw text: one row per physical line, the whole
         line in the one TEXT_COLUMN, nothing split, nothing treated as a
         header. For log files — syslog, hostd.log, auth.log.1, an
         extensionless dump — which the CSV path mangled: it sniffed a
@@ -2830,13 +4014,19 @@ class Store:
         (blank lines are kept as empty rows for exactly that reason — the
         grid has a hide-empty-rows option for the analyst who'd rather not
         see them). Same batching, progress, cancel and keep-what-committed
-        contract as ingest_csv; same encoding sniff."""
+        contract as ingest_csv; same encoding sniff.
+
+        A line ends at \n and nowhere else (_text_line has the why)."""
         name = name or os.path.basename(path)
         if looks_binary(path):
             raise ValueError(f"{name} looks like a binary file (NUL bytes in its first 8 KB) — not importable as text")
         size = os.path.getsize(path)
         file_hash = self._quick_hash(path)
-        fh = open(path, "r", encoding=sniff_text_encoding(path), errors="replace", buffering=1 << 20)
+        # newline="\n", not the default: universal newlines also end a line
+        # at a lone \r. See _text_line.
+        encoding = sniff_text_encoding(path)
+        fh = open(path, "r", encoding=encoding, errors=TEXT_DECODE_ERRORS,
+                  newline="\n", buffering=1 << 20)
         try:
             first = fh.readline()
         except Exception:
@@ -2846,14 +4036,16 @@ class Store:
             fh.close()
             raise ValueError("File is empty")
         fh.seek(0)
+        fallback0 = _cp1252_fallback_count()
 
         cols = [TEXT_COLUMN]
         with self.lock, self.db:
             cur = self.db.execute(
-                "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at)"
-                " VALUES (?,?,?,?,?,?)",
+                "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at, ingest)"
+                " VALUES (?,?,?,?,?,?,?)",
                 (name, os.path.abspath(path), "", "[]", file_hash,
-                 time.strftime("%Y-%m-%dT%H:%M:%S")),
+                 time.strftime("%Y-%m-%dT%H:%M:%S"),
+                 _ingest_record("text")),
             )
             source_id = cur.lastrowid
             self.db.execute("INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", (source_id,))
@@ -2869,9 +4061,7 @@ class Store:
         with self._ingest_synchronous_off():
             try:
                 for line in fh:
-                    # Universal newlines already folded \r\n to \n; the
-                    # final line may have no terminator at all.
-                    batch.append((line[:-1] if line.endswith("\n") else line,))
+                    batch.append((_text_line(line),))
                     if len(batch) >= BATCH:
                         if cancel is not None and cancel():
                             raise IngestCancelled(f"Import of {name} cancelled")
@@ -2901,8 +4091,8 @@ class Store:
                 fh.close()
 
         colmeta = [{"name": TEXT_COLUMN, "type": "text"}]
-        with self.lock, self.db:
-            self.db.execute("UPDATE sources SET columns=? WHERE id=?", (json.dumps(colmeta), source_id))
+        decoded = _encoding_report(encoding, _cp1252_fallback_count() - fallback0)
+        self._finish_source_columns(source_id, colmeta, decoded, name)
         if error is not None:
             if total == 0:
                 self.drop_source(source_id)
@@ -2915,18 +4105,42 @@ class Store:
         rec["rows_per_sec"] = int(total / elapsed) if elapsed > 0 else 0
         rec["ragged_rows"] = 0
         rec["suspect_quote_rows"] = 0
+        rec["encoding"], rec["cp1252_bytes"] = decoded["encoding"], decoded["cp1252_bytes"]
         return rec
 
     @staticmethod
     def preview_text_lines(text: str, max_rows: int = 50) -> dict:
-        """The raw-text importer's preview: the first lines, one per row, in
+        r"""The raw-text importer's preview: the first lines, one per row, in
         the shape preview_csv_text returns so the import preview renders
-        them with the same table."""
-        lines = text.splitlines()
-        if not lines and not text:
+        them with the same table. Split exactly as ingest_text splits —
+        str.splitlines() breaks on \r, \v, \f, \x85 and U+2028 too, so
+        the preview showed rows the import would not make."""
+        if not text:
             raise ValueError("File is empty")
+        lines = text.split("\n")
+        if lines[-1] == "":
+            lines.pop()   # the last line's terminator, not a blank line after it
+        lines = [_text_line(ln) for ln in lines[:max_rows]]
         return {"delimiter": None, "columns": [TEXT_COLUMN],
-                "sample_rows": [[ln] for ln in lines[:max_rows]], "inferred_types": ["text"]}
+                "sample_rows": [[ln] for ln in lines], "inferred_types": ["text"]}
+
+    def _finish_source_columns(self, source_id: int, colmeta: list[dict], decoded: dict,
+                               name: str) -> None:
+        """The last write of a text import: the typed columns, and — when
+        the bytes were not plain UTF-8 — how they were read
+        (_encoding_report), on the source where it outlives the toast.
+        The log gets the same line: it is the record of what happened."""
+        with self.lock, self.db:
+            if decoded["meta"] is None:
+                self.db.execute("UPDATE sources SET columns=? WHERE id=?", (json.dumps(colmeta), source_id))
+            else:
+                self.db.execute("UPDATE sources SET columns=?, origin_meta=? WHERE id=?",
+                                (json.dumps(colmeta), json.dumps(decoded["meta"]), source_id))
+        if decoded["encoding"] == "cp1252":
+            wlog.record("warn", f"{name} is not UTF-8 — read as Windows-1252")
+        elif decoded["cp1252_bytes"]:
+            wlog.record("warn", f"{name}: {decoded['cp1252_bytes']:,} byte(s) were not valid UTF-8 "
+                                "and were read as Windows-1252")
 
     def _commit_ingest_batch(self, insert_sql: str, batch: list[tuple], source_id: int, total: int,
                              also: tuple[str, list[tuple]] | None = None,
@@ -2959,11 +4173,8 @@ class Store:
         one table and gets another."""
         if delimiter is None:
             delimiter = self._sniff(text[:8192], name)
-        reader = csv.reader(io.StringIO(text), delimiter=delimiter)
-        try:
-            first_row = next(reader)
-        except StopIteration:
-            raise ValueError("File is empty")
+        _, rows = _csv_rows(io.StringIO(text), delimiter)
+        first_row = _first_nonblank_row(rows)
         if has_header:
             cols = sanitize_columns(first_row)
             ncols = len(cols)
@@ -2974,7 +4185,7 @@ class Store:
             leftover_row = first_row
 
         sample: list[list[str]] = []
-        for row in itertools.chain([leftover_row] if leftover_row is not None else [], reader):
+        for row in itertools.chain([leftover_row] if leftover_row is not None else [], rows):
             if len(sample) >= max_rows:
                 break
             if len(row) != ncols:
@@ -2992,9 +4203,11 @@ class Store:
         (see _webkit_to_iso) so that option can default to checked without
         the analyst needing to already know which columns are epoch-encoded.
         Never writes to the case db — a completely separate connection to
-        a completely separate file."""
-        ro = sqlite3.connect(f"file:{path}?mode=ro", uri=True, check_same_thread=False)
+        a completely separate file — nor beside that file
+        (_open_evidence_sqlite)."""
+        ro, cleanup = _open_evidence_sqlite(path)
         ro.row_factory = sqlite3.Row
+        ro.text_factory = _lenient_text_factory()   # the timestamp sniff reads values too
         try:
             table_names = [
                 r["name"] for r in ro.execute(
@@ -3003,19 +4216,30 @@ class Store:
             ]
             tables = []
             for t in table_names:
-                cols = ro.execute(f"PRAGMA table_info({q(t)})").fetchall()
-                row_count = ro.execute(f"SELECT COUNT(*) FROM {q(t)}").fetchone()[0]
-                likely_ts = []
-                for c in cols:
-                    if not re.search(r"time|utc|date", c["name"], re.IGNORECASE):
-                        continue
-                    sample = [
-                        r[0] for r in ro.execute(
-                            f"SELECT {q(c['name'])} FROM {q(t)} WHERE {q(c['name'])} IS NOT NULL LIMIT 20"
-                        )
-                    ]
-                    if sample and sum(1 for v in sample if _webkit_to_iso(v)) >= max(1, int(len(sample) * 0.8)):
-                        likely_ts.append(c["name"])
+                try:
+                    cols = _sqlite_table_columns(ro, t)
+                    row_count = ro.execute(f"SELECT COUNT(*) FROM {q(t)}").fetchone()[0]
+                    likely_ts = []
+                    for c in cols:
+                        if not re.search(r"time|utc|date", c["name"], re.IGNORECASE):
+                            continue
+                        sample = [
+                            r[0] for r in ro.execute(
+                                f"SELECT {q(c['name'])} FROM {q(t)} WHERE {q(c['name'])} IS NOT NULL LIMIT 20"
+                            )
+                        ]
+                        if sample and sum(1 for v in sample if _webkit_to_iso(v)) >= max(1, int(len(sample) * 0.8)):
+                            likely_ts.append(c["name"])
+                except sqlite3.Error as e:
+                    # One table this SQLite build can't read — a virtual
+                    # table whose module it lacks (Thunderbird's message
+                    # index uses its own FTS tokenizer) — used to fail the
+                    # preview of the whole FILE, so not one of its tables
+                    # could be imported. It is listed, marked unreadable
+                    # (`error`, row_count None), and the rest are offered.
+                    tables.append({"name": t, "row_count": None, "columns": [],
+                                   "likely_timestamp_columns": [], "error": str(e)})
+                    continue
                 tables.append({
                     "name": t,
                     "row_count": row_count,
@@ -3025,6 +4249,7 @@ class Store:
             return {"tables": tables}
         finally:
             ro.close()
+            cleanup()
 
     def ingest_sqlite_table(
         self,
@@ -3052,10 +4277,12 @@ class Store:
         timestamp_columns = set(timestamp_columns or [])
         file_hash = self._quick_hash(path)
 
-        ro = sqlite3.connect(f"file:{path}?mode=ro", uri=True, check_same_thread=False)
+        ro, cleanup = _open_evidence_sqlite(path)
         ro.row_factory = sqlite3.Row
+        undecodable = [0]
+        ro.text_factory = _lenient_text_factory(undecodable)
         try:
-            src_cols_info = ro.execute(f"PRAGMA table_info({q(table_name)})").fetchall()
+            src_cols_info = _sqlite_table_columns(ro, table_name)
             if not src_cols_info:
                 raise ValueError(f"No such table: {table_name}")
             src_colnames = [c["name"] for c in src_cols_info]
@@ -3066,9 +4293,10 @@ class Store:
 
             with self.lock, self.db:
                 cur = self.db.execute(
-                    "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at)"
-                    " VALUES (?,?,?,?,?,?)",
-                    (name, os.path.abspath(path), "", "[]", file_hash, time.strftime("%Y-%m-%dT%H:%M:%S")),
+                    "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at, ingest)"
+                    " VALUES (?,?,?,?,?,?,?)",
+                    (name, os.path.abspath(path), "", "[]", file_hash, time.strftime("%Y-%m-%dT%H:%M:%S"),
+                     _ingest_record("sqlite", table=table_name, timestamp_columns=sorted(timestamp_columns))),
                 )
                 source_id = cur.lastrowid
                 self.db.execute("INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", (source_id,))
@@ -3122,6 +4350,7 @@ class Store:
                     error = e
         finally:
             ro.close()
+            cleanup()
 
         types = [infer_type([r[i] for r in sample]) for i in range(ncols)] if sample else ["text"] * ncols
         colmeta = [{"name": c, "type": t} for c, t in zip(cols, types)]
@@ -3129,6 +4358,11 @@ class Store:
             self.db.execute("UPDATE sources SET columns=? WHERE id=?", (json.dumps(colmeta), source_id))
 
         if error is not None:
+            # Rows that committed before the failure stay, with an accurate
+            # row_count (ingest_csv's partial-import contract). None did:
+            # an empty table would look exactly like a real empty import.
+            if not total:
+                self.drop_source(source_id)
             raise error
 
         if build_fts and total:
@@ -3138,6 +4372,10 @@ class Store:
         rec = self.get_source(source_id)
         rec["elapsed_sec"] = round(elapsed, 2)
         rec["rows_per_sec"] = int(total / elapsed) if elapsed > 0 else 0
+        rec["undecodable_values"] = undecodable[0]
+        if undecodable[0]:
+            wlog.record("warn", f"{name}: {undecodable[0]:,} text value"
+                                f"{'s' if undecodable[0] != 1 else ''} not valid UTF-8 — imported with \ufffd")
         return rec
 
     def ingest_plaso(
@@ -3166,9 +4404,10 @@ class Store:
         ncols = len(cols)
         with self.lock, self.db:
             cur = self.db.execute(
-                "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at)"
-                " VALUES (?,?,?,?,?,?)",
-                (name, os.path.abspath(path), "", "[]", file_hash, time.strftime("%Y-%m-%dT%H:%M:%S")),
+                "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at, ingest)"
+                " VALUES (?,?,?,?,?,?,?)",
+                (name, os.path.abspath(path), "", "[]", file_hash, time.strftime("%Y-%m-%dT%H:%M:%S"),
+                 _ingest_record("plaso")),
             )
             source_id = cur.lastrowid
             self.db.execute("INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", (source_id,))
@@ -3280,9 +4519,10 @@ class Store:
 
             with self.lock, self.db:
                 cur = self.db.execute(
-                    "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at)"
-                    " VALUES (?,?,?,?,?,?)",
-                    (name, os.path.abspath(path), "", "[]", file_hash, time.strftime("%Y-%m-%dT%H:%M:%S")),
+                    "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at, ingest)"
+                    " VALUES (?,?,?,?,?,?,?)",
+                    (name, os.path.abspath(path), "", "[]", file_hash, time.strftime("%Y-%m-%dT%H:%M:%S"),
+                     _ingest_record("xlsx", sheet=sheet_name)),
                 )
                 source_id = cur.lastrowid
                 self.db.execute("INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", (source_id,))
@@ -3372,10 +4612,12 @@ class Store:
         seen_cols: list[str] = []
         seen_set: set[str] = set()
         bad_prev = {"count": 0, "first_line": 0, "first_error": ""}
+        clashes = {"count": 0}
         sample_flat: list[dict[str, str]] = []
         record_count = 0
+        fallback0 = _cp1252_fallback_count()
         for rec in _iter_json_records(path, bad=bad_prev):
-            flat = _flatten_json(rec, max_depth)
+            flat = _flatten_json(rec, max_depth, clashes)
             for k in flat:
                 if k not in seen_set:
                     seen_set.add(k)
@@ -3389,13 +4631,15 @@ class Store:
                     f"File has no readable records — {bad_prev['count']} unreadable line(s), "
                     f"first at line {bad_prev['first_line']}: {bad_prev['first_error']}")
             raise ValueError("File has no records")
-        cols = sanitize_columns(seen_cols)
-        key_by_col = dict(zip(cols, seen_cols))
-        sample_rows = [[flat.get(key_by_col[c], "") for c in cols] for flat in sample_flat]
+        cols, row_of = _json_column_plan(seen_cols)
+        sample_rows = [row_of(flat) for flat in sample_flat]
         types = [infer_type([r[i] for r in sample_rows]) for i in range(len(cols))] if sample_rows else ["text"] * len(cols)
         return {"columns": cols, "sample_rows": sample_rows, "inferred_types": types,
                 "record_count": record_count, "bad_records": bad_prev["count"],
-                "first_bad_line": bad_prev["first_line"]}
+                "first_bad_line": bad_prev["first_line"], "key_collisions": clashes["count"],
+                **{k: v for k, v in _encoding_report(sniff_text_encoding(path),
+                                                     _cp1252_fallback_count() - fallback0).items()
+                   if k != "meta"}}
 
     def ingest_json(
         self,
@@ -3445,15 +4689,15 @@ class Store:
                     f"first at line {bad_scan['first_line']}: {bad_scan['first_error']}")
             raise ValueError("File has no records")
 
-        cols = sanitize_columns(seen_cols)
+        cols, row_of = _json_column_plan(seen_cols)
         ncols = len(cols)
-        key_by_col = dict(zip(cols, seen_cols))
 
         with self.lock, self.db:
             cur = self.db.execute(
-                "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at)"
-                " VALUES (?,?,?,?,?,?)",
-                (name, os.path.abspath(path), "", "[]", file_hash, time.strftime("%Y-%m-%dT%H:%M:%S")),
+                "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at, ingest)"
+                " VALUES (?,?,?,?,?,?,?)",
+                (name, os.path.abspath(path), "", "[]", file_hash, time.strftime("%Y-%m-%dT%H:%M:%S"),
+                 _ingest_record("json", flatten_mode=flatten_mode, flatten_depth=flatten_depth)),
             )
             source_id = cur.lastrowid
             self.db.execute("INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", (source_id,))
@@ -3473,12 +4717,14 @@ class Store:
         # here (fresh collector) because THIS pass is the one that decides
         # what actually lands in the table.
         bad = {"count": 0, "first_line": 0, "first_error": ""}
+        clashes = {"count": 0}
         error: Exception | None = None
+        # Pass 2 only: pass 1 decoded the same bytes once already.
+        fallback0 = _cp1252_fallback_count()
         with self._ingest_synchronous_off():
             try:
                 for rec in _iter_json_records(path, bad=bad):
-                    flat = _flatten_json(rec, max_depth)
-                    row = [flat.get(key_by_col[c], "") for c in cols]
+                    row = row_of(_flatten_json(rec, max_depth, clashes))
                     batch.append(tuple(row))
                     if len(sample) < SAMPLE_ROWS:
                         sample.append(row)
@@ -3513,8 +4759,8 @@ class Store:
 
         types = [infer_type([r[i] for r in sample]) for i in range(ncols)] if sample else ["text"] * ncols
         colmeta = [{"name": c, "type": t} for c, t in zip(cols, types)]
-        with self.lock, self.db:
-            self.db.execute("UPDATE sources SET columns=? WHERE id=?", (json.dumps(colmeta), source_id))
+        decoded = _encoding_report(sniff_text_encoding(path), _cp1252_fallback_count() - fallback0)
+        self._finish_source_columns(source_id, colmeta, decoded, name)
 
         if error is not None:
             if total == 0:
@@ -3530,11 +4776,14 @@ class Store:
         rec["rows_per_sec"] = int(total / elapsed) if elapsed > 0 else 0
         rec["bad_records"] = bad["count"]
         rec["first_bad_line"] = bad["first_line"]
+        rec["key_collisions"] = clashes["count"]
+        rec["encoding"], rec["cp1252_bytes"] = decoded["encoding"], decoded["cp1252_bytes"]
         return rec
 
     def _create_source_shell(self, name: str, cols: list[str], *, path: str | None = None,
                              file_hash: str | None = None, origin: str | None = None,
-                             origin_meta: dict | None = None) -> tuple[int, str]:
+                             origin_meta: dict | None = None,
+                             ingest: str | None = None) -> tuple[int, str]:
         """The sources row, its open tab and an empty src_<id> for a table
         about to be filled — one short transaction, so the id and the table
         exist together or not at all. Shared by ingest_rows and
@@ -3544,11 +4793,11 @@ class Store:
         importing". Returns (source_id, table_name)."""
         with self.lock, self.db:
             cur = self.db.execute(
-                "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at, origin, origin_meta)"
-                " VALUES (?,?,?,?,?,?,?,?)",
+                "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at,"
+                " origin, origin_meta, ingest) VALUES (?,?,?,?,?,?,?,?,?)",
                 (name, os.path.abspath(path) if path else None, "", "[]", file_hash,
                  time.strftime("%Y-%m-%dT%H:%M:%S"), origin,
-                 json.dumps(origin_meta) if origin_meta is not None else None),
+                 json.dumps(origin_meta) if origin_meta is not None else None, ingest),
             )
             source_id = cur.lastrowid
             self.db.execute("INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", (source_id,))
@@ -3595,10 +4844,13 @@ class Store:
             raise ValueError("No columns")
         cols = sanitize_columns(list(columns))
         ncols = len(cols)
-        file_hash = self._quick_hash(path) if path and os.path.isfile(path) else None
+        # No file to fingerprint (a SQL-pane save, a plugin's computed
+        # table): an identity of its own, so a session can find it again.
+        file_hash = self._quick_hash(path) if path and os.path.isfile(path) else _made_table_hash()
 
         source_id, table = self._create_source_shell(
-            name, cols, path=path, file_hash=file_hash, origin=origin, origin_meta=origin_meta)
+            name, cols, path=path, file_hash=file_hash, origin=origin, origin_meta=origin_meta,
+            ingest=_ingest_record("rows"))
 
         placeholders = ",".join("?" * ncols)
         insert = f"INSERT INTO {q(table)} ({','.join(q(c) for c in cols)}) VALUES ({placeholders})"
@@ -3682,11 +4934,13 @@ class Store:
         A file is excluded for exactly one of: its extension isn't
         recognized ("extension"), include_patterns is non-empty and nothing
         in it matched ("no include pattern matched"), a pattern in
-        exclude_patterns matched ("excluded by pattern: <pattern>"), or it
+        exclude_patterns matched ("excluded by pattern: <pattern>"), it
         couldn't be stat'd ("unreadable" — a broken symlink, a permission
-        error mid-walk). Surfacing the reason is the point: tuning a
-        profile's patterns is a visible feedback loop instead of guessing
-        whether "*Amcache*" actually matched anything.
+        error mid-walk), or it is a FIFO, socket or device node ("not a
+        regular file" — never opened, since opening a FIFO blocks).
+        Surfacing the reason is the point: tuning a profile's patterns is a
+        visible feedback loop instead of guessing whether "*Amcache*"
+        actually matched anything.
 
         `already_imported` flags a matched file whose absolute path already
         equals some source's stored path — same abspath-equality convention
@@ -3740,11 +4994,23 @@ class Store:
                 fpath = os.path.join(dirpath, fname)
                 rel = os.path.relpath(fpath, root_abs).replace(os.sep, "/")
                 try:
-                    size = os.path.getsize(fpath)
+                    st = os.stat(fpath)
                 except OSError:
                     excluded.append({"path": fpath, "rel_path": rel, "reason": "unreadable"})
                     continue
-                entry = {"path": fpath, "rel_path": rel, "size_bytes": size}
+                # Only a regular file is a candidate, decided from the stat
+                # already in hand and before anything opens it. os.walk lists
+                # FIFOs, sockets and device nodes as files, and a mounted
+                # *nix image is full of them (/run/systemd/initctl). open() on
+                # a FIFO blocks until a writer appears, which on an image is
+                # never: the binary probe hung the scan, and a FIFO named
+                # *.csv was matched and hung the import. os.stat follows
+                # symlinks, so a link to a real file still imports and one
+                # to a FIFO does not.
+                if not stat.S_ISREG(st.st_mode):
+                    excluded.append({"path": fpath, "rel_path": rel, "reason": "not a regular file"})
+                    continue
+                entry = {"path": fpath, "rel_path": rel, "size_bytes": st.st_size}
                 ext = os.path.splitext(fname)[1].lower()
                 by_filename_pattern = any(fnmatch.fnmatch(fname.lower(), p.lower()) for p in fname_pats)
                 by_ext = ext in exts
@@ -3798,7 +5064,8 @@ class Store:
     INGEST_JOB_KEEP = 20        # finished jobs kept for the UI panel
 
     def start_ingest_job(self, kind: str, path: str, *, name: str | None = None,
-                         options: dict | None = None, delete_after: bool = False) -> dict:
+                         options: dict | None = None, delete_after: bool = False,
+                         spool_dir: str | None = None, recorded_path: str | None = None) -> dict:
         """Runs an ingest on a background daemon thread and returns its job
         record immediately — the exact reason start_search_all_job exists,
         applied to the operation that takes the longest of anything in the
@@ -3812,7 +5079,13 @@ class Store:
         read once rather than re-uploaded per table. `delete_after` removes
         `path` when the job ends (the upload route's tempfile — which the
         old synchronous upload endpoints leaked on disk, tens of GB at
-        this tool's file sizes).
+        this tool's file sizes), and `spool_dir` after it: the private
+        directory the upload was spooled into (server._upload_spool).
+
+        `recorded_path` is what the job's tables say they were imported
+        from when that is not `path` — an upload's spool is deleted when
+        the job ends, so the name the browser sent is recorded instead
+        (set_source_path's reason; record_upload_path does it).
 
         Progress lands in the job record from the per-BATCH `progress`
         callback the ingest paths already had (rows plus a unit/units_total
@@ -3874,6 +5147,8 @@ class Store:
                 "finished_at": None,
                 "options": options or {},
                 "delete_after": delete_after,
+                "spool_dir": spool_dir,
+                "recorded_path": recorded_path,
                 "thread": None,
             }
             self._ingest_jobs[job["job_id"]] = job
@@ -3935,6 +5210,7 @@ class Store:
                 res = self.backfill_derived_columns(
                     opts.get("def_ids") or [opts["def_id"]], progress=progress, cancel=cancel,
                     drop_on_cancel=opts.get("drop_on_cancel", False),
+                    previous=opts.get("previous"),
                 )
                 with self._ingest_jobs_lock:
                     job["status"] = "done"
@@ -3993,6 +5269,10 @@ class Store:
                         ))
                     with self._ingest_jobs_lock:
                         job["tables_done"] = i + 1
+            # Before the job reads as done, so the source list the client
+            # fetches on that never shows the spool's path.
+            if job["recorded_path"] is not None:
+                self.record_upload_path(job["path"], job["recorded_path"])
             # Directory import: drop each new table into the folder that
             # mirrors its on-disk path (created once, shared across the
             # tree), and bring it in CLOSED — a folder import can be dozens
@@ -4013,7 +5293,8 @@ class Store:
                 job["result"] = [
                     {k: r.get(k) for k in ("id", "name", "row_count", "elapsed_sec", "rows_per_sec",
                                            "ragged_rows", "suspect_quote_rows", "bad_records",
-                                           "first_bad_line")}
+                                           "first_bad_line", "key_collisions", "encoding",
+                                           "cp1252_bytes", "undecodable_values")}
                     for r in results
                 ]
             wlog.record("info", f"Import finished: {job['name']} ({job['kind']}) — "
@@ -4021,11 +5302,15 @@ class Store:
                                 f" (table{'s' if len(job['source_ids']) != 1 else ''} "
                                 f"{', '.join(str(i) for i in job['source_ids'])})")
         except IngestCancelled:
+            # The tables a multi-table job finished before the cancel stay.
+            self._record_upload_path_quietly(job)
             with self._ingest_jobs_lock:
                 job["status"] = "cancelled"
             wlog.record("info", f"{self._job_noun(job)} cancelled: {job['name']} ({job['kind']}) "
                                 f"after {self._job_elapsed(job):.1f}s")
         except Exception as e:  # noqa: BLE001 — surfaced to the UI as job.error
+            # And so does what a failed one committed before the error.
+            self._record_upload_path_quietly(job)
             with self._ingest_jobs_lock:
                 job["status"] = "error"
                 job["error"] = str(e)
@@ -4040,6 +5325,33 @@ class Store:
             if job["delete_after"]:
                 with contextlib.suppress(OSError):
                     os.remove(job["path"])
+                if job["spool_dir"]:
+                    with contextlib.suppress(OSError):
+                        os.rmdir(job["spool_dir"])
+
+    def record_upload_path(self, spool_path: str, recorded_path: str) -> None:
+        """Every table read from the upload spool `spool_path` records
+        `recorded_path` — the name the browser sent — as where it came
+        from, rather than the spool, a temp file deleted as soon as the
+        import ends (set_source_path's reason). A session saved against
+        such a table looked for its file there and reported it missing.
+
+        Keyed on the spool's path rather than on ids because an upload's
+        spool is unique to it (a private directory, server._upload_spool),
+        and because the tables that need it include ones the caller never
+        got an id for: the rows a failed import committed before its
+        error, and the tables a multi-table job finished before one
+        failed."""
+        with self.lock, self.db:
+            self.db.execute("UPDATE sources SET path=? WHERE path=?",
+                            (recorded_path, os.path.abspath(spool_path)))
+
+    def _record_upload_path_quietly(self, job: dict) -> None:
+        # The job's own failure is the error worth reporting; one from
+        # this (the failure may have been the database itself) is not.
+        if job.get("recorded_path") is not None:
+            with contextlib.suppress(sqlite3.Error):
+                self.record_upload_path(job["path"], job["recorded_path"])
 
     def _ingest_job_snapshot(self, job: dict) -> dict:
         keys = ("job_id", "kind", "name", "status", "rows_done", "units_done",
@@ -4526,6 +5838,15 @@ class Store:
                     raise KeyError(f"No table {source_id}")
         return self.get_source(source_id)
 
+    def set_source_path(self, source_id: int, path: str | None) -> None:
+        """Where a table says it was imported from, when that is not the
+        file it was read from: an upload is parsed (and hashed) from a
+        spool deleted the moment the import returns, so the name the
+        browser sent is what gets recorded, not a temp path that points at
+        nothing — or, worse, at a leftover copy of the evidence."""
+        with self.lock, self.db:
+            self.db.execute("UPDATE sources SET path=? WHERE id=?", (path, source_id))
+
     def get_source(self, source_id: int) -> dict:
         """A merge is addressed as a negative source_id (merges.id=m ->
         source_id=-m) so it can flow through every existing source_id: int
@@ -4560,11 +5881,12 @@ class Store:
         # tab titles, copy_sources_to's remap) wants the object. Tolerant
         # of a row from a case whose migration somehow left it unparseable —
         # provenance is a label, never worth failing a source listing over.
-        raw = d.get("origin_meta")
-        try:
-            d["origin_meta"] = json.loads(raw) if raw else None
-        except (TypeError, ValueError):
-            d["origin_meta"] = None
+        for key in ("origin_meta", "ingest"):
+            raw = d.get(key)
+            try:
+                d[key] = json.loads(raw) if raw else None
+            except (TypeError, ValueError):
+                d[key] = None
         d.setdefault("origin", None)
         return d
 
@@ -4625,21 +5947,14 @@ class Store:
                 "path": None,
                 "table_name": None,
                 "row_count": sum(m["row_count"] for m in members),
-                # canonical — lowest-id (first-created) member, plus every
-                # derived column present on ALL members under the same name
-                # (each member reads it from its own drv_ sidecar; a column
-                # missing on any member would need NULL-padding nothing
-                # here does, so it simply isn't exposed until it exists
-                # everywhere).
-                "columns": ([c for c in members[0]["columns"] if not c.get("derived")]
-                            + [c for c in members[0]["columns"] if c.get("derived")
-                               and all(any(mc.get("derived") and mc["name"].lower() == c["name"].lower()
-                                           for mc in m["columns"]) for m in members[1:])]),
+                "columns": self._merge_columns(row, members),
                 "file_hash": None,
                 "imported_at": row["created_at"],
                 "has_fts": 1 if all(m["has_fts"] for m in members) else 0,
                 "is_merge": True,
                 "member_source_ids": member_ids,
+                "col_mode": row["col_mode"],
+                "source_column": bool(row["source_column"]),
             }
         row = conn.execute("SELECT * FROM sources WHERE id=?", (source_id,)).fetchone()
         if not row:
@@ -4673,13 +5988,17 @@ class Store:
             "path": None,
             "table_name": None,
             "row_count": sum(m["row_count"] for m in members),
-            # canonical — lowest-id (first-created) member, plus the derived
-            # columns present on every member (same intersection rule as
-            # _source_lite_on, which documents why)
-            "columns": ([c for c in members[0]["columns"] if not c.get("derived")]
-                        + [c for c in members[0]["columns"] if c.get("derived")
-                           and all(any(mc.get("derived") and mc["name"].lower() == c["name"].lower()
-                                       for mc in m["columns"]) for m in members[1:])]),
+            "columns": self._merge_columns(row, members),
+            "col_mode": row["col_mode"],
+            "source_column": bool(row["source_column"]),
+            # Per member, which merge columns it lacks — what the builder's
+            # Edit view and the grid's "only in some tables" markers read.
+            "members": [
+                {"id": m["id"], "label": m.get("nickname") or m["name"], "name": m["name"],
+                 "row_count": m["row_count"],
+                 "missing": self._member_missing_columns(row, members, m)}
+                for m in members
+            ],
             "file_hash": None,
             "imported_at": row["created_at"],
             "has_fts": 1 if all(m["has_fts"] for m in members) else 0,
@@ -4693,13 +6012,184 @@ class Store:
             "note_count": sum(m["note_count"] for m in members),
         }
 
+    @staticmethod
+    def _merge_columns(row: sqlite3.Row | dict, members: list[dict]) -> list[dict]:
+        """A merge's column list, computed live from its members' current
+        columns. Base columns are matched by _col_key across members:
+        members[0]'s in its order, then each column a later member adds, in
+        that member's order. The first member to have a column decides its
+        spelling and type — for same-shaped members (every merge from
+        before mismatched ones) that is exactly members[0]'s list, as it
+        always was. col_mode 'shared' keeps only the columns every member
+        has; a member lacking an exposed column reads it as NULL (see
+        _member_projection).
+
+        "The same column" ignores ASCII case only, as SQLite does when it
+        reads a quoted name: "Größe" and "GRÖßE" are two columns, each empty
+        on the member that lacks it, never one member's header read as the
+        other's data.
+
+        Derived columns keep their older, stricter rule: exposed only when
+        present on ALL members under the same name, each read from its own
+        drv_ sidecar. The source column, when on, comes first."""
+        seen: dict[str, dict] = {}
+        counts: dict[str, int] = {}
+        for m in members:
+            for c in m["columns"]:
+                if c.get("derived"):
+                    continue
+                k = _col_key(c["name"])
+                if k not in seen:
+                    seen[k] = c
+                counts[k] = counts.get(k, 0) + 1
+        keys = list(seen)
+        if row["col_mode"] == "shared":
+            keys = [k for k in keys if counts[k] == len(members)]
+        cols = [seen[k] for k in keys]
+        taken = set(keys)
+        for c in members[0]["columns"]:
+            if not c.get("derived") or _col_key(c["name"]) in taken:
+                continue
+            twins = [next((mc for mc in m["columns"] if mc.get("derived")
+                           and _col_key(mc["name"]) == _col_key(c["name"])), None)
+                     for m in members[1:]]
+            if any(t is None for t in twins):
+                continue
+            # One column over every member, so it says what all of them
+            # hold: still building if any member is (a re-derive on the
+            # merge runs a job per member), and the failures summed — the
+            # "Show N unparsed rows" filter it offers matches rows in every
+            # member. The id stays the first member's; the remove and
+            # re-derive routes take the merge's id beside it and act on
+            # every member's definition (_derived_scope).
+            every = [c] + twins
+            failures = [x.get("parse_failures") for x in every]
+            cols.append({**c,
+                         "derived_status": max((x.get("derived_status") for x in every),
+                                               key=lambda s: _DERIVED_STATUS_RANK.get(s, 4)),
+                         "parse_failures": None if None in failures else sum(failures)})
+        if row["source_column"]:
+            name = MERGE_SOURCE_COLUMN
+            n = 2
+            while any(_col_key(c["name"]) == _col_key(name) for c in cols):
+                name = f"{MERGE_SOURCE_COLUMN} {n}"
+                n += 1
+            cols.insert(0, {"name": name, "type": "text", "source_column": True})
+        return cols
+
+    def _member_missing_columns(self, row: sqlite3.Row, members: list[dict], member: dict) -> list[str]:
+        have = {_col_key(c["name"]) for c in member["columns"]}
+        return [c["name"] for c in self._merge_columns(row, members)
+                if not c.get("source_column") and _col_key(c["name"]) not in have]
+
+    @staticmethod
+    def _member_projection(merge_src: dict, msrc: dict) -> list[str] | None:
+        """How one member of a merge must be read so that it exposes the
+        merge's columns under the merge's spelling: a SELECT list over the
+        member's own FROM, or None when the member's table already does
+        (every merge column present under a name SQLite resolves to it) —
+        which keeps same-shaped merges on exactly the SQL they always ran.
+
+        A column the member lacks is NULL; one spelled differently beyond
+        what SQLite's ASCII-only case folding bridges is aliased; the source
+        column is the member's label as a constant. The member's own
+        columns the merge doesn't expose (col_mode 'shared') are kept too,
+        so the search blob — always the member's own base columns — still
+        resolves inside the projection."""
+        have: dict[str, str] = {}
+        for c in msrc["columns"]:
+            have.setdefault(_col_key(c["name"]), c["name"])
+        exprs: list[str] = []
+        plain = True
+        used: set[str] = set()
+        for c in merge_src["columns"]:
+            name = c["name"]
+            if c.get("source_column"):
+                exprs.append(f"{_sql_text_literal(msrc.get('nickname') or msrc['name'])} AS {q(name)}")
+                plain = False
+                continue
+            actual = have.get(_col_key(name))
+            if actual is None:
+                exprs.append(f"NULL AS {q(name)}")
+                plain = False
+            elif actual == name:
+                exprs.append(q(name))
+            else:
+                exprs.append(f"{q(actual)} AS {q(name)}")
+                if not _sqlite_same_ident(actual, name):
+                    plain = False
+            used.add(_col_key(name))
+        if plain:
+            return None
+        for c in msrc["columns"]:
+            if not c.get("derived") and _col_key(c["name"]) not in used:
+                exprs.append(q(c["name"]))
+        return exprs
+
+    def _member_read_src(self, merge_src: dict, msrc: dict) -> dict:
+        """The src dict a merge member's own WHERE (filters, search, tags,
+        timeframe) compiles against: the member's own columns, renamed to
+        the merge's spelling, plus has_fts/id for its own FTS index. Every
+        name in it resolves inside _member_from's projection."""
+        # merge_id: raw filter fragments are validated once against the
+        # merge (identifiers against its columns, a dry run per member's
+        # projection), not per member against that member's own columns —
+        # where a column only some members have would be "Unknown".
+        if self._member_projection(merge_src, msrc) is None:
+            return {**msrc, "merge_id": merge_src["id"]}
+        rename = {_col_key(c["name"]): c["name"] for c in merge_src["columns"] if not c.get("source_column")}
+        return {**msrc, "merge_id": merge_src["id"],
+                "columns": [{**c, "name": rename.get(_col_key(c["name"]), c["name"])}
+                            for c in msrc["columns"]]}
+
+    def _member_ref_src(self, merge_src: dict, msrc: dict) -> dict:
+        """The src dict to resolve a merge's column references against for
+        one member, in the query shapes that join a member's table by
+        alias (`s."col"`, derived values via `d."col"`). A projected member
+        exposes every column — derived ones included — as a plain column of
+        the projection, so its references all go through the table alias
+        and no separate sidecar join is chained (_member_derived_join on
+        this src emits nothing)."""
+        if self._member_projection(merge_src, msrc) is None:
+            return merge_src
+        return {**merge_src, "columns": [{k: v for k, v in c.items() if k != "derived"}
+                                         for c in merge_src["columns"]]}
+
+    def _member_join_target(self, merge_src: dict, m: dict) -> str:
+        """The table text a view-join shape puts after `JOIN` for one
+        member: its table, or its projection (see _member_projection) when
+        the member doesn't carry the merge's columns as-is."""
+        if not merge_src.get("is_merge"):
+            return q(m["table_name"])
+        msrc = m.get("src") or self._source_lite(m["source_id"])
+        exprs = self._member_projection(merge_src, msrc)
+        if exprs is None:
+            return q(m["table_name"])
+        return f"(SELECT rid, {', '.join(exprs)} FROM {self._from_clause(msrc)})"
+
+    def _member_rows_from(self, src: dict, member_src: dict) -> str:
+        """FROM text for reading cells of one member's rows by rid (the
+        page/export readers): the member's own FROM, or its projection when
+        `src` is a merge the member doesn't carry the columns of as-is."""
+        if src.get("is_merge") and self._member_projection(src, member_src) is not None:
+            return self._member_join_target(src, {"source_id": member_src["id"], "src": member_src,
+                                                  "table_name": member_src["table_name"]})
+        return self._from_clause(member_src)
+
+    def _ref_src_for(self, src: dict, m: dict) -> dict:
+        """_member_ref_src for member `m` of `src`, or `src` itself when it
+        isn't a merge."""
+        if not src.get("is_merge"):
+            return src
+        return self._member_ref_src(src, m.get("src") or self._source_lite(m["source_id"]))
+
     def _resolve_members(self, source_id: int) -> list[dict]:
         """Real source -> single identity-mapped element. Merge -> one
-        element per member. SQLite resolves quoted identifiers
-        case-insensitively, so canonical column names work directly against
-        every member's table without needing per-member name translation —
-        the locked-in 'exact column match' rule already guarantees members
-        share the same names modulo case."""
+        element per member, carrying the member's own src dict. Members no
+        longer share the merge's columns, so nothing may write a merge
+        column name straight into a member's table: read a member through
+        _member_from / _member_join_target / merge_select_list, which pad
+        and rename it (see _member_projection)."""
         with self._reader() as ro:
             return self._resolve_members_on(ro, source_id)
 
@@ -4710,10 +6200,11 @@ class Store:
             src = self._source_lite_on(conn, source_id)
             return [{"source_id": source_id, "table_name": src["table_name"]}]
         merge = self._source_lite_on(conn, source_id)
-        return [
-            {"source_id": sid, "table_name": self._source_lite_on(conn, sid)["table_name"]}
-            for sid in merge["member_source_ids"]
-        ]
+        out = []
+        for sid in merge["member_source_ids"]:
+            msrc = self._source_lite_on(conn, sid)
+            out.append({"source_id": sid, "table_name": msrc["table_name"], "src": msrc})
+        return out
 
     def _merge_name_taken(self, name: str, exclude_id: int | None = None) -> bool:
         """Case-insensitive: two merges named "EVTX" and "evtx" are one
@@ -4727,28 +6218,120 @@ class Store:
             ).fetchone()
         return row is not None
 
-    def create_merge(self, name: str, source_ids: list[int]) -> dict:
+    def _check_merge_members(self, source_ids: list[int], col_mode: str) -> None:
+        """What a merge's member list must satisfy, for create and edit
+        alike. Columns no longer have to match: a member lacking one of the
+        merge's columns reads it as empty (see _member_projection). Only
+        'shared' mode needs something in common, or it exposes nothing."""
+        if col_mode not in MERGE_COLUMN_MODES:
+            raise ValueError(f"Unknown column mode {col_mode!r}")
+        ids = [int(i) for i in source_ids]
+        if len(ids) < 2:
+            raise ValueError("A merge needs at least 2 sources")
+        if len(set(ids)) != len(ids):
+            raise ValueError("A table can only be in a merge once")
+        if any(i <= 0 for i in ids):
+            raise ValueError("A merge can only include tables, not other merges")
+        sources = [self.get_source(sid) for sid in ids]
+        for s in sources:
+            self._require_columns(s)
+        if col_mode == "shared":
+            # Base columns only: adding a derived column to one member must
+            # not change what a merge of two same-format files can do.
+            common = set.intersection(*({_col_key(c["name"]) for c in self._base_cols(s)} for s in sources))
+            if not common:
+                raise ValueError("These tables have no columns in common — keep every column instead")
+
+    def create_merge(self, name: str, source_ids: list[int], col_mode: str = "all",
+                     source_column: bool = False) -> dict:
         name = (name or "").strip()
         if not name:
             raise ValueError("A merge needs a name")
         if self._merge_name_taken(name):
             raise ValueError(f'A merge named "{name}" already exists')
-        if len(source_ids) < 2:
-            raise ValueError("A merge needs at least 2 tables")
-        sources = [self.get_source(sid) for sid in source_ids]
-        # Base columns only: adding a derived column to one member must not
-        # change whether two files of the same format can merge.
-        sigs = {column_signature([c["name"] for c in s["columns"] if not c.get("derived")]) for s in sources}
-        if len(sigs) > 1:
-            raise ValueError("Selected tables don't have matching columns")
+        self._check_merge_members(source_ids, col_mode)
         with self.lock, self.db:
             cur = self.db.execute(
-                "INSERT INTO merges(name, source_ids, created_at) VALUES (?,?,?)",
-                (name, json.dumps(source_ids), time.strftime("%Y-%m-%dT%H:%M:%S")),
+                "INSERT INTO merges(name, source_ids, created_at, col_mode, source_column) VALUES (?,?,?,?,?)",
+                (name, json.dumps([int(i) for i in source_ids]), time.strftime("%Y-%m-%dT%H:%M:%S"),
+                 col_mode, 1 if source_column else 0),
             )
             merge_id = cur.lastrowid
             self.db.execute("INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", (-merge_id,))
         return self.get_source(-merge_id)
+
+    def update_merge(self, merge_id: int, name: str | None = None, source_ids: list[int] | None = None,
+                     col_mode: str | None = None, source_column: bool | None = None) -> dict:
+        """Edit a merge in place — its tables, column mode, source column
+        or name. In place matters: everything keyed by the merge's negative
+        id (its tab, layout, saved views, folder) stays with it, which
+        deleting and recreating would lose. Tags and notes live on member
+        rows and never depended on the merge at all.
+
+        Live views of the merge are dropped: their rows were drawn from the
+        old member list, and paging one now would mix the two."""
+        row = self._merge_row(merge_id)
+        new_name = row["name"] if name is None else (name or "").strip()
+        if not new_name:
+            raise ValueError("A merge needs a name")
+        if new_name != row["name"] and self._merge_name_taken(new_name, exclude_id=merge_id):
+            raise ValueError(f'A merge named "{new_name}" already exists')
+        ids = json.loads(row["source_ids"]) if source_ids is None else [int(i) for i in source_ids]
+        mode = row["col_mode"] if col_mode is None else col_mode
+        src_col = bool(row["source_column"]) if source_column is None else bool(source_column)
+        self._check_merge_members(ids, mode)
+        with self.lock, self.db:
+            self.db.execute(
+                "UPDATE merges SET name=?, source_ids=?, col_mode=?, source_column=? WHERE id=?",
+                (new_name, json.dumps(ids), mode, 1 if src_col else 0, merge_id),
+            )
+            self._evict_root_views(-merge_id)
+        self._maxlen_cache.pop(-merge_id, None)
+        return self.get_source(-merge_id)
+
+    def merge_preview(self, source_ids: list[int], col_mode: str = "all",
+                      source_column: bool = False, sample_rows: int = 12) -> dict:
+        """What create_merge would make of these tables, without making it:
+        the builder's preview. The column list is _merge_columns itself, so
+        the preview can't disagree with the merge it previews; each column
+        also says which tables have it, under what name and type. A few
+        rows are read from each table (the first ones, split evenly, at
+        least one per table while they last) through merge_select_list, so
+        empty cells show exactly where the merge would have them.
+
+        'shared' with nothing in common previews as no columns rather than
+        an error: the builder says why in words, and create_merge refuses."""
+        if col_mode not in MERGE_COLUMN_MODES:
+            raise ValueError(f"Unknown column mode {col_mode!r}")
+        ids = list(dict.fromkeys(int(i) for i in source_ids))
+        if any(i <= 0 for i in ids):
+            raise ValueError("A merge can only include tables, not other merges")
+        members = [self._source_lite(sid) for sid in ids]
+        if not members:
+            return {"columns": [], "members": [], "rows": []}
+        cols = self._merge_columns({"col_mode": col_mode, "source_column": source_column}, members)
+        own = [{_col_key(c["name"]): c for c in m["columns"]} for m in members]
+        merge_src = {"id": 0, "is_merge": True, "columns": cols}
+        per = max(1, min(4, sample_rows // len(members)))
+        rows: list[dict] = []
+        with self._reader() as ro:
+            for m in members:
+                if len(rows) >= sample_rows:
+                    break
+                frm = f"{q(m['table_name'])} s"
+                if any(c.get("derived") for c in m["columns"]):
+                    frm += f" LEFT JOIN {q(self._derived_table(m['id']))} d ON d.rid = s.rid"
+                sql = (f"SELECT {self.merge_select_list(merge_src, m) if cols else 's.rid'} FROM {frm} "
+                       f"ORDER BY s.rid LIMIT {min(per, sample_rows - len(rows))}")
+                rows += [{"source_id": m["id"], "cells": list(r) if cols else []} for r in ro.execute(sql)]
+        return {
+            "columns": [{**c, "in": {} if c.get("source_column") else {
+                str(m["id"]): {"name": o[_col_key(c["name"])]["name"], "type": o[_col_key(c["name"])]["type"]}
+                for m, o in zip(members, own) if _col_key(c["name"]) in o}} for c in cols],
+            "members": [{"id": m["id"], "label": m.get("nickname") or m["name"], "name": m["name"],
+                         "row_count": m["row_count"]} for m in members],
+            "rows": rows,
+        }
 
     def list_merges(self) -> list[dict]:
         with self._reader() as ro:
@@ -4775,6 +6358,9 @@ class Store:
             # live on the member rows (invariant #9) and survive on purpose.
             for t in ("open_tabs", "layouts", "saved_views"):
                 self.db.execute(f"DELETE FROM {t} WHERE source_id=?", (-merge_id,))
+            # Its views too, for drop_source's reason: a window still
+            # holding one would otherwise page and tag a merge nobody has.
+            self._evict_views_of(-merge_id)
 
     def merges_using(self, source_id: int) -> list[dict]:
         """The merges this table is a member of, as {id, name}.
@@ -4804,12 +6390,13 @@ class Store:
     def drop_source(self, source_id: int) -> None:
         """Delete a table and every sidecar keyed by its id.
 
-        Refuses a table that a merge is built on. Source ids are REUSED by
-        the next import (see the id reset below), so dropping a member
-        does not merely break that merge — it arms it: the next file
-        imported takes the freed id and silently becomes part of a merge
-        nobody added it to. Deleting the merge first is one click, and it
-        is the only order in which neither outcome is possible.
+        Refuses a table that a merge is built on: the merge would be left
+        naming a member that is not there, and it is the analyst who should
+        decide what becomes of it. Deleting the merge first is one click,
+        and it keeps the other tables. (Source ids used to be REUSED by the
+        next import, which made this worse — the next file imported took
+        the freed id and silently became part of a merge nobody added it
+        to. Ids are AUTOINCREMENT now, and the refusal stands on its own.)
 
         The internal callers are all ingest cancels dropping a partial
         import created seconds earlier, which cannot be a member of
@@ -4824,13 +6411,18 @@ class Store:
                 + " first — a merge is only a view over its tables, so deleting it keeps them.")
         src = self.get_source(source_id)
         with self.lock, self.db:
+            # Its views go first. A view id outlives the table in whatever
+            # window built it, and paging or tagging through one after the
+            # drop reads rows of a table that is gone — or, back when ids
+            # were reused, of the next import. Evicted, it answers 409 and
+            # the window rebuilds against what is actually there.
+            self._evict_views_of(source_id)
             self.db.execute(f"DROP TABLE IF EXISTS {q(src['table_name'])}")
             self.db.execute(f"DROP TABLE IF EXISTS {q('fts_' + str(source_id))}")
             self.db.execute(f"DROP VIEW IF EXISTS {q(src['table_name'] + '_doc')}")
-            # The watchlist's two per-table sidecars too: the id is reused by
-            # the next import (below), so a hit left keyed by it would sit
-            # under that file's name, and a scan record left behind would
-            # claim a table nothing has ever read was scanned clean.
+            # The watchlist's two per-table sidecars too: a hit left keyed
+            # by the id would be listed under a table that is not there,
+            # and a scan record left behind would say it was scanned clean.
             for t in ("row_tags", "row_notes", "watchlist_hits", "watchlist_scans"):
                 self.db.execute(f"DELETE FROM {t} WHERE source_id=?", (source_id,))
             self.db.execute("DELETE FROM layouts WHERE source_id=?", (source_id,))
@@ -4840,15 +6432,25 @@ class Store:
             self.db.execute(f"DROP TABLE IF EXISTS {q(self._derived_table(source_id))}")
             self.db.execute("DELETE FROM derived_columns WHERE source_id=?", (source_id,))
             # The subset provenance map, in BOTH directions: this table's
-            # own rows, and every subset that named it as the parent. The
-            # id gets reused (below), and a map left behind would point a
-            # subset's rows at whatever file lands on it next.
+            # own rows, and every subset that named it as the parent — a
+            # map left behind would point a subset's rows at a table that
+            # is not there.
             self.db.execute("DELETE FROM subset_rids WHERE source_id=? OR parent_source_id=?",
                             (source_id, source_id))
-        # SQLite reuses this id on the next import, so anything still keyed
-        # by it would silently attach to a different file.
-        self._drop_undo_for_source(source_id)
+            # Undo entries with rows in it: replaying one would write tags
+            # for rows that no longer exist.
+            self._drop_undo_for_source(source_id)
         self._maxlen_cache.pop(source_id, None)
+
+    def _evict_views_of(self, source_id: int) -> None:
+        """Evict every view built over this (signed) source id — root and
+        virtual, held or adopted, with their group sub-views. Caller holds
+        self.lock inside a self.db transaction, as for
+        _evict_view_and_children."""
+        for vid in list(self._views):
+            handle = self._views.get(vid)
+            if handle and handle.get("source_id") == source_id:
+                self._evict_view_and_children(vid)
 
     # -------------------------------------------------------- derived columns
 
@@ -4910,8 +6512,13 @@ class Store:
         and rid references stay legal."""
         if not src.get("is_merge") and m["source_id"] == src["id"]:
             return self._from_clause(src, alias)
-        if src.get("is_merge") and any(c.get("derived") for c in src["columns"]):
-            return self._from_clause(self._source_lite(m["source_id"]), alias)
+        if src.get("is_merge"):
+            msrc = m.get("src") or self._source_lite(m["source_id"])
+            if self._member_projection(src, msrc) is not None:
+                t = self._member_join_target(src, {**m, "src": msrc})
+                return f"{t} {alias}" if alias else t
+            if any(c.get("derived") for c in src["columns"]):
+                return self._from_clause(msrc, alias)
         t = q(m["table_name"])
         return f"{t} {alias}" if alias else t
 
@@ -5070,6 +6677,10 @@ class Store:
                  time.strftime("%Y-%m-%dT%H:%M:%S")),
             )
             def_id = cur.lastrowid
+        # Read back BEFORE the job starts: a backfill that fails at once
+        # removes the column (_fail_derive_backfill), and on a busy machine
+        # it can do that before this thread gets to the return below.
+        definition = self.get_derived_column(def_id)
         try:
             job = self.start_ingest_job(
                 "derive", "", name=name,
@@ -5087,7 +6698,7 @@ class Store:
             # whole table, and nothing able to chain off it.
             self._rollback_derive_definitions([def_id])
             raise
-        return {"definition": self.get_derived_column(def_id), "job_id": job["job_id"]}
+        return {"definition": definition, "job_id": job["job_id"]}
 
     STRUCT_SAMPLE = 200
 
@@ -5103,6 +6714,13 @@ class Store:
         checkboxes against, and a full scan of a 1.2M-row column to
         populate a picker would cost more than building the columns."""
         src = self._source_lite(source_id)
+        if src.get("is_merge"):
+            # A merge has no table of its own to sample (_sample_column
+            # read `"None"` and died on it). The header menu never offers
+            # Flatten on one; this is the same answer for every other way
+            # of asking, the detail pane's "Flatten this document" included.
+            raise ValueError("Flatten works on one table at a time — open a "
+                             "member table of this merge to flatten its documents")
         if not self._find_column(src, column):
             raise KeyError(f"No column called {column!r}")
         values = self._sample_column(src, column, limit=self.STRUCT_SAMPLE)
@@ -5215,6 +6833,8 @@ class Store:
                 def_ids.append(cur.lastrowid)
 
         label = prepared[0]["name"] if len(prepared) == 1 else f"{len(prepared)} columns"
+        # Before the job, for add_derived_column's reason.
+        definitions = [self.get_derived_column(d) for d in def_ids]
         try:
             job = self.start_ingest_job(
                 "derive", "", name=label,
@@ -5228,10 +6848,7 @@ class Store:
             # stuck 'building' — see add_derived_column.
             self._rollback_derive_definitions(def_ids)
             raise
-        return {
-            "definitions": [self.get_derived_column(d) for d in def_ids],
-            "job_id": job["job_id"],
-        }
+        return {"definitions": definitions, "job_id": job["job_id"]}
 
     def _rollback_derive_definitions(self, def_ids: list[int]) -> None:
         """Undo the definition rows a create has just committed, for a
@@ -5263,21 +6880,72 @@ class Store:
                      before["parse_failures"], before["id"]),
                 )
 
-    def remove_derived_column(self, def_id: int) -> None:
+    def _derived_scope(self, def_id: int, source_id: int | None = None) -> list[dict]:
+        """The definitions one action on a derived column applies to.
+
+        On a table that is `def_id` alone. On a merge (`source_id`
+        negative) it is every member's definition of that column, matched
+        by name the way _merge_columns matches them: creating on a merge
+        made one definition per member, and the merge's column list
+        carries only the FIRST member's id, so remove, re-derive and a
+        changed field path sent with that id alone used to act on that
+        member and leave the others as they were (invariant #9). Members
+        that do not carry the column are left out, which is also how a
+        column the merge does not expose (it is missing on some member)
+        is removed from the ones it is on."""
         d = self.get_derived_column(def_id)
-        with self.lock:
-            others = self.db.execute(
-                "SELECT * FROM derived_columns WHERE source_id=? AND id<>?",
-                (d["source_id"], def_id),
-            ).fetchall()
-        for o in others:
-            o_params = json.loads(o["params"] or "{}")
-            reads = {c.lower() for c in timeparse.op_inputs(o["op_id"], o["input_column"], o_params)}
-            if d["name"].lower() in reads:
-                raise ValueError(f"{o['name']!r} is computed from this column — remove that one first")
+        if source_id is None or source_id == d["source_id"]:
+            return [d]
+        if source_id > 0:
+            raise KeyError(f"No derived column {def_id} on table {source_id}")
+        members = [m["source_id"] for m in self._resolve_members(source_id)]
+        if d["source_id"] not in members:
+            raise KeyError(f"Derived column {def_id} is not on a table of merge {-source_id}")
+        key = _ascii_fold(d["name"])
+        out = []
+        with self._reader() as ro:
+            for sid in members:
+                for r in ro.execute("SELECT * FROM derived_columns WHERE source_id=? ORDER BY id", (sid,)):
+                    if _ascii_fold(r["name"]) == key:
+                        out.append(self._derived_dict(r))
+                        break
+        return out
+
+    def _member_label(self, d: dict, scope: list[dict]) -> str:
+        """" on table 'x'" when an action spans several members, so a
+        refusal says which member it came from; nothing otherwise."""
+        if len(scope) < 2:
+            return ""
+        return f" on table {self._source_lite(d['source_id'])['name']!r}"
+
+    def remove_derived_column(self, def_id: int, source_id: int | None = None) -> None:
+        """Remove a derived column — from every member that carries it when
+        `source_id` is the merge it was removed from (_derived_scope).
+
+        All-or-nothing on a merge, as creating on one is: every member is
+        checked for a column computed from this one before any is
+        removed, so a dependant on the second member refuses the whole
+        removal instead of leaving the first without the column."""
+        scope = self._derived_scope(def_id, source_id)
+        for d in scope:
+            with self.lock:
+                others = self.db.execute(
+                    "SELECT * FROM derived_columns WHERE source_id=? AND id<>?",
+                    (d["source_id"], d["id"]),
+                ).fetchall()
+            for o in others:
+                o_params = json.loads(o["params"] or "{}")
+                reads = {c.lower() for c in timeparse.op_inputs(o["op_id"], o["input_column"], o_params)}
+                if d["name"].lower() in reads:
+                    raise ValueError(f"{o['name']!r}{self._member_label(d, scope)} is computed from "
+                                     f"this column — remove that one first")
+        for d in scope:
+            self._drop_derived_definition(d)
+
+    def _drop_derived_definition(self, d: dict) -> None:
         drv = self._derived_table(d["source_id"])
         with self.lock, self.db:
-            self.db.execute("DELETE FROM derived_columns WHERE id=?", (def_id,))
+            self.db.execute("DELETE FROM derived_columns WHERE id=?", (d["id"],))
             try:
                 self.db.execute(f"ALTER TABLE {q(drv)} DROP COLUMN {q(d['name'])}")
             except sqlite3.OperationalError:
@@ -5343,16 +7011,66 @@ class Store:
                     pass
                 continue
 
-    def rederive_column(self, def_id: int, params: dict | None = None) -> dict:
+    def rederive_column(self, def_id: int, params: dict | None = None,
+                        source_id: int | None = None) -> dict:
         """Recompute a derived column in place — the path for "I set the
         wrong syslog year" or "these were local time, not UTC".
 
         The new params are written before the job starts, so a job that is
         refused (OpCancelled, the case closing) restores the definition
         exactly as it was rather than leaving it 'building' under params
-        nothing computed."""
-        d = self.get_derived_column(def_id)
-        new_params = timeparse.validate_params(d["op_id"], params if params is not None else d["params"])
+        nothing computed.
+
+        On a merge (`source_id` negative) every member that carries the
+        column is re-derived with the same params (_derived_scope), one
+        job per member — the shape creating on a merge has, so each member
+        shows, and cancels, in the jobs panel on its own, and a cancelled
+        member keeps its values marked 'partial', which the merge's column
+        then reports (_merge_columns). All-or-nothing up to the jobs, as
+        create is: every member's definition is checked against the new
+        params before any is rewritten, so params one member cannot take
+        refuse the whole re-derive instead of leaving the merge's one
+        column computed two ways."""
+        scope = self._derived_scope(def_id, source_id)
+        if params is not None and len({d["op_id"] for d in scope}) > 1:
+            ways = ", ".join(
+                f"{self._source_lite(d['source_id'])['name']}: "
+                f"{timeparse.OPERATIONS.get(d['op_id'], {}).get('label', d['op_id'])}" for d in scope)
+            raise ValueError(f"{scope[0]['name']!r} is not computed the same way on every table in "
+                             f"this merge ({ways}) — re-derive it on each table on its own")
+        prepared = []
+        for d in scope:
+            new_params = timeparse.validate_params(d["op_id"], params if params is not None else d["params"])
+            op = timeparse.OPERATIONS[d["op_id"]]
+            if op.get("check"):
+                # Same as add_derived_column: an op that references the case
+                # (lookup) is refused HERE, with nothing changed, when what it
+                # references has gone — not after the column was put in
+                # 'building' and the job got as far as loading it.
+                op["check"](self, new_params)
+            prepared.append((d, new_params))
+        results = [self._rederive_one(d, new_params) for d, new_params in prepared]
+        if len(results) == 1:
+            return results[0]
+        cascades, seen = [], set()
+        for r in results:
+            for n in r["cascades_to"]:
+                if _ascii_fold(n) not in seen:
+                    seen.add(_ascii_fold(n))
+                    cascades.append(n)
+        return {"definition": results[0]["definition"],
+                "member_definitions": [r["definition"] for r in results],
+                "job_id": results[0]["job_id"],
+                "job_ids": [r["job_id"] for r in results],
+                "cascades_to": cascades}
+
+    def _rederive_one(self, d: dict, new_params: dict) -> dict:
+        """rederive_column for one definition whose params are already
+        validated. A refusal part-way through a merge (the case closing)
+        restores the member it was refused on; the members before it
+        have jobs running, which the close cancels like any other — so
+        they end 'partial', as a cancelled re-derive does."""
+        def_id = d["id"]
         with self.lock, self.db:
             self.db.execute(
                 "UPDATE derived_columns SET params=?, status='building', parse_failures=NULL WHERE id=?",
@@ -5360,9 +7078,12 @@ class Store:
             )
         src = self._source_lite(d["source_id"])
         try:
+            # `previous` lets a backfill that fails before writing a value
+            # put the definition back as it was (_fail_derive_backfill).
             job = self.start_ingest_job(
                 "derive", "", name=d["name"],
-                options={"def_id": def_id, "drop_on_cancel": False, "units_total": src["row_count"]},
+                options={"def_id": def_id, "drop_on_cancel": False, "units_total": src["row_count"],
+                         "previous": [d]},
             )
         except OpCancelled:
             # Refused because the case is closing. The row above now says
@@ -5390,7 +7111,8 @@ class Store:
         return out["columns"][0] | {"rows": out["rows"]}
 
     def backfill_derived_columns(self, def_ids: list[int], progress=None, cancel=None,
-                                 drop_on_cancel: bool = False) -> dict:
+                                 drop_on_cancel: bool = False,
+                                 previous: list[dict] | None = None) -> dict:
         """Compute every row's values for one or more derived columns of the
         same source, in a single pass.
 
@@ -5408,60 +7130,79 @@ class Store:
         Several columns at once is what flattening a JSON blob into its
         fields needs (see add_derived_columns) — one scan and one progress
         bar instead of N of each. The SELECT reads each distinct input
-        column once however many definitions want it."""
+        column once however many definitions want it.
+
+        One value is never the column's problem: a parser that raises on a
+        cell makes that cell NULL, which the failure count then includes
+        like any other value that did not parse (see _backfill_value_errors
+        for the record of it). Anything else that stops the pass — a
+        lookup table gone since the column was made, a full disk — leaves
+        every column in a state that says what it holds rather than
+        'building' (see _fail_derive_backfill); `previous` is the
+        definition as a re-derive found it, so a pass that fails before
+        writing anything can put it back. Then it raises, and the job
+        reports it."""
         if not def_ids:
             raise ValueError("Nothing to backfill")
         defs = [self.get_derived_column(d) for d in def_ids]
         source_id = defs[0]["source_id"]
         if any(d["source_id"] != source_id for d in defs):
             raise ValueError("All columns in one backfill must belong to the same table")
-        src = self._source_lite(source_id)
-        drv = self._derived_table(source_id)
-        frm = self._from_clause(src)
-
-        # One SELECT slot per distinct input column, shared by every
-        # definition reading it.
-        slots: dict[str, int] = {}
-
-        def slot(col: str) -> int:
-            key = col.lower()
-            if key not in slots:
-                slots[key] = len(slots)
-            return slots[key]
-
-        plans = []
-        for d in defs:
-            op = timeparse.OPERATIONS[d["op_id"]]
-            inputs = timeparse.op_inputs(d["op_id"], d["input_column"], d["params"])
-            # state["inputs"]: the ordered column names behind the values
-            # parse_multi receives — an op that needs them (row_json's keys)
-            # reads them here rather than growing a second calling shape.
-            # Multi-input ops only: a stateful single-input op (syslog's
-            # year rollover) takes an empty dict as "fresh" and seeds it.
-            state = {"inputs": list(inputs)} if op["multi_input"] else {}
-            plan = {"d": d, "op": op, "state": state, "slots": [slot(c) for c in inputs]}
-            if op.get("prepare"):
-                # e.g. lookup loading its whole mapping once — per
-                # definition, before the scan, so the scan stays dict hits
-                op["prepare"](self, d["params"], plan["state"])
-            plans.append(plan)
-        cols = list(slots.keys())
-        # slot() keys case-insensitively but _col_ref needs the real name.
-        real = {}
-        for d in defs:
-            for c in timeparse.op_inputs(d["op_id"], d["input_column"], d["params"]):
-                real[c.lower()] = c
-        sel = ", ".join(self._col_ref(src, real[c]) for c in cols)
-
-        names = [d["name"] for d in defs]
-        assigns = ", ".join(f"{q(n)}=excluded.{q(n)}" for n in names)
-        upsert = (f"INSERT INTO {q(drv)}(rid, {', '.join(q(n) for n in names)}) "
-                  f"VALUES({','.join('?' * (len(names) + 1))}) "
-                  f"ON CONFLICT(rid) DO UPDATE SET {assigns}")
-
         rows_done, last_rid = 0, 0
-        total = src["row_count"]
+        # Everything from here is inside the try, setup included: the
+        # definitions are already 'building', so whatever the setup raises
+        # (an op id the registry no longer has, say) must land like any
+        # other failure rather than leave them so.
         try:
+            src = self._source_lite(source_id)
+            drv = self._derived_table(source_id)
+            frm = self._from_clause(src)
+
+            # One SELECT slot per distinct input column, shared by every
+            # definition reading it.
+            slots: dict[str, int] = {}
+
+            def slot(col: str) -> int:
+                key = col.lower()
+                if key not in slots:
+                    slots[key] = len(slots)
+                return slots[key]
+
+            plans = []
+            for d in defs:
+                op = timeparse.OPERATIONS[d["op_id"]]
+                inputs = timeparse.op_inputs(d["op_id"], d["input_column"], d["params"])
+                # state["inputs"]: the ordered column names behind the values
+                # parse_multi receives — an op that needs them (row_json's keys)
+                # reads them here rather than growing a second calling shape.
+                # Multi-input ops only: a stateful single-input op (syslog's
+                # year rollover) takes an empty dict as "fresh" and seeds it.
+                state = {"inputs": list(inputs)} if op["multi_input"] else {}
+                plans.append({"d": d, "op": op, "state": state, "slots": [slot(c) for c in inputs],
+                              "raised": 0, "first_error": None})
+            cols = list(slots.keys())
+            # slot() keys case-insensitively but _col_ref needs the real name.
+            real = {}
+            for d in defs:
+                for c in timeparse.op_inputs(d["op_id"], d["input_column"], d["params"]):
+                    real[c.lower()] = c
+            sel = ", ".join(self._col_ref(src, real[c]) for c in cols)
+
+            names = [d["name"] for d in defs]
+            assigns = ", ".join(f"{q(n)}=excluded.{q(n)}" for n in names)
+            upsert = (f"INSERT INTO {q(drv)}(rid, {', '.join(q(n) for n in names)}) "
+                      f"VALUES({','.join('?' * (len(names) + 1))}) "
+                      f"ON CONFLICT(rid) DO UPDATE SET {assigns}")
+
+            total = src["row_count"]
+            for plan in plans:
+                if plan["op"].get("prepare"):
+                    # e.g. lookup loading its whole mapping once — per
+                    # definition, before the scan, so the scan stays dict
+                    # hits. Inside the try: a lookup table deleted since the
+                    # column was made fails HERE, and has to land the way
+                    # any other failure does.
+                    plan["op"]["prepare"](self, plan["d"]["params"], plan["state"])
             while True:
                 with self._reader() as ro:
                     rows = ro.execute(
@@ -5476,17 +7217,41 @@ class Store:
                     out = [t[0]]
                     for plan in plans:
                         op = plan["op"]
-                        if op["multi_input"]:
-                            out.append(op["parse_multi"]([t[1 + i] for i in plan["slots"]],
-                                                         plan["d"]["params"], plan["state"]))
-                        else:
-                            out.append(op["parse"](t[1 + plan["slots"][0]], plan["d"]["params"], plan["state"]))
+                        # Per value, not per column: a parser that raises
+                        # on one cell (an offset no clock has, a "²" where
+                        # a tick count should be) used to fail the whole
+                        # backfill — and, on a re-derive, leave the
+                        # batches before it under the new params and the
+                        # rest under the old. The cell is NULL instead,
+                        # which _count_parse_failures counts with the rest.
+                        try:
+                            if op["multi_input"]:
+                                v = op["parse_multi"]([t[1 + i] for i in plan["slots"]],
+                                                      plan["d"]["params"], plan["state"])
+                            else:
+                                v = op["parse"](t[1 + plan["slots"][0]], plan["d"]["params"], plan["state"])
+                        except Exception as e:  # noqa: BLE001 — one value, see above
+                            v = None
+                            plan["raised"] += 1
+                            if plan["first_error"] is None:
+                                plan["first_error"] = f"row {t[0]}: {type(e).__name__}: {e}"
+                        out.append(v)
                     vals.append(tuple(out))
                 last_rid = vals[-1][0]
                 with self.lock, self.db:
                     if cancel and cancel():
                         raise IngestCancelled("cancelled during derive")
-                    self.db.executemany(upsert, vals)
+                    try:
+                        self.db.executemany(upsert, vals)
+                    except (UnicodeEncodeError, sqlite3.InterfaceError, sqlite3.ProgrammingError):
+                        # A value SQLite cannot bind: a str holding a lone
+                        # surrogate, or something that is not a str at all
+                        # from a plugin's op. Same transaction, so the rows
+                        # the first attempt got through are simply written
+                        # again — the upsert is idempotent. A closed
+                        # connection raises again here and goes on up.
+                        self.db.executemany(upsert, [tuple(_storable_cell(c) for c in row)
+                                                     for row in vals])
                 rows_done += len(vals)
                 if progress:
                     progress(rows_done, rows_done, total)
@@ -5505,10 +7270,22 @@ class Store:
                         [(d["id"],) for d in defs],
                     )
             raise
+        except Exception:
+            self._fail_derive_backfill(defs, wrote=rows_done > 0, drop=drop_on_cancel,
+                                       previous=previous)
+            raise
 
+        self._backfill_value_errors(plans)
         out_cols = []
         for d in defs:
-            failures = self._count_parse_failures(src, d)
+            # Every value is written by now, so this column is finished
+            # whatever the count does: a count that fails (the case closing
+            # under it) is an unknown number of failures, not a reason to
+            # leave the column 'building'.
+            try:
+                failures = self._count_parse_failures(src, d)
+            except Exception:  # noqa: BLE001 — see above
+                failures = None
             with self.lock, self.db:
                 self.db.execute(
                     "UPDATE derived_columns SET status='ready', parse_failures=? WHERE id=?",
@@ -5517,6 +7294,103 @@ class Store:
             out_cols.append({"def_id": d["id"], "source_id": source_id, "name": d["name"],
                              "parse_failures": failures})
         return {"source_id": source_id, "rows": rows_done, "columns": out_cols}
+
+    def _backfill_value_errors(self, plans: list[dict]) -> None:
+        """Write down that a parser raised, once per column per pass. The
+        cells are already NULL and counted as failures, so the analyst's
+        number is right without this; the log is for whoever wonders WHY a
+        value that looks parseable came out empty — it names the first
+        row and the exception."""
+        for plan in plans:
+            if plan["raised"]:
+                n = plan["raised"]
+                wlog.record("warn", f"Derive {plan['d']['name']!r}: {plan['d']['op_id']} raised on "
+                                    f"{n:,} value{'s' if n != 1 else ''}, left empty and counted as "
+                                    f"unparsed (first: {plan['first_error']})")
+
+    def _fail_derive_backfill(self, defs: list[dict], *, wrote: bool, drop: bool,
+                              previous: list[dict] | None) -> None:
+        """Where a backfill that stopped on an error (not a cancel) leaves
+        its columns. The state being avoided is the one it used to leave:
+        'building' with no job left to finish it, which survives every
+        reopen, blocks anything chaining off the column and makes
+        save_view_as_source refuse the table — and, on a re-derive, values
+        computed under two different sets of params with nothing to say so.
+
+        - A create (`drop`): removed, as a cancel removes it. The column
+          never had values worth keeping, and the job's error says why it
+          is not there.
+        - A re-derive that failed before writing anything (the lookup
+          table it reads is gone): the definition goes back to exactly
+          what it was (`previous`). Its values were never touched, so it
+          IS still that column. A cascade has no `previous` — its params
+          did not change, its parent's data did — so it is marked
+          'partial', which is what a cascade that could not start leaves
+          (_cascade_dependent_derives).
+        - A re-derive that wrote some batches first: 'error', and the
+          values cleared. Half old params and half new is the one answer
+          that cannot be read correctly, so none is left to read; the
+          header says to re-derive. Status first, so that if the clearing
+          fails too (the disk that filled up), the column still says it is
+          not to be trusted. The columns computed FROM it held values from
+          before and are now 'partial' for the same reason a cascade
+          that could not start leaves them so.
+
+        Every step is best-effort: the error being raised is the answer
+        (the job records it, and the log line names it), and a second
+        failure here — the case closing under it — must not replace it."""
+        if drop:
+            self._rollback_derive_definitions([d["id"] for d in defs])
+            return
+        before = {b["id"]: b for b in (previous or [])}
+        if not wrote:
+            for d in defs:
+                if d["id"] in before:
+                    self._restore_derive_definition(before[d["id"]])
+                else:
+                    with contextlib.suppress(Exception):
+                        with self.lock, self.db:
+                            self.db.execute(
+                                "UPDATE derived_columns SET status='partial' WHERE id=? AND status='building'",
+                                (d["id"],),
+                            )
+            return
+        names = [d["name"] for d in defs]
+        wlog.record("warn", f"Derive stopped part-way: {', '.join(names)} — the values it had "
+                            f"written were cleared rather than left mixed with the old ones; "
+                            f"re-derive to retry")
+        with contextlib.suppress(Exception):
+            with self.lock, self.db:
+                self.db.executemany(
+                    "UPDATE derived_columns SET status='error', parse_failures=NULL WHERE id=?",
+                    [(d["id"],) for d in defs],
+                )
+        source_id = defs[0]["source_id"]
+        drv = self._derived_table(source_id)
+        cleared = ", ".join(f"{q(d['name'])}=NULL" for d in defs)
+        with contextlib.suppress(Exception):
+            last = 0
+            while True:
+                # By rid range, a BATCH at a time, for invariant #4's
+                # reason: one UPDATE over a multi-million-row column would
+                # hold the writer for as long as the backfill's whole pass.
+                with self.lock, self.db:
+                    hi = self.db.execute(
+                        f"SELECT MAX(rid) FROM (SELECT rid FROM {q(drv)} WHERE rid > ? "
+                        f"ORDER BY rid LIMIT {BATCH})", (last,),
+                    ).fetchone()[0]
+                    if hi is None:
+                        break
+                    self.db.execute(f"UPDATE {q(drv)} SET {cleared} WHERE rid > ? AND rid <= ?",
+                                    (last, hi))
+                last = hi
+        with contextlib.suppress(Exception):
+            stale = [c["id"] for c in self.dependent_derived_columns(source_id, names)]
+            with self.lock, self.db:
+                self.db.executemany(
+                    "UPDATE derived_columns SET status='partial' WHERE id=? AND status='ready'",
+                    [(i,) for i in stale],
+                )
 
     def _count_parse_failures(self, src: dict, d: dict) -> int:
         """Rows whose input had something in it but produced no datetime —
@@ -5649,15 +7523,19 @@ class Store:
         per = max(1, -(-want // len(members)))
 
         def branch(m: dict) -> str:
-            ref = self._col_ref(src, column, "s", None if direct else "d")
+            # A member read through its projection (a merge of tables with
+            # different columns) has the column, padded or renamed, as a
+            # plain column of `s`.
+            rsrc = self._ref_src_for(src, m)
+            ref = self._col_ref(rsrc, column, "s", None if direct else "d")
             if direct:
                 scope = f"FROM {self._member_from(src, m, 's')}"
                 order = "s.rid"
             else:
                 scope = (f"FROM v.{q(view_id)} vv "
-                         f"JOIN {q(m['table_name'])} s ON s.rid = vv.rid "
+                         f"JOIN {self._member_join_target(src, m)} s ON s.rid = vv.rid "
                          f"AND vv.source_id = {int(m['source_id'])}"
-                         f"{self._member_derived_join(src, m, 's')}")
+                         f"{self._member_derived_join(rsrc, m, 's')}")
                 # The view's own order, which is what the analyst is
                 # looking at, and free: pos is the view table's rowid.
                 order = "vv.pos"
@@ -5669,6 +7547,18 @@ class Store:
         with self._reader() as ro, self._dropped_view_is_expired():
             return [r[0] for r in ro.execute(f"SELECT v FROM ({union}) LIMIT ?", (want,))]
 
+    def _derive_preview_member(self, merge_id: int, columns: list[str]) -> int:
+        """The member a derive preview on a merge samples: its first. A
+        column only some members have can't be derived on the merge —
+        add_derived_column refuses it, member by member — so the preview
+        refuses it the same way, rather than as an unknown column."""
+        members = self._resolve_members(merge_id)
+        for m in members:
+            for col in columns:
+                if self._find_column(m["src"], col) is None:
+                    raise ValueError(f"Member table {m['src']['name']!r} has no column {col!r}")
+        return members[0]["source_id"]
+
     def detect_timestamp_format(self, source_id: int, column: str) -> list[dict]:
         """Which operations can read this column, best first. Same
         sample-and-round-trip shape preview_sqlite_tables uses to pre-check
@@ -5677,7 +7567,7 @@ class Store:
         vs unix seconds) legitimately return several — the caller's preview
         of actual converted values is what settles it."""
         if source_id < 0:  # a merge samples its first (canonical) member
-            source_id = self._resolve_members(source_id)[0]["source_id"]
+            source_id = self._derive_preview_member(source_id, [column])
         src = self._source_lite(source_id)
         if self._find_column(src, column) is None:
             raise KeyError(column)
@@ -5694,6 +7584,11 @@ class Store:
         are skipped: those already sort and filter correctly, so converting
         them would just duplicate data."""
         src = self._source_lite(source_id)
+        if src.get("is_merge"):
+            # The hint follows an import, and a merge is never imported —
+            # its members already had their turn. It also has no table of
+            # its own to sample.
+            return []
         # Nothing to suggest for a column the analyst has already converted.
         converted = {d["input_column"].lower() for d in self.list_derived_columns(source_id)}
         out = []
@@ -5713,16 +7608,25 @@ class Store:
                 })
         return out
 
-    def _preview_rows(self, values: list, op_id: str, params: dict) -> list[dict]:
+    def _preview_state(self, op_id: str, params: dict) -> dict:
+        """The same hooks the real backfill runs: a lookup previewed without
+        its mapping loaded would show every value as a miss."""
         op = timeparse.OPERATIONS[op_id]
         state: dict = {}
-        # The same hooks the real backfill runs: a lookup previewed without
-        # its mapping loaded would show every value as a miss.
         if op.get("check"):
             op["check"](self, params)
         if op.get("prepare"):
             op["prepare"](self, params, state)
-        return [{"input": v, "output": op["parse"](v, params, state)} for v in values]
+        return state
+
+    def _preview_rows(self, values: list, op_id: str, params: dict,
+                      state: dict | None = None) -> list[dict]:
+        op = timeparse.OPERATIONS[op_id]
+        if state is None:
+            state = self._preview_state(op_id, params)
+        # parse_or_none: a value that raises previews as a failure, as it
+        # would backfill as one — not as a 500 for the whole modal.
+        return [{"input": v, "output": timeparse.parse_or_none(op, v, params, state)} for v in values]
 
     def preview_derived(self, source_id: int, column: str, op_id: str,
                         params: dict | None = None, limit: int = 10,
@@ -5751,6 +7655,8 @@ class Store:
             raise ValueError(f"Unknown operation: {op_id}")
         params = timeparse.validate_params(op_id, params)
         if view_id and not op["multi_input"]:
+            if source_id < 0:
+                self._derive_preview_member(source_id, [column])   # refuses a partial column
             samples = self._sample_column_in_view(view_id, column)
             return self._derived_preview_from(samples, op_id, params, limit, scope="view")
         # A multi-input operation reads several columns of the SAME row, so
@@ -5766,7 +7672,8 @@ class Store:
         if source_id < 0:
             # Preview against the first member — representative, and the
             # only side with a real table to sample.
-            source_id = self._resolve_members(source_id)[0]["source_id"]
+            source_id = self._derive_preview_member(
+                source_id, timeparse.op_inputs(op_id, column, params) if op["multi_input"] else [column])
         src = self._source_lite(source_id)
         if self._find_column(src, column) is None:
             raise KeyError(column)
@@ -5783,7 +7690,8 @@ class Store:
                 rows = ro.execute(
                     f"SELECT {sel} FROM {self._from_clause(src)} LIMIT ?", (limit,),
                 ).fetchall()
-            preview = [{"input": r[0], "output": op["parse_multi"](list(r), params, state)} for r in rows]
+            preview = [{"input": r[0], "output": timeparse.parse_multi_or_none(op, list(r), params, state)}
+                       for r in rows]
             # A failure is a NULL from a row that HAD something to read —
             # the same rule _count_parse_failures applies after the
             # backfill, so the modal's verdict and the column's count agree.
@@ -5803,11 +7711,11 @@ class Store:
         only one that knows which rows it came from, and the verdict the
         client writes is a claim about exactly that."""
         op = timeparse.OPERATIONS[op_id]
-        preview = self._preview_rows(samples[:limit], op_id, params)
-        state: dict = {}
-        if op.get("prepare"):
-            op["prepare"](self, params, state)
-        failures = sum(1 for v in samples if op["parse"](v, params, state) is None)
+        # One prepare for the pairs and the count both: a lookup's prepare
+        # loads its whole table (up to MAX_LOOKUP_ROWS) inside the request.
+        state = self._preview_state(op_id, params)
+        preview = self._preview_rows(samples[:limit], op_id, params, state)
+        failures = sum(1 for v in samples if timeparse.parse_or_none(op, v, params, state) is None)
         return {"preview": preview, "sampled": len(samples), "failures": failures, "scope": scope}
 
     def preview_regex_groups(self, source_id: int, column: str, pattern: str,
@@ -5829,7 +7737,7 @@ class Store:
         work is pure Python over those values — no new query shape."""
         names = structparse.regex_group_names(pattern)
         if source_id < 0:
-            source_id = self._resolve_members(source_id)[0]["source_id"]
+            source_id = self._derive_preview_member(source_id, [column])
         src = self._source_lite(source_id)
         if self._find_column(src, column) is None:
             raise KeyError(column)
@@ -5921,18 +7829,21 @@ class Store:
         )
 
         if src.get("is_merge"):
+            for frag in self._raw_fragments(spec.get("filter_tree")):
+                self.validate_where_fragment(source_id, frag)
             collist = ", ".join(q(c) for c in colnames)
+            sid_col = q(self._member_id_alias(colnames))
             branches = []
             params: list[Any] = []
             for m in self._resolve_members(source_id):
-                msrc = self._source_lite(m["source_id"])
-                where, p = self._compile_where(m["source_id"], msrc, spec, colnames)
+                msrc = m["src"]
+                where, p = self._compile_where(m["source_id"], self._member_read_src(src, msrc), spec, colnames)
                 for col in sort_cols:
                     self._ensure_sort_index_building(
                         m["source_id"], col,
                         self._index_table_for(src, col, msrc["table_name"], m["source_id"]))
                 branches.append(
-                    f"SELECT {int(m['source_id'])} AS source_id, rid, {collist} FROM {self._member_from(src, m)}"
+                    f"SELECT {int(m['source_id'])} AS {sid_col}, rid, {collist} FROM {self._member_from(src, m)}"
                     + (f" WHERE {where}" if where else "")
                 )
                 params.extend(p)
@@ -5940,7 +7851,7 @@ class Store:
             vid = self._next_view_id()
             sql = (
                 f"INSERT INTO v.{q(vid)}(source_id, rid) "
-                f"SELECT source_id, rid FROM ({union_sql}) {order}"
+                f"SELECT {sid_col}, rid FROM ({union_sql}) {order}"
             )
         else:
             table = src["table_name"]
@@ -5968,42 +7879,50 @@ class Store:
         # writer lock stands aside for it — asked while waiting for the
         # lock, not once before blocking on it (_writer_for_build).
         with self._writer_for_build(source_id, spec.get("op_token"), yield_others), \
-                self._running_build(source_id, spec.get("op_token")), \
-                self._interruptible(spec.get("op_token"), self.db), self.db:
-            # pos declared INTEGER PRIMARY KEY makes it *be* the rowid, so
-            # this alone gives the same unique/indexed-by-pos lookup the old
-            # CTAS + separate CREATE UNIQUE INDEX did, for one less full
-            # sort-and-write of every row (see CLAUDE.md's "Performance"
-            # section, change 3). pos is deliberately absent from the
-            # INSERT's column list: rowids are assigned 1..N in insertion
-            # order, and an INSERT..SELECT with ORDER BY inserts in sorted
-            # order — measured ~35% faster than numbering the same sort
-            # with ROW_NUMBER() OVER, for byte-identical view content.
-            # (The ORDER BY always ends in `rid ASC`, so the order — and
-            # therefore every pos — is fully determined, not sorter-
-            # dependent.) cursor.rowcount then gives the view's row count
-            # without re-scanning the table we just wrote.
-            self.db.execute(f"CREATE TABLE v.{q(vid)} (pos INTEGER PRIMARY KEY, source_id INTEGER, rid INTEGER)")
-            n = self.db.execute(sql, params).rowcount
-            # Evicted *after* the new view is built, not before (it used to
-            # be first): the whole block is one transaction, so a cancelled
-            # (interrupted) build rolls back to a world where the previous
-            # view still exists — the frontend keeps its rows instead of
-            # every open handle 409ing. The new view's handle isn't in
-            # self._views yet, so the eviction loop can't touch it. A held
-            # build evicts only an earlier pending view (see the docstring).
-            self._evict_root_views(source_id, pending_only=hold)
+                self._running_build(source_id, spec.get("op_token")):
+            with self._interruptible(spec.get("op_token"), self.db), self.db:
+                # pos declared INTEGER PRIMARY KEY makes it *be* the rowid, so
+                # this alone gives the same unique/indexed-by-pos lookup the old
+                # CTAS + separate CREATE UNIQUE INDEX did, for one less full
+                # sort-and-write of every row (see CLAUDE.md's "Performance"
+                # section, change 3). pos is deliberately absent from the
+                # INSERT's column list: rowids are assigned 1..N in insertion
+                # order, and an INSERT..SELECT with ORDER BY inserts in sorted
+                # order — measured ~35% faster than numbering the same sort
+                # with ROW_NUMBER() OVER, for byte-identical view content.
+                # (The ORDER BY always ends in `rid ASC`, so the order — and
+                # therefore every pos — is fully determined, not sorter-
+                # dependent.) cursor.rowcount then gives the view's row count
+                # without re-scanning the table we just wrote.
+                self.db.execute(f"CREATE TABLE v.{q(vid)} (pos INTEGER PRIMARY KEY, source_id INTEGER, rid INTEGER)")
+                n = self.db.execute(sql, params).rowcount
+                # Evicted *after* the new view is built, not before (it used to
+                # be first): the whole block is one transaction, so a cancelled
+                # (interrupted) build rolls back to a world where the previous
+                # view still exists — the frontend keeps its rows instead of
+                # every open handle 409ing. The new view's handle isn't in
+                # self._views yet, so the eviction loop can't touch it. A held
+                # build evicts only an earlier pending view (see the docstring).
+                self._evict_root_views(source_id, pending_only=hold)
 
-        handle = {
-            "view_id": vid,
-            "source_id": source_id,
-            "row_count": n,
-            "kind": "root",
-            "elapsed_ms": int((time.time() - t0) * 1000),
-        }
-        if hold:
-            handle["pending"] = True
-        self._views[vid] = handle
+            # Registered after the commit (a rolled-back build never gets a
+            # handle) but BEFORE the writer lock is released. Registering
+            # after it left a gap in which the next build for this source
+            # could take the lock, find no handle to evict, and register
+            # its own — leaving this one live beside it: two root views for
+            # one source, a table nothing would drop, and an older held
+            # view adopt_view would install over the newer build instead of
+            # answering 409.
+            handle = {
+                "view_id": vid,
+                "source_id": source_id,
+                "row_count": n,
+                "kind": "root",
+                "elapsed_ms": int((time.time() - t0) * 1000),
+            }
+            if hold:
+                handle["pending"] = True
+            self._views[vid] = handle
         return handle
 
     def _evict_root_views(self, source_id: int, *, keep: str | None = None,
@@ -6224,6 +8143,12 @@ class Store:
         `tag_ids` narrows to rows carrying at least one of those tags;
         None/empty means every tagged row regardless of which tag(s).
 
+        A source whose body would join more columns than SQLite's expression
+        depth allows (_fit_body_cols — 495 at the default limit) keeps only
+        the first that many, in body order, rather than failing the whole
+        build. Each one trimmed that way is listed in the result's
+        `body_trimmed` so the tab can say so.
+
         Same materialize-into-v.-then-page-by-pos pattern as build_view
         (CLAUDE.md invariant #2) — a heavily-tagged case can still be
         thousands of rows, so this isn't exempt from the no-LIMIT/OFFSET
@@ -6237,6 +8162,7 @@ class Store:
 
         branches = []
         params: list[Any] = []
+        body_trimmed: list[dict] = []
         for src in self.list_sources():
             if not src["tagged_row_count"]:
                 continue
@@ -6260,8 +8186,12 @@ class Store:
 
             chosen_body = [c for c in (cfg.get("body_columns") or []) if c in col_names]
             body_cols = chosen_body or [c["name"] for c in src["columns"]]
+            shown = self._fit_body_cols(body_cols)
+            if len(shown) < len(body_cols):
+                body_trimmed.append({"source_id": source_id, "source_name": src["name"],
+                                     "shown": len(shown), "total": len(body_cols)})
             body_expr = " || ' | ' || ".join(
-                f"COALESCE({self._col_ref(src, c, 's')}, '')" for c in body_cols
+                f"COALESCE({self._col_ref(src, c, 's')}, '')" for c in shown
             )
 
             # An analyst who picked body columns in Configure sources said
@@ -6318,7 +8248,19 @@ class Store:
                     self._evict_view_and_children(old)
 
         self._views[vid] = {"view_id": vid, "kind": "timeline", "row_count": n}
-        return {"view_id": vid, "row_count": n}
+        return {"view_id": vid, "row_count": n, "body_trimmed": body_trimmed}
+
+    def _fit_body_cols(self, cols: list[str]) -> list[str]:
+        """The first of `cols` that one ' | '-joined body can hold before
+        SQLite rejects the expression as too deep: two levels per column
+        (the value and its separator), less TIMELINE_BODY_DEPTH_HEADROOM —
+        495 at the default limit of 1000. All of them when this SQLite was
+        built with no depth limit at all (getlimit reports 0)."""
+        getlimit = getattr(self.db, "getlimit", None)
+        depth = getlimit(sqlite3.SQLITE_LIMIT_EXPR_DEPTH) if getlimit else SQLITE_DEFAULT_EXPR_DEPTH
+        if depth <= 0:
+            return cols
+        return cols[:max(1, (depth - TIMELINE_BODY_DEPTH_HEADROOM) // 2)]
 
     def fetch_timeline_rows(self, view_id: str, start: int, count: int) -> dict:
         handle = self._views.get(view_id)
@@ -6546,12 +8488,13 @@ class Store:
         # direct shape joins it with USING(rid) (bare column refs), the view
         # shape chains a second ON join (refs go through the `d` alias) — so
         # the value expression and the path conditions are built per branch.
-        def _val_expr(derived_alias: str | None) -> str:
-            ref = self._col_ref(src, column, "s", derived_alias)
+        def _val_expr(m: dict, derived_alias: str | None) -> str:
+            ref = self._col_ref(self._ref_src_for(src, m), column, "s", derived_alias)
             return f"DAY_BUCKET({ref})" if is_datetime else ref
 
         def _path_for(m: dict, derived_alias: str | None) -> tuple[str, list]:
-            clauses, p = self._path_where(path, colnames, "s", src, derived_alias, m["source_id"])
+            clauses, p = self._path_where(path, colnames, "s", self._ref_src_for(src, m),
+                                          derived_alias, m["source_id"])
             return "".join(f" AND {c}" for c in clauses), p
 
         has_path = bool(path)
@@ -6588,11 +8531,11 @@ class Store:
                 else:
                     scope = (
                         f"FROM v.{q(view_id)} vv "
-                        f"JOIN {q(m['table_name'])} s ON s.rid = vv.rid AND vv.source_id = {int(m['source_id'])}"
-                        f"{self._member_derived_join(src, m, 's')} "
+                        f"JOIN {self._member_join_target(src, m)} s ON s.rid = vv.rid AND vv.source_id = {int(m['source_id'])}"
+                        f"{self._member_derived_join(self._ref_src_for(src, m), m, 's')} "
                         f"WHERE 1=1{extra_where}"
                     )
-                branches.append(f"SELECT {_val_expr(derived_alias)} AS val, count(*) AS n {scope} GROUP BY 1")
+                branches.append(f"SELECT {_val_expr(m, derived_alias)} AS val, count(*) AS n {scope} GROUP BY 1")
                 params.extend(path_params)
         union_sql = " UNION ALL ".join(branches)
         if direction is None:
@@ -6627,6 +8570,33 @@ class Store:
         truncated = len(rows) > limit
         rows = rows[:limit]
         return {"groups": [{"value": r["val"], "count": r["n"]} for r in rows], "truncated": truncated}
+
+    def distinct_values(self, view_id: str, column: str, limit: int = DISTINCT_VALUES_MAX,
+                        op_token: str | None = None) -> dict:
+        """Every distinct non-empty value of one column across the view, in
+        the column's own sort order — what "Copy unique values" puts on the
+        clipboard when no rows are picked.
+
+        It is the header value picker's call to group_summary: the STORED
+        value (bucket_datetime=False), because the list is meant to be
+        pasted somewhere else and a day bucket is not a value the column
+        holds, and order="value" so a number column sorts as numbers and a
+        timestamp column chronologically. Merges and derived columns come
+        with it, since group_summary already resolves both per member.
+
+        NULL and '' are dropped — "(empty)" is not something anyone pastes
+        into a lookup. They are separate groups to SQLite, so the aggregate
+        asks for two past the cap to keep a list that is exactly `limit`
+        long once they're gone from reading as truncated. `truncated` is
+        the caller's cue to refuse rather than copy a list that stops
+        partway."""
+        if column == TAG_GROUP_COLUMN:
+            # Grouping's sentinel, not a column — its "values" are tag ids.
+            raise KeyError(column)
+        res = self.group_summary(view_id, column, order="value", direction="asc", limit=limit + 2,
+                                 op_token=op_token, bucket_datetime=False)
+        values = [g["value"] for g in res["groups"] if g["value"] is not None and g["value"] != ""]
+        return {"values": values[:limit], "truncated": res["truncated"] or len(values) > limit}
 
     # Bucket widths a histogram may pick from, seconds — chosen so the
     # view's span fits in max_buckets bars. Human-shaped (minute, hour,
@@ -6666,42 +8636,57 @@ class Store:
 
         def branch(m: dict, select: str) -> str:
             derived_alias = None if direct else "d"
-            ref = self._col_ref(src, column, "s", derived_alias)
+            rsrc = self._ref_src_for(src, m)
+            ref = self._col_ref(rsrc, column, "s", derived_alias)
             ts = ref if is_derived else f"TS_NORMALIZE({ref})"
             epoch = f"CAST(strftime('%s', {ts}) AS INTEGER)"
             if direct:
                 scope = f"FROM {self._member_from(src, m, 's')}"
             else:
                 scope = (f"FROM v.{q(view_id)} vv "
-                         f"JOIN {q(m['table_name'])} s ON s.rid = vv.rid AND vv.source_id = {int(m['source_id'])}"
-                         f"{self._member_derived_join(src, m, 's')}")
+                         f"JOIN {self._member_join_target(src, m)} s ON s.rid = vv.rid AND vv.source_id = {int(m['source_id'])}"
+                         f"{self._member_derived_join(rsrc, m, 's')}")
             return f"SELECT {select.replace('EPOCH', epoch)} {scope}"
 
         span_union = " UNION ALL ".join(branch(m, "EPOCH AS e") for m in members)
         with self._reader() as ro, self._dropped_view_is_expired(), self._interruptible(op_token, ro):
-            lo, hi, n = ro.execute(
-                f"SELECT MIN(e), MAX(e), COUNT(*) FROM ({span_union}) WHERE e IS NOT NULL").fetchone()
+            # The labels come from SQLite too, not time.gmtime: on Windows
+            # that raises OSError for anything before 1970 (a 500 for a
+            # column holding FILETIME zero), and SQLite formats every year
+            # its own strftime('%s') could have produced.
+            lo, hi, n, lo_text, hi_text = ro.execute(
+                "SELECT MIN(e), MAX(e), COUNT(*), datetime(MIN(e), 'unixepoch'), "
+                f"datetime(MAX(e), 'unixepoch') FROM ({span_union}) WHERE e IS NOT NULL").fetchone()
         if not n:
             return {"column": column, "bucket_seconds": 0, "start": None, "end": None,
                     "total": 0, "buckets": []}
         span = max(0, int(hi) - int(lo))
         bucket = next((b for b in self.HISTOGRAM_BUCKETS if span / b <= max_buckets),
                       self.HISTOGRAM_BUCKETS[-1])
+        # A bucket starts at floor(e / bucket) * bucket, which is what the
+        # strip assumes when it finds a row's bar (b <= t < b + bucket).
+        # SQLite's integer division truncates toward zero instead, so a
+        # pre-1970 (negative) epoch landed in the bucket AFTER its own —
+        # and 1601, FILETIME zero, is a value real artefacts carry. Shifting
+        # by a whole number of buckets past the span's minimum makes every
+        # dividend non-negative, where the two agree, and keeps EPOCH (a
+        # strftime over TS_NORMALIZE) evaluated once per row.
+        shift = max(0, -(int(lo) // bucket)) * bucket
+        bucket_sql = f"((EPOCH + {shift}) / {bucket}) * {bucket} - {shift}"
         count_union = " UNION ALL ".join(
-            branch(m, f"(EPOCH / {bucket}) * {bucket} AS b, 1 AS one") for m in members)
+            branch(m, f"{bucket_sql} AS b, 1 AS one") for m in members)
         with self._reader() as ro, self._dropped_view_is_expired(), self._interruptible(op_token, ro):
             rows = ro.execute(
                 f"SELECT b, COUNT(*) AS n FROM ({count_union}) WHERE b IS NOT NULL GROUP BY b ORDER BY b"
             ).fetchall()
-        iso = lambda t: time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(int(t)))
         out = {"column": column, "bucket_seconds": bucket,
-               "start": iso(lo), "end": iso(hi), "total": int(n),
+               "start": lo_text, "end": hi_text, "total": int(n),
                "buckets": [[int(r[0]), int(r[1])] for r in rows]}
         if stack == "tags":
-            out["stack"] = self._histogram_tag_stack(branch, members, bucket, op_token)
+            out["stack"] = self._histogram_tag_stack(branch, members, bucket_sql, op_token)
         return out
 
-    def _histogram_tag_stack(self, branch, members: list[dict], bucket: int,
+    def _histogram_tag_stack(self, branch, members: list[dict], bucket_sql: str,
                              op_token: str | None) -> dict:
         """The same buckets split by tag, as {tags: [id…], buckets: [[epoch,
         [untagged, n_first_tag, …]], …]}.
@@ -6734,7 +8719,7 @@ class Store:
                            f"WHERE rt.source_id = {int(m['source_id'])} AND rt.rid = s.rid)")
                 else:
                     tag = "NULL"
-                parts.append(branch(m, f"(EPOCH / {bucket}) * {bucket} AS b, {tag} AS tag"))
+                parts.append(branch(m, f"{bucket_sql} AS b, {tag} AS tag"))
             union = " UNION ALL ".join(parts)
             rows = ro.execute(
                 f"SELECT b, tag, COUNT(*) AS n FROM ({union}) WHERE b IS NOT NULL "
@@ -6881,13 +8866,14 @@ class Store:
             """This group's predicate for one member. Per member because
             both halves can be: a tag test is keyed by source_id (row_tags
             is), and so is any tag level in the nested path."""
+            rsrc = self._ref_src_for(src, m)
             if by_tag:
                 c, v = self._tag_condition("s", m["source_id"], value)
             else:
                 c, v = self._eq_condition(
-                    self._col_ref(src, column, "s", d_alias), value, colnames[column] == "datetime"
+                    self._col_ref(rsrc, column, "s", d_alias), value, colnames[column] == "datetime"
                 )
-            pc, pp = self._path_where(path, colnames, "s", src, d_alias, m["source_id"])
+            pc, pp = self._path_where(path, colnames, "s", rsrc, d_alias, m["source_id"])
             return f"{c}" + "".join(f" AND {x}" for x in pc), [*v, *pp]
 
         # Both locked blocks below read v.<parent view>, whose handle was
@@ -6905,8 +8891,8 @@ class Store:
                     ).fetchone()[0]
                 else:
                     n = self.db.execute(
-                        f"SELECT count(*) FROM v.{q(view_id)} vv JOIN {q(m['table_name'])} s "
-                        f"ON s.rid = vv.rid AND vv.source_id = ?{self._member_derived_join(src, m, 's')} WHERE {where_sql}",
+                        f"SELECT count(*) FROM v.{q(view_id)} vv JOIN {self._member_join_target(src, m)} s "
+                        f"ON s.rid = vv.rid AND vv.source_id = ?{self._member_derived_join(self._ref_src_for(src, m), m, 's')} WHERE {where_sql}",
                         [m["source_id"], *where_params],
                     ).fetchone()[0]
                 total += n
@@ -6925,7 +8911,18 @@ class Store:
         # over-tagging bug too, not just a display one.
         covers_source = self._grouping_covers_whole_source(root, src)
         is_merge = bool(src.get("is_merge"))
-        if is_merge or not covers_source or total > self.GROUP_MATERIALIZE_THRESHOLD:
+        # A tag level is the other thing the fast path can't hold still.
+        # Its predicate is re-run against row_tags on every page fetch,
+        # while row_count was fixed here — so tagging a row inside the
+        # expanded "untagged" group shrank the membership under the next
+        # page's offset and the grid skipped a row it never showed. Column
+        # values are source data and never change (invariant #1); tags do,
+        # constantly, and in exactly this view. Materialising snapshots
+        # membership the way a tag *filter* already does.
+        by_tag_anywhere = by_tag or any(
+            isinstance(p, dict) and p.get("column") == TAG_GROUP_COLUMN for p in (path or []))
+        if (is_merge or not covers_source or by_tag_anywhere
+                or total > self.GROUP_MATERIALIZE_THRESHOLD):
             vid = self._next_view_id()
             branches = []
             params: list[Any] = []
@@ -6940,35 +8937,51 @@ class Store:
                 else:
                     branches.append(
                         f"SELECT vv.pos AS root_pos, vv.source_id, vv.rid FROM v.{q(view_id)} vv "
-                        f"JOIN {q(m['table_name'])} s ON s.rid = vv.rid AND vv.source_id = ?{self._member_derived_join(src, m, 's')} "
+                        f"JOIN {self._member_join_target(src, m)} s ON s.rid = vv.rid AND vv.source_id = ?{self._member_derived_join(self._ref_src_for(src, m), m, 's')} "
                         f"WHERE {where_sql}"
                     )
                     params.extend([m["source_id"], *where_params])
             union_sql = " UNION ALL ".join(branches)
-            with self.lock, self._dropped_view_is_expired(), self.db:
-                # Same ORDER BY-fed insert as build_view: pos auto-assigns
-                # 1..N in insertion (= sorted) order, rowcount replaces a
-                # count(*) re-scan. root_pos is unique across the union
-                # (vv.pos from one view, or s.rid from one member table),
-                # so the order is fully determined.
-                self.db.execute(f"CREATE TABLE v.{q(vid)} (pos INTEGER PRIMARY KEY, source_id INTEGER, rid INTEGER)")
-                n = self.db.execute(
-                    f"INSERT INTO v.{q(vid)}(source_id, rid) "
-                    f"SELECT source_id, rid FROM ({union_sql}) ORDER BY root_pos",
-                    params,
-                ).rowcount
-            self._views[vid] = {
-                "view_id": vid, "source_id": root["source_id"], "row_count": n,
-                "kind": "group", "parent_view_id": view_id,
-            }
+            with self.lock:
+                with self._dropped_view_is_expired(), self.db:
+                    # The parent can have been rebuilt away since its
+                    # handle was read; a root_virtual one has no table
+                    # whose absence would say so, so ask the registry.
+                    if view_id not in self._views:
+                        raise ViewExpired("View expired — rebuild it")
+                    # Same ORDER BY-fed insert as build_view: pos auto-assigns
+                    # 1..N in insertion (= sorted) order, rowcount replaces a
+                    # count(*) re-scan. root_pos is unique across the union
+                    # (vv.pos from one view, or s.rid from one member table),
+                    # so the order is fully determined.
+                    self.db.execute(f"CREATE TABLE v.{q(vid)} (pos INTEGER PRIMARY KEY, source_id INTEGER, rid INTEGER)")
+                    n = self.db.execute(
+                        f"INSERT INTO v.{q(vid)}(source_id, rid) "
+                        f"SELECT source_id, rid FROM ({union_sql}) ORDER BY root_pos",
+                        params,
+                    ).rowcount
+                # Registered before the lock goes, like build_view's handle:
+                # a rebuild of the parent that took the lock first would
+                # have cascaded over a child it couldn't see yet, leaving a
+                # group (and its table) under a parent that no longer exists.
+                self._views[vid] = {
+                    "view_id": vid, "source_id": root["source_id"], "row_count": n,
+                    "kind": "group", "parent_view_id": view_id,
+                }
             return {"view_id": vid, "row_count": n, "elapsed_ms": 0}
 
-        vid = self._next_view_id()
-        self._views[vid] = {
-            "view_id": vid, "source_id": root["source_id"], "row_count": total,
-            "kind": "group_virtual", "parent_view_id": view_id,
-            "column": column, "value": value, "members": members, "path": path,
-        }
+        # Same rule for the virtual group, which has no table but does have
+        # a parent: registered under the lock, and only while that parent
+        # is still the registered view it was counted against.
+        with self.lock:
+            if view_id not in self._views:
+                raise ViewExpired("View expired — rebuild it")
+            vid = self._next_view_id()
+            self._views[vid] = {
+                "view_id": vid, "source_id": root["source_id"], "row_count": total,
+                "kind": "group_virtual", "parent_view_id": view_id,
+                "column": column, "value": value, "members": members, "path": path,
+            }
         return {"view_id": vid, "row_count": total, "elapsed_ms": 0}
 
     def _virtual_group_where(self, handle: dict, conn: sqlite3.Connection | None = None) -> tuple[str, list]:
@@ -7040,6 +9053,7 @@ class Store:
         if op == "regex":
             if val == "":
                 return "", []
+            _compiled_regex(val)   # refuse an unusable pattern here, by name — see _regexp
             return f"{c} REGEXP ?", [val]
         if op in (">", ">=", "<", "<="):
             if val == "":
@@ -7058,8 +9072,20 @@ class Store:
                 # Row ids arrive as strings (the tree is JSON from a picker);
                 # bind them as the integers the column holds.
                 items = [int(s) if str(s).strip().lstrip("-").isdigit() else s for s in items]
+            if _HAS_JSON_EACH:   # one parameter however long the list — see _HAS_JSON_EACH
+                return f"{c} IN (SELECT value FROM json_each(?))", [json.dumps(items)]
             return f"{c} IN ({','.join('?' * len(items))})", items
         return "", []
+
+    @staticmethod
+    def _raw_fragments(node: dict | None) -> list[str]:
+        if not node:
+            return []
+        if node.get("type") == "raw":
+            return [node.get("sql", "")]
+        if node.get("type") == "group":
+            return [f for c in node.get("children", []) for f in Store._raw_fragments(c)]
+        return []
 
     @staticmethod
     def _tree_has_raw(node: dict | None) -> bool:
@@ -7110,7 +9136,10 @@ class Store:
             sql = node.get("sql", "")
             # Re-validated on every compile, not just at authoring time — a
             # stored preset may be replayed later against a different schema.
-            self.validate_where_fragment(source_id, sql)
+            # A merge member's compile skips it: build_view/spec_sql validate
+            # each fragment once against the merge itself (_member_read_src).
+            if "merge_id" not in src:
+                self.validate_where_fragment(source_id, sql)
             return f"({sql})", []
         if kind == "cond":
             col, op = node.get("column"), node.get("op")
@@ -7183,15 +9212,28 @@ class Store:
             if ident.upper() in self.ALLOWED_SQL_WORDS or ident in colnames or NUM_RE.match(ident):
                 continue
             raise ValueError(f"Unknown identifier: {ident}")
+        # A double-quoted name has to be a column too. SQLite reads one that
+        # isn't as a string literal (its double-quoted-string fallback), and
+        # EXPLAIN below accepts that happily: `"Event Id " <> '4624'` — one
+        # trailing space — matched every row, `"EventID" = '4624'` none,
+        # and neither said why. Case folds as SQLite folds it, ASCII only.
+        folded = {_ascii_fold(c) for c in colnames}
+        for name in _double_quoted_names(frag):
+            if _ascii_fold(name) not in folded:
+                raise ValueError(
+                    f'Unknown column "{name}". A double-quoted name must be one of this '
+                    "table's columns; a text value takes single quotes.")
+        # EXPLAIN below never calls REGEXP, so it can't catch a bad pattern.
+        _check_regexp_literals(frag)
 
         # A merge has no table of its own: the fragment is later spliced
         # into each member's branch, so the dry-run below must pass against
         # every member (invariant #9 — its identifier check above already
         # ran against the merge's exposed column set).
-        froms = ([self._from_clause(self._source_lite(m["source_id"]))
-                  for m in self._resolve_members(source_id)]
+        froms = ([self._member_from(src, m) for m in self._resolve_members(source_id)]
                  if source_id < 0 else [self._from_clause(src)])
-        ro = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, check_same_thread=False)
+        ro = _no_dq_strings(sqlite3.connect(sqlite_ro_uri(self.path), uri=True,
+                                            check_same_thread=False))
         ro.row_factory = sqlite3.Row
         ro.create_function("REGEXP", 2, _regexp, deterministic=True)
         try:
@@ -7224,10 +9266,16 @@ class Store:
 
         search_mode = spec.get("search_mode", "contains")
         search = (spec.get("search") or "").strip()
+        if search or (search_mode == "advanced" and spec.get("search_terms")):
+            # Every search mode reads all of the table's columns, and a
+            # table still importing has none yet: `_blob_expr([])` compiled
+            # `() LIKE ?`, a syntax error the route could only call a 500.
+            self._require_columns(src)
         if search_mode == "regex" and search:
             # Base columns only, matching build_fts's doc view exactly — the
             # indexed and fallback paths have to search the same text, and
             # derived values are computed from data that's already in it.
+            _compiled_regex(search)   # refuse an unusable pattern here, by name — see _regexp
             blob = _blob_expr([c["name"] for c in self._base_cols(src)])
             clauses.append(f"({blob}) REGEXP ?")
             params.append(search)
@@ -7309,10 +9357,13 @@ class Store:
             # a row counts as in-range if *any* of its timestamps is —
             # the "timestomped creation date, but a real modified date"
             # case the timeframe filter exists for in the first place.
-            if col and colnames.get(col) == "datetime":
+            # `src` is this member's own (merge-spelled) column list, so a
+            # merge column the member lacks never counts as "has it".
+            present = {_col_key(c["name"]) for c in src["columns"]}
+            if col and colnames.get(col) == "datetime" and _col_key(col) in present:
                 ts_cols = [col]
             else:
-                ts_cols = [c for c, t in colnames.items() if t == "datetime"]
+                ts_cols = [c for c, t in colnames.items() if t == "datetime" and _col_key(c) in present]
             if ts_cols and (start_norm or end_norm):
                 parts = []
                 for c in ts_cols:
@@ -7326,7 +9377,7 @@ class Store:
                     else:
                         parts.append(f"{expr} <= ?")
                         params.append(end_norm)
-                clauses.append("(" + " OR ".join(parts) + ")")
+                clauses.append("(" + _sql_chain(parts, " OR ") + ")")
 
         # "Hide empty rows" (the table menu): drop a row whose EVERY column
         # is empty — NULL or '', the same "empty" the per-column filter op
@@ -7342,9 +9393,26 @@ class Store:
                 clause, p = self._compile_condition(c, "not_empty", "", colnames)
                 parts.append(clause)
                 params.extend(p)
-            clauses.append("(" + " OR ".join(parts) + ")")
+            # _sql_chain: one OR per column is past SQLite's expression
+            # depth limit on a table about 1,000 columns wide. Halves keep
+            # their order, so the params still line up.
+            clauses.append("(" + _sql_chain(parts, " OR ") + ")")
 
         return " AND ".join(clauses), params
+
+    @staticmethod
+    def _member_id_alias(colnames) -> str:
+        """What a merge's UNION calls the member id it projects beside the
+        data columns: `source_id`, unless the file has a column of that
+        name (any ASCII case) — then ORDER BY "source_id" resolved to the
+        first of the two, the member id, and sorting the merge on the
+        file's own column sorted it by member. Underscores are prepended
+        until the name is free, since any name a file could also use."""
+        taken = {_ascii_fold(c) for c in colnames}
+        alias = "source_id"
+        while alias in taken:
+            alias = "_" + alias
+        return alias
 
     @staticmethod
     def _compile_order(spec, colnames) -> str:
@@ -7372,28 +9440,46 @@ class Store:
     @staticmethod
     def _inline_sql_params(sql: str, params: list) -> str:
         """Substitute ? placeholders with safely-quoted literals, producing
-        SQL fit to hand the analyst in the SQL pane. Skips any ? that sits
-        inside a string literal — a raw filter fragment the analyst typed
-        can legitimately contain one — by walking the text with the same
-        ''-doubling rule SQLite itself uses."""
+        SQL fit to hand the analyst in the SQL pane. Skips any ? that is not
+        a placeholder, by walking the text the way SQLite's tokenizer does:
+        inside a string literal (a raw filter fragment the analyst typed can
+        legitimately contain one), inside a quoted identifier ("In Use?" is
+        a header q() quotes — and also `x` and [x], which a typed fragment
+        may use), or inside a comment. Quotes escape by doubling, as in
+        SQLite; brackets don't escape at all."""
         out: list[str] = []
         it = iter(params)
-        in_str = False
+        closers = {"'": "'", '"': '"', "`": "`", "[": "]"}
+        n = len(sql)
         i = 0
-        while i < len(sql):
+        while i < n:
             ch = sql[i]
-            if in_str:
-                if ch == "'":
-                    if i + 1 < len(sql) and sql[i + 1] == "'":
-                        out.append("''")
-                        i += 2
-                        continue
-                    in_str = False
-                out.append(ch)
-            elif ch == "'":
-                in_str = True
-                out.append(ch)
-            elif ch == "?":
+            if ch in closers:
+                close = closers[ch]
+                j = i + 1
+                while j < n:
+                    if sql[j] == close:
+                        if close != "]" and j + 1 < n and sql[j + 1] == close:
+                            j += 2
+                            continue
+                        break
+                    j += 1
+                out.append(sql[i:j + 1])
+                i = j + 1
+                continue
+            if sql.startswith("--", i):
+                j = sql.find("\n", i)
+                j = n if j < 0 else j
+                out.append(sql[i:j])
+                i = j
+                continue
+            if sql.startswith("/*", i):
+                j = sql.find("*/", i + 2)
+                j = n if j < 0 else j + 2
+                out.append(sql[i:j])
+                i = j
+                continue
+            if ch == "?":
                 try:
                     v = next(it)
                 except StopIteration:
@@ -7430,15 +9516,24 @@ class Store:
         colnames = {c["name"]: c["type"] for c in src["columns"]}
         order = self._compile_order(spec, colnames)
         if src.get("is_merge"):
+            for frag in self._raw_fragments(spec.get("filter_tree")):
+                self.validate_where_fragment(source_id, frag)
             collist = ", ".join(q(c) for c in colnames)
+            sid_col = q(self._member_id_alias(colnames))
             branches = []
             params: list[Any] = []
             for m in self._resolve_members(source_id):
-                msrc = self._source_lite(m["source_id"])
-                where, p = self._compile_where(m["source_id"], msrc, spec, colnames)
+                msrc = m["src"]
+                where, p = self._compile_where(m["source_id"], self._member_read_src(src, msrc), spec, colnames)
+                # The pane's own src_<id> name, projected when the member
+                # doesn't carry the merge's columns as-is — run_sql's shadow
+                # view supplies any derived columns the projection names.
+                exprs = self._member_projection(src, msrc)
+                from_sql = (q(m["table_name"]) if exprs is None
+                            else f"(SELECT rid, {', '.join(exprs)} FROM {q(m['table_name'])})")
                 branches.append(
-                    f"SELECT {int(m['source_id'])} AS source_id, rid, {collist}\n"
-                    f"FROM {q(m['table_name'])}"
+                    f"SELECT {int(m['source_id'])} AS {sid_col}, rid, {collist}\n"
+                    f"FROM {from_sql}"
                     + (f"\nWHERE {where}" if where else "")
                 )
                 params.extend(p)
@@ -7509,7 +9604,7 @@ class Store:
                 member_src = self._source_lite_on(ro, sid)
                 ph = ",".join("?" * len(rids))
                 for row in ro.execute(
-                    f"SELECT rid, {sel} FROM {self._from_clause(member_src)} WHERE rid IN ({ph})", rids
+                    f"SELECT rid, {sel} FROM {self._member_rows_from(src, member_src)} WHERE rid IN ({ph})", rids
                 ):
                     # positional: the SELECT puts rid first, then cols in
                     # order — tuple(row) is one C-level copy, vs a
@@ -7829,8 +9924,12 @@ class Store:
             members = self._resolve_members_on(ro, handle["source_id"])
             for m in members:
                 msrc = self._source_lite_on(ro, m["source_id"])
-                for c in ts_cols:
-                    if not any(cc["name"] == c for cc in msrc["columns"]):
+                for want in ts_cols:
+                    # The member's own spelling — a merge matches columns
+                    # ignoring case, so "TIME" on one member is "Time" here.
+                    c = next((cc["name"] for cc in msrc["columns"]
+                              if _col_key(cc["name"]) == _col_key(want)), None)
+                    if c is None:
                         continue  # merge member without this column
                     if kind == "root_virtual":
                         ts_expr = f"TS_NORMALIZE({q(c)})"
@@ -7924,15 +10023,22 @@ class Store:
         UI's autofit-column-width shortcut. One sequential scan per member
         table, every column computed in a single pass.
 
-        Cached per source, invalidated by row_count changing — a full scan
-        over every column of a 10M-row source isn't cheap, and autofit is a
-        button a user can click repeatedly (once per column double-click,
-        plus a "fit all" action) without the underlying data changing at
-        all between clicks."""
+        Cached per source — a full scan over every column of a 10M-row
+        source isn't cheap, and autofit is a button a user can click
+        repeatedly (once per column double-click, plus a "fit all" action)
+        without the underlying data changing at all between clicks. Keyed
+        on the row count AND the column list, derived columns' id and
+        status included: base columns never change after ingest
+        (invariant #1), but a derived column comes and goes, and fills in
+        behind a backfill, without the row count moving — keyed on rows
+        alone, the answer after one was added simply lacked it."""
         with self._reader() as ro, self._dropped_view_is_expired():
             src = self._source_lite_on(ro, source_id)
+            key = (src["row_count"],
+                   tuple((c["name"], c.get("derived_id"), c.get("derived_status"))
+                         for c in src["columns"]))
             cached = self._maxlen_cache.get(source_id)
-            if cached and cached[0] == src["row_count"]:
+            if cached and cached[0] == key:
                 return cached[1]
             self._require_columns(src)
             cols = [c["name"] for c in src["columns"]]
@@ -7945,7 +10051,7 @@ class Store:
                     if v and v > maxes[i]:
                         maxes[i] = v
         result = {c: maxes[i] for i, c in enumerate(cols)}
-        self._maxlen_cache[source_id] = (src["row_count"], result)
+        self._maxlen_cache[source_id] = (key, result)
         return result
 
     # -------------------------------------------------------------------- tags
@@ -7974,9 +10080,10 @@ class Store:
         with self._reader() as ro:
             for m in self._resolve_members_on(ro, source_id):
                 msrc = self._source_lite_on(ro, m["source_id"])
-                member_names = {c["name"] for c in msrc["columns"]}
-                for c in ts_cols:
-                    if c not in member_names:
+                member_names = {_col_key(c["name"]): c["name"] for c in msrc["columns"]}
+                for want in ts_cols:
+                    c = member_names.get(_col_key(want))  # the member's own spelling
+                    if c is None:
                         continue
                     row = ro.execute(
                         f"SELECT MIN(TS_NORMALIZE({q(c)})), MAX(TS_NORMALIZE({q(c)})) "
@@ -8003,11 +10110,17 @@ class Store:
             # would be crying wolf.
             if tag_id:
                 was = self.db.execute("SELECT name FROM tag_defs WHERE id=?", (tag_id,)).fetchone()
+                if was is None:
+                    # Edited from a window that still lists a tag another
+                    # one deleted. Creating it again under the old id is
+                    # not an option (ids are never reused), and a new id
+                    # would be a tag nobody asked for.
+                    raise RecordGone(f"Tag {tag_id} no longer exists in this case")
                 self.db.execute(
                     "UPDATE tag_defs SET name=?, color=?, hotkey=? WHERE id=?",
                     (name, color, hotkey, tag_id),
                 )
-                if was is None or was["name"] != name:
+                if was["name"] != name:
                     self._bump_state_generation()
             else:
                 cur = self.db.execute(
@@ -8022,10 +10135,16 @@ class Store:
     def delete_tag(self, tag_id: int) -> None:
         """Drops every assignment of the tag with it — a direct row_tags
         write rather than a recorded delta (there is nothing to undo once
-        the tag itself is gone), so it bumps the state generation itself."""
+        the tag itself is gone), so it bumps the state generation itself.
+
+        An indicator that auto-tags with it stops auto-tagging rather than
+        keep the id: the next scan would otherwise write assignments for a
+        tag that does not exist, invisible in every list and still counted
+        in a table's tagged-row total."""
         with self.lock, self.db:
             self._drop_undo_for_tag(tag_id)
             self.db.execute("DELETE FROM row_tags WHERE tag_id=?", (tag_id,))
+            self.db.execute("UPDATE watchlist SET auto_tag_id=NULL WHERE auto_tag_id=?", (tag_id,))
             self.db.execute("DELETE FROM tag_defs WHERE id=?", (tag_id,))
             self._bump_state_generation()
 
@@ -8059,7 +10178,8 @@ class Store:
     def _apply_tag_change(self, *, tag_id: int, on: bool, source_id: int, scope: str,
                           target_sql: str | None = None, target_params: Sequence = (),
                           pairs: Sequence[Sequence[int]] | None = None,
-                          count_ids: Sequence[int] | None = None) -> int:
+                          count_ids: Sequence[int] | None = None,
+                          record: bool = True) -> int:
         """The single write path behind every tag apply/remove.
 
         The target — the rows the analyst asked to change — arrives either
@@ -8084,7 +10204,34 @@ class Store:
         CLAUDE.md invariant #7 — every tag write goes through here; nothing
         INSERTs or DELETEs row_tags directly.
 
-        Caller must hold self.lock and be inside a self.db transaction."""
+        `record=False` is for writes the analyst did not make — a watchlist
+        scan's auto-tags (`_scan_unit`). Those still move exactly the delta,
+        but leave the analyst's Ctrl+Z stack alone: one entry per scanned
+        (indicator, table) unit evicted the analyst's whole history the
+        moment a scan had UNDO_LIMIT of them, and Ctrl+Z then stripped
+        auto-tags off rows whose hits were still listed. An unrecorded
+        write also CLAIMS its target rows out of any recorded entry that
+        moved them the same way (`_claim_from_undo`): rows an analyst
+        tagged that a scan then matched are the scan's as well, and undoing
+        the analyst's change must not untag them — invariant #7's overlap
+        rule, with the scan as the other writer. Pairs only; nothing
+        unrecorded writes a whole view.
+
+        Caller must hold self.lock and be inside a self.db transaction.
+
+        Both ends of the write are checked first, in that same transaction:
+        the tag, and every real table the rows belong to (the pairs' own
+        ids, or `count_ids` — the members — on the whole-view paths). A
+        window can still be showing a table or a tag another window has
+        deleted, and its write used to land anyway: committed rows for an
+        id nothing names any more, behind a request that then failed on
+        the way out. RecordGone here means nothing was written."""
+        if not record and pairs is None:
+            raise ValueError("an unrecorded tag change takes explicit pairs")
+        if not self.db.execute("SELECT 1 FROM tag_defs WHERE id=?", (tag_id,)).fetchone():
+            raise RecordGone(f"Tag {tag_id} no longer exists in this case")
+        self._require_sources({int(sid) for sid, _ in pairs} if pairs is not None
+                              else {int(i) for i in (count_ids or ())})
         self._undo_seq += 1
         table = f"undo_{self._undo_seq}"
         if pairs is not None:
@@ -8101,6 +10248,8 @@ class Store:
                 f"INSERT OR IGNORE INTO v.{q(table)}(source_id, rid) VALUES (?,?)",
                 [(int(sid), int(rid)) for sid, rid in pairs],
             )
+            if not record:
+                self._claim_from_undo(table, tag_id, on)
             # Delete the rows this change *wouldn't* move: already tagged on
             # the way in, not tagged on the way out.
             self.db.execute(
@@ -8121,7 +10270,9 @@ class Store:
             )
         changed = self.db.execute(f"SELECT count(*) FROM v.{q(table)}").fetchone()[0]
         self._write_tag_delta(table, tag_id, on)
-        if changed:
+        if not record:
+            self.db.execute(f"DROP TABLE IF EXISTS v.{q(table)}")
+        elif changed:
             self._undo.append({
                 "undo_id": self._undo_seq, "table": table, "tag_id": tag_id,
                 "on": on, "count": changed, "source_id": source_id, "scope": scope,
@@ -8136,6 +10287,19 @@ class Store:
             # undo" — so drop it rather than record it.
             self.db.execute(f"DROP TABLE IF EXISTS v.{q(table)}")
         return changed
+
+    def _require_sources(self, source_ids: Iterable[int]) -> None:
+        """RecordGone unless every id names a real table in this case. On
+        whichever connection the caller is writing with (self.db), so it
+        sees the same state the write that follows will."""
+        ids = sorted(set(source_ids))
+        if not ids:
+            return
+        have = {r[0] for r in self.db.execute(
+            f"SELECT id FROM sources WHERE id IN ({','.join('?' * len(ids))})", ids)}
+        missing = [i for i in ids if i not in have]
+        if missing:
+            raise RecordGone(f"Table {missing[0]} no longer exists in this case")
 
     def _write_tag_delta(self, table: str, tag_id: int, on: bool) -> None:
         """Apply (or re-apply) one delta table's rows in the given
@@ -8194,6 +10358,26 @@ class Store:
             dead = self._undo.pop(0)
             total -= dead["count"]
             self.db.execute(f"DROP TABLE IF EXISTS v.{q(dead['table'])}")
+
+    def _claim_from_undo(self, target: str, tag_id: int, on: bool) -> None:
+        """Take the rows in `target` (a v. table of (source_id, rid)) out of
+        every recorded entry that moved `tag_id` in the same direction, for
+        an unrecorded write that is putting those rows into that state too
+        (see _apply_tag_change's `record`). An entry left with no rows is
+        dropped — a Ctrl+Z that changes nothing reads as a broken undo.
+        Caller holds self.lock, inside a transaction."""
+        keep = []
+        for e in self._undo:
+            if e["tag_id"] == tag_id and e["on"] == on:
+                self.db.execute(
+                    f"DELETE FROM v.{q(e['table'])} WHERE (source_id, rid) IN "
+                    f"(SELECT source_id, rid FROM v.{q(target)})")
+                e["count"] = self.db.execute(f"SELECT count(*) FROM v.{q(e['table'])}").fetchone()[0]
+                if not e["count"]:
+                    self.db.execute(f"DROP TABLE IF EXISTS v.{q(e['table'])}")
+                    continue
+            keep.append(e)
+        self._undo = keep
 
     def _drop_undo_for_tag(self, tag_id: int) -> None:
         """Deleting a tag definition takes its assignments with it, so every
@@ -8262,25 +10446,29 @@ class Store:
             )
         return self.tag_counts(source_id)
 
-    def set_tags_pairs(self, pairs: list[list[int]], tag_id: int, on: bool) -> dict:
+    def set_tags_pairs(self, pairs: list[list[int]], tag_id: int, on: bool,
+                       source_id: int | None = None) -> dict:
         """Same as set_tags, but for a merged view where selected rows can
         belong to different real source_ids — each pair is that row's own
-        (source_id, rid), never the merge's synthetic negative id."""
+        (source_id, rid), never the merge's synthetic negative id.
+
+        `source_id` is the merge the selection was made in, when there is
+        one, and it decides what the returned counts cover: the client
+        stores them as that merge's whole-table counts (S.tagCountsAll),
+        so they have to count EVERY member — counting only the members the
+        selection happened to touch made a ribbon of 3 read 1. The same
+        member list goes to undo, which recounts against it."""
         if not pairs:
             return {"counts": {}}
+        count_ids = sorted({int(sid) for sid, _ in pairs})
+        if source_id is not None and int(source_id) < 0:
+            count_ids = [m["source_id"] for m in self._resolve_members(int(source_id))]
         with self.lock, self.db:
             self._apply_tag_change(
                 tag_id=tag_id, on=on, source_id=int(pairs[0][0]), scope="rows",
-                pairs=pairs, count_ids=sorted({int(sid) for sid, _ in pairs}),
+                pairs=pairs, count_ids=count_ids,
             )
-        member_ids = sorted({sid for sid, _ in pairs})
-        ph = ",".join("?" * len(member_ids))
-        with self.lock:
-            rows = self.db.execute(
-                f"SELECT tag_id, count(*) n FROM row_tags WHERE source_id IN ({ph}) GROUP BY 1",
-                member_ids,
-            ).fetchall()
-        return {"counts": {str(r["tag_id"]): r["n"] for r in rows}}
+            return self._tag_counts_for_ids(count_ids)
 
     def tag_view(self, view_id: str, tag_id: int, on: bool, exclude: list[Iterable[int]] | None = None) -> dict:
         """Tag every row in a materialised view — the 'filter to it, then mark
@@ -8488,6 +10676,16 @@ class Store:
 
     def set_note(self, source_id: int, rid: int, note: str) -> None:
         with self.lock, self.db:
+            # The row has to be there, for the reason _apply_tag_change
+            # checks its targets: a note posted from a window still showing
+            # a deleted table was committed against an id nothing names.
+            # A merge's notes live on its member rows (invariant #9), so
+            # only a real table is a place a note can go.
+            src = self.db.execute("SELECT table_name FROM sources WHERE id=?", (source_id,)).fetchone()
+            if src is None:
+                raise RecordGone(f"Table {source_id} no longer exists in this case")
+            if not self.db.execute(f"SELECT 1 FROM {q(src['table_name'])} WHERE rid=?", (rid,)).fetchone():
+                raise RecordGone(f"Table {source_id} has no row {rid}")
             if note.strip():
                 self.db.execute(
                     "INSERT INTO row_notes(source_id, rid, note) VALUES (?,?,?) "
@@ -8700,6 +10898,66 @@ class Store:
 
     # ------------------------------------------------------------ watchlist
 
+    #: The columns the Watchlist's Export… writes (watchlist.js), in order.
+    WATCHLIST_EXPORT_COLUMNS = ("value", "kind", "note", "hits")
+
+    @classmethod
+    def parse_indicator_list(cls, text: str, default_kind: str = "other") -> list[dict]:
+        """The indicators in a file given to the Watchlist's Import…, as
+        `{value, kind, note}` in file order, duplicates included (the
+        import dedupes against the list, and against itself).
+
+        A plain list is one indicator per line: blanks and #-comments
+        dropped, an optional `value,kind` carrying its own type.
+
+        The Watchlist's own Export… is not one: it is a CSV under a header
+        row, `value,kind,note,hits`. Read as a plain list, that header came
+        back as an indicator called "value", every kind as the rest of its
+        line ("filename,,3") and a quoted value split at its comma. So a
+        first line made of the export's column names, `value` first and at
+        least two of them, is read as that header and everything after it
+        as CSV — each row keeps its kind (an empty one takes
+        `default_kind`) and its note, and `hits` is left to the scan to
+        recount. Only that header switches: a plain list whose first
+        indicator is the word "value" is one cell, not a header, and stays
+        an indicator. static/js/watchlist.js mirrors this to count and
+        preview the file; it never decides."""
+        text = (text or "").lstrip("\ufeff")
+        lines = text.splitlines(keepends=True)
+        for i, raw in enumerate(lines):
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            try:
+                header = [c.strip().lower() for c in next(csv.reader([line]), [])]
+            except csv.Error:
+                header = []
+            if (len(header) >= 2 and header[0] == "value" and len(set(header)) == len(header)
+                    and set(header) <= set(cls.WATCHLIST_EXPORT_COLUMNS)):
+                out = []
+                try:
+                    for rec in csv.reader(io.StringIO("".join(lines[i + 1:]), newline="")):
+                        row = dict(zip(header, rec))
+                        value = (row.get("value") or "").strip()
+                        if value:
+                            out.append({"value": value,
+                                        "kind": (row.get("kind") or "").strip() or default_kind,
+                                        "note": row.get("note") or None})
+                except csv.Error as e:
+                    raise ValueError(f"Could not read the watchlist export: {e}") from None
+                return out
+            break
+        out = []
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            value, _, kind = line.partition(",")
+            value = value.strip()
+            if value:
+                out.append({"value": value, "kind": kind.strip() or default_kind, "note": None})
+        return out
+
     def add_indicator(self, value: str, kind: str = "other",
                       note: str | None = None, auto_tag_id: int | None = None) -> dict:
         value = (value or "").strip()
@@ -8712,6 +10970,13 @@ class Store:
             # the same hits, and nothing ever told the analyst.
             if self.db.execute("SELECT 1 FROM watchlist WHERE value=?", (value,)).fetchone():
                 raise ValueError(f"{value} is already on the watchlist")
+            # Checked under the same lock as the insert. An id from a tag
+            # list another case painted (or a tag deleted a moment ago) is
+            # otherwise stored as-is, and every scan writes assignments
+            # for it that no list shows.
+            if auto_tag_id is not None and not self.db.execute(
+                    "SELECT 1 FROM tag_defs WHERE id=?", (auto_tag_id,)).fetchone():
+                raise ValueError(f"Auto-tag {auto_tag_id} is not a tag in this case")
             cur = self.db.execute(
                 "INSERT INTO watchlist(value, kind, note, auto_tag_id, created_at)"
                 " VALUES (?,?,?,?,?)",
@@ -8832,12 +11097,17 @@ class Store:
                 return None
             with self.db:
                 # The source too can have gone between the match and here:
-                # drop_source deletes its hits, and its id is the next
-                # import's, so a write for it now would file this value's
-                # rows under whatever table takes the id.
+                # drop_source deletes its hits, so a write for it now would
+                # file this value's rows under a table that is not there.
                 if not self.db.execute("SELECT 1 FROM sources WHERE id=?", (source_id,)).fetchone():
                     return None
-                row = self.db.execute("SELECT value, auto_tag_id FROM watchlist WHERE id=?", (wid,)).fetchone()
+                # The auto-tag through a join, so an indicator still naming
+                # a tag that is gone (delete_tag clears it; this is the
+                # belt to that brace) scans without tagging rather than
+                # failing the unit.
+                row = self.db.execute(
+                    "SELECT w.value, t.id AS auto_tag_id FROM watchlist w "
+                    "LEFT JOIN tag_defs t ON t.id = w.auto_tag_id WHERE w.id=?", (wid,)).fetchone()
                 if row is None or row["value"] != value:
                     return None
                 # What this unit is replacing, for the state generation
@@ -8864,8 +11134,11 @@ class Store:
                         "INSERT OR IGNORE INTO watchlist_hits(watchlist_id, source_id, rid) VALUES (?,?,?)",
                         [(wid, source_id, rid) for rid in rids])
                     if row["auto_tag_id"]:
+                        # Unrecorded: the scan is not the analyst, and its
+                        # tags stand while its hits do — see `record`.
                         self._apply_tag_change(tag_id=int(row["auto_tag_id"]), on=True, source_id=source_id,
-                                               scope="rows", pairs=[(source_id, rid) for rid in rids])
+                                               scope="rows", pairs=[(source_id, rid) for rid in rids],
+                                               record=False)
                         tagged = True
                 # A watchlist widget's number is the sum of the hit counts,
                 # so a scan that finds different hits moves it with nothing
@@ -9273,7 +11546,7 @@ class Store:
         if os.path.abspath(path) == os.path.abspath(self.path):
             raise ValueError("That is the currently open case")
         try:
-            ro = sqlite3.connect(f"file:{os.path.abspath(path)}?mode=ro", uri=True)
+            ro = sqlite3.connect(sqlite_ro_uri(path), uri=True)
         except sqlite3.Error as e:
             raise ValueError(f"Could not open case file: {e}")
         ro.row_factory = sqlite3.Row
@@ -9588,8 +11861,11 @@ class Store:
                 # A template that names its body columns explicitly is
                 # taken at its word, timestamp included.
                 body_cols = [c["name"] for c in src["columns"] if c["name"] != ts_col]
+            # Trimmed silently, unlike the Timeline: the preview is cut to
+            # WATCHLIST_PREVIEW_CHARS long before the 495th column.
             body_expr = " || ' | ' || ".join(
-                f"COALESCE({self._col_ref(src, c, 's')}, '')" for c in body_cols) or "''"
+                f"COALESCE({self._col_ref(src, c, 's')}, '')"
+                for c in self._fit_body_cols(body_cols)) or "''"
             branches.append(
                 "SELECT * FROM ("
                 f"SELECT ? AS source_name, {int(sid)} AS source_id, s.rid AS rid, "
@@ -10032,7 +12308,7 @@ class Store:
                         "Use your own plugin table — the {table} placeholder.") from e
                 raise
             finally:
-                self.db.set_authorizer(None)
+                _clear_authorizer(self.db)
             return max(0, cur.rowcount if cur.rowcount is not None else 0)
 
     # src_<id>, drv_<id> and the tables analyst work lives in. A plugin
@@ -10615,6 +12891,12 @@ class Store:
         its own source, query and drill, and this runs them all and
         answers with one label/value row per cell."""
         query = query or {}
+        if not isinstance(query, dict):
+            # A cell's query arrives unchecked inside `cells` (the route's
+            # model only types the top-level one), and `.get` on a string
+            # was a 500 — or, per cell, an AttributeError past the cell's
+            # own error catch.
+            raise ValueError("A widget's query must be an object")
         if source == "cells":
             return self._cells_preview(cells or [], limit)
         if source == "sql":
@@ -10741,6 +13023,10 @@ class Store:
                 # exporting analyst happened to add isn't part of the
                 # evidence's shape.
                 "columns": self._base_cols(src),
+                # How it was read, so a case without it open can re-import
+                # it into the same rids (import_case_session). Absent from
+                # sessions saved before it was recorded.
+                "ingest": src.get("ingest"),
             },
             "tag_defs": tags,
             "row_tags": rt,
@@ -10751,46 +13037,81 @@ class Store:
             # function of data the receiving case already has, so importing
             # re-runs the backfill rather than shipping a second copy of
             # every timestamp.
-            "derived_columns": [
-                {k: d[k] for k in ("name", "input_column", "op_id", "params")}
-                for d in self.list_derived_columns(source_id)
-            ],
+            "derived_columns": [self._session_derived_def(d)
+                                for d in self.list_derived_columns(source_id)],
         }
 
+    def _session_derived_def(self, d: dict) -> dict:
+        """One derived column's definition as a session carries it. A
+        lookup's params name its table by THIS case's source id, which means
+        nothing in another case — or in this one, once the table is dropped
+        and the id reused — so the table's identity travels beside it as
+        `lookup_table` (the evidence's fingerprint and name, the keys session
+        sources are matched by), and the receiving side resolves that
+        instead (_resolve_session_lookup)."""
+        out = {k: d[k] for k in ("name", "input_column", "op_id", "params")}
+        if d["op_id"] == "lookup":
+            try:
+                other = self._source_lite(int((d.get("params") or {}).get("other_source_id")))
+            except (KeyError, TypeError, ValueError):
+                other = None
+            if other is not None and other["id"] >= 0:
+                out["lookup_table"] = {
+                    "file_hash": other.get("file_hash"), "name": other.get("name"),
+                    "columns": [c["name"] for c in self._base_cols(other)],
+                    "row_count": other.get("row_count")}
+        return out
+
+    def _resolve_session_lookup(self, d: dict) -> int:
+        """The live source a session's lookup column should read, from the
+        `lookup_table` identity _session_derived_def wrote, matched the way
+        a load matches session sources (_match_session_sources: the hash,
+        then which table of that file). A SQL-saved or plugin-made lookup
+        table — common here — matches by its synthetic hash like any other
+        (MADE_HASH_PREFIX), so another case's table of the same name is not
+        it. One recorded with no hash at all (a session from before made
+        tables had one) used to pair by name; nothing shows that table is
+        this one, so it is a warning now, like a load. Raises ValueError — a
+        warning, the column not recreated — when no table matches or
+        several could. The session's id is never used: binding by it filled
+        a column from whichever table happened to hold that number, with
+        nothing to say so."""
+        ident = d.get("lookup_table")
+        if not isinstance(ident, dict):
+            raise ValueError("the session does not say which table it looks values up in "
+                             "(it was saved before that was recorded); recreate it from the column menu")
+        name = ident.get("name")
+        h = ident.get("file_hash")
+        if not h:
+            raise ValueError(f"its lookup table {name!r} was made inside Winnow and the session was "
+                             "saved before such tables could be told apart, so which one it reads "
+                             "can't be confirmed; recreate it from the column menu")
+        real = [s for s in self.list_sources() if s["id"] >= 0]
+        pairs = self._match_session_sources([ident], real)
+        if 0 in pairs:
+            return real[pairs[0]]["id"]
+        same = [s for s in real if s.get("file_hash") == h]
+        if not same and not _is_file_hash(h) and any(s["name"] == name for s in real):
+            raise ValueError(f"its lookup table {name!r} was made inside Winnow, and this case's "
+                             f"{name!r} is a different table made separately")
+        if not same:
+            raise ValueError(f"its lookup table {name!r} is not in this case")
+        raise ValueError(f"{len(same)} tables here could be its lookup table {name!r} and none "
+                         "of them is unambiguously it; recreate it from the column menu")
+
     def import_session(self, source_id: int, session: dict, merge: bool = True) -> dict:
+        """Apply a one-table session to `source_id`. merge=False replaces
+        that table's tags and notes — only that table's, since a one-table
+        session says nothing about the others."""
         src = self.get_source(source_id)
-        warnings = []
-        s_src = session.get("source", {})
-        if s_src.get("file_hash") and s_src["file_hash"] != src["file_hash"]:
-            warnings.append(
-                "Session was recorded against a different file. Row numbers may not line up."
-            )
-        # Map session tag ids onto local tag ids by name, creating what's missing.
-        local = {t["name"].lower(): t["id"] for t in self.list_tags()}
-        idmap = {}
-        for t in session.get("tag_defs", []):
-            key = t["name"].lower()
-            if key not in local:
-                new = self.upsert_tag(None, t["name"], t.get("color", "#888888"), t.get("hotkey"))
-                local[key] = new["id"]
-            idmap[t["id"]] = local[key]
+        warnings = self._session_hash_warnings(src, session)
+        idmap = self._session_tag_idmap(session)
 
         with self.lock, self.db:
             if not merge:
                 self.db.execute("DELETE FROM row_tags WHERE source_id=?", (source_id,))
                 self.db.execute("DELETE FROM row_notes WHERE source_id=?", (source_id,))
-            self.db.executemany(
-                "INSERT OR IGNORE INTO row_tags(source_id, rid, tag_id) VALUES (?,?,?)",
-                [
-                    (source_id, r["rid"], idmap.get(r["tag_id"], r["tag_id"]))
-                    for r in session.get("row_tags", [])
-                ],
-            )
-            self.db.executemany(
-                "INSERT INTO row_notes(source_id, rid, note) VALUES (?,?,?) "
-                "ON CONFLICT(source_id, rid) DO UPDATE SET note=excluded.note",
-                [(source_id, r["rid"], r["note"]) for r in session.get("row_notes", [])],
-            )
+            self._write_session_rows(source_id, session, idmap)
             # Tags arrived wholesale rather than through the delta path, so
             # the bump it would have done is owed here: a dashboard cached
             # against the pre-load state is now counting somebody else's
@@ -10800,10 +13121,76 @@ class Store:
         # every existing undo entry now describes a world that is gone —
         # replaying one would strip tags off rows the loaded session owns.
         self._discard_undo()
+        derived_added, job_ids = self._restore_session_reading(source_id, session, warnings)
+        return {"warnings": warnings, "tags_applied": len(session.get("row_tags", [])),
+                "derived_columns_added": derived_added,
+                "derived_job_ids": job_ids}
+
+    @staticmethod
+    def _session_hash_warnings(src: dict, session: dict) -> list[str]:
+        s_src = session.get("source", {})
+        if s_src.get("file_hash") and s_src["file_hash"] != src["file_hash"]:
+            what = ("file" if _is_file_hash(s_src["file_hash"]) and _is_file_hash(src["file_hash"])
+                    else "table")
+            return [f"Session was recorded against a different {what}. Row numbers may not line up."]
+        return []
+
+    def _session_tag_idmap(self, session: dict) -> dict:
+        """{session tag id -> local tag id}, matched by name with
+        pair_tag_names — the rule copy and diff use too — creating what's
+        missing."""
+        local = {t["name"]: t["id"] for t in self.list_tags()}
+        defs = session.get("tag_defs", [])
+        paired = pair_tag_names([t["name"] for t in defs], local)
+        created: dict[str, int] = {}
+        idmap = {}
+        for t in defs:
+            if t["name"] in paired:
+                idmap[t["id"]] = local[paired[t["name"]]]
+                continue
+            if t["name"] not in created:
+                created[t["name"]] = self.upsert_tag(
+                    None, t["name"], t.get("color", "#888888"), t.get("hotkey"))["id"]
+            idmap[t["id"]] = created[t["name"]]
+        return idmap
+
+    def _write_session_rows(self, source_id: int, session: dict, idmap: dict) -> None:
+        """One table's tags and notes out of a session document. Caller
+        holds self.lock inside a self.db transaction, and owns the clearing
+        a replace needs — which tables that covers is the caller's to say."""
+        self.db.executemany(
+            "INSERT OR IGNORE INTO row_tags(source_id, rid, tag_id) VALUES (?,?,?)",
+            [
+                (source_id, r["rid"], idmap.get(r["tag_id"], r["tag_id"]))
+                for r in session.get("row_tags", [])
+            ],
+        )
+        self.db.executemany(
+            "INSERT INTO row_notes(source_id, rid, note) VALUES (?,?,?) "
+            "ON CONFLICT(source_id, rid) DO UPDATE SET note=excluded.note",
+            [(source_id, r["rid"], r["note"]) for r in session.get("row_notes", [])],
+        )
+
+    def _restore_session_reading(self, source_id: int, session: dict,
+                                 warnings: list[str]) -> tuple[int, list[str]]:
+        """The half of a session that is how the evidence is READ — layout,
+        saved views, derived columns — rather than what was concluded about
+        it. Returns (derived columns added, their backfill job ids)."""
         if session.get("layout"):
             self.save_layout(source_id, session["layout"])
+        # A view the table already holds — same name, same spec — is not
+        # added again. saved_views has no unique name (two specs may share
+        # one), so every load used to append the session's views anew: one
+        # became sixteen after a few save/load cycles. Only an exact match
+        # is skipped; a same-named view with a different spec is someone's
+        # work and is kept beside the local one, not written over it.
+        have = {(v["name"], json.dumps(v["payload"], sort_keys=True))
+                for v in self.list_saved_views(source_id)}
         for sv in session.get("saved_views", []):
-            self.save_view(source_id, sv["name"], sv["payload"])
+            key = (sv["name"], json.dumps(sv["payload"], sort_keys=True))
+            if key not in have:
+                self.save_view(source_id, sv["name"], sv["payload"])
+                have.add(key)
 
         # Derived columns arrive as definitions and are recomputed here —
         # each starts its own backfill job. A name that's already taken
@@ -10814,15 +13201,18 @@ class Store:
         pending_jobs: dict[str, str] = {}  # column name -> its backfill job, for chains
         for d in session.get("derived_columns", []):
             try:
+                params = d.get("params")
+                if d["op_id"] == "lookup":
+                    params = dict(params or {}, other_source_id=self._resolve_session_lookup(d))
                 # A chained column's parent was created a moment ago and its
                 # backfill is an async job — wait for that link, or the
                 # "still building" guard (correctly) refuses the child.
-                for inp in timeparse.op_inputs(d["op_id"], d["input_column"], d.get("params")):
+                for inp in timeparse.op_inputs(d["op_id"], d["input_column"], params):
                     jid = pending_jobs.get(inp.lower())
                     if jid:
                         self.wait_for_ingest_job(jid, timeout=600)
                 res = self.add_derived_column(source_id, d["name"], d["input_column"],
-                                              d["op_id"], d.get("params"))
+                                              d["op_id"], params)
                 pending_jobs[d["name"].lower()] = res["job_id"]
                 derived_added += 1
             except (ValueError, KeyError) as e:
@@ -10833,15 +13223,15 @@ class Store:
         # as done while the columns are still empty; anything reading values
         # straight afterwards gets NULLs. Hand them back so the caller can
         # decide whether to wait.
-        return {"warnings": warnings, "tags_applied": len(session.get("row_tags", [])),
-                "derived_columns_added": derived_added,
-                "derived_job_ids": list(pending_jobs.values())}
+        return derived_added, list(pending_jobs.values())
 
     # ---------------------------------------------------------- case sessions
 
     def export_case_session(self) -> dict:
-        """Whole-case session: every open source's tags/notes/layout, in one
-        file. Builds directly on export_session — no new per-source shape."""
+        """Whole-case session: every source's tags/notes/layout — open in a
+        tab or not — in one file. Merges have no entry: their tags live on
+        their members. Builds directly on export_session — no new
+        per-source shape."""
         return {
             "format": "winnow-case-session/1",
             "exported_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -10849,40 +13239,146 @@ class Store:
         }
 
     def import_case_session(self, session: dict, merge: bool = True) -> dict:
-        """Reattaches each source session by file_hash to whatever's already
-        open; if a source isn't open but its original file still exists at
-        the recorded path, re-imports it first. Local single-user tool with
-        full filesystem access already (same trust level as --open), so this
-        is the one action that can fully reconstruct a case from a session."""
+        """Reattaches each source session to the live table it describes
+        (_match_session_sources: the file's hash, then which table of that
+        file); if a source's file isn't in the case at all but still exists
+        at the recorded path, re-imports it first — the way it was imported
+        (_reimport_session_source). Local single-user tool with full
+        filesystem access already (same trust level as --open), so this is
+        the one action that can fully reconstruct a case from a session.
+
+        A source whose FILE is in the case but which matches no single
+        table of it — the case lacks that table, or holds two copies
+        nothing tells apart — is skipped with a warning naming it. Never
+        re-imported (the file is here; another copy of it is not this
+        table) and never put on a sibling: that was the old hash-only
+        match, which moved one table's tags onto another's rows.
+
+        And a session's tags name rows by rid, so even a matched table only
+        gets them if it holds the rows the session was recorded against:
+        the row count and columns the session recorded
+        (_session_shape_mismatch). Anything else is skipped with a warning
+        rather than tagged — the same file imported with other options has
+        every rid on a different row, and nothing about the tags would
+        show it.
+
+        A table made inside Winnow (a SQL-pane save, a plugin's computed
+        table, a subset) has a synthetic hash — MADE_HASH_PREFIX — and
+        matches by it like a file; only a copy of that table carries it, so
+        another case's table made the same way, with the same name and
+        rows, never takes these tags. With no table of that identity here
+        there is nothing to re-import either, and the warning says so
+        (_made_table_unmatched_warning). A session saved before made
+        tables had an identity records none for them: such an entry is
+        never matched (a same-named table here may have been made over
+        again since), and a replace leaves the tables it could be as they
+        are (_legacy_made_table_candidates) rather than clearing them for
+        nothing."""
         warnings: list[str] = []
         tags_applied = 0
         sources_restored = 0
         sources_reimported = 0
-        by_hash = self._live_sources_by_hash()
+        entries = session.get("sources", [])
+        live = self.list_sources()
+        metas = [e.get("source", {}) for e in entries]
+        pairs = self._match_session_sources(metas, live)
+        live_hashes = {s["file_hash"] for s in live if s.get("file_hash")}
+        resolved: list[tuple[int, dict]] = []
+        # Open tables a skipped source may be: a replace leaves these as
+        # they are (below), since the session's version of them was not
+        # applied either.
+        unplaced: set[int] = set()
 
-        for src_session in session.get("sources", []):
-            s_meta = src_session.get("source", {})
-            source_id = by_hash.get(s_meta.get("file_hash"))
+        for i, src_session in enumerate(entries):
+            s_meta = metas[i]
+            label = s_meta.get("name") or s_meta.get("path") or "unknown"
+            source_id = live[pairs[i]]["id"] if i in pairs else None
+            reimported = False
+            if source_id is None and s_meta.get("file_hash") in live_hashes:
+                same = [s["id"] for s in live if s.get("file_hash") == s_meta["file_hash"]]
+                unplaced.update(same)
+                what = (f"{len(same)} table(s) from the same file" if _is_file_hash(s_meta["file_hash"])
+                        else f"{len(same)} copies of this table")
+                warnings.append(
+                    f"'{s_meta.get('name', 'unknown')}' was not restored: this case has "
+                    f"{what} and none of them is "
+                    "unambiguously this one (matched on name, columns and row count) "
+                    "— skipped rather than guessed")
+                continue
+            if source_id is None and not _is_file_hash(s_meta.get("file_hash")):
+                # Made inside Winnow, and this case has no table with its
+                # identity — or a record from before made tables had one.
+                # There is no file to re-import it from either way.
+                could_be = self._legacy_made_table_candidates(s_meta, live)
+                unplaced.update(could_be)
+                warnings.append(self._made_table_unmatched_warning(s_meta, live, could_be))
+                continue
             if source_id is None:
-                path = s_meta.get("path")
-                if path and os.path.isfile(path):
-                    try:
-                        rec = self.ingest_csv(path, name=s_meta.get("name"))
-                        source_id = rec["id"]
-                        sources_reimported += 1
-                    except Exception as e:
-                        warnings.append(f"Could not re-import {s_meta.get('name', path)}: {e}")
-                        continue
-                else:
-                    warnings.append(
-                        f"'{s_meta.get('name', 'unknown')}' isn't open and its original file "
-                        f"wasn't found at {path or 'an unknown path'} — skipped"
-                    )
+                source_id, why = self._reimport_session_source(s_meta)
+                if source_id is None:
+                    warnings.append(why)
                     continue
-            res = self.import_session(source_id, src_session, merge=merge)
-            warnings.extend(res["warnings"])
-            tags_applied += res["tags_applied"]
-            sources_restored += 1
+                reimported = True
+            mismatch = self._session_shape_mismatch(self.get_source(source_id), s_meta)
+            if mismatch:
+                if reimported:
+                    # Read the right file the wrong way (a session from
+                    # before the reader was recorded, guessed from the
+                    # extension): the copy is no use to anyone.
+                    self.drop_source(source_id)
+                    warnings.append(
+                        f"'{label}' was re-imported from {s_meta.get('path')} but came out "
+                        f"different from the session's copy ({mismatch}) — removed again, "
+                        "its tags and notes not applied")
+                else:
+                    unplaced.add(source_id)
+                    warnings.append(
+                        f"'{label}' is in this case, but not as the session's copy was imported "
+                        f"({mismatch}) — its tags and notes would land on other rows, so "
+                        "they were not applied")
+                continue
+            if reimported:
+                sources_reimported += 1
+            resolved.append((source_id, src_session))
+
+        # Replace means the CASE's tags and notes, every table of it — what
+        # the Load dialog says. Clearing only the tables the snapshot names
+        # left a table imported after it was taken holding its second-pass
+        # tags: the case was then neither the session nor the live state but
+        # a mix, and a diff against the session called it clean. The clear
+        # and every table's writes are one transaction, so a failure part
+        # way leaves the case as it was rather than half-replaced.
+        #
+        # Except the open tables a skipped source may be (`unplaced`): the
+        # session's tags for them were refused because they would land on
+        # other rows, and clearing the tags those tables do have would lose
+        # the analyst's work there for nothing in return.
+        unplaced -= {sid for sid, _ in resolved}
+        if unplaced and not merge:
+            names = sorted(s["name"] for s in live if s["id"] in unplaced)
+            warnings.append(
+                f"Left the tags and notes on {', '.join(repr(n) for n in names)} as they were: "
+                "the session's copy could not be applied there, so replacing would only have "
+                "cleared them")
+        idmaps = []
+        for source_id, src_session in resolved:
+            warnings.extend(self._session_hash_warnings(self._source_lite(source_id), src_session))
+            idmaps.append(self._session_tag_idmap(src_session))
+        with self.lock, self.db:
+            if not merge:
+                keep = sorted(unplaced)
+                spare = f" WHERE source_id NOT IN ({','.join('?' * len(keep))})" if keep else ""
+                self.db.execute(f"DELETE FROM row_tags{spare}", keep)
+                self.db.execute(f"DELETE FROM row_notes{spare}", keep)
+            for (source_id, src_session), idmap in zip(resolved, idmaps):
+                self._write_session_rows(source_id, src_session, idmap)
+                tags_applied += len(src_session.get("row_tags", []))
+                sources_restored += 1
+            # Wholesale, outside the delta path — see import_session.
+            self._bump_state_generation()
+        self._discard_undo()
+        for source_id, src_session in resolved:
+            self._restore_session_reading(source_id, src_session, warnings)
 
         return {
             "warnings": warnings,
@@ -10890,6 +13386,160 @@ class Store:
             "sources_restored": sources_restored,
             "sources_reimported": sources_reimported,
         }
+
+    @classmethod
+    def _legacy_made_table_candidates(cls, s_meta: dict, live: list[dict]) -> list[int]:
+        """The live tables a session entry with NO hash could describe — a
+        table made inside Winnow, recorded before such tables were given an
+        identity. Nothing proves which (if any) it is, so none is tagged,
+        but a replace must not clear these either. A made table's name,
+        columns and rows never change (invariant #1; a rename is a
+        nickname), so the table it was is one with no file behind it that
+        still agrees on all three — whatever of them the entry recorded.
+        An entry that has a hash has an identity, and no candidates."""
+        if s_meta.get("file_hash"):
+            return []
+        name = s_meta.get("name") or ""
+        cols = [c.get("name") if isinstance(c, dict) else c for c in s_meta.get("columns") or []]
+        rows = s_meta.get("row_count")
+        out = []
+        for s in live:
+            if _is_file_hash(s.get("file_hash")) or s.get("name") != name:
+                continue
+            if rows is not None and s.get("row_count") != rows:
+                continue
+            if cols and [c["name"] for c in cls._base_cols(s)] != cols:
+                continue
+            out.append(s["id"])
+        return out
+
+    @staticmethod
+    def _made_table_unmatched_warning(s_meta: dict, live: list[dict], could_be: list[int]) -> str:
+        """What to tell the analyst about a made-inside-Winnow entry that
+        matched no table here. It used to fall through to re-import, which
+        said the table "isn't open" — while it was open, and its tags had
+        just been cleared."""
+        label = s_meta.get("name") or "unknown"
+        if not s_meta.get("file_hash"):
+            if could_be:
+                return (f"'{label}' was not restored: the session was saved before Winnow could tell "
+                        "apart tables made inside it (SQL pane saves, plugin output), so nothing "
+                        f"shows this case's '{label}' is the same table — its tags and notes were "
+                        "not applied")
+            return (f"'{label}' was not restored: it is a table made inside Winnow, saved before "
+                    "such tables could be told apart, and this case has no table it could be")
+        if any(s.get("name") == label for s in live):
+            return (f"'{label}' was not restored: it was made inside Winnow (not imported from a "
+                    f"file), and this case's '{label}' is a different table made separately — the "
+                    "session's tags and notes were not put on it")
+        return (f"'{label}' was not restored: it was made inside Winnow (not imported from a file), "
+                "so there is no file to re-import it from, and this case does not have it or a "
+                "copy of it")
+
+    _SESSION_READERS = ("csv", "text", "json", "sqlite", "xlsx", "plaso")
+
+    def _reimport_session_source(self, s_meta: dict) -> tuple[int | None, str | None]:
+        """(source_id, None) after re-importing a session source from its
+        recorded path, or (None, why it was not).
+
+        The path came out of a session document, which is often a file
+        another analyst sent — so it is treated as a claim to check, not a
+        place to read from: a network path is refused before anything
+        touches it (_is_network_path), only a regular file at an absolute
+        path is considered, and the file is fingerprinted and compared with
+        the session's file_hash BEFORE it is ingested. Nothing but the
+        evidence the session was recorded against is ever read into the
+        case.
+
+        The reader and its options are the ones the table was imported
+        with (sources.ingest, carried in the session). A session saved
+        before that was recorded gets the reader the import queue would
+        pick for the extension — a guess, which the caller checks against
+        the shape the session did record."""
+        label = s_meta.get("name") or s_meta.get("path") or "unknown"
+        path = s_meta.get("path")
+        if not path:
+            return None, f"'{label}' isn't in this case and the session doesn't say which file it came from — skipped"
+        if _is_network_path(path) or not os.path.isabs(path):
+            return None, (f"'{label}' isn't in this case, and the session names {path} for it — not a local "
+                          "file path, so Winnow did not look at it. Open the file yourself, then load "
+                          "the session again.")
+        if not os.path.isfile(path):
+            return None, f"'{label}' isn't in this case and its original file wasn't found at {path} — skipped"
+        want = s_meta.get("file_hash")
+        how = s_meta.get("ingest") or self._guess_session_reader(path)
+        kind = how.get("kind") if isinstance(how, dict) else None
+        if kind not in self._SESSION_READERS:
+            # "rows" with a file behind it is a plugin's importer: a table
+            # made with no file never gets here (import_case_session).
+            why = ("was read by a plugin's importer"
+                   if kind == "rows" else "has no record of how it was read")
+            return None, (f"'{label}' isn't in this case, and it {why}, so Winnow can't re-import it "
+                          f"from {path}. Import it yourself, then load the session again.")
+        try:
+            have = self._quick_hash(path)
+        except OSError as e:
+            return None, f"Could not re-import '{label}': {e}"
+        if not want or have != want:
+            return None, (f"'{label}' isn't in this case, and {path} is not the file the session was "
+                          "recorded against (it has changed, or it is a different file) — not "
+                          "imported, its tags and notes not applied")
+        name = s_meta.get("name")
+        try:
+            if kind == "csv":
+                rec = self.ingest_csv(path, name=name, delimiter=how.get("delimiter"),
+                                      has_header=how.get("has_header", True),
+                                      column_types=how.get("column_types"))
+            elif kind == "text":
+                rec = self.ingest_text(path, name=name)
+            elif kind == "json":
+                rec = self.ingest_json(path, name=name, flatten_mode=how.get("flatten_mode", "none"),
+                                       flatten_depth=how.get("flatten_depth", 0))
+            elif kind == "sqlite":
+                rec = self.ingest_sqlite_table(path, how["table"], name=name,
+                                               timestamp_columns=how.get("timestamp_columns"))
+            elif kind == "xlsx":
+                rec = self.ingest_xlsx_sheet(path, how["sheet"], name=name)
+            else:
+                rec = self.ingest_plaso(path, name=name)
+        except Exception as e:
+            return None, f"Could not re-import '{label}': {e}"
+        if rec.get("file_hash") != want:
+            # Changed between the check and the read.
+            self.drop_source(rec["id"])
+            return None, f"'{label}' changed on disk while it was being re-imported — removed again"
+        return rec["id"], None
+
+    @staticmethod
+    def _guess_session_reader(path: str) -> dict:
+        """The reader the import queue would choose for this extension
+        (server._ingest_kind_for_path, minus plugins), for a session saved
+        before sources.ingest existed. A SQLite file or workbook holds
+        several tables and the old session didn't say which, so those get
+        no guess at all."""
+        ext = os.path.splitext(path)[1].lower()
+        if ext in SQLITE_IMPORT_EXTENSIONS or ext in XLSX_IMPORT_EXTENSIONS:
+            return {}
+        if ext in PLASO_IMPORT_EXTENSIONS:
+            return {"kind": "plaso"}
+        if ext in (".json", ".jsonl", ".ndjson"):
+            return {"kind": "json"}
+        return {"kind": "csv" if ext in DEFAULT_IMPORT_EXTENSIONS else "text"}
+
+    @classmethod
+    def _session_shape_mismatch(cls, src: dict, s_meta: dict) -> str | None:
+        """Why `src` does not hold the rows a session source was recorded
+        against, or None if it does — the same number of rows under the
+        same imported columns. A session from before either was recorded
+        can't be checked on that count and passes it."""
+        want_rows = s_meta.get("row_count")
+        if want_rows is not None and want_rows != src["row_count"]:
+            return f"{want_rows:,} rows in the session, {src['row_count']:,} here"
+        want_cols = [c.get("name") for c in s_meta.get("columns") or []]
+        have_cols = [c["name"] for c in cls._base_cols(src)]
+        if want_cols and want_cols != have_cols:
+            return "different columns"
+        return None
 
     _SESSION_NAME_RE = re.compile(r"[^A-Za-z0-9_ -]")
 
@@ -10942,20 +13592,41 @@ class Store:
             raise ValueError("That is this case — pick a different one to copy into")
         if not os.path.isfile(target_path):
             raise ValueError(f"No case file at {target_path}")
+        # Before Store(target_path), which would write its schema into
+        # whatever is there: the case registry can hold a path that is
+        # not a case (registered before registration checked, or a case
+        # file since replaced), and the one the analyst picks here may be
+        # a browser history database they meant to IMPORT.
+        if not is_winnow_case_file(target_path):
+            raise ValueError(
+                f"{target_path} is not a Winnow case file — copying into it would write into it")
         for sid in source_ids:
             if sid < 0:
                 raise ValueError("Merges can't be copied — their member tables can be, individually")
-        holder = probe_case_lock(target_path)
-        if holder:
-            raise ValueError(
-                f"That case is open in another Winnow — {describe_case_lock(holder)}. "
-                "Close it there first.")
-
-        t = Store(target_path)
+        # A copy already running into the same case holds that case's lock
+        # from THIS process, so the probe below reported it as "open in
+        # another Winnow", naming our own pid — what a double-clicked "Copy
+        # into this case" told the analyst. Two copies racing past the probe
+        # before either had opened the target would also both copy.
+        with self._copying_lock:
+            if target_path in self._copying_into:
+                raise ValueError("Already copying into that case — wait for that copy to finish")
+            self._copying_into.add(target_path)
         try:
-            return self._copy_sources_into(t, source_ids)
+            holder = probe_case_lock(target_path)
+            if holder:
+                raise ValueError(
+                    f"That case is open in another Winnow — {describe_case_lock(holder)}. "
+                    "Close it there first.")
+
+            t = Store(target_path)
+            try:
+                return self._copy_sources_into(t, source_ids)
+            finally:
+                t.close()
         finally:
-            t.close()
+            with self._copying_lock:
+                self._copying_into.discard(target_path)
 
     def _copy_sources_into(self, t: "Store", source_ids: list[int]) -> dict:
         src_rows = {}
@@ -10976,7 +13647,7 @@ class Store:
                 tag_map = t._map_tags_by_name(tag_defs)
                 shared_cols = [c for c in ("name", "path", "table_name", "row_count",
                                            "columns", "file_hash", "imported_at", "nickname",
-                                           "origin", "origin_meta")]
+                                           "origin", "origin_meta", "ingest")]
                 for sid in source_ids:
                     src = src_rows[sid]
                     cur = t.db.execute(
@@ -11042,6 +13713,15 @@ class Store:
                     copied.append({"id": new_id, "name": src["name"],
                                    "rows": src["row_count"], **stats})
 
+                # A lookup column's definition names its table by THIS
+                # case's id, which in the target is whatever table took that
+                # number there: a re-derive (or a cascade from its input)
+                # would fill the column from it without a word. It follows
+                # its table when that came along in this copy, else the
+                # target's table with the same fingerprint when there is
+                # exactly one, else it names none — the values stay as
+                # copied and a re-derive asks for the table.
+                self._repoint_copied_lookups(t, id_map)
                 # Subset provenance travels only as far as its parent does:
                 # parent_source_id is THIS case's numbering, and a later
                 # import into the target could land on that id. Map rows
@@ -11073,15 +13753,46 @@ class Store:
                     t.db.execute("DETACH srccase")
         return {"target": t.path, "copied": copied}
 
+    @staticmethod
+    def _repoint_copied_lookups(t: "Store", id_map: dict[int, int]) -> None:
+        """See the call in _copy_sources_into. Runs on the target's writer,
+        inside the copy's transaction, with this case attached as srccase."""
+        for d in t.db.execute(
+                "SELECT id, name, params FROM derived_columns WHERE op_id='lookup' AND source_id IN "
+                f"({','.join('?' * len(id_map))})", list(id_map.values())).fetchall():
+            params = json.loads(d["params"] or "{}")
+            try:
+                old = int(params.get("other_source_id"))
+            except (TypeError, ValueError):
+                continue
+            new = id_map.get(old)
+            if new is None:
+                was = t.db.execute("SELECT file_hash, name FROM srccase.sources WHERE id=?",
+                                   (old,)).fetchone()
+                found = t.db.execute(
+                    "SELECT id, name FROM sources WHERE file_hash=?",
+                    (was["file_hash"],)).fetchall() if was and was["file_hash"] else []
+                if len(found) > 1:
+                    found = [f for f in found if f["name"] == was["name"]]
+                new = found[0]["id"] if len(found) == 1 else None
+            params["other_source_id"] = new
+            t.db.execute("UPDATE derived_columns SET params=? WHERE id=?",
+                         (json.dumps(params), d["id"]))
+
     def _map_tags_by_name(self, incoming_defs: list[dict]) -> dict:
         """{incoming tag id -> this case's tag id}, creating what's missing.
-        Caller holds self.lock inside a transaction."""
+        Names pair by pair_tag_names, the rule session load uses. Caller
+        holds self.lock inside a transaction."""
         mine = {r["name"]: r["id"] for r in self.db.execute("SELECT id, name FROM tag_defs")}
+        paired = pair_tag_names([d["name"] for d in incoming_defs], mine)
         taken_keys = {r[0] for r in self.db.execute(
             "SELECT hotkey FROM tag_defs WHERE hotkey IS NOT NULL")}
         out = {}
         for d in incoming_defs:
-            if d["name"] in mine:
+            if d["name"] in paired:
+                out[d["id"]] = mine[paired[d["name"]]]
+                continue
+            if d["name"] in mine:          # created a moment ago for an earlier def of the same name
                 out[d["id"]] = mine[d["name"]]
                 continue
             hotkey = d.get("hotkey") if d.get("hotkey") not in taken_keys else None
@@ -11095,13 +13806,26 @@ class Store:
 
     # ------------------------------------------------- sessions in the case
 
+    @staticmethod
+    def _session_name(name: str | None) -> str:
+        """The name a session is stored under, or ValueError saying why it
+        can't be. Any text goes — the routes carry it as {name:path}, so a
+        "/" (a date: "before 12/05") round-trips — except "." and "..",
+        which no URL path can carry however they are escaped: a browser
+        resolves them, %2E spellings included, before the request leaves,
+        so a session saved under one could never be reached again."""
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("A session needs a name")
+        if name in (".", ".."):
+            raise ValueError(f"A session can't be called {name!r} — pick a name with a letter in it")
+        return name
+
     def save_session(self, name: str) -> dict:
         """Snapshot the current analysis layer under `name`, in the case
         file. Saving over an existing name replaces it — the alternative is
         a pile of "triage-2-final-v3" and no way to tell them apart."""
-        name = (name or "").strip()
-        if not name:
-            raise ValueError("A session needs a name")
+        name = self._session_name(name)
         data = self.export_case_session()
         return self._write_session(name, data, origin="saved")
 
@@ -11128,7 +13852,11 @@ class Store:
         return {
             "id": row["id"], "name": row["name"], "saved_at": row["saved_at"],
             "origin": row["origin"], "source_count": len(srcs),
-            "tagged_rows": sum(len(s.get("row_tags") or []) for s in srcs),
+            # Rows, not tag assignments: a row carrying two tags is one
+            # tagged row — what the panel's "N tagged" says, and what the
+            # live table list counts (COUNT(DISTINCT rid)). Summing
+            # row_tags read a row with three tags as three.
+            "tagged_rows": sum(len({t.get("rid") for t in s.get("row_tags") or []}) for s in srcs),
             "notes": sum(len(s.get("row_notes") or []) for s in srcs),
         }
 
@@ -11157,9 +13885,7 @@ class Store:
             self.db.execute("DELETE FROM sessions WHERE name=?", (name,))
 
     def rename_session(self, name: str, new_name: str) -> dict:
-        new_name = (new_name or "").strip()
-        if not new_name:
-            raise ValueError("A session needs a name")
+        new_name = self._session_name(new_name)
         with self.lock, self.db:
             if self.db.execute("SELECT 1 FROM sessions WHERE name=?", (new_name,)).fetchone():
                 raise ValueError(f"A session named {new_name!r} already exists")
@@ -11175,7 +13901,7 @@ class Store:
         different decisions."""
         if data.get("format") != "winnow-case-session/1":
             raise ValueError("That file isn't a Winnow case session")
-        return self._write_session(name, data, origin="imported")
+        return self._write_session(self._session_name(name), data, origin="imported")
 
     LIVE_SESSION = "__live__"
 
@@ -11196,27 +13922,51 @@ class Store:
         means bypassing its state-generation bump too, so this does it
         itself — a dashboard whose tag counts were worked out during the
         last pass is wrong about this one, not merely old."""
-        saved = self.save_session(save_as) if save_as else None
-        with self.lock, self.db:
-            tags = self.db.execute("SELECT COUNT(*) FROM row_tags").fetchone()[0]
-            notes = self.db.execute("SELECT COUNT(*) FROM row_notes").fetchone()[0]
-            self.db.execute("DELETE FROM row_tags")
-            self.db.execute("DELETE FROM row_notes")
-            self._bump_state_generation()
-        # The undo entries reference rows that no longer carry those tags;
-        # replaying one would reinsert assignments this deliberately cleared.
-        self._discard_undo()
+        # One hold of the (re-entrant) writer lock from the snapshot to the
+        # clear. Saved and cleared under separate holds, a tag written in
+        # between — a watchlist scan's auto-tag, a second window — landed
+        # after the snapshot and before the DELETE, and so was in neither:
+        # gone, with the session reading as complete. The same hold keeps
+        # the undo discard from taking an entry recorded after the clear.
+        with self.lock:
+            saved = self.save_session(save_as) if save_as else None
+            with self.db:
+                tags = self.db.execute("SELECT COUNT(*) FROM row_tags").fetchone()[0]
+                notes = self.db.execute("SELECT COUNT(*) FROM row_notes").fetchone()[0]
+                self.db.execute("DELETE FROM row_tags")
+                self.db.execute("DELETE FROM row_notes")
+                self._bump_state_generation()
+            # The undo entries reference rows that no longer carry those tags;
+            # replaying one would reinsert assignments this deliberately cleared.
+            self._discard_undo()
         return {"saved": saved, "tags_cleared": tags, "notes_cleared": notes}
 
     def _drop_undo_for_source(self, source_id: int) -> None:
-        """Undo entries naming a source that no longer exists. SQLite reuses
-        a deleted row id, so the next import can land on the same source_id
-        and inherit them — replaying one then tags rows of an unrelated
-        file. Mirrors _drop_undo_for_tag."""
+        """Undo entries with any row in a source that no longer exists.
+        Mirrors _drop_undo_for_tag.
+
+        By the rows the entry recorded, not by the source it was made
+        from: an entry made on a merge (or from a Timeline selection) is
+        filed under the merge's id but holds member rows, so dropping a
+        member after deleting the merge used to leave it behind — and with
+        ids reused, Ctrl+Z then tagged rows of the next file imported.
+        `count_ids` (the real tables a change could touch) rules most
+        entries out without reading them."""
         with self.lock:
             keep = []
             for entry in self._undo:
-                if entry.get("source_id") == source_id:
+                ids = entry.get("count_ids")
+                if ids is None:
+                    ids = [entry.get("source_id")]
+                touches = entry.get("source_id") == source_id
+                if not touches and source_id in ids:
+                    try:
+                        touches = self.db.execute(
+                            f"SELECT 1 FROM v.{q(entry['table'])} WHERE source_id=? LIMIT 1",
+                            (source_id,)).fetchone() is not None
+                    except sqlite3.Error:
+                        touches = True   # can't tell: drop it rather than risk replaying it
+                if touches:
                     with contextlib.suppress(sqlite3.Error):
                         self.db.execute(f"DROP TABLE IF EXISTS v.{q(entry['table'])}")
                     continue
@@ -11238,20 +13988,21 @@ class Store:
                     self.db.execute(f"DROP TABLE IF EXISTS v.{q(entry['table'])}")
             self._undo.clear()
 
-    def _session_tag_map(self, data: dict) -> tuple[dict, dict, dict]:
+    def _session_tag_map(self, data: dict, keys: list[str]) -> tuple[dict, dict, dict]:
         """(tags_by_row, notes_by_row, source_labels) for a session document.
 
-        Keyed by (file_hash or name, rid) rather than source_id, because two
-        cases number their sources differently — a QC review is usually the
-        reviewer's case against the analyst's file, and matching on the
-        evidence's own fingerprint is what makes that work at all.
+        Keyed by (source key, rid) rather than source_id, because two cases
+        number their sources differently — a QC review is usually the
+        reviewer's case against the analyst's file. `keys` names each of the
+        document's sources, in order; diff_sessions derives them from the
+        evidence's own fingerprint (_diff_source_keys), which is what makes
+        that work at all.
         """
         tags: dict = {}
         notes: dict = {}
         labels: dict = {}
-        for src in data.get("sources", []):
+        for src, key in zip(data.get("sources", []), keys):
             meta = src.get("source") or {}
-            key = meta.get("file_hash") or meta.get("name") or ""
             labels[key] = meta.get("name") or key
             names = {t["id"]: t["name"] for t in (src.get("tag_defs") or [])}
             for rt in src.get("row_tags") or []:
@@ -11261,24 +14012,115 @@ class Store:
                 notes[(key, rn["rid"])] = rn.get("note") or ""
         return tags, notes, labels
 
-    def _live_sources_by_hash(self, sources: list[dict] | None = None) -> dict:
-        """{file_hash: source_id} for the open case — the one way a session
-        source is matched to a live table (import_case_session and the diff
-        both read it). Evidence is identified by its own fingerprint, never
-        by a filename two different exports can share."""
-        return {s["file_hash"]: s["id"] for s in (sources or self.list_sources()) if s.get("file_hash")}
+    @classmethod
+    def _session_identity(cls, meta: dict) -> tuple:
+        """Everything a session records about a source, as one comparable
+        value: (file_hash, name, base column names, row_count). A live
+        source (list_sources) reads the same way, minus its derived
+        columns — the session's column list is the evidence's own shape."""
+        cols = meta.get("columns") or []
+        if any(isinstance(c, dict) and c.get("derived") for c in cols):
+            cols = cls._base_cols(meta)
+        names = tuple(c.get("name") if isinstance(c, dict) else c for c in cols)
+        return (meta.get("file_hash") or None, meta.get("name") or "", names, meta.get("row_count"))
 
-    def _session_source_resolver(self):
-        """key -> live source id | None, for the keys _session_tag_map
-        builds (a file hash, or the name of a source that has none). A hash
-        matches by hash only; a hashless source matches a hashless live
-        source of the same name, since nothing better identifies it. A
-        same-named table with a different hash is a different file and
-        stays unresolved — a diff must never pivot into the wrong evidence."""
-        sources = self.list_sources()
-        by_hash = self._live_sources_by_hash(sources)
-        by_name_hashless = {s["name"]: s["id"] for s in sources if not s.get("file_hash")}
-        return lambda key: by_hash.get(key, by_name_hashless.get(key))
+    @classmethod
+    def _match_session_sources(cls, entries: list[dict], candidates: list[dict],
+                               *, hashless: bool = False) -> dict[int, int]:
+        """Pair session source records with the sources they describe:
+        {entry index: candidate index}, one-to-one. The candidates are the
+        live case's sources, or (for the diff) the other session's.
+
+        The file hash says which FILE; it cannot say which table of it.
+        Every table imported out of one SQLite database, every sheet of one
+        workbook and a file imported twice share it, and matching on it
+        alone (the old {hash: id} dict, last one wins) put one table's tags
+        on another's rows. So the hash is required and the rest of what a
+        session records picks the table, coarsest last:
+
+        1. hash, name, columns and row count all agree. Records equal in
+           all four are indistinguishable, so n of them pair with n
+           candidates in order — document order against id order, which is
+           import order on both sides of a session restored into its own
+           case (export_case_session lists by id).
+        2. hash and name — the same table with a different shape (imported
+           again with other options).
+        3. hash, columns and row count — the same table under another name,
+           which is the ordinary QC case: the reviewer named their tables.
+        4. hash alone, when it is the only record and the only candidate of
+           that file left — the single-table file, as it always matched.
+
+        Below tier 1 only one-to-one pairs: two records that agree on a
+        coarse key but not a finer one are different tables, and pairing
+        them in order would be a guess. Whatever is left unpaired is
+        reported by the caller, never placed. Never matched on ids: two
+        cases number their sources independently (invariant #10).
+
+        A table made inside Winnow has a synthetic hash (MADE_HASH_PREFIX,
+        SUBSET_HASH_PREFIX) and pairs by it exactly like a file. A record
+        with NO hash is one a session wrote before made tables had one:
+        `hashless` lets two such records pair by tiers 1 and 2 — name
+        required — which is what the diff does between two documents.
+        Never against a live table: load, the lookup resolver and the
+        diff's pivot leave it unmatched, since a same-named table here may
+        have been made over again since (import_case_session)."""
+        ie = [cls._session_identity(m) for m in entries]
+        ic = [cls._session_identity(m) for m in candidates]
+        free_e = [i for i, x in enumerate(ie) if x[0] or hashless]
+        free_c = [j for j, x in enumerate(ic) if x[0] or hashless]
+        tiers = ((lambda x: x, True),
+                 (lambda x: x[:2], False),
+                 (lambda x: (x[0], x[2], x[3]), False),
+                 (lambda x: x[0], False))
+        pairs: dict[int, int] = {}
+        for tier, (key, n_to_n) in enumerate(tiers):
+            by_e: dict = {}
+            by_c: dict = {}
+            for i in free_e:
+                if tier < 2 or ie[i][0]:
+                    by_e.setdefault(key(ie[i]), []).append(i)
+            for j in free_c:
+                if tier < 2 or ic[j][0]:
+                    by_c.setdefault(key(ic[j]), []).append(j)
+            for k, es in by_e.items():
+                cs = by_c.get(k, [])
+                if not cs or len(es) != len(cs) or (len(es) > 1 and not n_to_n):
+                    continue
+                pairs.update(zip(es, cs))
+            free_e = [i for i in free_e if i not in pairs]
+            taken = set(pairs.values())
+            free_c = [j for j in free_c if j not in taken]
+        return pairs
+
+    @classmethod
+    def _diff_source_keys(cls, left: list[dict], right: list[dict]) -> tuple[list[str], list[str]]:
+        """One key per source on each side of a diff, equal exactly when
+        the two records describe the same table (_match_session_sources).
+        The file hash where that alone is unambiguous, which keeps the
+        common single-table shape what it always was; hash plus name, and
+        then a counter, where several tables share it."""
+        pairs = cls._match_session_sources(left, right, hashless=True)
+        units = [(i, pairs.get(i)) for i in range(len(left))]
+        paired_right = set(pairs.values())
+        units += [(None, j) for j in range(len(right)) if j not in paired_right]
+        metas = [left[i] if i is not None else right[j] for i, j in units]
+        bases = [m.get("file_hash") or m.get("name") or "" for m in metas]
+        counts: dict = {}
+        for b in bases:
+            counts[b] = counts.get(b, 0) + 1
+        keys, seen = [], {}
+        for b, m in zip(bases, metas):
+            k = b if counts[b] == 1 else f"{b}|{m.get('name') or ''}"
+            seen[k] = seen.get(k, 0) + 1
+            keys.append(k if seen[k] == 1 else f"{k}|{seen[k]}")
+        lk: list = [None] * len(left)
+        rk: list = [None] * len(right)
+        for (i, j), k in zip(units, keys):
+            if i is not None:
+                lk[i] = k
+            if j is not None:
+                rk[j] = k
+        return lk, rk
 
     def diff_sessions(self, left: str, right: str, limit: int = 2000) -> dict:
         """What changed between two sessions — the QC question: "what did
@@ -11296,9 +14138,18 @@ class Store:
         def _load(which):
             return self.export_case_session() if which == self.LIVE_SESSION else self.get_session(which)
 
-        lt, ln, llab = self._session_tag_map(_load(left))
-        rt, rn, rlab = self._session_tag_map(_load(right))
+        ldoc, rdoc = _load(left), _load(right)
+        lmeta = [s.get("source") or {} for s in ldoc.get("sources", [])]
+        rmeta = [s.get("source") or {} for s in rdoc.get("sources", [])]
+        lkeys, rkeys = self._diff_source_keys(lmeta, rmeta)
+        lt, ln, llab = self._session_tag_map(ldoc, lkeys)
+        rt, rn, rlab = self._session_tag_map(rdoc, rkeys)
         labels = {**rlab, **llab}
+        # The right side's names in the left side's spelling where
+        # pair_tag_names pairs them — the rule loading either session
+        # would apply — so the diff reports what a load would change.
+        paired = pair_tag_names({n for v in rt.values() for n in v}, {n for v in lt.values() for n in v})
+        rt = {k: {paired.get(n, n) for n in v} for k, v in rt.items()}
 
         added, removed, changed, note_changes = [], [], [], []
         for key in sorted(set(lt) | set(rt), key=lambda k: (str(k[0]), k[1])):
@@ -11324,7 +14175,16 @@ class Store:
         # Per table, uncapped: what the panel shows as its counts. The row
         # lists below are capped, so a table past the cap still reports
         # how many rows differ even when not all of them can be opened.
-        resolve = self._session_source_resolver()
+        # Each key resolves to the live table its record matches — by the
+        # same rule a load uses (no `hashless`: a record with no hash is
+        # never placed on a live table), so a diff never pivots into
+        # evidence a load would not have put those tags on.
+        live = self.list_sources()
+        live_id: dict = {}
+        for metas, keys in ((rmeta, rkeys), (lmeta, lkeys)):   # left wins
+            for i, j in self._match_session_sources(metas, live).items():
+                live_id[keys[i]] = live[j]["id"]
+        resolve = live_id.get
         per_source: dict = {}
         for kind, rows in groups.items():
             for r in rows:
@@ -11482,7 +14342,7 @@ class Store:
             tagnames = {r["id"]: r["name"] for r in ro.execute("SELECT id, name FROM tag_defs")}
             buf = io.StringIO()
             w = csv.writer(buf, lineterminator="\n")
-            w.writerow(["Line", "Tags", "Note", *cols])
+            w.writerow(_export_header(cols, _csv_safe))
             yield buf.getvalue()
             buf.seek(0), buf.truncate(0)
 
@@ -11507,7 +14367,7 @@ class Store:
         for r in rows:
             if tagged_only and r["rid"] not in tmap:
                 continue
-            w.writerow([r["rid"], "; ".join(tmap.get(r["rid"], [])), _csv_safe(nmap.get(r["rid"], "")), *[_csv_safe(r[c]) for c in cols]])
+            w.writerow([r["rid"], _csv_safe("; ".join(tmap.get(r["rid"], []))), _csv_safe(nmap.get(r["rid"], "")), *[_csv_safe(r[c]) for c in cols]])
             yield buf.getvalue()
             buf.seek(0), buf.truncate(0)
 
@@ -11531,7 +14391,7 @@ class Store:
             tagnames = {r["id"]: r["name"] for r in ro.execute("SELECT id, name FROM tag_defs")}
             buf = io.StringIO()
             w = csv.writer(buf, lineterminator="\n")
-            w.writerow(["Line", "Tags", "Note", *cols])
+            w.writerow(_export_header(cols, _csv_safe))
             yield buf.getvalue()
             buf.seek(0), buf.truncate(0)
 
@@ -11568,7 +14428,7 @@ class Store:
                 for r in chunk:
                     if tagged_only and r["rid"] not in tagged_set:
                         continue
-                    w.writerow([r["rid"], "; ".join(tmap.get(r["rid"], [])), _csv_safe(nmap.get(r["rid"], "")),
+                    w.writerow([r["rid"], _csv_safe("; ".join(tmap.get(r["rid"], []))), _csv_safe(nmap.get(r["rid"], "")),
                                *[_csv_safe(r[c]) for c in cols]])
                 yield buf.getvalue()
                 buf.seek(0), buf.truncate(0)
@@ -11591,11 +14451,26 @@ class Store:
             src = self._source_lite_on(ro, handle["source_id"])
             cols = self._export_columns(ro, src)
             sel = ", ".join(q(c) for c in cols)
+            # A merge's rows come from several tables, and Line is the rid
+            # within ONE of them — so without saying which, two rows read
+            # "Line 1" and nothing in the file tells the reader where either
+            # is. A merge export carries the member's name (as the sidebar
+            # shows it) after Line; a single table's stays as it was.
+            member_names: dict[int, str] | None = None
+            if src.get("is_merge"):
+                ids = [int(i) for i in src["member_source_ids"]]
+                member_names = {
+                    r["id"]: r["nickname"] or r["name"] for r in ro.execute(
+                        f"SELECT id, name, nickname FROM sources WHERE id IN ({','.join('?' * len(ids))})",
+                        ids)}
 
             tagnames = {r["id"]: r["name"] for r in ro.execute("SELECT id, name FROM tag_defs")}
             buf = io.StringIO()
             w = csv.writer(buf, lineterminator="\n")
-            w.writerow(["Line", "Tags", "Note", *cols])
+            head = _export_header(cols, _csv_safe)
+            if member_names is not None:
+                head.insert(1, "Table")
+            w.writerow(head)
             yield buf.getvalue()
             buf.seek(0), buf.truncate(0)
 
@@ -11631,7 +14506,7 @@ class Store:
                     member_src = self._source_lite_on(ro, sid)
                     ph = ",".join("?" * len(rids))
                     for row in ro.execute(
-                        f"SELECT rid, {sel} FROM {self._from_clause(member_src)} WHERE rid IN ({ph})", rids
+                        f"SELECT rid, {sel} FROM {self._member_rows_from(src, member_src)} WHERE rid IN ({ph})", rids
                     ):
                         cellmap[(sid, row["rid"])] = tuple(row[c] for c in cols)
                     for rid, tid in ro.execute(
@@ -11649,7 +14524,9 @@ class Store:
                         continue  # tagged_only filtered this row out
                     w.writerow([
                         r["rid"],
-                        "; ".join(tmap.get(key, [])),
+                        *([_csv_safe(member_names.get(r["source_id"], f"table {r['source_id']}"))]
+                          if member_names is not None else []),
+                        _csv_safe("; ".join(tmap.get(key, []))),
                         _csv_safe(nmap.get(key, "")),
                         *[_csv_safe(v) for v in cellmap[key]],
                     ])
@@ -11664,12 +14541,21 @@ class Store:
         "tagged or not"), so unlike _export_view_csv_rows this doesn't need
         v.view_N at all — just row_tags per source_id. Reads run on a
         _reader() connection checked out per source, so a big multi-sheet
-        export never touches self.lock; openpyxl's in-memory writes below
-        don't touch the db at all."""
+        export never touches self.lock.
+
+        The tagged rows are read in keyset pages, cells joined to the page
+        of row_tags they came from and tags/notes fetched by the page's rid
+        RANGE — never a list of rids. It used to bind every tagged rid of a
+        source into one `IN (...)`, which past 32,766 tagged rows is "too
+        many SQL variables" on a stock SQLite build (python.org's Windows
+        Python), so the export failed outright for exactly the cases with
+        the most work in them. A source with more tagged rows than one
+        worksheet holds continues on numbered sheets (_xlsx_write_sheets,
+        the all-tables rule); write-only, so no cell objects pile up."""
         tagnames = {t["id"]: t["name"] for t in self.list_tags()}
-        wb = Workbook()
-        wb.remove(wb.active)
+        wb = Workbook(write_only=True)
         used_names: set[str] = set()
+        sheets = 0
 
         for src in self.list_sources():
             if not src.get("tagged_row_count"):
@@ -11677,41 +14563,43 @@ class Store:
             source_id = src["id"]
             with self._reader() as ro, self._dropped_view_is_expired():
                 cols = self._export_columns(ro, src)
-                sel = ", ".join(q(c) for c in cols)
-                rids = [r[0] for r in ro.execute(
-                    "SELECT DISTINCT rid FROM row_tags WHERE source_id=? ORDER BY rid", (source_id,)
-                )]
-                cellmap: dict[int, tuple] = {}
-                tmap: dict[int, list[str]] = {}
-                nmap: dict[int, str] = {}
-                if rids:
-                    ph = ",".join("?" * len(rids))
-                    for row in ro.execute(
-                        f"SELECT rid, {sel} FROM {self._from_clause(src)} WHERE rid IN ({ph})", rids
-                    ):
-                        cellmap[row["rid"]] = tuple(row[c] for c in cols)
-                    for rid, tid in ro.execute(
-                        f"SELECT rid, tag_id FROM row_tags WHERE source_id=? AND rid IN ({ph})", [source_id, *rids]
-                    ):
-                        tmap.setdefault(rid, []).append(tagnames.get(tid, str(tid)))
-                    for rid, note in ro.execute(
-                        f"SELECT rid, note FROM row_notes WHERE source_id=? AND rid IN ({ph})", [source_id, *rids]
-                    ):
-                        nmap[rid] = note
+                sel = ", ".join(self._col_ref(src, c, "s") for c in cols)
 
-            ws = wb.create_sheet(_xlsx_sheet_name(src["name"], used_names))
-            ws.append(["Line", "Tags", "Note", *cols])
-            for rid in rids:
-                if rid not in cellmap:
-                    continue
-                ws.append([
-                    rid,
-                    _xlsx_safe("; ".join(tmap.get(rid, []))),
-                    _xlsx_safe(nmap.get(rid, "")),
-                    *[_xlsx_safe(v) for v in cellmap[rid]],
-                ])
+                def tagged_rows(ro=ro, sel=sel, source_id=source_id, src=src):
+                    last = 0
+                    while True:
+                        page = ro.execute(
+                            f"SELECT s.rid, {sel} FROM {self._from_clause(src, 's')} WHERE s.rid IN "
+                            f"(SELECT DISTINCT rid FROM row_tags WHERE source_id=? AND rid > ? "
+                            f"ORDER BY rid LIMIT {BATCH}) ORDER BY s.rid", (source_id, last),
+                        ).fetchall()
+                        if not page:
+                            return
+                        lo, hi = page[0][0], page[-1][0]
+                        tmap: dict[int, list[str]] = {}
+                        for rid, tid in ro.execute(
+                            "SELECT rid, tag_id FROM row_tags WHERE source_id=? AND rid BETWEEN ? AND ?",
+                            (source_id, lo, hi),
+                        ):
+                            tmap.setdefault(rid, []).append(tagnames.get(tid, str(tid)))
+                        nmap = {rid: note for rid, note in ro.execute(
+                            "SELECT rid, note FROM row_notes WHERE source_id=? AND rid BETWEEN ? AND ?",
+                            (source_id, lo, hi))}
+                        for row in page:
+                            rid = row[0]
+                            yield [
+                                rid,
+                                _xlsx_safe("; ".join(tmap.get(rid, []))),
+                                _xlsx_safe(nmap.get(rid, "")),
+                                *[_xlsx_safe(v) for v in row[1:]],
+                            ]
+                        last = hi
 
-        if not wb.sheetnames:
+                n_sheets, _ = _xlsx_write_sheets(wb, used_names, src["name"],
+                                                 _export_header(cols, _xlsx_safe), tagged_rows())
+                sheets += n_sheets
+
+        if not sheets:
             wb.create_sheet("No tagged rows").append(["No rows are tagged in this case yet."])
 
         buf = io.BytesIO()
@@ -11745,12 +14633,13 @@ class Store:
         that doesn't travel — recorded as an export exception under
         invariant #9). Same header convention as the tagged
         export (Line, Tags, Note, then the analyst's layout columns), same
-        formula guard. Differences from export_tagged_xlsx, each because
-        "all rows" is a different size of thing:
+        formula guard, same write-only workbook and the same continuation
+        sheets (_xlsx_write_sheets). Differences from export_tagged_xlsx,
+        each because "all rows" is a different size of thing:
 
-        - openpyxl's write-only workbook, saved to `path` (a temp file the
-          route hands to FileResponse) rather than an in-memory BytesIO —
-          a 2M-row table as Python cell objects is gigabytes.
+        - Saved to `path` (a temp file the route hands to FileResponse)
+          rather than an in-memory BytesIO — even compressed, every row of
+          the case is far more than its tagged subset.
         - Rows are read in keyset chunks (`WHERE rid > ? ORDER BY rid`)
           on one _reader() checkout per source; never self.lock
           (invariant #4). Tags and notes are preloaded per source with
@@ -11761,7 +14650,6 @@ class Store:
           how the analyst hears about it first.
 
         Returns {"sheets": n, "rows": n} for the log line."""
-        per = XLSX_MAX_ROWS - 1
         tagnames = {t["id"]: t["name"] for t in self.list_tags()}
         wb = Workbook(write_only=True)
         used_names: set[str] = set()
@@ -11782,44 +14670,29 @@ class Store:
                 nmap = {rid: note for rid, note in ro.execute(
                     "SELECT rid, note FROM row_notes WHERE source_id=?", (source_id,))}
 
-                header = ["Line", "Tags", "Note", *cols]
-                # Continuations derive from the name the FIRST sheet actually
-                # got — two tables both called Security.evtx.csv become
-                # "Security.evtx.csv" and "Security.evtx.csv_1", and the
-                # second one's overflow must read "…_1 (2)", not "… (2)",
-                # which would look like the first table continuing.
-                first = _xlsx_sheet_name(src["name"], used_names)
-                part = 1
-                ws = wb.create_sheet(first)
-                ws.append(header)
-                sheets += 1
-                written = 0
-                last_rid = 0
-                while True:
-                    rows = ro.execute(
-                        f"SELECT rid, {sel} FROM {self._from_clause(src)} "
-                        f"WHERE rid > ? ORDER BY rid LIMIT {BATCH}", (last_rid,),
-                    ).fetchall()
-                    if not rows:
-                        break
-                    for row in rows:
-                        if written == per:
-                            part += 1
-                            suffix = f" ({part})"
-                            ws = wb.create_sheet(_xlsx_sheet_name(first[: 31 - len(suffix)] + suffix, used_names))
-                            ws.append(header)
-                            sheets += 1
-                            written = 0
-                        rid = row[0]
-                        ws.append([
-                            rid,
-                            _xlsx_safe("; ".join(tmap.get(rid, []))),
-                            _xlsx_safe(nmap.get(rid, "")),
-                            *[_xlsx_safe(v) for v in row[1:]],
-                        ])
-                        written += 1
-                        total_rows += 1
-                    last_rid = rows[-1][0]
+                def all_rows(ro=ro, sel=sel, src=src, tmap=tmap, nmap=nmap):
+                    last_rid = 0
+                    while True:
+                        rows = ro.execute(
+                            f"SELECT rid, {sel} FROM {self._from_clause(src)} "
+                            f"WHERE rid > ? ORDER BY rid LIMIT {BATCH}", (last_rid,),
+                        ).fetchall()
+                        if not rows:
+                            return
+                        for row in rows:
+                            rid = row[0]
+                            yield [
+                                rid,
+                                _xlsx_safe("; ".join(tmap.get(rid, []))),
+                                _xlsx_safe(nmap.get(rid, "")),
+                                *[_xlsx_safe(v) for v in row[1:]],
+                            ]
+                        last_rid = rows[-1][0]
+
+                n_sheets, n_rows = _xlsx_write_sheets(wb, used_names, src["name"],
+                                                      _export_header(cols, _xlsx_safe), all_rows())
+                sheets += n_sheets
+                total_rows += n_rows
 
         if not sheets:
             wb.create_sheet("No tables").append(["This case has no tables to export."])
@@ -11879,11 +14752,16 @@ class Store:
         its route turns into a 400 rather than an empty answer that reads
         like "no matches".
 
+        A table the sweep could not count is in the list too, as
+        `{source_id, name, error}` with no match_count — after the hits,
+        since it has none — rather than left out, which reads as "no
+        matches".
+
         start_search_all_job is the same sweep run on a background thread
         with incremental results, which is what the UI uses."""
         scope = self.resolve_search_all_scope(source_ids)["source_ids"]
         out = [hit for _, _, hit, _read in self._iter_search_all_sources(query, terms, scope) if hit]
-        out.sort(key=lambda d: -d["match_count"])
+        out.sort(key=lambda d: (bool(d.get("error")), -d.get("match_count", 0)))
         return out
 
     def _iter_search_all_sources(
@@ -11902,7 +14780,13 @@ class Store:
         source so a caller can report progress and surface partial results
         while the sweep is still running (start_search_all_job) — a source
         with no matches yields a None hit rather than being skipped
-        silently, so `scanned` always advances. Unsorted, in source order:
+        silently, so `scanned` always advances. A source whose count
+        raised yields `{source_id, name, error}` as its hit: it used to be
+        recorded as no match, so a table the sweep could not read at all
+        (one too wide for the search expression, before _sql_chain) was
+        reported as "No matches." — the one answer an analyst moves on
+        from. The exception is a table dropped since the sweep began,
+        which has nothing left to report and still yields None. Unsorted, in source order:
         sorting is the collecting caller's job, since a running sweep has
         nothing stable to sort yet.
 
@@ -12015,10 +14899,19 @@ class Store:
                                 "matched_terms": [] if not n
                                                  else [t["term"] for t in per_term] if breakdown
                                                  else None}
-                except sqlite3.Error:
-                    n = 0  # source dropped (or its index swapped) mid-sweep
+                except sqlite3.Error as e:
+                    n = 0
                     per_term = []
                     read = None
+                    with self._reader() as ro:
+                        still_here = ro.execute(
+                            "SELECT 1 FROM sources WHERE id=?", (source_id,)).fetchone() is not None
+                    if still_here:
+                        failed = {"source_id": source_id, "name": src["name"], "error": str(e)}
+                        scanned += 1
+                        yield scanned, total, failed, None
+                        time.sleep(0.02)
+                        continue
             hit = None
             if n:
                 hit = {
@@ -12159,6 +15052,10 @@ class Store:
                 "scanned": 0,
                 "total": 0,
                 "hits": [],
+                # Tables the sweep could not count ({source_id, name,
+                # error}), kept apart from `hits` so that list still means
+                # "tables that matched" to everything reading it.
+                "failed": [],
                 # What the sweep proved, per source it read end to end
                 # (_iter_search_all_sources' `read`), for
                 # seed_watchlist_from_search_all. Deliberately NOT in the
@@ -12187,7 +15084,9 @@ class Store:
                         break
                     job["scanned"] = scanned
                     job["total"] = total
-                    if hit:
+                    if hit and hit.get("error"):
+                        job["failed"].append(hit)
+                    elif hit:
                         job["hits"].append(hit)
                     if read:
                         job["read"][read["source_id"]] = read
@@ -12217,6 +15116,7 @@ class Store:
                 "scanned": job["scanned"],
                 "total": job["total"],
                 "hits": sorted(job["hits"], key=lambda d: -d["match_count"]),
+                "failed": list(job["failed"]),
                 "done": job["done"],
                 "error": job["error"],
                 "cancelled": job["cancelled"],
@@ -12417,6 +15317,26 @@ class Store:
 
     SQL_PANE_FORBIDDEN_RE = re.compile(r"\b(attach|detach|pragma|vacuum)\b", re.IGNORECASE)
 
+    def merge_select_list(self, merge_src: dict, member_src: dict) -> str:
+        """One member's SELECT list in a hand-built UNION ALL over a merge:
+        every merge column, in the merge's order, `AS` the merge's name —
+        read as `s."col"` (`d."col"` for a derived column) over
+        `src_<id> s LEFT JOIN drv_<id> d ON d.rid = s.rid`. The union is
+        positional, so a member lacking a column pads it with NULL, and the
+        source column is the member's label. Public: the bundled plugins
+        build their merge scopes with it."""
+        own = {_col_key(c["name"]): c["name"] for c in member_src["columns"]}
+
+        def _cell(c: dict) -> str:
+            if c.get("source_column"):
+                return f"{_sql_text_literal(member_src.get('nickname') or member_src['name'])} AS {q(c['name'])}"
+            actual = own.get(_col_key(c["name"]))
+            if actual is None:
+                return f"NULL AS {q(c['name'])}"
+            return f"{self._col_ref(member_src, actual, 's', 'd')} AS {q(c['name'])}"
+
+        return ", ".join(_cell(c) for c in merge_src["columns"])
+
     def _merge_union_sql(self, conn: sqlite3.Connection, merge_id: int) -> str:
         """SELECT text behind the pane's merge_<id> TEMP VIEW: a UNION ALL
         of the members carrying source_id, rid and every exposed column
@@ -12434,7 +15354,7 @@ class Store:
             frm = f"main.{q(m['table_name'])} s"
             if has_drv:
                 frm += f" LEFT JOIN main.{q(self._derived_table(mid))} d ON d.rid = s.rid"
-            sel = ", ".join(f"{self._col_ref(m, c, 's', 'd')} AS {q(c)}" for c in cols)
+            sel = self.merge_select_list(msrc, m)
             taken = {c.lower() for c in cols}
             branches.append(
                 f"SELECT {int(mid)} AS source_id, s.rid AS rid, {sel}, "
@@ -12493,7 +15413,7 @@ class Store:
         so derived columns resolve and Tags/Note are ordinary queryable
         columns. TEMP lives on this connection only: the case file is
         never written, and mode=ro stays honest. Callers own the close."""
-        ro = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, check_same_thread=False)
+        ro = sqlite3.connect(sqlite_ro_uri(self.path), uri=True, check_same_thread=False)
         ro.row_factory = sqlite3.Row
         ro.create_function("REGEXP", 2, _regexp, deterministic=True)
         ro.create_function("DAY_BUCKET", 1, _day_bucket, deterministic=True)
@@ -12521,9 +15441,67 @@ class Store:
         ro.set_authorizer(read_only_authorizer)
         return ro
 
+    @contextlib.contextmanager
+    def _pane_query(self, op_token: str | None = None):
+        """A _pane_connection to run one of the analyst's queries on, that
+        something can STOP: cancel_op(op_token) — the busy chip's Cancel,
+        or server.py noticing the request's client has gone — and
+        stop_pane_queries(), which close() and the server's shutdown call.
+
+        The pane runs whatever was typed, and some of it never ends: a
+        recursive CTE with no stop condition, a cross join of two 2M-row
+        tables. Nothing could stop one. It ran at 100% CPU through a closed
+        window, a case switch, Shut down and SIGTERM — the process cannot
+        exit while a worker thread is inside sqlite3_step — holding the
+        case lock until someone found the process and killed it.
+
+        No deadline (a progress handler could impose one): a GROUP BY over
+        a few million rows legitimately takes minutes, and the analyst is
+        better placed than a timer to say which query is runaway. Every way
+        they can say so is covered above.
+
+        An interrupt from stop_pane_queries surfaces as OpCancelled, as a
+        cancel does — a 499 nobody reads, since the case is going away."""
+        if self._pane_stopped:   # don't even open the file; re-checked below
+            raise OpCancelled("The case is closing")
+        ro = self._pane_connection()
+        with self._op_lock:
+            stopped = self._pane_stopped
+            if not stopped:
+                self._pane_conns.add(ro)
+        if stopped:
+            ro.close()
+            raise OpCancelled("The case is closing")
+        try:
+            with self._interruptible(op_token, ro):
+                yield ro
+        except sqlite3.OperationalError as e:
+            # _interruptible has already turned a cancel into OpCancelled;
+            # an interrupt it did not ask for came from stop_pane_queries.
+            if "interrupt" in str(e).lower() and self._pane_stopped:
+                raise OpCancelled("The case is closing") from e
+            raise
+        finally:
+            with self._pane_gone:
+                self._pane_conns.discard(ro)
+                ro.close()
+                self._pane_gone.notify_all()
+
+    def stop_pane_queries(self) -> int:
+        """Interrupt every running SQL pane query (_pane_query) and refuse
+        new ones from here on: close() and the server's shutdown both mean
+        this Store is finished. Returns how many were running. Safe from
+        any thread, never waits on a query."""
+        with self._op_lock:
+            self._pane_stopped = True
+            for conn in self._pane_conns:
+                conn.interrupt()
+            return len(self._pane_conns)
+
     SQL_TO_TABLE_SOFT_CAP = 500_000
 
-    def sql_to_table(self, sql: str, name: str, force: bool = False) -> dict:
+    def sql_to_table(self, sql: str, name: str, force: bool = False, *,
+                     op_token: str | None = None) -> dict:
         """Land a pane query's FULL result as a new source — an ordinary
         table (taggable, timeline-able, exportable), via the same ingest
         conventions everything else uses. Past SQL_TO_TABLE_SOFT_CAP rows
@@ -12535,8 +15513,8 @@ class Store:
         structural = _blank_string_literals(_strip_sql_comments(sql))
         if self.SQL_PANE_FORBIDDEN_RE.search(structural):
             raise ValueError("ATTACH, DETACH, PRAGMA and VACUUM aren't allowed in the SQL pane")
-        ro = self._pane_connection()
-        try:
+        _check_regexp_literals(sql)
+        with self._pane_query(op_token) as ro:
             if not force:
                 # Exact count when the query wraps cleanly; a query that
                 # defeats the wrap falls back to stream-and-stop below.
@@ -12545,8 +15523,11 @@ class Store:
                         f"SELECT COUNT(*) FROM ({sql.rstrip().rstrip(';')})").fetchone()[0]
                     if n > self.SQL_TO_TABLE_SOFT_CAP:
                         return {"needs_confirm": True, "rows": n}
-                except sqlite3.Error:
-                    pass
+                except sqlite3.Error as e:
+                    # Stopped, not a query that defeats the wrap: falling
+                    # through would start the same runaway again.
+                    if "interrupt" in str(e).lower():
+                        raise
             cur = ro.execute(sql)
             cols = [d[0] for d in cur.description] if cur.description else []
             if not cols:
@@ -12556,11 +15537,9 @@ class Store:
                 chunk = cur.fetchmany(50_000)
                 if not chunk:
                     break
-                rows.extend([["" if v is None else str(v) for v in r] for r in chunk])
+                rows.extend([[pane_cell_text(v) for v in r] for r in chunk])
                 if not force and len(rows) > self.SQL_TO_TABLE_SOFT_CAP:
                     return {"needs_confirm": True, "rows": None}  # count unknowable cheaply
-        finally:
-            ro.close()
         # Provenance: the query that produced it, so the table reads as
         # derived (the SQL pane's own "Saved from…" badge) rather than as a
         # file nobody can find on disk.
@@ -12663,8 +15642,9 @@ class Store:
         file_hash gets a synthetic 'subset:<sha256>': a subset has no file
         on disk, and a NULL hash is exactly what makes import_case_session
         skip a source, so a saved session would never give a subset its
-        tags back (SQL-saved tables have that gap today). The prefix keeps
-        it from ever reading as a _quick_hash of something on disk."""
+        tags back (SQL-saved and plugin-made tables get 'made:<random>' in
+        ingest_rows for the same reason; see MADE_HASH_PREFIX). The prefix
+        keeps it from ever reading as a _quick_hash of something on disk."""
         name = (name or "").strip()
         if not name:
             raise ValueError("Name the new table")
@@ -12757,7 +15737,7 @@ class Store:
                     for chunk in self._iter_subset_keys(ro, view_id, handle, picks, skip, op_token):
                         if copy["cancelled"]:   # close() — read once per batch, ingest_csv's cadence
                             raise OpCancelled("The case is closing — the copy was cancelled")
-                        cells = self._subset_cells(ro, cols, chunk, op_token)
+                        cells = self._subset_cells(ro, cols, chunk, op_token, parent)
                         rows: list[tuple] = []
                         mapping: list[tuple] = []
                         for pair in chunk:
@@ -12787,7 +15767,7 @@ class Store:
                 with self.lock, self.db:
                     self.db.execute(
                         "UPDATE sources SET columns=?, origin_meta=?, file_hash=? WHERE id=?",
-                        (json.dumps(colmeta), json.dumps(meta), "subset:" + digest, new_id))
+                        (json.dumps(colmeta), json.dumps(meta), SUBSET_HASH_PREFIX + digest, new_id))
                     if copy_tags:
                         self.db.execute(
                             "INSERT OR IGNORE INTO row_tags(source_id, rid, tag_id) "
@@ -12906,13 +15886,14 @@ class Store:
                 yield [(r["source_id"], r["rid"]) for r in rows if (r["source_id"], r["rid"]) not in skip]
 
     def _subset_cells(self, ro: sqlite3.Connection, cols: list[str], chunk: list[tuple[int, int]],
-                      op_token: str | None) -> dict[tuple[int, int], tuple]:
+                      op_token: str | None, parent: dict | None = None) -> dict[tuple[int, int], tuple]:
         """{(source_id, rid): cells} for one batch of keys, each row read
         through ITS member's _from_clause — derived sidecar joined
         USING(rid), so base and derived columns are both addressable bare
-        — the fetch_rows shape, which is what lets a merge's canonical
-        column list run unchanged against every member. NULL → '' as
-        ingest_rows stores it."""
+        — the fetch_rows shape. A member of a merge `parent` that doesn't
+        carry the merge's columns as-is is read through its projection
+        (_member_rows_from), which pads and renames it to that column
+        list. NULL → '' as ingest_rows stores it."""
         by_source: dict[int, list[int]] = {}
         for s, r in chunk:
             by_source.setdefault(s, []).append(r)
@@ -12920,7 +15901,9 @@ class Store:
         out: dict[tuple[int, int], tuple] = {}
         with self._interruptible(op_token, ro):
             for s, rids in by_source.items():
-                frm = self._from_clause(self._source_lite_on(ro, s))
+                msrc = self._source_lite_on(ro, s)
+                frm = (self._member_rows_from(parent, msrc) if parent and parent.get("is_merge")
+                       else self._from_clause(msrc))
                 for i in range(0, len(rids), 900):
                     part = rids[i:i + 900]
                     for row in ro.execute(
@@ -12930,14 +15913,13 @@ class Store:
                                                for v in t[1:])
         return out
 
-    def run_sql(self, sql: str, limit: int | None = 5000, op_token: str | None = None) -> dict:
+    def run_sql(self, sql: str, limit: int = 5000, *, op_token: str | None = None) -> dict:
         """Read-only ad-hoc query against the case file, its rows inline:
         the shape plugins (winnow.api.sql) and dashboards draw from, each
-        passing a limit sized to what it draws. The SQL pane does not come
-        through here — run_sql_result holds its rows server-side, because
-        the pane has no cap and an uncapped answer in one response is
-        gigabytes. `limit=None` still returns every row, for a Python
-        caller that knows its result is small.
+        passing a limit sized to what it draws. The SQL pane's Run does not
+        come through here — run_sql_result holds its rows server-side,
+        because the pane has no cap and an uncapped answer in one response
+        is gigabytes.
 
         This intentionally allows arbitrary SELECT/EXPLAIN — that's the
         point of the pane — unlike validate_where_fragment's tight allowlist
@@ -12951,79 +15933,71 @@ class Store:
         on). Stacked statements aren't a separate concern here: Python's
         sqlite3 already refuses to execute more than one statement per call.
 
-        Registered as a run (_sql_run), so it can be stopped like the
-        pane's: `op_token` through cancel_op, every run by
-        cancel_sql_runs and close().
+        Runs on a _pane_query connection, so a query that never ends can
+        still be stopped — `op_token` through cancel_op, every query by
+        stop_pane_queries (close(), and the server's shutdown).
         """
         structural = _blank_string_literals(_strip_sql_comments(sql))
         if self.SQL_PANE_FORBIDDEN_RE.search(structural):
             raise ValueError("ATTACH, DETACH, PRAGMA and VACUUM aren't allowed in the SQL pane")
-        token = op_token or f"sqlq_{time.time_ns():x}"
-        with self._sql_run(token):
-            ro = self._pane_connection()
-            try:
-                t0 = time.time()
-                with self._interruptible(token, ro):
-                    cur = ro.cursor()
-                    cur.row_factory = None
-                    cur.execute(sql)
-                    rows = cur.fetchall() if limit is None else cur.fetchmany(limit)
-                cols = [d[0] for d in cur.description] if cur.description else []
-                return {
-                    "columns": cols,
-                    "rows": [list(r) for r in rows],
-                    "truncated": limit is not None and len(rows) == limit,
-                    "elapsed_ms": int((time.time() - t0) * 1000),
-                }
-            finally:
-                ro.close()
+        _check_regexp_literals(sql)
+        with self._pane_query(op_token) as ro:
+            t0 = time.time()
+            cur = ro.execute(sql)
+            rows = cur.fetchmany(limit + 1)   # one past the limit: exactly `limit` rows is not truncated
+            cols = [d[0] for d in cur.description] if cur.description else []
+            return {
+                "columns": cols,
+                "rows": [[r[i] for i in range(len(cols))] for r in rows[:limit]],
+                "truncated": len(rows) > limit,
+                "elapsed_ms": int((time.time() - t0) * 1000),
+            }
 
     def run_sql_result(self, sql: str, op_token: str | None = None, release=()) -> dict:
         """The SQL pane's Run: every row of the answer, held server-side.
 
-        The query runs on the pane's read-only connection exactly as
-        run_sql's does (same forbidden-statement check, same authorizer);
-        its cursor is handed to SqlResults.materialise, which copies the
-        rows a batch at a time into the scratch database and returns the
-        result's id, count and column widths. The response carries the
-        first SqlResults.PREVIEW_ROWS rows; the pane pages the rest by id,
-        sorts through it, and exports from it — see winnow/sqlresults.py
-        for why nothing holds the whole answer in memory any more.
+        The query runs on a _pane_query connection exactly as run_sql's
+        does (same forbidden-statement check, same authorizer, stopped by
+        the same things); its cursor is handed to SqlResults.materialise,
+        which copies the rows a batch at a time into the scratch database
+        and returns the result's id, count and column widths. The response
+        carries the first SqlResults.PREVIEW_ROWS rows; the pane pages the
+        rest by id, sorts through it, and exports from it — see
+        winnow/sqlresults.py for why nothing holds the whole answer in
+        memory any more.
 
-        `op_token` makes the run stoppable (cancel_op): stopped mid-fetch,
-        the rows so far are kept and `stopped` says "cancelled"; stopped
-        before the first row, it is OpCancelled (499). `release` names the
+        `op_token` is the pane's Stop (cancel_op): stopped mid-fetch, the
+        rows so far are kept and `stopped` says "cancelled"; stopped
+        before the first row, it is OpCancelled (499). stop_pane_queries
+        (close(), shutdown) ends it the same way. `release` names the
         result(s) this run replaces — the tab's last one — so a re-run
         frees its scratch space before taking more."""
         structural = _blank_string_literals(_strip_sql_comments(sql))
         if self.SQL_PANE_FORBIDDEN_RE.search(structural):
             raise ValueError("ATTACH, DETACH, PRAGMA and VACUUM aren't allowed in the SQL pane")
+        _check_regexp_literals(sql)
         if release:
             self.sql_results.release(release)
         token = op_token or f"sqlr_{time.time_ns():x}"
         with self._sql_run(token) as run:
-            ro = self._pane_connection()
-            try:
+            with self._pane_query(token) as ro:
                 t0 = time.time()
-                with self._interruptible(token, ro):
-                    cur = ro.cursor()
-                    cur.row_factory = None
-                    cur.execute(sql)
-                    meta = self.sql_results.materialise(
-                        cur, cancelled=lambda: self._op_was_cancelled(token),
-                        progress=lambda n: run.__setitem__("rows", n))
+                cur = ro.cursor()
+                cur.row_factory = None
+                cur.execute(sql)
+                meta = self.sql_results.materialise(
+                    cur, cancelled=lambda: self._op_was_cancelled(token),
+                    progress=lambda n: run.__setitem__("rows", n))
                 elapsed = int((time.time() - t0) * 1000)
-            finally:
-                ro.close()
-        out = self.sql_results.summary(meta["id"])
+            out = self.sql_results.summary(meta["id"])
         out["elapsed_ms"] = elapsed
         return out
 
     @contextlib.contextmanager
     def _sql_run(self, token: str) -> Iterator[dict]:
-        """Registers a pane query as in flight for the block — what
-        cancel_sql_runs and close() reach to stop it, and what
-        sql_run_progress reads. Refused once close() has begun."""
+        """Registers a pane run as in flight for the block — what
+        sql_run_progress reads, and what close() waits on before it
+        deletes the results file. Refused once close() has begun."""
         run = {"rows": 0, "done": threading.Event()}
         with self._ingest_jobs_lock:
             if self._closing:
@@ -13047,31 +16021,26 @@ class Store:
             run = self._sql_runs.get(token)
             return {"running": run is not None, "rows": run["rows"] if run else 0}
 
-    def cancel_sql_runs(self) -> int:
-        """Stop every SQL query in flight; how many there were. The UI's
-        Shut down calls this first: uvicorn's graceful shutdown waits for
-        open requests, and a runaway query is a request that never ends —
-        Winnow stayed up at full CPU, holding the case lock, until
-        killed."""
-        with self._ingest_jobs_lock:
-            tokens = list(self._sql_runs)
-        for token in tokens:
-            self.cancel_op(token)
-        return len(tokens)
-
     def sql_result_csv(self, result_id: str, sort: int | None = None, order: str = "asc") -> Iterator[str]:
         """A held result as CSV text chunks, in displayed order, streamed
-        off the scratch table. Values as the pane shows them (js_str),
-        through _csv_safe like every other export of case data."""
+        off the scratch table. Values as the pane shows them (js_str);
+        text — the column names included, which are just as much the
+        query's output — through _csv_safe like every other export of case
+        data. A number stays a number: -5 is not a formula, and an
+        apostrophe in front of it would make it text in the spreadsheet."""
         cols, rows = self.sql_results.iter_rows(result_id, sort, order)
+
+        def cell(v):
+            text = _sql_js_str(v)
+            return text if isinstance(v, (int, float)) else _csv_safe(text)
 
         def gen():
             buf = io.StringIO()
             w = csv.writer(buf, lineterminator="\n")
-            w.writerow(cols)
+            w.writerow([_csv_safe(c) for c in cols])
             n = 0
             for row in rows:
-                w.writerow([_csv_safe(_sql_js_str(v)) for v in row])
+                w.writerow([cell(v) for v in row])
                 n += 1
                 if n % 2000 == 0:
                     yield buf.getvalue()
@@ -13111,8 +16080,14 @@ def _csv_safe(v):
 _XLSX_ILLEGAL = re.compile(r"[\000-\010\013\014\016-\037]")
 
 
+# Excel's per-cell text limit. openpyxl enforces it by cutting the string
+# at 32,767 characters and saying nothing.
+XLSX_CELL_MAX = 32_767
+
+
 def _xlsx_safe(v):
-    """_csv_safe, plus the characters a worksheet cannot hold at all.
+    """_csv_safe, plus the characters a worksheet cannot hold at all, and
+    a visible mark on a value too long for one cell.
 
     Winnow keeps control characters in cell VALUES on purpose — ingest
     strips them from column names only, because a name has to be
@@ -13126,17 +16101,77 @@ def _xlsx_safe(v):
     silently shortened string in an exported artifact is worse than a
     visible \\x07: the escape says what was there and is reversible,
     while a strip quietly rewrites evidence.
+
+    Length is the same argument. Past XLSX_CELL_MAX openpyxl truncates
+    without a word, and an encoded PowerShell payload or a long script
+    block is exactly the value that runs past it — the reader of the
+    workbook then has a cut-off command line that looks complete. Cut
+    here instead, with a marker that says it was cut and how long the
+    value is; the case file still holds all of it.
     """
+    full = len(v) if isinstance(v, str) else 0
     if isinstance(v, str) and _XLSX_ILLEGAL.search(v):
         v = _XLSX_ILLEGAL.sub(lambda m: "\\x%02x" % ord(m.group()), v)
-    return _csv_safe(v)
+    v = _csv_safe(v)
+    if isinstance(v, str) and len(v) > XLSX_CELL_MAX:
+        mark = f" …[cut: the value is {full:,} characters, a cell holds {XLSX_CELL_MAX:,} — all of it is in the case]"
+        v = v[: XLSX_CELL_MAX - len(mark)] + mark
+    return v
+
+
+def _xlsx_write_sheets(wb, used_names: set[str], name: str, header: list,
+                       rows: Iterable[list]) -> tuple[int, int]:
+    """Write one table's `rows` to a write-only workbook under its own
+    sheet name, continuing on "Name (2)", "Name (3)"… with the header
+    re-emitted once a sheet holds XLSX_MAX_ROWS - 1 rows, so every row
+    lands. Returns (sheets written, rows written). Both workbook exports
+    use it — the tagged-rows one had no continuation and wrote a sheet
+    Excel refuses to open.
+
+    Continuations derive from the name the FIRST sheet actually got — two
+    tables both called Security.evtx.csv become "Security.evtx.csv" and
+    "Security.evtx.csv_1", and the second one's overflow must read
+    "…_1 (2)", not "… (2)", which would look like the first table
+    continuing."""
+    per = XLSX_MAX_ROWS - 1   # one row is the header
+    first = _xlsx_sheet_name(name, used_names)
+    part = 1
+    ws = wb.create_sheet(first)
+    ws.append(header)
+    sheets, written, total = 1, 0, 0
+    for row in rows:
+        if written == per:
+            part += 1
+            suffix = f" ({part})"
+            ws = wb.create_sheet(_xlsx_sheet_name(first[: 31 - len(suffix)] + suffix, used_names))
+            ws.append(header)
+            sheets += 1
+            written = 0
+        ws.append(row)
+        written += 1
+        total += 1
+    return sheets, total
+
+
+def _export_header(cols: list[str], safe) -> list:
+    """An export's header row through the same formula guard as its cells
+    (`safe` is _csv_safe or _xlsx_safe). Column names are header text out
+    of the evidence file — attacker-influenced exactly as the cells are —
+    and openpyxl writes any string opening with '=' as a formula, so a
+    column called =HYPERLINK(...) was a live link in the hand-over
+    workbook's first row while every cell under it was neutralised."""
+    return ["Line", "Tags", "Note", *[safe(c) for c in cols]]
 
 
 def _esc_like(s: str) -> str:
     return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-_XLSX_SHEET_INVALID = re.compile(r"[\\/?*\[\]:]")
+# What a worksheet NAME cannot hold: Excel's own \ / ? * [ ] : plus every C0
+# control character and DEL — a name is XML text in workbook.xml, and
+# openpyxl writes a BEL there without complaint, producing a workbook
+# that neither Excel nor openpyxl will open again.
+_XLSX_SHEET_INVALID = re.compile(r"[\\/?*\[\]:\x00-\x1f\x7f]")
 
 
 # Excel's hard per-worksheet row limit (1,048,576 including the header).
@@ -13182,7 +16217,7 @@ def write_rows_xlsx(target, columns: list, rows: Iterable, sheet_name: str = "Qu
             ws = wb.create_sheet(_xlsx_sheet_name(first[: 31 - len(suffix)] + suffix, used))
             ws.append(header)
             on_sheet = 0
-        ws.append([_xlsx_safe(_sql_cell(v)) for v in row])
+        ws.append([_xlsx_safe(pane_cell_json(v)) for v in row])
         on_sheet += 1
         total += 1
     wb.save(target)
@@ -13190,15 +16225,18 @@ def write_rows_xlsx(target, columns: list, rows: Iterable, sheet_name: str = "Qu
 
 
 def _xlsx_sheet_name(name: str, used: set[str]) -> str:
-    """Excel worksheet names: no \\/?*[]:, max 31 chars, can't be blank or
-    start/end with an apostrophe, and must be unique within the workbook.
+    """Excel worksheet names: no \\/?*[]: (nor control characters), max 31
+    chars, can't be blank or start/end with an apostrophe, can't be
+    "History" (Excel reserves it), and must be unique within the workbook.
     Dedup mirrors sanitize_columns' approach (store.py:137) — append a
-    numeric suffix, truncating the base to make room for it."""
+    numeric suffix, truncating the base to make room for it. The
+    apostrophe rule is applied AFTER the cut to 31: "AAAA…A's log" cut
+    there ends in the apostrophe the full name had in its middle."""
     clean = _XLSX_SHEET_INVALID.sub("_", (name or "Sheet").strip()).strip("'") or "Sheet"
-    clean = clean[:31]
+    clean = clean[:31].rstrip("'")
     base = clean
     n = 1
-    while clean.lower() in used:
+    while clean.lower() in used or clean.lower() == "history":
         suffix = f"_{n}"
         clean = base[: 31 - len(suffix)] + suffix
         n += 1
@@ -13263,6 +16301,33 @@ def _strip_sql_comments(frag: str) -> str:
             out.append(frag[i])
             i += 1
     return "".join(out)
+
+
+def _double_quoted_names(frag: str) -> list[str]:
+    """The double-quoted spans in `frag`, unescaped ("" -> "), skipping
+    single-quoted literals (a '"' inside one is text, not a quote) — the
+    same walk _blank_string_literals does, keeping what it blanks."""
+    out: list[str] = []
+    i, n = 0, len(frag)
+    while i < n:
+        ch = frag[i]
+        if ch not in ("'", '"'):
+            i += 1
+            continue
+        j, buf = i + 1, []
+        while j < n:
+            if frag[j] == ch:
+                if j + 1 < n and frag[j + 1] == ch:
+                    buf.append(ch)
+                    j += 2
+                    continue
+                break
+            buf.append(frag[j])
+            j += 1
+        if ch == '"':
+            out.append("".join(buf))
+        i = j + 1
+    return out
 
 
 def _blank_string_literals(frag: str) -> str:

@@ -77,17 +77,62 @@ def test_banner_shows_and_save_as_promotes(browser, quicklook_server, tmp_path):
         pg.wait_for_selector("#tempBanner:not([hidden])", timeout=20_000)
         assert "temporary" in pg.locator("#tempBanner").inner_text()
 
+        # Saving opens + New case's own dialog, not a bare name prompt
+        # (reported: it only asked for a name, so a quick look could not
+        # be given a group, a path or a profile like any other case).
         pg.locator("#tempSaveBtn").click()
-        pg.wait_for_selector(".confirm-overlay input")
-        pg.locator(".confirm-overlay input").fill("Promoted case")
-        pg.locator(".confirm-card .btn", has_text="OK").first.click()
+        pg.wait_for_selector("#modal:not([hidden])")
+        assert pg.locator("#modalTitle").text_content() == "Save as a case"
+        labels = pg.locator("#modalBody > label").all_inner_texts()
+        assert labels == ["Name", "Group", "Case file path", "Profile"], labels
+        assert pg.locator(".confirm-overlay").count() == 0
+
+        inputs = pg.locator("#modalBody input")
+        inputs.nth(0).fill("Promoted case")
+        inputs.nth(1).fill("ACME IR")
+        # The path follows the name into the folder the quick look already
+        # lives under, so the default save is a rename, not a copy.
+        path = inputs.nth(2).input_value()
+        assert path.startswith(str(tmp_path / "cases")), path
+        assert path.endswith("promoted-case.db-winnow"), path
+        pg.locator("#modalBody .btn", has_text="Save case").click()
 
         pg.wait_for_selector("#tempBanner[hidden]", state="attached", timeout=15_000)
         cur = pg.evaluate("""() => fetch('/api/case/current',
           { headers: { 'X-Timeline-Lite-Client': '1' } }).then((r) => r.json())""")
         assert cur["temp"] is False
         assert cur["name"] == "Promoted case"
+        assert cur["path"] == path
+        rec = next(c for c in pg.evaluate("""() => fetch('/api/cases',
+          { headers: { 'X-Timeline-Lite-Client': '1' } }).then((r) => r.json())""")
+                   if c["path"] == path)
+        assert rec["group"] == "ACME IR"
         assert not errors, errors
+    finally:
+        ctx.close()
+
+
+def test_cancelling_save_from_the_leave_guard_goes_back_to_it(browser, quicklook_server):
+    """The guard's Save opens the save dialog in its place (one modal at a
+    time); Cancel there returns to the guard's question rather than
+    dropping the analyst back into the quick look with no dialog."""
+    ctx = browser.new_context(viewport={"width": 1200, "height": 700})
+    ctx.add_init_script("localStorage.setItem('winnow.remotePrompt', 'seen');"
+                        "localStorage.setItem('winnow.appearance', JSON.stringify({ splash: false }))")
+    pg = ctx.new_page()
+    try:
+        pg.goto(f"http://127.0.0.1:{quicklook_server}/")
+        pg.wait_for_selector("#tempBanner:not([hidden])", timeout=20_000)
+        pg.locator("#btnHome").click()
+        pg.wait_for_selector("#modal:not([hidden])")
+        pg.locator("#modal button", has_text="Save as a case").click()
+        pg.wait_for_function(
+            "() => document.getElementById('modalTitle').textContent === 'Save as a case'")
+        pg.locator("#modalBody .btn", has_text="Cancel").click()
+        pg.wait_for_function(
+            "() => /isn.t saved/.test(document.getElementById('modalTitle').textContent)")
+        assert not pg.evaluate("() => document.getElementById('modal').hidden")
+        assert pg.evaluate("() => document.getElementById('home').hidden")
     finally:
         ctx.close()
 

@@ -172,7 +172,11 @@ def register(api):              # REQUIRED
 
 `register(api)` is called once at load. Raise anything inside it and the
 plugin is recorded as failed (with your exception's message) and skipped
-— it never takes the server or other plugins down. The same is true of
+— it never takes the server or other plugins down. Skipped means all of
+it: whatever your `register()` had already registered before it raised
+(formats, routes, tabs, row actions, panels, dashboards) is taken back
+out, so a half-registered plugin can't keep working while the manager
+lists it as failed. The same is true of
 your module-level code, and of `SystemExit`: `sys.exit("needs Winnow
 2.0")` at import is recorded as a load error rather than exiting Winnow,
 so it is a safe way to refuse to run. It is not a *good* one — the
@@ -300,6 +304,14 @@ def parse(path, options) -> dict:
 - **`rows` should be a generator.** It's consumed lazily and committed in
   batches, so memory stays flat on a multi-GB input. Returning a list
   works, and materializes the whole file first.
+- **`path`'s file name is the file's real name — for an upload too.** A
+  file dropped into the browser is spooled under its own name in a
+  private temp directory, so `os.path.basename(path)` is `hostd.log` or
+  `$MFT` whichever way the analyst brought it in, and reading meaning
+  from it (a log type, a `$J`) works the same. The spool is deleted the
+  moment the import returns: read the file inside `parse` and the rows
+  it yields, never keep `path` for later. The table records the uploaded
+  file's name as its path, not the spool's.
 - **Cells may be `str`, `int`, `float`, or `None`.** Everything is
   stringified (`None` → `""`) because source columns are TEXT — the same
   evidence-fidelity rule the CSV path follows. Don't pre-format numbers
@@ -409,7 +421,7 @@ Prefer it to reaching into the app's globals — this is what's supported.
 | `assets` | `/plugin_assets/<fs_name>` — prefix for your own files |
 | `api(path, opts)` | `fetch` wrapper: JSON in/out, throws with `err.status`, sets the CSRF header |
 | `post(path, body)` | JSON POST shorthand |
-| `sql(sql, limit)` | Read-only query against the case file |
+| `sql(sql, limit)` | Read-only query against the case file. Cells JSON can't carry exactly come back as text: a BLOB as its UTF-8 text or SQLite's `X'00FF'`, `Inf`/`-Inf`/`NaN`, and an integer past ±2^53 as its decimal digits (server-side, `req.store.run_sql` still returns the raw values) |
 | `schemaText()` | The case's schema as CREATE TABLE-ish SQL (LLM-ready) |
 | `toast(msg, ms)` | Transient status message — one slot, no button; see [Feedback](#feedback-toasts-notifications-and-dialogs) |
 | `notify(opts)` | A row in the bottom-right jobs panel, the card an import gets — progress, detail, buttons; returns a handle (`update` / `done` / `fail` / `close`) |
@@ -832,7 +844,11 @@ results are kept on ran low): the result is the rows that had come back
 by then, and still counts as a result. For more than the first page,
 query with `winnow.sql(sql, limit)` yourself. `selectedRows()` returns a
 promise (since API 12): a shift-click can select rows the pane never
-loaded, so they come from the server. Both `onRun` and
+loaded, so they come from the server. A run that is overtaken before it
+returns — Run again in the same tab, the tab closed, another case
+opened — rejects with a "Superseded" error, and its result is neither
+painted nor announced to `onRun`: it describes a query (or a case) the
+page has moved on from. Both `onRun` and
 `onChange` return an unsubscribe and are cut with your mount.
 
 The `claude_assistant/` example's **Copilot** is the worked example: a
@@ -977,6 +993,10 @@ res = req.store.run_sql("SELECT a, b FROM src_1 LIMIT 100", limit=5000)
 # -> {"columns": [...], "rows": [[...], ...], "truncated": bool, "elapsed_ms": int}
 ```
 
+`rows` holds at most `limit` rows; `truncated` is true only when the
+query had more than that (a result of exactly `limit` rows is not
+truncated).
+
 **Use `run_sql` for reads.** It opens its own read-only connection and
 never takes Winnow's writer lock, so a slow aggregation can't block
 ingests, tagging, or anyone else's queries — and it inherits the SQL
@@ -1006,7 +1026,9 @@ A source dict:
   "columns": [{"name": "Timestamp", "type": "datetime"}, ...],
   "row_count": 331_642,
   "path": "/evidence/…",             # absolute source path, may be None
-  "file_hash": "…", "imported_at": "2026-08-16T09:12:44",
+  "file_hash": "…",                  # the file's fingerprint; "made:…" / "subset:…" for a
+                                     # table made inside Winnow — an identity, not a digest
+  "imported_at": "2026-08-16T09:12:44",
   "has_fts": 1, "fts_building": False,
   "is_open": True,                    # has a visible tab
   "tagged_row_count": 118, "note_count": 4,
@@ -1016,7 +1038,15 @@ A source dict:
 Two things to know about ids: a **negative** `source_id` is a *merge*
 (a virtual union of several sources) with no single backing table — if
 your feature needs `table_name`, reject negatives with a `ValueError`
-rather than building broken SQL. And the sidecar tables are queryable
+rather than building broken SQL, or read every member yourself. A
+merge's members **don't all have its columns** (a column only some
+tables have is empty for the rest), so never write a merge's column
+names straight into a member's SELECT: an unknown double-quoted name is
+a string literal in SQLite, and every cell would read as the column's
+name. `req.store.merge_select_list(merge_src, member_src)` gives one
+member's SELECT list over `src_<id> s LEFT JOIN drv_<id> d ON d.rid =
+s.rid`, padding what it lacks with NULL — the bundled pivot, first/last
+and lateral movement plugins build their merge unions with it. And the sidecar tables are queryable
 too: `row_tags(source_id, rid, tag_id)`, `row_notes(source_id, rid,
 note)`, `tag_defs(id, name, color, hotkey)` — that's how you join
 analyst findings to evidence rows.
@@ -1126,7 +1156,11 @@ req.store.ingest_rows(
 
 It follows every ingest convention automatically (TEXT columns,
 contiguous row ids, batched commits, background search index), so the
-result is a completely normal source.
+result is a completely normal source. With no `path` there is no file to
+fingerprint, so the table gets an identity of its own (`file_hash`
+`"made:…"`): a saved session puts its tags and notes back, and a copy of
+it in another case matches, but a table another case made the same way —
+same name, same rows — does not.
 
 **Never write to a `src_` table.** Source tables are immutable by
 contract — that's what makes re-import non-destructive and sessions
@@ -1286,7 +1320,10 @@ a scope dropdown like any other plugin, just defaulting to off.
 `workspace/plugins.json`) or *for this case only* (an override stored in
 the case file's `case_settings`, so it travels with the evidence). The
 registry reloads on every case switch — per-case disablement really
-unloads the code, same guarantee as the machine-level switch.
+unloads the code, same guarantee as the machine-level switch. A reload
+is built beside the running set and switched in whole, one reload at a
+time: while yours imports, your routes keep answering from the previous
+load, and there is no moment in between when they 404.
 
 **Distribute** a folder plugin as a zip or a git repo containing the
 plugin folder. Include a README saying what it does, what it needs
@@ -1398,9 +1435,10 @@ def lookup_handler(req):
   that needs a network call makes it through its own `register_api`
   route.
 - Tell the analyst the name in your README: "set `WINNOW_VT_API_KEY`
-  under Settings → Environment". (The bundled `claude_assistant` predates
-  this and reads the Anthropic SDK's own `ANTHROPIC_API_KEY` from the
-  shell — the pattern to copy is the README sentence, not the name.)
+  under Settings → Environment". The bundled `claude_assistant` does
+  exactly this with `WINNOW_ANTHROPIC_API_KEY`, falling back to the
+  Anthropic SDK's own `ANTHROPIC_API_KEY` from the shell when it isn't
+  set.
 - For everything that is *not* secret — the engagement, a base URL, a
   document link — use a [case variable](#case-variables) instead, so it
   travels with the case.
@@ -1432,6 +1470,9 @@ def lookup_handler(req):
 ### `register_ingest_format(*, id, label, parse, extensions=(), filename_patterns=(), description="", options=())`
 
 `parse(path: str, options: dict) -> {"columns": list[str], "rows": Iterable[Sequence], "column_types"?: list[str], "name"?: str}`
+
+`path` ends in the file's own name, uploads included, and an upload's
+spool is gone once the import returns (see *The `parse` contract*).
 
 Option spec: `{"name": str, "label"?: str, "type": "bool"|"text"|"choice", "default"?: Any, "choices"?: list[str]}`
 

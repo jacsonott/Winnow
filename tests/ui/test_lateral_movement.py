@@ -108,22 +108,59 @@ def test_lateral_movement_tab_mounts_binds_defaults_and_builds(browser, server, 
         pg.locator(".lm-caret").click()
         pg.wait_for_function("() => !document.querySelector('.lm-events').hidden")
 
-        # A new movement type can be defined right from the panel — the
-        # editor pre-guesses columns, so this only needs a name and Save.
+        # A new movement type can be defined right from the panel. The
+        # builder reads one table's columns and guesses each role from
+        # them: UserName for the user, not the SID in UserId, which the
+        # old union-of-every-table guess picked.
         before = pg.locator(".lm-events .lm-event").count()
         pg.locator("button", has_text="+ New event type").click()
-        pg.wait_for_selector("#modal:not([hidden])")
-        pg.locator("#modal .confirm-input").first.fill("My custom hop")
-        # source/dest are pre-guessed from the table's column names. The
-        # first select is the header-set picker; the source column is next.
-        assert pg.locator("#modal select").nth(1).input_value() != "", "source column should be pre-guessed"
-        pg.locator("#modal button", has_text="Save event").click()
+        pg.wait_for_selector("#modal:not([hidden]) .lm-eb")
+        role = lambda r: pg.locator(f"#modal select[data-role='{r}']").input_value()
+        assert (role("src_col"), role("dst_col"), role("label_col"), role("time_col")) == (
+            "RemoteHost", "Computer", "UserName", "TimeCreated")
+
+        # The preview counts what the event finds in that table before it
+        # is saved: all three logons, two links, three hosts.
+        pg.wait_for_function(
+            "() => [...document.querySelectorAll('#modal .lm-eb-stat b')].map((b) => b.textContent).join() === '3,2,3'",
+            timeout=10_000)
+
+        # A condition's value chips come from the column itself.
+        pg.locator("#modal button", has_text="+ Add a condition").click()
+        pg.locator("#modal .lm-eb-cond select[aria-label='Condition column']").select_option("UserName")
+        pg.locator("#modal .lm-eb-chip", has_text="alice").click()
+        assert pg.locator("#modal .lm-eb-cond input").input_value() == "alice"
+        pg.wait_for_function(
+            "() => document.querySelector('#modal .lm-eb-stat b').textContent === '2'", timeout=10_000)
+
+        # A name already in the list is refused before it is saved: a
+        # saved event sharing a shipped one's name ticked and unticked
+        # together with it.
+        name = pg.locator("#lmEbName")
+        name.fill(labels[0])
+        assert pg.locator("#modal .lm-eb-save").is_disabled()
+        assert "already the name" in pg.locator("#modal .lm-eb-hint").inner_text()
+        name.fill("My custom hop")
+        pg.locator("#modal .lm-eb-save").click()
         pg.wait_for_function(
             "(n) => document.querySelectorAll('.lm-events .lm-event').length > n", arg=before)
-        assert any("My custom hop" in t for t in pg.locator(".lm-event-name").all_inner_texts())
-        # The header-set picker offered the app's EvtxECmd nickname.
-        hs_opts = pg.evaluate("() => [...document.querySelectorAll('#modal select')].length")
-        assert hs_opts >= 5  # header_set, src, dst, label, time
+        mine = pg.locator(".lm-events .lm-event", has_text="My custom hop")
+        assert mine.locator("input").is_checked(), "a new event is ticked where it binds"
+
+        # Events… edits it in the same builder, name and all, and the
+        # tick follows the rename.
+        pg.locator("button", has_text="Events…").click()
+        pg.locator("#modal .lm-mgr-row", has_text="My custom hop").locator("button", has_text="Edit").click()
+        pg.wait_for_selector("#modal:not([hidden]) .lm-eb")
+        assert name.input_value() == "My custom hop"
+        assert pg.locator("#modal .lm-eb-cond input").input_value() == "alice"
+        name.fill("My renamed hop")
+        pg.locator("#modal .lm-eb-save").click()
+        pg.wait_for_selector("#modal:not([hidden]) .lm-mgr")
+        assert "My renamed hop" in pg.locator("#modal .lm-mgr-name").all_inner_texts()
+        pg.locator("#modal button", has_text="Close").click()
+        assert pg.locator(".lm-events .lm-event", has_text="My renamed hop").locator("input").is_checked()
+        assert not any("My custom hop" in t for t in pg.locator(".lm-event-name").all_inner_texts())
         assert not errors, errors
     finally:
         ctx.close()

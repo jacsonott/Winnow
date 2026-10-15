@@ -48,7 +48,16 @@ def test_toolbar_buttons_never_fold_into_two_lines(page):
         # The search box is the one thing that never shrinks.
         assert _rect(page, "#search")["w"] >= 300
     finally:
+        # Escape in the search box clears it and rebuilds the view, and a
+        # view that lands mid-selection resets it: when that fell between
+        # the two clicks below, the Shift-click selected one row, "1"
+        # untagged only that, and the wait timed out with seven rows still
+        # tagged on the shared case. Wait for the rebuild to land first.
+        before = page.evaluate("() => __winnow.S.view.view_id")
         page.keyboard.press("Escape")
+        page.wait_for_function(
+            "(vid) => __winnow.S.view && __winnow.S.view.view_id !== vid"
+            " && document.getElementById('searchWrap').hidden", arg=before)
         rows.nth(1).locator(".cell").nth(1).click()
         rows.nth(8).locator(".cell").nth(1).click(modifiers=["Shift"])
         page.keyboard.press("1")

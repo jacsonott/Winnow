@@ -121,6 +121,88 @@ def test_save_as_refuses_a_real_case(client, case_path):
         server.STORE.close()
 
 
+def _quicklook(server, c, tmp_path):
+    body = c.post("/api/assoc/open", json={"files": [_csv(tmp_path)]}, headers=HEADERS).json()
+    server.STORE.wait_for_ingest_job(body["started"][0]["job_id"], timeout=30)
+    return body["case"]
+
+
+def test_save_as_takes_the_new_case_dialogs_path_and_group(client, tmp_path):
+    """Save as a case… is + New case's dialog now, so the path and group
+    typed there are where the case lands and what it's listed under — not
+    the name slugged into the cases folder, which was all a name-only
+    prompt could do."""
+    server, c = client
+    old_path = _quicklook(server, c, tmp_path)
+    dest = tmp_path / "elsewhere" / "acme-breach.db-winnow"   # the folder doesn't exist yet
+
+    res = c.post("/api/case/save_as", headers=HEADERS,
+                 json={"name": "ACME breach", "group": "ACME IR", "path": str(dest)})
+    assert res.status_code == 200, res.text
+    assert res.json()["path"] == str(dest)
+    assert dest.is_file() and not os.path.exists(old_path)
+    rec = WS.cases.find_by_path(str(dest))
+    assert (rec["name"], rec["group"]) == ("ACME breach", "ACME IR")
+    assert server.STORE.path == str(dest)
+    assert server.STORE.list_sources()[0]["row_count"] == 2
+    server.STORE.close()
+
+
+def test_save_as_refuses_a_path_that_is_taken_or_still_a_quicklook(client, tmp_path):
+    server, c = client
+    old_path = _quicklook(server, c, tmp_path)
+    taken = tmp_path / "taken.db-winnow"
+    taken.write_text("not mine")
+    res = c.post("/api/case/save_as", json={"name": "x", "path": str(taken)}, headers=HEADERS)
+    assert res.status_code == 400
+    assert taken.read_text() == "not mine"
+    # Saved into quicklook/, it would still be temporary — off the home
+    # screen and the startup sweep's to delete.
+    inside = os.path.join(os.path.dirname(old_path), "kept.db-winnow")
+    res = c.post("/api/case/save_as", json={"name": "x", "path": inside}, headers=HEADERS)
+    assert res.status_code == 400
+    assert not os.path.exists(inside)
+    assert c.get("/api/case/current", headers=HEADERS).json()["temp"] is True
+    server.STORE.close()
+
+
+def test_save_as_to_another_drive_copies_then_deletes(client, tmp_path, monkeypatch):
+    """A rename can't cross drives or mounts (D:\\Cases from a Winnow on
+    C:), and the dialog's Browse… reaches any folder."""
+    import errno
+    server, c = client
+    old_path = _quicklook(server, c, tmp_path)
+    real_replace = os.replace
+
+    def cross_device(src, dst):
+        if src == old_path:
+            raise OSError(errno.EXDEV, "Invalid cross-device link")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(server.os, "replace", cross_device)
+    dest = tmp_path / "other-drive" / "case.db-winnow"
+    res = c.post("/api/case/save_as", json={"name": "Moved", "path": str(dest)}, headers=HEADERS)
+    assert res.status_code == 200, res.text
+    assert dest.is_file() and not os.path.exists(old_path)
+    assert server.STORE.list_sources()[0]["row_count"] == 2
+    server.STORE.close()
+
+
+def test_save_as_over_a_stale_listing_takes_the_new_name(client, tmp_path):
+    """A case deleted outside Winnow stays listed under its path; saving a
+    quick look to that path must list it under the name just typed, not
+    the old record's."""
+    server, c = client
+    _quicklook(server, c, tmp_path)
+    dest = tmp_path / "reused.db-winnow"
+    WS.cases.create(str(dest), name="Old case", group="Old group")
+    res = c.post("/api/case/save_as", json={"name": "New case", "path": str(dest)}, headers=HEADERS)
+    assert res.status_code == 200, res.text
+    rec = WS.cases.find_by_path(str(dest))
+    assert (rec["name"], rec["group"]) == ("New case", "")
+    server.STORE.close()
+
+
 def test_discard_deletes_the_quicklook_and_only_the_quicklook(client, tmp_path):
     server, c = client
     body = c.post("/api/assoc/open", json={"files": [_csv(tmp_path)]}, headers=HEADERS).json()
@@ -462,3 +544,85 @@ def test_a_plugin_format_file_ingests_via_the_plugin(client, tmp_path, monkeypat
     assert [col["name"] for col in src["columns"]] == ["EventId", "Msg"]
     assert src["row_count"] == 2
     server.STORE.close()
+
+
+def test_one_corrupt_file_does_not_stop_the_sweep(tmp_path, monkeypatch):
+    """Only OSError was caught per file, so a quick-look whose content is
+    not a database (sqlite3.DatabaseError) ended the whole sweep — every
+    abandoned file listed after it stayed forever. It is skipped, not
+    deleted (the janitor only eats what it can prove is empty), and the
+    rest are swept."""
+    import server
+    from winnow.store import Store
+
+    qdir = tmp_path / "cases" / server.QUICKLOOK_DIRNAME
+    qdir.mkdir(parents=True)
+    monkeypatch.setattr(server, "_cases_dir", lambda: str(tmp_path / "cases"))
+    old = __import__("time").time() - 30 * 86400
+    bad = qdir / "quicklook-a-corrupt.db-winnow"
+    bad.write_bytes(b"SQLite format 3\x00" + b"\xff" * 4000)   # the header, then garbage
+    empties = []
+    for i in range(3):
+        p = qdir / f"quicklook-z{i}.db-winnow"
+        Store(str(p)).close()
+        empties.append(p)
+    for p in [bad, *empties]:
+        os.utime(p, (old, old))
+
+    assert server._sweep_quicklook() == 3
+    assert not any(p.exists() for p in empties)
+    assert bad.exists(), "a file the sweep can't read is not proven empty"
+
+
+def test_the_sweep_never_deletes_a_sqlite_file_that_is_not_a_case(tmp_path, monkeypatch):
+    """_case_holds_work reads "none of the work tables" as empty, and a
+    browser History database has none of them — so any non-Winnow SQLite
+    file left in quicklook/ for a week was deleted. The sweep only deletes
+    case files."""
+    import sqlite3
+    import server
+
+    qdir = tmp_path / "cases" / server.QUICKLOOK_DIRNAME
+    qdir.mkdir(parents=True)
+    monkeypatch.setattr(server, "_cases_dir", lambda: str(tmp_path / "cases"))
+    evidence = qdir / "History.db"
+    conn = sqlite3.connect(str(evidence))
+    conn.execute("CREATE TABLE urls (id INTEGER PRIMARY KEY, url TEXT)")
+    conn.execute("INSERT INTO urls(url) VALUES ('https://example.test')")
+    conn.commit()
+    conn.close()
+    old = __import__("time").time() - 30 * 86400
+    os.utime(evidence, (old, old))
+
+    assert server._sweep_quicklook() == 0
+    assert evidence.exists()
+
+
+def test_discarding_a_quicklook_unloads_a_plugin_only_it_turned_on(client, tmp_path, monkeypatch):
+    """The effective plugin set is per case, so every way a case goes away
+    has to reload it. Discard set STORE to None and stopped there: a plugin
+    switched on for just this quick-look stayed imported and kept answering
+    at the home screen, with the machine setting saying off."""
+    from winnow.plugin_api import PluginRegistry
+
+    server, c = client
+    plugs = tmp_path / "plugs"
+    plugs.mkdir()
+    (plugs / "caseonly.py").write_text(
+        'def register(api):\n    api.register_api("ping", lambda req: {"pong": True})\n')
+    monkeypatch.setattr(server, "PLUGIN_DIRS", [plugs])
+    monkeypatch.setattr(server, "PLUGINS", PluginRegistry())
+    WS.plugin_prefs.set_machine_enabled("caseonly", False, True)
+
+    body = c.post("/api/assoc/open", json={"files": [_csv(tmp_path)]}, headers=HEADERS).json()
+    server.STORE.wait_for_ingest_job(body["started"][0]["job_id"], timeout=30)
+    assert c.get("/api/plugin/caseonly/ping").status_code == 404      # off by machine
+    r = c.post("/api/plugins/toggle", json={"fs_name": "caseonly", "scope": "on_case"},
+               headers=HEADERS)
+    assert r.status_code == 200, r.text
+    assert c.get("/api/plugin/caseonly/ping").json() == {"pong": True}
+
+    assert c.post("/api/case/discard", json={}, headers=HEADERS).status_code == 200
+    assert c.get("/api/plugin/caseonly/ping").status_code == 404
+    rec = next(p for p in c.get("/api/plugins").json()["plugins"] if p["fs_name"] == "caseonly")
+    assert rec["enabled"] is False

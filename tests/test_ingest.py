@@ -193,3 +193,48 @@ def test_month_name_timestamp_column_types_as_datetime(store, write_csv):
     rec = store.ingest_csv(write_csv(rows, "mn.csv"), name="mn", build_fts=False)
     col = next(c for c in store.get_source(rec["id"])["columns"] if c["name"] == "When")
     assert col["type"] == "datetime"
+
+
+def test_leading_blank_lines_are_skipped_to_reach_the_header(store, tmp_path):
+    """A CSV that starts with a blank line (a tool that writes a banner and
+    then an empty line, or a hand-trimmed export) read the blank line as
+    the header: zero columns, `CREATE TABLE ... (rid INTEGER PRIMARY KEY, )`,
+    a raw "syntax error" for the analyst, and the file handle left open.
+    The header is the first non-blank row — the rule the Excel import
+    already follows."""
+    p = tmp_path / "lead.csv"
+    p.write_text("\n  \n,,\na,b\n1,2\n3,4\n", encoding="utf-8")
+    rec = store.ingest_csv(str(p), build_fts=False)
+    assert [c["name"] for c in rec["columns"]] == ["a", "b"]
+    assert rec["row_count"] == 2
+    prev = store.preview_csv_text(p.read_text(encoding="utf-8"), name="lead.csv")
+    assert prev["columns"] == ["a", "b"] and prev["sample_rows"] == [["1", "2"], ["3", "4"]]
+
+
+def test_a_file_of_blank_lines_is_empty_and_closes_its_handle(store, tmp_path):
+    import gc
+    import warnings
+    p = tmp_path / "blank.csv"
+    p.write_text("\n\n\n", encoding="utf-8")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", ResourceWarning)   # a leaked handle fails the test
+        try:
+            store.ingest_csv(str(p), build_fts=False)
+        except ValueError as e:
+            assert "empty" in str(e)
+        else:
+            raise AssertionError("a file of blank lines imported")
+        gc.collect()
+    assert store.list_sources() == []
+
+
+def test_a_header_named_like_the_line_sort_is_renamed(store, write_csv):
+    """`__line__` is the sort key the grid sends for "file order" — a real
+    header with that name was shadowed by it, so sorting the column
+    returned file order. Reserved like `rid` and `__tag__`."""
+    assert sanitize_columns(["__line__", "x"]) == ["__line___1", "x"]
+    rec = store.ingest_csv(write_csv([["__LINE__", "v"], ["b", "1"], ["a", "2"]]), build_fts=False)
+    name = rec["columns"][0]["name"]
+    assert name.lower() != "__line__"
+    vid = store.build_view(rec["id"], {"sort": [{"column": name, "dir": "asc"}]})["view_id"]
+    assert [r["cells"][0] for r in store.fetch_rows(vid, 0, 10)["rows"]] == ["a", "b"]

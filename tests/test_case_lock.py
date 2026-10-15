@@ -156,3 +156,181 @@ def test_reopening_a_closed_store_at_the_same_path_really_reopens(client, store,
     r = client.post("/api/case/open", json={"path": case_path})
     assert r.status_code == 200
     assert server.STORE is not store and not server.STORE.closed
+
+
+# ------------------------------------------------- deleting a case's file
+
+def _register(client, path, name="victim"):
+    r = client.post("/api/cases", json={"path": str(path), "name": name})
+    assert r.status_code == 200, r.text
+    return r.json()["id"]
+
+
+def test_deleting_the_file_of_a_case_another_winnow_has_open_is_refused(client, tmp_path):
+    """The delete route only ever checked whether THIS process had the case
+    open. A second Winnow holding it (here: a Store in this test standing in
+    for one — flock is per open file, so the probe sees it exactly as
+    another process would) lost its case file from under it, and the
+    registry entry with it."""
+    import server
+
+    other = str(tmp_path / "held.db-winnow")
+    held = Store(other, default_tags=DEFAULT_TAGS)
+    try:
+        cid = _register(client, other)
+        r = client.delete(f"/api/cases/{cid}?delete_file=true")
+        assert r.status_code == 409
+        detail = r.json()["detail"]
+        assert detail["error"] == "case_in_use"
+        assert "another Winnow" in detail["message"]
+        assert os.path.isfile(other)
+        assert any(c["id"] == cid for c in server.WS.cases.list())
+    finally:
+        held.close()
+
+
+def test_a_heartbeat_alone_also_refuses_the_delete(client, tmp_path):
+    """The share case: no flock to see, only the other machine's beat."""
+    other = str(tmp_path / "shared.db-winnow")
+    Store(other, default_tags=DEFAULT_TAGS).close()
+    _write_marker(other, heartbeat_at=time.time() - 3)
+    cid = _register(client, other)
+    r = client.delete(f"/api/cases/{cid}?delete_file=true")
+    assert r.status_code == 409
+    assert os.path.isfile(other)
+
+
+def test_deleting_a_case_file_takes_what_lives_beside_it(client, tmp_path):
+    """-wal/-shm stay behind whenever the last connection didn't close
+    cleanly, and a killed Winnow leaves its stale lock marker. Deleting only
+    the .db-winnow left all three in the cases folder for good."""
+    other = str(tmp_path / "gone.db-winnow")
+    Store(other, default_tags=DEFAULT_TAGS).close()
+    for suffix in ("-wal", "-shm"):
+        with open(other + suffix, "wb") as f:
+            f.write(b"\0" * 32)
+    _write_marker(other, heartbeat_at=time.time() - CASE_LOCK_STALE_AFTER_SEC - 60)
+    cid = _register(client, other)
+    r = client.delete(f"/api/cases/{cid}?delete_file=true")
+    assert r.status_code == 200, r.text
+    assert sorted(p.name for p in tmp_path.iterdir() if p.name.startswith("gone")) == []
+
+
+# ------------------------------------------------ one marker per case file
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="needs symlinks")
+def test_a_case_reached_through_a_symlink_shares_its_lock(case_path, tmp_path):
+    """case_lock_path used abspath, so a case opened through a link got a
+    marker of its own beside the link — and a second Winnow opening the
+    same file by its real path saw nothing holding it."""
+    alias = str(tmp_path / "alias.db")
+    os.symlink(case_path, alias)
+    s = Store(alias, default_tags=DEFAULT_TAGS)
+    try:
+        assert case_lock_path(alias) == case_lock_path(case_path)
+        holder = probe_case_lock(case_path)
+        assert holder is not None and holder["pid"] == os.getpid()
+    finally:
+        s.close()
+    assert probe_case_lock(case_path) is None
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="needs symlinks")
+def test_reopening_the_open_case_through_a_symlink_is_not_a_reopen(client, store, tmp_path):
+    """Now that the marker is shared, the same-path short circuit has to
+    compare the same canonical form, or this process would probe its own
+    lock through the link and refuse itself."""
+    import server
+
+    alias = str(tmp_path / "alias.db")
+    os.symlink(store.path, alias)
+    r = client.post("/api/case/open", json={"path": alias})
+    assert r.status_code == 200, r.text
+    assert server.STORE is store and not store.closed
+
+
+# ------------------------------------------------------ concurrent switches
+
+def _race_two_opens(client, monkeypatch, paths):
+    """POST /api/case/open for each path from its own thread, arranged so
+    that both requests are inside _open_store at the same moment if
+    nothing serialises them. Returns (statuses, every Store opened).
+
+    The barrier is what makes this deterministic rather than a race the
+    test usually wins: unserialised, both requests read `old = STORE` and
+    then meet here, so neither can swap STORE before the other has
+    committed to its own open. Serialised, the second request never
+    arrives while the first waits; the wait times out, the barrier
+    breaks, and each request runs alone — one second, not a hang."""
+    import threading
+
+    import server
+
+    meet = threading.Barrier(len(paths))
+    made = []
+    real = server._open_store
+
+    def open_store(path):
+        try:
+            meet.wait(timeout=1.0)
+        except threading.BrokenBarrierError:
+            pass
+        s = real(path)
+        made.append(s)
+        return s
+
+    monkeypatch.setattr(server, "_open_store", open_store)
+    statuses = {}
+
+    def go(i, p):
+        statuses[i] = client.post("/api/case/open", json={"path": p}).status_code
+
+    threads = [threading.Thread(target=go, args=(i, p)) for i, p in enumerate(paths)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(30)
+    return [statuses.get(i) for i in range(len(paths))], made
+
+
+def test_two_case_opens_at_once_leave_no_store_open_behind(client, tmp_path, monkeypatch):
+    """Double-clicking a case card (or two windows switching at once) sent
+    two /api/case/open whose `old = STORE; STORE = new; old.close()` steps
+    interleaved: one freshly opened Store was never closed. Its flock and
+    heartbeat stayed held for the life of the process, so that case then
+    read as "already open in another Winnow" — naming this very server."""
+    import server
+
+    a, b = str(tmp_path / "a.db"), str(tmp_path / "b.db")
+    for p in (a, b):
+        Store(p, default_tags=DEFAULT_TAGS).close()
+    statuses, made = _race_two_opens(client, monkeypatch, [a, b])
+    leaked = [s for s in made if s is not server.STORE and not s.closed]
+    try:
+        assert statuses == [200, 200]
+        assert not leaked, f"left open behind the switch: {[s.path for s in leaked]}"
+        # The case that lost the race is free again, not held by a ghost.
+        loser = b if os.path.abspath(server.STORE.path) == os.path.abspath(a) else a
+        assert probe_case_lock(loser) is None
+    finally:
+        for s in leaked:
+            s.close()
+
+
+def test_two_opens_of_the_same_case_make_one_store(client, tmp_path, monkeypatch):
+    """The same double-click on one card: both requests passed the
+    already-open check before either had opened anything, so the case got
+    TWO writer Stores in one process — and the one not kept stayed open."""
+    import server
+
+    a = str(tmp_path / "a.db")
+    Store(a, default_tags=DEFAULT_TAGS).close()
+    statuses, made = _race_two_opens(client, monkeypatch, [a, a])
+    leaked = [s for s in made if s is not server.STORE and not s.closed]
+    try:
+        assert statuses == [200, 200]
+        assert len(made) == 1, "a second writer Store was opened on the same case file"
+        assert not leaked
+    finally:
+        for s in leaked:
+            s.close()

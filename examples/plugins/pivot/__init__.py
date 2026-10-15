@@ -150,11 +150,10 @@ def _scope(req, src):
     (invariant #9: the merge path is part of the operation)."""
     if not src.get("is_merge"):
         return _from_clause(src)
-    cols = [c["name"] for c in src["columns"]]
     branches = []
     for mid in src["member_source_ids"]:
         m = req.store.get_source(mid)
-        sel = ", ".join(f"{_col(m, c)} AS {q(c)}" for c in cols)
+        sel = req.store.merge_select_list(src, m)  # NULL-pads columns a member lacks
         branches.append(f"SELECT {int(m['id'])} AS source_id, s.rid AS rid, {sel} FROM {_from_clause(m)}")
     return "(" + " UNION ALL ".join(branches) + ") s"
 

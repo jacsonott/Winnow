@@ -69,6 +69,36 @@ def store(case_path):
     s.close()
 
 
+# SQLITE_MAX_VARIABLE_NUMBER as stock SQLite ships it (32766 since 3.32;
+# python.org's Windows and macOS builds). Debian's build raises it to
+# 250000, so a statement binding one parameter per row or per list item
+# passes here and fails on an analyst's machine — `stock_sqlite_limits`
+# puts the stock ceiling back on a store's every connection.
+STOCK_VARIABLE_LIMIT = 32766
+
+
+@pytest.fixture
+def stock_sqlite_limits(store, monkeypatch):
+    import sqlite3
+
+    if not hasattr(store.db, "setlimit"):
+        pytest.skip("Connection.setlimit needs Python 3.11+")
+    store.db.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, STOCK_VARIABLE_LIMIT)
+    real = store._open_reader
+
+    def limited():
+        ro = real()
+        ro.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, STOCK_VARIABLE_LIMIT)
+        return ro
+
+    monkeypatch.setattr(store, "_open_reader", limited)
+    with store._reader_lock:
+        idle, store._reader_pool = store._reader_pool, []
+    for conn in idle:
+        conn.close()
+    return store
+
+
 STANDARD_ROWS = [
     ["Timestamp", "EventId", "User", "Process", "CommandLine"],
     ["2024-01-05 13:22:01", "4624", "ACME\\jacson", "svchost.exe", "C:\\Windows\\System32\\svchost.exe"],

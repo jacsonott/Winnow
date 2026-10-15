@@ -42,6 +42,16 @@ def test_a_saved_session_lives_in_the_case_file(store, write_csv, case_path):
     assert json.loads(row["payload"])["format"] == "winnow-case-session/1"
 
 
+def test_a_sessions_tagged_count_is_rows_not_tag_assignments(store, write_csv):
+    """The Sessions panel shows it as "N tagged" — rows, beside the notes
+    and table counts. It summed row_tags, so a row with two tags was two."""
+    sid = _case(store, write_csv)
+    _tag(store, sid, [1, 2], "TA")
+    _tag(store, sid, [2], "TB")
+    assert store.save_session("pass1")["tagged_rows"] == 2
+    assert store.list_sessions()[0]["tagged_rows"] == 2
+
+
 def test_saving_the_same_name_replaces_rather_than_accumulates(store, write_csv):
     sid = _case(store, write_csv)
     _tag(store, sid, [1], "TA")
@@ -321,6 +331,59 @@ def test_an_unnamed_session_is_a_400_not_a_500(store, monkeypatch):
                        headers=HEADERS).status_code == 400
 
 
+# Names an analyst actually types — a date is the commonest way to tell
+# passes apart — plus the shapes that would confuse a router that splits
+# the name back into segments.
+ROUND_TRIP_NAMES = ["before 12/05", "host1/day2", "/leading", "trailing/", "a/../b",
+                    "x/load", "x/rename", "50% done", "q?x#y", "back\\slash"]
+
+
+@pytest.mark.parametrize("name", ROUND_TRIP_NAMES)
+def test_every_name_the_save_route_takes_round_trips(store, write_csv, monkeypatch, name):
+    """A session saved under a name with "/" in it could never be loaded,
+    renamed, downloaded or deleted: the client sends the name
+    encodeURIComponent'd (%2F), the server decodes the path before routing,
+    and a one-segment {name} cannot match two segments — every one of those
+    calls 404'd and the session sat in the list for good."""
+    from urllib.parse import quote
+
+    sid = _case(store, write_csv)
+    _tag(store, sid, [1, 2], "TA")
+    client = _client(store, monkeypatch)
+    enc = lambda n: quote(n, safe="")   # what encodeURIComponent sends
+
+    assert client.post("/api/case_sessions", json={"name": name}, headers=HEADERS).status_code == 200
+    r = client.post(f"/api/case_sessions/{enc(name)}/load", params={"merge": "false"}, headers=HEADERS)
+    assert r.status_code == 200, r.text
+    r = client.get(f"/api/case_sessions/{enc(name)}/download", headers=HEADERS)
+    assert r.status_code == 200 and r.json()["format"] == "winnow-case-session/1"
+    renamed = name + " (2)"
+    r = client.post(f"/api/case_sessions/{enc(name)}/rename", json={"name": renamed}, headers=HEADERS)
+    assert r.status_code == 200 and r.json()["name"] == renamed
+    r = client.request("DELETE", f"/api/case_sessions/{enc(renamed)}", headers=HEADERS)
+    assert r.status_code == 200
+    assert store.list_sessions() == []
+
+
+@pytest.mark.parametrize("name", [".", ".."])
+def test_a_name_no_link_can_carry_is_refused_when_it_is_given(store, write_csv, name):
+    """"." and ".." are the two names that cannot travel as a path segment
+    however they are escaped — a browser resolves them (and their %2E
+    spellings) away before the request leaves. Refused at the door, with a
+    reason, rather than saved and then unreachable."""
+    _case(store, write_csv)
+    with pytest.raises(ValueError, match="can.t be called"):
+        store.save_session(name)
+    store.save_session("ok")
+    with pytest.raises(ValueError, match="can.t be called"):
+        store.rename_session("ok", name)
+    with pytest.raises(ValueError, match="can.t be called"):
+        store.adopt_session(name, store.export_case_session())
+    with pytest.raises(ValueError, match="can.t be called"):
+        store.start_new_session(save_as=name)
+    assert [s["name"] for s in store.list_sessions()] == ["ok"]
+
+
 def test_starting_a_new_session_saves_then_clears(store, write_csv):
     sid = _case(store, write_csv)
     _tag(store, sid, [1, 2, 3], "TA")
@@ -362,3 +425,533 @@ def test_clearing_drops_undo_entries_that_would_resurrect_tags(store, write_csv)
     store.start_new_session(save_as="before")
     assert not store._undo
     assert store.db.execute("SELECT COUNT(*) FROM row_tags").fetchone()[0] == 0
+
+
+def test_a_tag_written_while_a_new_session_starts_is_saved_or_kept(store, write_csv, monkeypatch):
+    """Save-then-clear ran as two holds of the writer lock. A tag written
+    in between (a watchlist auto-tag, a second window) landed after the
+    snapshot and before the DELETE: in neither the saved session nor the
+    live state. Driven deterministically: the competing write runs the
+    moment the session write lets go of the lock, which is exactly that
+    gap when there is one."""
+    import threading
+
+    sid = _case(store, write_csv)
+    tag = _tag(store, sid, [1], "TA")
+    inner = store.lock
+    pending = []
+
+    class _RunOnRelease:
+        def acquire(self, *a, **k):
+            return inner.acquire(*a, **k)
+
+        def release(self):
+            inner.release()
+            if pending and not inner._is_owned():
+                t = threading.Thread(target=pending.pop())
+                t.start()
+                t.join()
+
+        def __enter__(self):
+            inner.acquire()
+            return self
+
+        def __exit__(self, *exc):
+            self.release()
+
+    store.lock = _RunOnRelease()
+    write = store._write_session
+
+    def writing(*a, **k):
+        pending.append(lambda: store.set_tags(sid, [3], tag, True))
+        return write(*a, **k)
+
+    monkeypatch.setattr(store, "_write_session", writing)
+    store.start_new_session(save_as="pass one")
+
+    saved = {(s["source"]["name"], t["rid"]) for s in store.get_session("pass one")["sources"]
+             for t in s.get("row_tags") or []}
+    live = {r[0] for r in store.db.execute("SELECT rid FROM row_tags WHERE source_id=?", (sid,))}
+    assert not pending                                   # the competing write did run
+    assert ("evidence.csv", 3) in saved or 3 in live     # and was not lost
+
+
+def test_loading_with_replace_clears_tables_the_snapshot_never_saw(store, write_csv):
+    """The Load dialog says "This replaces the tags and notes currently in
+    the case". A table imported after the snapshot was taken is not in it,
+    and its second-pass tags and notes used to survive the load — the case
+    then held neither the session nor the live state, but a mix, and a diff
+    against the session afterwards reported it as clean."""
+    a = _case(store, write_csv, "a.csv")
+    ta = _tag(store, a, [1], "TA")
+    store.save_session("first pass")
+    store.start_new_session()
+
+    b = store.ingest_csv(write_csv([["u"], ["3"], ["4"]], "b.csv"), name="b.csv",
+                         build_fts=False)["id"]
+    store.set_tags(b, [1, 2], ta, True)
+    store.set_note(b, 1, "second-pass note")
+
+    store.load_session("first pass", merge=False)
+
+    rows = {(r["source_id"], r["rid"]) for r in store.db.execute(
+        "SELECT source_id, rid FROM row_tags")}
+    assert rows == {(a, 1)}
+    assert store.db.execute("SELECT COUNT(*) FROM row_notes").fetchone()[0] == 0
+    assert store.diff_sessions("first pass", store.LIVE_SESSION)["counts"] == {
+        "added": 0, "removed": 0, "changed": 0, "note_changes": 0}
+
+
+def test_merge_load_still_leaves_tables_the_snapshot_never_saw(store, write_csv):
+    """The other half: merge adds to the live state, so a table outside the
+    snapshot keeps what it has."""
+    a = _case(store, write_csv, "a.csv")
+    ta = _tag(store, a, [1], "TA")
+    store.save_session("first pass")
+    b = store.ingest_csv(write_csv([["u"], ["3"], ["4"]], "b.csv"), name="b.csv",
+                         build_fts=False)["id"]
+    store.set_tags(b, [2], ta, True)
+
+    store.load_session("first pass", merge=True)
+
+    rows = {(r["source_id"], r["rid"]) for r in store.db.execute(
+        "SELECT source_id, rid FROM row_tags")}
+    assert rows == {(a, 1), (b, 2)}
+
+
+def test_loading_a_session_again_does_not_duplicate_its_saved_views(store, write_csv):
+    """Every load used to append the session's saved views again, so one
+    view became two after a save/load cycle and 16 after four — loading a
+    snapshot has to be idempotent for the parts of it that are not tags."""
+    sid = _case(store, write_csv)
+    store.save_view(sid, "my filter", {"filters": [{"col": "User", "op": "equals", "value": "bob"}]})
+    store.save_view(sid, "same name, other spec", {"filters": []})
+    for _ in range(3):
+        store.save_session("pass")
+        store.load_session("pass", merge=False)
+        store.load_session("pass", merge=True)
+
+    views = store.list_saved_views(sid)
+    assert sorted(v["name"] for v in views) == ["my filter", "same name, other spec"]
+
+
+def test_a_received_view_with_a_name_already_taken_is_kept_beside_it(store, write_csv):
+    """Skipping only exact duplicates: a session view that shares a name
+    with a local one but describes a different filter is someone's work,
+    and is added rather than dropped or written over the local one."""
+    sid = _case(store, write_csv)
+    store.save_view(sid, "suspects", {"filters": [{"col": "User", "op": "equals", "value": "bob"}]})
+    data = store.export_case_session()
+    data["sources"][0]["saved_views"] = [
+        {"name": "suspects", "payload": {"filters": [{"col": "User", "op": "equals", "value": "eve"}]}}]
+
+    store.import_case_session(data, merge=True)
+    store.import_case_session(data, merge=True)
+
+    values = sorted(v["payload"]["filters"][0]["value"] for v in store.list_saved_views(sid))
+    assert values == ["bob", "eve"]
+
+
+# ------------------------------------------- tables that share one file hash
+#
+# The hash is the file's, so every table imported out of one SQLite
+# database (a browser History: urls and visits), every sheet of one
+# workbook, and a file imported twice all carry the same one. Matching
+# on the hash alone mapped all of them onto one live table: "replace" lost
+# the first table's tags while reporting both restored, "merge" put them
+# on the other table's rows, and the diff collapsed the two tables into
+# one and reported nothing while different rows were tagged.
+
+def _history(tmp_path, name="History.db"):
+    import sqlite3
+    db = tmp_path / name
+    c = sqlite3.connect(db)
+    c.execute("CREATE TABLE urls (id INTEGER, url TEXT)")
+    c.executemany("INSERT INTO urls VALUES (?, ?)", [(i, f"http://u{i}.test") for i in range(5)])
+    c.execute("CREATE TABLE visits (id INTEGER, url_id INTEGER, at TEXT)")
+    c.executemany("INSERT INTO visits VALUES (?, ?, ?)", [(i, i, "t") for i in range(5)])
+    c.commit()
+    c.close()
+    return str(db)
+
+
+def _tagged(store, sid):
+    return sorted(r[0] for r in store.db.execute(
+        "SELECT rid FROM row_tags WHERE source_id=?", (sid,)))
+
+
+def _two_tables(store, tmp_path):
+    db = _history(tmp_path)
+    urls = store.ingest_sqlite_table(db, "urls", build_fts=False)["id"]
+    visits = store.ingest_sqlite_table(db, "visits", build_fts=False)["id"]
+    assert store.get_source(urls)["file_hash"] == store.get_source(visits)["file_hash"]
+    return urls, visits
+
+
+@pytest.mark.parametrize("merge", [False, True])
+def test_loading_puts_each_tables_tags_back_on_that_table(store, tmp_path, merge):
+    urls, visits = _two_tables(store, tmp_path)
+    _tag(store, urls, [1, 2], "TA")
+    _tag(store, visits, [5], "TA")
+    store.save_session("pass1")
+    store.start_new_session()
+
+    res = store.load_session("pass1", merge=merge)
+    assert (_tagged(store, urls), _tagged(store, visits)) == ([1, 2], [5])
+    assert res["sources_restored"] == 2 and res["warnings"] == []
+
+
+def test_the_diff_keeps_two_tables_from_one_file_apart(store, tmp_path):
+    urls, visits = _two_tables(store, tmp_path)
+    _tag(store, urls, [1, 2], "TA")
+    store.save_session("pass1")
+    assert store.diff_sessions("pass1", store.LIVE_SESSION)["counts"]["added"] == 0
+    # The same rids tagged, but on the OTHER table: a real difference.
+    store.start_new_session()
+    _tag(store, visits, [1, 2], "TA")
+
+    d = store.diff_sessions("pass1", store.LIVE_SESSION)
+    assert d["counts"] == {"added": 2, "removed": 2, "changed": 0, "note_changes": 0}
+    assert {(r["source_id"], r["rid"]) for r in d["removed"]} == {(urls, 1), (urls, 2)}
+    assert {(r["source_id"], r["rid"]) for r in d["added"]} == {(visits, 1), (visits, 2)}
+    assert not d["only_left_sources"] and not d["only_right_sources"]
+
+
+def test_sheets_of_one_workbook_get_their_own_tags(store, tmp_path):
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    a = wb.active
+    a.title = "Logons"
+    for r in ROWS:
+        a.append(r)
+    b = wb.create_sheet("Processes")
+    for r in [["Image"], ["a.exe"], ["b.exe"], ["c.exe"]]:
+        b.append(r)
+    path = str(tmp_path / "triage.xlsx")
+    wb.save(path)
+    logons = store.ingest_xlsx_sheet(path, "Logons", build_fts=False)["id"]
+    procs = store.ingest_xlsx_sheet(path, "Processes", build_fts=False)["id"]
+    _tag(store, logons, [1], "TA")
+    _tag(store, procs, [3], "TA")
+    store.save_session("pass1")
+    store.start_new_session()
+
+    store.load_session("pass1", merge=False)
+    assert (_tagged(store, logons), _tagged(store, procs)) == ([1], [3])
+    assert store.diff_sessions("pass1", store.LIVE_SESSION)["counts"] == {
+        "added": 0, "removed": 0, "changed": 0, "note_changes": 0}
+
+
+def test_a_file_imported_twice_keeps_each_copys_tags(store, write_csv):
+    """Two copies indistinguishable by anything a session records: the
+    session lists them in import order, and so does the case, so the
+    restore pairs them that way."""
+    first = _case(store, write_csv)
+    second = _case(store, write_csv)
+    _tag(store, first, [1], "TA")
+    _tag(store, second, [4], "TA")
+    store.save_session("pass1")
+    store.start_new_session()
+
+    res = store.load_session("pass1", merge=False)
+    assert (_tagged(store, first), _tagged(store, second)) == ([1], [4])
+    assert res["sources_restored"] == 2
+
+
+def test_a_qc_case_that_named_the_tables_differently_still_matches(store, tmp_path):
+    """Cross-case is the point of a session (invariant #10): the
+    reviewer imported the same History with their own table names, so
+    name cannot be required — the shape tells the two tables apart."""
+    from winnow.store import Store
+
+    urls, visits = _two_tables(store, tmp_path)
+    _tag(store, urls, [2], "TA")
+    _tag(store, visits, [3], "TA")
+    theirs = store.export_case_session()
+
+    other = Store(str(tmp_path / "reviewer.db"))
+    try:
+        db = _history(tmp_path, "copy-of-History.db")
+        ov = other.ingest_sqlite_table(db, "visits", name="visits (DC01)", build_fts=False)["id"]
+        ou = other.ingest_sqlite_table(db, "urls", name="urls (DC01)", build_fts=False)["id"]
+        other.adopt_session("analyst", theirs)
+        res = other.load_session("analyst", merge=True)
+        assert (_tagged(other, ou), _tagged(other, ov)) == ([2], [3])
+        assert res["warnings"] == []
+        d = other.diff_sessions("analyst", other.LIVE_SESSION)
+        assert d["counts"] == {"added": 0, "removed": 0, "changed": 0, "note_changes": 0}
+        assert len(d["shared_sources"]) == 2
+    finally:
+        other.close()
+
+
+def test_a_table_this_case_does_not_have_is_skipped_not_put_on_its_sibling(store, tmp_path):
+    """The case holds urls but not visits. visits' tags have nowhere to
+    go, and the only other table from that file is not a stand-in."""
+    from winnow.store import Store
+
+    urls, visits = _two_tables(store, tmp_path)
+    _tag(store, urls, [1], "TA")
+    _tag(store, visits, [4], "TA")
+    theirs = store.export_case_session()
+
+    other = Store(str(tmp_path / "partial.db"))
+    try:
+        ou = other.ingest_sqlite_table(_history(tmp_path, "h2.db"), "urls", build_fts=False)["id"]
+        other.adopt_session("analyst", theirs)
+        res = other.load_session("analyst", merge=False)
+        assert _tagged(other, ou) == [1]
+        assert res["sources_restored"] == 1 and res["sources_reimported"] == 0
+        assert any("visits" in w for w in res["warnings"]), res["warnings"]
+        assert [s["name"] for s in other.list_sources()] == ["h2.urls"], \
+            "nothing was re-imported to stand in for the missing table"
+    finally:
+        other.close()
+
+
+def test_two_identical_copies_against_one_entry_is_refused_not_guessed(store, write_csv):
+    """The session knew one copy of the file; this case has two that
+    nothing tells apart. Which one the tags belong on is a guess, and a
+    silent wrong guess is the failure this exists to prevent."""
+    sid = _case(store, write_csv)
+    _tag(store, sid, [2], "TA")
+    store.save_session("one copy")
+    store.start_new_session()
+    dup = _case(store, write_csv)
+
+    res = store.load_session("one copy", merge=True)
+    assert (_tagged(store, sid), _tagged(store, dup)) == ([], [])
+    assert res["sources_restored"] == 0
+    assert res["warnings"] and "evidence.csv" in res["warnings"][0]
+
+
+def test_a_replace_that_cannot_tell_the_copies_apart_leaves_both_alone(store, write_csv):
+    """Replace clears the case, but not the tables a skipped source may be:
+    with two indistinguishable copies, either could hold the rows the
+    session meant, and wiping the tags both have would lose work without
+    putting the session's in their place."""
+    sid = _case(store, write_csv)
+    _tag(store, sid, [2], "TA")
+    store.save_session("one copy")
+    store.start_new_session()
+    dup = _case(store, write_csv)
+    _tag(store, sid, [1], "TB")
+    _tag(store, dup, [3], "TB")
+
+    res = store.load_session("one copy", merge=False)
+    assert (_tagged(store, sid), _tagged(store, dup)) == ([1], [3])
+    assert res["sources_restored"] == 0
+    assert any("as they were" in w for w in res["warnings"])
+
+
+# ------------------------------------------------- tables made inside Winnow
+#
+# A table saved from the SQL pane ("Save as table…") or written by a plugin
+# with no file behind it (first_last's output) had no file hash. Matching
+# requires one, so a load skipped those tables — and a replacing load
+# clears every table first, so even a session saved a second earlier lost
+# their tags and notes, with a warning that the table "isn't open". They
+# now carry an identity of their own (made:<random>): it matches the table
+# and its copies, and nothing another case made the same way.
+
+ZERO = {"added": 0, "removed": 0, "changed": 0, "note_changes": 0}
+
+
+def _sql_table(store, sid, name="hits"):
+    return store.sql_to_table(f"SELECT Host, User FROM src_{sid} ORDER BY rid", name)["source"]["id"]
+
+
+def _plugin_table(store, name="First/Last"):
+    # What a plugin tab writes back (first_last): computed rows, no file.
+    return store.ingest_rows(["Host", "First"], [["h1", "t1"], ["h2", "t2"], ["h3", "t3"]],
+                             name=name, build_fts=False)["id"]
+
+
+def _note(store, sid, rid):
+    row = store.db.execute("SELECT note FROM row_notes WHERE source_id=? AND rid=?", (sid, rid)).fetchone()
+    return row[0] if row else None
+
+
+def test_reloading_the_session_just_saved_keeps_a_sql_saved_tables_tags(store, write_csv):
+    """The report, as it happened: save, load straight back with replace,
+    and the SQL-saved table's tags were gone."""
+    sid = _case(store, write_csv)
+    hits = _sql_table(store, sid)
+    _tag(store, hits, [1, 4], "TA")
+    store.set_note(hits, 4, "pivot host")
+    store.save_session("now")
+
+    res = store.load_session("now", merge=False)
+    assert _tagged(store, hits) == [1, 4] and _note(store, hits, 4) == "pivot host"
+    assert res["warnings"] == [] and res["sources_restored"] == 2
+
+
+@pytest.mark.parametrize("merge", [False, True])
+def test_a_table_saved_from_the_sql_pane_gets_its_tags_back(store, write_csv, merge):
+    sid = _case(store, write_csv)
+    hits = _sql_table(store, sid)
+    _tag(store, sid, [1], "TA")
+    _tag(store, hits, [2, 3], "TA")
+    store.set_note(hits, 3, "lateral hop")
+    store.save_session("pass1")
+    store.start_new_session()
+
+    res = store.load_session("pass1", merge=merge)
+    assert (_tagged(store, sid), _tagged(store, hits)) == ([1], [2, 3])
+    assert _note(store, hits, 3) == "lateral hop"
+    assert res["warnings"] == [] and res["sources_restored"] == 2
+    assert store.diff_sessions("pass1", store.LIVE_SESSION)["counts"] == ZERO
+
+
+@pytest.mark.parametrize("merge", [False, True])
+def test_a_table_a_plugin_made_gets_its_tags_back(store, write_csv, merge):
+    fl = _plugin_table(store)
+    _tag(store, fl, [1, 3], "TA")
+    store.set_note(fl, 1, "first logon")
+    store.save_session("pass1")
+    store.start_new_session()
+
+    res = store.load_session("pass1", merge=merge)
+    assert _tagged(store, fl) == [1, 3] and _note(store, fl, 1) == "first logon"
+    assert res["warnings"] == []
+    # and a difference found by the diff opens on that table
+    _tag(store, fl, [2], "TA")
+    d = store.diff_sessions("pass1", store.LIVE_SESSION)
+    assert [(r["source_id"], r["rid"]) for r in d["added"]] == [(fl, 2)]
+
+
+def test_tags_put_on_a_made_table_through_a_merge_come_back(store, write_csv):
+    """A merge's tags live on its members, so a member made inside Winnow
+    is restored through its own identity like any other."""
+    sid = _case(store, write_csv)
+    hits = _sql_table(store, sid)                       # same columns: the two merge
+    mid = store.create_merge("both", [sid, hits])["id"]
+    v = store.build_view(mid, {"source_id": mid, "filters": [], "sort": [],
+                               "filter_tree": {"type": "cond", "column": "User", "op": "equals",
+                                               "value": "bob"}})
+    store.tag_view(v["view_id"], store.upsert_tag(None, "TA", "#ff0000", None)["id"], True)
+    assert (_tagged(store, sid), _tagged(store, hits)) == ([2], [2])
+    store.save_session("pass1")
+    store.start_new_session()
+
+    res = store.load_session("pass1", merge=False)
+    assert (_tagged(store, sid), _tagged(store, hits)) == ([2], [2])
+    assert res["warnings"] == []
+
+
+def test_a_table_made_the_same_way_in_another_case_is_not_this_one(store, write_csv, tmp_path):
+    """Two analysts run the same query over the same evidence: two tables
+    with the same name, columns and rows, and still two tables — nothing
+    says the rows came out in the same order, or that the query was the
+    same. A session from one never tags the other; a COPY of the table
+    (copy_sources_to keeps its identity) is the table, as a file's is."""
+    from winnow.store import Store
+
+    sid = _case(store, write_csv)
+    hits = _sql_table(store, sid)
+    _tag(store, hits, [1], "TA")
+    theirs = store.export_case_session()
+
+    other = Store(str(tmp_path / "reviewer.db"))
+    try:
+        ohits = _sql_table(other, _case(other, write_csv))
+        _tag(other, ohits, [4], "TB")
+        other.adopt_session("analyst", theirs)
+        res = other.load_session("analyst", merge=True)
+        assert _tagged(other, ohits) == [4]
+        said = [w for w in res["warnings"] if "hits" in w]
+        assert len(said) == 1 and "different table" in said[0] and "isn't open" not in said[0], said
+        d = other.diff_sessions("analyst", other.LIVE_SESSION)
+        assert [(r["source_id"], r["rid"]) for r in d["removed"]] == [(None, 1)], \
+            "the analyst's hits is not this case's to open"
+    finally:
+        other.close()
+
+    target = Store(str(tmp_path / "copy.db"))
+    tp = target.path
+    target.close()
+    store.copy_sources_to(tp, [sid, hits])
+    t = Store(tp)
+    try:
+        copy = next(s["id"] for s in t.list_sources() if s["name"] == "hits")
+        t.start_new_session()          # the copy brought its tags; the load has to put them back
+        t.adopt_session("analyst", theirs)
+        res = t.load_session("analyst", merge=False)
+        assert _tagged(t, copy) == [1] and res["warnings"] == []
+    finally:
+        t.close()
+
+
+def test_a_session_from_before_made_tables_had_an_identity_never_costs_their_tags(store, write_csv):
+    """A session saved before the fix recorded no hash for a made table,
+    and nothing it holds proves which table here it was — a same-named one
+    may have been made over again since. So its tags for it are not
+    applied, and a replace leaves what that table has alone instead of
+    clearing it for nothing; the rest of the session loads as usual."""
+    sid = _case(store, write_csv)
+    hits = _sql_table(store, sid)
+    fl = _plugin_table(store)
+    _tag(store, sid, [2], "TA")
+    _tag(store, hits, [1], "TA")
+    old = store.export_case_session()
+    for e in old["sources"]:
+        if e["source"]["name"] in ("hits", "First/Last"):
+            e["source"]["file_hash"] = None             # what it recorded before the fix
+    store._write_session("before", old, origin="saved")
+    store.start_new_session()
+    _tag(store, sid, [3], "TB")
+    _tag(store, hits, [4], "TB")
+    store.set_note(hits, 4, "second pass")
+    _tag(store, fl, [2], "TB")
+
+    res = store.load_session("before", merge=False)
+    assert _tagged(store, sid) == [2]                   # replaced, as the Load dialog says
+    assert (_tagged(store, hits), _tagged(store, fl)) == ([4], [2])
+    assert _note(store, hits, 4) == "second pass"
+    assert any("hits" in w and "same table" in w for w in res["warnings"]), res["warnings"]
+    assert any("'hits'" in w and "'First/Last'" in w and "as they were" in w for w in res["warnings"])
+    assert not any("isn't open" in w for w in res["warnings"])
+    # The diff agrees with the load: the old record does not open on this table.
+    d = store.diff_sessions("before", store.LIVE_SESSION)
+    assert [(r["source"], r["source_id"], r["rid"]) for r in d["removed"] if r["source"] == "hits"] \
+        == [("hits", None, 1)]
+
+
+def test_an_older_case_gives_its_made_tables_an_identity_on_open(tmp_path, write_csv):
+    """A case from before keeps NULL hashes for the tables it made. The
+    first open gives each its own identity — once, so a session saved
+    afterwards still matches on every later open — and leaves a file's
+    fingerprint alone."""
+    import sqlite3
+
+    from winnow.store import Store
+
+    path = str(tmp_path / "older.db")
+    s = Store(path)
+    sid = _case(s, write_csv)
+    hits, fl = _sql_table(s, sid), _plugin_table(s)
+    fingerprint = s.get_source(sid)["file_hash"]
+    s.close()
+    con = sqlite3.connect(path)
+    con.execute("UPDATE sources SET file_hash=NULL WHERE id IN (?,?)", (hits, fl))
+    con.commit()
+    con.close()
+
+    s = Store(path)
+    try:
+        h = {x["id"]: x["file_hash"] for x in s.list_sources()}
+        assert h[sid] == fingerprint
+        assert h[hits].startswith("made:") and h[fl].startswith("made:") and h[hits] != h[fl]
+        _tag(s, hits, [2], "TA")
+        s.save_session("after")
+    finally:
+        s.close()
+    s = Store(path)
+    try:
+        assert s.get_source(hits)["file_hash"] == h[hits]
+        s.start_new_session()
+        res = s.load_session("after", merge=False)
+        assert _tagged(s, hits) == [2] and res["warnings"] == []
+    finally:
+        s.close()

@@ -30,6 +30,19 @@ def test_unix_epoch_auto_ranges_by_plausible_year():
     assert parse("unix_epoch", "1700000000000000000") == "2023-11-14 22:13:20.000000"
 
 
+def test_integer_epochs_convert_exactly():
+    """A float carries ~16 significant digits; a nanosecond epoch has 19
+    and a WebKit value 17. Dividing as floats put the result up to a
+    microsecond off either way, and a nanosecond value at the very end of
+    the window rounded into 2101 and was refused outright."""
+    assert parse("unix_epoch", "1700000000123456789") == "2023-11-14 22:13:20.123456"
+    assert parse("unix_epoch", "1700000000123456999", {"unit": "ns"}) == "2023-11-14 22:13:20.123456"
+    assert parse("unix_epoch", "4133980799999999999") == "2100-12-31 23:59:59.999999"
+    assert parse("webkit_epoch", "13348668000123457") == "2024-01-02 11:20:00.123457"
+    assert parse("unix_epoch", "1700000000.5") == "2023-11-14 22:13:20.500000"   # a fraction stays float
+    assert parse("unix_epoch", "9" * 40) is None                                # and so does anything absurd
+
+
 def test_unix_epoch_rejects_out_of_window_and_garbage():
     assert parse("unix_epoch", "620000000") is None  # 1989 — below the 1990 floor
     assert parse("unix_epoch", "-1700000000") is None
@@ -174,6 +187,18 @@ def test_mac_absolute_overlaps_unix_seconds():
     assert parse("unix_epoch", "700000000") == "1992-03-07 20:26:40"
 
 
+def test_mac_absolute_reads_dates_before_2001():
+    """Negative Cocoa time is before 2001 and inside the 1990 floor — a
+    1990s date in a plist or Photos store. It was refused outright. Zero
+    (the unset default) still is, and detection still scores negatives as
+    misses, so a column of -1 sentinels is not offered as Mac time."""
+    assert parse("mac_absolute", "-100000000") == "1997-10-31 14:13:20"
+    assert parse("mac_absolute", "-1.5") == "2000-12-31 23:59:58.500000"
+    assert parse("mac_absolute", "0") is None
+    assert parse("mac_absolute", "-400000000") is None          # 1988 — below the window
+    assert not [r for r in timeparse.detect(["-1", "-1", "-5"]) if r["op_id"] == "mac_absolute"]
+
+
 def test_excel_serial():
     assert parse("excel_serial", "45296") == "2024-01-05 00:00:00"
     assert parse("excel_serial", "45296.5") == "2024-01-05 12:00:00"
@@ -196,6 +221,69 @@ def test_apache_clf():
 def test_rfc2822():
     assert parse("rfc2822", "Mon, 02 Jan 2006 15:04:05 -0700") == "2006-01-02 22:04:05"
     assert parse("rfc2822", "garbage") is None
+
+
+def test_rfc2822_obsolete_years_follow_the_rfc():
+    """RFC 5322 §4.3: a two-digit year is 19xx from 50 up and 20xx below;
+    three digits are 1900 + n. email.utils splits at 68 and keeps three
+    digits as written, so "55" read as 2055 — plausible, and wrong — and
+    "124" as year 124, refused."""
+    assert parse("rfc2822", "Wed, 02 Jan 124 15:04:05 GMT") == "2024-01-02 15:04:05"
+    assert parse("rfc2822", "Mon, 02 Jan 55 15:04:05 +0000") is None    # 1955, below the window
+    assert parse("rfc2822", "Mon, 02 Jan 95 15:04:05 +0000") == "1995-01-02 15:04:05"
+    assert parse("rfc2822", "Mon, 02 Jan 06 15:04:05 -0700") == "2006-01-02 22:04:05"
+    assert parse("rfc2822", "02 Jan 06 15:04 GMT") == "2006-01-02 15:04:00"
+
+
+def test_rfc2822_zones_the_rfc_defines_are_converted():
+    assert parse("rfc2822", "Mon, 02 Jan 2006 15:04:05 GMT") == "2006-01-02 15:04:05"
+    assert parse("rfc2822", "Mon, 02 Jan 2006 15:04:05 UT") == "2006-01-02 15:04:05"
+    assert parse("rfc2822", "Mon, 02 Jan 2006 15:04:05 UTC") == "2006-01-02 15:04:05"
+    assert parse("rfc2822", "Mon, 02 Jan 2006 15:04:05 Z") == "2006-01-02 15:04:05"
+    assert parse("rfc2822", "Mon, 02 Jan 2006 15:04:05 EST") == "2006-01-02 20:04:05"
+    assert parse("rfc2822", "Mon, 02 Jan 2006 15:04:05 EDT") == "2006-01-02 19:04:05"
+    assert parse("rfc2822", "Mon, 02 Jan 2006 15:04:05 CST") == "2006-01-02 21:04:05"
+    assert parse("rfc2822", "Mon, 02 Jan 2006 15:04:05 CDT") == "2006-01-02 20:04:05"
+    assert parse("rfc2822", "Mon, 02 Jan 2006 15:04:05 MST") == "2006-01-02 22:04:05"
+    assert parse("rfc2822", "Mon, 02 Jan 2006 15:04:05 MDT") == "2006-01-02 21:04:05"
+    assert parse("rfc2822", "Mon, 02 Jan 2006 15:04:05 PST") == "2006-01-02 23:04:05"
+    assert parse("rfc2822", "Mon, 02 Jan 2006 15:04:05 PDT") == "2006-01-02 22:04:05"
+    assert parse("rfc2822", "Mon, 02 Jan 2006 15:04:05 +0530") == "2006-01-02 09:34:05"
+    assert parse("rfc2822", "Mon, 02 Jan 2006 15:04:05 +0000") == "2006-01-02 15:04:05"
+    # A comment after the zone is a comment; the zone still counts.
+    assert parse("rfc2822", "Mon, 02 Jan 2006 15:04:05 -0800 (PST)") == "2006-01-02 23:04:05"
+    # A zone written with the offset as an explicit param beside it: the
+    # value's own zone wins, as everywhere else.
+    assert parse("rfc2822", "Mon, 02 Jan 2006 15:04:05 EST", {"utc_offset": "+02:00"}) == "2006-01-02 20:04:05"
+
+
+def test_rfc2822_zone_it_does_not_know_is_a_failure_not_utc():
+    """"15:04:05 CET" came out 15:04:05 — the wall-clock time read as UTC,
+    an hour off, counted as a success — while "15:04:05 EST" was
+    converted. A zone that cannot be applied is a value that does not
+    parse: NULL, and counted, so it shows under "unparsed rows"."""
+    for zone in ("CET", "CEST", "IST", "BST", "JST", "AEST", "cet", "Europe/Berlin",
+                 "AST", "ADT",          # Atlantic, or Arabia (+03:00) — can't tell
+                 "A", "M", "N", "Y",    # military letters: RFC 822 had their signs backwards
+                 "+01:00x", "+05", "+1500", "+0560", "(PDT)"):
+        assert parse("rfc2822", f"Mon, 02 Jan 2006 15:04:05 {zone}") is None, zone
+        assert parse("rfc2822", f"Mon, 02 Jan 2006 15:04:05 {zone}", {"utc_offset": "+01:00"}) is None, zone
+    # date(1)'s layout puts the zone before the year — same rule there.
+    assert parse("rfc2822", "Mon Jan  2 15:04:05 CET 2006") is None
+    assert parse("rfc2822", "Mon Jan  2 15:04:05 UTC 2006") == "2006-01-02 15:04:05"
+    assert parse("rfc2822", "Mon Jan  2 15:04:05 PST 2006") == "2006-01-02 23:04:05"
+
+
+def test_rfc2822_no_zone_is_local_time_and_minus_zero_is_utc():
+    """No zone at all is naive local time — kept as written, or shifted by
+    the analyst's fixed offset. "-0000" is not that: RFC 5322 §3.3 says
+    the time IS in UT and only the sender's own zone is unknown, so the
+    offset param (for values that carry no zone) must not move it."""
+    assert parse("rfc2822", "Mon, 02 Jan 2006 15:04:05") == "2006-01-02 15:04:05"
+    assert parse("rfc2822", "Mon, 02 Jan 2006 15:04:05", {"utc_offset": "+02:00"}) == "2006-01-02 13:04:05"
+    assert parse("rfc2822", "Mon Jan  2 15:04:05 2006", {"utc_offset": "-01:00"}) == "2006-01-02 16:04:05"
+    assert parse("rfc2822", "Mon, 02 Jan 2006 15:04:05 -0000") == "2006-01-02 15:04:05"
+    assert parse("rfc2822", "Mon, 02 Jan 2006 15:04:05 -0000", {"utc_offset": "+02:00"}) == "2006-01-02 15:04:05"
 
 
 def test_us_datetime_ampm_rules():
@@ -277,6 +365,8 @@ def test_every_output_matches_the_shapes_store_already_recognizes():
         parse("excel_serial", "45296.5"),
         parse("apache_clf", "10/Oct/2000:13:55:36 -0700"),
         parse("rfc2822", "Mon, 02 Jan 2006 15:04:05 -0700"),
+        parse("rfc2822", "Mon, 02 Jan 2006 15:04:05 EST"),
+        parse("rfc2822", "Mon, 02 Jan 2006 15:04:05 -0000"),
         parse("us_datetime", "1/5/2024 1:22:01 PM"),
         parse("compact_ymd", "20240105132201"),
     ]
@@ -285,6 +375,26 @@ def test_every_output_matches_the_shapes_store_already_recognizes():
         assert _TS_ISO_RE.match(out), out
         assert _ts_normalize(out) == out[:19], out
         assert _day_bucket(out) == out[:10], out
+
+
+
+def test_a_year_below_1000_keeps_four_digits():
+    """strftime's %Y on glibc drops the zero padding below year 1000, so
+    a string op holding "0999-…" wrote "999-06-01 00:00:00": not a shape
+    the store recognises, and as text it sorted after every 2024 date."""
+    outs = [
+        parse("iso8601", "0999-06-01T00:00:00"),
+        parse("dd_mmm_yyyy", "05 Jan 0999 13:22:01"),
+        parse("apache_clf", "05/Jan/0999:13:22:01"),
+        parse("us_datetime", "1/5/0999 1:22 PM"),
+        parse("iso8601", "0001-01-01T00:00:00.5"),
+    ]
+    assert outs == ["0999-06-01 00:00:00", "0999-01-05 13:22:01", "0999-01-05 13:22:01",
+                    "0999-01-05 13:22:00", "0001-01-01 00:00:00.500000"]
+    for out in outs:
+        assert _TS_ISO_RE.match(out), out
+        assert _ts_normalize(out) == out[:19], out
+        assert out < "2024-01-01 00:00:00"
 
 
 # ------------------------------------------ month-name native recognition
@@ -332,3 +442,189 @@ def test_detecting_a_column_of_infinities_suggests_nothing_rather_than_raising()
     over the samples, so one unguarded conversion took the whole request
     down with an OverflowError."""
     assert timeparse.detect(["inf", "nan", "1e400", "inf"]) == []
+
+
+# ------------------------------------------- 12-hour times and trailing zones
+
+@pytest.mark.parametrize("value", [
+    "1/5/2024 1:22:01.123 PM", "1/5/2024 1:22:01.1234567 PM", "1/5/2024 1:22:01 Pm",
+    "1/5/2024 1:22:01 p.m.", "1/5/2024 1:22:01 P.M.", "1/5/2024 1:22:01pm",
+])
+def test_an_afternoon_is_an_afternoon_however_it_is_written(value):
+    """The AM/PM group followed the seconds directly, so a fraction in
+    between — or "Pm", or "p.m." — left it unmatched and the time read as
+    morning: 12 hours early, in the derived column and in the Timeline's
+    and timeframe filter's TS_NORMALIZE alike."""
+    assert parse("us_datetime", value) == "2024-01-05 13:22:01"
+    assert _ts_normalize(value) == "2024-01-05 13:22:01"
+    assert _day_bucket(value) == "2024-01-05"
+    assert timeparse.parse_datetime_lenient(value).hour == 13
+
+
+def test_twelve_hour_edges_and_words_that_only_start_like_one():
+    assert parse("us_datetime", "1/5/2024 12:30:00 a.m.") == "2024-01-05 00:30:00"
+    assert parse("us_datetime", "1/5/2024 12:30:00.5 PM") == "2024-01-05 12:30:00"
+    assert _ts_normalize("June 23, 2026 5:11:00.250 p.m.") == "2026-06-23 17:11:00"
+    # "Am…" is a word, not a meridiem.
+    assert _ts_normalize("1/5/2024 1:22:01 Amsterdam") == "2024-01-05 01:22:01"
+
+
+@pytest.mark.parametrize("value, want", [
+    ("2024-01-05 13:22:01+05", "2024-01-05 08:22:01"),                  # PostgreSQL text
+    ("2024-01-05 13:22:01.123+05", "2024-01-05 08:22:01.123000"),
+    ("2024-01-05T13:22:01.1234567890+05:00", "2024-01-05 08:22:01.123456"),
+    ("2024-01-05T13:22:01−05:00", "2024-01-05 18:22:01"),         # U+2212 minus
+    ("2024-01-05T13:22:01 UTC", "2024-01-05 13:22:01"),
+    ("2024-01-05 13:22:01 GMT+02:00", "2024-01-05 11:22:01"),
+    ("2024-01-05T13:22:01+01:00[Europe/Paris]", "2024-01-05 12:22:01"),
+    ("2024-01-05 13:22:01 INFO service started", "2024-01-05 13:22:01"),  # not a zone: kept
+])
+def test_iso_offsets_it_can_apply(value, want):
+    assert parse("iso8601", value) == want
+    # An explicit zone beats the analyst's fixed offset, as Z/±HH:MM always did.
+    if "INFO" not in value:
+        assert parse("iso8601", value, {"utc_offset": "+09:00"}) == want
+
+
+@pytest.mark.parametrize("op, value", [
+    ("iso8601", "2024-01-05T13:22:01 EST"),
+    ("iso8601", "2024-01-05T13:22:01 America/New_York"),
+    ("iso8601", "2024-01-05T13:22:01+25:00"),
+    ("iso8601", "2024-01-05T13:22:01+5:3"),
+    ("dd_mmm_yyyy", "05 Jan 2024 13:22:01 PST"),
+    ("us_datetime", "1/5/2024 1:22:01 PM CEST"),
+])
+def test_a_zone_it_cannot_apply_is_refused_not_dropped(op, value):
+    """Dropping it read the wall-clock time as if it were already UTC (or
+    whatever the analyst's fixed offset says) — hours off, and nothing in
+    the column says so. A parse failure is counted and shown."""
+    assert parse(op, value) is None
+
+
+@pytest.mark.parametrize("op, value, want", [
+    ("dd_mmm_yyyy", "05 Jan 2024 13:22:01 +0200", "2024-01-05 11:22:01"),
+    ("dd_mmm_yyyy", "05 Jan 2024 13:22:01.123 -05:00", "2024-01-05 18:22:01"),
+    ("dd_mmm_yyyy", "05 Jan 2024 13:22:01 GMT", "2024-01-05 13:22:01"),
+    ("us_datetime", "1/5/2024 1:22:01 PM +02:00", "2024-01-05 11:22:01"),
+    ("us_datetime", "1/5/2024 13:22:01 -0500", "2024-01-05 18:22:01"),
+    ("us_datetime", "1/5/2024 1:22:01 PM UTC", "2024-01-05 13:22:01"),
+])
+def test_dd_mmm_and_us_apply_a_trailing_offset(op, value, want):
+    assert parse(op, value) == want
+    assert parse(op, value, {"utc_offset": "+09:00"}) == want
+    assert _TS_ISO_RE.match(want) and _ts_normalize(want) == want[:19]
+
+
+# ----------------------------------------------------------- totality
+#
+# A parser that raises on one value used to fail the whole backfill of the
+# column it was building, leave it 'building' for good and, on a re-derive,
+# leave the batches before the bad row under the new params and the rest
+# under the old; detect() raising made the suggestion and detect routes
+# 500 for the whole table. Each of these came out of real evidence.
+
+@pytest.mark.parametrize("op_id,value,params", [
+    # An offset no clock has, inside the value: one cell's problem, not
+    # the analyst's param (validate_params still refuses THAT loudly).
+    ("iso8601", "2024-01-05T13:22:01+15:00", {}),
+    ("iso8601", "2024-01-05T13:22:01+99:99", {}),
+    ("apache_clf", "05/Jan/2024:13:22:01 +9999", {}),
+    ("apache_clf", "05/Jan/2024:13:22:01 +1500", {}),
+    # .NET's DateTime.MinValue / MaxValue, which exports write for "never",
+    # converted to UTC past either end of datetime's range.
+    ("iso8601", "0001-01-01T00:00:00+05:00", {}),
+    ("iso8601", "9999-12-31T23:59:59-05:00", {}),
+    ("iso8601", "0001-01-01T00:00:00", {"utc_offset": "+02:00"}),
+    ("apache_clf", "01/Jan/0001:00:00:00 +0100", {}),
+    ("us_datetime", "1/1/0001 12:00:00 AM", {"utc_offset": "+01:00"}),
+    ("us_datetime", "12/31/9999 23:59:59", {"utc_offset": "-01:00"}),
+    ("dd_mmm_yyyy", "01 Jan 0001 00:00:00", {"utc_offset": "+14:00"}),
+    # Digits that are not decimal digits, and decimal strings int() refuses.
+    ("windows_filetime", "²", {}),
+    ("windows_filetime", "¹²³", {}),
+    ("windows_filetime", "9" * 5000, {}),
+    ("windows_filetime", "0" * 5000, {}),
+    ("dotnet_ticks", "²", {}),
+    ("dotnet_ticks", "1" * 5000, {}),
+], ids=lambda v: f"{v[0]}x{len(v)}" if isinstance(v, str) and len(v) > 40 else None)
+def test_a_value_a_parser_cannot_read_is_none_not_an_exception(op_id, value, params):
+    assert parse(op_id, value, params) is None
+
+
+def test_the_offset_param_is_still_refused_loudly():
+    """The in-value offset became a quiet failure; the analyst's own
+    utc_offset must not — a typo there would shift nothing silently."""
+    with pytest.raises(ValueError):
+        timeparse.validate_params("iso8601", {"utc_offset": "+15:00"})
+
+
+def test_a_year_before_1000_is_still_canonical():
+    """strftime's %Y drops the zero padding below year 1000 on glibc
+    ("999-01-01", which sorts after "2024"); _fmt writes the fields out."""
+    out = parse("iso8601", "0999-01-01T00:00:00")
+    assert out == "0999-01-01 00:00:00"
+    assert _TS_ISO_RE.match(out)
+
+
+_HOSTILE = [
+    "", " ", "\x00", "-1", "nan", "inf", "1e400", "9" * 400, "0x" + "f" * 400, "²", "¹²³",
+    "١٧٠٠٠٠٠٠٠٠", "１７００００００００", "{" * 1000, "[1,2", '{"a": 1e999}',
+    '{"a":"trunc \\ud83d"}', '{"a":{"\\udc00k":"v"}}', "<a>", "<a></b>",
+    "2024-01-05T13:22:01+15:00", "0001-01-01T00:00:00+05:00", "9999-12-31T23:59:59-05:00",
+    "05/Jan/2024:13:22:01 +9999", "01/Jan/0001:00:00:00 +0100", "1/1/0001 0:00",
+    "12/31/9999 23:59:59", "Mon, 02 Jan 2006 15:04:05 +9999", "Jan 32 00:00:00",
+    "3155378976000000000", "-13300000000000000",
+]
+
+
+def _params_for(op):
+    params = timeparse.detect_defaults(op)
+    params.update({
+        "json_field": {"path": "$.a"}, "xml_field": {"path": "a"},
+        "regex_extract": {"pattern": r"(\d+)"}, "duration_delta": {"other_column": "b"},
+        "coalesce": {"extra_columns": ["b"]}, "row_json": {"extra_columns": ["b"]},
+    }.get(op["id"], {}))
+    out = [params]
+    if any(p["name"] == "utc_offset" for p in op["params"]):
+        out += [dict(params, utc_offset="+14:00"), dict(params, utc_offset="-14:00")]
+    return out
+
+
+@pytest.mark.parametrize("op_id", sorted(timeparse.OPERATIONS))
+def test_every_registered_operation_is_total_over_hostile_values(op_id):
+    """The class, not the instances above: every op the registry holds
+    returns text SQLite can store, or None, for every value — including
+    one under each extreme utc_offset."""
+    op = timeparse.OPERATIONS[op_id]
+    for params in _params_for(op):
+        for value in _HOSTILE:
+            state = {"map": {"1": "one"}} if op_id == "lookup" else {}
+            if op["multi_input"]:
+                state["inputs"] = ["a", "b"]
+                out = op["parse_multi"]([value, value], params, state)
+            else:
+                out = op["parse"](value, params, state)
+            assert out is None or isinstance(out, str), (params, value, out)
+            if out is not None:
+                out.encode("utf-8")   # a lone surrogate cannot be stored
+
+
+def test_detect_ranks_around_a_parser_that_raises(monkeypatch):
+    """Registered ops need not be ours (nothing stops a plugin registering
+    into the same table). One whose parse raises ranks as reading nothing;
+    one whose own detect raises is left out — neither takes the ranking
+    down."""
+    def boom(value, params, state):
+        raise RuntimeError("not today")
+
+    def bad_detect(samples, params):
+        raise RuntimeError("nor today")
+
+    for op in ({"id": "t_boom_parse", "label": "boom", "parse": boom},
+               {"id": "t_boom_detect", "label": "boom", "parse": boom, "detect": bad_detect}):
+        monkeypatch.setitem(timeparse.OPERATIONS, op["id"], op)
+        timeparse.register_op(op)
+    got = timeparse.detect(["1700000000", "1700000060"])
+    assert got[0]["op_id"] == "unix_epoch"
+    assert not {"t_boom_parse", "t_boom_detect"} & {r["op_id"] for r in got}
+    assert timeparse.parse_or_none(timeparse.OPERATIONS["t_boom_parse"], "x", {}, {}) is None

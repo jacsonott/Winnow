@@ -166,7 +166,11 @@ paths.py           INSTALL_ROOT — the one line that knows where the install
                     root is relative to this package. workspace/, the
                     updater's target and the server's static/ all resolve
                     from it, so a wrong answer here is silent and
-                    expensive; tests/test_paths.py pins it. Imports nothing.
+                    expensive; tests/test_paths.py pins it. Also
+                    sqlite_ro_uri(), the only way Winnow opens a SQLite
+                    file read-only — a path pasted into `file:...?mode=ro`
+                    opens a different file when it holds # ? or % (see
+                    docs/notes/ingest.md). Imports nothing from the app.
 version.py         The one place Winnow's version number lives. Nothing in
                     it but the string, because update.py reads it out of a
                     downloaded archive it must not execute. Bump it in the
@@ -229,6 +233,17 @@ docs/              Long-form documentation. writing-plugins.md — the plugin
                     developer guide. notes/ — the per-subsystem working
                     notes ("things that bite"), one file per part of the
                     app; read the one covering what you're about to touch.
+                    wiki/ — the user manual, one page per area of the app
+                    (Home.md is the index, README.md links into it). A
+                    change an analyst would notice updates the page that
+                    describes it in the same PR; UI labels there are
+                    quoted exactly as the app shows them. It is also the
+                    GitHub wiki's source: .github/workflows/wiki.yml runs
+                    scripts/build_wiki.py on every develop push that touches
+                    it and replaces the wiki wholesale, so edit here, never
+                    in the wiki. Every page must be listed under Home.md's
+                    "## Pages" (it becomes the sidebar) and every link must
+                    resolve; tests/test_build_wiki.py fails otherwise.
 plugins/           Analyst-installed plugins (gitignored except its README).
                     Managed from Settings → Plugins → Manage plugins…,
                     a two-pane manager (static/js/pluginmanager.js):
@@ -309,8 +324,11 @@ static/js/splash.js The launch animation — winnowing, which is what the app
                     exists and can't be what breaks startup. Runs CONCURRENTLY
                     with boot(), so it fades onto a screen that is already
                     populated. Skippable by any key/click, off via Settings →
-                    Appearance, and skipped entirely under
-                    prefers-reduced-motion. tests/ui/conftest.py disables it
+                    Appearance, and skipped under prefers-reduced-motion
+                    EXCEPT on Windows, where Chromium reports that whenever
+                    Animation effects are off — the VM/RDP default — so
+                    honouring it there meant nobody saw it
+                    (splash.osSkipsSplash). tests/ui/conftest.py disables it
                     for the shared page fixture — a full-viewport overlay
                     would make every click in every other test wait it out.
 static/style.css   Token-driven theming: 6 styles (panel/phosphor/blueprint/
@@ -444,7 +462,10 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
 6. **Only the visible window is ever in the DOM.** `render()` in `static/js/grid.js` builds
    rows for the scroll window plus overscan and positions them with a single
    `translateY`. Don't introduce per-row listeners; the grid uses event
-   delegation on `#body`.
+   delegation on `#body`. Both axes: a row holds cells for the columns in
+   the horizontal window (plus pinned ones), not for every column
+   (`paintedColumns`), and the SQL pane's result table builds only its
+   on-screen rows and columns — see docs/notes/grid.md and ui.md.
 
 7. **A tag write records the rows it actually changed, and undo replays
    that.** Every apply/remove — the selection paths, `tag_view`, both
@@ -549,7 +570,12 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
    analysts' cases number sources and tags independently, and a QC review
    is precisely the case where the two sides came from different cases —
    comparing ids reports every row as differing even when they agree
-   completely. There is a test for exactly that.
+   completely. There is a test for exactly that. The hash names the FILE,
+   not the table — every table of one SQLite file and every sheet of one
+   workbook share it — so load and diff both pick the table within it by
+   what the session records (name, columns, row count;
+   `_match_session_sources`), and refuse rather than guess when that
+   still leaves two candidates (docs/notes/store.md).
 
 
 ## Things that bite
@@ -647,7 +673,8 @@ lot to leave to memory.
 
 **CI runs each suite in shards.** `pytest --shard K/N` (tests/sharding.py)
 keeps whole files, dealt by test count, and ci.yml runs that as a matrix —
-six browser jobs, two backend. The checks the branch ruleset requires are
+six browser jobs, and two backend on each of Python 3.10 (the minimum the
+README promises) and 3.12. The checks the branch ruleset requires are
 the two roll-up jobs at the bottom of ci.yml, not the shards, so N can
 change without touching the ruleset. One consequence for `tests/ui`: each
 shard starts its own server, so any module can be the first thing a cold

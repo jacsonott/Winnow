@@ -22,9 +22,10 @@ import { openSettings, syncAppearanceFromServer } from './settings.js';
 import { drawWordmark } from './splash.js';
 import { S } from './state.js';
 import { fmtBytes } from './tables.js';
+import { loadCaseTags } from './tags.js';
 import { updateTimeRangeButton } from './timeframe.js';
 import { loadTimelineTemplates } from './timeline.js';
-import { confirmDialog, modal, promptDialog } from './ui.js';
+import { confirmDialog, modal, oneAtATime, promptDialog } from './ui.js';
 
 /* -------------------------------------------------------------- home screen */
 
@@ -105,7 +106,21 @@ export function describeCaseHolder(holder) {
     + 'at all and the file can be corrupted.';
 }
 
-export async function openCase(path, opts = {}) {
+/* One case switch at a time from this page. A double-click on a case card
+   is two clicks, and each used to start its own open: two POSTs racing on
+   the server (which serialises them now — see _CASE_SWITCH in server.py),
+   then two state resets and two loadSources interleaving here. A second
+   call while one is in flight gets the first one's promise instead —
+   whichever case was asked for first is the one that opens. */
+let caseOpening = null;
+
+export function openCase(path, opts = {}) {
+  if (caseOpening) return caseOpening;
+  caseOpening = openCaseNow(path, opts).finally(() => { caseOpening = null; });
+  return caseOpening;
+}
+
+export async function openCaseNow(path, opts = {}) {
   // A note save still inside its 500 ms debounce fires after the server
   // has swapped stores, and /api/note writes into whichever store is
   // current — the previous case's {source_id, rid} landing on an unrelated
@@ -130,7 +145,9 @@ export async function openCase(path, opts = {}) {
         okLabel: 'Open anyway', cancelLabel: 'Don\u2019t open', danger: true,
       });
       if (!go) return;
-      return openCase(path, { force: true });
+      // Straight to the worker: this IS the in-flight open, still holding
+      // the guard above, so going through openCase would get itself back.
+      return openCaseNow(path, { force: true });
     }
     toast('Could not open case: ' + e.message, 6000);
     return;
@@ -165,10 +182,10 @@ export async function openCase(path, opts = {}) {
   S.timeRange = { enabled: false, column: null, start: '', end: '' };
   updateTimeRangeButton();
   // Same reasoning for the timeline: its view_id belongs to the Store
-  // instance that just closed, and its tag-id checkboxes belong to the
+  // instance that just closed, and its switched-off tag ids belong to the
   // previous case's tag_defs — neither means anything here.
   S.timeline = { view: null, pages: new Map(), pending: new Set(), reqId: S.timeline.reqId + 1,
-                 tagFilter: null, raw: new Set() };
+                 tagsOff: new Set(), raw: new Set() };
   // sql_tabs is a per-case table, so the previous case's tabs (and the
   // results and runs keyed by their ids) don't describe this one.
   resetSqlPane();
@@ -205,6 +222,9 @@ export async function openCase(path, opts = {}) {
   // ts_format lives in the case file, so it's per-case state like sql_tabs
   // — reload it rather than carrying the last case's setting over.
   await loadCaseSettings();
+  // Tag definitions are per case too (see loadCaseTags), and an empty case
+  // never opens a table to reload them on the way in.
+  await loadCaseTags();
   await loadSources();
 }
 
@@ -470,23 +490,32 @@ export function openFolderBrowser(startPath, onSelect, onCancel, { mode = 'folde
    there's no surviving DOM to read values back out of afterward; the only
    way to preserve what the analyst already typed is to snapshot it into
    plain values and re-invoke this function with them as the new initial
-   state, same pattern openImportPreview's onConfirm/onCancel already use. */
+   state, same pattern openImportPreview's onConfirm/onCancel already use.
+
+   `state.saveQuickLook` makes this the quick look's "Save as a case…"
+   (tempSaveAs): the same fields, but the open quick look's file moves to
+   the path rather than a new case being made there. */
 export function openNewCaseModal(state = {}) {
-  modal('New case', (b) => {
+  const saving = state.saveQuickLook || null;
+  modal(saving ? 'Save as a case' : 'New case', (b) => {
+    if (saving) {
+      b.append(el('p', null, 'Its tables, tags and notes move into the case file below, '
+        + 'and the case is listed on the home screen.'));
+    }
     const nameInput = fieldInput(state.name || '');
     nameInput.placeholder = 'Case name';
     const nameRow = el('div', 'row-actions');
     nameRow.append(nameInput);
-    b.append(el('label', null, 'Name'), nameRow);
+    b.append(el('label', 'field-label', 'Name'), nameRow);
 
     const groupInput = fieldInput(state.group || '');
     groupInput.placeholder = 'Group (optional) — e.g. an IR engagement name';
     groupInput.setAttribute('list', 'home-new-case-groups');
     const groupRow = el('div', 'row-actions');
     groupRow.append(groupInput, groupOptionsDatalist('home-new-case-groups'));
-    b.append(el('label', null, 'Group'), groupRow);
+    b.append(el('label', 'field-label', 'Group'), groupRow);
 
-    let chosenDir = state.chosenDir || S.casesDir || 'cases';
+    let chosenDir = state.chosenDir || S.casesDir || S.defaultCasesDir || 'cases';
     const pathInput = fieldInput(state.path || joinPath(chosenDir, slugify(state.name || '') + CASE_EXT));
     pathInput.style.fontFamily = 'var(--mono)';
     let pathTouched = state.pathTouched || false;
@@ -496,7 +525,7 @@ export function openNewCaseModal(state = {}) {
     browseBtn.onclick = () => {
       const snapshot = {
         name: nameInput.value, group: groupInput.value, path: pathInput.value,
-        chosenDir, pathTouched,
+        chosenDir, pathTouched, saveQuickLook: state.saveQuickLook,
         caseType: typeSel.value,
         vars: Object.fromEntries([...varInputs].map(([k, inp]) => [k, inp.value])),
       };
@@ -510,7 +539,7 @@ export function openNewCaseModal(state = {}) {
     };
     const pathRow = el('div', 'row-actions');
     pathRow.append(pathInput, browseBtn);
-    b.append(el('label', null, 'Case file path'), pathRow);
+    b.append(el('label', 'field-label', 'Case file path'), pathRow);
 
     // The profile, applied right after the case opens, so a Triage case
     // starts with the triage plugins on — no settings trip. (The record is
@@ -561,12 +590,12 @@ export function openNewCaseModal(state = {}) {
     typeSel.onchange = renderProfileVars;
     const typeRow = el('div', 'row-actions');
     typeRow.append(typeSel);
-    b.append(el('label', null, 'Profile'), typeRow, varsBox);
+    b.append(el('label', 'field-label', 'Profile'), typeRow, varsBox);
 
 
     const actions = el('div', 'row-actions');
-    const create = el('button', 'btn', 'Create case');
-    create.onclick = async () => {
+    const create = el('button', 'btn', saving ? 'Save case' : 'Create case');
+    create.onclick = oneAtATime(create, async () => {
       const name = nameInput.value.trim();
       if (!name) { toast('Name the case first'); return; }
       const path = pathInput.value.trim();
@@ -578,14 +607,28 @@ export function openNewCaseModal(state = {}) {
         varInputs.get(missing[0].name).focus();
         return;
       }
-      try {
-        await post('/api/cases', { path, name, group: groupInput.value.trim(), notes: '' });
-      } catch (e) {
-        toast('Could not create case: ' + e.message, 6000);
-        return;
+      if (saving) {
+        let res;
+        try {
+          res = await post('/api/case/save_as', { path, name, group: groupInput.value.trim() });
+        } catch (e) {
+          toast('Could not save the case: ' + e.message, 6000);
+          return;
+        }
+        $('modal').hidden = true;
+        paintTempBanner(false);
+        setBrandLabel(res.name);
+        toast(`Saved — "${res.name}" is on the home screen now`, 6000);
+      } else {
+        try {
+          await post('/api/cases', { path, name, group: groupInput.value.trim(), notes: '' });
+        } catch (e) {
+          toast('Could not create case: ' + e.message, 6000);
+          return;
+        }
+        $('modal').hidden = true;
+        await openCase(path); // shared with the home screen's "open" flow — same brand-label/view-cache handling
       }
-      $('modal').hidden = true;
-      await openCase(path); // shared with the home screen's "open" flow — same brand-label/view-cache handling
       if (typeSel.value) {
         try {
           // Values typed above land first, so applying the profile (which
@@ -595,12 +638,16 @@ export function openNewCaseModal(state = {}) {
           }
           await applyBundle({ id: Number(typeSel.value) });
         } catch (e) {
-          toast('Case created, but the profile failed to apply: ' + e.message, 6000);
+          toast(`Case ${saving ? 'saved' : 'created'}, but the profile failed to apply: ` + e.message, 6000);
         }
       }
-    };
+      if (saving && saving.onSaved) await saving.onSaved();
+    });
     const cancel = el('button', 'btn ghost', 'Cancel');
-    cancel.onclick = () => { $('modal').hidden = true; };
+    cancel.onclick = () => {
+      $('modal').hidden = true;
+      if (saving && saving.onCancel) saving.onCancel();
+    };
     actions.append(create, cancel);
     b.append(actions);
   });
@@ -608,18 +655,23 @@ export function openNewCaseModal(state = {}) {
 
 /* First run of this Winnow instance (no cases_dir configured, no cases
    yet): ask where case files should live instead of silently defaulting
-   to ./cases. Asked once — either answer configures the instance. */
+   to cases/ beside server.py. Asked once — either answer configures the
+   instance. */
 export async function maybeOfferStorageDir() {
   let prefs;
   try {
     prefs = await api('/api/prefs');
   } catch { return; }
   S.casesDir = prefs.cases_dir || null;
+  // The server's own answer, absolute: cases/ beside server.py. What the
+  // dialog names is exactly what "Use the default" stores, and what a new
+  // case is filed under while nothing has been chosen.
+  S.defaultCasesDir = prefs.default_cases_dir || null;
   if (!prefs.first_run) return;
   const pick = await confirmDialog(
     'First run — where should Winnow keep its case files? '
-    + 'The default is a "cases" folder next to the server. You can pick any '
-    + 'folder on this machine instead.',
+    + `The default is a "cases" folder next to the server: ${prefs.default_cases_dir}. `
+    + 'You can pick any folder on this machine instead.',
     { okLabel: 'Choose a folder…', cancelLabel: 'Use the default' });
   if (pick) {
     openFolderBrowser(undefined, async (dir) => {
@@ -635,7 +687,7 @@ export async function maybeOfferStorageDir() {
   } else {
     // "Use the default" is still an answer — record it so we never nag.
     try {
-      const res = await post('/api/prefs', { cases_dir: 'cases' });
+      const res = await post('/api/prefs', { cases_dir: prefs.default_cases_dir });
       S.casesDir = res.cases_dir;
     } catch { /* next launch asks again — fine */ }
   }
@@ -671,24 +723,26 @@ export function openExistingCasePrompt(state = {}) {
     };
     const row = el('div', 'row-actions');
     row.append(pathInput, browseBtn);
-    b.append(el('label', null, 'Case file'), row);
+    b.append(el('label', 'field-label', 'Case file'), row);
     b.append(el('p', 'fb-help', 'Registers the case on this machine\u2019s list and opens it.'));
 
     const actions = el('div', 'row-actions');
     const openBtn = el('button', 'btn', 'Open');
-    openBtn.onclick = async () => {
+    openBtn.onclick = oneAtATime(openBtn, async () => {
       const trimmed = pathInput.value.trim();
       if (!trimmed) { toast('Enter or browse to a case file'); return; }
       const name = trimmed.split(/[\\/]/).pop().replace(/\.db-winnow$|\.db$/i, '');
       try {
-        await post('/api/cases', { path: trimmed, name, group: '', notes: '' });
+        // must_exist: a path with nothing at it is refused, not created —
+        // creating a case is + New case's job.
+        await post('/api/cases', { path: trimmed, name, group: '', notes: '', must_exist: true });
       } catch (e) {
-        toast('Could not register case: ' + e.message, 6000);
+        toast('Could not open case: ' + e.message, 6000);
         return;
       }
       $('modal').hidden = true;
       await openCase(trimmed);
-    };
+    });
     const cancel = el('button', 'btn ghost', 'Cancel');
     cancel.onclick = () => { $('modal').hidden = true; };
     actions.append(openBtn, cancel);
@@ -703,20 +757,20 @@ export function openEditCaseModal(c) {
     const nameInput = fieldInput(c.name);
     const nameRow = el('div', 'row-actions');
     nameRow.append(nameInput);
-    b.append(el('label', null, 'Name'), nameRow);
+    b.append(el('label', 'field-label', 'Name'), nameRow);
 
     const groupInput = fieldInput(c.group || '');
     groupInput.setAttribute('list', 'home-edit-case-groups');
     const groupRow = el('div', 'row-actions');
     groupRow.append(groupInput, groupOptionsDatalist('home-edit-case-groups'));
-    b.append(el('label', null, 'Group'), groupRow);
+    b.append(el('label', 'field-label', 'Group'), groupRow);
 
     const notesArea = el('textarea');
     notesArea.rows = 4;
     notesArea.value = c.notes || '';
     notesArea.placeholder = 'Notes about this case…';
     notesArea.style.width = '100%';
-    b.append(el('label', null, 'Notes'), notesArea);
+    b.append(el('label', 'field-label', 'Notes'), notesArea);
 
     b.append(el('div', 'note-status', c.path));
 
@@ -744,7 +798,12 @@ export function openEditCaseModal(c) {
 
 export async function removeCaseFromList(c) {
   if (!(await confirmDialog(`Remove "${c.name}" from this list? The case file itself is left untouched on disk.`, { danger: true, okLabel: 'Remove' }))) return;
-  await api(`/api/cases/${c.id}`, { method: 'DELETE' });
+  // `path` says which case this list meant — see deleteCaseFile.
+  try {
+    await api(`/api/cases/${c.id}?path=${encodeURIComponent(c.path)}`, { method: 'DELETE' });
+  } catch (e) {
+    toast('Could not remove: ' + e.message, 6000);
+  }
   refreshCases();
 }
 
@@ -753,10 +812,16 @@ export async function deleteCaseFile(c) {
     `Permanently delete the case file for "${c.name}"?\n\n${c.path}\n\nThis cannot be undone — all tags, notes and imported data in it will be lost.`,
     { danger: true, okLabel: 'Delete permanently' },
   ))) return;
+  // The path as well as the id: this list can be older than the registry
+  // (another window forgot this case and registered a new one), and the
+  // server refuses rather than delete whichever file the id names now.
   try {
-    await api(`/api/cases/${c.id}?delete_file=true`, { method: 'DELETE' });
+    await api(`/api/cases/${c.id}?delete_file=true&path=${encodeURIComponent(c.path)}`, { method: 'DELETE' });
   } catch (e) {
     toast('Could not delete: ' + e.message, 6000);
+    // Not always a no-op: a path that is not a case file is still taken
+    // off the list (the message says so), so the list is re-read either way.
+    refreshCases();
     return;
   }
   refreshCases();
@@ -953,25 +1018,38 @@ export function paintTempBanner(on) {
 }
 
 /* The three ways out of a quick look, shared by the banner's buttons and
-   the leave-guard dialog (openQuickLookExitDialog). Each returns whether
-   it actually happened, so the guard knows if navigation may proceed. */
+   the leave-guard dialog (openQuickLookExitDialog). Discard returns
+   whether it actually happened, so the guard knows if navigation may
+   proceed; Save and Add open dialogs of their own and say so through
+   their callbacks instead. */
 
-export async function tempSaveAs() {
-  const name = await promptDialog('Save this as a case named:');
-  if (!name || !name.trim()) return false;
-  let res;
-  try { res = await post('/api/case/save_as', { name: name.trim() }); }
-  catch (e) { toast(e.message, 6000); return false; }
-  paintTempBanner(false);
-  setBrandLabel(res.name);
-  toast(`Saved — "${res.name}" is on the home screen now`, 6000);
-  return true;
+/* Save is + New case's own dialog (openNewCaseModal), so a quick look is
+   filed with the same name, group, path and profile as any other case. It
+   used to ask for a name only and always land in the cases folder. The
+   folder offered is the one the quick look already sits in (the parent of
+   quicklook/), so saving there is a rename; variables the quick look
+   already holds fill in the profile's fields. `onSaved` runs once the
+   case is saved (and any profile applied); `onCancel` on Cancel. */
+export async function tempSaveAs({ onSaved, onCancel } = {}) {
+  const [cur, vars] = await Promise.all([
+    api('/api/case/current').catch(() => null),
+    api('/api/case/variables').catch(() => []),
+  ]);
+  const parentOf = (p) => (p || '').replace(/[\\/][^\\/]*$/, '');
+  openNewCaseModal({
+    chosenDir: parentOf(parentOf(cur && cur.path)) || undefined,
+    vars: Object.fromEntries(vars.filter((v) => v.value).map((v) => [v.name, v.value])),
+    saveQuickLook: { onSaved, onCancel },
+  });
 }
 
 export function tempCopyModal({ thenDiscard = false } = {}) {
   (async () => {
     let cases;
-    try { cases = (await api('/api/cases')).filter((c) => !c.missing); }
+    // The registry marks a case whose file is gone `exists: false` — there
+    // is no `missing` key, so filtering on one offered every case, and
+    // picking a vanished one only failed after the copy was asked for.
+    try { cases = (await api('/api/cases')).filter((c) => c.exists !== false); }
     catch (e) { toast(e.message, 5000); return; }
     if (!cases.length) { toast('No saved cases yet — use "Save as a case…" instead', 6000); return; }
     modal('Add these tables to a case', (b) => {
@@ -986,7 +1064,7 @@ export function tempCopyModal({ thenDiscard = false } = {}) {
         row.append(el('span', 'session-name', c.name),
                    el('span', 'count', c.path));
         const go = el('button', 'btn ghost', 'Copy into this case');
-        go.onclick = async () => {
+        go.onclick = oneAtATime(go, async () => {
           const ids = S.sources.filter((s) => s.id > 0 && !s.error).map((s) => s.id);
           if (!ids.length) { toast('Nothing here to copy yet'); return; }
           setBusy(true);
@@ -997,7 +1075,7 @@ export function tempCopyModal({ thenDiscard = false } = {}) {
           $('modal').hidden = true;
           toast(`Copied ${res.copied.length} table${res.copied.length === 1 ? '' : 's'} into "${c.name}"`, 8000);
           if (thenDiscard) await tempDiscard({ confirm: false });
-        };
+        });
         row.append(go);
         list.append(row);
       }
@@ -1030,9 +1108,11 @@ export function openQuickLookExitDialog() {
       + 'from the home screen. Choose what happens to it first:'));
     const acts = el('div', 'row-actions');
     const save = el('button', 'btn', 'Save as a case…');
-    save.onclick = async () => {
-      if (await tempSaveAs()) { $('modal').hidden = true; showHome(); await refreshCases(); }
-    };
+    // The save dialog replaces this one; Cancel there comes back here.
+    save.onclick = () => tempSaveAs({
+      onSaved: async () => { showHome(); await refreshCases(); },
+      onCancel: openQuickLookExitDialog,
+    });
     const copy = el('button', 'btn ghost', 'Add to an existing case…');
     copy.onclick = () => tempCopyModal({ thenDiscard: true });
     const discard = el('button', 'btn ghost danger', 'Discard');
@@ -1062,6 +1142,7 @@ export async function boot() {
     paintTempBanner(!!cur.temp);
     showApp();
     await loadCaseSettings();
+    await loadCaseTags();   // same reason as openCase: an empty case opens no table
     await loadSources();
     startJobsPoll(); // an import (or index build) from before a reload shows back up
   } else {

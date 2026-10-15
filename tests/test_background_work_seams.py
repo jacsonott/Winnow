@@ -84,8 +84,8 @@ def test_a_scan_started_during_a_save_as_table_copy_finishes(case_path, write_cs
         copying = threading.Event()
         real_cells = Store._subset_cells
 
-        def stalling(self, ro, cols, chunk, op_token):
-            out = real_cells(self, ro, cols, chunk, op_token)
+        def stalling(self, *args):
+            out = real_cells(self, *args)
             copying.set()
             release.wait(20)
             return out
@@ -294,8 +294,8 @@ def test_a_copy_in_flight_reads_as_a_copy_not_an_import(case_path, write_csv, mo
         copying = threading.Event()
         real_cells = Store._subset_cells
 
-        def stalling(self, ro, cols, chunk, op_token):
-            out = real_cells(self, ro, cols, chunk, op_token)
+        def stalling(self, *args):
+            out = real_cells(self, *args)
             copying.set()
             release.wait(20)
             return out

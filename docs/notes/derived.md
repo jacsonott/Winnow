@@ -81,6 +81,35 @@ see [docs/notes/README.md](README.md) for the whole set.
   columns are created through the existing batch route — one scan, N
   columns, all-or-nothing — which is the same machinery the JSON flatten
   picker uses.
+- **A regex that can backtrack for minutes is refused, not run.** Python's
+  `re` has no timeout, a backfill polls its cancel flag only between
+  batches, and the preview and `/api/derived/regex_groups` run inside the
+  request — so `(\w+\s?)*` against one 30-character cell that almost
+  matches held a worker (or the whole backfill) for minutes with nothing
+  able to stop it. `structparse._compile_analyst_regex` is the one gate
+  every derive pattern passes, and its check is `rxguard.regex_hazard`:
+  the same automaton the regex filter, search and SQL-pane REGEXP use
+  (docs/notes/store.md has how it decides). There used to be a second,
+  shape-only check here, because structparse cannot import store; two
+  checks drew the line in two places, so the guard moved to a module
+  both import. The dotted and CSV shapes people write all the time —
+  `(\.[a-z]+)*`, `([a-z0-9-]+\.)+`, `(?:[^,]*,)*`, `(\S+\s+){3}` — pass;
+  `(\w+\s?)*`, `(\w+\.\w+)+` and `(\d+\d*,)+` do not. Bounding the
+  outer repeat is NOT a way out: `(\w+\s?){0,50}` took a minute on 29
+  characters. Overlaps are judged case-insensitively, as REGEXP runs, so
+  for a derive pattern (case-sensitive unless it says `(?i)`) the check
+  can only be stricter than it needs to be, never looser.
+- **Every path the flatten picker offers has to survive `validate_params`
+  and extract the sample it was offered with.** Because the batch is
+  all-or-nothing, one offered path that fails to parse fails every column
+  the analyst ticked — and the picker pre-ticks anything at 100%. Two
+  shapes broke that: an EVTX `Data Name` holding an apostrophe was spliced
+  into `'…'` bare (now `"O'Brien"`, or `'it''s "x"'` when it holds both,
+  XPath 2.0's doubling — `parse_xml_path` reads all three, and its step
+  splitting skips `/ ] @` inside the quotes), and a JSON key with edge
+  whitespace went out in dot notation, which strips (now bracket-quoted,
+  and quoted keys are no longer stripped). `test_structparse.py` checks
+  the property itself on those shapes, not just the two fixes.
 
 - **Derived columns** (`timeparse.py`, `derived_columns`/`drv_<id>` tables,
   `/api/derived/*`, the column header's right-click menu's "Add datetime column from
@@ -105,10 +134,16 @@ see [docs/notes/README.md](README.md) for the whole set.
     (identical by construction, so a derived value is **not** searchable —
     it's computed from text that already is), `column_signature` (adding a
     derived column must not change merge eligibility), `_iter_search_all_sources`,
-    and the session file's column list. Merges get base columns only: each
-    member has its own `drv_` table and its own definitions, and a UNION
-    ALL across mismatched sets would need per-member NULL padding nothing
-    does yet.
+    and the session file's column list. Merge *eligibility* is base
+    columns only, on the server (`create_merge`) and in the Merge tables
+    dialog's grouping alike (`merge.js`'s `columnGroupKey`) — the dialog
+    used to group by every column, so a table with a derived column sat
+    in a group of its own and the dialog said no two tables matched for
+    a merge the server accepts. Each member has its own `drv_` table and
+    its own definitions; a merge exposes a derived column only where
+    every member has one of that name (`_merge_columns`), since a UNION
+    ALL across mismatched sets would need per-member NULL padding
+    nothing does yet. Editing one is its own entry below.
   - **An op that reads several columns declares them as params and the
     store asks `timeparse.op_inputs(op_id, input_column, params)`** for
     the full ordered list — never `params["other_column"]` by name. The
@@ -118,8 +153,7 @@ see [docs/notes/README.md](README.md) for the whole set.
     dependency checks and the session round-trip all go through that one
     helper, so a new `column`/`columns`-typed param is read everywhere
     the moment it's declared. `combine.py`'s coalesce (`family:
-    "combine"`, `derived_kind: "combine"` — not `"text"`, which the
-    header menu treats as "has a field path to edit") is the model.
+    "combine"`, `derived_kind: "combine"`) is the model.
     `row_json` (same family) is the second: the store puts the ordered
     input names in `state["inputs"]` before any `parse_multi` call —
     backfill and preview both — so an op whose output names its columns
@@ -127,7 +161,13 @@ see [docs/notes/README.md](README.md) for the whole set.
     `columns` param carries two UI-only keys, `any_type` (offer every
     column, not just text) and `prefill: "all"` (start with every other
     column chosen); `validate_params` ignores both. `bool` is a param
-    type now (a checkbox; the state holds a real boolean).
+    type now (a checkbox; the state holds a real boolean). A cell goes
+    out as an unquoted JSON number only when the number json writes
+    back is the cell's own text — "1.10", "-0" and
+    "9999999999999999.99" stay strings, or the object would say 1.1, 0
+    and 1e+16 about evidence that didn't — and the patterns are
+    `fullmatch`ed, since `$` also matches before a trailing newline and
+    wrote the cell "42\n" as 42.
   - **`_from_clause(src)` is the one place the join is spelled** —
     `LEFT JOIN drv_<id> USING(rid)`, so an unqualified `rid` stays legal
     on both sides. `drv`'s rid is an INTEGER PRIMARY KEY, so the join
@@ -171,15 +211,79 @@ see [docs/notes/README.md](README.md) for the whole set.
     `(building…)` in the header after every reopen, makes
     `save_view_as_source` refuse the whole table, and blocks anything
     chaining off it, with no way back except deleting the column.
+  - **One value is never the column's problem, and a failed pass never
+    leaves `'building'`.** Parsers are meant to be total — return text or
+    None for any input — and `test_timeparse.py` holds every registered op
+    to that over a hostile corpus. The ones that weren't: an offset inside
+    a value beyond ±14:00 (`_value_offset`; the analyst's own `utc_offset`
+    param still fails loudly in `validate_params`), .NET's
+    `1/1/0001 12:00:00 AM` under any offset (`_shift_naive`/`_fmt` give
+    None at datetime's range ends), `"²"` and 5,000-digit strings as tick
+    counts (`isdecimal` + a length cap before `int()`), and a JSON
+    `"\ud83d"` whose lone surrogate SQLite cannot store (`_leaf_text`
+    writes it back as the escape the cell held — `structparse.utf8_text`,
+    the rule JSON import follows too, rather than U+FFFD, which would make
+    two different half-characters one value and two keys one column
+    name). Because the registry is open, the callers don't trust
+    that either: the backfill wraps each value (a raise is NULL, counted
+    with the other failures, logged once per column with the first row),
+    retries a batch SQLite refused with `_storable_cell`, and detect /
+    preview / suggestions go through `timeparse.parse_or_none` — one bad
+    cell used to 500 those routes for the whole table. Anything else that
+    stops a pass lands in `_fail_derive_backfill`: a create is removed
+    (as on cancel); a re-derive that wrote nothing yet is put back exactly
+    as it was (`previous`, the snapshot `rederive_column` passes); a
+    cascade that wrote nothing is `partial`; and a re-derive that stopped
+    after committing some batches is `'error'` with its values cleared and
+    its own children `partial` — two runs' values side by side (the report
+    had 20,000 rows at 11:22:01 and 20,009 at 13:22:01 for identical
+    input) is the one result nobody can read correctly. `rederive_column`
+    also runs the op's `check` first, so a lookup whose table is gone is
+    refused with nothing changed.
   - **Canonical output is `YYYY-MM-DD HH:MM:SS[.ffffff]`**, sub-second only
-    when the source has that resolution. That exact shape is why there are
+    when the source has that resolution — four-digit year always, which is
+    why `_fmt` writes the fields out itself and not with `strftime`: glibc's `%Y` writes
+    year 999 as `999`, a shape nothing recognises and that sorts after
+    2024 as text. That exact shape is why there are
     **no new regexes to hand-sync**: `_TS_ISO_RE`/`TS_NORMALIZE`/`DAY_BUCKET`
     and `tsformat.js`'s `parseTimestamp` already prefix-match it. Timezones:
     epoch-family values are UTC by definition, values carrying an explicit
     offset (ISO `Z`/`±HH:MM`, CLF, RFC 2822) are converted to UTC, and
     naive text is kept exactly as written unless the analyst sets the
     op's optional fixed `utc_offset` — never a TZ database, never DST
-    inference. Unparseable input is NULL, not `''`: it drops out of
+    inference. The ISO, `dd_mmm_yyyy` and US ops read whatever follows the
+    time through one function, `timeparse._trailing_zone`: Z/UTC/GMT,
+    `GMT+02:00`, `±HH:MM`/`±HHMM`/`±HH` (U+2212 as a minus too) are
+    applied and win over `utc_offset`; a zone it *cannot* apply — an
+    abbreviation like `EST`, an IANA name, an offset past ±14:00 — makes
+    the value a parse failure rather than being dropped, because dropping
+    it reads the wall-clock time as if it were UTC, hours off with
+    nothing in the column to say so (that is what `+05`, a 10-digit
+    fraction before the offset, `−05:00`, and every offset after a
+    dd-Mmm or US time used to do). Trailing text that names no zone — a
+    log message after the timestamp — is left alone, as before. RFC 2822
+    has a zone grammar of its own and keeps the same rule without
+    `_trailing_zone`: the zones the RFC defines (UT/UTC/GMT/Z, EST/EDT,
+    CST/CDT, MST/MDT, PST/PDT, ±HHMM within ±14:00) are applied, and
+    anything else in the zone slot — `CET`, `AST` (Atlantic or Arabia),
+    a military letter (RFC 822 wrote their signs backwards), an IANA
+    name — is a parse failure. `email.utils` dropped a zone it did not
+    know without a word, so `15:04:05 CET` came out as 15:04:05 UTC
+    while `15:04:05 EST` was converted. `-0000` is UTC by the RFC's own
+    definition (the time IS in UT; only the sender's zone is unknown),
+    so `utc_offset` does not shift it — `email.utils` returns it naive,
+    like a value with no zone at all, which is why it is named
+    explicitly. The zone token is found by mirroring email's own token
+    selection (`_rfc2822_zone_token`: `date`'s layout puts the zone
+    before the year) and cross-checked against what the stdlib parsed,
+    so a future divergence fails values rather than misplacing them. The
+    12-hour marker is `timeparse.MERIDIEM` everywhere a US or month-name
+    time is read (`_US_RE`, store.py's `_TS_US_RE`/`_TS_MONTH_RE` behind
+    TS_NORMALIZE and DAY_BUCKET, tsformat.js's twins): `PM`, `Pm`,
+    `p.m.`, after an optional fraction. `\s*(AM|PM|am|pm)?` straight after
+    the seconds read `1:22:01.123 PM` as 01:22 — twelve hours early in
+    the derived column, the Timeline and the timeframe filter at once.
+    Unparseable input is NULL, not `''`: it drops out of
     comparisons and the timeframe filter instead of pretending to be data,
     and the count of non-empty inputs that produced NULL is surfaced per
     column ("Show N unparsed rows" builds a raw-filter fragment
@@ -197,3 +301,59 @@ see [docs/notes/README.md](README.md) for the whole set.
     `derived_columns` deliberately has no index on `source_id` — it holds
     one row per derived column in the whole case, so a scan is one page
     either way and an index would cost more file than it could save.
+- **A lookup column names its table by a case-local id, so the id never
+  travels on its own** (`enrich.py`; `_session_derived_def` /
+  `_resolve_session_lookup` for sessions, `_repoint_copied_lookups` for
+  "Copy into case"). In another case — or in this one once the table is
+  dropped and its id reused — that number is some other table, and a
+  session import used to fill the column from it with no warning (the
+  owner column said mallory where the analyst had alice). A session now
+  carries the table's identity beside the definition (`lookup_table`:
+  file hash, name, base columns and row count — what a session source
+  records) and the import resolves it the way session sources are
+  matched by a load (`_match_session_sources`; a SQL-saved or
+  plugin-made lookup table by its synthetic `made:` hash, so another
+  case's table of the same name is not it); no such table, or more than
+  one it cannot tell apart, is a warning and the column is not
+  recreated. A session saved before the identity was recorded is
+  refused the same way rather than trusted by id — and so is one that
+  recorded a made table with no hash, which used to pair by name. A copy re-points the definition to its table when that came
+  along, else to the target's one table with the same fingerprint, else
+  to none — the copied values stand and a re-derive asks for the table.
+  Blank keys (NULL or `''`, the one-column "had input" rule) match
+  nothing on either side, and so are neither a hit nor a parse failure:
+  an empty Host used to join the lookup table's own blank-key row.
+- **A derived column on a merge is one definition per member, and an
+  edit made on the merge goes to every one of them** (invariant #9).
+  Creating on a merge fans out (`add_derived_column(s)` with a negative
+  id: checked against every member, then made on each), but the merge's
+  column list carries only the FIRST member's `derived_id` — so Remove,
+  Re-derive and "Change the field path…", sent with that id alone,
+  acted on the first member: a remove left every other member's copy
+  behind, a re-derive recomputed one member of four. The client now
+  sends the table the edit was made from (`source_id` on
+  `DELETE /api/derived/{id}` and on `/rederive`), and `_derived_scope`
+  turns a merge's id into each member's definition of that name
+  (ASCII-folded, as `_merge_columns` matches them); no `source_id`, or a
+  member's own, is the one definition, as before. All-or-nothing up
+  front, the way create is: a remove checks every member for a column
+  computed from it before removing any, and a re-derive validates the
+  params against every member's definition before rewriting any —
+  refusing outright when the members compute the column with different
+  operations (made per table before the merge), since one set of params
+  cannot mean the same to both. One job per member, as create starts,
+  so each cancels on its own and a cancelled member is left 'partial'.
+  The merge's column therefore reports all of them: the least finished
+  status (`_DERIVED_STATUS_RANK` — building, error, partial, ready) and
+  the failures SUMMED, because the "Show N unparsed rows" filter it
+  offers matches rows in every member; it used to count the first.
+- **"Change the field path…" is offered only for an op that has a
+  `path` param** (`derived.js`'s `hasFieldPath` — JSON field and XML
+  field), not for every `derived_kind: "text"` column. Regex capture
+  and lookup are `"text"` too, and the prompt's `{path}` rederive is not
+  a param either op takes, so it failed every time and their settings
+  could not be changed at all. They take Re-derive…, which is the
+  derive modal with the operation fixed and the column's current params
+  filled in — pattern and group, or the lookup table and its columns —
+  with the named-group "a column for each" offer suppressed, because a
+  re-derive edits one column and never sends a batch.

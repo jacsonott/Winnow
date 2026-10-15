@@ -65,6 +65,7 @@ _UTC = timezone.utc
 _FILETIME_EPOCH = datetime(1601, 1, 1)
 _DOTNET_EPOCH = datetime(1, 1, 1)
 _MAC_EPOCH = datetime(2001, 1, 1, tzinfo=_UTC)
+_UNIX_EPOCH = datetime(1970, 1, 1, tzinfo=_UTC)
 # Lotus 1-2-3 convention (day 1 = 1900-01-01, with the phantom 1900-02-29
 # Excel inherited) — 1899-12-30 as day zero makes modern serials come out
 # right without special-casing the 1900 leap bug for dates that predate
@@ -91,26 +92,150 @@ def _parse_utc_offset(text: str) -> timedelta:
     return sign * timedelta(hours=hours, minutes=minutes)
 
 
-def _fmt(dt: datetime, subsecond: bool) -> str:
+def _value_offset(text: str) -> timezone | None:
+    """The offset a VALUE carries ("+05:30" in an ISO stamp, "-0700" in a
+    CLF line), or None when it is not one a clock can have.
+
+    Not `_parse_utc_offset`, whose ValueError is right for the analyst's
+    `utc_offset` param (a typo there should fail column creation loudly)
+    and wrong here: an offset inside the data is one cell's problem. It
+    used to escape the parser, and one `+15:00` among a million good
+    stamps failed the whole backfill and left the column stuck
+    'building'. A value whose offset is out of range is a value that does
+    not parse — NULL, counted with the other failures."""
+    try:
+        return timezone(_parse_utc_offset(text))
+    except ValueError:
+        return None
+
+
+def _fmt(dt: datetime | None, subsecond: bool) -> str | None:
     """Canonical output. An aware datetime is converted to UTC first; a naive
-    one is emitted exactly as its components stand (the no-TZ-math rule)."""
+    one is emitted exactly as its components stand (the no-TZ-math rule).
+
+    Total, like every parser built on it: None in is None out (so
+    `_fmt(_shift_naive(...))` needs no check between the two), and a
+    conversion that falls off either end of datetime's range — year 1 at
+    a positive offset is year 0 in UTC, `0001-01-01T00:00:00+05:00` —
+    is None rather than the OverflowError that used to fail a whole
+    backfill over one .NET MinValue sentinel.
+
+    Written out field by field rather than with strftime: `%Y` is not
+    zero-padded below year 1000 on glibc ("999-01-01", which sorts after
+    "2024" and which _TS_ISO_RE does not accept), and what it does there
+    is up to each platform's C library."""
+    if dt is None:
+        return None
     if dt.tzinfo is not None:
-        dt = dt.astimezone(_UTC).replace(tzinfo=None)
-    if subsecond:
-        return dt.strftime("%Y-%m-%d %H:%M:%S.%f")
-    return dt.strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            dt = dt.astimezone(_UTC).replace(tzinfo=None)
+        except (OverflowError, ValueError):
+            return None
+    out = (f"{dt.year:04d}-{dt.month:02d}-{dt.day:02d} "
+           f"{dt.hour:02d}:{dt.minute:02d}:{dt.second:02d}")
+    return f"{out}.{dt.microsecond:06d}" if subsecond else out
+
+
+# A 12-hour marker in any of the ways exporters write one — "PM", "pm",
+# "Pm", "p.m.", "P.M." — capturing just the letter. Not followed by
+# another letter, so "Amsterdam" is not "AM". Shared by _US_RE here and
+# mirrored in store.py's _TS_US_RE/_TS_MONTH_RE and tsformat.js's
+# TS_US_RE/TS_MONTH_RE: a fraction between the seconds and the marker,
+# or any spelling but the four the old `(AM|PM|am|pm)` named, left it
+# unmatched and the time read as morning — 12 hours early, silently.
+MERIDIEM = r"([AaPp])\.?[Mm]\.?(?![A-Za-z])"
+
+
+def hour24(h: int, meridiem: str | None) -> int:
+    """12-hour clock to 24 from MERIDIEM's captured letter."""
+    if meridiem:
+        if meridiem in "Pp" and h < 12:
+            return h + 12
+        if meridiem in "Aa" and h == 12:
+            return 0
+    return h
+
+
+# Zone abbreviations a value may end in that name an offset this module
+# cannot know (several are ambiguous, all of them shift with daylight
+# saving). Uppercase only, as zone abbreviations are written — a
+# lowercase word after a timestamp in a log line is the log line.
+_ZONE_ABBREVIATIONS = frozenset(
+    "EST EDT CST CDT MST MDT PST PDT AKST AKDT HST HDT AST ADT NST NDT "
+    "CET CEST EET EEST WET WEST BST IST MSK JST KST HKT SGT PHT ICT WIB "
+    "AEST AEDT ACST ACDT AWST NZST NZDT SAST WAT CAT EAT".split())
+_TRAIL_UTC_RE = re.compile(r"(?:Z|UTC|GMT)(?![A-Za-z])", re.IGNORECASE)
+_TRAIL_OFFSET_RE = re.compile(r"([+\-\u2212])(\d{1,2})(?::?(\d{2}))?(?![\d:])")
+_TRAIL_IANA_RE = re.compile(r"[A-Za-z_]+/[A-Za-z_]")
+_TRAIL_ABBR_RE = re.compile(r"[A-Z]{2,5}(?![A-Za-z])")
+
+
+def _trailing_zone(rest: str) -> tuple[bool, timedelta | None]:
+    """What the text after a parsed timestamp says about its zone:
+    (False, None) when it names none — trailing text that is not a zone is
+    left alone, as it always was; (True, offset) for one that can be
+    applied — Z/UTC/GMT, GMT+02:00, ±HH:MM, ±HHMM, ±HH, with U+2212 as a
+    minus; (True, None) for one that cannot — an abbreviation, an IANA
+    name, an offset out of range or malformed. The callers turn that last
+    one into a parse failure: dropping the zone reads the wall-clock time
+    as if it were already UTC (or the analyst's fixed offset), hours off,
+    and nothing in the column would say so."""
+    s = rest.lstrip()
+    if not s:
+        return False, None
+    m = _TRAIL_UTC_RE.match(s)
+    if m:
+        s = s[m.end():]
+        if not (s[:1] in ("+", "-", "\u2212") and s[1:2].isdigit()):
+            return True, timedelta(0)
+    if s[:1] in ("+", "-", "\u2212") and s[1:2].isdigit():
+        om = _TRAIL_OFFSET_RE.match(s)
+        if not om:
+            return True, None
+        try:
+            return True, _parse_utc_offset(
+                ("-" if om.group(1) != "+" else "+") + om.group(2) + ":" + (om.group(3) or "00"))
+        except ValueError:
+            return True, None
+    if m:
+        return True, timedelta(0)
+    if _TRAIL_IANA_RE.match(s):
+        return True, None
+    am = _TRAIL_ABBR_RE.match(s)
+    if am and am.group(0) in _ZONE_ABBREVIATIONS:
+        return True, None
+    return False, None
+
+
+def _zoned(dt: datetime, rest: str, params: dict) -> datetime | None:
+    """dt with the zone `rest` names applied (aware, so _fmt converts it
+    to UTC), or shifted by the analyst's fixed offset when it names none —
+    an explicit zone in the value wins over the parameter, as ISO 8601's
+    Z/±HH:MM always did. None when the zone named can't be applied."""
+    named, off = _trailing_zone(rest)
+    if not named:
+        return _shift_naive(dt, params)
+    if off is None:
+        return None
+    return dt.replace(tzinfo=timezone(off))
 
 
 def _plausible(dt: datetime) -> bool:
     return PLAUSIBLE_MIN_YEAR <= dt.year <= PLAUSIBLE_MAX_YEAR
 
 
-def _shift_naive(dt: datetime, params: dict) -> datetime:
+def _shift_naive(dt: datetime, params: dict) -> datetime | None:
     """Apply the optional fixed `utc_offset` param to a naive local-time
-    value: UTC = local - offset (a -05:00 log line moves 5 hours later)."""
+    value: UTC = local - offset (a -05:00 log line moves 5 hours later).
+    None when that moves it outside datetime's range (`1/1/0001 12:00:00
+    AM`, .NET's DateTime.MinValue, under any positive offset) — see
+    _fmt, which passes the None straight through."""
     off = params.get("utc_offset")
     if off:
-        return dt - _parse_utc_offset(off)
+        try:
+            return dt - _parse_utc_offset(off)
+        except OverflowError:
+            return None
     return dt
 
 
@@ -154,10 +279,35 @@ def _success_rate_detect(op: dict) -> Callable:
         state: dict = {}
         ok = 0
         for v in vals:
-            if op["parse"](v, params, state) is not None:
+            if parse_or_none(op, v, params, state) is not None:
                 ok += 1
         return ok / len(vals)
     return detect
+
+
+def parse_or_none(op: dict, value: Any, params: dict, state: dict) -> Any:
+    """`op["parse"]`, with a value that raises answered as a value that
+    does not parse.
+
+    The built-in parsers are meant to be total, but the registry is open
+    (structparse, combine and enrich register into it, and nothing stops
+    a plugin doing the same) and a sample is evidence: one cell nobody anticipated must cost that cell,
+    not the answer for every other one. Detection, the previews and the
+    post-import suggestions all run every parser over real values, and
+    they used to turn one such cell into a 500 for the whole table. The
+    backfill guards each value the same way inline (it also counts them)."""
+    try:
+        return op["parse"](value, params, state)
+    except Exception:  # noqa: BLE001 — see above: one value, not the column
+        return None
+
+
+def parse_multi_or_none(op: dict, values: list, params: dict, state: dict) -> Any:
+    """parse_or_none for an op that reads several columns of a row."""
+    try:
+        return op["parse_multi"](values, params, state)
+    except Exception:  # noqa: BLE001 — as parse_or_none
+        return None
 
 
 def detect_defaults(op: dict) -> dict:
@@ -186,7 +336,10 @@ def detect(samples: Iterable) -> list[dict]:
         if op["hidden_from_detect"]:
             continue
         params = detect_defaults(op)
-        conf = op["detect"](samples, params)
+        try:
+            conf = op["detect"](samples, params)
+        except Exception:  # noqa: BLE001 — a custom detector that breaks ranks nothing
+            continue
         if conf > 0:
             results.append({"op_id": op["id"], "label": op["label"], "confidence": conf, "params": params})
     results.sort(key=lambda r: -r["confidence"])
@@ -341,9 +494,25 @@ def _finite(value: Any) -> float | None:
     return f if math.isfinite(f) else None
 
 
+# A whole number short enough for int() to take without tripping Python's
+# digit limit — far longer than any timestamp, far shorter than that limit.
+_WHOLE_RE = re.compile(r"^[+-]?\d{1,30}$")
+
+
+def _exact_int(s: str) -> int | None:
+    """`s` as an int when it is written as one, else None. The integer
+    encodings below are converted with integer arithmetic for these: a
+    float holds ~16 significant digits, a nanosecond epoch has 19 and a
+    WebKit value 17, so `v / scale` was off by up to a microsecond either
+    way, and a value at the very end of the window rounded into 2101 and
+    was refused."""
+    return int(s) if _WHOLE_RE.match(s) else None
+
+
 def _parse_unix(value: Any, params: dict, state: dict) -> str | None:
     s = str(value).strip()
-    v = _finite(s)
+    exact = _exact_int(s)
+    v = exact if exact is not None else _finite(s)
     if v is None or v <= 0:
         return None
     unit = params.get("unit", "auto")
@@ -351,7 +520,11 @@ def _parse_unix(value: Any, params: dict, state: dict) -> str | None:
         if unit != "auto" and unit != name:
             continue
         try:
-            dt = datetime.fromtimestamp(v / scale, tz=_UTC)
+            if exact is not None:
+                # Truncated to the microsecond, as FILETIME's ticks // 10 is.
+                dt = _UNIX_EPOCH + timedelta(microseconds=exact * 1_000_000 // scale)
+            else:
+                dt = datetime.fromtimestamp(v / scale, tz=_UTC)
         except (OverflowError, OSError, ValueError):
             continue
         if not _plausible(dt):
@@ -381,6 +554,19 @@ _FILETIME_MAX = int((datetime(9999, 12, 28) - _FILETIME_EPOCH).total_seconds() *
 _BARE_HEX_RE = re.compile(r"^[0-9A-Fa-f]+$")
 
 
+def _decimal_ticks(s: str) -> bool:
+    """Whether `int(s)` can read `s` as a tick count worth range-checking.
+
+    `isdecimal`, not `isdigit`: superscripts ("²", common in pasted
+    spreadsheet text) are digits but not decimal, so `isdigit` let them
+    through to an int() that raises. And a length cap, because int()
+    refuses a decimal string over 4,300 digits outright (CPython's
+    int_max_str_digits, leading zeros included) — a value that long is
+    not a timestamp. Both tick formats top out at 19 digits; the rest of
+    the allowance is for zero padding."""
+    return s.isdecimal() and len(s) <= 24
+
+
 def _parse_filetime(value: Any, params: dict, state: dict) -> str | None:
     s = str(value).strip()
     ticks: int | None = None
@@ -389,7 +575,7 @@ def _parse_filetime(value: Any, params: dict, state: dict) -> str | None:
             ticks = int(s, 16)
         except ValueError:
             return None
-    elif s.isdigit():
+    elif _decimal_ticks(s):
         ticks = int(s)
     elif _BARE_HEX_RE.match(s) and re.search(r"[A-Fa-f]", s):
         # Bare hex only when a letter proves it's hex — an all-digit string
@@ -420,15 +606,18 @@ _WEBKIT_OFFSET_US = 11_644_473_600_000_000
 
 def _parse_webkit(value: Any, params: dict, state: dict) -> str | None:
     s = str(value).strip()
-    f = _finite(s)
-    if f is None:
-        return None
-    v = int(f)
+    v = _exact_int(s)
+    if v is None:
+        f = _finite(s)
+        if f is None:
+            return None
+        v = int(f)
     unix_us = v - _WEBKIT_OFFSET_US
     if unix_us <= 0:
         return None
     try:
-        dt = datetime.fromtimestamp(unix_us / 1_000_000, tz=_UTC)
+        # Integer microseconds end to end (see _exact_int).
+        dt = _UNIX_EPOCH + timedelta(microseconds=unix_us)
     except (OverflowError, OSError, ValueError):
         return None
     if not _plausible(dt):
@@ -497,46 +686,50 @@ register_op({
 })
 
 
+# Any number of fraction digits (truncated to microseconds): capping it
+# at nine left a tenth digit unmatched, and the offset after it unread.
+# The zone is read from what follows by _trailing_zone.
 _ISO_RE = re.compile(
     r"^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})"
-    r"(?::(\d{2})(?:[.,](\d{1,9}))?)?"
-    r"\s*(Z|[+-]\d{2}:?\d{2})?"
+    r"(?::(\d{2})(?:[.,](\d+))?)?"
 )
 
 
 def _parse_iso(value: Any, params: dict, state: dict) -> str | None:
-    m = _ISO_RE.match(str(value).strip())
+    s = str(value).strip()
+    m = _ISO_RE.match(s)
     if not m:
         return None
-    y, mo, d, h, mi, sec, frac, off = m.groups()
+    y, mo, d, h, mi, sec, frac = m.groups()
     try:
         dt = datetime(int(y), int(mo), int(d), int(h), int(mi), int(sec or 0),
                       int(frac[:6].ljust(6, "0")) if frac else 0)
     except ValueError:
         return None
-    if off:
-        # Explicit offset → convert to UTC. "+0530" and "+05:30" both allowed.
-        dt = dt.replace(tzinfo=timezone(_parse_utc_offset(off)))
-    else:
-        dt = _shift_naive(dt, params)
+    # An explicit zone → converted to UTC; "+0530", "+05:30" and "+05"
+    # all allowed (_trailing_zone).
+    dt = _zoned(dt, s[m.end():], params)
+    if dt is None:
+        return None
     return _fmt(dt, subsecond=bool(frac))
 
 
 register_op({
     "id": "iso8601",
     "label": "ISO 8601",
-    "description": "YYYY-MM-DDThh:mm:ss with optional fraction (. or ,) and offset. Z/±HH:MM values are converted to UTC; values without an offset are kept as written.",
+    "description": "YYYY-MM-DDThh:mm:ss with optional fraction (. or ,) and offset. Z/UTC/±HH:MM/±HH values are converted to UTC; values without an offset are kept as written; a zone that can't be converted (EST, Europe/Paris) doesn't parse.",
     "params": [_UTC_OFFSET_PARAM],
     "subsecond": True,
     "parse": _parse_iso,
 })
 
 
-_DD_MMM_RE = re.compile(r"^(\d{1,2})[ -]([A-Za-z]{3})[ -](\d{4})[ ,]+(\d{1,2}):(\d{2}):(\d{2})")
+_DD_MMM_RE = re.compile(r"^(\d{1,2})[ -]([A-Za-z]{3})[ -](\d{4})[ ,]+(\d{1,2}):(\d{2}):(\d{2})(?:[.,]\d+)?")
 
 
 def _parse_dd_mmm(value: Any, params: dict, state: dict) -> str | None:
-    m = _DD_MMM_RE.match(str(value).strip())
+    s = str(value).strip()
+    m = _DD_MMM_RE.match(s)
     if not m:
         return None
     month = MONTHS.get(m.group(2).lower())
@@ -547,13 +740,14 @@ def _parse_dd_mmm(value: Any, params: dict, state: dict) -> str | None:
                       int(m.group(4)), int(m.group(5)), int(m.group(6)))
     except ValueError:
         return None
-    return _fmt(_shift_naive(dt, params), subsecond=False)
+    dt = _zoned(dt, s[m.end():], params)
+    return None if dt is None else _fmt(dt, subsecond=False)
 
 
 register_op({
     "id": "dd_mmm_yyyy",
     "label": "dd Mmm yyyy hh:mm:ss",
-    "description": "e.g. \"05 Jan 2024 13:22:01\" (also 5-Jan-2024). English month abbreviations.",
+    "description": "e.g. \"05 Jan 2024 13:22:01\" (also 5-Jan-2024). English month abbreviations. A trailing offset (+0200, GMT) is converted to UTC.",
     "params": [_UTC_OFFSET_PARAM],
     "subsecond": False,
     "parse": _parse_dd_mmm,
@@ -589,7 +783,12 @@ register_op({
 def _parse_mac(value: Any, params: dict, state: dict) -> str | None:
     s = str(value).strip()
     v = _finite(s)
-    if v is None or v <= 0:
+    # Negative is before 2001 and still inside the plausible window back to
+    # 1990 — a 1990s file or photo date in a plist or Photos store is a
+    # real value, and refusing it left a NULL in a column the analyst asked
+    # for. Zero stays refused: it is the unset default far more often than
+    # midnight on 2001-01-01.
+    if v is None or v == 0:
         return None
     try:
         dt = _MAC_EPOCH + timedelta(seconds=v)
@@ -600,12 +799,22 @@ def _parse_mac(value: Any, params: dict, state: dict) -> str | None:
     return _fmt(dt, subsecond="." in s)
 
 
+def _parse_mac_for_detect(value: Any, params: dict, state: dict) -> str | None:
+    # Detection still scores negatives as misses: a column of small negative
+    # integers is a -1 sentinel far more often than 1990s Cocoa time, and a
+    # post-import "this looks like Mac time" hint for it would be noise.
+    if str(value).strip().startswith("-"):
+        return None
+    return _parse_mac(value, params, state)
+
+
 register_op({
     "id": "mac_absolute",
     "label": "Mac absolute (Cocoa) time",
-    "description": "Seconds since 2001-01-01 UTC (macOS/iOS plists, sqlite stores). Overlaps the unix-seconds range — check the preview to pick the right one.",
+    "description": "Seconds since 2001-01-01 UTC (macOS/iOS plists, sqlite stores); negative for dates before 2001. Overlaps the unix-seconds range — check the preview to pick the right one.",
     "subsecond": True,
     "parse": _parse_mac,
+    "detect": _success_rate_detect({"parse": _parse_mac_for_detect}),
 })
 
 
@@ -638,7 +847,7 @@ register_op({
 
 def _parse_dotnet(value: Any, params: dict, state: dict) -> str | None:
     s = str(value).strip()
-    if not s.isdigit():
+    if not _decimal_ticks(s):
         return None
     ticks = int(s)
     dt_max_ticks = 3155378975999999999  # DateTime.MaxValue.Ticks
@@ -675,7 +884,10 @@ def _parse_clf(value: Any, params: dict, state: dict) -> str | None:
     except ValueError:
         return None
     if m.group(7):
-        dt = dt.replace(tzinfo=timezone(_parse_utc_offset(m.group(7))))
+        tz = _value_offset(m.group(7))
+        if tz is None:
+            return None
+        dt = dt.replace(tzinfo=tz)
     else:
         dt = _shift_naive(dt, params)
     return _fmt(dt, subsecond=False)
@@ -691,54 +903,159 @@ register_op({
 })
 
 
+# RFC 5322 §4.3's obsolete years: two digits mean 19xx from 50 up and 20xx
+# below, three digits mean 1900 + n. email.utils splits two-digit years at
+# 68 (the POSIX strptime rule, not the RFC's) and keeps three digits as
+# written, so "Jan 55" came out 2055 — a plausible, wrong date — and
+# "Jan 124" year 124. The year is widened here before it gets there.
+_RFC2822_YEAR_RE = re.compile(r"^((?:[A-Za-z]{3},\s*)?\d{1,2}\s+[A-Za-z]{3,}\s+)(\d{2,3})(?=\s)")
+
+
+def _widen_rfc2822_year(m: re.Match) -> str:
+    y = int(m.group(2))
+    y += 1900 if len(m.group(2)) == 3 or y >= 50 else 2000
+    return f"{m.group(1)}{y:04d}"
+
+
+# The zones RFC 2822 §3.3/§4.3 defines, as the fixed offsets it gives
+# them, plus UTC (unambiguous, and what most software writes). Not
+# email.utils' own table: that adds AST/ADT — Atlantic time to it, Arabia
+# Standard Time (+03:00) to a Gulf mail server, and an abbreviation cannot
+# say which — and, worse, drops any zone it does not know without a word,
+# so "15:04:05 CET" came back as 15:04:05 in UTC, an hour off, while
+# "15:04:05 EST" was converted. The RFC's single-letter military zones
+# (other than Z) are not here either: §4.3 says RFC 822 defined their
+# signs backwards, so "A" is +01:00 or -01:00 depending on the sender.
+_RFC2822_ZONES = {
+    "UT": 0, "UTC": 0, "GMT": 0, "Z": 0,
+    "EST": -5, "EDT": -4, "CST": -6, "CDT": -5,
+    "MST": -7, "MDT": -6, "PST": -8, "PDT": -7,
+}
+_RFC2822_NUMERIC_ZONE_RE = re.compile(r"[+-]\d{4}")
+_RFC2822_DAYNAMES = frozenset(("mon", "tue", "wed", "thu", "fri", "sat", "sun"))
+
+
+def _rfc2822_zone_token(text: str) -> str:
+    """The token email.utils reads as the zone ('' when there is none).
+
+    Mirrors the token selection in email._parseaddr._parsedate_tz, which
+    is lenient about layout — `date`'s "Mon Jan  2 15:04:05 CET 2006"
+    puts the zone before the year — so "whatever follows the time" is not
+    the same token. Only the selection is mirrored: the date and time
+    still come from the stdlib, and _parse_rfc2822 refuses a value whose
+    zone this reads differently from the stdlib, so a future Python that
+    changed the rules would fail values rather than misplace them."""
+    data = text.split()
+    if not data:
+        return ""
+    if data[0].endswith(",") or data[0].lower() in _RFC2822_DAYNAMES:
+        del data[0]
+    else:
+        i = data[0].rfind(",")
+        if i >= 0:
+            data[0] = data[0][i + 1:]
+    if len(data) == 3:
+        parts = data[0].split("-")
+        if len(parts) == 3:
+            data = parts + data[1:]
+    if len(data) == 4:
+        s = data[3]
+        i = s.find("+")
+        if i == -1:
+            i = s.find("-")
+        if i > 0:
+            data[3:] = [s[:i], s[i:]]
+        else:
+            data.append("")
+    if len(data) < 5:
+        return ""
+    _dd, _mm, yy, tm, tz = data[:5]
+    if yy.find(":") > 0:
+        yy = tm
+    if yy.endswith(","):
+        yy = yy[:-1]
+    if yy and not yy[0].isdigit():
+        tz = yy
+    return tz
+
+
+def _rfc2822_offset(zone: str) -> timedelta | None:
+    """The offset a non-empty RFC 2822 zone token stands for, or None
+    when it is not one the RFC defines — which the caller turns into a
+    parse failure, never into the wall-clock time read as UTC.
+
+    "-0000" is the RFC's own spelling for "this time IS in UT, and the
+    sender's local zone is unknown" (RFC 5322 §3.3) — so it is UTC, and
+    the analyst's `utc_offset` (which is for values that carry no zone at
+    all) must not shift it. email.utils returns it as a naive datetime,
+    exactly like a value with no zone, which is why it is named here."""
+    z = zone.upper()
+    if z in _RFC2822_ZONES:
+        return timedelta(hours=_RFC2822_ZONES[z])
+    if z == "-0000":
+        return timedelta(0)
+    if _RFC2822_NUMERIC_ZONE_RE.fullmatch(z):
+        tz = _value_offset(z)   # ±14:00 and 59 minutes at most, as everywhere else
+        return tz.utcoffset(None) if tz is not None else None
+    return None
+
+
 def _parse_rfc2822(value: Any, params: dict, state: dict) -> str | None:
     try:
-        dt = parsedate_to_datetime(str(value).strip())
+        text = _RFC2822_YEAR_RE.sub(_widen_rfc2822_year, str(value).strip(), count=1)
+        dt = parsedate_to_datetime(text)
     except (TypeError, ValueError, IndexError):
         return None
     if dt is None or not _plausible(dt):
         return None
-    if dt.tzinfo is None:
-        dt = _shift_naive(dt, params)
-    return _fmt(dt, subsecond=False)
+    zone = _rfc2822_zone_token(text)
+    if not zone:
+        # No zone at all: local time as written, or the analyst's offset.
+        # (A stdlib that saw one where the mirror saw none is refused.)
+        return _fmt(_shift_naive(dt, params), subsecond=False) if dt.tzinfo is None else None
+    off = _rfc2822_offset(zone)
+    if off is None:
+        return None
+    if (dt.tzinfo is None) != (zone == "-0000") or (dt.tzinfo is not None and dt.utcoffset() != off):
+        return None   # the stdlib read this zone differently from the mirror above
+    return _fmt(dt.replace(tzinfo=timezone(off)), subsecond=False)
 
 
 register_op({
     "id": "rfc2822",
     "label": "RFC 2822 (email date)",
-    "description": "Mon, 02 Jan 2006 15:04:05 -0700 (email headers, HTTP dates). Offset-bearing values are converted to UTC.",
+    "description": "Mon, 02 Jan 2006 15:04:05 -0700 (email headers, HTTP dates). Offset-bearing values are converted to UTC; "
+                   "a zone abbreviation RFC 2822 does not define (CET, IST, …) is a parse failure, not a guess.",
     "params": [_UTC_OFFSET_PARAM],
     "subsecond": False,
     "parse": _parse_rfc2822,
 })
 
 
-_US_RE = re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{4})[ ,]+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM|am|pm)?")
+_US_RE = re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{4})[ ,]+(\d{1,2}):(\d{2})(?::(\d{2})(?:[.,]\d+)?)?"
+                    r"\s*(?:" + MERIDIEM + r")?")
 
 
 def _parse_us(value: Any, params: dict, state: dict) -> str | None:
-    m = _US_RE.match(str(value).strip())
+    s = str(value).strip()
+    m = _US_RE.match(s)
     if not m:
         return None
     mo, d, y, h, mi, sec, ampm = m.groups()
-    hh = int(h)
-    if ampm:
-        # Same 12-hour rules as store.py's _ts_normalize US branch.
-        if ampm.lower() == "pm" and hh < 12:
-            hh += 12
-        if ampm.lower() == "am" and hh == 12:
-            hh = 0
+    # Same 12-hour rules as store.py's _ts_normalize US branch.
+    hh = hour24(int(h), ampm)
     try:
         dt = datetime(int(y), int(mo), int(d), hh, int(mi), int(sec or 0))
     except ValueError:
         return None
-    return _fmt(_shift_naive(dt, params), subsecond=False)
+    dt = _zoned(dt, s[m.end():], params)
+    return None if dt is None else _fmt(dt, subsecond=False)
 
 
 register_op({
     "id": "us_datetime",
     "label": "US MM/DD/YYYY hh:mm:ss",
-    "description": "US-style dates with optional AM/PM (Timeline Explorer / EZTools exports).",
+    "description": "US-style dates with optional AM/PM (Timeline Explorer / EZTools exports). A trailing offset (-0500, UTC) is converted to UTC.",
     "params": [_UTC_OFFSET_PARAM],
     "subsecond": False,
     "parse": _parse_us,
@@ -772,12 +1089,7 @@ def parse_datetime_lenient(value: Any) -> datetime | None:
     m = _US_RE.match(s)
     if m:
         mo, d, y, h, mi, sec, ampm = m.groups()
-        hh = int(h)
-        if ampm:
-            if ampm.lower() == "pm" and hh < 12:
-                hh += 12
-            if ampm.lower() == "am" and hh == 12:
-                hh = 0
+        hh = hour24(int(h), ampm)
         try:
             return datetime(int(y), int(mo), int(d), hh, int(mi), int(sec or 0))
         except ValueError:

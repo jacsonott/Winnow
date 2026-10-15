@@ -59,7 +59,7 @@ split, found by loading the app:
 
 | module | holds |
 | --- | --- |
-| `core` | `$`, `el`, constants, `api`/`post`, toast/busy, `debounce`. Imports nothing. |
+| `core` | `$`, `el`, constants, `api`/`post`, toast/busy, `debounce`, `nameMap` (every column-keyed map — see [ui.md](ui.md)). Imports nothing. |
 | `state` | `S` and the `sel*` row-selection helpers |
 | `view` | building/rebuilding the materialized view |
 | `grid` | paging, prefetch, painting, cell-range selection |

@@ -14,8 +14,8 @@
      and moves on. An analyst opening their fifth case of the day should
      never be waiting on us.
    - **Disable-able.** Settings → Appearance turns it off entirely, and
-     `prefers-reduced-motion` skips straight to the final frame without
-     being asked.
+     `prefers-reduced-motion` skips it without being asked — except on
+     Windows, where that hint means something else (see osSkipsSplash).
    - **Themed.** It reads the same appearance the rest of the app does, so
      a light-mode install gets ink-on-parchment rather than a black
      rectangle. Colours come from the Harvest palette either way.
@@ -31,7 +31,7 @@
    calls a frame, the backing store is capped by a pixel budget, and if
    frames are still slow it lowers the render scale and thins the chaff. */
 
-import { $ } from './core.js';
+import { $, IS_WINDOWS } from './core.js';
 
 const TOKENS = [
   '4624', '4688', 'TCP', 'SYN', 'svc.exe', '0x1A3F', '445', 'RDP', '::1', '8.8.8.8',
@@ -212,17 +212,26 @@ export function reducedMotion() {
   return !!(mm && mm.matches);
 }
 
+/* Whether the OS hint alone keeps the default from playing. Not on
+   Windows: Chromium reports reduced motion there whenever Animation effects
+   are off, which performance policies, VM images and RDP profiles do as a
+   matter of course, so honouring it meant the animation never played on
+   exactly the machines this tool lives on — for everyone except the
+   analysts who had unticked and re-ticked the box (which writes 'always').
+   Elsewhere the hint is an accessibility switch someone chose, and it
+   still wins over the default. */
+export function osSkipsSplash() {
+  return reducedMotion() && !IS_WINDOWS;
+}
+
 /* Three states, not two. `false` is off. `'always'` — what the Settings
    checkbox writes when the analyst ticks it themselves — plays regardless
-   of the OS hint. Anything else (the default `true`, or unset) is
-   "on, but honour reduced-motion": Windows reports reduced motion whenever
-   Animation effects are off, which performance policies and VM images do
-   as a matter of course, so this default alone had the animation quietly
-   never playing on exactly the machines this tool lives on. */
+   of the OS hint. Anything else (the default `true`, or unset) is "on,
+   unless the OS asks for reduced motion" (osSkipsSplash). */
 export function splashEnabled(appearance) {
   if (appearance && appearance.splash === false) { recordSplash('skipped', 'off in Settings'); return false; }
   if (appearance && appearance.splash === 'always') return true;
-  if (reducedMotion()) { recordSplash('skipped', 'system asks for reduced motion'); return false; }
+  if (osSkipsSplash()) { recordSplash('skipped', 'system asks for reduced motion'); return false; }
   return true;
 }
 
