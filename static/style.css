@@ -827,6 +827,13 @@ section.page-with-panels { flex-direction: row; }
 .search-mode-toggle .btn:first-child { border-radius: var(--radius-sm) 0 0 var(--radius-sm); }
 .search-mode-toggle .btn:last-child { border-radius: 0 var(--radius-sm) var(--radius-sm) 0; }
 .search-mode-toggle .btn + .btn { border-left: 0; }
+/* The search dialog borrows this toggle for Paste a list / Advanced, and
+   there it is a dialog segment: the builders' tint (see .vp-seg). The
+   toolbar's own toggle keeps the .btn[aria-pressed] fill. */
+.modal-body .search-mode-toggle .btn[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  border-color: var(--accent-dim); color: var(--text);
+}
 
 /* The max-height matters: each term is a full editor row, so a many-term
    filter (the shipped tool sweep is 26) would otherwise stack taller than
@@ -2036,10 +2043,20 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .vp-toggles { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; justify-content: space-between; }
 .vp-seg { display: flex; gap: 2px; flex-wrap: wrap; }
 .vp-seg .btn { font-size: 11px; padding: 3px 7px; }
-/* The same filled look the Settings segments use: accent text on the
-   accent-dim fill measured 1.4–2.7:1 across the skins, and accent-on-panel
-   fails in Phosphor light, where the green is not a text colour. */
-.vp-seg .btn[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+/* The builders' pressed segment (.mb-seg, .lm-eb-seg): a 16% accent tint
+   under full-contrast --text, the same rule as Settings' .segmented and
+   the plugin manager's .pl-scope. What failed before this was accent
+   TEXT — on the accent-dim fill it measured 1.4–2.7:1 across the skins,
+   and on the panel in Phosphor light, where the green is not a text
+   colour. The filled accent that replaced it was the loudest thing in
+   every dialog, louder than the one main button (.btn.primary) whose job
+   that is, and --accent-fg on --accent is only 3.3:1 in Panel light.
+   --text on the tint is 6.9:1 or better in every skin and theme;
+   tests/ui/test_visual_pass.py measures it. */
+.vp-seg .btn[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  border-color: var(--accent-dim); color: var(--text);
+}
 .vp-list {
   flex: 1 1 auto; min-height: 60px; max-height: 40vh; overflow-y: auto;
   display: flex; flex-direction: column; gap: 1px;
@@ -2339,7 +2356,10 @@ textarea:focus { border-color: var(--accent); outline: none; }
 
 /* 6px on top so the focused input's ring doesn't sit on the help text. */
 .fb-help { margin: 6px 0 10px; font-size: 12px; color: var(--dim); }
-.tf-enabled { display: flex; align-items: center; gap: 6px; margin: 4px 0 10px; }
+/* A checkbox row in the Timeframe dialog ("Keep applied when switching
+   tables"): box and words on one line, the row to itself. It was
+   .tf-enabled while the dialog also had an Enabled box. */
+.tf-check { display: flex; align-items: center; gap: 6px; margin: 4px 0 10px; }
 /* A labelled field in the older dialogs, in the builders' shape
    (.lm-eb-field): label above, control full width under it, an optional
    note under that. A label beside its box put each box at a different x
@@ -2423,12 +2443,17 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .style-swatch span { width: 14px; height: 14px; border-radius: 3px; border: 1px solid var(--line-2); }
 
 .segmented { display: flex; border: var(--border-w) solid var(--line-2); border-radius: var(--radius-sm); overflow: hidden; margin-top: 8px; width: fit-content; }
+/* The builders' segment (.mb-seg): unpressed is transparent, so the
+   pressed tint is seen against the dialog's own --panel. Against --panel-2
+   (what the unpressed buttons used to paint) the tint sat too close in
+   the light skins — Harvest light measured 3.7 ΔE apart, a difference
+   you have to look for. See .vp-seg for why the text is --text. */
 .segmented button {
-  background: var(--panel-2); border: 0; border-right: var(--border-w) solid var(--line-2); color: var(--dim);
+  background: transparent; border: 0; border-right: var(--border-w) solid var(--line-2); color: var(--dim);
   padding: 6px 14px; font: inherit; font-size: 12px; cursor: pointer;
 }
 .segmented button:last-child { border-right: 0; }
-.segmented button[aria-pressed="true"] { background: var(--accent); color: var(--accent-fg); }
+.segmented button[aria-pressed="true"] { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--text); }
 
 .accent-picker { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
 .accent-swatch { width: 20px; height: 20px; border-radius: 50%; border: 1px solid var(--line-2); background: var(--sw); cursor: pointer; padding: 0; }
@@ -3365,7 +3390,8 @@ html.remote .row.selected:hover { background: var(--row-selected); }
 }
 .pl-scope button:last-child { border-right: 0; }
 .pl-scope button:hover:not([aria-pressed="true"]):not(:disabled) { color: var(--text); background: var(--line); }
-.pl-scope button[aria-pressed="true"] { background: var(--accent-dim); border-color: var(--accent); color: var(--accent-fg); }
+/* A dialog segment, so the builders' tint (see .vp-seg). */
+.pl-scope button[aria-pressed="true"] { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--text); }
 .pl-scope button:disabled { opacity: .5; cursor: default; }
 .pl-scope-note { font-size: 10px; color: var(--dim); max-width: 280px; text-align: right; line-height: 1.5; }
 

@@ -424,10 +424,14 @@ start Winnow again. See [Stopping Winnow](Installation.md#stopping-winnow).
 ## Case settings
 
 **Case ▾ → Case settings…** holds the settings stored in the open case file,
-which go with it when you hand it to another analyst:
+which go with it when you hand it to another analyst. Settings, by contrast,
+is about this machine.
 
 - **Timestamps**: this case's display format, or **Use the machine-wide
-  default**.
+  default**. It is display only: the stored and exported value is always
+  the text the file came with. A format picked on one column (right-click
+  its header) beats this one, and this one beats the machine-wide default
+  (see [Timestamps](#timestamps)).
 - **Dashboards**: **Dashboard creator mode** puts **Add to dashboard** back
   into column-header menus, row menus and the **Filters ▾** button. Off, those
   menus stay short; boards are always available under Dashboards. See

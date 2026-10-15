@@ -799,11 +799,25 @@ def _parse_mac(value: Any, params: dict, state: dict) -> str | None:
     return _fmt(dt, subsecond="." in s)
 
 
+# Detection only: the smallest value detection will call Cocoa time,
+# 2004-03-03. Mac time is the one numeric encoding whose epoch sits INSIDE
+# the plausible window, so every small number parses as a moment just
+# after 2001-01-01 — and in evidence a column of small numbers is a record
+# number, an event id, a process id or a duration in seconds far more often
+# than a Cocoa timestamp from the first three years of OS X. EvtxECmd's
+# RecordNumber (1, 2, 3…) was offered as "Mac absolute (Cocoa) time — 100%
+# of sampled values parse". Floored by magnitude rather than by "is it a
+# whole number" because durations carry fractions.
+_MAC_DETECT_FLOOR = 100_000_000
+
+
 def _parse_mac_for_detect(value: Any, params: dict, state: dict) -> str | None:
-    # Detection still scores negatives as misses: a column of small negative
-    # integers is a -1 sentinel far more often than 1990s Cocoa time, and a
-    # post-import "this looks like Mac time" hint for it would be noise.
-    if str(value).strip().startswith("-"):
+    # Below the floor is a miss, and that includes every negative: a column
+    # of small negative integers is a -1 sentinel far more often than 1990s
+    # Cocoa time. The parser itself still reads all of these — an analyst
+    # who picks the operation for such a column gets what they asked for.
+    v = _finite(str(value).strip())
+    if v is None or v < _MAC_DETECT_FLOOR:
         return None
     return _parse_mac(value, params, state)
 
@@ -835,6 +849,19 @@ def _parse_excel(value: Any, params: dict, state: dict) -> str | None:
     return _fmt(_shift_naive(dt, params), subsecond=False)
 
 
+def _parse_excel_for_detect(value: Any, params: dict, state: dict) -> str | None:
+    # Detection only, the same trap as _MAC_DETECT_FLOOR: Excel's whole
+    # plausible window is 32874–73050, and a whole number in it is an
+    # event record id, a process id or an ephemeral port (49152–65535 is
+    # 2034–2079) far more often than a date-only serial — a spreadsheet
+    # date that reaches a CSV with no time of day usually arrives as text.
+    # A serial with a fraction is still a candidate, and the parser still
+    # reads a whole one for an analyst who picks the operation.
+    if _WHOLE_RE.match(str(value).strip()):
+        return None
+    return _parse_excel(value, params, state)
+
+
 register_op({
     "id": "excel_serial",
     "label": "Excel serial date",
@@ -842,6 +869,7 @@ register_op({
     "params": [_UTC_OFFSET_PARAM],
     "subsecond": False,
     "parse": _parse_excel,
+    "detect": _success_rate_detect({"parse": _parse_excel_for_detect}),
 })
 
 

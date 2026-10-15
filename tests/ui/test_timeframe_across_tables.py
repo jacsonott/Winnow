@@ -65,7 +65,7 @@ def _set_range(page, rng):
     inputs = page.locator("#modalBody input[type=text]")
     inputs.nth(0).fill(rng["start"])
     inputs.nth(1).fill(rng["end"])
-    page.locator("#modalBody label.tf-enabled", has_text="Enabled").locator("input").check()
+    # No Enabled box to tick any more: Apply is what turns it on.
     page.get_by_role("button", name="Apply").click()
     page.wait_for_selector("#modal[hidden]", state="attached")
 

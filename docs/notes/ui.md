@@ -81,10 +81,18 @@ see [docs/notes/README.md](README.md) for the whole set.
   into a one-chip column. The header bar has the same shape:
   `.bar-actions` never shrinks and its buttons never wrap, `#sourceTabs`
   keeps `SOURCE_TABS_MIN` (140px) and it is `#pageTabs` — which scrolls —
-  that shrinks (`flex: 0 1 auto`, 60px floor). A pressed segment (`.vp-seg`, `.segmented`)
-  is the filled accent with `--accent-fg` text; accent text on the dim
-  accent fill measured 1.4–2.7:1 across the skins, and accent-on-panel
-  fails in Phosphor light.
+  that shrinks (`flex: 0 1 auto`, 60px floor). A pressed segment in a
+  dialog or panel (`.vp-seg`, `.segmented`, `.pl-scope`, the search
+  dialog's Paste/Advanced) is the builders' tint — 16% accent over a
+  transparent unpressed row, `--text` on it — and not accent text, which
+  is what failed: accent on the dim accent fill measured 1.4–2.7:1 across
+  the skins, and accent on the panel fails in Phosphor light. It was the
+  filled accent for a while, which read but outshouted each dialog's one
+  `.btn.primary`. The unpressed buttons have to be transparent for the
+  tint to show: on `--panel-2` it sat 3.7 ΔE from them in Harvest light.
+  Toolbar toggles (`.btn[aria-pressed]`) keep the accent-dim fill.
+  `tests/ui/test_visual_pass.py` measures text contrast and the
+  pressed/unpressed gap in every skin and theme.
 
 - The **timeframe filter** (`S.timeRange`, `static/js/timeframe.js`, `time_range` on
   `ViewSpec`, compiled in `_compile_where` via the registered SQL function
@@ -95,7 +103,11 @@ see [docs/notes/README.md](README.md) for the whole set.
   on purpose (see the comments at each site). It's
   meant to stay pinned while everything else changes underneath it, and
   toggles on/off via its own keybind (`toggleTimeRange`) rather than
-  needing its config modal reopened. `column: null` means "every datetime
+  needing its config modal reopened. **Apply always turns it on**; the
+  dialog has no Enabled box. It had one, and a range typed in with the box
+  unticked was saved but not applied, so Apply looked broken. Off is
+  Clear (range gone) or the toggle key (range kept); the dialog says so
+  when it is opened on a range that is off. `column: null` means "every datetime
   column on whichever table is open, OR'd together" — the MFT case this
   exists for: a timestomped Created date shouldn't hide a row whose
   Modified date is genuinely in range. `TS_NORMALIZE(x)` (a zero-padded

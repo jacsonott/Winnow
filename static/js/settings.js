@@ -504,15 +504,12 @@ export function openSkinPicker(onPicked) {
 export function openCaseSettings() {
   markModalAction('openCaseSettings');
   modal('Case settings', (b) => {
-    b.append(el('p', null,
-      'These are stored in the case file, so they follow it to whoever you hand it to — '
-      + 'unlike Settings, which is about this machine.'));
+    // One line each; the longer account of both is the wiki's Case
+    // settings section (Settings and shortcuts).
+    b.append(el('p', null, 'Saved in the case file, so they travel with it — Settings is for this machine.'));
 
     b.append(el('div', 'settings-sub-label', 'Timestamps'));
-    b.append(el('p', 'fb-help',
-      'How datetime columns are displayed in this case. Presentation only — the stored and '
-      + 'exported value is always the text the file came with. A format picked on an individual '
-      + "column (right-click its header) beats this, which beats the machine-wide default."));
+    b.append(el('p', 'fb-help', 'Display only — a format set on a column (right-click its header) beats this.'));
 
     const sel = el('select');
     const inherit = el('option', null, 'Use the machine-wide default');

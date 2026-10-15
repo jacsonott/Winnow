@@ -684,6 +684,29 @@ def test_detect_source_suggestions_skips_already_typed_datetime_columns(store, w
     assert cols == ["Epoch"]
 
 
+def test_an_evtxecmd_record_number_is_not_suggested_as_mac_time(store, write_csv):
+    """The add dialog said RecordNumber was "Mac absolute (Cocoa) time"
+    with 100% of values parsing, and the post-import notice could say the
+    same: the counters of an EvtxECmd table all read as moments in the
+    first hours after 2001-01-01. Neither offers it now — and an analyst
+    who picks the operation by hand still gets the column."""
+    rows = [["RecordNumber", "EventRecordId", "TimeCreated", "EventId", "ProcessId"]]
+    for i in range(1, 121):
+        rows.append([str(i), str(100000 + i), f"2026-03-03 00:{i // 60:02d}:{i % 60:02d}",
+                     ["4624", "4625", "4688"][i % 3], str(600 + 4 * i)])
+    sid = _ingest(store, write_csv, rows, name="evtx.csv")
+
+    assert store.detect_timestamp_format(sid, "RecordNumber") == []
+    assert store.detect_timestamp_format(sid, "EventId") == []
+    assert store.detect_source_suggestions(sid) == []
+
+    preview = store.preview_derived(sid, "RecordNumber", "mac_absolute", {})
+    assert preview["failures"] == 0
+    def_id = _add(store, sid, "RecordNumber (parsed)", "RecordNumber", "mac_absolute")
+    assert store.get_derived_column(def_id)["status"] == "ready"
+    assert _cells(store, sid)[0]["RecordNumber (parsed)"] == "2001-01-01 00:00:01"
+
+
 def test_preview_reports_failures_before_anything_is_created(store, write_csv):
     sid = _ingest(store, write_csv, EPOCH_ROWS)
     p = store.preview_derived(sid, "Epoch", "unix_epoch", {})

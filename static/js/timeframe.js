@@ -252,29 +252,30 @@ export function toggleTimeRange() {
 export function openTimeRangeModal() {
   markModalAction('openTimeRange');
   modal('Timeframe filter', (b) => {
+    // No Enabled box. Apply always turns the filter on, and the two ways
+    // off are Clear (forget the range) and the toggle key (keep it): with
+    // a box as well, a range typed in with the box left unticked was
+    // saved but not applied, and Apply looked as if it had done nothing.
     const toggleKey = S.keymap.toggleTimeRange[0] || '(unbound)';
-    const openKey = S.keymap.openTimeRange[0] || '(unbound)';
+    // One line, and it follows the across-tables switch below: with it
+    // off the range is per table, and the line must not say otherwise.
     const intro = el('p');
     const paintIntro = () => {
       intro.textContent = (timeframeAcrossTables()
-        ? 'Stays applied across filter/preset changes and table switches, unlike the regular filters — '
-        : 'Stays applied across filter/preset changes, unlike the regular filters, and each table keeps its own — ')
-        + `toggle it on/off quickly with "${toggleKey}", or jump straight back to this dialog with "${openKey}".`;
+        ? 'Survives filters and table switches'
+        : 'Survives filters; each table keeps its own')
+        + ` — "${toggleKey}" turns it off without clearing it.`;
     };
     paintIntro();
     b.append(intro);
-
-    const enabledLabel = el('label', 'tf-enabled');
-    const enabledCb = el('input');
-    enabledCb.type = 'checkbox';
-    enabledCb.checked = S.timeRange.enabled;
-    enabledLabel.append(enabledCb, document.createTextNode(' Enabled'));
-    b.append(enabledLabel);
+    if (!S.timeRange.enabled && (S.timeRange.start || S.timeRange.end)) {
+      b.append(el('p', 'fb-help tf-off', 'Off right now — Apply turns it back on.'));
+    }
 
     // A preference rather than part of the range, so it saves as it is
     // clicked — Cancel below discards the range edits, not this. The same
     // switch is in Settings → Filter & search syntax.
-    const acrossLabel = el('label', 'tf-enabled');
+    const acrossLabel = el('label', 'tf-check');
     const acrossCb = el('input');
     acrossCb.type = 'checkbox';
     acrossCb.id = 'tfAcrossTables';
@@ -370,7 +371,6 @@ export function openTimeRangeModal() {
           if (!res.start && !res.end) { toast('No tagged rows with a usable timestamp'); return; }
           startInput.value = res.start || '';
           endInput.value = res.end || '';
-          enabledCb.checked = true;
           toast('Range set from tagged rows — Apply to use it');
         } catch (e) {
           toast('Could not read tagged range: ' + e.message, 4000);
@@ -387,7 +387,7 @@ export function openTimeRangeModal() {
       if (!startInput.value.trim() && !endInput.value.trim()) { toast('Set a start and/or end'); return; }
       if (!validateTimeInput(startInput, 'Start') || !validateTimeInput(endInput, 'End')) return;
       S.timeRange = {
-        enabled: enabledCb.checked,
+        enabled: true,
         column: colSel.value || null,
         start: startInput.value.trim(),
         end: endInput.value.trim(),
