@@ -626,7 +626,7 @@ export default function mount(container, winnow) {
       area.style.cssText = 'margin-top:10px';
       b.append(area);
 
-      const apply = el('button', 'btn', 'Apply');
+      const apply = el('button', 'btn primary', 'Apply');
       apply.style.marginTop = '12px';
       apply.onclick = () => {
         document.getElementById('modal').hidden = true;

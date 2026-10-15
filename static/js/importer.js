@@ -314,7 +314,7 @@ export function openImportModal() {
     const folderBtn = el('button', 'btn ghost', 'Import a whole folder…');
     folderBtn.title = 'Scan a directory (e.g. KAPE output) against extension + glob patterns';
     folderBtn.onclick = () => openDirectoryImportModal();
-    const importAll = el('button', 'btn', 'Import all queued');
+    const importAll = el('button', 'btn primary', 'Import all queued');
     // The one primary action in the row, pushed to the far right so it
     // isn't the neighbour of "Import a whole folder…".
     importAll.style.marginLeft = 'auto';
@@ -519,7 +519,7 @@ function openUnitPicker(src, { initial, onConfirm, onCancel } = {}, cfg) {
     b.append(tableList);
 
     const actions = el('div', 'row-actions');
-    const importBtn = el('button', 'btn', cfg.confirm);
+    const importBtn = el('button', 'btn primary', cfg.confirm);
     const cancel = el('button', 'btn ghost', 'Cancel');
     cancel.onclick = () => { if (onCancel) onCancel(); else $('modal').hidden = true; };
     actions.append(importBtn, cancel);
@@ -741,7 +741,7 @@ export async function openDirectoryImportModal(state = {}) {
 
     const resultsBox = el('div', 'search-all-results');
     const actions = el('div', 'row-actions');
-    const importBtn = el('button', 'btn', 'Import checked (0)');
+    const importBtn = el('button', 'btn primary', 'Import checked (0)');
     importBtn.disabled = true;
 
     async function runScan() {

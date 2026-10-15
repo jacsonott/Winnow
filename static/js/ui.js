@@ -224,7 +224,7 @@ export function confirmDialog(message, opts = {}) {
     const acts = el('div', 'confirm-actions');
     const cancelBtn = el('button', 'btn ghost', opts.cancelLabel || 'Cancel');
     cancelBtn.onclick = () => close(false);
-    const okBtn = el('button', 'btn' + (opts.danger ? ' danger' : ''), opts.okLabel || 'OK');
+    const okBtn = el('button', 'btn ' + (opts.danger ? 'danger' : 'primary'), opts.okLabel || 'OK');
     okBtn.onclick = () => close(true);
     acts.append(cancelBtn, okBtn);
     card.append(acts);
@@ -241,7 +241,7 @@ export function alertDialog(message, opts = {}) {
   const build = (card, close) => {
     card.append(el('p', 'confirm-message', message));
     const acts = el('div', 'confirm-actions');
-    const okBtn = el('button', 'btn', opts.okLabel || 'OK');
+    const okBtn = el('button', 'btn primary', opts.okLabel || 'OK');
     okBtn.onclick = () => close(undefined);
     okBtn.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); close(undefined); } };
     acts.append(okBtn);
@@ -264,7 +264,7 @@ export function promptDialog(message, defaultValue = '', opts = {}) {
     const acts = el('div', 'confirm-actions');
     const cancelBtn = el('button', 'btn ghost', 'Cancel');
     cancelBtn.onclick = () => close(null);
-    const okBtn = el('button', 'btn', opts.okLabel || 'OK');
+    const okBtn = el('button', 'btn primary', opts.okLabel || 'OK');
     okBtn.onclick = () => close(input.value);
     acts.append(cancelBtn, okBtn);
     card.append(acts);

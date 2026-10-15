@@ -169,9 +169,10 @@ def test_help_text_clears_the_focus_ring(page):
     page.evaluate("() => __winnow.openJumpTsModal()")
     page.wait_for_selector("#modal:not([hidden])")
     gap = page.evaluate(
-        """() => { const row = document.querySelector('#modalBody .row-actions');
-             const help = row.nextElementSibling;
-             return help.getBoundingClientRect().top - row.getBoundingClientRect().bottom; }""")
+        """() => { const box = document.querySelector('#modalBody input[placeholder="YYYY-MM-DD HH:MM:SS"]');
+             const help = [...document.querySelectorAll('#modalBody .fb-help')]
+               .find((p) => p.textContent.startsWith('24-hour'));
+             return help.getBoundingClientRect().top - box.getBoundingClientRect().bottom; }""")
     page.keyboard.press("Escape")
     assert gap >= 4, gap
 

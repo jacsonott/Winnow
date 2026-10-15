@@ -1750,3 +1750,17 @@ see [docs/notes/README.md](README.md) for the whole set.
   that awaits first should take the wrapper.
   `tests/ui/test_double_click_submits_once.py` holds each POST in flight
   until the double-click is over and counts them.
+
+- **Older dialogs borrow the builders' look through two shared classes,
+  not inline styles.** The merge and lateral-movement builders set the
+  look (dim uppercase section heads, labels above fields, one accent-filled
+  main button); the older dialogs drifted from it one inline `cssText` at
+  a time — Timeframe's Start and End boxes started at different x because
+  each label sat beside its box, and every dialog's Apply looked like its
+  Cancel. `.btn.primary` is a dialog's main action (one per dialog — the
+  prompt/confirm OK, Apply, Create, Import…); `.dlg-field` is a label
+  above a full-width control, `.dlg-pair` two of them side by side,
+  `.dlg-input` a box plus its 📅. `.modal-body h4` is dim like the
+  builders' heads; Settings' section heads stay accent because they are
+  buttons. A new dialog uses these rather than restyling a select or an
+  input inline.

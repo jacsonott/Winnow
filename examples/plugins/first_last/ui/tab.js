@@ -1024,7 +1024,7 @@ export default function mount(container, winnow) {
         renderControls();
         schedule();
       };
-      const apply = el('button', 'btn', 'Apply');
+      const apply = el('button', 'btn primary', 'Apply');
       apply.style.marginTop = '12px';
       apply.onclick = applyNow;
       b.append(apply);
@@ -1390,7 +1390,11 @@ export default function mount(container, winnow) {
       const defaultName = src ? `First-Last of ${labelOf(src)}` : 'First-Last';
       const name = el('input', 'confirm-input');
       name.placeholder = defaultName;
-      b.append(el('label', null, 'Table name'), name);
+      // Label above a full-width box (the host's .dlg-field), so the default
+      // name in the placeholder isn't cut off by a box sized to share a row.
+      const nameField = el('div', 'dlg-field');
+      nameField.append(el('label', null, 'Table name'), name);
+      b.append(nameField);
 
       const tlRow = el('label');
       tlRow.style.cssText = 'display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;margin-top:10px';
@@ -1399,17 +1403,19 @@ export default function mount(container, winnow) {
       tlRow.append(tlCb, el('span', null, 'Add these rows to the Timeline (tags every row)'));
       b.append(tlRow);
       const tagName = el('input', 'confirm-input');
-      tagName.style.display = 'none';
-      b.append(tagName);
+      const tagField = el('div', 'dlg-field');
+      tagField.style.display = 'none';
+      tagField.append(tagName);
+      b.append(tagField);
       tlCb.onchange = () => {
-        tagName.style.display = tlCb.checked ? '' : 'none';
+        tagField.style.display = tlCb.checked ? '' : 'none';
         if (tlCb.checked && !tagName.value) tagName.value = name.value.trim() || defaultName;
       };
       b.append(el('p', 'fb-help', 'The Timeline shows every tagged row across the case — the tag '
         + '(created if needed) is what places these bookends on it, and the rail/tag ribbon pick it up too.'));
 
       const acts = el('div', 'row-actions');
-      const go = el('button', 'btn', 'Create table');
+      const go = el('button', 'btn primary', 'Create table');
       go.onclick = async () => {
         go.disabled = true;
         try {
