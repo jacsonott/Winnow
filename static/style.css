@@ -1990,6 +1990,14 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .collist label { display: flex; align-items: center; gap: 8px; padding: 3px 4px; font-family: var(--mono); font-size: 12px; flex: 1; min-width: 0; }
 .modal-body .row-actions { display: flex; gap: 6px; margin-top: 12px; align-items: center; }
 .modal-body .row-actions h4 { flex: 1; margin: 0; }
+/* A form dialog's field captions (New case / Save as a case, Edit case,
+   Open existing case file). The gap goes ABOVE each caption and only a
+   small one below it, so a caption reads with the box under it — with the
+   row's 12px on top instead, "Group" sat flush under the Name box and read
+   as its caption. */
+.modal-body .field-label { display: block; margin: 14px 0 4px; }
+.modal-body .field-label:first-child { margin-top: 0; }
+.modal-body .field-label + .row-actions { margin-top: 0; }
 
 /* ---------------------------------------------------------- value picker */
 

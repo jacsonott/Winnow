@@ -26,6 +26,9 @@ export const ROW_H_COMPACT = 20;
    names a key that isn't there. */
 export const IS_MAC = /Mac|iPhone|iPad/.test((navigator.platform || '') + (navigator.userAgent || ''));
 export const MOD_ENTER = IS_MAC ? '⌘⏎' : 'Ctrl+⏎';
+/* Windows, where Chromium's prefers-reduced-motion is just the Animation
+   effects switch — see splash.osSkipsSplash for why that matters. */
+export const IS_WINDOWS = /^Win/.test(navigator.platform || '') || /Windows/.test(navigator.userAgent || '');
 
 export let ROW_H = ROW_H_COMFORTABLE;
 /* Rebinding has to happen in this module: an imported binding is readable

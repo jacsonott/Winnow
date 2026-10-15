@@ -16,7 +16,7 @@ import { buildAssocPanel } from './assoc.js';
 import { buildEnvPanel } from './userenv.js';
 import { loadCaseVariables, loadSavedFilters } from './savedfilters.js';
 import { applyPageTabsSize, renderPageTabs, syncTabOverflow } from './sources.js';
-import { lastSplash, reducedMotion } from './splash.js';
+import { lastSplash, osSkipsSplash, reducedMotion } from './splash.js';
 import { S, gridRowCount, dashboardCreatorMode } from './state.js';
 import { openSavedFiltersModal, updateFiltersButton, updateTimeRangeButton } from './timeframe.js';
 import { TS_FORMATS } from './tsformat.js';
@@ -871,12 +871,16 @@ export function openSettings() {
 
     /* The winnowing animation on launch. On by default and skippable with
        any key or click while it runs — this switch is for someone who opens
-       Winnow all day and doesn't want it at all. prefers-reduced-motion is
-       honoured without needing this turned off. */
+       Winnow all day and doesn't want it at all. The box says whether it
+       will actually play: left at the default where the OS asks for reduced
+       motion (anywhere but Windows — splash.osSkipsSplash) it is skipped,
+       so it shows unticked. A ticked box over an animation that never
+       played is what had analysts unticking and re-ticking it to get it. */
     const splashLabel = el('label', 'check-row');
     const splashCb = el('input');
     splashCb.type = 'checkbox';
-    splashCb.checked = S.appearance.splash !== false;
+    splashCb.checked = S.appearance.splash === 'always'
+      || (S.appearance.splash !== false && !osSkipsSplash());
     splashCb.onchange = () => {
       // Ticked by hand means "play it" — including on a machine whose OS
       // asks for reduced motion (see splash.splashEnabled).
@@ -891,10 +895,14 @@ export function openSettings() {
       const last = lastSplash();
       const parts = ['The winnowing animation Winnow starts with. Any key or click skips it.'];
       if (reducedMotion()) {
-        parts.push(S.appearance.splash === 'always'
-          ? 'Your system asks for reduced motion; it plays anyway because you ticked this yourself.'
-          : 'Your system asks for reduced motion (Windows: Accessibility → Visual effects → Animation effects), '
-            + 'so it is skipped — tick the box to play it regardless.');
+        if (S.appearance.splash === 'always') {
+          parts.push('Your system asks for reduced motion; it plays anyway because you ticked this yourself.');
+        } else if (S.appearance.splash !== false) {
+          parts.push(osSkipsSplash()
+            ? 'Your system asks for reduced motion, so it is skipped — tick the box to play it anyway.'
+            : 'Windows has Animation effects off (Accessibility → Visual effects), as VM images and '
+              + 'performance settings often leave it; that does not skip it — untick the box if you would rather not see it.');
+        }
       }
       if (last && last.result) {
         parts.push(`Last launch: ${last.result}${last.reason ? ` — ${last.reason}` : ''}.`);

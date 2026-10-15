@@ -97,12 +97,13 @@ at once.
 ### Launch animation
 
 **Launch animation** is the winnowing animation Winnow opens with. Any key
-or click skips it. Left at its default, it is skipped when your operating
-system asks for reduced motion (on Windows, with **Accessibility → Visual
-effects → Animation effects** off, which many managed and virtual machines
-have). Ticking the box yourself makes it play regardless; unticking it turns
-it off. The note under the box says what happened at the last launch and
-why.
+or click skips it. It is on by default. On macOS and Linux, left at its
+default, it is skipped when your system asks for reduced motion, and the box
+shows unticked; tick it to play the animation anyway. On Windows it plays
+even with **Accessibility → Visual effects → Animation effects** off, because
+many managed and virtual machines turn that off as a performance setting
+rather than a preference; untick the box if you don't want it. The note
+under the box says what happened at the last launch and why.
 
 ### Pages as a dropdown
 

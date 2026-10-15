@@ -187,3 +187,27 @@ def test_a_new_case_goes_in_the_default_folder_when_none_was_chosen(page):
     assert DEFAULT_CASES + "/acme.db-winnow" in values, values
     page.keyboard.press("Escape")
     page.wait_for_selector("#modal[hidden]", state="attached")
+
+
+def test_new_case_captions_sit_with_the_box_below_them(page):
+    """Each caption sat flush under the previous field's box (the 12px gap
+    was on the row below the caption), so "Group" read as a caption of the
+    Name box. The dialog is also the quick look's Save as a case."""
+    page.evaluate("() => __winnow.openNewCaseModal()")
+    page.wait_for_selector("#modal:not([hidden])")
+    gaps = page.evaluate("""() => {
+      const out = {};
+      for (const lab of document.querySelectorAll('#modalBody > label')) {
+        const above = lab.previousElementSibling, below = lab.nextElementSibling;
+        if (!above || !below) continue;
+        const l = lab.getBoundingClientRect();
+        out[lab.textContent] = [l.top - above.getBoundingClientRect().bottom,
+                                below.getBoundingClientRect().top - l.bottom];
+      }
+      return out;
+    }""")
+    page.keyboard.press("Escape")
+    page.wait_for_selector("#modal[hidden]", state="attached")
+    assert set(gaps) >= {"Group", "Case file path", "Profile"}, gaps
+    for name, (above, below) in gaps.items():
+        assert above >= 10 and above > below, (name, gaps)

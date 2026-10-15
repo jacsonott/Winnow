@@ -95,8 +95,8 @@ python server.py        # python3 on most Linux and macOS installs
 
 The terminal prints `Winnow on http://127.0.0.1:8777  (home screen — no case
 open)` and a window opens on the home screen. Winnow plays a short launch
-animation (any key or click skips it; it is skipped when your system asks for
-reduced motion) and asks two questions, once each:
+animation (any key or click skips it, and **Settings → Appearance** turns it
+off) and asks two questions, once each:
 
 - whether you are working over RDP or another remote desktop. **Enable
   remote mode** switches the grid to whole-row scrolling and stops
