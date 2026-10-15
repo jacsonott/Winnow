@@ -330,6 +330,31 @@ def test_detect_hides_multi_input_ops_and_zero_confidence():
     assert all(r["op_id"] != "duration_delta" for r in got)
 
 
+def test_a_counter_is_not_offered_as_a_timestamp():
+    """EvtxECmd's RecordNumber — 1, 2, 3… — was suggested as "Mac absolute
+    (Cocoa) time" with every value parsing: Mac time's epoch is inside the
+    plausible window, so each small number is a moment just after
+    2001-01-01. Excel serial dates catch whole numbers one range up
+    (record ids, ephemeral ports). Detection offers neither now."""
+    record_number = [str(i) for i in range(1, 201)]
+    assert timeparse.detect(record_number) == []
+    for sample in ([str(100000 + i) for i in range(200)],          # EventRecordId
+                   ["4624", "4625", "4688", "1"],                  # EventId
+                   [str(49152 + 7 * i) for i in range(200)],       # ephemeral ports
+                   ["0.25", "12.5", "3600.75"]):                   # a duration in seconds
+        assert timeparse.detect(sample) == [], sample
+
+    # Only the guess changed. Picked by hand, both still read every value.
+    assert parse("mac_absolute", "1") == "2001-01-01 00:00:01"
+    assert parse("excel_serial", "49152") == "2034-07-27 00:00:00"
+
+    # And real values are still offered: Cocoa time from this decade,
+    # with or without a fraction, and an Excel serial with a time of day.
+    for sample in (["726153721", "726153781"], ["726153721.5"]):
+        assert "mac_absolute" in [r["op_id"] for r in timeparse.detect(sample)], sample
+    assert timeparse.detect(["45296.5576", "45297.25"])[0]["op_id"] == "excel_serial"
+
+
 # ----------------------------------------------------------- params
 
 def test_validate_params():

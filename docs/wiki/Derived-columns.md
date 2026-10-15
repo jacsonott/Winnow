@@ -58,7 +58,11 @@ Work down the dialog from the top:
    **Join from another table**, **Compare (elapsed time)** or **Combine
    columns**.
 2. **Operation** — the specific conversion, listed in the tables below.
-3. **Parse column** — the column to read.
+3. **Parse column** — the column to read. Opened from a header it is that
+   column. Opened from the table menu it starts on the first column that
+   looks like a timestamp: a datetime column, else one whose values or
+   name (`visit_time`, `Created`, `Epoch`) suggest a time, else the first
+   column.
 4. The operation's own settings, if any (required ones are marked `*`).
 5. **New column name** — prefilled as `Column (parsed)`, `Column
    (extract)`, `Column elapsed` and so on. A name the table already has, in
@@ -68,7 +72,10 @@ Work down the dialog from the top:
 When the type is **Timestamp**, Winnow tries every format against the
 column and picks the best one for you: *Suggested: Unix epoch — 100% of
 sampled values parse.* Check the preview anyway. Some numbers are valid in
-two formats (see [Ambiguous numbers](#ambiguous-numbers)).
+two formats (see [Ambiguous numbers](#ambiguous-numbers)). A column of small
+numbers, such as a record number or an event ID, gets *No format detected —
+pick one below to see what it produces.* instead of a suggestion (see
+[Counters are not suggested](#counters-are-not-suggested)).
 
 The preview shows up to ten real values and what each becomes; a value
 that won't convert shows *can't parse*. The verdict under it counts the
@@ -156,6 +163,18 @@ overlap, and so do nanosecond Unix epochs and .NET ticks. Both formats
 then report a high match rate, and the suggestion is only the first of
 them. Compare the preview with a time you already know for one row before
 you add the column.
+
+### Counters are not suggested
+
+Mac absolute time counts seconds from 2001-01-01, which is inside the
+1990–2100 window, so any small number converts: `1` becomes
+`2001-01-01 00:00:01`. A record number, an event ID, a process ID or a
+duration would all match it completely. The suggestion, and the notice
+after an import, therefore skip Mac absolute time for values below
+`100000000` (March 2004), and skip Excel serial dates for whole numbers,
+which in a log are far more often IDs or ports than dates. Both formats
+still convert those values when you choose them yourself under
+**Operation**.
 
 ### Year-less syslog
 
