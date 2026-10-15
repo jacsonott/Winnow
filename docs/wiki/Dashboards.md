@@ -358,7 +358,7 @@ open, the watchlist and the variables.
 
 | Button | Does |
 | --- | --- |
-| **＋ New profile…** | Build one from scratch: pick plugins, boards (from the Library or the open case) and variables |
+| **＋ New profile…** | Build one from scratch: pick plugins, boards (from the Library or the open case) and variables (see [Building a profile](#building-a-profile)) |
 | **Import…** / **Export…** | Read or write one profile as a single `.json` file. An imported profile whose name is taken is saved with **(imported)** added |
 | **Save current plugins…** | Save just the plugins switched on now, under a name |
 | **Copy to edit** | Shipped profiles are read-only; this starts an editable copy that remembers where it came from |
@@ -370,6 +370,62 @@ one line saying so and **See what changed**. **Take the shipped version**
 replaces your copy with it, and your edits to the copy are lost; **Keep
 mine** leaves it alone.
 Nothing is updated automatically.
+
+### Building a profile
+
+**＋ New profile…**, **Edit…** and **Copy to edit** open the profile
+builder, titled *New profile*, *Edit profile — name* or *New profile from
+“name”*. A shipped profile is read-only, so copying one starts a profile of
+your own called **name (copy)**.
+
+The left side, **What the profile turns on**, has the **Profile name** and
+**Description**, then two lists to tick:
+
+- **Plugins**: every installed plugin, the bundled examples marked
+  **example**. Applying the profile turns the ticked ones on for the case
+  and every other plugin off. A plugin the profile names that this machine
+  doesn't have stays in the list, ticked and marked **not installed**, so
+  saving the profile here doesn't drop it.
+- **Dashboards**: boards from the dashboard Library (a board's **Save to
+  library…** puts it there), boards in the open case, and the profile's own,
+  marked **library**, **open case** or **in this profile**. Each is created
+  in the case under its own name. A board saved with **Save as profile…** is
+  the profile's own board and is created under the profile's name.
+
+The right side, **What a case gets**, opens with one line saying what
+applying the profile does, such as *Turns on 3 plugins · opens 2 dashboards ·
+asks for 2 values (1 required)*, kept current as you tick and type. Under it,
+notes name any ticked plugin that isn't installed here, and the profile's
+watchlist, which the builder carries over unchanged (it has no watchlist
+editor).
+
+**Variables** are the values a case of this type carries, such as the
+engagement name, a backend URL or a link to the scoping document. **＋ Add
+variable** adds one as a card, and `✕` removes it:
+
+| Box | Means |
+| --- | --- |
+| **Name** | How plugins read the value (`req.variables`). A letter, then up to 63 letters, digits, `_`, `.` or `-`, and not used by another variable in the profile |
+| **Label** | What the analyst is shown. Left empty, the name is shown |
+| **What it’s for** | A line shown under the label |
+| **Default** | Already typed into the box when the analyst is asked |
+| **Required at case creation** | The case can't be created until it has a value |
+
+A name that breaks the rule, or repeats another, is flagged under its box,
+and **Create profile** (**Save changes** when editing) refuses it. Variables
+are case data and travel with the case file, so never a token or password:
+those go in **Settings → Environment** (see
+[Settings and shortcuts](Settings-and-shortcuts.md#environment)).
+
+**Asked when a case is created** shows the variables the way the analyst
+will be asked for them, required ones marked `*`: in the **New case** dialog,
+or after applying the profile to a case that has no value for a required one.
+It is a preview, so you can't type into it.
+
+The **Profile name** is checked as you type as well. Profiles are saved by
+name, so a name you already use says **Saving replaces your profile “…”**,
+and renaming a profile while editing it says the original stays as it is and
+the new name is saved as a second profile.
 
 ### Applying a profile
 

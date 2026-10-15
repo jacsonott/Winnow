@@ -708,6 +708,27 @@ function buildCaseVariableAddRow(box) {
   return add;
 }
 
+/* The values prompt's fields, one per variable definition: its label
+   (starred when required), what it is for, and a box holding its default.
+   Its own function so the profile builder can show the prompt as it will
+   look (an inert copy) without drawing a look-alike that could drift. */
+export function variablePromptFields(defs) {
+  const inputs = new Map();
+  const fields = defs.map((d) => {
+    const inp = el('input', 'confirm-input case-var-prompt');
+    inp.dataset.var = d.name;
+    inp.placeholder = d.required ? 'required' : 'optional';
+    inp.value = d.default || '';
+    const field = el('div', 'dlg-field');
+    field.append(el('label', null, (d.label || d.name) + (d.required ? ' *' : '')));
+    if (d.description) field.append(el('small', null, d.description));
+    field.append(inp);
+    inputs.set(d.name, inp);
+    return field;
+  });
+  return { fields, inputs };
+}
+
 /* A profile's required variables, asked for in one dialog — used after
    applying a profile to an existing case (the new-case dialog collects
    them inline instead). Resolves true when every required one is filled. */
@@ -715,19 +736,8 @@ export function promptForVariables(defs, { title = 'This profile needs a few val
   return new Promise((resolve) => {
     modal(title, (b) => {
       b.append(el('p', 'fb-help', 'Stored in the case file for plugins to use. Not for tokens or passwords.'));
-      const inputs = new Map();
-      for (const d of defs) {
-        const inp = el('input', 'confirm-input case-var-prompt');
-        inp.dataset.var = d.name;
-        inp.placeholder = d.required ? 'required' : 'optional';
-        inp.value = d.default || '';
-        const field = el('div', 'dlg-field');
-        field.append(el('label', null, (d.label || d.name) + (d.required ? ' *' : '')));
-        if (d.description) field.append(el('small', null, d.description));
-        field.append(inp);
-        b.append(field);
-        inputs.set(d.name, inp);
-      }
+      const { fields, inputs } = variablePromptFields(defs);
+      b.append(...fields);
       const acts = el('div', 'row-actions');
       const save = el('button', 'btn primary', 'Save');
       save.onclick = async () => {
