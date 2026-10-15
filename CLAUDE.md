@@ -663,7 +663,10 @@ lot to leave to memory.
   **skip** (never fail) without it or without a browser, so the airgapped
   target still installs nothing extra — but don't lean on that skip in CI,
   which is why the fast job `--ignore=tests/ui` explicitly and a second job
-  installs the browser. Marker: `-m ui` / `-m "not ui"`.
+  installs the browser and sets `WINNOW_UI_REQUIRE_BROWSER=1`, which turns
+  a missing Playwright or Chromium into a failure (tests/test_ui_browser_guard.py).
+  When a UI test fails, its report carries what the shared server logged
+  while it ran ("Captured server log"). Marker: `-m ui` / `-m "not ui"`.
 
 **CI runs each suite in shards.** `pytest --shard K/N` (tests/sharding.py)
 keeps whole files, dealt by test count, and ci.yml runs that as a matrix —
