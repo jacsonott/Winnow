@@ -32,11 +32,11 @@ def test_add_widget_previews_renders_and_persists(page):
     src = page.evaluate("() => __winnow.S.sources.find((s) => !s.is_merge).id")
     page.locator("#dashBar button", has_text="Add widget").click()
     page.wait_for_selector("#modal:not([hidden])")
-    page.locator("#modal .confirm-input").first.fill("Row count")
+    page.locator("#modal .dash-title-input").fill("Row count")
     page.locator("#modal select").first.select_option("sql")   # data source
     page.locator("#modal .dash-sql").fill(f"SELECT COUNT(*) AS n FROM src_{src}")
-    # preview renders the number BEFORE saving
-    page.locator("#modal button", has_text="Preview").click()
+    # preview renders the number BEFORE saving — by itself, once the
+    # typing stops; there is no button to press
     page.wait_for_function(
         "() => { const p = document.querySelector('#modal .dash-preview .dash-stat');"
         "        return p && +p.textContent.replace(/,/g,'') > 0; }", timeout=10_000)
@@ -65,7 +65,7 @@ def test_widget_template_writes_a_working_query(page):
     selects.nth(2).select_option(index=0)     # first real table (src_<id>)
     filled = page.locator("#modal .dash-sql").input_value()
     assert "COUNT(*)" in filled and "FROM src_" in filled
-    page.locator("#modal .confirm-input").first.fill("Rows via template")
+    page.locator("#modal .dash-title-input").fill("Rows via template")
     page.locator("#modal button", has_text="Save widget").click()
     page.wait_for_selector("#modal[hidden]", state="attached")
     page.wait_for_function(

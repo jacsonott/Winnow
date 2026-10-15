@@ -158,7 +158,7 @@ fails to import, or its setup raises an error:
   loads completely or adds nothing.
 
 A plugin written for a newer Winnow says so instead of failing obscurely,
-with a reason like `needs Winnow plugin API v12, this build provides v11 —
+with a reason like `needs Winnow plugin API v14, this build provides v13 —
 update Winnow`. **Where it came from → Plugin API** shows the same
 comparison.
 
@@ -211,8 +211,13 @@ page strip beside SQL, Timeline, Notes and Watchlist.
 ### pivot
 
 A spreadsheet-style pivot table. Pick a table (merged tables included),
-then drag fields, or click them, into **Filters**, **Columns**, **Rows** and
-**Values**. Values can be **Count**, **Distinct count**, **Sum**,
+then drag fields into **Filters**, **Columns**, **Rows** and **Values**. Or
+click a field — or Tab to it and press Enter — and pick an area from the
+**Place in** menu that opens under it (arrow keys move, Enter picks,
+Escape closes). An area the field is already in is greyed out with
+"Already there", and **Columns** or **Rows** says "Moves it out of Rows"
+(or Columns) when picking it would take the field out of the other one.
+Values can be **Count**, **Distinct count**, **Sum**,
 **Average**, **Min** or **Max**; Count counts non-empty cells, and Sum and
 Average ignore text that isn't a number. Filters use `is any of`,
 `is none of`, `contains`, `does not contain`, `starts with`,
@@ -237,6 +242,14 @@ Turns many events into bookends: group a table on one or more columns
 (Host + User, say) and get the first and last row of each group, in order
 of a column you choose. Forty thousand logons become a few hundred session
 start and end rows that read as a story.
+
+Drag fields from the list into the zones, or click a field — or Tab to it
+and press Enter — and pick a zone from the **Place in** menu that opens
+under it (arrow keys move, Enter picks, Escape closes). A zone the field
+can't go into is greyed out with the reason: "Already there", "Not a
+number column" for **Total up**, or "Full — 6 columns at most" for
+**Group rows on**. **Ordered by** holds one column, so it says what it
+replaces ("Replaces Timestamp").
 
 | Zone | What goes in it |
 | --- | --- |

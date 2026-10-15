@@ -14,7 +14,7 @@ import { releaseSqlResults, setActiveSqlResult, sqlCopyResult, sqlDownloadCsv, s
 import { moveCursor, rowsPaintY, spacerPx, vScroll } from './grid.js';
 import { loadCaseVariables } from './savedfilters.js';
 import { S } from './state.js';
-import { alertDialog, closeModal, confirmDialog, modal, promptDialog } from './ui.js';
+import { alertDialog, closeModal, confirmDialog, dropdownMenu, modal, promptDialog } from './ui.js';
 import { updateTimeRangeButton } from './timeframe.js';
 import { histogramOpen } from './histogram.js';
 
@@ -427,11 +427,17 @@ export async function showPage(name) {
 
 export function buildPluginTabContext(tab, kind = 'tab') {
   return {
-    apiVersion: 6,
+    apiVersion: 7,
     plugin: tab.plugin,
     base: `/api/plugin/${tab.plugin_fs}`,      // the plugin's own register_api routes
     assets: `/plugin_assets/${tab.plugin_fs}`, // the plugin's own files (css, workers, data)
     api, post, toast, el, modal, confirmDialog, promptDialog, alertDialog, closeModal,
+    // The app's own small menu, anchored under an element — the one behind
+    // Filters ▾ and Case ▾, so a plugin's menu IS one of the app's: one open
+    // at a time, Escape and an outside click close it, the arrows walk it.
+    // A choice of three or four things is a menu, not a modal over the
+    // board the analyst is arranging. (API 13 / apiVersion 7.)
+    dropdownMenu,
     // A row in the bottom-right jobs panel — the card an import gets —
     // driven through the returned handle (update/done/fail/close). Dies
     // with this mount; see jobs.js createNotice for the lifecycle.

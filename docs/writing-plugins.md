@@ -415,7 +415,7 @@ Prefer it to reaching into the app's globals — this is what's supported.
 
 | Field | What it is |
 | --- | --- |
-| `apiVersion` | Contract version of this object (currently `6`) |
+| `apiVersion` | Contract version of this object (currently `7`) |
 | `plugin` | Your plugin's display name |
 | `base` | `/api/plugin/<fs_name>` — prefix for your own routes |
 | `assets` | `/plugin_assets/<fs_name>` — prefix for your own files |
@@ -428,6 +428,7 @@ Prefer it to reaching into the app's globals — this is what's supported.
 | `el(tag, cls, text)` | Winnow's element helper |
 | `modal(title, build, opts)` / `closeModal()` | Winnow's modal singleton and its close |
 | `alertDialog(msg, opts)` / `confirmDialog(msg, opts)` / `promptDialog(msg, initial, opts)` | Themed replacements for `window.alert` / `confirm` / `prompt` — all async |
+| `dropdownMenu(anchor, items)` | The app's own small menu, opened under `anchor` — for a choice among a few things; see [Menus](#menus) |
 | `showTab(localId?)` | Bring the analyst to one of **your** tabs (reopens it if closed); no argument when you register exactly one |
 | `showPage(name)` | Switch to a built-in page: `'grid'`, `'sql'`, `'notes'`, `'timeline'`, `'watchlist'` (reopens it if closed) |
 | `sqlPage` | The SQL pane: `show()`, `text()`, `setText(sql, {newTab})`, `run()`, `result()`, `selectedRows()`, `onRun(cb)` — see [Driving the page](#driving-the-page) |
@@ -583,6 +584,49 @@ cannot bring one back. A notification is also the answer to "my tab was
 hidden when the answer arrived" — `container.hidden` says whether you
 are on screen, and `showTab()` from an action brings the analyst back
 (the bundled `claude_assistant` tab does exactly this).
+
+### Menus
+
+A choice among a few things — where a field goes, which of three
+exports — is a menu, not a modal over the work the analyst is arranging.
+`winnow.dropdownMenu(anchor, items)` opens the app's own menu under
+`anchor` (above it when there is no room below) — the one the Filters ▾
+and Case ▾ buttons open — so it behaves the way every menu in Winnow
+does: one is open at a time, Escape and a click outside close it, Down
+and Up step into it (from anywhere but a text field, which keeps its
+arrows) and walk it, and Enter picks the focused entry.
+
+```js
+field.tabIndex = 0;                              // reachable from the keyboard
+const open = () => winnow.dropdownMenu(field, [
+  { header: 'Place in' },
+  { label: 'Rows', onclick: () => place('rows') },
+  { label: 'Columns', onclick: () => place('cols'), desc: 'Moves it out of Rows' },
+  '-',
+  { label: 'Values', disabled: true, desc: 'Already there' },
+]);
+field.onclick = open;
+field.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } };
+```
+
+| Item | What it does |
+| --- | --- |
+| `label`, `onclick` | The entry, and what picking it runs; the menu closes first |
+| `disabled` | Greyed and not pickable. Say why in `desc` — a greyed entry with no reason reads as a bug |
+| `desc` | A dim second line under the label: what picking it will do, or why it can't be picked |
+| `note` | Dim text on the right that is not a key — a count, a name |
+| `title` | Hover text |
+| `checked` | `true` / `false` draws a ✓ column; leave it out for a plain entry |
+| `'-'` | A rule between groups of entries |
+| `{ header }` | A small section label, uppercased; `literal: true` keeps it as typed, in mono, for a value such as a column name or a path |
+
+Other keys the app's own menus use are not part of this contract. The
+menu does not move the focus when it opens, and does not put it back when
+it closes — true of every menu in the app. If picking an entry re-renders
+the element that opened it, a keyboard user's focus lands on `<body>`:
+focus the new node yourself when the menu was opened from the keyboard,
+as the bundled [`pivot/`](../examples/plugins/pivot/) and
+[`first_last/`](../examples/plugins/first_last/) field lists do.
 
 ### Theming
 
@@ -1341,7 +1385,9 @@ python server.py --plugins-dir ~/src/my-winnow-plugins
 
 Installs from the UI always land in the first directory (`plugins/`).
 
-**Versioning:** the current plugin API version is **12** (in 12 the SQL
+**Versioning:** the current plugin API version is **13** (the tab
+context's `dropdownMenu` arrived in 13, which took the context's own
+`apiVersion` to 7; in 12 the SQL
 pane started holding results on the server: `sqlPage` results gained
 `total` and `stopped`, their `rows` became the first 5,000, and
 `sqlPage.selectedRows()` became async, which took the context's own
@@ -1479,7 +1525,10 @@ Option spec: `{"name": str, "label"?: str, "type": "bool"|"text"|"choice", "defa
 ### `register_tab(*, id, label, entry, description="")`
 
 Module: `export default function mount(container, winnow)`, plus optional
-`onShow(container)` / `onHide(container)`.
+`onShow(container)` / `onHide(container)`. Everything `winnow` carries is
+tabled under [The `winnow` context](#the-winnow-context);
+`winnow.dropdownMenu(anchor, items)` (API 13) takes the item shape in
+[Menus](#menus).
 
 ### `register_api(route, handler, methods=("GET", "POST"))`
 

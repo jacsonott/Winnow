@@ -59,7 +59,8 @@ def test_the_tables_manager_reports_a_refused_close_and_remove(page):
     row.locator(".btn", has_text="Close").click()
     _toast(page, "database is locked")
 
-    row.locator(".btn", has_text="Remove").click()
+    row.locator(".tables-more").click()
+    page.locator(".menu .menu-item", has_text="Remove…").click()
     _confirm(page, "Remove")
     _toast(page, "delete that merge first")
     assert page.evaluate("() => __winnow.S.sources.length") >= 1
@@ -95,6 +96,9 @@ def test_deleting_a_profile_the_server_refuses(page, api):
 def test_saving_a_timeline_config_the_server_refuses(page):
     _refuse(page, "**/api/timeline_templates", "workspace is read-only", "POST")
     page.evaluate("() => __winnow.openTimelineSourceConfig()")
+    # Save waits for a change to save (Configure tables… is one Save per
+    # header set now, not one per table), so make one first.
+    page.locator("#modal").get_by_label("Type", exact=True).fill("Refused type")
     page.locator("#modalBody .btn", has_text="Save").first.click()
     _toast(page, "workspace is read-only")
     page.keyboard.press("Escape")

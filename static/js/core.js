@@ -62,7 +62,7 @@ export const GUTTER_W = 104;
 
  // keep in sync with `.gutter { width: ... }` in style.css
 /* Default ceiling for autofit-to-content column widths, overridable (and
-   removable) per browser under Settings → Appearance — see autofitMaxWidth.
+   removable) per browser under Settings → Grid & layout — see autofitMaxWidth.
    A cap exists because one pathological column can otherwise decide the
    width of the whole grid: a CommandLine full of base64 is tens of
    thousands of characters, and the rows are `width: max-content`, so an

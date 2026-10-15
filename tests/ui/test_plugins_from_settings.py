@@ -22,12 +22,13 @@ pytestmark = pytest.mark.ui
 def _open_settings_plugins(page):
     page.evaluate("() => __winnow.openSettings()")
     page.wait_for_selector("#modal:not([hidden])")
+    # Picked from Settings' section list, the way an analyst gets there.
     page.evaluate("""() => {
-      const heads = [...document.querySelectorAll('#modal .settings-section-head')];
-      const h = heads.find((x) => x.querySelector('.settings-section-title').textContent.trim() === 'Plugins');
-      if (h && h.getAttribute('aria-expanded') !== 'true') h.click();
+      const items = [...document.querySelectorAll('#modal .settings-nav-item')];
+      const it = items.find((x) => x.textContent.trim() === 'Plugins');
+      if (it) it.click();
     }""")
-    page.wait_for_selector("#modalBody .settings-line", state="attached")
+    page.wait_for_selector("#modalBody .settings-pane[data-section='plugins'] .settings-line", state="attached")
 
 
 def _click_manage(page):
@@ -49,6 +50,15 @@ def _title(page):
 
 def _has_way_back(page):
     return page.evaluate("() => !!document.querySelector('#modalBody .pm-foot .pm-mini')")
+
+
+def _section_shown(page):
+    """Which of Settings' sections is up: back means back to Plugins, not
+    to the top of Settings."""
+    return page.evaluate("""() => {
+      const p = document.querySelector('#modalBody .settings-pane:not([hidden])');
+      return p ? p.dataset.section : null;
+    }""")
 
 
 @pytest.fixture(autouse=True)
@@ -73,6 +83,7 @@ def test_the_close_button_goes_back_to_settings(page):
     page.wait_for_function("() => document.getElementById('modalTitle').textContent === 'Settings'",
                            timeout=5_000)
     assert page.evaluate("() => document.getElementById('modal').hidden") is False
+    assert _section_shown(page) == "plugins"
 
 
 def test_escape_goes_back_to_settings_too(page):
@@ -90,6 +101,7 @@ def test_the_back_button_goes_back_too(page):
     page.evaluate("() => document.querySelector('#modalBody .pm-foot .pm-mini').click()")
     page.wait_for_function("() => document.getElementById('modalTitle').textContent === 'Settings'",
                            timeout=5_000)
+    assert _section_shown(page) == "plugins"
 
 
 def test_opened_on_its_own_it_has_no_way_back(page):

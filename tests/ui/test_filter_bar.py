@@ -1,4 +1,4 @@
-"""The filter bar — the surface Settings -> Appearance turns on in place
+"""The filter bar — the surface Settings -> Grid & layout turns on in place
 of the always-on filter row.
 
 The bar was measured into existence, not guessed at: on a seven-table
@@ -93,16 +93,15 @@ def _assert_rows_sit_under_the_head(page, where: str):
     assert abs(geo["gap"]) < 2, f"{where}: {geo}"
 
 
-def _appearance_checkbox(page):
-    """Open Settings -> Appearance and hand back the "Always-on filter
-    row" checkbox, the way an analyst reaches it. Which way it needs
-    moving depends on the surface the test starts from, so that is the
-    caller's business."""
+def _grid_layout_checkbox(page):
+    """Open Settings -> Grid & layout and hand back the "Always-on filter
+    row" checkbox, the way an analyst reaches it: by picking the section
+    in Settings' list. Which way it needs moving depends on the surface
+    the test starts from, so that is the caller's business."""
     page.evaluate("() => __winnow.openSettings()")
     page.wait_for_selector("#modal:not([hidden])")
-    sec = page.locator("#modalBody .settings-section").filter(
-        has=page.locator(".settings-section-title", has_text=re.compile(r"^Appearance$")))
-    sec.locator(".settings-section-head").click()   # sections start collapsed
+    page.locator("#modalBody .settings-nav-item", has_text=re.compile(r"^Grid & layout$")).click()
+    sec = page.locator("#modalBody .settings-pane:not([hidden])")
     cb = sec.locator("label.check-row", has_text="Always-on filter row").locator("input")
     cb.wait_for(state="visible")
     return cb
@@ -110,7 +109,7 @@ def _appearance_checkbox(page):
 
 def _classic_row_from_settings(page):
     """Tick the box, from the bar this module's fixture turns on."""
-    cb = _appearance_checkbox(page)
+    cb = _grid_layout_checkbox(page)
     assert not cb.is_checked()
     cb.check()
     page.wait_for_function("() => __winnow.S.appearance.filterUi === 'row'")
@@ -264,7 +263,7 @@ def test_the_gutter_drag_lands_on_the_row_it_points_at_with_a_box_open(page):
 
 
 def test_switching_surfaces_moves_the_rows_with_the_head(page):
-    """Settings -> Appearance swaps a bar for a whole row of boxes, which is
+    """Settings -> Grid & layout swaps a bar for a whole row of boxes, which is
     the largest head-height change there is."""
     _classic_row_from_settings(page)
     page.evaluate("() => __winnow.closeModal()")
@@ -337,7 +336,7 @@ def test_the_bar_is_one_checkbox_away_from_the_row_that_ships(page):
       __winnow.renderHeadResized(); }""")
     assert page.locator("#filterRow .fcell input").count() == _cols(page)
 
-    cb = _appearance_checkbox(page)
+    cb = _grid_layout_checkbox(page)
     assert cb.is_checked(), "the shipped surface is the ticked state of this box"
     cb.uncheck()
     page.wait_for_function("() => __winnow.S.appearance.filterUi === 'bar'")

@@ -13,7 +13,7 @@ pytestmark = pytest.mark.ui
 def _open_panel(page):
     page.evaluate("() => __winnow.openSettings()")
     page.wait_for_selector("#modal:not([hidden])")
-    page.locator(".settings-section-head", has_text="File associations").click()
+    page.locator("#modalBody .settings-nav-item", has_text="File associations").click()
     page.wait_for_selector(".assoc-row")
 
 

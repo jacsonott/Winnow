@@ -133,7 +133,7 @@ def test_the_settings_checkbox_drives_it(page):
     use(page, "jenna")
     page.evaluate("() => __winnow.openSettings()")
     page.wait_for_selector("#modal:not([hidden])")
-    page.click("#modal .settings-section-head:has-text('Appearance')")
+    page.click("#modal .settings-nav-item:has-text('Appearance')")
     box = page.locator("#appearanceStripes")
     box.wait_for(state="visible")
     assert box.is_checked() is False, "the box should show Jenna's default"

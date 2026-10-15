@@ -27,12 +27,9 @@ function fmtWhen(iso) {
 
 export function openSessionManager() {
   modal('Sessions', (b) => {
-    b.append(el('p', null,
-      "A session is the tags and notes on every table in the case, open or not, at a point "
-      + "in time. They're stored "
-      + 'inside this case file, so they travel with it — save one before changing direction, '
-      + 'start a fresh pass without losing what you had, or compare two to see what changed. '
-      + 'Download one only when you need to hand your work to another analyst.'));
+    // One line; what a session is for, and when to download one, is on
+    // the wiki's Sessions and export page.
+    b.append(el('p', null, 'A session is every table’s tags and notes, open or not, kept in the case file.'));
 
     const list = el('div', 'session-list');
     b.append(list);

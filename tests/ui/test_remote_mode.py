@@ -1,4 +1,4 @@
-"""Remote session mode (Settings → Appearance → "Remote session mode").
+"""Remote session mode (Settings → Remote session → "Remote session mode").
 
 RDP-class protocols encode screen *changes*: smooth scrolling makes every
 wheel notch a dozen full-viewport re-encodes, infinite animations keep the
@@ -33,7 +33,7 @@ def reset_remote_setting(server):
 def _enable_via_settings(page):
     page.keyboard.press("?")
     page.wait_for_selector("#modal:not([hidden])")
-    page.click(".settings-section-head:has-text('Appearance')")
+    page.click("#modalBody .settings-nav-item:has-text('Remote session')")
     page.locator("label:has-text('Remote session mode') input").check()
     page.keyboard.press("Escape")
     page.wait_for_selector("#modal[hidden]", state="attached")

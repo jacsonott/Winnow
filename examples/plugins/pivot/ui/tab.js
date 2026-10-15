@@ -536,13 +536,11 @@ export default function mount(container, winnow) {
     fieldList.replaceChildren();
     for (const col of (src ? src.columns : [])) {
       if (needle && !col.name.toLowerCase().includes(needle)) continue;
-      const c = chip(col.name, { title: `${col.name} — ${col.type}` });
+      const c = chip(col.name, { title: `${col.name} — ${col.type} · click to place it, or drag it to an area` });
       const type = el('span', 'count', col.type === 'number' ? '#' : col.type === 'datetime' ? '🕑' : '');
       c.insertBefore(type, c.firstChild);
       wireDragSource(c, { from: 'list', name: col.name });
-      // Click-to-place, because drag isn't reachable from a keyboard and is
-      // fiddly on a laptop trackpad.
-      c.onclick = () => placeMenu(c, col.name);
+      wirePlace(c, col.name);
       fieldList.append(c);
     }
     if (!fieldList.children.length) {
@@ -1254,20 +1252,59 @@ export default function mount(container, winnow) {
     saveEdit();   // the table is the pivot's first fact; nothing else fires here
   }
 
-  function placeMenu(anchor, name) {
-    modal(`Place ${name}`, (b) => {
-      b.append(el('p', 'note-status', 'Drag works too — this is the click-only path.'));
-      const acts = el('div', 'row-actions');
-      for (const [id, label] of ZONES.map(([i, l]) => [i, l])) {
-        const btn = el('button', 'btn ghost', label);
-        btn.onclick = () => {
-          document.getElementById('modal').hidden = true;
-          addField({ from: 'list', name }, id);
-        };
-        acts.append(btn);
-      }
-      b.append(acts);
+  /* Click-to-place, because drag isn't reachable from a keyboard and is
+     fiddly on a laptop trackpad. The field is focusable, and Enter or
+     Space opens the same menu a click does. */
+  function wirePlace(c, name) {
+    c.tabIndex = 0;
+    c.setAttribute('role', 'button');
+    c.setAttribute('aria-haspopup', 'menu');
+    c.onclick = () => placeMenu(c, name);
+    c.addEventListener('keydown', (e) => {
+      if ((e.key !== 'Enter' && e.key !== ' ') || e.target !== c) return;
+      e.preventDefault();   // Space would scroll the rail
+      if (!e.repeat) placeMenu(c, name, { fromKey: true });
     });
+  }
+
+  /* The areas as a small menu under the field — the app's own dropdown
+     (winnow.dropdownMenu), so Escape, an outside click and the arrow keys
+     behave as every other menu in Winnow does. It was a modal titled
+     "Place <field>", which is a whole dialog for one click and covered the
+     wells being arranged. Each item does exactly what dropping the field
+     on that area does (addField); the menu only says in advance what
+     addField would do anyway: an area the field is already in is a no-op,
+     so it is shown greyed with why, and Rows/Columns say when the pick
+     moves the field out of the other one. */
+  function placeMenu(anchor, name, { fromKey = false } = {}) {
+    const labelOf = (zone) => ZONES.find(([id]) => id === zone)[1];
+    const items = ZONES.map(([id, label, hint]) => {
+      const item = {
+        label,
+        title: hint,
+        onclick: () => {
+          addField({ from: 'list', name }, id);
+          // renderFields rebuilt the list, so the focused field is a new
+          // node; a keyboard pick goes back to it rather than to <body>.
+          if (fromKey) refocusField(name);
+        },
+      };
+      if (id === 'filters' && state.filters.some((f) => f.column === name)) {
+        Object.assign(item, { disabled: true, desc: 'Already there' });
+      } else if (id === 'rows' || id === 'cols') {
+        const other = id === 'rows' ? 'cols' : 'rows';
+        if (state[id].includes(name)) Object.assign(item, { disabled: true, desc: 'Already there' });
+        else if (state[other].includes(name)) item.desc = `Moves it out of ${labelOf(other)}`;
+      }
+      return item;
+    });
+    winnow.dropdownMenu(anchor, [{ header: 'Place in' }, ...items]);
+  }
+
+  function refocusField(name) {
+    if (!document.getElementById('modal').hidden) return;
+    const again = [...fieldList.children].find((n) => n.dataset.field === name);
+    if (again) again.focus();
   }
 
   refresh = () => { fillSources(); renderFields(); };

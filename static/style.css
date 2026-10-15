@@ -827,6 +827,13 @@ section.page-with-panels { flex-direction: row; }
 .search-mode-toggle .btn:first-child { border-radius: var(--radius-sm) 0 0 var(--radius-sm); }
 .search-mode-toggle .btn:last-child { border-radius: 0 var(--radius-sm) var(--radius-sm) 0; }
 .search-mode-toggle .btn + .btn { border-left: 0; }
+/* The search dialog borrows this toggle for Paste a list / Advanced, and
+   there it is a dialog segment: the builders' tint (see .vp-seg). The
+   toolbar's own toggle keeps the .btn[aria-pressed] fill. */
+.modal-body .search-mode-toggle .btn[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  border-color: var(--accent-dim); color: var(--text);
+}
 
 /* The max-height matters: each term is a full editor row, so a many-term
    filter (the shipped tool sweep is 26) would otherwise stack taller than
@@ -857,17 +864,37 @@ section.page-with-panels { flex-direction: row; }
 /* Saved filters modal: one section per header set, dense rows — the flat
    list with per-row nickname buttons and 16px pitch read as noise once the
    shipped set landed (28 filters over three header sets). */
-.sf-list { display: flex; flex-direction: column; gap: 3px; margin: 4px 0 10px; }
+.sf-list { display: flex; flex-direction: column; gap: 1px; margin: 4px 0 10px; }
 .sf-group-head { display: flex; align-items: center; gap: 8px; margin: 10px 0 2px; }
 .sf-group-head:first-child { margin-top: 0; }
 .sf-group-name { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--dim); }
-.sf-row { display: flex; align-items: center; gap: 4px; padding: 2px 6px; background: var(--panel-2); border-radius: var(--radius-sm); }
-.sf-apply { flex: 1 1 auto; justify-content: flex-start; text-align: left; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sf-row .btn { padding: 2px 7px; font-size: 11px; }
 .sf-mini { font-size: 10px; padding: 2px 6px; flex: 0 0 auto; }
+/* A row is its name and a ⋯ — the name is text that applies the filter
+   when clicked, not a box (it read as an input), and Edit / Rename /
+   Move / Delete live in the ⋯ menu instead of five buttons per row.
+   The grip is the drag's affordance; the whole row drags. */
+.sf-row { display: flex; align-items: center; gap: 4px; padding: 1px 2px; border-radius: var(--radius-sm); }
+.sf-row:hover, .sf-row:focus-within { background: var(--row-hover); }
+.sf-grip { flex: 0 0 14px; text-align: center; color: var(--dim); opacity: .35; cursor: grab; font-size: 11px; user-select: none; }
+.sf-row:hover .sf-grip { opacity: 1; }
+.sf-name {
+  flex: 1 1 auto; min-width: 0; padding: 4px 2px; border-radius: var(--radius-sm);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 12px; color: var(--text); cursor: pointer;
+}
+/* Built for another set of columns: still clickable, visibly not this
+   table's. The applied one is the accent, the Filters button's ★. */
+.sf-row.sf-other .sf-name { color: var(--dim); }
+.sf-row .sf-name[aria-current="true"] { color: var(--accent); font-weight: 600; }
+.sf-row .sf-name:hover { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
 .sf-row.dragging { opacity: .4; }
 .sf-row.drop-before { box-shadow: inset 0 2px 0 var(--accent); }
 .sf-row.drop-after { box-shadow: inset 0 -2px 0 var(--accent); }
+/* The ⋯ that opens a row's actions (Saved filters, the Tables manager):
+   an icon, not a labelled button, so no border until it is pointed at or
+   its menu is open. */
+.btn.row-more { flex: 0 0 auto; padding: 0 7px; font-size: 14px; line-height: 20px; border-color: transparent; color: var(--dim); }
+.btn.row-more:hover, .btn.row-more[aria-expanded="true"] { border-color: var(--line-2); color: var(--text); background: var(--panel-2); }
 
 /* The Filters button's suggestion ring — what replaced the banner row:
    saved filters match the open table's columns and none is applied yet. */
@@ -889,6 +916,26 @@ section.page-with-panels { flex-direction: row; }
   border: 1px solid var(--line-2); border-radius: var(--radius-sm); padding: 0 3px;
 }
 .tag-chip .n { font-family: var(--mono); font-size: 10px; }
+
+/* The two tag list editors — Edit tags and Settings → Default tags for
+   new cases — share one row (tagEditRow): swatch, name, key, then a
+   fixed slot for the quiet "Saving…"/"Saved" that replaced their Save
+   buttons, fixed so the row doesn't shift as it comes and goes. */
+.tag-edit-list { display: grid; gap: 6px; margin: 4px 0 2px; }
+.tag-edit-row { display: flex; align-items: center; gap: 6px; }
+.tag-edit-color {
+  flex: 0 0 auto; width: 30px; height: 30px; padding: 2px; cursor: pointer;
+  background: var(--ink); border: var(--border-w) solid var(--line-2); border-radius: var(--radius-sm);
+}
+.tag-edit-color::-webkit-color-swatch-wrapper { padding: 0; }
+.tag-edit-color::-webkit-color-swatch { border: 0; border-radius: 2px; }
+.tag-edit-color::-moz-color-swatch { border: 0; border-radius: 2px; }
+.tag-edit-name { flex: 1 1 auto; min-width: 0; }
+.tag-edit-key { flex: 0 0 auto; width: 34px; padding-left: 4px; padding-right: 4px; text-align: center; font-family: var(--mono); }
+.confirm-input.invalid, .confirm-input.invalid:focus { border-color: var(--danger); }
+.tag-edit-state { flex: 0 0 82px; font-size: 11px; color: var(--dim); white-space: nowrap; }
+.tag-edit-state.warn { color: var(--danger); }
+.tag-edit-remove { flex: 0 0 auto; }
 
 .spacer { flex: 1; }
 .stats { font-family: var(--mono); font-size: 11px; color: var(--dim); white-space: nowrap; }
@@ -1116,7 +1163,7 @@ section.page-with-panels { flex-direction: row; }
 
 /* ------------------------------------------------------------ filter bar */
 
-/* The other filter surface, the one Settings → Appearance turns on in
+/* The other filter surface, the one Settings → Grid & layout turns on in
    place of the always-on row: one thin strip naming only the filters that
    are actually set. It sits OUTSIDE the grid's scroll
    container (see index.html) so the chips never scroll away with the
@@ -1702,6 +1749,87 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .timeline-row .tl-tag-dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; }
 .timeline-empty { padding: 40px 20px; text-align: center; color: var(--dim); font-size: 13px; }
 
+/* Configure tables… (openTimelineSourceConfig): the merge builder's shape
+   in classes of its own — the case's header sets on the left, the one
+   picked on the right with a preview of its rows painted by the
+   Timeline's own row code (.timeline-row), so the lines in here look like
+   the lines they preview. Chips and the picked set are the builders'
+   pressed state: a 16% accent tint. Status marks borrow the syntax tokens
+   every skin defines, as the merge builder's fit chips do. */
+.tlc { display: grid; gap: 12px; }
+.modal-body > .tlc-intro { margin: 0 0 10px; font-size: 12px; color: var(--dim); }
+.tlc-panes {
+  display: grid; grid-template-columns: minmax(0, 4fr) minmax(0, 8fr);
+  height: max(380px, min(640px, calc(82vh - 180px)));
+  border: var(--border-w) solid var(--line); border-radius: var(--radius-md); overflow: hidden;
+}
+.tlc-pane { padding: 12px; min-width: 0; min-height: 0; display: flex; flex-direction: column; gap: 10px; overflow: auto; }
+.tlc-pane > * { flex: 0 0 auto; }
+.tlc-pane + .tlc-pane { border-left: var(--border-w) solid var(--line); background: color-mix(in srgb, var(--panel) 70%, var(--ink)); gap: 14px; }
+.tlc-head { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--dim); }
+.tlc-filter {
+  width: 100%; background: var(--ink); color: var(--text); border: var(--border-w) solid var(--line-2);
+  border-radius: var(--radius-sm); padding: 5px 8px; font: inherit; font-size: 12px;
+}
+.tlc-filter:focus { border-color: var(--accent); outline: none; }
+.tlc-pane > .tlc-sets { display: grid; gap: 3px; align-content: start; flex: 1 1 auto; min-height: 0; overflow: auto; }
+.tlc-set {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 8px; align-items: baseline;
+  text-align: left; font: inherit; color: var(--text); background: transparent; cursor: pointer;
+  border: var(--border-w) solid transparent; border-radius: var(--radius-sm); padding: 6px 8px;
+}
+.tlc-set:hover { background: var(--row-hover); }
+.tlc-set[aria-pressed="true"] { background: color-mix(in srgb, var(--accent) 16%, transparent); border-color: var(--line-2); }
+.tlc-set-name { font-size: 12px; font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
+.tlc-marks { display: flex; gap: 4px; }
+.tlc-set-tables {
+  grid-column: 1 / -1; min-width: 0; font-family: var(--mono); font-size: 11px; color: var(--dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tlc-mark { font-family: var(--mono); font-size: 10.5px; line-height: 1.5; padding: 0 6px; border-radius: 10px; border: 1px solid currentColor; white-space: nowrap; }
+.tlc-mark.saved { color: var(--str); }
+.tlc-mark.default { color: var(--dim); border-color: var(--line-2); }
+.tlc-mark.unsaved { color: var(--num); }
+.tlc-empty { margin: 0; padding: 10px; color: var(--dim); font-size: 12px; }
+.tlc-title { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.tlc-title b { font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
+.tlc-scope { margin: -8px 0 0; font-size: 12px; color: var(--dim); line-height: 1.45; }
+.tlc-scope b { color: var(--text); font-weight: 500; }
+.tlc .dlg-field { margin-bottom: 0; }
+.tlc .dlg-field > select, .tlc .dlg-field > .confirm-input { width: 100%; min-width: 0; }
+.tlc-body-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 20px; }
+.tlc-label { font-size: 12px; color: var(--text); }
+.btn.tlc-small { padding: 1px 8px; font-size: 11px; }
+.tlc-chips { display: flex; flex-wrap: wrap; gap: 4px; max-height: 136px; overflow: auto; padding: 1px; }
+.tlc-chip {
+  display: inline-flex; align-items: center; gap: 5px; max-width: 30ch;
+  font: 11px var(--mono); color: var(--dim); background: transparent; cursor: pointer;
+  border: 1px solid var(--line-2); border-radius: 10px; padding: 1px 8px; white-space: nowrap; overflow: hidden;
+}
+.tlc-chip:hover { border-color: var(--accent-dim); color: var(--text); }
+.tlc-chip[aria-pressed="true"] { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--text); }
+/* Its place in the Body, filled so it reads on the tinted chip in every skin. */
+.tlc-ord {
+  font-weight: 600; font-size: 10px; line-height: 1.4; min-width: 1.5em; text-align: center; padding: 0 3px;
+  border-radius: 8px; background: var(--accent); color: var(--accent-fg); font-variant-numeric: tabular-nums;
+}
+.tlc-prev { display: grid; gap: 6px; }
+.tlc-prev-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.tlc-prev-from { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--dim); min-width: 0; }
+.tlc-prev-from select { font-size: 12px; padding: 2px 6px; max-width: 260px; }
+.tlc-preview { border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--ink); overflow: hidden; }
+.tlc-preview .timeline-row { cursor: default; }
+.tlc-preview .tl-col-ts { flex-basis: 150px; }
+.tlc-preview .tl-col-type { flex-basis: 150px; }
+.tlc-caption { font-size: 11.5px; color: var(--dim); line-height: 1.4; }
+.tlc-foot { display: flex; align-items: center; justify-content: flex-end; gap: 8px 10px; flex-wrap: wrap; }
+.tlc-hint { flex: 1 1 auto; min-width: 0; font-size: 12px; color: var(--num); }
+@media (max-width: 860px) {
+  .tlc-panes { grid-template-columns: minmax(0, 1fr); height: auto; }
+  .tlc-pane > .tlc-sets { max-height: 36vh; }
+  .tlc-pane + .tlc-pane { border-left: 0; border-top: var(--border-w) solid var(--line); }
+}
+
 /* --------------------------------------------------------------- dropdown */
 
 .menu {
@@ -1946,13 +2074,12 @@ textarea:focus { border-color: var(--accent); outline: none; }
   width: min(680px, 92vw); max-height: 82vh; display: flex; flex-direction: column;
 }
 .modal-card.wide { width: min(920px, 96vw); }
-/* Settings: eleven collapsible sections. A card that grows re-centres
-   itself on every click, so the header jumped up to 165px. It used to be a
-   fixed height, which kept it still — and also kept an all-collapsed
-   Settings at 82vh of mostly empty panel. Now it's sized to content and
-   anchored to the top of the viewport instead: it grows downward from a
-   fixed edge, so nothing above the click moves, and stops at the same
-   82vh, scrolling the body from there. */
+/* Anchored to the top of the viewport rather than centred: a card that
+   changes height re-centres itself, so its header jumps (Settings' did, by
+   up to 165px, while it was a column of collapsible sections). Settings
+   is tall — its panes are a fixed height now, see .settings-panes — and so
+   is the skin picker it opens, so going between the two keeps the top
+   edge where it was. Stops at 82vh, scrolling the body from there. */
 .modal-card.tall { max-height: 82vh; align-self: start; margin-top: 9vh; }
 /* The read-only skin tile in Settings opens the picker on click. */
 .style-card-static.style-card-link { cursor: pointer; }
@@ -2036,10 +2163,20 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .vp-toggles { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; justify-content: space-between; }
 .vp-seg { display: flex; gap: 2px; flex-wrap: wrap; }
 .vp-seg .btn { font-size: 11px; padding: 3px 7px; }
-/* The same filled look the Settings segments use: accent text on the
-   accent-dim fill measured 1.4–2.7:1 across the skins, and accent-on-panel
-   fails in Phosphor light, where the green is not a text colour. */
-.vp-seg .btn[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+/* The builders' pressed segment (.mb-seg, .lm-eb-seg): a 16% accent tint
+   under full-contrast --text, the same rule as Settings' .segmented and
+   the plugin manager's .pl-scope. What failed before this was accent
+   TEXT — on the accent-dim fill it measured 1.4–2.7:1 across the skins,
+   and on the panel in Phosphor light, where the green is not a text
+   colour. The filled accent that replaced it was the loudest thing in
+   every dialog, louder than the one main button (.btn.primary) whose job
+   that is, and --accent-fg on --accent is only 3.3:1 in Panel light.
+   --text on the tint is 6.9:1 or better in every skin and theme;
+   tests/ui/test_visual_pass.py measures it. */
+.vp-seg .btn[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  border-color: var(--accent-dim); color: var(--text);
+}
 .vp-list {
   flex: 1 1 auto; min-height: 60px; max-height: 40vh; overflow-y: auto;
   display: flex; flex-direction: column; gap: 1px;
@@ -2098,8 +2235,11 @@ textarea:focus { border-color: var(--accent); outline: none; }
   gap: 10px; padding: 3px 8px; }
 .tables-row .session-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .tables-row .count { margin-right: 0; white-space: nowrap; }
-.tables-row .tables-acts { display: flex; gap: 4px; }
+.tables-row .tables-acts { display: flex; gap: 4px; align-items: center; }
 .tables-row .tables-acts .btn { padding: 2px 8px; font-size: 11px; }
+/* Open and Close one width, so the chips beside them line up row to row. */
+.tables-row .tables-acts .tables-toggle { min-width: 48px; }
+.tables-row .tables-acts .row-more { padding: 0 7px; font-size: 14px; line-height: 18px; }
 .tables-row.no-index { grid-template-columns: minmax(0, 1fr) auto auto; }
 .session-list .source-indexes { padding: 0 4px 4px 16px; margin-top: -2px; }
 /* Drag-to-reorder feedback for saved-filter rows (wireDragReorder) — same
@@ -2122,13 +2262,17 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .browse-row .browse-mtime { flex: 0 0 auto; margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--dim); }
 .browse-row .browse-mtime + .count { margin-right: 0; margin-left: 12px; }
 
+/* The search index's state beside a table's counts: a chip, not a
+   control. Pill-shaped and hairline like the merge builder's (.mb-chip),
+   where every button is a squarer box — the old bordered rectangle read
+   as a "Not started" button that would start something. */
 .index-status {
-  font-family: var(--mono); font-size: 11px; white-space: nowrap;
-  border: var(--border-w) solid var(--line-2); border-radius: var(--radius-sm); padding: 2px 7px;
+  font-family: var(--mono); font-size: 11px; line-height: 16px; white-space: nowrap; cursor: default;
+  border: 1px solid currentColor; border-radius: 10px; padding: 0 7px;
 }
-.index-status-ready { color: var(--str); border-color: var(--str); }
-.index-status-building { color: var(--accent); border-color: var(--accent-dim); }
-.index-status-idle { color: var(--dim); }
+.index-status-ready { color: var(--str); }
+.index-status-building { color: var(--accent); }
+.index-status-idle { color: var(--dim); border-color: var(--line-2); }
 
 /* Per-column filter indexes, listed under their table in the Tables modal.
    A secondary line under the source row, not a column in it — most tables
@@ -2339,7 +2483,10 @@ textarea:focus { border-color: var(--accent); outline: none; }
 
 /* 6px on top so the focused input's ring doesn't sit on the help text. */
 .fb-help { margin: 6px 0 10px; font-size: 12px; color: var(--dim); }
-.tf-enabled { display: flex; align-items: center; gap: 6px; margin: 4px 0 10px; }
+/* A checkbox row in the Timeframe dialog ("Keep applied when switching
+   tables"): box and words on one line, the row to itself. It was
+   .tf-enabled while the dialog also had an Enabled box. */
+.tf-check { display: flex; align-items: center; gap: 6px; margin: 4px 0 10px; }
 /* A labelled field in the older dialogs, in the builders' shape
    (.lm-eb-field): label above, control full width under it, an optional
    note under that. A label beside its box put each box at a different x
@@ -2423,18 +2570,24 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .style-swatch span { width: 14px; height: 14px; border-radius: 3px; border: 1px solid var(--line-2); }
 
 .segmented { display: flex; border: var(--border-w) solid var(--line-2); border-radius: var(--radius-sm); overflow: hidden; margin-top: 8px; width: fit-content; }
+/* The builders' segment (.mb-seg): unpressed is transparent, so the
+   pressed tint is seen against the dialog's own --panel. Against --panel-2
+   (what the unpressed buttons used to paint) the tint sat too close in
+   the light skins — Harvest light measured 3.7 ΔE apart, a difference
+   you have to look for. See .vp-seg for why the text is --text. */
 .segmented button {
-  background: var(--panel-2); border: 0; border-right: var(--border-w) solid var(--line-2); color: var(--dim);
+  background: transparent; border: 0; border-right: var(--border-w) solid var(--line-2); color: var(--dim);
   padding: 6px 14px; font: inherit; font-size: 12px; cursor: pointer;
 }
 .segmented button:last-child { border-right: 0; }
-.segmented button[aria-pressed="true"] { background: var(--accent); color: var(--accent-fg); }
+.segmented button[aria-pressed="true"] { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--text); }
 
 .accent-picker { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
 .accent-swatch { width: 20px; height: 20px; border-radius: 50%; border: 1px solid var(--line-2); background: var(--sw); cursor: pointer; padding: 0; }
 .accent-swatch[aria-pressed="true"] { box-shadow: 0 0 0 2px var(--panel), 0 0 0 3px var(--sw); }
 #appearanceAccentCustom { width: 24px; height: 24px; border: 1px solid var(--line-2); border-radius: var(--radius-sm); background: none; padding: 0; cursor: pointer; }
-/* Collapsible Settings sections. The header carries .modal-body h4's type
+/* Collapsible sections (settingsSection — the profile builder's; Settings
+   itself is two panes, below). The header carries .modal-body h4's type
    treatment (uppercase, tracked) so collapsing them didn't change what a
    section *looks* like, only whether it's open — but stays accent where
    the h4 is now dim, because this one is a button you click. */
@@ -2451,6 +2604,41 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .settings-section-caret { flex: 0 0 auto; font-size: 9px; color: var(--dim); }
 .settings-section-head[aria-expanded="true"] .settings-section-caret { color: var(--accent); }
 .settings-section-body { padding: 0 4px 14px; }
+
+/* Settings as two panes (settingsPanes in settings.js): the sections
+   listed on the left, the chosen one on the right, one at a time — the
+   plugins and profiles managers' shape, and their list styling (.pm-item).
+   The height is FIXED rather than sized to the section, so going from
+   Shut down's one button to the keymap's forty rows moves nothing: the
+   card is .tall (anchored at the top), the panes are the same height
+   every time, and each pane scrolls on its own. The calc keeps the card
+   inside .tall's 82vh with room for the head and the body's padding; the
+   max() floor means a very short window scrolls the body instead of
+   squashing the list to nothing. */
+.settings-panes {
+  display: grid; grid-template-columns: 188px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr);
+  gap: 14px; height: max(320px, min(640px, calc(82vh - 80px)));
+}
+.settings-nav {
+  grid-column: 1; grid-row: 1; min-height: 0; overflow: auto;
+  display: flex; flex-direction: column; gap: 2px;
+  border-right: 1px solid var(--line); padding-right: 12px;
+}
+.settings-nav-item {
+  flex: 0 0 auto; text-align: left; background: none; border: 0; border-radius: var(--radius-sm);
+  padding: 6px 8px; font: inherit; font-size: 12px; color: var(--text); cursor: pointer;
+}
+.settings-nav-item:hover { background: var(--panel-2); }
+.settings-nav-item[aria-selected="true"] { background: var(--panel-2); box-shadow: inset 2px 0 0 var(--accent); }
+/* Drawn inside the item: the list is a scroller and clips the global ring. */
+.settings-nav-item:focus-visible { outline-offset: -2px; }
+.settings-pane { grid-column: 2; grid-row: 1; min-width: 0; min-height: 0; overflow: auto; padding-right: 4px; }
+.settings-pane-title { margin: 0 0 10px; font-size: 15px; font-weight: 600; color: var(--text); }
+.settings-pane-body > p:first-child { margin-top: 0; }
+/* A sub-heading that is a pane's first div is still not its first line
+   (Grid & layout opens with checkboxes), so it keeps the gap above it that
+   :first-of-type below takes away. */
+.settings-pane-body .settings-sub-label:not(:first-child) { margin-top: 14px; }
 
 .settings-sub-label { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .05em; margin-top: 14px; }
 .settings-sub-label:first-of-type { margin-top: 0; }
@@ -2684,6 +2872,9 @@ html[data-style="blueprint"] .btn:hover, html[data-style="blueprint"] .tab:hover
 html[data-style="blueprint"] .btn:active, html[data-style="blueprint"] .tag-chip:active {
   transform: translate(2px,2px); box-shadow: 0 0 0 var(--shadow-hard-c);
 }
+/* A row's ⋯ has no border at rest (.row-more), so no shadow either: down
+   Saved filters it was a column of offset boxes, one per filter. */
+html[data-style="blueprint"] .btn.row-more:not(:hover):not([aria-expanded="true"]) { box-shadow: none; }
 html[data-style="blueprint"] .tab[aria-selected="true"] {
   background: var(--accent); color: var(--accent-fg); box-shadow: 1px 1px 0 var(--shadow-hard-c); transform: translate(1px,1px);
 }
@@ -2732,7 +2923,7 @@ html[data-style="studio"] #search:focus, html[data-style="studio"] textarea:focu
 
 /* ------------------------------------------------- remote session mode */
 
-/* Settings → Appearance → "Remote session mode". RDP-class protocols
+/* Settings → Remote session → "Remote session mode". RDP-class protocols
    encode screen changes, so an infinite animation (busy sweep, job slide,
    the SQL cursor blink) keeps the encoder busy around the clock, and the
    row-hover repaint fires on every mousemove. Animations get the same
@@ -2844,23 +3035,79 @@ html.remote .row.selected:hover { background: var(--row-selected); }
 .mc-schema { font: 11px var(--mono); white-space: pre-wrap; color: var(--dim); }
 .mc-over-budget { color: var(--danger); }
 
-/* The profile builder (static/js/profilebuilder.js) */
-.pb-head { display: grid; gap: 2px; margin-bottom: 8px; }
-.pb-list { display: grid; gap: 2px; max-height: 240px; overflow: auto; margin: 4px 0 8px;
-  border: 1px solid var(--line-2); border-radius: var(--radius-sm); padding: 6px; background: var(--panel-2); }
-.pb-row { display: grid; grid-template-columns: auto minmax(120px, 1fr) minmax(0, 2fr); gap: 8px;
-  align-items: center; padding: 3px 4px; border-radius: var(--radius-sm); cursor: pointer; }
-.pb-row:hover { background: var(--hover); }
+/* The profile builder (static/js/profilebuilder.js), in the merge
+   builder's shape: what the profile turns on in the left pane, what a case
+   of it gets in the right one — the sentence saying what Apply does, the
+   variables as captioned cards, and the values prompt as an inert copy.
+   Each pane scrolls on its own, so the foot stays put. */
+.pb { display: grid; gap: 12px; }
+.pb > .fb-help { margin: 0; }
+.pb-panes {
+  display: grid; grid-template-columns: minmax(0, 6fr) minmax(0, 7fr); height: max(360px, min(680px, calc(82vh - 180px)));
+  border: var(--border-w) solid var(--line); border-radius: var(--radius-md); overflow: hidden;
+}
+.pb-pane { padding: 12px 14px; min-width: 0; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 16px; }
+.pb-pane > * { flex: 0 0 auto; }
+.pb-pane + .pb-pane { border-left: var(--border-w) solid var(--line); background: color-mix(in srgb, var(--panel) 70%, var(--ink)); gap: 12px; }
+.pb-pane-head { font-size: 13px; font-weight: 600; color: var(--text); }
+.pb-sec { display: grid; gap: 6px; }
+.pb-sec-head { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--dim); }
+.pb-sub { font-size: 11.5px; color: var(--dim); line-height: 1.4; }
+.pb-head { display: grid; gap: 10px; }
+.pb .dlg-field { margin-bottom: 0; }
+.pb .dlg-field > .confirm-input { width: 100%; min-width: 0; }
+/* .dlg-field > small is dim; a hint that warns is the danger colour, and
+   one with nothing to say takes no room. */
+.pb-hint.warn { color: var(--danger); }
+.pb-hint:empty { display: none; }
+.pb-list { display: grid; gap: 1px; }
+.pb-row {
+  display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; align-items: center; gap: 8px;
+  padding: 4px; border-radius: var(--radius-sm); cursor: pointer;
+}
+.pb-row:hover { background: var(--row-hover); }
+.pb-row input { margin: 0; accent-color: var(--accent); }
+.pb-cell { display: grid; min-width: 0; }
 .pb-name { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pb-desc { color: var(--dim); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pb-vars { display: grid; gap: 4px; margin: 4px 0 8px; }
-.pb-var { display: grid; grid-template-columns: 150px 1fr 1fr 110px auto auto; gap: 6px; align-items: center; }
-.pb-var input.confirm-input { margin: 0; }
-.pb-req { display: flex; align-items: center; gap: 4px; color: var(--dim); font-size: 11px; white-space: nowrap; }
-.pb-var-del { padding: 0 6px; }
-.pb-actions { margin-top: 10px; position: sticky; bottom: 0; background: var(--panel);
-  padding: 8px 0 2px; border-top: 1px solid var(--line-2); }
-@media (max-width: 900px) { .pb-var { grid-template-columns: 1fr 1fr; } }
+.pb-chip { font-family: var(--mono); font-size: 10.5px; padding: 0 7px; border-radius: 10px; border: 1px solid var(--line-2); color: var(--dim); white-space: nowrap; }
+.pb-chip.warn { color: var(--danger); border-color: currentColor; }
+.pb-summary { font-size: 13px; line-height: 1.5; color: var(--text); }
+.pb-summary b { font-family: var(--mono); font-weight: 600; font-variant-numeric: tabular-nums; }
+.pb-notes { list-style: none; margin: 0; padding: 0; display: grid; gap: 5px; }
+.pb-notes li {
+  font-size: 12px; line-height: 1.45; padding: 5px 10px; border-left: 2px solid var(--num);
+  background: var(--panel-2); border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+.pb-vars { display: grid; gap: 8px; }
+.pb-vars:empty { display: none; }
+.pb-var {
+  display: grid; gap: 8px; padding: 10px 12px; background: var(--panel);
+  border: var(--border-w) solid var(--line-2); border-radius: var(--radius-sm);
+}
+.pb-var-top { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: start; }
+.btn.pb-var-del { padding: 1px 7px; }
+.pb-var .confirm-input.bad { border-color: var(--danger); }
+/* The box sits on the Default box's line rather than its caption's. */
+.pb-req { display: flex; align-items: center; gap: 6px; align-self: end; padding-bottom: 7px; font-size: 12px; color: var(--text); cursor: pointer; }
+.pb-req input { margin: 0; accent-color: var(--accent); }
+.btn.pb-add { justify-self: start; padding: 3px 10px; font-size: 12px; }
+/* Dashed: it is the prompt, but not one that takes typing. */
+.pb-preview { padding: 12px; background: var(--panel); border: var(--border-w) dashed var(--line-2); border-radius: var(--radius-sm); display: grid; gap: 10px; }
+.pb-preview .confirm-input { cursor: default; }
+.pb-empty { margin: 0; font-size: 12px; color: var(--dim); }
+/* The grid's gap already spaces it; .modal-body .row-actions would add 12px more. */
+.pb > .pb-actions { margin-top: 0; }
+@media (max-width: 860px) {
+  .pb-panes { grid-template-columns: minmax(0, 1fr); height: auto; }
+  .pb-pane { overflow: visible; }
+  .pb-pane + .pb-pane { border-left: 0; border-top: var(--border-w) solid var(--line); }
+  /* Stacked, the dialog scrolls as one, so Save rides along at its foot —
+     pulled down over the body's 12px padding, or the rows scrolling past
+     show through underneath it. */
+  .pb-actions { position: sticky; bottom: -12px; background: var(--panel); padding: 8px 0 12px; border-top: 1px solid var(--line-2); }
+}
+@media (max-width: 560px) { .pb-var .dlg-pair { grid-template-columns: minmax(0, 1fr); gap: 8px; } }
 .assoc-manual { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 8px; }
 .assoc-manual summary { cursor: pointer; color: var(--dim); font-size: 12px; }
 .assoc-manual summary:hover { color: var(--text); }
@@ -3172,9 +3419,6 @@ html.remote .row.selected:hover { background: var(--row-selected); }
 .dash-card[draggable="true"] { cursor: grab; }
 .dash-card.dragging { opacity: .4; }
 .dash-card.drop-target { box-shadow: inset 0 0 0 2px var(--accent); }
-/* Preview pane in the widget editor — one card's worth of output before
-   committing it. */
-.dash-preview-wrap { margin-top: 8px; }
 .dash-form label { display: block; font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .05em; margin: 0 0 4px; }
 .dash-field { margin-top: 10px; min-width: 0; }
 .dash-form .confirm-input, .dash-form select { width: 100%; box-sizing: border-box; }
@@ -3185,6 +3429,68 @@ html.remote .row.selected:hover { background: var(--row-selected); }
 .dash-advanced { margin-top: 10px; border: 1px dashed var(--line-2); border-radius: var(--radius-sm); padding: 4px 8px; }
 .dash-advanced summary { cursor: pointer; font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .05em; }
 .dash-advanced .dash-field { margin-top: 6px; }
+/* The widget editor, in the builders' shape (the merge builder's .mb-*,
+   the movement-event builder's .lm-eb-*): the question on the left, how
+   it looks on the right above a card that answers the draft as it
+   changes. Its own classes, so a change to either builder can't reflow
+   it. Section heads are the builders' dim uppercase; field labels sit
+   above their control in plain 12px text, as .dlg-field's do, so the
+   two levels read apart. Fixed-height panes that scroll on their own,
+   so Save widget stays on screen however tall Advanced gets. */
+.dash-ed { display: grid; gap: 12px; }
+.dash-ed .fb-help.dash-ed-intro { margin: 0; }
+.dash-ed-panes { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  height: max(360px, min(660px, calc(82vh - 170px)));
+  border: var(--border-w) solid var(--line); border-radius: var(--radius-md); overflow: hidden; }
+.dash-ed-pane { padding: 12px 14px; min-width: 0; min-height: 0; overflow: auto;
+  display: flex; flex-direction: column; gap: 12px; }
+.dash-ed-pane > * { flex: 0 0 auto; }
+.dash-ed-pane + .dash-ed-pane { border-left: var(--border-w) solid var(--line);
+  background: color-mix(in srgb, var(--panel) 70%, var(--ink)); }
+.dash-ed-head { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--dim); }
+.dash-ed-group { display: grid; gap: 12px; }
+.dash-ed .dash-field { margin-top: 0; }
+.dash-ed .dash-field > label { display: block; margin: 0 0 4px; font-size: 12px; color: var(--text);
+  text-transform: none; letter-spacing: normal; }
+.dash-ed .confirm-input, .dash-ed select { width: 100%; box-sizing: border-box; }
+.dash-ed .dash-advanced { margin-top: 0; }
+.dash-ed .dash-advanced[open] { padding-bottom: 8px; }
+.dash-ed .dash-advanced .fb-help { margin-bottom: 0; }
+.dash-ed .dash-cells-note { margin-top: 0; }
+.dash-ed .dash-cells-note .fb-help { margin: 0; }
+.dash-ed .dash-live-row, .dash-ed .dash-cost { margin-top: 0; }
+.dash-ed > .row-actions { margin-top: 0; }
+/* Render as: every kind in sight as a chip, so one click repaints the
+   preview; Width a segmented control. Pressed is the builders' 16%
+   accent tint with the text colour, not accent text on a tint. */
+.dash-kinds { display: flex; flex-wrap: wrap; gap: 5px; }
+.dash-kinds button { font: inherit; font-size: 12px; color: var(--dim); background: transparent; cursor: pointer;
+  border: var(--border-w) solid var(--line-2); border-radius: 10px; padding: 2px 10px; white-space: nowrap; }
+.dash-kinds button:hover { color: var(--text); border-color: var(--accent-dim, var(--accent)); }
+.dash-kinds button[aria-pressed="true"] { color: var(--text); border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent); }
+.dash-seg { display: inline-flex; max-width: 100%; border: var(--border-w) solid var(--line-2);
+  border-radius: var(--radius-sm); overflow: hidden; }
+.dash-seg button { font: inherit; font-size: 12px; color: var(--dim); background: transparent; cursor: pointer;
+  border: 0; padding: 4px 10px; white-space: nowrap; }
+.dash-seg button + button { border-left: var(--border-w) solid var(--line-2); }
+.dash-seg button:hover { color: var(--text); }
+.dash-seg button[aria-pressed="true"] { color: var(--text); background: color-mix(in srgb, var(--accent) 16%, transparent); }
+.dash-seg button:focus-visible { outline-offset: -2px; }
+/* The preview: one card, drawn by the board's own painter. Dimmed, not
+   blanked, while a newer draft is being asked — the last answer stays
+   readable until the next one lands. */
+.dash-preview-head { display: flex; align-items: baseline; gap: 10px; }
+.dash-preview-head > span:first-child { flex: 1; }
+.dash-preview-meta { font: 11px var(--mono); letter-spacing: 0; text-transform: none; }
+.dash-ed .dash-card.dash-preview { min-height: 120px; }
+.dash-preview .dash-widget-body { transition: opacity .15s; }
+.dash-preview.busy .dash-widget-body { opacity: .5; }
+.dash-empty-note.bad { color: var(--danger); overflow-wrap: anywhere; }
+@media (max-width: 860px) {
+  .dash-ed-panes { grid-template-columns: minmax(0, 1fr); height: auto; }
+  .dash-ed-pane + .dash-ed-pane { border-left: 0; border-top: var(--border-w) solid var(--line); }
+}
 /* Drilldown: the number, a bar, a list row — each a way back to the rows. */
 .dash-drill { background: none; border: none; color: var(--line-2); cursor: pointer; font: inherit; margin-right: 2px; }
 .dash-card:hover .dash-drill { color: var(--accent); }
@@ -3192,7 +3498,6 @@ html.remote .row.selected:hover { background: var(--row-selected); }
 .dash-widget-body.drillable:hover .dash-stat { text-decoration: underline; text-decoration-color: var(--accent-dim); text-underline-offset: 6px; }
 .dash-list-row.drillable:hover { background: var(--sel); }
 .dash-pick-board, .dash-start-from { width: 100%; }
-.dash-form-row-3 { grid-template-columns: 1fr 1fr 1fr; }
 .dash-card.dash-preview { cursor: default; min-height: 60px; }
 .dash-widget-body { flex: 1 1 auto; min-height: 0; }
 .dash-stat { font-size: 34px; color: var(--accent); line-height: 1; }
@@ -3281,7 +3586,6 @@ html.remote .row.selected:hover { background: var(--row-selected); }
 .dash-empty-note { color: var(--dim); font-size: 12px; }
 .dash-sql { width: 100%; background: var(--ink); color: var(--text); border: 1px solid var(--line-2);
   font: 12px var(--mono); padding: 6px 8px; resize: vertical; }
-.bundle-shipped { margin-left: 8px; font-size: 10px; color: var(--accent); border: 1px solid var(--accent-dim, var(--line-2)); border-radius: 8px; padding: 0 6px; text-transform: uppercase; letter-spacing: .06em; }
 
 /* The profile manager (bundles.js) — two panes: the profiles on the left,
    the whole of one profile on the right. It earns .xwide for the same
@@ -3365,7 +3669,8 @@ html.remote .row.selected:hover { background: var(--row-selected); }
 }
 .pl-scope button:last-child { border-right: 0; }
 .pl-scope button:hover:not([aria-pressed="true"]):not(:disabled) { color: var(--text); background: var(--line); }
-.pl-scope button[aria-pressed="true"] { background: var(--accent-dim); border-color: var(--accent); color: var(--accent-fg); }
+/* A dialog segment, so the builders' tint (see .vp-seg). */
+.pl-scope button[aria-pressed="true"] { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--text); }
 .pl-scope button:disabled { opacity: .5; cursor: default; }
 .pl-scope-note { font-size: 10px; color: var(--dim); max-width: 280px; text-align: right; line-height: 1.5; }
 

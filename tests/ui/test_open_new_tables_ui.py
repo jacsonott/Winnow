@@ -70,9 +70,9 @@ def test_off_by_default_and_on_opens_the_first_of_a_batch(page, tmp_path):
 def test_the_checkbox_lives_under_imports_and_persists(page):
     page.evaluate("() => __winnow.openSettings()")
     page.wait_for_selector("#modal:not([hidden])")
-    # By the section's own title: "imports" also appears in other sections' help text
-    sec = page.locator("#modalBody .settings-section").filter(has=page.locator(".settings-section-title", has_text=re.compile(r"^Imports$")))
-    sec.locator(".settings-section-head").click()   # sections start collapsed
+    # By the section's own name in the list: "imports" also appears in other sections' help text
+    page.locator("#modalBody .settings-nav-item", has_text=re.compile(r"^Imports$")).click()
+    sec = page.locator("#modalBody .settings-pane:not([hidden])")
     cb = sec.locator("label.check-row", has_text="Open new tables").locator("input")
     cb.wait_for(state="visible")
     assert not cb.is_checked()

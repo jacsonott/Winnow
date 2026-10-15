@@ -1,15 +1,14 @@
 /* The unified timeline tab.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
-import { $, OVERSCAN, PAGE, ROW_H, api, el, post, setBusy, toast } from './core.js';
+import { $, OVERSCAN, PAGE, ROW_H, api, debounce, el, post, setBusy, toast } from './core.js';
 import { rowsPaintY, spacerPx, vScroll } from './grid.js';
-import { fieldInput } from './home.js';
 import { armOpCancel, opToken } from './jobs.js';
-import { headerSig } from './savedfilters.js';
-import { loadSources, openSource, recenterOnRow, sourceLabel, sourceTitle } from './sources.js';
+import { headerSig, nicknameFor } from './savedfilters.js';
+import { loadSources, openSource, recenterOnRow, sourceLabel } from './sources.js';
 import { showGridTab } from './sql.js';
 import { S } from './state.js';
-import { modal } from './ui.js';
+import { confirmDialog, modal, oneAtATime } from './ui.js';
 
 /* ---------------------------------------------------------- unified timeline */
 
@@ -200,27 +199,36 @@ export function renderTimelineRows() {
   const frag = document.createDocumentFragment();
   for (let pos = first; pos < last; pos++) {
     const r = timelineRowAt(pos);
-    const row = el('div', 'timeline-row' + (r ? '' : ' pending'));
-    const tsCell = el('div', 'tl-col-ts', r ? (r.ts || '—') : '');
-    const typeCell = el('div', 'tl-col-type');
-    if (r) {
-      for (const tid of r.tags) {
-        const dot = el('span', 'tl-tag-dot');
-        dot.style.background = tagColor[tid] || '#888';
-        dot.title = (S.tags.find((t) => t.id === tid) || {}).name || '';
-        typeCell.append(dot);
-      }
-      const badge = el('span', 'type-badge', r.type_label);
-      badge.title = r.source_name;
-      typeCell.append(badge);
-    }
-    const bodyCell = el('div', 'tl-col-body');
-    if (r) fillTimelineBody(bodyCell, r);
-    row.append(tsCell, typeCell, bodyCell);
+    const row = timelineRowNode(r, tagColor, fillTimelineBody);
     if (r) row.onclick = () => jumpToTimelineRow(r.source_id, r.rid);
     frag.append(row);
   }
   rowsEl.replaceChildren(frag);
+}
+
+/* One Timeline line — timestamp, tag dots and type badge, body — or the
+   empty placeholder for a row whose page hasn't arrived. `fillBody`
+   paints the Body cell: fillTimelineBody on the Timeline, with its raw /
+   summary toggle; Configure tables…' preview passes one without it. */
+export function timelineRowNode(r, tagColor, fillBody) {
+  const row = el('div', 'timeline-row' + (r ? '' : ' pending'));
+  const tsCell = el('div', 'tl-col-ts', r ? (r.ts || '—') : '');
+  const typeCell = el('div', 'tl-col-type');
+  if (r) {
+    for (const tid of r.tags) {
+      const dot = el('span', 'tl-tag-dot');
+      dot.style.background = tagColor[tid] || '#888';
+      dot.title = (S.tags.find((t) => t.id === tid) || {}).name || '';
+      typeCell.append(dot);
+    }
+    const badge = el('span', 'type-badge', r.type_label);
+    badge.title = r.source_name;
+    typeCell.append(badge);
+  }
+  const bodyCell = el('div', 'tl-col-body');
+  if (r) fillBody(bodyCell, r);
+  row.append(tsCell, typeCell, bodyCell);
+  return row;
 }
 
 /* The Body cell. The server sends both halves of the row (see
@@ -237,16 +245,10 @@ export function renderTimelineRows() {
    translateY) is built on that, so a row that grew would paint over its
    neighbour and put every row below it at the wrong offset. */
 export function fillTimelineBody(cell, r) {
-  cell.title = r.body;
   const summarised = !!(r.lead || r.detail);
   const key = `${r.source_id}:${r.rid}`;
   const showRaw = !summarised || S.timeline.raw.has(key);
-  if (showRaw) {
-    cell.append(el('span', 'tl-raw', r.body));
-  } else {
-    if (r.lead) cell.append(el('span', 'tl-lead', r.lead));
-    if (r.detail) cell.append(el('span', 'tl-detail', r.detail));
-  }
+  paintTimelineBody(cell, r, showRaw);
   if (!summarised) return; // nothing to swap to — the body already IS the raw row
   const btn = el('button', 'tl-raw-toggle', showRaw ? 'summary' : 'raw');
   btn.title = showRaw ? 'Show the summary' : 'Show the raw row';
@@ -257,6 +259,19 @@ export function fillTimelineBody(cell, r) {
     renderTimelineRows();
   };
   cell.append(btn);
+}
+
+/* The text half of the Body cell: the summary's lead and details, or the
+   raw row. Shared with Configure tables…' preview, so a previewed row is
+   painted by the same code as a row on the Timeline. */
+export function paintTimelineBody(cell, r, showRaw) {
+  cell.title = r.body;
+  if (showRaw) {
+    cell.append(el('span', 'tl-raw', r.body));
+  } else {
+    if (r.lead) cell.append(el('span', 'tl-lead', r.lead));
+    if (r.detail) cell.append(el('span', 'tl-detail', r.detail));
+  }
 }
 
 /* Open the row's own table at the row — from a timeline line, and from
@@ -306,98 +321,518 @@ export async function jumpToTimelineRow(sourceId, rid) {
 // repaints in the same frame.
 export let timelineScrollRaf = null;
 
-/* Per-source "which column is the timestamp, which columns make up the
-   body, what's this source called on the timeline" editor — writes to
-   workspace.timeline_templates (keyed by header set, so it's reused by
-   any future case whose columns match), not anything case-scoped. Every
-   real source gets a row here, whether or not it has tagged rows yet —
-   configuring ahead of tagging is the normal workflow, not an edge case. */
-export function openTimelineSourceConfig() {
-  modal('Configure timeline tables', (b) => {
-    b.append(el('p', null,
-      'Per header set, reused across cases: which column is the timestamp, which columns (in the order '
-      + 'checked) make up the body, and what this kind of table is called on the timeline. A table with no '
-      + 'matching config here falls back to its first datetime column and its own file name, and its body '
-      + 'reads as the summary Winnow ships for that artefact shape — or, for a shape it does not know, '
-      + 'every column joined. Checking body columns here replaces that summary with exactly what you check.'));
+/* ------------------------------------------------------ Configure tables… */
 
-    const list = el('div', 'session-list');
-    b.append(list);
+const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+const listNames = (arr) => (arr.length <= 1 ? (arr[0] || '')
+  : `${arr.slice(0, -1).join(', ')} and ${arr[arr.length - 1]}`);
 
-    const realSources = S.sources.filter((s) => !s.is_merge && !s.error);
-    for (const src of realSources) {
-      // Header-set key: the file's own columns (see baseColumns). A derived
-      // column can still be *picked* as the timestamp below — it just isn't
-      // part of what identifies this source type. server.py's
-      // _resolve_timeline_configs looks the config up by this same set;
-      // the two disagreeing is how adding a derived column used to drop a
-      // table's config without a word.
-      const colNames = src.columns.filter((c) => !c.derived).map((c) => c.name);
-      const dtCols = src.columns.filter((c) => c.type === 'datetime').map((c) => c.name);
-      const existing = timelineTemplateFor(colNames);
+/* The case's real tables grouped by header set: their own columns, derived
+   ones left out — the key Save writes under and server.py's
+   _resolve_timeline_configs looks up under (the two disagreeing is how
+   adding a derived column once dropped a table's config without a word).
+   One template serves every table in a group, so the dialog lists groups:
+   two EvtxECmd tables are one entry, and saving it changes both — which
+   the one-block-per-table dialog this replaced did too, without showing
+   it. A table that failed, or is still importing (no columns yet), has no
+   header set to list. */
+export function timelineHeaderSets() {
+  const bySig = new Map();
+  for (const s of S.sources) {
+    if (s.is_merge || s.error || !s.columns) continue;
+    const cols = s.columns.filter((c) => !c.derived).map((c) => c.name);
+    if (!cols.length) continue;
+    const sig = headerSig(cols);
+    if (!bySig.has(sig)) bySig.set(sig, { sig, cols, tables: [] });
+    bySig.get(sig).tables.push(s);
+  }
+  return [...bySig.values()];
+}
 
-      const row = el('div', 'row-actions session-row');
-      row.style.flexDirection = 'column';
-      row.style.alignItems = 'stretch';
-      const nameSpan = el('span', 'session-name', sourceLabel(src));
-      nameSpan.title = sourceTitle(src);
-      row.append(nameSpan);
+/* The template the server applies to a header set, found the way
+   _resolve_timeline_configs finds it: the one saved under the set's own
+   columns, else one an older release saved under a table's every column,
+   derived ones included. */
+export function headerSetTemplate(set) {
+  return timelineTemplateFor(set.cols)
+    || set.tables.map((t) => timelineTemplateFor(t.columns.map((c) => c.name))).find(Boolean)
+    || null;
+}
 
-      const typeInput = fieldInput(existing ? existing.type_label : '');
-      typeInput.placeholder = `Type (defaults to "${src.name}")`;
-      row.append(typeInput);
+/* The three fields the dialog edits, as a template holds them — or as the
+   shipped default has them: nothing set. A saved timestamp the tables
+   here don't have is kept, not blanked: the template is shared across
+   cases, and a derived column another case has is no reason to lose it. */
+function timelineDraft(set, tmpl) {
+  return {
+    type: (tmpl && tmpl.type_label) || '',
+    ts: (tmpl && tmpl.timestamp_column) || '',
+    body: ((tmpl && tmpl.body_columns) || []).filter((c) => set.cols.includes(c)),
+  };
+}
 
-      const tsSel = el('select');
-      tsSel.style.cssText = 'background:var(--ink);color:var(--text);border:1px solid var(--line-2);padding:5px 8px;font:inherit;margin-top:6px';
-      const noneOpt = document.createElement('option');
-      noneOpt.value = '';
-      noneOpt.textContent = dtCols.length ? '(first datetime column)' : '(no datetime column on this table)';
-      tsSel.append(noneOpt);
-      for (const c of dtCols) {
-        const opt = document.createElement('option');
-        opt.value = c; opt.textContent = c;
-        tsSel.append(opt);
-      }
-      tsSel.value = existing && dtCols.includes(existing.timestamp_column) ? existing.timestamp_column : '';
-      row.append(tsSel);
+const sameDraft = (a, b) => a.type.trim() === b.type.trim() && a.ts === b.ts
+  && a.body.join('\x1f') === b.body.join('\x1f');
 
-      const bodyWrap = el('div', 'row-actions');
-      bodyWrap.style.flexWrap = 'wrap';
-      let bodyOrder = existing && existing.body_columns && existing.body_columns.length
-        ? existing.body_columns.filter((c) => colNames.includes(c))
-        : [];
-      for (const c of colNames) {
-        const chip = el('button', 'btn ghost', c);
-        chip.setAttribute('aria-pressed', String(bodyOrder.includes(c)));
-        chip.title = 'Toggle inclusion in the body — order follows the order you check them in';
-        chip.onclick = () => {
-          bodyOrder = bodyOrder.includes(c) ? bodyOrder.filter((x) => x !== c) : [...bodyOrder, c];
-          chip.setAttribute('aria-pressed', String(bodyOrder.includes(c)));
-        };
-        bodyWrap.append(chip);
-      }
-      row.append(el('span', 'fb-help', 'Body columns (click to toggle, order = click order; none checked = every column):'), bodyWrap);
-
-      const saveBtn = el('button', 'btn', 'Save');
-      saveBtn.style.marginTop = '6px';
-      saveBtn.style.alignSelf = 'flex-start';   // the row stretches its children; a button needn't
-      saveBtn.onclick = async () => {
-        try {
-          await post('/api/timeline_templates', {
-            col_names: colNames,
-            type_label: typeInput.value.trim() || src.name,
-            timestamp_column: tsSel.value || null,
-            body_columns: bodyOrder,
-          });
-        } catch (e) { toast(`Could not save the timeline config for ${src.name}: ${e.message}`, 6000); return; }
-        await loadTimelineTemplates();
-        toast(`Saved timeline config for ${src.name}`);
-      };
-      row.append(saveBtn);
-      list.append(row);
+/* The Timestamp column choices for a set: every datetime column any of its
+   tables has, its own first and then derived ones (a derived datetime
+   column can be the timestamp — build_timeline resolves the name against
+   every column), each saying so when it isn't on every table, since a
+   table without it falls back to its first datetime column. */
+function timestampChoices(set) {
+  const by = new Map();
+  for (const t of set.tables) {
+    for (const c of t.columns) {
+      if (c.type !== 'datetime') continue;
+      if (!by.has(c.name)) by.set(c.name, { name: c.name, derived: !!c.derived, tables: [] });
+      by.get(c.name).tables.push(t);
     }
-    if (!realSources.length) list.append(el('div', 'note-status', 'No tables in this case yet.'));
-  }, { wide: true });
+  }
+  return [...by.values()].sort((a, b) => Number(a.derived) - Number(b.derived)).map((c) => {
+    const notes = [];
+    if (c.derived) notes.push('derived');
+    if (c.tables.length < set.tables.length) notes.push(`only on ${listNames(c.tables.map(sourceLabel))}`);
+    return { value: c.name, label: notes.length ? `${c.name} (${notes.join(', ')})` : c.name };
+  });
+}
+
+/* What "no timestamp picked" means for this set, named: build_timeline's
+   fallback is each table's first datetime column. */
+function defaultTimestampLabel(set) {
+  const firsts = new Set(set.tables.map((t) => (t.columns.find((c) => c.type === 'datetime') || {}).name || null));
+  if (firsts.size > 1) return 'Each table\'s first datetime column';
+  const [only] = firsts;
+  return only ? `First datetime column (${only})` : 'None (no datetime column, so its rows go last)';
+}
+
+function addOption(sel, value, label) {
+  const opt = document.createElement('option');
+  opt.value = value;
+  opt.textContent = label;
+  sel.append(opt);
+}
+
+/* Configure tables… — how each kind of table reads on the Timeline: its
+   type badge, which column is its timestamp, which columns make its Body.
+   Saved to workspace.timeline_templates, keyed by header set and reused
+   by every case whose tables have the same columns, so the dialog is
+   built around header sets rather than tables: the case's sets on the
+   left (with the tables each one covers, and whether it has a saved
+   setting or the shipped default), the selected one on the right with a
+   live preview of real rows from one of its tables — rendered by the
+   server's own timeline code (/api/timeline/preview), so what it shows is
+   what the Timeline will show.
+
+   Edits are kept per header set until that set is saved: switching to
+   another set and back finds them still there, the list marks each set
+   with unsaved changes, and the footer names the others when the one
+   shown is saved. Save writes the set shown, nothing else. Every real
+   table is listed whether or not it has tagged rows yet — configuring
+   ahead of tagging is the normal workflow, not an edge case. */
+export function openTimelineSourceConfig() {
+  const sets = timelineHeaderSets();
+  const state = {
+    sel: null,               // sig of the set on the right
+    drafts: new Map(),       // sig -> its edits, kept until it is saved
+    previewTable: new Map(), // sig -> id of the table its preview reads
+    setFilter: '',
+    colFilter: '',
+    preview: null,
+    previewKey: '',
+    previewError: '',
+    seq: 0,
+    busy: false,             // a Save or Back to default in flight
+  };
+  const open = sets.find((g) => g.tables.some((t) => t.id === S.sourceId));
+  state.sel = (open || sets[0] || {}).sig || null;
+
+  const setOf = (sig) => sets.find((g) => g.sig === sig) || null;
+  const saved = (g) => timelineDraft(g, headerSetTemplate(g));
+  const draftOf = (g) => {
+    if (!state.drafts.has(g.sig)) state.drafts.set(g.sig, saved(g));
+    return state.drafts.get(g.sig);
+  };
+  const dirty = (g) => state.drafts.has(g.sig) && !sameDraft(state.drafts.get(g.sig), saved(g));
+  const setName = (g) => {
+    const t = headerSetTemplate(g);
+    return (t && t.type_label) || nicknameFor(g.cols) || sourceLabel(g.tables[0]);
+  };
+  const previewTableOf = (g) => {
+    if (!state.previewTable.has(g.sig)) {
+      state.previewTable.set(g.sig, (g.tables.find((t) => t.tagged_row_count > 0) || g.tables[0]).id);
+    }
+    return state.previewTable.get(g.sig);
+  };
+  const previewRequest = (g) => {
+    const d = draftOf(g);
+    return { source_id: previewTableOf(g), timestamp_column: d.ts || null, body_columns: d.body, type_label: d.type.trim() };
+  };
+
+  let listEl, paneEl, chipsEl, clearBtn, bodyHelpEl, previewEl, captionEl, hintEl, saveBtn, resetBtn;
+
+  const fetchPreview = debounce(async () => {
+    const g = setOf(state.sel);
+    if (!g) return;
+    const req = previewRequest(g);
+    const seq = ++state.seq;
+    try {
+      const pv = await post('/api/timeline/preview', req);
+      if (seq !== state.seq) return;
+      state.preview = pv;
+      state.previewKey = JSON.stringify(req);
+      state.previewError = '';
+    } catch (e) {
+      if (seq !== state.seq) return;
+      state.preview = null;
+      state.previewError = e.message;
+    }
+    renderPreview();
+    renderBodyHelp();
+  }, 120);
+
+  modal('Configure timeline tables', (b) => {
+    b.append(el('p', 'tlc-intro',
+      'How each kind of table reads on the Timeline — set once per header set, reused by every case with the same columns.'));
+    if (!sets.length) {
+      b.append(el('p', 'tlc-empty', 'No tables in this case yet.'));
+      return;
+    }
+    const root = el('div', 'tlc');
+    const panes = el('div', 'tlc-panes');
+
+    const left = el('div', 'tlc-pane');
+    left.append(el('div', 'tlc-head', 'Header sets in this case'));
+    if (sets.length > 6) {
+      const filter = el('input', 'tlc-filter');
+      filter.type = 'search';
+      filter.placeholder = 'Filter header sets…';
+      filter.setAttribute('aria-label', 'Filter header sets');
+      filter.oninput = () => { state.setFilter = filter.value; renderList(); };
+      left.append(filter);
+    }
+    listEl = el('div', 'tlc-sets');
+    left.append(listEl);
+
+    paneEl = el('div', 'tlc-pane');
+    panes.append(left, paneEl);
+
+    const foot = el('div', 'tlc-foot');
+    hintEl = el('div', 'tlc-hint');
+    resetBtn = el('button', 'btn ghost', 'Back to default');
+    resetBtn.type = 'button';
+    resetBtn.title = 'Remove the saved setting for this header set, so its tables read the way Winnow does by default';
+    saveBtn = el('button', 'btn primary', 'Save');
+    saveBtn.type = 'button';
+    // One request per click (oneAtATime), and the buttons' enabled state
+    // put back from the dialog's own state once it settles — oneAtATime
+    // restores what it found, which was "enabled" when the click landed.
+    // A click it drops returns at once, so renderFoot also has to know a
+    // request is still in flight (state.busy) or it re-enables Save early.
+    const busy = (fn) => async () => {
+      state.busy = true;
+      try { await fn(); } finally { state.busy = false; }
+    };
+    const guardedSave = oneAtATime(saveBtn, busy(save));
+    const guardedReset = oneAtATime(resetBtn, busy(resetToDefault));
+    saveBtn.onclick = async (e) => { await guardedSave(e); renderFoot(); };
+    resetBtn.onclick = async (e) => { await guardedReset(e); renderFoot(); };
+    foot.append(hintEl, resetBtn, saveBtn);
+
+    root.append(panes, foot);
+    b.append(root);
+    renderList();
+    renderPane();
+  }, { wide: 'x' });
+
+  function renderList() {
+    listEl.replaceChildren();
+    const q = state.setFilter.trim().toLowerCase();
+    for (const g of sets) {
+      const name = setName(g);
+      const labels = g.tables.map(sourceLabel);
+      if (q && !name.toLowerCase().includes(q) && !labels.some((l) => l.toLowerCase().includes(q))) continue;
+      const btn = el('button', 'tlc-set');
+      btn.type = 'button';
+      btn.setAttribute('aria-pressed', String(g.sig === state.sel));
+      btn.title = `${plural(g.cols.length, 'column')}: ${g.cols.join(', ')}`;
+      const marks = el('span', 'tlc-marks');
+      if (dirty(g)) marks.append(el('span', 'tlc-mark unsaved', 'unsaved'));
+      marks.append(savedMark(g));
+      const tables = el('span', 'tlc-set-tables',
+        (labels.length > 1 ? `${plural(labels.length, 'table')} · ` : '') + labels.join(' · '));
+      btn.append(el('span', 'tlc-set-name', name), marks, tables);
+      btn.onclick = () => {
+        if (state.sel === g.sig) return;
+        state.sel = g.sig;
+        state.colFilter = '';
+        renderList();
+        renderPane();
+      };
+      listEl.append(btn);
+    }
+    if (!listEl.childElementCount) listEl.append(el('p', 'tlc-empty', 'No header set matches that filter.'));
+  }
+
+  function savedMark(g) {
+    const has = !!headerSetTemplate(g);
+    const mark = el('span', `tlc-mark ${has ? 'saved' : 'default'}`, has ? 'saved' : 'default');
+    mark.title = has ? 'Has a saved setting' : 'Reads the way Winnow does by default — nothing saved';
+    return mark;
+  }
+
+  function renderPane() {
+    paneEl.replaceChildren();
+    const g = setOf(state.sel);
+    if (!g) return;
+    const d = draftOf(g);
+
+    const title = el('div', 'tlc-title');
+    title.append(el('b', null, setName(g)), savedMark(g));
+    const scope = el('p', 'tlc-scope');
+    scope.append('Applies to ', el('b', null, listNames(g.tables.map(sourceLabel))),
+      ` — and to any table with these ${plural(g.cols.length, 'column')}, in this case or another.`);
+
+    const pair = el('div', 'dlg-pair');
+    const typeField = el('div', 'dlg-field');
+    const typeLabel = el('label', null, 'Type');
+    const typeInput = el('input', 'confirm-input');
+    typeInput.type = 'text';
+    typeInput.id = 'tlcType';
+    typeInput.autocomplete = 'off';
+    typeLabel.htmlFor = 'tlcType';
+    typeInput.value = d.type;
+    typeInput.placeholder = g.tables.length > 1 ? 'Each table\'s file name' : g.tables[0].name;
+    typeInput.oninput = () => { d.type = typeInput.value; edited(); };
+    typeInput.onkeydown = (e) => { if (e.key === 'Enter' && !saveBtn.disabled) saveBtn.click(); };
+    typeField.append(typeLabel, typeInput, el('small', null, 'The badge on each line. Blank: the table\'s file name.'));
+
+    const tsField = el('div', 'dlg-field');
+    const tsLabel = el('label', null, 'Timestamp column');
+    const tsSel = el('select');
+    tsSel.id = 'tlcTs';
+    tsLabel.htmlFor = 'tlcTs';
+    const choices = timestampChoices(g);
+    addOption(tsSel, '', defaultTimestampLabel(g));
+    for (const c of choices) addOption(tsSel, c.value, c.label);
+    if (d.ts && !choices.some((c) => c.value === d.ts)) addOption(tsSel, d.ts, `${d.ts} (not a datetime column here)`);
+    tsSel.value = d.ts;
+    tsSel.onchange = () => { d.ts = tsSel.value; edited(); };
+    tsField.append(tsLabel, tsSel);
+    pair.append(typeField, tsField);
+
+    const bodyField = el('div', 'dlg-field');
+    const bodyHead = el('div', 'tlc-body-head');
+    bodyHead.append(el('span', 'tlc-label', 'Body columns'));
+    clearBtn = el('button', 'btn ghost tlc-small', 'Clear');
+    clearBtn.type = 'button';
+    clearBtn.title = 'Pick none: the Body goes back to what Winnow shows by default';
+    clearBtn.onclick = () => { d.body = []; renderChips(); edited(); };
+    bodyHead.append(clearBtn);
+    bodyField.append(bodyHead);
+    if (g.cols.length > 24) {
+      const filter = el('input', 'tlc-filter');
+      filter.type = 'search';
+      filter.placeholder = 'Filter columns…';
+      filter.setAttribute('aria-label', 'Filter columns');
+      filter.oninput = () => { state.colFilter = filter.value; renderChips(); };
+      bodyField.append(filter);
+    }
+    chipsEl = el('div', 'tlc-chips');
+    chipsEl.setAttribute('role', 'group');
+    chipsEl.setAttribute('aria-label', 'Body columns');
+    bodyHelpEl = el('small');
+    bodyField.append(chipsEl, bodyHelpEl);
+
+    const prev = el('div', 'tlc-prev');
+    const prevHead = el('div', 'tlc-prev-head');
+    prevHead.append(el('div', 'tlc-head', 'Preview'));
+    if (g.tables.length > 1) {
+      const from = el('label', 'tlc-prev-from');
+      const tSel = el('select');
+      for (const t of g.tables) addOption(tSel, String(t.id), sourceLabel(t));
+      tSel.value = String(previewTableOf(g));
+      tSel.onchange = () => { state.previewTable.set(g.sig, Number(tSel.value)); fetchPreview(); };
+      from.append('Rows from ', tSel);
+      prevHead.append(from);
+    }
+    previewEl = el('div', 'tlc-preview');
+    captionEl = el('div', 'tlc-caption');
+    prev.append(prevHead, previewEl, captionEl);
+
+    paneEl.append(title, scope, pair, bodyField, prev);
+    // Drop whatever the previous set's preview was, including an answer
+    // still in flight for it.
+    state.seq++;
+    state.preview = null;
+    state.previewError = '';
+    renderChips();
+    renderBodyHelp();
+    renderPreview();
+    renderFoot();
+    fetchPreview();
+  }
+
+  function renderChips(focusCol) {
+    const g = setOf(state.sel);
+    const d = draftOf(g);
+    chipsEl.replaceChildren();
+    const q = state.colFilter.trim().toLowerCase();
+    let focus = null;
+    for (const c of g.cols) {
+      const at = d.body.indexOf(c);
+      if (q && at < 0 && !c.toLowerCase().includes(q)) continue;
+      const chip = el('button', 'tlc-chip');
+      chip.type = 'button';
+      chip.setAttribute('aria-pressed', String(at >= 0));
+      if (at >= 0) chip.append(el('b', 'tlc-ord', String(at + 1)));
+      chip.append(c);
+      chip.title = at >= 0
+        ? `Number ${at + 1} in the Body. Click to take it out.`
+        : 'Click to add it to the Body, after the ones already picked.';
+      chip.onclick = () => {
+        d.body = at >= 0 ? d.body.filter((x) => x !== c) : [...d.body, c];
+        renderChips(c);
+        edited();
+      };
+      if (c === focusCol) focus = chip;
+      chipsEl.append(chip);
+    }
+    if (!chipsEl.childElementCount) chipsEl.append(el('span', 'tlc-empty', 'No column matches that filter.'));
+    clearBtn.hidden = !d.body.length;
+    // Rebuilt on every click, so the keyboard stays on the chip it pressed.
+    if (focus) focus.focus();
+  }
+
+  /* What the Body is made of, in words: the picks, or what the Timeline
+     falls back to with none — the shipped summary for a shape Winnow
+     knows, else every column. Read off the preview's answer for exactly
+     these settings when it has one; until then from the shape alone. */
+  function renderBodyHelp() {
+    const g = setOf(state.sel);
+    const d = draftOf(g);
+    const pv = state.preview;
+    const current = pv && state.previewKey === JSON.stringify(previewRequest(g));
+    const shape = pv ? pv.shape : null;
+    let text;
+    if (d.body.length) {
+      text = 'Joined with " | " in the order picked. Click one again to take it out.'
+        + (shape ? ` Picking replaces the summary Winnow ships for ${shape}.` : '');
+    } else if (!pv) {
+      text = 'None picked.';
+    } else if (current ? pv.body === 'summary' : !!shape) {
+      text = `None picked, so the Body is the summary Winnow ships for ${current ? pv.summary_shape : shape}.`;
+    } else {
+      text = 'None picked, so the Body is every column, joined with " | ".';
+    }
+    bodyHelpEl.textContent = text;
+  }
+
+  function renderPreview() {
+    previewEl.replaceChildren();
+    captionEl.textContent = '';
+    if (state.previewError) {
+      previewEl.append(el('p', 'tlc-empty', `Couldn't preview this table: ${state.previewError}`));
+      return;
+    }
+    const pv = state.preview;
+    if (!pv) { previewEl.append(el('p', 'tlc-empty', 'Loading…')); return; }
+    const head = el('div', 'timeline-cols');
+    head.append(el('div', 'tl-col-ts', 'Timestamp'), el('div', 'tl-col-type', 'Type'), el('div', 'tl-col-body', 'Body'));
+    previewEl.append(head);
+    if (!pv.rows.length) { previewEl.append(el('p', 'tlc-empty', 'This table has no rows.')); return; }
+    const tagColor = Object.fromEntries(S.tags.map((t) => [t.id, t.color]));
+    // No raw/summary toggle here: the toggle is the Timeline's own state,
+    // and these lines are a sample of it, not lines on it.
+    const paintBody = (cell, r) => paintTimelineBody(cell, r, !(r.lead || r.detail));
+    const rows = el('div', 'tlc-prev-rows');
+    for (const r of pv.rows) rows.append(timelineRowNode(r, tagColor, paintBody));
+    previewEl.append(rows);
+
+    const label = sourceLabel(S.sources.find((s) => s.id === pv.source_id)) || pv.source_name;
+    const tagged = pv.rows.filter((r) => r.tagged).length;
+    const rest = pv.rows.length - tagged;
+    let caption;
+    if (!tagged) caption = `${label} has no tagged rows yet, so these are its first rows. A row is on the Timeline once it is tagged.`;
+    else if (!rest) caption = `${plural(tagged, 'tagged row')} from ${label}.`;
+    else caption = `${plural(tagged, 'tagged row')} from ${label}, plus ${rest} untagged (no tag dot) to fill the preview.`;
+    if (pv.body_shown < pv.body_total) caption += ` The Body shows its first ${pv.body_shown} of ${pv.body_total} columns.`;
+    captionEl.textContent = caption;
+  }
+
+  function renderFoot() {
+    const g = setOf(state.sel);
+    saveBtn.disabled = state.busy || !g || !dirty(g);
+    saveBtn.title = saveBtn.disabled ? 'Nothing changed for this header set' : `Save the settings for ${setName(g)}`;
+    resetBtn.hidden = !g || !headerSetTemplate(g);
+    const others = sets.filter((o) => o !== g && dirty(o)).map(setName);
+    hintEl.textContent = others.length
+      ? `Not saved yet: ${listNames(others)}. Save writes the header set shown.`
+      : '';
+  }
+
+  function edited() {
+    renderList();
+    renderFoot();
+    renderBodyHelp();
+    fetchPreview();
+  }
+
+  // Rebuilt behind the dialog, so what was just saved is what the
+  // Timeline shows on closing it; elsewhere the next visit rebuilds it.
+  function refreshTimeline() {
+    if (S.activeTab === 'timeline') buildTimeline();
+  }
+
+  async function save() {
+    const g = setOf(state.sel);
+    if (!g || !dirty(g)) return;
+    const d = draftOf(g);
+    const name = setName(g);
+    try {
+      await post('/api/timeline_templates', {
+        col_names: g.cols,
+        // Blank stays blank: build_timeline gives each table its own file
+        // name. Writing the first table's name here would put it on every
+        // other table's lines too, the template being shared.
+        type_label: d.type.trim(),
+        timestamp_column: d.ts || null,
+        body_columns: d.body,
+      });
+    } catch (e) {
+      toast(`Could not save the Timeline settings for ${name}: ${e.message}`, 6000);
+      return;
+    }
+    await loadTimelineTemplates();
+    state.drafts.delete(g.sig);
+    toast(`Saved the Timeline settings for ${setName(g)}`);
+    refreshTimeline();
+    renderList();
+    if (state.sel === g.sig) renderPane();
+  }
+
+  async function resetToDefault() {
+    const g = setOf(state.sel);
+    const tmpl = g && headerSetTemplate(g);
+    if (!tmpl) return;
+    const name = setName(g);
+    const ok = await confirmDialog(
+      `Put ${name} back to the default? Its saved type, timestamp and body columns are removed — `
+      + 'for every table with these columns, in this case and in others.',
+      { okLabel: 'Back to default' });
+    if (!ok) return;
+    try {
+      await api(`/api/timeline_templates/${tmpl.id}`, { method: 'DELETE' });
+    } catch (e) {
+      toast(`Could not put ${name} back to the default: ${e.message}`, 6000);
+      return;
+    }
+    await loadTimelineTemplates();
+    state.drafts.delete(g.sig);
+    toast(`${name} is back to the default`);
+    refreshTimeline();
+    renderList();
+    if (state.sel === g.sig) renderPane();
+  }
 }
 
 /* DOM wiring for this module, called once by main.js. Handlers can't

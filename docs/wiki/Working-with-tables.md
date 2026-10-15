@@ -6,7 +6,7 @@ Every file you import becomes a table in the case, and the grid is where you rea
 
 ## Tabs and the tables sidebar
 
-Each open table has a tab showing its name and row count. Click a tab to switch to it, drag tabs to reorder them, and right-click one for the table menu. The ✕ on a tab closes it, but the table stays in the case and can be reopened at any time. Switching tabs keeps each table's filters, search, sort, grouping and scroll position as you left them.
+Each open table has a tab showing its name and row count. Click a tab to switch to it, drag tabs to reorder them, and right-click one for its menu (see [Right-clicking a table](#right-clicking-a-table)). The ✕ on a tab closes it, but the table stays in the case and can be reopened at any time. Switching tabs keeps each table's filters, search, sort, grouping and scroll position as you left them.
 
 The sidebar lists every table in the case. It starts hidden: click ▶ at the left of the tab strip, or press `` ` ``, to show it. Drag its right edge to make it wider or narrower, and double-click the edge to reset it. The **Filter tables and pages…** box at the top narrows the list as you type.
 
@@ -16,7 +16,19 @@ The sidebar has these sections:
 - **All tables** lists every table, in folders if you use them. **open all** opens every closed table (it asks first when there are more than 12), and **tagged** opens the closed tables that have tagged rows.
 - **Pages** (SQL, Timeline, Notes, Watchlist) and **Dashboards** follow; see [SQL pane](SQL-pane.md), [Timeline, Search all and the Watchlist](Timeline-search-and-watchlist.md), [Tagging and notes](Tagging-and-notes.md) and [Dashboards](Dashboards.md).
 
-Hover over a table to see its nickname, the file it came from and when it was imported. Right-click it for the table menu. A ⛓ before a name marks a merge, and ⊂ marks a table saved from another table's rows.
+Hover over a table to see its nickname, the file it came from and when it was imported. Right-click it for the same menu as its tab. A ⛓ before a name marks a merge, and ⊂ marks a table saved from another table's rows.
+
+### Right-clicking a table
+
+Right-click a table's tab, or the table in the sidebar, for a short menu of what you can do to it:
+
+- **Close this tab** closes the tab, the same as its ✕. Only shown when the table is open.
+- **Nickname this table…** gives it a display name (see [Renaming a table](#renaming-a-table)). On a merge it reads **Rename this merge…**.
+- **Columns…** opens the table menu (see [The table menu](#the-table-menu)), opening the table first if it was closed. On the table you are looking at it shows its key, `C`.
+- **Merge with other tables…** starts the merge builder with this table ticked. On a merge it reads **Edit merge…** (see [Merging tables](#merging-tables)).
+- **Remove…** deletes the table from the case after asking, the same as **Remove…** in the Tables manager. It is greyed out on a table that is part of a merge, and names the merge.
+
+With a tab or a sidebar row focused, the keyboard's menu key or `Shift+F10` opens the same menu under it. `↓` moves into it, the arrow keys move through it and `Enter` picks.
 
 ### Folders
 
@@ -26,19 +38,21 @@ Click a folder's name to collapse or expand it, and double-click it to rename it
 
 ### Renaming a table
 
-A table is named after its file. To give it a clearer name, choose **Nickname this table…** in the table menu, or **Nickname…** in the Tables manager. The nickname is shown in place of the file name everywhere. Leave it empty to go back to the file name. A merge has no file name, so the same command reads **Rename this merge…**.
+A table is named after its file. To give it a clearer name, right-click its tab or its row in the sidebar and choose **Nickname this table…** (it is also in the table menu), or use **Nickname…** in the table's **⋯** menu in the Tables manager. The nickname is shown in place of the file name everywhere. Leave it empty to go back to the file name. A merge has no file name, so the same command reads **Rename this merge…**.
 
 ### The Tables manager
 
-Press `t`, or choose **Case ▾ → Tables…**, to see every table in the case with its row count, the number of tagged rows and notes, and whether its search index is ready (**✓ Ready**, **⏳ Building…** or **Not started**). Each row has **Settings…** (the table menu), **Open**/**Close**, **Nickname…** and **Remove…**.
+Press `t`, or choose **Case ▾ → Tables…**, to see every table in the case, open or closed, with its row count and the number of tagged rows and notes. Beside them, **index ready**, **indexing…** or **not indexed yet** says whether the table's search index is built. Until it is, Contains and Advanced searches on that table scan every row instead: the results are the same, only slower (see [The search index and slow searches](Filtering-and-searching.md#the-search-index-and-slow-searches)).
 
-**Remove…** deletes the table from the case, along with its tags and notes. It asks first. A table that is part of a merge can't be removed until the merge is deleted. Deleting a merge leaves its tables untouched.
+Each row has **Open** or **Close** and a **⋯** menu with **Settings…** (the table menu), **Nickname…** and **Remove…**. Closing a table, here or with the ✕ on its tab, only hides it; it stays in the case.
+
+**Remove…** deletes the table from the case, along with its tags and notes. It asks first. The same command is on the table's right-click menu. A table that is part of a merge can't be removed until the merge is deleted. Deleting a merge leaves its tables untouched.
 
 Filtering, grouping or opening the value picker on a column builds a small index for that column in the background. The Tables manager lists them under each table as **Filter indexes:**, and ✕ drops one if they take up too much space. Dropping one costs nothing but a slower first filter on that column next time. **Open all tagged** opens every closed table with tagged rows, and **Copy table definitions** copies every table's columns as SQL, for help writing a query in the [SQL pane](SQL-pane.md).
 
 ## The table menu
 
-Press `C`, right-click a tab, or right-click a table in the sidebar to open the table menu. Its top row has **Tables manager…**, **Reset view** (clears filters, search, tag filter and grouping and restores the default sort; the column layout and the timeframe stay) and **Close this tab**. Below that are three sections:
+Press `C` to open the table menu, or right-click a tab or a table in the sidebar and choose **Columns…**. Its top row has **Tables manager…**, **Reset view** (clears filters, search, tag filter and grouping and restores the default sort; the column layout and the timeframe stay) and **Close this tab**. Below that are three sections:
 
 - **Columns**: show, hide, pin and reorder columns (see below), plus **Add derived column…** (see [Derived columns](Derived-columns.md)).
 - **Value filter dropdowns**: when the ▾ value picker appears on this table's filter boxes (see [Filtering and searching](Filtering-and-searching.md#the-value-picker)).
@@ -66,7 +80,7 @@ A pinned column stays visible while you scroll sideways. Alt-click a header to p
 
 Drag the right edge of a header to resize a column, and double-click the edge to fit the column to its contents. Press `=` to fit every column, and `0` to reset every width to its default.
 
-Fitting is capped so that a single long value, such as a base64 command line, can't make a column enormous. The cap is set in **Settings → Appearance → Autofit column width limit** (900 pixels by default, or no limit). A column whose header needs more room than the cap still gets room for its name. A table with only one column, such as a log imported one line per row, fills the grid's width.
+Fitting is capped so that a single long value, such as a base64 command line, can't make a column enormous. The cap is set in **Settings → Grid & layout → Autofit column width limit** (900 pixels by default, or no limit). A column whose header needs more room than the cap still gets room for its name. A table with only one column, such as a log imported one line per row, fills the grid's width.
 
 ### Timestamp display
 
@@ -160,7 +174,7 @@ A merge shows several tables as one table: the same event log exported from five
 
 To merge tables:
 
-1. Choose **Case ▾ → Merge tables…**, or open one of the tables and choose **Merge with other tables…** in the **This table** section of the table menu, which starts with that table ticked.
+1. Choose **Case ▾ → Merge tables…**, or right-click one of the tables (its tab or its row in the sidebar) and choose **Merge with other tables…**, which starts with that table ticked. The same command is in the **This table** section of the table menu.
 2. Tick two or more tables. Tables with the same columns are listed together, with **Select all** for each group. Once a table is ticked, the others are marked with how they fit: **same columns**, **+N columns** when a table has columns the ticked ones don't, **N of M columns** when it lacks some, or **no shared columns**. Started from a table, the groups that fit it best come first. The first table you tick decides the column order.
 3. Choose **Keep every column** or **Only shared columns**, and whether to add a **From table** column.
 4. Check the preview, type a name or keep the suggested one, and click **Create merged table**. Each merge needs a different name.
@@ -173,7 +187,7 @@ Columns are matched by name. The order doesn't matter, and case is ignored for A
 
 Only the columns the tables were imported with are compared. A derived column appears in a merge when every table in it has one of that name. To add one to a merge, its input column has to be in every table.
 
-To change a merge, open it and choose **Edit merge…** in the **This table** section of the table menu. You can add or remove tables, switch between every column and shared columns, turn the From table column on or off, and rename it. The merge keeps its tab, layout and saved views.
+To change a merge, right-click it and choose **Edit merge…**, or use **Edit merge…** in the **This table** section of the table menu. You can add or remove tables, switch between every column and shared columns, turn the From table column on or off, and rename it. The merge keeps its tab, layout and saved views.
 
 A merge shows ⛓ before its name and works like any other table: filtering, searching, sorting, tagging, notes, grouping, the value picker, derived columns and exports all work on it. The exceptions:
 
@@ -182,7 +196,7 @@ A merge shows ⛓ before its name and works like any other table: filtering, sea
 - Flattening a JSON or XML column isn't available on a merge.
 - The watchlist and **Search all** look at the member tables rather than the merge, so their hits name the original tables. See [Timeline, Search all and the Watchlist](Timeline-search-and-watchlist.md).
 
-To delete a merge, use **Remove…** in the Tables manager. Its tables are not affected.
+To delete a merge, right-click it and choose **Remove…**, or use **Remove…** in its **⋯** menu in the Tables manager. Its tables are not affected.
 
 ## Saving a view as a table
 
