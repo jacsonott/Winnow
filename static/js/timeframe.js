@@ -11,6 +11,7 @@ import { moveCursor, render } from './grid.js';
 import { drawRail, regroupIfGroupedByTag } from './grouping.js';
 import { openMergeBuilder } from './merge.js';
 import { applyPreset, filtersForCurrentSource, headerSig, loadSavedFilters, matchingSavedFilters, nicknameFor, setNicknameFor } from './savedfilters.js';
+import { saveAppearance } from './settings.js';
 import { clearAllFilters, closeTab, editSourceNickname, openSource, sourceLabel, wireDragReorder } from './sources.js';
 import { normalizeTree, S } from './state.js';
 import { openTablesManager } from './tables.js';
@@ -180,7 +181,9 @@ export function updateFiltersButton() {
    openSource() — deliberately not among the fields it resets). The MFT use
    case this exists for: pin a date range, then flip through per-column
    quick filters/presets/tables without having to re-set the range each
-   time. Column choice is per-invocation, not persisted structure — "all
+   time. Switching tables is the one carry-over the analyst can turn off
+   (timeframeAcrossTables, below): off, each table keeps its own timeframe
+   the way it keeps its own filters. Column choice is per-invocation, not persisted structure — "all
    datetime columns" (column: null) ORs every datetime column on whichever
    table is open, so a timestomped Created date doesn't hide a row whose
    Modified date is genuinely in range; _compile_where falls back to that
@@ -189,6 +192,25 @@ export function updateFiltersButton() {
 
 export function datetimeColumns() {
   return S.columns.filter((c) => c.type === 'datetime').map((c) => c.name);
+}
+
+/* Whether the timeframe follows the analyst from table to table. On (the
+   default, and what every install did before this was a choice) it is one
+   case-wide range; off, openSource stashes it with the table being left
+   and puts back the one the arriving table had — none, for a table it
+   has not been set on. A machine preference beside openNewTables, not
+   case data: it is about how this analyst works, not about the evidence.
+   `!== false` so an appearance blob from before the key existed reads as
+   the behaviour it was saved under. S.appearance itself is guarded:
+   updateTimeRangeButton asks this during boot, before initAppearance. */
+export function timeframeAcrossTables() {
+  return !(S.appearance && S.appearance.timeframeAcrossTables === false);
+}
+
+export function setTimeframeAcrossTables(on) {
+  S.appearance.timeframeAcrossTables = !!on;
+  saveAppearance();
+  updateTimeRangeButton();
 }
 
 export function updateTimeRangeButton() {
@@ -204,7 +226,8 @@ export function updateTimeRangeButton() {
       + `${S.timeRange.start || '…'} → ${S.timeRange.end || '…'} — "${toggleKey}" to toggle off, "${openKey}" to edit`
     : hasRange
       ? `Timeframe filter set but off — "${toggleKey}" to toggle on, "${openKey}" to edit`
-      : `Set up a timeframe filter that survives filter/preset/table changes — "${openKey}" to open, "${toggleKey}" to toggle`;
+      : `Set up a timeframe filter that survives ${timeframeAcrossTables() ? 'filter/preset/table changes' : 'filter/preset changes'}`
+        + ` — "${openKey}" to open, "${toggleKey}" to toggle`;
 }
 
 export function toggleTimeRange() {
@@ -224,9 +247,15 @@ export function openTimeRangeModal() {
   modal('Timeframe filter', (b) => {
     const toggleKey = S.keymap.toggleTimeRange[0] || '(unbound)';
     const openKey = S.keymap.openTimeRange[0] || '(unbound)';
-    b.append(el('p', null,
-      `Stays applied across filter/preset changes and table switches, unlike the regular filters — `
-      + `toggle it on/off quickly with "${toggleKey}", or jump straight back to this dialog with "${openKey}".`));
+    const intro = el('p');
+    const paintIntro = () => {
+      intro.textContent = (timeframeAcrossTables()
+        ? 'Stays applied across filter/preset changes and table switches, unlike the regular filters — '
+        : 'Stays applied across filter/preset changes, unlike the regular filters, and each table keeps its own — ')
+        + `toggle it on/off quickly with "${toggleKey}", or jump straight back to this dialog with "${openKey}".`;
+    };
+    paintIntro();
+    b.append(intro);
 
     const enabledLabel = el('label', 'tf-enabled');
     const enabledCb = el('input');
@@ -234,6 +263,20 @@ export function openTimeRangeModal() {
     enabledCb.checked = S.timeRange.enabled;
     enabledLabel.append(enabledCb, document.createTextNode(' Enabled'));
     b.append(enabledLabel);
+
+    // A preference rather than part of the range, so it saves as it is
+    // clicked — Cancel below discards the range edits, not this. The same
+    // switch is in Settings → Filter & search syntax.
+    const acrossLabel = el('label', 'tf-enabled');
+    const acrossCb = el('input');
+    acrossCb.type = 'checkbox';
+    acrossCb.id = 'tfAcrossTables';
+    acrossCb.checked = timeframeAcrossTables();
+    acrossCb.onchange = () => { setTimeframeAcrossTables(acrossCb.checked); paintIntro(); };
+    acrossLabel.title = 'On: one timeframe for the whole case, applied to whichever table you open. '
+      + 'Off: each table keeps its own timeframe, and a table you have not set one on opens without one.';
+    acrossLabel.append(acrossCb, document.createTextNode(' Keep applied when switching tables'));
+    b.append(acrossLabel);
 
     b.append(el('label', null, 'Column'));
     const colSel = el('select');
