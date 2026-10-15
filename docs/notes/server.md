@@ -221,6 +221,17 @@ see [docs/notes/README.md](README.md) for the whole set.
   on a route rather than in `Store.latest_hits`. `POST
   /api/watchlist/merge` is 400 when the keeper does not cover every row the
   dropped indicator found, and the message says how many would go.
+- **`POST /api/timeline/preview` is a read that takes a body** — the
+  Configure tables… dialog's unsaved settings (`source_id`,
+  `timestamp_column`, `body_columns`, `type_label`, optional `limit`
+  clamped to 1–10), POSTed like `/api/derived/preview` and so behind the
+  client-header gate like any other POST. It writes nothing: no template,
+  no view. A merge or a table still importing is a 400 (the Timeline is
+  configured per real table; `_require_columns`), and a table that is gone
+  falls through to `gone_table_handler`'s 404 rather than being caught
+  here — catching every KeyError would turn a defect into a 404.
+  Unlike `/api/timeline` it does NOT resolve the saved templates: the
+  dialog sends what is on screen, saved or not.
 - **The profile routes** (`/api/plugin_bundles/*`) are all plain `def`:
   every one of them touches `WS.plugin_bundles` (a JSON file under a
   process-wide lock) or the Store, so none belongs on the event loop.

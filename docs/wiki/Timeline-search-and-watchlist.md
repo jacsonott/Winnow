@@ -68,20 +68,26 @@ A table gets a summary when it contains every column of one of the shapes below 
 
 By default each table is placed on the Timeline by its **first datetime column** — a column Winnow recognised as dates when it imported the file, or after those, a derived datetime column. A table with no datetime column of its own has its rows at the end with `—`; give it one with a [derived datetime column](Derived-columns.md) (a Unix epoch or FILETIME column, say) and the Timeline uses it from then on.
 
-To change this, press **Configure tables…** in the Timeline header. Every table in the case has an entry (merged tables are not listed; their rows appear under their member tables):
+To change this, press **Configure tables…** in the Timeline header. The dialog, **Configure timeline tables**, works per **header set** — a table's own set of columns — because that is what a setting is saved for: it is kept on this machine and reused by every table with the same columns, in this case and in later cases. Configure EvtxECmd output once and every future Security log lands the same way.
+
+**Header sets in this case**, on the left, has one entry per header set. It is named by the type you gave it, else by the header set's nickname (Winnow ships names for the tools it knows, such as *Event logs (EvtxECmd)*), else by its first table, and lists the tables it covers — two EvtxECmd exports are one entry, and a setting saved for it applies to both. Each entry is marked `saved` when it has a saved setting or `default` when it reads the way Winnow does by default, and `unsaved` while it holds changes you haven't saved. Merged tables are not listed; their rows appear under their member tables. A table whose import failed or is still running is not listed either.
+
+The right side sets the selected header set:
 
 | Field | What it sets |
 | --- | --- |
-| Type | The badge text, in place of the file name |
-| Timestamp | **(first datetime column)**, or any datetime column of the table |
-| Body columns | Click columns to put them in the Body, in the order you click them. None picked means the default: the summary, or every column |
+| Type | The badge text on each line. Blank means each table's own file name |
+| Timestamp column | The default, which names the column it falls back to — **First datetime column (TimeCreated)**, say, or **Each table's first datetime column** when the tables differ — or any datetime column of the tables, derived ones included. A column only some of the tables have says so (`only on …`); the others keep their first datetime column |
+| Body columns | Click columns to put them in the Body, in the order you click them; each picked column shows its place. Click one again to take it out, or **Clear** to pick none. None picked means the default: the summary Winnow ships for that kind of table, or for one it doesn't know, every column joined with ` \| `. The line under the columns says which applies. Picking columns replaces the summary with exactly the columns you picked |
 
-Press **Save** on that table's entry. Picking body columns replaces the shipped summary with exactly the columns you picked.
+**Preview** shows how rows of one of these tables will read on the Timeline — timestamp, type and body, exactly as the Timeline draws them — and changes as you edit the fields. It shows the table's tagged rows first, and its first rows when it has fewer than three tagged (untagged rows have no tag dot; they are not on the Timeline until tagged). When the header set covers several tables, **Rows from** picks which one to preview.
 
-A configuration is saved for the table's set of columns, on this machine, and is reused by every table with the same columns in this case and in later cases — configure EvtxECmd output once and every future Security log lands the same way. Three things to know:
+**Save** saves the header set shown; it is greyed out until something has changed. Your changes to other header sets are kept while the dialog is open — switching between entries doesn't lose them — and the line beside **Save** names any that are not saved yet (*Not saved yet: …*). Closing the dialog drops changes that were not saved. **Back to default** (shown when the header set has a saved setting) removes it, after asking, for every table with these columns, in this case and others.
 
-- Saving does not redraw the Timeline behind the dialog. It applies the next time the Timeline is built: open the tab again, or click a tag chip.
-- A configuration is matched on the file's own columns, so adding a [derived column](Derived-columns.md) to a table doesn't stop its configuration applying, and a derived datetime column can be the table's **Timestamp**.
+Three more things to know:
+
+- Saving redraws the Timeline behind the dialog, so it shows the new setting when you close the dialog.
+- A configuration is matched on the file's own columns, so adding a [derived column](Derived-columns.md) to a table doesn't stop its configuration applying, and a derived datetime column can be the table's **Timestamp column**.
 - The same configuration decides the time and text of each row in the Watchlist's [Latest hits](#latest-hits-and-each-indicators-hits) list.
 
 ## Search all
