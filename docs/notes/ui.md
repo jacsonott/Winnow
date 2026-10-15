@@ -1436,6 +1436,49 @@ see [docs/notes/README.md](README.md) for the whole set.
   findings sends the analyst looking for work they have already done.
   `tests/ui/test_timeline_tag_chips.py`.
 
+- **Configure tables… is per HEADER SET, so it lists header sets, not
+  tables** (`openTimelineSourceConfig`, `timelineHeaderSets`). A timeline
+  template is keyed by a table's own columns (derived ones left out —
+  the key `_resolve_timeline_configs` looks up), so one setting serves
+  every table of that shape. The dialog it replaced drew one block per
+  TABLE, each with a Save: in a case with two EvtxECmd tables, saving one
+  rewrote the other's Timeline lines, and nothing on screen said so. Now
+  each header set is one entry naming every table it covers, and the
+  right side says "Applies to A and B — and to any table with these N
+  columns". Things that are easy to undo by accident:
+  - **The saved/default mark mirrors the server's lookup**
+    (`headerSetTemplate`): the template under the set's own columns,
+    else one an older release saved under a table's every column. A
+    client that only checked the first would call a set "default" while
+    the Timeline still applied the old template.
+  - **A blank Type saves as blank**, not as the first table's file name
+    (what the per-table dialog sent). The template is shared, so that
+    name went on every other table's badges; blank lets `build_timeline`
+    fall back to each table's own name.
+  - **Edits are kept per header set until saved** (`state.drafts`):
+    switching sets keeps them, the list marks each `unsaved`, and the
+    footer names the others, because Save writes only the set shown.
+    Closing the dialog still drops them, as the old dialog did.
+  - **Save is disabled until something changed, and its state is put
+    back AFTER `oneAtATime` settles** (`renderFoot` in the click handler,
+    around the guarded call). `oneAtATime` restores the `disabled` it
+    found when the click landed — "enabled" — so setting it from inside
+    the handler is undone on the way out, leaving a just-saved set's Save
+    clickable.
+  - **The preview is the server's, not a re-implementation**:
+    `POST /api/timeline/preview` runs `_timeline_parts` (the code
+    `build_timeline` uses) over a few rows under the UNSAVED settings, and
+    the rows are painted by `timelineRowNode`/`paintTimelineBody`, the
+    Timeline's own row code, minus the raw/summary toggle (that state is
+    the Timeline's, `S.timeline.raw`). Debounced, with a sequence number
+    so a slow answer for the previous set can't paint over the current
+    one.
+  - **Saving rebuilds the Timeline when it is the page showing**
+    (`S.activeTab === 'timeline'`), so the analyst closes the dialog onto
+    what they saved. It used to apply only on the next build.
+  `tests/ui/test_timeline_config_builder.py`, and
+  `tests/test_timeline_preview.py` for the preview matching the Timeline.
+
 - **IOC watchlist tab** (watchlist.js) — case-level indicators (Store.watchlist / watchlist_hits, in the .db) scanned across every table; matches are counted, listed, and optionally auto-tagged through the normal tag path. **The scan is a background job** (`runScan`, the one helper behind Add, Scan all, the file import, From a case, the jobs.js source-done hook and Search-all's "Add to watchlist"): `POST /api/watchlist/scan/start`, a jobs-panel row with the tables-scanned progress (its ✕ and its Cancel both stop the scan), a 400 ms poll with the search-all rule that a **404 means stop** (superseded from another window, or the case closed) and a bound on any other failure (three in a row — the server exited or crashed — settle the row and the markers rather than polling forever), `#wlStatus` mirroring "Scanning 3/12 tables…" while the tab shows. Starts from one window go out one at a time, and **a newer scan folds the running one**: the server widens the new job to the old one's remaining scope, so the row being followed settles as "folded into the newer scan" (never orphaned in the running state with a Cancel that reaches nothing) and its "…" markers stay until the job that covers them lands — `finishScan` clears only the markers in the finished job's `watchlist_ids` (all of them when it was unscoped). **A new entry is in the list the moment the server has it** — the add/import responses already carry the indicator(s), so the row renders from them with "…" for a count (the in-flight ids live in a module-level Set, not on the row object: any `load()` mid-scan replaces `indicators` wholesale and would drop a flag carried there) and the scan that follows is scoped to the new ids. When the job lands: `load()` if the tab is showing, else the badge refresh and — when it found something — the row turns into the sticky "Watchlist: N hits · Open watchlist" alert; and when an auto-tag landed on the OPEN table — or on a member of the open merge, whose rows are the member's (invariant #9) — both row caches are cleared and the ribbon counts refreshed, or the tags would not paint until something else refreshed the grid. A grouping BY TAG is regrouped with it (`regroupIfGroupedByTag`, the same trio every other tag path ends in), or the auto-tagged rows would sit in "(untagged)" with the pre-tag counts until the analyst regrouped by hand. The repaint itself waits for the grid to be showing: `render()` against a grid a page tab hides measures a zero-height viewport and paints the first rows at the top, and the return to the tab restores the real scroll position over an empty viewport — so `finishScan` sets `S.gridRepaintPending` and `showGridTab` (the Alt+1, tab-history and mouse-thumb return paths) pays it on the way back, rail and regroup included. "Showing" is `gridIsShowing()` (sql.js), not `S.activeTab === 'grid'`: the home screen hides `#app` wholesale with the grid still the active tab. `showGridTab` consumes the flag whether or not it repaints — `openSource` and `openCase` pass `repaint: false` precisely because S.view/S.sourceId are still the OLD table's there, and they satisfy the owed repaint themselves once they have swapped (`installView`, or the cached-view path's own render/rail/regroup). A duplicate value is refused by the server (400 → toast). **The hits pane groups by table**: `/api/watchlist/hits` answers `{sources, hits}` with an exact per-table count and up to 200 rows per table in rid order; one sticky `.wl-hit-group-head` per table (label via `sourceLabel`, arrow and count styled like `.group-header-row`/`.group-header-count`), folding is client state, and a table past the cap ends in "…and N more — open the table" (jumpToTimelineRow). **The tab opens on the latest hits across every indicator**, not on "Select an indicator to see its hits": `renderLatestHits` paints `/api/watchlist/latest` — one line per flagged ROW naming the indicators that matched it, the table, the row and when, newest first — because a case with thousands of findings spent half the page on an instruction, and "which of these fired most recently" could only be answered by clicking every entry in turn. Clicking an indicator's name in a hit line, or a row on the left, narrows to the grouped-by-table pane; clicking the selected row again, or `← all indicators`, goes back. Every `load()` repaints the pane now, not only the one where the selection died under it — a scan that just landed changed what "latest" means. **The count cell is not always a count**: the same `.wl-count` cell takes a `.wl-state` variant that says `clean` (every table read, nothing matched — the one an analyst can quote), `not scanned` or `N/M tables`, off `scanned_sources`/`scan_targets` from `/api/watchlist/overview`. The slot class stays on whatever the answer is — stylesheet and tests find the cell the one way — and the variant only drops the pill geometry a number wanted. **Indicators covering the same rows carry a `.wl-dup` marker** and the summary leads with distinct rows flagged, naming the hit total for what it is ("counted across indicators") — `mimikatz` and `mimikatz.exe` both reported 2,323 hits and the summary added them. The marker opens a dialog that merges the pair through `POST /api/watchlist/merge`, and only ever offers the direction that loses no rows. See docs/design/analysis-suite.md and the scan entry in store.md.
 - **Importing a list of indicators asks about the list**
   (`openWatchlistImport`). "Import…" read the ADD row's two selects — at

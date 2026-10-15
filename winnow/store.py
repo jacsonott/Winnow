@@ -2436,12 +2436,10 @@ class Store:
         self.db.create_function("REGEXP", 2, _regexp, deterministic=True)
         self.db.create_function("DAY_BUCKET", 1, _day_bucket, deterministic=True)
         self.db.create_function("TS_NORMALIZE", 1, _ts_normalize, deterministic=True)
-        # Timeline summaries only — variadic, and only ever appearing in the
-        # INSERT that materialises a timeline view, which runs here on the
-        # writer. Deliberately NOT registered on the _reader() pool the way
-        # DAY_BUCKET/TS_NORMALIZE are: those turn up inside a stored view's
-        # WHERE that a reader later re-runs, while a summary is plain text
-        # the build already wrote into v.<view>.
+        # Timeline summaries — variadic. The INSERT that materialises a
+        # timeline view runs them here on the writer; Configure tables…'
+        # preview (timeline_preview) runs the same SELECT on the _reader()
+        # pool, which registers them too.
         self.db.create_function("TL_LEAD", -1, _tl_lead, deterministic=True)
         self.db.create_function("TL_DETAILS", -1, _tl_details, deterministic=True)
         self._tune(self.db)
@@ -3479,6 +3477,11 @@ class Store:
         ro.create_function("REGEXP", 2, _regexp, deterministic=True)
         ro.create_function("DAY_BUCKET", 1, _day_bucket, deterministic=True)
         ro.create_function("TS_NORMALIZE", 1, _ts_normalize, deterministic=True)
+        # The Timeline's summary functions, for timeline_preview: the build
+        # itself writes on self.db, but the preview of a few rows is a pure
+        # read and must not queue behind a long build for the writer lock.
+        ro.create_function("TL_LEAD", -1, _tl_lead, deterministic=True)
+        ro.create_function("TL_DETAILS", -1, _tl_details, deterministic=True)
         # Same mmap reasoning as _tune (address space, not RAM — and shared
         # with the writer's mapping via the OS page cache). busy_timeout
         # covers the rare WAL edge (recovery, checkpoint restart) where
@@ -8023,10 +8026,12 @@ class Store:
 
     # -------------------------------------------------------------- timeline
 
-    def _timeline_summary_template(self, src: dict) -> dict | None:
-        """The shipped summary template (defaults/headers.json) for this
-        source's artefact shape, or None for a CSV no shipped shape
-        describes.
+    def _timeline_summary_match(self, src: dict) -> tuple[str, dict] | None:
+        """(shape name, summary template) from defaults/headers.json for
+        this source's artefact shape, or None for a CSV no shipped shape
+        describes. The name is the shipped one ("Event logs (EvtxECmd)"),
+        which Configure tables… quotes when it says what the Body falls
+        back to.
 
         Matched the way every other header-set binding in here is matched
         (_sources_for_header_set): a source qualifies when it CONTAINS the
@@ -8040,14 +8045,19 @@ class Store:
 
         head = defaults.headers()
         have = {c["name"].strip().lower() for c in self._base_cols(src)}
-        best: tuple[int, dict] | None = None
+        best: tuple[int, str, dict] | None = None
         for name, cols in head["nicknames"]:
             spec = head["summaries"].get(name)
             if not spec or not all(c.strip().lower() in have for c in cols):
                 continue
             if best is None or len(cols) > best[0]:
-                best = (len(cols), spec)
-        return best[1] if best else None
+                best = (len(cols), name, spec)
+        return (best[1], best[2]) if best else None
+
+    def _timeline_summary_template(self, src: dict) -> dict | None:
+        """The template half of _timeline_summary_match."""
+        match = self._timeline_summary_match(src)
+        return match[1] if match else None
 
     def _timeline_summary_exprs(self, src: dict, ts_col: str | None) -> tuple[str, str, list] | None:
         """(lead SQL, details SQL, params) for this source's summary, or
@@ -8091,6 +8101,144 @@ class Store:
             params.append(label)
             args.append(self._col_ref(src, col, "s"))
         return lead_sql, f"TL_DETAILS({', '.join(args)})", params
+
+    def _timeline_parts(self, src: dict, cfg: dict) -> dict:
+        """How one source reads on the Timeline under `cfg` (a resolved
+        timeline template, or {} for none): the SQL for its timestamp,
+        body and summary columns against alias `s`, the summary's bound
+        parameters, and the type label — plus what was chosen, for the
+        callers that have to say so.
+
+        The one place these rules live. build_timeline unions a branch of
+        this per source, and timeline_preview (Configure tables…) runs the
+        very same expressions over a few rows, so the dialog's preview
+        cannot drift from what the Timeline then shows.
+
+        - The timestamp is `cfg`'s column when the source has it, else
+          its first datetime column, else none.
+        - The body is `cfg`'s columns (the ones the source has), else every
+          column, cut to what one expression can hold (_fit_body_cols).
+        - The summary only applies when nothing was picked: an analyst who
+          picked body columns said what they want this source to read as,
+          so the shipped summary stays out of it; otherwise the artefact
+          shape gets its summary, and a shape nothing describes keeps the
+          join.
+        - An empty type label is no label: the source's own name."""
+        col_names = {c["name"] for c in src["columns"]}
+        dt_cols = [c["name"] for c in src["columns"] if c["type"] == "datetime"]
+
+        ts_col = cfg.get("timestamp_column")
+        if ts_col not in col_names:
+            ts_col = dt_cols[0] if dt_cols else None
+        # A derived column is already canonical "YYYY-MM-DD HH:MM:SS",
+        # so it's used as-is: TS_NORMALIZE would only truncate the
+        # sub-second part that makes two same-second events sort in the
+        # order they happened. Everything else still normalises, which
+        # is what lets sources in different formats interleave.
+        ts_expr = "NULL"
+        if ts_col:
+            ref = self._col_ref(src, ts_col, "s")
+            ts_expr = ref if self._is_derived(src, ts_col) else f"TS_NORMALIZE({ref})"
+
+        chosen_body = [c for c in (cfg.get("body_columns") or []) if c in col_names]
+        body_cols = chosen_body or [c["name"] for c in src["columns"]]
+        shown = self._fit_body_cols(body_cols)
+        body_expr = " || ' | ' || ".join(
+            f"COALESCE({self._col_ref(src, c, 's')}, '')" for c in shown
+        )
+
+        summary = None if chosen_body else self._timeline_summary_exprs(src, ts_col)
+        lead_expr, detail_expr, summary_params = summary or ("''", "''", [])
+        shape = None
+        if summary:
+            match = self._timeline_summary_match(src)
+            shape = match[0] if match else None
+        return {
+            "ts_col": ts_col, "ts_expr": ts_expr, "body_expr": body_expr,
+            "lead_expr": lead_expr, "detail_expr": detail_expr, "summary_params": summary_params,
+            "type_label": cfg.get("type_label") or src["name"],
+            "body_columns": chosen_body, "body_shown": len(shown), "body_total": len(body_cols),
+            "summary_shape": shape,
+        }
+
+    TIMELINE_PREVIEW_ROWS = 3
+    TIMELINE_PREVIEW_MAX = 10
+
+    def timeline_preview(self, source_id: int, cfg: dict | None = None, limit: int | None = None) -> dict:
+        """A few rows of one table as the Timeline would show them under
+        `cfg` — the not-yet-saved settings in Configure tables…, so the
+        dialog can show the result of a pick before it is saved.
+
+        Built by _timeline_parts, the same expressions build_timeline
+        materialises, so a preview and the Timeline cannot disagree about
+        what a row reads as (the summary, its timestamp-column drop, the
+        495-column cap, the derived-column timestamp). Which rows: the
+        table's first TAGGED rows, since those are the ones the Timeline
+        holds, then its first rows when fewer are tagged, so a table nobody
+        has tagged yet still previews. In Timeline order among themselves.
+
+        `body` says what the Body is made of: "columns" (the ones picked),
+        "summary" (the shipped one for `summary_shape`) or "all" (every
+        column joined, for a shape nothing describes). `shape` names the
+        shipped shape the table matches whether or not its summary is in
+        use, so the dialog can say what picking columns replaces.
+        `timestamp_column` is the column actually read — the fallback
+        resolved, so the dialog can name it.
+
+        A pure read on the reader pool (invariant #4); a merge is refused,
+        since the Timeline is configured per real table (invariant #9:
+        its rows are read through their members)."""
+        if source_id < 0:
+            raise ValueError("A merged table isn't configured for the Timeline itself — "
+                             "its rows appear under the tables it merges.")
+        src = self.get_source(source_id)
+        self._require_columns(src)
+        limit = self.TIMELINE_PREVIEW_ROWS if limit is None else int(limit)
+        limit = max(1, min(self.TIMELINE_PREVIEW_MAX, limit))
+        p = self._timeline_parts(src, cfg or {})
+        select = (
+            f"SELECT s.rid AS rid, {p['ts_expr']} AS ts, ({p['body_expr']}) AS body, "
+            f"{p['lead_expr']} AS summary_lead, {p['detail_expr']} AS summary_detail, "
+            f"(SELECT GROUP_CONCAT(tag_id) FROM row_tags WHERE source_id={int(source_id)} AND rid=s.rid) AS tag_ids "
+            f"FROM {self._from_clause(src, 's')} "
+        )
+        with self._reader() as ro:
+            # rid order over row_tags' (source_id, rid, tag_id) key, and
+            # over the table's own rid key: two short range reads, never a
+            # scan of a large table.
+            tagged = [r[0] for r in ro.execute(
+                "SELECT DISTINCT rid FROM row_tags WHERE source_id=? ORDER BY rid LIMIT ?",
+                (source_id, limit))]
+            rows = []
+            if tagged:
+                rows += ro.execute(
+                    select + f"WHERE s.rid IN ({','.join('?' * len(tagged))})",
+                    [*p["summary_params"], *tagged]).fetchall()
+            if len(rows) < limit:
+                skip = f"WHERE s.rid NOT IN ({','.join('?' * len(tagged))}) " if tagged else ""
+                rows += ro.execute(
+                    select + skip + "ORDER BY s.rid LIMIT ?",
+                    [*p["summary_params"], *tagged, limit - len(rows)]).fetchall()
+        match = self._timeline_summary_match(src)
+        # Each row in fetch_timeline_rows' shape, so the dialog paints it
+        # with the Timeline's own row code — tag dots included.
+        out = [{
+            "source_id": source_id, "rid": r["rid"], "ts": r["ts"], "body": r["body"],
+            "lead": r["summary_lead"] or "", "detail": r["summary_detail"] or "",
+            "type_label": p["type_label"], "source_name": src["name"],
+            "tags": [int(x) for x in r["tag_ids"].split(",")] if r["tag_ids"] else [],
+        } for r in rows]
+        for r in out:
+            r["tagged"] = bool(r["tags"])
+        # The Timeline's own order: timestamped rows first, oldest first.
+        out.sort(key=lambda r: (r["ts"] is None, r["ts"] or "", r["rid"]))
+        return {
+            "source_id": source_id, "source_name": src["name"], "rows": out,
+            "timestamp_column": p["ts_col"],
+            "body": "columns" if p["body_columns"] else ("summary" if p["summary_shape"] else "all"),
+            "summary_shape": p["summary_shape"], "shape": match[0] if match else None,
+            "body_shown": p["body_shown"], "body_total": p["body_total"],
+        }
 
     def build_timeline(self, configs: dict[int, dict] | None = None, tag_ids: list[int] | None = None,
                        op_token: str | None = None) -> dict:
@@ -8145,44 +8293,14 @@ class Store:
             if not src["tagged_row_count"]:
                 continue
             source_id = src["id"]
-            col_names = {c["name"] for c in src["columns"]}
-            dt_cols = [c["name"] for c in src["columns"] if c["type"] == "datetime"]
-            cfg = configs.get(source_id, {})
-
-            ts_col = cfg.get("timestamp_column")
-            if ts_col not in col_names:
-                ts_col = dt_cols[0] if dt_cols else None
-            # A derived column is already canonical "YYYY-MM-DD HH:MM:SS",
-            # so it's used as-is: TS_NORMALIZE would only truncate the
-            # sub-second part that makes two same-second events sort in the
-            # order they happened. Everything else still normalises, which
-            # is what lets sources in different formats interleave.
-            ts_expr = "NULL"
-            if ts_col:
-                ref = self._col_ref(src, ts_col, "s")
-                ts_expr = ref if self._is_derived(src, ts_col) else f"TS_NORMALIZE({ref})"
-
-            chosen_body = [c for c in (cfg.get("body_columns") or []) if c in col_names]
-            body_cols = chosen_body or [c["name"] for c in src["columns"]]
-            shown = self._fit_body_cols(body_cols)
-            if len(shown) < len(body_cols):
+            p = self._timeline_parts(src, configs.get(source_id, {}))
+            if p["body_shown"] < p["body_total"]:
                 body_trimmed.append({"source_id": source_id, "source_name": src["name"],
-                                     "shown": len(shown), "total": len(body_cols)})
-            body_expr = " || ' | ' || ".join(
-                f"COALESCE({self._col_ref(src, c, 's')}, '')" for c in shown
-            )
-
-            # An analyst who picked body columns in Configure sources said
-            # what they want this source to read as, so the shipped summary
-            # stays out of it; otherwise the artefact shape gets its
-            # summary, and a shape nothing describes keeps the join.
-            summary = None if chosen_body else self._timeline_summary_exprs(src, ts_col)
-            lead_expr, detail_expr, summary_params = summary or ("''", "''", [])
-
-            type_label = cfg.get("type_label") or src["name"]
+                                     "shown": p["body_shown"], "total": p["body_total"]})
             branches.append(
-                f"SELECT {int(source_id)} AS source_id, s.rid AS rid, {ts_expr} AS ts, ({body_expr}) AS body, "
-                f"{lead_expr} AS summary_lead, {detail_expr} AS summary_detail, "
+                f"SELECT {int(source_id)} AS source_id, s.rid AS rid, {p['ts_expr']} AS ts, "
+                f"({p['body_expr']}) AS body, "
+                f"{p['lead_expr']} AS summary_lead, {p['detail_expr']} AS summary_detail, "
                 f"? AS type_label, ? AS source_name, "
                 f"(SELECT GROUP_CONCAT(tag_id) FROM row_tags WHERE source_id={int(source_id)} AND rid=s.rid) AS tag_ids "
                 f"FROM {self._from_clause(src, 's')} "
@@ -8192,8 +8310,8 @@ class Store:
             # the SELECT above, since SQLite binds by ordinal across the
             # whole UNION: the summary's detail labels, then the two label
             # columns, then this branch's tag ids.
-            params.extend(summary_params)
-            params.append(type_label)
+            params.extend(p["summary_params"])
+            params.append(p["type_label"])
             params.append(src["name"])
             if tag_ids:
                 params.extend(tag_ids)

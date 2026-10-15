@@ -156,7 +156,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   the `TL_LEAD`/`TL_DETAILS` SQL functions from the artefact shape's
   `summary` block in `defaults/headers.json`. Things worth knowing before
   touching it:
-  - The shape is matched by `_timeline_summary_template` the way every
+  - The shape is matched by `_timeline_summary_match` the way every
     other header-set binding here is (`_sources_for_header_set`): the
     source's **own imported columns** must CONTAIN the set's, so a derived
     column the analyst added can't cost a table its summary, and the most
@@ -169,10 +169,25 @@ see [docs/notes/README.md](README.md) for the whole set.
     a template's ts column instead.
   - **A shape with no template renders exactly the old join**, as does a
     source whose body columns the analyst picked by hand in Configure
-    sources — an explicit choice outranks a shipped default.
-  - `TL_LEAD`/`TL_DETAILS` are registered on the **writer only**, unlike
-    `DAY_BUCKET`/`TS_NORMALIZE`: they only ever appear in the timeline
-    INSERT, never in a stored view's WHERE that a reader re-runs.
+    tables… — an explicit choice outranks a shipped default.
+  - `TL_LEAD`/`TL_DETAILS` are registered on the writer AND the reader
+    pool. The build's INSERT runs them on the writer; Configure tables…'
+    preview (`timeline_preview`) runs the same SELECT on a reader, so a
+    long build or import holding the writer lock can't freeze the dialog
+    (`tests/test_timeline_preview.py` holds the lock for the whole read).
+  - **How a source reads on the Timeline is decided in one place,
+    `_timeline_parts`** — the timestamp fallback, the derived-timestamp
+    split, the body join and its 495-column cap, the summary-or-picks
+    rule, the empty-type fallback. `build_timeline` unions a branch of it
+    per source and `timeline_preview` (`POST /api/timeline/preview`) runs
+    it over a few rows of one table under the dialog's UNSAVED settings,
+    so the preview cannot drift from the Timeline. A new rule about how a
+    row reads goes in there, not in either caller — and not in
+    `latest_hits`, which deliberately differs (its body leaves out the
+    timestamp column, since the Watchlist pane shows the time beside it).
+    The preview reads the table's first tagged rows (rid order over
+    `row_tags`' key), topped up with its first rows when fewer are
+    tagged, then sorts them the Timeline's way.
   - Both halves are squashed to one line and capped (`TL_LEAD_MAX`,
     `TL_DETAIL_MAX`). A Timeline row is exactly one `--row-h` tall, and a
     Payload with newlines in it or a 4KB command line would otherwise own
