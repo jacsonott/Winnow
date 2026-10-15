@@ -857,17 +857,37 @@ section.page-with-panels { flex-direction: row; }
 /* Saved filters modal: one section per header set, dense rows — the flat
    list with per-row nickname buttons and 16px pitch read as noise once the
    shipped set landed (28 filters over three header sets). */
-.sf-list { display: flex; flex-direction: column; gap: 3px; margin: 4px 0 10px; }
+.sf-list { display: flex; flex-direction: column; gap: 1px; margin: 4px 0 10px; }
 .sf-group-head { display: flex; align-items: center; gap: 8px; margin: 10px 0 2px; }
 .sf-group-head:first-child { margin-top: 0; }
 .sf-group-name { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--dim); }
-.sf-row { display: flex; align-items: center; gap: 4px; padding: 2px 6px; background: var(--panel-2); border-radius: var(--radius-sm); }
-.sf-apply { flex: 1 1 auto; justify-content: flex-start; text-align: left; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sf-row .btn { padding: 2px 7px; font-size: 11px; }
 .sf-mini { font-size: 10px; padding: 2px 6px; flex: 0 0 auto; }
+/* A row is its name and a ⋯ — the name is text that applies the filter
+   when clicked, not a box (it read as an input), and Edit / Rename /
+   Move / Delete live in the ⋯ menu instead of five buttons per row.
+   The grip is the drag's affordance; the whole row drags. */
+.sf-row { display: flex; align-items: center; gap: 4px; padding: 1px 2px; border-radius: var(--radius-sm); }
+.sf-row:hover, .sf-row:focus-within { background: var(--row-hover); }
+.sf-grip { flex: 0 0 14px; text-align: center; color: var(--dim); opacity: .35; cursor: grab; font-size: 11px; user-select: none; }
+.sf-row:hover .sf-grip { opacity: 1; }
+.sf-name {
+  flex: 1 1 auto; min-width: 0; padding: 4px 2px; border-radius: var(--radius-sm);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 12px; color: var(--text); cursor: pointer;
+}
+/* Built for another set of columns: still clickable, visibly not this
+   table's. The applied one is the accent, the Filters button's ★. */
+.sf-row.sf-other .sf-name { color: var(--dim); }
+.sf-row .sf-name[aria-current="true"] { color: var(--accent); font-weight: 600; }
+.sf-row .sf-name:hover { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
 .sf-row.dragging { opacity: .4; }
 .sf-row.drop-before { box-shadow: inset 0 2px 0 var(--accent); }
 .sf-row.drop-after { box-shadow: inset 0 -2px 0 var(--accent); }
+/* The ⋯ that opens a row's actions (Saved filters, the Tables manager):
+   an icon, not a labelled button, so no border until it is pointed at or
+   its menu is open. */
+.btn.row-more { flex: 0 0 auto; padding: 0 7px; font-size: 14px; line-height: 20px; border-color: transparent; color: var(--dim); }
+.btn.row-more:hover, .btn.row-more[aria-expanded="true"] { border-color: var(--line-2); color: var(--text); background: var(--panel-2); }
 
 /* The Filters button's suggestion ring — what replaced the banner row:
    saved filters match the open table's columns and none is applied yet. */
@@ -889,6 +909,26 @@ section.page-with-panels { flex-direction: row; }
   border: 1px solid var(--line-2); border-radius: var(--radius-sm); padding: 0 3px;
 }
 .tag-chip .n { font-family: var(--mono); font-size: 10px; }
+
+/* The two tag list editors — Edit tags and Settings → Default tags for
+   new cases — share one row (tagEditRow): swatch, name, key, then a
+   fixed slot for the quiet "Saving…"/"Saved" that replaced their Save
+   buttons, fixed so the row doesn't shift as it comes and goes. */
+.tag-edit-list { display: grid; gap: 6px; margin: 4px 0 2px; }
+.tag-edit-row { display: flex; align-items: center; gap: 6px; }
+.tag-edit-color {
+  flex: 0 0 auto; width: 30px; height: 30px; padding: 2px; cursor: pointer;
+  background: var(--ink); border: var(--border-w) solid var(--line-2); border-radius: var(--radius-sm);
+}
+.tag-edit-color::-webkit-color-swatch-wrapper { padding: 0; }
+.tag-edit-color::-webkit-color-swatch { border: 0; border-radius: 2px; }
+.tag-edit-color::-moz-color-swatch { border: 0; border-radius: 2px; }
+.tag-edit-name { flex: 1 1 auto; min-width: 0; }
+.tag-edit-key { flex: 0 0 auto; width: 34px; padding-left: 4px; padding-right: 4px; text-align: center; font-family: var(--mono); }
+.confirm-input.invalid, .confirm-input.invalid:focus { border-color: var(--danger); }
+.tag-edit-state { flex: 0 0 82px; font-size: 11px; color: var(--dim); white-space: nowrap; }
+.tag-edit-state.warn { color: var(--danger); }
+.tag-edit-remove { flex: 0 0 auto; }
 
 .spacer { flex: 1; }
 .stats { font-family: var(--mono); font-size: 11px; color: var(--dim); white-space: nowrap; }
@@ -2077,8 +2117,11 @@ textarea:focus { border-color: var(--accent); outline: none; }
   gap: 10px; padding: 3px 8px; }
 .tables-row .session-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .tables-row .count { margin-right: 0; white-space: nowrap; }
-.tables-row .tables-acts { display: flex; gap: 4px; }
+.tables-row .tables-acts { display: flex; gap: 4px; align-items: center; }
 .tables-row .tables-acts .btn { padding: 2px 8px; font-size: 11px; }
+/* Open and Close one width, so the chips beside them line up row to row. */
+.tables-row .tables-acts .tables-toggle { min-width: 48px; }
+.tables-row .tables-acts .row-more { padding: 0 7px; font-size: 14px; line-height: 18px; }
 .tables-row.no-index { grid-template-columns: minmax(0, 1fr) auto auto; }
 .session-list .source-indexes { padding: 0 4px 4px 16px; margin-top: -2px; }
 /* Drag-to-reorder feedback for saved-filter rows (wireDragReorder) — same
@@ -2101,13 +2144,17 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .browse-row .browse-mtime { flex: 0 0 auto; margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--dim); }
 .browse-row .browse-mtime + .count { margin-right: 0; margin-left: 12px; }
 
+/* The search index's state beside a table's counts: a chip, not a
+   control. Pill-shaped and hairline like the merge builder's (.mb-chip),
+   where every button is a squarer box — the old bordered rectangle read
+   as a "Not started" button that would start something. */
 .index-status {
-  font-family: var(--mono); font-size: 11px; white-space: nowrap;
-  border: var(--border-w) solid var(--line-2); border-radius: var(--radius-sm); padding: 2px 7px;
+  font-family: var(--mono); font-size: 11px; line-height: 16px; white-space: nowrap; cursor: default;
+  border: 1px solid currentColor; border-radius: 10px; padding: 0 7px;
 }
-.index-status-ready { color: var(--str); border-color: var(--str); }
-.index-status-building { color: var(--accent); border-color: var(--accent-dim); }
-.index-status-idle { color: var(--dim); }
+.index-status-ready { color: var(--str); }
+.index-status-building { color: var(--accent); }
+.index-status-idle { color: var(--dim); border-color: var(--line-2); }
 
 /* Per-column filter indexes, listed under their table in the Tables modal.
    A secondary line under the source row, not a column in it — most tables
@@ -2663,6 +2710,9 @@ html[data-style="blueprint"] .btn:hover, html[data-style="blueprint"] .tab:hover
 html[data-style="blueprint"] .btn:active, html[data-style="blueprint"] .tag-chip:active {
   transform: translate(2px,2px); box-shadow: 0 0 0 var(--shadow-hard-c);
 }
+/* A row's ⋯ has no border at rest (.row-more), so no shadow either: down
+   Saved filters it was a column of offset boxes, one per filter. */
+html[data-style="blueprint"] .btn.row-more:not(:hover):not([aria-expanded="true"]) { box-shadow: none; }
 html[data-style="blueprint"] .tab[aria-selected="true"] {
   background: var(--accent); color: var(--accent-fg); box-shadow: 1px 1px 0 var(--shadow-hard-c); transform: translate(1px,1px);
 }

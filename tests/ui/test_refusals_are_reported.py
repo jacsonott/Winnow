@@ -59,7 +59,8 @@ def test_the_tables_manager_reports_a_refused_close_and_remove(page):
     row.locator(".btn", has_text="Close").click()
     _toast(page, "database is locked")
 
-    row.locator(".btn", has_text="Remove").click()
+    row.locator(".tables-more").click()
+    page.locator(".menu .menu-item", has_text="Remove…").click()
     _confirm(page, "Remove")
     _toast(page, "delete that merge first")
     assert page.evaluate("() => __winnow.S.sources.length") >= 1

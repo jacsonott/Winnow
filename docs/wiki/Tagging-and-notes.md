@@ -12,16 +12,18 @@ A new case starts with three tags:
 | Suspicious | `2` | orange |
 | Benign | `3` | green |
 
-They come from the default tag template, which you edit under **⚙ Settings → Default tags for new cases**: change a name, colour or key, add one with **+ tag**, remove one with **✕**, then press **Save template**. The template is kept per machine (`workspace/tags.json` in the Winnow folder) and seeds every case created after you save it, however it is created. To bring an existing case up to date, open **Edit tags** in that case and press **Apply default template**: it adds every template tag the case doesn't already have, matching by name and ignoring case.
+They come from the default tag template, which you edit under **⚙ Settings → Default tags for new cases**: change a name, colour or key, add one with **+ tag** or remove one with **✕**. Each change is saved as you make it, the same way as in the [tag editor](#editing-tags). The template is kept per machine (`workspace/tags.json` in the Winnow folder) and seeds every case created after the change, however it is created. To bring an existing case up to date, open **Edit tags** in that case and press **Apply default template**: it adds every template tag the case doesn't already have, matching by name and ignoring case.
 
 A case that has no tags at all when it is opened gets the template again, so deleting every tag does not leave a case permanently tagless.
 
 ## Editing tags
 
-Open the tag editor with the **Edit tags** chip at the right-hand end of the tag ribbon, or with **Edit tags…** at the bottom of a row's **Tag** submenu. Each tag is one line: a colour swatch, its name, its key, **Save** and **Delete**.
+Open the tag editor with the **Edit tags** chip at the right-hand end of the tag ribbon, or with **Edit tags…** at the bottom of a row's **Tag** submenu. Each tag is one line: a colour swatch, its name, its key and **Delete**.
 
-- **Rename or recolour**: change the name or pick a colour, then press **Save** on that line. Nothing changes until you do.
-- **Create**: **Add tag** adds a tag called "New tag" with no key. Rename it and give it a key, then **Save**.
+There is no Save button. A colour or a key is saved as soon as you pick it, and a name once you stop typing or leave the box. "Saved" shows briefly beside the line. If a change can't be saved, the line says "Not saved" and a message gives the reason.
+
+- **Rename or recolour**: change the name or pick a colour. A tag needs a name: while the box is empty the line says "Needs a name" and nothing is saved, and leaving the box puts the last saved name back.
+- **Create**: **Add tag** adds a tag called "New tag" with no key and selects its name, so you can type the new one straight over it. Then give it a key.
 - **Delete**: asks *Delete "name" and remove it from every row?* and, if you agree, takes the tag off every row in every table of the case. This cannot be undone with `Ctrl+Z`, and any watchlist indicator that auto-tagged with it stops auto-tagging.
 
 ### Tag keys

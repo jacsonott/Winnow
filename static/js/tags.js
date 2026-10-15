@@ -7,7 +7,7 @@ import { clearGroupPageCache, drawRail, groupCoordAt, loadRowsForPositions, posi
 import { S, cellRangeRows, selCount, selExcludedPairs, selExcludedPositions, selFirst, selPositions } from './state.js';
 import { openTagEditor } from './timeframe.js';
 import { renderTimelineTagFilter } from './timeline.js';
-import { confirmDialog } from './ui.js';
+import { confirmDialog, oneAtATime } from './ui.js';
 import { rebuildView } from './view.js';
 
 /* ----------------------------------------------------------------- tags */
@@ -146,8 +146,201 @@ export function renderTagRibbon() {
   rib.append(none);
   const edit = el('button', 'tag-chip');
   edit.append(el('span', null, 'Edit tags'));
-  edit.onclick = openTagEditor;
+  edit.onclick = () => openTagEditor();
   rib.append(edit);
+}
+
+/* ------------------------------------------------------- tag list editors */
+
+/* How long a paused name waits before it saves. The row note's figure
+   (saveNote), for the same reason: long enough not to write per keystroke,
+   short enough that closing the dialog straight after typing loses nothing
+   — the timer outlives the dialog, and leaving the box saves at once. */
+export const TAG_NAME_SAVE_MS = 500;
+
+/* One line of a tag list — Edit tags (the case's own) and Settings →
+   Default tags for new cases (the template) — that saves as it changes
+   instead of behind a Save button: the colour and the key at once, the
+   name once typing pauses or the box is left. Both editors had a Save the
+   analyst had to remember (one per row in Edit tags, one for the whole
+   template), and a rename typed and closed without it was silently lost.
+
+   `save({name, color, hotkey})` does the write and throws to refuse; the
+   row's own state slot says "Saving…" then "Saved", the way the row note
+   and the case notes do, and a refusal is toasted with the server's words
+   (ui.md, "A click handler reports its own refusal") and leaves "Not
+   saved" beside the row. An empty name is never sent: a pause while
+   retyping one would otherwise save a nameless tag in a case, and in the
+   template — whose server side drops nameless entries — delete the row
+   being edited. Leaving the box empty puts the last saved name back.
+
+   Saves run one at a time per row, so a slow write can't land after the
+   one that followed it. Returns {row, name, flush}: `name` is the name
+   box, `flush()` sends a pending name now and resolves once this row's
+   writes have settled — anything about to redraw the list calls it
+   first. */
+export function tagEditRow(t, { save, remove, removeLabel = '✕', removeTitle = '' }) {
+  const row = el('div', 'tag-edit-row');
+  const color = el('input', 'tag-edit-color');
+  color.type = 'color';
+  color.value = t.color || '#8899aa';
+  color.title = 'Colour';
+  const name = el('input', 'confirm-input tag-edit-name');
+  name.value = t.name || '';
+  name.placeholder = 'Tag name';
+  name.setAttribute('aria-label', 'Tag name');
+  const key = el('input', 'confirm-input tag-edit-key');
+  key.value = t.hotkey || '';
+  key.maxLength = 1;
+  key.title = 'Key — 1 to 9 tag the selection';
+  key.setAttribute('aria-label', 'Key');
+  const state = el('span', 'tag-edit-state');
+  state.setAttribute('aria-live', 'polite');
+  const rm = el('button', 'btn ghost tag-edit-remove', removeLabel);
+  if (removeTitle) rm.title = removeTitle;
+  rm.onclick = oneAtATime(rm, () => remove());
+  row.append(color, name, key, state, rm);
+
+  const fields = () => ({ name: name.value, color: color.value, hotkey: key.value || null });
+  const same = (a, b) => a.name === b.name && a.color === b.color && a.hotkey === b.hotkey;
+  // `saved` is what the server holds; `latest` what was last sent, so a
+  // blur straight after the pause that already sent the name sends nothing.
+  let saved = fields();
+  let latest = saved;
+  let timer = null;
+  let fade = null;
+  let inflight = 0;
+  let chain = Promise.resolve();
+  const show = (text, warn = false) => {
+    clearTimeout(fade);
+    state.textContent = text;
+    state.classList.toggle('warn', warn);
+    // "Saved" is a confirmation, not a state to live with: it goes once
+    // read, so the next one is visibly a new one.
+    if (text === 'Saved') fade = setTimeout(() => { if (state.textContent === 'Saved') show(''); }, 1500);
+  };
+  const needsName = (on) => {
+    name.classList.toggle('invalid', on);
+    if (on) show('Needs a name', true);
+  };
+  const commit = () => {
+    clearTimeout(timer);
+    timer = null;
+    const want = fields();
+    if (!want.name.trim()) { needsName(true); return chain; }
+    needsName(false);
+    if (same(want, latest)) {
+      if (!inflight && state.textContent === 'Saving…') show('');
+      return chain;
+    }
+    latest = want;
+    inflight++;
+    show('Saving…');
+    chain = chain.then(() => save(want)).then(() => {
+      saved = want;
+      inflight--;
+      if (!inflight) show('Saved');
+    }, (e) => {
+      inflight--;
+      latest = saved;
+      show('Not saved', true);
+      toast(`Could not save "${want.name}": ${e.message}`, 6000);
+    });
+    return chain;
+  };
+  color.addEventListener('change', commit);
+  key.addEventListener('focus', () => key.select());
+  key.addEventListener('input', commit);
+  name.addEventListener('input', () => {
+    clearTimeout(timer);
+    timer = null;
+    if (!name.value.trim()) { needsName(true); return; }
+    needsName(false);
+    show('Saving…');
+    timer = setTimeout(commit, TAG_NAME_SAVE_MS);
+  });
+  name.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); commit(); } });
+  name.addEventListener('blur', () => {
+    if (name.value.trim()) { commit(); return; }
+    clearTimeout(timer);
+    timer = null;
+    name.value = latest.name;
+    needsName(false);
+    show('');
+  });
+  return { row, name, flush: commit };
+}
+
+/* Settings → Default tags for new cases. The template is one file
+   (workspace/tags.json) written as a whole list, so every change — a
+   row's save, a row added, a row removed — sends the list, one write at a
+   time in the order they were made. `tags` only ever holds what each row
+   has committed: a name still being typed stays in its box, so another
+   row's save can't send it early. */
+export function buildDefaultTagsEditor(sec) {
+  const list = el('div', 'tag-edit-list');
+  const acts = el('div', 'row-actions');
+  const add = el('button', 'btn ghost', '+ tag');
+  // Not until the template has been read: every save writes the whole
+  // list, so a + tag on a list that failed to load would replace the
+  // template with one "New tag".
+  add.disabled = true;
+  acts.append(add);
+  sec.append(list, acts);
+  let tags = [];
+  let rows = [];
+  let chain = Promise.resolve();
+  const saveAll = () => {
+    const p = chain.then(() => post('/api/settings/default_tags', {
+      tags: tags.map((t) => ({ name: t.name, color: t.color, hotkey: t.hotkey || null })),
+    }));
+    chain = p.catch(() => {});
+    return p;
+  };
+  const settle = () => Promise.all(rows.map((r) => r.flush()));
+  const paint = () => {
+    list.replaceChildren();
+    rows = tags.map((t) => {
+      const r = tagEditRow(t, {
+        removeTitle: 'Remove this tag from the template',
+        save: async (want) => {
+          const was = { ...t };
+          Object.assign(t, want);
+          try { await saveAll(); } catch (e) { Object.assign(t, was); throw e; }
+        },
+        remove: async () => {
+          await settle();
+          const at = tags.indexOf(t);
+          if (at < 0) return;
+          tags.splice(at, 1);
+          try { await saveAll(); } catch (e) {
+            tags.splice(at, 0, t);
+            toast(`Could not remove "${t.name}": ${e.message}`, 6000);
+            return;
+          }
+          paint();
+        },
+      });
+      list.append(r.row);
+      return r;
+    });
+  };
+  add.onclick = oneAtATime(add, async () => {
+    await settle();
+    tags.push({ name: 'New tag', color: '#7f9bb5', hotkey: null });
+    try { await saveAll(); } catch (e) {
+      tags.pop();
+      toast(`Could not add a tag: ${e.message}`, 6000);
+      return;
+    }
+    paint();
+    const fresh = rows[rows.length - 1].name;
+    fresh.focus();
+    fresh.select();
+  });
+  api('/api/settings/default_tags')
+    .then((t) => { tags = t; paint(); add.disabled = false; })
+    .catch((e) => { list.append(el('p', 'fb-help', `Could not read the template: ${e.message}`)); });
 }
 
 /* Above this many rows, tagging asks first — and, on the per-row path,

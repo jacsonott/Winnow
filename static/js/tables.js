@@ -7,7 +7,7 @@ import { writeClipboardText } from './grouping.js';
 import { sqlSchemaForLLM } from './plugins.js';
 import { dropViewStateFor, editSourceNickname, loadSources, openTables, sourceGlyph, sourceLabel, sourceTitle, subsetParentLabel, taggedTablesToOpen } from './sources.js';
 import { S } from './state.js';
-import { alertDialog, confirmDialog, markModalAction, modal } from './ui.js';
+import { alertDialog, confirmDialog, dropdownMenu, markModalAction, modal, openMenuAnchor } from './ui.js';
 import { cancelPendingView } from './view.js';
 
 /* Every source/merge in the case, open or not — the counterpart to the tab
@@ -29,11 +29,18 @@ export async function refreshSourcesQuietly() {
   S.sources = [...sources, ...merges];
 }
 
+/* The search index's state, as the chip beside a table's counts says it.
+   Worded to stand alone: the chip has no column heading over it, and the
+   old bare "Not started" in a bordered box read as a button that would
+   start something. */
 export function indexStatusFor(s) {
-  if (s.has_fts) return { text: '✓ Ready', cls: 'ready' };
-  if (s.fts_building) return { text: '⏳ Building…', cls: 'building' };
-  return { text: 'Not started', cls: 'idle' };
+  if (s.has_fts) return { text: 'index ready', cls: 'ready' };
+  if (s.fts_building) return { text: 'indexing…', cls: 'building' };
+  return { text: 'not indexed yet', cls: 'idle' };
 }
+
+const INDEX_STATUS_TITLE = 'Contains and Advanced searches use this table\'s substring index once it is ready. '
+  + 'Until then they scan the table instead — the same results, more slowly.';
 
 export function fmtBytes(n) {
   if (n < 1024) return `${n} B`;
@@ -82,13 +89,10 @@ export function openTablesManager() {
   markModalAction('openTables');
   modal('Tables', (b) => {
     b.dataset.kind = 'tables';
-    b.append(el('p', null,
-      'Every table in this case. Closing a tab from the header only hides it here — '
-      + 'reopen it below, or use Remove to delete it (and its tags/notes) for good. '
-      + 'Contains/Advanced search uses a per-table substring index built in the background '
-      + '(shown below) — a table without one yet still searches correctly, just via a slower full scan. '
-      + 'Filtering, grouping or opening the value picker on a column also builds a small index for '
-      + 'that column; those are listed per table so they can be dropped if they add up.'));
+    // One line. What it cut — the search index, the per-column filter
+    // indexes — is on the wiki's Tables manager section and in the
+    // chips' own tooltips.
+    b.append(el('p', 'fb-help', 'Every table in this case, open or closed. Closing a tab only hides it; Remove deletes it.'));
 
     /* source_id -> [{column, building}]. Fetched once per modal open rather
        than joined onto /api/sources: it's one sqlite_master read per table
@@ -131,7 +135,87 @@ export function openTablesManager() {
     const list = el('div', 'session-list');
     b.append(list);
 
+    async function toggleOpen(s) {
+      setBusy(true);
+      try { await post(`/api/source/${s.id}/open`, { open: !s.is_open }); }
+      catch (e) { toast(`Could not ${s.is_open ? 'close' : 'open'} ${sourceLabel(s)}: ${e.message}`, 6000); return; }
+      finally { setBusy(false); }
+      if (s.is_open && S.sourceId === s.id) S.sourceId = null;
+      await loadSources();
+      openTablesManager();
+    }
+
+    async function removeSource(s) {
+      /* A table a merge is built on is refused, not warned about:
+         dropping it would leave the merge naming a member that is not
+         there (see Store.drop_source). The server refuses this too
+         (409); asking here as well is so the analyst gets the reason
+         and the merge's name without a round trip, and so the button
+         never looks like it did nothing. */
+      const usedBy = s.is_merge ? []
+        : (S.sources || []).filter((m) => m.is_merge && (m.member_source_ids || []).includes(s.id));
+      if (usedBy.length) {
+        const names = usedBy.map((m) => `"${sourceLabel(m)}"`).join(', ');
+        await alertDialog(
+          `${sourceLabel(s)} is merged into ${names}. Delete `
+          + (usedBy.length === 1 ? 'that merge' : 'those merges')
+          + ' first — a merge is only a view over its tables, so deleting it keeps them.');
+        return;
+      }
+      const warn = s.is_merge
+        ? `Delete merge "${sourceLabel(s)}"? The tables under it are untouched.`
+        : `Remove ${sourceLabel(s)} from this case? Tags and notes for it are deleted too.`;
+      if (!(await confirmDialog(warn, { danger: true, okLabel: 'Remove' }))) return;
+      // A search running in the background for it, or landed and
+      // waiting for Apply, is for a table that is about to not exist:
+      // its row goes, and the server drops the build or the held view.
+      cancelPendingView(s.id);
+      try {
+        await api(s.is_merge ? `/api/merges/${-s.id}` : `/api/source/${s.id}`, { method: 'DELETE' });
+      } catch (e) {
+        // A refusal (the server's own "merged into" 409, for a merge
+        // another window just made) has a reason worth reading; without
+        // this it was an unhandled rejection and the button looked dead.
+        toast(`Could not remove ${sourceLabel(s)}: ${e.message}`, 6000);
+        return;
+      }
+      if (!s.is_merge) {
+        S.viewCache.delete(s.id); // SQLite can reuse a deleted source's row id — don't let a stale cached view leak onto it
+        dropViewStateFor(s.id);   // nor the filters/sort stashed for it
+        if (S.diffMarks && S.diffMarks.sourceId === s.id) S.diffMarks = null; // nor a comparison's marks
+      }
+      if (S.sourceId === s.id) S.sourceId = null;
+      await loadSources();
+      openTablesManager();
+    }
+
+    // A row's ⋯. Settings… is the manager's way into the Table dialog
+    // (which has a "Tables manager…" back); openTableMenu opens the table
+    // itself first when it was closed.
+    function rowMenu(s) {
+      return [
+        {
+          label: 'Settings…', disabled: !!s.error,
+          title: 'The table menu — columns, pinning, exports, everything per-table',
+          onclick: () => openTableMenu(s.id),
+        },
+        {
+          label: 'Nickname…',
+          title: s.is_merge ? 'Rename this merge' : 'A display name shown in place of the file name — clear it to go back',
+          onclick: async () => { if (await editSourceNickname(s)) openTablesManager(); },
+        },
+        '-',
+        { label: 'Remove…', onclick: () => removeSource(s) },
+      ];
+    }
+
+    // What render() draws from, as one string, so the poll can tell a tick
+    // that changed nothing from one that did.
+    const paintedSig = () => JSON.stringify([S.sources, [...indexesBySource]]);
+    let lastSig = '';
+
     function render() {
+      lastSig = paintedSig();
       list.replaceChildren();
       for (const s of S.sources) {
         // A grid row, not a flex scatter — the name ellipsizes in the
@@ -150,74 +234,22 @@ export function openTablesManager() {
           : `${origin}${s.row_count.toLocaleString()} rows · ${s.tagged_row_count.toLocaleString()} tagged · ${s.note_count.toLocaleString()} notes`));
         if (!s.error) {
           const status = indexStatusFor(s);
-          row.append(el('span', 'index-status index-status-' + status.cls, status.text));
+          const chip = el('span', 'index-status index-status-' + status.cls, status.text);
+          chip.title = INDEX_STATUS_TITLE;
+          row.append(chip);
         }
+        // Open/Close stays a button — it is what the manager is opened for
+        // most — and the rest is in the ⋯.
         const acts2 = el('div', 'tables-acts');
-        const toggle = el('button', 'btn ghost', s.is_open ? 'Close' : 'Open');
-        toggle.onclick = async () => {
-          setBusy(true);
-          try { await post(`/api/source/${s.id}/open`, { open: !s.is_open }); }
-          catch (e) { toast(`Could not ${s.is_open ? 'close' : 'open'} ${sourceLabel(s)}: ${e.message}`, 6000); return; }
-          finally { setBusy(false); }
-          if (s.is_open && S.sourceId === s.id) S.sourceId = null;
-          await loadSources();
-          openTablesManager();
-        };
-        const menuBtn = el('button', 'btn ghost', 'Settings…');
-        menuBtn.title = 'The table menu — columns, pinning, exports, everything per-table';
-        menuBtn.onclick = () => openTableMenu(s.id);   // opens the table itself first if it was closed
-        if (!s.error) acts2.append(menuBtn);
-        const nick = el('button', 'btn ghost', 'Nickname…');
-        nick.title = s.is_merge ? 'Rename this merge' : 'A display name shown in place of the file name — clear it to go back';
-        nick.onclick = async () => {
-          if (!(await editSourceNickname(s))) return;
-          openTablesManager();
-        };
-        const del = el('button', 'btn ghost', 'Remove…');
-        del.onclick = async () => {
-          /* A table a merge is built on is refused, not warned about:
-             dropping it would leave the merge naming a member that is not
-             there (see Store.drop_source). The server refuses this too
-             (409); asking here as well is so the analyst gets the reason
-             and the merge's name without a round trip, and so the button
-             never looks like it did nothing. */
-          const usedBy = s.is_merge ? []
-            : (S.sources || []).filter((m) => m.is_merge && (m.member_source_ids || []).includes(s.id));
-          if (usedBy.length) {
-            const names = usedBy.map((m) => `"${sourceLabel(m)}"`).join(', ');
-            await alertDialog(
-              `${sourceLabel(s)} is merged into ${names}. Delete `
-              + (usedBy.length === 1 ? 'that merge' : 'those merges')
-              + ' first — a merge is only a view over its tables, so deleting it keeps them.');
-            return;
-          }
-          const warn = s.is_merge
-            ? `Delete merge "${sourceLabel(s)}"? The tables under it are untouched.`
-            : `Remove ${sourceLabel(s)} from this case? Tags and notes for it are deleted too.`;
-          if (!(await confirmDialog(warn, { danger: true, okLabel: 'Remove' }))) return;
-          // A search running in the background for it, or landed and
-          // waiting for Apply, is for a table that is about to not exist:
-          // its row goes, and the server drops the build or the held view.
-          cancelPendingView(s.id);
-          try {
-            await api(s.is_merge ? `/api/merges/${-s.id}` : `/api/source/${s.id}`, { method: 'DELETE' });
-          } catch (e) {
-            // A refusal (the server's own "merged into" 409, for a merge
-            // another window just made) has a reason worth reading; without
-            // this it was an unhandled rejection and the button looked dead.
-            toast(`Could not remove ${sourceLabel(s)}: ${e.message}`, 6000);
-            return;
-          }
-          if (!s.is_merge) {
-            S.viewCache.delete(s.id); // SQLite can reuse a deleted source's row id — don't let a stale cached view leak onto it
-            dropViewStateFor(s.id);   // nor the filters/sort stashed for it
-            if (S.diffMarks && S.diffMarks.sourceId === s.id) S.diffMarks = null; // nor a comparison's marks
-          }
-          if (S.sourceId === s.id) S.sourceId = null;
-          await loadSources();
-          openTablesManager();
-        };
-        acts2.append(toggle, nick, del);
+        const toggle = el('button', 'btn ghost tables-toggle', s.is_open ? 'Close' : 'Open');
+        toggle.onclick = () => toggleOpen(s);
+        const more = el('button', 'btn ghost row-more tables-more', '⋯');
+        more.title = 'Settings, nickname, remove';
+        more.setAttribute('aria-label', `Actions for ${sourceLabel(s)}`);
+        more.setAttribute('aria-haspopup', 'menu');
+        more.setAttribute('aria-expanded', 'false');
+        more.onclick = () => dropdownMenu(more, () => rowMenu(s));
+        acts2.append(toggle, more);
         row.append(acts2);
         list.append(row);
         const idxs = indexesBySource.get(s.id) || [];
@@ -232,7 +264,10 @@ export function openTablesManager() {
        rebuilding it. */
     function columnIndexRow(s, idxs) {
       const wrap = el('div', 'row-actions source-indexes');
-      wrap.append(el('span', 'fb-help', 'Filter indexes:'));
+      const label = el('span', 'fb-help', 'Filter indexes:');
+      label.title = 'Filtering, grouping or opening the value picker on a column builds a small index for it. '
+        + 'Drop one if they add up; the next filter on that column builds it again.';
+      wrap.append(label);
       for (const ix of idxs) {
         const chip = el('span', 'index-chip' + (ix.building ? ' building' : ''));
         chip.append(el('span', null, ix.column + (ix.building ? ' (building…)' : '')));
@@ -278,6 +313,13 @@ export function openTablesManager() {
         tablesModalPoll = null;
         return;
       }
+      // Redraw only when something on screen changed, and never under an
+      // open row menu: a redraw replaces every row, so a ⋯ menu would be
+      // left anchored to a button that is no longer there, and the focus
+      // a keyboard user had on a row would drop to the page every 1.5s.
+      if (openMenuAnchor && list.contains(openMenuAnchor)) return;
+      const sig = paintedSig();
+      if (sig === lastSig) return;
       render();
     }, 1500);
   }, { wide: 'x' });

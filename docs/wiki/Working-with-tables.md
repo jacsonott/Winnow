@@ -26,11 +26,13 @@ Click a folder's name to collapse or expand it, and double-click it to rename it
 
 ### Renaming a table
 
-A table is named after its file. To give it a clearer name, choose **Nickname this table…** in the table menu, or **Nickname…** in the Tables manager. The nickname is shown in place of the file name everywhere. Leave it empty to go back to the file name. A merge has no file name, so the same command reads **Rename this merge…**.
+A table is named after its file. To give it a clearer name, choose **Nickname this table…** in the table menu, or **Nickname…** in the table's **⋯** menu in the Tables manager. The nickname is shown in place of the file name everywhere. Leave it empty to go back to the file name. A merge has no file name, so the same command reads **Rename this merge…**.
 
 ### The Tables manager
 
-Press `t`, or choose **Case ▾ → Tables…**, to see every table in the case with its row count, the number of tagged rows and notes, and whether its search index is ready (**✓ Ready**, **⏳ Building…** or **Not started**). Each row has **Settings…** (the table menu), **Open**/**Close**, **Nickname…** and **Remove…**.
+Press `t`, or choose **Case ▾ → Tables…**, to see every table in the case, open or closed, with its row count and the number of tagged rows and notes. Beside them, **index ready**, **indexing…** or **not indexed yet** says whether the table's search index is built. Until it is, Contains and Advanced searches on that table scan every row instead: the results are the same, only slower (see [The search index and slow searches](Filtering-and-searching.md#the-search-index-and-slow-searches)).
+
+Each row has **Open** or **Close** and a **⋯** menu with **Settings…** (the table menu), **Nickname…** and **Remove…**. Closing a table, here or with the ✕ on its tab, only hides it; it stays in the case.
 
 **Remove…** deletes the table from the case, along with its tags and notes. It asks first. A table that is part of a merge can't be removed until the merge is deleted. Deleting a merge leaves its tables untouched.
 
@@ -182,7 +184,7 @@ A merge shows ⛓ before its name and works like any other table: filtering, sea
 - Flattening a JSON or XML column isn't available on a merge.
 - The watchlist and **Search all** look at the member tables rather than the merge, so their hits name the original tables. See [Timeline, Search all and the Watchlist](Timeline-search-and-watchlist.md).
 
-To delete a merge, use **Remove…** in the Tables manager. Its tables are not affected.
+To delete a merge, use **Remove…** in its **⋯** menu in the Tables manager. Its tables are not affected.
 
 ## Saving a view as a table
 
