@@ -167,12 +167,12 @@ def test_dragging_a_chip_out_of_include_columns_is_a_move(fl):
 def test_the_click_to_place_path_includes_it_too(fl):
     """Clicking a field offers the same placements — the keyboard and
     trackpad route through the same addField, and must not be a second
-    behaviour."""
+    behaviour. (The placements are a menu under the field now, not a
+    "Place Host" dialog; tests/ui/test_field_place_menu.py is about the
+    menu itself.)"""
     fl.evaluate("""() => document.querySelector("[data-field='Host']").click()""")
-    fl.wait_for_function("() => document.getElementById('modalTitle').textContent === 'Place Host'",
-                         timeout=10_000)
-    fl.evaluate("""() => [...document.querySelectorAll('#modalBody button')]
-      .find((b) => b.textContent === 'Group rows on').click()""")
+    fl.wait_for_selector(".menu .menu-item", timeout=10_000)
+    fl.locator(".menu .menu-item", has_text="Group rows on").click()
     fl.wait_for_function(
         "() => document.querySelectorAll(\"[data-zone='carry'] [data-field]\").length === 1",
         timeout=10_000)

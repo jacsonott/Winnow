@@ -19,8 +19,12 @@ then open the **First/Last** page tab.
 
 ## Controls
 
-Drag fields from the list into the zones (clicking a field offers the same
-placements — the keyboard/trackpad path):
+Drag fields from the list into the zones, or click a field (or Tab to it
+and press Enter — the keyboard/trackpad path) and pick a zone from the
+small **Place in** menu under it. A zone the field can't go into is greyed
+out with the reason — "Already there", "Not a number column" (Total up),
+"Full — 6 columns at most" (Group rows on) — and Ordered by says which
+column it replaces:
 
 | | |
 | --- | --- |
