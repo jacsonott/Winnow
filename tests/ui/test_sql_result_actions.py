@@ -195,6 +195,6 @@ def test_csv_neutralises_formulas_and_quotes_a_bare_cr_like_the_server(page):
     with page.expect_download() as dl:
         page.locator(".confirm-card .btn", has_text="Save").first.click()
     text = _P(dl.value.path()).read_bytes().decode("utf-8")
-    header, row = text.split("\n")
+    header, row = text.rstrip("\n").split("\n")
     assert header == "'=HYPERLINK(x),cr,n,s,a"
     assert row == "'=1+1,\"a\rb\",-5,'-5,'@x"

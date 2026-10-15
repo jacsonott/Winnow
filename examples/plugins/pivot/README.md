@@ -14,7 +14,10 @@ Then pick the **Pivot** page tab.
 ## What it does
 
 - **Four field areas**, like Excel's. Drag a field from the list, or click
-  it and pick an area (drag isn't reachable from a keyboard).
+  it (or Tab to it and press Enter — drag isn't reachable from a
+  keyboard) and pick an area from the small **Place in** menu under it.
+  An area the field is already in is greyed out ("Already there"), and
+  Rows/Columns say when picking one moves the field out of the other.
 - **Nested rows and columns.** Several fields in Rows nest, with a subtotal
   after each group; several in Columns produce stacked column headers.
 - **Aggregations**: Count, Distinct count, Sum, Average, Min, Max. One

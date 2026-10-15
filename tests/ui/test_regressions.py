@@ -125,7 +125,7 @@ def test_resetting_the_keymap_actually_resets_it(page):
     now-polluted defaults straight back."""
     page.keyboard.press("?")
     page.wait_for_selector("#modal:not([hidden])")
-    page.click(".settings-section-head:has-text('Keyboard shortcuts')")
+    page.click("#modalBody .settings-nav-item:has-text('Keyboard shortcuts')")
     row = page.locator(".settings-key-row").first
     before = row.inner_text()
 
@@ -305,8 +305,8 @@ def test_settings_no_longer_duplicates_the_saved_filters_list(page):
     alone."""
     page.keyboard.press("?")
     page.wait_for_selector("#modal:not([hidden])")
-    page.click(".settings-section-head:has-text('Saved filters')")
-    sec = page.locator(".settings-section:has(.settings-section-head:has-text('Saved filters'))")
+    page.click("#modalBody .settings-nav-item:has-text('Saved filters')")
+    sec = page.locator("#modalBody .settings-pane[data-section='filters']")
     assert sec.locator(".session-row, .sf-row").count() == 0
     sec.locator(".btn", has_text="Open saved filters").click()
     page.wait_for_selector(".sf-group-head")

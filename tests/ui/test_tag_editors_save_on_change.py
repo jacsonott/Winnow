@@ -157,8 +157,8 @@ def test_the_default_tag_template_saves_as_it_changes(page, api):
     try:
         page.keyboard.press("?")
         page.wait_for_selector("#modal:not([hidden])")
-        page.click(".settings-section-head:has-text('Default tags for new cases')")
-        sec = page.locator(".settings-section:has(.settings-section-head:has-text('Default tags for new cases'))")
+        page.click("#modalBody .settings-nav-item:has-text('Default tags for new cases')")
+        sec = page.locator(".settings-pane:has(.settings-pane-title:has-text('Default tags for new cases'))")
         sec.locator(".tag-edit-row").first.wait_for()
         assert sec.locator("button", has_text="Save template").count() == 0
 

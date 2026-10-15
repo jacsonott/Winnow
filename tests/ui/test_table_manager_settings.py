@@ -1,7 +1,7 @@
 """The Tables manager reaches each table's own menu — Settings… in a row's
-⋯ menu opens the same per-table modal the tab's right-click does, so a
-closed table's settings are reachable without reopening it by hand
-first (openTableMenu does that itself)."""
+⋯ menu opens the same per-table modal as Columns… on the tab's right-click
+menu, so a closed table's settings are reachable without reopening it by
+hand first (openTableMenu does that itself)."""
 
 from __future__ import annotations
 

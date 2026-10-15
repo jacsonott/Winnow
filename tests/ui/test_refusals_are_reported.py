@@ -96,6 +96,9 @@ def test_deleting_a_profile_the_server_refuses(page, api):
 def test_saving_a_timeline_config_the_server_refuses(page):
     _refuse(page, "**/api/timeline_templates", "workspace is read-only", "POST")
     page.evaluate("() => __winnow.openTimelineSourceConfig()")
+    # Save waits for a change to save (Configure tables… is one Save per
+    # header set now, not one per table), so make one first.
+    page.locator("#modal").get_by_label("Type", exact=True).fill("Refused type")
     page.locator("#modalBody .btn", has_text="Save").first.click()
     _toast(page, "workspace is read-only")
     page.keyboard.press("Escape")

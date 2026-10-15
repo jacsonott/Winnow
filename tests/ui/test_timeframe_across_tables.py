@@ -65,7 +65,7 @@ def _set_range(page, rng):
     inputs = page.locator("#modalBody input[type=text]")
     inputs.nth(0).fill(rng["start"])
     inputs.nth(1).fill(rng["end"])
-    page.locator("#modalBody label.tf-enabled", has_text="Enabled").locator("input").check()
+    # No Enabled box to tick any more: Apply is what turns it on.
     page.get_by_role("button", name="Apply").click()
     page.wait_for_selector("#modal[hidden]", state="attached")
 
@@ -137,7 +137,7 @@ def test_off_a_refresh_of_the_open_table_keeps_its_timeframe(page, tables):
 def test_settings_and_the_dialog_are_the_same_switch(page, tables):
     page.evaluate("() => __winnow.openSettings()")
     page.wait_for_selector("#modal:not([hidden])")
-    page.locator(".settings-section-head", has_text="Filter & search syntax").click()
+    page.locator("#modalBody .settings-nav-item", has_text="Filter & search syntax").click()
     cb = page.locator("#settingsTimeframeAcrossTables")
     assert cb.is_checked()
     cb.uncheck()

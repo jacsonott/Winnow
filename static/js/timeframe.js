@@ -252,29 +252,30 @@ export function toggleTimeRange() {
 export function openTimeRangeModal() {
   markModalAction('openTimeRange');
   modal('Timeframe filter', (b) => {
+    // No Enabled box. Apply always turns the filter on, and the two ways
+    // off are Clear (forget the range) and the toggle key (keep it): with
+    // a box as well, a range typed in with the box left unticked was
+    // saved but not applied, and Apply looked as if it had done nothing.
     const toggleKey = S.keymap.toggleTimeRange[0] || '(unbound)';
-    const openKey = S.keymap.openTimeRange[0] || '(unbound)';
+    // One line, and it follows the across-tables switch below: with it
+    // off the range is per table, and the line must not say otherwise.
     const intro = el('p');
     const paintIntro = () => {
       intro.textContent = (timeframeAcrossTables()
-        ? 'Stays applied across filter/preset changes and table switches, unlike the regular filters — '
-        : 'Stays applied across filter/preset changes, unlike the regular filters, and each table keeps its own — ')
-        + `toggle it on/off quickly with "${toggleKey}", or jump straight back to this dialog with "${openKey}".`;
+        ? 'Survives filters and table switches'
+        : 'Survives filters; each table keeps its own')
+        + ` — "${toggleKey}" turns it off without clearing it.`;
     };
     paintIntro();
     b.append(intro);
-
-    const enabledLabel = el('label', 'tf-enabled');
-    const enabledCb = el('input');
-    enabledCb.type = 'checkbox';
-    enabledCb.checked = S.timeRange.enabled;
-    enabledLabel.append(enabledCb, document.createTextNode(' Enabled'));
-    b.append(enabledLabel);
+    if (!S.timeRange.enabled && (S.timeRange.start || S.timeRange.end)) {
+      b.append(el('p', 'fb-help tf-off', 'Off right now — Apply turns it back on.'));
+    }
 
     // A preference rather than part of the range, so it saves as it is
     // clicked — Cancel below discards the range edits, not this. The same
     // switch is in Settings → Filter & search syntax.
-    const acrossLabel = el('label', 'tf-enabled');
+    const acrossLabel = el('label', 'tf-check');
     const acrossCb = el('input');
     acrossCb.type = 'checkbox';
     acrossCb.id = 'tfAcrossTables';
@@ -370,7 +371,6 @@ export function openTimeRangeModal() {
           if (!res.start && !res.end) { toast('No tagged rows with a usable timestamp'); return; }
           startInput.value = res.start || '';
           endInput.value = res.end || '';
-          enabledCb.checked = true;
           toast('Range set from tagged rows — Apply to use it');
         } catch (e) {
           toast('Could not read tagged range: ' + e.message, 4000);
@@ -387,7 +387,7 @@ export function openTimeRangeModal() {
       if (!startInput.value.trim() && !endInput.value.trim()) { toast('Set a start and/or end'); return; }
       if (!validateTimeInput(startInput, 'Start') || !validateTimeInput(endInput, 'End')) return;
       S.timeRange = {
-        enabled: enabledCb.checked,
+        enabled: true,
         column: colSel.value || null,
         start: startInput.value.trim(),
         end: endInput.value.trim(),
@@ -937,10 +937,13 @@ export function buildTableStripPanel(container) {
    adding one should be adding an entry. `build` gets (container, refresh)
    and may render nothing at all.
 
-   It lives behind a right-click on the tab or the sidebar row (and the
-   openTableMenu keybind) rather than a visible ▦ button, which is the icon
-   this replaced — a menu that's going to keep growing needs a home that
-   doesn't cost tab-strip width per entry. */
+   It lives behind the openTableMenu keybind, the Tables manager's
+   Settings… and Columns… on a table's right-click menu (tableMenuItems in
+   sources.js) rather than a visible ▦ button, which is the icon this
+   replaced — a menu that's going to keep growing needs a home that doesn't
+   cost tab-strip width per entry. The right-click opened this dialog
+   directly until it got a short menu of its own: a full-height modal was a
+   lot to put up for closing or renaming a tab. */
 export const TABLE_MENU_SECTIONS = [
   { id: 'strip', title: null, build: buildTableStripPanel },
   { id: 'columns', title: 'Columns', build: buildColumnsPanel },
@@ -948,8 +951,9 @@ export const TABLE_MENU_SECTIONS = [
   { id: 'table', title: 'This table', build: buildTableActionsPanel },
 ];
 
-/* `sourceId` is optional — the tab/sidebar entry points pass the table that
-   was right-clicked, which may not be the one on screen. The panels all
+/* `sourceId` is optional — the right-click menu's Columns… and the Tables
+   manager pass the table they were opened on, which may not be the one on
+   screen. The panels all
    read S.layout/S.order/S.columns (this table's live state), so opening
    that source first isn't a convenience, it's the precondition. */
 export async function openTableMenu(sourceId) {

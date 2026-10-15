@@ -46,9 +46,10 @@ from winnow import userenv
 from winnow import version
 from winnow import archive
 from winnow import workspace as WS
+from winnow.sqlresults import ResultExpired, TooBig
 from winnow.store import (CASE_SUFFIX, DEFAULT_IMPORT_EXTENSIONS, PLASO_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, MissingTable, OpCancelled, RecordGone, Store, ViewExpired,
                    case_lock_path, decode_text_sample, describe_case_lock, is_winnow_case_file, probe_case_lock, q,
-                   rows_to_xlsx, sniff_text_encoding, sweep_orphan_views)
+                   sniff_text_encoding, sweep_orphan_views)
 from winnow.store import case_session_document_problem, pane_cell_json, session_document_problem
 
 HERE = paths.INSTALL_ROOT  # static/, plugins/, examples/plugins/ all hang off the install root
@@ -742,12 +743,22 @@ class SavedViewWrite(BaseModel):
 
 
 class SqlQuery(BaseModel):
+    """Rows inline, capped — winnow.api.sql and dashboards. The SQL pane
+    has no cap and goes through /api/sql/run instead, which holds its
+    rows server-side; this default is what keeps an uncapped answer from
+    ever being one JSON response here by omission."""
     sql: str
     limit: int = 5000
     # The run's one-shot id (jobs.js opToken), so the busy chip's Cancel
     # reaches it through /api/cancel_op. Optional: a run without one is
     # still stopped by its client leaving, or by shutdown.
     op_token: str | None = None
+
+
+class SqlRun(BaseModel):
+    sql: str
+    op_token: str | None = None   # the pane's Stop and the busy chip's Cancel, through /api/cancel_op
+    release: list[str] = []       # the result(s) this run replaces — see Store.run_sql_result
 
 
 class IngestPath(BaseModel):
@@ -1261,7 +1272,9 @@ def api_shutdown():
     server usually lives in a forgotten terminal (or was started by a
     shortcut with no terminal at all) — "close the browser tab" leaving the
     process running forever is how a case file stays locked all weekend.
-    Nothing to save: every write already went to the case file."""
+    Nothing to save: every write already went to the case file. A SQL
+    pane query in flight is stopped by the signal this sends (see
+    _stop_pane_queries) — uvicorn would otherwise wait on it for ever."""
     _trigger_shutdown()
     return {"ok": True}
 
@@ -5088,6 +5101,32 @@ def api_timeline_rows(view_id: str, start: int = 0, count: int = 200):
         raise HTTPException(409, str(e))
 
 
+class TimelinePreview(BaseModel):
+    """What Configure tables… has on screen for a header set, not yet
+    saved — the same three fields a timeline template holds."""
+    source_id: int
+    timestamp_column: str | None = None
+    body_columns: list[str] = []
+    type_label: str | None = None
+    limit: int | None = None
+
+
+@app.post("/api/timeline/preview")
+def api_timeline_preview(body: TimelinePreview):
+    """A few rows of one table rendered the Timeline's way under unsaved
+    settings (Store.timeline_preview). Writes nothing; a POST because the
+    settings are a body, like /api/derived/preview. A merge or a table
+    still importing is the request's fault (400); a table that is gone is
+    gone_table_handler's 404, and any other KeyError stays the 500 it
+    would be."""
+    cfg = {"timestamp_column": body.timestamp_column, "body_columns": body.body_columns,
+           "type_label": body.type_label}
+    try:
+        return store().timeline_preview(body.source_id, cfg, limit=body.limit)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
 class SavedFilterCreate(BaseModel):
     name: str
     col_names: list[str]
@@ -5406,8 +5445,9 @@ async def _client_gone(request: Request) -> None:
 
 
 async def _run_pane_query(request: Request, op_token: str | None, run, *args, **kwargs):
-    """Run a SQL pane query — `run` is a bound Store.run_sql/sql_to_table —
-    on a worker thread, and interrupt it if the client hangs up first.
+    """Run a SQL pane query — `run` is a bound Store.run_sql,
+    run_sql_result or sql_to_table — on a worker thread, and interrupt it
+    if the client hangs up first.
 
     The pane runs whatever the analyst typed, and some of it never ends. A
     closed window, a reload or a curl --max-time left the query spinning
@@ -5445,40 +5485,6 @@ async def api_sql_to_table(body: SqlToTable, request: Request):
     except sqlite3.Error as e:
         raise HTTPException(400, str(e))
     return res
-
-
-class SqlResultXlsx(BaseModel):
-    """The result the pane is SHOWING, not the query that made it.
-
-    The rows come up from the client rather than being re-queried here so
-    the workbook matches the screen exactly — including a click-sort,
-    which lives only in the browser, and including the preview cap, so
-    the file can never disagree with the row count printed above it. The
-    neighbouring CSV and Copy buttons already work this way; "the whole
-    query, however big" is what Save as table is for."""
-    columns: list[str]
-    rows: list[list]
-    filename: str = "query-results.xlsx"
-    sheet: str = "Query"
-
-
-@app.post("/api/sql/export_xlsx")
-def api_sql_export_xlsx(body: SqlResultXlsx):
-    t0 = time.time()
-    what = f"SQL result ({len(body.rows):,} rows, .xlsx)"
-    wlog.record("info", f"Export started: {what} \u2192 {body.filename}")
-    try:
-        buf = rows_to_xlsx(body.columns, body.rows, body.sheet)
-    except ValueError as e:
-        wlog.record("error", f"Export failed: {what} \u2014 {e}")
-        raise HTTPException(400, str(e))
-    wlog.record("info", f"Export finished: {what} \u2014 {buf.getbuffer().nbytes:,} bytes "
-                        f"in {time.time() - t0:.1f}s")
-    return StreamingResponse(
-        buf,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers=_attachment(body.filename),
-    )
 
 
 class SaveViewAsTable(BaseModel):
@@ -5666,9 +5672,11 @@ def api_search_all_cancel(job_id: int | None = None):
 
 @app.post("/api/sql")
 async def api_sql(body: SqlQuery, request: Request):
-    """The SQL pane's Run. Stoppable three ways, because the SQL is whatever
-    was typed: the busy chip's Cancel (op_token → 499), the client hanging
-    up (_run_pane_query), and shutdown (Store.stop_pane_queries)."""
+    """A query's rows inline, capped — winnow.api.sql and dashboards; the
+    SQL pane's own Run is /api/sql/run. Stoppable three ways, because the
+    SQL is whatever was typed: cancel_op on its op_token (→ 499), the
+    client hanging up (_run_pane_query), and shutdown
+    (Store.stop_pane_queries)."""
     try:
         res = await _run_pane_query(request, body.op_token, store().run_sql, body.sql, body.limit)
     except OpCancelled:
@@ -5678,7 +5686,162 @@ async def api_sql(body: SqlQuery, request: Request):
     # Encoded here, at the JSON boundary, not in Store.run_sql: plugins
     # call run_sql server-side and are owed the values SQLite returned.
     res["rows"] = [[pane_cell_json(v) for v in row] for row in res["rows"]]
-    return res
+    # Straight to json.dumps, as api_rows does — FastAPI's per-cell
+    # jsonable_encoder walk is most of the time on a big answer.
+    return JSONResponse(res)
+
+
+@app.post("/api/sql/run")
+async def api_sql_run(body: SqlRun, request: Request):
+    """The SQL pane's Run: every row, held server-side (Store.run_sql_result,
+    winnow/sqlresults.py). Answers with the result's id, row count, column
+    widths and its first rows; the rest is paged through the routes
+    below. A Stop before the first row is the 499 OpCancelled maps to; a
+    Stop after it keeps the rows so far and says `stopped`. Async for the
+    same reason /api/sql is: a client that hangs up stops the query
+    (_run_pane_query)."""
+    try:
+        res = await _run_pane_query(request, body.op_token, store().run_sql_result,
+                                    body.sql, release=body.release)
+    except OpCancelled:
+        raise
+    except (ValueError, sqlite3.Error) as e:
+        raise HTTPException(400, str(e))
+    return JSONResponse(res)
+
+
+@app.get("/api/sql/run/progress")
+def api_sql_run_progress(token: str):
+    return store().sql_run_progress(token)
+
+
+def _sql_result_call(fn, *args, **kwargs):
+    """The held-result routes' one error contract: a result that is gone
+    is 404 (the pane says to run the query again), a bad column or row
+    reference is 400, a copy too big for a clipboard is 413."""
+    try:
+        return fn(*args, **kwargs)
+    except ResultExpired as e:
+        raise HTTPException(404, str(e))
+    except TooBig as e:
+        raise HTTPException(413, str(e))
+    except (ValueError, TypeError) as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/sql/result/{result_id}/rows")
+def api_sql_result_rows(result_id: str, start: int = 0, count: int = 500,
+                        sort: int | None = None, order: str = "asc"):
+    return JSONResponse(_sql_result_call(store().sql_results.page, result_id, start, count, sort, order))
+
+
+class SqlRowRef(BaseModel):
+    """Which result columns name a real row (the pane's sqlRowRef): the
+    rid column, plus the source_id column or the one source."""
+    rid_col: int
+    sid_col: int | None = None
+    sid: int | None = None
+
+
+@app.get("/api/sql/result/{result_id}/keys")
+def api_sql_result_keys(result_id: str, start: int, count: int, rid_col: int,
+                        sid_col: int | None = None, sid: int | None = None,
+                        sort: int | None = None, order: str = "asc"):
+    ref = {"rid_col": rid_col, "sid_col": sid_col, "sid": sid}
+    return {"keys": _sql_result_call(store().sql_results.keys, result_id, start, count, ref, sort, order)}
+
+
+@app.get("/api/sql/result/{result_id}/tags")
+def api_sql_result_tags(result_id: str, rid_col: int, sid_col: int | None = None, sid: int | None = None):
+    st = store()
+    ref = {"rid_col": rid_col, "sid_col": sid_col, "sid": sid}
+    return _sql_result_call(st.sql_results.tags, result_id, ref, st.path)
+
+
+class SqlResultPick(BaseModel):
+    sort: int | None = None
+    order: str = "asc"
+    keys: list[list[int]] | None = None   # the selection; None = every row
+    ref: SqlRowRef | None = None
+    format: str = "tsv"                   # "tsv" for the clipboard, "rows" for winnow.sqlPage.selectedRows
+
+
+@app.post("/api/sql/result/{result_id}/pick")
+def api_sql_result_pick(result_id: str, body: SqlResultPick):
+    return JSONResponse(_sql_result_call(
+        store().sql_results.pick, result_id, body.sort, body.order, body.keys,
+        body.ref.model_dump() if body.ref else None, as_text=body.format != "rows"))
+
+
+class SqlResultRelease(BaseModel):
+    ids: list[str]
+
+
+@app.post("/api/sql/result/release")
+def api_sql_result_release(body: SqlResultRelease):
+    return {"released": store().sql_results.release(body.ids)}
+
+
+@app.get("/api/sql/result/{result_id}/export.csv")
+def api_sql_result_csv(result_id: str, sort: int | None = None, order: str = "asc",
+                       filename: str = "query-results.csv"):
+    """Every row of a held result, in the order the pane shows it,
+    streamed off the scratch table — never assembled in memory, by the
+    server or the tab."""
+    st = store()
+    gen = _sql_result_call(st.sql_result_csv, result_id, sort, order)
+    what = f"SQL result {result_id} (.csv)"
+
+    def logged():
+        n, t0 = 0, time.time()
+        wlog.record("info", f"Export started: {what} \u2192 {filename}")
+        try:
+            for chunk in gen:
+                n += chunk.count("\n")
+                yield chunk
+        except GeneratorExit:
+            wlog.record("warn", f"Export aborted: {what} after {n:,} lines")
+            raise
+        except Exception as e:  # noqa: BLE001 — the download is already truncated; say why
+            wlog.record("error", f"Export failed: {what} after {n:,} lines — {type(e).__name__}: {e}")
+            raise
+        wlog.record("info", f"Export finished: {what} — {max(n - 1, 0):,} rows in {time.time() - t0:.1f}s")
+
+    return StreamingResponse(logged(), media_type="text/csv",
+                             headers=_attachment(filename or "query-results.csv"))
+
+
+@app.get("/api/sql/result/{result_id}/export.xlsx")
+def api_sql_result_xlsx(result_id: str, sort: int | None = None, order: str = "asc",
+                        filename: str = "query-results.xlsx", sheet: str = "Query"):
+    """A held result as a workbook, in displayed order, continuing onto
+    "Query (2)"… past one worksheet. Built into a temp file the response
+    streams and then deletes (export_all_xlsx's shape): the rows come off
+    the scratch table, so a million of them are never in memory at once —
+    it used to be the browser posting them all up, which crashed the tab."""
+    from starlette.background import BackgroundTask
+    st = store()
+    t0 = time.time()
+    what = f"SQL result {result_id} (.xlsx)"
+    wlog.record("info", f"Export started: {what} \u2192 {filename}")
+    fd, path = tempfile.mkstemp(suffix=".xlsx", prefix="winnow-export-")
+    os.close(fd)
+    try:
+        stats = _sql_result_call(st.sql_result_xlsx, result_id, path, sort, order, sheet)
+    except BaseException:
+        wlog.record("error", f"Export failed: {what}")
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+        raise
+    wlog.record("info", f"Export finished: {what} — {stats['rows']:,} rows on {stats['sheets']} "
+                        f"sheet{'s' if stats['sheets'] != 1 else ''}, {os.path.getsize(path):,} bytes "
+                        f"in {time.time() - t0:.1f}s")
+    return FileResponse(
+        path,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers=_attachment(filename or "query-results.xlsx"),
+        background=BackgroundTask(os.unlink, path),
+    )
 
 
 class SqlTabCreate(BaseModel):

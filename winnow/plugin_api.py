@@ -99,6 +99,12 @@ A tab plus its backend route, the full custom-UI shape:
     # context (see buildPluginTabContext in static/js/plugins.js):
     # winnow.api/post/toast/el/modal helpers, the themed dialogs
     # (alertDialog/confirmDialog/promptDialog — never window.alert &co),
+    # winnow.dropdownMenu(anchor, items) for the app's own small menu
+    # anchored under an element — items are {label, onclick} plus
+    # optional disabled/desc/note/title/checked, '-' for a rule and
+    # {header} for a section label; one menu is open at a time and Escape,
+    # an outside click and the arrow keys work as in every Winnow menu (a
+    # choice among a few things is a menu, not a modal over the work),
     # winnow.notify() for a row in the jobs panel with progress and
     # buttons, winnow.showTab()/showPage() to bring the analyst to one of
     # the plugin's tabs or a built-in page, winnow.base
@@ -227,7 +233,7 @@ PAGE_PANEL_PAGES = ("sql", "notes")
 # provides, with a message that says to update Winnow — the failure mode
 # is otherwise an AttributeError deep inside register() that reads like a
 # plugin bug.
-PLUGIN_API_VERSION = 11
+PLUGIN_API_VERSION = 13
 
 FORMAT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 # API routes may nest ("chat/stream") but each segment keeps the same shape.
@@ -683,7 +689,11 @@ class PluginAPI:
         selectedRows/onRun/show) and `winnow.notesPage` (text/setText/
         insert/onChange/show), which drive the page the panel sits on —
         the copilot in the claude_assistant example inserts and runs the
-        queries it writes."""
+        queries it writes. A sqlPage result is {columns, rows, total,
+        elapsed_ms, truncated, stopped}: the server holds the rows and
+        `rows` is the first 5,000 of `total` (API 12), and selectedRows()
+        is a promise, since a selection can reach rows the browser never
+        loaded."""
         if page not in PAGE_PANEL_PAGES:
             raise ValueError(f"Page panel page {page!r} must be one of {', '.join(PAGE_PANEL_PAGES)}")
         if not FORMAT_ID_RE.match(id or ""):

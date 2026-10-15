@@ -11,8 +11,9 @@ import { alertDialog, confirmDialog, dropdownMenu, markModalAction, modal, openM
 import { cancelPendingView } from './view.js';
 
 /* Every source/merge in the case, open or not — the counterpart to the tab
-   strip's now-nondestructive ✕. Open/Close just flips visibility; Remove is
-   the one place the old hard-delete-on-close behavior still lives. Also
+   strip's now-nondestructive ✕. Open/Close just flips visibility; Remove
+   (removeSource, also on a table's right-click menu) is the one place the
+   old hard-delete-on-close behavior still lives. Also
    folds in search index status (Contains/Advanced-mode search uses a
    per-table trigram substring index built in the background — see
    CLAUDE.md's "Things that bite") as a column rather than a separate
@@ -85,6 +86,67 @@ export async function compactCaseFile() {
     : `Compacted — nothing to reclaim (${fmtBytes(res.after_bytes)} on disk)`) + pending, 8000);
 }
 
+/* The merges built on a table — what stops it being removed (removeSource
+   says why). One rule for every Remove: the manager's button refuses with
+   it and a table's right-click menu greys its entry out with it, so the two
+   can't disagree about which tables can go. A merge itself is never in
+   one: merges aren't merged into merges. */
+export function mergesUsing(s) {
+  if (!s || s.is_merge) return [];
+  return (S.sources || []).filter((m) => m.is_merge && (m.member_source_ids || []).includes(s.id));
+}
+
+/* Why a table can't be removed, as a sentence — or null when it can. */
+export function removeRefusal(s) {
+  const usedBy = mergesUsing(s);
+  if (!usedBy.length) return null;
+  const names = usedBy.map((m) => `"${sourceLabel(m)}"`).join(', ');
+  return `${sourceLabel(s)} is merged into ${names}. Delete `
+    + (usedBy.length === 1 ? 'that merge' : 'those merges')
+    + ' first — a merge is only a view over its tables, so deleting it keeps them.';
+}
+
+/* Remove a table or a merge from the case, behind its confirm. Shared by
+   the Tables manager's Remove… and a table's right-click menu; true when
+   it was removed, so a caller showing a list knows to repaint it. */
+export async function removeSource(s) {
+  /* A table a merge is built on is refused, not warned about: dropping it
+     would leave the merge naming a member that is not there (see
+     Store.drop_source). The server refuses this too (409); asking here as
+     well is so the analyst gets the reason and the merge's name without a
+     round trip, and so the button never looks like it did nothing. */
+  const refusal = removeRefusal(s);
+  if (refusal) {
+    await alertDialog(refusal);
+    return false;
+  }
+  const warn = s.is_merge
+    ? `Delete merge "${sourceLabel(s)}"? The tables under it are untouched.`
+    : `Remove ${sourceLabel(s)} from this case? Tags and notes for it are deleted too.`;
+  if (!(await confirmDialog(warn, { danger: true, okLabel: 'Remove' }))) return false;
+  // A search running in the background for it, or landed and
+  // waiting for Apply, is for a table that is about to not exist:
+  // its row goes, and the server drops the build or the held view.
+  cancelPendingView(s.id);
+  try {
+    await api(s.is_merge ? `/api/merges/${-s.id}` : `/api/source/${s.id}`, { method: 'DELETE' });
+  } catch (e) {
+    // A refusal (the server's own "merged into" 409, for a merge
+    // another window just made) has a reason worth reading; without
+    // this it was an unhandled rejection and the button looked dead.
+    toast(`Could not remove ${sourceLabel(s)}: ${e.message}`, 6000);
+    return false;
+  }
+  if (!s.is_merge) {
+    S.viewCache.delete(s.id); // SQLite can reuse a deleted source's row id — don't let a stale cached view leak onto it
+    dropViewStateFor(s.id);   // nor the filters/sort stashed for it
+    if (S.diffMarks && S.diffMarks.sourceId === s.id) S.diffMarks = null; // nor a comparison's marks
+  }
+  if (S.sourceId === s.id) S.sourceId = null;
+  await loadSources();
+  return true;
+}
+
 export function openTablesManager() {
   markModalAction('openTables');
   modal('Tables', (b) => {
@@ -145,50 +207,6 @@ export function openTablesManager() {
       openTablesManager();
     }
 
-    async function removeSource(s) {
-      /* A table a merge is built on is refused, not warned about:
-         dropping it would leave the merge naming a member that is not
-         there (see Store.drop_source). The server refuses this too
-         (409); asking here as well is so the analyst gets the reason
-         and the merge's name without a round trip, and so the button
-         never looks like it did nothing. */
-      const usedBy = s.is_merge ? []
-        : (S.sources || []).filter((m) => m.is_merge && (m.member_source_ids || []).includes(s.id));
-      if (usedBy.length) {
-        const names = usedBy.map((m) => `"${sourceLabel(m)}"`).join(', ');
-        await alertDialog(
-          `${sourceLabel(s)} is merged into ${names}. Delete `
-          + (usedBy.length === 1 ? 'that merge' : 'those merges')
-          + ' first — a merge is only a view over its tables, so deleting it keeps them.');
-        return;
-      }
-      const warn = s.is_merge
-        ? `Delete merge "${sourceLabel(s)}"? The tables under it are untouched.`
-        : `Remove ${sourceLabel(s)} from this case? Tags and notes for it are deleted too.`;
-      if (!(await confirmDialog(warn, { danger: true, okLabel: 'Remove' }))) return;
-      // A search running in the background for it, or landed and
-      // waiting for Apply, is for a table that is about to not exist:
-      // its row goes, and the server drops the build or the held view.
-      cancelPendingView(s.id);
-      try {
-        await api(s.is_merge ? `/api/merges/${-s.id}` : `/api/source/${s.id}`, { method: 'DELETE' });
-      } catch (e) {
-        // A refusal (the server's own "merged into" 409, for a merge
-        // another window just made) has a reason worth reading; without
-        // this it was an unhandled rejection and the button looked dead.
-        toast(`Could not remove ${sourceLabel(s)}: ${e.message}`, 6000);
-        return;
-      }
-      if (!s.is_merge) {
-        S.viewCache.delete(s.id); // SQLite can reuse a deleted source's row id — don't let a stale cached view leak onto it
-        dropViewStateFor(s.id);   // nor the filters/sort stashed for it
-        if (S.diffMarks && S.diffMarks.sourceId === s.id) S.diffMarks = null; // nor a comparison's marks
-      }
-      if (S.sourceId === s.id) S.sourceId = null;
-      await loadSources();
-      openTablesManager();
-    }
-
     // A row's ⋯. Settings… is the manager's way into the Table dialog
     // (which has a "Tables manager…" back); openTableMenu opens the table
     // itself first when it was closed.
@@ -205,7 +223,7 @@ export function openTablesManager() {
           onclick: async () => { if (await editSourceNickname(s)) openTablesManager(); },
         },
         '-',
-        { label: 'Remove…', onclick: () => removeSource(s) },
+        { label: 'Remove…', onclick: async () => { if (await removeSource(s)) openTablesManager(); } },
       ];
     }
 

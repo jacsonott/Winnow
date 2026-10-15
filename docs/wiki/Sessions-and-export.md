@@ -100,7 +100,9 @@ notes.
 ## Handing work to another analyst
 
 Two analysts on one investigation each work in their own case file. A
-session file is how one passes their tags and notes to the other.
+session file is how one passes their tags and notes to the other. That is
+the only time you need one: a saved session is already inside the case
+file and goes wherever the case goes.
 
 ### Sending a session file
 

@@ -211,8 +211,7 @@ def test_a_folded_card_is_still_editable_from_its_line(page):
         _wait_folded(page, 2)
         _rows(page).nth(1).locator(".dash-empties-edit").click()
         page.wait_for_selector("#modal:not([hidden]) .dash-form", timeout=15_000)
-        assert page.locator("#modal .dash-form input.confirm-input").first.input_value() \
-            == "Recent alerts"
+        assert page.locator("#modal .dash-title-input").input_value() == "Recent alerts"
     finally:
         page.keyboard.press("Escape")
         page.wait_for_function("() => document.getElementById('modal').hidden", timeout=15_000)

@@ -7,9 +7,9 @@ import { $, MOD_ENTER, api, debounce, el, post, toast } from './core.js';
 import { hideDetailPane } from './detail.js';
 import { render, renderTagToolbar } from './grid.js';
 import { drawRail, regroupIfGroupedByTag } from './grouping.js';
-import { abandonSqlRuns, hidePluginViews, runSql, sqlResultNodes, syncPluginPanels } from './plugins.js';
+import { abandonSqlRuns, hidePluginViews, runSql, sqlResultNodes, sqlRunningNodes, syncPluginPanels } from './plugins.js';
 import { syncHistogramPanel } from './histogram.js';
-import { quoteIdent, setActiveSqlResult } from './sqlassist.js';
+import { quoteIdent, releaseSqlResults, setActiveSqlResult } from './sqlassist.js';
 import { checkPresets } from './savedfilters.js';
 import { syncDiffBanner } from './session.js';
 import { paneTable, sourceLabel, syncTabSelection, wireDragReorder } from './sources.js';
@@ -45,9 +45,11 @@ export function showSqlTab() {
    The editor holds exactly one tab's text at a time; switching tabs flushes
    the current text first (flushSqlTabSave — the debounced autosave is not
    allowed to lose an edit just because you clicked away within its window).
-   Result sets stay in memory only, in S.sqlResults keyed by tab id: they're
-   re-derivable by pressing Run, can be large, and are a snapshot of the
-   data rather than the analysis, so they don't belong in the case file. */
+   Result sets are not in the case file: they're re-derivable by pressing
+   Run, can be large, and are a snapshot of the data rather than the
+   analysis. The server holds each one's rows in a scratch database of its
+   own (winnow/sqlresults.py); S.sqlResults, keyed by tab id, holds the
+   handle and the first page. */
 
 export const SQL_AUTOSAVE_MS = 700;
 
@@ -223,6 +225,22 @@ export async function loadSqlTabs() {
   renderSqlTabs();
 }
 
+/* Forget the open case's SQL pane: its tabs, results and runs. A case
+   switch calls this — sql_tabs is a per-case table, and its ids restart
+   in the next case. Left empty rather than reloaded here; showSqlTab
+   loads lazily. A query still running belongs to the case that just
+   closed (closing its Store stopped it): abandoning it is what keeps it
+   from landing in this case's tab of the same id when its
+   request returns, and from being what Ctrl+C or a tag hotkey then acts
+   on. */
+export function resetSqlPane() {
+  S.sqlTabs = [];
+  S.sqlTabId = null;
+  S.sqlResults.clear();
+  abandonSqlRuns();
+  setActiveSqlResult(null);
+}
+
 export const activeSqlTab = () => S.sqlTabs.find((t) => t.id === S.sqlTabId) || null;
 
 /* Loads the active tab's stored text + last result into the editor/result
@@ -234,8 +252,12 @@ export function applySqlTabToEditor() {
   $('sqlText').disabled = !tab;
   const out = $('sqlResult');
   const cached = tab ? S.sqlResults.get(tab.id) : null;
-  setActiveSqlResult(cached && !cached.error ? cached : null);
-  if (!cached) out.replaceChildren(sqlEmptyState());
+  const running = tab ? S.sqlRuns.get(tab.id) : null;
+  // A tab whose run is still out shows that run, not the result it is
+  // about to replace (and released when it started).
+  setActiveSqlResult(cached && !cached.error && !running ? cached : null);
+  if (running) out.replaceChildren(...sqlRunningNodes(running));
+  else if (!cached) out.replaceChildren(sqlEmptyState());
   else if (cached.error) out.replaceChildren(el('div', 'sql-error', cached.error));
   else out.replaceChildren(...sqlResultNodes(cached));
 }
@@ -360,8 +382,12 @@ export async function closeSqlTab(t) {
   }
   const idx = S.sqlTabs.findIndex((x) => x.id === t.id);
   S.sqlTabs = S.sqlTabs.filter((x) => x.id !== t.id);
+  // Its run, if one is out, stops — nobody will read what it lands — and
+  // its result is let go.
+  abandonSqlRuns(t.id);
+  const gone = S.sqlResults.get(t.id);
+  if (gone && gone.id) releaseSqlResults([gone.id]);
   S.sqlResults.delete(t.id);
-  abandonSqlRuns(t.id);   // its answer has no tab to go to
   if (S.sqlTabId === t.id) {
     const next = S.sqlTabs[Math.min(idx, S.sqlTabs.length - 1)];
     S.sqlTabId = next ? next.id : null;

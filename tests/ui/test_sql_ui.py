@@ -75,12 +75,13 @@ def test_results_sort_by_clicking_headers_and_show_tags(page):
     page.click("#btnRunSql")
     page.wait_for_function("() => document.querySelectorAll('#sqlResult tr').length === 21")
 
-    cell = lambda: page.locator("#sqlResult tr").nth(1).locator("td").nth(1).inner_text()  # noqa: E731
+    # The sort is the server's (the result is held there), so the sorted
+    # rows land a fetch after the click: wait for the first one.
+    first = "() => document.querySelectorAll('#sqlResult tr')[1]?.querySelectorAll('td')[1]?.textContent"
     page.locator("#sqlResult th", has_text="EventId").click()
-    asc = cell()
+    page.wait_for_function(f"({first})() === '1'")   # EventId cycles 4624/4625/4688/1
     page.locator("#sqlResult th", has_text="EventId").click()
-    desc = cell()
-    assert asc == "1" and desc == "4688"  # EventId cycles 4624/4625/4688/1
+    page.wait_for_function(f"({first})() === '4688'")
 
     # cleanup: untag
     page.evaluate("() => __winnow.showGridTab()")
@@ -153,7 +154,7 @@ def test_autocomplete_marks_and_completes_derived_columns(page):
 
 
 def _hold_first_sql_run(page):
-    """Intercept /api/sql: the first run is held (its route returned for
+    """Intercept /api/sql/run: the first run is held (its route returned for
     the test to answer whenever it likes), later ones go straight through.
     That makes "a slow run is still in flight" a state the test controls
     rather than a query it hopes is slow enough (test_search_supersede.py's
@@ -168,7 +169,7 @@ def _hold_first_sql_run(page):
         else:
             route.continue_()
 
-    pattern = re.compile(r".*/api/sql$")
+    pattern = re.compile(r".*/api/sql/run$")
     page.route(pattern, handler)
     return held, pattern
 
@@ -180,7 +181,8 @@ def _answer_late(route, column):
 
     try:
         route.fulfill(status=200, content_type="application/json", body=json.dumps(
-            {"columns": [column], "rows": [[1]], "elapsed_ms": 1, "truncated": False}))
+            {"id": "late", "columns": [column], "rows": [[1]], "total": 1, "widths": [1],
+             "stopped": None, "elapsed_ms": 1}))
     except Exception:
         pass
 

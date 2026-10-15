@@ -12,6 +12,7 @@ import { clearPageCache, headH, rScroll, render, rowAt, spacerPx } from './grid.
 import { closeAllGroupViews, drawRail, dropGrouping, regroupAll, renderGroupStrip, setGrouping } from './grouping.js';
 import { shutdownWinnow } from './home.js';
 import { openImportModal } from './importer.js';
+import { keyLabel } from './keymap.js';
 import { openMergeBuilder } from './merge.js';
 import { showPluginTab } from './plugins.js';
 import { checkPresets } from './savedfilters.js';
@@ -24,11 +25,11 @@ import { dashDrag, loadDashboards, renderDashboardsInto, showDashboard } from '.
 import { openCaseSettings } from './settings.js';
 import { openLog } from './errlog.js';
 import { S, clearCellSelection, selClear, selCount, selFirst, specKey } from './state.js';
-import { compactCaseFile, openTablesManager } from './tables.js';
+import { compactCaseFile, mergesUsing, openTablesManager, removeRefusal, removeSource } from './tables.js';
 import { loadTags, refreshTagCounts, renderTagRibbon } from './tags.js';
 import { openTableMenu, timeframeAcrossTables, updateFiltersButton, updateTimeRangeButton } from './timeframe.js';
 import { baseColumns } from './tsformat.js';
-import { confirmDialog, dropdownMenu, modal, promptDialog } from './ui.js';
+import { confirmDialog, contextMenu, dropdownMenu, modal, promptDialog } from './ui.js';
 import { dropPendingSelection, pendingViewStatsText, rebuildView, syncNoRows, writeStatsLine } from './view.js';
 
 /* --------------------------------------------------------------- sources */
@@ -298,6 +299,87 @@ export function wireTabDrag(t, id) {
   wireDragReorder(t, id, { containerSelector: '#sourceTabs', rowSelector: '.tab', horizontal: true });
 }
 
+/* What a right-click on a table offers — on its tab, and on its rows in
+   the sidebar. It used to open the whole Table dialog (openTableMenu: every
+   column, the value dropdowns, layout defaults), a full-height modal for
+   what was most often a close or a rename; that dialog is one entry here
+   now, Columns…, and still `C` on its own. Each entry is the same call,
+   under the same label, as the place that already did it: the Table
+   dialog's (Close this tab, the nickname, the merge builder) and the
+   Tables manager's (Remove…, with its confirm and its refusal).
+
+   Items are built from S.sources on every paint rather than from the
+   record the row was drawn with — a background loadSources() can land
+   while the menu is up. Nothing here opens the table first: a nickname,
+   a merge or a removal doesn't need it on screen, and Columns… is
+   openTableMenu, which opens it itself. */
+export const TABLE_MENU_HINT = 'Right-click to close, rename, merge or remove — or for its columns';
+
+export function tableMenuItems(id) {
+  const s = S.sources.find((x) => x.id === id);
+  if (!s) return [];
+  const merge = !!s.is_merge;
+  const items = [];
+  // Only on an open table, like the Table dialog's own Close this tab: a
+  // closed one has no tab to close.
+  if (s.is_open) {
+    items.push({
+      label: 'Close this tab',
+      title: 'Stays in the case — reopen it from the sidebar',
+      onclick: () => closeTab(s),
+    });
+    items.push('-');
+  }
+  items.push({
+    label: merge ? 'Rename this merge…' : 'Nickname this table…',
+    title: merge ? 'Rename this merge' : 'A display name shown in place of the file name — clear it to go back',
+    onclick: () => editSourceNickname(s),
+  });
+  // The keycap only on the table that's showing: `C` opens the dialog for
+  // that one, so beside any other table it would promise the wrong thing.
+  const key = s.id === S.sourceId && S.activeTab === 'grid' ? ((S.keymap || {}).openTableMenu || [])[0] : null;
+  items.push({
+    label: 'Columns…',
+    title: 'The table menu: show, hide, pin and reorder columns, value filter dropdowns, layout defaults',
+    hint: key ? keyLabel(key) : '',
+    onclick: () => openTableMenu(s.id),
+  });
+  items.push({
+    label: merge ? 'Edit merge…' : 'Merge with other tables…',
+    title: merge
+      ? 'Add or remove tables, or change which columns this merge keeps. Its layout and saved views stay.'
+      : 'One table across this and others, matched by column name',
+    onclick: () => openMergeBuilder(merge ? { edit: s } : { preselect: [s.id] }),
+  });
+  items.push('-');
+  // Greyed out, with the merge named on the item itself, rather than
+  // left to the refusal dialog: the menu can say it before the click.
+  const usedBy = mergesUsing(s);
+  items.push({
+    label: 'Remove…',
+    disabled: usedBy.length > 0,
+    desc: usedBy.length ? `Merged into ${usedBy.map((m) => `"${sourceLabel(m)}"`).join(', ')}` : undefined,
+    title: usedBy.length ? removeRefusal(s)
+      : merge ? 'Delete this merge — the tables under it are untouched'
+      : 'Delete this table from the case, with its tags and notes',
+    onclick: () => removeSource(s),
+  });
+  return items;
+}
+
+/* The right-click itself, for a tab and both kinds of sidebar row. The
+   ContextMenu key and Shift+F10 fire this same event on the focused node,
+   but at a point the browser picks — Chromium the node's centre, with
+   button -1; others have used 0,0 — so a keyboard opening anchors the menu
+   under the node, the way a dropdown sits under its button. */
+export function openTableContextMenu(e, id) {
+  e.preventDefault();
+  const r = e.currentTarget.getBoundingClientRect();
+  const onNode = e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
+  const at = e.button === -1 || !onNode ? { clientX: r.left, clientY: r.bottom } : e;
+  contextMenu(at, () => tableMenuItems(id));
+}
+
 export function renderTabs() {
   const openTabs = openTabsSorted();
   const tabs = $('sourceTabs');
@@ -321,11 +403,10 @@ export function renderTabs() {
     t.append(x);
     if (!s.error) {
       t.onclick = () => openSource(s.id);
-      // Right-click is where the table menu lives now (the ▦ column-chooser
-      // button that used to sit here opened a strict subset of it) — same
-      // menu from the tab, the sidebar row and the openTableMenu keybind.
-      t.oncontextmenu = (e) => { e.preventDefault(); openTableMenu(s.id); };
-      t.title = sourceTitle(s, 'Right-click for the table menu');
+      // The same short menu from the tab and both sidebar rows
+      // (tableMenuItems); the Table dialog is its Columns…, and `C`.
+      t.oncontextmenu = (e) => openTableContextMenu(e, s.id);
+      t.title = sourceTitle(s, TABLE_MENU_HINT);
     }
     wireTabDrag(t, s.id);
     tabs.append(t);
@@ -1411,9 +1492,9 @@ export function openSidebarRow(s, index, total) {
   const row = el('div', 'sidebar-row sidebar-openrow' + (active ? ' active' : ''));
   const label = el('button', 'menu-item', sourceGlyph(s) + sourceLabel(s) + (s.error ? ' ⚠' : ''));
   label.disabled = !!s.error;
-  label.title = s.error || sourceTitle(s, 'Right-click for the table menu');
+  label.title = s.error || sourceTitle(s, TABLE_MENU_HINT);
   label.onclick = () => openSource(s.id);
-  if (!s.error) row.oncontextmenu = (e) => { e.preventDefault(); openTableMenu(s.id); };
+  if (!s.error) row.oncontextmenu = (e) => openTableContextMenu(e, s.id);
   row.append(label);
   if (!s.error) row.append(el('span', 'sidebar-row-count', s.row_count.toLocaleString()));
   const acts = el('div', 'sidebar-row-actions');
@@ -1507,10 +1588,11 @@ export function sidebarRow(s, { depth = 0 } = {}) {
   row.append(label);
   if (!s.error) {
     // Same menu the tab strip's right-click opens, on the table's name in
-    // the sidebar — including for a closed table, which openTableMenu opens
-    // first (its panels all read the live S.layout/S.columns).
-    row.oncontextmenu = (e) => { e.preventDefault(); openTableMenu(s.id); };
-    label.title = sourceTitle(s, 'Right-click for the table menu');
+    // the sidebar — including for a closed table, which gets no Close and
+    // whose Columns… opens it first (openTableMenu: the dialog's panels all
+    // read the live S.layout/S.columns).
+    row.oncontextmenu = (e) => openTableContextMenu(e, s.id);
+    label.title = sourceTitle(s, TABLE_MENU_HINT);
     row.append(el('span', 'sidebar-row-count', s.row_count.toLocaleString()));
     const acts = el('div', 'sidebar-row-actions');
     const mv = el('button', 'menu-item-action', '🗀');
