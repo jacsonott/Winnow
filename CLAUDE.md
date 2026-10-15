@@ -664,7 +664,8 @@ lot to leave to memory.
 
 **CI runs each suite in shards.** `pytest --shard K/N` (tests/sharding.py)
 keeps whole files, dealt by test count, and ci.yml runs that as a matrix —
-six browser jobs, two backend. The checks the branch ruleset requires are
+six browser jobs, and two backend on each of Python 3.10 (the minimum the
+README promises) and 3.12. The checks the branch ruleset requires are
 the two roll-up jobs at the bottom of ci.yml, not the shards, so N can
 change without touching the ruleset. One consequence for `tests/ui`: each
 shard starts its own server, so any module can be the first thing a cold

@@ -5,6 +5,7 @@ ragged/varying-shape records, and .jsonl vs a single .json document."""
 from __future__ import annotations
 
 import json
+import sys
 
 import pytest
 
@@ -131,7 +132,10 @@ def test_pathologically_deep_json_ingests_instead_of_recursing_out(store, tmp_pa
     """A 2,000-level nested document used to walk _flatten_json off the
     interpreter stack (RecursionError). Full flatten now caps at 64
     object levels and stringifies the remainder — same convention as
-    "depth N" mode's leftovers."""
+    "depth N" mode's leftovers. Before Python 3.12 json itself stopped
+    near 1,000 levels, so there the read is retried under a raised
+    recursion limit, which is process-wide and must be put back."""
+    limit = sys.getrecursionlimit()
     p = tmp_path / "deep.json"
     p.write_text('{"a":' * 2000 + '1' + '}' * 2000, encoding="utf-8")
     rec = store.ingest_json(str(p), flatten_mode="full", build_fts=False)
@@ -139,6 +143,39 @@ def test_pathologically_deep_json_ingests_instead_of_recursing_out(store, tmp_pa
     assert len(rec["columns"]) == 1
     name = rec["columns"][0]["name"]
     assert name.count(".") == 64    # capped unfold, remainder is one cell
+    assert sys.getrecursionlimit() == limit
+
+
+# Deeper than json nests on any Python (3.12 and 3.13 stop near 10,000).
+TOO_DEEP = 1_000_000
+
+
+def test_json_nested_past_what_python_can_read_is_a_clear_error(store, tmp_path):
+    """Past the depth the running Python's json can nest, the analyst used
+    to get "maximum recursion depth exceeded while decoding a JSON object
+    from a unicode string". It is a JSONDecodeError now, a ValueError that
+    says what is wrong, and no source is left behind."""
+    limit = sys.getrecursionlimit()
+    p = tmp_path / "abyss.json"
+    p.write_text("[" * TOO_DEEP + "]" * TOO_DEEP, encoding="utf-8")
+    with pytest.raises(ValueError, match="Nested too deeply"):
+        store.ingest_json(str(p), build_fts=False)
+    assert store.list_sources() == []
+    assert sys.getrecursionlimit() == limit
+
+
+def test_a_jsonl_line_nested_past_python_is_one_bad_line(store, tmp_path):
+    """A RecursionError is not a JSONDecodeError, so the JSONL reader's
+    count-and-skip never saw it: one absurd line cost the whole file."""
+    p = tmp_path / "abyss.jsonl"
+    with open(p, "w", encoding="utf-8") as f:
+        f.write('{"n": 1}\n')
+        f.write("[" * TOO_DEEP + "]" * TOO_DEEP + "\n")
+        f.write('{"n": 2}\n')
+    rec = store.ingest_json(str(p), build_fts=False)
+    assert rec["row_count"] == 2
+    assert rec["bad_records"] == 1
+    assert rec["first_bad_line"] == 2
 
 
 def test_more_keys_than_a_table_can_hold_fold_into_one_json_column(store, tmp_path):

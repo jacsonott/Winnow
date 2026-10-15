@@ -90,6 +90,15 @@ see [docs/notes/README.md](README.md) for the whole set.
   They carry no `sources` row, so the grid, the sidebar and merges never
   see them; use `ingest_rows` when an analyst should browse the result.
 
+- **A plugin write's authorizer comes off through `_clear_authorizer`,
+  never `set_authorizer(None)`.** `plugin_table_write` puts
+  `_refuse_evidence_writes` on the writer connection for its one
+  statement. `None` only means "no authorizer" from Python 3.11; on 3.10
+  it installs None as the callback, every statement is denied, and one
+  `execute()` (the Claude assistant's clear-history) left the whole case
+  refusing writes, view builds and imports until a restart. CI ran only
+  3.12 then, so it shipped; the backend now also runs on 3.10.
+
 - **Plugins** (plugin_api.py, `plugins/`, Settings → Plugins) are
   Notepad++-style drop-in extensions, first loaded at server *import* (so
   `uvicorn server:app` gets them, not just `python server.py`;

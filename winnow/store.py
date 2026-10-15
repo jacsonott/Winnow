@@ -34,6 +34,7 @@ import socket
 import sqlite3
 import stat
 import string
+import sys
 import tempfile
 import threading
 import time
@@ -1211,6 +1212,62 @@ def column_signature(cols: list[str]) -> str:
     return hashlib.sha256("\x1f".join(sorted(_ascii_fold(c.strip()) for c in cols)).encode()).hexdigest()
 
 
+# Python 3.10's csv refuses any line holding a NUL ("line contains NUL");
+# 3.11 reads one into its cell like any other character. NULs are ordinary
+# in DFIR exports (UTF-16 debris, registry data), and 3.10 is the minimum
+# the README promises, so there _csv_rows escapes them past the parser.
+_CSV_READS_NUL = sys.version_info >= (3, 11)
+_NUL_ESC, _NUL_MARK = "\uffff", "\ufffe"     # noncharacters: rare, never special to csv
+_NUL_UNESCAPE = re.compile(f"{_NUL_ESC}[{_NUL_ESC}{_NUL_MARK}]")
+
+
+def _nul_unescape(m: re.Match) -> str:
+    return _NUL_ESC if m.group()[1] == _NUL_ESC else "\0"
+
+
+def _csv_rows(lines: Iterable[str], delimiter: str, *, escape_nul: bool | None = None):
+    """`(reader, rows)`: a csv.reader over `lines`, and what to iterate for
+    its rows — the reader itself wherever csv reads NUL. The reader is
+    returned for its line_num.
+
+    Where it does not (3.10, or `escape_nul=True`, which is how the tests
+    reach this path on every version), a line holding a NUL goes in with
+    each NUL written as ESC MARK and each ESC already there doubled, and the
+    row comes out with that undone: the same cells 3.11 reads. Exact, not
+    "rare enough": anything that was an ESC in the file comes back as one.
+    Only rows that took an escaped line pay for the unescape. That is
+    sound because csv asks for exactly the lines its record needs and no
+    more, so the flag a line sets belongs to the row read next, and a line
+    that needed no escaping holds no NUL and no ESC, so unescaping a cell
+    that spans both kinds of line touches only the escaped part. Every
+    line still passes through one generator here, which is why 3.11+
+    skips all of it."""
+    if escape_nul is None:
+        escape_nul = not _CSV_READS_NUL
+    if not escape_nul:
+        reader = csv.reader(lines, delimiter=delimiter)
+        return reader, reader
+    escaped = [False]
+
+    def escape():
+        for line in lines:
+            if "\0" in line or _NUL_ESC in line:
+                escaped[0] = True
+                line = line.replace(_NUL_ESC, _NUL_ESC * 2).replace("\0", _NUL_ESC + _NUL_MARK)
+            yield line
+
+    reader = csv.reader(escape(), delimiter=delimiter)
+
+    def rows():
+        for row in reader:
+            if escaped[0]:
+                escaped[0] = False
+                row = [_NUL_UNESCAPE.sub(_nul_unescape, c) for c in row]
+            yield row
+
+    return reader, rows()
+
+
 def _first_nonblank_row(reader: Iterable[list[str]]) -> list[str]:
     """The first row with anything in it — the header, or (without one)
     the row that fixes the table's width. Leading blank rows are skipped:
@@ -1365,12 +1422,58 @@ _JSON_READ = {"parse_float": _JsonNumber, "parse_int": _JsonNumber,
               "parse_constant": _JsonNumber, "object_pairs_hook": _json_object}
 
 
+# json's C scanner spends the interpreter's recursion limit on nesting
+# before Python 3.12 (1,000 frames by default), so a document nested about
+# 1,000 deep raised RecursionError on 3.10 and 3.11 where 3.12, whose C
+# code has a budget of its own, reads at least 8,000. On those two a parse
+# that runs out is tried once more under this limit. Measured, they spend
+# about 150 bytes of C stack a level, so 3,000 levels is under half a
+# megabyte, inside the 1 MB that is the smallest default thread stack on
+# the platforms Winnow supports. 0 = no retry.
+_JSON_DEEP_RECURSION_LIMIT = 3000 if sys.version_info < (3, 12) else 0
+_recursion_lock = threading.Lock()
+_recursion_raisers = 0
+_recursion_saved = 0
+
+
+@contextlib.contextmanager
+def _deep_json_recursion_limit():
+    """sys.setrecursionlimit is process-wide, so concurrent deep reads
+    share one raise: the first saves the limit, the last puts it back."""
+    global _recursion_raisers, _recursion_saved
+    with _recursion_lock:
+        if _recursion_raisers == 0:
+            _recursion_saved = sys.getrecursionlimit()
+            sys.setrecursionlimit(max(_recursion_saved, _JSON_DEEP_RECURSION_LIMIT))
+        _recursion_raisers += 1
+    try:
+        yield
+    finally:
+        with _recursion_lock:
+            _recursion_raisers -= 1
+            if _recursion_raisers == 0:
+                sys.setrecursionlimit(_recursion_saved)
+
+
 def _json_loads(text: str) -> Any:
-    return json.loads(text, **_JSON_READ)
+    """Past what the running Python can nest at all, a JSONDecodeError
+    rather than the RecursionError json raises: every caller handles the
+    first, and a JSONL import counts the line as bad and keeps the rest."""
+    try:
+        return json.loads(text, **_JSON_READ)
+    except RecursionError:
+        pass
+    if _JSON_DEEP_RECURSION_LIMIT:
+        try:
+            with _deep_json_recursion_limit():
+                return json.loads(text, **_JSON_READ)
+        except RecursionError:
+            pass
+    raise json.JSONDecodeError("Nested too deeply to read", text, 0)
 
 
 def _json_load(fh) -> Any:
-    return json.load(fh, **_JSON_READ)
+    return _json_loads(fh.read())     # what json.load does, through the retry above
 
 
 def _json_items(obj: dict):
@@ -1652,6 +1755,26 @@ def _iter_json_records(path: str, bad: dict | None = None) -> Iterable[dict]:
         yield data
     else:
         yield {"value": data}
+
+
+def _allow_everything(*_args) -> int:
+    return sqlite3.SQLITE_OK
+
+
+def _clear_authorizer(conn: sqlite3.Connection) -> None:
+    """Take an authorizer back off `conn`. set_authorizer(None) only means
+    "none" from Python 3.11; on 3.10 it installs None AS the callback, the
+    call fails on every statement, and SQLite reads that as a denial — so
+    one plugin table write left the writer connection refusing every
+    write, view build and import ("not authorized") until Winnow
+    restarted. 3.10 has no way to remove one, so it gets a callback that
+    allows everything instead. SQLite consults it only while preparing a
+    statement (once per table and column the statement names), never per
+    row, and a statement served from sqlite3's cache is not prepared again."""
+    if sys.version_info >= (3, 11):
+        conn.set_authorizer(None)
+    else:
+        conn.set_authorizer(_allow_everything)
 
 
 class IngestCancelled(Exception):
@@ -3691,12 +3814,12 @@ class Store:
             # override and may carry no extension at all, and the
             # extension is the whole point here.
             delimiter = self._sniff(head, path)
-        reader = csv.reader(fh, delimiter=delimiter)
+        reader, rows = _csv_rows(fh, delimiter)
 
         # Everything up to the row loop's own try/finally closes the file
         # on the way out too — a failure here used to leak the handle.
         try:
-            first_row = _first_nonblank_row(reader)
+            first_row = _first_nonblank_row(rows)
             if has_header:
                 cols = sanitize_columns(first_row)
                 ncols = len(cols)
@@ -3747,7 +3870,7 @@ class Store:
         with self._ingest_synchronous_off():
             try:
                 prev_line = 0
-                for row in itertools.chain(rows_iter, reader):
+                for row in itertools.chain(rows_iter, rows):
                     if len(row) != ncols:
                         # Ragged row: pad or trim rather than dropping evidence.
                         ragged += 1
@@ -4028,8 +4151,8 @@ class Store:
         one table and gets another."""
         if delimiter is None:
             delimiter = self._sniff(text[:8192], name)
-        reader = csv.reader(io.StringIO(text), delimiter=delimiter)
-        first_row = _first_nonblank_row(reader)
+        _, rows = _csv_rows(io.StringIO(text), delimiter)
+        first_row = _first_nonblank_row(rows)
         if has_header:
             cols = sanitize_columns(first_row)
             ncols = len(cols)
@@ -4040,7 +4163,7 @@ class Store:
             leftover_row = first_row
 
         sample: list[list[str]] = []
-        for row in itertools.chain([leftover_row] if leftover_row is not None else [], reader):
+        for row in itertools.chain([leftover_row] if leftover_row is not None else [], rows):
             if len(sample) >= max_rows:
                 break
             if len(row) != ncols:
@@ -12163,7 +12286,7 @@ class Store:
                         "Use your own plugin table — the {table} placeholder.") from e
                 raise
             finally:
-                self.db.set_authorizer(None)
+                _clear_authorizer(self.db)
             return max(0, cur.rowcount if cur.rowcount is not None else 0)
 
     # src_<id>, drv_<id> and the tables analyst work lives in. A plugin
