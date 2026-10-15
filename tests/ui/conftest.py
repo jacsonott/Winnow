@@ -13,16 +13,20 @@ Playwright and its Chromium live in `requirements-dev.txt` only — the
 airgapped target still needs nothing but the standard library plus FastAPI —
 and the whole module skips, rather than fails, when either is missing, so
 `pytest` on a box without a browser stays green and honest about what it
-covered.
+covered. CI sets WINNOW_UI_REQUIRE_BROWSER=1, which turns that skip into a
+failure: there a missing browser means the required `browser` check would
+pass having run nothing.
 """
 
 from __future__ import annotations
 
+import collections
 import json
 import os
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -32,9 +36,14 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 
-sync_playwright = pytest.importorskip(
-    "playwright.sync_api", reason="playwright not installed (pip install -r requirements-dev.txt)"
-).sync_playwright
+REQUIRE_BROWSER = os.environ.get("WINNOW_UI_REQUIRE_BROWSER") == "1"
+
+if REQUIRE_BROWSER:
+    from playwright.sync_api import sync_playwright   # an ImportError fails the run
+else:
+    sync_playwright = pytest.importorskip(
+        "playwright.sync_api", reason="playwright not installed (pip install -r requirements-dev.txt)"
+    ).sync_playwright
 
 
 def _free_port() -> int:
@@ -54,7 +63,10 @@ def browser():
         try:
             b = p.chromium.launch()
         except Exception as e:  # no browser binary installed
-            pytest.skip(f"chromium unavailable ({e}); run `playwright install chromium`")
+            msg = f"chromium unavailable ({e}); run `playwright install chromium`"
+            if REQUIRE_BROWSER:
+                pytest.fail(msg, pytrace=False)
+            pytest.skip(msg)
         yield b
         b.close()
 
@@ -79,11 +91,74 @@ def ui_csv(tmp_path_factory) -> Path:
     return path
 
 
+class ServerLog:
+    """What the shared server writes, read as it writes it. The pipe used to
+    be read only if the server died during startup, so a traceback behind a
+    failing test never reached its report, and a server that wrote more
+    than the pipe holds (64 KB on Linux) would have blocked mid-request and
+    hung the test. Keeps the last MAX_LINES; `mark()` and `since()` let a
+    report take just the lines written during one test."""
+
+    MAX_LINES = 5000
+
+    def __init__(self, stream):
+        self._lines: collections.deque[str] = collections.deque(maxlen=self.MAX_LINES)
+        self._total = 0
+        self._lock = threading.Lock()
+        self._thread = threading.Thread(target=self._pump, args=(stream,), daemon=True)
+        self._thread.start()
+
+    def _pump(self, stream):
+        for raw in iter(stream.readline, b""):
+            with self._lock:
+                self._lines.append(raw.decode(errors="replace").rstrip("\r\n"))
+                self._total += 1
+
+    def mark(self) -> int:
+        with self._lock:
+            return self._total
+
+    def since(self, mark: int) -> list[str]:
+        with self._lock:
+            kept_from = self._total - len(self._lines)
+            return list(self._lines)[max(mark - kept_from, 0):]
+
+    def finish(self, timeout: float = 5) -> str:
+        """Everything still held, once the process has exited."""
+        self._thread.join(timeout)
+        return "\n".join(self.since(0))
+
+
+# The shared server's log, for pytest_runtest_makereport. Set by `server`.
+_server_log: ServerLog | None = None
+_LOG_MARK = pytest.StashKey[int]()
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_setup(item):
+    item.stash[_LOG_MARK] = _server_log.mark() if _server_log else 0
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    """A failing UI test's report carries what the server logged while it
+    ran: when a UI test fails it is usually the server behind it."""
+    outcome = yield
+    rep = outcome.get_result()
+    if not rep.failed or _server_log is None:
+        return
+    time.sleep(0.3)   # uvicorn logs a handler's traceback after sending the 500
+    lines = _server_log.since(item.stash.get(_LOG_MARK, 0))
+    if lines:
+        rep.sections.append(("Captured server log", "\n".join(lines)))
+
+
 @pytest.fixture(scope="session")
 def server(tmp_path_factory, ui_csv):
     """One server for the whole UI session — startup is ~1s and none of these
     tests mutate the case in a way another test reads. Uses its own tmp case
     file, like every other test in the suite."""
+    global _server_log
     port = _free_port()
     case = tmp_path_factory.mktemp("case") / "ui.db"
     proc = subprocess.Popen(
@@ -103,14 +178,17 @@ def server(tmp_path_factory, ui_csv):
              # Settings → File associations test must never write the
              # developer's real ~/.local/share or ~/.config.
              "XDG_DATA_HOME": str(tmp_path_factory.mktemp("xdg-data")),
-             "XDG_CONFIG_HOME": str(tmp_path_factory.mktemp("xdg-config"))},
+             "XDG_CONFIG_HOME": str(tmp_path_factory.mktemp("xdg-config")),
+             # A print() to a pipe is block-buffered; the log should arrive
+             # while the test that caused it is still the one running.
+             "PYTHONUNBUFFERED": "1"},
     )
+    log = _server_log = ServerLog(proc.stdout)
     base = f"http://127.0.0.1:{port}"
     deadline = time.time() + 45
     while time.time() < deadline:
         if proc.poll() is not None:
-            out = proc.stdout.read().decode(errors="replace") if proc.stdout else ""
-            pytest.fail(f"server exited during startup:\n{out}")
+            pytest.fail(f"server exited during startup:\n{log.finish()}")
         try:
             with urllib.request.urlopen(base + "/api/sources", timeout=1) as r:
                 if r.status == 200:
@@ -119,13 +197,15 @@ def server(tmp_path_factory, ui_csv):
             time.sleep(0.15)
     else:
         proc.kill()
-        pytest.fail("server did not come up within 45s")
+        pytest.fail(f"server did not come up within 45s:\n{log.finish()}")
     yield base
     proc.terminate()
     try:
         proc.wait(timeout=10)
     except subprocess.TimeoutExpired:
         proc.kill()
+    log.finish()
+    _server_log = None
 
 
 @pytest.fixture(scope="session")
