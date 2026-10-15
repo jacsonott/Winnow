@@ -162,10 +162,10 @@ export function currentSpec() {
    lean on until the lazy per-column one exists. At a few hundred thousand
    rows that's tens of milliseconds; on a 2.4M-row $J it's the kind of
    pause a button you might click by accident shouldn't be able to cause.
-   The override lives per-table and per-column in the table menu (right-
-   click a tab), and the row menu's "Filter by values…" opens it regardless
-   — an explicit click is consent to pay for the scan in a way an
-   always-present button isn't. */
+   The override lives per-table and per-column in the table menu (C, or a
+   tab's right-click → Columns…), and the row menu's "Filter by values…"
+   opens it regardless — an explicit click is consent to pay for the scan
+   in a way an always-present button isn't. */
 export const VALUE_FILTER_AUTO_MAX = 250000;
 
 export const VALUE_PICKER_LIMIT = 1000;

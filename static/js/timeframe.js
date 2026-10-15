@@ -840,10 +840,13 @@ export function buildTableStripPanel(container) {
    adding one should be adding an entry. `build` gets (container, refresh)
    and may render nothing at all.
 
-   It lives behind a right-click on the tab or the sidebar row (and the
-   openTableMenu keybind) rather than a visible ▦ button, which is the icon
-   this replaced — a menu that's going to keep growing needs a home that
-   doesn't cost tab-strip width per entry. */
+   It lives behind the openTableMenu keybind, the Tables manager's
+   Settings… and Columns… on a table's right-click menu (tableMenuItems in
+   sources.js) rather than a visible ▦ button, which is the icon this
+   replaced — a menu that's going to keep growing needs a home that doesn't
+   cost tab-strip width per entry. The right-click opened this dialog
+   directly until it got a short menu of its own: a full-height modal was a
+   lot to put up for closing or renaming a tab. */
 export const TABLE_MENU_SECTIONS = [
   { id: 'strip', title: null, build: buildTableStripPanel },
   { id: 'columns', title: 'Columns', build: buildColumnsPanel },
@@ -851,8 +854,9 @@ export const TABLE_MENU_SECTIONS = [
   { id: 'table', title: 'This table', build: buildTableActionsPanel },
 ];
 
-/* `sourceId` is optional — the tab/sidebar entry points pass the table that
-   was right-clicked, which may not be the one on screen. The panels all
+/* `sourceId` is optional — the right-click menu's Columns… and the Tables
+   manager pass the table they were opened on, which may not be the one on
+   screen. The panels all
    read S.layout/S.order/S.columns (this table's live state), so opening
    that source first isn't a convenience, it's the precondition. */
 export async function openTableMenu(sourceId) {

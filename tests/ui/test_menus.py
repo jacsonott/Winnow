@@ -78,8 +78,12 @@ def test_column_header_right_click_opens_column_options(page):
     assert page.locator(".hcell-fmt").count() == 0, "the ▾ button was replaced by this menu"
 
 
-def test_tab_right_click_opens_the_table_menu(page):
+def test_tab_right_click_reaches_the_table_menu(page):
+    # A short menu at the pointer first (test_table_context_menu.py); the
+    # table menu itself is its Columns… entry.
     page.locator("#sourceTabs .tab").first.click(button="right")
+    page.wait_for_selector(".menu:not(.menu-sub)")
+    page.locator(".menu:not(.menu-sub) .menu-item", has_text="Columns…").click()
     page.wait_for_selector("#modal:not([hidden])")
     assert page.locator("#modalTitle").inner_text().upper().startswith("TABLE —")
     assert page.locator(".table-menu-section h4").count() >= 3

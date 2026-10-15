@@ -639,8 +639,8 @@ see [docs/notes/README.md](README.md) for the whole set.
   The note over a comparison of sessions that cover different tables
   says those tables ARE counted (diff_sessions keys every tagged row and
   note of both sides); it said the counts covered "what they share".
-- **The right-click surfaces** (row menu, column-header menu, table menu,
-  header value picker) all hang off one floating-menu implementation in `static/js/ui.js` —
+- **The right-click surfaces** (row menu, column-header menu, a table's
+  tab/sidebar menu, header value picker) all hang off one floating-menu implementation in `static/js/ui.js` —
   `showFloating`/`placeFloating` plus the single `openMenuEl`/`openMenuAnchor`
   pair, with `dropdownMenu` (anchored under a button), `contextMenu`
   (positioned at the pointer) and `anchoredPanel` (a card with real
@@ -927,13 +927,36 @@ see [docs/notes/README.md](README.md) for the whole set.
   look-and-feel prefs rather than in the layout — it's a statement about
   this screen, not about this table's columns.
 - **The table menu replaced the tab strip's `▦` column-chooser button**
-  (`TABLE_MENU_SECTIONS`/`openTableMenu`, right-click a tab or a sidebar
-  row, or press `C`). Same registry reasoning as the row menu: it's where
-  per-table features land, and the tab strip can't grow an icon per
-  feature. `openTableMenu(sourceId)` opens that source first when it isn't
-  the one on screen — not a convenience, a precondition, since every panel
-  reads the live `S.layout`/`S.order`/`S.columns` rather than the record it
-  was handed.
+  (`TABLE_MENU_SECTIONS`/`openTableMenu`: press `C`, the Tables manager's
+  Settings…, or Columns… on a table's right-click menu). Same registry
+  reasoning as the row menu: it's where per-table features land, and the
+  tab strip can't grow an icon per feature. `openTableMenu(sourceId)`
+  opens that source first when it isn't the one on screen — not a
+  convenience, a precondition, since every panel reads the live
+  `S.layout`/`S.order`/`S.columns` rather than the record it was handed.
+- **Right-clicking a table is a short menu, not the table menu**
+  (`tableMenuItems`/`openTableContextMenu` in sources.js, one handler for
+  the tab and both kinds of sidebar row). The right-click used to open the
+  full-height dialog above, for what was most often a close or a rename;
+  now it is a `contextMenu` at the pointer holding Close this tab (open
+  tables only), the nickname, Columns… (the dialog, unchanged), the merge
+  builder and Remove…. Each entry calls what the Table dialog or the
+  Tables manager already calls, under their label, so there is still one
+  implementation of each. Three things to keep: **items are built from
+  `S.sources` on every paint**, by id — a background `loadSources()` can
+  land while the menu is up and the record the row was drawn from is
+  stale by then. **A keyboard opening anchors under the node**: the
+  ContextMenu key and `Shift+F10` fire the same `contextmenu` event, which
+  Chromium places at the focused node's centre with `button === -1` (other
+  engines have used 0,0), so taking its coordinates dropped the menu over
+  the tab it was about; `button === -1` or a point off the node means
+  "place it like a dropdown". And **Remove…'s refusal is one predicate**
+  (`mergesUsing`/`removeRefusal` in tables.js): the manager's button
+  refuses with an alert, the menu greys its entry out and names the merge
+  in the `desc` line, and both read the same rule — the menu can say it
+  before the click, which a button in a list of buttons can't. Errored
+  rows (a broken merge) still get no menu; the Tables manager is where
+  those are removed. tests/ui/test_table_context_menu.py.
 - **"Hide empty rows" is a view predicate, not a layout edit.** Unlike
   its neighbour "Hide empty columns" (a one-shot client-side sample that
   writes `S.layout`), the row toggle is `S.hideEmptyRows` →
