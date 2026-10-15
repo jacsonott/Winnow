@@ -318,8 +318,11 @@ static/js/splash.js The launch animation — winnowing, which is what the app
                     exists and can't be what breaks startup. Runs CONCURRENTLY
                     with boot(), so it fades onto a screen that is already
                     populated. Skippable by any key/click, off via Settings →
-                    Appearance, and skipped entirely under
-                    prefers-reduced-motion. tests/ui/conftest.py disables it
+                    Appearance, and skipped under prefers-reduced-motion
+                    EXCEPT on Windows, where Chromium reports that whenever
+                    Animation effects are off — the VM/RDP default — so
+                    honouring it there meant nobody saw it
+                    (splash.osSkipsSplash). tests/ui/conftest.py disables it
                     for the shared page fixture — a full-viewport overlay
                     would make every click in every other test wait it out.
 static/style.css   Token-driven theming: 6 styles (panel/phosphor/blueprint/
