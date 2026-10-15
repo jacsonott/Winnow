@@ -598,3 +598,17 @@ see [docs/notes/README.md](README.md) for the whole set.
   spelled `["\uXXXX"]` in its path — `parse_json_path` reads that back
   as the same key — because the path is stored in a column definition
   and the picker's route could not encode its response at all.
+
+- **Python 3.10 reads the same evidence 3.12 does only because store.py
+  works around two stdlib differences.** 3.10's csv refuses any line
+  holding a NUL ("line contains NUL"), so a file with one NUL failed at
+  that line; `_csv_rows` escapes NULs past the parser there and
+  unescapes the cells, exactly (the escape characters themselves round
+  trip). And before 3.12 json's C scanner spends the interpreter's
+  recursion limit on nesting, so a document ~1,000 deep raised
+  RecursionError; `_json_loads` retries once under a raised limit
+  (`_JSON_DEEP_RECURSION_LIMIT`, sized against the smallest thread
+  stack). Past what any Python can nest it raises JSONDecodeError, so a
+  JSONL import counts the line as bad instead of losing the file. 3.11+
+  skips the csv escape and 3.12+ the retry; the backend suite runs on
+  3.10 in CI so a third difference shows up there.

@@ -81,6 +81,8 @@ STOCK_VARIABLE_LIMIT = 32766
 def stock_sqlite_limits(store, monkeypatch):
     import sqlite3
 
+    if not hasattr(store.db, "setlimit"):
+        pytest.skip("Connection.setlimit needs Python 3.11+")
     store.db.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, STOCK_VARIABLE_LIMIT)
     real = store._open_reader
 
