@@ -133,7 +133,8 @@ export const S = {
   caseVariables: [],       // the open case's variables [{name, value, description, required}] — Case settings → Variables
   sqlTabs: [],             // [{id, name, sql, pos}] from the case file's sql_tabs table (see showSqlTab)
   sqlTabId: null,          // which sql tab the editor/result pane is currently showing
-  sqlResults: new Map(),   // sql tab id -> last {columns, rows, elapsed_ms, truncated} | {error}, in memory only
+  sqlResults: new Map(),   // sql tab id -> last {id, columns, rows (first page), total, elapsed_ms, stopped} | {error}, in memory only — the rows live on the server (sqlresults.py)
+  sqlRuns: new Map(),      // sql tab id -> the op token of the run it is waiting on; a result whose token is not here any more is dropped (see runSql)
   searchAll: null,         // in-flight/finished Search-all job — see searchAllState(); survives closing the modal
   pendingViews: new Map(), // source_id -> a search-box build left to finish in the background — see view.js detach/applyPendingView
 };

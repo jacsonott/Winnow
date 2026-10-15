@@ -473,8 +473,8 @@ see [docs/notes/README.md](README.md) for the whole set.
   `runSql` captures `S.sqlTabId` up front and only paints if that tab is
   still showing, since you can switch tabs while a query is in flight.
   **The tab id is not enough to say a result still belongs there**, so
-  each run also holds its claim in `sqlRuns` (plugins.js) and checks it
-  after every await: running again in the same tab, closing the tab
+  each run also holds its claim in `S.sqlRuns` (its op token, per tab) and
+  checks it after every await: running again in the same tab, closing the tab
   (`closeSqlTab`) and opening another case (`openCase`, whose tabs are
   numbered from 1 again) all end the claim through `abandonSqlRuns`,
   which also aborts the request. Without it a slow run painted over the
@@ -493,38 +493,30 @@ see [docs/notes/README.md](README.md) for the whole set.
   of it on every row click: `SELECT *` on a 150-column table is 5,000 x 150
   = 750,000 cells, measured at 45 s to appear and 42 s per click (20
   columns: 3.5 s and 8 s), with the page frozen throughout. Now a paint is
-  the rows in view plus `SQL_OVERSCAN_ROWS` each way and the columns in
-  view plus `SQL_OVERSCAN_PX` each way; the pane's own scroll listener and
-  ResizeObserver (`wirePlugins`, one pair for the pane rather than one per
-  result) re-paint that window, and a click only moves `.sql-row-sel` on
-  the rows already built (event delegation on the table, not three
-  listeners per row). Things that bite:
-  - **A result that fits is painted exactly as before** — header, one
-    `<tr>` per row, one `<td>` per column — and the tests in
-    test_sql_*.py lean on that (`tr` nth(1) is the first row, `td` nth(i)
-    is column i). Only a result too big for the pane gets the stand-ins:
-    `tr.sql-pad` above and below, `td.sql-gap` at the head of a row for
-    the columns left of the window, and `tr.sql-sizer` last.
-  - **The sizer is why the columns don't jump.** A `<table>` sizes its
-    columns from whatever cells it holds, so a windowed one re-sized every
-    column to the rows that happened to be built, every scroll. The sizer
-    holds each column's longest value (by characters — the pane is
-    monospace, so that is the widest) and is `visibility: collapse`, the
-    one value that takes the row's height away while keeping its widths:
-    `hidden` leaves ~4 px of height, and removing it or `display: none`
-    takes the widths with it (measured). Tag chips count by their names;
-    the sizer is rebuilt when a tag hotkey changes them.
+  the rows in view plus `OVERSCAN` each way (the next entry) and the
+  columns in view plus `SQL_OVERSCAN_PX` each way; the result's own
+  scroller and a ResizeObserver on it re-paint that window, and a click
+  only moves `.sql-row-sel` on the rows already built. Things that bite:
+  - **The header always holds every column**; only body rows are
+    windowed. A row too wide for the pane starts with one `td.sql-gap`
+    spanning the columns left of the window, so every built cell keeps
+    its column's x, and simply ends after the window on the right.
+  - **The columns don't jump because their widths come from the server**
+    (every row's longest value, measured as the run lands, set on the
+    header cell) rather than from whichever cells happen to be built. A
+    windowed `<table>` sized from its own contents re-sized every column
+    on every scroll.
   - **The first paint runs before the table is in the document**, inside
     `sqlResultNodes`, because every caller does
-    `out.replaceChildren(...sqlResultNodes(r))` and the tests count rows the
-    moment `#sqlResult table` exists. It estimates from lower bounds
-    (`SQL_EST_CH_PX`, `SQL_EST_ROW_PX`) so it builds more than the pane
-    shows, never less, and a `requestAnimationFrame` re-windows with the
-    real geometry — the header cells' `offsetLeft`/`offsetWidth` for the
-    column edges, a built row's height for the pads.
+    `out.replaceChildren(...sqlResultNodes(r))`. It estimates the column
+    edges from the widths in characters at `SQL_EST_CH_PX` — a lower bound,
+    so it builds more columns than the pane shows, never fewer — and the
+    ResizeObserver's first call re-windows from the header cells' real
+    rects.
   - Copy, CSV…, Excel…, Save as table… and the tag hotkeys read the rows
-    (`displayedRows`, `r.tags.sel`), never the DOM, so a Shift range or a
-    copy reaches rows that were never built. Keep it that way.
+    from the server and the selection from `r.tags.sel`, never the DOM, so
+    a Shift range or a copy reaches rows and columns that were never
+    built. Keep it that way.
   `tests/ui/test_wide_tables_ui.py` covers it: a bounded cell count, the row
   under the middle of the pane holding the rid its position means at the
   top, middle and bottom, column widths unchanged by scrolling, and a
@@ -580,6 +572,62 @@ see [docs/notes/README.md](README.md) for the whole set.
   `code` colour — the global `code` rule is accent-on-panel, which on that
   bar is the bar's own colour. `tests/ui/test_sql_pane_welcome.py` pins
   all of it.
+- **The SQL result is uncapped, server-held and virtualized, with its
+  actions pinned** (`sqlResultNodes` in plugins.js; the server side is in
+  server.md). `/api/sql` used to stop at 5,000 rows, and since Copy / CSV
+  / Excel exported the rows the pane HELD, every export of a bigger answer
+  was cut at 5,000 too. Lifting the cap by shipping every row to the
+  browser had no memory bound anywhere, so the server keeps the result
+  (`POST /api/sql/run`) and the pane holds a handle (`r.id`), the first
+  page, `r.total` and `r.widths`. The table is built like the grid: only
+  the window in view plus `OVERSCAN` is in the DOM, between a top and a
+  bottom spacer row, through the grid's own `spacerPx`/`vScroll`/
+  `rowsPaintY` so the tail stays reachable past `MAX_SPACER_PX` (without
+  that a 2M-row result stops at row ~1.68M). Rows not fetched yet paint
+  as empty rows of the same height and come in `SQL_PAGE` at a time into
+  a cache on the result, one request in flight, keyed by the sort; a
+  click-sort is the server's and starts a new cache. Copy, CSV…, Excel…
+  and `selectedRows` all ask the server, in the displayed sort, and a
+  shift-range that runs through rows nobody scrolled past gets its keys
+  from `/keys`. Things that bite: **rows must be one height**, and
+  `.sql-result tbody tr` sets it rather than leaving it to the cells'
+  line-height: a cell with nothing in it has no line box, so a row of
+  NULLs or empty strings was 5px, and on a mostly-blank result the last
+  rows could not be scrolled to at all (`test_sql_result_blank_rows.py`);
+  **a zero-height spacer is left out**, so a short result is the plain
+  table the older UI tests address by `tr` index; **column widths come
+  from the server's measure of every row** (set as the header cell's
+  `width`, which auto layout treats as a minimum), or columns size to
+  whichever rows are painted and jump as you scroll; **a row click marks
+  the selection in place** rather than repainting, because a
+  double-click's second click would otherwise replace the row under the
+  pointer and hand the `dblclick` to a detached node that never bubbles
+  to `tbody`'s handler. Sort, scroll position and the row cache live on
+  the result (`r.pane`), since every return to the page rebuilds the
+  nodes (`showSqlTab` → `applySqlTabToEditor`); a page that lands calls
+  `pane.repaint`, which the latest build owns. The result bar sits
+  OUTSIDE `.sql-result-scroll`, which is the whole of "pin the export
+  options": it used to scroll away with the rows.
+  `tests/ui/test_sql_result_uncapped.py`.
+- **A SQL run paints only while its token is still the one its tab is
+  waiting on** (`S.sqlRuns`, `runSql`). The run is awaited, and while it
+  is out the analyst can re-run (a slow first run landing after a fast
+  second one overwrote it, and the exports then took the wrong rows),
+  close the tab (when `sql_tabs` ids were reused, the result came back in
+  the next new tab; a closed tab's query has to stop either way), or open
+  another case — the result painted under the new
+  case's "Query 1", and tagging rows in it wrote tags into the wrong case.
+  A re-run, a tab close and a case switch (`resetSqlPane`) all end the
+  run they replace through `abandonSqlRuns`, which aborts its request —
+  the server stops a query whose client hangs up — and cancels its token
+  too; whatever lands late is released, never painted, and `runSql`
+  returns a "Superseded" error for it. The same token is what **Stop**
+  and the busy chip cancel (`/api/cancel_op`): stopped after rows have
+  landed, the run keeps them and says "stopped" in its status; stopped
+  before the first one, it is "Query cancelled". "Running… N rows so
+  far" polls `/api/sql/run/progress` with it. A tab whose run is out shows
+  that, not the result it is replacing.
+  `tests/ui/test_sql_run_tokens.py`.
 - **The 2026-08 navigation batch** — five smaller features, and the traps
   each one carries:
   - **"Open filter in SQL pane"** (`Store.spec_sql`, `POST /api/view/sql`,

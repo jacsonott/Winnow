@@ -158,7 +158,7 @@ fails to import, or its setup raises an error:
   loads completely or adds nothing.
 
 A plugin written for a newer Winnow says so instead of failing obscurely,
-with a reason like `needs Winnow plugin API v13, this build provides v12 —
+with a reason like `needs Winnow plugin API v14, this build provides v13 —
 update Winnow`. **Where it came from → Plugin API** shows the same
 comparison.
 

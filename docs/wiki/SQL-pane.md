@@ -148,17 +148,24 @@ Points that catch people out:
 ## Results
 
 The result appears as a table under the editor. The line above it reads
-*N rows · M ms*, followed by *truncated* when the query had more rows than
-the limit, and *tags joined via rid* when the rows can be tagged (below).
+*N rows · M ms*, followed by *tags joined via rid* when the rows can be
+tagged (below). That line and the buttons beside it stay in place while
+you scroll the result, down or across.
 
-**The pane shows at most 5,000 rows.** When a query returns more, the first
-5,000 are shown and the status line says *truncated*; a result of exactly
-5,000 rows is complete and isn't marked. Count and group in the query
-rather than scrolling, and use **Save as table…** when you need every row.
+**The pane has no row limit.** While a query runs, the result area reads
+*Running… N rows so far*. Winnow keeps the result on disk rather than in
+the browser, and fetches the rows as you scroll to them, so a result of
+millions of rows scrolls like a small one; rows that are still being
+fetched show empty for a moment. The disk is the temporary folder: if it
+runs low, the query stops early and the status line says *stopped — the
+disk Winnow keeps results on is nearly full*. A result is kept until you
+run the tab's query again or close the tab; after a long session the
+oldest results are let go, and the status line says *this result is no
+longer held — run the query again* if you scroll back into one.
 
-Click a column header to sort the rows on screen by that column; click again
-to reverse. Sorting doesn't run the query again: it orders the rows already
-shown, comparing numbers as numbers.
+Click a column header to sort the whole result by that column; click again
+to reverse. Sorting doesn't run the query again. Numbers sort as numbers,
+including numbers stored as text, and NULLs come first.
 
 ### Tagging rows from a result
 
@@ -185,30 +192,35 @@ their tables, the counts update, and the change can be
 ## Stopping a runaway query
 
 A query has no time limit, because a large `GROUP BY` can rightly take
-minutes. If a query runs for more than about a second, a **✕ Cancel** chip
-appears; click it to stop the query, and the result area says *Query
-cancelled*. Running the query again in the same tab, closing its tab,
-opening another case or closing the Winnow window also stop it.
+minutes. While it runs, **Stop** sits beside the row count; if it runs for
+more than about a second, a **✕ Cancel** chip appears as well, and either
+one stops it. A query stopped after it had returned rows keeps them: they
+are the result, and the status line adds *stopped — these are the rows it
+had returned*. One stopped before it returned any says *Query cancelled*.
+Running the query again in the same tab, closing its tab, opening another
+case or closing the Winnow window also stop it.
 
 ## Exporting results
 
-The buttons on the right of the status line act on the result as shown: at
-most 5,000 rows, in the order you sorted them.
+The buttons on the right of the status line act on every row of the
+result, in the order you sorted it, not only the rows you have scrolled
+past.
 
 | Button | What it does |
 | --- | --- |
-| **Copy** | Copies the selected rows, or the whole result when none are selected, as tab-separated text with a header row |
+| **Copy** | Copies the selected rows, or the whole result when none are selected, as tab-separated text with a header row. A result too big for the clipboard is refused with *Too much to copy (N rows) — use CSV… to save it to a file instead* |
 | **CSV…** | Asks for a file name (the query tab's name to start with) and saves a `.csv` |
-| **Excel…** | Asks for a file name and saves a one-sheet `.xlsx` |
-| **Save as table…** | Runs the query again in full, with no row limit, and saves the result as a new table in the case |
+| **Excel…** | Asks for a file name and saves a `.xlsx`, one sheet named after the query tab. A result longer than a worksheet holds (1,048,576 rows) carries on onto a second sheet, *Name (2)*, and so on. Over 200,000 rows it says *Building the workbook — the download starts when it is ready*, because a workbook can only be saved once it is finished |
+| **Save as table…** | Runs the query again and saves the result as a new table in the case |
 
 **CSV…** and **Excel…** guard against formulas: a text value that starts
 with `=`, `+`, `-`, `@`, a tab or a carriage return gets a leading `'`, so a
 spreadsheet shows it rather than running it. Column names get the same
-treatment. **Excel…** also writes control characters that a worksheet can't
-hold as escapes such as `\x07`, and cuts a value longer than 32,767
-characters (the most a cell holds) with a note saying how long it was. The
-values in the case are not changed.
+treatment; numbers stay numbers, so `-5` is not changed. **Excel…** also
+writes control characters that a worksheet can't hold as escapes such as
+`\x07`, and cuts a value longer than 32,767 characters (the most a cell
+holds) with a note saying how long it was. The values in the case are not
+changed.
 
 **Save as table…** asks for the new table's name at **New table name:**. If
 the result is over 500,000 rows it asks *You're about to save N rows as a

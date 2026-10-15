@@ -271,8 +271,10 @@ export function syncSelectAllCheckbox() {
    its height must subtract it. */
 export function headH() { return $('gridHead').offsetHeight; }
 
-/* The spacer height to use for `total` rows — capped, see MAX_SPACER_PX. */
-export function spacerPx(total) { return Math.min(total * ROW_H, MAX_SPACER_PX); }
+/* The spacer height to use for `total` rows — capped, see MAX_SPACER_PX.
+   `rowH` (here, in vScroll and in rowsPaintY) defaults to the grid's own
+   ROW_H; the SQL pane's virtualized result passes its row height instead. */
+export function spacerPx(total, rowH = ROW_H) { return Math.min(total * rowH, MAX_SPACER_PX); }
 
 /* scrollTop as the rest of the grid means it: an offset into `total * ROW_H`
    pixels of rows. Identity below the spacer cap; a linear rescale above it.
@@ -280,8 +282,8 @@ export function spacerPx(total) { return Math.min(total * ROW_H, MAX_SPACER_PX);
    for the timeline, whose header sits outside its scroller. Both ends are
    anchored (0 maps to 0, max-scroll maps to max-offset), so the last row is
    exactly reachable rather than merely nearly so. */
-export function vScroll(scroller, total, head = 0) {
-  const want = total * ROW_H;
+export function vScroll(scroller, total, head = 0, rowH = ROW_H) {
+  const want = total * rowH;
   if (want <= MAX_SPACER_PX) return scroller.scrollTop;
   const maxReal = Math.max(0, head + MAX_SPACER_PX - scroller.clientHeight);
   const maxWant = Math.max(0, head + want - scroller.clientHeight);
@@ -307,9 +309,9 @@ export function rScroll(scroller, total, virt, head = 0) {
    reduces to exactly first * ROW_H. Above it, subtracting the fractional part
    of the virtual offset is what keeps scrolling smooth — without it the top
    row snaps to the viewport edge and the whole grid moves in ROW_H steps. */
-export function rowsPaintY(scroller, virt, first) {
-  const anchor = Math.floor(virt / ROW_H);
-  return scroller.scrollTop - (virt - anchor * ROW_H) - (anchor - first) * ROW_H;
+export function rowsPaintY(scroller, virt, first, rowH = ROW_H) {
+  const anchor = Math.floor(virt / rowH);
+  return scroller.scrollTop - (virt - anchor * rowH) - (anchor - first) * rowH;
 }
 
 export function syncRowsTop() {

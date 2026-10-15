@@ -38,7 +38,7 @@ PLUGIN = {
     "description": "Excel-style pivot tables: drag fields into rows, columns and values for cross-tabs with subtotals.",
 }
 
-WINNOW_API_VERSION = 12   # winnow.dropdownMenu: the click-to-place menu under a field
+WINNOW_API_VERSION = 13   # winnow.dropdownMenu: the click-to-place menu under a field
 
 # One GROUP BY per grouping level. Rows × columns levels stay small in
 # practice (Excel's own field wells get unusable well before this), and the

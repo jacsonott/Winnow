@@ -305,7 +305,7 @@ see [docs/notes/README.md](README.md) for the whole set.
     while it is only being previewed elsewhere.
 
 - **A plugin's menu is the app's menu** (`winnow.dropdownMenu`, plugin
-  API 12 / context `apiVersion` 6). Pivot's and First/Last's
+  API 13 / context `apiVersion` 7). Pivot's and First/Last's
   click-to-place used to be a modal titled "Place <field>" — a whole
   dialog for one click, over the board being arranged. Both open the
   ui.js singleton under the field now, so they are one-at-a-time with

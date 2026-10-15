@@ -233,7 +233,7 @@ PAGE_PANEL_PAGES = ("sql", "notes")
 # provides, with a message that says to update Winnow — the failure mode
 # is otherwise an AttributeError deep inside register() that reads like a
 # plugin bug.
-PLUGIN_API_VERSION = 12
+PLUGIN_API_VERSION = 13
 
 FORMAT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 # API routes may nest ("chat/stream") but each segment keeps the same shape.
@@ -689,7 +689,11 @@ class PluginAPI:
         selectedRows/onRun/show) and `winnow.notesPage` (text/setText/
         insert/onChange/show), which drive the page the panel sits on —
         the copilot in the claude_assistant example inserts and runs the
-        queries it writes."""
+        queries it writes. A sqlPage result is {columns, rows, total,
+        elapsed_ms, truncated, stopped}: the server holds the rows and
+        `rows` is the first 5,000 of `total` (API 12), and selectedRows()
+        is a promise, since a selection can reach rows the browser never
+        loaded."""
         if page not in PAGE_PANEL_PAGES:
             raise ValueError(f"Page panel page {page!r} must be one of {', '.join(PAGE_PANEL_PAGES)}")
         if not FORMAT_ID_RE.match(id or ""):

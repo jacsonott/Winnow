@@ -133,6 +133,12 @@ update.py          Update this install in place. Root, for the same reason —
 winnow/            Everything the app is made of. The modules below all
                     live here.
 store.py           All SQLite: ingest, view materialisation, tags, sessions, export.
+sqlresults.py      The SQL pane's results, held server-side: a run's rows
+                    copied in batches into a scratch SQLite file in the
+                    tempdir (the views prefix, flock and sweep), then
+                    paged, click-sorted, tag-joined and exported from there,
+                    so "no row cap" has a memory bound. Store owns one
+                    (`Store.sql_results`); see docs/notes/server.md.
 timeparse.py       Timestamp-parsing operations for derived datetime columns —
                     and, since structparse.py, combine.py and enrich.py all
                     register into it, the registry of derived-column
