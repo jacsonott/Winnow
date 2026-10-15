@@ -28,13 +28,18 @@ What you can do:
 - **Jump to the evidence.** Double-click a host to open its source table
   filtered to that host's rows.
 - **Define your own events** with **+ New event type** (right in the
-  panel header) — pick the header set it applies to (which scopes the
-  column dropdowns to that artifact's own column names), and the editor
-  pre-guesses source/destination/label/time, so you usually just name it
-  and add a condition (e.g. `EventId equals 5985`). Or leave the header
-  set as "any table with the chosen columns". Saved on this machine (via
-  `req.storage`), surviving case switches and updates like the app's own
-  saved filters. **Events…** manages the full set.
+  panel header). The builder reads the columns of one table in the case
+  and guesses the source host, destination host, user and time columns
+  from their names; add a condition (`EventId is 5985`) by picking from
+  the column's commonest values. The right-hand side shows what the
+  event finds in that table as you go (rows matched, links, hosts and
+  the busiest links), so a wrong column shows up before you save. Start
+  from a blank event or a copy of any existing one, and choose whether
+  it is offered on every table of the same header set or on any table
+  with its columns. Saved on this machine (via `req.storage`), surviving
+  case switches and updates like the app's own saved filters.
+  **Events…** lists every event, edits and deletes yours, and copies a
+  shipped one into the builder.
 - **Collapse the event list** with the header caret when the graph needs
   the room — the header keeps a count of what's selected.
 

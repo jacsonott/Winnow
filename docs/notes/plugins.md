@@ -269,6 +269,32 @@ see [docs/notes/README.md](README.md) for the whole set.
     tracebacks point at unrelated lines. Toggle the plugin off and on in
     Settings → Plugins (that's what `_reload_plugins` is for) or restart.
 
+- **lateral_movement's event builder previews through the graph's own
+  SQL.** `preview` and `edges` both build on `_prepare`, so "273 rows
+  match, 12 links" in the builder is the row set Build turns into edges
+  (a test holds `hops` to the edges' summed `n`); a preview with its own
+  WHERE would drift the first time the noise list changed. Four more
+  things the builder depends on:
+  - **An event's NAME is its identity in the tab.** A tick is keyed
+    `source_id::name`, so a saved event named like a shipped one ticked
+    and unticked with it. The builder refuses a taken name
+    (case-insensitive, across shipped and saved); a rename moves the
+    ticks to the new key (`replaceEvent`), a delete drops them
+    (`syncSelections`).
+  - **`POST defs` returns `header_sets` too.** The tab replaces its whole
+    `S.defs` with the reply, and a reply without them left every
+    header-set binding resolving against nothing until the next GET.
+  - **Binding needs every column the event reads**, not just the header
+    set's: `requires` lists the label, time and condition columns as well
+    (`requiresOf`), and `bindsTo` checks both. A condition on a column the
+    table lacked used to bind and then fail at Build with "No column".
+  - **Guesses are per table, and only for roles nobody chose.** The old
+    editor guessed from every table's columns at once, so it could pair a
+    source from one table with a destination from another, and its
+    `/user/` matched the SID in `UserId` before `UserName`. `st.picked`
+    is what keeps a table switch from rewriting an edited event's columns
+    while it is only being previewed elsewhere.
+
 - **Plugin enablement is two-layer, and the defaults point opposite ways.**
   Machine level (workspace/plugins.json): installed plugins are on unless
   in the `disabled` list; bundled examples (examples/plugins/, always in
