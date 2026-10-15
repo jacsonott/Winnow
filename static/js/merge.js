@@ -614,7 +614,7 @@ export function openImportPreview(src, opts = {}) {
     refreshPreview();
 
     const actions = el('div', 'row-actions');
-    const importBtn = el('button', 'btn', opts.onConfirm ? 'Use these settings' : 'Import');
+    const importBtn = el('button', 'btn primary', opts.onConfirm ? 'Use these settings' : 'Import');
     importBtn.onclick = async () => {
       // `kind` rides in the settings: choosing Lines turns a csv queue item
       // into a text one (and back), which is what the queue row shows.
@@ -761,7 +761,7 @@ export function openJsonImportPreview(src, opts = {}) {
     refreshPreview();
 
     const actions = el('div', 'row-actions');
-    const importBtn = el('button', 'btn', opts.onConfirm ? 'Use these settings' : 'Import');
+    const importBtn = el('button', 'btn primary', opts.onConfirm ? 'Use these settings' : 'Import');
     importBtn.onclick = async () => {
       const settings = { flatten_mode: flattenMode, flatten_depth: flattenDepth };
       if (opts.onConfirm) {

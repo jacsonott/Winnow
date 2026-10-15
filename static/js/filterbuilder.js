@@ -398,7 +398,7 @@ export function openFilterBuilder(editing = null) {
     b.append(help, treeContainer, sqlLabel, sqlBox, status, gbWrap);
 
     const actions = el('div', 'row-actions');
-    const apply = el('button', 'btn', 'Apply');
+    const apply = el('button', 'btn primary', 'Apply');
     apply.onclick = () => {
       const doApply = () => {
         // Grouping first — setGrouping only updates state; the rebuild below

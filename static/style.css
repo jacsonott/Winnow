@@ -1510,7 +1510,12 @@ code { font-family: var(--mono); color: var(--accent); background: var(--panel);
 .flatten-path { font-family: var(--mono); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .flatten-cov { font-size: 11px; color: var(--dim); text-align: right; align-self: start; padding-top: 5px; font-variant-numeric: tabular-nums; }
 .flatten-sample { font-family: var(--mono); font-size: 11px; color: var(--dim); align-self: start; padding-top: 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.flatten-row input[type="text"] { font-size: 11px; padding: 2px 5px; width: 100%; }
+.flatten-row input[type="text"] {
+  font: inherit; font-size: 11px; padding: 2px 5px; width: 100%;
+  background: var(--ink); color: var(--text);
+  border: var(--border-w) solid var(--line-2); border-radius: var(--radius-sm);
+}
+.flatten-row input[type="text"]:focus { outline: none; border-color: var(--accent); }
 .flatten-head { display: flex; gap: 8px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
 
 .note-box { display: flex; flex-direction: column; gap: 5px; }
@@ -1956,13 +1961,20 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .confirm-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .btn.danger { background: var(--danger-bg); border-color: var(--danger-border); color: var(--danger); }
 .btn.danger:hover { border-color: var(--danger); }
+/* A dialog's main action: the button that does what the dialog is for
+   (Apply, Create, Import, Save widget, a prompt's OK). The merge and
+   lateral builders' accent fill (.btn.mb-create) without their spacing,
+   so every dialog marks its main action the same way and Cancel beside it
+   stays plain. One per dialog — two accent buttons is no main action. */
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); font-weight: 600; }
+.btn.primary:disabled { background: var(--panel-3); border-color: var(--line-2); color: var(--dim); cursor: not-allowed; }
 .modal-head {
   display: flex; align-items: center; justify-content: space-between;
   padding: 9px 12px; border-bottom: 1px solid var(--line);
   font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--dim);
 }
 .modal-body { padding: 12px; overflow: auto; }
-.modal-body h4 { margin: 14px 0 6px; font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--accent); }
+.modal-body h4 { margin: 14px 0 6px; font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--dim); }
 .modal-body h4:first-child { margin-top: 0; }
 .kv { display: grid; grid-template-columns: 150px 1fr; gap: 3px 12px; font-size: 12px; }
 .kv kbd {
@@ -2299,6 +2311,22 @@ textarea:focus { border-color: var(--accent); outline: none; }
 /* 6px on top so the focused input's ring doesn't sit on the help text. */
 .fb-help { margin: 6px 0 10px; font-size: 12px; color: var(--dim); }
 .tf-enabled { display: flex; align-items: center; gap: 6px; margin: 4px 0 10px; }
+/* A labelled field in the older dialogs, in the builders' shape
+   (.lm-eb-field): label above, control full width under it, an optional
+   note under that. A label beside its box put each box at a different x
+   (Timeframe's Start and End, the profile values prompt). .dlg-pair sets
+   two fields side by side; .dlg-input is a box plus the button that goes
+   with it (the 📅 picker). Text boxes inside are .confirm-input. */
+.dlg-field { display: grid; gap: 4px; min-width: 0; align-content: start; margin-bottom: 10px; }
+.dlg-field > label { font-size: 12px; color: var(--text); }
+.dlg-field > small { font-size: 11.5px; color: var(--dim); line-height: 1.4; }
+.dlg-pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 0 12px; }
+.dlg-pair > .dlg-field { margin-bottom: 0; }
+.dlg-input { display: flex; gap: 6px; align-items: center; min-width: 0; }
+.dlg-input > .confirm-input { flex: 1; min-width: 0; }
+.dlg-input > .btn { align-self: stretch; }   /* the 📅 as tall as its box */
+.dlg-chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.confirm-input.mono { font-family: var(--mono); }
 .fb-tree { border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 8px; margin-bottom: 10px; }
 .fb-group { display: flex; flex-direction: column; gap: 6px; }
 .fb-group .fb-group { border-left: 2px solid var(--line-2); padding-left: 10px; margin-left: 2px; }
@@ -2377,9 +2405,10 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .accent-swatch { width: 20px; height: 20px; border-radius: 50%; border: 1px solid var(--line-2); background: var(--sw); cursor: pointer; padding: 0; }
 .accent-swatch[aria-pressed="true"] { box-shadow: 0 0 0 2px var(--panel), 0 0 0 3px var(--sw); }
 #appearanceAccentCustom { width: 24px; height: 24px; border: 1px solid var(--line-2); border-radius: var(--radius-sm); background: none; padding: 0; cursor: pointer; }
-/* Collapsible Settings sections. The header carries .modal-body h4's own
-   type treatment (accent, uppercase, tracked) so collapsing them didn't
-   change what a section *looks* like, only whether it's open. */
+/* Collapsible Settings sections. The header carries .modal-body h4's type
+   treatment (uppercase, tracked) so collapsing them didn't change what a
+   section *looks* like, only whether it's open — but stays accent where
+   the h4 is now dim, because this one is a button you click. */
 .settings-section { border-top: 1px solid var(--line); }
 .settings-section:first-child { border-top: 0; }
 .settings-section-head {
@@ -2762,6 +2791,7 @@ html.remote .row.selected:hover { background: var(--row-selected); }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mc-tabs { margin-bottom: 8px; }
 .mc-controls { display: grid; gap: 6px; margin-bottom: 10px; }
+.mc-controls > .btn { justify-self: start; }   /* Sweep is a button, not a bar */
 .mc-values, .mc-sql { width: 100%; background: var(--ink); color: var(--text);
   border: 1px solid var(--line-2); border-radius: var(--radius-sm); padding: 6px 8px;
   font: 12px var(--mono); resize: vertical; }

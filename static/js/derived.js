@@ -978,7 +978,7 @@ export async function openDerivedColumnModal(prefill, editing) {
     }
 
     const actions = el('div', 'row-actions');
-    const go = el('button', 'btn', editing ? 'Re-derive' : 'Add column');
+    const go = el('button', 'btn primary', editing ? 'Re-derive' : 'Add column');
     /* The one place the button's label, its enabled state and the single
        name field agree about what is being made: one column, or the
        ticked named groups. Declared after `go` and called from the group

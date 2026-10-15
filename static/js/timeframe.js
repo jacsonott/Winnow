@@ -21,6 +21,17 @@ import { rebuildView } from './view.js';
 
 /* ------------------------------------------------------ jump to timestamp */
 
+/* A timestamp box with its label above and the 📅 picker beside it — the
+   builders' field shape (.dlg-field), shared by Jump and Timeframe so the
+   two dialogs' boxes look and line up the same. */
+function timestampField(label, input) {
+  const field = el('div', 'dlg-field');
+  const row = el('div', 'dlg-input');
+  row.append(input, datePickerButton(input));
+  field.append(el('label', null, label), row);
+  return field;
+}
+
 /* Scroll to the row whose timestamp is closest to a given moment. The
    target is saved in S.jumpTs and deliberately survives switching tables —
    the workflow this exists for is "something happened at 13:22:01; show me
@@ -35,10 +46,9 @@ export function openJumpTsModal() {
       'Scrolls to the row whose timestamp is closest to this moment. The value is remembered '
       + `across tables — press "${jumpKey}" in any table to jump straight to it again.`));
 
-    b.append(el('label', null, 'Column'));
+    const colField = el('div', 'dlg-field');
+    colField.append(el('label', null, 'Column'));
     const colSel = el('select');
-    colSel.style.cssText = 'display:block;width:100%;background:var(--ink);color:var(--text);'
-      + 'border:1px solid var(--line-2);padding:6px 8px;font:inherit;margin-bottom:10px';
     const allOpt = document.createElement('option');
     allOpt.value = '';
     allOpt.textContent = 'Nearest across all datetime columns';
@@ -50,18 +60,15 @@ export function openJumpTsModal() {
       colSel.append(opt);
     }
     colSel.value = dtCols.includes(S.jumpTs.column) ? S.jumpTs.column : '';
-    b.append(colSel);
+    colField.append(colSel);
+    b.append(colField);
     if (!dtCols.length) b.append(el('p', 'fb-help', 'This table has no datetime columns — the jump will have nothing to measure against here.'));
 
-    const row = el('div', 'row-actions');
-    const input = el('input');
+    const input = el('input', 'confirm-input mono');
     input.type = 'text';
     input.placeholder = 'YYYY-MM-DD HH:MM:SS';
-    input.style.cssText = 'flex:1;background:var(--ink);color:var(--text);border:1px solid var(--line-2);'
-      + 'padding:6px 8px;font:inherit;font-family:var(--mono)';
     input.value = S.jumpTs.value || '';
-    row.append(el('span', null, 'Moment'), input, datePickerButton(input));
-    b.append(row);
+    b.append(timestampField('Moment', input));
     b.append(el('p', 'fb-help', '24-hour time — the date alone, or date plus HH:MM, also work.'));
 
     const go = () => {
@@ -74,7 +81,7 @@ export function openJumpTsModal() {
     };
     input.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); go(); } };
     const actions = el('div', 'row-actions');
-    const jumpBtn = el('button', 'btn', 'Jump');
+    const jumpBtn = el('button', 'btn primary', 'Jump');
     jumpBtn.onclick = go;
     const cancel = el('button', 'btn ghost', 'Cancel');
     cancel.onclick = () => { $('modal').hidden = true; };
@@ -235,10 +242,9 @@ export function openTimeRangeModal() {
     enabledLabel.append(enabledCb, document.createTextNode(' Enabled'));
     b.append(enabledLabel);
 
-    b.append(el('label', null, 'Column'));
+    const colField = el('div', 'dlg-field');
+    colField.append(el('label', null, 'Column'));
     const colSel = el('select');
-    colSel.style.cssText = 'display:block;width:100%;background:var(--ink);color:var(--text);'
-      + 'border:1px solid var(--line-2);padding:6px 8px;font:inherit;margin-bottom:10px';
     const allOpt = document.createElement('option');
     allOpt.value = '';
     allOpt.textContent = 'All datetime columns (catches a match on any of them)';
@@ -251,7 +257,8 @@ export function openTimeRangeModal() {
       colSel.append(opt);
     }
     colSel.value = cols.includes(S.timeRange.column) ? S.timeRange.column : '';
-    b.append(colSel);
+    colField.append(colSel);
+    b.append(colField);
     if (!cols.length) b.append(el('p', 'fb-help', "This table has no datetime columns yet, so the range below doesn't narrow it — the timeframe hides none of its rows, and applies on the tables that have one."));
 
     // Plain text, not <input type="datetime-local"> — that widget's native
@@ -262,26 +269,19 @@ export function openTimeRangeModal() {
     // separator is TS_ISO_RE's own shape (it accepts 'T' too, for values
     // coming from elsewhere, but the field asks for the one the rest of the
     // app displays: formatTimestamp's 'iso' option, the timeline, exports).
-    const inputStyle = 'flex:1;background:var(--ink);color:var(--text);border:1px solid var(--line-2);'
-      + 'padding:6px 8px;font:inherit;font-family:var(--mono)';
-
-    const startRow = el('div', 'row-actions');
-    const startInput = el('input');
+    const startInput = el('input', 'confirm-input mono');
     startInput.type = 'text';
     startInput.placeholder = 'YYYY-MM-DD HH:MM:SS';
-    startInput.style.cssText = inputStyle;
     startInput.value = S.timeRange.start || '';
-    startRow.append(el('span', null, 'Start'), startInput, datePickerButton(startInput));
-    b.append(startRow);
-
-    const endRow = el('div', 'row-actions');
-    const endInput = el('input');
+    const endInput = el('input', 'confirm-input mono');
     endInput.type = 'text';
     endInput.placeholder = 'YYYY-MM-DD HH:MM:SS';
-    endInput.style.cssText = inputStyle;
     endInput.value = S.timeRange.end || '';
-    endRow.append(el('span', null, 'End'), endInput, datePickerButton(endInput));
-    b.append(endRow);
+    // Side by side, so the two boxes line up (a label beside each put them
+    // at different x positions, "Start" and "End" being different widths).
+    const range = el('div', 'dlg-pair');
+    range.append(timestampField('Start', startInput), timestampField('End', endInput));
+    b.append(range);
     b.append(el('p', 'fb-help', '24-hour time, e.g. 2024-01-05 13:22:01 — the date alone, or date plus HH:MM, also work.'));
 
     // Free-text, so it's validated the same way a value has to be
@@ -299,8 +299,9 @@ export function openTimeRangeModal() {
     // Fill the range from what's already been triaged: earliest/latest
     // timestamp among tagged rows — any tag, or just the ones toggled on.
     if (S.sourceId && S.tags.length) {
-      b.append(el('label', null, 'From tagged rows'));
-      const tagRow = el('div', 'row-actions tr-tag-row');
+      const tagField = el('div', 'dlg-field');
+      tagField.append(el('label', null, 'From tagged rows'));
+      const tagRow = el('div', 'dlg-chips tr-tag-row');
       const selectedTags = new Set();
       for (const t of S.tags) {
         const chip = el('button', 'tag-chip');
@@ -333,11 +334,12 @@ export function openTimeRangeModal() {
         }
       };
       tagRow.append(fillBtn);
-      b.append(tagRow);
+      tagField.append(tagRow);
+      b.append(tagField);
     }
 
     const actions = el('div', 'row-actions');
-    const apply = el('button', 'btn', 'Apply');
+    const apply = el('button', 'btn primary', 'Apply');
     apply.onclick = () => {
       if (!startInput.value.trim() && !endInput.value.trim()) { toast('Set a start and/or end'); return; }
       if (!validateTimeInput(startInput, 'Start') || !validateTimeInput(endInput, 'End')) return;
@@ -771,6 +773,9 @@ export function buildValueFilterPanel(container, refresh) {
 export function buildTableActionsPanel(container, refresh) {
   const src = S.sources.find((s) => s.id === S.sourceId);
   const acts = el('div', 'row-actions');
+  // Four long labels don't fit one row of the dialog; squeezed, each one
+  // folded onto two lines. Wrap the row instead of the labels.
+  acts.style.flexWrap = 'wrap';
   const dflt = el('button', 'btn ghost', 'Save layout as default for these columns');
   dflt.title = 'Reuse this column order/visibility for any table imported with the same headers';
   dflt.onclick = () => saveDefaultLayout();

@@ -637,12 +637,15 @@ export function promptForVariables(defs, { title = 'This profile needs a few val
         inp.dataset.var = d.name;
         inp.placeholder = d.required ? 'required' : 'optional';
         inp.value = d.default || '';
-        b.append(el('label', null, (d.label || d.name) + (d.required ? ' *' : '')), inp);
-        if (d.description) b.append(el('p', 'fb-help', d.description));
+        const field = el('div', 'dlg-field');
+        field.append(el('label', null, (d.label || d.name) + (d.required ? ' *' : '')));
+        if (d.description) field.append(el('small', null, d.description));
+        field.append(inp);
+        b.append(field);
         inputs.set(d.name, inp);
       }
       const acts = el('div', 'row-actions');
-      const save = el('button', 'btn', 'Save');
+      const save = el('button', 'btn primary', 'Save');
       save.onclick = async () => {
         const missing = defs.filter((d) => d.required && !(inputs.get(d.name).value || '').trim());
         if (missing.length) { toast(`Fill in: ${missing.map((d) => d.label || d.name).join(', ')}`); return; }

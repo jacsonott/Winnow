@@ -206,7 +206,7 @@ export function openProfileBuilder(existing = null, { onSaved } = {}) {
 
     // ----------------------------------------------------------- saving
     const acts = el('div', 'row-actions pb-actions');
-    const save = el('button', 'btn', editing ? 'Save changes' : 'Create profile');
+    const save = el('button', 'btn primary', editing ? 'Save changes' : 'Create profile');
     const cancel = el('button', 'btn ghost', 'Cancel');
     cancel.onclick = () => { document.getElementById('modal').hidden = true; };
     save.onclick = async () => {

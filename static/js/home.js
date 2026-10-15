@@ -322,7 +322,7 @@ export function openFolderBrowser(startPath, onSelect, onCancel, { mode = 'folde
     b.append(status);
 
     const actions = el('div', 'row-actions');
-    const useBtn = el('button', 'btn', filesMode ? 'Add selected' : 'Use this folder');
+    const useBtn = el('button', 'btn primary', filesMode ? 'Add selected' : 'Use this folder');
     const paintUse = () => {
       if (!filesMode) return;
       useBtn.disabled = !picked.size;
@@ -704,7 +704,7 @@ export function openExistingCasePrompt(state = {}) {
     b.append(el('p', 'fb-help', 'Registers the case on this machine\u2019s list and opens it.'));
 
     const actions = el('div', 'row-actions');
-    const openBtn = el('button', 'btn', 'Open');
+    const openBtn = el('button', 'btn primary', 'Open');
     openBtn.onclick = oneAtATime(openBtn, async () => {
       const trimmed = pathInput.value.trim();
       if (!trimmed) { toast('Enter or browse to a case file'); return; }
