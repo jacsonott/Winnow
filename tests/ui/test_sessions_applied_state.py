@@ -80,8 +80,12 @@ def test_the_panel_says_a_comparison_is_applied_and_can_clear_it(page):
         text = line.inner_text()
         assert "Comparison applied" in text and "analyst" in text and "Current work" in text
         assert "only in analyst" in text.lower() and "(2 rows)" in text
-        assert page.locator(".session-compare select").first.input_value() == "analyst"
-        assert page.locator(".session-compare select").nth(1).input_value() == "__live__"
+        # Waited for: the dropdowns are filled once the panel's session list
+        # has loaded, after the status line is already up. Read once, they
+        # still said Current work on a loaded runner.
+        page.wait_for_function(
+            "() => [...document.querySelectorAll('.session-compare select')].map((s) => s.value).join()"
+            " === 'analyst,__live__'")
 
         # Show all differences: the added row joins, wearing B.
         line.locator(".btn", has_text="Show all differences").click()
