@@ -179,35 +179,100 @@ def test_a_click_in_the_first_moments_does_not_skip_it(browser, server):
         ctx.close()
 
 
-def test_reduced_motion_skips_by_default_but_an_explicit_tick_plays(browser, server):
-    """Windows with Animation effects off reports reduced motion; the
-    default honours it (and Settings says so), a hand-ticked box overrides."""
-    ctx = browser.new_context(viewport={"width": 1200, "height": 800}, reduced_motion="reduce")
+# Edge on Windows, as the app window reports itself. Winnow reads the
+# platform, so both are set; Playwright's user_agent alone leaves
+# navigator.platform saying Linux.
+WINDOWS_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36 Edg/141.0.0.0")
+
+
+def _reduced_motion_ctx(browser, appearance, windows=False):
+    ctx = browser.new_context(viewport={"width": 1200, "height": 800}, reduced_motion="reduce",
+                              **({"user_agent": WINDOWS_UA} if windows else {}))
+    if windows:
+        ctx.add_init_script("Object.defineProperty(Navigator.prototype, 'platform', { get: () => 'Win32' })")
     ctx.add_init_script("localStorage.setItem('winnow.remotePrompt', 'seen');"
-                        "localStorage.setItem('winnow.appearance', JSON.stringify({ splash: true }))")
+                        f"localStorage.setItem('winnow.appearance', JSON.stringify({appearance}))")
+    return ctx
+
+
+def _splash_box(pg):
+    pg.evaluate("() => __winnow.openSettings()")
+    pg.wait_for_selector("#modal:not([hidden])")
+    pg.click("#modal .settings-section-head:has-text('Appearance')")
+    box = pg.locator("#modal label.check-row", has_text="Launch animation").locator("input")
+    box.wait_for()
+    return box
+
+
+def _splash_note(pg):
+    return pg.locator("#modal .fb-help", has_text="winnowing animation").inner_text()
+
+
+def test_reduced_motion_skips_by_default_but_an_explicit_tick_plays(browser, server):
+    """Off Windows, reduced motion is an accessibility switch someone chose:
+    the default honours it (and Settings says so), a hand-ticked box
+    overrides."""
+    ctx = _reduced_motion_ctx(browser, "{ splash: true }")
     pg = ctx.new_page()
     try:
-        pg.goto(server, wait_until="networkidle")
+        pg.goto(server)
         pg.wait_for_selector(".row")
         assert pg.locator("#splash").get_attribute("hidden") is not None
         last = pg.evaluate("() => JSON.parse(localStorage.getItem('winnow.splash.last'))")
         assert last["result"] == "skipped" and "reduced motion" in last["reason"]
-        # Settings explains it.
-        pg.evaluate("() => __winnow.openSettings()")
-        pg.wait_for_selector("#modal:not([hidden])")
-        assert "reduced motion" in pg.locator("#modal .fb-help", has_text="Launch").first.inner_text() or \
-               "reduced motion" in pg.locator("#modal").inner_text()
+        # Settings explains it, and the box says it is not playing — a ticked
+        # box over a skipped animation is what had analysts unticking and
+        # re-ticking it to get it back.
+        box = _splash_box(pg)
+        assert "reduced motion, so it is skipped" in _splash_note(pg)
+        assert not box.is_checked()
+        box.check()
+        assert pg.evaluate("() => __winnow.S.appearance.splash") == "always"
+        assert "plays anyway" in _splash_note(pg)
     finally:
         ctx.close()
-    ctx2 = browser.new_context(viewport={"width": 1200, "height": 800}, reduced_motion="reduce")
-    ctx2.add_init_script("localStorage.setItem('winnow.remotePrompt', 'seen');"
-                         "localStorage.setItem('winnow.appearance', JSON.stringify({ splash: 'always' }))")
+    ctx2 = _reduced_motion_ctx(browser, "{ splash: 'always' }")
     pg2 = ctx2.new_page()
     try:
         pg2.goto(server, wait_until="commit")
         pg2.wait_for_selector("#splash:not([hidden])", timeout=10_000)
     finally:
         ctx2.close()
+
+
+@pytest.mark.parametrize("appearance", ["{}", "{ splash: true }"])
+def test_windows_with_animation_effects_off_still_plays_it_by_default(browser, server, appearance):
+    """Chromium on Windows reports reduced motion whenever Animation effects
+    are off, which VM images, RDP profiles and performance settings leave
+    that way. Honouring it meant the animation only ever played for analysts
+    who had unticked and re-ticked the box. `{}` is an install that never
+    saved a look; `splash: true` is one that saved any other appearance
+    setting, which writes the default out with it."""
+    ctx = _reduced_motion_ctx(browser, appearance, windows=True)
+    pg = ctx.new_page()
+    try:
+        pg.goto(server, wait_until="commit")
+        pg.wait_for_selector("#splash:not([hidden])", timeout=10_000)
+        pg.wait_for_timeout(800)          # past the focus-click grace period
+        pg.keyboard.press("Escape")
+        pg.wait_for_selector("#splash", state="hidden", timeout=3_000)
+        assert _splash_box(pg).is_checked()
+        assert "Animation effects off" in _splash_note(pg)
+    finally:
+        ctx.close()
+
+
+def test_off_on_windows_stays_off(browser, server):
+    ctx = _reduced_motion_ctx(browser, "{ splash: false }", windows=True)
+    pg = ctx.new_page()
+    try:
+        pg.goto(server)
+        pg.wait_for_selector(".row", timeout=15_000)
+        assert pg.locator("#splash").get_attribute("hidden") is not None
+        assert not _splash_box(pg).is_checked()
+    finally:
+        ctx.close()
 
 
 def test_a_slow_display_still_finishes_in_seconds(browser, server):

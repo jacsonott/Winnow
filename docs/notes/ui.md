@@ -783,6 +783,18 @@ see [docs/notes/README.md](README.md) for the whole set.
   later (`buildPluginsPanel`'s async listing) landing inside its own
   section rather than at the end of the modal. That section is now one
   line and a button — see the plugins manager below.
+- **On Windows, `prefers-reduced-motion` is not a preference.** Chromium
+  derives it from the Animation effects switch, which VM images, RDP
+  profiles and "best performance" leave off, so a launch animation that
+  honoured it by default played for nobody on Windows except the analysts
+  who had unticked and re-ticked its box (that writes `'always'`). The
+  default now ignores the hint there and honours it everywhere else
+  (`splash.osSkipsSplash`), and the Settings box shows whether the
+  animation will actually play rather than whether it is switched on: a
+  ticked box over a skipped animation is what sent people toggling it.
+  The CSS kill switch at the end of style.css still reads the same hint,
+  so on those machines the splash's own fade is instant.
+  `tests/ui/test_splash.py` spoofs Edge on Windows for it.
 - **`S.keymap` must hold its own key arrays, not `DEFAULT_KEYMAP`'s.**
   The settings UI's "+ key"/"✕" handlers splice and push those arrays in
   place, so the old shallow `{...DEFAULT_KEYMAP}` handed them the
