@@ -72,7 +72,9 @@ def test_combine_type_offers_coalesce_and_the_chips_build_the_param(page):
         assert d["params"] == {"extra_columns": ["CommandLine"]}, d["params"]
         # In the column order (the header window may not reach the last
         # column on this viewport, so the DOM isn't the thing to ask).
-        assert page.evaluate("() => __winnow.S.order.includes('HostOrProcess')")
+        # Waited for: the order can land after the backfill reads ready,
+        # and a single look failed under a loaded machine.
+        page.wait_for_function("() => __winnow.S.order.includes('HostOrProcess')")
     finally:
         if did:
             page.evaluate("""(id) => fetch('/api/derived/' + id, { method: 'DELETE',

@@ -79,6 +79,7 @@ def fl(browser, server):
     _new_sheet(pg)
     yield pg
     ctx.close()
+    _post(server, "/api/plugins/toggle", {"fs_name": "first_last", "scope": "off_all"})
     assert not errors, "uncaught JS errors: " + " | ".join(errors)
 
 
@@ -99,6 +100,7 @@ def test_the_table_picker_shows_a_nickname(browser, server):
     finally:
         # The case is shared with every other UI module; leave it as found.
         _post(server, f"/api/source/{sid}/nickname", {"nickname": ""})
+        _post(server, "/api/plugins/toggle", {"fs_name": "first_last", "scope": "off_all"})
 
 
 def test_a_new_sheet_starts_with_an_empty_description(fl):

@@ -58,8 +58,17 @@ def _post(server, route, body):
     return json.loads(urllib.request.urlopen(req, timeout=10).read())
 
 
+def _call(server, route, method="GET"):
+    req = urllib.request.Request(server.rstrip("/") + route, method=method,
+                                 headers={"X-Timeline-Lite-Client": "1"})
+    return json.loads(urllib.request.urlopen(req, timeout=10).read())
+
+
 def test_lateral_movement_tab_mounts_binds_defaults_and_builds(browser, server, tmp_path):
     _post(server, "/api/plugins/toggle", {"fs_name": "lateral_movement", "scope": "on_all"})
+    # The event types this test saves are machine-level plugin storage, so
+    # they outlive the case; what was saved before goes back afterwards.
+    saved = _call(server, "/api/plugin/lateral_movement/defs")["saved"]
     f = tmp_path / "logons.csv"
     f.write_text(LOGONS, encoding="utf-8")
     _post(server, "/api/ingest/jobs/path", {"path": str(f), "name": "logons.csv", "kind": "csv"})
@@ -164,4 +173,12 @@ def test_lateral_movement_tab_mounts_binds_defaults_and_builds(browser, server, 
         assert not errors, errors
     finally:
         ctx.close()
-        _post(server, "/api/plugins/toggle", {"fs_name": "lateral_movement", "scope": "off_all"})
+        # The table and the saved event type both stayed behind for every
+        # later module in the shard (#227).
+        try:
+            _post(server, "/api/plugin/lateral_movement/defs", {"saved": saved})
+            for src in _call(server, "/api/sources"):
+                if src["name"] == "logons.csv":
+                    _call(server, f"/api/source/{src['id']}", "DELETE")
+        finally:
+            _post(server, "/api/plugins/toggle", {"fs_name": "lateral_movement", "scope": "off_all"})

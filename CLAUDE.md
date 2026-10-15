@@ -680,6 +680,15 @@ something up (a plugin's routes, a cache) fails in whichever shard it
 leads. Wait for what you assert on (`wait_for_selector`,
 `wait_for_function`) rather than looking once with `is_visible()` right
 after waiting on something else — test_firstlast_state.py had exactly that.
+The other consequence: every module in a shard shares that server's case,
+so what one leaves behind is the next one's starting state. The autouse
+`case_left_as_found` fixture (tests/ui/conftest.py) snapshots the case's
+tables, tags and tagged rows, derived columns, merges, dashboards, plugin
+switches and the rest around each module and fails the module that changed them, at its own
+teardown. Clean up in a `finally`, by name or id rather than by repeating
+the gesture under test, and note that the `api` fixture raises on a non-2xx
+answer (pass `expect=` to provoke one on purpose); the cleanups that used to
+404 silently are how #227 went unnoticed.
 
 Run it with:
 

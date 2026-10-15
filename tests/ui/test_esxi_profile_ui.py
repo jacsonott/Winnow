@@ -6,6 +6,7 @@ across every imported log."""
 from __future__ import annotations
 
 import json
+import urllib.parse
 import urllib.request
 
 import pytest
@@ -20,7 +21,18 @@ def _post(server, route, body):
     return json.loads(urllib.request.urlopen(req, timeout=15).read())
 
 
-def test_esxi_profile_lists_applies_and_builds(browser, server, tmp_path):
+def _call(server, route, method="GET"):
+    req = urllib.request.Request(server.rstrip("/") + route, method=method,
+                                 headers={"X-Timeline-Lite-Client": "1"})
+    return json.loads(urllib.request.urlopen(req, timeout=15).read())
+
+
+def test_esxi_profile_lists_applies_and_builds(browser, server, tmp_path, restore_plugin_overrides):
+    # Applying the profile adds case variables and a dashboard, and the
+    # imports add tables; all of it goes again in the finally below.
+    variables = {v["name"] for v in _call(server, "/api/case/variables")}
+    dashboards = {d["id"] for d in _call(server, "/api/dashboards")}
+    sources = {s["id"] for s in _call(server, "/api/sources")}
     _post(server, "/api/plugins/toggle", {"fs_name": "esxi_logs", "scope": "on_all"})
     # Import two real ESXi log shapes through the plugin format.
     (tmp_path / "hostd.log").write_text(
@@ -67,20 +79,22 @@ def test_esxi_profile_lists_applies_and_builds(browser, server, tmp_path):
             """() => { const c=[...document.querySelectorAll('#dashGrid .dash-card')].find(x=>/Log lines/.test(x.textContent));
                        return c && c.querySelector('.dash-stat') && c.querySelector('.dash-stat').textContent.replace(/,/g,'')==='4'; }""",
             timeout=10_000)
-        # Leave the shared session case as found: drop the created
-        # dashboard and the two imported log sources, and disable the
-        # plugin again (see the shared-server pitfall — every later UI
-        # module sees this case).
-        pg.evaluate("""async () => {
-          const h = { 'X-Timeline-Lite-Client': '1' };
-          for (const d of await fetch('/api/dashboards', { headers: h }).then(r => r.json()))
-            await fetch('/api/dashboards/' + d.id, { method: 'DELETE', headers: h });
-          for (const s of __winnow.S.sources.filter(x => /\\.log$/.test(x.name)))
-            await fetch('/api/source/' + s.id, { method: 'DELETE', headers: h });
-        }""")
-        _post(server, "/api/plugins/toggle", {"fs_name": "esxi_logs", "scope": "off_all"})
-        pg.evaluate("async () => { __winnow.S.sourceId = null; __winnow.S.viewCache.clear();"
-                    " await __winnow.loadSources(); await __winnow.loadPlugins(); }")
     finally:
         ctx.close()
+        # Leave the shared case as found, whether or not the test got to
+        # the end: every later UI module in the shard sees it. This ran on
+        # success only, and never removed the profile's case variable (#227).
+        # restore_plugin_overrides puts back the plugin overrides it sets.
+        try:
+            for d in _call(server, "/api/dashboards"):
+                if d["id"] not in dashboards:
+                    _call(server, f"/api/dashboards/{d['id']}", "DELETE")
+            for s in _call(server, "/api/sources"):
+                if s["id"] not in sources:
+                    _call(server, f"/api/source/{s['id']}", "DELETE")
+            for v in _call(server, "/api/case/variables"):
+                if v["name"] not in variables:
+                    _call(server, f"/api/case/variables/{urllib.parse.quote(v['name'])}", "DELETE")
+        finally:
+            _post(server, "/api/plugins/toggle", {"fs_name": "esxi_logs", "scope": "off_all"})
         assert not errors, "uncaught JS errors: " + " | ".join(errors)

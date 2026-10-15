@@ -83,7 +83,14 @@ def wide_table(page, server, tmp_path):
             raise AssertionError("wide.csv never appeared in S.sources")
         sid = page.evaluate("() => __winnow.S.sources.find((s) => s.name === 'wide.csv').id")
         page.evaluate("(id) => __winnow.openSource(id)", sid)
-        page.wait_for_function("(id) => __winnow.S.sourceId === id", arg=sid)
+        # The view, not just the id: sourceId flips before the new table's
+        # view and columns land, and a strip opened in between can ask about
+        # the wrong table. That is the likeliest reason the strip once never
+        # drew, in one of four full local runs. 720 rows is wide.csv's; the
+        # shared table has 200.
+        page.wait_for_function(
+            "(id) => __winnow.S.sourceId === id && __winnow.S.view && __winnow.S.view.row_count === 720"
+            " && __winnow.busyCount === 0", arg=sid)
 
         btn = page.locator("#btnHistogram")
         # Generous: a CI runner drawing the first histogram of a fresh
@@ -91,7 +98,11 @@ def wide_table(page, server, tmp_path):
         btn.wait_for(state="visible", timeout=30_000)
         if btn.get_attribute("aria-pressed") == "false":
             btn.click()
-        page.wait_for_selector("#pluginPanels:not([hidden]) #histogramPanel canvas.th-canvas", timeout=30_000)
+        try:
+            page.wait_for_selector("#pluginPanels:not([hidden]) #histogramPanel canvas.th-canvas", timeout=30_000)
+        except Exception as e:
+            shows = page.evaluate("() => document.getElementById('histogramPanel').textContent")
+            raise AssertionError(f"the strip never drew; it shows {shows!r}") from e
         page.wait_for_function("() => /rows/.test(document.getElementById('histogramPanel').textContent)",
                                timeout=30_000)
     except Exception:

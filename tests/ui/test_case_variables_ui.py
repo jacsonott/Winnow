@@ -117,7 +117,7 @@ def test_new_case_dialog_asks_for_a_profiles_required_variables(page, api):
         page.wait_for_function("() => __winnow.S.view")
 
 
-def test_applying_a_profile_prompts_for_required_variables_it_seeds(page, api):
+def test_applying_a_profile_prompts_for_required_variables_it_seeds(page, api, restore_plugin_overrides):
     """Applying to an existing case seeds the definitions and asks for the
     required ones in one dialog; Later leaves them flagged in Case settings."""
     rec = api("/api/plugin_bundles", "POST", {

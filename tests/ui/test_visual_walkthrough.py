@@ -59,7 +59,8 @@ def test_a_one_column_table_takes_the_whole_grid(page, api, ui_csv):
         col_w2 = _rect(page, '.hcell[data-col="Message"]')["w"]
         assert col_w2 < col_w and col_w2 >= body_w2 - 104 - 40, (col_w2, body_w2)
     finally:
-        api(f"/api/sources/{sid}", "DELETE")
+        api(f"/api/source/{sid}", "DELETE")
+        page.evaluate("() => __winnow.loadSources()")
 
 
 def _tag_row_with_hotkey(page, nth, hotkey):

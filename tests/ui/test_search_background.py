@@ -121,20 +121,26 @@ class _Requests:
         return [u for m, u in self.seen[start:] if m == "POST" and re.search(pattern, u)]
 
 
-def _second_table(page, tmp_path):
-    """A second table in the shared case (tests/ui/test_view_state.py
-    adds one the same way, and a later test finds it already there).
-    Returns (the open table's id, the other's)."""
-    if page.evaluate("() => __winnow.S.sources.length") < 2:
-        csv2 = tmp_path / "second.csv"
-        csv2.write_text("Alpha,Beta\n" + "".join(f"{i},x{i}\n" for i in range(30)), encoding="utf-8")
-        status = page.evaluate("""(path) => fetch('/api/ingest/path', { method: 'POST',
-          headers: { 'X-Timeline-Lite-Client': '1', 'Content-Type': 'application/json' },
-          body: JSON.stringify({ path }) }).then((r) => r.status)""", str(csv2))
-        assert status == 200
-        page.evaluate("() => __winnow.loadSources()")
-        page.wait_for_function("() => __winnow.S.sources.length >= 2 && __winnow.S.view && __winnow.busyCount === 0")
-    return page.evaluate("() => [__winnow.S.sourceId, __winnow.S.sources.find((s) => s.id !== __winnow.S.sourceId).id]")
+def _second_table(page, api, tmp_path):
+    """A second table in the shared case, this test's own: the caller drops
+    it with _drop_table. It used to be imported only when the case had
+    fewer than two tables, and counted on test_view_state.py having left
+    one behind (#227). Returns (the open table's id, the new one's)."""
+    csv2 = tmp_path / "bg_second.csv"
+    csv2.write_text("Alpha,Beta\n" + "".join(f"{i},x{i}\n" for i in range(30)), encoding="utf-8")
+    second = api("/api/ingest/path", "POST", {"path": str(csv2)})["id"]
+    page.evaluate("() => __winnow.loadSources()")
+    page.wait_for_function("(id) => __winnow.S.sources.some((s) => s.id === id) && __winnow.S.view && __winnow.busyCount === 0", arg=second)
+    return page.evaluate("() => __winnow.S.sourceId"), second
+
+
+def _drop_table(page, api, first, sid):
+    """Drop a table _second_table added, from the grid of the one it was
+    added beside, so nothing on screen is still asking for it."""
+    page.evaluate("(id) => __winnow.openSource(id)", first)
+    page.wait_for_function("(id) => __winnow.S.sourceId === id && __winnow.S.view && __winnow.busyCount === 0", arg=first)
+    api(f"/api/source/{sid}", "DELETE")
+    page.evaluate("() => __winnow.loadSources()")
 
 
 def _arm(page):
@@ -439,7 +445,7 @@ def test_a_header_filter_calls_the_pending_search_off_before_it_builds(page):
         _reset(page)
 
 
-def test_coming_back_to_the_table_keeps_the_old_rows_and_the_search_pending(page, tmp_path):
+def test_coming_back_to_the_table_keeps_the_old_rows_and_the_search_pending(page, api, tmp_path):
     """Leave the table while its search runs, come back: the stash puts
     the search in the box again, and that spec IS the pending search —
     so the table shows the rows it had (the held build touched nothing),
@@ -449,7 +455,7 @@ def test_coming_back_to_the_table_keeps_the_old_rows_and_the_search_pending(page
     bg = _Background(page)
     reqs = _Requests(page)
     _arm(page)
-    first, second = _second_table(page, tmp_path)
+    first, second = _second_table(page, api, tmp_path)
     page.click("#btnSearchToggle")
     try:
         page.locator("#search").fill("4624")
@@ -479,6 +485,7 @@ def test_coming_back_to_the_table_keeps_the_old_rows_and_the_search_pending(page
     finally:
         bg.close()
         _reset(page)
+        _drop_table(page, api, first, second)
 
 
 def test_a_filter_build_still_blocks_with_the_chip(page):
