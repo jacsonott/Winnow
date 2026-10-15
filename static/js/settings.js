@@ -19,6 +19,7 @@ import { loadCaseVariables, loadSavedFilters } from './savedfilters.js';
 import { applyPageTabsSize, renderPageTabs, syncTabOverflow } from './sources.js';
 import { lastSplash, osSkipsSplash, reducedMotion } from './splash.js';
 import { S, gridRowCount, dashboardCreatorMode } from './state.js';
+import { buildDefaultTagsEditor } from './tags.js';
 import { openSavedFiltersModal, setTimeframeAcrossTables, timeframeAcrossTables, updateFiltersButton, updateTimeRangeButton } from './timeframe.js';
 import { TS_FORMATS } from './tsformat.js';
 import { markModalAction, confirmDialog, modal, promptDialog } from './ui.js';
@@ -1281,42 +1282,8 @@ export function openSettings(where) {
       "Seeds the tag set of every new case, however it's made — the home screen, a dropped or double-clicked "
       + 'file, --case on the command line — and of a case left with no tags at all, the next time it opens. '
       + "Doesn't change tags in a case that has any — use \"Apply default template\" in Edit tags for that."));
-    const dtList = el('div', 'settings-keys');
-    let defaultTags = [];
-
-    function renderDefaultTagRows() {
-      dtList.replaceChildren();
-      defaultTags.forEach((t, i) => {
-        const row = el('div', 'row-actions');
-        const color = el('input'); color.type = 'color'; color.value = t.color || '#8899aa';
-        color.oninput = () => { t.color = color.value; };
-        const name = el('input'); name.value = t.name || ''; name.placeholder = 'Tag name';
-        name.style.cssText = 'flex:1;background:var(--ink);color:var(--text);border:1px solid var(--line-2);padding:4px 7px;font:inherit';
-        name.oninput = () => { t.name = name.value; };
-        const key = el('input'); key.value = t.hotkey || ''; key.maxLength = 1;
-        key.style.cssText = 'width:34px;text-align:center;background:var(--ink);color:var(--text);border:1px solid var(--line-2);padding:4px;font-family:var(--mono)';
-        key.oninput = () => { t.hotkey = key.value || null; };
-        const rm = el('button', 'btn ghost', '✕');
-        rm.onclick = () => { defaultTags.splice(i, 1); renderDefaultTagRows(); };
-        row.append(color, name, key, rm);
-        dtList.append(row);
-      });
-    }
-
-    api('/api/settings/default_tags').then((t) => { defaultTags = t; renderDefaultTagRows(); }).catch(() => {});
-    secTags.append(dtList);
-
-    const dtActs = el('div', 'row-actions');
-    const dtAdd = el('button', 'btn ghost', '+ tag');
-    dtAdd.onclick = () => { defaultTags.push({ name: 'New tag', color: '#7f9bb5', hotkey: null }); renderDefaultTagRows(); };
-    const dtSave = el('button', 'btn', 'Save template');
-    dtSave.onclick = async () => {
-      defaultTags = await post('/api/settings/default_tags', { tags: defaultTags });
-      renderDefaultTagRows();
-      toast('Default tag template saved');
-    };
-    dtActs.append(dtAdd, dtSave);
-    secTags.append(dtActs);
+    // Saves as it changes, the same row Edit tags uses (tags.js).
+    buildDefaultTagsEditor(secTags);
 
     const secFilters = section('filters', 'Saved filters');
     secFilters.append(el('p', null,

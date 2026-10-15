@@ -23,6 +23,27 @@ see [docs/notes/README.md](README.md) for the whole set.
   "Remove the tag"), so a test that clicks it should find it by role
   (`.confirm-actions .btn:not(.ghost)`), not by the label.
 
+- **The tag editors save as they change, and never send an empty name.**
+  Edit tags and Settings → Default tags for new cases are the same row
+  (`tagEditRow` in tags.js): the colour and the key save at once, the name
+  after `TAG_NAME_SAVE_MS` of quiet or on leaving the box, and the row's
+  own slot says "Saving…"/"Saved" (the row note's idiom) — a refusal is a
+  toast with the server's words and "Not saved" left on the row. Three
+  things are load-bearing. An empty name is held, not sent: the template's
+  server side (`TagTemplate.save`) silently drops nameless entries, so a
+  pause while retyping a name used to be one debounce away from deleting
+  the row being edited; leaving the box empty puts the last saved name
+  back. The template is one file written as a whole list, so its saves
+  are chained one at a time and `tags` holds only what each row has
+  *committed* — another row's save must not send a name still being typed.
+  And anything that redraws a list (Add tag, Delete, Apply default
+  template, the template's + tag and ✕) awaits every row's `flush()` first,
+  or the redraw paints the old name and the next edit to that row builds
+  on it. The pending timer outlives the dialog on purpose: a name typed
+  and closed straight away still lands. The editor never checked for two
+  tags on one digit and still doesn't — the wiki documents that the
+  higher one in the list wins (`tests/ui/test_tag_editors_save_on_change.py`).
+
 - **A background refresh must not navigate.** `loadSources()` re-opens
   the current source as a side effect of picking a tab, and `openSource()`
   switches to the grid and resets that source's filters and search. That
@@ -317,7 +338,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   folder* (`wireTableDrag` + `wireFolderDrop`, its own `draggedTableId`),
   not reorders the strip.
 - **Editing a saved filter** goes through the real grid, not a
-  self-contained dialog: the Saved filters modal's "Edit" applies that
+  self-contained dialog: "Edit…" in a Saved filters row's ⋯ applies that
   filter (`applyPreset`) and *then* opens `openFilterBuilder(f)` with the
   record, so the row count behind the modal is live feedback on the change
   being made. The only thing the `editing` argument adds is an `Update
@@ -332,7 +353,26 @@ see [docs/notes/README.md](README.md) for the whole set.
   None-means-leave-alone partial-update convention `CaseRegistry.update`
   already used, so one method serves both a rename and a conditions
   re-save. Edit needs a table open (it applies the filter to preview it),
-  hence the disabled button and its explanatory title when none is.
+  hence the disabled entry, with "Open a table first" under it, when none is.
+
+- **A list's per-row actions are a ⋯, built with `dropdownMenu`** — Saved
+  filters and the Tables manager (`.btn.row-more`, borderless until
+  pointed at). Five buttons a row was the complaint: the actions an
+  analyst reaches for once in a while went into the menu, and only the
+  everyday one stayed visible (the name itself in Saved filters, which
+  applies the filter; Open/Close in the Tables manager). Pass the items as
+  a *function* so a menu reads the row's state when it opens, not when the
+  list was drawn — Move up/Move down are disabled at the ends of their
+  header set. Those two exist so the order can still be changed without a
+  mouse, which only works because a move puts the focus back on the same
+  row's ⋯ after the redraw (closing a menu restores no focus by itself):
+  Enter, arrows, Enter again. A list that **redraws on a timer** must not
+  redraw under its own open menu — the Tables manager's 1.5 s poll
+  replaced every row, which left the menu anchored to a detached button
+  (and dropped a keyboard user's focus each tick). It now skips a tick
+  while `openMenuAnchor` is inside the list, and any tick whose sources
+  and indexes match what was last painted
+  (`tests/ui/test_tables_manager_row_menu.py`).
 - **Two tab strips share the header bar**: `#sourceTabs` (tables, ordered
   by `S.tabOrder`) and `#pageTabs` (SQL, Timeline and plugin tabs, ordered
   by `S.pageTabPrefs.order`), split by the `#tabSplit` divider. Page tabs

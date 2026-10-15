@@ -110,7 +110,14 @@ To step through the saved filters made for exactly this table's columns, press `
 
 Applying a saved filter replaces the builder's conditions, the search and the grouping. It leaves the column boxes, the tag filter and the timeframe as they were, so a host filter in a column box keeps narrowing each saved filter you step through.
 
-**Filters ▾ → Saved filters…** opens the full list, grouped by column set, with the open table's set first. From there you can apply, **Edit** (opens it in the builder, where `Update "name"` saves over it and **Save as new…** keeps both), **Rename**, reorder with ▲/▼ or by dragging, and delete with ✕. **Export filters…** and **Import filters…** move them between machines as a JSON file. The same buttons are in **Settings → Saved filters**.
+**Filters ▾ → Saved filters…** opens the full list, grouped by column set, with the open table's set first. Click a filter's name to apply it. Drag a filter up or down within its column set to change the order `[` and `]` step through. Each filter's **⋯** menu has:
+
+- **Edit…**: applies the filter to the open table and opens it in the builder, where `Update "name"` saves over it and **Save as new…** keeps both. It needs a table open.
+- **Rename…**
+- **Move up** and **Move down**: the same reordering as dragging, from the keyboard.
+- **Delete…**, which asks first.
+
+**Export filters…** and **Import filters…** move them between machines as a JSON file. The same buttons are in **Settings → Saved filters**.
 
 ### Shipped triage filters
 
