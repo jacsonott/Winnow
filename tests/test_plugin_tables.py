@@ -62,6 +62,23 @@ def test_execute_takes_arbitrary_statements_against_this_table(store):
     assert t.execute("CREATE INDEX IF NOT EXISTS ix_chat_at ON {table} (at)") == 0  # DDL
 
 
+def test_the_case_still_takes_writes_after_a_plugin_statement(store, write_csv):
+    """execute() puts an authorizer on the writer connection for its one
+    statement. Taking it off with set_authorizer(None) only works from
+    Python 3.11: on 3.10 it installed a deny-all, and every later write in
+    the case (a note, a view, another import) failed "not authorized"
+    until Winnow restarted. The Claude assistant plugin calls execute() to
+    clear its history, so one click left the case read-only."""
+    rec = store.ingest_csv(write_csv([["a"], ["1"], ["2"]]), build_fts=False)
+    t = _req(store).table("chat").create(COLS)
+    t.execute("DELETE FROM {table}")
+    store.set_note(rec["id"], 1, "still writable")
+    store.build_view(rec["id"], {"source_id": rec["id"], "filters": [], "sort": []})
+    store.ingest_csv(write_csv([["b"], ["3"]], name="second.csv"), build_fts=False)
+    t.insert({"role": "user", "content": "x", "at": "1"})
+    assert len(t.rows()) == 1
+
+
 def test_two_plugins_cannot_see_or_name_each_others_tables(store):
     a = _req(store, "llm_harness").table("chat").create(COLS)
     b = _req(store, "other_plugin").table("chat").create(COLS)

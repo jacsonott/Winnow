@@ -17,12 +17,14 @@ recovery contracts, which nothing else in the suite did:
 from __future__ import annotations
 
 import csv
+import io
 import os
+import sys
 
 import pytest
 from fastapi.testclient import TestClient
 
-from winnow.store import sanitize_columns
+from winnow.store import _csv_rows, sanitize_columns
 
 HEADERS = {"X-Timeline-Lite-Client": "1"}
 
@@ -144,6 +146,44 @@ def test_nul_bytes_in_headers_are_stripped(store, tmp_path):
     p.write_bytes(b"Ho\x00st,User\nDC01,alice\n")
     rec = store.ingest_csv(str(p), build_fts=False)
     assert [c["name"] for c in rec["columns"]] == ["Host", "User"]
+
+
+def test_a_nul_in_a_cell_is_kept_on_every_python(store, tmp_path):
+    """Python 3.10's csv refuses any line holding a NUL ("line contains
+    NUL"), so on the oldest Python the README supports the whole file
+    failed at line 2; 3.11 reads the NUL into its cell. Both read the
+    same cells now, and the import preview agrees with the import."""
+    p = tmp_path / "nulcell.csv"
+    p.write_bytes(b'Host,Value\nDC01,ab\x00cd\nWS02,"two\nlines \x00"\n')
+    want = [["DC01", "ab\x00cd"], ["WS02", "two\nlines \x00"]]
+    rec = store.ingest_csv(str(p), build_fts=False)
+    view = store.build_view(rec["id"], {"source_id": rec["id"], "filters": [], "sort": []})
+    assert [r["cells"] for r in store.fetch_rows(view["view_id"], 0, 5)["rows"]] == want
+    prev = store.preview_csv_text(p.read_text(encoding="utf-8"), name=str(p))
+    assert prev["sample_rows"] == want
+
+
+ESC, MARK = "\uffff", "\ufffe"     # what _csv_rows writes a NUL as, past 3.10's csv
+
+
+@pytest.mark.parametrize("text, rows", [
+    ("a,b\nx\x00y,z\n", [["a", "b"], ["x\x00y", "z"]]),
+    ('"multi\nline \x00",q\nnext,row\n', [["multi\nline \x00", "q"], ["next", "row"]]),
+    # The escape's own characters in the file come back as themselves.
+    (f"{ESC}{MARK},{ESC}\x00{ESC}\n", [[f"{ESC}{MARK}", f"{ESC}\x00{ESC}"]]),
+    # A row after an escaped one is read as it stands.
+    (f"\x00,1\n{MARK},2\n", [["\x00", "1"], [MARK, "2"]]),
+    # One quoted cell spanning an escaped line and a plain one.
+    (f'"\x00\n{MARK}"\n', [[f"\x00\n{MARK}"]]),
+])
+def test_the_nul_escape_reads_what_csv_reads(text, rows):
+    """The path 3.10 takes, run on every version: CI's other Pythons never
+    take it on their own. Where csv reads NUL natively, the expected rows
+    are checked against it, so they are csv's answer, not this test's."""
+    _, got = _csv_rows(io.StringIO(text, newline=""), ",", escape_nul=True)
+    assert list(got) == rows
+    if sys.version_info >= (3, 11):
+        assert list(csv.reader(io.StringIO(text, newline=""))) == rows
 
 
 def test_sanitize_columns_strips_control_characters():
