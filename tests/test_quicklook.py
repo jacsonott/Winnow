@@ -121,6 +121,88 @@ def test_save_as_refuses_a_real_case(client, case_path):
         server.STORE.close()
 
 
+def _quicklook(server, c, tmp_path):
+    body = c.post("/api/assoc/open", json={"files": [_csv(tmp_path)]}, headers=HEADERS).json()
+    server.STORE.wait_for_ingest_job(body["started"][0]["job_id"], timeout=30)
+    return body["case"]
+
+
+def test_save_as_takes_the_new_case_dialogs_path_and_group(client, tmp_path):
+    """Save as a case… is + New case's dialog now, so the path and group
+    typed there are where the case lands and what it's listed under — not
+    the name slugged into the cases folder, which was all a name-only
+    prompt could do."""
+    server, c = client
+    old_path = _quicklook(server, c, tmp_path)
+    dest = tmp_path / "elsewhere" / "acme-breach.db-winnow"   # the folder doesn't exist yet
+
+    res = c.post("/api/case/save_as", headers=HEADERS,
+                 json={"name": "ACME breach", "group": "ACME IR", "path": str(dest)})
+    assert res.status_code == 200, res.text
+    assert res.json()["path"] == str(dest)
+    assert dest.is_file() and not os.path.exists(old_path)
+    rec = WS.cases.find_by_path(str(dest))
+    assert (rec["name"], rec["group"]) == ("ACME breach", "ACME IR")
+    assert server.STORE.path == str(dest)
+    assert server.STORE.list_sources()[0]["row_count"] == 2
+    server.STORE.close()
+
+
+def test_save_as_refuses_a_path_that_is_taken_or_still_a_quicklook(client, tmp_path):
+    server, c = client
+    old_path = _quicklook(server, c, tmp_path)
+    taken = tmp_path / "taken.db-winnow"
+    taken.write_text("not mine")
+    res = c.post("/api/case/save_as", json={"name": "x", "path": str(taken)}, headers=HEADERS)
+    assert res.status_code == 400
+    assert taken.read_text() == "not mine"
+    # Saved into quicklook/, it would still be temporary — off the home
+    # screen and the startup sweep's to delete.
+    inside = os.path.join(os.path.dirname(old_path), "kept.db-winnow")
+    res = c.post("/api/case/save_as", json={"name": "x", "path": inside}, headers=HEADERS)
+    assert res.status_code == 400
+    assert not os.path.exists(inside)
+    assert c.get("/api/case/current", headers=HEADERS).json()["temp"] is True
+    server.STORE.close()
+
+
+def test_save_as_to_another_drive_copies_then_deletes(client, tmp_path, monkeypatch):
+    """A rename can't cross drives or mounts (D:\\Cases from a Winnow on
+    C:), and the dialog's Browse… reaches any folder."""
+    import errno
+    server, c = client
+    old_path = _quicklook(server, c, tmp_path)
+    real_replace = os.replace
+
+    def cross_device(src, dst):
+        if src == old_path:
+            raise OSError(errno.EXDEV, "Invalid cross-device link")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(server.os, "replace", cross_device)
+    dest = tmp_path / "other-drive" / "case.db-winnow"
+    res = c.post("/api/case/save_as", json={"name": "Moved", "path": str(dest)}, headers=HEADERS)
+    assert res.status_code == 200, res.text
+    assert dest.is_file() and not os.path.exists(old_path)
+    assert server.STORE.list_sources()[0]["row_count"] == 2
+    server.STORE.close()
+
+
+def test_save_as_over_a_stale_listing_takes_the_new_name(client, tmp_path):
+    """A case deleted outside Winnow stays listed under its path; saving a
+    quick look to that path must list it under the name just typed, not
+    the old record's."""
+    server, c = client
+    _quicklook(server, c, tmp_path)
+    dest = tmp_path / "reused.db-winnow"
+    WS.cases.create(str(dest), name="Old case", group="Old group")
+    res = c.post("/api/case/save_as", json={"name": "New case", "path": str(dest)}, headers=HEADERS)
+    assert res.status_code == 200, res.text
+    rec = WS.cases.find_by_path(str(dest))
+    assert (rec["name"], rec["group"]) == ("New case", "")
+    server.STORE.close()
+
+
 def test_discard_deletes_the_quicklook_and_only_the_quicklook(client, tmp_path):
     server, c = client
     body = c.post("/api/assoc/open", json={"files": [_csv(tmp_path)]}, headers=HEADERS).json()

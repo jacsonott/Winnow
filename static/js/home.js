@@ -494,9 +494,18 @@ export function openFolderBrowser(startPath, onSelect, onCancel, { mode = 'folde
    there's no surviving DOM to read values back out of afterward; the only
    way to preserve what the analyst already typed is to snapshot it into
    plain values and re-invoke this function with them as the new initial
-   state, same pattern openImportPreview's onConfirm/onCancel already use. */
+   state, same pattern openImportPreview's onConfirm/onCancel already use.
+
+   `state.saveQuickLook` makes this the quick look's "Save as a case…"
+   (tempSaveAs): the same fields, but the open quick look's file moves to
+   the path rather than a new case being made there. */
 export function openNewCaseModal(state = {}) {
-  modal('New case', (b) => {
+  const saving = state.saveQuickLook || null;
+  modal(saving ? 'Save as a case' : 'New case', (b) => {
+    if (saving) {
+      b.append(el('p', null, 'Its tables, tags and notes move into the case file below, '
+        + 'and the case is listed on the home screen.'));
+    }
     const nameInput = fieldInput(state.name || '');
     nameInput.placeholder = 'Case name';
     const nameRow = el('div', 'row-actions');
@@ -520,7 +529,7 @@ export function openNewCaseModal(state = {}) {
     browseBtn.onclick = () => {
       const snapshot = {
         name: nameInput.value, group: groupInput.value, path: pathInput.value,
-        chosenDir, pathTouched,
+        chosenDir, pathTouched, saveQuickLook: state.saveQuickLook,
         caseType: typeSel.value,
         vars: Object.fromEntries([...varInputs].map(([k, inp]) => [k, inp.value])),
       };
@@ -589,7 +598,7 @@ export function openNewCaseModal(state = {}) {
 
 
     const actions = el('div', 'row-actions');
-    const create = el('button', 'btn', 'Create case');
+    const create = el('button', 'btn', saving ? 'Save case' : 'Create case');
     create.onclick = oneAtATime(create, async () => {
       const name = nameInput.value.trim();
       if (!name) { toast('Name the case first'); return; }
@@ -602,14 +611,28 @@ export function openNewCaseModal(state = {}) {
         varInputs.get(missing[0].name).focus();
         return;
       }
-      try {
-        await post('/api/cases', { path, name, group: groupInput.value.trim(), notes: '' });
-      } catch (e) {
-        toast('Could not create case: ' + e.message, 6000);
-        return;
+      if (saving) {
+        let res;
+        try {
+          res = await post('/api/case/save_as', { path, name, group: groupInput.value.trim() });
+        } catch (e) {
+          toast('Could not save the case: ' + e.message, 6000);
+          return;
+        }
+        $('modal').hidden = true;
+        paintTempBanner(false);
+        setBrandLabel(res.name);
+        toast(`Saved — "${res.name}" is on the home screen now`, 6000);
+      } else {
+        try {
+          await post('/api/cases', { path, name, group: groupInput.value.trim(), notes: '' });
+        } catch (e) {
+          toast('Could not create case: ' + e.message, 6000);
+          return;
+        }
+        $('modal').hidden = true;
+        await openCase(path); // shared with the home screen's "open" flow — same brand-label/view-cache handling
       }
-      $('modal').hidden = true;
-      await openCase(path); // shared with the home screen's "open" flow — same brand-label/view-cache handling
       if (typeSel.value) {
         try {
           // Values typed above land first, so applying the profile (which
@@ -619,12 +642,16 @@ export function openNewCaseModal(state = {}) {
           }
           await applyBundle({ id: Number(typeSel.value) });
         } catch (e) {
-          toast('Case created, but the profile failed to apply: ' + e.message, 6000);
+          toast(`Case ${saving ? 'saved' : 'created'}, but the profile failed to apply: ` + e.message, 6000);
         }
       }
+      if (saving && saving.onSaved) await saving.onSaved();
     });
     const cancel = el('button', 'btn ghost', 'Cancel');
-    cancel.onclick = () => { $('modal').hidden = true; };
+    cancel.onclick = () => {
+      $('modal').hidden = true;
+      if (saving && saving.onCancel) saving.onCancel();
+    };
     actions.append(create, cancel);
     b.append(actions);
   });
@@ -995,19 +1022,29 @@ export function paintTempBanner(on) {
 }
 
 /* The three ways out of a quick look, shared by the banner's buttons and
-   the leave-guard dialog (openQuickLookExitDialog). Each returns whether
-   it actually happened, so the guard knows if navigation may proceed. */
+   the leave-guard dialog (openQuickLookExitDialog). Discard returns
+   whether it actually happened, so the guard knows if navigation may
+   proceed; Save and Add open dialogs of their own and say so through
+   their callbacks instead. */
 
-export async function tempSaveAs() {
-  const name = await promptDialog('Save this as a case named:');
-  if (!name || !name.trim()) return false;
-  let res;
-  try { res = await post('/api/case/save_as', { name: name.trim() }); }
-  catch (e) { toast(e.message, 6000); return false; }
-  paintTempBanner(false);
-  setBrandLabel(res.name);
-  toast(`Saved — "${res.name}" is on the home screen now`, 6000);
-  return true;
+/* Save is + New case's own dialog (openNewCaseModal), so a quick look is
+   filed with the same name, group, path and profile as any other case. It
+   used to ask for a name only and always land in the cases folder. The
+   folder offered is the one the quick look already sits in (the parent of
+   quicklook/), so saving there is a rename; variables the quick look
+   already holds fill in the profile's fields. `onSaved` runs once the
+   case is saved (and any profile applied); `onCancel` on Cancel. */
+export async function tempSaveAs({ onSaved, onCancel } = {}) {
+  const [cur, vars] = await Promise.all([
+    api('/api/case/current').catch(() => null),
+    api('/api/case/variables').catch(() => []),
+  ]);
+  const parentOf = (p) => (p || '').replace(/[\\/][^\\/]*$/, '');
+  openNewCaseModal({
+    chosenDir: parentOf(parentOf(cur && cur.path)) || undefined,
+    vars: Object.fromEntries(vars.filter((v) => v.value).map((v) => [v.name, v.value])),
+    saveQuickLook: { onSaved, onCancel },
+  });
 }
 
 export function tempCopyModal({ thenDiscard = false } = {}) {
@@ -1075,9 +1112,11 @@ export function openQuickLookExitDialog() {
       + 'from the home screen. Choose what happens to it first:'));
     const acts = el('div', 'row-actions');
     const save = el('button', 'btn', 'Save as a case…');
-    save.onclick = async () => {
-      if (await tempSaveAs()) { $('modal').hidden = true; showHome(); await refreshCases(); }
-    };
+    // The save dialog replaces this one; Cancel there comes back here.
+    save.onclick = () => tempSaveAs({
+      onSaved: async () => { showHome(); await refreshCases(); },
+      onCancel: openQuickLookExitDialog,
+    });
     const copy = el('button', 'btn ghost', 'Add to an existing case…');
     copy.onclick = () => tempCopyModal({ thenDiscard: true });
     const discard = el('button', 'btn ghost danger', 'Discard');
