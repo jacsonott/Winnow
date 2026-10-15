@@ -19,7 +19,7 @@ import { applyPageTabsSize, renderPageTabs, syncTabOverflow } from './sources.js
 import { lastSplash, osSkipsSplash, reducedMotion } from './splash.js';
 import { S, gridRowCount, dashboardCreatorMode } from './state.js';
 import { buildDefaultTagsEditor } from './tags.js';
-import { openSavedFiltersModal, updateFiltersButton, updateTimeRangeButton } from './timeframe.js';
+import { openSavedFiltersModal, setTimeframeAcrossTables, timeframeAcrossTables, updateFiltersButton, updateTimeRangeButton } from './timeframe.js';
 import { TS_FORMATS } from './tsformat.js';
 import { markModalAction, confirmDialog, modal, promptDialog } from './ui.js';
 
@@ -90,6 +90,10 @@ export function defaultAppearance() {
     // leaves the analyst where they are (see jobs.js). On, the first table
     // of an import batch to finish opens; the rest land quietly.
     openNewTables: false,
+    // On unless turned off: the timeframe filter is one case-wide range that
+    // follows the analyst between tables. Off, each table keeps its own —
+    // see timeframeAcrossTables in timeframe.js.
+    timeframeAcrossTables: true,
     // 'bar' | 'row' — see FILTER_UI_DEFAULT. An install that predates this
     // has no key and therefore gets the default, like every other switch here.
     filterUi: FILTER_UI_DEFAULT,
@@ -1118,7 +1122,19 @@ export function openSettings() {
     secSyntax.append(el('p', null,
       'The ⏱ Timeframe button pins a start/end range against one datetime column, or every datetime '
       + "column at once (catches a row via its Modified time even if its Created time was timestomped) — "
-      + 'unlike the other filters, it stays applied when you clear filters, apply a saved filter, or switch tables.'));
+      + 'unlike the other filters, it stays applied when you clear filters or apply a saved filter.'));
+    // The same switch as the Timeframe dialog's — both write the one pref.
+    const tfLabel = el('label', 'check-row');
+    const tfCb = el('input');
+    tfCb.type = 'checkbox';
+    tfCb.id = 'settingsTimeframeAcrossTables';
+    tfCb.checked = timeframeAcrossTables();
+    tfCb.onchange = () => setTimeframeAcrossTables(tfCb.checked);
+    tfLabel.append(tfCb, el('span', null, 'Keep the timeframe applied when switching tables'));
+    secSyntax.append(tfLabel);
+    secSyntax.append(el('p', 'fb-help',
+      'On: one timeframe for the whole case, applied to whichever table you open. '
+      + 'Off: each table keeps its own, the way it keeps its own filters, and a table you have not set one on opens without one.'));
 
     const secTs = settingsSection(b, 'Timestamps');
     secTs.append(el('p', null,

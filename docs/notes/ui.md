@@ -111,8 +111,9 @@ see [docs/notes/README.md](README.md) for the whole set.
   `ViewSpec`, compiled in `_compile_where` via the registered SQL function
   `TS_NORMALIZE`) is deliberately a separate piece of state from every
   other filter mechanism, and every place that resets "the filters" —
-  `clearAllFilters()`, `applyPreset()`, opening a different source — is
-  written to skip it on purpose (see the comments at each site). It's
+  `clearAllFilters()`, `applyPreset()`, opening a different source (unless
+  the analyst turned that off; see the next entry) — is written to skip it
+  on purpose (see the comments at each site). It's
   meant to stay pinned while everything else changes underneath it, and
   toggles on/off via its own keybind (`toggleTimeRange`) rather than
   needing its config modal reopened. `column: null` means "every datetime
@@ -123,6 +124,24 @@ see [docs/notes/README.md](README.md) for the whole set.
   `parseTimestamp`) is what both the column values and the start/end
   bounds get compared through — a bare text/numeric comparison on the raw
   stored value sorts the US `M/D/YYYY` shape wrong.
+- **Following the analyst between tables is a preference**
+  (`timeframeAcrossTables` in timeframe.js, `S.appearance.timeframeAcrossTables`,
+  default on; the switch is in the Timeframe dialog and in Settings → Filter
+  & search syntax, both writing the one key). On is the behaviour above.
+  Off, `openSource` treats the range like the other per-table state: the
+  per-tab stash always records `timeRange`, and on a real switch
+  (`leaving`, never a refresh of the open table — every refresh idiom
+  re-enters `openSource`, and must not drop a range just set) it puts back
+  the arriving table's, or none. The callers that clear the timeframe for
+  a count-faithful landing (dashboard drill, search-all "Open ↦", the
+  session-diff pivot) still work in either mode because each clears it
+  AFTER `openSource(…, { skipBuild: true })` has restored the stash, not
+  before. It is a machine preference like `openNewTables`, so it is in
+  `workspace.AppSettings.APPEARANCE_KEYS` too — leave it out of that set
+  and the server drops `false` on the floor, and a new origin boots back
+  into "on". `updateTimeRangeButton` reads it during boot, before
+  `initAppearance` has set `S.appearance`; the helper guards for that, and
+  a version that didn't left the page blank.
 - **The histogram strip re-asks; it does not wait to be told.**
   `/api/histogram` names a view id, and a view is evicted the moment the
   next rebuild lands — which is what a burst of filter changes is. The

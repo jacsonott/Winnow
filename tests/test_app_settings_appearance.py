@@ -27,3 +27,11 @@ def test_other_settings_survive_an_appearance_write(client):
 def test_non_object_appearance_is_rejected(client):
     r = client.post("/api/settings/app", json={"appearance": "phosphor"})
     assert r.status_code in (400, 422)
+
+
+def test_the_timeframe_across_tables_switch_is_kept(client):
+    """Off is the value that has to survive: a machine that never kept the
+    key reads as on, so dropping it would silently turn the switch back."""
+    r = client.post("/api/settings/app", json={"appearance": {"timeframeAcrossTables": False}})
+    assert r.status_code == 200, r.text
+    assert client.get("/api/settings/app").json()["appearance"]["timeframeAcrossTables"] is False
