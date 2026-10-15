@@ -1,0 +1,70 @@
+# Publishes docs/wiki/ to the repository's GitHub wiki.
+#
+# docs/wiki/ stays the source: it is reviewed in pull requests, ships in
+# the release zip and reads correctly in the repository. The wiki is a copy
+# of it, regenerated here by scripts/build_wiki.py (which rewrites the
+# links that only make sense inside the repository) and pushed whole, so an
+# edit made in the wiki's own editor lasts until the next publish.
+#
+# It runs from develop because that is where docs/wiki/ changes land, in
+# the same pull request as the behaviour they describe.
+#
+# The wiki has to exist before anything can push to it. GitHub creates a
+# wiki's git repository only when its first page is saved from the Wiki
+# tab, so on a repository where that hasn't happened the clone below fails
+# and says what to do.
+name: Wiki
+
+on:
+  push:
+    branches: [develop]
+    paths:
+      - "docs/wiki/**"
+      - "scripts/build_wiki.py"
+      - ".github/workflows/wiki.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One publish at a time, in push order: each one replaces the whole wiki.
+concurrency:
+  group: wiki
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # the wiki is <repo>.wiki.git, and this is what lets the token push to it
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: repo
+
+      - name: Build the wiki's pages
+        run: python3 repo/scripts/build_wiki.py pages --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME"
+
+      - name: Check out the wiki
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          if ! git clone -q "https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY}.wiki.git" wiki; then
+            echo "::error::There is no wiki to publish to yet. Turn on Wikis in the repository's Settings, then open the Wiki tab and save a first page: GitHub only creates the wiki's git repository then."
+            exit 1
+          fi
+
+      - name: Replace the wiki's pages
+        working-directory: wiki
+        run: |
+          find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+          cp -R ../pages/. .
+          git add -A
+          if git diff --cached --quiet; then
+            echo "The wiki already matches docs/wiki/."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -q -m "Publish docs/wiki/ from ${GITHUB_REPOSITORY}@${GITHUB_SHA::7}"
+          git push -q origin HEAD

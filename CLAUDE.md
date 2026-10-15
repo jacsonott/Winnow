@@ -231,7 +231,13 @@ docs/              Long-form documentation. writing-plugins.md — the plugin
                     (Home.md is the index, README.md links into it). A
                     change an analyst would notice updates the page that
                     describes it in the same PR; UI labels there are
-                    quoted exactly as the app shows them.
+                    quoted exactly as the app shows them. It is also the
+                    GitHub wiki's source: .github/workflows/wiki.yml runs
+                    scripts/build_wiki.py on every develop push that touches
+                    it and replaces the wiki wholesale, so edit here, never
+                    in the wiki. Every page must be listed under Home.md's
+                    "## Pages" (it becomes the sidebar) and every link must
+                    resolve; tests/test_build_wiki.py fails otherwise.
 plugins/           Analyst-installed plugins (gitignored except its README).
                     Managed from Settings → Plugins → Manage plugins…,
                     a two-pane manager (static/js/pluginmanager.js):
