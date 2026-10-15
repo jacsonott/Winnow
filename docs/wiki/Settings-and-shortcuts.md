@@ -29,7 +29,7 @@ open Winnow in another browser, another browser profile, or on another port
 
 | Kept in | Settings |
 | --- | --- |
-| This browser, and copied to the machine for any new browser or port to start from | Skin, theme, accent color, row density, launch animation, Pages as a dropdown, Open new tables when an import finishes |
+| This browser, and copied to the machine for any new browser or port to start from | Skin, theme, accent color, row density, launch animation, Pages as a dropdown, Open new tables when an import finishes, Keep the timeframe applied when switching tables |
 | This browser only (per browser profile and address) | Keyboard shortcuts, striped rows, autofit width limit, always-on filter row |
 | This machine (the `workspace/` folder) | Remote session mode, the default timestamp format, default tags for new cases, saved filters, plugins, profiles, the Windows hidden-start option |
 | Your user account on this machine | File associations, environment variables |
@@ -271,6 +271,12 @@ A quick reference to the filter-row syntax (`svchost`, `!svchost`, `=4624`,
 `*`, `a|b|c`), the value picker, the search box modes and the timeframe
 filter. The full explanation is in
 [Filtering and searching](Filtering-and-searching.md).
+
+**Keep the timeframe applied when switching tables** is on by default: one
+timeframe for the whole case, applied to whichever table you open. Off, each
+table keeps its own, and a table you have not set one on opens without one.
+It is the same switch as **Keep applied when switching tables** in the
+timeframe dialog.
 
 ## Timestamps
 
