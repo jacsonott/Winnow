@@ -133,7 +133,7 @@ export const ACTION_LABELS = {
   copyUniqueValues: "Copy the unique values of the cursor's column — from the selected rows, else the whole view",
   openTables: 'Open Tables manager',
   toggleSidebar: 'Show/hide the table sidebar',
-  openTableMenu: 'Open the table menu (columns, value dropdowns) — also right-click a tab',
+  openTableMenu: 'Open the table menu (columns, value dropdowns) — also right-click a tab → Columns…',
   openSearchAll: 'Search all tables',
   toggleDetail: 'Open/close the detail pane',
   dropGrouping: 'Drop all grouping, restore column order',

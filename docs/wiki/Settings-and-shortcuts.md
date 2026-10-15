@@ -192,7 +192,7 @@ with the action names Settings uses.
 | Copy the unique values of the cursor's column — from the selected rows, else the whole view | `Ctrl+Shift+U`, `Meta+Shift+U` |
 | Open Tables manager | `t` |
 | Show/hide the table sidebar | `` ` `` |
-| Open the table menu (columns, value dropdowns) — also right-click a tab | `C` |
+| Open the table menu (columns, value dropdowns) — also right-click a tab → Columns… | `C` |
 | Search all tables | `s` |
 | Open/close the detail pane | `d` |
 | Drop all grouping, restore column order | `x` |
@@ -234,7 +234,7 @@ These are not in the rebindable list.
 | `Ctrl+Shift+C` / `⌘+Shift+C` | The same, with a header row. |
 | `Esc` | Close a dialog; leave a text box; otherwise clear the row picks and cell selection. |
 | Right-click a row | Tag it, filter to or exclude that cell's value, copy. |
-| Right-click a tab | That table's menu: columns, value dropdowns, layout. |
+| Right-click a tab | Close it, rename it, merge it or remove it, or **Columns…** for the table menu. |
 
 The SQL pane has its own uses for `Ctrl+C`, `Esc` and the tag digits on a
 selected result; see [SQL pane](SQL-pane.md).

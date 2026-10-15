@@ -1222,7 +1222,7 @@ export function openSettings(where) {
     secSyntax.append(el('p', null,
       'The ▾ on a filter box lists that column’s distinct values with counts — tick the ones to keep. '
       + `It appears automatically on tables under ${VALUE_FILTER_AUTO_MAX.toLocaleString()} rows (reading the values is a scan); `
-      + 'the table menu (right-click a tab) turns it on or off per table or per column, and a row’s '
+      + 'the table menu (C, or right-click a tab → Columns…) turns it on or off per table or per column, and a row’s '
       + 'right-click menu can open it for any column.'));
     secSyntax.append(el('p', null,
       'Search box — Contains is always a true substring match; Regex is a full scan; Advanced supports '

@@ -41,7 +41,7 @@ Things to know before you rely on one:
 | From | Do this |
 | --- | --- |
 | A column header | Right-click the header → **Derive a column from this…** |
-| The table menu | Right-click the table's tab (or press `C`, that is Shift+C) → **Columns** → **Add derived column…** |
+| The table menu | Press `C` (that is Shift+C), or right-click the table's tab and choose **Columns…**, then **Columns** → **Add derived column…** |
 | The detail pane | Right-click a field inside a JSON or XML document → **Add as a column** |
 | After an import | When a column looks like a timestamp Winnow can't already read, a notice says so; click **Add datetime column** |
 | A whole document | Right-click the header → **Flatten JSON/XML into columns…**, or right-click a document node in the detail pane → **Flatten this document into columns…** |
