@@ -137,7 +137,7 @@ def test_off_a_refresh_of_the_open_table_keeps_its_timeframe(page, tables):
 def test_settings_and_the_dialog_are_the_same_switch(page, tables):
     page.evaluate("() => __winnow.openSettings()")
     page.wait_for_selector("#modal:not([hidden])")
-    page.locator(".settings-section-head", has_text="Filter & search syntax").click()
+    page.locator("#modalBody .settings-nav-item", has_text="Filter & search syntax").click()
     cb = page.locator("#settingsTimeframeAcrossTables")
     assert cb.is_checked()
     cb.uncheck()
