@@ -228,3 +228,77 @@ def test_a_config_keyed_on_every_column_still_applies(client, store, write_csv):
     [row] = _timeline_rows(client)
     assert row["type_label"] == "Process log"
     assert (row["ts"], row["body"]) == ("2023-11-14 22:13:20", "alice")
+
+
+# A table wider than ~500 columns (flattened JSON gets there easily) used to
+# fail the whole build: the body joins its columns with `||`, one chain
+# SQLite parses two levels deeper per column, and past its expression depth
+# limit of 1000 the INSERT raised "Expression tree is too large" — so ONE
+# wide table took every other table's findings off the Timeline with it.
+
+def _wide_table(store, write_csv, ncols=600, name="wide.csv"):
+    header = ["Timestamp"] + [f"c{i}" for i in range(1, ncols)]
+    row = ["2026-01-05T10:00:00"] + [f"v{i}" for i in range(1, ncols)]
+    sid = store.ingest_csv(write_csv([header, row], name=name), name=name, build_fts=False)["id"]
+    store.set_tags(sid, [1], store.list_tags()[0]["id"], True)
+    return sid, header
+
+
+def test_a_table_too_wide_for_the_body_still_builds_with_its_first_columns(store, write_csv):
+    rec1_id, rec2_id, tag_a, tag_b, configs = _two_tagged_sources(store, write_csv)
+    wide_id, header = _wide_table(store, write_csv)
+
+    res = store.build_timeline(configs=configs)
+    assert res["row_count"] == 4  # the three narrow findings are still there too
+    [trimmed] = res["body_trimmed"]
+    assert trimmed["source_id"] == wide_id and trimmed["total"] == 600
+    shown = trimmed["shown"]
+    assert 400 < shown < 600
+
+    rows = store.fetch_timeline_rows(res["view_id"], 0, 10)["rows"]
+    wide = next(r for r in rows if r["source_id"] == wide_id)
+    assert wide["body"].split(" | ") == ["2026-01-05T10:00:00"] + [f"v{i}" for i in range(1, shown)]
+
+
+def test_configured_body_columns_past_the_cap_keep_their_order(store, write_csv):
+    wide_id, header = _wide_table(store, write_csv)
+    body = list(reversed(header))  # every column, last first
+    res = store.build_timeline(configs={wide_id: {"body_columns": body}})
+    shown = res["body_trimmed"][0]["shown"]
+    [row] = store.fetch_timeline_rows(res["view_id"], 0, 10)["rows"]
+    assert row["body"].split(" | ")[:2] == ["v599", "v598"]
+    assert len(row["body"].split(" | ")) == shown
+
+
+def test_a_table_under_the_cap_is_not_trimmed(store, write_csv):
+    _two_tagged_sources(store, write_csv)
+    assert store.build_timeline()["body_trimmed"] == []
+
+
+def test_the_cap_follows_the_linked_sqlites_depth_limit(store, write_csv):
+    """Read off the connection rather than assumed, so a SQLite built with
+    a lower limit still fits — and the cap is exact enough that the column
+    after it would not have."""
+    import sqlite3
+
+    import pytest
+
+    if not hasattr(store.db, "setlimit"):
+        pytest.skip("Connection.setlimit needs Python 3.11+")
+    wide_id, header = _wide_table(store, write_csv, ncols=150)
+    store.db.setlimit(sqlite3.SQLITE_LIMIT_EXPR_DEPTH, 200)
+    res = store.build_timeline()
+    [trimmed] = res["body_trimmed"]
+    assert trimmed["shown"] == 95  # (200 - headroom 10) // 2
+    [row] = store.fetch_timeline_rows(res["view_id"], 0, 10)["rows"]
+    assert len(row["body"].split(" | ")) == 95
+
+
+def test_watchlist_latest_hits_survive_a_table_too_wide_for_the_body(store, write_csv):
+    """Latest hits joins the same body from the same config, and failed the
+    same way."""
+    wide_id, header = _wide_table(store, write_csv)
+    store.add_indicator("v7")
+    store.scan_source(wide_id)
+    [hit] = store.latest_hits()["rows"]
+    assert hit["source_id"] == wide_id and hit["body"].startswith("v1 | v2 | ")

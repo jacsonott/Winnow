@@ -98,6 +98,22 @@ SEARCH_ALL_COUNT_CAP = 1000
 # paste — it exists to bound an accident (a whole wordlist pasted in), not
 # to ration normal use.
 SEARCH_ALL_TERM_BREAKDOWN_MAX = 250
+# The unified Timeline (and the Watchlist's Latest hits, which reads the
+# same per-source config) joins a source's body columns with `a || ' | ' ||
+# b || ...`, which SQLite parses as one left-deep tree two levels deeper per
+# column — so a ~500-column table used to fail the whole query ("Expression
+# tree is too large (maximum depth 1000)") and nothing rendered at all. Both
+# now keep only as many body columns as fit (see Store._fit_body_cols). The
+# depth limit is read off the linked SQLite; this is the fallback for
+# Pythons before 3.11, whose Connection has no getlimit(). 1000 is SQLite's
+# compiled-in default.
+SQLITE_DEFAULT_EXPR_DEPTH = 1000
+# Depth a timeline branch spends around the body chain itself (COALESCE
+# and the column ref). Measured at limits 200 and 1000: N columns need
+# 2*N + 2, so 499 builds and 500 fails at the default. The extra margin is
+# for a SQLite that nests a little differently, or a later change that
+# wraps the body in a function.
+TIMELINE_BODY_DEPTH_HEADROOM = 10
 
 # The extensions a directory import (scan_import_directory) recognizes by
 # default — every format ingest_csv/ingest_json already know how to read.
@@ -7975,6 +7991,12 @@ class Store:
         `tag_ids` narrows to rows carrying at least one of those tags;
         None/empty means every tagged row regardless of which tag(s).
 
+        A source whose body would join more columns than SQLite's expression
+        depth allows (_fit_body_cols — 495 at the default limit) keeps only
+        the first that many, in body order, rather than failing the whole
+        build. Each one trimmed that way is listed in the result's
+        `body_trimmed` so the tab can say so.
+
         Same materialize-into-v.-then-page-by-pos pattern as build_view
         (CLAUDE.md invariant #2) — a heavily-tagged case can still be
         thousands of rows, so this isn't exempt from the no-LIMIT/OFFSET
@@ -7988,6 +8010,7 @@ class Store:
 
         branches = []
         params: list[Any] = []
+        body_trimmed: list[dict] = []
         for src in self.list_sources():
             if not src["tagged_row_count"]:
                 continue
@@ -8011,8 +8034,12 @@ class Store:
 
             chosen_body = [c for c in (cfg.get("body_columns") or []) if c in col_names]
             body_cols = chosen_body or [c["name"] for c in src["columns"]]
+            shown = self._fit_body_cols(body_cols)
+            if len(shown) < len(body_cols):
+                body_trimmed.append({"source_id": source_id, "source_name": src["name"],
+                                     "shown": len(shown), "total": len(body_cols)})
             body_expr = " || ' | ' || ".join(
-                f"COALESCE({self._col_ref(src, c, 's')}, '')" for c in body_cols
+                f"COALESCE({self._col_ref(src, c, 's')}, '')" for c in shown
             )
 
             # An analyst who picked body columns in Configure sources said
@@ -8069,7 +8096,19 @@ class Store:
                     self._evict_view_and_children(old)
 
         self._views[vid] = {"view_id": vid, "kind": "timeline", "row_count": n}
-        return {"view_id": vid, "row_count": n}
+        return {"view_id": vid, "row_count": n, "body_trimmed": body_trimmed}
+
+    def _fit_body_cols(self, cols: list[str]) -> list[str]:
+        """The first of `cols` that one ' | '-joined body can hold before
+        SQLite rejects the expression as too deep: two levels per column
+        (the value and its separator), less TIMELINE_BODY_DEPTH_HEADROOM —
+        495 at the default limit of 1000. All of them when this SQLite was
+        built with no depth limit at all (getlimit reports 0)."""
+        getlimit = getattr(self.db, "getlimit", None)
+        depth = getlimit(sqlite3.SQLITE_LIMIT_EXPR_DEPTH) if getlimit else SQLITE_DEFAULT_EXPR_DEPTH
+        if depth <= 0:
+            return cols
+        return cols[:max(1, (depth - TIMELINE_BODY_DEPTH_HEADROOM) // 2)]
 
     def fetch_timeline_rows(self, view_id: str, start: int, count: int) -> dict:
         handle = self._views.get(view_id)
@@ -11643,8 +11682,11 @@ class Store:
                 # A template that names its body columns explicitly is
                 # taken at its word, timestamp included.
                 body_cols = [c["name"] for c in src["columns"] if c["name"] != ts_col]
+            # Trimmed silently, unlike the Timeline: the preview is cut to
+            # WATCHLIST_PREVIEW_CHARS long before the 495th column.
             body_expr = " || ' | ' || ".join(
-                f"COALESCE({self._col_ref(src, c, 's')}, '')" for c in body_cols) or "''"
+                f"COALESCE({self._col_ref(src, c, 's')}, '')"
+                for c in self._fit_body_cols(body_cols)) or "''"
             branches.append(
                 "SELECT * FROM ("
                 f"SELECT ? AS source_name, {int(sid)} AS source_id, s.rid AS rid, "

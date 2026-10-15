@@ -12,7 +12,7 @@ Each line has three columns:
 
 - **Timestamp** — the row's time, always written `YYYY-MM-DD HH:MM:SS` whatever display format Settings uses, so tables with different date formats sort together. A derived datetime column is used as it is, keeping any fractions of a second. Rows with no usable timestamp come last and show `—`.
 - **Type** — a dot per tag on the row (hover for the tag's name) and a badge naming the kind of table: the file name unless you set a type (see [Choosing the timestamp, type and body](#choosing-the-timestamp-type-and-body)). Hover the badge for the file name.
-- **Body** — a one-line summary of the row when Winnow knows the artefact, otherwise the whole row with its columns joined by ` | `. Hover it for the whole row.
+- **Body** — a one-line summary of the row when Winnow knows the artefact, otherwise the whole row with its columns joined by ` | `. Hover it for the whole row. A table with more than 495 columns shows only its first 495 in the Body, and the Timeline header says which table; pick body columns under **Configure tables…** to choose which ones.
 
 **Click a line** to open its table at that row on the grid page. A closed table is opened for you and gets its tab back.
 
