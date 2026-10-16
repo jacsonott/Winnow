@@ -117,7 +117,9 @@ def test_no_column_name_leaks_into_a_cell(store, abc):
     mid = store.create_merge("m", [a, b, c])["id"]
     v = _view(store, mid)
     names = {col["name"] for col in store.get_source(mid)["columns"]}
-    for r in _rows(store, v):
+    rows = _rows(store, v)
+    assert len(rows) == 6
+    for r in rows:
         assert not names & {cell for cell in r["cells"] if cell is not None}
 
 
