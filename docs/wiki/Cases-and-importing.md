@@ -1,10 +1,10 @@
 # Cases and importing
 
 A case is one investigation: a single file holding a copy of every row you
-import and everything you do with them — tags, notes, saved views,
-dashboards. This page covers the home screen where cases live, what a case
-file is, and every way to get evidence into one. Importing never changes the
-evidence file; Winnow reads it and copies the rows into the case.
+import and everything you do with them — tags, notes, dashboards. This page
+covers the home screen where cases live, what a case file is, and every way
+to get evidence into one. Importing never changes the evidence file; Winnow
+reads it and copies the rows into the case.
 
 ## The home screen
 
@@ -62,7 +62,7 @@ later; the `WINNOW_CASES_DIR` environment variable overrides it. See
 
 A case file ends in `.db-winnow` and is an ordinary SQLite database. It
 holds a copy of every imported row and its search index; tags, row notes
-and the Notes page; saved views, merges, derived columns and table folders;
+and the Notes page; merges, derived columns and table folders;
 the watchlist, dashboards, SQL tabs and sessions; and the case's own
 settings, such as which plugins are on for it. Saved filters, header-set
 names, folder-import profiles, analysis profiles, the case list and your

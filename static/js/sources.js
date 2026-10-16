@@ -347,7 +347,7 @@ export function tableMenuItems(id) {
   items.push({
     label: merge ? 'Edit merge…' : 'Merge with other tables…',
     title: merge
-      ? 'Add or remove tables, or change which columns this merge keeps. Its layout and saved views stay.'
+      ? 'Add or remove tables, or change which columns this merge keeps. Its layout stays.'
       : 'One table across this and others, matched by column name',
     onclick: () => openMergeBuilder(merge ? { edit: s } : { preselect: [s.id] }),
   });

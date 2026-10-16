@@ -26,13 +26,12 @@ def merged(store, write_csv):
 def test_delete_merge_removes_it_and_all_its_keyed_state(store, merged):
     a, b, merge = merged
     store.save_layout(merge["id"], {"widths": {"When": 140}})
-    store.save_view(merge["id"], "sorted", {"sort": [{"column": "When", "dir": "asc"}]})
 
     store.delete_merge(-merge["id"])
 
     assert store.list_merges() == []
     assert all(s["id"] != merge["id"] for s in store.list_sources())
-    for table in ("open_tabs", "layouts", "saved_views"):
+    for table in ("open_tabs", "layouts"):
         n = store.db.execute(
             f"SELECT COUNT(*) c FROM {table} WHERE source_id=?", (merge["id"],)).fetchone()["c"]
         assert n == 0, f"{table} row leaked for the deleted merge"

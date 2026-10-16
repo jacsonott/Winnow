@@ -420,7 +420,7 @@ def test_a_merge_widget_goes_stale_when_a_member_grows(store, write_csv):
 
 def test_results_do_not_travel_with_copy_sources_to(store, write_csv, tmp_path):
     """Decided and pinned: a save-as / quick-look copy moves EVIDENCE —
-    rows, tags, notes, layouts, saved views — and no board goes with it, so
+    rows, tags, notes, layouts — and no board goes with it, so
     no board's numbers do either. The target case is not a place the
     sender's "Failed logons: 651" belongs.
 
