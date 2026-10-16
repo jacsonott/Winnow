@@ -138,7 +138,9 @@ def test_the_summary_survives_a_tag_filter(evtx):
 
 def test_the_summary_never_repeats_the_timestamp_column(evtx):
     store, _ = evtx
-    for r in _rows(store):
+    rows = _rows(store)
+    assert rows, "the timeline came back empty, so there was nothing to check"
+    for r in rows:
         assert r["ts"] and r["ts"] not in r["lead"] and r["ts"] not in r["detail"]
         assert "2026-03-03" not in r["lead"] + r["detail"]
 

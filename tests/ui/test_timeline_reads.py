@@ -44,7 +44,6 @@ def tagged_evtx(page, tmp_path):
     row through the UI, and takes the whole table away again afterwards
     (which takes its tags with it, so the next module's Timeline is as
     empty as it expects)."""
-    before = set(page.evaluate("() => __winnow.S.sources.map((s) => s.id)"))
     page.evaluate("""([path, name]) => __winnow.post('/api/ingest/jobs/path',
          { path, name, kind: 'csv' }).then(() => __winnow.startJobsPoll())""",
                   [str(_evtx_csv(tmp_path)), "tl_evtx.csv"])

@@ -21,6 +21,32 @@ def _add(store, sid, name, column, op_id, params):
     return res["definition"]["id"]
 
 
+@pytest.fixture
+def held_backfills(store, monkeypatch):
+    """Derive jobs recorded instead of started, so a new column stays
+    'building' for as long as the test needs it to. Calling the fixture's
+    value stops holding, starts what was held and waits for it; teardown
+    does the same if the test didn't."""
+    start = store.start_ingest_job
+    held = []
+
+    def hold(kind, *args, **kwargs):
+        if kind != "derive":
+            return start(kind, *args, **kwargs)
+        held.append((args, kwargs))
+        return {"job_id": None}
+
+    def release():
+        monkeypatch.setattr(store, "start_ingest_job", start)
+        while held:
+            args, kwargs = held.pop(0)
+            store.wait_for_ingest_job(start("derive", *args, **kwargs)["job_id"], timeout=30)
+
+    monkeypatch.setattr(store, "start_ingest_job", hold)
+    yield release
+    release()
+
+
 def _values(store, sid, column):
     src = store.get_source(sid)
     idx = [c["name"] for c in src["columns"]].index(column)
@@ -49,18 +75,20 @@ def test_regex_on_extracted_chain_and_three_deep(store, write_csv):
     assert _values(store, sid, "Net") == ["10.0.0", "10.0.0"]
 
 
-def test_a_building_parent_is_refused(store, write_csv):
+def test_a_building_parent_is_refused(store, write_csv, held_backfills):
+    """A child built from a partial parent would read NULL for every row
+    the parent had not reached yet. The parent's backfill is held, so it is
+    still building when the child is asked for on every run: left to the
+    race, the tiny backfill often finished first and nothing was checked."""
     sid = store.ingest_csv(write_csv(ROWS, "e.csv"), name="e", build_fts=False)["id"]
-    res = store.add_derived_column(sid, "Config", "Payload", "json_field", {"path": "$.config"})
-    # Don't wait: the parent is (very likely) still building. If the tiny
-    # backfill already finished, creation succeeds — either outcome is a
-    # valid state; what may never happen is a child built from a partial
-    # parent, which the guard plus this race-free re-check protect.
-    try:
+    store.add_derived_column(sid, "Config", "Payload", "json_field", {"path": "$.config"})
+    with pytest.raises(ValueError, match="still building"):
         store.add_derived_column(sid, "Addr", "Config", "xml_field", {"path": "Cfg/Server@addr"})
-    except ValueError as e:
-        assert "still building" in str(e)
-    store.wait_for_ingest_job(res["job_id"], timeout=30)
+    assert [c["name"] for c in store.list_derived_columns(sid)] == ["Config"]
+    # Finished, the same request is fine: it was the building that was refused.
+    held_backfills()
+    _add(store, sid, "Addr", "Config", "xml_field", {"path": "Cfg/Server@addr"})
+    assert _values(store, sid, "Addr") == ["10.0.0.5", "10.0.0.9"]
 
 
 def test_parent_cannot_be_deleted_under_its_child(store, write_csv):
@@ -140,12 +168,10 @@ def test_flatten_batch_accepts_a_derived_input(store, write_csv):
     assert _values(store, sid, "B") == ["x0", "x1", "x2"]
 
 
-def test_flatten_batch_still_refuses_a_building_input(store, write_csv):
+def test_flatten_batch_still_refuses_a_building_input(store, write_csv, held_backfills):
     sid = store.ingest_csv(write_csv(ROWS, "fb2.csv"), name="fb2", build_fts=False)["id"]
-    res = store.add_derived_column(sid, "Config", "Payload", "json_field", {"path": "$.config"})
-    try:
+    store.add_derived_column(sid, "Config", "Payload", "json_field", {"path": "$.config"})
+    with pytest.raises(ValueError, match="still building"):
         store.add_derived_columns(sid, [
             {"name": "X", "input_column": "Config", "op_id": "json_field", "params": {"path": "$.x"}}])
-    except ValueError as e:
-        assert "still building" in str(e)
-    store.wait_for_ingest_job(res["job_id"], timeout=30)
+    assert [c["name"] for c in store.list_derived_columns(sid)] == ["Config"]
