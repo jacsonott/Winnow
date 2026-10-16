@@ -121,7 +121,7 @@ def test_a_fresh_install_gets_the_row(page):
     assert page.evaluate("() => __winnow.FILTER_UI_DEFAULT") == "row"
 
 
-def test_a_browser_that_has_never_seen_winnow_renders_the_row(browser, server):
+def test_a_browser_that_has_never_seen_winnow_renders_the_row(own_page):
     """The constant above is half the claim; what an analyst meets on a
     first run is a rendered grid, and only a browser can say what that
     looks like.
@@ -132,14 +132,8 @@ def test_a_browser_that_has_never_seen_winnow_renders_the_row(browser, server):
     module's own fixture turns the bar on before every test. Seeds nothing
     but the splash and the remote prompt, both of which would otherwise
     cover the grid."""
-    ctx = browser.new_context(viewport={"width": 1500, "height": 900})
-    ctx.add_init_script("localStorage.setItem('winnow.remotePrompt', 'seen');"
-                        "localStorage.setItem('winnow.appearance',"
-                        " JSON.stringify({ splash: false }))")
-    pg = ctx.new_page()
-    try:
-        pg.goto(server, wait_until="networkidle")
-        pg.wait_for_selector(".row")
+    with own_page(seed="localStorage.setItem('winnow.remotePrompt', 'seen');"
+                       "localStorage.setItem('winnow.appearance', JSON.stringify({ splash: false }))") as pg:
         cols = pg.evaluate("() => __winnow.visibleCols().length")
         assert cols > 3
         # A box under every column, no bar, and no opener on the headers —
@@ -147,8 +141,6 @@ def test_a_browser_that_has_never_seen_winnow_renders_the_row(browser, server):
         assert pg.locator("#filterRow .fcell input").count() == cols
         assert pg.locator("#filterBar").is_hidden()
         assert pg.locator(".hcell-filter").count() == 0
-    finally:
-        ctx.close()
 
 
 def test_the_grid_carries_no_empty_filter_boxes(page):

@@ -8,15 +8,15 @@ import pytest
 pytestmark = pytest.mark.ui
 
 
-def test_regex_capture_column_from_the_modal(page):
+def test_regex_capture_column_from_the_modal(page, format_detected):
     page.evaluate("() => __winnow.openDerivedColumnModal('CommandLine')")
     page.wait_for_selector("#modal:not([hidden])")
     assert page.locator("#modalTitle").inner_text().lower() == "add derived column"
+    format_detected()
 
     page.locator("#modalBody select[data-role=type]").select_option(label="Extract part of a value")  # type
     op_sel = page.locator("#modalBody select[data-role=op]")                                          # operation
     op_sel.select_option(label="Regex capture")
-    page.wait_for_timeout(200)
     # the suggestion tracks the op kind
     assert page.locator(".derived-name").input_value() == "CommandLine (extract)"
 

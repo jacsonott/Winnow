@@ -22,7 +22,7 @@ def test_selecting_header_text_does_not_toggle(page):
     page.mouse.down()
     page.mouse.move(box["x"] + 40, box["y"] + box["height"] / 2, steps=4)
     page.mouse.up()
-    page.wait_for_timeout(200)
+    page.wait_for_timeout(200)   # an expand fetches before it flips `expanded`
     assert page.evaluate("() => window.getSelection().toString()") != ""
     assert page.evaluate("() => __winnow.S.groups[0].expanded") == before
 

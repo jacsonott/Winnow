@@ -25,16 +25,7 @@ import pytest
 pytestmark = pytest.mark.ui
 
 
-def _open_sql(page):
-    page.click("#tabSql")
-    page.wait_for_selector("#sqlview:not([hidden])")
-    # The tab list (and the starter query it seeds into the editor) loads
-    # async — reading the editor before that lands reads the wrong text.
-    page.wait_for_function(
-        "() => __winnow.S.sqlTabs.length > 0 && !document.getElementById('sqlText').disabled")
-
-
-def test_the_seeded_query_names_the_table_the_analyst_sees(page, api):
+def test_the_seeded_query_names_the_table_the_analyst_sees(page, api, open_sql):
     # The case file is shared by the whole UI session and earlier modules
     # type into this editor, so the seeded text can only be observed on a
     # pane with no saved tabs — which is exactly the state an analyst's
@@ -43,7 +34,7 @@ def test_the_seeded_query_names_the_table_the_analyst_sees(page, api):
     for t in api("/api/sql_tabs"):
         api(f"/api/sql_tabs/{t['id']}", "DELETE")
     page.evaluate("() => __winnow.showSqlTab()")
-    _open_sql(page)
+    open_sql(page)
 
     text = page.locator("#sqlText").input_value()
     first, _, rest = text.partition("\n")
@@ -51,8 +42,8 @@ def test_the_seeded_query_names_the_table_the_analyst_sees(page, api):
     assert rest.strip() == "SELECT * FROM src_1 LIMIT 50;"
 
 
-def test_the_header_reads_as_a_sentence_not_a_shouted_label(page):
-    _open_sql(page)
+def test_the_header_reads_as_a_sentence_not_a_shouted_label(page, open_sql):
+    open_sql(page)
     head = page.locator(".sql-head")
     # Asserted as computed style rather than as "it fits on one line". The
     # second line was a consequence of uppercase (~12% wider) plus .1em
@@ -71,8 +62,8 @@ def test_the_header_reads_as_a_sentence_not_a_shouted_label(page):
         ["src_N", "merge_N", "main.src_N"]
 
 
-def test_the_results_area_says_how_to_run_a_query(page):
-    _open_sql(page)
+def test_the_results_area_says_how_to_run_a_query(page, open_sql):
+    open_sql(page)
     empty = page.locator("#sqlResult .sql-empty")
     empty.wait_for()
     text = empty.inner_text()
@@ -83,8 +74,8 @@ def test_the_results_area_says_how_to_run_a_query(page):
     assert page.locator("#sqlResult .sql-starter").count() >= 2
 
 
-def test_every_offered_starter_names_a_table_this_case_has(page):
-    _open_sql(page)
+def test_every_offered_starter_names_a_table_this_case_has(page, open_sql):
+    open_sql(page)
     starters = page.evaluate("() => __winnow.sqlStarters()")
     tables = set(page.evaluate(
         "() => __winnow.S.sources.filter((s) => !s.error).map((s) => __winnow.paneTable(s))"))
@@ -96,8 +87,8 @@ def test_every_offered_starter_names_a_table_this_case_has(page):
         assert "src_-" not in st["sql"]
 
 
-def test_clicking_a_starter_runs_it(page):
-    _open_sql(page)
+def test_clicking_a_starter_runs_it(page, open_sql):
+    open_sql(page)
     # An empty editor is "disposable", so the starter fills this tab rather
     # than opening one of its own — see the draft test below for the other
     # half of that rule.
@@ -110,8 +101,8 @@ def test_clicking_a_starter_runs_it(page):
     assert page.evaluate("() => __winnow.S.sqlTabs.length") == tabs
 
 
-def test_a_starter_does_not_overwrite_a_query_being_written(page, api):
-    _open_sql(page)
+def test_a_starter_does_not_overwrite_a_query_being_written(page, api, open_sql):
+    open_sql(page)
     draft = "SELECT EventId FROM src_1 WHERE Host = 'H3' -- half written"
     page.locator("#sqlText").fill(draft)
     before = page.evaluate("() => __winnow.S.sqlTabs.map((t) => t.id)")
@@ -131,10 +122,10 @@ def test_a_starter_does_not_overwrite_a_query_being_written(page, api):
         page.evaluate("() => __winnow.loadSqlTabs()")
 
 
-def test_starters_are_built_from_the_case_not_from_a_canned_example(page):
+def test_starters_are_built_from_the_case_not_from_a_canned_example(page, open_sql):
     """Two real tables, one of them tagged: the three queries an analyst is
     offered are all written out of what this case holds."""
-    _open_sql(page)
+    open_sql(page)
     starters = page.evaluate("""() => {
       const S = __winnow.S;
       const keepSources = S.sources, keepId = S.sourceId;
@@ -162,11 +153,11 @@ def test_starters_are_built_from_the_case_not_from_a_canned_example(page):
     assert "src_2" in starters[2]["sql"]
 
 
-def test_a_merge_gets_starters_it_can_actually_run(page):
+def test_a_merge_gets_starters_it_can_actually_run(page, open_sql):
     """A merge has no src_N of its own — only the merge_<id> view the pane
     connection builds — and its rids are unique per member, so the tagged
     rows have to be found by (source_id, rid). Invariant #9."""
-    _open_sql(page)
+    open_sql(page)
     starters = page.evaluate("""() => {
       const S = __winnow.S;
       const keepSources = S.sources, keepId = S.sourceId;
@@ -206,7 +197,8 @@ def _ac_labels(page):
             page.locator(".sql-ac .menu-item span:first-child").all_text_contents()]
 
 
-def test_a_left_behind_table_comment_is_not_a_second_table(page, server_post, api, tmp_path):
+def test_a_left_behind_table_comment_is_not_a_second_table(page, server_post, api, tmp_path, open_sql,
+                                                            until):
     """The comment on line one is there to survive the query being edited
     into something real — which means the everyday state of the editor is
     a comment naming one table above a FROM naming another. Scanned for
@@ -237,7 +229,7 @@ def test_a_left_behind_table_comment_is_not_a_second_table(page, server_post, ap
         pytest.fail("gadgets.csv never appeared in S.sources")
     sid = page.evaluate("() => (__winnow.S.sources.find((s) => s.name === 'gadgets.csv') || {}).id")
     try:
-        _open_sql(page)
+        open_sql(page)
         ta = page.locator("#sqlText")
         # Exactly what the analyst is left with after editing the seeded
         # query's FROM clause and keeping the line that named the file.
@@ -259,13 +251,12 @@ def test_a_left_behind_table_comment_is_not_a_second_table(page, server_post, ap
         ta.click()
         ta.fill(f"-- ui.csv (src_1)\nSELECT rid, Gadget FROM src_{sid} WHERE ")
         ta.type("Ga")
-        page.wait_for_selector(".sql-ac .menu-item")
         # Offered, not necessarily on top: the file is called gadgets.csv,
         # so the TABLE matches "Ga" as well, and which of the two a ranking
-        # puts first is not what this test is about. Each item renders its
-        # label on one line and its kind on the next.
-        labels = _ac_labels(page)
-        assert "Gadget" in labels, labels
+        # puts first is not what this test is about. Polled rather than read
+        # once: the first item to appear can be the list for "G", rebuilt
+        # a moment later for "Ga".
+        until(page, lambda: "Gadget" in _ac_labels(page), "Gadget offered for 'Ga'")
 
         ta.fill(f"-- ui.csv (src_1)\nSELECT rid, Gadget FROM src_{sid} WHERE ")
         ta.type("Ex")  # ExtremelyLongColumnHeaderName belongs to ui.csv alone

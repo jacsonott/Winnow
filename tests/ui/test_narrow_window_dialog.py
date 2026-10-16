@@ -35,7 +35,7 @@ def _narrow_enough_to_overflow(page):
     pytest.fail("the page never overflowed — nothing here to test")
 
 
-def test_a_dialog_opened_in_a_narrow_window_leaves_the_app_where_it_was(page):
+def test_a_dialog_opened_in_a_narrow_window_leaves_the_app_where_it_was(page, painted):
     try:
         _narrow_enough_to_overflow(page)
         assert _offsets(page) == {"body": 0, "root": 0, "app": 0}
@@ -46,7 +46,7 @@ def test_a_dialog_opened_in_a_narrow_window_leaves_the_app_where_it_was(page):
 
         page.keyboard.press("Escape")
         page.set_viewport_size({"width": 1280, "height": 700})
-        page.wait_for_timeout(200)
+        painted(page)
         assert _offsets(page) == {"body": 0, "root": 0, "app": 0}
     finally:
         page.set_viewport_size({"width": 1500, "height": 900})

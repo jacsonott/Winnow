@@ -9,9 +9,10 @@ import pytest
 pytestmark = pytest.mark.ui
 
 
-def test_type_first_picker(page):
+def test_type_first_picker(page, format_detected):
     page.evaluate("() => __winnow.openDerivedColumnModal('CommandLine')")
     page.wait_for_selector("#modal:not([hidden])")
+    format_detected()
     # What am I making, how, and from what: Type is the question the
     # analyst arrives with, the operation decides what the column list
     # means, and the column sits right above the parameters that read it.
@@ -36,6 +37,5 @@ def test_type_first_picker(page):
     # picking an operation still works end to end
     page.locator("#modalBody select[data-role=type]").select_option(label="Extract part of a value")
     page.locator("#modalBody select[data-role=op]").select_option(label="Regex capture")
-    page.wait_for_timeout(200)
     assert page.locator(".derived-name").input_value() == "CommandLine (extract)"
     page.keyboard.press("Escape")

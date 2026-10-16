@@ -39,7 +39,7 @@ def _evtx_csv(tmp_path):
 
 
 @pytest.fixture
-def tagged_evtx(page, tmp_path):
+def tagged_evtx(page, tmp_path, tag_written):
     """Imports an EvtxECmd-shaped table into the shared case, tags its one
     row through the UI, and takes the whole table away again afterwards
     (which takes its tags with it, so the next module's Timeline is as
@@ -56,8 +56,8 @@ def tagged_evtx(page, tmp_path):
     page.wait_for_function("(id) => __winnow.S.sourceId === id", arg=sid)
     page.wait_for_selector(".row")
     page.locator(".row").nth(0).locator(".cell").nth(1).click()
-    page.keyboard.press("1")
-    page.wait_for_timeout(250)
+    with tag_written(page):
+        page.keyboard.press("1")
     yield sid
     page.evaluate("""async (id) => {
         await __winnow.api('/api/source/' + id, { method: 'DELETE' }).catch(() => {});
@@ -134,6 +134,6 @@ def test_raw_swaps_the_row_in_place_and_back(page, tagged_evtx):
 def test_clicking_raw_does_not_jump_to_the_row_in_its_table(page, tagged_evtx):
     row = _summary_row(page)
     row.locator(".tl-raw-toggle").click()
-    page.wait_for_timeout(200)
+    page.wait_for_timeout(200)   # a jump opens the table first, then switches tabs
     assert page.locator("#timelineview").get_attribute("hidden") is None
     assert page.evaluate("() => __winnow.S.activeTab") == "timeline"

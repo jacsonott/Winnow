@@ -241,8 +241,8 @@ def test_clicking_a_bar_pivots_on_its_value(page):
         w = page.evaluate("(t) => __winnow.widgetFrom({ template: 'top', table: t, column: 'Host' })", f"src_{src}")
         _put_widgets(page, did, [w])
         _show(page, did)
-        page.wait_for_selector("#dashGrid canvas.drillable")
-        page.wait_for_timeout(300)   # the bars draw on the next frame
+        # The bars draw on the next frame, and leave where they are on the canvas.
+        page.wait_for_function("() => (document.querySelector('#dashGrid canvas.drillable') || {}).bars")
         page.locator("#dashGrid canvas.drillable").first.click(position={"x": 12, "y": 8})   # the first bar's row
         page.wait_for_selector("#dashboardview", state="hidden")
         page.wait_for_function("() => __winnow.S.view && __winnow.S.view.row_count === 40")
@@ -252,7 +252,7 @@ def test_clicking_a_bar_pivots_on_its_value(page):
         _delete_board(page, did)
 
 
-def test_clicking_a_histogram_bucket_sets_the_timeframe(page):
+def test_clicking_a_histogram_bucket_sets_the_timeframe(page, painted):
     did = _new_board(page, "Drill D")
     src = _src(page)
     try:
@@ -260,7 +260,7 @@ def test_clicking_a_histogram_bucket_sets_the_timeframe(page):
         _put_widgets(page, did, [w])
         _show(page, did)
         page.wait_for_selector("#dashGrid canvas.drillable")
-        page.wait_for_timeout(300)
+        painted(page)   # the histogram draws on the next frame
         page.locator("#dashGrid canvas.drillable").first.click(position={"x": 5, "y": 60})
         page.wait_for_selector("#dashboardview", state="hidden")
         page.wait_for_function("() => __winnow.S.timeRange.enabled === true")

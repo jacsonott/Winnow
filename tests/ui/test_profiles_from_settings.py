@@ -129,58 +129,36 @@ def test_opened_by_the_key_it_has_no_way_back(page):
     page.wait_for_selector("#modal[hidden]", state="attached", timeout=5_000)
 
 
-def test_keymap_v6_migration_moves_an_untouched_binding(browser, server, first_run_init):
+def test_keymap_v6_migration_moves_an_untouched_binding(own_page):
     """loadKeymap persists the whole default map on a profile's first load,
     so without a migration the new key reaches nobody who has run Winnow
     before — they keep pressing M and Settings keeps saying p."""
-    ctx = browser.new_context()
-    ctx.add_init_script(
-        first_run_init + ";"
-        "localStorage.setItem('winnow.keymap', JSON.stringify({ openPluginBundles: ['M'] }));"
-        "localStorage.setItem('winnow.keymap.v', '5');")
-    pg = ctx.new_page()
-    try:
-        pg.goto(server, wait_until="networkidle")
-        pg.wait_for_selector(".row", timeout=30_000)
+    with own_page(init=(
+            "localStorage.setItem('winnow.keymap', JSON.stringify({ openPluginBundles: ['M'] }));"
+            "localStorage.setItem('winnow.keymap.v', '5');")) as pg:
         assert pg.evaluate("() => __winnow.S.keymap.openPluginBundles") == ["p"]
         pg.locator("#body").focus()
         pg.keyboard.press("p")
         pg.wait_for_function("() => document.getElementById('modalTitle').textContent === 'Profiles'",
                              timeout=5_000)
-    finally:
-        ctx.close()
 
 
-def test_keymap_v6_leaves_a_rebound_profiles_key_alone(browser, server, first_run_init):
-    ctx = browser.new_context()
-    ctx.add_init_script(
-        first_run_init + ";"
-        "localStorage.setItem('winnow.keymap', JSON.stringify({ openPluginBundles: ['Z'] }));"
-        "localStorage.setItem('winnow.keymap.v', '5');")
-    pg = ctx.new_page()
-    try:
-        pg.goto(server, wait_until="networkidle")
-        pg.wait_for_selector(".row", timeout=30_000)
+def test_keymap_v6_leaves_a_rebound_profiles_key_alone(own_page):
+    with own_page(init=(
+            "localStorage.setItem('winnow.keymap', JSON.stringify({ openPluginBundles: ['Z'] }));"
+            "localStorage.setItem('winnow.keymap.v', '5');")) as pg:
         assert pg.evaluate("() => __winnow.S.keymap.openPluginBundles") == ["Z"]
-    finally:
-        ctx.close()
 
 
-def test_keymap_v6_refuses_to_take_a_p_somebody_else_holds(browser, server, first_run_init):
+def test_keymap_v6_refuses_to_take_a_p_somebody_else_holds(own_page):
     """`p` was unbound by default, so Settings accepted it for any action.
     Taking it here would shadow that binding — and because a migration edits
     the STORED map which is then merged OVER the defaults, merely declining
     to move would let the new default `p` arrive beside theirs. The refusal
     has to be written down to hold."""
-    ctx = browser.new_context()
-    ctx.add_init_script(
-        first_run_init + ";"
-        "localStorage.setItem('winnow.keymap', JSON.stringify({ toggleDetail: ['p'] }));"
-        "localStorage.setItem('winnow.keymap.v', '5');")
-    pg = ctx.new_page()
-    try:
-        pg.goto(server, wait_until="networkidle")
-        pg.wait_for_selector(".row", timeout=30_000)
+    with own_page(init=(
+            "localStorage.setItem('winnow.keymap', JSON.stringify({ toggleDetail: ['p'] }));"
+            "localStorage.setItem('winnow.keymap.v', '5');")) as pg:
         assert pg.evaluate("() => __winnow.S.keymap.toggleDetail") == ["p"]
         assert pg.evaluate("() => __winnow.S.keymap.openPluginBundles") == ["M"], \
             "the new default took a key the analyst had already bound"
@@ -191,5 +169,3 @@ def test_keymap_v6_refuses_to_take_a_p_somebody_else_holds(browser, server, firs
         pg.keyboard.press("p")
         pg.wait_for_function("() => !document.getElementById('detail').hidden", timeout=5_000)
         assert pg.evaluate("() => document.getElementById('modal').hidden") is True
-    finally:
-        ctx.close()

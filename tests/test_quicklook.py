@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -338,12 +337,9 @@ def test_a_fresh_case_still_reads_as_empty(tmp_path):
 # ------------------------------------------------------- the real launcher
 
 import http.client
-import socket
-import subprocess
-import sys
 import time
 
-ROOT = Path(__file__).resolve().parent.parent
+from spawn import running_server
 
 
 def _get(port, route):
@@ -357,50 +353,17 @@ def _get(port, route):
 def test_a_real_assoc_launch_becomes_a_quicklook_server(tmp_path):
     """python server.py --assoc file.csv with no Winnow running: this
     process becomes the server, on its own port, with the file in a temp
-    case — proven by asking the real process over HTTP."""
+    case — proven by asking the real process over HTTP. The port is
+    self-chosen, so it is read from what the process prints. The child sees
+    the real INSTALL_ROOT; tests/spawn.py's isolation is what keeps it from
+    registering in the developer's workspace/ and leaving its quicklook
+    file in their cases/."""
     dropped = tmp_path / "evidence.csv"
     dropped.write_text("Host,User\nh1,alice\n", encoding="utf-8")
-    # The child is a real process with the real INSTALL_ROOT, so without
-    # these overrides it would register itself in the developer's actual
-    # workspace/ and drop its quicklook file in the actual cases/ — state
-    # that outlives the test and collides on the next run.
-    env = {**os.environ, "WINNOW_NEVER_CONNECTED_EXIT_S": "600",
-           "WINNOW_IDLE_EXIT_S": "600",
-           "WINNOW_WORKSPACE_DIR": str(tmp_path / "ws"),
-           "WINNOW_ENV_FILE": str(tmp_path / "userenv"),
-           "WINNOW_CASES_DIR": str(tmp_path / "cases")}
-    # -u: the child's stdout is block-buffered under a pipe, so without it
-    # the "Winnow on …" line sits in the child's buffer and readline()
-    # starves forever.
-    proc = subprocess.Popen(
-        [sys.executable, "-u", str(ROOT / "server.py"), "--assoc", str(dropped),
-         "--no-browser", "--no-fts"],
-        cwd=str(tmp_path), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    try:
-        # Its port is self-chosen; learn it from the process's own output.
-        port = None
-        deadline = time.monotonic() + 40
-        lines = []
-        while time.monotonic() < deadline and port is None:
-            line = proc.stdout.readline().decode(errors="replace")
-            lines.append(line)
-            if "Winnow on http://127.0.0.1:" in line:
-                port = int(line.split(":")[2].split("/")[0].split()[0])
-            if proc.poll() is not None:
-                pytest.fail("launcher-server exited early:\n" + "".join(lines))
-        assert port, "never announced a port:\n" + "".join(lines)
-
-        # The announcement prints before uvicorn binds; wait for the socket.
-        deadline = time.monotonic() + 30
-        while time.monotonic() < deadline:
-            try:
-                _get(port, "/api/version")
-                break
-            except OSError:
-                time.sleep(0.2)
-        else:
-            pytest.fail("announced port never started accepting")
-
+    with running_server(tmp_path, "--assoc", dropped, "--no-fts", launcher=True, cwd=tmp_path,
+                        env={"WINNOW_NEVER_CONNECTED_EXIT_S": "600",
+                             "WINNOW_IDLE_EXIT_S": "600"}) as srv:
+        port = srv.port
         cur = _get(port, "/api/case/current")
         assert cur["temp"] is True
         assert "quicklook" in cur["path"]
@@ -414,12 +377,6 @@ def test_a_real_assoc_launch_becomes_a_quicklook_server(tmp_path):
             time.sleep(0.3)
         else:
             pytest.fail(f"ingest never landed: {_get(port, '/api/sources')}")
-    finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=15)
-        except subprocess.TimeoutExpired:
-            proc.kill()
 
 
 def test_save_as_refuses_while_an_import_runs(client, tmp_path, monkeypatch):

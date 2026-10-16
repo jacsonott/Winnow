@@ -10,93 +10,35 @@ test_notes_page_rows.py drives resetNotes() instead).
 
 from __future__ import annotations
 
-import json
-import os
-import socket
-import subprocess
-import sys
-import time
-import urllib.request
-from pathlib import Path
-
 import pytest
 
-pytestmark = pytest.mark.ui
+from spawn import running_server
 
-ROOT = Path(__file__).resolve().parent.parent.parent
+pytestmark = pytest.mark.ui
 
 
 @pytest.fixture
 def own_server(tmp_path):
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.close()
-    env = {**os.environ,
-           "WINNOW_IDLE_EXIT_S": "600", "WINNOW_NEVER_CONNECTED_EXIT_S": "600",
-           "WINNOW_WORKSPACE_DIR": str(tmp_path / "ws"),
-           "WINNOW_ENV_FILE": str(tmp_path / "userenv"),
-           "WINNOW_CASES_DIR": str(tmp_path / "cases"),
-           "XDG_DATA_HOME": str(tmp_path / "xdg-data"),
-           "XDG_CONFIG_HOME": str(tmp_path / "xdg-config")}
     csv_path = tmp_path / "a.csv"
     csv_path.write_text("Host,Cmd\n" + "".join(f"H{i},cmd{i}\n" for i in range(30)), encoding="utf-8")
-    proc = subprocess.Popen(
-        [sys.executable, str(ROOT / "server.py"), "--case", str(tmp_path / "caseA.db"),
-         "--open", str(csv_path), "--port", str(port), "--host", "127.0.0.1",
-         "--no-browser", "--no-fts"],
-        cwd=str(tmp_path), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    base = f"http://127.0.0.1:{port}"
-    deadline = time.monotonic() + 45
-    while time.monotonic() < deadline:
-        if proc.poll() is not None:
-            pytest.fail("server died during startup")
-        try:
-            urllib.request.urlopen(base + "/api/sources", timeout=1)
-            break
-        except OSError:
-            time.sleep(0.15)
-
-    def post(route, body):
-        req = urllib.request.Request(
-            base + route, data=json.dumps(body).encode(),
-            headers={"Content-Type": "application/json", "X-Timeline-Lite-Client": "1"})
-        return json.loads(urllib.request.urlopen(req, timeout=15).read())
-
-    def get(route):
-        return json.loads(urllib.request.urlopen(base + route, timeout=15).read())
-
-    yield {"base": base, "post": post, "get": get, "dir": tmp_path}
-    proc.terminate()
-    try:
-        proc.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        proc.kill()
+    with running_server(tmp_path, "--case", tmp_path / "caseA.db", "--open", csv_path, "--no-fts",
+                        env={"WINNOW_IDLE_EXIT_S": "600", "WINNOW_NEVER_CONNECTED_EXIT_S": "600"},
+                        cwd=tmp_path, ready="/api/sources") as srv:
+        yield {"base": srv.base, "post": srv.post, "get": srv.get, "dir": tmp_path}
 
 
 @pytest.fixture
-def own_page(browser, own_server):
-    ctx = browser.new_context(viewport={"width": 1400, "height": 900})
-    ctx.add_init_script("localStorage.setItem('winnow.remotePrompt', 'seen');"
-                        "localStorage.setItem('winnow.appearance',"
-                        " JSON.stringify({ splash: false, pagesMenu: false, filterUi: 'row' }));"
-                        "localStorage.setItem('winnow.sidebar', JSON.stringify({ collapsed: false }))")
-    pg = ctx.new_page()
-    errors = []
-    pg.on("pageerror", lambda e: errors.append(str(e)))
-    pg.goto(own_server["base"], wait_until="networkidle")
-    pg.wait_for_selector(".row")
-    yield pg
-    ctx.close()
-    assert not errors, errors
+def case_page(own_page, own_server):
+    with own_page(base=own_server["base"], viewport=(1400, 900)) as pg:
+        yield pg
 
 
-def test_opening_another_case_replaces_the_tag_list(own_page, own_server):
+def test_opening_another_case_replaces_the_tag_list(case_page, own_server):
     """S.tags was only reloaded by opening a table, which a case with no
     tables never does: case A's tags stayed in the Watchlist's auto-tag
     picker and the Timeline's chips, and an auto-tag picked from them was
     stored in case B naming a tag B does not have."""
-    page = own_page
+    page = case_page
     own_server["post"]("/api/tags", {"name": "OnlyInCaseA", "color": "#00ff00", "hotkey": None})
     page.evaluate("() => __winnow.loadTags()")
     assert "OnlyInCaseA" in page.evaluate("() => __winnow.S.tags.map(t => t.name)")
@@ -116,7 +58,7 @@ def test_opening_another_case_replaces_the_tag_list(own_page, own_server):
     assert options[1:] == [name for _, name in server_tags]
 
 
-def test_a_query_still_running_does_not_land_in_the_next_case(own_page, own_server):
+def test_a_query_still_running_does_not_land_in_the_next_case(case_page, own_server):
     """A SQL run started in case A and answered after case B opened was
     painted under B's "Query 1" — both cases number their tabs from 1 —
     and tagging one of its rows wrote a tag into case B for a row of
@@ -124,7 +66,7 @@ def test_a_query_still_running_does_not_land_in_the_next_case(own_page, own_serv
     import json
     import re
 
-    page = own_page
+    page = case_page
     page.click("#tabSql")
     page.wait_for_selector("#sqlview:not([hidden])")
     page.wait_for_function("() => __winnow.S.sqlTabs.length > 0 && !document.getElementById('sqlText').disabled")
@@ -151,7 +93,7 @@ def test_a_query_still_running_does_not_land_in_the_next_case(own_page, own_serv
                  "widths": [11], "stopped": None, "elapsed_ms": 1}))
         except Exception:
             pass   # the page already let go of it
-        page.wait_for_timeout(500)
+        page.wait_for_timeout(500)   # long enough for the stale answer to land if it is going to
         assert "stale_col" not in page.locator("#sqlResult").inner_text()
         assert page.evaluate("() => [...__winnow.S.sqlResults.keys()]") == []
         assert page.evaluate("() => __winnow.busyCount") == 0

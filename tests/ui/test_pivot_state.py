@@ -35,26 +35,18 @@ def _is_state_post(r):
 
 
 @pytest.fixture(scope="module")
-def pv_page(browser, server, server_post):
+def pv_page(own_page, server_post):
     server_post("/api/plugins/toggle", {"fs_name": "pivot", "scope": "on_all"})
     server_post("/api/plugin_state", {"key": KEY, "payload": None})
-    ctx = browser.new_context(viewport={"width": 1500, "height": 900})
-    ctx.add_init_script("localStorage.setItem('winnow.remotePrompt', 'seen');"
-                        "localStorage.setItem('winnow.appearance',"
-                        " JSON.stringify({ splash: false, pagesMenu: false }))")
-    pg = ctx.new_page()
-    errors: list[str] = []
-    pg.on("pageerror", lambda e: errors.append(str(e)))
-    pg.goto(server, wait_until="networkidle")
-    pg.wait_for_selector(".row")
-    pg.evaluate("() => __winnow.loadPlugins()")
-    pg.wait_for_function("() => __winnow.S.pluginTabs.some((t) => t.id.includes('pivot'))",
-                         timeout=10_000)
-    yield pg
-    ctx.close()
-    server_post("/api/plugin_state", {"key": KEY, "payload": None})
-    server_post("/api/plugins/toggle", {"fs_name": "pivot", "scope": "off_all"})
-    assert not errors, "uncaught JS errors: " + " | ".join(errors)
+    try:
+        with own_page() as pg:
+            pg.evaluate("() => __winnow.loadPlugins()")
+            pg.wait_for_function("() => __winnow.S.pluginTabs.some((t) => t.id.includes('pivot'))",
+                                 timeout=10_000)
+            yield pg
+    finally:
+        server_post("/api/plugin_state", {"key": KEY, "payload": None})
+        server_post("/api/plugins/toggle", {"fs_name": "pivot", "scope": "off_all"})
 
 
 def _open_tab(pg):

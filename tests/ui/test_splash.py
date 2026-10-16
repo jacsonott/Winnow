@@ -23,19 +23,15 @@ def _rgb(v: str) -> tuple[int, int, int]:
     return tuple(int(n) for n in re.findall(r"\d+", v)[:3])
 
 
-def _ctx(browser, appearance="{}"):
-    ctx = browser.new_context(viewport={"width": 1100, "height": 700})
-    ctx.add_init_script("localStorage.setItem('winnow.remotePrompt', 'seen');"
-                        f"localStorage.setItem('winnow.appearance', JSON.stringify({appearance}))")
-    return ctx
+def _ctx(own_page, appearance="{}"):
+    """A page that has not loaded yet, so the test sees the launch."""
+    return own_page(seed="localStorage.setItem('winnow.remotePrompt', 'seen');"
+                         f"localStorage.setItem('winnow.appearance', JSON.stringify({appearance}))",
+                    viewport=(1100, 700), goto=False)
 
 
-def test_it_plays_on_launch_and_then_reveals_the_app(browser, server):
-    ctx = _ctx(browser)
-    pg = ctx.new_page()
-    errors = []
-    pg.on("pageerror", lambda e: errors.append(str(e)))
-    try:
+def test_it_plays_on_launch_and_then_reveals_the_app(own_page, server):
+    with _ctx(own_page) as pg:
         pg.goto(server)
         # Covering the app while it runs...
         pg.wait_for_selector("#splash:not([hidden])", timeout=10_000)
@@ -43,64 +39,45 @@ def test_it_plays_on_launch_and_then_reveals_the_app(browser, server):
         # ...and gone afterwards, onto a screen that is already populated.
         pg.wait_for_selector("#splash", state="hidden", timeout=30_000)
         pg.wait_for_selector(".row", timeout=15_000)
-        assert not errors, errors
-    finally:
-        ctx.close()
 
 
-def test_any_key_skips_it(browser, server):
+def test_any_key_skips_it(own_page, server):
     """An analyst opening their fifth case of the day should never wait."""
-    ctx = _ctx(browser)
-    pg = ctx.new_page()
-    try:
+    with _ctx(own_page) as pg:
         pg.goto(server)
         pg.wait_for_selector("#splash:not([hidden])", timeout=10_000)
         pg.wait_for_timeout(800)          # past the focus-click grace period
         pg.keyboard.press("Escape")
         # Far faster than the ~4s the animation itself takes to settle.
         pg.wait_for_selector("#splash", state="hidden", timeout=3_000)
-    finally:
-        ctx.close()
 
 
-def test_a_click_skips_it(browser, server):
-    ctx = _ctx(browser)
-    pg = ctx.new_page()
-    try:
+def test_a_click_skips_it(own_page, server):
+    with _ctx(own_page) as pg:
         pg.goto(server)
         pg.wait_for_selector("#splash:not([hidden])", timeout=10_000)
         pg.wait_for_timeout(800)          # past the focus-click grace period
         pg.mouse.click(550, 350)
         pg.wait_for_selector("#splash", state="hidden", timeout=3_000)
-    finally:
-        ctx.close()
 
 
-def test_the_setting_turns_it_off_entirely(browser, server):
-    ctx = _ctx(browser, '{ "splash": false }')
-    pg = ctx.new_page()
-    try:
+def test_the_setting_turns_it_off_entirely(own_page, server):
+    with _ctx(own_page, '{ "splash": false }') as pg:
         pg.goto(server)
         pg.wait_for_selector(".row", timeout=15_000)
         # Never shown at all — not shown-then-hidden.
         assert pg.locator("#splash").get_attribute("hidden") is not None
-    finally:
-        ctx.close()
 
 
-def test_it_takes_the_theme_it_is_launched_in(browser, server):
+def test_it_takes_the_theme_it_is_launched_in(own_page, server):
     """A light install must not get a black rectangle thrown at it."""
     shades = {}
     for mode in ("dark", "light"):
-        ctx = _ctx(browser, f'{{ "style": "harvest", "themeMode": "{mode}", "accent": "#d9a441" }}')
-        pg = ctx.new_page()
-        try:
+        with _ctx(own_page, f'{{ "style": "harvest", "themeMode": "{mode}", "accent": "#d9a441" }}') as pg:
             pg.goto(server)
             pg.wait_for_selector("#splash:not([hidden])", timeout=10_000)
             shades[mode] = pg.evaluate(
                 "() => getComputedStyle(document.getElementById('splash')).backgroundColor")
-        finally:
-            ctx.close()
     assert shades["dark"] != shades["light"], shades
 
     def lum(rgb):
@@ -111,15 +88,13 @@ def test_it_takes_the_theme_it_is_launched_in(browser, server):
     assert lum(shades["dark"]) < 60, shades["dark"]
 
 
-def test_it_wears_the_skin_that_is_actually_applied(browser, server):
+def test_it_wears_the_skin_that_is_actually_applied(own_page, server):
     """The splash reads the live --ink and --accent rather than carrying a
     palette of its own — launching into Phosphor should not flash a wheat
     field first."""
     seen = {}
     for style in ("phosphor", "harvest"):
-        ctx = _ctx(browser, f'{{ "style": "{style}", "themeMode": "dark" }}')
-        pg = ctx.new_page()
-        try:
+        with _ctx(own_page, f'{{ "style": "{style}", "themeMode": "dark" }}') as pg:
             pg.goto(server)
             pg.wait_for_selector("#splash:not([hidden])", timeout=10_000)
             seen[style] = pg.evaluate("""() => {
@@ -128,8 +103,6 @@ def test_it_wears_the_skin_that_is_actually_applied(browser, server):
                        ink: cs.getPropertyValue('--ink').trim(),
                        accent: cs.getPropertyValue('--accent').trim() };
             }""")
-        finally:
-            ctx.close()
 
     # Asserted as relationships, not literals. This used to pin each skin's
     # accent by hex, which made it a second copy of the palette: softening
@@ -146,37 +119,29 @@ def test_it_wears_the_skin_that_is_actually_applied(browser, server):
     assert hr > hb and hg > hb, seen["harvest"]           # harvest's is warm
 
 
-def test_the_finished_wordmark_is_held_before_handing_over(browser, server):
+def test_the_finished_wordmark_is_held_before_handing_over(own_page, server):
     """The grain settling is the payoff; cutting away the moment the last
     one lands throws it away."""
     import time as _t
 
-    ctx = _ctx(browser)
-    pg = ctx.new_page()
-    try:
+    with _ctx(own_page) as pg:
         pg.goto(server)
         pg.wait_for_selector("#splashTagline.visible", timeout=25_000)
         shown = _t.monotonic()
         pg.wait_for_selector("#splash", state="hidden", timeout=25_000)
         held = _t.monotonic() - shown
         assert held > 1.5, f"handed over {held:.1f}s after settling — too quick to read"
-    finally:
-        ctx.close()
 
 
-def test_a_click_in_the_first_moments_does_not_skip_it(browser, server):
+def test_a_click_in_the_first_moments_does_not_skip_it(own_page, server):
     """The click that focuses a freshly opened app window lands on frame
     one — it used to end the animation before anyone saw it."""
-    ctx = _ctx(browser, '{}')
-    pg = ctx.new_page()
-    try:
+    with _ctx(own_page, '{}') as pg:
         pg.goto(server, wait_until="commit")
         pg.wait_for_selector("#splash:not([hidden])", timeout=10_000)
         pg.mouse.click(550, 350)
-        pg.wait_for_timeout(300)
+        pg.wait_for_timeout(300)   # long enough for a skip to have hidden it
         assert pg.locator("#splash").get_attribute("hidden") is None   # still playing
-    finally:
-        ctx.close()
 
 
 # Edge on Windows, as the app window reports itself. Winnow reads the
@@ -186,14 +151,13 @@ WINDOWS_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36 Edg/141.0.0.0")
 
 
-def _reduced_motion_ctx(browser, appearance, windows=False):
-    ctx = browser.new_context(viewport={"width": 1200, "height": 800}, reduced_motion="reduce",
-                              **({"user_agent": WINDOWS_UA} if windows else {}))
-    if windows:
-        ctx.add_init_script("Object.defineProperty(Navigator.prototype, 'platform', { get: () => 'Win32' })")
-    ctx.add_init_script("localStorage.setItem('winnow.remotePrompt', 'seen');"
-                        f"localStorage.setItem('winnow.appearance', JSON.stringify({appearance}))")
-    return ctx
+def _reduced_motion_ctx(own_page, appearance, windows=False):
+    return own_page(seed="localStorage.setItem('winnow.remotePrompt', 'seen');"
+                         f"localStorage.setItem('winnow.appearance', JSON.stringify({appearance}))",
+                    init=("Object.defineProperty(Navigator.prototype, 'platform', { get: () => 'Win32' })"
+                          if windows else ""),
+                    viewport=(1200, 800), goto=False, reduced_motion="reduce",
+                    **({"user_agent": WINDOWS_UA} if windows else {}))
 
 
 def _splash_box(pg):
@@ -209,13 +173,11 @@ def _splash_note(pg):
     return pg.locator("#modal .fb-help", has_text="winnowing animation").inner_text()
 
 
-def test_reduced_motion_skips_by_default_but_an_explicit_tick_plays(browser, server):
+def test_reduced_motion_skips_by_default_but_an_explicit_tick_plays(own_page, server):
     """Off Windows, reduced motion is an accessibility switch someone chose:
     the default honours it (and Settings says so), a hand-ticked box
     overrides."""
-    ctx = _reduced_motion_ctx(browser, "{ splash: true }")
-    pg = ctx.new_page()
-    try:
+    with _reduced_motion_ctx(own_page, "{ splash: true }") as pg:
         pg.goto(server)
         pg.wait_for_selector(".row")
         assert pg.locator("#splash").get_attribute("hidden") is not None
@@ -230,28 +192,20 @@ def test_reduced_motion_skips_by_default_but_an_explicit_tick_plays(browser, ser
         box.check()
         assert pg.evaluate("() => __winnow.S.appearance.splash") == "always"
         assert "plays anyway" in _splash_note(pg)
-    finally:
-        ctx.close()
-    ctx2 = _reduced_motion_ctx(browser, "{ splash: 'always' }")
-    pg2 = ctx2.new_page()
-    try:
+    with _reduced_motion_ctx(own_page, "{ splash: 'always' }") as pg2:
         pg2.goto(server, wait_until="commit")
         pg2.wait_for_selector("#splash:not([hidden])", timeout=10_000)
-    finally:
-        ctx2.close()
 
 
 @pytest.mark.parametrize("appearance", ["{}", "{ splash: true }"])
-def test_windows_with_animation_effects_off_still_plays_it_by_default(browser, server, appearance):
+def test_windows_with_animation_effects_off_still_plays_it_by_default(own_page, server, appearance):
     """Chromium on Windows reports reduced motion whenever Animation effects
     are off, which VM images, RDP profiles and performance settings leave
     that way. Honouring it meant the animation only ever played for analysts
     who had unticked and re-ticked the box. `{}` is an install that never
     saved a look; `splash: true` is one that saved any other appearance
     setting, which writes the default out with it."""
-    ctx = _reduced_motion_ctx(browser, appearance, windows=True)
-    pg = ctx.new_page()
-    try:
+    with _reduced_motion_ctx(own_page, appearance, windows=True) as pg:
         pg.goto(server, wait_until="commit")
         pg.wait_for_selector("#splash:not([hidden])", timeout=10_000)
         pg.wait_for_timeout(800)          # past the focus-click grace period
@@ -259,23 +213,17 @@ def test_windows_with_animation_effects_off_still_plays_it_by_default(browser, s
         pg.wait_for_selector("#splash", state="hidden", timeout=3_000)
         assert _splash_box(pg).is_checked()
         assert "Animation effects off" in _splash_note(pg)
-    finally:
-        ctx.close()
 
 
-def test_off_on_windows_stays_off(browser, server):
-    ctx = _reduced_motion_ctx(browser, "{ splash: false }", windows=True)
-    pg = ctx.new_page()
-    try:
+def test_off_on_windows_stays_off(own_page, server):
+    with _reduced_motion_ctx(own_page, "{ splash: false }", windows=True) as pg:
         pg.goto(server)
         pg.wait_for_selector(".row", timeout=15_000)
         assert pg.locator("#splash").get_attribute("hidden") is not None
         assert not _splash_box(pg).is_checked()
-    finally:
-        ctx.close()
 
 
-def test_a_slow_display_still_finishes_in_seconds(browser, server):
+def test_a_slow_display_still_finishes_in_seconds(own_page, server):
     """The launch must take the same few seconds on a VM with no GPU and a
     big high-DPI screen as on a workstation. Modelled here with software
     canvas, a 2560×1440 2× viewport and 8× CPU throttling — the shape of
@@ -284,14 +232,10 @@ def test_a_slow_display_still_finishes_in_seconds(browser, server):
     drops when frames run slow, so the whole thing stays under ~half of
     what a per-frame simulation took."""
     import time
-    ctx = browser.new_context(viewport={"width": 2560, "height": 1440}, device_scale_factor=2)
-    ctx.add_init_script("localStorage.setItem('winnow.remotePrompt', 'seen');"
-                        "localStorage.setItem('winnow.appearance', JSON.stringify({ splash: 'always' }))")
-    pg = ctx.new_page()
-    errors = []
-    pg.on("pageerror", lambda e: errors.append(str(e)))
-    try:
-        cdp = ctx.new_cdp_session(pg)
+    with own_page(seed="localStorage.setItem('winnow.remotePrompt', 'seen');"
+                       "localStorage.setItem('winnow.appearance', JSON.stringify({ splash: 'always' }))",
+                  viewport=(2560, 1440), device_scale_factor=2, goto=False) as pg:
+        cdp = pg.context.new_cdp_session(pg)
         cdp.send("Emulation.setCPUThrottlingRate", {"rate": 8})
         pg.goto(server)
         pg.wait_for_selector("#splash:not([hidden])", timeout=20_000)
@@ -299,6 +243,3 @@ def test_a_slow_display_still_finishes_in_seconds(browser, server):
         pg.wait_for_selector("#splash[hidden]", state="attached", timeout=60_000)
         took = time.monotonic() - t0
         assert took < 18, f"splash took {took:.1f}s under throttling"
-        assert not errors, errors
-    finally:
-        ctx.close()

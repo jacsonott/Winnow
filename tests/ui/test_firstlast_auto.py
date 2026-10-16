@@ -20,29 +20,6 @@ DRAG = """(args) => {
 }"""
 
 
-@pytest.fixture(scope="module")
-def fl_page(browser, server, server_post):
-    server_post("/api/plugins/toggle", {"fs_name": "first_last", "scope": "on_all"})
-    ctx = browser.new_context(viewport={"width": 1500, "height": 900})
-    ctx.add_init_script("localStorage.setItem('winnow.remotePrompt', 'seen');"
-                        "localStorage.removeItem('winnow.firstlast.auto');"
-                        "localStorage.setItem('winnow.appearance',"
-                        " JSON.stringify({ splash: false, pagesMenu: false }))")
-    pg = ctx.new_page()
-    errors: list[str] = []
-    pg.on("pageerror", lambda e: errors.append(str(e)))
-    pg.goto(server, wait_until="networkidle")
-    pg.wait_for_selector(".row")
-    pg.evaluate("() => __winnow.loadPlugins()")
-    pg.wait_for_function("() => __winnow.S.pluginTabs.some((t) => t.id.includes('firstlast'))", timeout=10_000)
-    pg.locator(".tab-plugin", has_text="First/Last").click()
-    pg.wait_for_selector("[data-zone='groupBy']", timeout=10_000)
-    yield pg
-    ctx.close()
-    server_post("/api/plugins/toggle", {"fs_name": "first_last", "scope": "off_all"})
-    assert not errors, "uncaught JS errors: " + " | ".join(errors)
-
-
 def test_auto_update_off_waits_for_refresh_and_is_remembered(fl_page):
     pg = fl_page
     auto = pg.locator("input.fl-auto")
@@ -56,8 +33,7 @@ def test_auto_update_off_waits_for_refresh_and_is_remembered(fl_page):
     # Nothing to run (no grouping) is not "pending": the stale marker clears.
     auto.uncheck()
     pg.locator("[data-zone='groupBy'] [data-field='Host'] button, [data-zone='groupBy'] .chip-rm, [data-zone='groupBy'] button").first.click()
-    pg.locator("button.fl-refresh").click()
-    pg.wait_for_timeout(300)
+    pg.locator("button.fl-refresh").click()   # with nothing to run, it clears at once
     assert not pg.evaluate("() => [...document.querySelectorAll('.note-status')].some((n) => n.textContent === 'Changed — press Refresh')")
     pg.evaluate(DRAG, ["[data-field='Host']", "[data-zone='groupBy']"])
     auto.check()

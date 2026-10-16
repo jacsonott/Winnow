@@ -87,6 +87,15 @@ def test_autofit_leaves_room_for_the_header_name(page):
         )
 
 
+def _autofit(page):
+    """= on the grid, and wait for the widths it asked the server for to
+    land. The key puts up "Measuring columns…" at once and replaces it when
+    the new widths are painted."""
+    page.click("#body")
+    page.keyboard.press("=")
+    page.wait_for_selector("#toast:not([hidden]):has-text('Columns autofit to content')")
+
+
 def test_autofit_respects_the_configured_cap(page):
     """The cap is a user setting now, so it has to be *read* at fit time
     rather than baked in. CommandLine's values are ~350 characters: uncapped
@@ -95,9 +104,7 @@ def test_autofit_respects_the_configured_cap(page):
     other column has to be scrolled)."""
     def fit_with(cap):
         page.evaluate(f"() => {{ __winnow.S.appearance.autofitMax = {cap}; __winnow.saveAppearance(); }}")
-        page.click("#body")
-        page.keyboard.press("=")
-        page.wait_for_timeout(500)
+        _autofit(page)
         return next(c for c in page.evaluate(MEASURE) if c["col"] == "CommandLine")["head"]
 
     assert fit_with(900) == 900
@@ -117,9 +124,7 @@ def test_autofit_shrinks_an_over_wide_column_back(page):
       __winnow.renderHead(); __winnow.render();
     }""")
     assert next(c for c in page.evaluate(MEASURE) if c["col"] == "Host")["head"] == 600
-    page.click("#body")
-    page.keyboard.press("=")
-    page.wait_for_timeout(500)
+    _autofit(page)
     host = next(c for c in page.evaluate(MEASURE) if c["col"] == "Host")
     assert host["head"] < 200, f"autofit left a 600px column at {host['head']}px — it can only grow"
     assert host["labelHas"] >= host["labelNeeds"]
@@ -139,11 +144,9 @@ def test_resetting_the_keymap_actually_resets_it(page):
 
     row.locator(".btn", has_text="+ key").click()
     page.keyboard.press("y")
-    page.wait_for_timeout(200)
     assert "y" in row.inner_text(), "the new binding never landed, so this proves nothing"
 
     page.click("#modalBody .btn:has-text('Reset to defaults')")
-    page.wait_for_timeout(200)
     assert row.inner_text() == before, "reset did not restore the default bindings"
     # And the module-level defaults themselves must be unpolluted, which is
     # the actual bug — a reset that only fixes S.keymap would still pass above
@@ -254,7 +257,6 @@ def test_jump_to_timestamp_is_reachable_from_the_timeframe_dialog(page):
     page.evaluate("() => __winnow.openTimeRangeModal()")
     page.wait_for_selector("#modal:not([hidden])")
     page.click("#modalBody .btn:has-text('Jump to timestamp…')")
-    page.wait_for_timeout(200)
     assert page.locator("#modalTitle").inner_text().lower() == "jump to timestamp"
     page.keyboard.press("Escape")
 
@@ -335,12 +337,12 @@ def test_shortcuts_go_inert_while_a_dialog_is_open(page):
     page.keyboard.press("e")
     page.wait_for_selector("#modal:not([hidden])")
     page.keyboard.press("v")
-    page.wait_for_timeout(150)
+    page.wait_for_timeout(150)   # as long as the picker takes to open when it does
     assert page.locator(".menu").count() == 0, "the value picker opened behind the dialog"
     page.keyboard.press("Escape")
     page.wait_for_selector("#modal[hidden]", state="attached")
     page.keyboard.press("v")
-    page.wait_for_timeout(150)
+    page.wait_for_selector(".menu", timeout=5_000)
     assert page.locator(".menu").count() == 1, "v must still work once the dialog is gone"
     page.keyboard.press("Escape")
 
@@ -366,7 +368,6 @@ def test_saved_filters_are_reachable_from_the_builder(page):
     page.keyboard.press("e")
     page.wait_for_selector("#modal:not([hidden])")
     page.click("#modalBody .btn:has-text('Saved filters…')")
-    page.wait_for_timeout(200)
     assert page.locator("#modalTitle").inner_text().lower() == "saved filters"  # CSS uppercases it
     page.keyboard.press("Escape")
 

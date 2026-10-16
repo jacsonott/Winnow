@@ -20,19 +20,14 @@ rather than passing having proved nothing.
 from __future__ import annotations
 
 import datetime as dt
-import os
-import socket
-import subprocess
-import sys
 import time
-import urllib.request
-from pathlib import Path
 
 import pytest
 
+from spawn import running_server
+
 pytestmark = pytest.mark.ui
 
-ROOT = Path(__file__).resolve().parent.parent.parent
 # Ends in ...0000 on purpose: the re-derive test below reads the last three
 # digits, and the newest row's are 000 — nowhere near the top of the order.
 N_ROWS = 150_001
@@ -47,52 +42,18 @@ def big_server(tmp_path_factory):
         f.write("Timestamp,Epoch,Host\n")
         for i in range(N_ROWS):
             f.write(f"2026-03-14 08:{i // 60 % 60:02d}:{i % 60:02d},{EPOCH0 + i},H{i % 5}\n")
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.close()
-    proc = subprocess.Popen(
-        [sys.executable, str(ROOT / "server.py"), "--case", str(d / "big.db"), "--open", str(csv),
-         "--port", str(port), "--host", "127.0.0.1", "--no-browser", "--no-fts"],
-        cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        env={**os.environ,
-             "WINNOW_WORKSPACE_DIR": str(d / "ws"), "WINNOW_ENV_FILE": str(d / "env"),
-             "XDG_DATA_HOME": str(d / "xdg-data"), "XDG_CONFIG_HOME": str(d / "xdg-config")})
-    base = f"http://127.0.0.1:{port}"
-    deadline = time.monotonic() + 90
-    while time.monotonic() < deadline:
-        if proc.poll() is not None:
-            pytest.fail("server exited during startup:\n" + proc.stdout.read().decode(errors="replace"))
-        try:
-            urllib.request.urlopen(base + "/api/sources", timeout=1)
-            break
-        except OSError:
-            time.sleep(0.15)
-    else:
-        proc.kill()
-        pytest.fail("server did not come up")
-    yield base
-    proc.terminate()
-    try:
-        proc.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        proc.kill()
+    with running_server(d, "--case", d / "big.db", "--open", csv, "--no-fts",
+                        ready="/api/sources", timeout=90) as srv:
+        yield srv.base
 
 
 @pytest.fixture
-def big(browser, big_server, first_run_init):
-    ctx = browser.new_context(viewport={"width": 1500, "height": 900})
-    ctx.add_init_script(first_run_init)
-    pg = ctx.new_page()
-    errors: list[str] = []
-    pg.on("pageerror", lambda e: errors.append(str(e)))
+def big(own_page, big_server):
     # "load", not "networkidle": a table this size keeps background work
     # (column index builds) going for a while after the first paint.
-    pg.goto(big_server, wait_until="load")
-    pg.wait_for_selector("#rows .row:not(.pending)", timeout=60_000)
-    yield pg
-    ctx.close()
-    assert not errors, "uncaught JS errors: " + " | ".join(errors)
+    with own_page(base=big_server, wait_until="load",
+                  ready="#rows .row:not(.pending)", ready_timeout=60_000) as pg:
+        yield pg
 
 
 def _call(page, path, method="GET", body=None):

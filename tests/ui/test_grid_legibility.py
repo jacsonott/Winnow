@@ -245,18 +245,17 @@ def test_the_copy_button_waits_for_the_pointer(page):
     assert btn.is_visible()
 
 
-def test_it_copies_that_field_and_nothing_else(page):
+def test_it_copies_that_field_and_nothing_else(page, copied):
     _open_row(page)
     dd = page.locator("#detailFields dd[data-col='CommandLine']")
     dd.hover()
-    dd.locator(".dfield-copy").click()
-    page.wait_for_timeout(300)
-    clip = page.evaluate("() => navigator.clipboard.readText()")
-    assert clip == _raw(page, 1, "CommandLine")
-    assert "Timestamp" not in clip, "that is Copy row's job"
+    with copied(page) as clip:
+        dd.locator(".dfield-copy").click()
+    assert clip.text == _raw(page, 1, "CommandLine")
+    assert "Timestamp" not in clip.text, "that is Copy row's job"
 
 
-def test_the_copy_follows_the_column_s_display_format(page):
+def test_the_copy_follows_the_column_s_display_format(page, copied):
     """The same rule the grid's copies follow (test_copy_formatted.py):
     what is on the clipboard is what was on the screen."""
     page.evaluate("""() => {
@@ -266,6 +265,6 @@ def test_the_copy_follows_the_column_s_display_format(page):
     dd = page.locator("#detailFields dd[data-col='Timestamp']")
     assert "03/14/2026" in dd.inner_text()
     dd.hover()
-    dd.locator(".dfield-copy").click()
-    page.wait_for_timeout(300)
-    assert page.evaluate("() => navigator.clipboard.readText()").startswith("03/14/2026")
+    with copied(page) as clip:
+        dd.locator(".dfield-copy").click()
+    assert clip.text.startswith("03/14/2026"), clip.text

@@ -21,19 +21,12 @@ the shared fixture's case, whose table list other modules count on.
 
 from __future__ import annotations
 
-import os
-import socket
-import subprocess
-import sys
-import time
-import urllib.request
-from pathlib import Path
-
 import pytest
+
+from spawn import running_server
 
 pytestmark = pytest.mark.ui
 
-ROOT = Path(__file__).resolve().parent.parent.parent
 N_COLS = 150
 N_ROWS = 3000
 
@@ -49,56 +42,16 @@ def wide_server(tmp_path_factory):
             [f"2026-03-14 08:{r // 60 % 60:02d}:{r % 60:02d}", str(4624 + r % 3), f"H{r % 7}"]
             + [f"v{r}-{c}" for c in range(N_COLS - 3)]))
     csv.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.close()
-    proc = subprocess.Popen(
-        [sys.executable, str(ROOT / "server.py"), "--case", str(d / "wide.db"), "--open", str(csv),
-         "--port", str(port), "--host", "127.0.0.1", "--no-browser", "--no-fts"],
-        cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        env={**os.environ,
-             "WINNOW_WORKSPACE_DIR": str(d / "ws"), "WINNOW_ENV_FILE": str(d / "env"),
-             "XDG_DATA_HOME": str(d / "xdg-data"), "XDG_CONFIG_HOME": str(d / "xdg-config")})
-    base = f"http://127.0.0.1:{port}"
-    deadline = time.monotonic() + 60
-    while time.monotonic() < deadline:
-        if proc.poll() is not None:
-            pytest.fail("server exited during startup:\n" + proc.stdout.read().decode(errors="replace"))
-        try:
-            urllib.request.urlopen(base + "/api/sources", timeout=1)
-            break
-        except OSError:
-            time.sleep(0.15)
-    else:
-        proc.kill()
-        pytest.fail("server did not come up")
-    yield base
-    proc.terminate()
-    try:
-        proc.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        proc.kill()
+    with running_server(d, "--case", d / "wide.db", "--open", csv, "--no-fts",
+                        ready="/api/sources", timeout=60) as srv:
+        yield srv.base
 
 
 @pytest.fixture
-def wide(browser, wide_server, first_run_init):
-    ctx = browser.new_context(viewport={"width": 1500, "height": 900},
-                              permissions=["clipboard-read", "clipboard-write"])
-    ctx.add_init_script(first_run_init)
-    pg = ctx.new_page()
-    errors: list[str] = []
-    pg.on("pageerror", lambda e: errors.append(str(e)))
-    pg.goto(wide_server, wait_until="networkidle")
-    pg.wait_for_selector("#rows .row:not(.pending)", timeout=30_000)
-    yield pg
-    ctx.close()
-    assert not errors, "uncaught JS errors: " + " | ".join(errors)
-
-
-def _settle(page):
-    """Two frames: the scroll listener paints on the next one."""
-    page.evaluate("() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))")
+def wide(own_page, wide_server):
+    with own_page(base=wide_server, ready="#rows .row:not(.pending)",
+                  permissions=["clipboard-read", "clipboard-write"]) as pg:
+        yield pg
 
 
 # What a painted grid row says about itself: how many cells it carries,
@@ -129,11 +82,11 @@ _GRID_ROW = """() => {
 
 # ----------------------------------------------------------------- grid
 
-def test_a_paint_builds_the_columns_on_screen_not_the_whole_table(wide):
+def test_a_paint_builds_the_columns_on_screen_not_the_whole_table(wide, painted):
     assert wide.evaluate("() => __winnow.visibleCols().length") == N_COLS
     for where in ("0", "body.scrollWidth / 2", "body.scrollWidth"):
         wide.evaluate(f"() => {{ const body = document.getElementById('body'); body.scrollLeft = {where}; }}")
-        _settle(wide)
+        painted(wide)
         got = wide.evaluate(_GRID_ROW)
         assert got["cells"] < N_COLS / 3, f"scrollLeft={where}: a row built {got['cells']} of {N_COLS} cells"
         assert not got["missing"], f"scrollLeft={where}: on screen with no cell under it: {got['missing']}"
@@ -143,11 +96,11 @@ def test_a_paint_builds_the_columns_on_screen_not_the_whole_table(wide):
         assert abs(got["rowWidth"] - got["headWidth"]) < 1
 
 
-def test_a_pinned_column_holds_its_place_however_far_the_grid_scrolls(wide):
+def test_a_pinned_column_holds_its_place_however_far_the_grid_scrolls(wide, painted):
     wide.evaluate("() => __winnow.togglePin('Host')")
     try:
         wide.evaluate("() => { const b = document.getElementById('body'); b.scrollLeft = b.scrollWidth / 2; }")
-        _settle(wide)
+        painted(wide)
         got = wide.evaluate("""() => {
           const ci = __winnow.visibleCols().indexOf('Host');
           const cell = [...document.querySelectorAll('#rows .row:not(.pending)')][4].querySelector(`.cell[data-col="${ci}"]`);
@@ -163,25 +116,25 @@ def test_a_pinned_column_holds_its_place_however_far_the_grid_scrolls(wide):
         wide.evaluate("() => __winnow.togglePin('Host')")
 
 
-def test_the_grid_growing_without_a_window_resize_paints_the_new_columns(wide):
+def test_the_grid_growing_without_a_window_resize_paints_the_new_columns(wide, painted):
     """Closing the detail pane or folding the sidebar widens the grid with
     no scroll and no window `resize` — and the rows only carry the columns
     the narrower grid could see."""
     wide.evaluate("() => { document.getElementById('body').style.marginRight = '900px'; __winnow.render(); }")
-    _settle(wide)
+    painted(wide)
     narrow = wide.evaluate(_GRID_ROW)["cells"]
     wide.evaluate("() => { document.getElementById('body').style.marginRight = ''; }")
-    _settle(wide)
+    painted(wide)
     got = wide.evaluate(_GRID_ROW)
     assert got["cells"] > narrow
     assert not got["missing"], f"columns uncovered by the wider grid with no cells: {got['missing']}"
 
 
-def test_the_arrow_keys_walk_into_columns_that_were_never_built(wide):
+def test_the_arrow_keys_walk_into_columns_that_were_never_built(wide, painted):
     wide.locator("#rows .row:not(.pending)").nth(2).locator(".cell").first.click()
     for _ in range(80):
         wide.keyboard.press("ArrowRight")
-    _settle(wide)
+    painted(wide)
     got = wide.evaluate("""() => {
       const a = document.querySelector('#rows .cell-active');
       const box = document.getElementById('body').getBoundingClientRect();
@@ -202,14 +155,14 @@ def _landed(page):
     page.wait_for_function("() => !document.querySelector('#sqlResult tr.sql-row-pending')")
 
 
-def _run_sql(page, sql):
+def _run_sql(page, painted, sql):
     page.click("#tabSql")
     page.wait_for_selector("#sqlview:not([hidden])")
     page.wait_for_function("() => __winnow.S.sqlTabs.length > 0 && !document.getElementById('sqlText').disabled")
     page.locator("#sqlText").fill(sql)
     page.click("#btnRunSql")
     page.wait_for_selector("#sqlResult table")
-    _settle(page)
+    painted(page)
 
 
 # The SQL result's equivalent of _GRID_ROW, for the row nearest the middle
@@ -246,15 +199,15 @@ _SQL_ROW = """() => {
 }"""
 
 
-def test_a_large_sql_result_builds_only_what_the_pane_shows(wide):
-    _run_sql(wide, "SELECT rid, * FROM src_1 ORDER BY rid")
+def test_a_large_sql_result_builds_only_what_the_pane_shows(wide, painted):
+    _run_sql(wide, painted, "SELECT rid, * FROM src_1 ORDER BY rid")
     assert wide.locator("#sqlResult th").count() > N_COLS
     top = wide.evaluate(_SQL_ROW)
     # 3,000 rows x 152 columns is 456,000 cells; the pane shows a few hundred.
     assert top["tds"] < 5000, f"{top['tds']} cells built for one screen of result"
     for where in ("sc.scrollHeight / 2", "sc.scrollHeight"):
         wide.evaluate(f"() => {{ const sc = document.querySelector('#sqlResult .sql-result-scroll'); sc.scrollTop = {where}; }}")
-        _settle(wide)
+        painted(wide)
         _landed(wide)
         got = wide.evaluate(_SQL_ROW)
         assert got["rid"] == got["index"] + 1, f"row {got['index']} on screen holds rid {got['rid']}"
@@ -264,7 +217,7 @@ def test_a_large_sql_result_builds_only_what_the_pane_shows(wide):
         # rows happen to be built — scrolling must not re-size them.
         assert got["widths"] == top["widths"]
     wide.evaluate("() => { const sc = document.querySelector('#sqlResult .sql-result-scroll'); sc.scrollLeft = sc.scrollWidth / 2; }")
-    _settle(wide)
+    painted(wide)
     got = wide.evaluate(_SQL_ROW)
     assert got["cells"] < N_COLS / 3, f"a scrolled row built {got['cells']} cells"
     assert not got["missing"] and not got["misplaced"], got
@@ -279,9 +232,9 @@ def _click_row(page, i, shift=False):
         .dispatchEvent(new MouseEvent('click', { bubbles: true, shiftKey: shift }))""", [i, shift])
 
 
-def test_a_row_click_in_a_large_result_moves_the_highlight_and_nothing_else(wide):
+def test_a_row_click_in_a_large_result_moves_the_highlight_and_nothing_else(wide, copied, painted):
     """Every click used to rebuild the whole table to move one class."""
-    _run_sql(wide, "SELECT rid, * FROM src_1 ORDER BY rid")
+    _run_sql(wide, painted, "SELECT rid, * FROM src_1 ORDER BY rid")
     wide.evaluate("() => document.querySelectorAll('#sqlResult tr[data-i]').forEach((t) => { t.__kept = true; })")
     _click_row(wide, 3)
     assert wide.locator("#sqlResult .sql-row-sel").count() == 1
@@ -290,19 +243,18 @@ def test_a_row_click_in_a_large_result_moves_the_highlight_and_nothing_else(wide
     # A Shift range reaches rows that were not built when it started, and
     # it is the whole range that the selection holds.
     wide.evaluate("() => { document.querySelector('#sqlResult .sql-result-scroll').scrollTop = 20000; }")
-    _settle(wide)
+    painted(wide)
     _landed(wide)
     far = wide.evaluate("() => Number(document.querySelectorAll('#sqlResult tr[data-i]')[30].dataset.i)")
     _click_row(wide, far, shift=True)
     assert wide.locator("#sqlResult .sql-row-sel").count() > 20
     wide.evaluate("() => document.activeElement && document.activeElement.blur()")
-    wide.keyboard.press("Control+c")
-    wide.wait_for_timeout(150)
-    clip = wide.evaluate("() => navigator.clipboard.readText()")
-    assert len(clip.strip().splitlines()) == 1 + (far - 3 + 1), "header + every row of the range"
+    with copied(wide) as clip:
+        wide.keyboard.press("Control+c")
+    assert len(clip.text.strip().splitlines()) == 1 + (far - 3 + 1), "header + every row of the range"
     # ...and the rows scrolled back to come up picked.
     wide.evaluate("() => { document.querySelector('#sqlResult .sql-result-scroll').scrollTop = 0; }")
-    _settle(wide)
+    painted(wide)
     picked = wide.evaluate("() => [...document.querySelectorAll('#sqlResult tr[data-i]')].slice(0, 6)"
                            ".map((t) => t.classList.contains('sql-row-sel'))")
     assert picked == [False, False, False, True, True, True]

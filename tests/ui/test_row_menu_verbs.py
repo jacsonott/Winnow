@@ -48,8 +48,8 @@ def _filter_eventid(page):
     # Wait for that rebuild to land before anything reads a cell: the rows
     # move under the pointer when it does, and a value read from the grid
     # a moment before the repaint is a value the menu was never opened on.
-    page.wait_for_function("() => __winnow.S.view && __winnow.S.view.row_count < 200")
-    page.wait_for_timeout(150)
+    page.wait_for_function("() => __winnow.S.view && __winnow.S.view.row_count < 200"
+                           " && __winnow.busyCount === 0 && !document.querySelector('#body .row.pending')")
 
 
 def test_the_value_is_named_once_in_the_heading(page):

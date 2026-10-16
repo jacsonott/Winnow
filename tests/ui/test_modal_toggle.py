@@ -22,7 +22,6 @@ def test_toggle_defers_to_a_focused_input(page):
     page.keyboard.press("J")
     page.wait_for_selector("#modal:not([hidden])")
     page.keyboard.press("J")
-    page.wait_for_timeout(100)
     assert not page.locator("#modal").is_hidden()
     assert "J" in page.evaluate("() => document.activeElement.value || ''")
     page.evaluate("() => document.activeElement.blur()")
@@ -60,7 +59,6 @@ def test_a_different_keybind_does_not_close_someone_elses_dialog(page):
     page.keyboard.press("C")  # table menu
     page.wait_for_selector("#modal:not([hidden])")
     page.keyboard.press("e")  # the builder's key — must stay inert, not swap dialogs
-    page.wait_for_timeout(150)
     assert not page.locator("#modal").is_hidden()
     assert page.locator("#modalTitle").inner_text().lower().startswith("table")
     page.keyboard.press("Escape")

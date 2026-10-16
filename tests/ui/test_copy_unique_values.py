@@ -42,8 +42,8 @@ def _select(page, r0, r1, col):
 
 
 def _result(page):
+    # The toast goes up once the clipboard write has resolved.
     page.wait_for_selector("#toast:not([hidden]):has-text('unique value')", timeout=10_000)
-    page.wait_for_timeout(300)
     return (page.locator("#toast").inner_text().strip(),
             page.evaluate("() => navigator.clipboard.readText()"))
 
@@ -90,7 +90,6 @@ def test_ctrl_shift_c_still_copies_with_headers(page):
     _select(page, 2, 2, "Host")
     page.keyboard.press("Control+Shift+C")
     page.wait_for_selector("#toast:not([hidden]):has-text('with headers')", timeout=10_000)
-    page.wait_for_timeout(300)
     assert page.evaluate("() => navigator.clipboard.readText()") == "Host\nH2"
 
 

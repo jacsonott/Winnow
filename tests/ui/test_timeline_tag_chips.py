@@ -53,11 +53,11 @@ def _empty_text(page):
 
 
 @pytest.fixture
-def one_tagged_row(page):
+def one_tagged_row(page, tag_written):
     """Tags a row with the first tag, leaves the shared case as found."""
     page.locator(".row").nth(1).locator(".cell").nth(1).click()
-    page.keyboard.press("1")
-    page.wait_for_timeout(250)
+    with tag_written(page):
+        page.keyboard.press("1")
     page.locator("#tabTimeline").click()
     page.wait_for_selector("#timelineview:not([hidden])")
     page.wait_for_selector(".timeline-row", timeout=10_000)
@@ -66,8 +66,8 @@ def one_tagged_row(page):
     page.evaluate("(id) => __winnow.openSource(id)", src)
     page.wait_for_selector(".row")
     page.locator(".row").nth(1).locator(".cell").nth(1).click()
-    page.keyboard.press("1")
-    page.wait_for_timeout(250)
+    with tag_written(page):
+        page.keyboard.press("1")
 
 
 def test_the_filter_is_chips_not_checkboxes(page, one_tagged_row):

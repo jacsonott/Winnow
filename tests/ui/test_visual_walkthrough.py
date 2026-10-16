@@ -25,7 +25,7 @@ def _single_line(page, selector, limit=30):
     return _rect(page, selector)["h"] < limit
 
 
-def test_a_one_column_table_takes_the_whole_grid(page, api, ui_csv):
+def test_a_one_column_table_takes_the_whole_grid(page, api, ui_csv, painted):
     log = Path(ui_csv).parent / "walk.log"
     log.write_text("\n".join(f"2026-03-14T08:00:{i:02d}Z info hostd[{2000 + i}] Event {i}: user root logged in" for i in range(40)) + "\n")
     api("/api/ingest/jobs/path", "POST", {"path": str(log)})
@@ -54,7 +54,7 @@ def test_a_one_column_table_takes_the_whole_grid(page, api, ui_csv):
         assert "logged in" in cell.inner_text()
         # The window shrinking takes the column with it, header included.
         page.set_viewport_size({"width": 1100, "height": 700})
-        page.wait_for_timeout(300)
+        painted(page)
         body_w2 = page.evaluate("() => document.getElementById('body').clientWidth")
         col_w2 = _rect(page, '.hcell[data-col="Message"]')["w"]
         assert col_w2 < col_w and col_w2 >= body_w2 - 104 - 40, (col_w2, body_w2)
@@ -80,7 +80,7 @@ def _tag_row_with_hotkey(page, nth, hotkey):
     return tag_id, source_id, rid
 
 
-def test_toolbar_and_header_keep_their_shape_on_a_laptop(page, api):
+def test_toolbar_and_header_keep_their_shape_on_a_laptop(page, api, painted):
     # Tag a couple of rows so the chips carry counts, as a real case's do —
     # the counts are what these measurements are about, so they have to be
     # real. The server's case is shared by the whole UI session, though, so
@@ -101,7 +101,7 @@ def test_toolbar_and_header_keep_their_shape_on_a_laptop(page, api):
         page.set_viewport_size({"width": 1024, "height": 640})
         page.click("#btnSearchToggle")
         page.wait_for_selector("#search:visible")
-        page.wait_for_timeout(200)
+        painted(page)
         # Every chip is one line; no chip sits under the row count.
         chips = page.evaluate("() => [...document.querySelectorAll('#tagRibbon .tag-chip')].map((c) => { const r = c.getBoundingClientRect(); return { x: r.x, y: r.y, w: r.width, h: r.height }; })")
         assert chips and all(c["h"] < 30 for c in chips), chips

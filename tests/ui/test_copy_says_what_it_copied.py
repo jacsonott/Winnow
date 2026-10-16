@@ -39,9 +39,12 @@ def _select(page, r0, r1, c0, c1):
 
 
 def _copy(page):
+    """The toast and the clipboard after Ctrl+C. The toast goes up once
+    the clipboard write has resolved, so by then the text is there to
+    read; only a "Copying…" progress toast comes before it."""
     page.keyboard.press("Control+c")
-    page.wait_for_selector("#toast:not([hidden])", timeout=10_000)
-    page.wait_for_timeout(350)
+    page.wait_for_function("() => { const t = document.getElementById('toast');"
+                           " return !t.hidden && !t.textContent.endsWith('…'); }", timeout=10_000)
     return (page.locator("#toast").inner_text().strip(),
             page.evaluate("() => navigator.clipboard.readText()"))
 

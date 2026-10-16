@@ -18,13 +18,6 @@ import pytest
 pytestmark = pytest.mark.ui
 
 
-def _post(server, route, body):
-    req = urllib.request.Request(
-        server.rstrip("/") + route, data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json", "X-Timeline-Lite-Client": "1"})
-    return json.loads(urllib.request.urlopen(req, timeout=10).read())
-
-
 def _open(page):
     page.evaluate("() => __winnow.openPluginManager()")
     page.wait_for_selector("#modal:not([hidden])")
@@ -109,7 +102,7 @@ def test_the_detail_pane_describes_a_plugin_that_is_not_running(page):
     assert "provides" in d["kv"]["Plugin API"]
 
 
-def test_what_it_adds_comes_from_the_registry_once_it_is_running(page, server):
+def test_what_it_adds_comes_from_the_registry_once_it_is_running(page, server, server_post):
     """A running plugin has real registry data behind it; "what it would
     add" is only the answer for one that was deliberately not run, and the
     pane must switch between them."""
@@ -124,7 +117,7 @@ def test_what_it_adds_comes_from_the_registry_once_it_is_running(page, server):
         _select(page, target["name"])
         assert "What it would add" in _detail(page)["sections"]
 
-        _post(server, "/api/plugins/toggle", {"fs_name": fs, "scope": "on_all"})
+        server_post("/api/plugins/toggle", {"fs_name": fs, "scope": "on_all"})
         page.evaluate("() => __winnow.loadPlugins()")
         page.wait_for_function("(f) => (__winnow.S.plugins.find((p) => p.fs_name === f) || {}).enabled === true",
                                arg=fs)
@@ -136,11 +129,11 @@ def test_what_it_adds_comes_from_the_registry_once_it_is_running(page, server):
         assert "What it would add" not in d["sections"]
         assert d["kv"]["Status"] == "loaded — no errors"
     finally:
-        _post(server, "/api/plugins/toggle", {"fs_name": fs, "scope": "off_all"})
+        server_post("/api/plugins/toggle", {"fs_name": fs, "scope": "off_all"})
         page.evaluate("() => __winnow.loadPlugins()")
 
 
-def test_follow_drops_the_case_override(page, server):
+def test_follow_drops_the_case_override(page, server, server_post):
     """The state one <select> could never spell: no override, follow the
     machine. Reachable here, and the foot sentence says which it is."""
     listing = json.loads(urllib.request.urlopen(urllib.request.Request(
@@ -149,7 +142,7 @@ def test_follow_drops_the_case_override(page, server):
     target = listing["plugins"][0]
     fs, name = target["fs_name"], target["name"]
     try:
-        _post(server, "/api/plugins/toggle", {"fs_name": fs, "scope": "on_case"})
+        server_post("/api/plugins/toggle", {"fs_name": fs, "scope": "on_case"})
         page.evaluate("() => __winnow.loadPlugins()")
         page.wait_for_function("(f) => (__winnow.S.plugins.find((p) => p.fs_name === f) || {}).case_override === true",
                                arg=fs)
@@ -168,7 +161,7 @@ def test_follow_drops_the_case_override(page, server):
         assert "every case on this machine" in foot, foot
     finally:
         page.keyboard.press("Escape")
-        _post(server, "/api/plugins/toggle", {"fs_name": fs, "scope": "off_all"})
+        server_post("/api/plugins/toggle", {"fs_name": fs, "scope": "off_all"})
         page.evaluate("() => __winnow.loadPlugins()")
 
 

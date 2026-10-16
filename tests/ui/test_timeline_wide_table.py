@@ -18,7 +18,7 @@ TS = "2026-03-02 00:00:00"  # no other UI fixture uses this date
 
 
 @pytest.fixture
-def tagged_wide(page, tmp_path):
+def tagged_wide(page, tmp_path, tag_written):
     """Imports a 600-column table into the shared case, tags its one row
     through the UI, and takes the table (and with it the tag) away again."""
     path = tmp_path / "tl_wide.csv"
@@ -38,8 +38,8 @@ def tagged_wide(page, tmp_path):
     page.wait_for_function("(id) => __winnow.S.sourceId === id", arg=sid)
     page.wait_for_selector(".row")
     page.locator(".row").nth(0).locator(".cell").nth(1).click()
-    page.keyboard.press("1")
-    page.wait_for_timeout(250)
+    with tag_written(page):
+        page.keyboard.press("1")
     yield sid
     page.evaluate("""async (id) => {
         await __winnow.api('/api/source/' + id, { method: 'DELETE' }).catch(() => {});

@@ -118,12 +118,17 @@ def test_shift_arrows_build_a_range_that_picks_without_eating_earlier_picks(page
     assert _picked(page) == [1, 5, 6, 7]                                  # row 1 stays
 
 
-def test_picks_survive_a_sort_and_a_filter_and_the_chip_counts_the_hidden(page):
+def test_picks_survive_a_sort_and_a_filter_and_the_chip_counts_the_hidden(page, view_rebuilt):
     _gutter(page, 0).click(); _gutter(page, 4).click(); _gutter(page, 8).click()     # rids 1, 5, 9
     rids = page.evaluate("() => __winnow.selPositions().map((p) => __winnow.S.rowsByPos.get(p).rid)")
     assert rids == [1, 5, 9]
-    page.locator('.hcell[data-col="Timestamp"] .label').click()                    # sort toggles
-    page.wait_for_function("() => __winnow.selCount() === 3 && __winnow.S.selHidden === 0", timeout=10_000)
+    with view_rebuilt(page):
+        page.locator('.hcell[data-col="Timestamp"] .label').click()                # sort toggles
+    # Before the sorted view lands, the old picks already read as 3 picked
+    # and none hidden, so this waits on the remap only once it has landed:
+    # the picks come back by id, and the rows they name with the first page.
+    page.wait_for_function("() => __winnow.selCount() === 3 && __winnow.S.selHidden === 0"
+                           " && __winnow.selPositions().every((p) => __winnow.S.rowsByPos.has(p))", timeout=10_000)
     assert sorted(page.evaluate("() => __winnow.selPositions().map((p) => __winnow.S.rowsByPos.get(p) && __winnow.S.rowsByPos.get(p).rid).filter(Boolean)")) == [1, 5, 9]
     page.locator('.fcell input[data-col="Host"]').fill("=H0")                       # keeps rids 1, 6, 11, … → of ours only rid 1
     page.wait_for_function("() => __winnow.S.selHidden === 2 && __winnow.selCount() === 1", timeout=10_000)
@@ -181,7 +186,6 @@ def test_space_on_a_focused_button_is_the_buttons_not_a_row_toggle(page):
     _gutter(page, 2).click(); _gutter(page, 3).click()
     page.locator("#tagToolbar button", has_text="Undo").focus()
     page.keyboard.press("Space")      # the button's own Space: it activates Undo, nothing toggles
-    page.wait_for_timeout(150)
     assert _picked(page) == [2]
 
 

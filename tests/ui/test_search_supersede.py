@@ -17,7 +17,6 @@ test says so.
 from __future__ import annotations
 
 import re
-import time
 
 import pytest
 
@@ -37,7 +36,8 @@ class _HeldViews:
 
     ROUTE = re.compile(r".*/api/view(/start)?(\?.*)?$")
 
-    def __init__(self, page, hold=1):
+    def __init__(self, page, until, hold=1):
+        self.until = until
         self.page = page
         self.hold = hold
         self.held = []
@@ -52,7 +52,7 @@ class _HeldViews:
             route.continue_()
 
     def wait_held(self, n=1):
-        _until(self.page, lambda: len(self.held) >= n, f"no /api/view held (saw {len(self.seen)})")
+        self.until(self.page, lambda: len(self.held) >= n, f"no /api/view held (saw {len(self.seen)})")
 
     def release(self):
         for r in self.held:
@@ -65,15 +65,6 @@ class _HeldViews:
     def close(self):
         self.release()
         self.page.unroute(self.ROUTE)
-
-
-def _until(page, pred, what, timeout=10):
-    """Python-side state (a route handler's list, a request sniffer) is
-    invisible to wait_for_function; poll it here, bounded."""
-    deadline = time.time() + timeout
-    while not pred():
-        assert time.time() < deadline, what
-        page.wait_for_timeout(25)
 
 
 def _cancel_sniffer(page):
@@ -114,8 +105,8 @@ def _reset(page):
     page.wait_for_function("() => __winnow.S.view && __winnow.S.view.row_count === 200 && __winnow.busyCount === 0")
 
 
-def test_a_slow_search_says_so_while_it_runs(page):
-    hold = _HeldViews(page)
+def test_a_slow_search_says_so_while_it_runs(page, until):
+    hold = _HeldViews(page, until)
     page.click("#btnSearchToggle")
     try:
         page.locator("#search").fill("4624")
@@ -136,8 +127,8 @@ def test_a_slow_search_says_so_while_it_runs(page):
         _reset(page)
 
 
-def test_typing_again_cancels_the_build_it_supersedes(page):
-    hold = _HeldViews(page)
+def test_typing_again_cancels_the_build_it_supersedes(page, until):
+    hold = _HeldViews(page, until)
     cancels = _cancel_sniffer(page)
     _arm_recorders(page)
     page.click("#btnSearchToggle")
@@ -150,7 +141,7 @@ def test_typing_again_cancels_the_build_it_supersedes(page):
         # The second build lands (it was let through); the first never does.
         page.wait_for_function("() => __winnow.S.view && __winnow.S.view.row_count === 50 && __winnow.busyCount === 0")
         page.wait_for_function("() => document.getElementById('viewStats').textContent.includes('of 200 rows')")
-        _until(page, lambda: cancels, "no /api/cancel_op was sent for the superseded build")
+        until(page, lambda: cancels, "no /api/cancel_op was sent for the superseded build")
         assert [c["token"] for c in cancels] == [first]
         assert len(hold.seen) == 2 and hold.seen[1]["op_token"] != first
         assert page.evaluate("() => window.__installed") == 1
@@ -164,11 +155,11 @@ def test_typing_again_cancels_the_build_it_supersedes(page):
         _reset(page)
 
 
-def test_the_chip_cancel_still_says_so_and_keeps_the_old_count(page):
+def test_the_chip_cancel_still_says_so_and_keeps_the_old_count(page, until):
     """The analyst's own cancel is not a supersede: it toasts, and the
     count from before the build comes back — the old rows are still the
     rows on screen."""
-    hold = _HeldViews(page)
+    hold = _HeldViews(page, until)
     cancels = _cancel_sniffer(page)
     _arm_recorders(page)
     before = _stats(page)
@@ -180,7 +171,7 @@ def test_the_chip_cancel_still_says_so_and_keeps_the_old_count(page):
         page.wait_for_selector("#busyCancel:not([hidden])")   # armed once the build has run ~1.2s
         page.wait_for_function("""() => document.getElementById('viewStats').textContent.startsWith('Searching')""")
         page.click("#busyCancel")
-        _until(page, lambda: cancels, "the chip sent no /api/cancel_op")
+        until(page, lambda: cancels, "the chip sent no /api/cancel_op")
         # The build reaches the server after its cancel did: 499, no view.
         hold.release()
         page.wait_for_function("() => (window.__toasts || []).some((t) => t.includes('Cancelled'))")
@@ -195,8 +186,8 @@ def test_the_chip_cancel_still_says_so_and_keeps_the_old_count(page):
         _reset(page)
 
 
-def test_a_filter_build_says_filtering(page):
-    hold = _HeldViews(page)
+def test_a_filter_build_says_filtering(page, until):
+    hold = _HeldViews(page, until)
     box = page.locator('.fcell input[data-col="EventId"]')
     try:
         box.fill("4")   # contains: 4624/4625/4688 stay, 1 goes — 150 rows

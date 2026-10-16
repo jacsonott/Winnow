@@ -16,20 +16,10 @@ from __future__ import annotations
 
 import json
 import re
-import time
 
 import pytest
 
 pytestmark = pytest.mark.ui
-
-
-def _until(probe, what, timeout=10.0):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if probe():
-            return
-        time.sleep(0.1)
-    pytest.fail(f"timed out waiting for {what}")
 
 
 def _server_tag(api, tag_id):
@@ -58,13 +48,13 @@ def _open_editor_row(page, name):
     pytest.fail(f"no row for {name!r} in Edit tags")
 
 
-def test_edit_tags_saves_a_rename_a_key_and_a_colour_with_nothing_pressed(page, api, probe_tag):
+def test_edit_tags_saves_a_rename_a_key_and_a_colour_with_nothing_pressed(page, api, probe_tag, until):
     row = _open_editor_row(page, "autosave probe")
     # The symptom: a Save per row that the analyst had to remember.
     assert page.locator("#modalBody button", has_text=re.compile(r"^\s*Save\s*$")).count() == 0
 
     row.locator(".tag-edit-name").fill("autosave renamed")
-    _until(lambda: _server_tag(api, probe_tag["id"])["name"] == "autosave renamed", "the rename to save")
+    until(page, lambda: _server_tag(api, probe_tag["id"])["name"] == "autosave renamed", "the rename to save")
     page.wait_for_function("(id) => __winnow.S.tags.find((t) => t.id === id).name === 'autosave renamed'",
                            arg=probe_tag["id"])
     state = row.locator(".tag-edit-state")
@@ -73,9 +63,9 @@ def test_edit_tags_saves_a_rename_a_key_and_a_colour_with_nothing_pressed(page, 
     assert state.inner_text() in ("Saved", ""), state.inner_text()
 
     row.locator(".tag-edit-key").fill("8")
-    _until(lambda: _server_tag(api, probe_tag["id"])["hotkey"] == "8", "the key to save")
+    until(page, lambda: _server_tag(api, probe_tag["id"])["hotkey"] == "8", "the key to save")
     row.locator(".tag-edit-color").fill("#ff0000")
-    _until(lambda: _server_tag(api, probe_tag["id"])["color"] == "#ff0000", "the colour to save")
+    until(page, lambda: _server_tag(api, probe_tag["id"])["color"] == "#ff0000", "the colour to save")
     # The case's own list follows, so the key works without reopening
     # anything — the ribbon and the hotkeys read S.tags.
     page.wait_for_function(
@@ -83,7 +73,7 @@ def test_edit_tags_saves_a_rename_a_key_and_a_colour_with_nothing_pressed(page, 
         arg=probe_tag["id"])
 
 
-def test_add_tag_puts_the_caret_in_the_new_name(page, api):
+def test_add_tag_puts_the_caret_in_the_new_name(page, api, until):
     """Add tag makes "New tag"; the name is what the analyst does next,
     so it arrives selected and is typed straight over."""
     before = {t["id"] for t in api("/api/tags")["tags"]}
@@ -95,7 +85,7 @@ def test_add_tag_puts_the_caret_in_the_new_name(page, api):
                                " return a && a.classList.contains('tag-edit-name') && a.value === 'New tag'"
                                " && a.selectionStart === 0 && a.selectionEnd === a.value.length; }")
         page.keyboard.type("Typed over")
-        _until(lambda: any(t["name"] == "Typed over" for t in api("/api/tags")["tags"] if t["id"] not in before),
+        until(page, lambda: any(t["name"] == "Typed over" for t in api("/api/tags")["tags"] if t["id"] not in before),
                "the new tag's name to save")
     finally:
         page.evaluate("() => { if (!document.getElementById('modal').hidden) __winnow.closeModal(); }")
@@ -105,14 +95,14 @@ def test_add_tag_puts_the_caret_in_the_new_name(page, api):
         page.evaluate("() => __winnow.loadTags()")
 
 
-def test_a_name_typed_and_closed_straight_away_is_kept(page, api, probe_tag):
+def test_a_name_typed_and_closed_straight_away_is_kept(page, api, probe_tag, until):
     """Closing inside the pause used to be the case where work was lost
     (with a Save button it was lost however long you waited)."""
     row = _open_editor_row(page, "autosave probe")
     row.locator(".tag-edit-name").fill("closed at once")
     page.keyboard.press("Escape")
     page.wait_for_selector("#modal[hidden]", state="attached")
-    _until(lambda: _server_tag(api, probe_tag["id"])["name"] == "closed at once", "the name to save after closing")
+    until(page, lambda: _server_tag(api, probe_tag["id"])["name"] == "closed at once", "the name to save after closing")
 
 
 def test_an_emptied_name_is_not_saved_and_comes_back(page, api, probe_tag):
@@ -152,7 +142,7 @@ def test_a_refused_save_says_why_and_does_not_claim_saved(page, api, probe_tag):
     assert _server_tag(api, probe_tag["id"])["name"] == "autosave probe"
 
 
-def test_the_default_tag_template_saves_as_it_changes(page, api):
+def test_the_default_tag_template_saves_as_it_changes(page, api, until):
     before = api("/api/settings/default_tags")
     try:
         page.keyboard.press("?")
@@ -163,26 +153,26 @@ def test_the_default_tag_template_saves_as_it_changes(page, api):
         assert sec.locator("button", has_text="Save template").count() == 0
 
         sec.locator(".btn", has_text="+ tag").click()
-        _until(lambda: len(api("/api/settings/default_tags")) == len(before) + 1, "the added row to save")
+        until(page, lambda: len(api("/api/settings/default_tags")) == len(before) + 1, "the added row to save")
         # The new row's name has the caret with its text selected, so the
         # name is typed straight over "New tag".
         page.wait_for_function("() => { const a = document.activeElement;"
                                " return a && a.classList.contains('tag-edit-name') && a.value === 'New tag'"
                                " && a.selectionStart === 0 && a.selectionEnd === a.value.length; }")
         page.keyboard.type("Lateral")
-        _until(lambda: api("/api/settings/default_tags")[-1]["name"] == "Lateral", "the new name to save")
+        until(page, lambda: api("/api/settings/default_tags")[-1]["name"] == "Lateral", "the new name to save")
 
         last = sec.locator(".tag-edit-row").last
         last.locator(".tag-edit-key").fill("7")
-        _until(lambda: api("/api/settings/default_tags")[-1]["hotkey"] == "7", "the key to save")
+        until(page, lambda: api("/api/settings/default_tags")[-1]["hotkey"] == "7", "the key to save")
 
         # Emptying a template name must not drop the row server-side.
         last.locator(".tag-edit-name").fill("")
-        page.wait_for_timeout(1200)
+        page.wait_for_timeout(1200)   # past the pause a save would have gone in
         assert [t["name"] for t in api("/api/settings/default_tags")][-1] == "Lateral"
 
         last.locator(".tag-edit-remove").click()
-        _until(lambda: api("/api/settings/default_tags") == before, "the removal to save")
+        until(page, lambda: api("/api/settings/default_tags") == before, "the removal to save")
         assert sec.locator(".tag-edit-row").count() == len(before)
     finally:
         page.evaluate("() => { if (!document.getElementById('modal').hidden) __winnow.closeModal(); }")

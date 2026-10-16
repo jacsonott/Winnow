@@ -21,20 +21,17 @@ from __future__ import annotations
 
 import http.client
 import json
-import os
 import signal
 import socket
 import subprocess
 import sys
 import threading
 import time
-from pathlib import Path
 
 import pytest
 
+from spawn import spawn_server
 from winnow.store import Store
-
-ROOT = Path(__file__).resolve().parent.parent
 
 RUNAWAY = ("WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c "
            "WHERE x < 1000000000) SELECT count(*) FROM c")
@@ -163,32 +160,8 @@ def test_a_client_that_gives_up_takes_its_query_with_it(live_server):
 
 
 def _spawn(tmp_path):
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        port = sock.getsockname()[1]
-    env = {**os.environ,
-           "WINNOW_WORKSPACE_DIR": str(tmp_path / "ws"),
-           "WINNOW_ENV_FILE": str(tmp_path / "userenv"),
-           "WINNOW_CASES_DIR": str(tmp_path / "cases")}
-    proc = subprocess.Popen(
-        [sys.executable, str(ROOT / "server.py"), "--case", str(tmp_path / "runaway.db"),
-         "--port", str(port), "--host", "127.0.0.1", "--no-browser", "--no-fts",
-         "--no-idle-shutdown"],
-        cwd=str(ROOT), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    deadline = time.monotonic() + 45
-    while time.monotonic() < deadline:
-        if proc.poll() is not None:
-            pytest.fail("server exited during startup:\n" + proc.stdout.read().decode(errors="replace"))
-        try:
-            c = http.client.HTTPConnection("127.0.0.1", port, timeout=1)
-            c.request("GET", "/api/version")
-            c.getresponse().read()
-            c.close()
-            return proc, port
-        except OSError:
-            time.sleep(0.15)
-    proc.kill()
-    pytest.fail("server did not come up")
+    return spawn_server(tmp_path, "--case", tmp_path / "runaway.db", "--no-fts",
+                        "--no-idle-shutdown")
 
 
 @pytest.mark.parametrize("how", [
@@ -204,7 +177,8 @@ def test_shut_down_is_not_held_up_by_a_runaway_query(tmp_path, how):
     was inside sqlite3_step with nothing to tell it to stop. The client
     here stays connected throughout, so only the shutdown itself can be
     what stops the query."""
-    proc, port = _spawn(tmp_path)
+    server = _spawn(tmp_path)
+    proc, port = server.proc, server.port
     held = http.client.HTTPConnection("127.0.0.1", port, timeout=60)
     try:
         held.request("POST", "/api/sql", body=json.dumps({"sql": RUNAWAY}),
@@ -224,6 +198,4 @@ def test_shut_down_is_not_held_up_by_a_runaway_query(tmp_path, how):
             pytest.fail("the server was still running 20s after being told to shut down")
     finally:
         held.close()
-        if proc.poll() is None:
-            proc.kill()
-            proc.wait(10)
+        server.stop()
