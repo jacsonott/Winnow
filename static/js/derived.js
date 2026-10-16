@@ -3,16 +3,18 @@ own additions to a source's column set.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { openStack } from './stack.js';
-import { saveLayout } from './columns.js';
+import { renderHead, saveLayout } from './columns.js';
 import { quickAddWidget } from './dashboard.js';
 import { tableOf, widgetFrom } from './dashwidgets.js';
 import { $, api, el, post, setBusy, toast, toastAction } from './core.js';
-import { ellipsize } from './filters.js';
+import { currentSpec, ellipsize } from './filters.js';
 import { render } from './grid.js';
 import { copyUniqueValues } from './grouping.js';
 import { startJobsPoll } from './jobs.js';
 import { loadSources, openSource } from './sources.js';
+import { gridIsShowing } from './sql.js';
 import { S, dashboardCreatorMode } from './state.js';
+import { clearRowCaches } from './tags.js';
 import { updateFiltersButton } from './timeframe.js';
 import { TS_FORMATS, baseColumns, columnMeta, parseTimestamp, tsFormatFor } from './tsformat.js';
 import { confirmDialog, modal, promptDialog } from './ui.js';
@@ -311,14 +313,94 @@ export async function addExtractedColumn(column, path, kind) {
 
 /* Brings the new columns into view without waiting for the backfill —
    same idiom the timestamp modal already uses. The columns appear
-   immediately with status 'building' and fill in top-down; the jobs panel
-   tracks progress and pollJobs reports the result. Blocking the UI on a
-   pass over a million rows would be the wrong trade for a column the
-   analyst can already see taking shape. */
+   immediately with status 'building'; the jobs panel tracks progress,
+   and when the job lands pollJobs reports it and refreshAfterDerive puts
+   the values on screen. Blocking the UI on a pass over a million rows
+   would be the wrong trade for a column the analyst can already see. */
 export async function showDerivedColumnsSoon() {
   await loadSources();
   await openSource(S.sourceId);
   startJobsPoll();
+}
+
+/* What a derived column's header and management menu read off it — the
+   fields a backfill's landing (or failing) changes. */
+export function derivedShape(c) {
+  return JSON.stringify([c.derived_id, c.derived_status, c.parse_failures, c.derived_op, c.derived_params]);
+}
+
+/* The other half of showDerivedColumnsSoon: the backfill has landed, and
+   the grid on screen was painted before it. Its cached rows were fetched
+   while the column was 'building' — blank, or filled only as far as the
+   pass had got — and S.columns still says "(building…)" in the header.
+   pollJobs refreshes S.sources when a derive job finishes, but with
+   loadSources(navigate:false), which leaves a live grid alone on purpose;
+   so the new column sat empty until the analyst switched tables and back.
+
+   `jobs` are the derive jobs pollJobs just saw finish, done or not, with
+   S.sources already fresh. The table on screen is affected when a done
+   job names it (or a member of the merge on screen), or when its derived
+   columns now read differently from S.columns — the second is what
+   catches a failure or a cancel, whose job names no table. Updated in
+   place rather than re-opened: the pass took long enough for the analyst
+   to have moved on, and a re-open would drop their picks and cursor (and,
+   from a page tab, drag them back to the grid). The cached rows go,
+   since they predate the values; and a view sorted, filtered, grouped or
+   timeframed by a column that just changed was ordered by the old (or
+   missing) values, so it is rebuilt. A cancelled or failed create is
+   removed outright, and leaves the column order with it. */
+export async function refreshAfterDerive(jobs) {
+  if (S.sourceId == null || !S.view) return;
+  const src = (S.sources || []).find((s) => s.id === S.sourceId);
+  if (!src) return;
+  const fresh = src.columns || [];
+  const tables = new Set([src.id, ...(src.member_source_ids || [])]);
+  const changed = new Set();
+  for (const j of jobs) {
+    if (j.status !== 'done' || !(j.source_ids || []).some((id) => tables.has(id))) continue;
+    for (const c of j.result || []) changed.add(c.name);
+  }
+  const before = new Map(S.columns.map((c) => [c.name, c]));
+  for (const c of fresh) {
+    const was = before.get(c.name);
+    if (c.derived && (!was || derivedShape(c) !== derivedShape(was))) changed.add(c.name);
+  }
+  const kept = new Set(fresh.map((c) => c.name));
+  const gone = S.columns.some((c) => !kept.has(c.name));
+  if (!changed.size && !gone) return;
+  // A cached row's cells are positional to S.columns (openSource says
+  // why), so the two change together, and the caches go below.
+  S.columns = fresh;
+  if (gone) S.order = S.order.filter((n) => kept.has(n));
+  renderHead();
+  if (viewReadsColumns(changed)) {
+    await rebuildView();
+    return;
+  }
+  clearRowCaches();
+  if (gridIsShowing()) render(); else S.gridRepaintPending = true;
+}
+
+/* Does the view on screen depend on any of these columns' values? A raw
+   filter fragment is SQL the analyst (or "Show N unparsed rows") wrote,
+   which this cannot read reliably — so it counts as yes, and the cost of
+   being wrong is one rebuild. */
+export function viewReadsColumns(names) {
+  const spec = currentSpec();
+  const read = [
+    ...spec.filters.map((f) => f.column),
+    ...spec.sort.map((s) => s.column),
+    ...S.groupByCols,
+  ];
+  if (spec.time_range && spec.time_range.enabled) read.push(spec.time_range.column);
+  let raw = false;
+  (function walk(node) {
+    if (!node) return;
+    if (node.type === 'raw') raw = true;
+    else if (node.type === 'cond') read.push(node.column);
+    else for (const child of node.children || []) walk(child);
+  })(spec.filter_tree);
+  return raw || read.some((n) => names.has(n));
 }
 
 /* The flatten picker: every field found in a sample of the column, with
@@ -1071,8 +1153,8 @@ export async function openDerivedColumnModal(prefill, editing) {
           });
         }
         $('modal').hidden = true;
-        // The column shows up immediately (status 'building') and fills in
-        // top-down as the backfill runs; the jobs panel tracks it.
+        // The column shows up immediately (status 'building'); the jobs
+        // panel tracks the backfill and refreshAfterDerive fills it in.
         await loadSources();
         await openSource(S.sourceId);
         startJobsPoll();

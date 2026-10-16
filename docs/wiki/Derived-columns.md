@@ -88,7 +88,9 @@ preview against the whole table, and the dialog says so.
 ### While it fills in
 
 The new column appears at once, right after the column it was derived
-from, and fills in from the top as Winnow works through the table.
+from, and the tooltip on the ƒ beside its name says *building…* while
+Winnow works through the table. When the job finishes the values appear where you are, without
+switching tables; your scroll position and picked rows stay as they were.
 Progress shows in the jobs panel, the same place imports appear, and the ✕
 on that row cancels. Cancelling an add removes the column; you can add it
 again at any time.

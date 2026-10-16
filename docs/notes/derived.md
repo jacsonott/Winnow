@@ -218,6 +218,29 @@ see [docs/notes/README.md](README.md) for the whole set.
     indistinguishable from a finished one in the grid); cancelling a
     *re-derive* keeps it and marks it `partial`, since that wasn't a
     request to delete the analyst's column.
+  - **The grid on screen is refreshed when the backfill lands, by
+    `derived.js`'s `refreshAfterDerive`, not by `loadSources`.** The
+    modal re-opens the table straight after the POST, while the pass is
+    still running, so the rows it caches are blank (or filled only as far
+    as the pass had got) and the header says "(building…)". `pollJobs`
+    refreshes the source list when the job finishes, but with
+    `navigate:false`, which leaves a live grid alone on purpose — so for
+    as long as that was the only refresh, a new column sat empty until
+    the analyst switched tables and back. The refresh re-reads the
+    column's status and drops the row caches in place, keeping the scroll
+    and the picks — a re-open would reset them (and, from a page tab,
+    drag the analyst back to the grid), and the analyst has had the whole
+    pass to move on. A view sorted, filtered, grouped or timeframed by the
+    column was ordered by the old (or missing) values and is rebuilt, and
+    a cancelled or failed create's column, gone on the server, leaves
+    `S.columns` and the column order; the row caches go in the same
+    step, because a cached row's cells are positional to `S.columns`. A
+    failed or cancelled job carries no table, so "is this the open table"
+    is answered by comparing its derived columns with `S.columns` as well
+    as by the done job's `source_ids`.
+    `tests/ui/test_derived_fills_in_ui.py` runs on its own 150k-row
+    server, because a pass over the shared fixture's 200 rows finishes
+    before the grid can fetch a page and never shows the bug.
   - **A backfill that is refused lands the same way a cancelled one
     does, one step earlier.** `start_ingest_job` raises `OpCancelled`
     while the case is closing, and the definition rows are already
