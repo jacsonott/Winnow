@@ -62,8 +62,14 @@ def test_typing_renders_the_preview_without_a_click(page):
         preview = page.locator("#notesPreview")
         assert editor.is_visible() and preview.is_visible() and page.locator("#notesDivider").is_visible()
         # Side by side: the preview starts where the editor ends, and both
-        # take the page's height.
-        ed, pv = editor.bounding_box(), preview.bounding_box()
+        # take the page's height. Measured once the row notes have answered,
+        # and both boxes in one call: that strip fills in under the split
+        # after the page shows and takes a line off its height, so two
+        # separate reads could straddle it (editor 777px, preview 757px).
+        page.wait_for_function("() => document.getElementById('notesRowsBody').childElementCount > 0")
+        ed, pv = page.evaluate("() => ['notesEditor', 'notesPreview'].map((id) => {"
+                               " const b = document.getElementById(id).getBoundingClientRect();"
+                               " return { x: b.x, width: b.width, height: b.height }; })")
         assert pv["x"] >= ed["x"] + ed["width"] - 1
         assert abs(pv["height"] - ed["height"]) < 2
         editor.fill("# Live\n- **rclone** from FILESRV01")
