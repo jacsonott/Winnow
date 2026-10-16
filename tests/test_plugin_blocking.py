@@ -13,18 +13,13 @@ in-process TestClient does not have the event loop this used to block.
 from __future__ import annotations
 
 import http.client
-import os
-import socket
-import subprocess
-import sys
 import textwrap
 import threading
 import time
-from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parent.parent
+from spawn import running_server
 
 SLOW_PLUGIN = '''
     import time
@@ -45,41 +40,11 @@ def server_with_slow_plugin(tmp_path):
     pdir = tmp_path / "plugins"
     pdir.mkdir()
     (pdir / "slowpoke.py").write_text(textwrap.dedent(SLOW_PLUGIN))
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
-    env = {**os.environ,
-           "WINNOW_WORKSPACE_DIR": str(tmp_path / "ws"),
-           "WINNOW_ENV_FILE": str(tmp_path / "userenv"),
-           "WINNOW_CASES_DIR": str(tmp_path / "cases"),
-           "WINNOW_PLUGINS_DIR": str(pdir),
-           "WINNOW_IDLE_EXIT_S": "300", "WINNOW_NEVER_CONNECTED_EXIT_S": "300"}
-    proc = subprocess.Popen(
-        [sys.executable, str(ROOT / "server.py"), "--case", str(tmp_path / "c.db"),
-         "--port", str(port), "--host", "127.0.0.1", "--no-browser", "--no-fts"],
-        cwd=str(ROOT), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    deadline = time.monotonic() + 45
-    while time.monotonic() < deadline:
-        if proc.poll() is not None:
-            pytest.fail("server exited during startup:\n"
-                        + proc.stdout.read().decode(errors="replace"))
-        try:
-            c = http.client.HTTPConnection("127.0.0.1", port, timeout=1)
-            c.request("GET", "/api/version")
-            c.getresponse().read()
-            c.close()
-            break
-        except OSError:
-            time.sleep(0.15)
-    else:
-        proc.kill()
-        pytest.fail("server did not come up")
-    yield port
-    proc.terminate()
-    try:
-        proc.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        proc.kill()
+    with running_server(tmp_path, "--case", tmp_path / "c.db", "--no-fts",
+                        env={"WINNOW_PLUGINS_DIR": str(pdir),
+                             "WINNOW_IDLE_EXIT_S": "300",
+                             "WINNOW_NEVER_CONNECTED_EXIT_S": "300"}) as srv:
+        yield srv.port
 
 
 def _get(port, path, timeout=30):

@@ -179,14 +179,10 @@ def _remote_off_after(server):
     urllib.request.urlopen(req, timeout=5).read()
 
 
-def test_the_first_run_offer_names_the_section_that_holds_the_setting(browser, server, _remote_off_after):
+def test_the_first_run_offer_names_the_section_that_holds_the_setting(own_page, _remote_off_after):
     """The offer says where to change the answer later. It said Appearance
     after the setting had left it, which sends someone hunting."""
-    ctx = browser.new_context(viewport={"width": 1500, "height": 900})
-    pg = ctx.new_page()
-    try:
-        pg.goto(server, wait_until="networkidle")
-        pg.wait_for_selector(".confirm-overlay")
+    with own_page(seed="", ready=".confirm-overlay") as pg:   # a browser that has never seen Winnow
         said = pg.locator(".confirm-card").inner_text()
         m = re.search(r"Settings → ([^.)]+)", said)
         assert m, said
@@ -197,5 +193,3 @@ def test_the_first_run_offer_names_the_section_that_holds_the_setting(browser, s
         pg.locator("#modalBody .settings-nav-item", has_text=re.compile(f"^{re.escape(m.group(1))}$")).click()
         assert pg.locator("#modalBody .settings-pane:not([hidden]) label",
                           has_text="Remote session mode").is_visible()
-    finally:
-        ctx.close()

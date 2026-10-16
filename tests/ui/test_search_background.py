@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import json
 import re
-import time
 
 import pytest
 
@@ -88,15 +87,6 @@ class _Background:
         self.released = True
         self.page.unroute(re.compile(r".*/api/view/start(\?.*)?$"))
         self.page.unroute(re.compile(r".*/api/view/job\?.*"))
-
-
-def _until(page, pred, what, timeout=10):
-    """Python-side state (a route's list, a response sniffer) is invisible
-    to wait_for_function; poll it here, bounded."""
-    deadline = time.time() + timeout
-    while not pred():
-        assert time.time() < deadline, what
-        page.wait_for_timeout(25)
 
 
 def _cancels(page):
@@ -175,7 +165,7 @@ def _reset(page):
     page.wait_for_function("() => __winnow.S.pendingViews.size === 0 && !document.querySelector('#jobsPanel .job-notice')")
 
 
-def test_a_long_search_goes_to_the_background_and_waits_for_apply(page):
+def test_a_long_search_goes_to_the_background_and_waits_for_apply(page, until):
     bg = _Background(page)
     _arm(page)
     page.click("#btnSearchToggle")
@@ -197,7 +187,7 @@ def test_a_long_search_goes_to_the_background_and_waits_for_apply(page):
         assert page.locator("#body .row").count() > 0
         assert any("search" in b for b in page.evaluate("() => __winnow.inFlightWork()"))
         assert page.evaluate("() => __winnow.S.pendingViews.size") == 1
-        _until(page, lambda: bg.polls >= 2, "the pending search is not being polled")
+        until(page, lambda: bg.polls >= 2, "the pending search is not being polled")
         # It lands: the notice offers Apply and Discard, a toast offers
         # Apply — and nothing installed itself.
         bg.release()
@@ -224,7 +214,7 @@ def test_a_long_search_goes_to_the_background_and_waits_for_apply(page):
         _reset(page)
 
 
-def test_typing_again_replaces_the_pending_search(page):
+def test_typing_again_replaces_the_pending_search(page, until):
     bg = _Background(page)
     cancels = _cancels(page)
     _arm(page)
@@ -238,7 +228,7 @@ def test_typing_again_replaces_the_pending_search(page):
         # One notice, the new search's; the first job was cancelled.
         page.wait_for_function("""() => { const rows = document.querySelectorAll('#jobsPanel .job-notice');
           return rows.length === 1 && rows[0].textContent.includes('Searching "4624"'); }""")
-        _until(page, lambda: cancels, "the superseded search was not cancelled")
+        until(page, lambda: cancels, "the superseded search was not cancelled")
         assert cancels[0].endswith(f"job_id={first}")
         assert len(bg.jobs) == 2 and bg.jobs[1]["job_id"] != first
         assert page.evaluate("() => __winnow.S.pendingViews.size") == 1
@@ -252,7 +242,7 @@ def test_typing_again_replaces_the_pending_search(page):
         _reset(page)
 
 
-def test_discard_closes_the_notice_and_keeps_the_old_view(page):
+def test_discard_closes_the_notice_and_keeps_the_old_view(page, until):
     bg = _Background(page)
     cancels = _cancels(page)
     _arm(page)
@@ -266,7 +256,7 @@ def test_discard_closes_the_notice_and_keeps_the_old_view(page):
         page.wait_for_selector(f"{ROWS} .job-action:has-text('Discard')")
         page.locator(f"{ROWS} .job-action", has_text="Discard").click()
         page.wait_for_function("() => !document.querySelector('#jobsPanel .job-notice')")
-        _until(page, lambda: cancels, "Discard sent no cancel")
+        until(page, lambda: cancels, "Discard sent no cancel")
         page.wait_for_function("() => document.getElementById('viewStats').textContent.startsWith('200 of 200 rows')")
         assert page.evaluate("() => __winnow.S.view.row_count") == 200
         assert page.evaluate("() => __winnow.S.pendingViews.size") == 0
@@ -277,7 +267,7 @@ def test_discard_closes_the_notice_and_keeps_the_old_view(page):
         _reset(page)
 
 
-def test_cancel_while_running_restores_the_stats(page):
+def test_cancel_while_running_restores_the_stats(page, until):
     bg = _Background(page)
     cancels = _cancels(page)
     _arm(page)
@@ -288,7 +278,7 @@ def test_cancel_while_running_restores_the_stats(page):
         page.wait_for_function("() => document.getElementById('viewStats').textContent.startsWith('Searching in background')")
         page.locator(f"{ROWS} .job-action", has_text="Cancel").click()
         page.wait_for_function("() => !document.querySelector('#jobsPanel .job-notice')")
-        _until(page, lambda: cancels, "Cancel sent no cancel")
+        until(page, lambda: cancels, "Cancel sent no cancel")
         page.wait_for_function("() => document.getElementById('viewStats').textContent.startsWith('200 of 200 rows')")
         assert page.evaluate("() => __winnow.S.pendingViews.size") == 0
         assert page.evaluate("() => __winnow.S.view.row_count") == 200
@@ -298,7 +288,7 @@ def test_cancel_while_running_restores_the_stats(page):
         _reset(page)
 
 
-def test_escape_in_the_box_cancels_the_pending_search(page):
+def test_escape_in_the_box_cancels_the_pending_search(page, until):
     bg = _Background(page)
     cancels = _cancels(page)
     _arm(page)
@@ -314,7 +304,7 @@ def test_escape_in_the_box_cancels_the_pending_search(page):
         # the search it replaced is gone, its job cancelled, the box empty.
         page.wait_for_function("""() => [...document.querySelectorAll('#jobsPanel .job-notice')]
           .every((r) => !r.textContent.includes('Searching "4624"'))""")
-        _until(page, lambda: cancels, "Escape sent no cancel")
+        until(page, lambda: cancels, "Escape sent no cancel")
         assert cancels[0].endswith(f"job_id={first}")
         assert page.locator("#search").input_value() == ""
         assert page.evaluate("() => __winnow.S.search") == ""
@@ -323,7 +313,7 @@ def test_escape_in_the_box_cancels_the_pending_search(page):
         _reset(page)
 
 
-def test_the_notice_x_cancels_the_pending_search(page):
+def test_the_notice_x_cancels_the_pending_search(page, until):
     """✕ on the row is the search's Cancel (and its Discard once it has
     landed) — a plain dismiss would leave the search polling with
     nothing on screen to apply or drop it from."""
@@ -336,7 +326,7 @@ def test_the_notice_x_cancels_the_pending_search(page):
         page.wait_for_selector(f"{ROWS} .job-x")
         page.locator(f"{ROWS} .job-x").click()
         page.wait_for_function("() => !document.querySelector('#jobsPanel .job-notice')")
-        _until(page, lambda: cancels, "the ✕ sent no cancel")
+        until(page, lambda: cancels, "the ✕ sent no cancel")
         page.wait_for_function("() => document.getElementById('viewStats').textContent.startsWith('200 of 200 rows')")
         assert page.evaluate("() => __winnow.S.pendingViews.size") == 0
         assert not any("search" in b for b in page.evaluate("() => __winnow.inFlightWork()"))

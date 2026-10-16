@@ -124,29 +124,21 @@ def test_ctrl_f_leaves_a_dialog_its_own_find(page):
     page.wait_for_selector("#modal[hidden]", state="attached", timeout=5_000)
 
 
-def test_keymap_v5_migration_adds_the_chord_to_an_existing_install(browser, server, first_run_init):
+def test_keymap_v5_migration_adds_the_chord_to_an_existing_install(own_page):
     """loadKeymap persists the whole default map on a profile's first load, so
     without a migration the new binding reaches nobody who has run Winnow
     before."""
-    ctx = browser.new_context()
-    ctx.add_init_script(
-        first_run_init + ";"
-        "localStorage.setItem('winnow.keymap', JSON.stringify({ focusSearch: ['/'] }));"
-        "localStorage.setItem('winnow.keymap.v', '4');")
-    pg = ctx.new_page()
-    try:
-        pg.goto(server, wait_until="networkidle")
-        pg.wait_for_selector(".row", timeout=30_000)
+    with own_page(init=(
+            "localStorage.setItem('winnow.keymap', JSON.stringify({ focusSearch: ['/'] }));"
+            "localStorage.setItem('winnow.keymap.v', '4');")) as pg:
         assert sorted(pg.evaluate("() => __winnow.S.keymap.focusSearch")) == ["/", "Ctrl+f"]
         pg.locator("#body").focus()
         pg.keyboard.press("Control+f")
         pg.wait_for_function("() => document.activeElement === document.getElementById('search')",
                              timeout=5_000)
-    finally:
-        ctx.close()
 
 
-def test_a_rebound_search_key_keeps_the_browsers_find(browser, server, first_run_init):
+def test_a_rebound_search_key_keeps_the_browsers_find(own_page):
     """A binding the analyst chose is never migrated over — and because the
     chord is only claimed while focusSearch still holds it, taking it off in
     Settings really does hand Ctrl+F back to the browser.
@@ -155,15 +147,9 @@ def test_a_rebound_search_key_keeps_the_browsers_find(browser, server, first_run
     browser here before this change too); the copy half does not — the
     toolbar used to name Ctrl+F in a fixed string whatever the binding
     said."""
-    ctx = browser.new_context()
-    ctx.add_init_script(
-        first_run_init + ";"
-        "localStorage.setItem('winnow.keymap', JSON.stringify({ focusSearch: ['p'] }));"
-        "localStorage.setItem('winnow.keymap.v', '4');")
-    pg = ctx.new_page()
-    try:
-        pg.goto(server, wait_until="networkidle")
-        pg.wait_for_selector(".row", timeout=30_000)
+    with own_page(init=(
+            "localStorage.setItem('winnow.keymap', JSON.stringify({ focusSearch: ['p'] }));"
+            "localStorage.setItem('winnow.keymap.v', '4');")) as pg:
         assert pg.evaluate("() => __winnow.S.keymap.focusSearch") == ["p"]
         _watch_chord(pg)
         pg.locator("#body").focus()
@@ -183,8 +169,6 @@ def test_a_rebound_search_key_keeps_the_browsers_find(browser, server, first_run
         placeholder = pg.locator("#search").get_attribute("placeholder")
         assert placeholder.endswith("p"), placeholder
         assert "Ctrl" not in placeholder
-    finally:
-        ctx.close()
 
 
 def test_meta_f_opens_the_box_for_a_mac_hand(page):
@@ -244,23 +228,17 @@ def test_settings_refuses_the_spellings_the_keymap_cannot_store(page):
     assert page.evaluate("() => __winnow.findKeyConflict('Ctrl+k', 'openSearchAll')") is None
 
 
-def test_the_migration_stands_down_when_the_chord_is_already_spent(browser, server, first_run_init):
+def test_the_migration_stands_down_when_the_chord_is_already_spent(own_page):
     """Ctrl+F matched nothing in Winnow until now, so Settings accepted it
     for any action. Where an analyst spent it on something else, handing it
     to focusSearch as well would put the pre-gate in front of their binding
     and shadow it — with the chip still sitting in Settings looking bound,
     and re-adding it refused as a conflict. So the migration leaves that
     install alone, and their key keeps doing what they asked for."""
-    ctx = browser.new_context()
-    ctx.add_init_script(
-        first_run_init + ";"
-        "localStorage.setItem('winnow.keymap', JSON.stringify("
-        "  { focusSearch: ['/'], openSearchAll: ['s', 'Ctrl+f'] }));"
-        "localStorage.setItem('winnow.keymap.v', '4');")
-    pg = ctx.new_page()
-    try:
-        pg.goto(server, wait_until="networkidle")
-        pg.wait_for_selector(".row", timeout=30_000)
+    with own_page(init=(
+            "localStorage.setItem('winnow.keymap', JSON.stringify("
+            "  { focusSearch: ['/'], openSearchAll: ['s', 'Ctrl+f'] }));"
+            "localStorage.setItem('winnow.keymap.v', '4');")) as pg:
         assert pg.evaluate("() => __winnow.S.keymap.focusSearch") == ["/"]
         assert pg.evaluate("() => __winnow.S.keymap.openSearchAll") == ["s", "Ctrl+f"]
 
@@ -277,8 +255,6 @@ def test_the_migration_stands_down_when_the_chord_is_already_spent(browser, serv
         assert pg.locator("#searchWrap").is_hidden()
         pg.keyboard.press("Escape")
         pg.wait_for_selector("#modal[hidden]", state="attached", timeout=5_000)
-    finally:
-        ctx.close()
 
 
 _MEASURE_PLACEHOLDER = """() => {

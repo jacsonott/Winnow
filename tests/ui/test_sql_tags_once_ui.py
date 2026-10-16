@@ -12,13 +12,6 @@ import pytest
 pytestmark = pytest.mark.ui
 
 
-def _open_sql(page):
-    page.click("#tabSql")
-    page.wait_for_selector("#sqlview:not([hidden])")
-    page.wait_for_function(
-        "() => __winnow.S.sqlTabs.length > 0 && !document.getElementById('sqlText').disabled")
-
-
 def _run(page, sql):
     page.locator("#sqlText").fill(sql)
     page.click("#btnRunSql")
@@ -30,13 +23,13 @@ def _headers(page):
     return [heads.nth(i).inner_text() for i in range(heads.count())]
 
 
-def test_the_views_tags_column_hosts_the_chips_instead_of_a_second_column(page):
+def test_the_views_tags_column_hosts_the_chips_instead_of_a_second_column(page, open_sql):
     page.locator(".row").nth(0).click()
     page.keyboard.press("1")
     page.wait_for_function("() => __winnow.rowAt(0).tags.length === 1")
     rid = page.evaluate("() => __winnow.rowAt(0).rid")
     try:
-        _open_sql(page)
+        open_sql(page)
         _run(page, f"SELECT rid, EventId, Tags FROM src_1 WHERE rid = {rid}")
         assert _headers(page) == ["rid", "EventId", "Tags"]
         assert page.locator(".sql-tag-chip").count() == 1
@@ -65,7 +58,7 @@ def test_the_views_tags_column_hosts_the_chips_instead_of_a_second_column(page):
         page.wait_for_function("() => __winnow.rowAt(0).tags.length === 0")
 
 
-def test_a_files_own_tags_column_keeps_its_text_on_a_table_and_on_a_merge(page, server_post, tmp_path):
+def test_a_files_own_tags_column_keeps_its_text_on_a_table_and_on_a_merge(page, server_post, tmp_path, open_sql):
     """A file whose header has a Tags column: the view names Winnow's
     column 'Winnow Tags', and the file's text must stay text — on the
     single table and on a merge of two such files, where the result
@@ -84,7 +77,7 @@ def test_a_files_own_tags_column_keeps_its_text_on_a_table_and_on_a_merge(page, 
     try:
         page.evaluate("() => __winnow.loadSources()")
         page.wait_for_function("() => __winnow.S.sources.some((s) => s.name === 'tags-merge')")
-        _open_sql(page)
+        open_sql(page)
         _run(page, f"SELECT rid, Tags, Host FROM src_{ids['a_tags.csv']}")
         assert _headers(page) == ["rid", "Tags", "Host", "Tags"], "the file's Tags is text; chips get their own column"
         assert page.locator("#sqlResult tr").nth(1).locator("td").nth(1).inner_text() == "from-file-a"

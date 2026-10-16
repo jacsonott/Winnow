@@ -20,22 +20,17 @@ pass having run nothing.
 
 from __future__ import annotations
 
-import collections
+import contextlib
 import json
 import os
-import socket
-import subprocess
-import sys
-import threading
 import time
-import urllib.error
 import urllib.request
 from pathlib import Path
 from urllib.parse import urlparse
 
 import pytest
 
-ROOT = Path(__file__).resolve().parent.parent.parent
+from spawn import ServerLog, spawn_server
 
 REQUIRE_BROWSER = os.environ.get("WINNOW_UI_REQUIRE_BROWSER") == "1"
 
@@ -45,17 +40,6 @@ else:
     sync_playwright = pytest.importorskip(
         "playwright.sync_api", reason="playwright not installed (pip install -r requirements-dev.txt)"
     ).sync_playwright
-
-
-def _free_port() -> int:
-    """A port the OS just told us was free. Racy in principle; in practice the
-    window between closing this socket and uvicorn binding it is microseconds,
-    and the alternative (a fixed port) collides with the analyst's own running
-    Winnow, or with a second session on the same box — which is the far more
-    likely failure here."""
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
 
 
 @pytest.fixture(scope="session")
@@ -92,44 +76,6 @@ def ui_csv(tmp_path_factory) -> Path:
     return path
 
 
-class ServerLog:
-    """What the shared server writes, read as it writes it. The pipe used to
-    be read only if the server died during startup, so a traceback behind a
-    failing test never reached its report, and a server that wrote more
-    than the pipe holds (64 KB on Linux) would have blocked mid-request and
-    hung the test. Keeps the last MAX_LINES; `mark()` and `since()` let a
-    report take just the lines written during one test."""
-
-    MAX_LINES = 5000
-
-    def __init__(self, stream):
-        self._lines: collections.deque[str] = collections.deque(maxlen=self.MAX_LINES)
-        self._total = 0
-        self._lock = threading.Lock()
-        self._thread = threading.Thread(target=self._pump, args=(stream,), daemon=True)
-        self._thread.start()
-
-    def _pump(self, stream):
-        for raw in iter(stream.readline, b""):
-            with self._lock:
-                self._lines.append(raw.decode(errors="replace").rstrip("\r\n"))
-                self._total += 1
-
-    def mark(self) -> int:
-        with self._lock:
-            return self._total
-
-    def since(self, mark: int) -> list[str]:
-        with self._lock:
-            kept_from = self._total - len(self._lines)
-            return list(self._lines)[max(mark - kept_from, 0):]
-
-    def finish(self, timeout: float = 5) -> str:
-        """Everything still held, once the process has exited."""
-        self._thread.join(timeout)
-        return "\n".join(self.since(0))
-
-
 # The shared server's log, for pytest_runtest_makereport. Set by `server`.
 _server_log: ServerLog | None = None
 _LOG_MARK = pytest.StashKey[int]()
@@ -159,54 +105,16 @@ def server(tmp_path_factory, ui_csv):
     """One server for the whole UI session — startup is ~1s. Every module
     shares its case, so each one leaves the case as it found it, and
     case_left_as_found below holds them to that. Uses its own tmp case
-    file, like every other test in the suite."""
+    file, like every other test in the suite, and is isolated from the
+    developer's real workspace the way every spawned server is (see
+    tests/spawn.py)."""
     global _server_log
-    port = _free_port()
-    case = tmp_path_factory.mktemp("case") / "ui.db"
-    proc = subprocess.Popen(
-        [sys.executable, str(ROOT / "server.py"), "--case", str(case),
-         "--open", str(ui_csv), "--port", str(port), "--host", "127.0.0.1",
-         "--no-browser", "--no-fts"],
-        cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        # A subprocess can't be reached by the isolate_workspace
-        # monkeypatch, so isolate it by env — otherwise every UI run
-        # registers this throwaway case in the developer's real registry.
-        env={**os.environ,
-             "WINNOW_WORKSPACE_DIR": str(tmp_path_factory.mktemp("ws")),
-             # The WINNOW_* token store: without this, Windows falls
-             # through to the developer's real HKCU\Environment.
-             "WINNOW_ENV_FILE": str(tmp_path_factory.mktemp("env") / "env"),
-             # Same idea for the association adapters' target dirs: a
-             # Settings → File associations test must never write the
-             # developer's real ~/.local/share or ~/.config.
-             "XDG_DATA_HOME": str(tmp_path_factory.mktemp("xdg-data")),
-             "XDG_CONFIG_HOME": str(tmp_path_factory.mktemp("xdg-config")),
-             # A print() to a pipe is block-buffered; the log should arrive
-             # while the test that caused it is still the one running.
-             "PYTHONUNBUFFERED": "1"},
-    )
-    log = _server_log = ServerLog(proc.stdout)
-    base = f"http://127.0.0.1:{port}"
-    deadline = time.time() + 45
-    while time.time() < deadline:
-        if proc.poll() is not None:
-            pytest.fail(f"server exited during startup:\n{log.finish()}")
-        try:
-            with urllib.request.urlopen(base + "/api/sources", timeout=1) as r:
-                if r.status == 200:
-                    break
-        except (urllib.error.URLError, OSError):
-            time.sleep(0.15)
-    else:
-        proc.kill()
-        pytest.fail(f"server did not come up within 45s:\n{log.finish()}")
-    yield base
-    proc.terminate()
-    try:
-        proc.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-    log.finish()
+    tmp = tmp_path_factory.mktemp("server")
+    srv = spawn_server(tmp, "--case", tmp / "ui.db", "--open", ui_csv, "--no-fts",
+                       ready="/api/sources")
+    _server_log = srv.log
+    yield srv.base
+    srv.stop()
     _server_log = None
 
 
@@ -220,8 +128,19 @@ def server_post(server):
         req = urllib.request.Request(
             server.rstrip("/") + route, data=json.dumps(body).encode(),
             headers={"Content-Type": "application/json", "X-Timeline-Lite-Client": "1"})
-        return json.loads(urllib.request.urlopen(req, timeout=10).read())
+        return json.loads(urllib.request.urlopen(req, timeout=30).read())
     return _post
+
+
+@pytest.fixture(scope="session")
+def server_call(server):
+    """server_post's other half: a GET, or a bodiless DELETE, from outside
+    the page."""
+    def _call(route, method="GET"):
+        req = urllib.request.Request(server.rstrip("/") + route, method=method,
+                                     headers={"X-Timeline-Lite-Client": "1"})
+        return json.loads(urllib.request.urlopen(req, timeout=30).read())
+    return _call
 
 
 @pytest.fixture
@@ -346,26 +265,153 @@ def first_run_init():
     return FIRST_RUN_INIT
 
 
+class OwnPage:
+    """A page in a browser context of its own, for what the shared `page`
+    can't give a test: another viewport or localStorage, a page that lasts
+    a whole module, a second server.
+
+        with own_page(viewport=(1100, 700)) as pg:
+            ...
+
+    Like `page`, it fails on an uncaught JS error when it closes. Most of
+    the hand-built contexts it replaced never listened for one, so a
+    handler that threw in them still passed.
+
+    `seed` is the localStorage the page starts with: FIRST_RUN_INIT unless
+    the test is about another one ("" for a browser that has never seen
+    Winnow). `init` is added after it. `route` is a (pattern, handler)
+    pair set on the context before anything loads. The page loads `base`
+    (the shared server unless given) and waits for `ready`; `ready=None`
+    waits for nothing more than the load, and `goto=False` doesn't load at
+    all. `extra_page()` opens another tab in the same context, checked the
+    same way. Anything else goes to browser.new_context."""
+
+    def __init__(self, browser, base, *, seed=FIRST_RUN_INIT, init="", viewport=(1500, 900),
+                 route=None, goto=True, wait_until="networkidle", ready=".row",
+                 ready_timeout=30_000, **context):
+        self.browser, self.base = browser, base
+        self.script = ";".join(s for s in (seed, init) if s)
+        self.viewport, self.route, self.goto, self.wait_until = viewport, route, goto, wait_until
+        self.ready, self.ready_timeout = ready, ready_timeout
+        self.context = context
+        self.errors: list[str] = []
+
+    def extra_page(self):
+        pg = self.ctx.new_page()
+        pg.on("pageerror", lambda e: self.errors.append(str(e)))
+        return pg
+
+    def __enter__(self):
+        w, h = self.viewport
+        self.ctx = self.browser.new_context(viewport={"width": w, "height": h}, **self.context)
+        if self.script:
+            self.ctx.add_init_script(self.script)
+        if self.route:
+            self.ctx.route(*self.route)
+        self.page = self.extra_page()
+        if self.goto:
+            self.page.goto(self.base, wait_until=self.wait_until)
+            if self.ready:
+                self.page.wait_for_selector(self.ready, timeout=self.ready_timeout)
+        return self.page
+
+    def __exit__(self, kind, *_):
+        self.ctx.close()
+        if kind is None:
+            assert not self.errors, "uncaught JS errors: " + " | ".join(self.errors)
+
+
+@pytest.fixture(scope="session")
+def own_page(browser, server):
+    """OwnPage against the shared server; pass `base=` for another one."""
+    def _make(*, base=None, **kw):
+        return OwnPage(browser, base or server, **kw)
+    return _make
+
+
+@pytest.fixture(scope="session")
+def first_last_page(own_page, server_post):
+    """The First/Last plugin switched on for every case and its page open,
+    in an OwnPage; switched off again on the way out.
+
+        with first_last_page() as pg:
+            ...
+
+    `open_tab=False` stops short of clicking the tab, for a test about what
+    the tab restores when it opens. Everything else goes to own_page."""
+    @contextlib.contextmanager
+    def _open(*, open_tab=True, **kw):
+        server_post("/api/plugins/toggle", {"fs_name": "first_last", "scope": "on_all"})
+        try:
+            with own_page(**kw) as pg:
+                pg.evaluate("() => __winnow.loadPlugins()")
+                pg.wait_for_function(
+                    "() => __winnow.S.pluginTabs.some((t) => t.id.includes('firstlast'))",
+                    timeout=10_000)
+                if open_tab:
+                    pg.locator(".tab-plugin", has_text="First/Last").click()
+                    pg.wait_for_selector("[data-zone='groupBy']", timeout=10_000)
+                yield pg
+        finally:
+            server_post("/api/plugins/toggle", {"fs_name": "first_last", "scope": "off_all"})
+    return _open
+
+
+def _new_fl_sheet(pg):
+    # A NEW sheet, rather than "Start fresh". Sheet definitions live in the
+    # case file and the case is shared with every other module in this
+    # directory, so wiping them is somebody else's test failing later —
+    # test_firstlast_state.py is about exactly that state. A new sheet is
+    # the plugin's own way to get an empty working surface and leaves the
+    # saved ones alone.
+    before = pg.locator(".sql-tab").count()
+    pg.locator(".sql-tab", has_text="+").click()
+    pg.wait_for_function("(n) => document.querySelectorAll('.sql-tab').length > n",
+                         arg=before, timeout=10_000)
+    pg.wait_for_function(
+        "() => document.querySelectorAll(\"[data-zone='groupBy'] [data-field]\").length === 0",
+        timeout=10_000)
+
+
+@pytest.fixture
+def fl_new_sheet():
+    """Open a new, empty First/Last sheet on a page already showing it."""
+    return _new_fl_sheet
+
+
+@pytest.fixture
+def fl_sheet(first_last_page):
+    """A First/Last page of its own per test, on a new, empty sheet: the
+    zones are sheet state, and these tests are about what one gesture does
+    to an empty sheet."""
+    with first_last_page() as pg:
+        _new_fl_sheet(pg)
+        yield pg
+
+
+@pytest.fixture(scope="module")
+def fl_page(first_last_page):
+    """One First/Last page for a whole module. The plugin's auto-run
+    setting is cleared on every load, so a module that turns it on and
+    reloads gets its own choice back only by setting it again."""
+    with first_last_page(init="localStorage.removeItem('winnow.firstlast.auto')",
+                         permissions=["clipboard-read", "clipboard-write"]) as pg:
+        yield pg
+
+
 @pytest.fixture
 def page(browser, server):
     """A fresh browser context per test: localStorage is where the keymap,
     appearance and sidebar state live, so sharing one would let a test that
-    rebinds a key or changes the autofit cap decide the next test's outcome."""
-    ctx = browser.new_context(viewport={"width": 1500, "height": 900},
-                              permissions=["clipboard-read", "clipboard-write"])
-    ctx.add_init_script(FIRST_RUN_INIT)
-    pg = ctx.new_page()
-    errors: list[str] = []
-    pg.on("pageerror", lambda e: errors.append(str(e)))
-    pg.goto(server, wait_until="networkidle")
-    pg.wait_for_selector(".row", timeout=30_000)
-    yield pg
-    # An uncaught exception in app.js doesn't fail a test on its own — the
-    # assertion usually still passes, because the grid was already painted
-    # before the handler threw. Surfacing it here is what makes these tests
-    # catch a broken menu handler rather than just a broken layout.
-    ctx.close()
-    assert not errors, "uncaught JS errors: " + " | ".join(errors)
+    rebinds a key or changes the autofit cap decide the next test's outcome.
+
+    An uncaught exception in app.js fails the test on the way out (see
+    OwnPage). It wouldn't on its own, because the assertion usually still
+    passes: the grid was already painted before the handler threw. That
+    is what makes these tests catch a broken menu handler rather than just
+    a broken layout."""
+    with OwnPage(browser, server, permissions=["clipboard-read", "clipboard-write"]) as pg:
+        yield pg
 
 
 @pytest.fixture
@@ -589,6 +635,22 @@ def format_detected(page):
             "() => { const n = document.querySelector('#modalBody .fb-help');"
             " return n && n.textContent && n.textContent !== 'Detecting format…' && n.textContent; }").json_value()
     return _wait
+
+
+def _open_sql(page):
+    page.click("#tabSql")
+    page.wait_for_selector("#sqlview:not([hidden])")
+    # The tab list (and the starter query it seeds into the editor) loads
+    # async: filling or reading the editor before that lands gets the
+    # wrong text.
+    page.wait_for_function(
+        "() => __winnow.S.sqlTabs.length > 0 && !document.getElementById('sqlText').disabled")
+
+
+@pytest.fixture
+def open_sql():
+    """open_sql(page): show the SQL pane, ready to type into."""
+    return _open_sql
 
 
 @pytest.fixture

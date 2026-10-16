@@ -63,6 +63,7 @@ def test_new_hit_badge_lights_and_clears(page, until):
     page.wait_for_selector("#watchlistview:not([hidden])")
     page.wait_for_selector("#tabWatchlist.has-new-hits", state="detached")
     assert page.locator("#tabWatchlist .tab-badge").count() == 0
+
     # Polled from Python: wait_for_function does NOT await a promise-returning
     # predicate (the Promise object is truthy), but page.evaluate does.
     def seen_all():

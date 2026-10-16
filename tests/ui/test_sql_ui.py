@@ -8,17 +8,8 @@ import pytest
 pytestmark = pytest.mark.ui
 
 
-def _open_sql(page):
-    page.click("#tabSql")
-    page.wait_for_selector("#sqlview:not([hidden])")
-    # The tab list (and the starter query it seeds into the editor) loads
-    # async — filling the editor before that lands gets overwritten.
-    page.wait_for_function(
-        "() => __winnow.S.sqlTabs.length > 0 && !document.getElementById('sqlText').disabled")
-
-
-def test_autocomplete_keywords_tables_and_columns(page):
-    _open_sql(page)
+def test_autocomplete_keywords_tables_and_columns(page, open_sql):
+    open_sql(page)
     ta = page.locator("#sqlText")
     ta.click()
     ta.fill("")
@@ -41,8 +32,8 @@ def test_autocomplete_keywords_tables_and_columns(page):
     page.keyboard.press("Escape")
 
 
-def test_tables_menu_inserts_the_src_name(page):
-    _open_sql(page)
+def test_tables_menu_inserts_the_src_name(page, open_sql):
+    open_sql(page)
     page.locator("#sqlText").fill("")
     page.click("#btnSqlTables")
     page.wait_for_selector(".menu .menu-item")
@@ -52,14 +43,14 @@ def test_tables_menu_inserts_the_src_name(page):
     assert page.locator("#sqlText").input_value() == "src_1"
 
 
-def test_results_sort_by_clicking_headers_and_show_tags(page):
+def test_results_sort_by_clicking_headers_and_show_tags(page, open_sql):
     # Tag the cursor row so the Tags column has something to prove.
     page.locator(".row").nth(0).click()
     page.keyboard.press("1")
     page.wait_for_function("() => __winnow.rowAt(0).tags.length === 1")
     rid = page.evaluate("() => __winnow.rowAt(0).rid")
 
-    _open_sql(page)
+    open_sql(page)
     page.locator("#sqlText").fill(f"SELECT rid, EventId FROM src_1 WHERE rid = {rid}")
     page.click("#btnRunSql")
     page.wait_for_selector("#sqlResult table")
@@ -90,8 +81,8 @@ def test_results_sort_by_clicking_headers_and_show_tags(page):
     page.wait_for_function("() => __winnow.rowAt(0).tags.length === 0")
 
 
-def test_query_box_resizes_from_the_bar(page):
-    _open_sql(page)
+def test_query_box_resizes_from_the_bar(page, open_sql):
+    open_sql(page)
     h0 = page.evaluate("() => document.getElementById('sqlText').offsetHeight")
     bar = page.locator("#sqlResize").bounding_box()
     page.mouse.move(bar["x"] + 200, bar["y"] + 3)
@@ -102,7 +93,7 @@ def test_query_box_resizes_from_the_bar(page):
     assert h1 > h0 + 80
 
 
-def test_autocomplete_marks_and_completes_derived_columns(page):
+def test_autocomplete_marks_and_completes_derived_columns(page, open_sql):
     """Derived columns were always suggested — before the shadow views
     that was a trap (the query returned the literal column name). Now the
     suggestion is real and tagged 'derived'."""
@@ -130,7 +121,7 @@ def test_autocomplete_marks_and_completes_derived_columns(page):
         else:
             raise AssertionError("AcBinary never finished building")
 
-        _open_sql(page)
+        open_sql(page)
         ta = page.locator("#sqlText")
         ta.click()
         ta.fill("SELECT * FROM src_1 WHERE AcBin")
@@ -187,12 +178,12 @@ def _answer_late(route, column):
         pass
 
 
-def test_a_slow_run_does_not_paint_over_the_run_after_it(page):
+def test_a_slow_run_does_not_paint_over_the_run_after_it(page, open_sql):
     """runSql painted by the tab id it started from and nothing else, so a
     slow run that came back after a quicker re-run in the same tab put
     its rows over the newer result — and Copy/CSV/tagging then took the
     old query's rows."""
-    _open_sql(page)
+    open_sql(page)
     held, pattern = _hold_first_sql_run(page)
     try:
         page.locator("#sqlText").fill("SELECT 1 AS slow_one")

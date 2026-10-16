@@ -22,13 +22,6 @@ import pytest
 pytestmark = pytest.mark.ui
 
 
-def _post(server, route, body):
-    req = urllib.request.Request(
-        server.rstrip("/") + route, data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json", "X-Timeline-Lite-Client": "1"})
-    return json.loads(urllib.request.urlopen(req, timeout=10).read())
-
-
 def _open_manager(page):
     # Called directly rather than through Settings: this file opens the
     # manager from the home screen too, where the grid has no focus.
@@ -86,14 +79,14 @@ def test_the_home_screen_offers_only_the_machine_wide_scope(page):
     assert [r["label"] for r in rows] == ["Everywhere"], rows
 
 
-def test_a_case_override_is_still_told_the_truth_from_home(page, server):
+def test_a_case_override_is_still_told_the_truth_from_home(page, server, server_post):
     """A plugin a case has turned on must not read as plain machine state
     just because its per-case control is not on offer."""
     plugins = json.loads(urllib.request.urlopen(urllib.request.Request(
         server.rstrip("/") + "/api/plugins",
         headers={"X-Timeline-Lite-Client": "1"})).read())["plugins"]
     fs = plugins[0]["fs_name"]
-    _post(server, "/api/plugins/toggle", {"fs_name": fs, "scope": "on_case"})
+    server_post("/api/plugins/toggle", {"fs_name": fs, "scope": "on_case"})
     try:
         page.evaluate("() => __winnow.loadPlugins()")
         page.wait_for_function("(f) => (__winnow.S.plugins.find((p) => p.fs_name === f) || {}).case_override === true",
@@ -109,5 +102,5 @@ def test_a_case_override_is_still_told_the_truth_from_home(page, server):
         assert _scope_rows(page)[0]["label"] == "Everywhere"
     finally:
         page.keyboard.press("Escape")
-        _post(server, "/api/plugins/toggle", {"fs_name": fs, "scope": "off_all"})
+        server_post("/api/plugins/toggle", {"fs_name": fs, "scope": "off_all"})
         page.evaluate("() => __winnow.loadPlugins()")

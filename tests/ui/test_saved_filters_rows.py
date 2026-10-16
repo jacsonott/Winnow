@@ -14,7 +14,6 @@ for ui.csv's columns and deleted afterwards.
 
 from __future__ import annotations
 
-
 import pytest
 
 pytestmark = pytest.mark.ui

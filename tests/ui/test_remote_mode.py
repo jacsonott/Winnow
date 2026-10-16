@@ -94,39 +94,26 @@ def test_native_scrolling_is_untouched_when_off(page, wheel_settled):
     assert _wheel(page, wheel_settled, 100) == 100
 
 
-def test_remote_mode_survives_a_fresh_browser_context(page, browser, server):
+def test_remote_mode_survives_a_fresh_browser_context(page, own_page):
     """The reported bug: the setting lived in per-origin, per-profile
     localStorage, so an update restart (or a quick-look's random port)
     reset it. Machine-side storage means a completely fresh browser
     context — no localStorage at all — still comes up in remote mode."""
     _enable_via_settings(page)
-    ctx = browser.new_context()
-    ctx.add_init_script("localStorage.setItem('winnow.remotePrompt', 'seen');"
-                        "localStorage.setItem('winnow.appearance', JSON.stringify({ splash: false }))")
-    pg = ctx.new_page()
-    try:
-        pg.goto(server, wait_until="networkidle")
+    with own_page(ready=None) as pg:
         pg.wait_for_function("() => document.documentElement.classList.contains('remote')",
                              timeout=10_000)
-    finally:
-        ctx.close()
 
 
-def test_a_pre_move_localstorage_value_migrates_up_once(browser, server):
+def test_a_pre_move_localstorage_value_migrates_up_once(own_page):
     """An install that had remote mode on under the old localStorage
     scheme: the first boot pushes it to the server and drops the local
     key, so the machine keeps the analyst's answer."""
-    ctx = browser.new_context()
-    ctx.add_init_script(
-        "localStorage.setItem('winnow.remotePrompt', 'seen');"
-        "localStorage.setItem('winnow.appearance',"
-        " JSON.stringify({ splash: false, remoteSession: true }))")
-    pg = ctx.new_page()
-    try:
-        pg.goto(server, wait_until="networkidle")
+    with own_page(seed="localStorage.setItem('winnow.remotePrompt', 'seen');"
+                       "localStorage.setItem('winnow.appearance',"
+                       " JSON.stringify({ splash: false, remoteSession: true }))",
+                  ready=None) as pg:
         pg.wait_for_function("() => __winnow.S.appSettings.remote_session === true", timeout=10_000)
         assert pg.evaluate("() => document.documentElement.classList.contains('remote')")
         assert not pg.evaluate(
             "() => 'remoteSession' in JSON.parse(localStorage.getItem('winnow.appearance') || '{}')")
-    finally:
-        ctx.close()

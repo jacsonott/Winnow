@@ -26,22 +26,12 @@ server that blinked look like a cache that was lost.
 from __future__ import annotations
 
 import re
-import time
 
 import pytest
 
 pytestmark = pytest.mark.ui
 
 PREVIEW = re.compile(r".*/api/dashboard/widget/preview$")
-
-
-def _until(page, pred, what, timeout=10):
-    """Python-side state (a route handler's list) is invisible to
-    wait_for_function; poll it here, bounded."""
-    deadline = time.time() + timeout
-    while not pred():
-        assert time.time() < deadline, what
-        page.wait_for_timeout(25)
 
 
 class _Previews:
@@ -109,7 +99,7 @@ def _widget_ids(page, did):
       .then(d => d.widgets.map(w => w.id))""", did)
 
 
-def test_reopening_a_board_only_runs_the_widgets_marked_live(page):
+def test_reopening_a_board_only_runs_the_widgets_marked_live(page, until):
     did = _make_board(page, "Cache board", [
         _widget("Alpha", "SELECT 42 AS n"),
         _widget("Beta", "SELECT 7 AS n"),
@@ -121,7 +111,7 @@ def test_reopening_a_board_only_runs_the_widgets_marked_live(page):
         _open(page, did)
         page.wait_for_function(
             "() => document.querySelectorAll('#dashGrid .dash-stat').length === 3", timeout=15_000)
-        _until(page, lambda: len(prev.bodies) == 3, f"first open ran {len(prev.bodies)}/3 widgets")
+        until(page, lambda: len(prev.bodies) == 3, f"first open ran {len(prev.bodies)}/3 widgets")
 
         ids = _widget_ids(page, did)
         prev.bodies.clear()
@@ -132,14 +122,14 @@ def test_reopening_a_board_only_runs_the_widgets_marked_live(page):
         page.wait_for_function(
             """() => [...document.querySelectorAll('#dashGrid .dash-stat')]
                  .map(s => s.textContent).join(',') === '42,7,9'""", timeout=15_000)
-        _until(page, lambda: len(prev.held) >= 1, "the live widget never re-ran")
+        until(page, lambda: len(prev.held) >= 1, "the live widget never re-ran")
         assert [b.get("widget_id") for b in prev.bodies] == [ids[2]]
     finally:
         prev.release()
         _drop_board(page, did)
 
 
-def test_dragging_a_card_does_not_re_run_the_board(page):
+def test_dragging_a_card_does_not_re_run_the_board(page, until):
     """Half the cost was here: render() after a persist() re-ran every
     widget, so moving one card re-ran all of them."""
     did = _make_board(page, "Drag cache", [
@@ -151,7 +141,7 @@ def test_dragging_a_card_does_not_re_run_the_board(page):
         _open(page, did)
         page.wait_for_function(
             "() => document.querySelectorAll('#dashGrid .dash-stat').length === 2", timeout=15_000)
-        _until(page, lambda: len(prev.bodies) == 2, "first open did not run both widgets")
+        until(page, lambda: len(prev.bodies) == 2, "first open did not run both widgets")
         prev.bodies.clear()
 
         page.evaluate("""() => {
@@ -172,7 +162,7 @@ def test_dragging_a_card_does_not_re_run_the_board(page):
         # ↻ Refresh IS a re-run, and its requests are the barrier: once they
         # have arrived, anything the drag issued would have arrived first.
         page.locator("#dashBar .dash-refresh").click()
-        _until(page, lambda: len(prev.bodies) >= 2, "Refresh all ran nothing")
+        until(page, lambda: len(prev.bodies) >= 2, "Refresh all ran nothing")
         assert len(prev.bodies) == 2, "the drag re-ran widgets it did not need to"
     finally:
         prev.release()
@@ -332,7 +322,7 @@ def test_the_editor_turns_run_every_time_on_and_back_off(page):
         _drop_board(page, did)
 
 
-def test_run_now_re_runs_one_widget_and_restamps_it(page):
+def test_run_now_re_runs_one_widget_and_restamps_it(page, until):
     did = _make_board(page, "Run now board", [
         _widget("Alpha", "SELECT 42 AS n"),
         _widget("Beta", "SELECT 7 AS n"),
@@ -342,7 +332,7 @@ def test_run_now_re_runs_one_widget_and_restamps_it(page):
         _open(page, did)
         page.wait_for_function(
             "() => document.querySelectorAll('#dashGrid .dash-stat').length === 2", timeout=15_000)
-        _until(page, lambda: len(prev.bodies) == 2, "first open did not run both widgets")
+        until(page, lambda: len(prev.bodies) == 2, "first open did not run both widgets")
         prev.bodies.clear()
         page.locator("#dashGrid .dash-card .dash-edit").first.click()
         page.wait_for_selector("#modal:not([hidden])", timeout=10_000)

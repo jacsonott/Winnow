@@ -10,16 +10,13 @@ from __future__ import annotations
 
 import asyncio
 import http.client
-import os
-import socket
-import subprocess
-import sys
 import time
 from pathlib import Path
 
 import pytest
 
 import server as srv
+from spawn import spawn_server
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -59,51 +56,17 @@ def test_exit_reasons_cover_the_matrix():
 
 
 def _spawn(tmp_path, extra_env=None, args=()):
-    env = {**os.environ,
-           "WINNOW_IDLE_EXIT_S": "2",
-           "WINNOW_NEVER_CONNECTED_EXIT_S": "3",
-           "WINNOW_IDLE_TICK_S": "0.3",
-           # Keep the spawned server out of the developer's real
-           # workspace/ (registry, instances.json).
-           "WINNOW_WORKSPACE_DIR": str(tmp_path / "ws"),
-           "WINNOW_ENV_FILE": str(tmp_path / "userenv"),
-           **(extra_env or {})}
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
-    proc = subprocess.Popen(
-        [sys.executable, str(ROOT / "server.py"), "--case", str(tmp_path / "idle.db"),
-         "--port", str(port), "--no-browser", "--no-fts", *args],
-        cwd=str(ROOT), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    deadline = time.monotonic() + 30
-    while time.monotonic() < deadline:
-        try:
-            c = http.client.HTTPConnection("127.0.0.1", port, timeout=1)
-            c.request("GET", "/api/version")
-            c.getresponse().read()
-            c.close()
-            return proc, port
-        except OSError:
-            if proc.poll() is not None:
-                out = proc.stdout.read().decode(errors="replace")
-                pytest.fail(f"server exited during startup:\n{out}")
-            time.sleep(0.15)
-    proc.kill()
-    pytest.fail("server never came up")
-
-
-def _wait_exit(proc, timeout):
-    try:
-        return proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        return None
+    return spawn_server(tmp_path, "--case", tmp_path / "idle.db", "--no-fts", *args,
+                        env={"WINNOW_IDLE_EXIT_S": "2",
+                             "WINNOW_NEVER_CONNECTED_EXIT_S": "3",
+                             "WINNOW_IDLE_TICK_S": "0.3",
+                             **(extra_env or {})})
 
 
 def test_a_server_nobody_connects_to_exits_by_itself(tmp_path):
-    proc, port = _spawn(tmp_path)
-    code = _wait_exit(proc, 30)
-    out = proc.stdout.read().decode(errors="replace")
+    server = _spawn(tmp_path)
+    code = server.wait_exit(30)
+    out = server.log.finish()
     assert code == 0, f"expected a clean self-exit, got {code}:\n{out}"
     assert "no browser ever connected" in out
 
@@ -116,20 +79,20 @@ def _goodbye(port):
 
 
 def test_a_held_presence_connection_keeps_it_alive(tmp_path):
-    proc, port = _spawn(tmp_path, extra_env={"WINNOW_SUSPENDED_EXIT_S": "3"})
-    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+    server = _spawn(tmp_path, extra_env={"WINNOW_SUSPENDED_EXIT_S": "3"})
+    conn = http.client.HTTPConnection("127.0.0.1", server.port, timeout=30)
     conn.request("GET", "/api/presence")
     resp = conn.getresponse()
     resp.read(3)  # the first ping — the stream is genuinely established
 
     # Well past every shrunken grace: with a stream open it must stay up.
     time.sleep(6)
-    assert proc.poll() is None, "exited while a browser was still connected"
+    assert server.proc.poll() is None, "exited while a browser was still connected"
 
     conn.close()
-    _goodbye(port)          # the window says it is closing, as a page does
-    code = _wait_exit(proc, 30)
-    out = proc.stdout.read().decode(errors="replace")
+    _goodbye(server.port)   # the window says it is closing, as a page does
+    code = server.wait_exit(30)
+    out = server.log.finish()
     assert code == 0, f"expected a clean exit after the window closed, got {code}:\n{out}"
     assert "the last window closed" in out
 
@@ -139,40 +102,38 @@ def test_a_stream_that_drops_without_a_goodbye_waits_for_the_window(tmp_path):
     presence stream had dropped — a suspended background tab, a sleeping
     laptop — and the server exited out from under it. Losing the stream is
     not the same as losing the window, so the short fuse no longer applies."""
-    proc, port = _spawn(tmp_path, extra_env={"WINNOW_SUSPENDED_EXIT_S": "60"})
-    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+    server = _spawn(tmp_path, extra_env={"WINNOW_SUSPENDED_EXIT_S": "60"})
+    conn = http.client.HTTPConnection("127.0.0.1", server.port, timeout=30)
     conn.request("GET", "/api/presence")
     conn.getresponse().read(3)
     conn.close()            # dropped, with no goodbye — the window is still there
 
     time.sleep(6)           # three times the closed-window fuse
-    assert proc.poll() is None, "exited while the window was still open"
-    proc.terminate()
-    proc.wait(timeout=15)
+    assert server.proc.poll() is None, "exited while the window was still open"
+    server.stop()
 
 
 def test_a_stream_that_drops_without_a_goodbye_still_exits_eventually(tmp_path):
     """A machine asleep overnight should not leave a server holding the
     case file forever — the long fuse is long, not absent."""
-    proc, port = _spawn(tmp_path, extra_env={"WINNOW_SUSPENDED_EXIT_S": "2"})
-    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+    server = _spawn(tmp_path, extra_env={"WINNOW_SUSPENDED_EXIT_S": "2"})
+    conn = http.client.HTTPConnection("127.0.0.1", server.port, timeout=30)
     conn.request("GET", "/api/presence")
     conn.getresponse().read(3)
     conn.close()
-    code = _wait_exit(proc, 30)
-    out = proc.stdout.read().decode(errors="replace")
+    code = server.wait_exit(30)
+    out = server.log.finish()
     assert code == 0, f"expected a clean self-exit, got {code}:\n{out}"
     assert "no browser has been connected for" in out
 
 
 def test_the_flag_disables_it(tmp_path):
-    proc, port = _spawn(tmp_path, args=("--no-idle-shutdown",))
+    server = _spawn(tmp_path, args=("--no-idle-shutdown",))
     time.sleep(6)   # far past both shrunken graces
     try:
-        assert proc.poll() is None, "exited despite --no-idle-shutdown"
+        assert server.proc.poll() is None, "exited despite --no-idle-shutdown"
     finally:
-        proc.terminate()
-        _wait_exit(proc, 15)
+        server.stop()
 
 
 def test_a_window_that_never_said_goodbye_gets_the_long_fuse():

@@ -12,12 +12,6 @@ import pytest
 pytestmark = pytest.mark.ui
 
 
-def _post(server, route, body):
-    req = urllib.request.Request(server.rstrip("/") + route, data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json", "X-Timeline-Lite-Client": "1"})
-    return json.loads(urllib.request.urlopen(req, timeout=10).read())
-
-
 def test_watchlist_add_autoscan_and_hits(page, server, tmp_path):
     page.locator("#tabWatchlist").click()
     page.wait_for_selector("#watchlistview:not([hidden])")

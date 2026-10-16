@@ -8,9 +8,7 @@ something, and a plugin does not get to decide what.
 
 from __future__ import annotations
 
-import json
 import time
-import urllib.request
 
 import pytest
 
@@ -19,17 +17,10 @@ pytestmark = pytest.mark.ui
 BOARD = "ESXi / Linux host overview"
 
 
-def _post(server, route, body):
-    req = urllib.request.Request(
-        server.rstrip("/") + route, data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json", "X-Timeline-Lite-Client": "1"})
-    return json.loads(urllib.request.urlopen(req, timeout=10).read())
-
-
 @pytest.fixture
-def offered(page, server):
+def offered(page, server_post):
     """The bundled esxi_logs plugin, which registers the reference board."""
-    _post(server, "/api/plugins/toggle", {"fs_name": "esxi_logs", "scope": "on_all"})
+    server_post("/api/plugins/toggle", {"fs_name": "esxi_logs", "scope": "on_all"})
     page.evaluate("() => __winnow.loadPlugins()")
     page.wait_for_function("() => (__winnow.S.pluginDashboards || []).length > 0", timeout=10_000)
     # Deliberately NOT calling renderSidebar() here: toggling a plugin has
@@ -46,7 +37,7 @@ def offered(page, server):
       await __winnow.loadDashboards();
       __winnow.renderSidebar();
     }""")
-    _post(server, "/api/plugins/toggle", {"fs_name": "esxi_logs", "scope": "off_all"})
+    server_post("/api/plugins/toggle", {"fs_name": "esxi_logs", "scope": "off_all"})
     page.evaluate("() => __winnow.loadPlugins()")
     # …and turning it off takes the row with it, rather than leaving a
     # phantom whose ＋ would 404.

@@ -5,19 +5,9 @@ table… with the timeline tag)."""
 
 from __future__ import annotations
 
-import json
-import urllib.request
-
 import pytest
 
 pytestmark = pytest.mark.ui
-
-
-def _post(server, route, body):
-    req = urllib.request.Request(
-        server.rstrip("/") + route, data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json", "X-Timeline-Lite-Client": "1"})
-    return json.loads(urllib.request.urlopen(req, timeout=10).read())
 
 
 DRAG = """(args) => {
@@ -30,33 +20,6 @@ DRAG = """(args) => {
   dst.dispatchEvent(new DragEvent('drop', { bubbles: true, dataTransfer: dt, cancelable: true }));
   src.dispatchEvent(new DragEvent('dragend', { bubbles: true, dataTransfer: dt }));
 }"""
-
-
-@pytest.fixture(scope="module")
-def fl_page(browser, server):
-    _post(server, "/api/plugins/toggle", {"fs_name": "first_last", "scope": "on_all"})
-    ctx = browser.new_context(viewport={"width": 1500, "height": 900},
-                              permissions=["clipboard-read", "clipboard-write"])
-    # pagesMenu: false for the same reason tests/ui/conftest.py does it —
-    # this file clicks the plugin's own .tab-plugin node, which the Pages
-    # dropdown (the default now) collapses into one button.
-    ctx.add_init_script("localStorage.setItem('winnow.remotePrompt', 'seen');"
-                        "localStorage.setItem('winnow.appearance',"
-                        " JSON.stringify({ splash: false, pagesMenu: false }))")
-    pg = ctx.new_page()
-    errors: list[str] = []
-    pg.on("pageerror", lambda e: errors.append(str(e)))
-    pg.goto(server, wait_until="networkidle")
-    pg.wait_for_selector(".row")
-    pg.evaluate("() => __winnow.loadPlugins()")
-    pg.wait_for_function("() => __winnow.S.pluginTabs.some((t) => t.id.includes('firstlast'))",
-                         timeout=10_000)
-    pg.locator(".tab-plugin", has_text="First/Last").click()
-    pg.wait_for_selector("[data-zone='groupBy']", timeout=10_000)
-    yield pg
-    ctx.close()
-    _post(server, "/api/plugins/toggle", {"fs_name": "first_last", "scope": "off_all"})
-    assert not errors, "uncaught JS errors: " + " | ".join(errors)
 
 
 def _chip(field):

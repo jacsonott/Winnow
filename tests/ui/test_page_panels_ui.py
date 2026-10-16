@@ -50,14 +50,8 @@ def notes_panel(page):
     _unregister(page)
 
 
-def _open_sql(page):
-    page.click("#tabSql")
-    page.wait_for_selector("#sqlview:not([hidden])")
-    page.wait_for_function("() => __winnow.S.sqlTabs.length > 0 && !document.getElementById('sqlText').disabled")
-
-
-def test_toggle_sits_left_of_run_and_opens_the_column(page, sql_panel):
-    _open_sql(page)
+def test_toggle_sits_left_of_run_and_opens_the_column(page, sql_panel, open_sql):
+    open_sql(page)
     btn = page.locator("#sqlPluginButtons .plugin-panel-btn", has_text="Helper")
     assert btn.count() == 1
     assert btn.get_attribute("aria-pressed") == "false"
@@ -80,15 +74,15 @@ def test_toggle_sits_left_of_run_and_opens_the_column(page, sql_panel):
     page.wait_for_selector("#sqlview[hidden]", state="attached")
     assert page.evaluate("() => document.getElementById('sqlPluginPanels').hidden") is True
     shows = page.evaluate("() => window.__shows")
-    _open_sql(page)
+    open_sql(page)
     page.wait_for_selector("#sqlPluginPanels:not([hidden])")
     page.wait_for_function("(n) => window.__shows > n", arg=shows)
     # The toggle is remembered
     assert json.loads(page.evaluate("() => localStorage.getItem('winnow.panels')"))["fake.helper"] is True
 
 
-def test_sql_page_api_sets_runs_and_reports(page, sql_panel):
-    _open_sql(page)
+def test_sql_page_api_sets_runs_and_reports(page, sql_panel, open_sql):
+    open_sql(page)
     page.locator("#sqlPluginButtons .plugin-panel-btn").click()
     page.wait_for_function("() => !!window.__panelCtx")
     page.evaluate("() => { window.__runs = []; window.__panelCtx.sqlPage.onRun((d) => window.__runs.push(d)); }")
@@ -122,8 +116,8 @@ def test_sql_page_api_sets_runs_and_reports(page, sql_panel):
     assert sel["columns"][:2] == ["rid", "EventId"] and len(sel["rows"]) == 1 and sel["rows"][0][0] == 2
 
 
-def test_set_text_in_a_new_tab_keeps_the_analysts_query(page, sql_panel):
-    _open_sql(page)
+def test_set_text_in_a_new_tab_keeps_the_analysts_query(page, sql_panel, open_sql):
+    open_sql(page)
     page.locator("#sqlText").fill("SELECT 'mine'")
     page.locator("#sqlPluginButtons .plugin-panel-btn").click()
     page.wait_for_function("() => !!window.__panelCtx")
@@ -161,8 +155,8 @@ def test_notes_api_loads_before_it_writes(page, notes_panel):
     page.evaluate("() => __winnow.post('/api/case/notes', { body: '' })")
 
 
-def test_the_column_resizes_and_remembers(page, sql_panel):
-    _open_sql(page)
+def test_the_column_resizes_and_remembers(page, sql_panel, open_sql):
+    open_sql(page)
     page.locator("#sqlPluginButtons .plugin-panel-btn").click()
     page.wait_for_selector("#sqlPluginPanels:not([hidden])")
     w0 = page.locator("#sqlPluginPanels").bounding_box()["width"]

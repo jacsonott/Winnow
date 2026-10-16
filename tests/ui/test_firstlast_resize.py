@@ -21,30 +21,6 @@ DRAG = """(args) => {
 }"""
 
 
-@pytest.fixture(scope="module")
-def fl_page(browser, server, server_post):
-    server_post("/api/plugins/toggle", {"fs_name": "first_last", "scope": "on_all"})
-    ctx = browser.new_context(viewport={"width": 1500, "height": 900})
-    ctx.add_init_script("localStorage.setItem('winnow.remotePrompt', 'seen');"
-                        "localStorage.removeItem('winnow.firstlast.auto');"
-                        "localStorage.setItem('winnow.appearance',"
-                        " JSON.stringify({ splash: false, pagesMenu: false }))")
-    pg = ctx.new_page()
-    errors: list[str] = []
-    pg.on("pageerror", lambda e: errors.append(str(e)))
-    pg.goto(server, wait_until="networkidle")
-    pg.wait_for_selector(".row")
-    pg.evaluate("() => __winnow.loadPlugins()")
-    pg.wait_for_function("() => __winnow.S.pluginTabs.some((t) => t.id.includes('firstlast'))", timeout=10_000)
-    pg.locator(".tab-plugin", has_text="First/Last").click()
-    pg.wait_for_selector("[data-zone='groupBy']", timeout=10_000)
-    yield pg
-    ctx.close()
-    server_post("/api/plugins/toggle", {"fs_name": "first_last", "scope": "off_all"})
-    assert not errors, "uncaught JS errors: " + " | ".join(errors)
-
-
-
 def _drag(pg, locator, dx):
     box = locator.bounding_box()
     x, y = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2

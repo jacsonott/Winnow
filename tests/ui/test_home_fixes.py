@@ -7,18 +7,10 @@ look instead of the default skin."""
 from __future__ import annotations
 
 import json
-import urllib.request
 
 import pytest
 
 pytestmark = pytest.mark.ui
-
-
-def _post(server, route, body):
-    req = urllib.request.Request(
-        server.rstrip("/") + route, data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json", "X-Timeline-Lite-Client": "1"})
-    return json.loads(urllib.request.urlopen(req, timeout=10).read())
 
 
 def test_join_path_uses_the_directory_s_own_separator(page):
@@ -59,27 +51,24 @@ def test_quicklook_banner_spans_the_bar_and_ignores_the_sidebar(page):
     page.evaluate("() => __winnow.paintTempBanner(false)")
 
 
-def test_fresh_origin_adopts_the_machine_s_saved_look(browser, server):
-    before = _post(server, "/api/settings/app", {})   # current, unchanged
-    _post(server, "/api/settings/app", {"appearance": {
+def test_fresh_origin_adopts_the_machine_s_saved_look(own_page, server_post):
+    before = server_post("/api/settings/app", {})   # current, unchanged
+    server_post("/api/settings/app", {"appearance": {
         "style": "phosphor", "themeMode": "dark", "accent": "#39e881",
         "accentCustomized": False, "splash": False}})
-    ctx = browser.new_context(viewport={"width": 1200, "height": 800})
-    # No stored appearance at all — a brand-new origin, like a quick-look.
-    ctx.add_init_script("localStorage.setItem('winnow.remotePrompt', 'seen')")
-    pg = ctx.new_page()
     try:
-        pg.goto(server, wait_until="networkidle")
-        pg.wait_for_function("() => document.documentElement.getAttribute('data-style') === 'phosphor'",
-                             timeout=10_000)
-        assert pg.evaluate("() => __winnow.S.appearance.style") == "phosphor"
+        # No stored appearance at all — a brand-new origin, like a quick-look.
+        with own_page(seed="localStorage.setItem('winnow.remotePrompt', 'seen')",
+                      viewport=(1200, 800), ready=None) as pg:
+            pg.wait_for_function("() => document.documentElement.getAttribute('data-style') === 'phosphor'",
+                                 timeout=10_000)
+            assert pg.evaluate("() => __winnow.S.appearance.style") == "phosphor"
     finally:
-        ctx.close()
         # An origin WITH its own stored look keeps it (the shared fixture
         # contexts store one) — and put the machine back as we found it.
         restore = before.get("appearance") or {"style": "harvest", "themeMode": "dark",
                                                 "accent": "#d9a441", "accentCustomized": False, "splash": False}
-        _post(server, "/api/settings/app", {"appearance": restore})
+        server_post("/api/settings/app", {"appearance": restore})
 
 
 def test_double_clicking_a_case_card_opens_it_once(page, until):

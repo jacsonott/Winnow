@@ -232,27 +232,16 @@ def test_the_button_tooltips_follow_a_rebinding(page):
     assert '"r" to toggle' in tr.get_attribute("title")
 
 
-def test_the_retired_plugins_toggle_carries_over(browser, server, first_run_init):
+def test_the_retired_plugins_toggle_carries_over(own_page):
     """An analyst who kept the table_histogram plugin's panel open (one key
     in winnow.panels, the plugin host's map) gets the built-in strip open on
     first load — once: the key goes, the rest of the map stays."""
-    ctx = browser.new_context(viewport={"width": 1500, "height": 900})
-    ctx.add_init_script(
-        first_run_init + ";"
-        "if (!localStorage.getItem('winnow.histogram')) localStorage.setItem('winnow.panels',"
-        " JSON.stringify({ 'table-histogram.histogram': true, 'other.panel': true }));")
-    pg = ctx.new_page()
-    errors = []
-    pg.on("pageerror", lambda e: errors.append(str(e)))
-    try:
-        pg.goto(server, wait_until="networkidle")
-        pg.wait_for_selector(".row", timeout=30_000)
+    with own_page(init=(
+            "if (!localStorage.getItem('winnow.histogram')) localStorage.setItem('winnow.panels',"
+            " JSON.stringify({ 'table-histogram.histogram': true, 'other.panel': true }));")) as pg:
         pg.wait_for_selector(CANVAS, timeout=10_000)
         assert pg.locator("#btnHistogram").get_attribute("aria-pressed") == "true"
         pg.wait_for_function("() => /200 rows/.test(document.getElementById('histogramPanel').textContent)", timeout=10_000)
         prefs = pg.evaluate("() => [JSON.parse(localStorage.getItem('winnow.histogram')), JSON.parse(localStorage.getItem('winnow.panels'))]")
         assert prefs[0]["open"] is True
         assert prefs[1] == {"other.panel": True}
-    finally:
-        ctx.close()
-    assert not errors, "uncaught JS errors: " + " | ".join(errors)

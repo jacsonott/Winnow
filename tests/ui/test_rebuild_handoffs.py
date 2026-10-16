@@ -30,7 +30,6 @@ state, and each puts the full table back.
 from __future__ import annotations
 
 import re
-import time
 
 import pytest
 
@@ -39,20 +38,12 @@ pytestmark = pytest.mark.ui
 NOTICES = "#jobsPanel .job-notice"
 
 
-def _until(page, pred, what, timeout=10):
-    """Python-side state (a route handler's list) is invisible to
-    wait_for_function; poll it here, bounded."""
-    deadline = time.time() + timeout
-    while not pred():
-        assert time.time() < deadline, what
-        page.wait_for_timeout(25)
-
-
 class _Held:
     """Holds every request matching `pattern` until release(); after that
     they pass straight through."""
 
-    def __init__(self, page, pattern):
+    def __init__(self, page, until, pattern):
+        self.until = until
         self.page = page
         self.pattern = re.compile(pattern)
         self.held = []
@@ -68,7 +59,7 @@ class _Held:
             route.continue_()
 
     def wait_held(self, n=1):
-        _until(self.page, lambda: len(self.held) >= n, f"nothing held for {self.pattern.pattern}")
+        self.until(self.page, lambda: len(self.held) >= n, f"nothing held for {self.pattern.pattern}")
 
     def release(self):
         self.open = False
@@ -151,15 +142,15 @@ def test_reset_from_regex_mode_lands_on_the_view_it_built(page):
         _reset(page)
 
 
-def test_the_cancel_chip_does_not_blink_when_a_build_supersedes_another(page):
+def test_the_cancel_chip_does_not_blink_when_a_build_supersedes_another(page, until):
     """Picks are what make the window: the superseding build asks the
     server where they went (/api/view/keys) before it starts building, and
     the build it superseded disarms the chip as soon as its own fetch is
     aborted. Held here, that window is as long as the test likes; in the
     app it is a round trip on every keystroke."""
     page.evaluate("() => { __winnow.selAdd(0); __winnow.selAdd(1); __winnow.renderTagToolbar(); }")
-    builds = _Held(page, r".*/api/view(\?.*)?$")
-    keys = _Held(page, r".*/api/view/keys(\?.*)?$")
+    builds = _Held(page, until, r".*/api/view(\?.*)?$")
+    keys = _Held(page, until, r".*/api/view/keys(\?.*)?$")
     keys.open = False       # the first build's own lookup goes through
     box = page.locator('.fcell input[data-col="EventId"]')
     try:
@@ -189,7 +180,7 @@ def test_the_cancel_chip_does_not_blink_when_a_build_supersedes_another(page):
         _reset(page)
 
 
-def test_a_build_lands_after_its_table_is_removed_under_it(page):
+def test_a_build_lands_after_its_table_is_removed_under_it(page, until):
     """Remove takes the table out of S.sources; a build already out for it
     lands a beat later and asks that list for the record — for the total
     the stats line denominates with, and for whether the table has a
@@ -203,7 +194,7 @@ def test_a_build_lands_after_its_table_is_removed_under_it(page):
     errors = []
     page.on("pageerror", lambda e: errors.append(str(e)))
     sid = page.evaluate("() => __winnow.S.sourceId")
-    builds = _Held(page, r".*/api/view(\?.*)?$")
+    builds = _Held(page, until, r".*/api/view(\?.*)?$")
     try:
         page.evaluate("""() => {
           window.__landed = 0;

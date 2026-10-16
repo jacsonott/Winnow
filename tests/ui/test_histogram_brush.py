@@ -17,21 +17,12 @@ given (Store.HISTOGRAM_BUCKETS); it was never being given a smaller one.
 from __future__ import annotations
 
 import datetime
-import json
 import time
-import urllib.request
 from urllib.parse import parse_qs, urlparse
 
 import pytest
 
 pytestmark = pytest.mark.ui
-
-
-def _post(server, route, body):
-    req = urllib.request.Request(
-        server.rstrip("/") + route, data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json", "X-Timeline-Lite-Client": "1"})
-    return json.loads(urllib.request.urlopen(req, timeout=10).read())
 
 
 def _put_back(page, sid):
@@ -56,7 +47,7 @@ def _put_back(page, sid):
 
 
 @pytest.fixture
-def wide_table(page, server, tmp_path):
+def wide_table(page, tmp_path, server_post):
     """Three days of events, so the bars are hours wide — the shared
     fixture spans three minutes, where every bucket is already seconds and
     the rounding never bit."""
@@ -68,7 +59,7 @@ def wide_table(page, server, tmp_path):
     f.write_text("\n".join(lines) + "\n")
     sid = None
     try:
-        _post(server, "/api/ingest/jobs/path", {"path": str(f), "name": "wide.csv", "kind": "csv"})
+        server_post("/api/ingest/jobs/path", {"path": str(f), "name": "wide.csv", "kind": "csv"})
         # Polled from Python: wait_for_function does not await a promise
         # predicate, so the .then() form passes instantly and races the import
         # (tests/test_ui_test_hygiene.py enforces this).

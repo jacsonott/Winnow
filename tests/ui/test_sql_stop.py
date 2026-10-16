@@ -20,15 +20,8 @@ RUNAWAY = ("WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c "
            "WHERE x < 1000000000) SELECT count(*) FROM c")
 
 
-def _open_sql(page):
-    page.click("#tabSql")
-    page.wait_for_selector("#sqlview:not([hidden])")
-    page.wait_for_function(
-        "() => __winnow.S.sqlTabs.length > 0 && !document.getElementById('sqlText').disabled")
-
-
-def test_a_runaway_query_is_stopped_from_the_busy_chip(page):
-    _open_sql(page)
+def test_a_runaway_query_is_stopped_from_the_busy_chip(page, open_sql):
+    open_sql(page)
     editor = page.locator("#sqlText")
     was = editor.input_value()
     try:

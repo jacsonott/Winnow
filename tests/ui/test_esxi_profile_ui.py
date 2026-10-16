@@ -14,26 +14,13 @@ import pytest
 pytestmark = pytest.mark.ui
 
 
-def _post(server, route, body):
-    req = urllib.request.Request(
-        server.rstrip("/") + route, data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json", "X-Timeline-Lite-Client": "1"})
-    return json.loads(urllib.request.urlopen(req, timeout=15).read())
-
-
-def _call(server, route, method="GET"):
-    req = urllib.request.Request(server.rstrip("/") + route, method=method,
-                                 headers={"X-Timeline-Lite-Client": "1"})
-    return json.loads(urllib.request.urlopen(req, timeout=15).read())
-
-
-def test_esxi_profile_lists_applies_and_builds(browser, server, tmp_path, restore_plugin_overrides):
+def test_esxi_profile_lists_applies_and_builds(own_page, server, tmp_path, restore_plugin_overrides, server_post, server_call):
     # Applying the profile adds case variables and a dashboard, and the
     # imports add tables; all of it goes again in the finally below.
-    variables = {v["name"] for v in _call(server, "/api/case/variables")}
-    dashboards = {d["id"] for d in _call(server, "/api/dashboards")}
-    sources = {s["id"] for s in _call(server, "/api/sources")}
-    _post(server, "/api/plugins/toggle", {"fs_name": "esxi_logs", "scope": "on_all"})
+    variables = {v["name"] for v in server_call("/api/case/variables")}
+    dashboards = {d["id"] for d in server_call("/api/dashboards")}
+    sources = {s["id"] for s in server_call("/api/sources")}
+    server_post("/api/plugins/toggle", {"fs_name": "esxi_logs", "scope": "on_all"})
     # Import two real ESXi log shapes through the plugin format.
     (tmp_path / "hostd.log").write_text(
         "2024-01-05T13:22:01.1Z info hostd[1] [Originator@6876 sub=x] PowerOn VM web01\n"
@@ -42,59 +29,50 @@ def test_esxi_profile_lists_applies_and_builds(browser, server, tmp_path, restor
         "Jan  5 13:22:01 esxi01 sshd[2]: Accepted password for root from 10.0.0.5 port 22 ssh2\n"
         "Jan  5 13:22:05 esxi01 sshd[3]: Failed password for root from 10.0.0.9 port 41 ssh2\n")
     for f in ("hostd.log", "auth.log"):
-        _post(server, "/api/ingest/plugin/path",
+        server_post("/api/ingest/plugin/path",
               {"path": str(tmp_path / f), "format_id": "esxi-logs.esxi_log", "options": {}})
 
-    ctx = browser.new_context(viewport={"width": 1400, "height": 950})
-    ctx.add_init_script("localStorage.setItem('winnow.remotePrompt', 'seen');"
-                        "localStorage.setItem('winnow.appearance', JSON.stringify({ splash: false }))")
-    pg = ctx.new_page()
-    errors: list[str] = []
-    pg.on("pageerror", lambda e: errors.append(str(e)))
     try:
-        pg.goto(server, wait_until="networkidle")
-        pg.wait_for_selector(".row")
-        pg.evaluate("() => __winnow.loadSources()")
+        with own_page(viewport=(1400, 950)) as pg:
+            pg.evaluate("() => __winnow.loadSources()")
 
-        listed = {b["name"]: b for b in json.loads(
-            urllib.request.urlopen(server.rstrip('/') + "/api/plugin_bundles").read())}
-        assert "ESXi / UAC triage" in listed
-        prof = listed["ESXi / UAC triage"]
-        assert prof["id"] < 0 and prof["shipped"] is True
+            listed = {b["name"]: b for b in json.loads(
+                urllib.request.urlopen(server.rstrip('/') + "/api/plugin_bundles").read())}
+            assert "ESXi / UAC triage" in listed
+            prof = listed["ESXi / UAC triage"]
+            assert prof["id"] < 0 and prof["shipped"] is True
 
-        expected = len(prof["dashboard"])
-        _post(server, f"/api/plugin_bundles/{prof['id']}/apply", {})
-        pg.evaluate("async () => { await __winnow.loadDashboards(); }")
-        boards = pg.evaluate("() => __winnow.S.dashboards.map((d) => d.name)")
-        assert "ESXi / UAC triage" in boards
-        did = pg.evaluate("() => __winnow.S.dashboards.find((d) => d.name === 'ESXi / UAC triage').id")
-        pg.evaluate("(id) => __winnow.showDashboard(id)", did)
-        pg.wait_for_selector("#dashboardview:not([hidden])")
-        pg.wait_for_function(
-            "(n) => document.querySelectorAll('#dashGrid .dash-card:not(.dash-add)').length === n",
-            arg=expected, timeout=10_000)
-        # the union widget totalled across BOTH logs (4 lines), proving
-        # {{all:...}} spanned them rather than binding to one
-        pg.wait_for_function(
-            """() => { const c=[...document.querySelectorAll('#dashGrid .dash-card')].find(x=>/Log lines/.test(x.textContent));
-                       return c && c.querySelector('.dash-stat') && c.querySelector('.dash-stat').textContent.replace(/,/g,'')==='4'; }""",
-            timeout=10_000)
+            expected = len(prof["dashboard"])
+            server_post(f"/api/plugin_bundles/{prof['id']}/apply", {})
+            pg.evaluate("async () => { await __winnow.loadDashboards(); }")
+            boards = pg.evaluate("() => __winnow.S.dashboards.map((d) => d.name)")
+            assert "ESXi / UAC triage" in boards
+            did = pg.evaluate("() => __winnow.S.dashboards.find((d) => d.name === 'ESXi / UAC triage').id")
+            pg.evaluate("(id) => __winnow.showDashboard(id)", did)
+            pg.wait_for_selector("#dashboardview:not([hidden])")
+            pg.wait_for_function(
+                "(n) => document.querySelectorAll('#dashGrid .dash-card:not(.dash-add)').length === n",
+                arg=expected, timeout=10_000)
+            # the union widget totalled across BOTH logs (4 lines), proving
+            # {{all:...}} spanned them rather than binding to one
+            pg.wait_for_function(
+                """() => { const c=[...document.querySelectorAll('#dashGrid .dash-card')].find(x=>/Log lines/.test(x.textContent));
+                           return c && c.querySelector('.dash-stat') && c.querySelector('.dash-stat').textContent.replace(/,/g,'')==='4'; }""",
+                timeout=10_000)
     finally:
-        ctx.close()
         # Leave the shared case as found, whether or not the test got to
         # the end: every later UI module in the shard sees it. This ran on
         # success only, and never removed the profile's case variable (#227).
         # restore_plugin_overrides puts back the plugin overrides it sets.
         try:
-            for d in _call(server, "/api/dashboards"):
+            for d in server_call("/api/dashboards"):
                 if d["id"] not in dashboards:
-                    _call(server, f"/api/dashboards/{d['id']}", "DELETE")
-            for s in _call(server, "/api/sources"):
+                    server_call(f"/api/dashboards/{d['id']}", "DELETE")
+            for s in server_call("/api/sources"):
                 if s["id"] not in sources:
-                    _call(server, f"/api/source/{s['id']}", "DELETE")
-            for v in _call(server, "/api/case/variables"):
+                    server_call(f"/api/source/{s['id']}", "DELETE")
+            for v in server_call("/api/case/variables"):
                 if v["name"] not in variables:
-                    _call(server, f"/api/case/variables/{urllib.parse.quote(v['name'])}", "DELETE")
+                    server_call(f"/api/case/variables/{urllib.parse.quote(v['name'])}", "DELETE")
         finally:
-            _post(server, "/api/plugins/toggle", {"fs_name": "esxi_logs", "scope": "off_all"})
-        assert not errors, "uncaught JS errors: " + " | ".join(errors)
+            server_post("/api/plugins/toggle", {"fs_name": "esxi_logs", "scope": "off_all"})

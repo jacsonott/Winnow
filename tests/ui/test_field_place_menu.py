@@ -21,6 +21,8 @@ What these pin, in the terms an analyst would notice:
 
 from __future__ import annotations
 
+import contextlib
+
 import pytest
 
 pytestmark = pytest.mark.ui
@@ -41,50 +43,37 @@ def plugins_on(server_post):
     server_post("/api/plugins/toggle", {"fs_name": "first_last", "scope": "off_all"})
 
 
-def _open(browser, server, server_post, *, tab, zone, key, route=None):
+@contextlib.contextmanager
+def _open(own_page, server_post, *, tab, zone, key, route=None):
     """A fresh page on a fresh, empty sheet of `tab`, pointed at ui.csv.
     The sheet state lives in the case file and is shared with every other
     test here, so it is cleared before each load rather than inherited."""
     server_post("/api/plugin_state", {"key": key, "payload": None})
-    ctx = browser.new_context(viewport={"width": 1500, "height": 900})
-    ctx.add_init_script("localStorage.setItem('winnow.remotePrompt', 'seen');"
-                        "localStorage.setItem('winnow.appearance',"
-                        " JSON.stringify({ splash: false, pagesMenu: false }))")
-    if route:
-        ctx.route(*route)
-    pg = ctx.new_page()
-    errors: list[str] = []
-    pg.on("pageerror", lambda e: errors.append(str(e)))
-    pg.goto(server, wait_until="networkidle")
-    pg.wait_for_selector(".row")
-    pg.evaluate("() => __winnow.loadPlugins()")
-    pg.wait_for_function("(t) => __winnow.S.pluginTabs.some((p) => p.label === t)", arg=tab,
-                         timeout=10_000)
-    pg.locator(".tab-plugin", has_text=tab).click()
-    pg.wait_for_selector(f".pluginview [data-zone='{zone}']", timeout=10_000)
-    want = str(pg.evaluate("() => __winnow.S.sources.find((s) => s.name === 'ui.csv').id"))
-    pg.wait_for_function("() => document.querySelector('.pluginview select')?.options.length > 0",
-                         timeout=10_000)
-    if pg.eval_on_selector(".pluginview select", "(s) => s.value") != want:
-        pg.select_option(".pluginview select", want)
-    pg.wait_for_selector(".pluginview [data-field='Host']", timeout=10_000)
-    return ctx, pg, errors
+    with own_page(route=route) as pg:
+        pg.evaluate("() => __winnow.loadPlugins()")
+        pg.wait_for_function("(t) => __winnow.S.pluginTabs.some((p) => p.label === t)", arg=tab,
+                             timeout=10_000)
+        pg.locator(".tab-plugin", has_text=tab).click()
+        pg.wait_for_selector(f".pluginview [data-zone='{zone}']", timeout=10_000)
+        want = str(pg.evaluate("() => __winnow.S.sources.find((s) => s.name === 'ui.csv').id"))
+        pg.wait_for_function("() => document.querySelector('.pluginview select')?.options.length > 0",
+                             timeout=10_000)
+        if pg.eval_on_selector(".pluginview select", "(s) => s.value") != want:
+            pg.select_option(".pluginview select", want)
+        pg.wait_for_selector(".pluginview [data-field='Host']", timeout=10_000)
+        yield pg
 
 
 @pytest.fixture
-def pv(browser, server, server_post):
-    ctx, pg, errors = _open(browser, server, server_post, tab="Pivot", zone="rows", key=PIVOT_KEY)
-    yield pg
-    ctx.close()
-    assert not errors, "uncaught JS errors: " + " | ".join(errors)
+def pv(own_page, server_post):
+    with _open(own_page, server_post, tab="Pivot", zone="rows", key=PIVOT_KEY) as pg:
+        yield pg
 
 
 @pytest.fixture
-def fl(browser, server, server_post):
-    ctx, pg, errors = _open(browser, server, server_post, tab="First/Last", zone="groupBy", key=FL_KEY)
-    yield pg
-    ctx.close()
-    assert not errors, "uncaught JS errors: " + " | ".join(errors)
+def fl(own_page, server_post):
+    with _open(own_page, server_post, tab="First/Last", zone="groupBy", key=FL_KEY) as pg:
+        yield pg
 
 
 def _field(pg, name):
@@ -349,7 +338,7 @@ def test_firstlast_a_keyboard_pick_that_opens_a_dialog_leaves_focus_in_it(fl):
     fl.wait_for_selector("#modal[hidden]", state="attached", timeout=10_000)
 
 
-def test_firstlast_group_rows_on_greys_out_at_the_group_column_limit(browser, server, server_post):
+def test_firstlast_group_rows_on_greys_out_at_the_group_column_limit(own_page, server_post):
     """The backend refuses more group columns than its limit with a 400 on
     the next preview; the menu reads the same limit from /meta and says so
     first. ui.csv has five columns and the shipped limit is six, so the
@@ -360,9 +349,8 @@ def test_firstlast_group_rows_on_greys_out_at_the_group_column_limit(browser, se
         body["limits"]["group_cols"] = 2
         route.fulfill(response=resp, json=body)
 
-    ctx, pg, errors = _open(browser, server, server_post, tab="First/Last", zone="groupBy", key=FL_KEY,
-                            route=("**/api/plugin/first_last/meta", lower_limit))
-    try:
+    with _open(own_page, server_post, tab="First/Last", zone="groupBy", key=FL_KEY,
+               route=("**/api/plugin/first_last/meta", lower_limit)) as pg:
         for name in ("Host", "EventId"):
             _click_open(pg, name)
             _pick(pg, "Group rows on")
@@ -372,6 +360,3 @@ def test_firstlast_group_rows_on_greys_out_at_the_group_column_limit(browser, se
         assert _item(pg, "Group rows on") == {"label": "Group rows on", "desc": "Full — 2 columns at most",
                                               "disabled": True}
         assert _item(pg, "Include columns")["disabled"] is False
-    finally:
-        ctx.close()
-    assert not errors, "uncaught JS errors: " + " | ".join(errors)
