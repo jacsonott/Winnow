@@ -187,7 +187,7 @@ Columns are matched by name. The order doesn't matter, and case is ignored for A
 
 Only the columns the tables were imported with are compared. A derived column appears in a merge when every table in it has one of that name. To add one to a merge, its input column has to be in every table.
 
-To change a merge, right-click it and choose **Edit merge…**, or use **Edit merge…** in the **This table** section of the table menu. You can add or remove tables, switch between every column and shared columns, turn the From table column on or off, and rename it. The merge keeps its tab, layout and saved views.
+To change a merge, right-click it and choose **Edit merge…**, or use **Edit merge…** in the **This table** section of the table menu. You can add or remove tables, switch between every column and shared columns, turn the From table column on or off, and rename it. The merge keeps its tab and layout.
 
 A merge shows ⛓ before its name and works like any other table: filtering, searching, sorting, tagging, notes, grouping, the value picker, derived columns and exports all work on it. The exceptions:
 

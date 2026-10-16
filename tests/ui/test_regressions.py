@@ -33,6 +33,14 @@ MEASURE = """() => {
 }"""
 
 
+def _columns(page):
+    """MEASURE, refusing an empty answer: the checks below loop over it, and
+    a loop over no columns passes whatever the grid looks like."""
+    cols = page.evaluate(MEASURE)
+    assert cols, "no header cell matched .hcell[data-col], so there was nothing to check"
+    return cols
+
+
 def test_filter_cells_stay_the_width_of_their_columns(page):
     """The filter row is pinned to the header row by giving both the same
     flex-basis — which stops being true the moment a filter cell's *content*
@@ -42,7 +50,7 @@ def test_filter_cells_stay_the_width_of_their_columns(page):
     column narrower than that had a filter box wider than its header and the
     two rows drifted apart across the grid.
     """
-    for col in page.evaluate(MEASURE):
+    for col in _columns(page):
         assert col["filter"] == col["head"], (
             f"{col['col']}: filter cell {col['filter']}px under a {col['head']}px header — "
             "the filter row is no longer pinned to the columns"
@@ -72,7 +80,7 @@ def test_autofit_leaves_room_for_the_header_name(page):
     page.keyboard.press("=")
     page.wait_for_function("() => !document.querySelector('.busy-bar:not([hidden])')")
     page.wait_for_timeout(400)
-    for col in page.evaluate(MEASURE):
+    for col in _columns(page):
         assert col["labelHas"] >= col["labelNeeds"], (
             f"{col['col']}: header needs {col['labelNeeds']}px, got {col['labelHas']}px — "
             "autofit truncated the column's own name"

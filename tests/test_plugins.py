@@ -2388,11 +2388,10 @@ def test_first_last_breaks_timestamp_ties_by_rid(fl_client):
     deterministically, so re-running never swaps first and last."""
     client, sid = fl_client
     out = _fl(client, "preview", source_id=sid, group_by=["User"],
-              sort_column="When", columns=["EventId"], template="{which}")
-    carol = [r for r in out["rows"] if r[-1] in ("First", "Last")]
-    firsts = {r[1] for r in out["rows"] if r[-1] == "First"}
-    lasts = {r[1] for r in out["rows"] if r[-1] == "Last"}
-    assert "4625" in firsts and "4624" in lasts  # file order: 4625 row came first
+              sort_column="When", columns=["User", "EventId"], template="{which}")
+    assert out["columns"] == ["When", "User", "EventId", "Description"]
+    carol = {r[-1]: r[2] for r in out["rows"] if r[1] == "carol"}
+    assert carol == {"First": "4625", "Last": "4624"}  # file order: the 4625 row came first
 
 
 def test_first_last_filters_scope_the_grouping(fl_client):

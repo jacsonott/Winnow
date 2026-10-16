@@ -216,10 +216,14 @@ def test_discover_paths_names_evtx_data_elements_after_their_name_attribute():
 def test_discovered_paths_all_extract():
     """Whatever discovery offers has to be addressable — a path in the
     picker that extracts nothing would build a column of NULLs."""
-    for row in sp.discover_paths([EVTX], "xml"):
+    xml = sp.discover_paths([EVTX], "xml")
+    assert xml, "discovery offered no XML path, so there was nothing to check"
+    for row in xml:
         assert sp._extract_xml(EVTX, {"path": row["path"]}, {}) is not None, row["path"]
     doc = json.dumps(DOC)
-    for row in sp.discover_paths([doc], "json"):
+    paths = sp.discover_paths([doc], "json")
+    assert paths, "discovery offered no JSON path, so there was nothing to check"
+    for row in paths:
         assert sp._extract_json(doc, {"path": row["path"]}, {}) is not None, row["path"]
 
 

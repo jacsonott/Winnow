@@ -60,9 +60,9 @@ def _questions():
 
 
 def test_every_kape_sql_widget_has_a_drill_that_names_real_columns():
-    for title, w in _questions():
-        if (w.get("source") or "sql") != "sql":
-            continue
+    sql = [(title, w) for title, w in _questions() if (w.get("source") or "sql") == "sql"]
+    assert sql, "the KAPE board has no SQL widget, so there was nothing to check"
+    for title, w in sql:
         drill = w.get("drill")
         assert drill, title
         w = dict(w, title=title)
