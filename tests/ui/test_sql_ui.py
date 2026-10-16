@@ -204,7 +204,7 @@ def test_a_slow_run_does_not_paint_over_the_run_after_it(page):
         page.wait_for_function("() => /quick_one/.test(document.getElementById('sqlResult').textContent)")
 
         _answer_late(held[0], "slow_one")
-        page.wait_for_timeout(500)
+        page.wait_for_timeout(500)   # long enough for the late answer to land if it is going to
         assert "quick_one" in page.locator("#sqlResult").inner_text()
         assert "slow_one" not in page.locator("#sqlResult").inner_text()
         assert page.evaluate("() => __winnow.S.sqlResults.get(__winnow.S.sqlTabId).columns") == ["quick_one"]

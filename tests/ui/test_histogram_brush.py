@@ -168,7 +168,7 @@ def test_the_bars_get_finer_for_the_smaller_range(page, wide_table):
     assert after < before, (before, after)
 
 
-def test_the_panel_asks_for_as_many_bars_as_it_can_show(page, wide_table):
+def test_the_panel_asks_for_as_many_bars_as_it_can_show(page, wide_table, until):
     """A fixed 160 buckets made 5px slivers on a wide canvas and stayed 160
     at every zoom level. The ask comes from the canvas now, so it changes
     when the canvas does."""
@@ -180,9 +180,10 @@ def test_the_panel_asks_for_as_many_bars_as_it_can_show(page, wide_table):
     page.wait_for_function(
         "(w) => { const c = document.querySelector('canvas.th-canvas'); return !!c && c.clientWidth < w; }",
         arg=int(wide))
+    asked = len(asks)
     page.evaluate("() => __winnow.rebuildView({ keepScroll: false })")
     # The panel refetches on the view change, after its own 150ms debounce.
-    page.wait_for_timeout(1200)
+    until(page, lambda: len(asks) > asked, "the panel to ask again for the narrower canvas")
 
     narrow = page.locator("canvas.th-canvas").bounding_box()["width"]
     got = [int(parse_qs(urlparse(a).query)["max_buckets"][0]) for a in asks]

@@ -33,23 +33,17 @@ def evtx_table(page, server_post, tmp_path):
     page.evaluate("(id) => __winnow.api('/api/source/' + id, { method: 'DELETE' }).then(() => __winnow.loadSources())", sid)
 
 
-def _suggestion(page):
-    page.wait_for_function(
-        "() => { const n = document.querySelector('#modalBody .fb-help'); return n && n.textContent && n.textContent !== 'Detecting format…'; }")
-    return page.evaluate("() => document.querySelector('#modalBody .fb-help').textContent")
-
-
-def test_opened_from_the_table_it_starts_on_the_timestamp(page, evtx_table):
+def test_opened_from_the_table_it_starts_on_the_timestamp(page, evtx_table, format_detected):
     page.evaluate("() => __winnow.openDerivedColumnModal()")
     page.wait_for_selector("#modalBody select[data-role=column]")
     assert page.locator("#modalBody select[data-role=column]").input_value() == "TimeCreated"
-    assert "Mac absolute" not in _suggestion(page)
+    assert "Mac absolute" not in format_detected()
 
 
-def test_a_counter_gets_no_confident_guess_but_can_still_be_converted(page, evtx_table):
+def test_a_counter_gets_no_confident_guess_but_can_still_be_converted(page, evtx_table, format_detected):
     page.evaluate("() => __winnow.openDerivedColumnModal('RecordNumber')")
     page.wait_for_selector("#modalBody select[data-role=column]")
-    note = _suggestion(page)
+    note = format_detected()
     assert note == "No format detected — pick one below to see what it produces.", note
     # The analyst's own choice still stands: picked by hand, Mac time reads
     # every value and the preview says so.

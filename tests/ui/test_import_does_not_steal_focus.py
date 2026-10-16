@@ -102,7 +102,7 @@ def test_a_finished_import_does_not_rebuild_the_grid_underneath_you(page, tmp_pa
         timeout=20_000)
     page.wait_for_function("() => __winnow.S.sources.some((s) => s.name === 'second.csv')",
                            timeout=20_000)
-    page.wait_for_timeout(600)
+    page.wait_for_timeout(600)   # and the poll's refresh after it
 
     assert page.evaluate("() => __winnow.S.sourceId") == first, "the import moved the grid"
     assert page.evaluate("() => __winnow.S.activeTab") == "grid"
@@ -119,7 +119,7 @@ def test_several_imports_in_a_row_never_move_the_analyst(page, tmp_path):
     for i in range(3):
         _import(page, _csv(tmp_path, f"batch{i}.csv"), f"batch{i}.csv")
     page.wait_for_function("(n) => __winnow.S.sources.length >= n + 3", arg=before, timeout=30_000)
-    page.wait_for_timeout(600)
+    page.wait_for_timeout(600)   # let the poll's refresh land
     assert page.evaluate("() => __winnow.S.activeTab") == "sql"
     page.evaluate("() => __winnow.showGridTab()")
 

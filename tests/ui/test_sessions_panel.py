@@ -325,7 +325,7 @@ def test_a_fresh_pass_over_a_taken_name_asks_first(page):
         ask = page.locator(".confirm-card", has_text="already exists")
         ask.wait_for(state="visible", timeout=5000)
         ask.locator(".btn", has_text="Cancel").click()
-        page.wait_for_timeout(500)
+        page.wait_for_timeout(500)   # long enough for a save or a clear to have gone through
 
         after = page.evaluate("""() => fetch('/api/case_sessions',
           { headers: { 'X-Timeline-Lite-Client': '1' } }).then((r) => r.json())""")["sessions"]

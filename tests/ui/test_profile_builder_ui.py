@@ -320,7 +320,7 @@ def test_a_name_that_would_overwrite_a_profile_says_so_before_save(page, api):
         _cleanup(api)
 
 
-def test_save_waits_for_the_plugin_list(page, api):
+def test_save_waits_for_the_plugin_list(page, api, until):
     """The panes are drawn before the plugin and dashboard lists arrive.
     A Save in that gap would have written a profile with no plugins and
     no boards, so it stays off until they land."""
@@ -333,15 +333,11 @@ def test_save_waits_for_the_plugin_list(page, api):
         page.wait_for_selector("#modalBody .pb-head input")
         page.locator("#modalBody .pb-head input").first.fill("UI Builder Early")
         create = page.locator("#modalBody .btn", has_text="Create profile")
-        for _ in range(100):
-            if held:
-                break
-            page.wait_for_timeout(50)
-        assert held, "the builder never asked for the plugin list"
+        until(page, lambda: held, "the builder to ask for the plugin list")
         assert create.is_disabled()
         assert "Reading" in _summary(page)
         create.click(force=True)
-        page.wait_for_timeout(300)
+        page.wait_for_timeout(300)   # long enough for a save to have gone through
         assert not any(b["name"] == "UI Builder Early" for b in api("/api/plugin_bundles"))
 
         for r in held:

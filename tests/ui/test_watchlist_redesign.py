@@ -41,7 +41,7 @@ def test_layout_summary_and_note_subline(page):
     _clear_watchlist(page)
 
 
-def test_new_hit_badge_lights_and_clears(page):
+def test_new_hit_badge_lights_and_clears(page, until):
     _clear_watchlist(page)
     # Seed an indicator + hits WITHOUT the tab open, then refresh the badge —
     # this is the "a scan found something while you were elsewhere" path.
@@ -63,17 +63,13 @@ def test_new_hit_badge_lights_and_clears(page):
     page.wait_for_selector("#watchlistview:not([hidden])")
     page.wait_for_selector("#tabWatchlist.has-new-hits", state="detached")
     assert page.locator("#tabWatchlist .tab-badge").count() == 0
-    # Poll from Python — wait_for_function does NOT await a promise-returning
+    # Polled from Python: wait_for_function does NOT await a promise-returning
     # predicate (the Promise object is truthy), but page.evaluate does.
-    for _ in range(50):
+    def seen_all():
         b = page.evaluate("() => fetch('/api/watchlist/badge').then(r => r.json())")
-        if b["seen"] > 0 and b["seen"] == b["total_hits"]:
-            break
-        page.wait_for_timeout(100)
-    else:
-        raise AssertionError(f"seen high-water never persisted: {b}")
+        return b["seen"] > 0 and b["seen"] == b["total_hits"]
+    until(page, seen_all, "the seen high-water to persist")
     # A badge refresh with nothing new stays dark.
-    page.evaluate("() => __winnow.refreshWatchlistBadge()")
-    page.wait_for_timeout(200)
+    page.evaluate("() => __winnow.refreshWatchlistBadge()")   # evaluate waits for its promise
     assert page.locator("#tabWatchlist.has-new-hits").count() == 0
     _clear_watchlist(page)

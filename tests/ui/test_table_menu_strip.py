@@ -97,7 +97,7 @@ def test_dragging_a_row_keeps_the_typed_filter(page):
         assert rows.count() >= 2
         first, second = rows.nth(0).inner_text().split()[0], rows.nth(1).inner_text().split()[0]
         rows.nth(1).drag_to(rows.nth(0), target_position={"x": 10, "y": 3})
-        page.wait_for_timeout(300)
+        page.wait_for_function("(was) => __winnow.S.order.join('\\n') !== was", arg="\n".join(orig))
         assert page.locator("#modalBody .collist-search").input_value() == "e", "the drop re-rendered the panel"
         after = page.evaluate("() => [...__winnow.S.order]")
         assert after.index(second) < after.index(first)

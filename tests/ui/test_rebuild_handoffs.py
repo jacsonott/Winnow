@@ -179,7 +179,7 @@ def test_the_cancel_chip_does_not_blink_when_a_build_supersedes_another(page):
         # The superseded build is done with (its fetch was aborted), the
         # newer one is still asking about the picks — and the Cancel the
         # analyst was looking at is still there to press.
-        page.wait_for_timeout(300)
+        page.wait_for_timeout(300)   # long enough for a hide to have happened
         assert page.evaluate("() => window.__chipHidden") == 0
         assert page.locator("#busyCancel").is_visible()
     finally:

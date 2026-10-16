@@ -11,7 +11,6 @@ carries over."""
 
 from __future__ import annotations
 
-import time
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -148,7 +147,6 @@ def test_h_toggles_the_strip_from_the_grid(page):
         page.wait_for_selector("#sqlview:not([hidden])")
         page.locator("#body").focus()
         page.keyboard.press("h")
-        page.wait_for_timeout(200)
         assert page.locator("#btnHistogram").get_attribute("aria-pressed") == "false"
     finally:
         page.evaluate("() => { __winnow.showGridTab(); __winnow.toggleHistogram(false); localStorage.removeItem('winnow.histogram'); }")
@@ -180,7 +178,7 @@ def test_the_first_chart_is_asked_for_at_the_canvas_width(page):
         page.evaluate("() => { __winnow.toggleHistogram(false); localStorage.removeItem('winnow.histogram'); }")
 
 
-def test_a_view_rebuilt_behind_a_page_tab_is_fetched_once_on_return(page):
+def test_a_view_rebuilt_behind_a_page_tab_is_fetched_once_on_return(page, until):
     """Open but hidden behind a page tab, the strip used to fetch on every
     view change — for a canvas nobody could see — and again on the way
     back to the grid: two aggregate passes for one chart."""
@@ -200,10 +198,8 @@ def test_a_view_rebuilt_behind_a_page_tab_is_fetched_once_on_return(page):
         # Back on the grid, the show edge fetches — once.
         page.evaluate("() => __winnow.showGridTab()")
         page.wait_for_selector(CANVAS)
-        deadline = time.monotonic() + 10
-        while len(asks) < before + 1 and time.monotonic() < deadline:
-            time.sleep(0.1)
-        page.wait_for_timeout(600)
+        until(page, lambda: len(asks) > before, "the strip to fetch on the way back")
+        page.wait_for_timeout(600)         # and no second fetch follows it
         assert len(asks) == before + 1, asks[before:]
     finally:
         page.evaluate("() => { __winnow.showGridTab(); __winnow.toggleHistogram(false); localStorage.removeItem('winnow.histogram'); }")

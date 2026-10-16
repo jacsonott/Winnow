@@ -31,10 +31,9 @@ def _widen(page):
       }
       __winnow.renderHead(); __winnow.render();
     }""")
-    page.wait_for_timeout(150)
 
 
-def _unpin_all(page):
+def _unpin_all(page, layout_saved):
     """Clear pins AND persist the clearing. Pinning is a layout property
     saved server-side, and the UI suite shares one case file — an in-memory
     reset would be undone by the next test's page reloading the layout,
@@ -60,12 +59,11 @@ def _unpin_all(page):
       __winnow.saveLayout();
       document.getElementById('body').scrollLeft = 0;
     }""")
-    # saveLayout is debounced; give it time to reach the server.
-    page.wait_for_timeout(600)
+    layout_saved()
 
 
-def test_alt_click_pins_a_column_and_it_stays_put(page):
-    _unpin_all(page)
+def test_alt_click_pins_a_column_and_it_stays_put(page, layout_saved, painted):
+    _unpin_all(page, layout_saved)
     try:
         # Guarantee the grid actually overflows sideways. Other modules hide
         # columns and that survives in the saved layout, so the table can be
@@ -85,7 +83,7 @@ def test_alt_click_pins_a_column_and_it_stays_put(page):
 
         def scroll_to(x):
             page.evaluate("(x) => { document.getElementById('body').scrollLeft = x; }", x)
-            page.wait_for_timeout(250)
+            painted(page)
 
         # A pinned column is not immovable — `sticky` keeps it in flow until
         # it reaches its offset, THEN holds. So the contract is tested across
@@ -117,25 +115,25 @@ def test_alt_click_pins_a_column_and_it_stays_put(page):
         cell = page.locator('.cell.pinned').first.bounding_box()
         assert abs(cell["x"] - parked["x"]) < 3, (parked, cell)
     finally:
-        _unpin_all(page)
+        _unpin_all(page, layout_saved)
 
 
-def test_alt_click_does_not_also_sort(page):
+def test_alt_click_does_not_also_sort(page, layout_saved):
     """Alt-click is a different gesture, not a sort with a side effect."""
-    _unpin_all(page)
+    _unpin_all(page, layout_saved)
     try:
         page.evaluate("() => { __winnow.S.sort = []; __winnow.renderHead(); }")
         page.locator('.hcell[data-col="Host"]').click(modifiers=["Alt"])
         page.wait_for_selector('.hcell.pinned[data-col="Host"]')
         assert page.evaluate("() => __winnow.S.sort") == []
     finally:
-        _unpin_all(page)
+        _unpin_all(page, layout_saved)
 
 
-def test_a_second_pin_sits_beside_the_first(page):
+def test_a_second_pin_sits_beside_the_first(page, layout_saved, painted):
     """Offsets accumulate — the second pinned column stops where the first
     one ends, rather than on top of it."""
-    _unpin_all(page)
+    _unpin_all(page, layout_saved)
     try:
         page.locator('.hcell[data-col="Timestamp"]').click(modifiers=["Alt"])
         page.wait_for_selector('.hcell.pinned[data-col="Timestamp"]')
@@ -148,43 +146,43 @@ def test_a_second_pin_sits_beside_the_first(page):
         assert offsets[1][1] > offsets[0][1], offsets
 
         page.evaluate("() => { document.getElementById('body').scrollLeft = 900; }")
-        page.wait_for_timeout(300)
+        painted(page)
         boxes = page.locator(".hcell.pinned").all()
         a, bb = boxes[0].bounding_box(), boxes[1].bounding_box()
         assert bb["x"] >= a["x"] + a["width"] - 2, (a, bb)
     finally:
-        _unpin_all(page)
+        _unpin_all(page, layout_saved)
 
 
-def test_pinning_survives_reopening_the_table(page):
+def test_pinning_survives_reopening_the_table(page, layout_saved):
     """It's a layout property, so it is saved with the rest of the layout."""
-    _unpin_all(page)
+    _unpin_all(page, layout_saved)
     try:
         page.locator('.hcell[data-col="Host"]').click(modifiers=["Alt"])
         page.wait_for_selector('.hcell.pinned[data-col="Host"]')
-        page.wait_for_timeout(600)   # the layout save is debounced
+        layout_saved()
 
         sid = page.evaluate("() => __winnow.S.sourceId")
         page.evaluate("(id) => __winnow.openSource(id)", sid)
         page.wait_for_function("() => __winnow.S.view")
         page.wait_for_selector('.hcell.pinned[data-col="Host"]')
     finally:
-        _unpin_all(page)
+        _unpin_all(page, layout_saved)
 
 
-def test_the_columns_panel_pins_too(page):
+def test_the_columns_panel_pins_too(page, layout_saved):
     """The other way in, for anyone who doesn't know the modifier."""
-    _unpin_all(page)
+    _unpin_all(page, layout_saved)
     try:
         page.evaluate("() => __winnow.openTableMenu(__winnow.S.sourceId)")
         page.wait_for_selector(".collist-row")
         row = page.locator(".collist-row", has_text="EventId").first
         row.locator(".collist-pin").click()
-        page.wait_for_timeout(200)
+        page.wait_for_selector('.hcell.pinned[data-col="EventId"]')
         assert page.evaluate("() => (__winnow.S.layout['EventId'] || {}).pinned") is True
         page.keyboard.press("Escape")
     finally:
-        _unpin_all(page)
+        _unpin_all(page, layout_saved)
 
 
 # ------------------------------------------- the selection on a pinned cell
@@ -223,10 +221,9 @@ def _select_cells(page, r0, r1, c0, c1):
       __winnow.setCellRange(__winnow.S.cellAnchor, __winnow.S.cellFocus);
       __winnow.render();
     }""", [r0, r1, c0, c1])
-    page.wait_for_timeout(150)
 
 
-def test_a_selected_pinned_cell_looks_selected_on_every_row(page):
+def test_a_selected_pinned_cell_looks_selected_on_every_row(page, layout_saved):
     """A pinned cell paints an opaque background to cover the columns
     sliding under it, and the zebra stripe rule for it is MORE specific
     than the selection was — so the selection showed on odd rows and the
@@ -236,7 +233,7 @@ def test_a_selected_pinned_cell_looks_selected_on_every_row(page):
     Asserted as computed colour against a cell that is plainly selected in
     the same row, because the class was always applied — it was the
     cascade that dropped it, and a class assertion passed throughout."""
-    _unpin_all(page)
+    _unpin_all(page, layout_saved)
     try:
         page.locator('.hcell[data-col="Timestamp"]').click(modifiers=["Alt"])
         page.wait_for_selector('.hcell.pinned[data-col="Timestamp"]')
@@ -251,16 +248,16 @@ def test_a_selected_pinned_cell_looks_selected_on_every_row(page):
         assert len(got) >= 3, got
         assert all(g == want for g in got), (want, got)
     finally:
-        _unpin_all(page)
+        _unpin_all(page, layout_saved)
 
 
-def test_a_selected_pinned_cell_keeps_the_ring_and_its_divider(page):
+def test_a_selected_pinned_cell_keeps_the_ring_and_its_divider(page, layout_saved):
     """box-shadow replaces rather than merges, and `.cell.pinned`'s divider
     outranked `.cell-selected`'s ring — so a pinned cell never showed the
     outline the rest of the selection wore. Both have to be there: the
     divider is what separates a pinned column from the ones scrolling
     under it."""
-    _unpin_all(page)
+    _unpin_all(page, layout_saved)
     try:
         page.locator('.hcell[data-col="Timestamp"]').click(modifiers=["Alt"])
         page.wait_for_selector('.hcell.pinned[data-col="Timestamp"]')
@@ -283,14 +280,14 @@ def test_a_selected_pinned_cell_keeps_the_ring_and_its_divider(page):
         assert ring in shadow, f"the selection ring is missing from: {shadow}"
         assert divider in shadow, f"the pinned divider is missing from: {shadow}"
     finally:
-        _unpin_all(page)
+        _unpin_all(page, layout_saved)
 
 
-def test_the_line_number_says_which_rows_the_rectangle_covers(page):
+def test_the_line_number_says_which_rows_the_rectangle_covers(page, layout_saved):
     """The gutter is not a cell, so it was the one column a cell range
     could never mark — and reading down the line numbers told an analyst
     nothing about what they had selected."""
-    _unpin_all(page)
+    _unpin_all(page, layout_saved)
     try:
         _select_cells(page, 3, 6, 0, 1)
         marked = page.evaluate("""() => [...document.querySelectorAll('#body .row')]

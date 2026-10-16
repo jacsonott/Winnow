@@ -99,5 +99,4 @@ def test_a_files_own_tags_column_keeps_its_text_on_a_table_and_on_a_merge(page, 
         page.evaluate("() => __winnow.showGridTab()")
         for route in (f"/api/merges/{abs(int(merge['id']))}", f"/api/source/{ids['a_tags.csv']}", f"/api/source/{ids['b_tags.csv']}"):
             page.evaluate("(r) => fetch(r, { method: 'DELETE', headers: { 'X-Timeline-Lite-Client': '1' } })", route)
-        page.wait_for_timeout(300)
         page.evaluate("() => __winnow.loadSources()")

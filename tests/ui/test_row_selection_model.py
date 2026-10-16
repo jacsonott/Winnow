@@ -181,7 +181,6 @@ def test_space_on_a_focused_button_is_the_buttons_not_a_row_toggle(page):
     _gutter(page, 2).click(); _gutter(page, 3).click()
     page.locator("#tagToolbar button", has_text="Undo").focus()
     page.keyboard.press("Space")      # the button's own Space: it activates Undo, nothing toggles
-    page.wait_for_timeout(150)
     assert _picked(page) == [2]
 
 

@@ -30,7 +30,7 @@ def test_term_file_import_fills_the_paste_pane(page, tmp_path):
 
     # Re-importing the same file adds nothing (dedupe against the pane).
     page.locator("#modal input[type=file]").set_input_files(str(f))
-    page.wait_for_timeout(300)
+    page.wait_for_timeout(300)   # the file is read asynchronously; long enough for it to land
     assert page.locator("#modal .search-all-paste").input_value().split("\n") == lines
 
     # And the terms feed the search exactly as if they had been typed.

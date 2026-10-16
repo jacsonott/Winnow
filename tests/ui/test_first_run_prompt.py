@@ -42,7 +42,7 @@ def test_first_run_offers_remote_mode_once(browser, server):
     # answered once — a reload must not ask again
     pg.reload(wait_until="networkidle")
     pg.wait_for_selector(".row")
-    pg.wait_for_timeout(400)
+    pg.wait_for_timeout(400)   # past the settings round trip the prompt would follow
     assert pg.locator(".confirm-overlay").count() == 0
     assert pg.evaluate("() => document.documentElement.classList.contains('remote')")
     ctx.close()
@@ -52,11 +52,11 @@ def test_declining_also_only_asks_once(browser, server):
     ctx, pg = _fresh_page(browser, server)
     pg.wait_for_selector(".confirm-overlay")
     pg.locator(".confirm-card .btn", has_text="No, local session").click()
-    pg.wait_for_timeout(200)
+    pg.wait_for_selector(".confirm-overlay", state="detached")
     assert not pg.evaluate("() => document.documentElement.classList.contains('remote')")
     pg.reload(wait_until="networkidle")
     pg.wait_for_selector(".row")
-    pg.wait_for_timeout(400)
+    pg.wait_for_timeout(400)   # past the settings round trip the prompt would follow
     assert pg.locator(".confirm-overlay").count() == 0
     ctx.close()
 
@@ -67,6 +67,6 @@ def test_a_machine_with_stored_appearance_is_not_nagged(browser, server):
     pg = ctx.new_page()
     pg.goto(server, wait_until="networkidle")
     pg.wait_for_selector(".row")
-    pg.wait_for_timeout(400)
+    pg.wait_for_timeout(400)   # past the settings round trip the prompt would follow
     assert pg.locator(".confirm-overlay").count() == 0
     ctx.close()

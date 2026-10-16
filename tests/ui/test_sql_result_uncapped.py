@@ -44,7 +44,7 @@ def _run(page, sql):
     page.wait_for_selector("#sqlResult table", timeout=60_000)
 
 
-def _scroll_result(page, dy=0, dx=0):
+def _scroll_result(page, wheel_settled, dy=0, dx=0):
     """Wheel over the result's rows, the way an analyst scrolls it — not by
     setting scrollTop on whichever element the implementation happens to
     scroll — and let the virtualized window repaint. The default is "all
@@ -58,8 +58,10 @@ def _scroll_result(page, dy=0, dx=0):
     at = page.evaluate("() => { const b = document.querySelector('#sqlResult .sql-result-scroll')"
                        ".getBoundingClientRect(); return [b.x + b.width / 2, b.y + b.height / 2]; }")
     page.mouse.move(*at)
-    page.mouse.wheel(dx, dy)
-    page.wait_for_timeout(300)
+    with wheel_settled(page, "#sqlResult .sql-result-scroll"):
+        page.mouse.wheel(dx, dy)
+    # The rows the scroll brought on screen come from the server.
+    page.wait_for_function("() => !document.querySelector('#sqlResult tr.sql-row-pending')", timeout=30_000)
 
 
 def _hit(page, locator):
@@ -79,13 +81,13 @@ def test_a_result_past_5000_rows_comes_back_whole(page):
     assert "truncated" not in status
 
 
-def test_the_actions_stay_in_view_while_the_result_scrolls(page):
+def test_the_actions_stay_in_view_while_the_result_scrolls(page, wheel_settled):
     """The symptom: scroll down a result and Copy/CSV/Excel/Save are gone."""
     _run(page, _count(12_000, ", printf('%080d', i) AS wide"))
     for label in ("Copy", "CSV…", "Excel…", "Save as table…"):
         assert _hit(page, page.locator(".sql-result-actions .btn", has_text=label)), label
-    _scroll_result(page)
-    _scroll_result(page, dx=10_000)
+    _scroll_result(page, wheel_settled)
+    _scroll_result(page, wheel_settled, dx=10_000)
     for label in ("Copy", "CSV…", "Excel…", "Save as table…"):
         assert _hit(page, page.locator(".sql-result-actions .btn", has_text=label)), \
             f"{label} scrolled out of view with the rows"
@@ -96,22 +98,22 @@ def test_the_actions_stay_in_view_while_the_result_scrolls(page):
     assert 0 <= head["y"] - (bar["y"] + bar["height"]) < 12, "the header row sits right under the bar"
 
 
-def test_only_the_visible_window_is_in_the_dom(page):
+def test_only_the_visible_window_is_in_the_dom(page, wheel_settled):
     _run(page, _count(12_000))
     assert page.locator("#sqlResult tr").count() < 300
-    _scroll_result(page)
+    _scroll_result(page, wheel_settled)
     last = page.locator("#sqlResult tr").last.locator("td").first.inner_text()
     assert last == "12000", "the last row must be reachable by scrolling"
 
 
-def test_the_last_of_two_million_rows_is_reachable(page):
+def test_the_last_of_two_million_rows_is_reachable(page, wheel_settled):
     """Two million rows is ~40M px of table at 20px a row, past the height
     Blink will lay an element out at (33,554,365px). Without the grid's
     spacer cap and rescale the tail of the result is simply not there to
     scroll to — a 2.46M-row table once showed only its first 1.4M."""
     _run(page, _count(2_000_000))
     assert "2,000,000 rows" in page.locator(".sql-result-bar .note-status").inner_text()
-    _scroll_result(page)
+    _scroll_result(page, wheel_settled)
     cells = [c for c in page.locator("#sqlResult td:first-child").all_inner_texts() if c]
     assert cells[-1] == "2000000"
     # The last row is ON SCREEN, not merely in the DOM below it.
@@ -120,7 +122,7 @@ def test_the_last_of_two_million_rows_is_reachable(page):
     assert row["y"] + row["height"] <= pane["y"] + pane["height"] + 1
 
 
-def test_columns_keep_their_width_while_scrolling(page):
+def test_columns_keep_their_width_while_scrolling(page, wheel_settled):
     """Auto table layout sizes columns to the rows in the DOM, so a long
     value near the bottom would widen its column only once scrolled to.
     Widths come from every row up front instead."""
@@ -128,7 +130,7 @@ def test_columns_keep_their_width_while_scrolling(page):
     widths = lambda: page.evaluate(  # noqa: E731
         "() => [...document.querySelectorAll('#sqlResult th')].map((th) => th.getBoundingClientRect().width)")
     before = widths()
-    _scroll_result(page)
+    _scroll_result(page, wheel_settled)
     after = widths()
     assert after == pytest.approx(before, abs=1)
 
@@ -178,14 +180,17 @@ def test_csv_takes_every_row(page):
 
 def test_a_click_sort_orders_the_whole_result(page):
     _run(page, _count(7_000))
+    top = page.locator("#sqlResult td").first.inner_text()
     page.locator("#sqlResult th", has_text="i").click()
     page.locator("#sqlResult th", has_text="i").click()   # descending
-    page.wait_for_timeout(150)
+    # The sort runs on the server; wait for the rows it sends back.
+    page.wait_for_function("(top) => !document.querySelector('#sqlResult tr.sql-row-pending')"
+                           " && document.querySelector('#sqlResult td').textContent !== top", arg=top)
     first = page.locator("#sqlResult td").first.inner_text()
     assert first == "7000", "the sort must cover rows past the old cap"
 
 
-def test_a_tagged_row_past_the_first_page_shows_its_tag(page):
+def test_a_tagged_row_past_the_first_page_shows_its_tag(page, wheel_settled):
     """The Tags column used to be joined in the browser over the rows it
     held, so with rows held on the server it must come from the server —
     and a row the pane only fetched while scrolling has to arrive with its
@@ -197,7 +202,7 @@ def test_a_tagged_row_past_the_first_page_shows_its_tag(page):
         _run(page, "SELECT x.rid FROM src_1 x, (WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL "
                    "SELECT i + 1 FROM n WHERE i < 40) SELECT i FROM n) ORDER BY x.rid, i")
         assert "8,000 rows" in page.locator(".sql-result-bar .note-status").inner_text()
-        _scroll_result(page)
+        _scroll_result(page, wheel_settled)
         page.wait_for_function("() => document.querySelector('#sqlResult tbody tr:last-child td')"
                                "?.textContent === '200'")
         last = page.locator("#sqlResult tbody tr[data-i]").last

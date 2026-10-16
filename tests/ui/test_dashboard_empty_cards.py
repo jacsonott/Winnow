@@ -273,8 +273,8 @@ def _fill(page):
     page.wait_for_function(
         "() => document.querySelectorAll('#dashGrid .dash-empties-row').length === 0",
         timeout=15_000)
-    page.wait_for_selector("#dashGrid canvas", timeout=15_000)
-    page.wait_for_timeout(300)   # the bars draw on the next frame
+    # The bars draw on the next frame, and leave where they are on the canvas.
+    page.wait_for_function("() => (document.querySelector('#dashGrid canvas') || {}).bars", timeout=15_000)
 
 
 def test_a_card_that_fills_in_draws_its_chart_at_the_cards_own_size(page):

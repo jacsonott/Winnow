@@ -30,8 +30,7 @@ def test_a_failing_import_job_toasts_its_error(page, tmp_path):
     toast = page.locator("#toast").inner_text()
     assert "empty" in toast.lower()
     # And the failure produced no phantom source.
-    page.evaluate("() => __winnow.loadSources()")
-    page.wait_for_timeout(300)
+    page.evaluate("() => __winnow.loadSources()")   # evaluate waits for the promise
     assert page.evaluate("() => __winnow.S.sources.length") == before
 
 

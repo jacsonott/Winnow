@@ -10,11 +10,11 @@ import pytest
 pytestmark = pytest.mark.ui
 
 
-def test_combine_type_offers_coalesce_and_the_chips_build_the_param(page):
+def test_combine_type_offers_coalesce_and_the_chips_build_the_param(page, format_detected):
     page.evaluate("() => __winnow.openDerivedColumnModal('Host')")
     page.wait_for_selector("#modal:not([hidden])")
+    format_detected()
     page.locator("#modalBody select[data-role=type]").select_option(label="Combine columns")   # type
-    page.wait_for_timeout(150)
     ops = page.evaluate(
         "() => [...document.querySelector('#modalBody select[data-role=op]').options].map((o) => o.textContent)")
     assert ops == ["First non-empty value", "Row as JSON"], ops
@@ -24,9 +24,7 @@ def test_combine_type_offers_coalesce_and_the_chips_build_the_param(page):
     assert add.count() == 1
     assert page.locator(".derived-columns .fb-groupby-chip").count() == 0
     add.select_option("EventId")
-    page.wait_for_timeout(100)
     page.locator(".derived-columns select.fb-groupby-add").select_option("CommandLine")
-    page.wait_for_timeout(100)
     chips = page.locator(".derived-columns .fb-groupby-chip").all_inner_texts()
     assert [c.replace("✕", "").strip() for c in chips] == ["EventId", "CommandLine"]
     # The chosen ones (and the parse column itself) leave the add list.
@@ -40,11 +38,11 @@ def test_combine_type_offers_coalesce_and_the_chips_build_the_param(page):
     assert page.locator(".derived-columns .fb-groupby-chip").count() == 2
     # Changing the Parse column keeps the chosen Type and its chips.
     page.locator("#modalBody select[data-role=column]").select_option("Timestamp")
-    page.wait_for_timeout(400)
+    format_detected()
     assert page.locator("#modalBody select[data-role=type]").input_value() == "Combine columns"
     assert page.locator(".derived-columns .fb-groupby-chip").count() == 2
     page.locator("#modalBody select[data-role=column]").select_option("Host")
-    page.wait_for_timeout(300)
+    format_detected()
     # Removing the first chip keeps the second in place.
     page.locator(".derived-columns .fb-groupby-rm").first.click()
     chips = page.locator(".derived-columns .fb-groupby-chip").all_inner_texts()

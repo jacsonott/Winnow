@@ -33,7 +33,7 @@ def _fresh(browser, server):
 def test_no_prompt_on_a_machine_that_uses_no_associations(browser, server):
     ctx, pg = _fresh(browser, server)
     try:
-        pg.wait_for_timeout(600)
+        pg.wait_for_timeout(600)   # past the round trips the prompt would follow
         assert pg.evaluate("() => document.getElementById('modal').hidden")
     finally:
         ctx.close()
@@ -61,7 +61,7 @@ def test_prompt_fires_once_and_any_answer_is_final(browser, server):
         # Answered: a fresh boot must stay quiet.
         ctx2, pg2 = _fresh(browser, server)
         try:
-            pg2.wait_for_timeout(700)
+            pg2.wait_for_timeout(700)   # past the round trips the prompt would follow
             assert pg2.evaluate("() => document.getElementById('modal').hidden")
         finally:
             ctx2.close()

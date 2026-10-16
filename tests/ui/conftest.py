@@ -31,6 +31,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from urllib.parse import urlparse
 
 import pytest
 
@@ -392,6 +393,202 @@ def api(page):
             raise AssertionError(f"{method} {path} -> {status}, expected {expect}: {text[:500]}")
         return json.loads(text) if text else None
     return _api
+
+
+@pytest.fixture
+def until():
+    """Wait, bounded, for something wait_for_function can't see: a list a
+    route handler fills, an answer only the server has.
+
+        until(page, lambda: len(held) == 2, "both previews held")
+
+    It polls with the page's own wait_for_timeout rather than time.sleep,
+    because route handlers only run while Playwright is waiting on the
+    page: a test sleeping in Python would never see the list grow."""
+    def _until(page, probe, what, timeout=10.0):
+        deadline = time.monotonic() + timeout
+        while not probe():
+            if time.monotonic() >= deadline:
+                pytest.fail(f"timed out waiting for {what}")
+            page.wait_for_timeout(25)
+    return _until
+
+
+@pytest.fixture
+def painted():
+    """Wait for two animation frames: whatever a change put off to the
+    next frame (the grid's repaint on scroll, a chart drawing its bars)
+    has drawn by the end of the second.
+
+        page.keyboard.press("Control+ArrowRight")
+        painted(page)
+
+    One frame is not enough. A scroll handler asks for its frame during
+    the frame the scroll lands in, which can be after a callback the test
+    asked for first; the second frame comes after both."""
+    def _painted(page):
+        page.evaluate("() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))")
+    return _painted
+
+
+class WheelSettled:
+    """See the `wheel_settled` fixture."""
+
+    def __init__(self, page, selector="#body"):
+        self.page, self.selector = page, selector
+
+    def __enter__(self):
+        self.page.evaluate("(sel) => { const s = document.querySelector(sel);"
+                           " window.__wheelWatch = { at: s.scrollTop + ',' + s.scrollLeft, moved: false, still: 0, frames: 0 }; }",
+                           self.selector)
+        return self
+
+    def __exit__(self, kind, *_):
+        try:
+            if kind is None:
+                self.page.wait_for_function("""(sel) => {
+                  const s = document.querySelector(sel), w = window.__wheelWatch;
+                  const at = s.scrollTop + ',' + s.scrollLeft;
+                  w.frames++;
+                  if (at !== w.at) { w.at = at; w.moved = true; w.still = 0; } else w.still++;
+                  return w.moved ? w.still >= 5 : w.frames >= 30;
+                }""", arg=self.selector, polling="raf")
+        finally:
+            self.page.evaluate("() => { delete window.__wheelWatch; }")
+
+
+@pytest.fixture
+def wheel_settled():
+    """Wait for a wheel to finish scrolling:
+
+        with wheel_settled(page, "#body"):
+            page.mouse.wheel(0, 100)
+
+    mouse.wheel returns before the scroll has started, and a smooth scroll
+    then animates over several frames. This waits until the element has
+    moved and held still for five frames, or, for a wheel with nowhere to
+    go, until thirty frames have passed without it moving."""
+    return WheelSettled
+
+
+class Copied:
+    """See the `copied` fixture."""
+    MARK = "⁣nothing copied yet"
+
+    def __init__(self, page, timeout=5.0):
+        self.page, self.timeout, self.text = page, timeout, None
+
+    def __enter__(self):
+        self.page.evaluate("(m) => navigator.clipboard.writeText(m)", self.MARK)
+        return self
+
+    def __exit__(self, kind, *_):
+        if kind is not None:
+            return
+        deadline = time.monotonic() + self.timeout
+        while (text := self.page.evaluate("() => navigator.clipboard.readText()")) == self.MARK:
+            if time.monotonic() >= deadline:
+                pytest.fail("nothing reached the clipboard")
+            self.page.wait_for_timeout(25)
+        self.text = text
+
+
+@pytest.fixture
+def copied():
+    """What a gesture put on the clipboard:
+
+        with copied(page) as clip:
+            page.keyboard.press("Control+c")
+        assert clip.text == "..."
+
+    navigator.clipboard.writeText resolves after the handler that called
+    it has returned, so a read straight after the gesture can still find
+    whatever was there before it. Entering puts a marker on the clipboard
+    and leaving waits for the copy to replace it. wait_for_function can't
+    do this: it doesn't wait for a promise, and readText returns one."""
+    return Copied
+
+
+class Rebuilt:
+    """See the `view_rebuilt` fixture."""
+
+    def __init__(self, page, timeout=15_000):
+        self.page, self.timeout = page, timeout
+
+    def __enter__(self):
+        self.before = self.page.evaluate("() => __winnow.S.view && __winnow.S.view.view_id")
+        return self
+
+    def __exit__(self, kind, *_):
+        if kind is None:
+            self.page.wait_for_function(
+                "(was) => __winnow.S.view && __winnow.S.view.view_id !== was && __winnow.busyCount === 0",
+                arg=self.before, timeout=self.timeout)
+
+
+@pytest.fixture
+def view_rebuilt():
+    """Wait for the grid to land on a new view after a gesture that
+    filters, sorts or searches:
+
+        with view_rebuilt(page):
+            page.click(".vp-actions .btn:has-text('Apply')")
+        assert page.evaluate("() => __winnow.S.view.row_count") == 100
+
+    It waits for the change rather than for the expected answer, so a
+    wrong answer fails on its own assertion instead of as a timeout."""
+    return Rebuilt
+
+
+@pytest.fixture
+def tag_written():
+    """Wait for the write a tag gesture sends:
+
+        with tag_written(page):
+            page.keyboard.press("1")
+
+    Either of the two routes a tag key can take: picked rows by id, or a
+    whole view less its exclusions."""
+    def _expect(page, timeout=15_000):
+        return page.expect_response(
+            lambda r: r.request.method == "POST"
+            and urlparse(r.url).path in ("/api/row_tags", "/api/row_tags/view"), timeout=timeout)
+    return _expect
+
+
+@pytest.fixture
+def layout_saved(page, api, until):
+    """Wait for the open table's layout (widths, pins, hidden columns,
+    order, hide-empty-rows) to reach the server. saveLayout waits 400 ms
+    for the changes to stop before it posts, so a test that reopens or
+    reloads straight after one reads back the layout from before it, and
+    a cleanup that ends without waiting leaves its save to land in the
+    middle of the next test."""
+    def _wait():
+        sid, want = page.evaluate("""() => [__winnow.S.sourceId, JSON.stringify({ columns: __winnow.S.layout,
+          order: __winnow.S.order, hide_empty_rows: __winnow.S.hideEmptyRows })]""")
+        want = json.loads(want)
+
+        def landed():
+            got = api(f"/api/layout?source_id={sid}")
+            return all(got.get(k) == v for k, v in want.items())
+        until(page, landed, "the layout to be saved")
+    return _wait
+
+
+@pytest.fixture
+def format_detected(page):
+    """Wait for the Add derived column dialog's format detection to
+    answer, and return what it said. Opening the dialog and changing its
+    column each ask the server; the answer can move Type and Operation
+    and rebuilds the parameters, so a test that goes on before it lands
+    can have its choices redrawn under it, or check a Type the answer
+    hasn't had a chance to move yet."""
+    def _wait():
+        return page.wait_for_function(
+            "() => { const n = document.querySelector('#modalBody .fb-help');"
+            " return n && n.textContent && n.textContent !== 'Detecting format…' && n.textContent; }").json_value()
+    return _wait
 
 
 @pytest.fixture

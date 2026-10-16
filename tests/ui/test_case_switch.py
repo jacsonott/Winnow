@@ -151,7 +151,7 @@ def test_a_query_still_running_does_not_land_in_the_next_case(own_page, own_serv
                  "widths": [11], "stopped": None, "elapsed_ms": 1}))
         except Exception:
             pass   # the page already let go of it
-        page.wait_for_timeout(500)
+        page.wait_for_timeout(500)   # long enough for the stale answer to land if it is going to
         assert "stale_col" not in page.locator("#sqlResult").inner_text()
         assert page.evaluate("() => [...__winnow.S.sqlResults.keys()]") == []
         assert page.evaluate("() => __winnow.busyCount") == 0

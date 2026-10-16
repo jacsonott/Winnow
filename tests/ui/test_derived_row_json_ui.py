@@ -11,13 +11,12 @@ import pytest
 pytestmark = pytest.mark.ui
 
 
-def test_row_as_json_prefills_every_column_and_lands_in_the_grid(page):
+def test_row_as_json_prefills_every_column_and_lands_in_the_grid(page, format_detected):
     page.evaluate("() => __winnow.openDerivedColumnModal('Host')")
     page.wait_for_selector("#modal:not([hidden])")
+    format_detected()
     page.locator("#modalBody select[data-role=type]").select_option(label="Combine columns")
-    page.wait_for_timeout(150)
     page.locator("#modalBody select[data-role=op]").select_option(label="Row as JSON")
-    page.wait_for_timeout(200)
     assert page.locator(".derived-name").input_value() == "Row as JSON"
     chips = [c.replace("✕", "").strip() for c in page.locator(".derived-columns .fb-groupby-chip").all_inner_texts()]
     assert chips == ["Timestamp", "EventId", "ExtremelyLongColumnHeaderName", "CommandLine"]   # all but Host
@@ -28,7 +27,6 @@ def test_row_as_json_prefills_every_column_and_lands_in_the_grid(page):
     # Drop one column, tick skip-empty, add the column
     page.locator(".derived-columns .fb-groupby-chip", has_text="ExtremelyLongColumnHeaderName").locator("button").click()
     cb.check()
-    page.wait_for_timeout(300)
     page.locator("#modalBody button", has_text="Add column").click()
     page.wait_for_function("() => __winnow.S.columns.some((c) => c.name === 'Row as JSON')", timeout=30_000)
     try:

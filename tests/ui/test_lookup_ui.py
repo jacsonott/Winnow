@@ -20,7 +20,7 @@ def _ingest(page, path):
     assert status == 200
 
 
-def test_lookup_modal_pickers_preview_and_column(page, tmp_path):
+def test_lookup_modal_pickers_preview_and_column(page, tmp_path, format_detected):
     owners = tmp_path / "owners.csv"
     owners.write_text("Host,Owner\nH0,alice\nH1,bob\nH2,carol\nH3,dave\nH4,erin\n", encoding="utf-8")
     sites = tmp_path / "sites.csv"
@@ -37,8 +37,8 @@ def test_lookup_modal_pickers_preview_and_column(page, tmp_path):
     try:
         page.evaluate("() => __winnow.openDerivedColumnModal('Host')")
         page.wait_for_selector("#modal:not([hidden])")
+        format_detected()
         page.locator("#modalBody select[data-role=type]").select_option(label="Join from another table")  # type -> its op auto-selects
-        page.wait_for_timeout(200)
 
         # The table picker offers the other real tables — never the open one.
         offered = page.evaluate("""() =>
@@ -53,10 +53,8 @@ def test_lookup_modal_pickers_preview_and_column(page, tmp_path):
         # The key/value pickers list the CHOSEN table's columns, and re-list
         # when the table changes rather than keeping the previous table's.
         page.locator(".derived-param select").nth(0).select_option(str(ids["sites.csv"]))
-        page.wait_for_timeout(200)
         assert key_cols() == ["Machine", "Site"]
         page.locator(".derived-param select").nth(0).select_option(str(ids["owners.csv"]))
-        page.wait_for_timeout(200)
         assert key_cols() == ["Host", "Owner"]
 
         page.locator(".derived-param select").nth(1).select_option("Host")

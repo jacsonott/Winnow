@@ -14,7 +14,6 @@ for ui.csv's columns and deleted afterwards.
 
 from __future__ import annotations
 
-import time
 
 import pytest
 
@@ -60,15 +59,6 @@ def _order(api, *filters):
     return [next(f["name"] for f in filters if f["id"] == i) for i in ids if i in {f["id"] for f in filters}]
 
 
-def _until(probe, what, timeout=10.0):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if probe():
-            return
-        time.sleep(0.1)
-    pytest.fail(f"timed out waiting for {what}")
-
-
 def test_a_row_is_a_plain_name_and_one_button(page, two_filters):
     a, _ = two_filters
     _open(page)
@@ -106,7 +96,7 @@ def test_enter_on_a_name_applies_it_too(page, two_filters):
     page.wait_for_function("() => __winnow.S.view.row_count === 50")
 
 
-def test_move_down_and_up_from_the_keyboard(page, api, two_filters):
+def test_move_down_and_up_from_the_keyboard(page, api, two_filters, until):
     a, b = two_filters
     assert _order(api, a, b) == ["rows probe A", "rows probe B"]
     _open(page)
@@ -124,31 +114,31 @@ def test_move_down_and_up_from_the_keyboard(page, api, two_filters):
 
     _row(page, a).locator(".sf-more").focus()
     choose("Move down")
-    _until(lambda: _order(api, a, b) == ["rows probe B", "rows probe A"], "Move down to save")
+    until(page, lambda: _order(api, a, b) == ["rows probe B", "rows probe A"], "Move down to save")
     # Back on the same filter's ⋯, so a second move is the same keys again.
     page.wait_for_function(
         "(id) => document.activeElement.classList.contains('sf-more')"
         " && document.activeElement.closest('.sf-row').dataset.id === String(id)", arg=a["id"])
     choose("Move up")
-    _until(lambda: _order(api, a, b) == ["rows probe A", "rows probe B"], "Move up to save")
+    until(page, lambda: _order(api, a, b) == ["rows probe A", "rows probe B"], "Move up to save")
     page.keyboard.press("Escape")
 
 
-def test_dragging_a_row_reorders_its_header_set(page, api, two_filters):
+def test_dragging_a_row_reorders_its_header_set(page, api, two_filters, until):
     a, b = two_filters
     _open(page)
     target = _row(page, b)
     box = target.bounding_box()
     # Onto B's lower half: A lands after it.
     _row(page, a).drag_to(target, target_position={"x": 60, "y": box["height"] - 3})
-    _until(lambda: _order(api, a, b) == ["rows probe B", "rows probe A"], "the drag to save")
+    until(page, lambda: _order(api, a, b) == ["rows probe B", "rows probe A"], "the drag to save")
     page.wait_for_function(
         "([a, b]) => { const ids = [...document.querySelectorAll('.sf-row')].map((r) => Number(r.dataset.id));"
         " return ids.indexOf(b) < ids.indexOf(a); }", arg=[a["id"], b["id"]])
     page.keyboard.press("Escape")
 
 
-def test_delete_from_the_menu_still_asks(page, api, two_filters):
+def test_delete_from_the_menu_still_asks(page, api, two_filters, until):
     a, b = two_filters
     _open(page)
     _row(page, b).locator(".sf-more").click()
@@ -163,7 +153,7 @@ def test_delete_from_the_menu_still_asks(page, api, two_filters):
     _row(page, b).locator(".sf-more").click()
     page.locator(".menu .menu-item", has_text="Delete…").click()
     page.locator(".confirm-card .btn", has_text="Delete").click()
-    _until(lambda: all(f["id"] != b["id"] for f in api("/api/saved_filters")), "the delete to land")
+    until(page, lambda: all(f["id"] != b["id"] for f in api("/api/saved_filters")), "the delete to land")
     assert _row(page, b).count() == 0
     assert _row(page, a).count() == 1
     page.keyboard.press("Escape")

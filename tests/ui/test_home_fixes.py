@@ -82,7 +82,7 @@ def test_fresh_origin_adopts_the_machine_s_saved_look(browser, server):
         _post(server, "/api/settings/app", {"appearance": restore})
 
 
-def test_double_clicking_a_case_card_opens_it_once(page):
+def test_double_clicking_a_case_card_opens_it_once(page, until):
     """A double-click on a case card is two clicks, and each one used to
     POST /api/case/open: two opens racing on the server (which left a
     Store open behind the switch, and the case reading as "open in another
@@ -97,14 +97,10 @@ def test_double_clicking_a_case_card_opens_it_once(page):
     page.route("**/api/case/open", lambda route: held.append(route))
     try:
         card.dblclick()
-        deadline = 20
-        while not held and deadline:
-            page.wait_for_timeout(50)
-            deadline -= 1
-        assert len(held) == 1
+        until(page, lambda: held, "the open to be asked for")
         # A second POST from the second click would arrive within moments;
         # give it a generous window to show up rather than looking once.
-        page.wait_for_timeout(500)
+        page.wait_for_timeout(500)   # see above
         assert len(held) == 1, f"{len(held)} opens for one double-click"
     finally:
         # Released before unrouting: unroute settles a still-held route

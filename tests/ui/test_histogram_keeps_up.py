@@ -106,7 +106,7 @@ def test_it_gives_up_rather_than_polling_a_view_that_keeps_failing(page):
         page.wait_for_timeout(2_500)     # many multiples of the 150ms debounce
         asked = len(seen)
         assert asked <= 6, f"the strip asked {asked} times — it is polling"
-        page.wait_for_timeout(1_000)
+        page.wait_for_timeout(1_000)   # and then nothing more
         assert len(seen) == asked, "it is still asking"
         # …and the chart that is up is the last one it could draw, not an
         # error message: the rows are still on screen and still real.
@@ -131,7 +131,7 @@ def test_an_ordinary_filter_change_still_redraws_once(page):
         page.wait_for_function(
             "(n) => (document.querySelector('.th-info')||{}).textContent.startsWith(n)",
             arg=f"{FILTERED}", timeout=15_000)
-        page.wait_for_timeout(700)
+        page.wait_for_timeout(700)   # past the debounce, for a second request to show up
         assert len(asks) - before == 1, f"{len(asks) - before} requests for one filter change"
     finally:
         _reset(page)

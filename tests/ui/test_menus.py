@@ -53,15 +53,15 @@ def test_row_menu_scope_follows_the_selection(page, row_menu):
     assert page.locator(".row.selected").count() == 3
 
 
-def test_row_menu_filters_by_the_clicked_cell(page):
+def test_row_menu_filters_by_the_clicked_cell(page, view_rebuilt):
     host_index = page.evaluate("() => __winnow.visibleCols().indexOf('Host')")
     value = page.locator(".row").first.locator(".cell").nth(host_index).inner_text()
     page.locator(".row").first.locator(".cell").nth(host_index).click(button="right")
     page.wait_for_selector(".menu")
     # The value itself lives in the heading now, not in the verb's label.
     assert f"Host = {value}" in page.locator(".menu:not(.menu-sub) .menu-header").last.inner_text()
-    page.click(".menu:not(.menu-sub) .menu-item:has-text('Narrow to this value')")
-    page.wait_for_timeout(800)
+    with view_rebuilt(page):
+        page.click(".menu:not(.menu-sub) .menu-item:has-text('Narrow to this value')")
     assert page.locator('.fcell input[data-col="Host"]').input_value() == f"={value}"
     assert page.evaluate("() => __winnow.S.view.row_count") < 200
 
@@ -89,15 +89,15 @@ def test_tab_right_click_reaches_the_table_menu(page):
     assert page.locator(".table-menu-section h4").count() >= 3
 
 
-def test_value_picker_writes_a_filter_the_grid_applies(page):
+def test_value_picker_writes_a_filter_the_grid_applies(page, view_rebuilt):
     page.click('.fcell-pick[data-col="EventId"]')
     page.wait_for_selector(".value-picker .vp-row")
     assert page.locator(".value-picker .vp-row").count() == 4  # the fixture's four EventIds
     page.click(".vp-actions .btn:has-text('None')")
     page.locator(".value-picker .vp-row input").nth(0).check()
     page.locator(".value-picker .vp-row input").nth(1).check()
-    page.click(".vp-actions .btn:has-text('Apply')")
-    page.wait_for_timeout(900)
+    with view_rebuilt(page):
+        page.click(".vp-actions .btn:has-text('Apply')")
     raw = page.locator('.fcell input[data-col="EventId"]').input_value()
     assert "|" in raw, f"two ticked values should become an any-of filter, got {raw!r}"
     assert page.evaluate("() => __winnow.S.view.row_count") == 100  # two of four, 50 rows each
@@ -107,8 +107,8 @@ def test_value_picker_writes_a_filter_the_grid_applies(page):
     page.click('.fcell-pick[data-col="EventId"]')
     page.wait_for_selector(".value-picker .vp-row")
     page.click(".vp-actions .btn:has-text('All')")
-    page.click(".vp-actions .btn:has-text('Apply')")
-    page.wait_for_timeout(900)
+    with view_rebuilt(page):
+        page.click(".vp-actions .btn:has-text('Apply')")
     assert page.locator('.fcell input[data-col="EventId"]').input_value() == ""
     assert page.evaluate("() => __winnow.S.view.row_count") == 200
 

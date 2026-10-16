@@ -201,19 +201,19 @@ def test_an_arrow_at_the_edge_stays_put_rather_than_wrapping(page):
 
 # ---------------------------------------------------------- scrolling
 
-def test_moving_down_past_the_window_scrolls_and_the_cell_is_still_drawn(page):
+def test_moving_down_past_the_window_scrolls_and_the_cell_is_still_drawn(page, painted):
     """Only the visible window is in the DOM, so an active cell the grid
     did not scroll to would be a ring on a row that does not exist."""
     cols = _cols(page)
     _click_cell(page, 0, cols[0])
     page.keyboard.press("Control+ArrowDown")
-    page.wait_for_timeout(300)
+    painted(page)
     assert page.evaluate("() => document.getElementById('body').scrollTop") > 100
     assert page.locator("#body .cell-active").count() == 1
     assert page.locator("#body .cell-active").is_visible()
 
 
-def test_moving_right_brings_the_column_into_view(page):
+def test_moving_right_brings_the_column_into_view(page, painted):
     """In memory only, like the pinned test below — nothing here is
     saved, so the widened columns die with this browser context."""
     page.evaluate("""() => {
@@ -222,17 +222,17 @@ def test_moving_right_brings_the_column_into_view(page):
       }
       __winnow.renderHead(); __winnow.render();
     }""")
-    page.wait_for_timeout(150)
+    painted(page)
     cols = _cols(page)
     _click_cell(page, 1, cols[0])
     assert page.evaluate("() => document.getElementById('body').scrollLeft") == 0
     page.keyboard.press("Control+ArrowRight")
-    page.wait_for_timeout(300)
+    painted(page)
     assert page.evaluate("() => document.getElementById('body').scrollLeft") > 0
     assert page.locator("#body .cell-active").is_visible()
 
 
-def test_the_active_cell_does_not_park_under_a_pinned_column(page):
+def test_the_active_cell_does_not_park_under_a_pinned_column(page, painted):
     """A pinned column is position:sticky over the left edge of the
     scroller. Scrolling a cell flush to scrollLeft puts it underneath one,
     where the ring is invisible and the analyst has lost their place.
@@ -254,13 +254,13 @@ def test_the_active_cell_does_not_park_under_a_pinned_column(page):
       __winnow.S.layout[name] = { ...(__winnow.S.layout[name] || {}), pinned: true };
       __winnow.renderHead(); __winnow.render();
     }""", cols[0])
-    page.wait_for_timeout(200)
+    painted(page)
     try:
         _click_cell(page, 1, cols[1])
         page.keyboard.press("Control+ArrowRight")
-        page.wait_for_timeout(300)
+        painted(page)
         page.keyboard.press("ArrowLeft")
-        page.wait_for_timeout(300)
+        painted(page)
         ring = page.locator("#body .cell-active").bounding_box()
         pinned = page.locator(f'#body .row .cell.pinned').first.bounding_box()
         assert ring["x"] >= pinned["x"] + pinned["width"] - 1, (ring, pinned)
@@ -276,7 +276,7 @@ def test_the_active_cell_does_not_park_under_a_pinned_column(page):
 
 # ------------------------------------------- what the selection means
 
-def test_arrowing_with_rows_picked_does_not_steal_the_copy(page):
+def test_arrowing_with_rows_picked_does_not_steal_the_copy(page, copied):
     """The regression this feature would otherwise ship. Pick rows in the
     gutter, press an arrow to read the next one, and Ctrl+C must still
     copy the rows — a one-cell range is where you are, not what you
@@ -287,31 +287,29 @@ def test_arrowing_with_rows_picked_does_not_steal_the_copy(page):
     page.keyboard.press("ArrowDown")
     assert _range(page) is not None, "the arrow does leave a one-cell range behind"
 
-    page.keyboard.press("Control+c")
-    page.wait_for_timeout(400)
-    clip = page.evaluate("() => navigator.clipboard.readText()")
-    assert len(clip.strip().splitlines()) == 2, clip
+    with copied(page) as clip:
+        page.keyboard.press("Control+c")
+    assert len(clip.text.strip().splitlines()) == 2, clip.text
 
 
-def test_a_rectangle_still_wins_the_copy(page):
+def test_a_rectangle_still_wins_the_copy(page, copied):
     """Dragging one out — or Shift+Arrowing one — is a choice, and it
     keeps beating whatever was picked earlier."""
     cols = _cols(page)
     page.locator("#body .row").nth(1).locator(".gutter").click()
     _click_cell(page, 5, cols[0])
     page.keyboard.press("Shift+ArrowDown")
-    page.keyboard.press("Control+c")
-    page.wait_for_timeout(400)
-    clip = page.evaluate("() => navigator.clipboard.readText()")
-    lines = clip.strip().splitlines()
-    assert len(lines) == 2, clip
+    with copied(page) as clip:
+        page.keyboard.press("Control+c")
+    lines = clip.text.strip().splitlines()
+    assert len(lines) == 2, clip.text
     # One column wide: the rectangle, not whole rows.
-    assert "\t" not in lines[0], clip
+    assert "\t" not in lines[0], clip.text
 
 
 # ------------------------------------------------------- staying alive
 
-def test_the_active_cell_survives_a_column_resize(page):
+def test_the_active_cell_survives_a_column_resize(page, painted):
     """renderHead() drops the rectangle because column indices stop
     meaning anything against a list it is about to rewrite. The active
     cell is carried across by column NAME, so the repaints that do not
@@ -325,7 +323,7 @@ def test_the_active_cell_survives_a_column_resize(page):
       __winnow.S.layout[n] = { ...(__winnow.S.layout[n] || {}), w: 220 };
       __winnow.renderHead(); __winnow.render();
     }""", cols[0])
-    page.wait_for_timeout(150)
+    painted(page)
     assert _focus(page) == {"pos": 4, "col": ci}
     assert page.locator("#body .cell-active").count() == 1
 
@@ -510,7 +508,7 @@ def test_the_letter_jumps_jump_rather_than_extend(page):
     assert (r["r0"], r["r1"]) == (0, 0)
 
 
-def test_a_jump_that_is_not_an_arrow_takes_the_cell_cursor_with_it(page):
+def test_a_jump_that_is_not_an_arrow_takes_the_cell_cursor_with_it(page, painted):
     """Everything that moves the row cursor without an arrow key — the
     row-open chevron, jump-to-timestamp, a watchlist hit, a right-click on
     a far row — used to leave the active cell where it was. The next
@@ -519,7 +517,7 @@ def test_a_jump_that_is_not_an_arrow_takes_the_cell_cursor_with_it(page):
     cols = _cols(page)
     _click_cell(page, 3, cols[1])
     page.evaluate("() => __winnow.moveCursor(120, false)")
-    page.wait_for_timeout(200)
+    painted(page)
     assert _focus(page)["pos"] == 120, "the cell cursor stayed behind"
     page.keyboard.press("ArrowDown")
     assert _focus(page)["pos"] == 121
@@ -538,7 +536,7 @@ def test_a_right_click_puts_the_cell_cursor_where_the_menu_is(page):
         page.wait_for_selector(".menu", state="detached")
 
 
-def test_clicking_one_cell_still_beats_rows_picked_earlier(page):
+def test_clicking_one_cell_still_beats_rows_picked_earlier(page, copied):
     """The copy rule is about being ASKED for, not about size. Clicking a
     single cell to copy it is a real gesture, and inferring intent from
     the rectangle's size instead broke it whenever rows happened to be
@@ -548,11 +546,10 @@ def test_clicking_one_cell_still_beats_rows_picked_earlier(page):
     page.locator("#body .row").nth(2).locator(".gutter").click()
     assert page.evaluate("() => __winnow.selCount()") == 2
     _click_cell(page, 5, cols[1])
-    page.keyboard.press("Control+c")
-    page.wait_for_timeout(400)
-    clip = page.evaluate("() => navigator.clipboard.readText()")
-    assert len(clip.strip().splitlines()) == 1, clip
-    assert "\t" not in clip, clip
+    with copied(page) as clip:
+        page.keyboard.press("Control+c")
+    assert len(clip.text.strip().splitlines()) == 1, clip.text
+    assert "\t" not in clip.text, clip.text
 
 
 def test_a_right_click_inside_a_rectangle_keeps_it(page):

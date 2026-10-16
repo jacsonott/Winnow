@@ -56,8 +56,7 @@ def test_auto_update_off_waits_for_refresh_and_is_remembered(fl_page):
     # Nothing to run (no grouping) is not "pending": the stale marker clears.
     auto.uncheck()
     pg.locator("[data-zone='groupBy'] [data-field='Host'] button, [data-zone='groupBy'] .chip-rm, [data-zone='groupBy'] button").first.click()
-    pg.locator("button.fl-refresh").click()
-    pg.wait_for_timeout(300)
+    pg.locator("button.fl-refresh").click()   # with nothing to run, it clears at once
     assert not pg.evaluate("() => [...document.querySelectorAll('.note-status')].some((n) => n.textContent === 'Changed — press Refresh')")
     pg.evaluate(DRAG, ["[data-field='Host']", "[data-zone='groupBy']"])
     auto.check()

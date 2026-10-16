@@ -85,7 +85,8 @@ def test_preview_columns_resize_from_the_header_edge_and_survive_a_rerun(fl_page
     assert abs(pg.locator("table tbody tr").first.locator("td").first.bounding_box()["width"] - w1) < 4
     # A re-render (the preview re-runs) keeps the width — it's sheet state.
     pg.locator("button.fl-refresh").click()
-    pg.wait_for_timeout(600)
+    pg.wait_for_function("() => ![...document.querySelectorAll('.note-status')].some((n) => n.textContent === 'Previewing…')",
+                         timeout=10_000)
     pg.wait_for_selector("table tbody tr", timeout=10_000)
     assert abs(pg.locator("table thead th").first.bounding_box()["width"] - w1) < 4
     # Resizing never started a header reorder drag (still one grouping, same order).

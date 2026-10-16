@@ -279,7 +279,7 @@ def _click_row(page, i, shift=False):
         .dispatchEvent(new MouseEvent('click', { bubbles: true, shiftKey: shift }))""", [i, shift])
 
 
-def test_a_row_click_in_a_large_result_moves_the_highlight_and_nothing_else(wide):
+def test_a_row_click_in_a_large_result_moves_the_highlight_and_nothing_else(wide, copied):
     """Every click used to rebuild the whole table to move one class."""
     _run_sql(wide, "SELECT rid, * FROM src_1 ORDER BY rid")
     wide.evaluate("() => document.querySelectorAll('#sqlResult tr[data-i]').forEach((t) => { t.__kept = true; })")
@@ -296,10 +296,9 @@ def test_a_row_click_in_a_large_result_moves_the_highlight_and_nothing_else(wide
     _click_row(wide, far, shift=True)
     assert wide.locator("#sqlResult .sql-row-sel").count() > 20
     wide.evaluate("() => document.activeElement && document.activeElement.blur()")
-    wide.keyboard.press("Control+c")
-    wide.wait_for_timeout(150)
-    clip = wide.evaluate("() => navigator.clipboard.readText()")
-    assert len(clip.strip().splitlines()) == 1 + (far - 3 + 1), "header + every row of the range"
+    with copied(wide) as clip:
+        wide.keyboard.press("Control+c")
+    assert len(clip.text.strip().splitlines()) == 1 + (far - 3 + 1), "header + every row of the range"
     # ...and the rows scrolled back to come up picked.
     wide.evaluate("() => { document.querySelector('#sqlResult .sql-result-scroll').scrollTop = 0; }")
     _settle(wide)

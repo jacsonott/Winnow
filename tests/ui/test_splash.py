@@ -173,7 +173,7 @@ def test_a_click_in_the_first_moments_does_not_skip_it(browser, server):
         pg.goto(server, wait_until="commit")
         pg.wait_for_selector("#splash:not([hidden])", timeout=10_000)
         pg.mouse.click(550, 350)
-        pg.wait_for_timeout(300)
+        pg.wait_for_timeout(300)   # long enough for a skip to have hidden it
         assert pg.locator("#splash").get_attribute("hidden") is None   # still playing
     finally:
         ctx.close()
