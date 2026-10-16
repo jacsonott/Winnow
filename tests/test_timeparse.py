@@ -357,6 +357,15 @@ def test_duration_delta_pair():
     assert pp(None, "2024-01-05 13:22:01", {}) is None
 
 
+def test_duration_delta_reads_a_missing_seconds_field_as_zero():
+    """Minute-precision times are routine (an ISO `13:22`, a US export's
+    `1:22 PM`). Their seconds are zero; read as anything else, every delta
+    against a time that has seconds is out by that much."""
+    pp = timeparse.OPERATIONS["duration_delta"]["parse_pair"]
+    assert pp("2024-01-05 13:22", "2024-01-05 13:21:00", {}) == "60.000000"
+    assert pp("1/5/2024 1:22 PM", "2024-01-05 13:21:00", {}) == "60.000000"
+
+
 # ----------------------------------------------------------- detection
 
 def test_detect_ranks_by_success_rate_registry_order_breaks_ties():

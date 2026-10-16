@@ -82,7 +82,10 @@ see [docs/notes/README.md](README.md) for the whole set.
   with any unchecked rows passed as `exclude` — server-side so an excluded
   row that legitimately already had the tag keeps it), or an explicit
   subset (every page it spans is fetched *first*, and a failure is a toast,
-  not a gap).
+  not a gap). `tests/ui/test_tag_picks_across_pages.py` holds both on a
+  12,000-row table: select-all less one row, and a run of picks pressed
+  while half of it is still loading. Put the old `filter(Boolean)` back
+  and they tag 9,999 and 10 rows.
 - **Grouped mode's rows are ordinary rows.** They paint through the same
   `buildDataRow` the flat grid uses and address themselves with the same
   `pos`, so selection, the cursor, the cell range, the row menu, copy,
@@ -213,7 +216,12 @@ see [docs/notes/README.md](README.md) for the whole set.
   The sibling that sprang it was the suggestion banner, an element the app
   no longer has (the suggestion is a state of the Filters button instead);
   the explicit pins stay so the next hidden sibling can't set the same trap
-  again.
+  again. `tests/ui/test_grid_past_the_spacer_cap.py` holds the reach on a
+  stubbed 2.5M-row view (the build's answer and the page fetches are
+  answered by the test): the scrollbar's foot, its midpoint and
+  Ctrl+ArrowDown each land where they should. The pre-fix code stops at
+  row 1,398,098 there. It does not cover the grid-row pins: with the
+  spacer capped, removing them leaves that view intact.
 - **The tag rail has its own gutter; it overlays nothing** (`.rail` and
   `.grid-body`'s `margin-right: var(--rail-w)` in style.css, `drawRail`
   in grouping.js). It is absolutely positioned against `.grid`, and for

@@ -176,9 +176,10 @@ def test_a_card_only_carries_copy_its_render_kind_can_show():
     kv or chart card carrying one is a sentence written for a screen that
     never shows it — which is how the two chips cards it replaced came to
     carry subs nobody had ever read."""
-    for w in _board()["widgets"]:
-        if w.get("sub"):
-            assert w["render"] in ("stat", "signals"), (w["title"], w["render"])
+    carrying = [w for w in _board()["widgets"] if w.get("sub")]
+    assert carrying, "no card carries a sub, so there was nothing to check"
+    for w in carrying:
+        assert w["render"] in ("stat", "signals"), (w["title"], w["render"])
 
 
 def test_only_the_cheap_card_runs_on_every_open():

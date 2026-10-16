@@ -3,7 +3,11 @@ by the input column — VLOOKUP, materialized."""
 
 from __future__ import annotations
 
+import time
+
 import pytest
+
+from winnow import enrich
 
 HOSTS = [["IP", "Hostname"],
          ["10.0.0.5", "DC01"],
@@ -72,6 +76,44 @@ def test_lookup_validates_at_creation(store, write_csv):
     with pytest.raises(ValueError, match="real table"):
         store.add_derived_column(ev, "X", "Src", "lookup",
                                  {"other_source_id": -1, "match_column": "IP", "value_column": "Hostname"})
+    # The op's own check, which a stored definition meets on a re-derive
+    # without the generic required-parameter check in front of it.
+    for missing in ("match_column", "value_column"):
+        params = {"other_source_id": lk, "match_column": "IP", "value_column": "Hostname", missing: ""}
+        with pytest.raises(ValueError, match="Pick the key column and the value column"):
+            enrich._prepare(store, params, {})
+
+
+def test_a_lookup_table_past_the_row_cap_is_refused(store, write_csv, monkeypatch):
+    """The mapping is held in memory, so the table is capped. A table of
+    exactly the cap loads; one row more is refused, saying why."""
+    lk, ev = _mk(store, write_csv)   # hosts.csv has 3 rows
+    params = {"other_source_id": lk, "match_column": "IP", "value_column": "Hostname"}
+    monkeypatch.setattr(enrich, "MAX_LOOKUP_ROWS", 3)
+    state = {}
+    enrich._prepare(store, params, state)
+    assert state["map"]["10.0.0.9"] == "WKS-ALICE"
+    monkeypatch.setattr(enrich, "MAX_LOOKUP_ROWS", 2)
+    with pytest.raises(ValueError, match="more than 2 rows"):
+        enrich._prepare(store, params, {})
+
+
+def test_every_match_under_one_key_is_gathered_in_linear_time(store, write_csv):
+    """multi='all' used to re-join a key's growing string on every match,
+    so one key's cost grew with the square of its matches: 200,000 values
+    under one key took ~10s here, a 2M-row table about 20 minutes.
+    Gathered and joined once it is ~0.2s; the bound leaves an order of
+    magnitude for a slow runner on either side."""
+    n = 200_000
+    lk = store.ingest_csv(write_csv([["K", "V"]] + [["k", f"v{i}"] for i in range(n)], "many.csv"),
+                          name="many", build_fts=False)["id"]
+    state = {}
+    t0 = time.monotonic()
+    enrich._prepare(store, {"other_source_id": lk, "match_column": "K", "value_column": "V",
+                            "multi": "all"}, state)
+    elapsed = time.monotonic() - t0
+    assert state["map"]["k"].split(", ") == [f"v{i}" for i in range(n)]
+    assert elapsed < 3, f"gathering {n:,} matches took {elapsed:.1f}s — multi='all' is quadratic again"
 
 
 def test_lookup_on_a_merge_fans_out(store, write_csv):

@@ -96,6 +96,49 @@ def test_tar_symlinks_are_skipped(tmp_path):
     assert any("not a regular file" in sk["reason"] for sk in rep["skipped"])
 
 
+def _mark_encrypted(path, name):
+    """zipfile can't write an encrypted member, so set the encrypted bit
+    (bit 0 of the general purpose flags) on one by hand, in its local
+    header and in its central directory entry. Its data stays plain."""
+    raw = bytearray(path.read_bytes())
+    with zipfile.ZipFile(path) as zf:
+        raw[zf.getinfo(name).header_offset + 6] |= 0x1
+    i = raw.find(b"PK\x01\x02")
+    while i != -1:
+        n = int.from_bytes(raw[i + 28:i + 30], "little")
+        if raw[i + 46:i + 46 + n] == name.encode():
+            raw[i + 8] |= 0x1
+        i = raw.find(b"PK\x01\x02", i + 46)
+    path.write_bytes(bytes(raw))
+
+
+def test_an_encrypted_member_is_skipped_and_the_rest_extracted(tmp_path):
+    z = tmp_path / "locked.zip"
+    _write_zip(z, {"before.txt": "a", "secret.txt": "pretend ciphertext", "after.txt": "b"})
+    _mark_encrypted(z, "secret.txt")
+    rep = archive.expand_archive(str(z))
+    assert _tree(rep["root"]) == ["after.txt", "before.txt"]
+    assert rep["skipped"] == [{"path": "secret.txt", "reason": "encrypted zip member"}]
+    assert rep["files"] == 2 and rep["truncated"] is False
+
+
+@pytest.mark.parametrize("kind", ["zip", "tgz"])
+def test_file_count_cap_marks_truncated(tmp_path, monkeypatch, kind):
+    monkeypatch.setattr(archive, "MAX_TOTAL_FILES", 2)
+    a = tmp_path / f"many.{kind}"
+    (_write_zip if kind == "zip" else _write_tgz)(a, {f"f{i}.txt": "x" for i in range(5)})
+    rep = archive.expand_archive(str(a))
+    assert rep["truncated"] is True
+    assert rep["files"] == 2 and len(_tree(rep["root"])) == 2
+
+
+def test_a_gzipped_log_is_one_file(tmp_path):
+    g = tmp_path / "auth.log.1.gz"
+    g.write_bytes(gzip.compress(b"old auth line\n"))
+    rep = archive.expand_archive(str(g))
+    assert (rep["files"], rep["archives"]) == (1, 1)
+
+
 def test_byte_budget_stops_a_bomb(tmp_path, monkeypatch):
     monkeypatch.setattr(archive, "MAX_TOTAL_BYTES", 1024)
     z = tmp_path / "bomb.zip"

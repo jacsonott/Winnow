@@ -187,9 +187,6 @@ def test_toggling_a_plugin_off_takes_its_row_actions_with_it(page, api):
     if p is None:
         pytest.skip("no bundled plugin to toggle")
     flip, restore = ("Off", "On") if p.get("machine_enabled") else ("On", "Off")
-    # A stand-in the server never listed: the toggle's refresh must drop it.
-    page.evaluate("() => __winnow.S.pluginRowActions.push({ id: 'ghost', local_id: 'ghost', plugin: 'ghost', "
-                  "plugin_fs: 'ghost', label: 'Ghost action', description: '', max_rows: 5 })")
     # The manager renders one .pm-item per S.plugins entry, in order, so
     # the plugin is found by position keyed on fs_name — its display name
     # is the wrong key (two plugins may share one; only the folder is
@@ -204,20 +201,32 @@ def test_toggling_a_plugin_off_takes_its_row_actions_with_it(page, api):
                   " return row ? [...row.querySelectorAll('button')].find((b) => b.textContent === label) : null; }")
     set_scope = ("([fs, label]) => { (%s)(fs).click(); (%s)(label).click(); }" % (pick, everywhere))
 
+    landed = "([fs, on]) => (__winnow.S.plugins.find((q) => q.fs_name === fs) || {}).machine_enabled === on"
+
     def open_on(fs):
-        page.evaluate("() => __winnow.openPluginManager()")
+        # Opening the manager reloads the plugin listing in the background,
+        # and that reload drops the stand-in below as surely as a toggle
+        # does. Waited out, so only the toggle's own answer can take it.
+        page.evaluate("() => { window.__rowActions = __winnow.S.pluginRowActions; __winnow.openPluginManager(); }")
         page.wait_for_selector("#modal:not([hidden])")
         page.wait_for_function("(fs) => !!(%s)(fs)" % pick, arg=fs, timeout=10_000)
+        page.wait_for_function("() => __winnow.S.pluginRowActions !== window.__rowActions", timeout=10_000)
 
     open_on(p["fs_name"])
+    # A stand-in the server never listed: the toggle's refresh must drop it.
+    page.evaluate("() => __winnow.S.pluginRowActions.push({ id: 'ghost', local_id: 'ghost', plugin: 'ghost', "
+                  "plugin_fs: 'ghost', label: 'Ghost action', description: '', max_rows: 5 })")
     page.evaluate(set_scope, [p["fs_name"], flip])
     try:
-        page.wait_for_function("() => !__winnow.S.pluginRowActions.some((a) => a.id === 'ghost')", timeout=10_000)
+        # The toggle has answered before anything is put back. A restore
+        # sent while it was still out could reach the server first, and the
+        # flip then landed after it and stayed for every later module.
+        page.wait_for_function(landed, arg=[p["fs_name"], flip == "On"], timeout=10_000)
+        assert not page.evaluate("() => __winnow.S.pluginRowActions.some((a) => a.id === 'ghost')")
     finally:
         open_on(p["fs_name"])
         page.evaluate(set_scope, [p["fs_name"], restore])
-        page.wait_for_function("([fs, on]) => (__winnow.S.plugins.find((q) => q.fs_name === fs) || {}).machine_enabled === on",
-                               arg=[p["fs_name"], restore == "On"], timeout=10_000)
+        page.wait_for_function(landed, arg=[p["fs_name"], restore == "On"], timeout=10_000)
         page.keyboard.press("Escape")
 
 

@@ -60,17 +60,21 @@ def browser():
 def ui_csv(tmp_path_factory) -> Path:
     """Small, but shaped for the things the UI tests measure: a column whose
     *header* is far longer than its values (autofit), one whose values are far
-    longer than its header (the autofit cap), and enough repetition for the
-    value picker to have something to list."""
+    longer than its header (the autofit cap), enough repetition for the
+    value picker to have something to list, and a column of JSON, so the
+    detail pane's structured view and the extract-a-field flows have
+    something to take apart."""
     path = tmp_path_factory.mktemp("ui") / "ui.csv"
-    rows = ["Timestamp,EventId,Host,ExtremelyLongColumnHeaderName,CommandLine"]
+    rows = ["Timestamp,EventId,Host,ExtremelyLongColumnHeaderName,CommandLine,Payload"]
     for i in range(200):
+        payload = json.dumps({"user": f"u{i % 3}", "proc": {"pid": 4000 + i, "name": "cmd.exe"}})
         rows.append(
             f"2026-03-14 08:{i // 60:02d}:{i % 60:02d},"
             f"{[4624, 4625, 4688, 1][i % 4]},"
             f"H{i % 5},"
             f"v,"
-            f"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -Enc {'A' * 300}"
+            f"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -Enc {'A' * 300},"
+            '"' + payload.replace('"', '""') + '"'
         )
     path.write_text("\n".join(rows) + "\n", encoding="utf-8")
     return path

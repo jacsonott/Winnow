@@ -18,7 +18,7 @@ import pytest
 
 pytestmark = pytest.mark.ui
 
-UI_COLUMNS = ["Timestamp", "EventId", "Host", "ExtremelyLongColumnHeaderName", "CommandLine"]
+UI_COLUMNS = "() => __winnow.S.sources.find((s) => s.id === __winnow.S.sourceId).columns.map((c) => c.name)"
 
 
 def _payload(event_id):
@@ -29,8 +29,9 @@ def _payload(event_id):
 
 @pytest.fixture
 def two_filters(page, api):
-    a = api("/api/saved_filters", "POST", {"name": "rows probe A", "col_names": UI_COLUMNS, "payload": _payload("4624")})
-    b = api("/api/saved_filters", "POST", {"name": "rows probe B", "col_names": UI_COLUMNS, "payload": _payload("4625")})
+    cols = page.evaluate(UI_COLUMNS)
+    a = api("/api/saved_filters", "POST", {"name": "rows probe A", "col_names": cols, "payload": _payload("4624")})
+    b = api("/api/saved_filters", "POST", {"name": "rows probe B", "col_names": cols, "payload": _payload("4625")})
     page.evaluate("() => __winnow.loadSavedFilters()")
     yield a, b
     page.evaluate("() => { if (!document.getElementById('modal').hidden) __winnow.closeModal(); }")

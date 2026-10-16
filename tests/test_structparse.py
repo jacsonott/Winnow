@@ -103,6 +103,15 @@ def test_half_a_character_in_json_comes_out_as_text_sqlite_can_store():
     assert sp._extract_json('{"e": "\\ud83d\\ude00"}', {"path": "$.e"}, {}) == "\U0001F600"
 
 
+def test_an_extracted_object_keeps_its_characters():
+    """An object or array comes out as JSON text, with its characters as
+    the data has them rather than as \\u escapes: `"José"`, not
+    `"Jos\\u00e9"`, which is not what a filter or a reader is looking for."""
+    cell = '{"user": {"name": "José", "groups": ["Администраторы"]}}'
+    assert sp._extract_json(cell, {"path": "$.user"}, {}) == '{"name": "José", "groups": ["Администраторы"]}'
+    assert sp._extract_json(cell, {"path": "$.user.groups"}, {}) == '["Администраторы"]'
+
+
 def test_xml_that_cannot_be_encoded_is_not_xml():
     assert sp._extract_xml("<a>\ud800</a>", {"path": "a"}, {}) is None
 
@@ -216,10 +225,14 @@ def test_discover_paths_names_evtx_data_elements_after_their_name_attribute():
 def test_discovered_paths_all_extract():
     """Whatever discovery offers has to be addressable — a path in the
     picker that extracts nothing would build a column of NULLs."""
-    for row in sp.discover_paths([EVTX], "xml"):
+    xml = sp.discover_paths([EVTX], "xml")
+    assert xml, "discovery offered no XML path, so there was nothing to check"
+    for row in xml:
         assert sp._extract_xml(EVTX, {"path": row["path"]}, {}) is not None, row["path"]
     doc = json.dumps(DOC)
-    for row in sp.discover_paths([doc], "json"):
+    paths = sp.discover_paths([doc], "json")
+    assert paths, "discovery offered no JSON path, so there was nothing to check"
+    for row in paths:
         assert sp._extract_json(doc, {"path": row["path"]}, {}) is not None, row["path"]
 
 

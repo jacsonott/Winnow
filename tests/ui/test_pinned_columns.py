@@ -294,6 +294,8 @@ def test_the_line_number_says_which_rows_the_rectangle_covers(page, layout_saved
           .map((r) => [Number(r.dataset.pos),
                        r.querySelector('.gutter').classList.contains('gutter-in-range')])
           .filter(([p]) => p >= 1 && p <= 8)""")
+        # All eight there to be read: a loop over no rows passes.
+        assert sorted(pos for pos, _ in marked) == list(range(1, 9)), marked
         for pos, inRange in marked:
             assert inRange == (3 <= pos <= 6), (pos, inRange, marked)
     finally:
