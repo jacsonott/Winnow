@@ -76,10 +76,7 @@ def test_autofit_leaves_room_for_the_header_name(page):
     under a long header came out with the header ellipsised — the column was
     fitted to its content and became unidentifiable.
     """
-    page.click("#body")
-    page.keyboard.press("=")
-    page.wait_for_function("() => !document.querySelector('.busy-bar:not([hidden])')")
-    page.wait_for_timeout(400)
+    _autofit(page)
     for col in _columns(page):
         assert col["labelHas"] >= col["labelNeeds"], (
             f"{col['col']}: header needs {col['labelNeeds']}px, got {col['labelHas']}px — "
