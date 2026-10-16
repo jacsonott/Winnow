@@ -268,10 +268,11 @@ def test_matching_saved_filters_ring_the_button_instead_of_a_banner(page):
     assert page.locator("#presetBanner").count() == 0
 
     # ui.csv's columns match no shipped filter — inject one client-side so
-    # the test never writes to the workspace on disk.
+    # the test never writes to the workspace on disk. Its columns are read
+    # off the open table, so a column added to the fixture can't unmatch it.
     page.evaluate("""() => {
       __winnow.S.savedFilters.push({ id: 9902, name: 'ui fixture filter',
-        col_names: ['Timestamp', 'EventId', 'Host', 'ExtremelyLongColumnHeaderName', 'CommandLine'],
+        col_names: __winnow.S.sources.find((s) => s.id === __winnow.S.sourceId).columns.map((c) => c.name),
         payload: { filter_tree: { type: 'group', op: 'AND', children: [
           { type: 'cond', column: 'EventId', op: 'in', value: ['4624'] }] },
           search: '', search_mode: 'contains', search_terms: [] } });
