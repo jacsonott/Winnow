@@ -681,7 +681,16 @@ something up (a plugin's routes, a cache) fails in whichever shard it
 leads. Wait for what you assert on (`wait_for_selector`,
 `wait_for_function`) rather than looking once with `is_visible()` right
 after waiting on something else — test_firstlast_state.py had exactly that.
-The other consequence: every module in a shard shares that server's case,
+The same goes for a fixed `wait_for_timeout` before an assert: conftest has
+waits for the usual signals (`until` for Python-side state, `painted`,
+`view_rebuilt`, `copied`, `tag_written` and the rest), and
+tests/test_ui_test_hygiene.py fails a fixed wait that goes straight into an
+assert unless a comment on it says why (a check that something did NOT
+happen has nothing else to wait for). A test that needs a browser context
+of its own takes `own_page`, which seeds the same first-run state and fails
+on an uncaught JS error as `page` does; one that needs a server of its own
+starts it with tests/spawn.py, which keeps it out of the developer's real
+workspace. The other consequence: every module in a shard shares that server's case,
 so what one leaves behind is the next one's starting state. The autouse
 `case_left_as_found` fixture (tests/ui/conftest.py) snapshots the case's
 tables, tags and tagged rows, derived columns, merges, dashboards, plugin
