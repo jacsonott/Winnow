@@ -5,7 +5,7 @@ progress, and armOpCancel.
 import { $, api, el, post, toast } from './core.js';
 import { markDashboardStale } from './dashboard.js';
 import { clientLog } from './errlog.js';
-import { offerTimestampColumns } from './derived.js';
+import { offerTimestampColumns, refreshAfterDerive } from './derived.js';
 import { updateSearchHint } from './filters.js';
 import { scanWatchlistForSources, watchlistScanRunning } from './watchlist.js';
 import { loadSources } from './sources.js';
@@ -289,11 +289,10 @@ export async function pollJobs() {
       batchNavigated = true;
       try { await loadSources(landed[0].source_ids[0]); } catch {}
     } else if (finishedNow.some((j) => j.status === 'done'
-        // A derive that failed has changed the table too: its column was
-        // removed, put back as it was, or marked failed with its values
-        // cleared (Store._fail_derive_backfill). Without this the header
-        // went on saying "(building…)" over whatever the server now holds.
-        || (j.kind === 'derive' && j.status === 'error'))) {
+        // A derive that failed or was cancelled has changed the table too:
+        // its column was removed, put back as it was, or marked failed
+        // with its values cleared (Store._fail_derive_backfill).
+        || j.kind === 'derive')) {
       // navigate:false — a finished import refreshes the tab strip, the
       // sidebar and the dashboards, but never takes the analyst somewhere
       // they didn't ask to go (see loadSources). The setting above is the
@@ -304,6 +303,11 @@ export async function pollJobs() {
       // re-select side effects (same reasoning as the Tables modal poll).
       try { await refreshSourcesQuietly(); } catch {}
     }
+    // That refresh leaves a live grid alone on purpose, so the table a
+    // derive ran on is brought up to date separately: its header still
+    // says "(building…)" and its cached rows predate the values.
+    const derives = finishedNow.filter((j) => j.kind === 'derive');
+    if (derives.length) { try { await refreshAfterDerive(derives); } catch {} }
     // Rows just arrived, so every number on an open dashboard was worked
     // out before them. The board is only told when it LOADS otherwise,
     // which for an analyst who opened it to watch the import land is never.
