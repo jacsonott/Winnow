@@ -20,7 +20,9 @@ def test_row_as_json_prefills_every_column_and_lands_in_the_grid(page):
     page.wait_for_timeout(200)
     assert page.locator(".derived-name").input_value() == "Row as JSON"
     chips = [c.replace("✕", "").strip() for c in page.locator(".derived-columns .fb-groupby-chip").all_inner_texts()]
-    assert chips == ["Timestamp", "EventId", "ExtremelyLongColumnHeaderName", "CommandLine"]   # all but Host
+    others = page.evaluate("() => __winnow.S.columns.map((c) => c.name).filter((n) => n !== 'Host')")
+    assert "ExtremelyLongColumnHeaderName" in others
+    assert chips == others   # every column but Host, in the table's order
     cb = page.locator("#modalBody .derived-param-bool input[type=checkbox]")
     assert cb.count() == 1 and not cb.is_checked()
     # The preview shows a JSON object with the parse column first
@@ -32,7 +34,7 @@ def test_row_as_json_prefills_every_column_and_lands_in_the_grid(page):
     page.locator("#modalBody button", has_text="Add column").click()
     page.wait_for_function("() => __winnow.S.columns.some((c) => c.name === 'Row as JSON')", timeout=30_000)
     try:
-        _assert_grid_value(page)
+        _assert_grid_value(page, ["Host"] + [c for c in others if c != "ExtremelyLongColumnHeaderName"])
     finally:
         # The shared table's header set must be left as found: a derived
         # column that stays changes it, and the saved-filter ring test
@@ -45,7 +47,7 @@ def test_row_as_json_prefills_every_column_and_lands_in_the_grid(page):
         page.wait_for_function("() => !__winnow.S.columns.some((c) => c.name === 'Row as JSON')", timeout=15_000)
 
 
-def _assert_grid_value(page):
+def _assert_grid_value(page, keys):
     # The backfill is a job: poll the first row through the rows API (cells
     # are in S.columns order) until the new column has its value.
     cell = ""
@@ -58,6 +60,6 @@ def _assert_grid_value(page):
             break
         page.wait_for_timeout(200)
     obj = json.loads(cell)
-    assert list(obj) == ["Host", "Timestamp", "EventId", "CommandLine"]
+    assert list(obj) == keys
     assert obj["EventId"] in (4624, 4625, 4688, 1) and isinstance(obj["EventId"], int)
     assert obj["Host"].startswith("H")
