@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import pytest
 
+from spawn import running_server
+
 pytestmark = pytest.mark.ui
 
 
@@ -43,3 +45,32 @@ def test_no_rows_collapses_the_panel_to_a_sentence(page):
         page.locator('.fcell input[data-col="Host"]').fill("")
         page.keyboard.press("Enter")
         page.evaluate("() => { __winnow.toggleHistogram(false); localStorage.removeItem('winnow.histogram'); }")
+
+
+@pytest.fixture
+def own_server(tmp_path):
+    """Its own case: the test below closes the only tab, which the shared
+    case's other modules would open to find gone."""
+    csv_path = tmp_path / "a.csv"
+    csv_path.write_text("When,Host\n" + "".join(f"2020-01-01 08:{i:02d}:00,H{i}\n" for i in range(30)),
+                        encoding="utf-8")
+    with running_server(tmp_path, "--case", tmp_path / "case.db", "--open", csv_path, "--no-fts",
+                        env={"WINNOW_IDLE_EXIT_S": "600", "WINNOW_NEVER_CONNECTED_EXIT_S": "600"},
+                        cwd=tmp_path, ready="/api/sources") as srv:
+        yield srv
+
+
+def test_closing_the_last_tab_takes_its_chart_with_it(own_page, own_server):
+    """No table is open, so there is no view, and no view change to redraw
+    on: the strip went on charting the table whose tab had just closed."""
+    with own_page(base=own_server.base, viewport=(1400, 900)) as page:
+        page.evaluate("() => __winnow.toggleHistogram(true)")
+        page.wait_for_function(
+            "() => document.querySelector('#histogramPanel .th-info').textContent.startsWith('30 rows')",
+            timeout=15_000)
+        page.locator("#sourceTabs .tab .x").click()
+        page.wait_for_function("() => __winnow.S.sourceId === null")
+        page.wait_for_selector("#histogramPanel .th-empty", state="visible", timeout=10_000)
+        assert page.locator("#histogramPanel .th-empty").inner_text() == "Open a table to chart when its rows happened."
+        assert page.locator("#histogramPanel .th-info").inner_text() == ""
+        assert page.locator("#histogramPanel canvas.th-canvas").is_hidden()

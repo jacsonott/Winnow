@@ -10,6 +10,7 @@ import { hideDetailPane, syncRowOpenHint } from './detail.js';
 import { currentSpec, renderAdvancedChips, setSearchMode, updateSearchHint } from './filters.js';
 import { clearPageCache, headH, rScroll, render, rowAt, spacerPx } from './grid.js';
 import { closeAllGroupViews, drawRail, dropGrouping, regroupAll, renderGroupStrip, setGrouping } from './grouping.js';
+import { refreshHistogram } from './histogram.js';
 import { shutdownWinnow } from './home.js';
 import { openImportModal } from './importer.js';
 import { keyLabel } from './keymap.js';
@@ -826,6 +827,10 @@ export async function loadSources(select, { navigate = true, openOpts = undefine
     // case) never reaches renderHead, so the strip stayed an 18px dashed
     // stub until a table opened.
     renderGroupStrip();
+    // No view landed, so no winnow:viewchange either — the histogram strip
+    // kept charting the table that just went (or the previous case's)
+    // until another table opened.
+    refreshHistogram();
   }
 }
 

@@ -10,6 +10,8 @@ test_notes_page_rows.py drives resetNotes() instead).
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from spawn import running_server
@@ -20,7 +22,8 @@ pytestmark = pytest.mark.ui
 @pytest.fixture
 def own_server(tmp_path):
     csv_path = tmp_path / "a.csv"
-    csv_path.write_text("Host,Cmd\n" + "".join(f"H{i},cmd{i}\n" for i in range(30)), encoding="utf-8")
+    csv_path.write_text("When,Host,Cmd\n" + "".join(f"2020-01-01 08:{i:02d}:00,H{i},cmd{i}\n" for i in range(30)),
+                        encoding="utf-8")
     with running_server(tmp_path, "--case", tmp_path / "caseA.db", "--open", csv_path, "--no-fts",
                         env={"WINNOW_IDLE_EXIT_S": "600", "WINNOW_NEVER_CONNECTED_EXIT_S": "600"},
                         cwd=tmp_path, ready="/api/sources") as srv:
@@ -97,5 +100,79 @@ def test_a_query_still_running_does_not_land_in_the_next_case(case_page, own_ser
         assert "stale_col" not in page.locator("#sqlResult").inner_text()
         assert page.evaluate("() => [...__winnow.S.sqlResults.keys()]") == []
         assert page.evaluate("() => __winnow.busyCount") == 0
+    finally:
+        page.unroute(pattern)
+
+
+def _strip(page):
+    """What the histogram strip says: its count line, and the one-line
+    empty state when that is what it is showing instead of a chart."""
+    return page.evaluate("""() => {
+      const info = document.querySelector('#histogramPanel .th-info');
+      const empty = document.querySelector('#histogramPanel .th-empty');
+      return { info: info.textContent, empty: empty.hidden ? null : empty.textContent };
+    }""")
+
+
+def _open_strip(page, rows):
+    page.evaluate("() => __winnow.toggleHistogram(true)")
+    page.wait_for_function(
+        "(n) => document.querySelector('#histogramPanel .th-info').textContent.startsWith(n + ' rows')",
+        arg=str(rows), timeout=15_000)
+
+
+def test_a_case_with_no_table_does_not_keep_the_last_cases_histogram(case_page, own_server):
+    """With the strip open, opening another case left the previous case's
+    chart up — its bars and its row count — until something rebuilt the
+    view. The strip only redrew on a view change, and a case that opens on
+    no table (a new one, or one with every tab closed) never builds one."""
+    page = case_page
+    _open_strip(page, 30)
+
+    case_b = str(own_server["dir"] / "caseB.db-winnow")
+    own_server["post"]("/api/cases", {"path": case_b, "name": "Empty B", "group": "", "notes": ""})
+    page.evaluate("(p) => __winnow.openCase(p)", case_b)
+    page.wait_for_function("() => __winnow.S.sources.length === 0")
+
+    page.wait_for_selector("#histogramPanel .th-empty", state="visible", timeout=10_000)
+    assert _strip(page) == {"info": "", "empty": "Open a table to chart when its rows happened."}
+    assert page.locator("#histogramPanel canvas.th-canvas").is_hidden()
+    assert page.evaluate("() => __winnow.histogramData()") is None
+
+
+def test_the_last_cases_histogram_is_gone_before_the_new_cases_view_lands(case_page, own_server, until):
+    """The same report on a case that has tables: the old chart stayed up
+    for as long as the new case's first view took to build, which on a
+    large case is long enough to read as stuck. The build is held here so
+    that window lasts as long as the test needs."""
+    page = case_page
+    case_a = str(own_server["dir"] / "caseA.db")
+    case_b = str(own_server["dir"] / "caseB.db-winnow")
+    own_server["post"]("/api/cases", {"path": case_b, "name": "B", "group": "", "notes": ""})
+    page.evaluate("(p) => __winnow.openCase(p)", case_b)
+    page.wait_for_function("() => __winnow.S.sources.length === 0")
+    csv_b = own_server["dir"] / "b.csv"
+    csv_b.write_text("When,Host\n" + "".join(f"2024-06-0{d} 12:00:00,B{d}\n" for d in range(1, 8)),
+                     encoding="utf-8")
+    own_server["post"]("/api/ingest/path", {"path": str(csv_b), "build_fts": False})
+    page.evaluate("(p) => __winnow.openCase(p)", case_a)
+    page.wait_for_function("() => __winnow.S.sources.length === 1 && __winnow.S.sources[0].row_count === 30")
+    _open_strip(page, 30)
+
+    held = []
+    pattern = re.compile(r".*/api/view$")
+    page.route(pattern, lambda route: held.append(route) if not held else route.continue_())
+    try:
+        # Not awaited: openCase is waiting on the build held below.
+        page.evaluate("(p) => { __winnow.openCase(p); }", case_b)
+        until(page, lambda: held, "case B's first view build held")
+        assert _strip(page) == {"info": "", "empty": "Loading…"}
+        assert page.evaluate("() => __winnow.histogramData()") is None
+
+        held[0].continue_()
+        page.wait_for_function(
+            "() => document.querySelector('#histogramPanel .th-info').textContent.startsWith('7 rows')",
+            timeout=15_000)
+        assert page.evaluate("() => __winnow.histogramData().total") == 7
     finally:
         page.unroute(pattern)
