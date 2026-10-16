@@ -212,7 +212,12 @@ export function wireSqlAssist() {
 
   // ---- autocomplete
   ta.addEventListener('input', () => acRefresh(ta));
-  ta.addEventListener('blur', () => setTimeout(acHide, 150));
+  // Hidden a beat after the editor loses focus, and only if it is still
+  // away by then: back in the editor and typing within that beat (Run,
+  // then straight back to the query), the dropdown on screen is the one
+  // for the word being typed now, and hiding it left nothing until the
+  // next keystroke.
+  ta.addEventListener('blur', () => setTimeout(() => { if (document.activeElement !== ta) acHide(); }, 150));
   ta.addEventListener('click', acHide);
   ta.addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key === ' ') {
