@@ -51,6 +51,10 @@ def test_cell_text_conversions():
     assert xlsxread.cell_text(datetime.date(2024, 5, 2)) == "2024-05-02"
     assert xlsxread.cell_text(datetime.time(9, 30, 5)) == "09:30:05"
     assert xlsxread.cell_text(datetime.timedelta(hours=26, minutes=3, seconds=4)) == "26:03:04"
+    # On the hour, and past a hundred: the hours are whole hours, however many.
+    assert xlsxread.cell_text(datetime.timedelta(hours=1)) == "1:00:00"
+    assert xlsxread.cell_text(datetime.timedelta(minutes=59, seconds=59)) == "0:59:59"
+    assert xlsxread.cell_text(datetime.timedelta(hours=100)) == "100:00:00"
 
 
 def test_reader_rows_dates_and_gaps(write_xlsx):

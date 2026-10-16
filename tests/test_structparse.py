@@ -103,6 +103,15 @@ def test_half_a_character_in_json_comes_out_as_text_sqlite_can_store():
     assert sp._extract_json('{"e": "\\ud83d\\ude00"}', {"path": "$.e"}, {}) == "\U0001F600"
 
 
+def test_an_extracted_object_keeps_its_characters():
+    """An object or array comes out as JSON text, with its characters as
+    the data has them rather than as \\u escapes: `"José"`, not
+    `"Jos\\u00e9"`, which is not what a filter or a reader is looking for."""
+    cell = '{"user": {"name": "José", "groups": ["Администраторы"]}}'
+    assert sp._extract_json(cell, {"path": "$.user"}, {}) == '{"name": "José", "groups": ["Администраторы"]}'
+    assert sp._extract_json(cell, {"path": "$.user.groups"}, {}) == '["Администраторы"]'
+
+
 def test_xml_that_cannot_be_encoded_is_not_xml():
     assert sp._extract_xml("<a>\ud800</a>", {"path": "a"}, {}) is None
 

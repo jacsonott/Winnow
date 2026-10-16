@@ -268,3 +268,27 @@ def test_a_lone_surrogate_in_an_event_does_not_stop_the_import(store, tmp_path):
     row = store.fetch_rows(v["view_id"], 2, 1)["rows"][0]["cells"]
     assert "OS:/tmp/evil\\udc80.txt" in row
     assert json.loads(row[-1])["note"] == "\udc81"        # Attributes stays valid JSON
+
+
+def test_the_attributes_cell_keeps_its_characters(store, tmp_path):
+    """Attributes holds what Plaso extracted that has no column of its
+    own, as JSON. A non-ASCII value is written as itself, so a search for
+    the name an analyst can see finds it."""
+    path = str(tmp_path / "u.plaso")
+    make_old_plaso(path)
+    db = sqlite3.connect(path)
+    db.execute("INSERT INTO event_data(_data) VALUES (?)", (_zc({
+        "__container_type__": "event_data", "__type__": "AttributeContainer",
+        "data_type": "fs:stat", "parser": "filestat", "display_name": "OS:/tmp/r.docx",
+        "filename": "/tmp/r.docx", "owner": "José", "group": "Администраторы"}),))
+    db.execute("INSERT INTO event(_timestamp, _data) VALUES (?,?)", (1_700_000_180_000_000, _zc({
+        "__container_type__": "event", "__type__": "AttributeContainer",
+        "timestamp": 1_700_000_180_000_000, "timestamp_desc": "Creation Time",
+        "_event_data_row_identifier": 3})))
+    db.commit()
+    db.close()
+
+    rec = store.ingest_plaso(path, build_fts=False)
+    v = store.build_view(rec["id"], {"source_id": rec["id"]})
+    attributes = store.fetch_rows(v["view_id"], 2, 1)["rows"][0]["cells"][-1]
+    assert '"owner": "José"' in attributes and '"group": "Администраторы"' in attributes
