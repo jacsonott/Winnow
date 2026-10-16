@@ -266,6 +266,169 @@ export function appendXmlNodes(container, node, path, indent) {
   container.append('>\n');
 }
 
+/* ------------------ documents JSON.parse refuses
+
+   A value that isn't one strict JSON document can still hold one, or
+   something built the same way:
+
+   - Python's repr of a list or dict, `[{'Name': 'UserAgent', 'Value':
+     'Mozilla/5.0'}]` — single quotes, None/True/False — which is what a
+     pipeline that went through Python on its way to a CSV leaves behind;
+   - JSON a lax exporter wrote: a raw newline or tab inside a string, an
+     unescaped backslash in a Windows path, NaN, a trailing comma;
+   - a document inside other text: a log line's `[INFO] {...}`, a wrapper
+     (`[ctx {...}]`), a note after it, two run together.
+
+   JSON.parse refuses every one, so the pane showed each as a single
+   unbroken line. This parser only finds the structure (brackets, strings,
+   separators and a short list of bare words) and every token is shown as
+   the cell writes it, never decoded and re-encoded: text selected in the
+   layout still matches what a contains-filter searches for, and a 64-bit
+   integer keeps all its digits.
+
+   None of it carries a path. structparse.load_json reads a cell only when
+   all of it is one strict JSON document, so "Add as a column" on a node
+   here would fill the column with nothing on every row, the same reason
+   the unparseable-XML fallback isn't addressable either. */
+
+// A hostile value must not turn a cursor move into a hang. Every `[` or
+// `{` is a candidate and a failed one is retried a character later, so a
+// long run of `[` would cost its length times the nesting depth; the
+// budget counts every character and token the parser looks at, across all
+// candidates, and past it the rest of the value is shown as text.
+export const LOOSE_SCAN_BUDGET = 2000000;
+export const LOOSE_MAX_DEPTH = 256;
+
+const LOOSE_CLOSERS = { '[': ']', '{': '}', '(': ')' };
+const LOOSE_WORDS = {
+  true: 'jtok-bool', false: 'jtok-bool', True: 'jtok-bool', False: 'jtok-bool',
+  null: 'jtok-null', None: 'jtok-null',
+  NaN: 'jtok-num', Infinity: 'jtok-num', '-Infinity': 'jtok-num',
+  nan: 'jtok-num', inf: 'jtok-num', '-inf': 'jtok-num',
+};
+const LOOSE_NUMBER = /[-+]?(?:0[xX][\da-fA-F_]+|(?:\d[\d_]*(?:\.[\d_]*)?|\.\d[\d_]*)(?:[eE][-+]?\d+)?j?)/y;
+const LOOSE_WORD = /-?[A-Za-z_]\w*/y;
+const LOOSE_STRING_PREFIX = /[rRbBuU]{0,2}(?=["'])/y;
+
+function looseSkipSpace(p) {
+  while (p.i < p.s.length && ' \t\r\n'.includes(p.s[p.i])) { p.i++; p.budget--; }
+}
+
+/* One value at p.i: { leaf: tokenClass, text } or a container. null when
+   what's there isn't one, with p.i somewhere past it. */
+function looseValue(p, depth) {
+  looseSkipSpace(p);
+  if (p.i >= p.s.length || --p.budget < 0) return null;
+  if (LOOSE_CLOSERS[p.s[p.i]]) return depth < LOOSE_MAX_DEPTH ? looseContainer(p, depth + 1) : null;
+  const start = p.i;
+  LOOSE_STRING_PREFIX.lastIndex = start;
+  if (LOOSE_STRING_PREFIX.test(p.s)) {
+    const open = LOOSE_STRING_PREFIX.lastIndex;
+    const quote = p.s[open];
+    for (let j = open + 1; j < p.s.length && --p.budget >= 0; j++) {
+      if (p.s[j] === '\\') j++;
+      else if (p.s[j] === quote) { p.i = j + 1; return { leaf: 'jtok-str', text: p.s.slice(start, p.i) }; }
+    }
+    return null;
+  }
+  for (const [re, cls] of [[LOOSE_NUMBER, 'jtok-num'], [LOOSE_WORD, null]]) {
+    re.lastIndex = start;
+    const m = re.exec(p.s);
+    if (!m || /\w/.test(p.s[re.lastIndex] || '')) continue;
+    const tokenClass = cls || LOOSE_WORDS[m[0]];
+    if (!tokenClass) return null;
+    p.i = re.lastIndex;
+    return { leaf: tokenClass, text: m[0] };
+  }
+  return null;
+}
+
+/* A list, tuple or set ({ open, close, items }) or a dict/object
+   ({ open, close, entries: [[keyText, value], ...] }), opening at p.i.
+   A `{` is a dict if its first element is followed by `:`. */
+function looseContainer(p, depth) {
+  const open = p.s[p.i];
+  const close = LOOSE_CLOSERS[open];
+  p.i++;
+  const items = [];
+  const entries = [];
+  for (;;) {
+    looseSkipSpace(p);
+    if (p.s[p.i] === close) { p.i++; break; }
+    const keyStart = p.i;
+    const value = looseValue(p, depth);
+    if (!value) return null;
+    const keyText = p.s.slice(keyStart, p.i);
+    looseSkipSpace(p);
+    if (open === '{' && !items.length && p.s[p.i] === ':') {
+      p.i++;
+      const entry = looseValue(p, depth);
+      if (!entry) return null;
+      entries.push([keyText, entry]);
+      looseSkipSpace(p);
+    } else if (entries.length) {
+      return null;
+    } else {
+      items.push(value);
+    }
+    if (p.s[p.i] === ',') { p.i++; continue; }
+    if (p.s[p.i] === close) { p.i++; break; }
+    return null;
+  }
+  return entries.length ? { open, close, entries } : { open, close, items };
+}
+
+/* JSON.parse takes the `[0]` of `items[0]`, and `{}` and `[{}]` are
+   documents too, but none of them is worth turning one line into five.
+   Worth laying out: a dict with an entry, or a list holding a non-empty
+   dict or list. */
+export function looseWorthShowing(node) {
+  if (node.entries) return true;
+  return node.items.some((n) => !n.leaf && (n.entries || n.items.length));
+}
+
+/* Every document in `s`, in order and never overlapping, as
+   { start, end, node }. A candidate that doesn't parse (the `[INFO]`, or a
+   wrapper with words inside it) is passed over one character at a time,
+   so the document inside a failed wrapper is still found. A `(` is never
+   a candidate on its own, since prose is full of them, but a tuple inside
+   a list or dict reads as one. */
+export function findLooseDocuments(s) {
+  const docs = [];
+  const p = { s, i: 0, budget: LOOSE_SCAN_BUDGET };
+  for (let i = 0; i < s.length && p.budget > 0; i++) {
+    if (s[i] !== '[' && s[i] !== '{') continue;
+    p.i = i;
+    const node = looseContainer(p, 1);
+    if (!node || !looseWorthShowing(node)) continue;
+    docs.push({ start: i, end: p.i, node });
+    i = p.i - 1;
+  }
+  return docs;
+}
+
+export function appendLooseNodes(container, node, indent) {
+  if (node.leaf) { container.append(el('span', node.leaf, node.text)); return; }
+  const parts = node.entries || node.items;
+  if (!parts.length) { container.append(node.open + node.close); return; }
+  const pad = '  '.repeat(indent);
+  const padIn = '  '.repeat(indent + 1);
+  container.append(node.open + '\n');
+  parts.forEach((part, i) => {
+    container.append(padIn);
+    if (node.entries) {
+      container.append(el('span', 'jtok-key', part[0]), ': ');
+      appendLooseNodes(container, part[1], indent + 1);
+    } else {
+      appendLooseNodes(container, part, indent + 1);
+    }
+    // A one-element tuple keeps the comma that makes it a tuple.
+    const more = i < parts.length - 1 || (node.open === '(' && parts.length === 1);
+    container.append(more ? ',\n' : '\n');
+  });
+  container.append(pad + node.close);
+}
+
 export function renderDetailContent(v) {
   const json = tryParseJSON(v);
   if (json !== null && typeof json === 'object') {
@@ -296,6 +459,18 @@ export function renderDetailContent(v) {
       appendXmlHighlighted(pre, prettyXml(v));
       return pre;
     } catch { /* malformed fragment — fall through to plain text */ }
+  }
+  const docs = findLooseDocuments(v);
+  if (docs.length) {
+    const pre = el('pre', 'detail-pretty');
+    let at = 0;
+    for (const d of docs) {
+      pre.append(v.slice(at, d.start));
+      appendLooseNodes(pre, d.node, 0);
+      at = d.end;
+    }
+    pre.append(v.slice(at));
+    return pre;
   }
   return document.createTextNode(v);
 }

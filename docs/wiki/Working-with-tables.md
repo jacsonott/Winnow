@@ -117,6 +117,8 @@ JSON and XML values are pretty-printed as an indented tree. Right-click a node i
 | **Copy value** / **Copy path** | Copies the value, or the path to the node |
 | **Flatten this document into columns…** | Opens the flatten dialog for the column. Not available on a merge. |
 
+Values that are nearly JSON are laid out the same way: Python-style lists and dicts (`[{'Name': 'UserAgent', 'Value': 'Mozilla/5.0'}]`), JSON with a raw line break or an unescaped backslash in a string, and a document inside other text, such as a log line's `[INFO] {...}`. Each token is shown exactly as the cell writes it. These nodes have no menu of their own, because **Add as a column** needs the whole value to be one valid JSON document; select text in them instead.
+
 Select some text in a field and right-click it to **Copy** it, filter the column to rows containing it (**Filter *column* to *text***, or **… only** to drop every other filter), **Exclude** it, or **Search all columns for** it.
 
 Hover over a field to show its ⧉ button, which copies that field as displayed (in its chosen timestamp format, for example). **Copy row** at the top copies the whole row as `name: value` lines. ⬒ docks the pane to the right or the bottom, and you can drag the divider to resize it. The **Note** box at the bottom saves as you type; see [Tagging and notes](Tagging-and-notes.md).
