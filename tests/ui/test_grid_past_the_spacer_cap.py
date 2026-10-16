@@ -116,9 +116,13 @@ def test_the_scrollbar_reaches_the_last_row(page, tall_view):
     # Its neighbours run on without a hole, so nothing was skipped to get here.
     assert [p for p, _ in seen["rows"]] == list(range(seen["rows"][0][0], N))
     # The spacer stayed under the cap: past it is where the browser stops
-    # growing the element and the tail becomes unreachable.
-    assert page.evaluate("() => document.getElementById('body').scrollHeight"
-                         " <= __winnow.MAX_SPACER_PX + __winnow.headH()")
+    # growing the element and the tail becomes unreachable. Uncapped, this
+    # view's spacer would be 60M px, which the browser clamps at about 33.5M.
+    # A viewport of slack: the header's height and the rows' fractional
+    # placement round differently with different fonts.
+    height = page.evaluate("() => { const b = document.getElementById('body');"
+                           " return [b.scrollHeight, __winnow.MAX_SPACER_PX + b.clientHeight]; }")
+    assert height[0] <= height[1], height
 
 
 def test_halfway_down_the_scrollbar_is_halfway_down_the_view(page, tall_view):

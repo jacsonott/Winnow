@@ -48,13 +48,18 @@ def test_a_blank_row_is_as_tall_as_any_other(page):
 
 def test_the_last_row_of_a_mostly_blank_result_can_be_scrolled_to(page):
     _run(page, SPARSE)
-    box = page.locator("#sqlResult td").first.bounding_box()
-    page.mouse.move(box["x"] + 5, box["y"] + 5)
+    # The scroller, measured in one call: a row cell found in one round trip
+    # can be repainted away before the next measures it.
+    at = page.evaluate("() => { const b = document.querySelector('#sqlResult .sql-result-scroll')"
+                       ".getBoundingClientRect(); return [b.x + b.width / 2, b.y + b.height / 2]; }")
+    page.mouse.move(*at)
     page.mouse.wheel(0, 10 ** 8)
+    # Waited for with its text: the row is painted empty while its page of
+    # rows is still being fetched, so a row that is merely there can still
+    # read blank.
     page.wait_for_function(
-        "() => document.querySelector('#sqlResult tbody tr[data-i=\"19999\"]')")
+        "() => document.querySelector('#sqlResult tbody tr[data-i=\"19999\"] td')?.textContent === '20000'")
     last = page.locator('#sqlResult tbody tr[data-i="19999"]')
-    assert last.locator("td").first.inner_text() == "20000"
     # On screen, inside the scroller — not merely in the DOM below it.
     row = last.bounding_box()
     pane = page.locator(".sql-result-scroll").bounding_box()
