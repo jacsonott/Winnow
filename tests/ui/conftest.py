@@ -155,8 +155,9 @@ def pytest_runtest_makereport(item, call):
 
 @pytest.fixture(scope="session")
 def server(tmp_path_factory, ui_csv):
-    """One server for the whole UI session — startup is ~1s and none of these
-    tests mutate the case in a way another test reads. Uses its own tmp case
+    """One server for the whole UI session — startup is ~1s. Every module
+    shares its case, so each one leaves the case as it found it, and
+    case_left_as_found below holds them to that. Uses its own tmp case
     file, like every other test in the suite."""
     global _server_log
     port = _free_port()
@@ -222,6 +223,22 @@ def server_post(server):
     return _post
 
 
+@pytest.fixture
+def restore_plugin_overrides(server, server_post):
+    """For a test that applies a profile: applying gives every plugin an
+    explicit on/off override for this case, which every later module in
+    the shard would inherit. Puts back the override each plugin had."""
+    def overrides():
+        with urllib.request.urlopen(server.rstrip("/") + "/api/plugins", timeout=10) as r:
+            return {p["fs_name"]: p["case_override"] for p in json.loads(r.read())["plugins"]}
+    before = overrides()
+    yield
+    scope = {None: "follow_case", True: "on_case", False: "off_case"}
+    for name, now in overrides().items():
+        if now != before.get(name):
+            server_post("/api/plugins/toggle", {"fs_name": name, "scope": scope[before.get(name)]})
+
+
 # The bundled tab plugins now restore what they had from the case file
 # (plugin_ui_state, via winnow.tabState), and the case here is shared by
 # the whole session — so one module's grouping would arrive in the next
@@ -236,6 +253,60 @@ def clean_plugin_tab_state(server_post):
     yield
     for key in keys:
         server_post("/api/plugin_state", {"key": key, "payload": None})
+
+
+def _case_state(server):
+    """What one UI module may not leave behind for the next, as a set of
+    labels, so that two snapshots diff into exactly what changed."""
+    def get(route):
+        with urllib.request.urlopen(server.rstrip("/") + route, timeout=30) as r:
+            return json.loads(r.read())
+
+    # An import a module queued is part of what it leaves, even when it is
+    # still running as the module ends.
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline and any(
+            j["status"] in ("queued", "running") for j in get("/api/ingest/jobs")["jobs"]):
+        time.sleep(0.1)
+    tags = {str(t["id"]): t["name"] for t in get("/api/tags")["tags"]}
+    state = {f"tag {name!r}" for name in tags.values()}
+    for src in get("/api/sources"):
+        state.add(f"table {src['name']!r}")
+        for tag_id, n in get(f"/api/tags?source_id={src['id']}")["counts"].items():
+            if n:
+                state.add(f"{n} row(s) of {src['name']!r} tagged {tags.get(tag_id, tag_id)!r}")
+        state |= {f"derived column {d['name']!r} on {src['name']!r}"
+                  for d in get(f"/api/derived?source_id={src['id']}")}
+    for kind, route, key in (("merge", "/api/merges", "name"),
+                             ("folder", "/api/folders", "name"),
+                             ("case variable", "/api/case/variables", "name"),
+                             ("watchlist indicator", "/api/watchlist", "value"),
+                             ("dashboard", "/api/dashboards", "name"),
+                             ("saved filter", "/api/saved_filters", "name"),
+                             ("session file", "/api/sessions", "name")):
+        state |= {f"{kind} {d[key]!r}" for d in get(route)}
+    state |= {f"case session {d['name']!r}" for d in get("/api/case_sessions")["sessions"]}
+    # A plugin left on puts its tab, routes and formats in every later module.
+    state |= {f"plugin {p['fs_name']!r} {'on' if p['enabled'] else 'off'}, case override {p['case_override']!r}"
+              for p in get("/api/plugins")["plugins"]}
+    return state
+
+
+# The server above is shared by every module in a shard, and so is its
+# case. A module that left a table, a tag or a dashboard behind used to
+# surface as a failure in whichever unrelated module the shard dealt next,
+# and only in the full run (#227). This fails the module that leaves it,
+# at its own teardown, wherever the shard puts it.
+@pytest.fixture(autouse=True, scope="module")
+def case_left_as_found(server):
+    before = _case_state(server)
+    yield
+    after = _case_state(server)
+    left, gone = sorted(after - before), sorted(before - after)
+    assert not (left or gone), (
+        "this module changed the case every later module in the shard shares; clean up in a finally:"
+        + "".join(f"\n  left behind: {x}" for x in left)
+        + "".join(f"\n  removed: {x}" for x in gone))
 
 
 # Every shared context is a "first run on this machine" — pre-answer the
@@ -299,13 +370,27 @@ def page(browser, server):
 @pytest.fixture
 def api(page):
     """JSON call against the shared server from inside the page, carrying
-    the CSRF header every non-GET /api/* route requires."""
-    def _api(path, method="GET", body=None):
-        return page.evaluate(
+    the CSRF header every non-GET /api/* route requires.
+
+    A non-2xx answer raises rather than coming back as `{"detail": ...}`.
+    It used to come back, and three modules' cleanup deleted their tables
+    through a route that does not exist: every one of those 404s read as
+    a dict, so the tables stayed in the case every later module shares
+    (#227). A test that means to provoke an error passes `expect=` with
+    the status it wants."""
+    def _api(path, method="GET", body=None, expect=None):
+        status, text = page.evaluate(
             """([path, method, body]) => fetch(path, { method,
                   headers: { 'X-Timeline-Lite-Client': '1', 'Content-Type': 'application/json' },
-                  body: body == null ? undefined : JSON.stringify(body) }).then((r) => r.json())""",
+                  body: body == null ? undefined : JSON.stringify(body) })
+                .then(async (r) => [r.status, await r.text()])""",
             [path, method, body])
+        if expect is None:
+            if not 200 <= status < 300:
+                raise AssertionError(f"{method} {path} -> {status}: {text[:500]}")
+        elif status != expect:
+            raise AssertionError(f"{method} {path} -> {status}, expected {expect}: {text[:500]}")
+        return json.loads(text) if text else None
     return _api
 
 

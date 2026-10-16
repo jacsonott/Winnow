@@ -23,7 +23,10 @@ def gappy(page, server_post, ui_csv):
         page.wait_for_timeout(200)
     sid = page.evaluate("() => __winnow.S.sources.find((s) => s.name === 'gappy.csv').id")
     yield sid
-    page.evaluate("(id) => __winnow.api(`/api/sources/${id}`, { method: 'DELETE' }).catch(() => {})", sid)
+    # /api/source, singular. This went to /api/sources/{id}, which does not
+    # exist, and a .catch swallowed the 404, so gappy.csv stayed in the case
+    # every later module in the shard shares (#227).
+    page.evaluate("(id) => __winnow.api(`/api/source/${id}`, { method: 'DELETE' }).then(() => __winnow.loadSources())", sid)
 
 
 def _open(page, sid):

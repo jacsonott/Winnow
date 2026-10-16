@@ -29,7 +29,7 @@ def test_ctrl_a_selects_every_row_in_the_view(page):
     page.keyboard.press("Escape")
 
 
-def test_tag_key_tags_every_row_a_cell_range_spans(page):
+def test_tag_key_tags_every_row_a_cell_range_spans(page, api):
     """Highlighting cells across four rows and pressing a tag key used to
     tag only the cursor's row — the other three needed a separate row
     selection. The range IS the statement of which rows are meant."""
@@ -38,11 +38,19 @@ def test_tag_key_tags_every_row_a_cell_range_spans(page):
     rows.nth(5).locator(".cell").nth(3).click(modifiers=["Shift"])
     page.wait_for_timeout(150)
     assert page.evaluate("() => __winnow.S.cellRange.r1 - __winnow.S.cellRange.r0") == 3
+    pairs = page.evaluate("() => [2, 3, 4, 5].map((p) => [__winnow.rowAt(p).source_id, __winnow.rowAt(p).rid])")
+    tag_id = page.evaluate("() => __winnow.S.tags.find((t) => String(t.hotkey) === '1').id")
 
-    page.keyboard.press("1")  # the TA hotkey
-    page.wait_for_function(
-        "() => [2, 3, 4, 5].every((p) => (__winnow.rowAt(p) || { tags: [] }).tags.length === 1)")
+    try:
+        page.keyboard.press("1")  # the TA hotkey
+        page.wait_for_function(
+            "() => [2, 3, 4, 5].every((p) => (__winnow.rowAt(p) || { tags: [] }).tags.length === 1)")
 
-    page.keyboard.press("1")  # same range, toggles back off — leaves the case clean
-    page.wait_for_function(
-        "() => [2, 3, 4, 5].every((p) => (__winnow.rowAt(p) || { tags: [] }).tags.length === 0)")
+        page.keyboard.press("1")  # same range, toggles back off
+        page.wait_for_function(
+            "() => [2, 3, 4, 5].every((p) => (__winnow.rowAt(p) || { tags: [] }).tags.length === 0)")
+    finally:
+        # The toggle above is what is under test, so it can't be what
+        # cleans up: a failure between the two presses left four rows tagged
+        # in the case the rest of the shard shares (#227).
+        api("/api/row_tags", "POST", {"pairs": pairs, "tag_id": tag_id, "on": False})

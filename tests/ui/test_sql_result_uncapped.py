@@ -51,8 +51,13 @@ def _scroll_result(page, dy=0, dx=0):
     the way down"."""
     if not dx and not dy:
         dy = 10 ** 8
-    box = page.locator("#sqlResult td").first.bounding_box()
-    page.mouse.move(box["x"] + 5, box["y"] + 5)
+    # Measured in the page, in one call, on the scroller rather than a row
+    # cell: the rows are rebuilt whenever the pane is laid out or a page of
+    # them lands, so a cell looked up in one round trip and measured in the
+    # next could already be gone, and bounding_box() answered None.
+    at = page.evaluate("() => { const b = document.querySelector('#sqlResult .sql-result-scroll')"
+                       ".getBoundingClientRect(); return [b.x + b.width / 2, b.y + b.height / 2]; }")
+    page.mouse.move(*at)
     page.mouse.wheel(dx, dy)
     page.wait_for_timeout(300)
 

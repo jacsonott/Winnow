@@ -55,6 +55,7 @@ def fl_page(browser, server):
     pg.wait_for_selector("[data-zone='groupBy']", timeout=10_000)
     yield pg
     ctx.close()
+    _post(server, "/api/plugins/toggle", {"fs_name": "first_last", "scope": "off_all"})
     assert not errors, "uncaught JS errors: " + " | ".join(errors)
 
 

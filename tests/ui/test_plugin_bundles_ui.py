@@ -44,48 +44,59 @@ def test_save_list_and_delete_a_profile(page):
     page.keyboard.press("Escape")
 
 
-def test_shipped_kape_profile_is_readonly_and_applies(page):
+def test_shipped_kape_profile_is_readonly_and_applies(page, api, restore_plugin_overrides):
     """The shipped KAPE-triage profile shows in the manager with a 'shipped'
     badge and no delete button, and applying it — through the sheet, which
     now stands between the button and the case — loads every widget the
     profile defines (counted from the shipped defaults, so growing the
     dashboard doesn't silently stale this test again)."""
     from winnow import defaults
-    expected = len(next(pr for pr in defaults.profiles() if pr["name"] == "KAPE triage")["dashboard"])
-    page.keyboard.press("p")
-    page.wait_for_selector(".pm-item:has-text('KAPE triage')")
-    page.locator(".pm-item", has_text="KAPE triage").click()
-    # read-only: a shipped badge, no delete control
-    assert page.locator(".pm-item", has_text="KAPE triage").locator(".pm-tag")\
-        .first.inner_text().lower() == "shipped"   # the badge is uppercased by CSS
-    assert page.locator(".pm-head-acts .pm-del").count() == 0
-    apply_btn = page.locator(".pm-foot .btn", has_text="Apply to this case")
-    assert apply_btn.is_enabled()
+    profile = next(pr for pr in defaults.profiles() if pr["name"] == "KAPE triage")
+    expected = len(profile["dashboard"])
+    # Applying adds a dashboard, watchlist indicators and a case variable,
+    # and sets every plugin's override for this case; each goes again in
+    # the finally and restore_plugin_overrides. This used to drop only the
+    # first two, on success only, and the rest stayed for whichever module
+    # came next (#227).
+    dashboards = {d["id"] for d in api("/api/dashboards")}
+    indicators = {i["id"] for i in api("/api/watchlist")}
+    variables = {v["name"] for v in api("/api/case/variables")}
+    try:
+        page.keyboard.press("p")
+        page.wait_for_selector(".pm-item:has-text('KAPE triage')")
+        page.locator(".pm-item", has_text="KAPE triage").click()
+        # read-only: a shipped badge, no delete control
+        assert page.locator(".pm-item", has_text="KAPE triage").locator(".pm-tag")\
+            .first.inner_text().lower() == "shipped"   # the badge is uppercased by CSS
+        assert page.locator(".pm-head-acts .pm-del").count() == 0
+        apply_btn = page.locator(".pm-foot .btn", has_text="Apply to this case")
+        assert apply_btn.is_enabled()
 
-    apply_btn.click()
-    page.wait_for_selector('.ap-part[data-part="boards"]', timeout=15_000)
-    assert f"Create “KAPE triage” ({expected} widgets)" in \
-        page.locator('.ap-part[data-part="boards"]').inner_text()
-    page.locator(".row-actions .btn", has_text="Apply").click()
-    page.wait_for_selector("#modal[hidden]", state="attached", timeout=30_000)
+        apply_btn.click()
+        page.wait_for_selector('.ap-part[data-part="boards"]', timeout=15_000)
+        assert f"Create “KAPE triage” ({expected} widgets)" in \
+            page.locator('.ap-part[data-part="boards"]').inner_text()
+        page.locator(".row-actions .btn", has_text="Apply").click()
+        page.wait_for_selector("#modal[hidden]", state="attached", timeout=30_000)
 
-    # applying creates ONE named "KAPE triage" dashboard in the sidebar
-    # (the host overview it used to ship beside is folded into it); open it
-    page.evaluate("() => __winnow.renderSidebar()")
-    page.wait_for_selector("#sidebarList .sidebar-row:has-text('KAPE triage')")
-    assert page.locator("#sidebarList .sidebar-row", has_text="KAPE host overview").count() == 0
-    page.locator("#sidebarList .sidebar-row", has_text="KAPE triage").locator(".menu-item").click()
-    page.wait_for_selector("#dashboardview:not([hidden])")
-    page.wait_for_function(
-        "(n) => document.querySelectorAll('#dashGrid .dash-card:not(.dash-add)').length === n",
-        arg=expected, timeout=10_000)
-
-    # cleanup: leave the shared case as we found it
-    page.evaluate("""async () => {
-      const h = { 'Content-Type':'application/json', 'X-Timeline-Lite-Client':'1' };
-      for (const d of await fetch('/api/dashboards', { headers:h }).then(r=>r.json()))
-        await fetch('/api/dashboards/' + d.id, { method:'DELETE', headers:h });
-      const wl = await fetch('/api/watchlist', { headers:h }).then(r=>r.json());
-      for (const i of (wl.indicators||wl)) await fetch('/api/watchlist/' + i.id, { method:'DELETE', headers:h });
-    }""")
-    page.keyboard.press("Escape")
+        # applying creates ONE named "KAPE triage" dashboard in the sidebar
+        # (the host overview it used to ship beside is folded into it); open it
+        page.evaluate("() => __winnow.renderSidebar()")
+        page.wait_for_selector("#sidebarList .sidebar-row:has-text('KAPE triage')")
+        assert page.locator("#sidebarList .sidebar-row", has_text="KAPE host overview").count() == 0
+        page.locator("#sidebarList .sidebar-row", has_text="KAPE triage").locator(".menu-item").click()
+        page.wait_for_selector("#dashboardview:not([hidden])")
+        page.wait_for_function(
+            "(n) => document.querySelectorAll('#dashGrid .dash-card:not(.dash-add)').length === n",
+            arg=expected, timeout=10_000)
+        page.keyboard.press("Escape")
+    finally:
+        for d in api("/api/dashboards"):
+            if d["id"] not in dashboards:
+                api(f"/api/dashboards/{d['id']}", "DELETE")
+        for i in api("/api/watchlist"):
+            if i["id"] not in indicators:
+                api(f"/api/watchlist/{i['id']}", "DELETE")
+        for v in api("/api/case/variables"):
+            if v["name"] not in variables:
+                api(f"/api/case/variables/{v['name']}", "DELETE")
