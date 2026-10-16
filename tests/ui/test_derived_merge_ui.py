@@ -102,9 +102,15 @@ def test_merge_dialog_groups_by_the_files_own_columns(page, api, tmp_path):
                 page.locator("#modalBody").inner_text()
             box.check()
         # One group holds both — it is titled by the file's columns, not
-        # the analyst's derived one.
-        head = page.locator("#modal .mb-ghead", has_text="DmWhen").first.inner_text()
-        assert "DmUser" not in head
+        # the analyst's derived one. Asserted on the groups themselves: with
+        # the derived column counted, the two land in groups of their own,
+        # and a check on one heading alone still passed.
+        groups = page.evaluate("""(names) => [...document.querySelectorAll('#modal .mb-group')]
+            .map((g) => ({ head: g.querySelector('.mb-ghead').textContent,
+                           tables: names.filter((n) => g.textContent.includes(n)) }))
+            .filter((g) => g.tables.length)""", ["dm_group_0.csv", "dm_group_1.csv"])
+        assert [g["tables"] for g in groups] == [["dm_group_0.csv", "dm_group_1.csv"]], groups
+        assert "DmWhen" in groups[0]["head"] and "DmUser" not in groups[0]["head"]
         page.locator("#modal button", has_text="Create merge").click()
         page.wait_for_function("() => __winnow.S.sourceId < 0", timeout=10_000)
         merge = page.evaluate("() => __winnow.S.sources.find((s) => s.id === __winnow.S.sourceId)")

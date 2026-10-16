@@ -736,12 +736,6 @@ class LayoutWrite(BaseModel):
     payload: dict
 
 
-class SavedViewWrite(BaseModel):
-    source_id: int
-    name: str
-    payload: dict
-
-
 class SqlQuery(BaseModel):
     """Rows inline, capped — winnow.api.sql and dashboards. The SQL pane
     has no cap and goes through /api/sql/run instead, which holds its
@@ -927,7 +921,8 @@ _WORK_TABLES = (
     "row_tags", "row_notes", "sessions",        # the original three
     "case_notes", "case_variables",
     "dashboards", "dashboard",                  # `dashboard` is the pre-rename single-row table
-    "derived_columns", "filter_presets", "merges", "saved_views",
+    "derived_columns", "filter_presets", "merges",
+    "saved_views",                              # gone from new case files; an old one may still have rows
     "source_folders", "watchlist", "sql_tabs",
 )
 
@@ -4988,22 +4983,6 @@ def api_layout_save(body: LayoutWrite):
 @app.get("/api/layout")
 def api_layout_get(source_id: int):
     return store().get_layout(source_id) or {}
-
-
-@app.get("/api/saved_views")
-def api_saved_views(source_id: int):
-    return store().list_saved_views(source_id)
-
-
-@app.post("/api/saved_views")
-def api_saved_view_add(body: SavedViewWrite):
-    return store().save_view(body.source_id, body.name, body.payload)
-
-
-@app.delete("/api/saved_views/{view_id}")
-def api_saved_view_del(view_id: int):
-    store().delete_saved_view(view_id)
-    return {"ok": True}
 
 
 class NicknameWrite(BaseModel):

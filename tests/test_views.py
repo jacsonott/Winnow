@@ -553,6 +553,31 @@ def test_time_range_open_ended_start_or_end(mft_like):
     assert set(_names(store, only_before)) == {"old_file.txt", "created_only.dll"}
 
 
+@pytest.mark.parametrize("column", ["Time", None])
+def test_time_range_reads_us_format_timestamps_as_times(store, write_csv, column):
+    """Every test above is ISO, where comparing the raw text gives the
+    same answer as comparing times. US exports are month first with a
+    12-hour clock, so a range that stopped normalising them would go wrong
+    silently. Against the raw text every row here sorts before
+    "2026-01-01" and the range keeps none; read day first, the January and
+    February rows swap; with PM ignored, the last row moves inside."""
+    path = write_csv([
+        ["Time", "Name"],
+        ["1/5/2026 1:22:01 PM", "in_range"],
+        ["12/30/2025 11:00:00 PM", "before"],
+        ["2/1/2026 9:00:00 AM", "after"],
+        ["1/31/2026 1:00:00 PM", "afternoon_of_the_last_day"],
+    ])
+    sid = store.ingest_csv(path, name="us.csv", build_fts=False)["id"]
+    assert {c["name"]: c["type"] for c in store.get_source(sid)["columns"]}["Time"] == "datetime"
+    spec = {
+        "source_id": sid, "filters": [], "sort": [],
+        "time_range": {"enabled": True, "column": column, "start": "2026-01-01T00:00", "end": "2026-01-31T12:00"},
+    }
+    view = store.build_view(sid, spec)
+    assert [r["cells"][1] for r in store.fetch_rows(view["view_id"], 0, 10)["rows"]] == ["in_range"]
+
+
 def test_find_nearest_timestamp_on_every_view_kind(ingested):
     """Jump-to-timestamp measures closeness in real time (julianday over
     TS_NORMALIZE), not string order, and must return a position that

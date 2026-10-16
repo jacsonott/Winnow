@@ -891,7 +891,7 @@ export function buildTableActionsPanel(container, refresh) {
   // to change them in place.
   const merge = el('button', 'btn ghost', src && src.is_merge ? 'Edit merge…' : 'Merge with other tables…');
   merge.title = src && src.is_merge
-    ? 'Add or remove tables, or change which columns this merge keeps. Its layout and saved views stay.'
+    ? 'Add or remove tables, or change which columns this merge keeps. Its layout stays.'
     : 'One table across this and others, matched by column name';
   merge.onclick = () => {
     if (!src) return;
