@@ -126,6 +126,8 @@ def test_one_unreadable_case_does_not_sink_the_sweep(cases, tmp_path):
     assert len(out) == 2
     assert out[0]["error"] is None and out[0]["hits"]
     assert out[1]["error"] and out[1]["hits"] == []
+    # It found nothing, so nothing was cut off.
+    assert out[1]["truncated"] is False
 
 
 def _case_with(tmp_path, name, tables):

@@ -141,7 +141,8 @@ def test_timeline_api_routes(client, write_csv):
     del_id = listed[0]["id"]
     r3 = client.delete(f"/api/timeline_templates/{del_id}")
     assert r3.status_code == 200
-    assert len(client.get("/api/timeline_templates").json()) == 1
+    # The other one is what is left, not the one asked for.
+    assert [t["id"] for t in client.get("/api/timeline_templates").json()] == [listed[1]["id"]]
 
 
 # ------------------------------------------- configs and derived columns
