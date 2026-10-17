@@ -195,7 +195,7 @@ Winnow checks every regular expression before running it, in filters and in sear
 
 ## Filtering by tag
 
-The tag chips above the grid also filter. Click a tag to show only rows carrying it. Clicking a second tag shows rows carrying either. **Any tag** shows every tagged row and **No tags** shows the rows nobody has tagged yet, which is what is left to go through. See [Tagging and notes](Tagging-and-notes.md) for tagging itself.
+The tag chips above the grid also filter. Click a tag to show only rows carrying it. Clicking a second tag shows rows carrying either. **Any tag** shows every tagged row and **No tags** shows the rows nobody has tagged yet, which is what is left to go through. Right-click a tag and choose **Exclude *tag*** to hide the rows carrying it; the chip is struck through until you click it again. See [Tagging and notes](Tagging-and-notes.md) for tagging itself.
 
 ## Clearing filters
 

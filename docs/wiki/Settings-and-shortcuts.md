@@ -234,6 +234,7 @@ These are not in the rebindable list.
 | `Ctrl+Shift+C` / `⌘+Shift+C` | The same, with a header row. |
 | `Esc` | Close a dialog; leave a text box; otherwise clear the row picks and cell selection. |
 | Right-click a row | Tag it, filter to or exclude that cell's value, copy. |
+| Right-click a tag chip | Filter to that tag, or exclude the rows carrying it. |
 | Right-click a tab | Close it, rename it, merge it or remove it, or **Columns…** for the table menu. |
 
 The SQL pane has its own uses for `Ctrl+C`, `Esc` and the tag digits on a
