@@ -182,6 +182,23 @@ see [docs/notes/README.md](README.md) for the whole set.
   count line, because a chart that is quietly wrong is worse than one
   that is obviously absent.
 
+- **A case switch resets the histogram strip; it does not wait for a
+  view change.** The strip only ever redrew on `winnow:viewchange`, so
+  after opening another case it went on showing the previous case's
+  chart — its bars and its row count — until the new case's first view
+  landed. A case that opens on no table (a new one, or every tab closed)
+  never builds a view, so that was indefinitely; a large one, for as long
+  as its first build took. `openCaseNow` calls `resetHistogram()` with
+  the other per-case resets: it drops the chart, bumps `seq` so an answer
+  still out about the old case can't land, and sets `opening`, under
+  which the strip says "Loading…" and does not ask — `S.view` and
+  `S.sourceId` still name the previous case's table then (loadSources
+  keeps `S.sourceId` on purpose). The next view change clears it; so does
+  `refreshHistogram()`, which loadSources' no-table branch calls because
+  no view change is coming from there — the same branch the last tab
+  closing within a case goes through, which had the same stale chart.
+  tests/ui/test_case_switch.py and test_histogram_empty_state.py.
+
 - **The histogram strip** (`static/js/histogram.js`, `GET /api/histogram`
   over `Store.time_histogram`, toggled by `#btnHistogram` or `h`) was the
   `table_histogram` example plugin until 2026-09 and is built in now;
