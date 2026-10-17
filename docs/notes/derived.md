@@ -128,7 +128,38 @@ see [docs/notes/README.md](README.md) for the whole set.
   splitting skips `/ ] @` inside the quotes), and a JSON key with edge
   whitespace went out in dot notation, which strips (now bracket-quoted,
   and quoted keys are no longer stripped). `test_structparse.py` checks
-  the property itself on those shapes, not just the two fixes.
+  the property itself on those shapes, not just the two fixes. The JSON
+  `[Name='…']` predicate quotes its value the same way (one
+  `_quote_predicate` for both syntaxes, `quotePredicate` in derived.js),
+  and test_struct_name_value.py holds it to the same property.
+- **A Name/Value list's columns are named by the Name, unlike every other
+  JSON path.** suggest_name gives a JSON field its full dotted path so
+  `target.ip` and `source.ip` stay apart, but in
+  `ExtendedProperties[Name='UserAgent'].Value` the path is plumbing and
+  the Name is the field name, which is what was asked for. The value key
+  is dropped only when it is the plain one (`Value`, `#text`), so
+  `[Name='X'].OldValue` and `.NewValue` stay two columns. Two lists in one
+  document holding the same Name both suggest it; the picker's
+  `uniqueColumnName` makes the second `UserAgent 2`. Detection is
+  deliberately narrow (`_kv_shape`): a list of files with a `name` and a
+  `size` must stay positional, since a column per file name would fill
+  the picker with one-row fields.
+- **load_json reads more than JSON, and json_field reads what it reads.**
+  `strict=False`, then `load_loose` (Python's repr, trailing commas,
+  unescaped backslashes), because the detail pane offers paths on those
+  values and a path the backend won't extract fills the column with
+  nothing. The loose parser only runs when json.loads has already
+  refused, so a strict JSON column pays nothing for it. A Python-repr
+  column parses in Python rather than C, about ten times slower (80µs for
+  a 500-character Name/Value list), so it gets its own cap,
+  `LOOSE_MAX_CHARS` (a million; the worst shape takes about a second
+  there, where 8 MB took nine), and `_load_json_for_row` keeps the last
+  row's document so a ten-column flatten parses each row once. It also
+  widens sniff_kind, so a Python-repr column now gets the Flatten picker.
+  The parser is a loop over one token regex, not the pane's recursion; a
+  differential fuzz against a recursive version and against detail.js
+  agreed on 200,000 and 20,000 values, and
+  tests/ui/test_detail_name_value_paths_ui.py keeps the edge cases.
 
 - **Derived columns** (`timeparse.py`, `derived_columns`/`drv_<id>` tables,
   `/api/derived/*`, the column header's right-click menu's "Add datetime column from
