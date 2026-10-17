@@ -203,19 +203,39 @@ a column** or **Copy path**.
 
 ### JSON paths
 
-| Path | Means | From `{"user":{"name":"alice"},"items":[{"id":7}],"odd.key":{"value":"x"}}` |
+| Path | Means | From `{"user":{"name":"alice"},"items":[{"id":7}],"odd.key":{"value":"x"},"props":[{"Name":"UserAgent","Value":"curl"}]}` |
 | --- | --- | --- |
 | `$.user.name` or `user.name` | A key inside a key. The leading `$` is optional | `alice` |
 | `items[0].id` | Array item by position, counting from 0; `[-1]` is the last | `7` |
 | `["odd.key"].value` | A key that contains a dot, bracket or quote, quoted | `x` |
+| `props[Name='UserAgent'].Value` | The entry of a list whose `Name` is `UserAgent`, wherever it sits in the list | `curl` |
 | `user` | A whole object or array comes out as JSON text | `{"name": "alice"}` |
 
 A JSON `null` gives an empty cell; a missing key gives no value at all.
-JSON paths can select an array item by position only. In an EvtxECmd
-`Payload` column the item at a given position can be a different field for
-a different event ID, so look at the `@Name` that sits beside each
-`#text` (the flatten picker lists both) before you trust a positional
-column.
+
+The `[Name='…']` form is for lists of Name/Value pairs, such as an M365
+audit record's `ExtendedProperties`, an EvtxECmd `Payload`'s
+`{"@Name": …, "#text": …}` entries, or Azure AD's `ModifiedProperties`.
+The order of their entries changes from one row to the next, so
+`props[3].Value` can be a different field in every row, where
+`props[Name='UserAgent'].Value` is always the same one. When you click or
+flatten, Winnow writes this form for you when every entry of a list has a
+`Name` or `Key` (in any case, with or without a leading `@`), no two
+entries share a name, and at least one entry has a value beside its name:
+`Value`, `#text`, or another key with "value" in it, such as `NewValue`.
+The column is named after the entry: `props[Name='UserAgent'].Value` is
+`UserAgent`, `Data[@Name='LogonType'].#text` is `LogonType`, and
+`ModifiedProperties[Name='StrongAuth'].NewValue` is `StrongAuth.NewValue`.
+Any other list, such as a list of files that each have a `name` and a
+`size`, is addressed by position.
+
+JSON fields are also read from values that are nearly JSON, when the whole
+value is one document: Python-style lists and dicts
+(`[{'Name': 'UserAgent', 'Value': None}]`, where `None` gives an empty
+cell), a raw line break in a string, an unescaped backslash, and a trailing
+comma. Such a value is read up to 1,000,000 characters; strict JSON is read
+up to 8 MB. Reading these is slower than reading strict JSON, so a column
+of them takes longer to fill.
 
 ### XML paths
 

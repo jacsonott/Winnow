@@ -1807,36 +1807,62 @@ see [docs/notes/README.md](README.md) for the whole set.
   of them between the pane's own buttons and the note box would bury the
   keyboard path that exists.
 
-- **The detail pane lays out documents JSON.parse refuses, and none of
-  them is addressable** (detail.js `findLooseDocuments`,
-  `appendLooseNodes`). It only ever tried a strict whole-value parse, so
-  three shapes analysts actually have came out as one unbroken line:
-  Python's repr of a list or dict (`[{'Name': 'UserAgent', 'Value': ...}]`,
-  what `str()` of parsed JSON writes and what a pipeline through pandas
-  leaves in a CSV), JSON a lax exporter wrote (a raw newline or tab in a
-  string, an unescaped `C:\Windows`, NaN, a trailing comma), and a
-  document inside other text (`[INFO] {...}`, `[ctx {...}]`). The strict
-  path still runs first and is the only one that puts `data-path` on a
-  node. The loose one is a structure-only parser: brackets, strings of
-  either quote (prefixes like `b'...'` included), separators and a short
-  list of bare words. Four things it does on purpose. **Tokens are shown
-  as the cell writes them**, never decoded and re-encoded: a selection
-  lifted out of the layout has to match what the contains-filter searches,
-  and `'Name'` re-quoted as `"Name"` would match nothing; it is also why a
-  FILETIME past 2^53 keeps its digits here (the strict path still rounds
-  them through JSON.parse). **No path**, because structparse.load_json
-  reads a cell only when all of it is one strict document; extending that
-  is a backend change to every json_field row, not a pane change. **Only
-  `[` and `{` start a candidate, and only a dict with an entry or a list
-  holding a non-empty container counts**: JSON.parse takes the `[2099123]`
-  of `hostd[2099123]:` and the `[0]` of `items[0]`, and prose is full of
-  parentheses, so a tuple only reads as one inside a list or dict. A failed
-  candidate is retried one character later, which is how the document
-  inside a `[ctx ...]` wrapper is found. **One budget bounds the whole
-  scan** (`LOOSE_SCAN_BUDGET`, every character and token across all
-  candidates, plus `LOOSE_MAX_DEPTH`): retrying per character is quadratic
-  on a run of `[`, and showDetail runs on every cursor move. Past it the
-  rest of the value is text. tests/ui/test_detail_loose_documents_ui.py.
+- **The detail pane lays out documents JSON.parse refuses, and only a
+  whole-value one is addressable** (detail.js `findLooseDocuments`,
+  `appendLooseNodes`, `looseDecode`). It only ever tried a strict
+  whole-value parse, so three shapes analysts actually have came out as
+  one unbroken line: Python's repr of a list or dict (`[{'Name':
+  'UserAgent', 'Value': ...}]`, what `str()` of parsed JSON writes and
+  what a pipeline through pandas leaves in a CSV), JSON a lax exporter
+  wrote (a raw newline or tab in a string, an unescaped `C:\Windows`, NaN,
+  a trailing comma), and a document inside other text (`[INFO] {...}`,
+  `[ctx {...}]`). The strict path still runs first. The loose one is a
+  structure-only parser: brackets, strings of either quote (prefixes like
+  `b'...'` included), separators and a short list of bare words. Five
+  things it does on purpose. **Tokens are shown as the cell writes them**,
+  never decoded and re-encoded: a selection lifted out of the layout has
+  to match what the contains-filter searches, and `'Name'` re-quoted as
+  `"Name"` would match nothing; it is also why a FILETIME past 2^53 keeps
+  its digits here (the strict path still rounds them through JSON.parse).
+  **A path only when the document is the whole value**, give or take
+  surrounding spaces and line breaks, and is at most `LOOSE_MAX_CHARS`
+  long: structparse.load_json falls back to
+  `load_loose`, the same grammar in Python, and reads a cell only when all
+  of it is one document, so a path on a document inside other text would
+  fill the column with nothing on every row. The two parsers are twins
+  and have to accept exactly the same values, and `looseDecode` has to
+  decode strings, keys and numbers exactly as `load_loose` does (the path
+  holds `UserAgent` where the cell says `'UserAgent'`);
+  tests/ui/test_detail_name_value_paths_ui.py renders values in the
+  browser and extracts every offered path in Python to hold them to it.
+  **Only `[` and `{` start a candidate, and only a dict with an entry or a
+  list holding a non-empty container counts**: JSON.parse takes the
+  `[2099123]` of `hostd[2099123]:` and the `[0]` of `items[0]`, and prose
+  is full of parentheses, so a tuple only reads as one inside a list or
+  dict. A failed candidate is retried one character later, which is how
+  the document inside a `[ctx ...]` wrapper is found. **One budget bounds
+  the whole scan** (`LOOSE_SCAN_BUDGET`, every character and token across
+  all candidates, plus `LOOSE_MAX_DEPTH`): retrying per character is
+  quadratic on a run of `[`, and showDetail runs on every cursor move.
+  Past it the rest of the value is text. **The depth limit is shared**:
+  `LOOSE_MAX_DEPTH` is 256 on both sides, so a document the pane gives up
+  on is one the backend refuses too. tests/ui/test_detail_loose_documents_ui.py.
+
+- **A Name/Value list is addressed by name, and the Name stands for its
+  Value** (detail.js `jsonKvShape`, `kvNameTarget`; structparse
+  `_kv_shape`). `[{"Name": "UserAgent", "Value": ...}, ...]` puts its
+  entries in the writer's order, so each entry's path is
+  `[Name='UserAgent']`, not `[3]`, in both appendJsonNodes and the loose
+  layout. The rules for what counts are in `_kv_shape`'s comment and the
+  pane's copy has to agree with it; a disagreement doesn't break
+  extraction (the predicate walk doesn't care how a path was found) but
+  does make the pane name a column Flatten wouldn't offer. The Name node
+  restates the predicate, so it isn't a field of its own: it carries the
+  path of the one other key in its entry, which is what makes
+  right-click `'UserAgent'` → **Add as a column** produce the UserAgent
+  column. Beside two values (OldValue/NewValue) it would be a guess, so it
+  carries nothing. Its `data-value` is therefore the Value's text, not the
+  name's, and **Filter to this value** on it filters to the Value.
 
 - **A plugin describes itself without being imported, and the plugins
   manager is what that buys.** The Settings → Plugins panel used to show a

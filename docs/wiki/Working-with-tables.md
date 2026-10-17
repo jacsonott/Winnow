@@ -117,7 +117,9 @@ JSON and XML values are pretty-printed as an indented tree. Right-click a node i
 | **Copy value** / **Copy path** | Copies the value, or the path to the node |
 | **Flatten this document into columns…** | Opens the flatten dialog for the column. Not available on a merge. |
 
-Values that are nearly JSON are laid out the same way: Python-style lists and dicts (`[{'Name': 'UserAgent', 'Value': 'Mozilla/5.0'}]`), JSON with a raw line break or an unescaped backslash in a string, and a document inside other text, such as a log line's `[INFO] {...}`. Each token is shown exactly as the cell writes it. These nodes have no menu of their own, because **Add as a column** needs the whole value to be one valid JSON document; select text in them instead.
+In a list of Name/Value pairs, such as `[{"Name": "UserAgent", "Value": "Mozilla/5.0"}, ...]`, each entry is addressed by its name rather than its position. Right-clicking the name `UserAgent` acts on the value beside it, and **Add as a column** adds a column called `UserAgent`. [Derived columns](Derived-columns.md#json-paths) says which lists count as Name/Value pairs.
+
+Values that are nearly JSON are laid out the same way: Python-style lists and dicts (`[{'Name': 'UserAgent', 'Value': 'Mozilla/5.0'}]`), JSON with a raw line break or an unescaped backslash in a string, and a document inside other text, such as a log line's `[INFO] {...}`. Each token is shown exactly as the cell writes it. When the whole value is one such document, its nodes have the same menu as a JSON document's. A document inside other text has no menu of its own, because **Add as a column** needs the whole value to be one document; select text in it instead.
 
 Select some text in a field and right-click it to **Copy** it, filter the column to rows containing it (**Filter *column* to *text***, or **… only** to drop every other filter), **Exclude** it, or **Search all columns for** it.
 

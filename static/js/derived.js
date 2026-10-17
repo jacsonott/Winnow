@@ -258,10 +258,56 @@ export function takenColumnNames() {
   return new Set(S.columns.map((c) => c.name.toLowerCase()));
 }
 
+/* A predicate's value as a path writes it — structparse._quote_predicate:
+   single quotes, double when the value holds an apostrophe, and a
+   doubled quote when it holds both. */
+export function quotePredicate(value) {
+  const v = String(value);
+  if (!v.includes("'")) return `'${v}'`;
+  if (!v.includes('"')) return `"${v}"`;
+  return `'${v.replace(/'/g, "''")}'`;
+}
+
+/* structparse.parse_json_path's twin, for naming only: segments are
+   numbers (an index), [key, value] pairs (a `[Name='X']` predicate) and
+   strings (a key). null for a path it can't read. */
+const JSON_PATH_TOKEN = new RegExp([
+  /\.\s*([^.[\]"']+)/.source,
+  /\[\s*(-?\d+)\s*\]/.source,
+  /\[\s*(@?[A-Za-z_]\w*)\s*=\s*(?:'((?:''|[^'])*)'|"((?:""|[^"])*)")\s*\]/.source,
+  /\[\s*"((?:\\.|[^"\\])*)"\s*\]/.source,
+  /\[\s*'((?:\\.|[^'\\])*)'\s*\]/.source,
+  /([^.[\]"']+)/.source,
+].join('|'), 'y');
+
+export function parseJsonPath(text) {
+  let s = String(text || '').trim();
+  if (s.startsWith('$')) s = s.slice(1);
+  const out = [];
+  let pos = 0;
+  while (pos < s.length) {
+    if (/\s/.test(s[pos])) { pos++; continue; }
+    JSON_PATH_TOKEN.lastIndex = pos;
+    const m = JSON_PATH_TOKEN.exec(s);
+    if (!m || JSON_PATH_TOKEN.lastIndex === pos) return null;
+    if (m[2] !== undefined) out.push(Number(m[2]));
+    else if (m[3] !== undefined) out.push([m[3], m[4] !== undefined ? m[4].replace(/''/g, "'") : m[5].replace(/""/g, '"')]);
+    else if (m[1] !== undefined || m[8] !== undefined) out.push((m[1] !== undefined ? m[1] : m[8]).trim());
+    else {
+      out.push((m[6] !== undefined ? m[6] : m[7]).replace(/\\(u[0-9a-fA-F]{4}|[\s\S])/g,
+        (all, e) => (e.length === 5 ? String.fromCharCode(parseInt(e.slice(1), 16)) : e)));
+    }
+    pos = JSON_PATH_TOKEN.lastIndex;
+  }
+  return out.length ? out : null;
+}
+
 /* Suggests the column name the way structparse.suggest_name does — for
    JSON the full dotted path (target.ip, items[0].id: two fields with the
-   same leaf get names that say which is which), for XML the last
-   meaningful component or an EVTX-style predicate's own value. */
+   same leaf get names that say which is which) unless the path picks a
+   Name/Value entry, which is named by its Name (UserAgent, or
+   X.NewValue beside an OldValue); for XML the last meaningful component
+   or an EVTX-style predicate's own value. */
 export function suggestColumnName(path, kind) {
   const s = String(path);
   // JSON first: the "@" rules below are XML's (Provider/@Name), and an
@@ -270,13 +316,23 @@ export function suggestColumnName(path, kind) {
   // $.EventData.Data[0].@Name came out as "$.EventData.Data[0]. Name"
   // beside a clean "EventData.Data[0].#text" from the sibling key.
   if (kind === 'json') {
-    const parts = s.replace(/^\$/, '').match(/\["'](?:[^"']*)["']|\[\d+\]|[^.[\]]+/g) || [];
-    if (!parts.some((seg) => !/^\[\d+\]$/.test(seg))) return s.replace(/^\$\.?/, '');
+    const segs = parseJsonPath(s);
+    if (!segs) return s;
+    if (segs.every((seg) => typeof seg === 'number')) return s.replace(/^[$.]+/, '');
+    let last = -1;
+    segs.forEach((seg, i) => { if (Array.isArray(seg)) last = i; });
     let out = '';
-    for (const seg of parts) {
-      if (/^\[\d+\]$/.test(seg)) { out += seg; continue; }
-      const key = seg.replace(/^\["']|["']\]$/g, '').replace(/^\[|\]$/g, '');
-      out += (out ? '.' : '') + key;
+    let rest = segs;
+    if (last >= 0 && String(segs[last][1]).trim()) {
+      out = String(segs[last][1]).trim();
+      rest = segs.slice(last + 1);
+      if (rest.length && typeof rest[0] === 'string'
+          && ['value', 'text'].includes(rest[0].toLowerCase().replace(/^[@#]+/, ''))) rest = rest.slice(1);
+    }
+    for (const seg of rest) {
+      if (typeof seg === 'number') out += `[${seg}]`;
+      else if (Array.isArray(seg)) out += `[${seg[0]}=${quotePredicate(seg[1])}]`;
+      else out += (out ? '.' : '') + seg;
     }
     return out;
   }

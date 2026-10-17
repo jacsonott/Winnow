@@ -22,7 +22,7 @@ RENDER = """(v) => {
     pretty,
     text: n.textContent,
     paths: pretty ? [...n.querySelectorAll('.struct-node')].map((x) => x.dataset.path) : [],
-    tokens: pretty ? [...n.querySelectorAll('span')].map((x) => [x.className, x.textContent]) : [],
+    tokens: pretty ? [...n.querySelectorAll('span')].map((x) => [x.className.replace(' struct-node', ''), x.textContent]) : [],
   };
 }"""
 
@@ -45,9 +45,9 @@ def test_a_python_list_of_name_value_dicts_is_laid_out(page):
     assert ["jtok-key", "'Name'"] in r["tokens"]
     assert ["jtok-str", "'UserAgent'"] in r["tokens"]
     assert ["jtok-null", "None"] in r["tokens"]
-    # Not addressable: json_field reads only a cell that is wholly one strict
-    # JSON document, so "Add as a column" from here would come back empty.
-    assert r["paths"] == []
+    # The whole value is one document load_json reads too, so its fields
+    # are addressable — by Name, test_detail_name_value_paths_ui.py.
+    assert "$[Name='UserAgent'].Value" in r["paths"]
 
 
 @pytest.mark.parametrize("value, shown", [
@@ -89,7 +89,9 @@ def test_a_document_inside_other_text_is_laid_out_where_it_sits(page, value, sho
 def test_a_strict_json_list_stays_an_addressable_document(page):
     r = _render(page, '[{"Name":"UserAgent","Value":"x"},{"Name":"Count","Value":2}]')
     assert r["pretty"], r
-    assert "$[0].Name" in r["paths"] and "$[1].Value" in r["paths"], r["paths"]
+    # Addressed by Name since it is a Name/Value list; that shape has its
+    # own file, test_detail_name_value_paths_ui.py.
+    assert "$[Name='UserAgent'].Value" in r["paths"] and "$[Name='Count'].Value" in r["paths"], r["paths"]
 
 
 @pytest.mark.parametrize("value", [

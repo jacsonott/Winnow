@@ -2,7 +2,7 @@
 
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { $, debounce, el, post, toast } from './core.js';
-import { addExtractedColumn, openFlattenModal } from './derived.js';
+import { addExtractedColumn, openFlattenModal, quotePredicate } from './derived.js';
 import { ellipsize, setColumnFilter, setSearchMode } from './filters.js';
 import { clearPageCache, render, rowAt } from './grid.js';
 import { writeClipboardText } from './grouping.js';
@@ -97,6 +97,60 @@ export function jsonPathStep(base, seg) {
   return /^[^.[\]"']+$/.test(seg) ? `${base}.${seg}` : `${base}["${String(seg).replace(/(["\\])/g, '\\$1')}"]`;
 }
 
+/* A list of Name/Value pairs is addressed by name, not by index:
+   `ExtendedProperties[Name='UserAgent'].Value`, which becomes a column
+   called UserAgent. The twin of structparse._kv_shape, and it has to
+   agree with it name for name — a path offered here on a list the backend
+   reads positionally still extracts (the predicate walk doesn't care how
+   the path was found), but the column it names has to be the one the
+   Flatten picker would have offered. The rules and the reasons for them
+   are in the comment above structparse._KV_NAME_KEYS: a Name or Key in
+   every entry, all different strings, and something value-like beside at
+   least one of them. */
+const KV_NAME_KEYS = [/^@?name$/i, /^@?key$/i];
+
+function kvNameOk(n) {
+  return typeof n === 'string' && n.length > 0 && n.length <= 120
+    && /[^ \t\n\r\x0b\x0c]/.test(n) && !/[\x00-\x1f\x7f\ud800-\udfff]/.test(n);
+}
+
+function kvValueLike(k) {
+  const l = k.toLowerCase().replace(/^[@#]+/, '');
+  return l === 'text' || l.includes('value');
+}
+
+function isDict(x) {
+  return x !== null && typeof x === 'object' && !Array.isArray(x);
+}
+
+export function jsonKvShape(items) {
+  if (!items.length || !items.every((x) => isDict(x) && Object.keys(x).length)) return null;
+  for (const rx of KV_NAME_KEYS) {
+    const key = Object.keys(items[0]).find((k) => rx.test(k));
+    if (key === undefined) continue;
+    const names = items.map((x) => (Object.prototype.hasOwnProperty.call(x, key) ? x[key] : undefined));
+    if (!names.every(kvNameOk) || new Set(names).size !== names.length) continue;
+    if (items.some((x) => Object.keys(x).some((k) => k !== key && kvValueLike(k)))) return key;
+  }
+  return null;
+}
+
+export function jsonKvStep(base, key, name) {
+  return `${base}[${key}=${quotePredicate(name)}]`;
+}
+
+/* What the Name in a Name/Value entry stands for. The Name restates the
+   predicate that selected its entry, so it isn't a field of its own; when
+   the entry holds one thing beside it, the Name means that thing, and
+   right-clicking "UserAgent" adds the UserAgent column the way
+   right-clicking a key adds its value. Beside two (OldValue, NewValue) it
+   would be a guess, so it means nothing. */
+function kvNameTarget(keys, nameKey, entryPath, leafOf) {
+  const others = keys.filter((k) => k !== nameKey);
+  if (others.length !== 1) return null;
+  return { path: jsonPathStep(entryPath, others[0]), value: leafOf(others[0]) };
+}
+
 export function jsonTokenClass(v) {
   if (v === null) return 'jtok-null';
   if (typeof v === 'boolean') return 'jtok-bool';
@@ -118,15 +172,17 @@ export function fieldNode(cls, text, path, value, kind) {
   return n;
 }
 
-export function appendJsonNodes(container, value, path, indent) {
+export function appendJsonNodes(container, value, path, indent, nameKey) {
   const pad = '  '.repeat(indent);
   const padIn = '  '.repeat(indent + 1);
   if (Array.isArray(value)) {
     if (!value.length) { container.append('[]'); return; }
+    const kv = jsonKvShape(value);
     container.append('[\n');
     value.forEach((v, i) => {
       container.append(padIn);
-      appendJsonNodes(container, v, jsonPathStep(path, i), indent + 1);
+      if (kv) appendJsonNodes(container, v, jsonKvStep(path, kv, v[kv]), indent + 1, kv);
+      else appendJsonNodes(container, v, jsonPathStep(path, i), indent + 1);
       container.append(i < value.length - 1 ? ',\n' : '\n');
     });
     container.append(pad + ']');
@@ -135,12 +191,24 @@ export function appendJsonNodes(container, value, path, indent) {
   if (value && typeof value === 'object') {
     const keys = Object.keys(value);
     if (!keys.length) { container.append('{}'); return; }
+    const named = nameKey ? kvNameTarget(keys, nameKey, path, (k) => {
+      const x = value[k];
+      return x && typeof x === 'object' ? undefined : jsonLeafText(x);
+    }) : null;
     container.append('{\n');
     keys.forEach((k, i) => {
+      container.append(padIn);
+      if (k === nameKey) {
+        const np = named ? named.path : null;
+        const nv = named ? named.value : undefined;
+        container.append(fieldNode('jtok-key', JSON.stringify(k), np, nv, 'json'), ': ',
+          fieldNode('jtok-str', JSON.stringify(value[k]), np, nv, 'json'));
+        container.append(i < keys.length - 1 ? ',\n' : '\n');
+        return;
+      }
       const kp = jsonPathStep(path, k);
       const leaf = value[k];
       const scalar = !leaf || typeof leaf !== 'object';
-      container.append(padIn);
       // The key carries the path too, so clicking either half of
       // `"user": "jacson"` means the same field.
       container.append(fieldNode('jtok-key', JSON.stringify(k), kp,
@@ -286,10 +354,17 @@ export function appendXmlNodes(container, node, path, indent) {
    layout still matches what a contains-filter searches for, and a 64-bit
    integer keeps all its digits.
 
-   None of it carries a path. structparse.load_json reads a cell only when
-   all of it is one strict JSON document, so "Add as a column" on a node
-   here would fill the column with nothing on every row, the same reason
-   the unparseable-XML fallback isn't addressable either. */
+   A document that is the whole value carries paths, like strict JSON
+   does: structparse.load_json falls back to the same grammar
+   (structparse.load_loose, the twin of looseValue/looseContainer below,
+   which has to accept exactly what they do), so "Add as a column" on one
+   of its nodes reads the same field out of every row. Each node is
+   decoded for that (looseDecode) the way load_loose decodes it, so the
+   path holds `UserAgent` where the cell says `'UserAgent'`. A document
+   inside other text carries none: the backend reads a cell only when all
+   of it is one document, so a path there would fill the column with
+   nothing on every row, the same reason the unparseable-XML fallback
+   isn't addressable either. */
 
 // A hostile value must not turn a cursor move into a hang. Every `[` or
 // `{` is a candidate and a failed one is retried a character later, so a
@@ -298,6 +373,9 @@ export function appendXmlNodes(container, node, path, indent) {
 // candidates, and past it the rest of the value is shown as text.
 export const LOOSE_SCAN_BUDGET = 2000000;
 export const LOOSE_MAX_DEPTH = 256;
+// The longest whole-value document structparse.load_loose will read, and
+// so the longest one given paths here (its LOOSE_MAX_CHARS).
+export const LOOSE_MAX_CHARS = 1000000;
 
 const LOOSE_CLOSERS = { '[': ']', '{': '}', '(': ')' };
 const LOOSE_WORDS = {
@@ -344,7 +422,8 @@ function looseValue(p, depth) {
 }
 
 /* A list, tuple or set ({ open, close, items }) or a dict/object
-   ({ open, close, entries: [[keyText, value], ...] }), opening at p.i.
+   ({ open, close, entries: [[keyText, value, keyNode], ...] }), opening
+   at p.i.
    A `{` is a dict if its first element is followed by `:`. */
 function looseContainer(p, depth) {
   const open = p.s[p.i];
@@ -364,7 +443,7 @@ function looseContainer(p, depth) {
       p.i++;
       const entry = looseValue(p, depth);
       if (!entry) return null;
-      entries.push([keyText, entry]);
+      entries.push([keyText, entry, value]);
       looseSkipSpace(p);
     } else if (entries.length) {
       return null;
@@ -407,20 +486,110 @@ export function findLooseDocuments(s) {
   return docs;
 }
 
-export function appendLooseNodes(container, node, indent) {
-  if (node.leaf) { container.append(el('span', node.leaf, node.text)); return; }
+/* What load_loose makes of a node, set on it as `value` (and on a leaf,
+   `leafText`: what the column would hold, structparse._leaf_text's
+   answer). Strings are decoded as JSON and Python both decode them, and
+   an escape neither knows stays as written; a number json.loads could
+   have read becomes a number, any other (hex, `1_000`) stays its own
+   text, and so is a string to the Name/Value rules, as it is there. */
+const LOOSE_WORD_VALUES = {
+  true: true, True: true, false: false, False: false, null: null, None: null,
+  NaN: NaN, nan: NaN, Infinity: Infinity, inf: Infinity, '-Infinity': -Infinity, '-inf': -Infinity,
+};
+const LOOSE_ESCAPES = { '\\': '\\', "'": "'", '"': '"', '/': '/', n: '\n', r: '\r', t: '\t', b: '\b', f: '\f' };
+const LOOSE_INT = /^-?(?:0|[1-9]\d*)$/;
+const LOOSE_FLOAT = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][-+]?\d+)?$/;
+
+export function looseString(text) {
+  const prefix = /^[rRbBuU]*/.exec(text)[0];
+  const body = text.slice(prefix.length + 1, -1);
+  if (/r/i.test(prefix)) return body;
+  return body.replace(/\\(?:u([0-9a-fA-F]{4})|U([0-9a-fA-F]{8})|x([0-9a-fA-F]{2})|([\s\S]))/g,
+    (all, u, cp, x, c) => {
+      if (u) return String.fromCharCode(parseInt(u, 16));
+      if (cp) return parseInt(cp, 16) <= 0x10ffff ? String.fromCodePoint(parseInt(cp, 16)) : all;
+      if (x) return String.fromCharCode(parseInt(x, 16));
+      return Object.prototype.hasOwnProperty.call(LOOSE_ESCAPES, c) ? LOOSE_ESCAPES[c] : all;
+    });
+}
+
+function looseLeafText(v) {
+  if (typeof v === 'number' && !Number.isFinite(v)) return Number.isNaN(v) ? 'nan' : (v > 0 ? 'inf' : '-inf');
+  return jsonLeafText(v);
+}
+
+// A key that isn't a string (`{1: 'a'}`, `{None: 0}`) is named by its own
+// text, which is also what the pane shows.
+function looseKey(keyText, keyNode) {
+  return keyNode.leaf === 'jtok-str' ? looseString(keyNode.text) : keyText;
+}
+
+export function looseDecode(node) {
+  if (node.leaf === 'jtok-str') {
+    node.value = node.leafText = looseString(node.text);
+  } else if (node.leaf && Object.prototype.hasOwnProperty.call(LOOSE_WORD_VALUES, node.text)) {
+    node.value = LOOSE_WORD_VALUES[node.text];
+    node.leafText = looseLeafText(node.value);
+  } else if (node.leaf) {
+    const t = node.text;
+    // An integer keeps every digit: the column holds Python's int, not a
+    // double that rounded it.
+    if (LOOSE_INT.test(t)) { node.value = Number(t); node.leafText = t === '-0' ? '0' : t; }
+    else if (LOOSE_FLOAT.test(t)) { node.value = Number(t); node.leafText = String(node.value); }
+    else { node.value = node.leafText = t; }
+  } else if (node.entries) {
+    node.value = Object.create(null);
+    node.byKey = Object.create(null);
+    for (const [keyText, entry, keyNode] of node.entries) {
+      const k = looseKey(keyText, keyNode);
+      node.value[k] = looseDecode(entry);
+      node.byKey[k] = entry;
+    }
+  } else if (node.open === '{' && !node.items.length) {
+    node.value = Object.create(null);
+    node.byKey = Object.create(null);
+  } else {
+    node.value = node.items.map(looseDecode);
+  }
+  return node.value;
+}
+
+/* Lays a document out as the cell writes it. With `path`, a whole-value
+   document that looseDecode has been run over: every node carries its
+   path, Name/Value lists by name as in appendJsonNodes. */
+export function appendLooseNodes(container, node, indent, path, nameKey) {
+  if (node.leaf) {
+    container.append(path ? fieldNode(node.leaf, node.text, path, node.leafText, 'json')
+                          : el('span', node.leaf, node.text));
+    return;
+  }
   const parts = node.entries || node.items;
   if (!parts.length) { container.append(node.open + node.close); return; }
   const pad = '  '.repeat(indent);
   const padIn = '  '.repeat(indent + 1);
+  const kv = path && !node.entries ? jsonKvShape(node.value) : null;
+  const named = path && nameKey && node.entries
+    ? kvNameTarget(Object.keys(node.byKey), nameKey, path, (k) => node.byKey[k].leafText) : null;
   container.append(node.open + '\n');
   parts.forEach((part, i) => {
     container.append(padIn);
     if (node.entries) {
-      container.append(el('span', 'jtok-key', part[0]), ': ');
-      appendLooseNodes(container, part[1], indent + 1);
+      const [keyText, entry, keyNode] = part;
+      const k = path ? looseKey(keyText, keyNode) : null;
+      if (path && k === nameKey && entry.leaf) {
+        const np = named ? named.path : null;
+        const nv = named ? named.value : undefined;
+        container.append(fieldNode('jtok-key', keyText, np, nv, 'json'), ': ',
+          fieldNode(entry.leaf, entry.text, np, nv, 'json'));
+      } else {
+        const kp = path ? jsonPathStep(path, k) : null;
+        container.append(fieldNode('jtok-key', keyText, kp, entry.leaf ? entry.leafText : undefined, 'json'), ': ');
+        appendLooseNodes(container, entry, indent + 1, kp);
+      }
+    } else if (kv) {
+      appendLooseNodes(container, part, indent + 1, jsonKvStep(path, kv, part.value[kv]), kv);
     } else {
-      appendLooseNodes(container, part, indent + 1);
+      appendLooseNodes(container, part, indent + 1, path ? jsonPathStep(path, i) : null);
     }
     // A one-element tuple keeps the comma that makes it a tuple.
     const more = i < parts.length - 1 || (node.open === '(' && parts.length === 1);
@@ -463,6 +632,15 @@ export function renderDetailContent(v) {
   const docs = findLooseDocuments(v);
   if (docs.length) {
     const pre = el('pre', 'detail-pretty');
+    // The whole value, give or take the whitespace load_json strips, is
+    // what the backend can read a path out of.
+    const blank = /^[ \t\r\n]*$/;
+    if (docs.length === 1 && blank.test(v.slice(0, docs[0].start)) && blank.test(v.slice(docs[0].end))
+        && docs[0].end - docs[0].start <= LOOSE_MAX_CHARS) {
+      looseDecode(docs[0].node);
+      appendLooseNodes(pre, docs[0].node, 0, '$');
+      return pre;
+    }
     let at = 0;
     for (const d of docs) {
       pre.append(v.slice(at, d.start));
