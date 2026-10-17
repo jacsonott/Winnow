@@ -106,3 +106,57 @@ def test_it_works_the_same_on_a_merge(tmp_path):
         assert rows(["__none__", red["id"]]) == 7
     finally:
         store.close()
+
+
+# ---------------------------------------------------------------- excluding
+
+def test_an_excluded_tag_hides_the_rows_carrying_it(case):
+    """`!<id>` is a tag filtered OUT — the chip's right-click Exclude. On
+    its own it keeps everything else, untagged rows included."""
+    store, src, red, blue = case
+    assert _rows(store, src, [f"!{red['id']}"]) == 8
+    assert _rows(store, src, [f"!{red['id']}", f"!{blue['id']}"]) == 7
+
+
+def test_an_exclusion_is_anded_with_the_rest_not_ored(case):
+    """The reason it can't just be one more OR'd part: "Red, but not the
+    Blue ones" must drop a row carrying both, and a union with "not Blue"
+    would instead bring back every untagged row."""
+    store, src, red, blue = case
+    store.set_tags(src["id"], [1], blue["id"], True)   # rid 1 is Red and Blue now
+    assert _rows(store, src, [red["id"], f"!{blue['id']}"]) == 1
+    assert _rows(store, src, ["__any__", f"!{blue['id']}"]) == 1
+    # Untagged rows carry no Blue, so excluding it leaves them all.
+    assert _rows(store, src, ["__none__", f"!{blue['id']}"]) == 7
+
+
+def test_something_that_only_looks_like_an_exclusion_is_ignored(case):
+    store, src, red, blue = case
+    assert _rows(store, src, ["!", "!x", "!-1", "!²", "!__any__"]) == 10
+
+
+def test_an_exclusion_works_the_same_on_a_merge(tmp_path):
+    """Invariant #9: a row is hidden when its OWN table's tags carry the
+    excluded tag, member by member."""
+    store = Store(str(tmp_path / "case.db"))
+    try:
+        ids = []
+        for n in ("a.csv", "b.csv"):
+            p = tmp_path / n
+            p.write_text("Host,EventId\n" + "".join(f"H{i},{4624 + i}\n" for i in range(4)), encoding="utf-8")
+            ids.append(store.ingest_csv(str(p))["id"])
+        a, b = ids
+        red = store.upsert_tag(None, "Red", "#ff0000", "1")
+        blue = store.upsert_tag(None, "Blue", "#0000ff", "2")
+        store.set_tags(a, [1, 2], red["id"], True)
+        store.set_tags(b, [1], red["id"], True)
+        store.set_tags(b, [1, 2], blue["id"], True)
+        merge = store.create_merge("both", [a, b])
+
+        def rows(tags):
+            return store.build_view(merge["id"], {"filters": [], "sort": [], "tags": tags})["row_count"]
+
+        assert rows([f"!{red['id']}"]) == 5
+        assert rows([red["id"], f"!{blue['id']}"]) == 2
+    finally:
+        store.close()
