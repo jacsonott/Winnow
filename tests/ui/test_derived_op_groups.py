@@ -43,6 +43,6 @@ def test_type_first_picker(page, format_detected):
     page.locator("#modalBody select[data-role=type]").select_option(label="Decode a value")
     ops = page.evaluate(
         "() => [...document.querySelector('#modalBody select[data-role=op]').options].map((o) => o.textContent)")
-    assert ops == ["URL decode"]
+    assert ops == ["URL decode", "Base64 decode"]
     assert page.locator(".derived-name").input_value() == "CommandLine (decoded)"
     page.keyboard.press("Escape")

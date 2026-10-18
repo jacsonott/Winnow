@@ -3,10 +3,11 @@
 A derived column is a new column Winnow computes from one that is already
 in the table: a sortable time from a Unix epoch or a FILETIME, a field
 lifted out of a JSON or XML document, a piece of a value cut out with a
-regex, a URL-encoded request decoded, the first non-empty of three
-user-name columns, or a value looked up in another table. The original column is never changed, and neither is
-the evidence file. Once built, a derived column sorts, filters, groups and
-exports like any other.
+regex, a URL-encoded request or a base64 command decoded, the first
+non-empty of three user-name columns, or a value looked up in another
+table. The original column is never changed, and neither is the evidence
+file. Once built, a derived column sorts, filters, groups and exports like
+any other.
 
 ## What a derived column is
 
@@ -313,9 +314,15 @@ search and `REGEXP` in the SQL pane.
 
 ## Decoding a value
 
-The **Decode a value** type has one operation, **URL decode**. It turns
-percent-encoding back into the text it stands for, the way the web server
-read the request:
+The **Decode a value** type turns an encoded value back into the text it
+stands for: **URL decode** or **Base64 decode**. Neither empties a value it
+can't decode. That value is copied unchanged, so these columns never have
+unparsed rows.
+
+### URL decode
+
+**URL decode** turns percent-encoding back into the text it stands for,
+the way the web server read the request:
 
 | Input | Output |
 | --- | --- |
@@ -330,12 +337,40 @@ plus, `%2B`, is a plus either way.
 Nothing in a value is lost. Text that isn't an escape (`100%`, `%zz`) stays
 as it is, and so does an escape that isn't valid UTF-8, such as Latin-1's
 `caf%E9` or the overlong `%C0%AE` of a directory traversal:
-`%C0%AE%C0%AE%2Fetc` becomes `%C0%AE%C0%AE/etc`. A value with nothing to
-decode is copied unchanged, so this column never has unparsed rows.
+`%C0%AE%C0%AE%2Fetc` becomes `%C0%AE%C0%AE/etc`.
 
 Each value is decoded once, so a double-encoded `%252F` comes out as
 `%2F`. To decode it again, derive a second **URL decode** column from the
 first.
+
+### Base64 decode
+
+**Base64 decode** reads both alphabets, standard (`+` and `/`) and
+URL-safe (`-` and `_`, as in a JWT), with or without the `=` padding, and
+ignores line breaks.
+
+| Input | Output |
+| --- | --- |
+| `aGVsbG8gd29ybGQ=` | `hello world` |
+| `eyJhbGciOiJIUzI1NiJ9` | `{"alg":"HS256"}` |
+| `SQBFAFgAIAAoAE4AZQB3AC0ATwBiAGoAZQBjAHQAIABOAGUAdAAuAFcAZQBiAEMAbABpAGUAbgB0ACkA` | `IEX (New-Object Net.WebClient)` |
+
+**Text encoding** is **auto** by default. It reads UTF-8, or UTF-16LE when
+the bytes look like it. PowerShell's `-EncodedCommand` is UTF-16LE, so it
+comes out as the command. A UTF-16LE value in a script other than Latin,
+such as Cyrillic, isn't recognised automatically; choose **utf-16le** for
+it.
+
+A value that isn't base64 (`hello world`, `C:\Windows`) is copied
+unchanged, and so is one that decodes to something other than text, such
+as binary or `AAAA`, which is three zero bytes. A short ordinary value can
+still be valid base64 by accident: `WS01` decodes to `Y-5`. Use this on a
+column that holds base64, and check the preview.
+
+The value has to be base64 as a whole. For a command line such as
+`powershell -enc SQBFAFgA…`, first take the encoded part out with a
+**Regex capture** such as `(?i)-(?:e|ec|enc|encodedcommand)\s+(\S+)`, then
+derive **Base64 decode** from that column.
 
 ## Combining columns
 
@@ -383,7 +418,8 @@ All of these are on the derived column's header right-click menu.
   offset, another column to try. It is offered for every derived column
   except a JSON or XML field: timestamps, combined columns, durations, a
   **Regex capture**'s pattern and group, a **URL decode**'s **Treat + as a
-  space**, and a lookup's table and columns.
+  space**, a **Base64 decode**'s **Text encoding**, and a lookup's table and
+  columns.
   The column keeps its name, position and width. Any
   derived column built from this one is recomputed after it, and the
   notice names them.
