@@ -699,6 +699,7 @@ export async function openDerivedColumnModal(prefill, editing) {
     const OP_TYPES = [
       ['Timestamp', (op) => op.family === 'datetime' && op.derived_kind !== 'duration'],
       ['Extract part of a value', (op) => op.family === 'extract'],
+      ['Decode a value', (op) => op.family === 'decode'],
       ['Join from another table', (op) => op.family === 'lookup'],
       ['Compare (elapsed time)', (op) => op.derived_kind === 'duration'],
       ['Combine columns', (op) => op.family === 'combine'],
@@ -720,6 +721,7 @@ export async function openDerivedColumnModal(prefill, editing) {
     function defaultName() {
       const op = currentOp();
       if (op && op.derived_kind === 'duration') return `${state.column} elapsed`;
+      if (op && op.family === 'decode') return `${state.column} (decoded)`;
       if (op && op.derived_kind === 'text') return `${state.column} (extract)`;
       if (op && op.id === 'row_json') return 'Row as JSON';
       if (op && op.derived_kind === 'combine') return `${state.column} (combined)`;

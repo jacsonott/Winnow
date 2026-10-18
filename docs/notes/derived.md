@@ -144,6 +144,19 @@ see [docs/notes/README.md](README.md) for the whole set.
   deliberately narrow (`_kv_shape`): a list of files with a `name` and a
   `size` must stay positional, since a column per file name would fill
   the picker with one-row fields.
+- **URL decode keeps what it cannot decode, escape by escape**
+  (`decode.py`, family `"decode"`, its own type in the modal). A run of
+  `%XX` escapes is decoded as UTF-8 together, since one character spans
+  several, and a byte that is not part of valid UTF-8 is written back as
+  the escape the cell held, hex case included. Not U+FFFD: Latin-1's
+  `caf%E9` and the overlong `%C0%AE` of a traversal are what an analyst
+  decodes a column to find, and a replacement character makes them all
+  the same mark. Not a NULL for the whole value either, which would hide
+  the `%2F` decoded beside them. So the op returns NULL only for empty
+  input and the column never has unparsed rows. `+` becomes a space
+  before the escapes are decoded, so `%2B` survives as a plus;
+  `plus_as_space` turns that off for paths. One pass only: double
+  encoding is undone by deriving from the derived column.
 - **load_json reads more than JSON, and json_field reads what it reads.**
   `strict=False`, then `load_loose` (Python's repr, trailing commas,
   unescaped backslashes), because the detail pane offers paths on those

@@ -49,6 +49,7 @@ except ImportError:  # pragma: no cover - Windows
 
 from . import enrich  # noqa: F401 — registers the cross-table lookup op into timeparse.OPERATIONS
 from . import combine  # noqa: F401 — registers the multi-column ops (coalesce) the same way
+from . import decode  # noqa: F401 — registers the decode ops (URL decode) the same way
 from . import structparse  # noqa: F401 — registers the JSON/XML extraction ops into timeparse.OPERATIONS
 from . import timeparse
 from . import plasoread

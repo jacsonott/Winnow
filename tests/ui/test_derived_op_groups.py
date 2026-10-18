@@ -21,8 +21,8 @@ def test_type_first_picker(page, format_detected):
     assert labels[:3] == ["Type", "Operation", "Parse column"], labels
     types = page.evaluate(
         "() => [...document.querySelector('#modalBody select[data-role=type]').options].map((o) => o.value)")
-    assert types == ["Timestamp", "Extract part of a value", "Join from another table",
-                     "Compare (elapsed time)", "Combine columns"]
+    assert types == ["Timestamp", "Extract part of a value", "Decode a value",
+                     "Join from another table", "Compare (elapsed time)", "Combine columns"]
 
     # picking a type populates the Operation list with only that kind's ops
     page.locator("#modalBody select[data-role=type]").select_option(label="Extract part of a value")
@@ -38,4 +38,11 @@ def test_type_first_picker(page, format_detected):
     page.locator("#modalBody select[data-role=type]").select_option(label="Extract part of a value")
     page.locator("#modalBody select[data-role=op]").select_option(label="Regex capture")
     assert page.locator(".derived-name").input_value() == "CommandLine (extract)"
+
+    # a decode op is text like an extract, but the column says what it did
+    page.locator("#modalBody select[data-role=type]").select_option(label="Decode a value")
+    ops = page.evaluate(
+        "() => [...document.querySelector('#modalBody select[data-role=op]').options].map((o) => o.textContent)")
+    assert ops == ["URL decode"]
+    assert page.locator(".derived-name").input_value() == "CommandLine (decoded)"
     page.keyboard.press("Escape")
