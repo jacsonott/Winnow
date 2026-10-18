@@ -134,7 +134,9 @@ than seven days that are not open and hold no tags, notes or other work.
 | `--open` on the command line | Imports delimited files at startup. |
 | **Import files…** on a format in **Settings → Plugins** | Forces files through that plugin's parser. See [Plugins](Plugins.md). |
 
-Drag-and-drop takes files; for a folder use **Import a whole folder…**.
+Drag-and-drop takes files; for a folder use **Import a whole folder…**. If
+the pointer turns into a no-entry sign instead, see
+[Troubleshooting](Troubleshooting.md#dragging-a-file-in-shows-a-no-entry-cursor).
 
 ### The Import window
 

@@ -178,6 +178,34 @@ index. Search still works at scanning speed. Check the version with:
 python -c "import sqlite3; print(sqlite3.sqlite_version)"
 ```
 
+### Dragging a file in shows a no-entry cursor
+
+Winnow takes any file dragged onto its window. When the pointer turns into
+a no-entry sign and the file won't drop, Windows refused the drag before
+Winnow saw it, so nothing in Winnow's settings changes it. Drag the same
+file onto an ordinary Edge tab to tell which case you're in: if that's
+refused too, the cause is the machine, not Winnow. The usual causes:
+
+- **Remote Desktop or a virtual machine.** You can't drag a file from your
+  own computer into a Remote Desktop window, or into most virtual machine
+  windows unless the VM software's drag-and-drop option is on. Copy the
+  file across (copy and paste works over Remote Desktop) and drag it from
+  File Explorer inside the session.
+- **The browser is running as administrator.** Windows doesn't let you drag
+  from a program running normally, such as File Explorer, into one running
+  as administrator. In Task Manager, open **Details**, right-click a column
+  heading, choose **Select columns** and tick **Elevated**: if
+  `msedge.exe` says **Yes**, close Edge, untick **Run this program as an
+  administrator** on the **Compatibility** tab of Edge's properties if it's
+  set, and start Winnow normally rather than with **Run as administrator**.
+- **Security software.** Some endpoint security and data-loss-prevention
+  tools block dragging files into a browser. If Edge refuses drags on
+  other websites too, ask whoever manages the machine.
+
+Whatever the cause, **Case ▾ → Import…** (or **Import files…** in an empty
+case) still works, and its file picker can reach anything File Explorer
+can.
+
 ### Imports are slow, or rows look wrong
 
 Winnow parses two imports at a time; the rest wait as **queued** in the
