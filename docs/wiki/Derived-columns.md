@@ -3,8 +3,8 @@
 A derived column is a new column Winnow computes from one that is already
 in the table: a sortable time from a Unix epoch or a FILETIME, a field
 lifted out of a JSON or XML document, a piece of a value cut out with a
-regex, the first non-empty of three user-name columns, or a value looked
-up in another table. The original column is never changed, and neither is
+regex, a URL-encoded request decoded, the first non-empty of three
+user-name columns, or a value looked up in another table. The original column is never changed, and neither is
 the evidence file. Once built, a derived column sorts, filters, groups and
 exports like any other.
 
@@ -55,8 +55,8 @@ is taken it becomes `LogonType 2`.
 Work down the dialog from the top:
 
 1. **Type** — what you want: **Timestamp**, **Extract part of a value**,
-   **Join from another table**, **Compare (elapsed time)** or **Combine
-   columns**.
+   **Decode a value**, **Join from another table**, **Compare (elapsed
+   time)** or **Combine columns**.
 2. **Operation** — the specific conversion, listed in the tables below.
 3. **Parse column** — the column to read. Opened from a header it is that
    column. Opened from the table menu it starts on the first column that
@@ -65,7 +65,7 @@ Work down the dialog from the top:
    column.
 4. The operation's own settings, if any (required ones are marked `*`).
 5. **New column name** — prefilled as `Column (parsed)`, `Column
-   (extract)`, `Column elapsed` and so on. A name the table already has, in
+   (extract)`, `Column (decoded)`, `Column elapsed` and so on. A name the table already has, in
    any capitalisation, is refused.
 6. Check the **Preview**, then click **Add column**.
 
@@ -311,6 +311,32 @@ The common delimited shapes pass: `(\.[a-z]+)*`, `([a-z0-9-]+\.)+`,
 `(?:[^,]*,)*`, `(\S+\s+){3}`. The same check applies to the regex filter,
 search and `REGEXP` in the SQL pane.
 
+## Decoding a value
+
+The **Decode a value** type has one operation, **URL decode**. It turns
+percent-encoding back into the text it stands for, the way the web server
+read the request:
+
+| Input | Output |
+| --- | --- |
+| `cmd%3Dwhoami%26x%3D%2Fetc%2Fpasswd` | `cmd=whoami&x=/etc/passwd` |
+| `q=hello+world%21` | `q=hello world!` |
+| `caf%C3%A9` | `café` |
+
+**Treat + as a space** is on by default, which is right for a query string
+or a form post. Turn it off for a URL path, where `+` is a plus. An encoded
+plus, `%2B`, is a plus either way.
+
+Nothing in a value is lost. Text that isn't an escape (`100%`, `%zz`) stays
+as it is, and so does an escape that isn't valid UTF-8, such as Latin-1's
+`caf%E9` or the overlong `%C0%AE` of a directory traversal:
+`%C0%AE%C0%AE%2Fetc` becomes `%C0%AE%C0%AE/etc`. A value with nothing to
+decode is copied unchanged, so this column never has unparsed rows.
+
+Each value is decoded once, so a double-encoded `%252F` comes out as
+`%2F`. To decode it again, derive a second **URL decode** column from the
+first.
+
 ## Combining columns
 
 | Operation | What it does | Example |
@@ -356,7 +382,8 @@ All of these are on the derived column's header right-click menu.
   and the settings editable: the wrong syslog year, a forgotten UTC
   offset, another column to try. It is offered for every derived column
   except a JSON or XML field: timestamps, combined columns, durations, a
-  **Regex capture**'s pattern and group, and a lookup's table and columns.
+  **Regex capture**'s pattern and group, a **URL decode**'s **Treat + as a
+  space**, and a lookup's table and columns.
   The column keeps its name, position and width. Any
   derived column built from this one is recomputed after it, and the
   notice names them.

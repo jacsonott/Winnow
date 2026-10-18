@@ -140,10 +140,11 @@ sqlresults.py      The SQL pane's results, held server-side: a run's rows
                     so "no row cap" has a memory bound. Store owns one
                     (`Store.sql_results`); see docs/notes/server.md.
 timeparse.py       Timestamp-parsing operations for derived datetime columns —
-                    and, since structparse.py, combine.py and enrich.py all
-                    register into it, the registry of derived-column
-                    operations generally. `family` splits them ("datetime",
-                    "extract", "combine", "lookup") so each picker offers
+                    and, since structparse.py, combine.py, decode.py and
+                    enrich.py all register into it, the registry of
+                    derived-column operations generally. `family` splits
+                    them ("datetime", "extract", "decode", "combine",
+                    "lookup") so each picker offers
                     only the ops that answer its question. Stdlib only, imports
                     nothing from the app.
 structparse.py     JSON/XML field-extraction operations, registered into
