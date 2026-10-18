@@ -191,13 +191,18 @@ refused too, the cause is the machine, not Winnow. The usual causes:
   windows unless the VM software's drag-and-drop option is on. Copy the
   file across (copy and paste works over Remote Desktop) and drag it from
   File Explorer inside the session.
-- **The browser is running as administrator.** Windows doesn't let you drag
-  from a program running normally, such as File Explorer, into one running
-  as administrator. In Task Manager, open **Details**, right-click a column
-  heading, choose **Select columns** and tick **Elevated**: if
-  `msedge.exe` says **Yes**, close Edge, untick **Run this program as an
-  administrator** on the **Compatibility** tab of Edge's properties if it's
-  set, and start Winnow normally rather than with **Run as administrator**.
+- **Winnow or the browser is running as administrator.** Windows doesn't
+  let you drag from a program running normally, such as File Explorer,
+  into one running as administrator. Starting Winnow from an administrator
+  PowerShell or with **Run as administrator** does this, because the window
+  it opens runs as administrator too. Winnow warns you when that happens,
+  in the terminal and in a notice at the bottom left of its window: close
+  Winnow and start it from a normal window instead. If there's no notice
+  and drags are still refused, check Edge itself. In Task Manager, open
+  **Details**, right-click a column heading, choose **Select columns** and
+  tick **Elevated**: if `msedge.exe` says **Yes**, close Edge and untick
+  **Run this program as an administrator** on the **Compatibility** tab of
+  Edge's properties.
 - **Security software.** Some endpoint security and data-loss-prevention
   tools block dragging files into a browser. If Edge refuses drags on
   other websites too, ask whoever manages the machine.

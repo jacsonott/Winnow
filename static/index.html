@@ -370,6 +370,9 @@ Markdown: # headings, - bullets, **bold**, `code`, tables. Link ▾ points at a 
 
 <!-- Shown when Winnow's server stops answering (static/js/connection.js). -->
 <div id="connBanner" class="conn-banner" role="status" hidden></div>
+<!-- Shown when Winnow runs as administrator on Windows, which stops files
+     being dragged in (maybeWarnElevated in static/js/importer.js). -->
+<div id="elevNotice" class="elev-notice" role="status" hidden></div>
 <div class="toast" id="toast" role="status" hidden></div>
 
 <!-- Cancel chip for a long-running cancellable op (view/timeline build,

@@ -37,6 +37,7 @@ from pydantic import BaseModel
 
 from winnow import assoc as file_assoc
 from winnow import browser
+from winnow import elevation
 from winnow import instances
 from winnow import multicase
 from winnow import paths
@@ -2051,6 +2052,15 @@ def api_browse_dir(request: Request, path: str = "", files: bool = False,
 
 class PrefsBody(BaseModel):
     cases_dir: str | None = None
+
+
+@app.get("/api/elevation")
+def api_elevation(request: Request):
+    """Whether this window will refuse files dragged in from File Explorer
+    because Winnow is running as administrator (winnow/elevation.py). Only
+    a browser on this machine is affected: one on another computer runs
+    with its own rights, whatever the server's."""
+    return {"drops_blocked": _is_loopback(request) and elevation.this_process()}
 
 
 @app.get("/api/prefs")
@@ -6156,6 +6166,15 @@ def main() -> None:
             "login and no access control — anyone who can reach this address on the "
             "network can open, import into, or query any case this server has access to. "
             "Only do this on a trusted, isolated network.",
+            file=sys.stderr,
+        )
+
+    if elevation.this_process():
+        print(
+            "WARNING: Winnow is running as administrator. Windows doesn't let File "
+            "Explorer drag files into a program running as administrator, so dragging "
+            "files onto Winnow's window may not work. Start Winnow from a normal, "
+            "non-administrator window to drag files in; Case > Import... works either way.",
             file=sys.stderr,
         )
 

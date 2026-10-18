@@ -380,6 +380,17 @@ see [docs/notes/README.md](README.md) for the whole set.
   element boundary a drag crosses, not just the window's, so a naive
   enter-shows/leave-hides flickers as the pointer crosses any child
   element underneath.
+- **A drop Windows refuses never reaches the page.** Started from an
+  administrator PowerShell, Winnow and the app window it opens run
+  elevated, and Windows (UIPI) won't let a normal File Explorer drag into
+  an elevated window: a no-entry cursor, and not one drag event for
+  `wireFileDrop` to see, so no handler change can detect or fix it.
+  `winnow/elevation.py` asks Windows instead (this process elevated, the
+  desktop shell not), and the server warns at startup while
+  `GET /api/elevation` drives `maybeWarnElevated`'s notice in the window.
+  The shell half is what keeps it quiet with UAC off, where Explorer is
+  elevated too and drops work. It's only "may": a browser that was
+  already open runs the window with its own rights, not Winnow's.
 - **Every import runs as a background job** (`Store.start_ingest_job` /
   `_ingest_job_worker`, `POST /api/ingest/jobs/{path,upload}`, `GET
   /api/ingest/jobs`, per-job cancel) — the search-all job pattern made
