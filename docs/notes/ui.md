@@ -262,6 +262,22 @@ see [docs/notes/README.md](README.md) for the whole set.
   filters), and should all pick up the same nickname rather than needing it
   set per-filter. Keyed the same way as `ColumnLayouts` (sorted, lowercased
   column names) — saving again for the same set overwrites in place.
+- **An excluded tag is a `'!<id>'` entry in `S.tagFilter`, not a field of
+  its own** (`tagExcludeKey` in tags.js; the chip's right-click menu and a
+  tag group header's Exclude write it). Ten-odd places copy, stash, reset
+  or replay `S.tagFilter` — the per-table stash (`stashViewState`, put back
+  by `openSource`), the background search's `viewStateSnapshot`,
+  `clearViewNarrowing`, `landOnFilters`, a dashboard's count-of-this-view
+  drill and its reset — and a separate `S.tagExclude` would have had to be
+  added to every one, with the one that got missed showing a table
+  "excluding" rows it no longer was, or the reverse, with nothing on screen
+  to say so. In the same list it travels for free. `_compile_where` ANDs the exclusions where it
+  ORs everything else: "Suspicious, but not Benign" must drop a row carrying
+  both, and an OR'd "not Benign" would bring back every untagged row. Any
+  code that reads `S.tagFilter` as a list of tag ids has to skip
+  `isTagExclusion` entries; anything that replaces it with one tag (the tag
+  group's Filter to) keeps `tagFilterExclusions()`, since the rows it was
+  asked to narrow to were counted without the excluded ones.
 - **The group header's own menu** (`groupMenuItems`) tags or untags every
   row in a group in one `/api/row_tags/view` call against a view id from
   `groupRowsView` — the group's own expanded sub-view when it has one,

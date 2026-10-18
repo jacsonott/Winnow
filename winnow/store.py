@@ -9440,7 +9440,25 @@ class Store:
         # sentinel silently. Each part is compiled on its own now and the
         # parts are OR'd, which also makes "untagged, plus the ones I
         # marked" a filter the ribbon can express.
+        #
+        # A "!<id>" entry is a tag filtered OUT (the chip's right-click
+        # menu), and it is the one part that is ANDed rather than OR'd:
+        # "Suspicious, but not the ones I marked Benign" has to drop a row
+        # carrying both, and a union with "not Benign" would bring back
+        # every untagged row instead. Exclusions ride in the same list
+        # rather than a field of their own so that everything that already
+        # carries, stashes or clears the tag filter — a table switch, a
+        # background search, Clear filters, a dashboard drill — carries
+        # them too without being told.
         tag_filter = spec.get("tags") or []
+        excluded = [int(t[1:]) for t in tag_filter
+                    if isinstance(t, str) and t.startswith("!") and t[1:].isdecimal()]
+        if excluded:
+            clauses.append(
+                f"rid NOT IN (SELECT rid FROM row_tags WHERE source_id=? AND tag_id IN ({','.join('?' * len(excluded))}))"
+            )
+            params.append(source_id)
+            params.extend(excluded)
         if tag_filter:
             parts: list[str] = []
             if "__any__" in tag_filter:

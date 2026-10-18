@@ -8,7 +8,7 @@ import { buildDataRow, ensurePage, headH, moveCursor, render, renderTagToolbar, 
 import { armOpCancel, opToken } from './jobs.js';
 import { openRowContextMenu } from './rowmenu.js';
 import { S, cellInRange, cellRangeRows, clearCellSelection, selClear, selCount, selHas, selPositions, selRemap, selSetRange, selSnapshot, selViewRows } from './state.js';
-import { BULK_TAG_CONFIRM_AT, clearRowCaches, refreshTagCounts, refreshUndoState, renderTagRibbon } from './tags.js';
+import { BULK_TAG_CONFIRM_AT, clearRowCaches, refreshTagCounts, refreshUndoState, renderTagRibbon, tagFilterExclusions, toggleTagExclusion } from './tags.js';
 import { confirmDialog, contextMenu, dropdownMenu } from './ui.js';
 import { displayCell } from './tsformat.js';
 import { rebuildView } from './view.js';
@@ -870,11 +870,21 @@ export function groupMenuItems(gi) {
       label: `Filter to ${ellipsize(label)}`,
       title: 'Narrows the whole view to these rows — the same thing clicking the tag in the ribbon does',
       onclick: () => {
-        S.tagFilter = [g.value === null ? '__none__' : g.value];
+        // A tag filtered out stays out: this group's rows were counted
+        // without it, and "these rows" must not grow by the ones it hid.
+        S.tagFilter = [g.value === null ? '__none__' : g.value, ...tagFilterExclusions()];
         renderTagRibbon();
         rebuildView({ keepScroll: false });
       },
     });
+    // The untagged bucket has no tag to exclude; hiding it is "Any tag".
+    if (g.value !== null) {
+      items.push({
+        label: `Exclude ${ellipsize(label)}`,
+        title: 'Hides every row carrying this tag — the same thing Exclude on its chip in the ribbon does',
+        onclick: () => toggleTagExclusion(g.value),
+      });
+    }
   } else if (colType !== 'datetime') {
     items.push('-');
     items.push({ label: `Filter to ${ellipsize(displayValue(g.value))}`, onclick: () => filterByValue(colName, g.value) });

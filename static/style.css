@@ -910,6 +910,11 @@ section.page-with-panels { flex-direction: row; }
 }
 .tag-chip:hover { color: var(--text); }
 .tag-chip[aria-pressed="true"] { color: var(--text); background: var(--panel-2); border-color: currentColor; }
+/* Excluded (the chip's right-click menu): as lit as a pressed chip, since
+   it is just as much a filter that is on, but struck through on a dashed
+   edge so "these rows are hidden" can't be read as "only these rows". */
+.tag-chip.excluded { background: var(--panel-2); border-color: currentColor; border-style: dashed; }
+.tag-chip.excluded .name { text-decoration: line-through; }
 .tag-chip .swatch { width: 8px; height: 8px; border-radius: 1px; }
 .tag-chip .key {
   font-family: var(--mono); font-size: 10px; color: var(--dim);

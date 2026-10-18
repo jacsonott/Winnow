@@ -69,7 +69,7 @@ The direction is decided by the whole view, never by one row: anything still unt
 
 With the grid grouped (see [Working with tables](Working-with-tables.md)), right-click a group header. Under **Tag *N* rows** each tag applies to every row in the group, whether or not the group is expanded and at any level of nesting. **Remove a tag instead…** switches the list to removing; **Apply a tag instead…** switches back. Groups of 10,000 rows or more ask first.
 
-**+ Tag** in the **Group by** strip adds a level that buckets rows by their tags, with an *(untagged)* bucket for what is left. A tag group's header menu has **Filter to *tag*** in place of a value filter.
+**+ Tag** in the **Group by** strip adds a level that buckets rows by their tags, with an *(untagged)* bucket for what is left. A tag group's header menu has **Filter to *tag*** and **Exclude *tag*** in place of the value filters.
 
 ### Merged and saved tables
 
@@ -91,6 +91,8 @@ The rail is the narrow strip down the right-hand edge of the grid. Every tagged 
 
 Click a chip in the ribbon to show only rows with that tag; click it again to drop it.
 
+To hide a tag's rows instead, right-click its chip and choose **Exclude *tag***. The chip stays lit, with its name struck through and a dashed edge, and clicking it brings the rows back. The same menu has **Filter to *tag*** and **Clear the tag filter**.
+
 | Chips pressed | Rows shown |
 | --- | --- |
 | One tag | Rows with that tag |
@@ -98,6 +100,8 @@ Click a chip in the ribbon to show only rows with that tag; click it again to dr
 | **Any tag** | Rows with at least one tag (picking a specific tag replaces it) |
 | **No tags** | Rows with no tag — what is left to go through |
 | **No tags** and a tag | Untagged rows plus rows with that tag |
+| A tag excluded | Rows without that tag |
+| A tag, and another excluded | Rows with the first tag that do not also have the second |
 
 The tag filter combines with the column filters, search and timeframe. **Clear filters** (or `c`) clears it along with everything else. The other filter tools are on [Filtering and searching](Filtering-and-searching.md).
 
