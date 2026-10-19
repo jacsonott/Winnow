@@ -5,11 +5,13 @@ in the case.
 import { recordTabVisit } from './tabhistory.js';
 import { renderHead, saveLayout } from './columns.js';
 import { $, ROW_H, api, el, nameMap, post, toast } from './core.js';
-import { derivedOps } from './derived.js';
+import { derivedOps, renameColumnIn } from './derived.js';
 import { hideDetailPane, syncRowOpenHint } from './detail.js';
 import { currentSpec, renderAdvancedChips, setSearchMode, updateSearchHint } from './filters.js';
+import { clearFilterHistory, dropFilterHistory, filterHistoryStates, syncFilterBaseline } from './filterundo.js';
 import { clearPageCache, headH, rScroll, render, rowAt, spacerPx } from './grid.js';
 import { closeAllGroupViews, drawRail, dropGrouping, regroupAll, renderGroupStrip, setGrouping } from './grouping.js';
+import { refreshHistogram } from './histogram.js';
 import { shutdownWinnow } from './home.js';
 import { openImportModal } from './importer.js';
 import { keyLabel } from './keymap.js';
@@ -172,7 +174,7 @@ export async function closeTab(s) {
   // the tab simply stayed. The stash is only dropped once the tab is gone.
   try { await post(`/api/source/${s.id}/open`, { open: false }); }
   catch (e) { toast(`Could not close ${sourceLabel(s)}: ${e.message}`, 6000); return; }
-  viewStateStash.delete(s.id);
+  dropViewStateFor(s.id);
   if (S.sourceId === s.id) S.sourceId = null;
   await loadSources();
 }
@@ -183,7 +185,7 @@ export async function closeTab(s) {
 export async function closeAllTabs() {
   try {
     await post('/api/tabs/close_all', {});
-    viewStateStash.clear();
+    clearViewStateStash();
     S.sourceId = null;
     await loadSources();
   } catch (e) { toast('Could not close tabs: ' + e.message, 6000); }
@@ -826,6 +828,10 @@ export async function loadSources(select, { navigate = true, openOpts = undefine
     // case) never reaches renderHead, so the strip stayed an 18px dashed
     // stub until a table opened.
     renderGroupStrip();
+    // No view landed, so no winnow:viewchange either — the histogram strip
+    // kept charting the table that just went (or the previous case's)
+    // until another table opened.
+    refreshHistogram();
   }
 }
 
@@ -840,14 +846,32 @@ export async function loadSources(select, { navigate = true, openOpts = undefine
    already persists those per source. */
 const viewStateStash = new Map();
 
-export function clearViewStateStash() { viewStateStash.clear(); }
+/* The filter-undo history goes with the stash, for the same reasons —
+   see filterundo.js. */
+export function clearViewStateStash() { viewStateStash.clear(); clearFilterHistory(); }
 
 /* One table's stash, dropped when that table is. SQLite reuses a deleted
    source's id, so a re-import can land on it and inherit the previous
    file's filters and sort — silently showing a slice of a table nobody
    filtered, or a filter on a column the new file doesn't have. closeTab
    already does this; Remove did not. */
-export function dropViewStateFor(id) { return viewStateStash.delete(id); }
+export function dropViewStateFor(id) { dropFilterHistory(id); return viewStateStash.delete(id); }
+
+/* A derived column renamed on these tables (derived.js
+   renameDerivedColumn): what each one has stashed moves to the new name,
+   so coming back to it doesn't rebuild a filter or sort on a column that
+   is no longer there. A merge over them has its own entry, keyed by its
+   own id, and moves with them when it is the table renamed from. Their
+   filter-undo history moves too, for the same reason. */
+export function renameColumnInStash(ids, from, to) {
+  const all = new Set(ids);
+  if (S.sourceId != null && S.sourceId < 0) all.add(S.sourceId);
+  for (const id of all) {
+    const st = viewStateStash.get(id);
+    if (st) renameColumnIn(st, from, to);
+    for (const fs of filterHistoryStates(id)) renameColumnIn(fs, from, to);
+  }
+}
 
 function stashViewState() {
   if (S.sourceId == null || !S.view) return;
@@ -1016,6 +1040,10 @@ export async function openSource(id, { skipBuild = false } = {}) {
   if (S.columns.some((c) => c.derived)) await derivedOps().catch(() => {});
   await loadTags();
   renderHead();
+  // Whatever the table opens with is where `z` starts from, not a filter
+  // change: a case-wide timeframe set on the last table is not this one's
+  // to undo.
+  syncFilterBaseline(id);
   // A caller about to replace the filters (a dashboard drill) builds the
   // view itself, once, rather than paying for the stashed one first.
   if (skipBuild) { syncTabSelection(); return; }
@@ -1775,6 +1803,10 @@ export async function clearAllFilters(seed = null) {
   // filters clears the marks with it, so the grid never wears comparison
   // chrome over a view that isn't the comparison.
   S.diffMarks = null;
+  // A seed is the one filter to land on: a column's box text (`raw`), or a
+  // condition for the filter tree (`cond`) when the box would read the text
+  // as its own syntax — see filterByContains (detail.js).
+  if (seed && seed.cond) return landOnFilters({}, { type: 'group', op: 'AND', children: [seed.cond] });
   return landOnFilters(seed ? { [seed.column]: seed.raw } : {}, { type: 'group', op: 'AND', children: [] });
 }
 

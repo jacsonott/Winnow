@@ -11,12 +11,11 @@ import pytest
 pytestmark = pytest.mark.ui
 
 
-def test_row_as_json_prefills_every_column_and_lands_in_the_grid(page, format_detected):
+def test_row_as_json_prefills_every_column_and_lands_in_the_grid(page, format_detected, derive_pick):
     page.evaluate("() => __winnow.openDerivedColumnModal('Host')")
     page.wait_for_selector("#modal:not([hidden])")
     format_detected()
-    page.locator("#modalBody select[data-role=type]").select_option(label="Combine columns")
-    page.locator("#modalBody select[data-role=op]").select_option(label="Row as JSON")
+    derive_pick("Row as JSON")
     assert page.locator(".derived-name").input_value() == "Row as JSON"
     chips = [c.replace("✕", "").strip() for c in page.locator(".derived-columns .fb-groupby-chip").all_inner_texts()]
     others = page.evaluate("() => __winnow.S.columns.map((c) => c.name).filter((n) => n !== 'Host')")

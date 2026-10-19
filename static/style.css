@@ -97,6 +97,11 @@ html[data-style="panel"][data-theme="dark"] {
   --danger: #e0796a; --danger-bg: #4a2530; --danger-border: #7a3b48;
   --diff-a: #ff7a66; --diff-a-bg: #3a2320; --diff-b: #3fc1c9; --diff-b-bg: #173236;
   --str: #9fd0a0; --num: #7fb0d8; --kw: #c98fd6;
+  /* The value type written after each column name in the table menu.
+     Its own token so it reads as a different colour from the name in
+     every skin: each one points it at whichever of its syntax colours
+     stays clear of both --text and --accent. */
+  --col-type: var(--num);
   --radius-sm: 2px; --radius-md: 3px; --border-w: 1px;
   --ease: ease; --transition-fast: 120ms;
   --shadow-tag: 0 4px 16px rgba(0,0,0,.4); --shadow-modal: 0 8px 24px rgba(0,0,0,.35);
@@ -111,6 +116,7 @@ html[data-style="panel"][data-theme="light"] {
   --danger: #c0392b; --danger-bg: #fbe1de; --danger-border: #e3a89c;
   --diff-a: #c0392b; --diff-a-bg: #fbe1dd; --diff-b: #0e7c86; --diff-b-bg: #d8f1f3;
   --str: #2f8f52; --num: #2f6fa8; --kw: #8a4fa0;
+  --col-type: var(--num);
   --radius-sm: 2px; --radius-md: 3px; --border-w: 1px;
   --ease: ease; --transition-fast: 120ms;
   --shadow-tag: 0 4px 16px rgba(30,40,60,.15); --shadow-modal: 0 8px 24px rgba(30,40,60,.12);
@@ -131,6 +137,7 @@ html[data-style="phosphor"][data-theme="dark"] {
   --danger: #ff6b6b; --danger-bg: #3a1414; --danger-border: #6b2323;
   --diff-a: #ff6b6b; --diff-a-bg: #3a1c1c; --diff-b: #39e881; --diff-b-bg: #123324;
   --str: #7be8a0; --num: #6fd0e0; --kw: #d9a8ff;
+  --col-type: var(--num);
   --radius-sm: 0px; --radius-md: 0px; --border-w: 1px;
   --ease: linear; --transition-fast: 80ms;
   --shadow-tag: 0 0 16px color-mix(in srgb, var(--accent) 35%, transparent);
@@ -149,6 +156,7 @@ html[data-style="phosphor"][data-theme="light"] {
   --danger: #b23a2e; --danger-bg: #f0d9ce; --danger-border: #cf9a86;
   --diff-a: #b23a2e; --diff-a-bg: #f4d9d2; --diff-b: #1f8a4c; --diff-b-bg: #d5ecd9;
   --str: #2f7d46; --num: #2f6f8a; --kw: #7a4f8a;
+  --col-type: var(--num);
   --radius-sm: 0px; --radius-md: 0px; --border-w: 1px;
   --ease: linear; --transition-fast: 80ms;
   --shadow-tag: none; --shadow-modal: none;
@@ -197,6 +205,7 @@ html[data-style="jenna"][data-theme="dark"] {
   --danger: #e06c60; --danger-bg: #3a1f1d; --danger-border: #6b3330;
   --diff-a: #e06c60; --diff-a-bg: #3a2220; --diff-b: #86c386; --diff-b-bg: #223324;
   --str: #6fb4d9; --num: #86c386; --kw: #d7a35e;
+  --col-type: var(--num);
   --radius-sm: 0px; --radius-md: 0px; --border-w: 1px;
   --ease: ease-out; --transition-fast: 100ms;
   --shadow-tag: 0 2px 8px rgba(0,0,0,.5); --shadow-modal: 0 4px 16px rgba(0,0,0,.55);
@@ -216,6 +225,7 @@ html[data-style="jenna"][data-theme="light"] {
   --danger: #c0392b; --danger-bg: #fbe4e2; --danger-border: #e8b0aa;
   --diff-a: #c0392b; --diff-a-bg: #fbe0dd; --diff-b: #2f7d46; --diff-b-bg: #ddeede;
   --str: #2b6f94; --num: #2f7d46; --kw: #a06a1f;
+  --col-type: var(--num);
   --radius-sm: 0px; --radius-md: 0px; --border-w: 1px;
   --ease: ease-out; --transition-fast: 100ms;
   --shadow-tag: 0 2px 8px rgba(0,0,0,.14); --shadow-modal: 0 4px 16px rgba(0,0,0,.16);
@@ -234,6 +244,7 @@ html[data-style="blueprint"][data-theme="dark"] {
   --danger: #ff4d4d; --danger-bg: #3a1414; --danger-border: #7a2020;
   --diff-a: #ff4d4d; --diff-a-bg: #3a1a1a; --diff-b: #ffd23f; --diff-b-bg: #3a3214;
   --str: #4dd08a; --num: #4d9fff; --kw: #d685ff;
+  --col-type: var(--num);
   --radius-sm: 0px; --radius-md: 0px; --border-w: 2px;
   --ease: ease-out; --transition-fast: 80ms;
   --shadow-hard-c: #000000;
@@ -249,6 +260,7 @@ html[data-style="blueprint"][data-theme="light"] {
   --danger: #c0392b; --danger-bg: #fbe1de; --danger-border: #1c1c1c;
   --diff-a: #c0392b; --diff-a-bg: #f7dcd8; --diff-b: #8a6d00; --diff-b-bg: #f6efc9;
   --str: #1f7a3f; --num: #1f5f9f; --kw: #7a3f9f;
+  --col-type: var(--num);
   --radius-sm: 0px; --radius-md: 0px; --border-w: 2px;
   --ease: ease-out; --transition-fast: 80ms;
   --shadow-hard-c: #1c1c1c;
@@ -302,6 +314,9 @@ html[data-style="harvest"][data-theme="dark"] {
   --danger: #d9866f; --danger-bg: #2f1f1b; --danger-border: #5e3a2f;
   --diff-a: #ff6b57; --diff-a-bg: #3a1f18; --diff-b: #4fd08a; --diff-b-bg: #173226;
   --str: #a6bd8f; --num: #c9a066; --kw: #b09ac6;
+  /* --num is the accent's gold here, and the type sits a row's width from
+     the accent-filled ▾ auto·on buttons, so it takes the lavender. */
+  --col-type: var(--kw);
   --radius-sm: 2px; --radius-md: 3px; --border-w: 1px;
   --ease: ease; --transition-fast: 120ms;
   --shadow-tag: 0 4px 16px rgba(0,0,0,.55); --shadow-modal: 0 8px 24px rgba(0,0,0,.5);
@@ -322,6 +337,7 @@ html[data-style="harvest"][data-theme="light"] {
   --danger: #9e4a31; --danger-bg: #f5e3db; --danger-border: #dcb6a6;
   --diff-a: #c8321b; --diff-a-bg: #fbe3dc; --diff-b: #1f8a4c; --diff-b-bg: #d9f2e3;
   --str: #52682f; --num: #8a6420; --kw: #75507f;
+  --col-type: var(--kw); /* --num is the accent's gold, as in dark */
   --radius-sm: 2px; --radius-md: 3px; --border-w: 1px;
   --ease: ease; --transition-fast: 120ms;
   --shadow-tag: 0 4px 16px rgba(90,70,30,.16); --shadow-modal: 0 8px 24px rgba(90,70,30,.18);
@@ -336,6 +352,7 @@ html[data-style="studio"][data-theme="dark"] {
   --danger: #ff6b81; --danger-bg: #3a1420; --danger-border: #6b2035;
   --diff-a: #ff6b81; --diff-a-bg: #3a1c26; --diff-b: #7c6cf6; --diff-b-bg: #262244;
   --str: #6fe0b0; --num: #6fa8f0; --kw: #c69cf0;
+  --col-type: var(--num);
   --radius-sm: 8px; --radius-md: 14px; --border-w: 1px;
   --ease: cubic-bezier(.2,.8,.2,1); --transition-fast: 150ms;
   --shadow-tag: 0 10px 30px rgba(0,0,0,.35); --shadow-modal: 0 16px 40px rgba(0,0,0,.4);
@@ -350,6 +367,7 @@ html[data-style="studio"][data-theme="light"] {
   --danger: #d9534f; --danger-bg: #fbe4e3; --danger-border: #eab3b0;
   --diff-a: #d9534f; --diff-a-bg: #f9dcdb; --diff-b: #7c6cf6; --diff-b-bg: #e4e1fb;
   --str: #1f9a5c; --num: #1f6fd0; --kw: #9a5cd0;
+  --col-type: var(--num);
   --radius-sm: 8px; --radius-md: 14px; --border-w: 1px;
   --ease: cubic-bezier(.2,.8,.2,1); --transition-fast: 150ms;
   --shadow-tag: 0 16px 40px rgba(40,40,80,.12); --shadow-modal: 0 16px 40px rgba(40,40,80,.14);
@@ -910,6 +928,11 @@ section.page-with-panels { flex-direction: row; }
 }
 .tag-chip:hover { color: var(--text); }
 .tag-chip[aria-pressed="true"] { color: var(--text); background: var(--panel-2); border-color: currentColor; }
+/* Excluded (the chip's right-click menu): as lit as a pressed chip, since
+   it is just as much a filter that is on, but struck through on a dashed
+   edge so "these rows are hidden" can't be read as "only these rows". */
+.tag-chip.excluded { background: var(--panel-2); border-color: currentColor; border-style: dashed; }
+.tag-chip.excluded .name { text-decoration: line-through; }
 .tag-chip .swatch { width: 8px; height: 8px; border-radius: 1px; }
 .tag-chip .key {
   font-family: var(--mono); font-size: 10px; color: var(--dim);
@@ -1518,6 +1541,15 @@ code { font-family: var(--mono); color: var(--accent); background: var(--panel);
 .dfield-copy:hover { color: var(--accent); border-color: var(--accent-dim); }
 
 .detail-pretty { margin: 0; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+/* A value shown as plain text because it was too deep or too big to lay
+   out (detail.js shownAsText). The hint above it is in the UI face and
+   --dim, so it reads as the pane talking rather than as the evidence. The
+   text breaks anywhere: such a value is often a run of brackets, which
+   break-all doesn't split (no break after an opening bracket), and one
+   unbroken 4 KB line widened the field list until it pushed the note box
+   out of the pane. */
+.dfield-hint { font-family: var(--ui); font-size: 11px; color: var(--dim); margin-bottom: 2px; }
+.dfield-text { overflow-wrap: anywhere; }
 .jtok-key { color: var(--accent); }
 .jtok-str { color: var(--str); }
 .jtok-num { color: var(--num); }
@@ -2136,6 +2168,7 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .collist-row.drop-after { box-shadow: inset 0 -2px 0 var(--accent); }
 .collist-row:hover { background: var(--panel-2); }
 .collist label { display: flex; align-items: center; gap: 8px; padding: 3px 4px; font-family: var(--mono); font-size: 12px; flex: 1; min-width: 0; }
+.collist-type { color: var(--col-type); }
 .modal-body .row-actions { display: flex; gap: 6px; margin-top: 12px; align-items: center; }
 .modal-body .row-actions h4 { flex: 1; margin: 0; }
 /* A form dialog's field captions (New case / Save as a case, Edit case,
@@ -2554,6 +2587,12 @@ textarea:focus { border-color: var(--accent); outline: none; }
   background: var(--panel-2); border: 1px solid var(--line-2); border-radius: var(--radius-sm); padding: 2px 4px;
 }
 .settings-key-chip .btn { font-size: 9px; padding: 1px 4px; }
+/* The fixed keys under the map, a .kv per place they work. The key column
+   is wider than .kv's 150px so "Ctrl/⌘ + Shift + arrow" and the
+   modified-click gestures read on one line rather than wrapping mid-chord. */
+.settings-fixed-where { font-size: 12px; font-weight: 600; color: var(--text); margin: 12px 0 5px; }
+.settings-fixed-keys { grid-template-columns: 200px 1fr; }
+.settings-fixed-keys kbd { align-self: start; }   /* not stretched to a wrapped description's height */
 
 .appearance-styles { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; margin-top: 8px; }
 .style-card {
@@ -2733,6 +2772,10 @@ textarea:focus { border-color: var(--accent); outline: none; }
   border: 1px solid var(--line-2); border-radius: var(--radius-sm); padding: 5px 8px; font: inherit;
 }
 .derived-param-help { flex: 1; min-width: 0; margin: 0; }
+.derived-param.derived-param-wrap { align-items: flex-start; flex-wrap: wrap; }
+.derived-param.derived-param-wrap .derived-param-label { padding-top: 4px; }
+.derived-param.derived-param-wrap .derived-param-help { flex-basis: 100%; padding-left: 160px; }
+.derived-param-wrap .derived-columns { flex: 1; min-width: 0; }
 /* "A column per named group" — one row per (?P<name>…) the pattern
    declares: tick it, name the column it becomes, and see what it would
    pull out of the sampled values. A grid rather than a flex row so the
@@ -2759,21 +2802,108 @@ textarea:focus { border-color: var(--accent); outline: none; }
 
 /* The scope buttons sit on this line, so it becomes a row. */
 .derived-preview-title {
-  font-size: 12px; color: var(--text-dim); margin-top: 12px;
+  font-size: 12px; color: var(--text-dim); margin-top: 4px;
   display: flex; align-items: center; gap: 10px;
 }
 .derived-scope { margin-left: auto; }
+/* A fixed height, rows scrolling above a verdict line that stays put. */
 .derived-preview {
   border: 1px solid var(--line); border-radius: var(--radius-sm);
-  padding: 8px 10px; margin-top: 4px; max-height: 240px; overflow: auto;
+  margin-top: 4px; height: 168px; display: flex; flex-direction: column; overflow: hidden;
 }
+.derived-preview-rows { flex: 1 1 0; min-height: 0; overflow: auto; padding: 8px 10px 4px; }
+.derived-preview-rows > .fb-help { margin: 0; }
+/* Two lines' room whether it holds one or two, each line cut short
+   rather than wrapped (the whole sentence is in its title). */
+.derived-preview-foot {
+  flex: 0 0 auto; height: 40px; padding: 3px 10px; border-top: 1px solid var(--line);
+  display: flex; flex-direction: column; justify-content: center; overflow: hidden;
+}
+.derived-preview-foot .fb-help { margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* The last answer stays on screen, dimmed, while the next is on its way. */
+.derived-preview.stale .derived-preview-rows,
+.derived-preview.stale .derived-preview-foot { opacity: .45; transition: opacity 120ms ease; }
 .derived-preview-row { display: flex; align-items: baseline; gap: 8px; font-family: var(--mono); font-size: 11px; }
 .derived-in { flex: 0 1 auto; max-width: 45%; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .derived-arrow { flex: 0 0 auto; color: var(--text-dim); }
 .derived-out { flex: 1 1 auto; min-width: 0; }
 .derived-out.bad, .fb-help.bad { color: var(--danger, #c0392b); }
-.derived-verdict { margin: 8px 0 0; }
 .derived-name { font-family: var(--mono); }
+
+/* The dialog's two panes: what to make on the left, its settings and
+   preview on the right. The frame is a FIXED height, like
+   .settings-panes, and so is every part of the right pane except the
+   settings box, which takes whatever is left and scrolls — so choosing a
+   different entry, a format with more settings, or a regex whose named
+   groups appear changes what is inside the boxes and moves none of them.
+   It used to be a column of rows sized to its content and centred, so
+   each of those resized the card and slid its header. The calc keeps the
+   card inside .tall's 82vh with the head, the buttons and the padding. */
+.derived-panes {
+  display: grid; grid-template-columns: 220px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr);
+  gap: 14px; height: max(400px, min(600px, calc(82vh - 130px)));
+}
+.derived-rail {
+  min-height: 0; display: flex; flex-direction: column; gap: 6px;
+  border-right: 1px solid var(--line); padding-right: 10px;
+}
+.derived-search {
+  flex: 0 0 auto; background: var(--ink); color: var(--text);
+  border: 1px solid var(--line-2); border-radius: var(--radius-sm); padding: 5px 8px; font: inherit; font-size: 12px;
+}
+.derived-search:focus { border-color: var(--accent); outline: none; }
+.derived-rail-list { flex: 1 1 0; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 1px; }
+.derived-rail-group {
+  flex: 0 0 auto; padding: 10px 8px 3px;
+  font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--dim);
+}
+.derived-rail-group:first-child { padding-top: 2px; }
+/* The Settings dialog's section list, item for item, plus a pin. */
+.derived-rail-row { flex: 0 0 auto; display: flex; align-items: stretch; border-radius: var(--radius-sm); }
+.derived-rail-row:hover { background: var(--panel-2); }
+.derived-rail-item {
+  flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px;
+  text-align: left; background: none; border: 0; border-radius: var(--radius-sm);
+  padding: 5px 8px; font: inherit; font-size: 12px; color: var(--text); cursor: pointer;
+}
+.derived-rail-item[aria-selected="true"] { background: var(--panel-2); box-shadow: inset 2px 0 0 var(--accent); }
+.derived-rail-item:disabled { color: var(--dim); cursor: default; }
+/* Drawn inside the item: the list is a scroller and clips the global ring. */
+.derived-rail-item:focus-visible, .derived-rail-pin:focus-visible { outline-offset: -2px; }
+.derived-rail-hint { font-size: 11px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Out of the way until wanted — on the row under the pointer, the row
+   with focus, and the chosen row, which is where pinning is found. */
+.derived-rail-pin {
+  flex: 0 0 auto; background: none; border: 0; border-radius: var(--radius-sm);
+  color: var(--dim); font: inherit; font-size: 11px; padding: 0 7px; cursor: pointer; opacity: 0;
+}
+.derived-rail-row:hover .derived-rail-pin, .derived-rail-row:focus-within .derived-rail-pin,
+.derived-rail-row.selected .derived-rail-pin { opacity: 1; }
+.derived-rail-pin:hover { color: var(--text); }
+.derived-rail-empty { padding: 8px; font-size: 12px; color: var(--dim); }
+.derived-pane { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.derived-pane > * { flex: 0 0 auto; }
+.derived-pane > .derived-row:first-child { margin-top: 0; }
+.derived-settings {
+  flex: 1 1 0; min-height: 0; overflow: auto; position: relative;
+  margin: 4px 0; padding: 8px 4px 4px 0;
+  border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
+}
+/* A shadow along the bottom edge while more settings sit below it. */
+.derived-settings.more { box-shadow: inset 0 -16px 14px -14px color-mix(in srgb, var(--text) 35%, transparent); }
+.derived-settings > .derived-row:first-child { margin-top: 0; }
+.derived-settings .derived-params { margin: 0 0 6px; }
+.derived-detect { margin: -4px 0 8px 160px; }
+.derived-desc { margin: 0 0 6px; font-size: 12px; line-height: 1.45; color: var(--dim); }
+/* While a regex's named groups stand in for the one column, the field
+   keeps its room (hidden, not removed) and a line over it says why. */
+.derived-name-row { position: relative; }
+.derived-name-aside {
+  display: none; position: absolute; left: 160px; right: 0; top: 50%; transform: translateY(-50%);
+  font-size: 12px; font-style: italic; color: var(--dim);
+}
+.derived-name-row.by-group .derived-name { visibility: hidden; }
+.derived-name-row.by-group .derived-name-aside { display: block; }
 
 /* Shown while dragging OS files over the window (wireFileDrop in app.js) —
    above .modal's own z-index so it's visible even if a modal happens to be
@@ -3001,6 +3131,20 @@ html.remote .row.selected:hover { background: var(--row-selected); }
 }
 .conn-msg { font-size: 12px; line-height: 1.45; }
 .conn-banner .btn { white-space: nowrap; flex: 0 0 auto; }
+
+/* Running as administrator (maybeWarnElevated in static/js/importer.js).
+   Bottom left, clear of the toast and the connection banner (centre) and
+   the jobs panel (right), so it can sit there on the home screen and in a
+   case alike until it's dismissed. */
+.elev-notice {
+  position: fixed; left: 14px; bottom: 14px; z-index: 55;
+  display: flex; align-items: center; gap: 12px; max-width: min(460px, 92vw);
+  padding: 10px 14px; border-radius: var(--radius-md);
+  background: var(--panel); color: var(--text);
+  border: var(--border-w) solid var(--accent-dim); box-shadow: var(--shadow-modal);
+}
+.elev-msg { font-size: 12px; line-height: 1.45; }
+.elev-notice .btn { white-space: nowrap; flex: 0 0 auto; }
 
 /* Across cases (static/js/multicase.js) */
 .mc-cases { display: grid; gap: 2px; max-height: 150px; overflow: auto; margin: 4px 0 10px;

@@ -630,13 +630,19 @@ export function startResize(e, name) {
   document.addEventListener('mouseup', up);
 }
 
-export const saveLayout = debounce(() => {
-  if (!S.sourceId) return;
-  post('/api/layout', {
+/* saveLayout's write without the wait, for a caller about to read the
+   layout back (a derived column's rename re-opens the table): a resize
+   or move made in the last 400ms would otherwise still be pending, and
+   lost under the copy the re-open fetches. */
+export function saveLayoutNow() {
+  if (!S.sourceId) return Promise.resolve();
+  return post('/api/layout', {
     source_id: S.sourceId,
     payload: { columns: S.layout, order: S.order, sort: S.sort, value_filters: S.valueFilterMode, hide_empty_rows: S.hideEmptyRows },
   }).catch(() => {});
-}, 400);
+}
+
+export const saveLayout = debounce(saveLayoutNow, 400);
 
 /* Saves the current column order/visibility/timestamp-format as the
    cross-case default for this exact header set (workspace/column_layouts.json,

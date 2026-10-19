@@ -30,10 +30,26 @@ To filter from a cell, select it and press `f` to filter its column to that valu
 | `""` or `''` | empty cells | |
 | `*` | cells with any value | |
 | `a.exe\|b.exe\|c.exe` | cells exactly equal to any of the values | Case-sensitive, like `=` |
+| `a.exe\|""` | cells equal to any of the values, or empty | `""` in a list is an empty cell |
+| `=" padded "` `"a\|b"\|c.exe` | exact values that bare text can't hold | See [Quoted values](#quoted-values) |
 
-Spaces at either end of what you type are ignored. An operator needs a value after it: a lone `=` or `!` is read as text to look for. There are no wildcards. A `%`, `_` or `*` inside a value is matched literally. An operator applies to everything after it, so `!a.exe|b.exe` means "does not contain the text `a.exe|b.exe`", not "neither of these"; use the filter builder for that. A value that itself contains `|` can't be typed as a list; tick it in the value picker instead.
+Spaces at either end of what you type are ignored. An operator needs a value after it: a lone `=` or `!` is read as text to look for. There are no wildcards. A `%`, `_` or `*` inside a value is matched literally. An operator applies to everything after it, so `!a.exe|b.exe` means "does not contain the text `a.exe|b.exe`", not "neither of these"; use the filter builder for that.
 
 **Settings → Filter & search syntax** has a short version of this table.
+
+### Quoted values
+
+Some exact values can't be typed bare: the box trims spaces at either end, a `|` would split a list, and a list that starts with `<`, `>`, `=`, `!`, `^` or `/` would read as an operator or a regular expression. Put those values in double quotes, in an `=` or `!=` filter or as items in a list:
+
+| Type this | Matches |
+| --- | --- |
+| `=" padded "` | cells exactly equal to ` padded `, spaces included |
+| `"cmd \| more"\|cmd.exe` | `cmd \| more` or `cmd.exe` |
+| `"<unknown>"\|"/tmp/"` | `<unknown>` or `/tmp/` |
+
+Inside quotes, `""` stands for one `"`. Quotes are only read this way when the value needs them. `="C:\Program Files\x.exe"` still matches the text with its quotes, as it always has, because a quoted path is a common value. The value picker and the `f` key write quotes for you when a value needs them, so you rarely type them yourself.
+
+A value with a line break in it can't be put in the filter box at all.
 
 ### Case sensitivity
 
@@ -65,7 +81,7 @@ The ▾ beside a column's filter box opens the value picker. It lists the column
 
 The picker starts on **This view**, so the list reflects your other filters. If the column already has a value selection, it starts on **Whole table** so that you can widen the selection again. Empty cells are listed as `(empty)`.
 
-The picker writes an ordinary filter: one value becomes `=value`, several become `a|b|c`. Ticking every value in a complete list removes the filter. Some selections can't be written in the box: a value containing `|`, a value with spaces at either end, or `(empty)` ticked alongside other values. Winnow applies those through the filter builder instead and tells you so ("applied under Filters ▾").
+The picker writes an ordinary filter into the column's filter box: one value becomes `=value`, several become `a|b|c`, and `(empty)` ticked alongside other values becomes `""` in the list. A value that needs [quotes](#quoted-values) gets them, such as `"a|b"|c` or `=" padded "`. **Apply** with nothing changed leaves the column's filter as it is. Ticking every value in a complete list removes the filter, unless the list is **This view** and the column's own filter decided what it lists: after a filter such as `svchost`, `>30` or `!p1` on the column, the picker lists only the values that filter leaves, and ticking them all filters to exactly those values. The one selection the box can't hold is a value with a line break in it; Winnow applies that through the filter builder instead and tells you so ("applied under Filters ▾").
 
 The list holds the 1,000 most common values at most. When a column has more, the picker says so. The **Find a value…** box only searches the values already listed, so to reach a rarer value, narrow the column first (for example with a contains filter) and reopen the picker.
 
@@ -94,7 +110,7 @@ A filter is a group of conditions. In the **Match … of:** line at the top of e
 
 A datetime column gets a 📅 date picker next to the value. When you open the builder, any filters in the column boxes move into it as conditions, so the builder always shows the whole filter.
 
-Under the conditions, **Equivalent SQL (editable):** shows the same filter as a SQL expression. You can edit either side and they stay in step. If you type SQL that the guided editor can't show, the builder switches to raw SQL mode and says so. **Start over with the guided editor** leaves raw mode. Raw SQL is checked when you click **Apply**, and an error is shown under the box. Only plain conditions are accepted: no `SELECT`, no `;` and no comments.
+Under the conditions, **Equivalent SQL (editable):** shows the same filter as a SQL expression. You can edit either side and they stay in step. If you type SQL that the guided editor can't show, the builder switches to raw SQL mode and says so. A `LIKE` becomes a guided condition only when it means exactly the same thing: `'%text%'` is contains and `'text%'` is starts with, as long as the text has no other `%` or `_` in it. Any other `LIKE`, such as `'%.exe'`, `'p_.exe'` or `'P1.EXE'` (which ignores case, unlike equals), stays as raw SQL and filters exactly as typed. A contains or starts with whose value holds a `%` or `_` is shown with an `ESCAPE '\'` clause, so the SQL matches those characters literally, as the condition does. **Start over with the guided editor** leaves raw mode. Raw SQL is checked when you click **Apply**, and an error is shown under the box. Only plain conditions are accepted: no `SELECT`, no `;` and no comments.
 
 The **Group by** section lets a filter carry a grouping too (see [Grouping rows](Working-with-tables.md#grouping-rows)). **Apply** runs the filter; **Clear** empties the conditions.
 
@@ -159,7 +175,7 @@ The same switch is in Settings, under **Filter & search syntax**.
 
 Click **Histogram** or press `h` to show a bar chart above the grid of when the rows in the current view happened. Choose which datetime column to chart from its list. The line beside it gives the row count, the bucket size and the tallest bar. Winnow picks a bucket size, from one second up to a year, that gives bars a few pixels wide across the strip, so narrowing the timeframe gives finer buckets. Hover a bar to see its time range and row count. **Tags** colours the bars by tag: each row counts under the first tag it carries, with untagged rows underneath.
 
-Drag across the bars to set the timeframe filter to that range on the charted column. **Clear timeframe** removes it again. The histogram follows every filter, so it is a quick way to see where a search's hits cluster in time.
+Drag across the bars to set the timeframe filter to that range on the charted column. **Clear timeframe** removes it again. The histogram follows every filter, so it is a quick way to see where a search's hits cluster in time. It stays open when you open another case and charts that case's table once it has loaded; a case with no table open shows "Open a table to chart when its rows happened."
 
 If the table has no datetime column, the histogram says so. You can make one from a text timestamp; see [Derived columns](Derived-columns.md).
 
@@ -195,7 +211,7 @@ Winnow checks every regular expression before running it, in filters and in sear
 
 ## Filtering by tag
 
-The tag chips above the grid also filter. Click a tag to show only rows carrying it. Clicking a second tag shows rows carrying either. **Any tag** shows every tagged row and **No tags** shows the rows nobody has tagged yet, which is what is left to go through. See [Tagging and notes](Tagging-and-notes.md) for tagging itself.
+The tag chips above the grid also filter. Click a tag to show only rows carrying it. Clicking a second tag shows rows carrying either. **Any tag** shows every tagged row and **No tags** shows the rows nobody has tagged yet, which is what is left to go through. Right-click a tag and choose **Exclude *tag*** to hide the rows carrying it; the chip is struck through until you click it again. See [Tagging and notes](Tagging-and-notes.md) for tagging itself.
 
 ## Clearing filters
 
@@ -204,6 +220,12 @@ The tag chips above the grid also filter. Click a tag to show only rows carrying
 **Reset view** in the table menu does the same and also restores the table's default sort.
 
 To remove only the timeframe, use **Clear** in the timeframe dialog or **Clear timeframe** on the histogram.
+
+## Undoing a filter change
+
+Press `z` to undo the last filter change on the table you are looking at. Press it again to keep stepping back through earlier ones. It covers the column filters, the value picker, the filter builder, the search box, the tag filter and the timeframe, so one press also brings back the filters and search that **Clear filters** removed. Grouping comes back with `X`, as before. A word typed into a filter box or the search box comes back as one step, not a letter at a time. The sort, grouping and **Hide empty rows** are left as they are.
+
+Each table keeps its own list, so `z` never changes another table's filters. The list is gone once the tab is closed or another case is opened. Undoing a tag is a different key, `Ctrl+Z`; see [Tagging and notes](Tagging-and-notes.md#undo).
 
 ## Keys
 
@@ -214,6 +236,7 @@ To remove only the timeframe, use **Clear** in the timeframe dialog or **Clear t
 | `e` | Filter builder |
 | `]` or `w` / `[` or `q` | Next / previous saved filter |
 | `c` | Clear filters, search and tag filter |
+| `z` | Undo the last filter change |
 | `/` or `Ctrl+F` | Search box |
 | `r` / `R` | Toggle the timeframe / open the timeframe dialog |
 | `h` | Histogram |

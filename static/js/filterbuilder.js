@@ -2,7 +2,7 @@
 
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { $, api, debounce, el, post, toast } from './core.js';
-import { parseFilter, setColumnFilter } from './filters.js';
+import { makePickerNode, parseFilter, setColumnFilter } from './filters.js';
 import { checkPresets } from './savedfilters.js';
 import { setGrouping } from './grouping.js';
 import { S, normalizeTree } from './state.js';
@@ -34,22 +34,47 @@ export function sqlLit(v) { return "'" + String(v).replace(/'/g, "''") + "'"; }
 
 export function sqlIdent(c) { return '"' + String(c).replace(/"/g, '""') + '"'; }
 
+/* A LIKE pattern for contains/starts text, as the server compiles it
+   (Store._compile_condition: LIKE ... ESCAPE '\'). Text holding a `%` or
+   `_` has to escape them, or the SQL shown says something else — a contains
+   on `a%b` read as `LIKE '%a%b%'`, which also matches `axxb`. Text without
+   them is shown bare, the way it always was: there a backslash is already
+   literal, as it is to SQLite with no ESCAPE clause. */
+export function likeSql(c, text, { lead, not = false }) {
+  const kw = not ? 'NOT LIKE' : 'LIKE';
+  const s = String(text);
+  if (!/[%_]/.test(s)) return `${c} ${kw} ${sqlLit((lead ? '%' : '') + s + '%')}`;
+  const esc = s.replace(/[\\%_]/g, '\\$&');
+  return `${c} ${kw} ${sqlLit((lead ? '%' : '') + esc + '%')} ESCAPE '\\'`;
+}
+
 export function serializeCond(node) {
   const c = sqlIdent(node.column);
   const v = node.value;
+  // An empty contains/starts compiles to no clause at all server-side, so
+  // it says nothing here either: `LIKE '%%'` would claim it drops NULLs,
+  // and would not parse back as the blank condition it came from.
+  if (['contains', 'not_contains', 'starts'].includes(node.op) && (v == null || v === '')) return '';
   switch (node.op) {
-    case 'contains': return `${c} LIKE ${sqlLit('%' + v + '%')}`;
-    case 'not_contains': return `(${c} NOT LIKE ${sqlLit('%' + v + '%')} OR ${c} IS NULL)`;
+    case 'contains': return likeSql(c, v, { lead: true });
+    case 'not_contains': return `(${likeSql(c, v, { lead: true, not: true })} OR ${c} IS NULL)`;
     case 'equals': return `${c} = ${sqlLit(v)}`;
     case 'not_equals': return `(${c} <> ${sqlLit(v)} OR ${c} IS NULL)`;
-    case 'starts': return `${c} LIKE ${sqlLit(v + '%')}`;
+    case 'starts': return likeSql(c, v, { lead: false });
     case 'regex': return `${c} REGEXP ${sqlLit(v)}`;
     case '>': case '>=': case '<': case '<=': return `${c} ${node.op} ${sqlLit(v)}`;
     case 'empty': return `(${c} IS NULL OR ${c} = '')`;
     case 'not_empty': return `(${c} IS NOT NULL AND ${c} <> '')`;
     case 'in': {
       const items = Array.isArray(v) ? v : String(v || '').split('\n').map((x) => x.trim()).filter(Boolean);
-      return items.length ? `${c} IN (${items.map(sqlLit).join(', ')})` : '1';
+      // An empty string in a list is the empty cell, NULL included, as the
+      // server compiles it (Store._compile_condition) — the value picker
+      // and the box's `a|""` put one there.
+      const values = items.filter((x) => x !== '');
+      const empty = values.length !== items.length ? `${c} IS NULL OR ${c} = ''` : '';
+      const inList = values.length ? `${c} IN (${values.map(sqlLit).join(', ')})` : '';
+      if (inList && empty) return `(${inList} OR ${empty})`;
+      return inList || (empty ? `(${empty})` : '1');
     }
     default: return '1';
   }
@@ -87,12 +112,46 @@ export const unquoteStr = (t) => t.slice(1, -1).replace(/''/g, "'");
 
 export const isStrLit = (t) => !!t && t[0] === "'";
 
+/* What a LIKE pattern means as a guided condition, or null when no guided
+   condition means exactly that — the caller then keeps the SQL as raw,
+   which runs as typed. Two shapes qualify, because they are what the
+   server's own contains and starts-with compile to (Store._compile_condition:
+   LIKE with `%` around the escaped text, ESCAPE '\', so the same
+   ASCII-only case folding as any LIKE): `%text%` and `text%`, with text
+   holding no wildcard of its own. A `_`, a `%` anywhere else (`%.exe`,
+   `p%.exe`, `%p%exe%`) or no `%` at all — LIKE 'P1.EXE' is a
+   case-insensitive equality, and equals is case-sensitive — has no guided
+   twin. With an ESCAPE character, it and the character after it are that
+   character, literally, as SQLite reads them. */
+export function likePatternCond(column, pattern, escape = null) {
+  const segs = []; // literal runs as strings, each unescaped `%` as null
+  for (let i = 0; i < pattern.length; i++) {
+    let ch = pattern[i];
+    if (escape !== null && ch === escape) {
+      if (++i >= pattern.length) return null; // a dangling escape matches nothing
+      ch = pattern[i];
+    } else if (ch === '_') {
+      return null;
+    } else if (ch === '%') {
+      segs.push(null);
+      continue;
+    }
+    if (typeof segs[segs.length - 1] === 'string') segs[segs.length - 1] += ch;
+    else segs.push(ch);
+  }
+  const [a, b, c] = segs;
+  if (segs.length === 3 && a === null && typeof b === 'string' && c === null) return { type: 'cond', column, op: 'contains', value: b };
+  if (segs.length === 2 && typeof a === 'string' && b === null) return { type: 'cond', column, op: 'starts', value: a };
+  return null;
+}
+
 /* Round-trips only the narrow subset serializeTree/serializeCond emit: the
    simple atomic ops (contains/starts/equals/regex/comparisons/in) plus
    AND/OR/paren grouping. The compound shapes for not_contains/not_equals/
    empty/not_empty — and anything else outside this subset — fall back to
    raw mode, which still works as a filter, it just won't populate the
-   structured editor. */
+   structured editor. A LIKE is in the subset only in the shapes
+   likePatternCond accepts. */
 export function parseWhereFragment(text) {
   const toks = tokenizeWhere(text.trim());
   if (!toks) return null;
@@ -107,11 +166,18 @@ export function parseWhereFragment(text) {
     if (op === 'LIKE') {
       const lit = toks[pos + 2];
       if (!isStrLit(lit)) return null;
-      const val = unquoteStr(lit);
-      pos += 3;
-      if (val.startsWith('%') && val.endsWith('%') && val.length >= 2) return { type: 'cond', column, op: 'contains', value: val.slice(1, -1) };
-      if (!val.startsWith('%') && val.endsWith('%')) return { type: 'cond', column, op: 'starts', value: val.slice(0, -1) };
-      return { type: 'cond', column, op: 'equals', value: val };
+      let escape = null;
+      let next = pos + 3;
+      if (toks[next] === 'ESCAPE') {
+        const e = toks[next + 1];
+        if (!isStrLit(e) || unquoteStr(e).length !== 1) return null;
+        escape = unquoteStr(e);
+        next += 2;
+      }
+      const cond = likePatternCond(column, unquoteStr(lit), escape);
+      if (!cond) return null;
+      pos = next;
+      return cond;
     }
     if (op === 'REGEXP') {
       const lit = toks[pos + 2];
@@ -297,10 +363,12 @@ export function openFilterBuilder(editing = null) {
       const parsed = parseFilter(raw || '');
       if (!parsed) continue;
       S.filterTree.children = S.filterTree.children || [];
-      S.filterTree.children.push({
-        type: 'cond', column, op: parsed.op,
-        value: OP_NO_VALUE.has(parsed.op) ? '' : parsed.value,
-      });
+      // A list holding the empty value (`a|""`) arrives as the picker's
+      // OR of `in` and `is empty`: the builder's one-per-line box drops a
+      // blank line the moment it is edited.
+      S.filterTree.children.push(parsed.op === 'in' && parsed.value.includes('')
+        ? makePickerNode(column, parsed.value)
+        : { type: 'cond', column, op: parsed.op, value: OP_NO_VALUE.has(parsed.op) ? '' : parsed.value });
       setColumnFilter(column, '');
     }
   }

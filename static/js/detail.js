@@ -1,14 +1,15 @@
 /* The detail pane, its notes field, and the JSON/XML pretty-printing in it.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
-import { $, debounce, el, post, toast } from './core.js';
-import { addExtractedColumn, openFlattenModal } from './derived.js';
-import { ellipsize, setColumnFilter, setSearchMode } from './filters.js';
+import { $, el, post, toast } from './core.js';
+import { addExtractedColumn, openFlattenModal, quotePredicate } from './derived.js';
+import { ellipsize, parseFilter, setColumnFilter, setSearchMode } from './filters.js';
 import { clearPageCache, render, rowAt } from './grid.js';
 import { writeClipboardText } from './grouping.js';
 import { syncSearchExpansion } from './search.js';
 import { clearAllFilters, sourceLabel } from './sources.js';
 import { S } from './state.js';
+import { updateFiltersButton } from './timeframe.js';
 import { displayCell } from './tsformat.js';
 import { contextMenu } from './ui.js';
 import { rebuildView } from './view.js';
@@ -97,6 +98,60 @@ export function jsonPathStep(base, seg) {
   return /^[^.[\]"']+$/.test(seg) ? `${base}.${seg}` : `${base}["${String(seg).replace(/(["\\])/g, '\\$1')}"]`;
 }
 
+/* A list of Name/Value pairs is addressed by name, not by index:
+   `ExtendedProperties[Name='UserAgent'].Value`, which becomes a column
+   called UserAgent. The twin of structparse._kv_shape, and it has to
+   agree with it name for name — a path offered here on a list the backend
+   reads positionally still extracts (the predicate walk doesn't care how
+   the path was found), but the column it names has to be the one the
+   Flatten picker would have offered. The rules and the reasons for them
+   are in the comment above structparse._KV_NAME_KEYS: a Name or Key in
+   every entry, all different strings, and something value-like beside at
+   least one of them. */
+const KV_NAME_KEYS = [/^@?name$/i, /^@?key$/i];
+
+function kvNameOk(n) {
+  return typeof n === 'string' && n.length > 0 && n.length <= 120
+    && /[^ \t\n\r\x0b\x0c]/.test(n) && !/[\x00-\x1f\x7f\ud800-\udfff]/.test(n);
+}
+
+function kvValueLike(k) {
+  const l = k.toLowerCase().replace(/^[@#]+/, '');
+  return l === 'text' || l.includes('value');
+}
+
+function isDict(x) {
+  return x !== null && typeof x === 'object' && !Array.isArray(x);
+}
+
+export function jsonKvShape(items) {
+  if (!items.length || !items.every((x) => isDict(x) && Object.keys(x).length)) return null;
+  for (const rx of KV_NAME_KEYS) {
+    const key = Object.keys(items[0]).find((k) => rx.test(k));
+    if (key === undefined) continue;
+    const names = items.map((x) => (Object.prototype.hasOwnProperty.call(x, key) ? x[key] : undefined));
+    if (!names.every(kvNameOk) || new Set(names).size !== names.length) continue;
+    if (items.some((x) => Object.keys(x).some((k) => k !== key && kvValueLike(k)))) return key;
+  }
+  return null;
+}
+
+export function jsonKvStep(base, key, name) {
+  return `${base}[${key}=${quotePredicate(name)}]`;
+}
+
+/* What the Name in a Name/Value entry stands for. The Name restates the
+   predicate that selected its entry, so it isn't a field of its own; when
+   the entry holds one thing beside it, the Name means that thing, and
+   right-clicking "UserAgent" adds the UserAgent column the way
+   right-clicking a key adds its value. Beside two (OldValue, NewValue) it
+   would be a guess, so it means nothing. */
+function kvNameTarget(keys, nameKey, entryPath, leafOf) {
+  const others = keys.filter((k) => k !== nameKey);
+  if (others.length !== 1) return null;
+  return { path: jsonPathStep(entryPath, others[0]), value: leafOf(others[0]) };
+}
+
 export function jsonTokenClass(v) {
   if (v === null) return 'jtok-null';
   if (typeof v === 'boolean') return 'jtok-bool';
@@ -118,15 +173,17 @@ export function fieldNode(cls, text, path, value, kind) {
   return n;
 }
 
-export function appendJsonNodes(container, value, path, indent) {
+export function appendJsonNodes(container, value, path, indent, nameKey) {
   const pad = '  '.repeat(indent);
   const padIn = '  '.repeat(indent + 1);
   if (Array.isArray(value)) {
     if (!value.length) { container.append('[]'); return; }
+    const kv = jsonKvShape(value);
     container.append('[\n');
     value.forEach((v, i) => {
       container.append(padIn);
-      appendJsonNodes(container, v, jsonPathStep(path, i), indent + 1);
+      if (kv) appendJsonNodes(container, v, jsonKvStep(path, kv, v[kv]), indent + 1, kv);
+      else appendJsonNodes(container, v, jsonPathStep(path, i), indent + 1);
       container.append(i < value.length - 1 ? ',\n' : '\n');
     });
     container.append(pad + ']');
@@ -135,12 +192,24 @@ export function appendJsonNodes(container, value, path, indent) {
   if (value && typeof value === 'object') {
     const keys = Object.keys(value);
     if (!keys.length) { container.append('{}'); return; }
+    const named = nameKey ? kvNameTarget(keys, nameKey, path, (k) => {
+      const x = value[k];
+      return x && typeof x === 'object' ? undefined : jsonLeafText(x);
+    }) : null;
     container.append('{\n');
     keys.forEach((k, i) => {
+      container.append(padIn);
+      if (k === nameKey) {
+        const np = named ? named.path : null;
+        const nv = named ? named.value : undefined;
+        container.append(fieldNode('jtok-key', JSON.stringify(k), np, nv, 'json'), ': ',
+          fieldNode('jtok-str', JSON.stringify(value[k]), np, nv, 'json'));
+        container.append(i < keys.length - 1 ? ',\n' : '\n');
+        return;
+      }
       const kp = jsonPathStep(path, k);
       const leaf = value[k];
       const scalar = !leaf || typeof leaf !== 'object';
-      container.append(padIn);
       // The key carries the path too, so clicking either half of
       // `"user": "jacson"` means the same field.
       container.append(fieldNode('jtok-key', JSON.stringify(k), kp,
@@ -266,9 +335,333 @@ export function appendXmlNodes(container, node, path, indent) {
   container.append('>\n');
 }
 
+/* ------------------ documents JSON.parse refuses
+
+   A value that isn't one strict JSON document can still hold one, or
+   something built the same way:
+
+   - Python's repr of a list or dict, `[{'Name': 'UserAgent', 'Value':
+     'Mozilla/5.0'}]` — single quotes, None/True/False — which is what a
+     pipeline that went through Python on its way to a CSV leaves behind;
+   - JSON a lax exporter wrote: a raw newline or tab inside a string, an
+     unescaped backslash in a Windows path, NaN, a trailing comma;
+   - a document inside other text: a log line's `[INFO] {...}`, a wrapper
+     (`[ctx {...}]`), a note after it, two run together.
+
+   JSON.parse refuses every one, so the pane showed each as a single
+   unbroken line. This parser only finds the structure (brackets, strings,
+   separators and a short list of bare words) and every token is shown as
+   the cell writes it, never decoded and re-encoded: text selected in the
+   layout still matches what a contains-filter searches for, and a 64-bit
+   integer keeps all its digits.
+
+   A document that is the whole value carries paths, like strict JSON
+   does: structparse.load_json falls back to the same grammar
+   (structparse.load_loose, the twin of looseValue/looseContainer below,
+   which has to accept exactly what they do), so "Add as a column" on one
+   of its nodes reads the same field out of every row. Each node is
+   decoded for that (looseDecode) the way load_loose decodes it, so the
+   path holds `UserAgent` where the cell says `'UserAgent'`. A document
+   inside other text carries none: the backend reads a cell only when all
+   of it is one document, so a path there would fill the column with
+   nothing on every row, the same reason the unparseable-XML fallback
+   isn't addressable either. */
+
+// A hostile value must not turn a cursor move into a hang. Every `[` or
+// `{` is a candidate and a failed one is retried a character later, so a
+// long run of `[` would cost its length times the nesting depth; the
+// budget counts every character and token the parser looks at, across all
+// candidates, and past it the rest of the value is shown as text.
+export const LOOSE_SCAN_BUDGET = 2000000;
+export const LOOSE_MAX_DEPTH = 256;
+// The longest whole-value document structparse.load_loose will read, and
+// so the longest one given paths here (its LOOSE_MAX_CHARS).
+export const LOOSE_MAX_CHARS = 1000000;
+
+const LOOSE_CLOSERS = { '[': ']', '{': '}', '(': ')' };
+const LOOSE_WORDS = {
+  true: 'jtok-bool', false: 'jtok-bool', True: 'jtok-bool', False: 'jtok-bool',
+  null: 'jtok-null', None: 'jtok-null',
+  NaN: 'jtok-num', Infinity: 'jtok-num', '-Infinity': 'jtok-num',
+  nan: 'jtok-num', inf: 'jtok-num', '-inf': 'jtok-num',
+};
+const LOOSE_NUMBER = /[-+]?(?:0[xX][\da-fA-F_]+|(?:\d[\d_]*(?:\.[\d_]*)?|\.\d[\d_]*)(?:[eE][-+]?\d+)?j?)/y;
+const LOOSE_WORD = /-?[A-Za-z_]\w*/y;
+const LOOSE_STRING_PREFIX = /[rRbBuU]{0,2}(?=["'])/y;
+
+function looseSkipSpace(p) {
+  while (p.i < p.s.length && ' \t\r\n'.includes(p.s[p.i])) { p.i++; p.budget--; }
+}
+
+/* One value at p.i: { leaf: tokenClass, text } or a container. null when
+   what's there isn't one, with p.i somewhere past it. */
+function looseValue(p, depth) {
+  looseSkipSpace(p);
+  if (p.i >= p.s.length || --p.budget < 0) return null;
+  if (LOOSE_CLOSERS[p.s[p.i]]) return depth < LOOSE_MAX_DEPTH ? looseContainer(p, depth + 1) : null;
+  const start = p.i;
+  LOOSE_STRING_PREFIX.lastIndex = start;
+  if (LOOSE_STRING_PREFIX.test(p.s)) {
+    const open = LOOSE_STRING_PREFIX.lastIndex;
+    const quote = p.s[open];
+    for (let j = open + 1; j < p.s.length && --p.budget >= 0; j++) {
+      if (p.s[j] === '\\') j++;
+      else if (p.s[j] === quote) { p.i = j + 1; return { leaf: 'jtok-str', text: p.s.slice(start, p.i) }; }
+    }
+    return null;
+  }
+  for (const [re, cls] of [[LOOSE_NUMBER, 'jtok-num'], [LOOSE_WORD, null]]) {
+    re.lastIndex = start;
+    const m = re.exec(p.s);
+    if (!m || /\w/.test(p.s[re.lastIndex] || '')) continue;
+    const tokenClass = cls || LOOSE_WORDS[m[0]];
+    if (!tokenClass) return null;
+    p.i = re.lastIndex;
+    return { leaf: tokenClass, text: m[0] };
+  }
+  return null;
+}
+
+/* A list, tuple or set ({ open, close, items }) or a dict/object
+   ({ open, close, entries: [[keyText, value, keyNode], ...] }), opening
+   at p.i.
+   A `{` is a dict if its first element is followed by `:`. */
+function looseContainer(p, depth) {
+  const open = p.s[p.i];
+  const close = LOOSE_CLOSERS[open];
+  p.i++;
+  const items = [];
+  const entries = [];
+  for (;;) {
+    looseSkipSpace(p);
+    if (p.s[p.i] === close) { p.i++; break; }
+    const keyStart = p.i;
+    const value = looseValue(p, depth);
+    if (!value) return null;
+    const keyText = p.s.slice(keyStart, p.i);
+    looseSkipSpace(p);
+    if (open === '{' && !items.length && p.s[p.i] === ':') {
+      p.i++;
+      const entry = looseValue(p, depth);
+      if (!entry) return null;
+      entries.push([keyText, entry, value]);
+      looseSkipSpace(p);
+    } else if (entries.length) {
+      return null;
+    } else {
+      items.push(value);
+    }
+    if (p.s[p.i] === ',') { p.i++; continue; }
+    if (p.s[p.i] === close) { p.i++; break; }
+    return null;
+  }
+  return entries.length ? { open, close, entries } : { open, close, items };
+}
+
+/* JSON.parse takes the `[0]` of `items[0]`, and `{}` and `[{}]` are
+   documents too, but none of them is worth turning one line into five.
+   Worth laying out: a dict with an entry, or a list holding a non-empty
+   dict or list. */
+export function looseWorthShowing(node) {
+  if (node.entries) return true;
+  return node.items.some((n) => !n.leaf && (n.entries || n.items.length));
+}
+
+/* Every document in `s`, in order and never overlapping, as
+   { start, end, node }. A candidate that doesn't parse (the `[INFO]`, or a
+   wrapper with words inside it) is passed over one character at a time,
+   so the document inside a failed wrapper is still found. A `(` is never
+   a candidate on its own, since prose is full of them, but a tuple inside
+   a list or dict reads as one. */
+export function findLooseDocuments(s) {
+  const docs = [];
+  const p = { s, i: 0, budget: LOOSE_SCAN_BUDGET };
+  for (let i = 0; i < s.length && p.budget > 0; i++) {
+    if (s[i] !== '[' && s[i] !== '{') continue;
+    p.i = i;
+    const node = looseContainer(p, 1);
+    if (!node || !looseWorthShowing(node)) continue;
+    docs.push({ start: i, end: p.i, node });
+    i = p.i - 1;
+  }
+  return docs;
+}
+
+/* What load_loose makes of a node, set on it as `value` (and on a leaf,
+   `leafText`: what the column would hold, structparse._leaf_text's
+   answer). Strings are decoded as JSON and Python both decode them, and
+   an escape neither knows stays as written; a number json.loads could
+   have read becomes a number, any other (hex, `1_000`) stays its own
+   text, and so is a string to the Name/Value rules, as it is there. */
+const LOOSE_WORD_VALUES = {
+  true: true, True: true, false: false, False: false, null: null, None: null,
+  NaN: NaN, nan: NaN, Infinity: Infinity, inf: Infinity, '-Infinity': -Infinity, '-inf': -Infinity,
+};
+const LOOSE_ESCAPES = { '\\': '\\', "'": "'", '"': '"', '/': '/', n: '\n', r: '\r', t: '\t', b: '\b', f: '\f' };
+const LOOSE_INT = /^-?(?:0|[1-9]\d*)$/;
+const LOOSE_FLOAT = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][-+]?\d+)?$/;
+
+export function looseString(text) {
+  const prefix = /^[rRbBuU]*/.exec(text)[0];
+  const body = text.slice(prefix.length + 1, -1);
+  if (/r/i.test(prefix)) return body;
+  return body.replace(/\\(?:u([0-9a-fA-F]{4})|U([0-9a-fA-F]{8})|x([0-9a-fA-F]{2})|([\s\S]))/g,
+    (all, u, cp, x, c) => {
+      if (u) return String.fromCharCode(parseInt(u, 16));
+      if (cp) return parseInt(cp, 16) <= 0x10ffff ? String.fromCodePoint(parseInt(cp, 16)) : all;
+      if (x) return String.fromCharCode(parseInt(x, 16));
+      return Object.prototype.hasOwnProperty.call(LOOSE_ESCAPES, c) ? LOOSE_ESCAPES[c] : all;
+    });
+}
+
+function looseLeafText(v) {
+  if (typeof v === 'number' && !Number.isFinite(v)) return Number.isNaN(v) ? 'nan' : (v > 0 ? 'inf' : '-inf');
+  return jsonLeafText(v);
+}
+
+// A key that isn't a string (`{1: 'a'}`, `{None: 0}`) is named by its own
+// text, which is also what the pane shows.
+function looseKey(keyText, keyNode) {
+  return keyNode.leaf === 'jtok-str' ? looseString(keyNode.text) : keyText;
+}
+
+export function looseDecode(node) {
+  if (node.leaf === 'jtok-str') {
+    node.value = node.leafText = looseString(node.text);
+  } else if (node.leaf && Object.prototype.hasOwnProperty.call(LOOSE_WORD_VALUES, node.text)) {
+    node.value = LOOSE_WORD_VALUES[node.text];
+    node.leafText = looseLeafText(node.value);
+  } else if (node.leaf) {
+    const t = node.text;
+    // An integer keeps every digit: the column holds Python's int, not a
+    // double that rounded it.
+    if (LOOSE_INT.test(t)) { node.value = Number(t); node.leafText = t === '-0' ? '0' : t; }
+    else if (LOOSE_FLOAT.test(t)) { node.value = Number(t); node.leafText = String(node.value); }
+    else { node.value = node.leafText = t; }
+  } else if (node.entries) {
+    node.value = Object.create(null);
+    node.byKey = Object.create(null);
+    for (const [keyText, entry, keyNode] of node.entries) {
+      const k = looseKey(keyText, keyNode);
+      node.value[k] = looseDecode(entry);
+      node.byKey[k] = entry;
+    }
+  } else if (node.open === '{' && !node.items.length) {
+    node.value = Object.create(null);
+    node.byKey = Object.create(null);
+  } else {
+    node.value = node.items.map(looseDecode);
+  }
+  return node.value;
+}
+
+/* Lays a document out as the cell writes it. With `path`, a whole-value
+   document that looseDecode has been run over: every node carries its
+   path, Name/Value lists by name as in appendJsonNodes. */
+export function appendLooseNodes(container, node, indent, path, nameKey) {
+  if (node.leaf) {
+    container.append(path ? fieldNode(node.leaf, node.text, path, node.leafText, 'json')
+                          : el('span', node.leaf, node.text));
+    return;
+  }
+  const parts = node.entries || node.items;
+  if (!parts.length) { container.append(node.open + node.close); return; }
+  const pad = '  '.repeat(indent);
+  const padIn = '  '.repeat(indent + 1);
+  const kv = path && !node.entries ? jsonKvShape(node.value) : null;
+  const named = path && nameKey && node.entries
+    ? kvNameTarget(Object.keys(node.byKey), nameKey, path, (k) => node.byKey[k].leafText) : null;
+  container.append(node.open + '\n');
+  parts.forEach((part, i) => {
+    container.append(padIn);
+    if (node.entries) {
+      const [keyText, entry, keyNode] = part;
+      const k = path ? looseKey(keyText, keyNode) : null;
+      if (path && k === nameKey && entry.leaf) {
+        const np = named ? named.path : null;
+        const nv = named ? named.value : undefined;
+        container.append(fieldNode('jtok-key', keyText, np, nv, 'json'), ': ',
+          fieldNode(entry.leaf, entry.text, np, nv, 'json'));
+      } else {
+        const kp = path ? jsonPathStep(path, k) : null;
+        container.append(fieldNode('jtok-key', keyText, kp, entry.leaf ? entry.leafText : undefined, 'json'), ': ');
+        appendLooseNodes(container, entry, indent + 1, kp);
+      }
+    } else if (kv) {
+      appendLooseNodes(container, part, indent + 1, jsonKvStep(path, kv, part.value[kv]), kv);
+    } else {
+      appendLooseNodes(container, part, indent + 1, path ? jsonPathStep(path, i) : null);
+    }
+    // A one-element tuple keeps the comma that makes it a tuple.
+    const more = i < parts.length - 1 || (node.open === '(' && parts.length === 1);
+    container.append(more ? ',\n' : '\n');
+  });
+  container.append(pad + node.close);
+}
+
+/* ------------------ documents too deep or too big to lay out
+
+   appendJsonNodes and appendXmlNodes recurse once per level, and how deep
+   a cell goes is up to whoever wrote the evidence: ~2,100 nested arrays
+   (about 4 KB) or ~3,000 nested elements ran the pane out of stack, and a
+   200,000-element array cost about 2 s of DOM on every cursor move. So a
+   parsed document is measured first, without recursion, and one past
+   either limit is shown as the text it holds, with a line saying why.
+   The loose layout is measured the same way: its parser stops at
+   LOOSE_MAX_DEPTH, but a long list written with single quotes would
+   otherwise be the way round the item limit.
+   Real documents are nowhere near either: an EVTX record is 4-6 levels and
+   ~100 elements and attributes, and the busiest JSON exports (CloudTrail,
+   Entra sign-ins, Kubernetes audit) are a dozen-odd levels and hundreds
+   to low thousands of values. 64 levels is already 128 columns of
+   indentation, past anything the pane can show usefully, and 5,000 items
+   lay out in about 45 ms. */
+export const STRUCT_MAX_DEPTH = 64;
+export const STRUCT_MAX_NODES = 5000;
+
+/* null when the documents under `roots` fit, else the hint to show
+   instead. An explicit stack, since the documents this exists to refuse
+   are the ones that would overflow the call stack; it stops at the first
+   node over either limit rather than counting all 200,000. `weigh` is how
+   many laid-out nodes one node is (an XML element's attributes are nodes
+   of their own). */
+export function structTooBig(roots, kidsOf, weigh) {
+  const todo = roots.map((r) => [r, 1]);
+  let nodes = 0;
+  while (todo.length) {
+    const [node, depth] = todo.pop();
+    if (depth > STRUCT_MAX_DEPTH) {
+      return `Nested more than ${STRUCT_MAX_DEPTH} levels deep, so it is shown as text.`;
+    }
+    const kids = kidsOf(node);
+    nodes += weigh(node);
+    // Everything still waiting will be counted too.
+    if (nodes + todo.length + kids.length > STRUCT_MAX_NODES) {
+      return `More than ${STRUCT_MAX_NODES.toLocaleString('en-US')} items, so it is shown as text.`;
+    }
+    for (const k of kids) todo.push([k, depth + 1]);
+  }
+  return null;
+}
+
+const jsonKids = (v) => (v !== null && typeof v === 'object' ? Object.values(v) : []);
+const xmlKids = (n) => n.children;
+const xmlWeight = (n) => 1 + n.attributes.length;
+const looseKids = (n) => (n.leaf ? [] : n.entries ? n.entries.map((e) => e[1]) : n.items);
+
+/* A value shown as the text it holds, under a line saying why it isn't
+   laid out. */
+export function shownAsText(v, why) {
+  const frag = document.createDocumentFragment();
+  frag.append(el('div', 'dfield-hint', why), el('div', 'dfield-text', v));
+  return frag;
+}
+
 export function renderDetailContent(v) {
   const json = tryParseJSON(v);
   if (json !== null && typeof json === 'object') {
+    const tooBig = structTooBig([json], jsonKids, () => 1);
+    if (tooBig) return shownAsText(v, tooBig);
     const pre = el('pre', 'detail-pretty');
     appendJsonNodes(pre, json, '$', 0);
     return pre;
@@ -276,6 +669,10 @@ export function renderDetailContent(v) {
   if (looksLikeXml(v)) {
     const root = parseXmlDoc(v);
     if (root) {
+      // The fragment wrapper (below) is ours, and is no level of the document.
+      const tops = root.tagName === 'winnow-fragment' ? [...root.children] : [root];
+      const tooBig = structTooBig(tops, xmlKids, xmlWeight);
+      if (tooBig) return shownAsText(v, tooBig);
       const pre = el('pre', 'detail-pretty');
       // A synthetic fragment wrapper is ours, not the document's — its
       // children are what the analyst actually has, and what paths are
@@ -296,6 +693,29 @@ export function renderDetailContent(v) {
       appendXmlHighlighted(pre, prettyXml(v));
       return pre;
     } catch { /* malformed fragment — fall through to plain text */ }
+  }
+  const docs = findLooseDocuments(v);
+  if (docs.length) {
+    const tooBig = structTooBig(docs.map((d) => d.node), looseKids, () => 1);
+    if (tooBig) return shownAsText(v, tooBig);
+    const pre = el('pre', 'detail-pretty');
+    // The whole value, give or take the whitespace load_json strips, is
+    // what the backend can read a path out of.
+    const blank = /^[ \t\r\n]*$/;
+    if (docs.length === 1 && blank.test(v.slice(0, docs[0].start)) && blank.test(v.slice(docs[0].end))
+        && docs[0].end - docs[0].start <= LOOSE_MAX_CHARS) {
+      looseDecode(docs[0].node);
+      appendLooseNodes(pre, docs[0].node, 0, '$');
+      return pre;
+    }
+    let at = 0;
+    for (const d of docs) {
+      pre.append(v.slice(at, d.start));
+      appendLooseNodes(pre, d.node, 0);
+      at = d.end;
+    }
+    pre.append(v.slice(at));
+    return pre;
   }
   return document.createTextNode(v);
 }
@@ -356,6 +776,38 @@ export function copyFieldButton(column) {
   return b;
 }
 
+/* One field of the pane, its name and its value laid out; an empty value
+   gets no line. A value that can't be laid out (a renderer bug, a shape
+   nobody foresaw) is shown as the text it holds rather than taking the
+   rest of the pane with it: every field is built in one pass, and one
+   throw used to leave the fields after it unpainted. */
+export function appendDetailField(dl, column, v) {
+  if (v == null || v === '') return;
+  // The column's name as the column writes it. It used to be
+  // uppercased in CSS, which costs a beat per field in a two-column
+  // list of forty of them, and made names that are already mixed case
+  // in the evidence (TimeCreated, CommandLine) unrecognisable as the
+  // same strings the header row shows.
+  const dt = el('dt', null, column);
+  dt.dataset.col = column;
+  dl.append(dt);
+  const dd = el('dd');
+  // Which column a selection or a clicked node belongs to — the detail
+  // menu's actions (filter, exclude, add as column) all need it, and the
+  // <dd> is the only thing that still knows once you're deep inside a
+  // pretty-printed document.
+  dd.dataset.col = column;
+  let content;
+  try {
+    content = renderDetailContent(displayCell(column, v));
+  } catch (e) {
+    console.error(e);
+    content = shownAsText(String(v), 'Could not be laid out, so it is shown as text.');
+  }
+  dd.append(copyFieldButton(column), content);
+  dl.append(dd);
+}
+
 /* The detail pane only force-opens on double-click (activateRow's plain
    single-click path deliberately never calls showDetail) or the toggleDetail
    hotkey. Once it's open, though, cursor movement — click, arrow keys,
@@ -387,31 +839,18 @@ export function showDetail(pos) {
   // state that something else may have moved since.
   dl.dataset.pos = pos;
   dl.replaceChildren();
-  S.columns.forEach((c, i) => {
-    const v = r.cells[i];
-    if (v == null || v === '') return;
-    // The column's name as the column writes it. It used to be
-    // uppercased in CSS, which costs a beat per field in a two-column
-    // list of forty of them, and made names that are already mixed case
-    // in the evidence (TimeCreated, CommandLine) unrecognisable as the
-    // same strings the header row shows.
-    const dt = el('dt', null, c.name);
-    dt.dataset.col = c.name;
-    dl.append(dt);
-    const dd = el('dd');
-    // Which column a selection or a clicked node belongs to — the detail
-    // menu's actions (filter, exclude, add as column) all need it, and the
-    // <dd> is the only thing that still knows once you're deep inside a
-    // pretty-printed document.
-    dd.dataset.col = c.name;
-    dd.append(copyFieldButton(c.name), renderDetailContent(displayCell(c.name, v)));
-    dl.append(dd);
-  });
   const note = $('noteInput');
-  note.value = r.note || '';
+  // r.note is the server's copy, which is behind the box while a save is
+  // pending — see keepsUnsavedNote.
+  if (!keepsUnsavedNote(note, r)) note.value = r.note || '';
   note.dataset.rid = r.rid;
   note.dataset.sourceId = r.source_id;
   $('noteStatus').textContent = '';
+  // The fields go last, once the title, the Copy target and the note box
+  // all name this row. A value whose layout threw used to stop showDetail
+  // before the note box was rebound, so the pane said Line 2 and a note
+  // typed under it was saved on the row before.
+  S.columns.forEach((c, i) => appendDetailField(dl, c.name, r.cells[i]));
 }
 
 /* ------------------------------------------------- detail pane menu
@@ -511,24 +950,66 @@ export function detailMenuItems(ctx) {
    that finds it again is the substring one. Reuses the same raw-filter
    syntax the header boxes take, and the same clearAllFilters seeding that
    makes `only` correct (the timeframe filter survives, grouping is
-   stashed) rather than reimplementing either. */
+   stashed) rather than reimplementing either.
+
+   The box only gets the text when it reads back as exactly this contains.
+   Selected evidence is full of the box's syntax — `whoami | findstr` is an
+   any-of list of two exact values, `=cmd` an equals, `>5` a comparison,
+   `^HKLM` starts-with, `/usr/bin/` a regex, `*` and `""` not-empty and
+   empty — and the box has no quoting for a contains (its quotes are for
+   exact values only, see unquoteValue). So anything that doesn't
+   round-trip, or that the box would trim or strip (edge whitespace, a
+   line break), goes into the filter tree as a contains condition instead:
+   the value picker's route for the line break the box can't hold, and the
+   server escapes the value for LIKE there itself. */
 export async function filterByContains(column, text, { only = false, exclude = false } = {}) {
   const value = String(text == null ? '' : text);
   if (!value) return;
-  if (/^\s|\s$/.test(value)) {
-    toast('That selection starts or ends with whitespace — trim it and try again', 5000);
-    return;
-  }
+  const op = exclude ? 'not_contains' : 'contains';
   const raw = (exclude ? '!' : '') + value;
+  const cond = boxHoldsContains(op, value) ? null : { type: 'cond', column, op, value };
   const shown = ellipsize(value);
+  const where = cond ? ` — applied under Filters ▾, as the filter box can't hold that text as a plain contains` : '';
   if (only) {
-    await clearAllFilters({ column, raw });
-    toast(`Filtered ${column} to ${shown} · other filters cleared`);
+    await clearAllFilters(cond ? { column, cond } : { column, raw });
+    toast(`Filtered ${column} to ${shown} · other filters cleared${where}`, cond ? 5000 : undefined);
     return;
   }
-  setColumnFilter(column, raw);
+  // One filter per column either way: the box's text is overwritten, as
+  // it always was, and so is a condition this put in the tree last time,
+  // so the same gesture leaves the same filter whichever way the text had
+  // to travel.
+  setContainsTreeCond(column, cond);
+  setColumnFilter(column, cond ? '' : raw);
+  updateFiltersButton();
   await rebuildView();
-  toast(`Filtered ${column} ${exclude ? 'not ' : ''}containing ${shown}`);
+  toast(`Filtered ${column} ${exclude ? 'not ' : ''}containing ${shown}${where}`, cond ? 5000 : undefined);
+}
+
+export function boxHoldsContains(op, value) {
+  if (/[\r\n]/.test(value)) return false; // an <input> strips them
+  const p = parseFilter((op === 'not_contains' ? '!' : '') + value);
+  return !!p && p.op === op && p.value === value;
+}
+
+/* The condition filterByContains puts in the tree, found again the way the
+   picker's node is (isPickerNode, filters.js): structurally, since the
+   builder's SQL round-trip would drop a marker. A top-level contains or
+   does-not-contain on the column whose text the box can't hold — one whose
+   text it could hold can only have come from the builder, and is left
+   alone. Added into the root when that is the plain AND group, and ANDed
+   onto it otherwise, so a root the analyst turned into an OR (or a raw
+   fragment) keeps its own meaning. */
+export function setContainsTreeCond(column, cond) {
+  const ours = (n) => !!n && n.type === 'cond' && n.column === column
+    && (n.op === 'contains' || n.op === 'not_contains') && !boxHoldsContains(n.op, String(n.value ?? ''));
+  const root = S.filterTree;
+  if (root && root.type === 'group' && root.op === 'AND') {
+    root.children = (root.children || []).filter((n) => !ours(n));
+    if (cond) root.children.push(cond);
+    return;
+  }
+  if (cond) S.filterTree = { type: 'group', op: 'AND', children: root ? [root, cond] : [cond] };
 }
 
 export async function searchForText(text) {
@@ -545,12 +1026,65 @@ export async function searchForText(text) {
   toast(`Searching for ${ellipsize(value)}`);
 }
 
-export const saveNote = debounce(async () => {
+/* The note box saves 500 ms after the last keystroke, so for that long —
+   and for as long as the POST then takes — the box is ahead of the
+   server, and so of every row object a page fetch brings back. Two things
+   follow, both in showDetail (keepsUnsavedNote):
+
+   - a page that lands while the analyst types re-shows the same row
+     (grid.js ensurePage, after anything that clears the row caches: a
+     derived column finishing, an import, a tag written elsewhere), and
+     setting the box to that row's `note` threw away what was typed since
+     the last save — mid-sentence, and the rest of the sentence was then
+     saved on its own. `noteUnsaved` is what says the box is ahead: set on
+     a keystroke, cleared only once a save of exactly what the box holds,
+     for the row it is bound to, has come back.
+   - a cursor move rebinds the box to another row, and a save still
+     waiting out its delay read the binding when it fired: it posted the
+     new row's own note back to it, and what was typed on the old row in
+     the last half second was lost. flushNoteSave sends it first, against
+     the row it was typed on. */
+let noteSaveTimer = null;
+let noteUnsaved = false;
+
+export function saveNote() {
+  noteUnsaved = true;
+  clearTimeout(noteSaveTimer);
+  noteSaveTimer = setTimeout(writeNote, 500);
+}
+
+export function flushNoteSave() {
+  if (noteSaveTimer === null) return;
+  clearTimeout(noteSaveTimer);
+  writeNote();
+}
+
+/* Whether showDetail should leave the note box's text alone for row `r`:
+   only when the box is already that row's and holds typing the server
+   hasn't confirmed. Any other row takes the box over, so a save still
+   pending for the row it is leaving goes now, before the rebind. */
+export function keepsUnsavedNote(note, r) {
+  if (note.dataset.rid === String(r.rid) && note.dataset.sourceId === String(r.source_id)) return noteUnsaved;
+  flushNoteSave();
+  noteUnsaved = false;
+  return false;
+}
+
+export async function writeNote() {
+  noteSaveTimer = null;
   const note = $('noteInput');
   const rid = Number(note.dataset.rid);
   const sourceId = Number(note.dataset.sourceId);
   if (!rid) return;
-  await post('/api/note', { source_id: sourceId, rid, note: note.value });
+  const value = note.value;
+  await post('/api/note', { source_id: sourceId, rid, note: value });
+  // Still this row's box, holding what was just saved: nothing is pending.
+  // Otherwise the analyst has typed on since, or the box shows another row
+  // now (a cursor move flushed this save), and "Saved" under it would be
+  // about text this save didn't carry.
+  const current = Number(note.dataset.rid) === rid && Number(note.dataset.sourceId) === sourceId
+    && note.value === value;
+  if (current) noteUnsaved = false;
   const r = rowAt(S.cursor);
   if (r && r.rid === rid) r.note = note.value;
   // Same rule as tagRowsAtPositions: under a grouping the row just patched
@@ -561,9 +1095,9 @@ export const saveNote = debounce(async () => {
   // means the object under the cursor is not the input's row, so nothing
   // above was patched and the cached copy of this rid is the stale one.
   if (!r || r.rid !== rid || S.groupByCols.length) clearPageCache();
-  $('noteStatus').textContent = 'Saved';
+  if (current) $('noteStatus').textContent = 'Saved';
   render();
-}, 500);
+}
 
 /* ------------------------------------------------------------- detail pane */
 

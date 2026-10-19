@@ -9,6 +9,7 @@ import { inFlightWork, startJobsPoll } from './jobs.js';
 import { dropPendingTabState, resetPluginTabMounts } from './plugins.js';
 import { resetDerivedSuggestions } from './derived.js';
 import { hideDetailPane } from './detail.js';
+import { resetHistogram } from './histogram.js';
 import { resetJobState } from './jobs.js';
 import { resetNotes } from './notes.js';
 import { resetWatchlist } from './watchlist.js';
@@ -199,6 +200,9 @@ export async function openCaseNow(path, opts = {}) {
   resetNotes();   // another case's narrative isn't this one's
   resetWatchlist();
   resetDashboard();
+  // The histogram strip's chart is the previous case's rows; it waits for
+  // this case's first view (or says there is no table) instead.
+  resetHistogram();
   // The effective plugin set is per-case (case_settings overrides beat the
   // machine default), and the server reloaded its registry when this case
   // opened — refetch so tabs/formats/panel reflect THIS case's plugins.

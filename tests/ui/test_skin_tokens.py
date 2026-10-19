@@ -30,7 +30,7 @@ TOKENS = [
     "--border-hairline", "--text-faint",
     "--danger", "--danger-bg", "--danger-border",
     "--diff-a", "--diff-a-bg", "--diff-b", "--diff-b-bg",
-    "--str", "--num", "--kw",
+    "--str", "--num", "--kw", "--col-type",
     "--radius-sm", "--radius-md", "--border-w",
     "--ease", "--transition-fast",
     "--shadow-tag", "--shadow-modal",

@@ -37,6 +37,7 @@ from pydantic import BaseModel
 
 from winnow import assoc as file_assoc
 from winnow import browser
+from winnow import elevation
 from winnow import instances
 from winnow import multicase
 from winnow import paths
@@ -1768,7 +1769,13 @@ def _case_save_as(request: Request, body: CaseSaveAsBody):
             raise HTTPException(400, f"A case file named {os.path.basename(dest)} already exists")
 
     old_path = STORE.path
-    STORE.close()
+    # Only the case file moves, and its -wal is deleted below, so every
+    # write must be in the file itself first. A download or a search-all
+    # still reading an older snapshot can stop that; then nothing moves.
+    if not STORE.close(fold_wal=True):
+        STORE = _open_store(old_path)
+        raise HTTPException(409, "Something is still reading this case (a download or a search) "
+                                 "— save again when it finishes")
     try:
         _move_case_file(old_path, dest)
     except OSError as e:
@@ -2051,6 +2058,15 @@ def api_browse_dir(request: Request, path: str = "", files: bool = False,
 
 class PrefsBody(BaseModel):
     cases_dir: str | None = None
+
+
+@app.get("/api/elevation")
+def api_elevation(request: Request):
+    """Whether this window will refuse files dragged in from File Explorer
+    because Winnow is running as administrator (winnow/elevation.py). Only
+    a browser on this machine is affected: one on another computer runs
+    with its own rights, whatever the server's."""
+    return {"drops_blocked": _is_loopback(request) and elevation.this_process()}
 
 
 @app.get("/api/prefs")
@@ -4758,6 +4774,13 @@ class RederiveWrite(BaseModel):
     source_id: int | None = None
 
 
+class DerivedRename(BaseModel):
+    name: str
+    # The table it was renamed from, as on rederive: a merge's id renames
+    # every member's definition of the column.
+    source_id: int | None = None
+
+
 class DerivedBatchItem(BaseModel):
     name: str
     input_column: str
@@ -4814,6 +4837,16 @@ def api_derived_delete(def_id: int, source_id: int | None = None):
 def api_derived_rederive(def_id: int, body: RederiveWrite):
     try:
         return store().rederive_column(def_id, body.params, body.source_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.post("/api/derived/{def_id}/rename")
+def api_derived_rename(def_id: int, body: DerivedRename):
+    try:
+        return store().rename_derived_column(def_id, body.name, body.source_id)
     except ValueError as e:
         raise HTTPException(400, str(e))
     except KeyError as e:
@@ -5245,6 +5278,8 @@ async def api_session_import(source_id: int, file: UploadFile = File(...), merge
         return await run_in_threadpool(store().import_session, source_id, session, merge=merge)
     except KeyError as e:   # no such table to import onto
         raise HTTPException(404, str(e))
+    except ValueError as e:   # refused before writing: tag names it can't match (_session_tag_doubts)
+        raise HTTPException(400, str(e))
 
 
 @app.get("/api/case_session")
@@ -5265,7 +5300,10 @@ async def api_case_session_import(file: UploadFile = File(...), merge: bool = Fo
     problem = case_session_document_problem(session)
     if problem:
         raise HTTPException(400, f"Not a valid session file: {problem}")
-    return await run_in_threadpool(store().import_case_session, session, merge=merge)
+    try:
+        return await run_in_threadpool(store().import_case_session, session, merge=merge)
+    except ValueError as e:   # refused before writing: tag names it can't match (_session_tag_doubts)
+        raise HTTPException(400, str(e))
 
 
 class SessionSaveReq(BaseModel):
@@ -5315,6 +5353,11 @@ def api_case_sessions_load(name: str, merge: bool = True):
         return store().load_session(name, merge=merge)
     except KeyError as e:
         raise HTTPException(404, str(e))
+    except ValueError as e:
+        # Refused before anything was written — a tag name more than one
+        # tag carries, in a session from outside this case
+        # (Store._session_tag_doubts). The analyst's to fix, so not a 500.
+        raise HTTPException(400, str(e))
 
 
 @app.post("/api/case_sessions/adopt")
@@ -5400,6 +5443,8 @@ def api_sessions_load(name: str, merge: bool = True):
         return store().load_named_session(name, merge=merge)
     except KeyError as e:
         raise HTTPException(404, str(e))
+    except ValueError as e:   # refused before writing: tag names it can't match (_session_tag_doubts)
+        raise HTTPException(400, str(e))
 
 
 @app.delete("/api/sessions/{name}")
@@ -6156,6 +6201,15 @@ def main() -> None:
             "login and no access control — anyone who can reach this address on the "
             "network can open, import into, or query any case this server has access to. "
             "Only do this on a trusted, isolated network.",
+            file=sys.stderr,
+        )
+
+    if elevation.this_process():
+        print(
+            "WARNING: Winnow is running as administrator. Windows doesn't let File "
+            "Explorer drag files into a program running as administrator, so dragging "
+            "files onto Winnow's window may not work. Start Winnow from a normal, "
+            "non-administrator window to drag files in; Case > Import... works either way.",
             file=sys.stderr,
         )
 

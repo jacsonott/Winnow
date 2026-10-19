@@ -131,6 +131,10 @@ def test_no_column_name_leaks_into_a_cell(store, abc):
     ({"column": "EventId", "op": "equals", "value": "4624"}, 3),
     ({"column": "Other", "op": "contains", "value": "need"}, 1),
     ({"column": "Host", "op": "in", "value": ["WS01", "WS02"]}, 5),
+    # '' in a list is the empty cell, and a member without the column reads
+    # it as NULL: B's "y" plus every row of A and C.
+    ({"column": "Extra", "op": "in", "value": ["y", ""]}, 4),
+    ({"column": "Extra", "op": "in", "value": [""]}, 3),
 ])
 def test_filters_treat_a_missing_column_as_empty(store, abc, flt, expected):
     a, b, c = abc
@@ -335,6 +339,38 @@ def test_deriving_from_a_column_only_some_tables_have_is_refused_up_front(store,
 
 
 # ---------------------------------------------------------- source column
+
+@pytest.mark.parametrize("from_table", [False, True])
+def test_a_derived_column_is_not_another_member_file_column_of_its_name(store, write_csv, abc, from_table):
+    """a derives a column it calls Extra; b has Extra in its file. The
+    merge's Extra is b's, and a lacks it. Before, a was read as its bare
+    table — no sidecar, so no Extra — and every build of the merge failed
+    with "no such column" (or, with SQLite's double-quoted-string
+    fallback, matched nothing and listed the name as a value). With the
+    From table column on it opened, showing a's own values as b's."""
+    a, b, _ = abc
+    res = store.add_derived_column(a, "Extra", "Msg", "regex_extract", {"pattern": r"^(\w+)"})
+    store.wait_for_ingest_job(res["job_id"], timeout=30)
+    m = store.create_merge("m", [a, b], source_column=from_table)
+    mid = m["id"]
+
+    extra = lambda: sorted(_cells(store, mid, _view(store, mid), "Extra"), key=lambda v: (v is not None, v or ""))
+    assert extra() == [None, None, "x", "x", "y"]
+    assert {mem["id"]: "Extra" in mem["missing"] for mem in m["members"]} == {a: True, b: False}
+    flt = lambda op, value: _view(store, mid, filters=[{"column": "Extra", "op": op, "value": value}])["row_count"]
+    assert flt("equals", "alpha") == 0
+    assert flt("equals", "x") == 2
+    assert flt("empty", "") == 2
+    assert {r["value"]: r["count"] for r in store.column_values(mid, "Extra")} == {None: 2, "x": 2, "y": 1}
+    groups = store.group_summary(_view(store, mid)["view_id"], "Extra")["groups"]
+    assert {g["value"]: g["count"] for g in groups} == {None: 2, "x": 2, "y": 1}
+    res = store.run_sql(f'SELECT "Msg", "Extra" FROM merge_{-mid} ORDER BY "Msg"')
+    assert dict(res["rows"])["alpha logon"] is None
+
+    # Edit merge's "From table" tick, either way, reads it the same.
+    store.update_merge(-mid, source_column=not from_table)
+    assert extra() == [None, None, "x", "x", "y"]
+
 
 def test_source_column_names_each_row_table(store, abc):
     a, b, c = abc

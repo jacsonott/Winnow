@@ -64,7 +64,7 @@ split, found by loading the app:
 | `view` | building/rebuilding the materialized view |
 | `grid` | paging, prefetch, painting, cell-range selection |
 | `columns` `tsformat` `derived` | column layout/widths; timestamp parsing and display formats; derived and extracted columns |
-| `filters` `filterbuilder` `savedfilters` `timeframe` | quick filters and the value picker; the guided tree; saved filters and nicknames; timeframe and jump-to-timestamp |
+| `filters` `filterbuilder` `savedfilters` `timeframe` `filterundo` | quick filters and the value picker; the guided tree; saved filters and nicknames; timeframe and jump-to-timestamp; undoing a filter change (`z`) |
 | `grouping` `tags` `rowmenu` `detail` | group-by; tagging and undo; the row right-click menu; the detail pane |
 | `sources` `importer` `merge` `tables` | sources/tabs/sidebar; every import path; the merge builder; the Tables manager |
 | `search` `sql` `timeline` `session` `plugins` | toolbar + search-all; the SQL pane; the timeline tab; session files; the plugin host frontend |

@@ -66,7 +66,7 @@ In the table menu's **Columns** list, untick a column to hide it and tick it to 
 
 **Hide empty rows** is a toggle in the same place. It drops rows in which every column is empty, such as blank lines in a raw text import. It counts as a filter: the row count follows it, and it is remembered for the table.
 
-Each column's type (text, number or datetime) is shown in the list, with "derived" after a derived column.
+Each column's type (text, number or datetime) is shown after its name, in a colour of its own so the two don't run together, with "derived" after a derived column.
 
 ### Reordering columns
 
@@ -117,7 +117,15 @@ JSON and XML values are pretty-printed as an indented tree. Right-click a node i
 | **Copy value** / **Copy path** | Copies the value, or the path to the node |
 | **Flatten this document into columns…** | Opens the flatten dialog for the column. Not available on a merge. |
 
+In a list of Name/Value pairs, such as `[{"Name": "UserAgent", "Value": "Mozilla/5.0"}, ...]`, each entry is addressed by its name rather than its position. Right-clicking the name `UserAgent` acts on the value beside it, and **Add as a column** adds a column called `UserAgent`. [Derived columns](Derived-columns.md#json-paths) says which lists count as Name/Value pairs.
+
+Values that are nearly JSON are laid out the same way: Python-style lists and dicts (`[{'Name': 'UserAgent', 'Value': 'Mozilla/5.0'}]`), JSON with a raw line break or an unescaped backslash in a string, and a document inside other text, such as a log line's `[INFO] {...}`. Each token is shown exactly as the cell writes it. When the whole value is one such document, its nodes have the same menu as a JSON document's. A document inside other text has no menu of its own, because **Add as a column** needs the whole value to be one document; select text in it instead.
+
+A document nested more than 64 levels deep, or holding more than 5,000 items (values, or elements and attributes), is shown as plain text instead, under **Nested more than 64 levels deep, so it is shown as text.** or **More than 5,000 items, so it is shown as text.** Real event data is nowhere near either limit. A value the pane can't lay out for any other reason is shown the same way, under **Could not be laid out, so it is shown as text.**
+
 Select some text in a field and right-click it to **Copy** it, filter the column to rows containing it (**Filter *column* to *text***, or **… only** to drop every other filter), **Exclude** it, or **Search all columns for** it.
+
+These filters, and **Filter *column* to this value**, match the text exactly as it is, even when it holds characters the filter box reads as [filter syntax](Filtering-and-searching.md#filter-syntax), such as the `|` in `whoami | findstr` or a leading `=`, `!`, `^` or `>`. Text like that can't go in the box as a plain "contains", so Winnow applies it through the filter builder instead and says so ("applied under Filters ▾").
 
 Hover over a field to show its ⧉ button, which copies that field as displayed (in its chosen timestamp format, for example). **Copy row** at the top copies the whole row as `name: value` lines. ⬒ docks the pane to the right or the bottom, and you can drag the divider to resize it. The **Note** box at the bottom saves as you type; see [Tagging and notes](Tagging-and-notes.md).
 

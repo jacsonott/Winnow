@@ -22,7 +22,7 @@ def _wait_ready(page, name, timeout_s=15):
     raise AssertionError(f"{name} never finished building")
 
 
-def test_modal_offers_derived_inputs_and_builds_a_chain(page):
+def test_modal_offers_derived_inputs_and_builds_a_chain(page, derive_pick, derive_preview):
     rec = page.evaluate("""() => fetch('/api/derived', { method: 'POST',
       headers: { 'X-Timeline-Lite-Client': '1', 'Content-Type': 'application/json' },
       body: JSON.stringify({ source_id: 1, name: 'ChainParent', input_column: 'CommandLine',
@@ -45,10 +45,9 @@ def test_modal_offers_derived_inputs_and_builds_a_chain(page):
           .map((o) => [o.value, o.textContent])""")
         assert ["ChainParent", "ChainParent · derived"] in opts
 
-        page.locator("#modalBody select[data-role=type]").select_option(label="Extract part of a value")
-        page.locator("#modalBody select[data-role=op]").select_option(label="Regex capture")
+        derive_pick("Regex capture")
         page.locator(".derived-param input").first.fill(r"^(\w+)")
-        page.wait_for_selector(".derived-preview-row")
+        derive_preview()
         assert "powershell" in page.locator(".derived-preview-row").first.inner_text()
         page.locator(".derived-name").fill("ChainChild")
         page.locator("#modalBody .btn", has_text="Add column").first.click()

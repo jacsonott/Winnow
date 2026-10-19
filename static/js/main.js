@@ -30,6 +30,7 @@ import * as watchlist from './watchlist.js';
 import * as dashboard from './dashboard.js';
 import * as dashwidgets from './dashwidgets.js';
 import * as filters from './filters.js';
+import * as filterundo from './filterundo.js';
 import * as splash from './splash.js';
 import * as sources from './sources.js';
 import * as view from './view.js';
@@ -71,7 +72,7 @@ import { wireGrid } from './grid.js';
 import { wireGrouping } from './grouping.js';
 import { syncHistogramPanel, wireHistogram } from './histogram.js';
 import { maybeOfferStorageDir, boot, wireHome } from './home.js';
-import { wireFileDrop } from './importer.js';
+import { maybeWarnElevated, wireFileDrop } from './importer.js';
 import { loadKeymap, wireKeymap } from './keymap.js';
 import { wirePlugins } from './plugins.js';
 import { wireSearch } from './search.js';
@@ -90,7 +91,7 @@ import { wireUi } from './ui.js';
    spread would freeze the value of a rebindable export like ROW_H at boot.
    Collision-free by construction — these names all shared one scope until
    the file was split. Not an API; nothing in the app reads it. */
-const NAMESPACES = { splash, core, connection, state, jobs, tabhistory, charts, stack, notes, watchlist, dashboard, dashwidgets, filters, sources, view, columns, tsformat, derived, grid, grouping, tags, detail, ui, filterbuilder, savedfilters, timeframe, histogram, merge, multicase, importer, tables, plugins, search, session, sql, timeline, rowmenu, subset, keymap, settings, bundles, profilebuilder, pluginmanager, userenv, home, errlog };
+const NAMESPACES = { splash, core, connection, state, jobs, tabhistory, charts, stack, notes, watchlist, dashboard, dashwidgets, filters, filterundo, sources, view, columns, tsformat, derived, grid, grouping, tags, detail, ui, filterbuilder, savedfilters, timeframe, histogram, merge, multicase, importer, tables, plugins, search, session, sql, timeline, rowmenu, subset, keymap, settings, bundles, profilebuilder, pluginmanager, userenv, home, errlog };
 window.__winnow = {};
 for (const ns of Object.values(NAMESPACES)) {
   for (const key of Object.keys(ns)) {
@@ -165,3 +166,7 @@ boot().catch((e) => toast('Could not start: ' + e.message, 8000));
 errlog.startLogBadgePoll();
 
 maybeOfferRemoteMode().then(() => maybeOfferStorageDir()).then(() => maybeOfferDefaultPrompt());
+
+// Not in that chain: it asks nothing and blocks nothing, so it needn't
+// wait behind a dialog the analyst hasn't answered yet.
+maybeWarnElevated();

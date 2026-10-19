@@ -182,6 +182,23 @@ see [docs/notes/README.md](README.md) for the whole set.
   count line, because a chart that is quietly wrong is worse than one
   that is obviously absent.
 
+- **A case switch resets the histogram strip; it does not wait for a
+  view change.** The strip only ever redrew on `winnow:viewchange`, so
+  after opening another case it went on showing the previous case's
+  chart — its bars and its row count — until the new case's first view
+  landed. A case that opens on no table (a new one, or every tab closed)
+  never builds a view, so that was indefinitely; a large one, for as long
+  as its first build took. `openCaseNow` calls `resetHistogram()` with
+  the other per-case resets: it drops the chart, bumps `seq` so an answer
+  still out about the old case can't land, and sets `opening`, under
+  which the strip says "Loading…" and does not ask — `S.view` and
+  `S.sourceId` still name the previous case's table then (loadSources
+  keeps `S.sourceId` on purpose). The next view change clears it; so does
+  `refreshHistogram()`, which loadSources' no-table branch calls because
+  no view change is coming from there — the same branch the last tab
+  closing within a case goes through, which had the same stale chart.
+  tests/ui/test_case_switch.py and test_histogram_empty_state.py.
+
 - **The histogram strip** (`static/js/histogram.js`, `GET /api/histogram`
   over `Store.time_histogram`, toggled by `#btnHistogram` or `h`) was the
   `table_histogram` example plugin until 2026-09 and is built in now;
@@ -245,6 +262,22 @@ see [docs/notes/README.md](README.md) for the whole set.
   filters), and should all pick up the same nickname rather than needing it
   set per-filter. Keyed the same way as `ColumnLayouts` (sorted, lowercased
   column names) — saving again for the same set overwrites in place.
+- **An excluded tag is a `'!<id>'` entry in `S.tagFilter`, not a field of
+  its own** (`tagExcludeKey` in tags.js; the chip's right-click menu and a
+  tag group header's Exclude write it). Ten-odd places copy, stash, reset
+  or replay `S.tagFilter` — the per-table stash (`stashViewState`, put back
+  by `openSource`), the background search's `viewStateSnapshot`,
+  `clearViewNarrowing`, `landOnFilters`, a dashboard's count-of-this-view
+  drill and its reset — and a separate `S.tagExclude` would have had to be
+  added to every one, with the one that got missed showing a table
+  "excluding" rows it no longer was, or the reverse, with nothing on screen
+  to say so. In the same list it travels for free. `_compile_where` ANDs the exclusions where it
+  ORs everything else: "Suspicious, but not Benign" must drop a row carrying
+  both, and an OR'd "not Benign" would bring back every untagged row. Any
+  code that reads `S.tagFilter` as a list of tag ids has to skip
+  `isTagExclusion` entries; anything that replaces it with one tag (the tag
+  group's Filter to) keeps `tagFilterExclusions()`, since the rows it was
+  asked to narrow to were counted without the excluded ones.
 - **The group header's own menu** (`groupMenuItems`) tags or untags every
   row in a group in one `/api/row_tags/view` call against a view id from
   `groupRowsView` — the group's own expanded sub-view when it has one,
@@ -860,6 +893,19 @@ see [docs/notes/README.md](README.md) for the whole set.
     client-side (`pickerRows`) — neither route takes a search term — so
     the capped-list warning sends the analyst to a text filter on the
     column instead of promising Find reaches the rest.
+  - **"Everything ticked" is "no filter" only on a list this column's
+    filter didn't narrow, and Apply with nothing changed is a no-op.**
+    The picker opens on This view for any column whose filter isn't a
+    value selection — a contains, regex, `>`, `!` — and that list holds
+    only what the filter left, all ticked. `apply()` read it as "every
+    value ticked" and cleared the box: Apply with nothing touched widened
+    `p1` from 8 rows back to 40, and the wiki's own advice ("narrow the
+    column first … and reopen the picker") walked straight into it. Apply
+    now compares the ticks with the ones the list arrived with
+    (`loadedChecked`) and does nothing when they match; and a changed
+    selection that ends up all ticked writes the values out, not a clear,
+    when the list is This view and the column has its own filter (box text
+    or the picker's tree node — the two things a clear removes).
   - **`bucket_datetime=False`.** `group_summary` day-buckets datetime
     columns, and a `2024-01-05` bucket matches no stored value, so an
     `=`/`in` filter built from one selects nothing. The flag turns the
@@ -879,17 +925,65 @@ see [docs/notes/README.md](README.md) for the whole set.
     count. The row menu's "Filter by values…" opens it regardless: an
     explicit click is consent to pay for the scan in a way an
     always-present button isn't.
-  - **What the filter box can't spell.** `=v` round-trips any value
-    including one containing `|` (parseFilter matches the `=` prefix
-    first), but the box trims, `a|b|c` is its only multi-value spelling,
-    and `IN ()` drops empty strings server-side. So a selection with edge
-    whitespace, a `|` in a multi-selection, or `(empty)` mixed with real
-    values goes into the guided filter tree instead (`setPickerTreeNode`),
-    with a toast saying so. That node is recognised *structurally* on the
-    way back (an in/equals/empty cond on the column, or an OR of exactly
-    those) rather than by a marker field, because `openFilterBuilder`
-    round-trips the tree through SQL text and would drop any marker we
-    invented.
+  - **The box spells every selection but one.** It used to spell only
+    the plain ones: a selection with edge whitespace, a `|` in a
+    multi-selection, or `(empty)` beside real values went into the guided
+    filter tree (`setPickerTreeNode`) and left the box empty — and since
+    "(empty)" is ticked by default, unticking one value on any column
+    with blanks did it, which reads as the picker filling the box only
+    some of the time. Worse, a list whose first value started with an
+    operator character (`<unknown>|mid`) or that started and ended with
+    `/` (Unix paths) did land in the box, and the box read it as a
+    comparison or a regex. Now:
+    - **`""` in a list is the empty cell**, and the server agrees: an `in`
+      whose value is a LIST holding `''` compiles to `IN (…) OR IS NULL
+      OR = ''` (`Store._compile_condition`, and `serializeCond` says the
+      same in the builder's SQL). A newline-separated STRING `in` still
+      drops blank lines — there a blank is a stray newline, not a pick.
+    - **Quotes, read only when needed** (`unquoteValue`): a double-quoted
+      value in a list or after `=`/`!=` is the text inside it only if
+      that text could not be written bare — empty, edge whitespace, a
+      `|`, or a leading quote, operator or `/`. Any other quoted text is
+      literal, quotes and all, because `="C:\x.exe"` is what `f` writes
+      for an everyday quoted service path and must keep matching the
+      quotes. The leading-quote rule is what makes a value that itself
+      looks quoted (`" x "`, quotes included) round-trip: it is written
+      as `"""" x """"` and read back.
+    - **The writers check by parsing back** (`quickFilterTextForValues`,
+      `valueFilterText`, `valueExcludeText`): a spelling that doesn't
+      reparse to exactly the picked values is refused rather than
+      written, so a gap in the rules lands in the tree instead of
+      filtering on something nobody picked. The only refusal left is a
+      line break, which an `<input>` strips — that still goes to the
+      tree, with a toast saying why.
+    - **The filter builder absorbs `a|""` as the picker's node** (an OR
+      of `in`/`equals` and `empty`), not as an `in` holding `''`: its
+      one-per-line box drops a blank line on the first edit.
+    The tree node is still recognised everywhere, for the line-break case
+    and for sessions and saved state written before this. It is
+    recognised *structurally* (an in/equals/empty cond on the column, or
+    an OR of exactly those) rather than by a marker field, because
+    `openFilterBuilder` round-trips the tree through SQL text and would
+    drop any marker we invented.
+- **Text pasted into a filter box is syntax, so every writer parses it
+  back first.** The detail pane's "Filter <col> to <selection>", "… only",
+  "Exclude" and a document node's "Filter <col> to this value"
+  (`filterByContains`, detail.js) used to write the text in bare, and
+  evidence is full of the box's operators: `whoami | findstr` became an
+  any-of on two exact values (the rows holding the selection vanished),
+  `=cmd` an equals, `^HKLM` starts-with, `/usr/bin/` a regex, `*` and `""`
+  not-empty and empty. The box has quoting for exact values only, none for
+  a contains, so text that doesn't parse back as exactly that contains —
+  or that the box would trim or strip (edge whitespace, a line break) —
+  goes into the filter tree as a `contains`/`not_contains` cond instead,
+  the picker's line-break route, with a toast saying so. The server
+  escapes `%`/`_` for LIKE in a cond itself, so nothing is escaped here.
+  Like the picker's node, that cond is the column's one slot: the next
+  gesture on the column replaces it whichever route it takes
+  (`setContainsTreeCond`, found structurally — a top-level contains on the
+  column whose text the box couldn't hold). Any new "filter to this text"
+  writer should take the same check; the `=`-writers already do
+  (`valueFilterText`).
 - **Settings is two panes, one section at a time, and it opens where it
   was left** (`settingsPanes` in settings.js; the plugins and profiles
   managers' shape). It was a column of collapsible sections
@@ -1047,6 +1141,22 @@ see [docs/notes/README.md](README.md) for the whole set.
     event fires, and folding a box away rebuilds nothing at all. Three
     paths resize the head this way: the `⌕`/chip/picker reveal, the fold,
     and the Grid & layout switch between the two surfaces.
+- **The filter builder's SQL box maps a LIKE only to the condition that
+  means exactly that LIKE** (`likePatternCond`, filterbuilder.js). It used
+  to map every LIKE without looking at `%` and `_`: `"Proc" LIKE '%.exe'`
+  became equals `%.exe` (0 rows where SQLite matches 41), `LIKE 'p_.exe'`
+  an equals, `LIKE 'P1.EXE'` a case-SENSITIVE equals (LIKE folds A–Z),
+  `LIKE '%p%exe%'` a contains of the literal `p%exe`. Only two shapes have
+  a guided twin, because they are what the server compiles contains and
+  starts-with to (`Store._compile_condition`: LIKE over the escaped text,
+  `ESCAPE '\'`, same ASCII-only case folding): `'%text%'` and `'text%'`
+  with no wildcard left inside the text. Everything else stays raw SQL,
+  which runs as typed. The other direction has the same trap: a guided
+  contains on `a%b` was shown as `LIKE '%a%b%'`, so `likeSql` escapes
+  `%`/`_`/`\` with an `ESCAPE '\'` clause when the text holds a wildcard,
+  and the parser reads that clause back. An empty contains/starts is shown
+  as nothing, which is what the server compiles it to; `LIKE '%%'` drops
+  NULLs and is raw SQL when typed.
 - **`.fcell` needs its `min-width: 0`, and it's not tidying.** Giving the
   filter cell `display: flex` (to seat the value picker's ▾ next to the
   input) also made its own automatic minimum size content-based — and a
@@ -1493,6 +1603,18 @@ see [docs/notes/README.md](README.md) for the whole set.
   `openFilterBuilder`/`openValuePicker`. `moveDown`/`moveUp` did change
   *behaviour* — they move the cell cursor now — but their bindings are
   untouched, so no migration was needed for that either.
+- **A key handled by hand is listed by hand** (`FIXED_KEYS`, keymap.js).
+  Settings → Keyboard shortcuts draws the rebindable rows from S.keymap,
+  so those can't go missing — but every key dispatched outside the map
+  (wireKeymap's pre-gates, the search and filter boxes, the SQL editor's
+  Ctrl+Enter and Ctrl+Space, menu arrows, Settings' own section list, the
+  modified clicks in grid.js/columns.js) reaches Settings only through
+  that list, and a dozen of them were never in it. Add the line in the
+  same change as the handler, and mirror it in the wiki's "Fixed keys"
+  tables (docs/wiki/Settings-and-shortcuts.md), which use the same groups.
+  The entries are display strings (`Ctrl/⌘ + C`), not keymap specs.
+  tests/ui/test_shortcuts_listed.py holds the pane to both lists and pins
+  the keys that were missing by name.
 - **Shortcuts are gated off the home screen**: the document keydown
   listener returns early when `$('app').hidden` — every keymap action, tag
   hotkey, Alt+digit and the copy/undo combos act on case UI that isn't on
@@ -1559,6 +1681,47 @@ see [docs/notes/README.md](README.md) for the whole set.
   over the defaults and a stored map has no entry for an action that
   didn't exist. When retiring an alias later, remember both halves: the
   DEFAULT_KEYMAP entry and a migration for maps that carry it.
+
+- **`z` undoes filter changes, and it is recorded in the rebuild, not at
+  the call sites** (filterundo.js). Forty-odd places change a filter and
+  every one of them ends in `runBuild`, which calls `recordFilterState`
+  with the table it is about to build; the history is a baseline per
+  table (what it was last built with) plus a stack of what changed. A new
+  way to change a filter needs nothing from this — as long as it goes
+  through a rebuild. Five things it relies on:
+  - **Compared by what the view is built from, restored from the raw
+    text.** Each part (column filters, search, tree, tag filter,
+    timeframe) has a key in the spec's terms — parsed filters, `null` for
+    an empty tree, `''` for a disabled timeframe — so a stray space, a box
+    emptied to `''` rather than deleted, or a mode toggle with nothing
+    typed is not a step to undo through. An entry holds only the parts
+    that changed and undo puts back only those, which is why sort,
+    grouping and Hide empty rows are never touched.
+  - **Typing coalesces.** A header box rebuilds on every pause past the
+    220ms debounce, so builds that only change one box's text (or the
+    search text) within `FILTER_UNDO_COALESCE_MS` of the last one fold
+    into it; typed back to where it started, the entry drops. Only while
+    that box has the focus: `c` pressed straight after typing changes the
+    same one column, and folded into the word it dropped the entry, so
+    `z` found nothing to bring back.
+  - **A derived-column rename moves the history too.**
+    `renameColumnInStash` runs `renameColumnIn` over
+    `filterHistoryStates` as well as the stash, or undo past the rename
+    put a filter back on a column that no longer exists by that name —
+    and `put` drops those, silently.
+  - **`openSource` re-baselines** (`syncFilterBaseline`) before it builds.
+    Opening a table is not a change to it — and without that, a case-wide
+    timeframe set on one table (`timeframeAcrossTables`) turned up as an
+    undo step on the next table opened.
+  - **It dies with the stash** — `clearViewStateStash` and
+    `dropViewStateFor` drop it too, which is why `closeTab` and
+    `closeAllTabs` call those rather than touching the Map. Source ids
+    restart in a new case and SQLite reuses a removed table's id; an
+    entry kept past either would put one table's filters on another.
+  Baselines and entries are deep copies: `setPickerTreeNode` edits
+  `S.filterTree.children` in place, and a baseline holding the live tree
+  would change along with it and see no difference at the next build.
+  `tests/ui/test_undo_filter_change.py`.
 
 - **Stack view** (stack.js) — the column-header menu's "Stack values (rarest first)…" opens a modal of the current view's distinct values by count (via group_summary, order=count direction=asc), drawn with charts.js. Click a bar to filter the grid to that value. Least-frequency-of-occurrence triage. **The box is sized to its bars** — `max-height: min(60vh,520px)` over a canvas whose height is `rows × 22`, not a fixed height: a column that stacks to nine distinct values used to open a screen-high modal with nine bars in the top corner and four fifths of nothing under them. See docs/design/analysis-suite.md.
 
@@ -1786,6 +1949,27 @@ see [docs/notes/README.md](README.md) for the whole set.
   tags to have come along, or the subset's to appear on the parent, and
   the tooltip is where both expectations get corrected.
 
+- **The note box is ahead of the server while a save is pending, and
+  `showDetail` must not undo that** (detail.js `keepsUnsavedNote`,
+  `flushNoteSave`, `writeNote`). The box saves 500 ms after the last
+  keystroke, so every row object a fetch brings back in that window (and
+  while the POST is out) has the old note. `showDetail` is not only a
+  cursor move: `ensurePage` re-shows the cursor row whenever a visible
+  page lands, and anything that clears the row caches makes one land — a
+  derived column finishing, an import, a tag written elsewhere — so
+  setting the box to `r.note` there emptied it mid-sentence and the rest
+  of the sentence was then saved alone. The box keeps its text when it is
+  already bound to that row (`dataset.rid`/`sourceId`) and `noteUnsaved`
+  is set — on a keystroke, cleared only when a save of exactly what the
+  box holds, for the row it is bound to, has come back. Not on focus:
+  a box with focus and nothing typed should still show a note a session
+  load or another window wrote. Any other row takes the box over, and
+  the save still pending for the row being left is **flushed before the
+  rebind**: it reads its row when it fires, so a cursor move inside the
+  500 ms used to post the new row's own note back to it and drop what
+  was typed on the old one. "Saved" only appears when the box still holds
+  what that save carried. tests/ui/test_detail_note_autosave.py.
+
 - **The detail pane's field list is a two-column read, and reads like
   one.** The names are painted as the column writes them; the uppercasing
   they used to get from CSS cost a beat per field in a list of forty (the
@@ -1806,6 +1990,95 @@ see [docs/notes/README.md](README.md) for the whole set.
   would put the row in the DOM twice. The button is not a tab stop: forty
   of them between the pane's own buttons and the note box would bury the
   keyboard path that exists.
+
+- **The detail pane lays out documents JSON.parse refuses, and only a
+  whole-value one is addressable** (detail.js `findLooseDocuments`,
+  `appendLooseNodes`, `looseDecode`). It only ever tried a strict
+  whole-value parse, so three shapes analysts actually have came out as
+  one unbroken line: Python's repr of a list or dict (`[{'Name':
+  'UserAgent', 'Value': ...}]`, what `str()` of parsed JSON writes and
+  what a pipeline through pandas leaves in a CSV), JSON a lax exporter
+  wrote (a raw newline or tab in a string, an unescaped `C:\Windows`, NaN,
+  a trailing comma), and a document inside other text (`[INFO] {...}`,
+  `[ctx {...}]`). The strict path still runs first. The loose one is a
+  structure-only parser: brackets, strings of either quote (prefixes like
+  `b'...'` included), separators and a short list of bare words. Five
+  things it does on purpose. **Tokens are shown as the cell writes them**,
+  never decoded and re-encoded: a selection lifted out of the layout has
+  to match what the contains-filter searches, and `'Name'` re-quoted as
+  `"Name"` would match nothing; it is also why a FILETIME past 2^53 keeps
+  its digits here (the strict path still rounds them through JSON.parse).
+  **A path only when the document is the whole value**, give or take
+  surrounding spaces and line breaks, and is at most `LOOSE_MAX_CHARS`
+  long: structparse.load_json falls back to
+  `load_loose`, the same grammar in Python, and reads a cell only when all
+  of it is one document, so a path on a document inside other text would
+  fill the column with nothing on every row. The two parsers are twins
+  and have to accept exactly the same values, and `looseDecode` has to
+  decode strings, keys and numbers exactly as `load_loose` does (the path
+  holds `UserAgent` where the cell says `'UserAgent'`);
+  tests/ui/test_detail_name_value_paths_ui.py renders values in the
+  browser and extracts every offered path in Python to hold them to it.
+  **Only `[` and `{` start a candidate, and only a dict with an entry or a
+  list holding a non-empty container counts**: JSON.parse takes the
+  `[2099123]` of `hostd[2099123]:` and the `[0]` of `items[0]`, and prose
+  is full of parentheses, so a tuple only reads as one inside a list or
+  dict. A failed candidate is retried one character later, which is how
+  the document inside a `[ctx ...]` wrapper is found. **One budget bounds
+  the whole scan** (`LOOSE_SCAN_BUDGET`, every character and token across
+  all candidates, plus `LOOSE_MAX_DEPTH`): retrying per character is
+  quadratic on a run of `[`, and showDetail runs on every cursor move.
+  Past it the rest of the value is text. **The depth limit is shared**:
+  `LOOSE_MAX_DEPTH` is 256 on both sides, so a document the pane gives up
+  on is one the backend refuses too. tests/ui/test_detail_loose_documents_ui.py.
+
+- **A document is measured before it is laid out, and the note box is
+  bound before any field is** (detail.js `structTooBig`, `shownAsText`,
+  `appendDetailField`). `appendJsonNodes` and `appendXmlNodes` recurse
+  once per level, so ~2,100 nested arrays (a 4 KB cell) or ~3,000 nested
+  elements threw "Maximum call stack size exceeded" out of `showDetail`,
+  and a 200,000-element array cost ~2 s per cursor move. Evidence decides
+  what a cell holds, so this is reachable on purpose. `structTooBig` walks
+  the parsed document with its own stack (recursing to measure would
+  overflow on exactly the documents it is for) and stops at the first
+  node past `STRUCT_MAX_DEPTH` (64) levels or `STRUCT_MAX_NODES` (5,000)
+  items — JSON values, XML elements plus their attributes; an XML
+  fragment is measured from its own top elements, not the pane's wrapper.
+  Past either, the field is the text it holds under a `.dfield-hint` line
+  saying which, in a `.dfield-text` that breaks anywhere: `break-all`
+  never breaks after an opening bracket, so the attack value as one 4 KB
+  line widened the field list until the note box left the pane. The limits are far outside real data (an EVTX record is
+  4-6 levels and ~100 items; the busiest JSON exports a dozen-odd levels
+  and low thousands), and 5,000 items lay out in ~45 ms. The loose layout
+  is measured too, though its parser already stops at `LOOSE_MAX_DEPTH`:
+  otherwise single quotes would be the way round the item limit. That
+  makes 64 a layout limit there, not a parse one — a loose document 65 to
+  256 levels deep is still read by `load_loose`, and the pane shows it as
+  text rather than offering paths on it. **The order in `showDetail`
+  matters as much as the limits**: the throw came after the title said
+  "Line 2" and before the note box was rebound, so a note typed under it
+  was saved on line 1. The note box (like the title and `#detailFields`'
+  `dataset.pos`) is now bound before the fields are built, and each field
+  is built in a try/catch (`appendDetailField`) that shows the stored
+  text under "Could not be laid out" — nothing known throws past the
+  limits, so that is a backstop, not the fix.
+  tests/ui/test_detail_deep_documents_ui.py.
+
+- **A Name/Value list is addressed by name, and the Name stands for its
+  Value** (detail.js `jsonKvShape`, `kvNameTarget`; structparse
+  `_kv_shape`). `[{"Name": "UserAgent", "Value": ...}, ...]` puts its
+  entries in the writer's order, so each entry's path is
+  `[Name='UserAgent']`, not `[3]`, in both appendJsonNodes and the loose
+  layout. The rules for what counts are in `_kv_shape`'s comment and the
+  pane's copy has to agree with it; a disagreement doesn't break
+  extraction (the predicate walk doesn't care how a path was found) but
+  does make the pane name a column Flatten wouldn't offer. The Name node
+  restates the predicate, so it isn't a field of its own: it carries the
+  path of the one other key in its entry, which is what makes
+  right-click `'UserAgent'` → **Add as a column** produce the UserAgent
+  column. Beside two values (OldValue/NewValue) it would be a guess, so it
+  carries nothing. Its `data-value` is therefore the Value's text, not the
+  name's, and **Filter to this value** on it filters to the Value.
 
 - **A plugin describes itself without being imported, and the plugins
   manager is what that buys.** The Settings → Plugins panel used to show a
