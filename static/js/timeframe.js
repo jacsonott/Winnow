@@ -742,7 +742,7 @@ export function buildColumnsPanel(container, refresh = openTableMenu) {
     paintPin();
     pin.onclick = () => { togglePin(name); paintPin(); };
     const c = columnMeta(name);
-    lab.append(el('span', 'count', ' ' + (c ? c.type : '') + (c && c.derived ? ' · derived' : '')));
+    lab.append(el('span', 'collist-type', ' ' + (c ? c.type : '') + (c && c.derived ? ' · derived' : '')));
     row.append(lab, pin);
     // Per-column value-picker override, in the same row as the visibility
     // box because they're the same kind of decision about the same column.
