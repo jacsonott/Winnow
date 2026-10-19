@@ -240,6 +240,31 @@ see [docs/notes/README.md](README.md) for the whole set.
   and every case switch). Prefs are `winnow.histogram` `{open, column}`
   per browser; the plugin's `winnow.panels['table-histogram.histogram']`
   is migrated to `open` once and deleted.
+- **The strip marks where the grid is** (histogram.js `gridMarks`,
+  grid.js `onScreenRows`). The rows on screen — no overscan, none under
+  the sticky header — are a band when their times run one way (a veil
+  behind the bars and a thumb in the 6px lane above the plot), and a
+  tick each when they do not; the row cursor is a 1px `--text` line on a
+  `--panel` halo through the plot. Five things to know before touching
+  it. **It reads the times out of rows the grid already holds**
+  (`parseTimestamp` to epoch, the client twin of TS_NORMALIZE), so a
+  scroll never asks the server: `render()` and the grouped path call
+  `histogramFollowGrid`, which looks once per frame and repaints only
+  when a mark would land on another pixel — `paintChart` is split out of
+  `draw` so that repaint leaves the legend and the count line alone.
+  **Band or ticks is decided from the rows, not from `S.sort`**: tool
+  output usually arrives in time order, and sorted by Host the ties fall
+  back to rid order, so a screenful of one host IS one stretch of time —
+  keyed on the sort, both would have got ticks. **The veil goes behind
+  the bars and the cursor line in front.** Over them the veil tinted every
+  bar it crossed, and bar colour is what the tag split is read by (and
+  what test_histogram_panel samples); behind them a 1px line vanished
+  into the busiest bucket, and without the halo it still did, between two
+  tall bars. **The cursor has no mark in the lane**: it is usually one of
+  the rows on screen, and a notch there sat on the band's thumb and hid
+  it. **Times outside the chart's span are dropped, not clamped**: between
+  a rebuild and the strip's next answer the rows are the new view's and
+  the axis is the old one's. tests/ui/test_histogram_position.py.
 - There's no separate "preset" concept anymore — a preset is just a saved
   filter (`workspace.SavedFilters`, cross-case) whose `col_names` happens to
   match (exactly, or "similar" per the same Jaccard/subset heuristic the old

@@ -5,6 +5,7 @@ import { applyPin, colWidth, pinnedOffsets, visibleCols } from './columns.js';
 import { $, GUTTER_W, MAX_SPACER_PX, OVERSCAN, PAGE, ROW_H, api, el } from './core.js';
 import { maybeShowDetail, showDetail } from './detail.js';
 import { ensureGroupPage, findGroupAt, groupCoordAt, groupDataRowAt, isLeafLevel, renderGrouped, toggleGroup } from './grouping.js';
+import { histogramFollowGrid } from './histogram.js';
 import { S, cellInRange, cellRangeAllSelected, cellRangeRowCount, cellRangeRows, clearCellSelection, gridRowCount, selAdd, selClear, selCount, selHas, selRangeApply, selRanges, selRemove, selReplace, selSnapshot, selToggle, selUndoAvailable, selUndoLast } from './state.js';
 import { applyTag } from './tags.js';
 import { displayCell } from './tsformat.js';
@@ -353,7 +354,7 @@ export function syncRowsWidth(widths, cols) {
 export function render() {
   if (!S.view) return;
   syncSelectAllCheckbox();
-  if (S.groupByCols.length) { renderGrouped(); return; }
+  if (S.groupByCols.length) { renderGrouped(); histogramFollowGrid(); return; }
   syncRowsTop();
   const body = $('body');
   const rowsEl = $('rows');
@@ -383,6 +384,24 @@ export function render() {
   rowsEl.replaceChildren(frag);
   renderTagToolbar();
   titleClippedCells();
+  histogramFollowGrid();
+}
+
+/* The rows actually on screen, as {first, last} positions — no overscan,
+   and none of the rows the sticky header covers. The same geometry
+   scrollIntoView uses: row `pos` is visible below the header when
+   pos * ROW_H reaches past the virtual offset, and above the bottom edge
+   while headH() + pos * ROW_H is short of it. Null when the grid has no
+   rows or is not laid out. The histogram strip marks these. */
+export function onScreenRows() {
+  const total = gridRowCount();
+  const body = $('body');
+  if (!S.view || !total || !body || !body.clientHeight) return null;
+  const head = headH();
+  const virt = vScroll(body, total, head);
+  const first = Math.min(total - 1, Math.floor(virt / ROW_H));
+  const last = Math.min(total - 1, Math.max(first, Math.ceil((virt + body.clientHeight - head) / ROW_H) - 1));
+  return { first, last };
 }
 
 /* A cell the column cut short says what it says, on hover — and only one

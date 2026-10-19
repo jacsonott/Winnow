@@ -16,6 +16,11 @@
    panel, dim, sel), read at draw time, so a skin or accent change is one
    redraw (winnow:appearance) — a canvas does not inherit CSS.
 
+   It also says where the grid is: the rows on screen are marked along the
+   top of the plot, and the row cursor as a line through it (gridMarks).
+   The grid's render() asks for that through histogramFollowGrid, so a
+   scroll or a cursor move repaints the canvas and never refetches.
+
    Declarations only. wireHistogram() builds the chrome and attaches the
    document listeners once, for the page's life (session.js does the same
    for the diff banner): the strip is not a plugin mount, so there is
@@ -23,9 +28,11 @@
    panels; plugins.js syncPluginPanels() is the one writer of that host's
    `hidden` and asks histogramOpen() so the host shows for either kind. */
 import { $, api, el } from './core.js';
+import { onScreenRows, rowAt } from './grid.js';
 import { syncPluginPanels } from './plugins.js';
 import { S } from './state.js';
 import { datetimeColumns, updateTimeRangeButton } from './timeframe.js';
+import { parseTimestamp } from './tsformat.js';
 import { rebuildView } from './view.js';
 
 /* Per browser, like the appearance and keymap prefs: {open, column}. */
@@ -65,6 +72,9 @@ let stale = false;
 let opening = false;
 let shown = false;      // what syncHistogramPanel last applied (its onShow edge)
 let ui = null;          // {colSel, info, canvas, hint, empty} once wired
+let chartUp = false;    // the canvas holds a chart (draw() reached paintChart)
+let marks = null;       // the grid position the canvas last painted (gridMarks)
+let marksRaf = null;    // one repaint per frame, however often the grid renders
 
 function prefs() {
   try {
@@ -158,6 +168,7 @@ export function resetHistogram() {
   retries = 0;
   brush = null;
   column = null;
+  marks = null;
   opening = true;
   draw();
 }
@@ -168,6 +179,13 @@ export function resetHistogram() {
    see what is actually on screen. */
 export function histogramData() { return data; }
 export function histogramLayers() { return stackLayers(); }
+/* The grid position as last painted, in time: {band: {start, end} | null,
+   ticks: [epoch…], cursor: epoch | null}, or null with no chart up. */
+export function histogramPosition() {
+  if (!chartUp || !marks) return null;
+  return { band: marks.band && { start: marks.band.start, end: marks.band.end },
+    ticks: marks.ticks.map((tk) => tk.t), cursor: marks.cursor && marks.cursor.t };
+}
 
 /* ------------------------------------------------------------- chrome */
 
@@ -218,11 +236,11 @@ function buildChrome(container) {
       const b = data.buckets.find((bb) => tt >= bb[0] && tt < bb[0] + data.bucket_seconds);
       const stack = stackLayers();
       const seg = stack && b && stack.rows.find((r) => r[0] === b[0]);
-      canvas.title = b
+      canvas.title = (b
         ? `${iso(b[0])} — ${b[1].toLocaleString()} rows`
           + (seg ? '\n' + seg[1].map((n, i) => (n ? `${stack.labels[i]}: ${n.toLocaleString()}` : ''))
                             .filter(Boolean).join('\n') : '')
-        : iso(tt);
+        : iso(tt)) + marksTitle(x);
     }
   });
   canvas.addEventListener('mouseup', endBrush);
@@ -258,6 +276,7 @@ const tokens = () => {
     line2: cs.getPropertyValue('--line-2').trim() || '#444',
     sel: cs.getPropertyValue('--sel').trim() || 'rgba(255,255,255,.1)',
     text: cs.getPropertyValue('--text').trim() || '#ddd',
+    panel: cs.getPropertyValue('--panel').trim() || '#191d23',
     mono: cs.getPropertyValue('--mono').trim() || 'monospace',
   };
 };
@@ -301,6 +320,120 @@ function span() {
 }
 const xOf = (t, w) => { const s = span(); return ((t - s.t0) / (s.t1 - s.t0)) * w; };
 const tOf = (x, w) => { const s = span(); return s.t0 + (x / w) * (s.t1 - s.t0); };
+
+/* A stored value as epoch seconds, read the way the server reads it for
+   the bars: tsformat's parseTimestamp is the client twin of TS_NORMALIZE
+   (store.py keeps the two in step), both whole seconds, both UTC. Null for
+   anything neither can read — the same rows the bars leave out. Built
+   with setUTCFullYear rather than Date.UTC, which reads years 0–99 as
+   1900–1999. */
+function epochOf(raw) {
+  if (raw == null || raw === '') return null;
+  const p = parseTimestamp(raw);
+  if (!p || p.mo < 1 || p.mo > 12 || p.d < 1 || p.d > 31 || p.h > 23 || p.mi > 59 || p.s > 59) return null;
+  const d = new Date(0);
+  d.setUTCFullYear(p.y, p.mo - 1, p.d);
+  d.setUTCHours(p.h, p.mi, p.s, 0);
+  return Math.floor(d.getTime() / 1000);
+}
+
+/* Where the grid is, in the chart's x: the rows on screen and the row
+   cursor, each read from the charted column of rows the grid already
+   holds — nothing is fetched for this.
+
+   The rows on screen are a BAND only when they are in time order (either
+   way): then they are one stretch of time and the band is that stretch.
+   Sorted by something like a process id they are scattered across the
+   chart, and a band from the earliest to the latest would claim most of
+   it while saying nothing; each row gets a TICK of its own instead.
+   Deciding from the rows rather than from S.sort means a table that
+   arrived in time order (most tool output does) gets the band without
+   being sorted — and so does a screenful of one host when sorted by
+   host, since ties fall back to rid order and those rows ARE one stretch
+   of that host's time.
+
+   The cursor is the row the grid's cursor sits on, on screen or not, as
+   long as its page is still cached. A row with no parsable time in the
+   charted column has no place here, just as it has no bar. */
+const MIN_BAND_PX = 4;
+function gridMarks(w) {
+  const none = { key: '', band: null, ticks: [], cursor: null };
+  const s = span();
+  const ci = column ? S.columns.findIndex((c) => c.name === column) : -1;
+  if (!s || ci < 0 || !S.view) return none;
+  // Only times the chart can place: while a rebuilt view's answer is
+  // still out, the rows are the new view's and the axis the old one's.
+  const at = (r) => {
+    const t = r ? epochOf(r.cells[ci]) : null;
+    return t != null && t >= s.t0 && t <= s.t1 ? t : null;
+  };
+  const times = [];
+  const rows = onScreenRows();
+  if (rows) {
+    for (let pos = rows.first; pos <= rows.last; pos++) {
+      const t = at(rowAt(pos));
+      if (t != null) times.push(t);
+    }
+  }
+  let up = true, down = true;
+  for (let i = 1; i < times.length; i++) {
+    if (times[i] < times[i - 1]) up = false;
+    if (times[i] > times[i - 1]) down = false;
+  }
+  let band = null, ticks = [];
+  if (times.length && (up || down)) {
+    const start = Math.min(times[0], times[times.length - 1]);
+    const end = Math.max(times[0], times[times.length - 1]);
+    let x0 = xOf(start, w), x1 = xOf(end, w);
+    // A screenful of rows is often one second of a year-long table; it
+    // still has to be findable.
+    if (x1 - x0 < MIN_BAND_PX) { const mid = (x0 + x1) / 2; x0 = mid - MIN_BAND_PX / 2; x1 = mid + MIN_BAND_PX / 2; }
+    band = { start, end, x0: Math.round(x0), x1: Math.round(x1) };
+  } else {
+    const seen = new Set();
+    for (const t of times) {
+      const x = Math.round(xOf(t, w));
+      if (!seen.has(x)) { seen.add(x); ticks.push({ t, x }); }
+    }
+  }
+  const ct = S.cursor >= 0 ? at(rowAt(S.cursor)) : null;
+  const cursor = ct == null ? null : { t: ct, x: Math.round(xOf(ct, w)) };
+  // Pixels, not times: a scroll that moves nothing on the canvas is not
+  // worth a repaint.
+  const key = `${band ? `${band.x0}-${band.x1}` : ''}|${ticks.map((tk) => tk.x).join(',')}|${cursor ? cursor.x : ''}`;
+  return { key, band, ticks, cursor };
+}
+
+/* What the marks under the pointer are, for the canvas tooltip — the one
+   place they are explained on screen. Within a couple of pixels, since
+   the thumb can be 4px wide and the cursor line is 1. */
+function marksTitle(x) {
+  if (!marks) return '';
+  const near = (a, b) => x >= a - 2 && x <= b + 2;
+  const out = [];
+  if (marks.cursor && near(marks.cursor.x, marks.cursor.x + 1)) out.push(`Selected row: ${iso(marks.cursor.t)}`);
+  if (marks.band && near(marks.band.x0, marks.band.x1)) {
+    out.push(marks.band.start === marks.band.end ? `Rows on screen: ${iso(marks.band.start)}`
+      : `Rows on screen: ${iso(marks.band.start)} — ${iso(marks.band.end)}`);
+  }
+  if (marks.ticks.some((tk) => near(tk.x, tk.x + 1))) {
+    out.push('Rows on screen — not in time order, so each one is marked on its own');
+  }
+  return out.length ? '\n\n' + out.join('\n') : '';
+}
+
+/* Called by the grid's render() — every scroll frame, cursor move and
+   page landing. Coalesced to one look per frame, and the canvas is only
+   repainted when the marks would land somewhere else. */
+export function histogramFollowGrid() {
+  if (!shown || !chartUp || marksRaf) return;
+  marksRaf = requestAnimationFrame(() => {
+    marksRaf = null;
+    if (!shown || !chartUp || !ui) return;
+    const w = ui.canvas.clientWidth || 1;
+    if (gridMarks(w).key !== (marks ? marks.key : '')) paintChart();
+  });
+}
 
 /* The stacked layers to paint, or null when the chart is a plain one.
    Layer 0 is the untagged remainder; the rest follow the server's tag
@@ -362,7 +495,8 @@ function drawLegend() {
 
 function draw() {
   if (!ui) return;
-  const { canvas, info } = ui;
+  const { info } = ui;
+  chartUp = false;   // until the chart path below says otherwise
   /* The one place the strip says it is working. Every other cue lives in
      the `!data` branch below, so a chart that was already up repainted
      the PREVIOUS answer byte-for-byte while a new one was in flight and
@@ -411,6 +545,24 @@ function draw() {
     return;
   }
   showChart();   // before measuring: a hidden canvas has no width
+  const max = paintChart();
+  drawLegend();
+  const tr = S.timeRange;
+  info.textContent = `${data.total.toLocaleString()} rows · ${humanBucket(data.bucket_seconds)} buckets · max ${max.toLocaleString()}`
+    + (tr && tr.enabled && (tr.start || tr.end) ? ' · timeframe on' : '')
+    // Said plainly rather than left for the analyst to notice: a chart
+    // describing a filter that is no longer on is worse than no chart,
+    // because it is quietly wrong instead of obviously absent.
+    + (stale ? ' · showing the previous filter' : '');
+}
+
+/* The canvas alone — bars, axis, the grid's position, the brush — so a
+   scroll can repaint it without touching the chrome around it. Returns
+   the tallest bar, which the count line reports. */
+const LANE = 6;   // the strip above the plot the position marks sit in
+function paintChart() {
+  chartUp = true;
+  const { canvas } = ui;
   const w = canvas.clientWidth || canvas.parentElement.clientWidth || 600;
   const dpr = window.devicePixelRatio || 1;
   canvas.width = Math.round(w * dpr);
@@ -420,10 +572,21 @@ function draw() {
   ctx.clearRect(0, 0, w, HEIGHT);
   const t = tokens();
   ctx.font = `10px ${t.mono}`;
-  const top = 6, bottom = HEIGHT - 16, plotH = bottom - top;
+  const top = LANE + 2, bottom = HEIGHT - 16, plotH = bottom - top;
   const max = Math.max(...data.buckets.map((b) => b[1]));
   const s = span();
   const bw = Math.max(1, (data.bucket_seconds / (s.t1 - s.t0)) * w - 1);
+  marks = gridMarks(w);
+  // The rows on screen, as a column lit BEHIND the bars: over them it
+  // would tint every bar it crossed, and the bars' colour is what the
+  // tag split is read by.
+  if (marks.band) {
+    ctx.save();
+    ctx.globalAlpha = 0.14;
+    ctx.fillStyle = t.text;
+    ctx.fillRect(marks.band.x0, top, marks.band.x1 - marks.band.x0, plotH);
+    ctx.restore();
+  }
   const stack = stackLayers();
   if (stack) {
     // Bottom-up, untagged first: each row is in exactly one segment (the
@@ -463,6 +626,23 @@ function draw() {
   ctx.fillText(endLabel, w - ctx.measureText(endLabel).width - 4, HEIGHT - 4);
   const mid = iso((s.t0 + s.t1) / 2);
   ctx.fillText(mid, w / 2 - ctx.measureText(mid).width / 2, HEIGHT - 4);
+  // The lane above the plot: the band's thumb, like a scrollbar's, or a
+  // tick per row when the rows on screen are not one stretch of time.
+  ctx.fillStyle = t.text;
+  if (marks.band) ctx.fillRect(marks.band.x0, 0, marks.band.x1 - marks.band.x0, LANE - 1);
+  for (const tk of marks.ticks) ctx.fillRect(tk.x, 0, 1, LANE - 1);
+  // The row cursor: a line through the plot, over the bars, which would
+  // otherwise hide it. On a halo of the panel colour, because a bare
+  // 1px line laid over a bar, or in the gap between two tall ones, all
+  // but disappeared into it. Plot only, never the lane: the cursor is
+  // usually one of the rows on screen, and a mark of its own up there
+  // sat on the band's thumb and hid it.
+  if (marks.cursor) {
+    ctx.fillStyle = t.panel;
+    ctx.fillRect(marks.cursor.x - 1, top, 3, plotH);
+    ctx.fillStyle = t.text;
+    ctx.fillRect(marks.cursor.x, top, 1, plotH);
+  }
   // brush overlay
   if (brush) {
     const x0 = Math.min(brush.x0, brush.x1), x1 = Math.max(brush.x0, brush.x1);
@@ -484,14 +664,7 @@ function draw() {
     const lw = ctx.measureText(label).width;
     ctx.fillText(label, Math.max(2, Math.min(w - lw - 2, (x0 + x1) / 2 - lw / 2)), top + 10);
   }
-  drawLegend();
-  const tr = S.timeRange;
-  info.textContent = `${data.total.toLocaleString()} rows · ${humanBucket(data.bucket_seconds)} buckets · max ${max.toLocaleString()}`
-    + (tr && tr.enabled && (tr.start || tr.end) ? ' · timeframe on' : '')
-    // Said plainly rather than left for the analyst to notice: a chart
-    // describing a filter that is no longer on is worse than no chart,
-    // because it is quietly wrong instead of obviously absent.
-    + (stale ? ' · showing the previous filter' : '');
+  return max;
 }
 
 /* Snapping. Ranges should read as clean clock times, which is why the
