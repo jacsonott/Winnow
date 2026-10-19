@@ -1206,6 +1206,8 @@ export function openSettings(where) {
       ['""', 'empty'],
       ['*', 'not empty'],
       ['a|b|c', 'any of these values'],
+      ['a|""', 'any of these values, or empty'],
+      ['=" x "  "a|b"|c', 'quotes keep edge spaces and |, and a leading < > = ! ^ /'],
     ];
     const f = el('div', 'kv');
     for (const [a, c] of filters) { f.append(el('kbd', null, a), el('span', null, c)); }

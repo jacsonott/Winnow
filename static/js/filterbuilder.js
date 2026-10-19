@@ -2,7 +2,7 @@
 
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { $, api, debounce, el, post, toast } from './core.js';
-import { parseFilter, setColumnFilter } from './filters.js';
+import { makePickerNode, parseFilter, setColumnFilter } from './filters.js';
 import { checkPresets } from './savedfilters.js';
 import { setGrouping } from './grouping.js';
 import { S, normalizeTree } from './state.js';
@@ -49,7 +49,14 @@ export function serializeCond(node) {
     case 'not_empty': return `(${c} IS NOT NULL AND ${c} <> '')`;
     case 'in': {
       const items = Array.isArray(v) ? v : String(v || '').split('\n').map((x) => x.trim()).filter(Boolean);
-      return items.length ? `${c} IN (${items.map(sqlLit).join(', ')})` : '1';
+      // An empty string in a list is the empty cell, NULL included, as the
+      // server compiles it (Store._compile_condition) — the value picker
+      // and the box's `a|""` put one there.
+      const values = items.filter((x) => x !== '');
+      const empty = values.length !== items.length ? `${c} IS NULL OR ${c} = ''` : '';
+      const inList = values.length ? `${c} IN (${values.map(sqlLit).join(', ')})` : '';
+      if (inList && empty) return `(${inList} OR ${empty})`;
+      return inList || (empty ? `(${empty})` : '1');
     }
     default: return '1';
   }
@@ -297,10 +304,12 @@ export function openFilterBuilder(editing = null) {
       const parsed = parseFilter(raw || '');
       if (!parsed) continue;
       S.filterTree.children = S.filterTree.children || [];
-      S.filterTree.children.push({
-        type: 'cond', column, op: parsed.op,
-        value: OP_NO_VALUE.has(parsed.op) ? '' : parsed.value,
-      });
+      // A list holding the empty value (`a|""`) arrives as the picker's
+      // OR of `in` and `is empty`: the builder's one-per-line box drops a
+      // blank line the moment it is edited.
+      S.filterTree.children.push(parsed.op === 'in' && parsed.value.includes('')
+        ? makePickerNode(column, parsed.value)
+        : { type: 'cond', column, op: parsed.op, value: OP_NO_VALUE.has(parsed.op) ? '' : parsed.value });
       setColumnFilter(column, '');
     }
   }

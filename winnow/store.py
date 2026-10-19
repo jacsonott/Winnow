@@ -9396,16 +9396,27 @@ class Store:
         if op == "not_empty":
             return f"({c} IS NOT NULL AND {c} <> '')", []
         if op == "in":
+            # An empty string in a LIST is the empty cell — the box's
+            # `a|""`, the value picker's "(empty)" ticked beside real
+            # values — and means what `empty` means, NULL included, which
+            # `IN` alone can never match. It used to be dropped, so the
+            # rows it named silently fell out of the filter. A
+            # newline-separated string still drops its blank lines: there
+            # a blank is a stray newline, not a value anyone picked.
+            with_empty = isinstance(val, list) and "" in val
             items = [s for s in (val if isinstance(val, list) else str(val).split("\n")) if s != ""]
+            empty_sql = f"{c} IS NULL OR {c} = ''"
             if not items:
-                return "", []
+                return (f"({empty_sql})", []) if with_empty else ("", [])
             if col in Store.PHYSICAL_COLUMNS:
                 # Row ids arrive as strings (the tree is JSON from a picker);
                 # bind them as the integers the column holds.
                 items = [int(s) if str(s).strip().lstrip("-").isdigit() else s for s in items]
             if _HAS_JSON_EACH:   # one parameter however long the list — see _HAS_JSON_EACH
-                return f"{c} IN (SELECT value FROM json_each(?))", [json.dumps(items)]
-            return f"{c} IN ({','.join('?' * len(items))})", items
+                sql, params = f"{c} IN (SELECT value FROM json_each(?))", [json.dumps(items)]
+            else:
+                sql, params = f"{c} IN ({','.join('?' * len(items))})", items
+            return (f"({sql} OR {empty_sql})", params) if with_empty else (sql, params)
         return "", []
 
     @staticmethod
