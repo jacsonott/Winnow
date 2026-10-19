@@ -205,6 +205,12 @@ The tag chips above the grid also filter. Click a tag to show only rows carrying
 
 To remove only the timeframe, use **Clear** in the timeframe dialog or **Clear timeframe** on the histogram.
 
+## Undoing a filter change
+
+Press `z` to undo the last filter change on the table you are looking at. Press it again to keep stepping back through earlier ones. It covers the column filters, the value picker, the filter builder, the search box, the tag filter and the timeframe, so one press also brings back the filters and search that **Clear filters** removed. Grouping comes back with `X`, as before. A word typed into a filter box or the search box comes back as one step, not a letter at a time. The sort, grouping and **Hide empty rows** are left as they are.
+
+Each table keeps its own list, so `z` never changes another table's filters. The list is gone once the tab is closed or another case is opened. Undoing a tag is a different key, `Ctrl+Z`; see [Tagging and notes](Tagging-and-notes.md#undo).
+
 ## Keys
 
 | Key | Action |
@@ -214,6 +220,7 @@ To remove only the timeframe, use **Clear** in the timeframe dialog or **Clear t
 | `e` | Filter builder |
 | `]` or `w` / `[` or `q` | Next / previous saved filter |
 | `c` | Clear filters, search and tag filter |
+| `z` | Undo the last filter change |
 | `/` or `Ctrl+F` | Search box |
 | `r` / `R` | Toggle the timeframe / open the timeframe dialog |
 | `h` | Histogram |

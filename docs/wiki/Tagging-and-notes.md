@@ -107,7 +107,7 @@ The tag filter combines with the column filters, search and timeframe. **Clear f
 
 ## Undo
 
-`Ctrl+Z` (`⌘Z`) undoes the last tag change, and each press steps one change further back. The right-click menu shows what the next undo will do, for example **Undo: Tag 160 rows · Suspicious**. With nothing left, a toast says *Nothing to undo*. Inside a text box `Ctrl+Z` undoes typing as usual.
+`Ctrl+Z` (`⌘Z`) undoes the last tag change, and each press steps one change further back. The right-click menu shows what the next undo will do, for example **Undo: Tag 160 rows · Suspicious**. With nothing left, a toast says *Nothing to undo*. Inside a text box `Ctrl+Z` undoes typing as usual. Filter changes have an undo of their own, `z`; see [Filtering and searching](Filtering-and-searching.md#undoing-a-filter-change).
 
 Undo restores exactly the rows a change moved, not the rows you aimed it at. Tag 200 rows when 40 already carried the tag and the change records 160; undoing it takes the tag off those 160 and the 40 keep it. Removing a tag works the same way the other round. A press that changed nothing — tagging rows that were already tagged — is not recorded.
 
