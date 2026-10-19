@@ -3177,8 +3177,12 @@ class Store:
             return 0
 
     CHECKPOINT_TIMEOUT_S = 10.0
+    # close(fold_wal=True): long enough for a page fetch or a search's count
+    # to finish, short enough that a long download only delays the 409.
+    FOLD_TIMEOUT_S = 2.0
 
-    def _checkpoint_truncate(self, timeout_s: float | None = None) -> bool:
+    def _checkpoint_truncate(self, timeout_s: float | None = None, *,
+                             folded_is_enough: bool = False) -> bool:
         """wal_checkpoint(TRUNCATE) on the CASE FILE, retried until it
         really completes. True if the WAL was truncated, False if readers
         kept it pinned for the whole budget.
@@ -3203,7 +3207,12 @@ class Store:
         TRUNCATE invokes the connection's busy handler: with the default
         5s, one blocked attempt sits *inside* the pragma for 5s (measured
         5.03s), so a 10s budget really took ~15s and a 0.5s budget took
-        5s — all of it holding self.lock, which stalls every writer."""
+        5s — all of it holding self.lock, which stalls every writer.
+
+        `folded_is_enough` also accepts a checkpoint that copied every frame
+        back (log == checkpointed) but couldn't reset the WAL because a
+        reader is still mid-statement: the case file then holds every write,
+        which is all close(fold_wal=True) needs to know."""
         budget = self.CHECKPOINT_TIMEOUT_S if timeout_s is None else timeout_s
         deadline = time.monotonic() + budget  # monotonic: an NTP step must not move the deadline
         prior = self.db.execute("PRAGMA busy_timeout").fetchone()[0]
@@ -3213,6 +3222,8 @@ class Store:
             while True:
                 row = self.db.execute("PRAGMA main.wal_checkpoint(TRUNCATE)").fetchone()
                 if row is not None and row[0] == 0:
+                    return True
+                if folded_is_enough and row is not None and row[1] >= 0 and row[1] == row[2]:
                     return True
                 if time.monotonic() >= deadline:
                     return False
@@ -3399,7 +3410,13 @@ class Store:
             with contextlib.suppress(sqlite3.Error):
                 conn.close()
 
-    def close(self) -> None:
+    def close(self, *, fold_wal: bool = False) -> bool:
+        """Release the case file. Returns True, unless `fold_wal` asked for
+        every committed write to be copied out of the -wal into the case
+        file itself and that couldn't be done — see the end of this method.
+        Only a caller about to move the file without its -wal (save_as)
+        needs to ask; every other close leaves the -wal beside the file,
+        where the next open replays it."""
         # SQL pane queries first: one can run for ever, and it has no job
         # record or thread of its own to stop cooperatively, so it is
         # interrupted outright — now, so it unwinds while the waits below
@@ -3483,7 +3500,21 @@ class Store:
         # top of close for the other half of the same problem: stopping the
         # jobs above means reading, and those reads are on the pool now.)
         self._drain_idle_readers(permanent=True)
+        folded = True
         with self.lock:
+            # The drain only reaches idle readers. One checked out by a
+            # request still in flight — a CSV export streaming, a search-all
+            # sweep — keeps the case file open past the writer's close, so
+            # SQLite skips the checkpoint it does on the last close, and
+            # save_as deleting the -wal took every write since the last
+            # checkpoint with it (with 64 KB pages that is ~64 MB of WAL: on
+            # a quick look, usually the whole import and every tag). So fold
+            # it in here, under the lock, so nothing commits after the
+            # check. A reader whose snapshot already has every write doesn't
+            # stop the frames being copied back, only the WAL being reset,
+            # which is why "folded" is enough and "truncated" is not needed.
+            if fold_wal:
+                folded = self._checkpoint_truncate(self.FOLD_TIMEOUT_S, folded_is_enough=True)
             self.db.close()
         # Release the flock (see __init__) before unlinking, so that if the
         # remove below is the one that fails, what's left behind is an
@@ -3504,6 +3535,7 @@ class Store:
                 pass
         self._case_lock.release()
         self.closed = True
+        return folded
 
     READER_POOL_CAP = 6  # matches app.js's PAGE_FETCH_CONCURRENCY — the burstiest client
 
