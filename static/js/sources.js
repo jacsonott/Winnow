@@ -1174,8 +1174,9 @@ function foldersByParent() {
 }
 
 /* Every folder as a flat list with a "Parent / Child" path label, tree
-   order — for the row's "Move to a folder" menu. */
-function foldersFlattened() {
+   order — for the row's "Move to a folder" menu and the merge builder's
+   folder filter. */
+export function foldersFlattened() {
   const kids = foldersByParent();
   const out = [];
   (function walk(key, prefix) {

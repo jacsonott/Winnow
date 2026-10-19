@@ -3,7 +3,7 @@
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { $, api, debounce, el, post, toast } from './core.js';
 import { startJobsPoll, uploadWithProgress } from './jobs.js';
-import { loadSources, sourceLabel, sourceTitle } from './sources.js';
+import { foldersFlattened, loadSources, sourceLabel, sourceTitle } from './sources.js';
 import { S } from './state.js';
 import { nicknameFor } from './savedfilters.js';
 import { modal, oneAtATime } from './ui.js';
@@ -44,6 +44,7 @@ export function openMergeBuilder(opts = {}) {
     mode: edit && edit.col_mode === 'shared' ? 'shared' : 'all',
     srcCol: edit ? !!edit.source_column : true,
     filter: '',
+    folder: '',   // '' every folder, 'root' tables in none, else a folder id
     nameTouched: !!edit,
     preview: null,
     previewError: '',
@@ -73,6 +74,25 @@ export function openMergeBuilder(opts = {}) {
     }
     return out;
   })();
+
+  /* The sidebar's folders that hold a table listed here, in tree order,
+     each with every table in it or beneath it: a directory import nests a
+     host's output (WS01/EventLogs), so choosing WS01 has to show its
+     subfolders' tables too. `pathOf` names a table's own folder. */
+  const flatFolders = foldersFlattened();
+  const pathOf = new Map(flatFolders.map((f) => [f.id, f.pathLabel]));
+  const parentOf = new Map(S.folders.map((f) => [f.id, f.parent_id ?? null]));
+  const underFolder = new Map(flatFolders.map((f) => [String(f.id), new Set()]));
+  for (const s of real) {
+    for (let fid = s.folder_id ?? null; fid != null; fid = parentOf.get(fid) ?? null) {
+      const set = underFolder.get(String(fid));
+      if (set) set.add(s.id);
+    }
+  }
+  const folderChoices = flatFolders.filter((f) => underFolder.get(String(f.id)).size);
+  const unfiled = real.filter((s) => s.folder_id == null).length;
+  const inFolder = (t) => !state.folder
+    || (state.folder === 'root' ? t.folder_id == null : underFolder.get(state.folder).has(t.id));
 
   const groupLabel = (g) => nicknameFor(g.cols)
     || g.cols.slice(0, 3).join(', ') + (g.cols.length > 3 ? ` +${g.cols.length - 3} more` : '');
@@ -148,7 +168,28 @@ export function openMergeBuilder(opts = {}) {
     filter.setAttribute('aria-label', 'Filter tables');
     filter.oninput = () => { state.filter = filter.value; renderList(); };
     list = el('div', 'mb-list');
-    left.append(el('div', 'mb-head', 'Tables in this case'), filter, list);
+    left.append(el('div', 'mb-head', 'Tables in this case'));
+    // Only offered once some table is filed in a folder — with none, every
+    // table is in the same place and the list has nothing to narrow by.
+    if (folderChoices.length) {
+      const bar = el('div', 'mb-filters');
+      const pick = el('select', 'mb-folder');
+      pick.setAttribute('aria-label', 'Show tables in folder');
+      const opt = (value, label) => {
+        const o = el('option', null, label);
+        o.value = value;
+        pick.append(o);
+      };
+      opt('', 'All folders');
+      for (const f of folderChoices) opt(String(f.id), `${f.pathLabel} (${underFolder.get(String(f.id)).size})`);
+      if (unfiled) opt('root', `Not in a folder (${unfiled})`);
+      pick.onchange = () => { state.folder = pick.value; renderList(); };
+      bar.append(filter, pick);
+      left.append(bar);
+    } else {
+      left.append(filter);
+    }
+    left.append(list);
 
     const right = el('div', 'mb-pane mb-result');
     const summary = el('div', 'mb-summary');
@@ -227,7 +268,8 @@ export function openMergeBuilder(opts = {}) {
     list.replaceChildren();
     const q = state.filter.trim().toLowerCase();
     for (const g of groupList) {
-      const tables = g.tables.filter((t) => !q || sourceLabel(t).toLowerCase().includes(q) || t.name.toLowerCase().includes(q));
+      const tables = g.tables.filter((t) => inFolder(t)
+        && (!q || sourceLabel(t).toLowerCase().includes(q) || t.name.toLowerCase().includes(q)));
       if (!tables.length) continue;
       const wrap = el('div', 'mb-group');
       const head = el('div', 'mb-ghead');
@@ -266,7 +308,10 @@ export function openMergeBuilder(opts = {}) {
         const cell = el('span', 'mb-tcell');
         const nm = el('span', 'mb-tname', sourceLabel(t));
         cell.title = sourceTitle(t);
-        cell.append(nm, el('span', 'mb-tsub', `${fmt(t.row_count)} rows`));
+        // The folder says which host or collection a table came from when
+        // several share a file name (Security.csv from every machine).
+        const where = pathOf.get(t.folder_id);
+        cell.append(nm, el('span', 'mb-tsub', `${fmt(t.row_count)} rows${where ? ` · 🗀 ${where}` : ''}`));
         const [txt, kind] = fitChip(t);
         row.append(box, cell, el('span', `mb-chip ${kind}`, txt));
         wrap.append(row);

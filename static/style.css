@@ -3898,6 +3898,10 @@ html.remote .row.selected:hover { background: var(--row-selected); }
   border-radius: var(--radius-sm); padding: 5px 8px; font: inherit; font-size: 12px;
 }
 .mb-filter:focus { border-color: var(--accent); outline: none; }
+/* The folder picker beside the text filter, once the case has folders. */
+.mb-filters { display: flex; gap: 6px; }
+.mb-filters .mb-filter { flex: 1 1 auto; width: auto; min-width: 0; }
+.mb-folder { flex: 0 1 45%; min-width: 0; font-size: 12px; padding: 4px 6px; text-overflow: ellipsis; }
 .mb-pane > .mb-list { display: grid; gap: 12px; align-content: start; flex: 1 1 auto; min-height: 0; overflow: auto; }
 .mb-group { display: grid; gap: 2px; }
 .mb-ghead {
@@ -3915,7 +3919,7 @@ html.remote .row.selected:hover { background: var(--row-selected); }
 .mb-trow input { margin: 0; accent-color: var(--accent); }
 .mb-tcell { min-width: 0; display: grid; }
 .mb-tname { font-family: var(--mono); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.mb-tsub { font-family: var(--mono); font-size: 11px; color: var(--dim); }
+.mb-tsub { font-family: var(--mono); font-size: 11px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mb-chip { font-family: var(--mono); font-size: 11px; padding: 0 7px; border-radius: 10px; border: 1px solid currentColor; white-space: nowrap; }
 .mb-chip.ok { color: var(--str); }
 .mb-chip.info { color: var(--num); }
