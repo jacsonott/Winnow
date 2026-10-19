@@ -1803,6 +1803,10 @@ export async function clearAllFilters(seed = null) {
   // filters clears the marks with it, so the grid never wears comparison
   // chrome over a view that isn't the comparison.
   S.diffMarks = null;
+  // A seed is the one filter to land on: a column's box text (`raw`), or a
+  // condition for the filter tree (`cond`) when the box would read the text
+  // as its own syntax — see filterByContains (detail.js).
+  if (seed && seed.cond) return landOnFilters({}, { type: 'group', op: 'AND', children: [seed.cond] });
   return landOnFilters(seed ? { [seed.column]: seed.raw } : {}, { type: 'group', op: 'AND', children: [] });
 }
 

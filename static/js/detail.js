@@ -3,12 +3,13 @@
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { $, debounce, el, post, toast } from './core.js';
 import { addExtractedColumn, openFlattenModal, quotePredicate } from './derived.js';
-import { ellipsize, setColumnFilter, setSearchMode } from './filters.js';
+import { ellipsize, parseFilter, setColumnFilter, setSearchMode } from './filters.js';
 import { clearPageCache, render, rowAt } from './grid.js';
 import { writeClipboardText } from './grouping.js';
 import { syncSearchExpansion } from './search.js';
 import { clearAllFilters, sourceLabel } from './sources.js';
 import { S } from './state.js';
+import { updateFiltersButton } from './timeframe.js';
 import { displayCell } from './tsformat.js';
 import { contextMenu } from './ui.js';
 import { rebuildView } from './view.js';
@@ -864,24 +865,66 @@ export function detailMenuItems(ctx) {
    that finds it again is the substring one. Reuses the same raw-filter
    syntax the header boxes take, and the same clearAllFilters seeding that
    makes `only` correct (the timeframe filter survives, grouping is
-   stashed) rather than reimplementing either. */
+   stashed) rather than reimplementing either.
+
+   The box only gets the text when it reads back as exactly this contains.
+   Selected evidence is full of the box's syntax — `whoami | findstr` is an
+   any-of list of two exact values, `=cmd` an equals, `>5` a comparison,
+   `^HKLM` starts-with, `/usr/bin/` a regex, `*` and `""` not-empty and
+   empty — and the box has no quoting for a contains (its quotes are for
+   exact values only, see unquoteValue). So anything that doesn't
+   round-trip, or that the box would trim or strip (edge whitespace, a
+   line break), goes into the filter tree as a contains condition instead:
+   the value picker's route for the line break the box can't hold, and the
+   server escapes the value for LIKE there itself. */
 export async function filterByContains(column, text, { only = false, exclude = false } = {}) {
   const value = String(text == null ? '' : text);
   if (!value) return;
-  if (/^\s|\s$/.test(value)) {
-    toast('That selection starts or ends with whitespace — trim it and try again', 5000);
-    return;
-  }
+  const op = exclude ? 'not_contains' : 'contains';
   const raw = (exclude ? '!' : '') + value;
+  const cond = boxHoldsContains(op, value) ? null : { type: 'cond', column, op, value };
   const shown = ellipsize(value);
+  const where = cond ? ` — applied under Filters ▾, as the filter box can't hold that text as a plain contains` : '';
   if (only) {
-    await clearAllFilters({ column, raw });
-    toast(`Filtered ${column} to ${shown} · other filters cleared`);
+    await clearAllFilters(cond ? { column, cond } : { column, raw });
+    toast(`Filtered ${column} to ${shown} · other filters cleared${where}`, cond ? 5000 : undefined);
     return;
   }
-  setColumnFilter(column, raw);
+  // One filter per column either way: the box's text is overwritten, as
+  // it always was, and so is a condition this put in the tree last time,
+  // so the same gesture leaves the same filter whichever way the text had
+  // to travel.
+  setContainsTreeCond(column, cond);
+  setColumnFilter(column, cond ? '' : raw);
+  updateFiltersButton();
   await rebuildView();
-  toast(`Filtered ${column} ${exclude ? 'not ' : ''}containing ${shown}`);
+  toast(`Filtered ${column} ${exclude ? 'not ' : ''}containing ${shown}${where}`, cond ? 5000 : undefined);
+}
+
+export function boxHoldsContains(op, value) {
+  if (/[\r\n]/.test(value)) return false; // an <input> strips them
+  const p = parseFilter((op === 'not_contains' ? '!' : '') + value);
+  return !!p && p.op === op && p.value === value;
+}
+
+/* The condition filterByContains puts in the tree, found again the way the
+   picker's node is (isPickerNode, filters.js): structurally, since the
+   builder's SQL round-trip would drop a marker. A top-level contains or
+   does-not-contain on the column whose text the box can't hold — one whose
+   text it could hold can only have come from the builder, and is left
+   alone. Added into the root when that is the plain AND group, and ANDed
+   onto it otherwise, so a root the analyst turned into an OR (or a raw
+   fragment) keeps its own meaning. */
+export function setContainsTreeCond(column, cond) {
+  const ours = (n) => !!n && n.type === 'cond' && n.column === column
+    && (n.op === 'contains' || n.op === 'not_contains') && !boxHoldsContains(n.op, String(n.value ?? ''));
+  const root = S.filterTree;
+  if (root && root.type === 'group' && root.op === 'AND') {
+    root.children = (root.children || []).filter((n) => !ours(n));
+    if (cond) root.children.push(cond);
+    return;
+  }
+  if (cond) S.filterTree = { type: 'group', op: 'AND', children: root ? [root, cond] : [cond] };
 }
 
 export async function searchForText(text) {

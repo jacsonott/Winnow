@@ -952,6 +952,25 @@ see [docs/notes/README.md](README.md) for the whole set.
     an OR of exactly those) rather than by a marker field, because
     `openFilterBuilder` round-trips the tree through SQL text and would
     drop any marker we invented.
+- **Text pasted into a filter box is syntax, so every writer parses it
+  back first.** The detail pane's "Filter <col> to <selection>", "… only",
+  "Exclude" and a document node's "Filter <col> to this value"
+  (`filterByContains`, detail.js) used to write the text in bare, and
+  evidence is full of the box's operators: `whoami | findstr` became an
+  any-of on two exact values (the rows holding the selection vanished),
+  `=cmd` an equals, `^HKLM` starts-with, `/usr/bin/` a regex, `*` and `""`
+  not-empty and empty. The box has quoting for exact values only, none for
+  a contains, so text that doesn't parse back as exactly that contains —
+  or that the box would trim or strip (edge whitespace, a line break) —
+  goes into the filter tree as a `contains`/`not_contains` cond instead,
+  the picker's line-break route, with a toast saying so. The server
+  escapes `%`/`_` for LIKE in a cond itself, so nothing is escaped here.
+  Like the picker's node, that cond is the column's one slot: the next
+  gesture on the column replaces it whichever route it takes
+  (`setContainsTreeCond`, found structurally — a top-level contains on the
+  column whose text the box couldn't hold). Any new "filter to this text"
+  writer should take the same check; the `=`-writers already do
+  (`valueFilterText`).
 - **Settings is two panes, one section at a time, and it opens where it
   was left** (`settingsPanes` in settings.js; the plugins and profiles
   managers' shape). It was a column of collapsible sections
