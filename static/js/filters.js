@@ -27,7 +27,9 @@ const searchSoon = debounce(() => rebuildView({ detachAfterMs: SEARCH_DETACH_MS 
      =foo     exact             ^foo    starts with
      >10 <10 >=10 <=10          /re/    regex
      ""       empty             *       not empty
-     a|b|c    any of            */
+     a|b|c    any of            a|""    any of, or empty
+   plus quoting, for exact values the bare text can't spell (see
+   unquoteValue): `=" padded "`, `"a|b"|c`. */
 export function parseFilter(raw) {
   const s = raw.trim();
   if (!s) return null;
@@ -37,10 +39,69 @@ export function parseFilter(raw) {
   const m = s.match(/^(!=|>=|<=|[!=^><])(.*)$/);
   if (m && m[2] !== '') {
     const map = { '!': 'not_contains', '=': 'equals', '^': 'starts', '!=': 'not_equals' };
-    return { op: map[m[1]] || m[1], value: m[2].trim() };
+    const op = map[m[1]] || m[1];
+    const value = m[2].trim();
+    if (op !== 'equals' && op !== 'not_equals') return { op, value };
+    // `=""` keeps the literal two quotes it has always meant: an exact
+    // match on nothing is no filter at all server-side, and `""` on its own
+    // is already how the box says empty.
+    return { op, value: unquoteValue(value) || value };
   }
-  if (s.includes('|')) return { op: 'in', value: s.split('|').map((x) => x.trim()).filter(Boolean) };
+  if (s.includes('|')) return { op: 'in', value: splitValueList(s) };
   return { op: 'contains', value: s };
+}
+
+/* Quoting, for the exact values (`=`, `!=` and lists) — what lets the value
+   picker write every selection into the box rather than some of them. A
+   value needs it when bare text would lose it or be read as something
+   else: it's empty, has spaces at an edge (the box trims), holds the list's
+   `|`, or starts with a character that means something at the front of
+   the box — an operator, the `/` that opens a regex, or a quote.
+
+   A quoted value is read as the text inside it ONLY when that text needed
+   the quotes. Any other quoted text is literal, quotes and all, which is
+   what it meant before quoting existed: `="C:\Program Files\x.exe"` is an
+   everyday value in a service or command-line column, `f` writes it bare,
+   and it must go on matching the quotes. Inside quotes `""` is one `"`,
+   the CSV rule. */
+const QUOTED_VALUE = /^"((?:[^"]|"")*)"$/;
+
+const needsQuotes = (v) => v === '' || v !== v.trim() || v.includes('|') || /^["!=^<>/]/.test(v);
+
+const quoteValue = (v) => '"' + v.replace(/"/g, '""') + '"';
+
+function unquoteValue(t) {
+  const m = t.match(QUOTED_VALUE);
+  if (!m) return t;
+  const inner = m[1].replace(/""/g, '"');
+  return needsQuotes(inner) ? inner : t;
+}
+
+/* `a|b|c`, split on the bars that aren't inside a quoted item. A bare item
+   is trimmed and a blank one dropped (`a||b`, or the `a|` of a list still
+   being typed), exactly as before; `""` is the empty value, kept. An item
+   that opens a quote but doesn't close it right before a bar is bare text,
+   so `"C:\x.exe" -k|y` still splits where it always did. */
+const QUOTED_ITEM = /\s*("(?:[^"]|"")*")\s*(?=\||$)/y; // sticky: a 999-value list is one pass, not a slice per item
+
+function splitValueList(s) {
+  const items = [];
+  let i = 0;
+  while (i <= s.length) {
+    QUOTED_ITEM.lastIndex = i;
+    const quoted = QUOTED_ITEM.exec(s);
+    if (quoted) {
+      items.push(unquoteValue(quoted[1]));
+      i = QUOTED_ITEM.lastIndex + 1;
+      continue;
+    }
+    const bar = s.indexOf('|', i);
+    const end = bar < 0 ? s.length : bar;
+    const item = s.slice(i, end).trim();
+    if (item) items.push(item);
+    i = end + 1;
+  }
+  return items;
 }
 
 /* How one column's filter reads on a chip in the filter bar. Short enough
@@ -63,7 +124,7 @@ export function describeFilter(raw) {
     case 'regex': return '/' + v(26) + '/';
     case 'empty': return 'is empty';
     case 'not_empty': return 'is not empty';
-    case 'in': return ellipsize(p.value.join(' | '), 34);
+    case 'in': return ellipsize(p.value.map(displayValue).join(' | '), 34);
     default: return p.op + ' ' + v(26); // the numeric comparisons: > >= < <=
   }
 }
@@ -218,10 +279,13 @@ export function currentValueSelection(column) {
   return node ? new Set(valuesFromPickerNode(node)) : null;
 }
 
-/* The picker's node in the guided filter tree, for the selections the
-   header box can't spell (a value containing `|`, one with whitespace at
-   its edges, or `(empty)` mixed with real values — `IN ()` drops empty
-   strings server-side, so that combination has to be an OR).
+/* The picker's node in the guided filter tree, for the one selection the
+   header box can't spell: a value with a line break in it, which an
+   <input> strips. It used to be every selection with a `|` in a value,
+   whitespace at a value's edge or `(empty)` beside real values, which is
+   how a picked filter could land in the box one time and not the next —
+   the box quotes those now (see unquoteValue). Older sessions and saved
+   state can still carry such a node, so it is still read everywhere.
 
    Recognised structurally rather than by a marker field: openFilterBuilder
    round-trips the tree through SQL text, which would drop any marker we
@@ -273,13 +337,27 @@ export function setPickerTreeNode(column, values) {
   if (node) S.filterTree = { type: 'group', op: 'AND', children: [root, node] };
 }
 
-/* The header box's two spellings, or null when neither fits — see
-   valueFilterText for why `=v` is safe with a `|` in it but a multi-value
-   `a|b|c` isn't, and why edge whitespace never survives either. */
+/* What the header box says for a set of picked values: `=v` for one, `a|b|c`
+   for several, each value quoted only where it has to be (see
+   unquoteValue), so the box reads as plainly as the selection allows.
+   Null only for a value with a line break in it — an <input> strips those,
+   so no spelling survives being put in one. Checked by parsing the text
+   back, so a value this gets wrong lands in the filter tree rather than
+   filtering on something nobody picked. */
 export function quickFilterTextForValues(values) {
-  if (values.length === 1) return valueFilterText(values[0] === '' ? '' : values[0]);
-  if (values.some((v) => v === '' || String(v).includes('|') || valueFilterText(v) === null)) return null;
-  return values.join('|');
+  if (values.length === 1) return valueFilterText(values[0]);
+  if (values.some((v) => /[\r\n]/.test(v))) return null;
+  // A leading quote is the one reason in needsQuotes that bare text can
+  // survive: `"C:\x.exe"` reads back as itself, quotes and all, and is
+  // far easier to read than `"""C:\x.exe"""`. Only when it is a whole
+  // quoted string on its own, though — `"abc` bare would pair its quote
+  // with one in a later value — and only when unquoteValue keeps it.
+  const bare = (v) => v !== '' && v === v.trim() && !v.includes('|') && !/^[!=^<>/]/.test(v)
+    && (v[0] !== '"' || (QUOTED_VALUE.test(v) && unquoteValue(v) === v));
+  const text = values.map((v) => (bare(v) ? v : quoteValue(v))).join('|');
+  const p = parseFilter(text);
+  const same = p && p.op === 'in' && p.value.length === values.length && p.value.every((v, i) => v === values[i]);
+  return same ? text : null;
 }
 
 export async function applyValueSelection(column, values, { clearInstead }) {
@@ -291,7 +369,7 @@ export async function applyValueSelection(column, values, { clearInstead }) {
     setColumnFilter(column, text === null ? '' : text);
     if (text === null) {
       setPickerTreeNode(column, values);
-      toast(`${column}: applied under Filters ▾ — these values can't be written in the filter box`, 5000);
+      toast(`${column}: applied under Filters ▾ — a value spans more than one line, which the filter box can't hold`, 5000);
     }
   }
   updateFiltersButton();
@@ -506,22 +584,32 @@ export function renderValuePicker(panel, column, state, actions) {
    the value picker's single-value case — so the three can't drift apart on
    what an empty cell means or how a value gets escaped.
 
-   `=value` is the spelling on purpose: it round-trips any value the box can
-   hold, including one containing a `|` (parseFilter matches the `=` prefix
-   before it ever looks for the any-of separator). What it can't hold is a
-   value whose own edges are whitespace — the box trims — which is why
-   valueFilterText() reports null rather than quietly filtering on the
-   trimmed text, and the picker routes those through the filter tree. */
+   `=value` is the spelling on purpose: it round-trips almost any value
+   bare, including one containing a `|` (parseFilter matches the `=` prefix
+   before it ever looks for the any-of separator). A value with whitespace
+   at an edge — which the box trims — is quoted, `=" padded "`, and so is
+   one whose bare text would read back as such a quoted value (see
+   unquoteValue). What no spelling holds is a line break, which an <input>
+   strips: valueFilterText() reports null for that rather than quietly
+   filtering on something else, and the picker routes it through the
+   filter tree. Both spellings are checked by parsing them back. */
 export function valueFilterText(v) {
   if (v == null || v === '') return '""';
-  const s = String(v);
-  return s === s.trim() && !/[\r\n]/.test(s) ? '=' + s : null;
+  return exactValueText('=', 'equals', String(v));
 }
 
 export function valueExcludeText(v) {
   if (v == null || v === '') return '*'; // "not empty" is the exclusion of empty
-  const s = String(v);
-  return s === s.trim() && !/[\r\n]/.test(s) ? '!=' + s : null;
+  return exactValueText('!=', 'not_equals', String(v));
+}
+
+function exactValueText(prefix, op, s) {
+  if (/[\r\n]/.test(s)) return null;
+  for (const text of [prefix + s, prefix + quoteValue(s)]) {
+    const p = parseFilter(text);
+    if (p && p.op === op && p.value === s) return text;
+  }
+  return null;
 }
 
 /* Writes a raw filter string into a column's header box and the state
@@ -551,7 +639,7 @@ export const ellipsize = (s, n = 42) => (s.length > n ? s.slice(0, n - 1) + '…
 export async function filterByValue(column, value, { only = false, exclude = false } = {}) {
   const raw = exclude ? valueExcludeText(value) : valueFilterText(value);
   if (raw === null) {
-    toast(`"${ellipsize(String(value))}" starts or ends with whitespace — use Filter by values… to select it`, 5000);
+    toast(`"${ellipsize(String(value))}" spans more than one line, which the filter box can't hold — use Filter by values… to select it`, 5000);
     return;
   }
   const shown = ellipsize(displayValue(value));

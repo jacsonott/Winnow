@@ -30,10 +30,26 @@ To filter from a cell, select it and press `f` to filter its column to that valu
 | `""` or `''` | empty cells | |
 | `*` | cells with any value | |
 | `a.exe\|b.exe\|c.exe` | cells exactly equal to any of the values | Case-sensitive, like `=` |
+| `a.exe\|""` | cells equal to any of the values, or empty | `""` in a list is an empty cell |
+| `=" padded "` `"a\|b"\|c.exe` | exact values that bare text can't hold | See [Quoted values](#quoted-values) |
 
-Spaces at either end of what you type are ignored. An operator needs a value after it: a lone `=` or `!` is read as text to look for. There are no wildcards. A `%`, `_` or `*` inside a value is matched literally. An operator applies to everything after it, so `!a.exe|b.exe` means "does not contain the text `a.exe|b.exe`", not "neither of these"; use the filter builder for that. A value that itself contains `|` can't be typed as a list; tick it in the value picker instead.
+Spaces at either end of what you type are ignored. An operator needs a value after it: a lone `=` or `!` is read as text to look for. There are no wildcards. A `%`, `_` or `*` inside a value is matched literally. An operator applies to everything after it, so `!a.exe|b.exe` means "does not contain the text `a.exe|b.exe`", not "neither of these"; use the filter builder for that.
 
 **Settings → Filter & search syntax** has a short version of this table.
+
+### Quoted values
+
+Some exact values can't be typed bare: the box trims spaces at either end, a `|` would split a list, and a list that starts with `<`, `>`, `=`, `!`, `^` or `/` would read as an operator or a regular expression. Put those values in double quotes, in an `=` or `!=` filter or as items in a list:
+
+| Type this | Matches |
+| --- | --- |
+| `=" padded "` | cells exactly equal to ` padded `, spaces included |
+| `"cmd \| more"\|cmd.exe` | `cmd \| more` or `cmd.exe` |
+| `"<unknown>"\|"/tmp/"` | `<unknown>` or `/tmp/` |
+
+Inside quotes, `""` stands for one `"`. Quotes are only read this way when the value needs them. `="C:\Program Files\x.exe"` still matches the text with its quotes, as it always has, because a quoted path is a common value. The value picker and the `f` key write quotes for you when a value needs them, so you rarely type them yourself.
+
+A value with a line break in it can't be put in the filter box at all.
 
 ### Case sensitivity
 
@@ -65,7 +81,7 @@ The ▾ beside a column's filter box opens the value picker. It lists the column
 
 The picker starts on **This view**, so the list reflects your other filters. If the column already has a value selection, it starts on **Whole table** so that you can widen the selection again. Empty cells are listed as `(empty)`.
 
-The picker writes an ordinary filter: one value becomes `=value`, several become `a|b|c`. Ticking every value in a complete list removes the filter. Some selections can't be written in the box: a value containing `|`, a value with spaces at either end, or `(empty)` ticked alongside other values. Winnow applies those through the filter builder instead and tells you so ("applied under Filters ▾").
+The picker writes an ordinary filter into the column's filter box: one value becomes `=value`, several become `a|b|c`, and `(empty)` ticked alongside other values becomes `""` in the list. A value that needs [quotes](#quoted-values) gets them, such as `"a|b"|c` or `=" padded "`. Ticking every value in a complete list removes the filter. The one selection the box can't hold is a value with a line break in it; Winnow applies that through the filter builder instead and tells you so ("applied under Filters ▾").
 
 The list holds the 1,000 most common values at most. When a column has more, the picker says so. The **Find a value…** box only searches the values already listed, so to reach a rarer value, narrow the column first (for example with a contains filter) and reopen the picker.
 

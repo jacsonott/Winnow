@@ -912,17 +912,46 @@ see [docs/notes/README.md](README.md) for the whole set.
     count. The row menu's "Filter by values…" opens it regardless: an
     explicit click is consent to pay for the scan in a way an
     always-present button isn't.
-  - **What the filter box can't spell.** `=v` round-trips any value
-    including one containing `|` (parseFilter matches the `=` prefix
-    first), but the box trims, `a|b|c` is its only multi-value spelling,
-    and `IN ()` drops empty strings server-side. So a selection with edge
-    whitespace, a `|` in a multi-selection, or `(empty)` mixed with real
-    values goes into the guided filter tree instead (`setPickerTreeNode`),
-    with a toast saying so. That node is recognised *structurally* on the
-    way back (an in/equals/empty cond on the column, or an OR of exactly
-    those) rather than by a marker field, because `openFilterBuilder`
-    round-trips the tree through SQL text and would drop any marker we
-    invented.
+  - **The box spells every selection but one.** It used to spell only
+    the plain ones: a selection with edge whitespace, a `|` in a
+    multi-selection, or `(empty)` beside real values went into the guided
+    filter tree (`setPickerTreeNode`) and left the box empty — and since
+    "(empty)" is ticked by default, unticking one value on any column
+    with blanks did it, which reads as the picker filling the box only
+    some of the time. Worse, a list whose first value started with an
+    operator character (`<unknown>|mid`) or that started and ended with
+    `/` (Unix paths) did land in the box, and the box read it as a
+    comparison or a regex. Now:
+    - **`""` in a list is the empty cell**, and the server agrees: an `in`
+      whose value is a LIST holding `''` compiles to `IN (…) OR IS NULL
+      OR = ''` (`Store._compile_condition`, and `serializeCond` says the
+      same in the builder's SQL). A newline-separated STRING `in` still
+      drops blank lines — there a blank is a stray newline, not a pick.
+    - **Quotes, read only when needed** (`unquoteValue`): a double-quoted
+      value in a list or after `=`/`!=` is the text inside it only if
+      that text could not be written bare — empty, edge whitespace, a
+      `|`, or a leading quote, operator or `/`. Any other quoted text is
+      literal, quotes and all, because `="C:\x.exe"` is what `f` writes
+      for an everyday quoted service path and must keep matching the
+      quotes. The leading-quote rule is what makes a value that itself
+      looks quoted (`" x "`, quotes included) round-trip: it is written
+      as `"""" x """"` and read back.
+    - **The writers check by parsing back** (`quickFilterTextForValues`,
+      `valueFilterText`, `valueExcludeText`): a spelling that doesn't
+      reparse to exactly the picked values is refused rather than
+      written, so a gap in the rules lands in the tree instead of
+      filtering on something nobody picked. The only refusal left is a
+      line break, which an `<input>` strips — that still goes to the
+      tree, with a toast saying why.
+    - **The filter builder absorbs `a|""` as the picker's node** (an OR
+      of `in`/`equals` and `empty`), not as an `in` holding `''`: its
+      one-per-line box drops a blank line on the first edit.
+    The tree node is still recognised everywhere, for the line-break case
+    and for sessions and saved state written before this. It is
+    recognised *structurally* (an in/equals/empty cond on the column, or
+    an OR of exactly those) rather than by a marker field, because
+    `openFilterBuilder` round-trips the tree through SQL text and would
+    drop any marker we invented.
 - **Settings is two panes, one section at a time, and it opens where it
   was left** (`settingsPanes` in settings.js; the plugins and profiles
   managers' shape). It was a column of collapsible sections
