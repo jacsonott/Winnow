@@ -176,3 +176,42 @@ def test_the_last_cases_histogram_is_gone_before_the_new_cases_view_lands(case_p
         assert page.evaluate("() => __winnow.histogramData().total") == 7
     finally:
         page.unroute(pattern)
+
+
+def test_the_last_cases_filters_do_not_open_on_the_next_cases_table(case_page, own_server, view_rebuilt):
+    """A header filter and a search set on case A's table came back on
+    case B's when the two tables shared an id, which the first table of
+    any two cases does: B opened filtered by a column value and a search
+    nobody typed there, on rows that never matched them, and read as an
+    empty table. The case switch cleared the per-table stash, then the
+    first table it opened stashed what was still on screen under that
+    shared id and read it straight back."""
+    page = case_page
+    case_a = str(own_server["dir"] / "caseA.db")
+    case_b = str(own_server["dir"] / "caseB.db-winnow")
+    own_server["post"]("/api/cases", {"path": case_b, "name": "B", "group": "", "notes": ""})
+    page.evaluate("(p) => __winnow.openCase(p)", case_b)
+    page.wait_for_function("() => __winnow.S.sources.length === 0")
+    csv_b = own_server["dir"] / "b.csv"
+    csv_b.write_text("When,Host\n" + "".join(f"2024-06-0{d} 12:00:00,B{d}\n" for d in range(1, 8)),
+                     encoding="utf-8")
+    own_server["post"]("/api/ingest/path", {"path": str(csv_b), "build_fts": False})
+    page.evaluate("(p) => __winnow.openCase(p)", case_a)
+    page.wait_for_function("() => __winnow.S.view && __winnow.S.view.row_count === 30 && __winnow.busyCount === 0")
+    assert page.evaluate("() => __winnow.S.sourceId") == 1
+
+    with view_rebuilt(page):
+        page.locator('.fcell input[data-col="Host"]').fill("H1")
+    page.click("#btnSearchToggle")
+    with view_rebuilt(page):
+        page.locator("#search").fill("cmd1")
+    assert page.evaluate("() => __winnow.S.view.row_count") == 11
+
+    page.evaluate("(p) => __winnow.openCase(p)", case_b)
+    page.wait_for_function("() => __winnow.S.sources.length === 1 && __winnow.S.sources[0].row_count === 7"
+                           " && __winnow.S.view && __winnow.busyCount === 0", timeout=15_000)
+    assert page.evaluate("""() => ({ source: __winnow.S.sourceId, rows: __winnow.S.view.row_count,
+                                     filters: __winnow.S.filters, search: __winnow.S.search })""") == \
+        {"source": 1, "rows": 7, "filters": {}, "search": ""}
+    assert page.locator('.fcell input[data-col="Host"]').input_value() == ""
+    assert page.locator("#search").input_value() == ""

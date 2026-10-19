@@ -199,6 +199,19 @@ see [docs/notes/README.md](README.md) for the whole set.
   closing within a case goes through, which had the same stale chart.
   tests/ui/test_case_switch.py and test_histogram_empty_state.py.
 
+- **A case switch must not stash what is on screen.** `openCaseNow`
+  clears the per-tab stash (`clearViewStateStash`), then `loadSources`
+  opens the new case's first table, and `openSource` stashes the table it
+  is leaving before it reads the arriving one's. `S.sourceId` is kept
+  across the switch on purpose, so that stash wrote the previous case's
+  filters and search under the old id; ids restart at 1 in every case, so
+  the arriving table almost always had that id and opened with them,
+  usually showing 0 rows. `clearViewStateStash` now makes the next
+  `stashViewState` a no-op (`stashOnScreen`). Nulling `S.view` or
+  `S.sourceId` in `openCaseNow` instead would also stop it, but both are
+  read by the rest of the switch: loadSources picks its tab from
+  `S.sourceId`. tests/ui/test_case_switch.py.
+
 - **The histogram strip** (`static/js/histogram.js`, `GET /api/histogram`
   over `Store.time_histogram`, toggled by `#btnHistogram` or `h`) was the
   `table_histogram` example plugin until 2026-09 and is built in now;
