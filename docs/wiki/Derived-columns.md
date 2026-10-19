@@ -454,6 +454,11 @@ open and Winnow adds it to each member table, checking all of them first,
 so a name clash on one member stops it everywhere. The preview samples the
 first member, or the merged view under **This view**.
 
+A derived column on one member table is never shown as another member's
+column from its file, even when the two have the same name. If `b.csv`
+derives a column called `Host` and `a.csv` has a `Host` column of its own,
+the merge's **Host** is `a.csv`'s, and `b.csv`'s rows are empty there.
+
 Two things work differently on a merge:
 
 - **Flatten** isn't offered. Open a member table to flatten its documents.

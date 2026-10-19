@@ -188,6 +188,29 @@ def test_rename_on_one_member_leaves_the_merge_layout_alone(store, write_csv):
     assert next(d for d in store.list_derived_columns(b))["name"] == "User"
 
 
+def test_rename_to_a_name_another_member_has_keeps_its_merges_working(store, write_csv):
+    """Renamed on b's own tab to a name a and c have in their files. The
+    merges over b still open — each shows a's and c's Host, b's rows
+    empty there — and a merge's saved width, place and sort for that Host
+    are its own, not leftovers of the renamed column to be dropped."""
+    a = _table(store, write_csv, [["When", "Who", "Host"], ["2024-01-01 10:00:00", "u=alice;h=SRV1", "A-HOST"]], "a")
+    b = _table(store, write_csv, B_ROWS, "b")
+    c = _table(store, write_csv, [["When", "Who", "Host"], ["2024-01-03 10:00:00", "u=carol", "C-HOST"]], "c")
+    ab = store.create_merge("ab", [a, b])["id"]
+    abc = store.create_merge("abc", [a, b, c])["id"]
+    layout = {"columns": {"Host": {"w": 333}}, "order": ["When", "Who", "Host"],
+              "sort": [{"column": "Host", "dir": "asc"}]}
+    store.save_layout(abc, json.loads(json.dumps(layout)))
+    on_b = _add(store, b, "Computer", "Who", "regex_extract", {"pattern": r"h=(\w+)"})
+
+    store.rename_derived_column(on_b, "Host", b)
+    nulls_first = lambda v: (v is not None, v or "")
+    assert sorted(_values(store, ab, "Host"), key=nulls_first) == [None, "A-HOST"]
+    assert sorted(_values(store, abc, "Host"), key=nulls_first) == [None, "A-HOST", "C-HOST"]
+    assert _values(store, b, "Host") == ["WKS2"]
+    assert store.get_layout(abc) == layout
+
+
 def test_merge_rename_checks_members_without_the_column(store, write_csv):
     a = _table(store, write_csv, ROWS, "a")
     b = _table(store, write_csv, [["When", "Who", "Start", "Account"], ["x", "u=z", "y", "q"]], "b")
