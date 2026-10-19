@@ -1109,6 +1109,22 @@ see [docs/notes/README.md](README.md) for the whole set.
     event fires, and folding a box away rebuilds nothing at all. Three
     paths resize the head this way: the `⌕`/chip/picker reveal, the fold,
     and the Grid & layout switch between the two surfaces.
+- **The filter builder's SQL box maps a LIKE only to the condition that
+  means exactly that LIKE** (`likePatternCond`, filterbuilder.js). It used
+  to map every LIKE without looking at `%` and `_`: `"Proc" LIKE '%.exe'`
+  became equals `%.exe` (0 rows where SQLite matches 41), `LIKE 'p_.exe'`
+  an equals, `LIKE 'P1.EXE'` a case-SENSITIVE equals (LIKE folds A–Z),
+  `LIKE '%p%exe%'` a contains of the literal `p%exe`. Only two shapes have
+  a guided twin, because they are what the server compiles contains and
+  starts-with to (`Store._compile_condition`: LIKE over the escaped text,
+  `ESCAPE '\'`, same ASCII-only case folding): `'%text%'` and `'text%'`
+  with no wildcard left inside the text. Everything else stays raw SQL,
+  which runs as typed. The other direction has the same trap: a guided
+  contains on `a%b` was shown as `LIKE '%a%b%'`, so `likeSql` escapes
+  `%`/`_`/`\` with an `ESCAPE '\'` clause when the text holds a wildcard,
+  and the parser reads that clause back. An empty contains/starts is shown
+  as nothing, which is what the server compiles it to; `LIKE '%%'` drops
+  NULLs and is raw SQL when typed.
 - **`.fcell` needs its `min-width: 0`, and it's not tidying.** Giving the
   filter cell `display: flex` (to seat the value picker's ▾ next to the
   input) also made its own automatic minimum size content-based — and a
