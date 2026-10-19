@@ -207,6 +207,34 @@ export function renderTagRibbon() {
 
 /* ------------------------------------------------------- tag list editors */
 
+/* The colours a new tag is handed, in order. The first three are the
+   shipped defaults (store.DEFAULT_TAGS: TA, Suspicious, Benign), so the
+   first tag an analyst adds to a fresh case is the first colour it doesn't
+   already have. Every tag used to arrive the same grey-blue, and a ribbon
+   of three of them is three tags nobody can tell apart at a glance. Nine,
+   one per tag key; blue sits late so the first few added don't read as
+   the old default. Mid-tones, like the three defaults, since each one is
+   both a row stripe and chip text on dark and light skins alike. */
+export const NEW_TAG_COLORS = [
+  '#c0392b', '#d68a2e', '#5d8a66', '#8e5cc2', '#2a9d8f',
+  '#c94f8a', '#b8962e', '#3b7dd8', '#8a6a4f',
+];
+
+/* What Add tag (Edit tags) and + tag (the template) create, given the
+   tags already in that list: the first palette colour none of them has
+   and the first of keys 1–9 none of them holds, so the new tag can be
+   pressed straight away. With all nine colours taken it reuses the one
+   the fewest tags carry; with all nine keys taken it has none, as every
+   new tag used to. */
+export function newTagDefaults(existing) {
+  const colors = existing.map((t) => (t.color || '').toLowerCase());
+  const uses = (c) => colors.filter((x) => x === c).length;
+  const color = NEW_TAG_COLORS.reduce((best, c) => (uses(c) < uses(best) ? c : best));
+  const keys = new Set(existing.map((t) => t.hotkey));
+  const hotkey = ['1', '2', '3', '4', '5', '6', '7', '8', '9'].find((k) => !keys.has(k)) || null;
+  return { name: 'New tag', color, hotkey };
+}
+
 /* How long a paused name waits before it saves. The row note's figure
    (saveNote), for the same reason: long enough not to write per keystroke,
    short enough that closing the dialog straight after typing loses nothing
@@ -382,7 +410,7 @@ export function buildDefaultTagsEditor(sec) {
   };
   add.onclick = oneAtATime(add, async () => {
     await settle();
-    tags.push({ name: 'New tag', color: '#7f9bb5', hotkey: null });
+    tags.push(newTagDefaults(tags));
     try { await saveAll(); } catch (e) {
       tags.pop();
       toast(`Could not add a tag: ${e.message}`, 6000);
