@@ -599,9 +599,69 @@ export function appendLooseNodes(container, node, indent, path, nameKey) {
   container.append(pad + node.close);
 }
 
+/* ------------------ documents too deep or too big to lay out
+
+   appendJsonNodes and appendXmlNodes recurse once per level, and how deep
+   a cell goes is up to whoever wrote the evidence: ~2,100 nested arrays
+   (about 4 KB) or ~3,000 nested elements ran the pane out of stack, and a
+   200,000-element array cost about 2 s of DOM on every cursor move. So a
+   parsed document is measured first, without recursion, and one past
+   either limit is shown as the text it holds, with a line saying why.
+   The loose layout is measured the same way: its parser stops at
+   LOOSE_MAX_DEPTH, but a long list written with single quotes would
+   otherwise be the way round the item limit.
+   Real documents are nowhere near either: an EVTX record is 4-6 levels and
+   ~100 elements and attributes, and the busiest JSON exports (CloudTrail,
+   Entra sign-ins, Kubernetes audit) are a dozen-odd levels and hundreds
+   to low thousands of values. 64 levels is already 128 columns of
+   indentation, past anything the pane can show usefully, and 5,000 items
+   lay out in about 45 ms. */
+export const STRUCT_MAX_DEPTH = 64;
+export const STRUCT_MAX_NODES = 5000;
+
+/* null when the documents under `roots` fit, else the hint to show
+   instead. An explicit stack, since the documents this exists to refuse
+   are the ones that would overflow the call stack; it stops at the first
+   node over either limit rather than counting all 200,000. `weigh` is how
+   many laid-out nodes one node is (an XML element's attributes are nodes
+   of their own). */
+export function structTooBig(roots, kidsOf, weigh) {
+  const todo = roots.map((r) => [r, 1]);
+  let nodes = 0;
+  while (todo.length) {
+    const [node, depth] = todo.pop();
+    if (depth > STRUCT_MAX_DEPTH) {
+      return `Nested more than ${STRUCT_MAX_DEPTH} levels deep, so it is shown as text.`;
+    }
+    const kids = kidsOf(node);
+    nodes += weigh(node);
+    // Everything still waiting will be counted too.
+    if (nodes + todo.length + kids.length > STRUCT_MAX_NODES) {
+      return `More than ${STRUCT_MAX_NODES.toLocaleString('en-US')} items, so it is shown as text.`;
+    }
+    for (const k of kids) todo.push([k, depth + 1]);
+  }
+  return null;
+}
+
+const jsonKids = (v) => (v !== null && typeof v === 'object' ? Object.values(v) : []);
+const xmlKids = (n) => n.children;
+const xmlWeight = (n) => 1 + n.attributes.length;
+const looseKids = (n) => (n.leaf ? [] : n.entries ? n.entries.map((e) => e[1]) : n.items);
+
+/* A value shown as the text it holds, under a line saying why it isn't
+   laid out. */
+export function shownAsText(v, why) {
+  const frag = document.createDocumentFragment();
+  frag.append(el('div', 'dfield-hint', why), el('div', 'dfield-text', v));
+  return frag;
+}
+
 export function renderDetailContent(v) {
   const json = tryParseJSON(v);
   if (json !== null && typeof json === 'object') {
+    const tooBig = structTooBig([json], jsonKids, () => 1);
+    if (tooBig) return shownAsText(v, tooBig);
     const pre = el('pre', 'detail-pretty');
     appendJsonNodes(pre, json, '$', 0);
     return pre;
@@ -609,6 +669,10 @@ export function renderDetailContent(v) {
   if (looksLikeXml(v)) {
     const root = parseXmlDoc(v);
     if (root) {
+      // The fragment wrapper (below) is ours, and is no level of the document.
+      const tops = root.tagName === 'winnow-fragment' ? [...root.children] : [root];
+      const tooBig = structTooBig(tops, xmlKids, xmlWeight);
+      if (tooBig) return shownAsText(v, tooBig);
       const pre = el('pre', 'detail-pretty');
       // A synthetic fragment wrapper is ours, not the document's — its
       // children are what the analyst actually has, and what paths are
@@ -632,6 +696,8 @@ export function renderDetailContent(v) {
   }
   const docs = findLooseDocuments(v);
   if (docs.length) {
+    const tooBig = structTooBig(docs.map((d) => d.node), looseKids, () => 1);
+    if (tooBig) return shownAsText(v, tooBig);
     const pre = el('pre', 'detail-pretty');
     // The whole value, give or take the whitespace load_json strips, is
     // what the backend can read a path out of.
@@ -710,6 +776,38 @@ export function copyFieldButton(column) {
   return b;
 }
 
+/* One field of the pane, its name and its value laid out; an empty value
+   gets no line. A value that can't be laid out (a renderer bug, a shape
+   nobody foresaw) is shown as the text it holds rather than taking the
+   rest of the pane with it: every field is built in one pass, and one
+   throw used to leave the fields after it unpainted. */
+export function appendDetailField(dl, column, v) {
+  if (v == null || v === '') return;
+  // The column's name as the column writes it. It used to be
+  // uppercased in CSS, which costs a beat per field in a two-column
+  // list of forty of them, and made names that are already mixed case
+  // in the evidence (TimeCreated, CommandLine) unrecognisable as the
+  // same strings the header row shows.
+  const dt = el('dt', null, column);
+  dt.dataset.col = column;
+  dl.append(dt);
+  const dd = el('dd');
+  // Which column a selection or a clicked node belongs to — the detail
+  // menu's actions (filter, exclude, add as column) all need it, and the
+  // <dd> is the only thing that still knows once you're deep inside a
+  // pretty-printed document.
+  dd.dataset.col = column;
+  let content;
+  try {
+    content = renderDetailContent(displayCell(column, v));
+  } catch (e) {
+    console.error(e);
+    content = shownAsText(String(v), 'Could not be laid out, so it is shown as text.');
+  }
+  dd.append(copyFieldButton(column), content);
+  dl.append(dd);
+}
+
 /* The detail pane only force-opens on double-click (activateRow's plain
    single-click path deliberately never calls showDetail) or the toggleDetail
    hotkey. Once it's open, though, cursor movement — click, arrow keys,
@@ -741,26 +839,6 @@ export function showDetail(pos) {
   // state that something else may have moved since.
   dl.dataset.pos = pos;
   dl.replaceChildren();
-  S.columns.forEach((c, i) => {
-    const v = r.cells[i];
-    if (v == null || v === '') return;
-    // The column's name as the column writes it. It used to be
-    // uppercased in CSS, which costs a beat per field in a two-column
-    // list of forty of them, and made names that are already mixed case
-    // in the evidence (TimeCreated, CommandLine) unrecognisable as the
-    // same strings the header row shows.
-    const dt = el('dt', null, c.name);
-    dt.dataset.col = c.name;
-    dl.append(dt);
-    const dd = el('dd');
-    // Which column a selection or a clicked node belongs to — the detail
-    // menu's actions (filter, exclude, add as column) all need it, and the
-    // <dd> is the only thing that still knows once you're deep inside a
-    // pretty-printed document.
-    dd.dataset.col = c.name;
-    dd.append(copyFieldButton(c.name), renderDetailContent(displayCell(c.name, v)));
-    dl.append(dd);
-  });
   const note = $('noteInput');
   // r.note is the server's copy, which is behind the box while a save is
   // pending — see keepsUnsavedNote.
@@ -768,6 +846,11 @@ export function showDetail(pos) {
   note.dataset.rid = r.rid;
   note.dataset.sourceId = r.source_id;
   $('noteStatus').textContent = '';
+  // The fields go last, once the title, the Copy target and the note box
+  // all name this row. A value whose layout threw used to stop showDetail
+  // before the note box was rebound, so the pane said Line 2 and a note
+  // typed under it was saved on the row before.
+  S.columns.forEach((c, i) => appendDetailField(dl, c.name, r.cells[i]));
 }
 
 /* ------------------------------------------------- detail pane menu

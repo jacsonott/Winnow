@@ -2032,6 +2032,38 @@ see [docs/notes/README.md](README.md) for the whole set.
   `LOOSE_MAX_DEPTH` is 256 on both sides, so a document the pane gives up
   on is one the backend refuses too. tests/ui/test_detail_loose_documents_ui.py.
 
+- **A document is measured before it is laid out, and the note box is
+  bound before any field is** (detail.js `structTooBig`, `shownAsText`,
+  `appendDetailField`). `appendJsonNodes` and `appendXmlNodes` recurse
+  once per level, so ~2,100 nested arrays (a 4 KB cell) or ~3,000 nested
+  elements threw "Maximum call stack size exceeded" out of `showDetail`,
+  and a 200,000-element array cost ~2 s per cursor move. Evidence decides
+  what a cell holds, so this is reachable on purpose. `structTooBig` walks
+  the parsed document with its own stack (recursing to measure would
+  overflow on exactly the documents it is for) and stops at the first
+  node past `STRUCT_MAX_DEPTH` (64) levels or `STRUCT_MAX_NODES` (5,000)
+  items — JSON values, XML elements plus their attributes; an XML
+  fragment is measured from its own top elements, not the pane's wrapper.
+  Past either, the field is the text it holds under a `.dfield-hint` line
+  saying which, in a `.dfield-text` that breaks anywhere: `break-all`
+  never breaks after an opening bracket, so the attack value as one 4 KB
+  line widened the field list until the note box left the pane. The limits are far outside real data (an EVTX record is
+  4-6 levels and ~100 items; the busiest JSON exports a dozen-odd levels
+  and low thousands), and 5,000 items lay out in ~45 ms. The loose layout
+  is measured too, though its parser already stops at `LOOSE_MAX_DEPTH`:
+  otherwise single quotes would be the way round the item limit. That
+  makes 64 a layout limit there, not a parse one — a loose document 65 to
+  256 levels deep is still read by `load_loose`, and the pane shows it as
+  text rather than offering paths on it. **The order in `showDetail`
+  matters as much as the limits**: the throw came after the title said
+  "Line 2" and before the note box was rebound, so a note typed under it
+  was saved on line 1. The note box (like the title and `#detailFields`'
+  `dataset.pos`) is now bound before the fields are built, and each field
+  is built in a try/catch (`appendDetailField`) that shows the stored
+  text under "Could not be laid out" — nothing known throws past the
+  limits, so that is a backstop, not the fix.
+  tests/ui/test_detail_deep_documents_ui.py.
+
 - **A Name/Value list is addressed by name, and the Name stands for its
   Value** (detail.js `jsonKvShape`, `kvNameTarget`; structparse
   `_kv_shape`). `[{"Name": "UserAgent", "Value": ...}, ...]` puts its

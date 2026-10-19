@@ -1541,6 +1541,15 @@ code { font-family: var(--mono); color: var(--accent); background: var(--panel);
 .dfield-copy:hover { color: var(--accent); border-color: var(--accent-dim); }
 
 .detail-pretty { margin: 0; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+/* A value shown as plain text because it was too deep or too big to lay
+   out (detail.js shownAsText). The hint above it is in the UI face and
+   --dim, so it reads as the pane talking rather than as the evidence. The
+   text breaks anywhere: such a value is often a run of brackets, which
+   break-all doesn't split (no break after an opening bracket), and one
+   unbroken 4 KB line widened the field list until it pushed the note box
+   out of the pane. */
+.dfield-hint { font-family: var(--ui); font-size: 11px; color: var(--dim); margin-bottom: 2px; }
+.dfield-text { overflow-wrap: anywhere; }
 .jtok-key { color: var(--accent); }
 .jtok-str { color: var(--str); }
 .jtok-num { color: var(--num); }

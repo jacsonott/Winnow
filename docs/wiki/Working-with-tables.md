@@ -121,6 +121,8 @@ In a list of Name/Value pairs, such as `[{"Name": "UserAgent", "Value": "Mozilla
 
 Values that are nearly JSON are laid out the same way: Python-style lists and dicts (`[{'Name': 'UserAgent', 'Value': 'Mozilla/5.0'}]`), JSON with a raw line break or an unescaped backslash in a string, and a document inside other text, such as a log line's `[INFO] {...}`. Each token is shown exactly as the cell writes it. When the whole value is one such document, its nodes have the same menu as a JSON document's. A document inside other text has no menu of its own, because **Add as a column** needs the whole value to be one document; select text in it instead.
 
+A document nested more than 64 levels deep, or holding more than 5,000 items (values, or elements and attributes), is shown as plain text instead, under **Nested more than 64 levels deep, so it is shown as text.** or **More than 5,000 items, so it is shown as text.** Real event data is nowhere near either limit. A value the pane can't lay out for any other reason is shown the same way, under **Could not be laid out, so it is shown as text.**
+
 Select some text in a field and right-click it to **Copy** it, filter the column to rows containing it (**Filter *column* to *text***, or **… only** to drop every other filter), **Exclude** it, or **Search all columns for** it.
 
 These filters, and **Filter *column* to this value**, match the text exactly as it is, even when it holds characters the filter box reads as [filter syntax](Filtering-and-searching.md#filter-syntax), such as the `|` in `whoami | findstr` or a leading `=`, `!`, `^` or `>`. Text like that can't go in the box as a plain "contains", so Winnow applies it through the filter builder instead and says so ("applied under Filters ▾").
