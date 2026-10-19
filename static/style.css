@@ -2559,6 +2559,12 @@ textarea:focus { border-color: var(--accent); outline: none; }
   background: var(--panel-2); border: 1px solid var(--line-2); border-radius: var(--radius-sm); padding: 2px 4px;
 }
 .settings-key-chip .btn { font-size: 9px; padding: 1px 4px; }
+/* The fixed keys under the map, a .kv per place they work. The key column
+   is wider than .kv's 150px so "Ctrl/⌘ + Shift + arrow" and the
+   modified-click gestures read on one line rather than wrapping mid-chord. */
+.settings-fixed-where { font-size: 12px; font-weight: 600; color: var(--text); margin: 12px 0 5px; }
+.settings-fixed-keys { grid-template-columns: 200px 1fr; }
+.settings-fixed-keys kbd { align-self: start; }   /* not stretched to a wrapped description's height */
 
 .appearance-styles { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; margin-top: 8px; }
 .style-card {

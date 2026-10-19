@@ -10,7 +10,7 @@ import { headH, rScroll, render, spacerPx, vScroll } from './grid.js';
 import { drawRail, rebuildGroupPrefix, renderGrouped } from './grouping.js';
 import { syncHistogramPanel } from './histogram.js';
 import { shutdownWinnow } from './home.js';
-import { ACTION_LABELS, defaultKeymap, findKeyConflict, keyLabel, keySpecFromEvent, saveKeymap } from './keymap.js';
+import { ACTION_LABELS, FIXED_KEYS, defaultKeymap, findKeyConflict, keyLabel, keySpecFromEvent, saveKeymap } from './keymap.js';
 import { buildPluginsPanel } from './pluginmanager.js';
 import { listBundles, openPluginBundlesModal } from './bundles.js';
 import { buildAssocPanel } from './assoc.js';
@@ -1091,7 +1091,7 @@ export function openSettings(where) {
       + 'On: the first table of a batch to finish opens; the rest of that batch land without moving you again.'));
 
     const secKeys = section('keys', 'Keyboard shortcuts');
-    secKeys.append(el('p', null, 'Tag hotkeys (1–9) are set per-tag in Edit tags. Escape always clears the selection or closes a panel. Space toggles the rows the cell selection covers: every row of a multi-row selection, all together, or the cursor row when there is no multi-row selection. Shift+Space picks those rows without toggling. '
+    secKeys.append(el('p', null, 'Tag hotkeys (1–9) are set per-tag in Edit tags. The keys under Fixed keys, below the list, are not rebindable. '
       + '"+ key" waits for a full press — hold modifiers for a combination (e.g. Ctrl+Shift+K), or Shift+letter for a capital.'));
     const list = el('div', 'settings-keys');
 
@@ -1180,26 +1180,16 @@ export function openSettings(where) {
     reset.onclick = () => { S.keymap = defaultKeymap(); keymapChanged(); };
     secKeys.append(reset);
 
-    const fixedKeys = el('div', 'kv');
-    fixedKeys.style.marginTop = '10px';
-    fixedKeys.append(el('kbd', null, 'Shift + arrow'),
-      el('span', null, 'Grow the cell selection, the way dragging does'));
-    fixedKeys.append(el('kbd', null, 'Ctrl/\u2318 + Shift + arrow'),
-      el('span', null, 'Grow it all the way to the first/last row or column'));
-    fixedKeys.append(el('kbd', null, 'Space'),
-      el('span', null, 'Pick every row the cell selection covers \u2014 or let them all go, if they are already picked'));
-    fixedKeys.append(el('kbd', null, 'Shift + Space'),
-      el('span', null, 'Turn the cell selection into picked rows, for tagging'));
-    fixedKeys.append(el('kbd', null, '1 – 9'), el('span', null, 'Toggle the tag with that hotkey on the selection'));
-    fixedKeys.append(el('kbd', null, 'Shift + 1 – 9'), el('span', null, 'Apply that tag to every row in the current view — or, when every row already has it, remove it from them all (asks first)'));
-    fixedKeys.append(el('kbd', null, 'Alt + 1 – 0'), el('span', null, 'Switch tabs — 1 is the table you were last in, 2 – 0 the page tabs in strip order'));
-    fixedKeys.append(el('kbd', null, 'Ctrl/⌘ + C'), el('span', null, 'Copy the selected cells, or the picked rows (the cursor row if none are picked), as tab-separated text'));
-    fixedKeys.append(el('kbd', null, 'Ctrl/⌘ + Shift + C'), el('span', null, 'The same, with a header row'));
-    fixedKeys.append(el('kbd', null, 'Ctrl/⌘ + Z'), el('span', null, 'Undo the last tag applied or removed (repeat to keep stepping back)'));
-    fixedKeys.append(el('kbd', null, 'Esc'), el('span', null, 'Clear selection, or close a panel'));
-    fixedKeys.append(el('kbd', null, 'Right-click a row'), el('span', null, 'Tag it, filter to or exclude that cell’s value, copy'));
-    fixedKeys.append(el('kbd', null, 'Right-click a tab'), el('span', null, 'That table’s menu — columns, value dropdowns, layout'));
-    secKeys.append(fixedKeys);
+    // Everything the map above does not hold, grouped by where it works.
+    // The list lives beside the dispatcher in keymap.js (FIXED_KEYS), not
+    // here, so whoever hand-writes a new key handler finds it there.
+    secKeys.append(el('div', 'settings-sub-label', 'Fixed keys'));
+    for (const [where, keys] of FIXED_KEYS) {
+      secKeys.append(el('div', 'settings-fixed-where', where));
+      const kv = el('div', 'kv settings-fixed-keys');
+      for (const [key, what] of keys) kv.append(el('kbd', null, key), el('span', null, what));
+      secKeys.append(kv);
+    }
 
     const secSyntax = section('syntax', 'Filter & search syntax');
     const filters = [
