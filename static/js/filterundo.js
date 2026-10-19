@@ -39,6 +39,11 @@ export const FILTER_UNDO_COALESCE_MS = 1500;
 
 const clone = (v) => JSON.parse(JSON.stringify(v));
 
+/* Own properties only: column names are user data, and the snapshot's
+   JSON copy is a plain object, so a column called `toString` read as
+   `before.toString` is Object.prototype's function, not a filter. */
+const rawOf = (filters, c) => (Object.prototype.hasOwnProperty.call(filters, c) ? filters[c] || '' : '');
+
 /* Each part of a table's filters: how to read it out of S, how to put it
    back, and the key two states are compared by. The key is what the view
    is BUILT from rather than the raw text, so a trailing space in a box,
@@ -51,7 +56,7 @@ const PARTS = {
     // A column that has gone since (a removed derived column) is not put
     // back: a filter on it would fail the rebuild outright.
     put: (v) => { S.filters = nameMap(Object.fromEntries(Object.entries(v).filter(([c]) => S.columns.some((x) => x.name === c)))); },
-    key: (v) => JSON.stringify(Object.keys(v).sort().map((c) => [c, parseFilter(v[c] || '')]).filter(([, p]) => p)),
+    key: (v) => JSON.stringify(Object.keys(v).sort().map((c) => [c, parseFilter(rawOf(v, c))]).filter(([, p]) => p)),
   },
   search: {
     label: 'search',
@@ -104,7 +109,7 @@ const pick = (st, keys) => Object.fromEntries(keys.map((k) => [k, st[k]]));
 
 function changedColumns(before, after) {
   const cols = new Set([...Object.keys(before), ...Object.keys(after)]);
-  return [...cols].filter((c) => (before[c] || '').trim() !== (after[c] || '').trim());
+  return [...cols].filter((c) => rawOf(before, c).trim() !== rawOf(after, c).trim());
 }
 
 /* What a change was typed into, when it was one box's text and nothing

@@ -20,10 +20,13 @@ TOAST = "#toast:not([hidden])"
 
 
 def _filter(page, view_rebuilt, col, text):
+    # The box's own debounced rebuild, and no Enter: Enter builds at once
+    # but leaves the debounce armed, and a second build landing 220ms
+    # later — after a table switch, in the two-table test — is a race
+    # these tests would be measuring instead of the undo.
     box = page.locator(f'.fcell input[data-col="{col}"]')
     with view_rebuilt(page):
         box.fill(text)
-        box.press("Enter")
 
 
 def _undo(page, view_rebuilt):
