@@ -32,6 +32,33 @@ def test_autocomplete_keywords_tables_and_columns(page, open_sql):
     page.keyboard.press("Escape")
 
 
+def test_the_dropdown_survives_leaving_the_editor_and_coming_straight_back(page, open_sql):
+    """Leaving the editor hides its dropdown 150 ms later. That timer used to
+    hide whatever was showing by then, so back in the editor and typing
+    inside those 150 ms, the dropdown for the new word was painted and then
+    torn down by the old blur, with nothing to bring it back until the next
+    keystroke. test_sql_pane_welcome.py's comment test does exactly that
+    (Run, then straight back to type) and failed on CI with no dropdown.
+
+    Leaving, coming back and typing all happen in one call, so they land
+    inside the 150 ms however loaded the machine is. The promise it returns
+    is a timer of the same length set after the blur's, so it resolves
+    after the blur's has run."""
+    open_sql(page)
+    page.locator("#sqlText").click()
+    page.evaluate("""() => {
+      const ta = document.getElementById('sqlText');
+      ta.blur();
+      ta.focus();
+      ta.value = 'SELECT * FROM src_1 WHERE Even';
+      ta.setSelectionRange(ta.value.length, ta.value.length);
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
+      return new Promise((done) => setTimeout(done, 150));
+    }""")
+    labels = page.locator(".sql-ac .menu-item span:first-child").all_text_contents()
+    assert "EventId" in labels, labels
+    page.keyboard.press("Escape")
+
 def test_tables_menu_inserts_the_src_name(page, open_sql):
     open_sql(page)
     page.locator("#sqlText").fill("")
