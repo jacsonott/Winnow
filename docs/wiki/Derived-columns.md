@@ -53,30 +53,53 @@ is taken it becomes `LogonType 2`.
 
 ### The Add derived column dialog
 
-Work down the dialog from the top:
+The dialog has two sides. Down the left is a list of what you can make,
+grouped as **Time**, **Extract**, **Decode**, **Combine** and **Join**;
+click one and the right side shows everything about it. The dialog stays
+the same size and in the same place whatever you pick, so nothing jumps
+while you try different options.
 
-1. **Type** — what you want: **Timestamp**, **Extract part of a value**,
-   **Decode a value**, **Join from another table**, **Compare (elapsed
-   time)** or **Combine columns**.
-2. **Operation** — the specific conversion, listed in the tables below.
-3. **Parse column** — the column to read. Opened from a header it is that
+1. Pick what to make from the list. Every operation in the tables below
+   has its own entry, except the timestamp formats: they share one entry,
+   **Parse a timestamp**, and you choose the format from its **Format**
+   list.
+2. **Parse column** — the column to read. Opened from a header it is that
    column. Opened from the table menu it starts on the first column that
    looks like a timestamp: a datetime column, else one whose values or
    name (`visit_time`, `Created`, `Epoch`) suggest a time, else the first
    column.
-4. The operation's own settings, if any (required ones are marked `*`).
-5. **New column name** — prefilled as `Column (parsed)`, `Column
+3. The settings box under it: a line on what the operation does, then its
+   own settings, if any (required ones are marked `*`). When there are
+   more settings than fit, the box scrolls and its bottom edge is shaded.
+4. **New column name** — prefilled as `Column (parsed)`, `Column
    (extract)`, `Column (decoded)`, `Column elapsed` and so on. A name the table already has, in
    any capitalisation, is refused.
-6. Check the **Preview**, then click **Add column**.
+5. Check the **Preview**, then click **Add column**.
 
-When the type is **Timestamp**, Winnow tries every format against the
-column and picks the best one for you: *Suggested: Unix epoch — 100% of
-sampled values parse.* Check the preview anyway. Some numbers are valid in
-two formats (see [Ambiguous numbers](#ambiguous-numbers)). A column of small
-numbers, such as a record number or an event ID, gets *No format detected —
-pick one below to see what it produces.* instead of a suggestion (see
-[Counters are not suggested](#counters-are-not-suggested)).
+The dialog opens on **Parse a timestamp**. Winnow tries every format
+against the column and picks the best one for you, saying so under
+**Format**: *Suggested: Unix epoch — 100% of sampled values parse.* Check
+the preview anyway. Some numbers are valid in two formats (see
+[Ambiguous numbers](#ambiguous-numbers)). A column of small numbers, such
+as a record number or an event ID, gets *No format detected — pick one to
+see what it produces.* instead of a suggestion (see
+[Counters are not suggested](#counters-are-not-suggested)). Once you pick
+a format yourself, changing to a different entry and back keeps it; a new
+**Parse column** gets a new suggestion.
+
+**Finding an entry.** Type in the **Search…** box at the top of the list,
+where the cursor starts, to narrow it: `json`, `base64`, `lookup`. A
+timestamp format is found through **Parse a timestamp**, which then shows
+the format that matched (`filetime` shows *Windows FILETIME*); click it
+and that format is picked. The arrow keys move through the list, and
+`Enter` in the search box picks the first match. `Esc` clears the
+search; with the search empty, it closes the dialog.
+
+**Pinning favourites.** Point at an entry and click the ☆ beside it to
+pin it to a **Pinned** section at the top of the list, in the order you
+pin them. A pinned entry leaves its group while it is pinned; click its ✕
+to put it back. Pins stay in this browser, for every case, like the tags
+pinned to the row menu.
 
 The preview shows up to ten real values and what each becomes; a value
 that won't convert shows *can't parse*. The verdict under it counts the
@@ -178,7 +201,7 @@ after an import, therefore skip Mac absolute time for values below
 `100000000` (March 2004), and skip Excel serial dates for whole numbers,
 which in a log are far more often IDs or ports than dates. Both formats
 still convert those values when you choose them yourself under
-**Operation**.
+**Format**.
 
 ### Year-less syslog
 
@@ -193,7 +216,7 @@ change it in place.
 
 ## Extracting part of a value
 
-The **Extract part of a value** type pulls one piece out of each row:
+The entries under **Extract** pull one piece out of each row:
 **JSON field**, **XML field** or **Regex capture**. A row that doesn't
 have the field, or doesn't match, is left empty and counted in **Show N
 rows without this field**.
@@ -292,7 +315,9 @@ pattern and the numbers shift. Patterns are limited to 512 characters.
 When a pattern names its groups, the dialog offers *This pattern names 3
 groups — make a column for each?*, with a box and a name per group and
 sample values under each. Leave them ticked and the button becomes **Add 3
-columns**: one pass over the table, one column per group.
+columns**: one pass over the table, one column per group. **New column
+name** steps aside while any are ticked, since each group's column takes
+the name beside it.
 
 ### Patterns Winnow refuses
 
@@ -385,7 +410,7 @@ number reads back exactly as the cell did, so `4624` is a number while
 
 ## Comparing two times
 
-**Duration between two columns** (type **Compare (elapsed time)**) stores
+**Duration between two columns** (under **Time** in the dialog's list) stores
 **Parse column** minus **Subtract column**, in seconds, negative when the
 first is earlier. Both inputs should be datetime columns in ISO or US form,
 which every derived timestamp is. Right-click the header to show it as `1h
@@ -394,7 +419,7 @@ which every derived timestamp is. Right-click the header to show it as `1h
 
 ## Looking values up in another table
 
-**Look up from another table** (type **Join from another table**) works
+**Look up from another table** (under **Join** in the dialog's list) works
 like VLOOKUP. The **Parse column** holds the key; choose the **Lookup
 table**, **Its key column** and the **Value to bring back**.
 
@@ -414,7 +439,8 @@ merge or the table you are adding the column to, and can have at most
 All of these are on the derived column's header right-click menu.
 
 - **Re-derive…** reopens the dialog with the column and operation fixed
-  and the settings editable: the wrong syslog year, a forgotten UTC
+  (the list shows the operation, and the rest of it is greyed out) and
+  the settings editable: the wrong syslog year, a forgotten UTC
   offset, another column to try. It is offered for every derived column
   except a JSON or XML field: timestamps, combined columns, durations, a
   **Regex capture**'s pattern and group, a **URL decode**'s **Treat + as a
