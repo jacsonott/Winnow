@@ -262,6 +262,39 @@ def test_identical_sessions_say_so_rather_than_showing_an_empty_table(page):
         page.keyboard.press("Escape")
 
 
+def test_two_tags_of_one_name_are_not_reported_as_agreement(page):
+    """Two sessions that put a row on different tags called "New tag" —
+    Add tag's name for every new tag until it got free ones — were "No
+    differences — the two agree on every row": tags are compared by name.
+    From another case nothing can tell those tags apart, so the panel says
+    that instead of vouching for rows nobody compared."""
+    _cleanup(page)
+
+    def doc(on_row_1):
+        return {"format": "winnow-case-session/1", "sources": [{
+            "source": {"name": "elsewhere.csv", "file_hash": "nope", "columns": []},
+            "tag_defs": [{"id": 1, "name": "New tag"}, {"id": 2, "name": "New tag"}],
+            "row_tags": [{"rid": 1, "tag_id": on_row_1}, {"rid": 2, "tag_id": 3 - on_row_1}],
+            "row_notes": []}]}
+    try:
+        for name, first in (("theirs", 1), ("swapped", 2)):
+            status = page.evaluate("""async ([name, doc]) => (await fetch('/api/case_sessions/adopt', {
+              method: 'POST', headers: { 'X-Timeline-Lite-Client': '1', 'Content-Type': 'application/json' },
+              body: JSON.stringify({ name, session: doc }) })).status""", [name, doc(first)])
+            assert status == 200, status
+        _open(page)
+        page.locator(".session-compare select").first.select_option("theirs")
+        page.locator(".session-compare select").nth(1).select_option("swapped")
+        page.locator(".btn", has_text="Compare").click()
+        page.wait_for_selector("text=No differences")
+        said = page.locator(".session-diff").inner_text()
+        assert "agree on every row" not in said, said
+        assert "“New tag” is the name of more than one tag" in said, said
+    finally:
+        _cleanup(page)
+        page.keyboard.press("Escape")
+
+
 def test_a_fresh_pass_saves_then_clears(page):
     _cleanup(page)
     _tag_rows(page, [0, 1])

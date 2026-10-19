@@ -341,9 +341,23 @@ function renderDiff(out, d) {
       + 'Those are counted below too: every tagged row and note in a table only one side has '
       + 'counts as a difference.'));
   }
+  // Tags are compared by name, so two tags sharing one on a side are one
+  // tag to the comparison: a row moved between them is in no count, and
+  // "the two agree on every row" would be a claim nobody checked. Only
+  // sent when the server couldn't tell them apart by id (a session from
+  // another case — Store._diff_tag_doubts).
+  const dup = d.duplicate_tag_names || [];
+  if (dup.length) {
+    out.append(el('div', 'note-status',
+      `${dup.map((n) => `“${n}”`).join(', ')} ${dup.length === 1 ? 'is the name' : 'are names'} of more `
+      + 'than one tag in one of these sessions. Tags from another case are compared by name, so a row '
+      + 'moved between tags of the same name doesn’t show as a difference here.'));
+  }
   const c = d.counts;
   if (!c.added && !c.removed && !c.changed && !c.note_changes) {
-    out.append(el('div', 'note-status', 'No differences — the two agree on every row.'));
+    out.append(el('div', 'note-status', dup.length
+      ? 'No differences between tag names.'
+      : 'No differences — the two agree on every row.'));
     return;
   }
   const L = nameOf(d.left), R = nameOf(d.right);
