@@ -41,11 +41,16 @@ def test_a_view_that_cannot_be_rebuilt_is_not_retried_forever(page, server_post,
         sent = []
         page.on("request", lambda r: sent.append(r.url) if any(
             p in r.url for p in ("/api/rows", "/api/view")) else None)
-        # From outside the page: another window removing the table.
-        server_call(f"/api/source/{sid}", method="DELETE")
-        sid = None
         # The recovery: the page 409s, the grid rebuilds, the rebuild fails.
+        # Listening starts before the table goes, because the scroll is not
+        # the only thing that asks for a page: the idle prefetch of the next
+        # one can land between the DELETE and the scroll, spend the view's
+        # one rebuild there, and leave the scroll's 409 (rightly) starting
+        # none, so a wait opened after the DELETE never saw a response.
         with page.expect_response(lambda r: r.request.method == "POST" and r.url.endswith("/api/view")) as rebuilt:
+            # From outside the page: another window removing the table.
+            server_call(f"/api/source/{sid}", method="DELETE")
+            sid = None
             page.locator("#body").evaluate("(b) => { b.scrollTop = b.scrollHeight; }")
         assert rebuilt.value.status >= 400
         # Nothing to wait for: the failure is requests that keep coming.
