@@ -31,6 +31,34 @@ def test_filter_ops(ingested, op, value, expect_users):
     assert users == expect_users
 
 
+@pytest.mark.parametrize("json_each", [True, False])
+@pytest.mark.parametrize("where", ["filters", "filter_tree"])
+def test_an_in_list_holding_the_empty_string_matches_empty_cells(store, write_csv, monkeypatch, json_each, where):
+    """`a|""` in a column box — what the value picker writes when "(empty)"
+    is ticked beside real values — is one `in` list holding ''. That '' used
+    to be dropped, so the empty rows the analyst picked fell out of the
+    filter, which is why the picker parked those selections in the filter
+    tree and left the box empty. Both compile paths, both list shapes."""
+    from winnow import store as store_module
+
+    monkeypatch.setattr(store_module, "_HAS_JSON_EACH", json_each)
+    sid = store.ingest_csv(write_csv([["Proc"], ["a.exe"], [""], ["b.exe"], [""], ["c.exe"]], "e.csv"),
+                           name="e.csv", build_fts=False)["id"]
+
+    def count(value):
+        cond = {"column": "Proc", "op": "in", "value": value}
+        spec = ({"filters": [cond]} if where == "filters"
+                else {"filters": [], "filter_tree": {"type": "cond", **cond}})
+        return store.build_view(sid, {"source_id": sid, "sort": [], **spec})["row_count"]
+
+    assert count(["a.exe", ""]) == 3
+    assert count([""]) == 2
+    assert count(["a.exe", "b.exe"]) == 2
+    # A newline-separated string is not a picked list: a blank line in it is
+    # a stray newline, and still drops out rather than adding the empties.
+    assert count("a.exe\n\nb.exe\n") == 2
+
+
 def test_sort_multi_column(store, write_csv):
     path = write_csv([
         ["Group", "Seq"],

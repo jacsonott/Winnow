@@ -114,23 +114,25 @@ def test_value_picker_writes_a_filter_the_grid_applies(page, view_rebuilt):
 
 
 def test_value_picker_routes_unspellable_values_to_the_filter_tree(page):
-    """A value containing `|` can't go in the header box as part of an any-of
-    list — the box would read it as a separator. Those selections become a
-    condition in the guided filter tree instead, and the picker's own button
-    marks itself so the column doesn't look unfiltered."""
+    """A value with a line break in it can't go in the header box at all —
+    an <input> strips line breaks. That selection becomes a condition in
+    the guided filter tree instead, and the picker's own button marks
+    itself so the column doesn't look unfiltered. (A `|` in a value, edge
+    spaces and "(empty)" used to come here too, and left the box empty;
+    the box quotes those now — tests/ui/test_value_picker_fills_the_box.py.)"""
     # Driven through applyValueSelection directly rather than by ticking boxes:
     # what's under test is what the picker does with a selection it can't
-    # spell, not whether this fixture happens to contain a pipe.
+    # spell, not whether this fixture happens to contain a line break.
     applied = page.evaluate("""async () => {
-      await __winnow.applyValueSelection('Host', ['H1|x', 'H2'], { clearInstead: false });
+      await __winnow.applyValueSelection('Host', ['H1\\nx', 'H2'], { clearInstead: false });
       return {
         box: __winnow.S.filters['Host'] || '',
         tree: JSON.stringify(__winnow.S.filterTree),
         marked: !!document.querySelector('.fcell-pick[data-col="Host"].active'),
       };
     }""")
-    assert applied["box"] == "", "a pipe-carrying selection must not be written into the box"
-    assert '"op":"in"' in applied["tree"] and "H1|x" in applied["tree"]
+    assert applied["box"] == "", "a line break can't be written into the box"
+    assert '"op":"in"' in applied["tree"] and "H1\\nx" in applied["tree"]
     assert applied["marked"], "the column's picker button should show the filter lives in the tree"
 
 

@@ -131,6 +131,10 @@ def test_no_column_name_leaks_into_a_cell(store, abc):
     ({"column": "EventId", "op": "equals", "value": "4624"}, 3),
     ({"column": "Other", "op": "contains", "value": "need"}, 1),
     ({"column": "Host", "op": "in", "value": ["WS01", "WS02"]}, 5),
+    # '' in a list is the empty cell, and a member without the column reads
+    # it as NULL: B's "y" plus every row of A and C.
+    ({"column": "Extra", "op": "in", "value": ["y", ""]}, 4),
+    ({"column": "Extra", "op": "in", "value": [""]}, 3),
 ])
 def test_filters_treat_a_missing_column_as_empty(store, abc, flt, expected):
     a, b, c = abc
