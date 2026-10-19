@@ -414,7 +414,17 @@ see [docs/notes/README.md](README.md) for the whole set.
   named `quicklook/`? — so temp-ness survives restarts with no flag to
   persist, and `save_as` converts to a real case by *moving the file* out
   of that directory (close → `os.replace` → reopen; on a failed rename the
-  old file reopens, never leaving the server storeless). Quick-looks stay
+  old file reopens, never leaving the server storeless). Only the file
+  moves and its `-wal` is deleted, so the close is `close(fold_wal=True)`:
+  every write is checkpointed into the file first. A reader checked out by
+  a request still in flight (a CSV export streaming, a search-all sweep)
+  keeps the file open past the writer's close, so SQLite's own
+  last-close checkpoint never runs, and with 64 KB pages the WAL only
+  checkpoints itself at ~64 MB — on a quick look, usually the whole
+  import and every tag. That reader only blocks the fold when its
+  snapshot is older than the newest write; then save_as reopens the
+  quick look and answers 409 rather than moving a file that is missing
+  them. Quick-looks stay
   out of the case registry until saved, which is also why the startup
   `_sweep_quicklook` janitor is safe: it only eats files that are old,
   unlocked, and carry zero tags/notes/sessions — touched work is never

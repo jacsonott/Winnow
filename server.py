@@ -1769,7 +1769,13 @@ def _case_save_as(request: Request, body: CaseSaveAsBody):
             raise HTTPException(400, f"A case file named {os.path.basename(dest)} already exists")
 
     old_path = STORE.path
-    STORE.close()
+    # Only the case file moves, and its -wal is deleted below, so every
+    # write must be in the file itself first. A download or a search-all
+    # still reading an older snapshot can stop that; then nothing moves.
+    if not STORE.close(fold_wal=True):
+        STORE = _open_store(old_path)
+        raise HTTPException(409, "Something is still reading this case (a download or a search) "
+                                 "— save again when it finishes")
     try:
         _move_case_file(old_path, dest)
     except OSError as e:
