@@ -462,3 +462,36 @@ see [docs/notes/README.md](README.md) for the whole set.
   filled in — pattern and group, or the lookup table and its columns —
   with the named-group "a column for each" offer suppressed, because a
   re-derive edits one column and never sends a batch.
+- **A derived column's name is a reference, so a rename has to move
+  every holder of it, in one transaction** (`rename_derived_column`).
+  The holders in the case file: the `drv_<id>` column itself, every
+  definition that reads it — its `input_column` and the `column`/
+  `columns` params op_inputs names, on its own table, and a lookup's
+  `lookup_column` params on ANY table whose `lookup_source` is this one
+  (`_renamed_refs`) — and the saved layouts of its table and of each
+  merge over it (only when every member showing the old name was
+  renamed). One `BEGIN IMMEDIATE` around all of it, because a rename
+  that moved the column and not the child computed from it leaves a
+  child whose next re-derive reads a column that is not there. Refused
+  while the column or anything reading it is 'building': a backfill
+  binds the names it was started with into its SELECT and upsert.
+  `RENAME COLUMN` is a schema edit, not a row rewrite, but SQLite
+  refuses it (as it does DROP COLUMN) when any view anywhere in the
+  file fails to parse; then the values are copied into a new column and
+  the old one left blanked — the same orphan a refused DROP leaves,
+  which add_derived_column already reuses. A change of capitals alone
+  has no copy fallback (it would copy a column onto itself), so it is
+  refused there with nothing changed. Saved filters, default column
+  layouts and Timeline templates are NOT rewritten: they live in
+  workspace/, keyed by header set and shared with every table in every
+  case that has one, so following one table's rename there would break
+  the rest.
+- **The client moves its own state before it re-opens the table**
+  (`derived.js` `renameColumnIn`, over `S` and the stashed view state of
+  every table renamed on). openSource stashes what is on screen and
+  puts it back, so a filter, sort, grouping or timeframe on the old name
+  would otherwise come back naming a column the table no longer has.
+  The layout is saved with `saveLayoutNow()` first rather than through
+  the 400ms debounce: the re-open fetches the server's copy, and a
+  width changed just before the rename was still waiting to be written,
+  so it came back without it (tests/ui/test_derived_rename_ui.py).

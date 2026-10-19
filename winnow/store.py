@@ -1130,6 +1130,33 @@ def _ascii_fold(name: str) -> str:
     return name.translate(_ASCII_FOLD)
 
 
+def _rename_in_layout(payload: dict, olds: set[str], new: str) -> bool:
+    """A saved layout (columns.js saveLayout's payload) with a renamed
+    column's entries moved to its new name: its per-column settings, its
+    place in the order and any sort on it. `olds` are the old names
+    _ascii_fold-ed. An entry already under the new name is a leftover of
+    a column that is gone (the rename was checked against every column
+    the table has), so the renamed column's own settings replace it.
+    True when anything changed."""
+    def renamed(n):
+        return isinstance(n, str) and _ascii_fold(n) in olds
+
+    def stale(n):
+        return isinstance(n, str) and _ascii_fold(n) == _ascii_fold(new) and not renamed(n)
+
+    before = json.dumps(payload, sort_keys=True)
+    cols = payload.get("columns")
+    if isinstance(cols, dict):
+        payload["columns"] = {(new if renamed(k) else k): v for k, v in cols.items() if not stale(k)}
+    order = payload.get("order")
+    if isinstance(order, list):
+        payload["order"] = [new if renamed(n) else n for n in order if not stale(n)]
+    for s in payload.get("sort") or []:
+        if isinstance(s, dict) and renamed(s.get("column")):
+            s["column"] = new
+    return json.dumps(payload, sort_keys=True) != before
+
+
 def _no_dq_strings(conn: sqlite3.Connection) -> sqlite3.Connection:
     """Turn off SQLite's double-quoted-string fallback on a connection
     that runs Winnow's own SQL, where it can only ever hide a bug: every
@@ -6953,6 +6980,195 @@ class Store:
                 # so the column is invisible everywhere; add_derived_column
                 # reuses the orphan if the same name comes back.
                 pass
+
+    def rename_derived_column(self, def_id: int, name: str,
+                              source_id: int | None = None) -> dict:
+        """Give a derived column a new name — on every member that carries
+        it when `source_id` is the merge it was renamed from
+        (_derived_scope), as remove and re-derive do.
+
+        The file's own columns are evidence and keep the names they came
+        with; a derived column's name is the analyst's, so it is the one
+        that can change. Everything in the case file that names it follows
+        in the same transaction: the drv_<id> column itself, every derived
+        column computed from it (its input, a `column`/`columns` param, or
+        a lookup on any table reading it as the key or the value), and the
+        saved layout of its table and of each merge over it, so it keeps
+        its place, width, format and sort. What lives outside the case file
+        is left alone — saved filters, default layouts and Timeline
+        settings are keyed by header set and shared with every table, in
+        every case, that has one.
+
+        On a merge the new name is checked against every member, as adding
+        a column there is: a member without the column that already has
+        one of the new name would otherwise end up showing two columns as
+        one. Refused while the column, or anything computed from it, is
+        building, since a backfill reads and writes its columns by the
+        names they had when it started."""
+        new = (name or "").strip()
+        if not new:
+            raise ValueError("The column needs a name")
+        if len(new) > 200:
+            raise ValueError("Column name is too long")
+        if new.lower() in RESERVED_COLUMN_NAMES:
+            raise ValueError(f"{new!r} is a reserved column name")
+        scope = self._derived_scope(def_id, source_id)
+        ids = {d["id"] for d in scope}
+        on_merge = source_id is not None and source_id < 0
+        tables = ([m["source_id"] for m in self._resolve_members(source_id)] if on_merge
+                  else [scope[0]["source_id"]])
+        for sid in tables:
+            src = self._source_lite(sid)
+            taken = self._find_column(src, new)
+            if taken and taken.get("derived_id") not in ids:
+                where = f"Member table {src['name']!r}" if on_merge else "This table"
+                raise ValueError(f"{where} already has a column called {new!r}")
+        if all(d["name"] == new for d in scope):
+            return {"definition": self.get_derived_column(def_id)}
+
+        # Layouts name columns as the grid shows them, which on a merge is
+        # the merge's own spelling — the members' names, matched the way
+        # _derived_scope matched them. A merge's layout follows only when
+        # every member showing the old name was renamed: renamed on one
+        # table, a merge over it and another table that keeps the old name
+        # still has a column of that name for its layout to describe.
+        olds = {_ascii_fold(d["name"]) for d in scope}
+        renamed_on = {d["source_id"] for d in scope}
+        layout_ids = set(renamed_on)
+        for mid in {m["id"] for d in scope for m in self.merges_using(d["source_id"])}:
+            try:
+                members = [m["source_id"] for m in self._resolve_members(-mid)]
+            except KeyError:
+                continue   # a merge missing a member opens as an error, layout or not
+            if all(sid in renamed_on or not any(_ascii_fold(c["name"]) in olds
+                                                for c in self._source_lite(sid)["columns"])
+                   for sid in members):
+                layout_ids.add(-mid)
+        labels = {d["id"]: self._member_label(d, scope) for d in scope}
+        with self.lock:
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                # Read under the lock, in the transaction that writes: a
+                # column started (or made) from this one since the checks
+                # above is either seen here or made after the rename.
+                every = [self._derived_dict(r) for r in
+                         self.db.execute("SELECT * FROM derived_columns ORDER BY id")]
+                now = {r["id"]: r for r in every}
+                rewrites: dict[int, dict] = {}
+                for d in scope:
+                    if now[d["id"]]["status"] == "building":
+                        raise ValueError(f"{d['name']!r}{labels[d['id']]} is still building "
+                                         f"— wait for it to finish first")
+                    for r in every:
+                        if r["id"] in ids:
+                            continue
+                        changed = self._renamed_refs(rewrites.get(r["id"], r), d["source_id"], d["name"], new)
+                        if changed is None:
+                            continue
+                        if r["status"] == "building":
+                            raise ValueError(f"{r['name']!r} is being computed from {d['name']!r} "
+                                             f"— wait for it to finish first")
+                        rewrites[r["id"]] = changed
+                for d in scope:
+                    if d["name"] != new:
+                        self._rename_drv_column(self._derived_table(d["source_id"]), d["name"], new)
+                        self.db.execute("UPDATE derived_columns SET name=? WHERE id=?", (new, d["id"]))
+                for rid, r in rewrites.items():
+                    self.db.execute("UPDATE derived_columns SET input_column=?, params=? WHERE id=?",
+                                    (r["input_column"], json.dumps(r["params"]), rid))
+                for sid in sorted(layout_ids):
+                    row = self.db.execute("SELECT payload FROM layouts WHERE source_id=?", (sid,)).fetchone()
+                    if not row:
+                        continue
+                    payload = json.loads(row[0])
+                    if _rename_in_layout(payload, olds, new):
+                        self.db.execute("UPDATE layouts SET payload=? WHERE source_id=?",
+                                        (json.dumps(payload), sid))
+                self.db.commit()
+            except BaseException:
+                self.db.rollback()
+                raise
+        out = {"definition": self.get_derived_column(def_id)}
+        if len(scope) > 1:
+            out["member_definitions"] = [self.get_derived_column(d["id"]) for d in scope]
+        return out
+
+    @staticmethod
+    def _renamed_refs(reader: dict, source_id: int, old: str, new: str) -> dict | None:
+        """`reader` (a derived_columns definition) with every reference it
+        makes to column `old` of table `source_id` changed to `new`, or
+        None when it makes none. Which params name columns comes from the
+        op's own param schema, as op_inputs reads it: `column`/`columns`
+        name the reader's own table's columns, and `lookup_column` names a
+        column of the table its `lookup_source` param points at."""
+        op = timeparse.OPERATIONS.get(reader["op_id"]) or {"params": []}
+        key = old.lower()
+        hit = False
+
+        def swap(v):
+            nonlocal hit
+            if isinstance(v, str) and v.strip().lower() == key:
+                hit = True
+                return new
+            return v
+
+        input_column = reader["input_column"]
+        params = dict(reader["params"] or {})
+        if reader["source_id"] == source_id:
+            input_column = swap(input_column)
+            for spec in op["params"]:
+                v = params.get(spec["name"])
+                if spec.get("type") == "column":
+                    params[spec["name"]] = swap(v)
+                elif spec.get("type") == "columns" and v:
+                    items = v.split(",") if isinstance(v, str) else list(v)
+                    params[spec["name"]] = [swap(str(x).strip()) for x in items]
+        looked_in = next((params.get(s["name"]) for s in op["params"] if s.get("type") == "lookup_source"), None)
+        try:
+            looked_in = int(looked_in)
+        except (TypeError, ValueError):
+            looked_in = None
+        if looked_in == source_id:
+            for spec in op["params"]:
+                if spec.get("type") == "lookup_column":
+                    params[spec["name"]] = swap(params.get(spec["name"]))
+        if not hit:
+            return None
+        return {**reader, "input_column": input_column, "params": params}
+
+    def _rename_drv_column(self, drv: str, old: str, new: str) -> None:
+        """Rename one column of a drv_<id> sidecar, inside the caller's
+        transaction (writer lock held).
+
+        RENAME COLUMN is a schema edit, not a rewrite of the rows, so it
+        costs the same on a 2M-row table as on ten. SQLite refuses it when
+        anything else in the file's schema no longer parses (and before
+        3.25 has no RENAME COLUMN at all); then the values are copied into
+        a new column and the old one is left behind blanked — the same
+        invisible orphan _drop_derived_definition leaves where DROP COLUMN
+        is refused, since definitions, not the sidecar, decide what is
+        shown. An orphan already holding the new name is dropped first, or
+        reused when it cannot be."""
+        phys = [r[1] for r in self.db.execute(f"PRAGMA table_info({q(drv)})")]
+        same = _ascii_fold(old) == _ascii_fold(new)
+        orphan = next((p for p in phys if not same and _ascii_fold(p) == _ascii_fold(new)), None)
+        if orphan is not None:
+            try:
+                self.db.execute(f"ALTER TABLE {q(drv)} DROP COLUMN {q(orphan)}")
+                orphan = None
+            except sqlite3.OperationalError:
+                pass
+        if orphan is None:
+            try:
+                self.db.execute(f"ALTER TABLE {q(drv)} RENAME COLUMN {q(old)} TO {q(new)}")
+                return
+            except sqlite3.OperationalError as e:
+                if same:
+                    # Copying a column onto itself would blank it; a change
+                    # of capitals alone has no fallback.
+                    raise ValueError(f"Could not rename {old!r}: {e}") from e
+                self.db.execute(f"ALTER TABLE {q(drv)} ADD COLUMN {q(new)} TEXT")
+        self.db.execute(f"UPDATE {q(drv)} SET {q(new)}={q(old)}, {q(old)}=NULL")
 
     def dependent_derived_columns(self, source_id: int, names: list[str]) -> list[dict]:
         """Definitions on this source computed from any of `names` — the

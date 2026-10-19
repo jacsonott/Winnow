@@ -425,12 +425,22 @@ All of these are on the derived column's header right-click menu.
   notice names them.
 - **Change the field path…** takes the place of Re-derive for a JSON or
   XML field: edit the path and click **Recompute**.
+- **Rename derived column…** asks for the new name. The values stay as
+  they are, nothing is recomputed, and the column keeps its position,
+  width, display format and sort. A filter, grouping or timeframe set on
+  it stays applied under the new name. Derived columns built from this
+  one, including a lookup on another table that reads it, are pointed at
+  the new name. The name can't be one the table already has, and Winnow
+  refuses while the column, or one built from it, is still building.
+  Only derived columns can be renamed; the file's own columns keep their
+  names.
 - **Remove derived column…** asks first, then removes it. Winnow refuses
   while another derived column is built from this one; remove that one
   first.
 
-There is no rename. To change a derived column's name, remove it and add
-it again under the new name.
+A rename doesn't change saved filters, default layouts, Timeline settings
+or SQL queries that use the old name. Those are kept outside the case or
+written by you, so update them yourself.
 
 Cancelling a re-derive from the jobs panel keeps the column with whatever
 it had computed. Its ƒ tooltip then says *incomplete — re-derive to
@@ -449,14 +459,16 @@ Two things work differently on a merge:
 - **Flatten** isn't offered. Open a member table to flatten its documents.
 - A lookup's **Lookup table** must be a real table, never a merge.
 
-**Re-derive…**, **Change the field path…** and **Remove derived column…**
-on a merge change every member table's copy. Winnow checks all of them
-first: if another derived column on any member is built from it, or the
-members compute it with different operations, nothing changes. Each member
+**Re-derive…**, **Change the field path…**, **Rename derived column…** and
+**Remove derived column…** on a merge change every member table's copy.
+Winnow checks all of them first: if another derived column on any member
+is built from it, or the members compute it with different operations,
+nothing changes. Each member
 is recomputed as its own job in the jobs panel; the merged column's ƒ
 tooltip says *building…* until all of them finish, and its **Show N unparsed rows**
 count covers every member. **Remove derived column…** says it removes the
-column from all the tables in the merge.
+column from all the tables in the merge. A rename on a merge checks the new
+name against every member table, including one without the column.
 
 ## Derived columns travel with the case
 

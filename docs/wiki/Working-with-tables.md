@@ -66,7 +66,7 @@ In the table menu's **Columns** list, untick a column to hide it and tick it to 
 
 **Hide empty rows** is a toggle in the same place. It drops rows in which every column is empty, such as blank lines in a raw text import. It counts as a filter: the row count follows it, and it is remembered for the table.
 
-Each column's type (text, number or datetime) is shown in the list, with "derived" after a derived column.
+Each column's type (text, number or datetime) is shown after its name, in a colour of its own so the two don't run together, with "derived" after a derived column.
 
 ### Reordering columns
 

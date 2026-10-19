@@ -3,19 +3,19 @@ own additions to a source's column set.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { openStack } from './stack.js';
-import { renderHead, saveLayout } from './columns.js';
+import { renderHead, saveLayout, saveLayoutNow } from './columns.js';
 import { quickAddWidget } from './dashboard.js';
 import { tableOf, widgetFrom } from './dashwidgets.js';
-import { $, api, el, post, setBusy, toast, toastAction } from './core.js';
+import { $, api, el, nameMap, post, setBusy, toast, toastAction } from './core.js';
 import { currentSpec, ellipsize } from './filters.js';
 import { render } from './grid.js';
 import { copyUniqueValues } from './grouping.js';
 import { startJobsPoll } from './jobs.js';
-import { loadSources, openSource } from './sources.js';
+import { loadSources, openSource, renameColumnInStash } from './sources.js';
 import { gridIsShowing } from './sql.js';
 import { S, dashboardCreatorMode } from './state.js';
 import { clearRowCaches } from './tags.js';
-import { updateFiltersButton } from './timeframe.js';
+import { updateFiltersButton, updateTimeRangeButton } from './timeframe.js';
 import { TS_FORMATS, baseColumns, columnMeta, parseTimestamp, tsFormatFor } from './tsformat.js';
 import { confirmDialog, modal, promptDialog } from './ui.js';
 import { rebuildView } from './view.js';
@@ -129,6 +129,7 @@ export function columnMenuItems(name) {
         onclick: () => showUnparsedRows(c),
       });
     }
+    items.push({ label: 'Rename derived column…', onclick: () => renameDerivedColumn(c) });
     if (hasFieldPath(c)) {
       items.push({ label: 'Change the field path…', onclick: () => editExtractedPath(c) });
     } else {
@@ -209,6 +210,60 @@ export async function editExtractedPath(c) {
   } catch (e) {
     toast('Could not change the path: ' + e.message, 6000);
   }
+}
+
+/* The file's own columns are evidence and keep their names; a derived
+   column's name is the analyst's, so it can change. The server moves
+   everything in the case file that names it (columns computed from it,
+   lookups on other tables, the saved layouts), and this moves what is on
+   screen before the re-open, so a filter, sort, grouping or timeframe on
+   the column carries over under the new name instead of falling off.
+   Sends the table it was renamed from, as Re-derive and Remove do: on a
+   merge that renames every member's copy, whose own stashed views move
+   with it. */
+export async function renameDerivedColumn(c) {
+  const next = await promptDialog(`New name for the derived column "${c.name}":`, c.name, { okLabel: 'Rename' });
+  if (next === null || next.trim() === c.name) return;
+  let res;
+  try {
+    res = await post(`/api/derived/${c.derived_id}/rename`, { name: next, source_id: S.sourceId });
+  } catch (e) {
+    toast('Could not rename: ' + e.message, 6000);
+    return;
+  }
+  const name = res.definition.name;
+  renameColumnIn(S, c.name, name);
+  const tables = (res.member_definitions || [res.definition]).map((d) => d.source_id);
+  renameColumnInStash(tables, c.name, name);
+  updateTimeRangeButton();
+  await saveLayoutNow();
+  await loadSources();
+  await openSource(S.sourceId);
+  toast(`Renamed "${c.name}" to "${name}"`);
+}
+
+/* Every place a table's view state names a column, moved to a new name:
+   the live state (S) or one stashed for a table not on screen
+   (sources.js viewStateStash), which spell grouping differently but are
+   otherwise the same shape. In place where the state is an object other
+   code keeps a hold of; names compare without case, as the server's
+   collision check does, so the one column is the only match. */
+export function renameColumnIn(st, from, to) {
+  const swap = (n) => (typeof n === 'string' && n.toLowerCase() === from.toLowerCase() ? to : n);
+  const rekey = (m) => nameMap(Object.fromEntries(Object.entries(m).map(([k, v]) => [swap(k), v])));
+  if (st.filters) st.filters = rekey(st.filters);
+  if (st.layout) st.layout = rekey(st.layout);
+  for (const key of ['filterOpen', 'groupBy', 'groupByCols', 'order', 'preGroupOrder']) {
+    if (Array.isArray(st[key])) st[key] = st[key].map(swap);
+  }
+  for (const s of st.sort || []) s.column = swap(s.column);
+  (function walk(node) {
+    if (!node) return;
+    if (node.type === 'cond') node.column = swap(node.column);
+    for (const child of node.children || []) walk(child);
+  })(st.filterTree);
+  if (st.timeRange && st.timeRange.column) st.timeRange.column = swap(st.timeRange.column);
+  if (st.cellFocus && st.cellFocus.name) st.cellFocus.name = swap(st.cellFocus.name);
 }
 
 export async function removeDerivedColumn(c) {

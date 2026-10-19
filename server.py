@@ -4768,6 +4768,13 @@ class RederiveWrite(BaseModel):
     source_id: int | None = None
 
 
+class DerivedRename(BaseModel):
+    name: str
+    # The table it was renamed from, as on rederive: a merge's id renames
+    # every member's definition of the column.
+    source_id: int | None = None
+
+
 class DerivedBatchItem(BaseModel):
     name: str
     input_column: str
@@ -4824,6 +4831,16 @@ def api_derived_delete(def_id: int, source_id: int | None = None):
 def api_derived_rederive(def_id: int, body: RederiveWrite):
     try:
         return store().rederive_column(def_id, body.params, body.source_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.post("/api/derived/{def_id}/rename")
+def api_derived_rename(def_id: int, body: DerivedRename):
+    try:
+        return store().rename_derived_column(def_id, body.name, body.source_id)
     except ValueError as e:
         raise HTTPException(400, str(e))
     except KeyError as e:

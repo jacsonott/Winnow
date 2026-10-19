@@ -5,7 +5,7 @@ in the case.
 import { recordTabVisit } from './tabhistory.js';
 import { renderHead, saveLayout } from './columns.js';
 import { $, ROW_H, api, el, nameMap, post, toast } from './core.js';
-import { derivedOps } from './derived.js';
+import { derivedOps, renameColumnIn } from './derived.js';
 import { hideDetailPane, syncRowOpenHint } from './detail.js';
 import { currentSpec, renderAdvancedChips, setSearchMode, updateSearchHint } from './filters.js';
 import { clearFilterHistory, dropFilterHistory, syncFilterBaseline } from './filterundo.js';
@@ -856,6 +856,20 @@ export function clearViewStateStash() { viewStateStash.clear(); clearFilterHisto
    filtered, or a filter on a column the new file doesn't have. closeTab
    already does this; Remove did not. */
 export function dropViewStateFor(id) { dropFilterHistory(id); return viewStateStash.delete(id); }
+
+/* A derived column renamed on these tables (derived.js
+   renameDerivedColumn): what each one has stashed moves to the new name,
+   so coming back to it doesn't rebuild a filter or sort on a column that
+   is no longer there. A merge over them has its own entry, keyed by its
+   own id, and moves with them when it is the table renamed from. */
+export function renameColumnInStash(ids, from, to) {
+  const all = new Set(ids);
+  if (S.sourceId != null && S.sourceId < 0) all.add(S.sourceId);
+  for (const id of all) {
+    const st = viewStateStash.get(id);
+    if (st) renameColumnIn(st, from, to);
+  }
+}
 
 function stashViewState() {
   if (S.sourceId == null || !S.view) return;
