@@ -23,7 +23,7 @@ Open the tag editor with the **Edit tags** chip at the right-hand end of the tag
 There is no Save button. A colour or a key is saved as soon as you pick it, and a name once you stop typing or leave the box. "Saved" shows briefly beside the line. If a change can't be saved, the line says "Not saved" and a message gives the reason.
 
 - **Rename or recolour**: change the name or pick a colour. A tag needs a name: while the box is empty the line says "Needs a name" and nothing is saved, and leaving the box puts the last saved name back.
-- **Create**: **Add tag** adds a tag called "New tag" with no key and selects its name, so you can type the new one straight over it. Then give it a key.
+- **Create**: **Add tag** adds a tag called "New tag" and selects its name, so you can type the new one straight over it. It gets the first free key from `1` to `9` and a colour none of the other tags has yet, from a set of nine (red, orange, green, purple, teal, pink, gold, blue and brown, in that order). Once all nine keys are taken a new tag has no key, and once all nine colours are taken it gets the one the fewest tags have. Change either as you would on any tag.
 - **Delete**: asks *Delete "name" and remove it from every row?* and, if you agree, takes the tag off every row in every table of the case. This cannot be undone with `Ctrl+Z`, and any watchlist indicator that auto-tagged with it stops auto-tagging.
 
 ### Tag keys

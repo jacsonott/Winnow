@@ -219,7 +219,10 @@ find comes back.
 
 ### Fixed keys
 
-These are not in the rebindable list.
+These are not in the rebindable list. Settings lists them under **Fixed
+keys**, below **Reset to defaults**, in the same groups as here.
+
+**In the grid**
 
 | Key | What it does |
 | --- | --- |
@@ -229,17 +232,69 @@ These are not in the rebindable list.
 | `Shift+Space` | Turn the cell selection into picked rows, for tagging. |
 | `1` – `9` | Toggle the tag with that key on the selection. |
 | `Shift+1` – `Shift+9` | Apply that tag to every row in the current view, or take it off them if they all have it. Asks first. |
-| `Alt+1` – `Alt+0` | Switch tabs: `1` is the table you were last in, `2` to `0` the page tabs in strip order. |
-| `Ctrl+Z` / `⌘+Z` | Undo the last tag applied or removed. Repeat to keep stepping back. Filter changes have their own undo, `z`. |
 | `Ctrl+C` / `⌘+C` | Copy the cell selection, or the picked rows, as tab-separated text, the way the grid displays them. Up to 20,000 rows. |
 | `Ctrl+Shift+C` / `⌘+Shift+C` | The same, with a header row. |
-| `Esc` | Close a dialog; leave a text box; otherwise clear the row picks and cell selection. |
-| Right-click a row | Tag it, filter to or exclude that cell's value, copy. |
-| Right-click a tag chip | Filter to that tag, or exclude the rows carrying it. |
-| Right-click a tab | Close it, rename it, merge it or remove it, or **Columns…** for the table menu. |
+| `Ctrl+Z` / `⌘+Z` | Undo the last tag applied or removed. Repeat to keep stepping back. Filter changes have their own undo, `z`. |
+| `Esc` | Let go of the picked rows and the cell selection. |
 
-The SQL pane has its own uses for `Ctrl+C`, `Esc` and the tag digits on a
-selected result; see [SQL pane](SQL-pane.md).
+**Anywhere in a case**
+
+| Key | What it does |
+| --- | --- |
+| `Alt+1` – `Alt+0` | Switch tabs: `1` is the table you were last in, `2` to `0` the page tabs in strip order. |
+| `Esc` | Close a dialog or menu, or leave the box you are typing in. |
+| The key that opened it | Close a dialog again: `?` Settings, `t` Tables, `s` Search tables, `C` the table menu, `e` the Filter builder, `R` the timeframe, `J` jump to timestamp, `p` Profiles. |
+| Any key or click | Skip the launch animation. |
+
+**Search and filter boxes**
+
+| Key | What it does |
+| --- | --- |
+| `Enter` | In the search box or a column's filter box: apply it now and go back to the grid. |
+| `Esc` | In the search box or a column's filter box: clear it. In the search box this also stops a search still running. |
+| `Enter` | In the value picker's **Find a value…** box: apply the ticked values. |
+| `Enter` | In **+ filter a column…**: open the first column that matches. |
+| `Ctrl+Enter` / `⌘+Enter` | In **Search tables**: run the search. `Enter` in a term box does too. |
+
+**SQL pane**
+
+| Key | What it does |
+| --- | --- |
+| `Ctrl+Enter` / `⌘+Enter` | Run the query. |
+| `Ctrl+Space` | Open autocomplete. It also opens by itself after two characters of a word. |
+| `↑` / `↓`, `Tab` or `Enter`, `Esc` | In autocomplete: move, accept the suggestion, close it. |
+| `1` – `9` | Toggle that tag on the selected result rows, when the result names real rows. |
+| `Ctrl+C` / `⌘+C` | Copy the selected result rows as tab-separated text, with a header row. |
+| `Esc` | Clear the result selection. |
+| `Ctrl`+click / `⌘`+click a row | Add it to the result selection, or take it out. |
+| `Shift`+click a row | Select every result row from the last one clicked to it. |
+
+More on selecting and tagging results is in [SQL pane](SQL-pane.md).
+
+**Menus and dialogs**
+
+| Key | What it does |
+| --- | --- |
+| `↑` / `↓` | Move through a menu's items. From outside the menu, step in at the first or last. |
+| `→` / `←` | Open a submenu, or close it again. |
+| `Esc` | Close the menu, keeping whatever was selected underneath it. |
+| Menu key, `Shift+F10` | On a focused tab or sidebar table: open its menu. |
+| `Enter` | In a dialog's name or value box: its main button (**OK**, **Create**, **Save**…). |
+| `↑` / `↓`, `Home` / `End` | In Settings' section list: show the next or previous section, or the first or last. |
+
+**With the mouse**
+
+| Gesture | What it does |
+| --- | --- |
+| `Shift`+click a cell | Grow the cell selection to it. |
+| `Ctrl`+click / `⌘`+click a cell | Pick that row, or drop it. |
+| `Shift`+click a row number | Pick every row from the last row clicked to this one. `Ctrl+Shift`+click (`⌘+Shift` on a Mac) drops them instead. |
+| `Shift`+click a header | Add that column to the sort, or flip its direction if it is in the sort already. |
+| `Alt`+click a header | Pin or unpin that column. |
+| Right-click a row | Tag it, filter to or exclude that cell's value, copy. |
+| Right-click a header | Column options: stack or copy its values, derive a column. |
+| Right-click a tab | Close it, rename it, merge it or remove it, or **Columns…** for the table menu. |
+| Right-click a tag chip | Filter to that tag, or exclude the rows carrying it. |
 
 ### Tag keys
 
@@ -295,8 +350,9 @@ the case's setting, which beats this one. A case sets its own under
 ## Default tags for new cases
 
 The tag set every new case starts with. Each row is a colour, a name, a
-one-character key and **✕** to remove it; **+ tag** adds a row. Every change
-is saved as you make it, the same way as in the tag editor (see
+one-character key and **✕** to remove it; **+ tag** adds a row, with the first
+free key and colour picked the way **Add tag** picks them. Every change is
+saved as you make it, the same way as in the tag editor (see
 [Editing tags](Tagging-and-notes.md#editing-tags)). Winnow ships with three:
 
 | Tag | Key | Colour |

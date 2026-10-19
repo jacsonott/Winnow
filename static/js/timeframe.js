@@ -15,7 +15,7 @@ import { saveAppearance } from './settings.js';
 import { clearAllFilters, closeTab, editSourceNickname, openSource, sourceLabel, wireDragReorder } from './sources.js';
 import { normalizeTree, S } from './state.js';
 import { openTablesManager } from './tables.js';
-import { clearRowCaches, loadTags, tagEditRow } from './tags.js';
+import { clearRowCaches, loadTags, newTagDefaults, tagEditRow } from './tags.js';
 import { baseColumns, columnMeta, parseTimestamp } from './tsformat.js';
 import { datePickerButton, dropdownMenu, markModalAction, confirmDialog, modal, oneAtATime, promptDialog } from './ui.js';
 import { rebuildView } from './view.js';
@@ -1022,7 +1022,7 @@ export function openTagEditor({ focusId = null } = {}) {
     add.onclick = oneAtATime(add, async () => {
       await settle();
       let made;
-      try { made = await post('/api/tags', { name: 'New tag', color: '#7f9bb5', hotkey: null }); }
+      try { made = await post('/api/tags', newTagDefaults(S.tags)); }
       catch (e) { toast(`Could not add a tag: ${e.message}`, 6000); return; }
       await loadTags();
       openTagEditor({ focusId: made.id });

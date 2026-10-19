@@ -1526,6 +1526,18 @@ see [docs/notes/README.md](README.md) for the whole set.
   `openFilterBuilder`/`openValuePicker`. `moveDown`/`moveUp` did change
   *behaviour* — they move the cell cursor now — but their bindings are
   untouched, so no migration was needed for that either.
+- **A key handled by hand is listed by hand** (`FIXED_KEYS`, keymap.js).
+  Settings → Keyboard shortcuts draws the rebindable rows from S.keymap,
+  so those can't go missing — but every key dispatched outside the map
+  (wireKeymap's pre-gates, the search and filter boxes, the SQL editor's
+  Ctrl+Enter and Ctrl+Space, menu arrows, Settings' own section list, the
+  modified clicks in grid.js/columns.js) reaches Settings only through
+  that list, and a dozen of them were never in it. Add the line in the
+  same change as the handler, and mirror it in the wiki's "Fixed keys"
+  tables (docs/wiki/Settings-and-shortcuts.md), which use the same groups.
+  The entries are display strings (`Ctrl/⌘ + C`), not keymap specs.
+  tests/ui/test_shortcuts_listed.py holds the pane to both lists and pins
+  the keys that were missing by name.
 - **Shortcuts are gated off the home screen**: the document keydown
   listener returns early when `$('app').hidden` — every keymap action, tag
   hotkey, Alt+digit and the copy/undo combos act on case UI that isn't on
