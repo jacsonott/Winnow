@@ -123,6 +123,24 @@ def test_clear_filters_is_one_step_back(page, view_rebuilt):
     assert page.evaluate(ROWS) == 200
 
 
+def test_clear_straight_after_typing_is_its_own_step(page, view_rebuilt):
+    """`c` pressed within the typing window changes the same one box the
+    word was typed into. It is still Clear filters, not the word typed
+    back out: `z` brings the filter back rather than finding nothing."""
+    _filter(page, view_rebuilt, "EventId", "=4624")
+    with view_rebuilt(page):
+        page.locator("#body").focus()
+        page.keyboard.press("c")
+    assert page.evaluate(ROWS) == 200
+    assert page.evaluate("() => __winnow.filterUndoDepth()") == 2
+
+    _undo(page, view_rebuilt)
+    assert page.evaluate(ROWS) == 50
+    assert _box(page, "EventId") == "=4624"
+    _undo(page, view_rebuilt)
+    assert page.evaluate(ROWS) == 200
+
+
 def _delete_source(server, sid):
     req = urllib.request.Request(server.rstrip("/") + f"/api/source/{sid}", method="DELETE",
                                  headers={"X-Timeline-Lite-Client": "1"})

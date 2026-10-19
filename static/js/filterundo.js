@@ -113,15 +113,20 @@ function changedColumns(before, after) {
 }
 
 /* What a change was typed into, when it was one box's text and nothing
-   else — the only kind of change that coalesces. */
+   else — the only kind of change that coalesces. The box has to have the
+   focus too: Clear filters (`c`) or the value picker straight after
+   typing changes the same one column, and is a step of its own, not the
+   word typed back out. */
 function typingTarget(changed, before, after) {
   if (changed.length !== 1) return null;
+  const el = document.activeElement;
   if (changed[0] === 'filters') {
     const cols = changedColumns(before.filters, after.filters);
-    return cols.length === 1 ? `filter:${cols[0]}` : null;
+    return cols.length === 1 && el && el.matches('.fcell input') && el.dataset.col === cols[0]
+      ? `filter:${cols[0]}` : null;
   }
   if (changed[0] === 'search' && before.search.searchMode === after.search.searchMode
-      && after.search.searchMode !== 'advanced') return 'search';
+      && after.search.searchMode !== 'advanced' && el && el.id === 'search') return 'search';
   return null;
 }
 
@@ -160,6 +165,16 @@ export function syncFilterBaseline(sourceId = S.sourceId) {
 }
 
 export function dropFilterHistory(sourceId) { histories.delete(sourceId); }
+
+/* Every state a table's history holds, its baseline and both sides of
+   each entry, for sources.js renameColumnInStash to move a renamed
+   derived column through: undo past the rename then puts a filter back
+   on the column under the name it has now, rather than dropping it as a
+   column that has gone. */
+export function filterHistoryStates(sourceId) {
+  const h = histories.get(sourceId);
+  return h ? [h.base, ...h.entries.flatMap((e) => [e.before, e.after])] : [];
+}
 export function clearFilterHistory() { histories.clear(); }
 
 export function filterUndoDepth(sourceId = S.sourceId) {

@@ -1611,7 +1611,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   with the table it is about to build; the history is a baseline per
   table (what it was last built with) plus a stack of what changed. A new
   way to change a filter needs nothing from this — as long as it goes
-  through a rebuild. Four things it relies on:
+  through a rebuild. Five things it relies on:
   - **Compared by what the view is built from, restored from the raw
     text.** Each part (column filters, search, tree, tag filter,
     timeframe) has a key in the spec's terms — parsed filters, `null` for
@@ -1623,7 +1623,15 @@ see [docs/notes/README.md](README.md) for the whole set.
   - **Typing coalesces.** A header box rebuilds on every pause past the
     220ms debounce, so builds that only change one box's text (or the
     search text) within `FILTER_UNDO_COALESCE_MS` of the last one fold
-    into it; typed back to where it started, the entry drops.
+    into it; typed back to where it started, the entry drops. Only while
+    that box has the focus: `c` pressed straight after typing changes the
+    same one column, and folded into the word it dropped the entry, so
+    `z` found nothing to bring back.
+  - **A derived-column rename moves the history too.**
+    `renameColumnInStash` runs `renameColumnIn` over
+    `filterHistoryStates` as well as the stash, or undo past the rename
+    put a filter back on a column that no longer exists by that name —
+    and `put` drops those, silently.
   - **`openSource` re-baselines** (`syncFilterBaseline`) before it builds.
     Opening a table is not a change to it — and without that, a case-wide
     timeframe set on one table (`timeframeAcrossTables`) turned up as an

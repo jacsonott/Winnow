@@ -8,7 +8,7 @@ import { $, ROW_H, api, el, nameMap, post, toast } from './core.js';
 import { derivedOps, renameColumnIn } from './derived.js';
 import { hideDetailPane, syncRowOpenHint } from './detail.js';
 import { currentSpec, renderAdvancedChips, setSearchMode, updateSearchHint } from './filters.js';
-import { clearFilterHistory, dropFilterHistory, syncFilterBaseline } from './filterundo.js';
+import { clearFilterHistory, dropFilterHistory, filterHistoryStates, syncFilterBaseline } from './filterundo.js';
 import { clearPageCache, headH, rScroll, render, rowAt, spacerPx } from './grid.js';
 import { closeAllGroupViews, drawRail, dropGrouping, regroupAll, renderGroupStrip, setGrouping } from './grouping.js';
 import { refreshHistogram } from './histogram.js';
@@ -861,13 +861,15 @@ export function dropViewStateFor(id) { dropFilterHistory(id); return viewStateSt
    renameDerivedColumn): what each one has stashed moves to the new name,
    so coming back to it doesn't rebuild a filter or sort on a column that
    is no longer there. A merge over them has its own entry, keyed by its
-   own id, and moves with them when it is the table renamed from. */
+   own id, and moves with them when it is the table renamed from. Their
+   filter-undo history moves too, for the same reason. */
 export function renameColumnInStash(ids, from, to) {
   const all = new Set(ids);
   if (S.sourceId != null && S.sourceId < 0) all.add(S.sourceId);
   for (const id of all) {
     const st = viewStateStash.get(id);
     if (st) renameColumnIn(st, from, to);
+    for (const fs of filterHistoryStates(id)) renameColumnIn(fs, from, to);
   }
 }
 
