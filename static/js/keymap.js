@@ -3,6 +3,7 @@
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { autofitAllColumnWidths, openColumnFilter, resetAllColumnWidths, saveDefaultLayout, visibleCols } from './columns.js';
 import { openFilterBuilder } from './filterbuilder.js';
+import { undoFilterChange } from './filterundo.js';
 import { $, ROW_H } from './core.js';
 import { currentModalAction, repaintOpenMenus, closeMenu, closeModal } from './ui.js';
 import { toggleDetailPane } from './detail.js';
@@ -82,6 +83,10 @@ export const DEFAULT_KEYMAP = {
   filterBySelectedCell: ['f'],
   filterBySelectedCellOnly: ['F'],
   clearFilters: ['c'],
+  // A bare z, next to c, and not Ctrl+Z: that one undoes TAGS (the
+  // dispatcher's fixed chord), and tags are evidence while filters are
+  // only where the analyst is looking — two undo stacks, two keys.
+  undoFilterChange: ['z'],
   // Ctrl+A, like everywhere else. The typing guard above the dispatcher
   // keeps it native inside inputs; grouped mode no-ops (the header
   // checkbox is disabled there for the same reason).
@@ -129,6 +134,7 @@ export const ACTION_LABELS = {
   filterBySelectedCell: "Filter by selected cell's value",
   filterBySelectedCellOnly: "Filter by selected cell's value, dropping every other filter",
   clearFilters: 'Clear all filters, search and tag filter',
+  undoFilterChange: 'Undo the last filter change (press again to keep stepping back)',
   selectAllRows: 'Select every row in the current view (same as the header checkbox)',
   copyUniqueValues: "Copy the unique values of the cursor's column — from the selected rows, else the whole view",
   openTables: 'Open Tables manager',
@@ -160,7 +166,7 @@ export const ACTION_LABELS = {
    over it on every load. */
 export const KEYMAP_VERSION_KEY = 'winnow.keymap.v';
 
-export const KEYMAP_VERSION = 6;
+export const KEYMAP_VERSION = 7;
 
 /* The four spec strings one Ctrl/⌘+F press can produce. keySpecFromEvent
    spells the plain chord 'Ctrl+f'; ⌘ makes it 'Meta+f', and Shift — or Caps
@@ -257,6 +263,17 @@ export const KEYMAP_MIGRATIONS = [
       && Array.isArray(keys) && keys.includes('p'));
     if (!taken && wasDefault('openPluginBundles', ['M'])) map.openPluginBundles = ['p'];
     else if (taken && !map.openPluginBundles) map.openPluginBundles = ['M'];
+  },
+  // v7 (2026-10): undoFilterChange arrives on `z`. A new action needs no
+  // migration to get its default — but `z` was unbound until now, so
+  // Settings would have accepted it for anything, and the default landing
+  // beside that would put two actions on one key (the earlier one in the
+  // list wins, with both chips showing). Where it is taken, the new action
+  // starts with no key; the analyst's binding is left as it was.
+  (map) => {
+    const taken = Object.entries(map).some(([action, keys]) => action !== 'undoFilterChange'
+      && Array.isArray(keys) && keys.includes('z'));
+    if (taken && !map.undoFilterChange) map.undoFilterChange = [];
   },
 ];
 
@@ -388,6 +405,74 @@ export function findKeyConflict(key, currentAction) {
   return null;
 }
 
+/* Every key the map above does not hold, as Settings → Keyboard shortcuts
+   lists them under the rebindable ones, grouped by where they work. Each
+   is dispatched by hand — in wireKeymap ahead of matchAction, or by the
+   module that owns the box, pane or menu it acts in (filters.js,
+   columns.js, search.js, sqlassist.js, plugins.js, ui.js, grid.js,
+   settings.js, splash.js) — and nothing ties a hand-written handler to
+   Settings but this list, which is how Ctrl+Enter, Ctrl+Space, the menu
+   arrows and the modified clicks all went unlisted there. A new one gets
+   its line here in the same change, and in the "Fixed keys" table of
+   docs/wiki/Settings-and-shortcuts.md. Keys are spelled for reading
+   (`Ctrl/⌘ + C`), not as keymap specs. */
+export const FIXED_KEYS = [
+  ['In the grid', [
+    ['Shift + arrow, PgUp, PgDn', 'Grow the cell selection, the way dragging does'],
+    ['Ctrl/⌘ + Shift + arrow', 'Grow it all the way to the first/last row or column'],
+    ['Space', 'Pick every row the cell selection covers — or let them all go, if they are already picked'],
+    ['Shift + Space', 'Turn the cell selection into picked rows, for tagging'],
+    ['1 – 9', 'Toggle the tag with that hotkey on the selection'],
+    ['Shift + 1 – 9', 'Apply that tag to every row in the current view — or, when every row already has it, remove it from them all (asks first)'],
+    ['Ctrl/⌘ + C', 'Copy the selected cells, or the picked rows (the cursor row if none are picked), as tab-separated text'],
+    ['Ctrl/⌘ + Shift + C', 'The same, with a header row'],
+    ['Ctrl/⌘ + Z', 'Undo the last tag applied or removed (repeat to keep stepping back)'],
+    ['Esc', 'Let go of the picked rows and the cell selection'],
+  ]],
+  ['Anywhere in a case', [
+    ['Alt + 1 – 0', 'Switch tabs — 1 is the table you were last in, 2 – 0 the page tabs in strip order'],
+    ['Esc', 'Close a dialog or menu, or leave the box you are typing in'],
+    ['The key that opened it', 'Close a dialog again — ? Settings, t Tables, s Search tables, C the table menu, e the Filter builder, R the timeframe, J jump to timestamp, p Profiles'],
+    ['Any key or click', 'Skip the launch animation'],
+  ]],
+  ['Search and filter boxes', [
+    ['Enter', 'In the search box or a column’s filter box: apply it now and go back to the grid'],
+    ['Esc', 'In the search box or a column’s filter box: clear it (the search box also stops a search still running)'],
+    ['Enter', 'In the value picker’s Find a value… box: apply the ticked values'],
+    ['Enter', 'In + filter a column…: open the first column that matches'],
+    ['Ctrl/⌘ + Enter', 'In Search tables: run the search (Enter in a term box does too)'],
+  ]],
+  ['SQL pane', [
+    ['Ctrl/⌘ + Enter', 'Run the query'],
+    ['Ctrl + Space', 'Open autocomplete — it also opens by itself after two characters of a word'],
+    ['↑ / ↓, Tab or Enter, Esc', 'In autocomplete: move, accept the suggestion, close it'],
+    ['1 – 9', 'Toggle that tag on the selected result rows, when the result names real rows'],
+    ['Ctrl/⌘ + C', 'Copy the selected result rows as tab-separated text, with a header row'],
+    ['Esc', 'Clear the result selection'],
+    ['Ctrl/⌘-click a row', 'Add it to the result selection, or take it out'],
+    ['Shift-click a row', 'Select every result row from the last one clicked to it'],
+  ]],
+  ['Menus and dialogs', [
+    ['↑ / ↓', 'Move through a menu’s items (from outside it, step in at the first or last)'],
+    ['→ / ←', 'Open a submenu / close it again'],
+    ['Esc', 'Close the menu, keeping whatever was selected underneath it'],
+    ['Menu key, Shift + F10', 'On a focused tab or sidebar table: open its menu'],
+    ['Enter', 'In a dialog’s name or value box: its main button (OK, Create, Save…)'],
+    ['↑ / ↓, Home / End', 'In Settings’ section list: show the next or previous section, or the first or last'],
+  ]],
+  ['With the mouse', [
+    ['Shift-click a cell', 'Grow the cell selection to it'],
+    ['Ctrl/⌘-click a cell', 'Pick that row, or drop it'],
+    ['Shift-click a row number', 'Pick every row from the last row clicked to this one — Ctrl/⌘ + Shift-click drops them instead'],
+    ['Shift-click a header', 'Add that column to the sort, or flip its direction if it is in the sort already'],
+    ['Alt-click a header', 'Pin or unpin that column'],
+    ['Right-click a row', 'Tag it, filter to or exclude that cell’s value, copy'],
+    ['Right-click a header', 'Column options — stack or copy its values, derive a column'],
+    ['Right-click a tab', 'Close, rename, merge or remove it, or Columns… for the table menu'],
+    ['Right-click a tag chip', 'Filter to that tag, or exclude the rows carrying it'],
+  ]],
+];
+
 /* The shortcuts that still mean something when the grid isn't the active
    tab — everything else moves a cursor, edits the grid's view spec or
    tags its rows, none of which the analyst can see from the SQL, Timeline
@@ -460,6 +545,7 @@ export const ACTION_HANDLERS = {
   filterBySelectedCell: () => filterBySelectedCell(),
   filterBySelectedCellOnly: () => filterBySelectedCell({ only: true }),
   clearFilters: () => clearAllFilters(),
+  undoFilterChange: () => undoFilterChange(),
   openTables: () => openTablesManager(),
   toggleSidebar: () => setSidebarVisible($('sidebar').hidden),
   openTableMenu: () => openTableMenu(),

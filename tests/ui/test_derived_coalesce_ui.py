@@ -1,5 +1,5 @@
-"""Adding a coalesce column through the modal: the Combine type, the
-ordered column chips, and the column arriving in the grid."""
+"""Adding a coalesce column through the modal: its entry in the side
+list, the ordered column chips, and the column arriving in the grid."""
 
 from __future__ import annotations
 
@@ -10,14 +10,11 @@ import pytest
 pytestmark = pytest.mark.ui
 
 
-def test_combine_type_offers_coalesce_and_the_chips_build_the_param(page, format_detected):
+def test_first_non_empty_value_and_the_chips_build_the_param(page, format_detected, derive_pick):
     page.evaluate("() => __winnow.openDerivedColumnModal('Host')")
     page.wait_for_selector("#modal:not([hidden])")
     format_detected()
-    page.locator("#modalBody select[data-role=type]").select_option(label="Combine columns")   # type
-    ops = page.evaluate(
-        "() => [...document.querySelector('#modalBody select[data-role=op]').options].map((o) => o.textContent)")
-    assert ops == ["First non-empty value", "Row as JSON"], ops
+    derive_pick("First non-empty value")
     assert page.locator(".derived-name").input_value() == "Host (combined)"
     # The chips widget, not a select: order is the meaning.
     add = page.locator(".derived-columns select.fb-groupby-add")
@@ -36,10 +33,12 @@ def test_combine_type_offers_coalesce_and_the_chips_build_the_param(page, format
     page.locator(".derived-param-label", has_text="Then try").click()
     page.locator(".derived-columns .fb-groupby-chip").first.click(position={"x": 8, "y": 6})
     assert page.locator(".derived-columns .fb-groupby-chip").count() == 2
-    # Changing the Parse column keeps the chosen Type and its chips.
+    # Changing the Parse column keeps what is being made and its chips —
+    # the column is a timestamp, and the format suggestion must not take
+    # the dialog over.
     page.locator("#modalBody select[data-role=column]").select_option("Timestamp")
     format_detected()
-    assert page.locator("#modalBody select[data-role=type]").input_value() == "Combine columns"
+    assert page.locator('#modalBody .derived-rail-item[aria-selected="true"]').inner_text() == "First non-empty value"
     assert page.locator(".derived-columns .fb-groupby-chip").count() == 2
     page.locator("#modalBody select[data-role=column]").select_option("Host")
     format_detected()

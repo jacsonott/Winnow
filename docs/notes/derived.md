@@ -87,6 +87,36 @@ see [docs/notes/README.md](README.md) for the whole set.
   started on the first column whatever it was, and now starts on the
   first that looks like a timestamp (`defaultParseColumn` in derived.js).
 
+- **The add dialog is a fixed frame; its content never sizes it**
+  (`openDerivedColumnModal`, `.derived-panes`). It was a column of rows
+  in a centred card: picking a type rebuilt the operation list, an
+  operation rebuilt its parameters, the preview emptied to "Checking…"
+  and refilled, and each of those changed the card's height, so the card
+  re-centred and its header slid (1,860px of header travel over one walk
+  through the choices, in a replica built to measure it). Now the card is `.tall` (top
+  anchored), the two panes are one fixed height, and every part of the
+  right pane is fixed except `.derived-settings`, which takes what is
+  left and scrolls. Three details hold that: the preview keeps its last
+  answer on screen, dimmed (`.stale`, `aria-busy="true"`), instead of
+  emptying; the verdict sits in a footer of fixed height; and the name
+  row hides its input with `visibility` (`.by-group`) when a regex's
+  named groups take over, so the row keeps its height. A new control in
+  the dialog goes inside `.derived-settings`, or it brings the jump
+  back. test_derived_op_groups.py measures the frame through every
+  entry. Because the preview can now be stale, a test that waits for
+  `.derived-preview-row` alone can read the previous answer's rows; wait
+  on the `derive_preview` fixture (aria-busy false) instead.
+
+- **The timestamp formats are one side-list entry; detection only fills
+  in its Format** (`deriveEntries`, `TIMESTAMP_ENTRY`). Detection runs on
+  every column change and is cached per column, but it picks the format
+  only while "Parse a timestamp" is chosen and the analyst hasn't picked
+  one by hand since the column changed (`formatTouched`) — it used to be
+  able to move the Type select out from under a half-built Combine.
+  `data-detected` on the modal body is the test hook for "the answer is
+  in". The side list's pins are `menuPins('derive')`, the row menu's
+  store, so they are per browser like every other pin.
+
 - **A regex derive addresses its group by NAME where the pattern names
   one.** `regex_extract` takes `group_name` alongside the numbered
   `group`, and the name wins. This is not a nicety: a pattern gets edited
@@ -128,7 +158,64 @@ see [docs/notes/README.md](README.md) for the whole set.
   splitting skips `/ ] @` inside the quotes), and a JSON key with edge
   whitespace went out in dot notation, which strips (now bracket-quoted,
   and quoted keys are no longer stripped). `test_structparse.py` checks
-  the property itself on those shapes, not just the two fixes.
+  the property itself on those shapes, not just the two fixes. The JSON
+  `[Name='…']` predicate quotes its value the same way (one
+  `_quote_predicate` for both syntaxes, `quotePredicate` in derived.js),
+  and test_struct_name_value.py holds it to the same property.
+- **A Name/Value list's columns are named by the Name, unlike every other
+  JSON path.** suggest_name gives a JSON field its full dotted path so
+  `target.ip` and `source.ip` stay apart, but in
+  `ExtendedProperties[Name='UserAgent'].Value` the path is plumbing and
+  the Name is the field name, which is what was asked for. The value key
+  is dropped only when it is the plain one (`Value`, `#text`), so
+  `[Name='X'].OldValue` and `.NewValue` stay two columns. Two lists in one
+  document holding the same Name both suggest it; the picker's
+  `uniqueColumnName` makes the second `UserAgent 2`. Detection is
+  deliberately narrow (`_kv_shape`): a list of files with a `name` and a
+  `size` must stay positional, since a column per file name would fill
+  the picker with one-row fields.
+- **URL decode keeps what it cannot decode, escape by escape**
+  (`decode.py`, family `"decode"`, its own group in the modal's list). A run of
+  `%XX` escapes is decoded as UTF-8 together, since one character spans
+  several, and a byte that is not part of valid UTF-8 is written back as
+  the escape the cell held, hex case included. Not U+FFFD: Latin-1's
+  `caf%E9` and the overlong `%C0%AE` of a traversal are what an analyst
+  decodes a column to find, and a replacement character makes them all
+  the same mark. Not a NULL for the whole value either, which would hide
+  the `%2F` decoded beside them. So the op returns NULL only for empty
+  input and the column never has unparsed rows. `+` becomes a space
+  before the escapes are decoded, so `%2B` survives as a plus;
+  `plus_as_space` turns that off for paths. One pass only: double
+  encoding is undone by deriving from the derived column.
+- **Base64 decode follows the same rule, and "is it text" is what makes
+  that safe.** A value that is not base64, or whose bytes do not decode
+  strictly to text without C0/C1 control characters (`_NOT_TEXT`), is
+  kept as written and is not a failure. Most ordinary values are not
+  base64 at all, and most of those that are by accident decode to
+  invalid UTF-8 or to controls (`AAAA` is three NULs); the ones that
+  don't (`WS01` is `Y-5`) cannot be told from text, which is why the
+  wiki says to use it on a column that holds base64. `encoding: auto`
+  picks UTF-16LE on a BOM or when at least half the high bytes are zero
+  (PowerShell's `-EncodedCommand`), else UTF-8. It does not fall back
+  from a failed UTF-8 to UTF-16LE: nearly any even-length binary is
+  "valid" UTF-16LE, so the fallback would decode noise into CJK; a
+  non-Latin UTF-16LE column takes `encoding: utf-16le` instead.
+- **load_json reads more than JSON, and json_field reads what it reads.**
+  `strict=False`, then `load_loose` (Python's repr, trailing commas,
+  unescaped backslashes), because the detail pane offers paths on those
+  values and a path the backend won't extract fills the column with
+  nothing. The loose parser only runs when json.loads has already
+  refused, so a strict JSON column pays nothing for it. A Python-repr
+  column parses in Python rather than C, about ten times slower (80µs for
+  a 500-character Name/Value list), so it gets its own cap,
+  `LOOSE_MAX_CHARS` (a million; the worst shape takes about a second
+  there, where 8 MB took nine), and `_load_json_for_row` keeps the last
+  row's document so a ten-column flatten parses each row once. It also
+  widens sniff_kind, so a Python-repr column now gets the Flatten picker.
+  The parser is a loop over one token regex, not the pane's recursion; a
+  differential fuzz against a recursive version and against detail.js
+  agreed on 200,000 and 20,000 values, and
+  tests/ui/test_detail_name_value_paths_ui.py keeps the edge cases.
 
 - **Derived columns** (`timeparse.py`, `derived_columns`/`drv_<id>` tables,
   `/api/derived/*`, the column header's right-click menu's "Add datetime column from
@@ -405,3 +492,36 @@ see [docs/notes/README.md](README.md) for the whole set.
   filled in — pattern and group, or the lookup table and its columns —
   with the named-group "a column for each" offer suppressed, because a
   re-derive edits one column and never sends a batch.
+- **A derived column's name is a reference, so a rename has to move
+  every holder of it, in one transaction** (`rename_derived_column`).
+  The holders in the case file: the `drv_<id>` column itself, every
+  definition that reads it — its `input_column` and the `column`/
+  `columns` params op_inputs names, on its own table, and a lookup's
+  `lookup_column` params on ANY table whose `lookup_source` is this one
+  (`_renamed_refs`) — and the saved layouts of its table and of each
+  merge over it (only when every member showing the old name was
+  renamed). One `BEGIN IMMEDIATE` around all of it, because a rename
+  that moved the column and not the child computed from it leaves a
+  child whose next re-derive reads a column that is not there. Refused
+  while the column or anything reading it is 'building': a backfill
+  binds the names it was started with into its SELECT and upsert.
+  `RENAME COLUMN` is a schema edit, not a row rewrite, but SQLite
+  refuses it (as it does DROP COLUMN) when any view anywhere in the
+  file fails to parse; then the values are copied into a new column and
+  the old one left blanked — the same orphan a refused DROP leaves,
+  which add_derived_column already reuses. A change of capitals alone
+  has no copy fallback (it would copy a column onto itself), so it is
+  refused there with nothing changed. Saved filters, default column
+  layouts and Timeline templates are NOT rewritten: they live in
+  workspace/, keyed by header set and shared with every table in every
+  case that has one, so following one table's rename there would break
+  the rest.
+- **The client moves its own state before it re-opens the table**
+  (`derived.js` `renameColumnIn`, over `S` and the stashed view state of
+  every table renamed on). openSource stashes what is on screen and
+  puts it back, so a filter, sort, grouping or timeframe on the old name
+  would otherwise come back naming a column the table no longer has.
+  The layout is saved with `saveLayoutNow()` first rather than through
+  the 400ms debounce: the re-open fetches the server's copy, and a
+  width changed just before the rename was still waiting to be written,
+  so it came back without it (tests/ui/test_derived_rename_ui.py).

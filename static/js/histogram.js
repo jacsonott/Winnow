@@ -56,6 +56,13 @@ let retries = 0;        // consecutive re-asks after an answer we could not use
    histogram isn't updating" that is really "the histogram didn't say it
    had given up". */
 let stale = false;
+/* Set by resetHistogram when another case opens, cleared by the first
+   view change after it (or refreshHistogram, when the case lands on no
+   table at all). In between, S.view and S.sourceId still name the
+   previous case's table — loadSources keeps S.sourceId on purpose — so
+   the strip neither draws nor asks: it says "Loading…" instead of
+   keeping the last case's chart up as if it were this one's. */
+let opening = false;
 let shown = false;      // what syncHistogramPanel last applied (its onShow edge)
 let ui = null;          // {colSel, info, canvas, hint, empty} once wired
 
@@ -127,7 +134,33 @@ export function syncHistogramPanel() {
   shown = show;
 }
 
-export function refreshHistogram() { return load(); }
+/* Re-read the grid's state now rather than on the next view change —
+   for the changes that never fire one: the grid left with no table (an
+   empty case, the last tab closed), which is a view going away rather
+   than a view landing. */
+export function refreshHistogram() { opening = false; return load(); }
+
+/* A case switch. Everything the strip holds describes the previous
+   case's table, and the only thing that used to replace it was a view
+   change in the new one: a case that opened on no table never sent one,
+   and a large one sent it only once its first view had built, so the
+   old chart stayed up — the previous case's rows under this case's name
+   — until something rebuilt the view. Dropped here, with home.js's other
+   per-case resets; the answer to a request still out is about the old
+   case, and the seq bump drops that too. */
+export function resetHistogram() {
+  seq += 1;
+  clearTimeout(timer);
+  data = null;
+  problem = null;
+  drawnFor = null;
+  stale = false;
+  retries = 0;
+  brush = null;
+  column = null;
+  opening = true;
+  draw();
+}
 
 /* What the strip last drew, and the layers it derived from it. Read-only
    windows onto module state — the chart lives on a canvas, so this is the
@@ -202,6 +235,9 @@ function buildChrome(container) {
 function showEmpty(text) {
   ui.canvas.hidden = true;
   ui.hint.hidden = true;
+  // The legend names the layers of a chart that is no longer drawn — the
+  // previous case's tags, after a case switch.
+  ui.legend.replaceChildren();
   ui.empty.textContent = text;
   ui.empty.hidden = false;
 }
@@ -344,6 +380,13 @@ function draw() {
   if (panel) {
     if (inflight > 0) panel.setAttribute('aria-busy', 'true');
     else panel.removeAttribute('aria-busy');
+  }
+  // Ahead of the S.sourceId test: mid case switch it still names the
+  // previous case's table (see `opening`).
+  if (opening) {
+    showEmpty('Loading…');
+    info.textContent = '';
+    return;
   }
   if (!S.sourceId) {
     showEmpty('Open a table to chart when its rows happened.');
@@ -511,8 +554,13 @@ function clearTimeRange() {
 
 async function load() {
   if (!ui) return;
+  // S.view is the previous case's until this one's first view lands; an
+  // ask now would name it to the new case's server (see `opening`).
+  if (opening) { draw(); return; }
   const v = S.view;
-  if (!S.sourceId || !v || !pickColumn()) { data = null; problem = null; drawnFor = null; draw(); return; }
+  // Nothing to ask about is still the newest answer: one still out for
+  // the table that just went away must not land on top of it.
+  if (!S.sourceId || !v || !pickColumn()) { seq += 1; data = null; problem = null; drawnFor = null; draw(); return; }
   const mine = ++seq;
   inflight++;
   draw();
@@ -571,7 +619,12 @@ export function wireHistogram() {
   // and syncHistogramPanel's show edge fetches then. Keying on the pref
   // alone ran the aggregate twice for a view rebuilt behind the SQL tab —
   // once for a canvas nobody could see, again on the way back.
-  document.addEventListener('winnow:viewchange', () => { if (shown) { retries = 0; stale = false; schedule(); } });
+  // A view landing ends a case switch whether or not the strip is on
+  // screen: hidden, the show edge's load() is what asks about it.
+  document.addEventListener('winnow:viewchange', () => {
+    opening = false;
+    if (shown) { retries = 0; stale = false; schedule(); }
+  });
   // Tokens are read at draw time, so a skin/accent change is one redraw.
   document.addEventListener('winnow:appearance', () => { if (shown) draw(); });
   window.addEventListener('resize', () => { if (shown) draw(); });

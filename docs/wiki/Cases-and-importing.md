@@ -113,7 +113,7 @@ this case is temporary and isn't saved anywhere yet.*:
 
 | Button | What it does |
 | --- | --- |
-| **Save as a case…** | Opens the same dialog as **+ New case** (**Name**, **Group**, **Case file path**, **Profile**), titled *Save as a case*. **Save case** moves the quick look's file to that path, lists it on the home screen and applies the profile. The path starts in the cases folder. Refused while an import is running. |
+| **Save as a case…** | Opens the same dialog as **+ New case** (**Name**, **Group**, **Case file path**, **Profile**), titled *Save as a case*. **Save case** moves the quick look's file to that path, lists it on the home screen and applies the profile. The path starts in the cases folder. Refused while an import is running, and while a download or a search started before your latest changes is still reading the case: save again when it finishes. |
 | **Add tables to an existing case…** | Copies every table, with its tags and notes, into a case you pick. |
 | **Discard…** | Deletes the quick look. |
 
@@ -134,7 +134,9 @@ than seven days that are not open and hold no tags, notes or other work.
 | `--open` on the command line | Imports delimited files at startup. |
 | **Import files…** on a format in **Settings → Plugins** | Forces files through that plugin's parser. See [Plugins](Plugins.md). |
 
-Drag-and-drop takes files; for a folder use **Import a whole folder…**.
+Drag-and-drop takes files; for a folder use **Import a whole folder…**. If
+the pointer turns into a no-entry sign instead, see
+[Troubleshooting](Troubleshooting.md#dragging-a-file-in-shows-a-no-entry-cursor).
 
 ### The Import window
 

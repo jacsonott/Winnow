@@ -922,3 +922,174 @@ def test_an_older_case_gives_its_made_tables_an_identity_on_open(tmp_path, write
         assert _tagged(s, hits) == [2] and res["warnings"] == []
     finally:
         s.close()
+
+
+# ------------------------------------------------- tags that share a name
+#
+# Tags are matched by NAME (invariant #10), and nothing makes a name
+# unique: a rename can repeat one, and until new tags got free names Add
+# tag made a "New tag" every time. Load kept the last id per name, so
+# reloading your own session put both tags' rows on one of them and
+# emptied the other, merge added the first's rows to the second, and the
+# diff — comparing names — called all of it no change.
+
+def _same_named(store, sid):
+    """Two tags called "New tag" on rows 1-2 and 3-4. Made the way a case
+    can still reach that state — a rename to a name in use — since a new
+    tag now gets a free name of its own."""
+    a = store.upsert_tag(None, "New tag", "#8e5cc2", "4")["id"]
+    b = store.upsert_tag(None, "Exfil", "#2a9d8f", "5")["id"]
+    store.upsert_tag(b, "New tag", "#2a9d8f", "5")
+    store.set_tags(sid, [1, 2], a, True)
+    store.set_tags(sid, [3, 4], b, True)
+    return a, b
+
+
+def _assignments(store, sid):
+    return sorted((r[0], r[1]) for r in store.db.execute(
+        "SELECT tag_id, rid FROM row_tags WHERE source_id=?", (sid,)))
+
+
+@pytest.mark.parametrize("merge", [False, True])
+def test_reloading_your_own_session_keeps_two_same_named_tags_apart(store, write_csv, merge):
+    sid = _case(store, write_csv)
+    a, b = _same_named(store, sid)
+    before = _assignments(store, sid)
+    assert before == [(a, 1), (a, 2), (b, 3), (b, 4)]
+    store.save_session("triage")
+
+    res = store.load_session("triage", merge=merge)
+
+    # Was: every row on the last "New tag" — replace emptied the other,
+    # merge added its rows to the second as well.
+    assert _assignments(store, sid) == before
+    assert res["warnings"] == []
+    assert [t["name"] for t in store.list_tags()].count("New tag") == 2   # nothing created
+
+
+def test_a_same_named_tag_deleted_since_the_save_comes_back_as_its_own_tag(store, write_csv):
+    """Its id is gone, and its name now belongs to the other one: putting
+    its rows there is the collapse again. It gets a tag of its own, under a
+    name nothing else has, and the load says so."""
+    sid = _case(store, write_csv)
+    a, b = _same_named(store, sid)
+    store.save_session("triage")
+    store.delete_tag(a)
+
+    res = store.load_session("triage", merge=False)
+
+    made = [t for t in store.list_tags() if t["id"] not in (a, b) and t["name"].startswith("New tag")]
+    assert [t["name"] for t in made] == ["New tag 2"]
+    assert _assignments(store, sid) == [(b, 3), (b, 4), (made[0]["id"], 1), (made[0]["id"], 2)]
+    assert any('"New tag 2"' in w for w in res["warnings"]), res["warnings"]
+
+
+def _received(store, tmp_path, write_csv, doc):
+    """Another analyst's case with the same evidence, holding `doc` as a
+    session they received — so its tag ids are not this case's."""
+    from winnow.store import Store
+    other = Store(str(tmp_path / "reviewer.db"))
+    osid = _case(other, write_csv)
+    other.adopt_session("from colleague", doc)
+    return other, osid
+
+
+@pytest.mark.parametrize("merge", [False, True])
+def test_a_received_session_with_two_same_named_tags_is_refused_not_collapsed(
+        store, write_csv, tmp_path, merge):
+    sid = _case(store, write_csv)
+    _same_named(store, sid)
+    other, osid = _received(store, tmp_path, write_csv, store.export_case_session())
+    try:
+        mine = other.upsert_tag(None, "Keep", "#123456", None)["id"]
+        other.set_tags(osid, [4], mine, True)
+        tags_before = other.list_tags()
+        with pytest.raises(ValueError, match=r'"New tag" names 2 tags in the session'):
+            other.load_session("from colleague", merge=merge)
+        # Refused before anything was written: no tag created, nothing cleared.
+        assert other.list_tags() == tags_before
+        assert _assignments(other, osid) == [(mine, 4)]
+    finally:
+        other.close()
+
+
+def test_a_name_two_tags_here_share_refuses_a_received_session_that_uses_it(
+        store, write_csv, tmp_path):
+    """The other side of it: the session's tag is one, but this case has
+    two tags of that name, and either would be a guess."""
+    sid = _case(store, write_csv)
+    _tag(store, sid, [1], "IOC")
+    other, osid = _received(store, tmp_path, write_csv, store.export_case_session())
+    try:
+        first = other.upsert_tag(None, "IOC", "#111111", None)["id"]
+        second = other.upsert_tag(None, "Scratch", "#222222", None)["id"]
+        other.upsert_tag(second, "IOC", "#222222", None)
+        with pytest.raises(ValueError, match=r'"IOC" names 2 tags in this case'):
+            other.load_session("from colleague", merge=True)
+        assert _assignments(other, osid) == []
+        other.upsert_tag(second, "IOC (old)", "#222222", None)     # what the message says to do
+        other.load_session("from colleague", merge=True)
+        assert _assignments(other, osid) == [(first, 1)]
+    finally:
+        other.close()
+
+
+def test_a_one_table_session_file_with_two_same_named_tags_is_refused(store, write_csv):
+    sid = _case(store, write_csv)
+    _same_named(store, sid)
+    doc = store.export_session(sid)
+    with pytest.raises(ValueError, match="New tag"):
+        store.import_session(sid, doc, merge=False)
+    assert len(_assignments(store, sid)) == 4
+
+
+def test_a_refused_load_is_a_400_naming_the_tags(store, write_csv, tmp_path, monkeypatch):
+    sid = _case(store, write_csv)
+    _same_named(store, sid)
+    doc = store.export_case_session()
+    store.adopt_session("received", doc)
+    client = _client(store, monkeypatch)
+    r = client.post("/api/case_sessions/received/load", params={"merge": "false"}, headers=HEADERS)
+    assert r.status_code == 400, r.text
+    assert '"New tag"' in r.json()["detail"]
+    r = client.post("/api/case_session", headers=HEADERS, data={"merge": "false"},
+                    files={"file": ("s.winnow_case.json", json.dumps(doc), "application/json")})
+    assert r.status_code == 400, r.text
+    # ... and the session saved here loads, by its tags' own ids.
+    store.save_session("mine")
+    assert client.post("/api/case_sessions/mine/load", params={"merge": "false"},
+                       headers=HEADERS).status_code == 200
+
+
+def test_the_diff_tells_same_named_tags_apart_within_one_case(store, write_csv):
+    """Row 1 moved from one "New tag" to both: compared by name, {New tag}
+    against {New tag} — no change."""
+    sid = _case(store, write_csv)
+    a, b = _same_named(store, sid)
+    store.set_tags(sid, [1, 2], a, False)
+    store.set_tags(sid, [1], b, True)
+    store.save_session("before")
+    store.set_tags(sid, [1], a, True)
+    store.save_session("after")
+
+    for right in ("after", store.LIVE_SESSION):
+        d = store.diff_sessions("before", right)
+        assert d["counts"]["changed"] == 1, d
+        assert [(r["rid"], r["left"], r["right"]) for r in d["changed"]] == [
+            (1, [f"New tag #{b}"], [f"New tag #{a}", f"New tag #{b}"])]
+        assert d["duplicate_tag_names"] == []
+
+
+def test_the_diff_reports_same_named_tags_it_cannot_tell_apart(store, write_csv, tmp_path):
+    """From another case the ids mean nothing, so the diff can't say which
+    "New tag" a row is on — it says that, rather than "no differences"."""
+    sid = _case(store, write_csv)
+    _same_named(store, sid)
+    other, osid = _received(store, tmp_path, write_csv, store.export_case_session())
+    try:
+        t = other.upsert_tag(None, "New tag", "#000000", None)["id"]
+        other.set_tags(osid, [1, 2, 3, 4], t, True)
+        d = other.diff_sessions("from colleague", other.LIVE_SESSION)
+        assert d["duplicate_tag_names"] == ["New tag"]
+    finally:
+        other.close()

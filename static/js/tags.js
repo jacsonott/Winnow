@@ -7,7 +7,7 @@ import { clearGroupPageCache, drawRail, groupCoordAt, loadRowsForPositions, posi
 import { S, cellRangeRows, selCount, selExcludedPairs, selExcludedPositions, selFirst, selPositions } from './state.js';
 import { openTagEditor } from './timeframe.js';
 import { renderTimelineTagFilter } from './timeline.js';
-import { confirmDialog, oneAtATime } from './ui.js';
+import { confirmDialog, contextMenu, oneAtATime } from './ui.js';
 import { rebuildView } from './view.js';
 
 /* ----------------------------------------------------------------- tags */
@@ -88,14 +88,56 @@ function setTagFilter(next) {
   rebuildView({ keepScroll: false });
 }
 
+/* An excluded tag — one filtered OUT — rides in the same list as the
+   ones filtered to, spelled '!<id>' (the header box's own "not"). That is
+   what makes it an ordinary part of the tag filter: the table-switch
+   stash, a background search's snapshot, Clear filters and a dashboard's
+   count-of-this-view all copy S.tagFilter, so they carry an exclusion
+   without knowing it exists. Store._compile_where ANDs these where it ORs
+   the rest. */
+export const tagExcludeKey = (id) => `!${id}`;
+
+export const isTagExclusion = (key) => typeof key === 'string' && key.startsWith('!');
+
+export const tagFilterExclusions = () => S.tagFilter.filter(isTagExclusion);
+
 /* Click semantics shared by every chip: click adds, click again removes,
-   and picking anything specific drops "Any tag". */
+   and picking anything specific drops "Any tag". What is excluded stays
+   excluded whatever is picked beside it, except the tag being picked: a
+   tag can't be both. */
 function toggleTagFilterKey(key) {
   const has = S.tagFilter.includes(key);
-  let next = S.tagFilter.filter((k) => k !== key);
+  const out = tagFilterExclusions().filter((k) => k !== tagExcludeKey(key));
+  let next = S.tagFilter.filter((k) => !isTagExclusion(k) && k !== key);
   if (key === '__any__') next = has ? [] : ['__any__'];
   else if (!has) next = [...next.filter((k) => k !== '__any__'), key];
-  setTagFilter(next);
+  setTagFilter([...next, ...out]);
+}
+
+/* Exclude a tag, or let its rows back in. Excluding a tag that was
+   filtered TO swaps it rather than leaving both, which would be no rows. */
+export function toggleTagExclusion(id) {
+  const key = tagExcludeKey(id);
+  const has = S.tagFilter.includes(key);
+  const next = S.tagFilter.filter((k) => k !== key && k !== id);
+  setTagFilter(has ? next : [...next, key]);
+}
+
+/* The chip's right-click menu. Both directions are here, rather than the
+   right-click simply excluding, because the menu is the one place that
+   says what each gesture on a chip does — and a ✓ on either line is how
+   to read which one is on. */
+function tagChipMenuItems(t) {
+  return [
+    { label: `Filter to ${t.name}`, checked: S.tagFilter.includes(t.id),
+      title: 'Show rows carrying this tag — the same as clicking the chip',
+      onclick: () => toggleTagFilterKey(t.id) },
+    { label: `Exclude ${t.name}`, checked: S.tagFilter.includes(tagExcludeKey(t.id)),
+      title: 'Hide every row carrying this tag. Combines with the rest of the tag filter: Suspicious with this one excluded means Suspicious rows that are not also this.',
+      onclick: () => toggleTagExclusion(t.id) },
+    '-',
+    { label: 'Clear the tag filter', disabled: !S.tagFilter.length, onclick: () => setTagFilter([]) },
+  ];
 }
 
 export function renderTagRibbon() {
@@ -103,11 +145,14 @@ export function renderTagRibbon() {
   rib.replaceChildren();
   for (const t of S.tags) {
     const chip = el('button', 'tag-chip');
-    chip.setAttribute('aria-pressed', String(S.tagFilter.includes(t.id)));
-    chip.style.color = S.tagFilter.includes(t.id) ? t.color : '';
+    const on = S.tagFilter.includes(t.id);
+    const out = S.tagFilter.includes(tagExcludeKey(t.id));
+    chip.setAttribute('aria-pressed', String(on));
+    chip.classList.toggle('excluded', out);
+    chip.style.color = on || out ? t.color : '';
     const sw = el('span', 'swatch');
     sw.style.background = t.color;
-    chip.append(sw, el('span', null, t.name));
+    chip.append(sw, el('span', 'name', t.name));
     if (t.hotkey) chip.append(el('span', 'key', t.hotkey));
     // Scoped to the current view, not the whole table: with a filter or a
     // search on, "how many of *these* are tagged" is the question the
@@ -123,11 +168,21 @@ export function renderTagRibbon() {
     // Both halves of what a chip does: click to narrow (and chips add
     // up), press to tag. The Shift form is named here because the ribbon
     // is where an analyst looks to find out what the keys do.
-    chip.title = `${scope}. Click to filter to ${t.name} — chips add up, so two of them mean rows carrying either.`
-      + ` Press ${t.hotkey || '—'} to tag the selection`
+    const keys = ` Press ${t.hotkey || '—'} to tag the selection`
       + (t.hotkey ? `, Shift+${t.hotkey} for every row in this view — or to take it off them, once they all have it` : '')
       + '.';
-    chip.onclick = () => toggleTagFilterKey(t.id);
+    chip.title = out
+      ? `Excluded: rows tagged ${t.name} are hidden (${all.toLocaleString()} in the table). Click to show them again.` + keys
+      : `${scope}. Click to filter to ${t.name} — chips add up, so two of them mean rows carrying either.`
+        + ` Right-click to exclude it instead.` + keys;
+    // A click on a chip that is excluded lets its rows back in, the
+    // way a click on one filtered to drops it: a click undoes what the
+    // chip is showing, whichever direction that is.
+    chip.onclick = () => (out ? toggleTagExclusion(t.id) : toggleTagFilterKey(t.id));
+    chip.oncontextmenu = (e) => {
+      e.preventDefault();
+      contextMenu(e, () => tagChipMenuItems(t));
+    };
     rib.append(chip);
   }
   const any = el('button', 'tag-chip');
@@ -151,6 +206,41 @@ export function renderTagRibbon() {
 }
 
 /* ------------------------------------------------------- tag list editors */
+
+/* The colours a new tag is handed, in order. The first three are the
+   shipped defaults (store.DEFAULT_TAGS: TA, Suspicious, Benign), so the
+   first tag an analyst adds to a fresh case is the first colour it doesn't
+   already have. Every tag used to arrive the same grey-blue, and a ribbon
+   of three of them is three tags nobody can tell apart at a glance. Nine,
+   one per tag key; blue sits late so the first few added don't read as
+   the old default. Mid-tones, like the three defaults, since each one is
+   both a row stripe and chip text on dark and light skins alike. */
+export const NEW_TAG_COLORS = [
+  '#c0392b', '#d68a2e', '#5d8a66', '#8e5cc2', '#2a9d8f',
+  '#c94f8a', '#b8962e', '#3b7dd8', '#8a6a4f',
+];
+
+/* What Add tag (Edit tags) and + tag (the template) create, given the
+   tags already in that list: the first palette colour none of them has
+   and the first of keys 1–9 none of them holds, so the new tag can be
+   pressed straight away. With all nine colours taken it reuses the one
+   the fewest tags carry; with all nine keys taken it has none, as every
+   new tag used to. And a name none of them has — "New tag", then "New
+   tag 2", "New tag 3"… — because sessions match tags by name: two
+   unrenamed "New tag"s became one when a session was loaded back.
+   Store.upsert_tag picks a free name too (any client, two windows); this
+   is what the template, which never reaches it, relies on. */
+export function newTagDefaults(existing) {
+  const colors = existing.map((t) => (t.color || '').toLowerCase());
+  const uses = (c) => colors.filter((x) => x === c).length;
+  const color = NEW_TAG_COLORS.reduce((best, c) => (uses(c) < uses(best) ? c : best));
+  const keys = new Set(existing.map((t) => t.hotkey));
+  const hotkey = ['1', '2', '3', '4', '5', '6', '7', '8', '9'].find((k) => !keys.has(k)) || null;
+  const names = new Set(existing.map((t) => t.name));
+  let name = 'New tag';
+  for (let n = 2; names.has(name); n += 1) name = `New tag ${n}`;
+  return { name, color, hotkey };
+}
 
 /* How long a paused name waits before it saves. The row note's figure
    (saveNote), for the same reason: long enough not to write per keystroke,
@@ -327,7 +417,7 @@ export function buildDefaultTagsEditor(sec) {
   };
   add.onclick = oneAtATime(add, async () => {
     await settle();
-    tags.push({ name: 'New tag', color: '#7f9bb5', hotkey: null });
+    tags.push(newTagDefaults(tags));
     try { await saveAll(); } catch (e) {
       tags.pop();
       toast(`Could not add a tag: ${e.message}`, 6000);

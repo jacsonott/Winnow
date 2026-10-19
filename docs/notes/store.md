@@ -405,6 +405,16 @@ see [docs/notes/README.md](README.md) for the whole set.
   name. Every merge read goes through `_member_from`,
   `_member_join_target`, `_member_rows_from` or `merge_select_list`;
   nothing may write a merge column into a member table directly.
+  A member's *derived* column is never its copy of a merge *file* column
+  of the same name (`_member_column`, shared by `_member_projection`,
+  `merge_select_list` and the missing-columns count): that member reads
+  it as NULL. Matching
+  on name alone made such a member look already-shaped, so it was read
+  as its bare table — no sidecar — and every build of the merge failed
+  with "no such column"; with the From table column on, the projection
+  instead showed the analyst's derived values as the other member's
+  evidence. `_member_read_src` drops the shadowed derived column too, or
+  the timeframe takes the member as having that column and reads NULL.
   `_ensure_purpose_index_building` builds under the member's own spelling
   (`_table_own_spelling`) and skips a member that lacks the column. A
   derived column is the exception that still needs every member: one is
@@ -549,6 +559,27 @@ see [docs/notes/README.md](README.md) for the whole set.
   by `name.lower()` alone while copy and diff matched exactly, so reloading
   your own session moved rows between the two and the diff said nothing
   had changed.
+- **Two tags with the SAME name are a name nothing can match by**, and
+  nothing stops them: a rename can repeat a name, and until `upsert_tag`
+  gave a new tag a free one ("New tag 2"…, exact names, creates only) Add
+  tag made a "New tag" every time. Load kept the last id per name, so
+  reloading your own session put both tags' rows on one and emptied the
+  other (merge added them), and the diff — sets of names — said nothing
+  changed. Now `_session_tag_doubts` finds every name that more than one
+  tag carries on the session's rows, or that more than one live tag has,
+  before anything is re-imported or written. A session saved in THIS case
+  (`origin = 'saved'` — `_stored_session`; tag_defs is AUTOINCREMENT, so
+  its ids are still these tags) matches those names by its own ids, while
+  the tag still has the name, and otherwise gives the rows a new tag under
+  a free name with a warning. Anything else — a received session, a file
+  — is refused with a 400 naming them, the precedent
+  `_match_session_sources` set for tables: by name there is no right
+  answer to "which of the two", and ids from another case mean nothing
+  (invariant #10). The diff does the same (`_diff_tag_doubts`): split by
+  id ("New tag #4") when both sides were numbered here, else listed in
+  `duplicate_tag_names` so the panel doesn't call the two "agreed".
+  `copy_sources_to` (`_map_tags_by_name`) still collapses them.
+  tests/test_case_sessions.py, the shared-name section.
 - **Loading a case session with replace (`merge=False`) clears every table's
   tags and notes, not just the snapshot's** — what the Load dialog promises.
   It used to clear per table inside `import_session`, so a table imported

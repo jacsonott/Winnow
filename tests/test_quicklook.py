@@ -379,6 +379,67 @@ def test_a_real_assoc_launch_becomes_a_quicklook_server(tmp_path):
             pytest.fail(f"ingest never landed: {_get(port, '/api/sources')}")
 
 
+def _quicklook_with_work(server, c, tmp_path):
+    """A quick look holding an import, three tagged rows and a note — all of
+    it still in the -wal, which only checkpoints itself at ~64 MB."""
+    p = tmp_path / "big.csv"
+    p.write_text("Host,User\n" + "".join(f"h{i},u{i}\n" for i in range(200)), encoding="utf-8")
+    body = c.post("/api/assoc/open", json={"files": [str(p)]}, headers=HEADERS).json()
+    server.STORE.wait_for_ingest_job(body["started"][0]["job_id"], timeout=30)
+    src = server.STORE.list_sources()[0]["id"]
+    tag = server.STORE.upsert_tag(None, "Suspicious", "#c94f4f", None)["id"]
+    server.STORE.set_tags(src, [1, 2, 3], tag, True)
+    server.STORE.set_note(src, 2, "lateral movement from here")
+    return src, tag
+
+
+def test_save_as_keeps_what_an_open_download_would_have_stranded_in_the_wal(client, tmp_path):
+    """A reader checked out by a request still in flight (a CSV export
+    streaming, a search-all sweep) keeps the case file open past the
+    writer's close, so SQLite skips the checkpoint it does on the last
+    close — and save_as, which moves only the file and deletes the -wal,
+    used to take every write since the last checkpoint with it: the case
+    reopened empty, or failed to open at all."""
+    server, c = client
+    src, tag = _quicklook_with_work(server, c, tmp_path)
+    with server.STORE._reader() as conn:
+        rows = conn.execute(f"SELECT * FROM src_{src}")
+        rows.fetchone()   # mid-statement, the way a streaming export holds it
+        res = c.post("/api/case/save_as", json={"name": "Saved mid-download"}, headers=HEADERS)
+        rows.close()
+    assert res.status_code == 200, res.text
+    assert server.STORE.list_sources()[0]["row_count"] == 200
+    assert server.STORE.tag_counts(src)["counts"][str(tag)] == 3
+    note = server.STORE.db.execute("SELECT note FROM row_notes WHERE source_id=? AND rid=2", (src,)).fetchone()
+    assert note[0] == "lateral movement from here"
+    server.STORE.close()
+
+
+def test_save_as_refuses_while_a_reader_still_holds_writes_back(client, tmp_path, monkeypatch):
+    """A reader whose snapshot is older than the newest writes stops those
+    frames being copied into the file, so the move would lose them. The
+    save is refused and the quick look stays open with everything in it."""
+    from winnow.store import Store
+    monkeypatch.setattr(Store, "FOLD_TIMEOUT_S", 0)
+    server, c = client
+    src, tag = _quicklook_with_work(server, c, tmp_path)
+    with server.STORE._reader() as conn:
+        rows = conn.execute(f"SELECT * FROM src_{src}")
+        rows.fetchone()
+        server.STORE.set_tags(src, [4, 5], tag, True)   # newer than the reader's snapshot
+        res = c.post("/api/case/save_as", json={"name": "Too soon"}, headers=HEADERS)
+        rows.close()   # a statement left open would keep the connection (and its snapshot) alive
+    assert res.status_code == 409
+    assert "still reading" in res.json()["detail"]
+    assert c.get("/api/case/current", headers=HEADERS).json()["temp"] is True
+    assert server.STORE.tag_counts(src)["counts"][str(tag)] == 5
+    # And once the reader is done, the same save goes through whole.
+    res = c.post("/api/case/save_as", json={"name": "Now"}, headers=HEADERS)
+    assert res.status_code == 200, res.text
+    assert server.STORE.tag_counts(src)["counts"][str(tag)] == 5
+    server.STORE.close()
+
+
 def test_save_as_refuses_while_an_import_runs(client, tmp_path, monkeypatch):
     """Closing the store cancels running ingest jobs, and a cancelled
     ingest drops its partial source — so save-mid-import would quietly

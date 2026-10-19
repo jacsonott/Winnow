@@ -3,21 +3,21 @@ own additions to a source's column set.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { openStack } from './stack.js';
-import { renderHead, saveLayout } from './columns.js';
+import { renderHead, saveLayout, saveLayoutNow } from './columns.js';
 import { quickAddWidget } from './dashboard.js';
 import { tableOf, widgetFrom } from './dashwidgets.js';
-import { $, api, el, post, setBusy, toast, toastAction } from './core.js';
+import { $, api, el, nameMap, post, setBusy, toast, toastAction } from './core.js';
 import { currentSpec, ellipsize } from './filters.js';
 import { render } from './grid.js';
 import { copyUniqueValues } from './grouping.js';
 import { startJobsPoll } from './jobs.js';
-import { loadSources, openSource } from './sources.js';
+import { loadSources, openSource, renameColumnInStash } from './sources.js';
 import { gridIsShowing } from './sql.js';
 import { S, dashboardCreatorMode } from './state.js';
 import { clearRowCaches } from './tags.js';
-import { updateFiltersButton } from './timeframe.js';
+import { updateFiltersButton, updateTimeRangeButton } from './timeframe.js';
 import { TS_FORMATS, baseColumns, columnMeta, parseTimestamp, tsFormatFor } from './tsformat.js';
-import { confirmDialog, modal, promptDialog } from './ui.js';
+import { confirmDialog, menuPins, modal, promptDialog } from './ui.js';
 import { rebuildView } from './view.js';
 
 /* ------------------------------------------------------- derived columns */
@@ -129,6 +129,7 @@ export function columnMenuItems(name) {
         onclick: () => showUnparsedRows(c),
       });
     }
+    items.push({ label: 'Rename derived column…', onclick: () => renameDerivedColumn(c) });
     if (hasFieldPath(c)) {
       items.push({ label: 'Change the field path…', onclick: () => editExtractedPath(c) });
     } else {
@@ -211,6 +212,60 @@ export async function editExtractedPath(c) {
   }
 }
 
+/* The file's own columns are evidence and keep their names; a derived
+   column's name is the analyst's, so it can change. The server moves
+   everything in the case file that names it (columns computed from it,
+   lookups on other tables, the saved layouts), and this moves what is on
+   screen before the re-open, so a filter, sort, grouping or timeframe on
+   the column carries over under the new name instead of falling off.
+   Sends the table it was renamed from, as Re-derive and Remove do: on a
+   merge that renames every member's copy, whose own stashed views move
+   with it. */
+export async function renameDerivedColumn(c) {
+  const next = await promptDialog(`New name for the derived column "${c.name}":`, c.name, { okLabel: 'Rename' });
+  if (next === null || next.trim() === c.name) return;
+  let res;
+  try {
+    res = await post(`/api/derived/${c.derived_id}/rename`, { name: next, source_id: S.sourceId });
+  } catch (e) {
+    toast('Could not rename: ' + e.message, 6000);
+    return;
+  }
+  const name = res.definition.name;
+  renameColumnIn(S, c.name, name);
+  const tables = (res.member_definitions || [res.definition]).map((d) => d.source_id);
+  renameColumnInStash(tables, c.name, name);
+  updateTimeRangeButton();
+  await saveLayoutNow();
+  await loadSources();
+  await openSource(S.sourceId);
+  toast(`Renamed "${c.name}" to "${name}"`);
+}
+
+/* Every place a table's view state names a column, moved to a new name:
+   the live state (S) or one stashed for a table not on screen
+   (sources.js viewStateStash), which spell grouping differently but are
+   otherwise the same shape. In place where the state is an object other
+   code keeps a hold of; names compare without case, as the server's
+   collision check does, so the one column is the only match. */
+export function renameColumnIn(st, from, to) {
+  const swap = (n) => (typeof n === 'string' && n.toLowerCase() === from.toLowerCase() ? to : n);
+  const rekey = (m) => nameMap(Object.fromEntries(Object.entries(m).map(([k, v]) => [swap(k), v])));
+  if (st.filters) st.filters = rekey(st.filters);
+  if (st.layout) st.layout = rekey(st.layout);
+  for (const key of ['filterOpen', 'groupBy', 'groupByCols', 'order', 'preGroupOrder']) {
+    if (Array.isArray(st[key])) st[key] = st[key].map(swap);
+  }
+  for (const s of st.sort || []) s.column = swap(s.column);
+  (function walk(node) {
+    if (!node) return;
+    if (node.type === 'cond') node.column = swap(node.column);
+    for (const child of node.children || []) walk(child);
+  })(st.filterTree);
+  if (st.timeRange && st.timeRange.column) st.timeRange.column = swap(st.timeRange.column);
+  if (st.cellFocus && st.cellFocus.name) st.cellFocus.name = swap(st.cellFocus.name);
+}
+
 export async function removeDerivedColumn(c) {
   const src = S.sources.find((x) => x.id === S.sourceId);
   const members = src && src.is_merge ? (src.member_source_ids || []).length : 0;
@@ -258,10 +313,56 @@ export function takenColumnNames() {
   return new Set(S.columns.map((c) => c.name.toLowerCase()));
 }
 
+/* A predicate's value as a path writes it — structparse._quote_predicate:
+   single quotes, double when the value holds an apostrophe, and a
+   doubled quote when it holds both. */
+export function quotePredicate(value) {
+  const v = String(value);
+  if (!v.includes("'")) return `'${v}'`;
+  if (!v.includes('"')) return `"${v}"`;
+  return `'${v.replace(/'/g, "''")}'`;
+}
+
+/* structparse.parse_json_path's twin, for naming only: segments are
+   numbers (an index), [key, value] pairs (a `[Name='X']` predicate) and
+   strings (a key). null for a path it can't read. */
+const JSON_PATH_TOKEN = new RegExp([
+  /\.\s*([^.[\]"']+)/.source,
+  /\[\s*(-?\d+)\s*\]/.source,
+  /\[\s*(@?[A-Za-z_]\w*)\s*=\s*(?:'((?:''|[^'])*)'|"((?:""|[^"])*)")\s*\]/.source,
+  /\[\s*"((?:\\.|[^"\\])*)"\s*\]/.source,
+  /\[\s*'((?:\\.|[^'\\])*)'\s*\]/.source,
+  /([^.[\]"']+)/.source,
+].join('|'), 'y');
+
+export function parseJsonPath(text) {
+  let s = String(text || '').trim();
+  if (s.startsWith('$')) s = s.slice(1);
+  const out = [];
+  let pos = 0;
+  while (pos < s.length) {
+    if (/\s/.test(s[pos])) { pos++; continue; }
+    JSON_PATH_TOKEN.lastIndex = pos;
+    const m = JSON_PATH_TOKEN.exec(s);
+    if (!m || JSON_PATH_TOKEN.lastIndex === pos) return null;
+    if (m[2] !== undefined) out.push(Number(m[2]));
+    else if (m[3] !== undefined) out.push([m[3], m[4] !== undefined ? m[4].replace(/''/g, "'") : m[5].replace(/""/g, '"')]);
+    else if (m[1] !== undefined || m[8] !== undefined) out.push((m[1] !== undefined ? m[1] : m[8]).trim());
+    else {
+      out.push((m[6] !== undefined ? m[6] : m[7]).replace(/\\(u[0-9a-fA-F]{4}|[\s\S])/g,
+        (all, e) => (e.length === 5 ? String.fromCharCode(parseInt(e.slice(1), 16)) : e)));
+    }
+    pos = JSON_PATH_TOKEN.lastIndex;
+  }
+  return out.length ? out : null;
+}
+
 /* Suggests the column name the way structparse.suggest_name does — for
    JSON the full dotted path (target.ip, items[0].id: two fields with the
-   same leaf get names that say which is which), for XML the last
-   meaningful component or an EVTX-style predicate's own value. */
+   same leaf get names that say which is which) unless the path picks a
+   Name/Value entry, which is named by its Name (UserAgent, or
+   X.NewValue beside an OldValue); for XML the last meaningful component
+   or an EVTX-style predicate's own value. */
 export function suggestColumnName(path, kind) {
   const s = String(path);
   // JSON first: the "@" rules below are XML's (Provider/@Name), and an
@@ -270,13 +371,23 @@ export function suggestColumnName(path, kind) {
   // $.EventData.Data[0].@Name came out as "$.EventData.Data[0]. Name"
   // beside a clean "EventData.Data[0].#text" from the sibling key.
   if (kind === 'json') {
-    const parts = s.replace(/^\$/, '').match(/\["'](?:[^"']*)["']|\[\d+\]|[^.[\]]+/g) || [];
-    if (!parts.some((seg) => !/^\[\d+\]$/.test(seg))) return s.replace(/^\$\.?/, '');
+    const segs = parseJsonPath(s);
+    if (!segs) return s;
+    if (segs.every((seg) => typeof seg === 'number')) return s.replace(/^[$.]+/, '');
+    let last = -1;
+    segs.forEach((seg, i) => { if (Array.isArray(seg)) last = i; });
     let out = '';
-    for (const seg of parts) {
-      if (/^\[\d+\]$/.test(seg)) { out += seg; continue; }
-      const key = seg.replace(/^\["']|["']\]$/g, '').replace(/^\[|\]$/g, '');
-      out += (out ? '.' : '') + key;
+    let rest = segs;
+    if (last >= 0 && String(segs[last][1]).trim()) {
+      out = String(segs[last][1]).trim();
+      rest = segs.slice(last + 1);
+      if (rest.length && typeof rest[0] === 'string'
+          && ['value', 'text'].includes(rest[0].toLowerCase().replace(/^[@#]+/, ''))) rest = rest.slice(1);
+    }
+    for (const seg of rest) {
+      if (typeof seg === 'number') out += `[${seg}]`;
+      else if (Array.isArray(seg)) out += `[${seg[0]}=${quotePredicate(seg[1])}]`;
+      else out += (out ? '.' : '') + seg;
     }
     return out;
   }
@@ -577,10 +688,86 @@ export function defaultParseColumn(cols) {
   return pick ? pick.name : null;
 }
 
+/* What the Add derived column dialog's side list offers, by group. Every
+   operation is an entry of its own except the timestamp formats, which
+   are one entry, "Parse a timestamp", with a Format picker inside it:
+   there are more than a dozen, detection picks the right one most of the
+   time, and listed one by one they filled the list and buried the other
+   kinds of column under it. A family that arrives with no group here is
+   listed under Other rather than vanishing. */
+export const DERIVE_GROUPS = [
+  ['Time', (op) => op.family === 'datetime'],
+  ['Extract', (op) => op.family === 'extract'],
+  ['Decode', (op) => op.family === 'decode'],
+  ['Combine', (op) => op.family === 'combine'],
+  ['Join', (op) => op.family === 'lookup'],
+];
+export const TIMESTAMP_ENTRY = 'timestamp';
+// The menuPins() key the side list's pinned entries are kept under.
+export const DERIVE_PINS = 'derive';
+
+export function isTimestampOp(op) {
+  return op.family === 'datetime' && op.derived_kind === 'datetime';
+}
+
+/* The side list's entries in display order: {key, label, group,
+   description} plus `formats` (the timestamp ops) on the timestamp entry
+   and `op` on every other. */
+export function deriveEntries(ops) {
+  const groupOf = (op) => { for (const [g, m] of DERIVE_GROUPS) if (m(op)) return g; return 'Other'; };
+  const entries = [];
+  for (const op of ops) {
+    if (!isTimestampOp(op)) {
+      entries.push({ key: op.id, label: op.label, group: groupOf(op), description: op.description, op });
+      continue;
+    }
+    let ts = entries.find((e) => e.key === TIMESTAMP_ENTRY);
+    if (!ts) {
+      ts = { key: TIMESTAMP_ENTRY, label: 'Parse a timestamp', group: groupOf(op), formats: [],
+             description: 'A date and time read out of this column, in UTC, that sorts, filters and lines up on the Timeline.' };
+      entries.push(ts);
+    }
+    ts.formats.push(op);
+  }
+  const order = DERIVE_GROUPS.map(([g]) => g).concat('Other');
+  return entries.sort((a, b) => order.indexOf(a.group) - order.indexOf(b.group));   // stable: registry order within a group
+}
+
+/* Does the search box's text find this entry? Every word has to appear
+   somewhere in its name, group, id or description. The timestamp entry
+   also answers for its formats — "filetime" finds it — and says which
+   one matched, so picking that hit can pick the format too. null for no
+   match, else {format}: the format's op id, or null when the entry
+   matched on its own words. */
+export function matchesDeriveSearch(entry, query) {
+  const terms = String(query || '').toLowerCase().split(/\s+/).filter(Boolean);
+  if (!terms.length) return { format: null };
+  const has = (...parts) => {
+    const text = parts.join(' ').toLowerCase();
+    return terms.every((t) => text.includes(t));
+  };
+  const own = [entry.label, entry.group, entry.op ? entry.op.id.replace(/_/g, ' ') : '', entry.description || ''];
+  if (has(...own)) return { format: null };
+  for (const f of entry.formats || []) {
+    if (has(...own, f.label, f.id.replace(/_/g, ' '), f.description || '')) return { format: f.id };
+  }
+  return null;
+}
+
 /* The add/re-derive modal. `prefill` is the column to parse; `editing` is
    the existing definition when re-deriving (the column and operation are
    then fixed — only the parameters are in play, which is the actual use
-   case: "I set the wrong syslog year"). */
+   case: "I set the wrong syslog year").
+
+   Two panes: what to make, listed down the left (searchable, with the
+   analyst's pinned favourites on top), and everything about it on the
+   right. The frame is a fixed height and so is every part of the right
+   pane but the settings box, which takes what is left and scrolls — so a
+   different entry, a format with more settings, or a regex sprouting
+   named groups changes what is in the boxes and moves none of them. It
+   used to be a column of rows sized to its content and centred on the
+   screen, so every one of those changes resized the card and slid its
+   header up or down. */
 export async function openDerivedColumnModal(prefill, editing) {
   let ops;
   try {
@@ -594,12 +781,27 @@ export async function openDerivedColumnModal(prefill, editing) {
   const textCols = [...baseColumns(),
     ...S.columns.filter((c) => c.derived && c.derived_status === 'ready')];
   if (!textCols.length) return;
+  const entries = deriveEntries(ops);
+  const tsEntry = entries.find((e) => e.key === TIMESTAMP_ENTRY);
+  const entryOf = (opId) => {
+    const op = ops.find((o) => o.id === opId);
+    return op && isTimestampOp(op) ? TIMESTAMP_ENTRY : opId;
+  };
   const state = {
     column: editing ? editing.derived_from : (prefill || defaultParseColumn(textCols)),
-    opId: editing ? editing.derived_op : null,
+    // Which side-list entry is chosen, and — while that is the timestamp
+    // entry — which format. A new column starts on the timestamp entry
+    // and lets detection pick its format.
+    entry: editing ? entryOf(editing.derived_op) : (tsEntry ? TIMESTAMP_ENTRY : entries[0].key),
+    format: editing && entryOf(editing.derived_op) === TIMESTAMP_ENTRY ? editing.derived_op
+      : (tsEntry ? tsEntry.formats[0].id : null),
+    // Set once the analyst picks a format by hand; detection then
+    // suggests rather than overrides, until the column changes.
+    formatTouched: false,
     params: {},
     name: editing ? editing.name : '',
   };
+  const pins = menuPins(DERIVE_PINS);
 
   /* Which rows the preview samples. The head of the file is the one
      region a triage filter exists to escape, so a preview taken from it
@@ -616,13 +818,18 @@ export async function openDerivedColumnModal(prefill, editing) {
   state.scope = narrowed() ? 'view' : 'table';
 
   modal(editing ? `Re-derive "${editing.name}"` : 'Add derived column', (body) => {
-    const previewBox = el('div', 'derived-preview');
     const paramBox = el('div', 'derived-params');
     const nameInput = el('input');
     nameInput.className = 'derived-name';
-    const opSelect = el('select');
     const colSelect = el('select');
-    const suggestNote = el('div', 'fb-help');
+    const formatSelect = el('select');
+    const detectNote = el('div', 'fb-help derived-detect');
+    const descBox = el('p', 'derived-desc');
+    const settingsBox = el('div', 'derived-settings');
+    const previewBox = el('div', 'derived-preview');
+    const previewRows = el('div', 'derived-preview-rows');
+    const previewFoot = el('div', 'derived-preview-foot');
+    previewBox.append(previewRows, previewFoot);
 
     for (const c of textCols) {
       const o = el('option', null, c.derived ? `${c.name} · derived` : c.name);
@@ -631,43 +838,32 @@ export async function openDerivedColumnModal(prefill, editing) {
     }
     colSelect.value = state.column;
     colSelect.disabled = !!editing;
+    for (const f of (tsEntry ? tsEntry.formats : [])) formatSelect.append(new Option(f.label, f.id));
+    formatSelect.disabled = !!editing;
+    // Tests address these by role rather than by position.
+    colSelect.dataset.role = 'column';
+    formatSelect.dataset.role = 'format';
+    const formatRow = labeledRow('Format', formatSelect);
 
-    // TYPE first, then the specific op. As one grouped dropdown, thirteen
-    // timestamp formats filled the visible list and the extract/join/
-    // compare kinds read as if they weren't there — an optgroup you had to
-    // scroll past. The type picker surfaces the four kinds up front; the op
-    // picker below then shows only the chosen kind's ops. A two-input
-    // operation (duration/compare) still needs a second column, so it's
-    // offered but never auto-suggested.
-    const typeSelect = el('select');
-    const OP_TYPES = [
-      ['Timestamp', (op) => op.family === 'datetime' && op.derived_kind !== 'duration'],
-      ['Extract part of a value', (op) => op.family === 'extract'],
-      ['Join from another table', (op) => op.family === 'lookup'],
-      ['Compare (elapsed time)', (op) => op.derived_kind === 'duration'],
-      ['Combine columns', (op) => op.family === 'combine'],
-    ];
-    const typeOf = (op) => { for (const [label, m] of OP_TYPES) if (m(op)) return label; return 'Other'; };
-    // Only offer types that actually have ops (a future family lands under
-    // "Other" rather than vanishing).
-    const typeLabels = OP_TYPES.map(([l]) => l).concat('Other')
-      .filter((label) => ops.some((op) => typeOf(op) === label));
-    for (const label of typeLabels) typeSelect.append(new Option(label, label));
-    function fillOpSelect(type) {
-      opSelect.replaceChildren();
-      for (const op of ops) if (typeOf(op) === type) opSelect.append(new Option(op.label, op.id));
-    }
-    fillOpSelect(typeSelect.value);   // the first type by default
-
-    function currentOp() { return ops.find((o) => o.id === opSelect.value); }
+    function currentOpId() { return state.entry === TIMESTAMP_ENTRY ? state.format : state.entry; }
+    function currentOp() { return ops.find((o) => o.id === currentOpId()); }
 
     function defaultName() {
       const op = currentOp();
       if (op && op.derived_kind === 'duration') return `${state.column} elapsed`;
+      if (op && op.family === 'decode') return `${state.column} (decoded)`;
       if (op && op.derived_kind === 'text') return `${state.column} (extract)`;
       if (op && op.id === 'row_json') return 'Row as JSON';
       if (op && op.derived_kind === 'combine') return `${state.column} (combined)`;
       return `${state.column} (parsed)`;
+    }
+    // "(parsed)" vs "(extract)" tracks the op kind — the suggestion stays
+    // current until the analyst has typed a name of their own.
+    let nameTouched = false;
+    function suggestName() {
+      if (editing || nameTouched) return;
+      state.name = defaultName();
+      nameInput.value = state.name;
     }
 
     function buildParams() {
@@ -775,6 +971,9 @@ export async function openDerivedColumnModal(prefill, editing) {
             input.append(add);
           };
           paint();
+          // Its help goes on a line of its own: beside a row of chips in
+          // the narrower right-hand pane it was squeezed to a word a line.
+          row.classList.add('derived-param-wrap');
           row.append(input);
           if (spec.help) row.append(el('span', 'fb-help derived-param-help', spec.help));
           paramBox.append(row);
@@ -798,6 +997,31 @@ export async function openDerivedColumnModal(prefill, editing) {
       }
     }
 
+    /* The settings box's bottom edge shades while more of it is out of
+       sight below — a fixed box that scrolls has to say that it does. */
+    function syncMore() {
+      requestAnimationFrame(() => settingsBox.classList.toggle('more',
+        settingsBox.scrollTop + settingsBox.clientHeight < settingsBox.scrollHeight - 2));
+    }
+    settingsBox.addEventListener('scroll', syncMore);
+
+    /* Everything in the settings box for the chosen entry: the Format
+       picker and what detection made of the column (the timestamp entry
+       only), what the operation does, then its parameters. */
+    function renderSettings() {
+      settingsBox.replaceChildren();
+      if (state.entry === TIMESTAMP_ENTRY) {
+        formatSelect.value = state.format;
+        settingsBox.append(formatRow, detectNote);
+      }
+      const op = currentOp();
+      descBox.textContent = op ? op.description : '';
+      settingsBox.append(descBox, paramBox, groupsBox, groupsNote);
+      settingsBox.scrollTop = 0;
+      buildParams();
+      syncMore();
+    }
+
     /* ------------------------------------------- regex named groups
 
        One pattern over one column is usually several columns of intent —
@@ -815,7 +1039,6 @@ export async function openDerivedColumnModal(prefill, editing) {
        around it in a way a group number does not. */
     const groupsBox = el('div', 'derived-groups');
     const groupsNote = el('div', 'fb-help bad');
-    let nameRow = null;       // the single-column name row, hidden while a batch is ticked
     let groups = [];          // [{name, samples, use, colName}]
     let groupsSeq = 0;
 
@@ -865,6 +1088,18 @@ export async function openDerivedColumnModal(prefill, editing) {
       syncGo();
     }
 
+    /* The offer lands below the pattern's own settings, which in a box of
+       fixed height can be out of sight. Bring it up the first time it
+       appears — but never so far that the field being typed in scrolls
+       away above. */
+    function revealGroups() {
+      const want = groupsBox.offsetTop + groupsBox.offsetHeight - settingsBox.clientHeight + 6;
+      const active = document.activeElement;
+      const cap = active && settingsBox.contains(active) ? active.offsetTop - 6 : want;
+      const top = Math.min(want, cap);
+      if (top > settingsBox.scrollTop) settingsBox.scrollTop = top;
+    }
+
     async function refreshGroups() {
       // Not while re-deriving: that edits one existing column, and Re-derive
       // never sends a batch (syncGo), so offering "a column for each"
@@ -875,9 +1110,10 @@ export async function openDerivedColumnModal(prefill, editing) {
       // initialization" into the console that way.
       if (editing) return;
       const seq = ++groupsSeq;
-      if (opSelect.value !== 'regex_extract' || !(state.params.pattern || '').trim()) {
+      if (currentOpId() !== 'regex_extract' || !(state.params.pattern || '').trim()) {
         groups = [];
         renderGroups(null);
+        syncMore();
         return;
       }
       let res;
@@ -889,9 +1125,11 @@ export async function openDerivedColumnModal(prefill, editing) {
         if (seq !== groupsSeq) return;
         groups = [];
         renderGroups(null);   // the preview below already says what is wrong with the pattern
+        syncMore();
         return;
       }
       if (seq !== groupsSeq) return;
+      const wasEmpty = !groups.length;
       const before = new Map(groups.map((g) => [g.name, g]));
       groups = res.groups.map((g) => {
         const had = before.get(g.name);
@@ -901,6 +1139,8 @@ export async function openDerivedColumnModal(prefill, editing) {
       renderGroups(groups.length && res.matched === 0
         ? 'The pattern matched none of the sampled values — the columns would all be empty.'
         : null);
+      if (wasEmpty && groups.length) revealGroups();
+      syncMore();
     }
 
     /* Declared before refreshPreview so its 409 fallback can call it —
@@ -912,13 +1152,29 @@ export async function openDerivedColumnModal(prefill, editing) {
       }
     }
 
+    /* While a new answer is on its way, the last one stays on screen,
+       dimmed, rather than the box emptying to a "Checking…" line: an
+       emptied box that refills is a box that changes height, and it read
+       as a flicker on every keystroke in a pattern. aria-busy is how a
+       test (or a screen reader) knows the rows on screen are the old
+       answer's. */
+    function previewBusy(on) {
+      previewBox.classList.toggle('stale', on);
+      previewBox.setAttribute('aria-busy', String(on));
+    }
+    function previewError(message) {
+      previewRows.replaceChildren(el('div', 'fb-help bad', message));
+      previewFoot.replaceChildren();
+      previewBusy(false);
+    }
+
     let previewSeq = 0;
     async function refreshPreview() {
       const seq = ++previewSeq;
-      previewBox.replaceChildren(el('div', 'fb-help', 'Checking…'));
+      previewBusy(true);
       let res;
       const ask = (scope) => post('/api/derived/preview', {
-        source_id: S.sourceId, column: state.column, op_id: opSelect.value, params: state.params,
+        source_id: S.sourceId, column: state.column, op_id: currentOpId(), params: state.params,
         view_id: scope === 'view' && S.view ? S.view.view_id : undefined,
       });
       try {
@@ -942,17 +1198,16 @@ export async function openDerivedColumnModal(prefill, editing) {
           toast('That view was rebuilt — previewing against the whole table');
           try { res = await ask('table'); } catch (e2) {
             if (seq !== previewSeq) return;   // the retry itself can be overtaken
-            previewBox.replaceChildren(el('div', 'fb-help bad', e2.message));
+            previewError(e2.message);
             return;
           }
         } else {
-          previewBox.replaceChildren(el('div', 'fb-help bad', e.message));
+          previewError(e.message);
           return;
         }
       }
       if (seq !== previewSeq) return; // a later keystroke already superseded this
-      previewBox.replaceChildren();
-      const table = el('div', 'derived-preview-rows');
+      const table = el('div', 'derived-preview-rows-list');
       for (const row of res.preview) {
         const r = el('div', 'derived-preview-row');
         r.append(el('span', 'derived-in', String(row.input == null ? '' : row.input)));
@@ -961,7 +1216,7 @@ export async function openDerivedColumnModal(prefill, editing) {
                     row.output == null ? "can't parse" : row.output));
         table.append(r);
       }
-      previewBox.append(table);
+      previewRows.replaceChildren(table);
       /* The verdict names the sample it is a verdict about. "All 200
          sampled values parse" is a very different claim depending on
          which 200, and it used to be silent about that. The name comes
@@ -970,100 +1225,263 @@ export async function openDerivedColumnModal(prefill, editing) {
          is not scoped server-side, so asking for the view still gets the
          table — and the sentence has to say the table. */
       const where = res.scope === 'view' ? 'in this view' : 'in the whole table';
-      previewBox.append(el('div', 'fb-help derived-verdict' + (res.failures ? ' bad' : ''),
-        res.failures
-          ? `${res.failures.toLocaleString()} of ${res.sampled.toLocaleString()} sampled values ${where} can't be parsed this way.`
-          : `All ${res.sampled.toLocaleString()} sampled values ${where} parse.`));
+      const verdict = res.failures
+        ? `${res.failures.toLocaleString()} of ${res.sampled.toLocaleString()} sampled values ${where} can't be parsed this way.`
+        : `All ${res.sampled.toLocaleString()} sampled values ${where} parse.`;
+      const v = el('div', 'fb-help derived-verdict' + (res.failures ? ' bad' : ''), verdict);
+      v.title = verdict;
+      previewFoot.replaceChildren(v);
       if (state.scope === 'view' && res.scope !== 'view') {
         // Otherwise the pressed button and the verdict disagree with
         // nothing on screen to explain which one to believe.
-        previewBox.append(el('div', 'fb-help derived-scope-note',
-          'This operation reads more than one column of each row, which the preview can only sample from the whole table.'));
+        const note = el('div', 'fb-help derived-scope-note',
+          'This reads more than one column of each row, so the preview samples the whole table.');
+        note.title = note.textContent;
+        previewFoot.append(note);
       }
+      previewBusy(false);
     }
 
     /* The preview and the named-group offer answer the same edits — the
        pattern, the column, the operation — so they refresh together. The
        group probe no-ops unless the operation is the regex one. */
-    function refreshBoth() { refreshPreview(); refreshGroups(); }
+    function refreshBoth() { refreshPreview(); refreshGroups(); syncMore(); }
+
+    /* ----------------------------------------- the format suggestion
+
+       Detection ranks timestamp formats for a column. It runs whenever
+       the column changes, whatever entry is chosen, and is remembered per
+       column, so going to the timestamp entry later costs no second
+       round trip. It picks the format only while the timestamp entry is
+       chosen and the analyst hasn't picked one by hand since the column
+       last changed; otherwise it is shown, not applied. The note's text
+       also goes on the body as data-detected, which is what a test waits
+       on to know the answer has landed. */
+    const detected = new Map();   // column -> Promise of the ranked list
+    let detectSeq = 0;
+    let ranked = [];
+    let rankedFor = null;         // the column `ranked` is about
+    function detectFor(column) {
+      if (!detected.has(column)) {
+        detected.set(column, post('/api/derived/detect', { source_id: S.sourceId, column })
+          .catch(() => []));   // detection is a convenience — the picker still works
+      }
+      return detected.get(column);
+    }
+    function applyDetection() {
+      if (state.entry !== TIMESTAMP_ENTRY || state.formatTouched || rankedFor !== state.column || !ranked.length) return;
+      const best = ranked[0];
+      if (!tsEntry.formats.some((f) => f.id === best.op_id)) return;
+      state.format = best.op_id;
+      state.params = Object.assign({}, best.params);
+    }
 
     async function pickColumn(name) {
       state.column = name;
-      if (!editing) {
-        nameInput.value = defaultName();
-        state.name = nameInput.value;
+      state.formatTouched = false;
+      suggestName();
+      const seq = ++detectSeq;
+      delete body.dataset.detected;
+      detectNote.textContent = 'Detecting format…';
+      const waitForFormat = state.entry === TIMESTAMP_ENTRY;
+      if (waitForFormat) {
+        // The preview would otherwise answer for whatever format was
+        // showing, then again for the detected one.
+        previewBusy(true);
+      } else {
+        buildParams();
+        refreshBoth();
       }
-      suggestNote.textContent = 'Detecting format…';
-      let ranked = [];
-      try {
-        ranked = await post('/api/derived/detect', { source_id: S.sourceId, column: name });
-      } catch { /* detection is a convenience — the picker still works */ }
+      const got = await detectFor(name);
+      if (seq !== detectSeq) return;
+      ranked = got;
+      rankedFor = name;
       if (ranked.length) {
         const best = ranked[0];
-        suggestNote.textContent =
+        detectNote.textContent =
           `Suggested: ${best.label} — ${Math.round(best.confidence * 100)}% of sampled values parse.`;
-        // Detection only ranks timestamp formats, so it may move Type
-        // only while Type IS Timestamp (or untouched). An analyst who has
-        // picked Combine and listed columns, then changed the parse
-        // column, keeps that choice — the suggestion is shown, not applied.
-        if (!editing && typeSelect.value === 'Timestamp') {
-          const bop = ops.find((o) => o.id === best.op_id);
-          if (bop) { typeSelect.value = typeOf(bop); fillOpSelect(typeSelect.value); }
-          opSelect.value = best.op_id;
-          state.params = Object.assign({}, best.params);
-        }
       } else {
-        suggestNote.textContent = editing ? '' : "No format detected — pick one below to see what it produces.";
+        detectNote.textContent = 'No format detected — pick one to see what it produces.';
       }
-      buildParams();
+      body.dataset.detected = detectNote.textContent;
+      // Shown, not applied: another entry is chosen, or the analyst picked
+      // a format while this was on its way — and either already refreshed
+      // the preview for what they chose.
+      if (state.entry !== TIMESTAMP_ENTRY || state.formatTouched) return;
+      applyDetection();
+      suggestName();
+      renderSettings();
       refreshBoth();
     }
+
+    /* ---------------------------------------------- the side list */
+    const search = el('input', 'derived-search');
+    search.type = 'search';
+    search.placeholder = 'Search…';
+    search.setAttribute('aria-label', 'Search what to make');
+    search.disabled = !!editing;
+    const railList = el('div', 'derived-rail-list');
+    railList.setAttribute('role', 'listbox');
+    railList.setAttribute('aria-label', 'What to make');
+
+    function setEntry(key, format) {
+      if (editing) return;
+      if (key === state.entry && !format) return;
+      state.entry = key;
+      state.params = {};
+      groups = [];
+      groupsSeq++;
+      renderGroups(null);
+      if (key === TIMESTAMP_ENTRY) {
+        if (format) { state.format = format; state.formatTouched = true; }
+        applyDetection();
+      }
+      suggestName();
+      syncSelected();
+      renderSettings();
+      refreshBoth();
+    }
+
+    // In place rather than a repaint, so the item that was clicked (or
+    // arrowed to) keeps the focus.
+    function syncSelected() {
+      for (const item of railList.querySelectorAll('.derived-rail-item')) {
+        const on = item.dataset.key === state.entry;
+        item.setAttribute('aria-selected', String(on));
+        item.parentElement.classList.toggle('selected', on);
+      }
+    }
+
+    function railRow(entry, hit, pinned) {
+      const row = el('div', 'derived-rail-row');
+      const item = el('button', 'derived-rail-item');
+      item.type = 'button';
+      item.dataset.key = entry.key;
+      if (hit.format) item.dataset.format = hit.format;
+      item.setAttribute('role', 'option');
+      const selected = entry.key === state.entry;
+      item.setAttribute('aria-selected', String(selected));
+      row.classList.toggle('selected', selected);
+      item.disabled = !!editing && !selected;
+      item.append(el('span', 'derived-rail-label', entry.label));
+      // A search that found the timestamp entry by one of its formats
+      // names the format, and picking the hit picks it.
+      if (hit.format) {
+        const f = entry.formats.find((x) => x.id === hit.format);
+        item.append(el('span', 'derived-rail-hint', f ? f.label : hit.format));
+      }
+      item.title = entry.description || '';
+      item.onclick = () => setEntry(entry.key, hit.format);
+      const pin = el('button', 'derived-rail-pin', pinned ? '✕' : '☆');
+      pin.type = 'button';
+      pin.title = pinned ? 'Unpin from the top of this list' : 'Pin to the top of this list';
+      pin.setAttribute('aria-label', `${pinned ? 'Unpin' : 'Pin'} ${entry.label}`);
+      pin.onclick = () => {
+        if (pinned) pins.remove(entry.key); else pins.add(entry.key);
+        paintRail();
+      };
+      row.append(item, pin);
+      return row;
+    }
+
+    /* Pinned entries come off their group and sit in a Pinned section on
+       top, in the order they were pinned — the list is one column of a
+       fixed height, so an entry shown twice costs a row and lights two
+       rows for one choice. The pins are menuPins(), per machine, beside
+       the row menu's. */
+    function paintRail() {
+      // A repaint replaces every row; whatever had the focus in the list
+      // gets it back in its new place (a pin moves its row to the top).
+      const had = railList.contains(document.activeElement) ? document.activeElement : null;
+      const hadRow = had && had.closest('.derived-rail-row');
+      const hadKey = hadRow ? hadRow.querySelector('.derived-rail-item').dataset.key : null;
+      const hadPin = !!had && had.classList.contains('derived-rail-pin');
+      const q = search.value;
+      const pinned = pins.ids.map((k) => entries.find((e) => e.key === k)).filter(Boolean);
+      const sections = [['Pinned', pinned, true]];
+      for (const g of DERIVE_GROUPS.map(([name]) => name).concat('Other')) {
+        sections.push([g, entries.filter((e) => e.group === g && !pins.has(e.key)), false]);
+      }
+      const nodes = [];
+      for (const [title, list, isPinned] of sections) {
+        const rows = [];
+        for (const entry of list) {
+          const hit = matchesDeriveSearch(entry, q);
+          if (hit) rows.push(railRow(entry, hit, isPinned));
+        }
+        if (!rows.length) continue;
+        nodes.push(el('div', 'derived-rail-group', title), ...rows);
+      }
+      if (!nodes.length) nodes.push(el('div', 'derived-rail-empty', `Nothing matches “${q.trim()}”.`));
+      railList.replaceChildren(...nodes);
+      const again = hadKey && railList.querySelector(`.derived-rail-item[data-key="${hadKey}"]`);
+      if (again) (hadPin ? again.nextElementSibling : again).focus();
+    }
+
+    const visibleItems = () => [...railList.querySelectorAll('.derived-rail-item:not(:disabled)')];
+    search.oninput = () => paintRail();
+    search.addEventListener('keydown', (e) => {
+      const first = visibleItems()[0];
+      if (e.key === 'ArrowDown' && first) {
+        e.preventDefault();
+        first.focus();
+        first.click();
+      } else if (e.key === 'Enter' && first) {
+        e.preventDefault();
+        first.click();
+        const now = railList.querySelector(`.derived-rail-item[data-key="${state.entry}"]`);
+        if (now) now.focus();
+      } else if (e.key === 'Escape' && search.value) {
+        // Clears the search; the next Escape closes the dialog (the global
+        // handler leaves a prevented Escape alone).
+        e.preventDefault();
+        search.value = '';
+        paintRail();
+      }
+    });
+    // Up and down walk the list, choosing as they go — the Settings
+    // dialog's section list behaves the same way. Up from the top goes
+    // back to the search box.
+    railList.addEventListener('keydown', (e) => {
+      if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+      const items = visibleItems();
+      const i = items.indexOf(document.activeElement);
+      if (i < 0) return;
+      e.preventDefault();
+      if (e.key === 'ArrowUp' && i === 0) { if (!search.disabled) search.focus(); return; }
+      const next = items[Math.max(0, Math.min(items.length - 1, i + (e.key === 'ArrowDown' ? 1 : -1)))];
+      next.focus();
+      next.click();
+    });
 
     colSelect.onchange = () => pickColumn(colSelect.value);
-    let nameTouched = false;
-    function onOpChanged() {
+    formatSelect.onchange = () => {
+      state.format = formatSelect.value;
+      state.formatTouched = true;
       state.params = {};
-      // "(parsed)" vs "(extract)" tracks the op kind — keep the suggestion
-      // current until the analyst has typed a name of their own.
-      if (!editing && !nameTouched) { nameInput.value = defaultName(); state.name = nameInput.value; }
-      buildParams();
+      suggestName();
+      renderSettings();
       refreshBoth();
-    }
-    opSelect.onchange = onOpChanged;
-    // Switching type repopulates the op list, then behaves like an op change.
-    typeSelect.onchange = () => { fillOpSelect(typeSelect.value); onOpChanged(); };
+    };
     nameInput.oninput = () => { nameTouched = true; state.name = nameInput.value; };
 
-    // What am I making, how, and from what. Type first because it is the
-    // question the analyst arrives with and it decides what the operation
-    // list holds; the operation next because it decides what the column
-    // list *means* (a timestamp to parse, a document to extract from, the
-    // first of several to combine); the column last, right above the
-    // parameters that read it and the preview of what it produces.
-    //
-    // The format suggestion still runs off the column pick, so it can
-    // move the two above it — shown rather than applied once the analyst
-    // has chosen an operation of their own (see pickColumn).
-    //
-    // The three carry data-role because tests used to address them by
-    // position, which is the wrong handle for a row that can be reordered
-    // — this reorder is what proved it.
-    typeSelect.dataset.role = 'type';
-    opSelect.dataset.role = 'op';
-    colSelect.dataset.role = 'column';
-    body.append(labeledRow('Type', typeSelect));
-    body.append(labeledRow('Operation', opSelect));
-    body.append(labeledRow('Parse column', colSelect));
-    body.append(suggestNote);
-    body.append(paramBox);
+    /* Left: the search box and the list. Right, top to bottom: the column
+       it reads, the settings box, the new column's name, the preview. */
+    const rail = el('div', 'derived-rail');
+    rail.append(search, railList);
+    const pane = el('div', 'derived-pane');
+    pane.append(labeledRow('Parse column', colSelect), settingsBox);
+    // The name row keeps its place when a regex's named groups take over
+    // (syncGo): the input steps aside for a line saying why, rather than
+    // the row folding away and everything under it moving up.
+    let nameRow = null;
+    const nameAside = el('span', 'derived-name-aside', 'Each ticked group above becomes a column of its own.');
     if (!editing) {
-      nameInput.value = defaultName();
-      state.name = nameInput.value;
       nameRow = labeledRow('New column name', nameInput);
-      body.append(nameRow);
+      nameRow.classList.add('derived-name-row');
+      nameRow.append(nameAside);
+      pane.append(nameRow);
     }
-    body.append(groupsBox);
-    body.append(groupsNote);
     /* The preview's own scope control, beside the word Preview, because
        what it changes is which rows the answer below is about. Same
        shape and the same two labels as the value picker's (filters.js),
@@ -1081,34 +1499,17 @@ export async function openDerivedColumnModal(prefill, editing) {
       scopeSeg.append(b);
     }
     previewHead.append(scopeSeg);
-    body.append(previewHead);
-    body.append(previewBox);
+    pane.append(previewHead, previewBox);
+    const panes = el('div', 'derived-panes');
+    panes.append(rail, pane);
+    body.append(panes);
     syncScope();
-
-    if (editing) {
-      state.opId = editing.derived_op;
-      const eop = ops.find((o) => o.id === editing.derived_op);
-      if (eop) { typeSelect.value = typeOf(eop); fillOpSelect(typeSelect.value); }
-      opSelect.value = editing.derived_op;
-      typeSelect.disabled = true;
-      opSelect.disabled = true;
-      api(`/api/derived?source_id=${S.sourceId}`).then((defs) => {
-        const d = defs.find((x) => x.id === editing.derived_id);
-        if (d) { state.params = Object.assign({}, d.params); buildParams(); refreshBoth(); }
-      }).catch(() => {});
-      buildParams();
-      refreshBoth();
-    } else {
-      pickColumn(state.column);
-    }
 
     const actions = el('div', 'row-actions');
     const go = el('button', 'btn primary', editing ? 'Re-derive' : 'Add column');
     /* The one place the button's label, its enabled state and the single
        name field agree about what is being made: one column, or the
-       ticked named groups. Declared after `go` and called from the group
-       handlers above — the modal builder runs top to bottom, so nothing
-       calls it before it exists. */
+       ticked named groups. */
     function syncGo() {
       const wanted = editing ? [] : groupsWanted();
       const problem = wanted.length ? groupsProblem() : null;
@@ -1117,7 +1518,7 @@ export async function openDerivedColumnModal(prefill, editing) {
       go.disabled = !!problem;
       go.title = problem || '';
       // One column's name is beside the point when several are being made.
-      if (nameRow) nameRow.hidden = !editing && wanted.length > 0;
+      if (nameRow) nameRow.classList.toggle('by-group', wanted.length > 0);
       groupsNote.textContent = problem || '';
     }
     go.onclick = async () => {
@@ -1149,7 +1550,7 @@ export async function openDerivedColumnModal(prefill, editing) {
         } else {
           res = await post('/api/derived', {
             source_id: S.sourceId, name: state.name, input_column: state.column,
-            op_id: opSelect.value, params: state.params,
+            op_id: currentOpId(), params: state.params,
           });
         }
         $('modal').hidden = true;
@@ -1170,7 +1571,20 @@ export async function openDerivedColumnModal(prefill, editing) {
     cancel.onclick = () => { $('modal').hidden = true; };
     actions.append(go, cancel);
     body.append(actions);
-  }, { wide: true });
+
+    suggestName();
+    paintRail();
+    renderSettings();
+    if (editing) {
+      api(`/api/derived?source_id=${S.sourceId}`).then((defs) => {
+        const d = defs.find((x) => x.id === editing.derived_id);
+        if (d) { state.params = Object.assign({}, d.params); buildParams(); refreshBoth(); }
+      }).catch(() => {});
+      refreshBoth();
+    } else {
+      pickColumn(state.column);
+    }
+  }, { wide: true, tall: true, focus: editing ? null : '.derived-search' });
 }
 
 /* After an import, if a column looks strongly like a timestamp the app

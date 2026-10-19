@@ -5,8 +5,10 @@ from __future__ import annotations
 
 
 def test_upsert_and_delete_tag(store):
-    created = store.upsert_tag(None, "Suspicious", "#ff0000", "1")
-    assert created["name"] == "Suspicious"
+    # Not a seeded default's name: a new tag never takes a name a tag
+    # already has (test_a_new_tag_never_takes_a_name_already_in_use).
+    created = store.upsert_tag(None, "Suspect", "#ff0000", "1")
+    assert created["name"] == "Suspect"
     assert created["id"] is not None
 
     renamed = store.upsert_tag(created["id"], "Very Suspicious", "#ff0000", "1")
@@ -16,6 +18,26 @@ def test_upsert_and_delete_tag(store):
 
     store.delete_tag(created["id"])
     assert created["id"] not in {t["id"] for t in store.list_tags()}
+
+
+def test_a_new_tag_never_takes_a_name_already_in_use(store, client):
+    """Add tag sent "New tag" every time, so two clicks made two tags
+    nothing outside the case could tell apart — and sessions, the diff and
+    copying tables all match tags by name, so a reload put both tags' rows
+    on one. A create now takes the first free name; any client, any
+    plugin, two windows at once."""
+    made = [client.post("/api/tags", json={"name": "New tag", "color": "#8e5cc2", "hotkey": None}).json()
+            for _ in range(3)]
+    assert [t["name"] for t in made] == ["New tag", "New tag 2", "New tag 3"]
+    assert store.upsert_tag(None, "TA", "#ff0000", None)["name"] == "TA 2"   # a seeded default's name
+    # Exact names, the rule session matching starts from: "Malware" and
+    # "malware" can be two tags on purpose (test_sessions.py).
+    assert store.upsert_tag(None, "new tag", "#000000", None)["name"] == "new tag"
+    # A name freed by a delete is free again.
+    client.delete(f"/api/tags/{made[1]['id']}")
+    assert store.upsert_tag(None, "New tag", "#000000", None)["name"] == "New tag 2"
+    # A rename is the analyst's own word for the tag, and is left alone.
+    assert store.upsert_tag(made[2]["id"], "New tag", "#000000", None)["name"] == "New tag"
 
 
 def test_set_tags_on_and_off(ingested):

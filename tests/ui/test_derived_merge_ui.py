@@ -138,6 +138,10 @@ def test_rederive_and_remove_on_a_merge_reach_every_member(page, api, tmp_path):
         assert not any("field path" in i for i in items), items
         page.locator(".menu .menu-item", has_text="Re-derive").click()
         page.wait_for_selector("#modal:not([hidden])")
+        # What it is can't change on a re-derive: the side list shows it,
+        # chosen, and offers nothing else.
+        assert page.locator("#modalBody .derived-rail-item:not(:disabled)").all_inner_texts() == ["Regex capture"]
+        assert page.locator("#modalBody .derived-search").is_disabled()
         pattern = page.locator(".derived-param input").first
         page.wait_for_function(
             "() => document.querySelector('.derived-param input').value === 'u=(\\\\w+)'")

@@ -159,6 +159,17 @@ capitals (`Malware` and `malware`) counts as the same tag when that is
 unambiguous on both sides. A tag you don't have is created, with the
 session's colour and key.
 
+A name that two tags share can't be matched that way, so which tag a row
+goes on would be a guess. Loading a session you saved in this case still
+works: it puts each row back on the tag it was on. If one of those tags has
+since been deleted or renamed, its rows go onto a new tag with a name of its
+own ("New tag 2", say), and a message says so. A session you received, or
+one loaded from a file, is not loaded at all: the message names the tag and
+says where it is repeated. If it's your case, give each tag its own name
+under **Edit tags** and load again. If the session repeats the name, the
+analyst who sent it has to rename the tags in their case and send the
+session again.
+
 ### Replace, not merge
 
 **Load** always replaces the case's tags and notes with the session's.
@@ -191,7 +202,12 @@ The result is one line per table, with a count in each column:
 | **All** | Every differing row in the table. |
 
 Tags are compared by name and tables by their evidence file, so two
-analysts' sessions from different cases compare correctly. If the two
+analysts' sessions from different cases compare correctly. Two tags that
+share a name are told apart when both sides come from this case (a session
+you saved here, or your current work), and named after their tag number
+in the marks, such as `New tag #4`. Between a received session and your
+work they can't be, so the panel names them above the counts: a row moved
+from one of them to the other is not counted as a difference. If the two
 sessions cover different tables, the panel says so above the counts. A
 table that only one side has still gets a line, with every tagged row in
 it counted as a difference. A table that isn't in your case is listed as

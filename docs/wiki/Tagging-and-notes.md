@@ -23,7 +23,7 @@ Open the tag editor with the **Edit tags** chip at the right-hand end of the tag
 There is no Save button. A colour or a key is saved as soon as you pick it, and a name once you stop typing or leave the box. "Saved" shows briefly beside the line. If a change can't be saved, the line says "Not saved" and a message gives the reason.
 
 - **Rename or recolour**: change the name or pick a colour. A tag needs a name: while the box is empty the line says "Needs a name" and nothing is saved, and leaving the box puts the last saved name back.
-- **Create**: **Add tag** adds a tag called "New tag" with no key and selects its name, so you can type the new one straight over it. Then give it a key.
+- **Create**: **Add tag** adds a tag called "New tag" and selects its name, so you can type the new one straight over it. While a tag already has that name it is called "New tag 2", then "New tag 3", and so on, and **+ tag** in the template does the same: two tags with one name can't be told apart when a session is loaded or compared (see [Sessions and export](Sessions-and-export.md#how-a-session-finds-its-tables)). It gets the first free key from `1` to `9` and a colour none of the other tags has yet, from a set of nine (red, orange, green, purple, teal, pink, gold, blue and brown, in that order). Once all nine keys are taken a new tag has no key, and once all nine colours are taken it gets the one the fewest tags have. Change either as you would on any tag.
 - **Delete**: asks *Delete "name" and remove it from every row?* and, if you agree, takes the tag off every row in every table of the case. This cannot be undone with `Ctrl+Z`, and any watchlist indicator that auto-tagged with it stops auto-tagging.
 
 ### Tag keys
@@ -69,7 +69,7 @@ The direction is decided by the whole view, never by one row: anything still unt
 
 With the grid grouped (see [Working with tables](Working-with-tables.md)), right-click a group header. Under **Tag *N* rows** each tag applies to every row in the group, whether or not the group is expanded and at any level of nesting. **Remove a tag instead…** switches the list to removing; **Apply a tag instead…** switches back. Groups of 10,000 rows or more ask first.
 
-**+ Tag** in the **Group by** strip adds a level that buckets rows by their tags, with an *(untagged)* bucket for what is left. A tag group's header menu has **Filter to *tag*** in place of a value filter.
+**+ Tag** in the **Group by** strip adds a level that buckets rows by their tags, with an *(untagged)* bucket for what is left. A tag group's header menu has **Filter to *tag*** and **Exclude *tag*** in place of the value filters.
 
 ### Merged and saved tables
 
@@ -91,6 +91,8 @@ The rail is the narrow strip down the right-hand edge of the grid. Every tagged 
 
 Click a chip in the ribbon to show only rows with that tag; click it again to drop it.
 
+To hide a tag's rows instead, right-click its chip and choose **Exclude *tag***. The chip stays lit, with its name struck through and a dashed edge, and clicking it brings the rows back. The same menu has **Filter to *tag*** and **Clear the tag filter**.
+
 | Chips pressed | Rows shown |
 | --- | --- |
 | One tag | Rows with that tag |
@@ -98,12 +100,14 @@ Click a chip in the ribbon to show only rows with that tag; click it again to dr
 | **Any tag** | Rows with at least one tag (picking a specific tag replaces it) |
 | **No tags** | Rows with no tag — what is left to go through |
 | **No tags** and a tag | Untagged rows plus rows with that tag |
+| A tag excluded | Rows without that tag |
+| A tag, and another excluded | Rows with the first tag that do not also have the second |
 
 The tag filter combines with the column filters, search and timeframe. **Clear filters** (or `c`) clears it along with everything else. The other filter tools are on [Filtering and searching](Filtering-and-searching.md).
 
 ## Undo
 
-`Ctrl+Z` (`⌘Z`) undoes the last tag change, and each press steps one change further back. The right-click menu shows what the next undo will do, for example **Undo: Tag 160 rows · Suspicious**. With nothing left, a toast says *Nothing to undo*. Inside a text box `Ctrl+Z` undoes typing as usual.
+`Ctrl+Z` (`⌘Z`) undoes the last tag change, and each press steps one change further back. The right-click menu shows what the next undo will do, for example **Undo: Tag 160 rows · Suspicious**. With nothing left, a toast says *Nothing to undo*. Inside a text box `Ctrl+Z` undoes typing as usual. Filter changes have an undo of their own, `z`; see [Filtering and searching](Filtering-and-searching.md#undoing-a-filter-change).
 
 Undo restores exactly the rows a change moved, not the rows you aimed it at. Tag 200 rows when 40 already carried the tag and the change records 160; undoing it takes the tag off those 160 and the 40 keep it. Removing a tag works the same way the other round. A press that changed nothing — tagging rows that were already tagged — is not recorded.
 
@@ -122,7 +126,7 @@ A row note is a sentence or two on one row: why it matters, what it led to.
 1. Open the row in the detail pane — double-click it, or press `d`.
 2. Type in the **Note** box at the bottom of the pane (*Why does this row matter?*). `n` puts the cursor there while the pane is open.
 
-The note saves itself shortly after you stop typing, and **Saved** appears under the box. Clearing the box deletes the note. A row with a note shows ✎ in its gutter. Each row has one note; on a merged table it is written on the member table's row.
+The note saves itself shortly after you stop typing, and **Saved** appears under the box. Moving to another row before then still saves it on the row you typed it on. Clearing the box deletes the note. A row with a note shows ✎ in its gutter. Each row has one note; on a merged table it is written on the member table's row.
 
 Row notes travel with tags in session files. `Ctrl+Z` does not undo them.
 

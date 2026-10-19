@@ -80,6 +80,24 @@ export function clearPageCache() {
   S.pageGen++;
 }
 
+/* The view handle the last recovery rebuild was started for — the two in
+   ensurePage below, for a page that came back expired or empty. One per
+   handle: a rebuild that fails (the filter names a column an edited merge
+   no longer has, the table was removed from another window) leaves
+   S.view as it was, and its failure path repaints, which asks for the
+   same page, gets the same answer and started the same rebuild again —
+   for ever, a hundred-odd requests a second, until the page was
+   reloaded. A rebuild that lands installs a new handle, and so does
+   reopening the table (sources.js builds a fresh one even for a cached
+   view), so each of those can recover once in its turn. */
+let recoveredView = null;
+
+function recoverView(view) {
+  if (recoveredView === view) return;
+  recoveredView = view;
+  rebuildView();
+}
+
 /* Returns a promise that resolves once the page is in S.pages, or once the
    attempt to load it has finished failing — callers that care (waitForPages)
    check S.pages afterwards. Concurrent callers for the same page share one
@@ -90,7 +108,8 @@ export function ensurePage(idx, { keep, prefetch } = {}) {
   const inFlight = S.pending.get(idx);
   if (inFlight) return inFlight;
   if (!S.view) return Promise.resolve();   // nothing to page against
-  const vid = S.view.view_id;
+  const view = S.view;
+  const vid = view.view_id;
   const gen = S.pageGen;
   const p = (async () => {
     try {
@@ -108,9 +127,10 @@ export function ensurePage(idx, { keep, prefetch } = {}) {
          Rebuilding is the same recovery the expired-view path below takes,
          and it can't loop: a rebuild replaces both the view id and the row
          count, so if the view really is empty, row_count becomes 0 and
-         this branch stops being reachable. */
+         this branch stops being reachable — and a rebuild that fails
+         replaces nothing, which is what recoverView is for. */
       if (!data.rows.length && idx * PAGE < S.view.row_count) {
-        rebuildView();
+        recoverView(view);
         return;
       }
       S.pages.set(idx, data.rows);
@@ -130,7 +150,7 @@ export function ensurePage(idx, { keep, prefetch } = {}) {
       // If the superseding build is still in flight its landing is the
       // recovery — a rebuild from here would cancel it and start the same
       // spec over. Nothing in flight means nobody else will: rebuild.
-      if (String(e.message).includes('expired') && !rebuildInFlight()) rebuildView();
+      if (String(e.message).includes('expired') && !rebuildInFlight()) recoverView(view);
     } finally {
       S.pending.delete(idx);
     }

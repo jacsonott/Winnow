@@ -49,6 +49,7 @@ except ImportError:  # pragma: no cover - Windows
 
 from . import enrich  # noqa: F401 — registers the cross-table lookup op into timeparse.OPERATIONS
 from . import combine  # noqa: F401 — registers the multi-column ops (coalesce) the same way
+from . import decode  # noqa: F401 — registers the decode ops (URL decode) the same way
 from . import structparse  # noqa: F401 — registers the JSON/XML extraction ops into timeparse.OPERATIONS
 from . import timeparse
 from . import plasoread
@@ -1127,6 +1128,68 @@ def _ascii_fold(name: str) -> str:
     only has the other is not an error but, through SQLite's
     double-quoted-string fallback, the column's NAME as a string literal."""
     return name.translate(_ASCII_FOLD)
+
+
+def _member_column(member_src: dict, column: dict) -> str | None:
+    """The member's own name for one of a merge's columns (matched by
+    _col_key), or None when it has none. A file column and a derived one
+    are never the same column, whatever their names: _merge_columns
+    matches file columns across members and exposes a derived one only
+    when every member derives it, so a member whose "Host" is derived,
+    beside another member's "Host" read from its file, lacks the merge's
+    "Host" — showing the two as one would put the analyst's own values
+    in a column of evidence under the evidence's name (the same reason a
+    rename on the merge refuses that name). Before this, the member was
+    read as its bare table and every build of the merge failed with
+    "no such column"."""
+    key = _col_key(column["name"])
+    for c in member_src["columns"]:
+        if _col_key(c["name"]) == key:
+            return c["name"] if bool(c.get("derived")) == bool(column.get("derived")) else None
+    return None
+
+
+def _rename_in_layout(payload: dict, olds: set[str], new: str, new_is_live: bool = False) -> bool:
+    """A saved layout (columns.js saveLayout's payload) with a renamed
+    column's entries moved to its new name: its per-column settings, its
+    place in the order and any sort on it. `olds` are the old names
+    _ascii_fold-ed. An entry already under the new name is a leftover of
+    a column that is gone (the rename was checked against every column
+    the table has), so the renamed column's own settings replace it.
+
+    Except on a merge with a member the rename didn't touch that has a
+    column of the new name (`new_is_live`): that column is still there,
+    so its entries are the ones kept, and any the renamed column had go.
+    True when anything changed."""
+    def renamed(n):
+        return isinstance(n, str) and _ascii_fold(n) in olds
+
+    def is_new(n):
+        return isinstance(n, str) and _ascii_fold(n) == _ascii_fold(new) and not renamed(n)
+
+    def kept(names):
+        # Which of two entries for the one column survives.
+        if new_is_live and any(is_new(n) for n in names):
+            return lambda n: not renamed(n)
+        return lambda n: not is_new(n)
+
+    before = json.dumps(payload, sort_keys=True)
+    cols = payload.get("columns")
+    if isinstance(cols, dict):
+        keep = kept(cols)
+        payload["columns"] = {(new if renamed(k) else k): v for k, v in cols.items() if keep(k)}
+    order = payload.get("order")
+    if isinstance(order, list):
+        keep = kept(order)
+        payload["order"] = [new if renamed(n) else n for n in order if keep(n)]
+    sort = payload.get("sort")
+    if isinstance(sort, list):
+        if new_is_live and any(isinstance(x, dict) and is_new(x.get("column")) for x in sort):
+            payload["sort"] = sort = [x for x in sort if not (isinstance(x, dict) and renamed(x.get("column")))]
+        for x in sort:
+            if isinstance(x, dict) and renamed(x.get("column")):
+                x["column"] = new
+    return json.dumps(payload, sort_keys=True) != before
 
 
 def _no_dq_strings(conn: sqlite3.Connection) -> sqlite3.Connection:
@@ -3149,8 +3212,12 @@ class Store:
             return 0
 
     CHECKPOINT_TIMEOUT_S = 10.0
+    # close(fold_wal=True): long enough for a page fetch or a search's count
+    # to finish, short enough that a long download only delays the 409.
+    FOLD_TIMEOUT_S = 2.0
 
-    def _checkpoint_truncate(self, timeout_s: float | None = None) -> bool:
+    def _checkpoint_truncate(self, timeout_s: float | None = None, *,
+                             folded_is_enough: bool = False) -> bool:
         """wal_checkpoint(TRUNCATE) on the CASE FILE, retried until it
         really completes. True if the WAL was truncated, False if readers
         kept it pinned for the whole budget.
@@ -3175,7 +3242,12 @@ class Store:
         TRUNCATE invokes the connection's busy handler: with the default
         5s, one blocked attempt sits *inside* the pragma for 5s (measured
         5.03s), so a 10s budget really took ~15s and a 0.5s budget took
-        5s — all of it holding self.lock, which stalls every writer."""
+        5s — all of it holding self.lock, which stalls every writer.
+
+        `folded_is_enough` also accepts a checkpoint that copied every frame
+        back (log == checkpointed) but couldn't reset the WAL because a
+        reader is still mid-statement: the case file then holds every write,
+        which is all close(fold_wal=True) needs to know."""
         budget = self.CHECKPOINT_TIMEOUT_S if timeout_s is None else timeout_s
         deadline = time.monotonic() + budget  # monotonic: an NTP step must not move the deadline
         prior = self.db.execute("PRAGMA busy_timeout").fetchone()[0]
@@ -3185,6 +3257,8 @@ class Store:
             while True:
                 row = self.db.execute("PRAGMA main.wal_checkpoint(TRUNCATE)").fetchone()
                 if row is not None and row[0] == 0:
+                    return True
+                if folded_is_enough and row is not None and row[1] >= 0 and row[1] == row[2]:
                     return True
                 if time.monotonic() >= deadline:
                     return False
@@ -3371,7 +3445,13 @@ class Store:
             with contextlib.suppress(sqlite3.Error):
                 conn.close()
 
-    def close(self) -> None:
+    def close(self, *, fold_wal: bool = False) -> bool:
+        """Release the case file. Returns True, unless `fold_wal` asked for
+        every committed write to be copied out of the -wal into the case
+        file itself and that couldn't be done — see the end of this method.
+        Only a caller about to move the file without its -wal (save_as)
+        needs to ask; every other close leaves the -wal beside the file,
+        where the next open replays it."""
         # SQL pane queries first: one can run for ever, and it has no job
         # record or thread of its own to stop cooperatively, so it is
         # interrupted outright — now, so it unwinds while the waits below
@@ -3455,7 +3535,21 @@ class Store:
         # top of close for the other half of the same problem: stopping the
         # jobs above means reading, and those reads are on the pool now.)
         self._drain_idle_readers(permanent=True)
+        folded = True
         with self.lock:
+            # The drain only reaches idle readers. One checked out by a
+            # request still in flight — a CSV export streaming, a search-all
+            # sweep — keeps the case file open past the writer's close, so
+            # SQLite skips the checkpoint it does on the last close, and
+            # save_as deleting the -wal took every write since the last
+            # checkpoint with it (with 64 KB pages that is ~64 MB of WAL: on
+            # a quick look, usually the whole import and every tag). So fold
+            # it in here, under the lock, so nothing commits after the
+            # check. A reader whose snapshot already has every write doesn't
+            # stop the frames being copied back, only the WAL being reset,
+            # which is why "folded" is enough and "truncated" is not needed.
+            if fold_wal:
+                folded = self._checkpoint_truncate(self.FOLD_TIMEOUT_S, folded_is_enough=True)
             self.db.close()
         # Release the flock (see __init__) before unlinking, so that if the
         # remove below is the one that fails, what's left behind is an
@@ -3476,6 +3570,7 @@ class Store:
                 pass
         self._case_lock.release()
         self.closed = True
+        return folded
 
     READER_POOL_CAP = 6  # matches app.js's PAGE_FETCH_CONCURRENCY — the burstiest client
 
@@ -6078,9 +6173,8 @@ class Store:
         return cols
 
     def _member_missing_columns(self, row: sqlite3.Row, members: list[dict], member: dict) -> list[str]:
-        have = {_col_key(c["name"]) for c in member["columns"]}
         return [c["name"] for c in self._merge_columns(row, members)
-                if not c.get("source_column") and _col_key(c["name"]) not in have]
+                if not c.get("source_column") and _member_column(member, c) is None]
 
     @staticmethod
     def _member_projection(merge_src: dict, msrc: dict) -> list[str] | None:
@@ -6095,10 +6189,11 @@ class Store:
         column is the member's label as a constant. The member's own
         columns the merge doesn't expose (col_mode 'shared') are kept too,
         so the search blob — always the member's own base columns — still
-        resolves inside the projection."""
-        have: dict[str, str] = {}
-        for c in msrc["columns"]:
-            have.setdefault(_col_key(c["name"]), c["name"])
+        resolves inside the projection.
+
+        A member's derived column is not its copy of a file column another
+        member has under the same name (_member_column): that member lacks
+        the merge's column like any other, and reads it as NULL."""
         exprs: list[str] = []
         plain = True
         used: set[str] = set()
@@ -6108,7 +6203,7 @@ class Store:
                 exprs.append(f"{_sql_text_literal(msrc.get('nickname') or msrc['name'])} AS {q(name)}")
                 plain = False
                 continue
-            actual = have.get(_col_key(name))
+            actual = _member_column(msrc, c)
             if actual is None:
                 exprs.append(f"NULL AS {q(name)}")
                 plain = False
@@ -6137,10 +6232,19 @@ class Store:
         # where a column only some members have would be "Unknown".
         if self._member_projection(merge_src, msrc) is None:
             return {**msrc, "merge_id": merge_src["id"]}
-        rename = {_col_key(c["name"]): c["name"] for c in merge_src["columns"] if not c.get("source_column")}
-        return {**msrc, "merge_id": merge_src["id"],
-                "columns": [{**c, "name": rename.get(_col_key(c["name"]), c["name"])}
-                            for c in msrc["columns"]]}
+        rename = {_col_key(c["name"]): c for c in merge_src["columns"] if not c.get("source_column")}
+        columns = []
+        for c in msrc["columns"]:
+            mc = rename.get(_col_key(c["name"]))
+            if mc is None:
+                columns.append(c)
+            elif _member_column(msrc, mc) is not None:
+                columns.append({**c, "name": mc["name"]})
+            # Otherwise a derived column under the name of the merge's file
+            # column, which is not the member's copy of it (_member_column):
+            # left in, the timeframe would take the member as having that
+            # column and read the projection's NULL.
+        return {**msrc, "merge_id": merge_src["id"], "columns": columns}
 
     def _member_ref_src(self, merge_src: dict, msrc: dict) -> dict:
         """The src dict to resolve a merge's column references against for
@@ -6952,6 +7056,200 @@ class Store:
                 # so the column is invisible everywhere; add_derived_column
                 # reuses the orphan if the same name comes back.
                 pass
+
+    def rename_derived_column(self, def_id: int, name: str,
+                              source_id: int | None = None) -> dict:
+        """Give a derived column a new name — on every member that carries
+        it when `source_id` is the merge it was renamed from
+        (_derived_scope), as remove and re-derive do.
+
+        The file's own columns are evidence and keep the names they came
+        with; a derived column's name is the analyst's, so it is the one
+        that can change. Everything in the case file that names it follows
+        in the same transaction: the drv_<id> column itself, every derived
+        column computed from it (its input, a `column`/`columns` param, or
+        a lookup on any table reading it as the key or the value), and the
+        saved layout of its table and of each merge over it, so it keeps
+        its place, width, format and sort. What lives outside the case file
+        is left alone — saved filters, default layouts and Timeline
+        settings are keyed by header set and shared with every table, in
+        every case, that has one.
+
+        On a merge the new name is checked against every member, as adding
+        a column there is: a member without the column that already has
+        one of the new name would otherwise end up showing two columns as
+        one. Refused while the column, or anything computed from it, is
+        building, since a backfill reads and writes its columns by the
+        names they had when it started."""
+        new = (name or "").strip()
+        if not new:
+            raise ValueError("The column needs a name")
+        if len(new) > 200:
+            raise ValueError("Column name is too long")
+        if new.lower() in RESERVED_COLUMN_NAMES:
+            raise ValueError(f"{new!r} is a reserved column name")
+        scope = self._derived_scope(def_id, source_id)
+        ids = {d["id"] for d in scope}
+        on_merge = source_id is not None and source_id < 0
+        tables = ([m["source_id"] for m in self._resolve_members(source_id)] if on_merge
+                  else [scope[0]["source_id"]])
+        for sid in tables:
+            src = self._source_lite(sid)
+            taken = self._find_column(src, new)
+            if taken and taken.get("derived_id") not in ids:
+                where = f"Member table {src['name']!r}" if on_merge else "This table"
+                raise ValueError(f"{where} already has a column called {new!r}")
+        if all(d["name"] == new for d in scope):
+            return {"definition": self.get_derived_column(def_id)}
+
+        # Layouts name columns as the grid shows them, which on a merge is
+        # the merge's own spelling — the members' names, matched the way
+        # _derived_scope matched them. A merge's layout follows only when
+        # every member showing the old name was renamed: renamed on one
+        # table, a merge over it and another table that keeps the old name
+        # still has a column of that name for its layout to describe.
+        olds = {_ascii_fold(d["name"]) for d in scope}
+        renamed_on = {d["source_id"] for d in scope}
+        layout_ids = set(renamed_on)
+        live_new: set[int] = set()
+        for mid in {m["id"] for d in scope for m in self.merges_using(d["source_id"])}:
+            try:
+                members = [m["source_id"] for m in self._resolve_members(-mid)]
+            except KeyError:
+                continue   # a merge missing a member opens as an error, layout or not
+            if all(sid in renamed_on or not any(_ascii_fold(c["name"]) in olds
+                                                for c in self._source_lite(sid)["columns"])
+                   for sid in members):
+                layout_ids.add(-mid)
+                if any(sid not in renamed_on and any(_ascii_fold(c["name"]) == _ascii_fold(new)
+                                                     for c in self._source_lite(sid)["columns"])
+                       for sid in members):
+                    live_new.add(-mid)
+        labels = {d["id"]: self._member_label(d, scope) for d in scope}
+        with self.lock:
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                # Read under the lock, in the transaction that writes: a
+                # column started (or made) from this one since the checks
+                # above is either seen here or made after the rename.
+                every = [self._derived_dict(r) for r in
+                         self.db.execute("SELECT * FROM derived_columns ORDER BY id")]
+                now = {r["id"]: r for r in every}
+                rewrites: dict[int, dict] = {}
+                for d in scope:
+                    if now[d["id"]]["status"] == "building":
+                        raise ValueError(f"{d['name']!r}{labels[d['id']]} is still building "
+                                         f"— wait for it to finish first")
+                    for r in every:
+                        if r["id"] in ids:
+                            continue
+                        changed = self._renamed_refs(rewrites.get(r["id"], r), d["source_id"], d["name"], new)
+                        if changed is None:
+                            continue
+                        if r["status"] == "building":
+                            raise ValueError(f"{r['name']!r} is being computed from {d['name']!r} "
+                                             f"— wait for it to finish first")
+                        rewrites[r["id"]] = changed
+                for d in scope:
+                    if d["name"] != new:
+                        self._rename_drv_column(self._derived_table(d["source_id"]), d["name"], new)
+                        self.db.execute("UPDATE derived_columns SET name=? WHERE id=?", (new, d["id"]))
+                for rid, r in rewrites.items():
+                    self.db.execute("UPDATE derived_columns SET input_column=?, params=? WHERE id=?",
+                                    (r["input_column"], json.dumps(r["params"]), rid))
+                for sid in sorted(layout_ids):
+                    row = self.db.execute("SELECT payload FROM layouts WHERE source_id=?", (sid,)).fetchone()
+                    if not row:
+                        continue
+                    payload = json.loads(row[0])
+                    if _rename_in_layout(payload, olds, new, sid in live_new):
+                        self.db.execute("UPDATE layouts SET payload=? WHERE source_id=?",
+                                        (json.dumps(payload), sid))
+                self.db.commit()
+            except BaseException:
+                self.db.rollback()
+                raise
+        out = {"definition": self.get_derived_column(def_id)}
+        if len(scope) > 1:
+            out["member_definitions"] = [self.get_derived_column(d["id"]) for d in scope]
+        return out
+
+    @staticmethod
+    def _renamed_refs(reader: dict, source_id: int, old: str, new: str) -> dict | None:
+        """`reader` (a derived_columns definition) with every reference it
+        makes to column `old` of table `source_id` changed to `new`, or
+        None when it makes none. Which params name columns comes from the
+        op's own param schema, as op_inputs reads it: `column`/`columns`
+        name the reader's own table's columns, and `lookup_column` names a
+        column of the table its `lookup_source` param points at."""
+        op = timeparse.OPERATIONS.get(reader["op_id"]) or {"params": []}
+        key = old.lower()
+        hit = False
+
+        def swap(v):
+            nonlocal hit
+            if isinstance(v, str) and v.strip().lower() == key:
+                hit = True
+                return new
+            return v
+
+        input_column = reader["input_column"]
+        params = dict(reader["params"] or {})
+        if reader["source_id"] == source_id:
+            input_column = swap(input_column)
+            for spec in op["params"]:
+                v = params.get(spec["name"])
+                if spec.get("type") == "column":
+                    params[spec["name"]] = swap(v)
+                elif spec.get("type") == "columns" and v:
+                    items = v.split(",") if isinstance(v, str) else list(v)
+                    params[spec["name"]] = [swap(str(x).strip()) for x in items]
+        looked_in = next((params.get(s["name"]) for s in op["params"] if s.get("type") == "lookup_source"), None)
+        try:
+            looked_in = int(looked_in)
+        except (TypeError, ValueError):
+            looked_in = None
+        if looked_in == source_id:
+            for spec in op["params"]:
+                if spec.get("type") == "lookup_column":
+                    params[spec["name"]] = swap(params.get(spec["name"]))
+        if not hit:
+            return None
+        return {**reader, "input_column": input_column, "params": params}
+
+    def _rename_drv_column(self, drv: str, old: str, new: str) -> None:
+        """Rename one column of a drv_<id> sidecar, inside the caller's
+        transaction (writer lock held).
+
+        RENAME COLUMN is a schema edit, not a rewrite of the rows, so it
+        costs the same on a 2M-row table as on ten. SQLite refuses it when
+        anything else in the file's schema no longer parses (and before
+        3.25 has no RENAME COLUMN at all); then the values are copied into
+        a new column and the old one is left behind blanked — the same
+        invisible orphan _drop_derived_definition leaves where DROP COLUMN
+        is refused, since definitions, not the sidecar, decide what is
+        shown. An orphan already holding the new name is dropped first, or
+        reused when it cannot be."""
+        phys = [r[1] for r in self.db.execute(f"PRAGMA table_info({q(drv)})")]
+        same = _ascii_fold(old) == _ascii_fold(new)
+        orphan = next((p for p in phys if not same and _ascii_fold(p) == _ascii_fold(new)), None)
+        if orphan is not None:
+            try:
+                self.db.execute(f"ALTER TABLE {q(drv)} DROP COLUMN {q(orphan)}")
+                orphan = None
+            except sqlite3.OperationalError:
+                pass
+        if orphan is None:
+            try:
+                self.db.execute(f"ALTER TABLE {q(drv)} RENAME COLUMN {q(old)} TO {q(new)}")
+                return
+            except sqlite3.OperationalError as e:
+                if same:
+                    # Copying a column onto itself would blank it; a change
+                    # of capitals alone has no fallback.
+                    raise ValueError(f"Could not rename {old!r}: {e}") from e
+                self.db.execute(f"ALTER TABLE {q(drv)} ADD COLUMN {q(new)} TEXT")
+        self.db.execute(f"UPDATE {q(drv)} SET {q(new)}={q(old)}, {q(old)}=NULL")
 
     def dependent_derived_columns(self, source_id: int, names: list[str]) -> list[dict]:
         """Definitions on this source computed from any of `names` — the
@@ -9179,16 +9477,27 @@ class Store:
         if op == "not_empty":
             return f"({c} IS NOT NULL AND {c} <> '')", []
         if op == "in":
+            # An empty string in a LIST is the empty cell — the box's
+            # `a|""`, the value picker's "(empty)" ticked beside real
+            # values — and means what `empty` means, NULL included, which
+            # `IN` alone can never match. It used to be dropped, so the
+            # rows it named silently fell out of the filter. A
+            # newline-separated string still drops its blank lines: there
+            # a blank is a stray newline, not a value anyone picked.
+            with_empty = isinstance(val, list) and "" in val
             items = [s for s in (val if isinstance(val, list) else str(val).split("\n")) if s != ""]
+            empty_sql = f"{c} IS NULL OR {c} = ''"
             if not items:
-                return "", []
+                return (f"({empty_sql})", []) if with_empty else ("", [])
             if col in Store.PHYSICAL_COLUMNS:
                 # Row ids arrive as strings (the tree is JSON from a picker);
                 # bind them as the integers the column holds.
                 items = [int(s) if str(s).strip().lstrip("-").isdigit() else s for s in items]
             if _HAS_JSON_EACH:   # one parameter however long the list — see _HAS_JSON_EACH
-                return f"{c} IN (SELECT value FROM json_each(?))", [json.dumps(items)]
-            return f"{c} IN ({','.join('?' * len(items))})", items
+                sql, params = f"{c} IN (SELECT value FROM json_each(?))", [json.dumps(items)]
+            else:
+                sql, params = f"{c} IN ({','.join('?' * len(items))})", items
+            return (f"({sql} OR {empty_sql})", params) if with_empty else (sql, params)
         return "", []
 
     @staticmethod
@@ -9440,7 +9749,25 @@ class Store:
         # sentinel silently. Each part is compiled on its own now and the
         # parts are OR'd, which also makes "untagged, plus the ones I
         # marked" a filter the ribbon can express.
+        #
+        # A "!<id>" entry is a tag filtered OUT (the chip's right-click
+        # menu), and it is the one part that is ANDed rather than OR'd:
+        # "Suspicious, but not the ones I marked Benign" has to drop a row
+        # carrying both, and a union with "not Benign" would bring back
+        # every untagged row instead. Exclusions ride in the same list
+        # rather than a field of their own so that everything that already
+        # carries, stashes or clears the tag filter — a table switch, a
+        # background search, Clear filters, a dashboard drill — carries
+        # them too without being told.
         tag_filter = spec.get("tags") or []
+        excluded = [int(t[1:]) for t in tag_filter
+                    if isinstance(t, str) and t.startswith("!") and t[1:].isdecimal()]
+        if excluded:
+            clauses.append(
+                f"rid NOT IN (SELECT rid FROM row_tags WHERE source_id=? AND tag_id IN ({','.join('?' * len(excluded))}))"
+            )
+            params.append(source_id)
+            params.extend(excluded)
         if tag_filter:
             parts: list[str] = []
             if "__any__" in tag_filter:
@@ -10237,6 +10564,21 @@ class Store:
                 if was["name"] != name:
                     self._bump_state_generation()
             else:
+                # A new tag never takes a name another tag already has: the
+                # first of "New tag", "New tag 2", "New tag 3"… that is free.
+                # Tags are matched by NAME wherever two cases meet (session
+                # load, the diff, copying tables), so two tags of one name
+                # are two tags nothing outside this case can tell apart —
+                # and Add tag sends "New tag" every time, which made that
+                # the ordinary state of a case two clicks in. Exact names,
+                # as pair_tag_names matches first: "Malware" and "malware"
+                # can be two tags on purpose. A rename is left alone — it
+                # is the analyst's own word for the tag.
+                taken = {r[0] for r in self.db.execute("SELECT name FROM tag_defs")}
+                base, n = name, 2
+                while name in taken:
+                    name = f"{base} {n}"
+                    n += 1
                 cur = self.db.execute(
                     "INSERT INTO tag_defs(name, color, hotkey) VALUES (?,?,?)",
                     (name, color, hotkey),
@@ -13198,6 +13540,10 @@ class Store:
         that table's tags and notes — only that table's, since a one-table
         session says nothing about the others."""
         src = self.get_source(source_id)
+        # A one-table session only ever arrives as a file, so nothing says
+        # its tag ids are this case's: names only, and a name two tags
+        # share is refused (_session_tag_doubts).
+        self._session_tag_doubts([session], same_case=False)
         warnings = self._session_hash_warnings(src, session)
         idmap = self._session_tag_idmap(session)
 
@@ -13229,16 +13575,100 @@ class Store:
             return [f"Session was recorded against a different {what}. Row numbers may not line up."]
         return []
 
-    def _session_tag_idmap(self, session: dict) -> dict:
+    def _session_tag_doubts(self, docs: list[dict], *, same_case: bool) -> set[str]:
+        """The tag names a session's rows carry that name more than one tag
+        — two of the session's own tags that carry rows, or two of this
+        case's that the name pairs with (pair_tag_names) — and so can't
+        be matched by name. `docs` are the session's per-table documents;
+        a case session's tags count across all of its tables, since every
+        one of them lists the same tag palette.
+
+        Matching such a name by name put every row of both tags on one of
+        them — the last id per name won — and said nothing: two "New tag"s
+        made by Add tag became one on the first reload of the analyst's own
+        session, and the diff, comparing names, called the two the same.
+
+        For a session saved in this case (`same_case`) the tag ids are this
+        case's own, so these names are returned for _session_tag_idmap to
+        match by id. From anywhere else an id means nothing here (invariant
+        #10) and there is no right answer to "which of the two", so the
+        load is refused, naming them — the precedent _match_session_sources
+        set for a table it can't tell from its sibling. Nothing has been
+        written or re-imported when this raises."""
+        used: dict[str, set[int]] = {}
+        for doc in docs:
+            names = {t["id"]: t["name"] for t in doc.get("tag_defs") or []}
+            for rt in doc.get("row_tags") or []:
+                if rt.get("tag_id") in names:
+                    used.setdefault(names[rt["tag_id"]], set()).add(rt["tag_id"])
+        if not used:
+            return set()
+        live: dict[str, int] = {}
+        for t in self.list_tags():
+            live[t["name"]] = live.get(t["name"], 0) + 1
+        paired = pair_tag_names(used, live)
+        doubt = {n: (len(ids), live.get(paired.get(n), 0)) for n, ids in used.items()}
+        doubt = {n: c for n, c in doubt.items() if c[0] > 1 or c[1] > 1}
+        if same_case or not doubt:
+            return set(doubt)
+        said = []
+        for n, (theirs, ours) in sorted(doubt.items()):
+            where = [f"{theirs} tags in the session"] if theirs > 1 else []
+            if ours > 1:
+                where.append(f"{ours} {'' if where else 'tags '}in this case")
+            said.append(f'"{n}" names {" and ".join(where)}')
+        fix = []
+        if any(ours > 1 for _, ours in doubt.values()):
+            fix.append("Give each tag here its own name (Edit tags) and load again.")
+        if any(theirs > 1 for theirs, _ in doubt.values()):
+            fix.append("A name the session repeats has to be changed in the case that saved it, "
+                       "and the session saved again.")
+        raise ValueError(
+            f"Not loaded: {'; '.join(said)}. Tags in a session from outside this case are "
+            "matched by name, so the rows of tags that share one can't be told apart. "
+            + " ".join(fix))
+
+    def _session_tag_idmap(self, session: dict, by_id: set[str] = frozenset(),
+                           made: dict | None = None, warnings: list[str] | None = None) -> dict:
         """{session tag id -> local tag id}, matched by name with
         pair_tag_names — the rule copy and diff use too — creating what's
-        missing."""
-        local = {t["name"]: t["id"] for t in self.list_tags()}
+        missing.
+
+        Except the names in `by_id` (_session_tag_doubts: names that more
+        than one tag carries, in a session saved in this case). Each tag of
+        one of those that carries rows of this table goes back to the tag
+        with the session's own id, while that tag still has the name;
+        otherwise it gets a tag of its own, created under a free name and
+        reported in `warnings` — never a namesake, which is what moved its
+        rows before. One that carries none is left out: it has nothing to
+        place, and no name to place it by. `made` carries the created ones
+        across a case session's tables, so one session tag is one new tag."""
+        tags = self.list_tags()
+        local = {t["name"]: t["id"] for t in tags}
+        name_of = {t["id"]: t["name"] for t in tags}
         defs = session.get("tag_defs", [])
+        carried = {rt.get("tag_id") for rt in session.get("row_tags") or []}
         paired = pair_tag_names([t["name"] for t in defs], local)
         created: dict[str, int] = {}
+        made = {} if made is None else made
         idmap = {}
         for t in defs:
+            if t["name"] in by_id:
+                if t["id"] not in carried:
+                    continue
+                if paired.get(t["name"]) is not None and name_of.get(t["id"]) == paired[t["name"]]:
+                    idmap[t["id"]] = t["id"]
+                    continue
+                key = (t["id"], t["name"])
+                if key not in made:
+                    new = self.upsert_tag(None, t["name"], t.get("color", "#888888"), t.get("hotkey"))
+                    made[key] = new["id"]
+                    if warnings is not None:
+                        warnings.append(
+                            f'One of the session\'s tags named "{t["name"]}" is no longer in this '
+                            f'case under that name, so its rows are on a new tag, "{new["name"]}"')
+                idmap[t["id"]] = made[key]
+                continue
             if t["name"] in paired:
                 idmap[t["id"]] = local[paired[t["name"]]]
                 continue
@@ -13321,7 +13751,7 @@ class Store:
             "sources": [self.export_session(s["id"]) for s in self.list_sources()],
         }
 
-    def import_case_session(self, session: dict, merge: bool = True) -> dict:
+    def import_case_session(self, session: dict, merge: bool = True, *, same_case: bool = False) -> dict:
         """Reattaches each source session to the live table it describes
         (_match_session_sources: the file's hash, then which table of that
         file); if a source's file isn't in the case at all but still exists
@@ -13356,12 +13786,20 @@ class Store:
         never matched (a same-named table here may have been made over
         again since), and a replace leaves the tables it could be as they
         are (_legacy_made_table_candidates) rather than clearing them for
-        nothing."""
+        nothing.
+
+        Tags are matched by name, except a name more than one tag carries
+        (_session_tag_doubts): by the session's own ids when it was saved in
+        this case (`same_case`, load_session's call for a session whose
+        origin is 'saved'), and otherwise the whole load is refused — before
+        anything is re-imported or written."""
         warnings: list[str] = []
         tags_applied = 0
         sources_restored = 0
         sources_reimported = 0
         entries = session.get("sources", [])
+        by_id = self._session_tag_doubts(entries, same_case=same_case)
+        made_tags: dict = {}
         live = self.list_sources()
         metas = [e.get("source", {}) for e in entries]
         pairs = self._match_session_sources(metas, live)
@@ -13446,7 +13884,7 @@ class Store:
         idmaps = []
         for source_id, src_session in resolved:
             warnings.extend(self._session_hash_warnings(self._source_lite(source_id), src_session))
-            idmaps.append(self._session_tag_idmap(src_session))
+            idmaps.append(self._session_tag_idmap(src_session, by_id, made_tags, warnings))
         with self.lock, self.db:
             if not merge:
                 keep = sorted(unplaced)
@@ -13948,16 +14386,26 @@ class Store:
         return [self._session_summary(n) for n in names]
 
     def get_session(self, name: str) -> dict:
+        return self._stored_session(name)[0]
+
+    def _stored_session(self, name: str) -> tuple[dict, bool]:
+        """(document, saved here). A session saved in this case — origin
+        'saved', which only save_session writes — names tags by this case's
+        own ids: tag_defs is AUTOINCREMENT, so an id is never handed to
+        another tag, and a copy of the case file carries the same ids. One
+        received from a file ('imported') was numbered by someone else's
+        case. _session_tag_doubts is what this is asked for."""
         with self._reader() as ro:
-            row = ro.execute("SELECT payload FROM sessions WHERE name=?", (name,)).fetchone()
+            row = ro.execute("SELECT origin, payload FROM sessions WHERE name=?", (name,)).fetchone()
         if not row:
             raise KeyError(f"No session named {name!r}")
-        return json.loads(row["payload"])
+        return json.loads(row["payload"]), row["origin"] == "saved"
 
     def load_session(self, name: str, merge: bool = True) -> dict:
         """Apply a stored session to the live case. merge=False replaces the
         current tags and notes; merge=True adds to them."""
-        return self.import_case_session(self.get_session(name), merge=merge)
+        doc, saved_here = self._stored_session(name)
+        return self.import_case_session(doc, merge=merge, same_case=saved_here)
 
     def delete_session(self, name: str) -> None:
         with self.lock, self.db:
@@ -14067,7 +14515,8 @@ class Store:
                     self.db.execute(f"DROP TABLE IF EXISTS v.{q(entry['table'])}")
             self._undo.clear()
 
-    def _session_tag_map(self, data: dict, keys: list[str]) -> tuple[dict, dict, dict]:
+    def _session_tag_map(self, data: dict, keys: list[str],
+                         split: set[str] = frozenset()) -> tuple[dict, dict, dict]:
         """(tags_by_row, notes_by_row, source_labels) for a session document.
 
         Keyed by (source key, rid) rather than source_id, because two cases
@@ -14076,6 +14525,10 @@ class Store:
         document's sources, in order; diff_sessions derives them from the
         evidence's own fingerprint (_diff_source_keys), which is what makes
         that work at all.
+
+        A tag is its name, except a name in `split` — one several tags
+        carry, in two documents numbered by the same case
+        (_diff_tag_doubts) — which is told apart by its id: "New tag #4".
         """
         tags: dict = {}
         notes: dict = {}
@@ -14083,13 +14536,42 @@ class Store:
         for src, key in zip(data.get("sources", []), keys):
             meta = src.get("source") or {}
             labels[key] = meta.get("name") or key
-            names = {t["id"]: t["name"] for t in (src.get("tag_defs") or [])}
+            names = {t["id"]: (f"{t['name']} #{t['id']}" if t["name"] in split else t["name"])
+                     for t in (src.get("tag_defs") or [])}
             for rt in src.get("row_tags") or []:
                 tags.setdefault((key, rt["rid"]), set()).add(
                     names.get(rt["tag_id"], f"tag:{rt['tag_id']}"))
             for rn in src.get("row_notes") or []:
                 notes[(key, rn["rid"])] = rn.get("note") or ""
         return tags, notes, labels
+
+    @staticmethod
+    def _diff_tag_doubts(ldoc: dict, rdoc: dict, *, same_case: bool) -> tuple[set[str], list[str]]:
+        """(names to tell apart by id, names that can't be) for a diff: the
+        names that more than one tag carries on rows of either document.
+        Compared as names, a row moved from one "New tag" to the other was
+        no change at all, and nor was the load that collapsed them.
+
+        When both documents were numbered by this case (a session saved
+        here, or the live case — _stored_session), the ids settle it, as
+        they do for a load: every such name is split by id on both sides,
+        a name two tags carry between the two sides included (one "New
+        tag" on each, different ids, is a row that moved). From another
+        case ids mean nothing (invariant #10), so the names a side repeats
+        are returned to be reported instead, sorted."""
+        def used(doc: dict) -> dict[str, set[int]]:
+            out: dict[str, set[int]] = {}
+            for src in doc.get("sources", []):
+                names = {t["id"]: t["name"] for t in src.get("tag_defs") or []}
+                for rt in src.get("row_tags") or []:
+                    if rt.get("tag_id") in names:
+                        out.setdefault(names[rt["tag_id"]], set()).add(rt["tag_id"])
+            return out
+
+        lu, ru = used(ldoc), used(rdoc)
+        if same_case:
+            return {n for n in lu.keys() | ru.keys() if len(lu.get(n, set()) | ru.get(n, set())) > 1}, []
+        return set(), sorted({n for side in (lu, ru) for n, ids in side.items() if len(ids) > 1})
 
     @classmethod
     def _session_identity(cls, meta: dict) -> tuple:
@@ -14213,16 +14695,23 @@ class Store:
         Tags are compared BY NAME, not by tag_id: two analysts' cases
         number their tags independently, so "TA-1" in one is rarely id 3 in
         the other. Comparing ids would report every row as different.
+        A name more than one tag carries is the exception (_diff_tag_doubts):
+        told apart by id when both sides were numbered by this case, and
+        otherwise listed in `duplicate_tag_names`, since a row moved
+        between two tags of one name is no difference by name.
         """
         def _load(which):
-            return self.export_case_session() if which == self.LIVE_SESSION else self.get_session(which)
+            if which == self.LIVE_SESSION:
+                return self.export_case_session(), True
+            return self._stored_session(which)
 
-        ldoc, rdoc = _load(left), _load(right)
+        (ldoc, lhere), (rdoc, rhere) = _load(left), _load(right)
         lmeta = [s.get("source") or {} for s in ldoc.get("sources", [])]
         rmeta = [s.get("source") or {} for s in rdoc.get("sources", [])]
         lkeys, rkeys = self._diff_source_keys(lmeta, rmeta)
-        lt, ln, llab = self._session_tag_map(ldoc, lkeys)
-        rt, rn, rlab = self._session_tag_map(rdoc, rkeys)
+        split, dup_names = self._diff_tag_doubts(ldoc, rdoc, same_case=lhere and rhere)
+        lt, ln, llab = self._session_tag_map(ldoc, lkeys, split)
+        rt, rn, rlab = self._session_tag_map(rdoc, rkeys, split)
         labels = {**rlab, **llab}
         # The right side's names in the left side's spelling where
         # pair_tag_names pairs them — the rule loading either session
@@ -14292,6 +14781,10 @@ class Store:
             "shared_sources": sorted(set(llab) & set(rlab)),
             "only_left_sources": sorted(set(llab) - set(rlab)),
             "only_right_sources": sorted(set(rlab) - set(llab)),
+            # Names that more than one tag on one side carries, where the
+            # two sides weren't numbered by one case and so can't be told
+            # apart: rows moved between those tags are in no count above.
+            "duplicate_tag_names": dup_names,
         }
 
     def export_session_file(self, name: str, path: str) -> dict:
@@ -15404,12 +15897,10 @@ class Store:
         positional, so a member lacking a column pads it with NULL, and the
         source column is the member's label. Public: the bundled plugins
         build their merge scopes with it."""
-        own = {_col_key(c["name"]): c["name"] for c in member_src["columns"]}
-
         def _cell(c: dict) -> str:
             if c.get("source_column"):
                 return f"{_sql_text_literal(member_src.get('nickname') or member_src['name'])} AS {q(c['name'])}"
-            actual = own.get(_col_key(c["name"]))
+            actual = _member_column(member_src, c)
             if actual is None:
                 return f"NULL AS {q(c['name'])}"
             return f"{self._col_ref(member_src, actual, 's', 'd')} AS {q(c['name'])}"

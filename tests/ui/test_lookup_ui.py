@@ -20,7 +20,7 @@ def _ingest(page, path):
     assert status == 200
 
 
-def test_lookup_modal_pickers_preview_and_column(page, tmp_path, format_detected):
+def test_lookup_modal_pickers_preview_and_column(page, tmp_path, format_detected, derive_pick, derive_preview):
     owners = tmp_path / "owners.csv"
     owners.write_text("Host,Owner\nH0,alice\nH1,bob\nH2,carol\nH3,dave\nH4,erin\n", encoding="utf-8")
     sites = tmp_path / "sites.csv"
@@ -38,7 +38,7 @@ def test_lookup_modal_pickers_preview_and_column(page, tmp_path, format_detected
         page.evaluate("() => __winnow.openDerivedColumnModal('Host')")
         page.wait_for_selector("#modal:not([hidden])")
         format_detected()
-        page.locator("#modalBody select[data-role=type]").select_option(label="Join from another table")  # type -> its op auto-selects
+        derive_pick("Look up from another table")
 
         # The table picker offers the other real tables — never the open one.
         offered = page.evaluate("""() =>
@@ -59,7 +59,7 @@ def test_lookup_modal_pickers_preview_and_column(page, tmp_path, format_detected
 
         page.locator(".derived-param select").nth(1).select_option("Host")
         page.locator(".derived-param select").nth(2).select_option("Owner")
-        page.wait_for_selector(".derived-preview-row")
+        derive_preview()
         assert "alice" in page.locator(".derived-preview-row").first.inner_text()  # row 1's Host is H0
 
         page.locator(".derived-name").fill("Owner")

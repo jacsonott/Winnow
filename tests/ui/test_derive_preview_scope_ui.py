@@ -74,8 +74,8 @@ def test_the_scope_can_be_switched_and_the_verdict_follows(page):
 
     page.locator('.derived-scope .btn[data-scope="table"]').click()
     page.wait_for_function(
-        # Guarded: refreshPreview clears the box to "Checking…" first, so
-        # the verdict node is briefly absent rather than merely stale.
+        # The old verdict stays on screen, dimmed, until the new one lands,
+        # so this waits for the words to change rather than for the node.
         "() => { const n = document.querySelector('.derived-verdict');"
         " return !!n && /whole table/.test(n.textContent); }",
         timeout=15_000)
@@ -99,10 +99,10 @@ def test_the_view_scope_actually_reaches_the_server(page):
 
         page.locator('.derived-scope .btn[data-scope="table"]').click()
         page.wait_for_function(
-            # Guarded: refreshPreview clears the box to "Checking…" first, so
-        # the verdict node is briefly absent rather than merely stale.
-        "() => { const n = document.querySelector('.derived-verdict');"
-        " return !!n && /whole table/.test(n.textContent); }",
+            # The old verdict stays on screen, dimmed, until the new one
+            # lands, so this waits for the words to change.
+            "() => { const n = document.querySelector('.derived-verdict');"
+            " return !!n && /whole table/.test(n.textContent); }",
             timeout=15_000)
         assert sent[-1].get("view_id") in (None, ""), sent[-1]
     finally:
@@ -117,10 +117,11 @@ def _toast(page):
 
 
 def _switch_op(page):
-    """Move the operation select to some other operation and fire its
-    handler — the cheapest way to make the modal ask the preview question
-    again without touching the scope."""
-    return page.evaluate("""() => { const s = document.querySelector('select[data-role="op"]');
+    """Move the Format select to some other format and fire its handler —
+    the cheapest way to make the modal ask the preview question again
+    without touching the scope. The dialog opens on parsing a timestamp,
+    so the Format select is there."""
+    return page.evaluate("""() => { const s = document.querySelector('select[data-role="format"]');
       const other = [...s.options].find((o) => o.value !== s.value);
       s.value = other.value;
       s.dispatchEvent(new Event('change'));
