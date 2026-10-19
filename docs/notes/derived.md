@@ -157,6 +157,19 @@ see [docs/notes/README.md](README.md) for the whole set.
   before the escapes are decoded, so `%2B` survives as a plus;
   `plus_as_space` turns that off for paths. One pass only: double
   encoding is undone by deriving from the derived column.
+- **Base64 decode follows the same rule, and "is it text" is what makes
+  that safe.** A value that is not base64, or whose bytes do not decode
+  strictly to text without C0/C1 control characters (`_NOT_TEXT`), is
+  kept as written and is not a failure. Most ordinary values are not
+  base64 at all, and most of those that are by accident decode to
+  invalid UTF-8 or to controls (`AAAA` is three NULs); the ones that
+  don't (`WS01` is `Y-5`) cannot be told from text, which is why the
+  wiki says to use it on a column that holds base64. `encoding: auto`
+  picks UTF-16LE on a BOM or when at least half the high bytes are zero
+  (PowerShell's `-EncodedCommand`), else UTF-8. It does not fall back
+  from a failed UTF-8 to UTF-16LE: nearly any even-length binary is
+  "valid" UTF-16LE, so the fallback would decode noise into CJK; a
+  non-Latin UTF-16LE column takes `encoding: utf-16le` instead.
 - **load_json reads more than JSON, and json_field reads what it reads.**
   `strict=False`, then `load_loose` (Python's repr, trailing commas,
   unescaped backslashes), because the detail pane offers paths on those

