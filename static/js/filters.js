@@ -417,6 +417,8 @@ export function openValuePicker(column, anchorEl) {
     values: null,
     truncated: false,
     checked: new Set(),
+    // The ticks the list arrived with, so Apply can tell "nothing changed".
+    loadedChecked: new Set(),
     loading: true,
     error: null,
   };
@@ -442,6 +444,7 @@ export function openValuePicker(column, anchorEl) {
       state.checked = new Set(res.values
         .map((v) => (v.value == null ? '' : String(v.value)))
         .filter((v) => !selected || selected.has(v)));
+      state.loadedChecked = new Set(state.checked);
     } catch (e) {
       // 409 = the view was evicted (see invariant #3). Whole-table scope
       // needs no view at all, so the question is still answerable — re-ask
@@ -461,10 +464,22 @@ export function openValuePicker(column, anchorEl) {
   async function apply() {
     const listed = (state.values || []).map((v) => (v.value == null ? '' : String(v.value)));
     const values = listed.filter((v) => state.checked.has(v));
-    // Everything ticked out of a complete list is the same statement as no
-    // filter at all — and says so, rather than writing a 400-term `IN`.
-    const clearInstead = !state.truncated && values.length === listed.length;
     closeMenu();
+    // Apply with nothing changed leaves the filter as it is. "This view"
+    // after a contains, a regex, `>` or `!` on this column lists only the
+    // values that filter left, all of them ticked, and reading that as
+    // "everything ticked" cleared the box and widened the grid to rows the
+    // analyst had filtered out.
+    const unchanged = values.length === state.loadedChecked.size && values.every((v) => state.loadedChecked.has(v));
+    if (unchanged) return;
+    // Everything ticked out of a complete list is the same statement as no
+    // filter at all — and says so, rather than writing a 400-term `IN` —
+    // unless the list is this view's and this column's own filter is what
+    // narrowed it. Then everything ticked is "every value that filter
+    // leaves", so it is written out as those values rather than dropped.
+    const ownFilter = !!parseFilter(S.filters[column] || '') || !!pickerTreeNode(column);
+    const narrowed = state.scope === 'view' && ownFilter;
+    const clearInstead = !state.truncated && !narrowed && values.length === listed.length;
     await applyValueSelection(column, values, { clearInstead });
   }
 

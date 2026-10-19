@@ -893,6 +893,19 @@ see [docs/notes/README.md](README.md) for the whole set.
     client-side (`pickerRows`) — neither route takes a search term — so
     the capped-list warning sends the analyst to a text filter on the
     column instead of promising Find reaches the rest.
+  - **"Everything ticked" is "no filter" only on a list this column's
+    filter didn't narrow, and Apply with nothing changed is a no-op.**
+    The picker opens on This view for any column whose filter isn't a
+    value selection — a contains, regex, `>`, `!` — and that list holds
+    only what the filter left, all ticked. `apply()` read it as "every
+    value ticked" and cleared the box: Apply with nothing touched widened
+    `p1` from 8 rows back to 40, and the wiki's own advice ("narrow the
+    column first … and reopen the picker") walked straight into it. Apply
+    now compares the ticks with the ones the list arrived with
+    (`loadedChecked`) and does nothing when they match; and a changed
+    selection that ends up all ticked writes the values out, not a clear,
+    when the list is This view and the column has its own filter (box text
+    or the picker's tree node — the two things a clear removes).
   - **`bucket_datetime=False`.** `group_summary` day-buckets datetime
     columns, and a `2024-01-05` bucket matches no stored value, so an
     `=`/`in` filter built from one selects nothing. The flag turns the

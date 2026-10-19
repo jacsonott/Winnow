@@ -12,6 +12,12 @@ to the rows it says.
 A list whose first value starts with an operator character, or a list of
 paths that starts and ends with `/`, was worse: it did land in the box,
 and the box read it as a comparison or a regex — rows nobody picked.
+
+The other direction broke too: Apply with nothing changed emptied a box
+the picker hadn't written. On a column filtered by a contains, regex,
+comparison or exclusion the picker lists "This view" — only the values
+that filter left, all ticked — and Apply read "everything ticked" as "no
+filter", widening the grid back to every row.
 """
 from __future__ import annotations
 
@@ -147,3 +153,54 @@ def test_the_filter_builder_keeps_the_empty_value_it_absorbs(page, picks, view_r
     assert "IS NULL" in sql and "cmd.exe" in sql, sql
     assert _box(page, "Proc") == ""
     page.evaluate("() => __winnow.closeModal()")
+
+
+@pytest.mark.parametrize("text, rows", [
+    ("s", 7),                # contains: svchost.exe and lsass.exe
+    ("!cmd", 12),            # does not contain
+    ("^svc", 4),             # starts with
+    ("/^(svc|lsa)/", 7),     # regex
+    (">l", 7),               # a comparison, as text
+])
+def test_apply_with_nothing_changed_keeps_the_columns_filter(page, picks, view_rebuilt, text, rows):
+    with view_rebuilt(page):
+        page.locator('.fcell input[data-col="Proc"]').fill(text)
+    assert _state(page)["rows"] == rows
+    _open_picker(page, "Proc")
+    # Not a value selection, so the picker lists this view: what the
+    # filter left, every value ticked.
+    assert page.locator(".value-picker .vp-seg button", has_text="This view").get_attribute("aria-pressed") == "true"
+    page.locator(".value-picker .vp-actions .btn:not(.ghost)").click()
+    page.wait_for_selector(".value-picker", state="detached")
+    # Nothing to wait for: Apply with nothing changed must not rebuild,
+    # and it used to rebuild at once onto all 14 rows.
+    page.wait_for_timeout(300)
+    assert _box(page, "Proc") == text
+    assert _state(page) == {"rows": rows, "tree": 0}
+
+
+def test_apply_with_nothing_changed_keeps_a_value_selection_on_this_view(page, picks, view_rebuilt):
+    """A value selection opens on Whole table; switched to This view it
+    lists only the one value, ticked."""
+    with view_rebuilt(page):
+        page.locator('.fcell input[data-col="Proc"]').fill("=svchost.exe")
+    _open_picker(page, "Proc")
+    page.locator(".value-picker .vp-seg button", has_text="This view").click()
+    page.wait_for_function("() => document.querySelectorAll('.value-picker .vp-row').length === 1")
+    page.locator(".value-picker .vp-actions .btn:not(.ghost)").click()
+    page.wait_for_selector(".value-picker", state="detached")
+    page.wait_for_timeout(300)  # as above: checking that no rebuild happens
+    assert _box(page, "Proc") == "=svchost.exe"
+    assert _state(page)["rows"] == 4
+
+
+def test_unticking_a_value_on_a_list_the_columns_filter_narrowed_applies(page, picks, view_rebuilt):
+    """The other half: a real change on that narrowed list still writes it."""
+    with view_rebuilt(page):
+        page.locator('.fcell input[data-col="Proc"]').fill("s")
+    _open_picker(page, "Proc")
+    assert page.locator(".value-picker .vp-row").count() == 2
+    _row(page, "lsass.exe").locator("input").uncheck()
+    _apply(page, view_rebuilt)
+    assert _box(page, "Proc") == "=svchost.exe"
+    assert _state(page) == {"rows": 4, "tree": 0}
