@@ -93,6 +93,20 @@ def _wait_for_rows(page, token):
     raise AssertionError(f"the run never started landing rows: {p}")
 
 
+def _wait_until_stopped(page, token, why):
+    """Until the server no longer counts the run as in flight. A run its
+    tab abandoned is aborted on the client at once, but its thread still
+    finishes on the server — notices the cancel, sizes the rows it kept —
+    and can be doing that after the next run has already painted. The
+    runaway never ends on its own, so one left running still fails here."""
+    for _ in range(150):   # polled with evaluate, which awaits — see test_ui_test_hygiene
+        p = _progress(page, token)
+        if not p["running"]:
+            return
+        page.wait_for_timeout(100)
+    raise AssertionError(f"{why}: {p}")
+
+
 def _status(page):
     return page.locator(".sql-result-bar .note-status").inner_text()
 
@@ -142,7 +156,7 @@ def test_a_rerun_is_not_overwritten_by_the_run_it_replaced(sql):
     # read — and the replaced query was stopped, not left to run.
     assert _status(page).startswith("3 rows")
     assert page.evaluate("(id) => __winnow.S.sqlResults.get(id).total", first["tabId"]) == 3
-    assert not _progress(page, first["token"])["running"]
+    _wait_until_stopped(page, first["token"], "the replaced query is still running on the server")
 
 
 def test_a_closed_tabs_run_stops_and_lands_nowhere(sql):
@@ -164,7 +178,7 @@ def test_a_closed_tabs_run_stops_and_lands_nowhere(sql):
         assert page.locator(".sql-result-bar").count() == 0, "the closed tab's result is in the new tab"
         for tab in (new_id, run["tabId"]):
             assert not page.evaluate("(id) => __winnow.S.sqlResults.has(id)", tab)
-        assert not _progress(page, run["token"])["running"], "closing the tab left its query running"
+        _wait_until_stopped(page, run["token"], "closing the tab left its query running")
     finally:
         # The new tab is empty, so closing it asks nothing.
         page.evaluate("""(id) => import('/static/js/sql.js').then((m) => {
