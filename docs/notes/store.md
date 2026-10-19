@@ -549,6 +549,27 @@ see [docs/notes/README.md](README.md) for the whole set.
   by `name.lower()` alone while copy and diff matched exactly, so reloading
   your own session moved rows between the two and the diff said nothing
   had changed.
+- **Two tags with the SAME name are a name nothing can match by**, and
+  nothing stops them: a rename can repeat a name, and until `upsert_tag`
+  gave a new tag a free one ("New tag 2"…, exact names, creates only) Add
+  tag made a "New tag" every time. Load kept the last id per name, so
+  reloading your own session put both tags' rows on one and emptied the
+  other (merge added them), and the diff — sets of names — said nothing
+  changed. Now `_session_tag_doubts` finds every name that more than one
+  tag carries on the session's rows, or that more than one live tag has,
+  before anything is re-imported or written. A session saved in THIS case
+  (`origin = 'saved'` — `_stored_session`; tag_defs is AUTOINCREMENT, so
+  its ids are still these tags) matches those names by its own ids, while
+  the tag still has the name, and otherwise gives the rows a new tag under
+  a free name with a warning. Anything else — a received session, a file
+  — is refused with a 400 naming them, the precedent
+  `_match_session_sources` set for tables: by name there is no right
+  answer to "which of the two", and ids from another case mean nothing
+  (invariant #10). The diff does the same (`_diff_tag_doubts`): split by
+  id ("New tag #4") when both sides were numbered here, else listed in
+  `duplicate_tag_names` so the panel doesn't call the two "agreed".
+  `copy_sources_to` (`_map_tags_by_name`) still collapses them.
+  tests/test_case_sessions.py, the shared-name section.
 - **Loading a case session with replace (`merge=False`) clears every table's
   tags and notes, not just the snapshot's** — what the Load dialog promises.
   It used to clear per table inside `import_session`, so a table imported

@@ -225,14 +225,21 @@ export const NEW_TAG_COLORS = [
    and the first of keys 1–9 none of them holds, so the new tag can be
    pressed straight away. With all nine colours taken it reuses the one
    the fewest tags carry; with all nine keys taken it has none, as every
-   new tag used to. */
+   new tag used to. And a name none of them has — "New tag", then "New
+   tag 2", "New tag 3"… — because sessions match tags by name: two
+   unrenamed "New tag"s became one when a session was loaded back.
+   Store.upsert_tag picks a free name too (any client, two windows); this
+   is what the template, which never reaches it, relies on. */
 export function newTagDefaults(existing) {
   const colors = existing.map((t) => (t.color || '').toLowerCase());
   const uses = (c) => colors.filter((x) => x === c).length;
   const color = NEW_TAG_COLORS.reduce((best, c) => (uses(c) < uses(best) ? c : best));
   const keys = new Set(existing.map((t) => t.hotkey));
   const hotkey = ['1', '2', '3', '4', '5', '6', '7', '8', '9'].find((k) => !keys.has(k)) || null;
-  return { name: 'New tag', color, hotkey };
+  const names = new Set(existing.map((t) => t.name));
+  let name = 'New tag';
+  for (let n = 2; names.has(name); n += 1) name = `New tag ${n}`;
+  return { name, color, hotkey };
 }
 
 /* How long a paused name waits before it saves. The row note's figure

@@ -5272,6 +5272,8 @@ async def api_session_import(source_id: int, file: UploadFile = File(...), merge
         return await run_in_threadpool(store().import_session, source_id, session, merge=merge)
     except KeyError as e:   # no such table to import onto
         raise HTTPException(404, str(e))
+    except ValueError as e:   # refused before writing: tag names it can't match (_session_tag_doubts)
+        raise HTTPException(400, str(e))
 
 
 @app.get("/api/case_session")
@@ -5292,7 +5294,10 @@ async def api_case_session_import(file: UploadFile = File(...), merge: bool = Fo
     problem = case_session_document_problem(session)
     if problem:
         raise HTTPException(400, f"Not a valid session file: {problem}")
-    return await run_in_threadpool(store().import_case_session, session, merge=merge)
+    try:
+        return await run_in_threadpool(store().import_case_session, session, merge=merge)
+    except ValueError as e:   # refused before writing: tag names it can't match (_session_tag_doubts)
+        raise HTTPException(400, str(e))
 
 
 class SessionSaveReq(BaseModel):
@@ -5342,6 +5347,11 @@ def api_case_sessions_load(name: str, merge: bool = True):
         return store().load_session(name, merge=merge)
     except KeyError as e:
         raise HTTPException(404, str(e))
+    except ValueError as e:
+        # Refused before anything was written — a tag name more than one
+        # tag carries, in a session from outside this case
+        # (Store._session_tag_doubts). The analyst's to fix, so not a 500.
+        raise HTTPException(400, str(e))
 
 
 @app.post("/api/case_sessions/adopt")
@@ -5427,6 +5437,8 @@ def api_sessions_load(name: str, merge: bool = True):
         return store().load_named_session(name, merge=merge)
     except KeyError as e:
         raise HTTPException(404, str(e))
+    except ValueError as e:   # refused before writing: tag names it can't match (_session_tag_doubts)
+        raise HTTPException(400, str(e))
 
 
 @app.delete("/api/sessions/{name}")
