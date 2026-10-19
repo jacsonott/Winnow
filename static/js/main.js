@@ -71,7 +71,7 @@ import { wireGrid } from './grid.js';
 import { wireGrouping } from './grouping.js';
 import { syncHistogramPanel, wireHistogram } from './histogram.js';
 import { maybeOfferStorageDir, boot, wireHome } from './home.js';
-import { wireFileDrop } from './importer.js';
+import { maybeWarnElevated, wireFileDrop } from './importer.js';
 import { loadKeymap, wireKeymap } from './keymap.js';
 import { wirePlugins } from './plugins.js';
 import { wireSearch } from './search.js';
@@ -165,3 +165,7 @@ boot().catch((e) => toast('Could not start: ' + e.message, 8000));
 errlog.startLogBadgePoll();
 
 maybeOfferRemoteMode().then(() => maybeOfferStorageDir()).then(() => maybeOfferDefaultPrompt());
+
+// Not in that chain: it asks nothing and blocks nothing, so it needn't
+// wait behind a dialog the analyst hasn't answered yet.
+maybeWarnElevated();

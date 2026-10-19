@@ -128,6 +128,13 @@ browser.py         Opening the UI as an app window (Chromium's --app) rather
                     is per-profile, so a fresh one would silently reset
                     every analyst's settings. Edge leads on Windows because
                     it ships with the OS.
+elevation.py       Whether Windows will refuse files dragged in from File
+                    Explorer because Winnow runs as administrator (it and
+                    its window elevated, the desktop shell not). Drives the
+                    startup warning and GET /api/elevation's notice; the
+                    page itself never sees a refused drag, so this is the
+                    only place it can be noticed. Win32 probes are injected
+                    so tests/test_elevation.py can run anywhere.
 update.py          Update this install in place. Root, for the same reason —
                     see its fuller entry below.
 winnow/            Everything the app is made of. The modules below all

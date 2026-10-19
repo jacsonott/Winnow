@@ -671,6 +671,26 @@ export function wireFileDrop() {
   });
 }
 
+/* Windows refuses a drag from File Explorer into a window running as
+   administrator before the page sees any event at all, so nothing above
+   can tell the analyst why the drop won't land: they just get a no-entry
+   cursor. The server can tell (winnow/elevation.py), so the window says so
+   as it loads, and keeps saying so until it's dismissed. "May", because a
+   browser that was already open runs the window with its own rights. */
+export async function maybeWarnElevated() {
+  let res;
+  try { res = await api('/api/elevation'); } catch { return; }
+  if (!res.drops_blocked) return;
+  const box = $('elevNotice');
+  const ok = el('button', 'btn ghost', 'Got it');
+  ok.onclick = () => { box.hidden = true; };
+  box.replaceChildren(el('span', 'elev-msg',
+    'Winnow is running as administrator, so Windows may refuse files dragged onto this '
+    + 'window from File Explorer. To drag files in, close Winnow and start it from a normal '
+    + 'window, not an administrator one. Case ▾ → Import… works either way.'), ok);
+  box.hidden = false;
+}
+
 /* A single dropped file recognized as SQLite opens the table-picker flow
    (it can't just queue-and-import like CSV/JSON — which table(s) to pull
    out is a real choice the analyst has to make, same as picking one by

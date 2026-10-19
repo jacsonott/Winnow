@@ -3007,6 +3007,20 @@ html.remote .row.selected:hover { background: var(--row-selected); }
 .conn-msg { font-size: 12px; line-height: 1.45; }
 .conn-banner .btn { white-space: nowrap; flex: 0 0 auto; }
 
+/* Running as administrator (maybeWarnElevated in static/js/importer.js).
+   Bottom left, clear of the toast and the connection banner (centre) and
+   the jobs panel (right), so it can sit there on the home screen and in a
+   case alike until it's dismissed. */
+.elev-notice {
+  position: fixed; left: 14px; bottom: 14px; z-index: 55;
+  display: flex; align-items: center; gap: 12px; max-width: min(460px, 92vw);
+  padding: 10px 14px; border-radius: var(--radius-md);
+  background: var(--panel); color: var(--text);
+  border: var(--border-w) solid var(--accent-dim); box-shadow: var(--shadow-modal);
+}
+.elev-msg { font-size: 12px; line-height: 1.45; }
+.elev-notice .btn { white-space: nowrap; flex: 0 0 auto; }
+
 /* Across cases (static/js/multicase.js) */
 .mc-cases { display: grid; gap: 2px; max-height: 150px; overflow: auto; margin: 4px 0 10px;
   border: 1px solid var(--line-2); border-radius: var(--radius-sm); padding: 6px; background: var(--panel-2); }
