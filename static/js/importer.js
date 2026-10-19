@@ -11,7 +11,7 @@ import { renderPluginTabs, renderPluginPanelButtons } from './plugins.js';
 import { fmtBytes } from './tables.js';
 import { loadSources } from './sources.js';
 import { S } from './state.js';
-import { confirmDialog, modal, oneAtATime, promptDialog } from './ui.js';
+import { confirmDialog, modal, oneAtATime, promptDialog, sideRail, sideRailMatch } from './ui.js';
 
 /* ------------------------------------------------------------- plugins */
 
@@ -715,6 +715,62 @@ export async function loadImportProfiles() {
   try { S.importProfiles = await api('/api/import_profiles'); } catch { S.importProfiles = []; }
 }
 
+/* What the Import a folder dialog's side list offers: no profile at all
+   (patterns built here and not saved), then the saved profiles by name.
+   Pins are menuPins(IMPORT_PINS), keyed by profile id. */
+export const IMPORT_PINS = 'import';
+export const CUSTOM_IMPORT = 'custom';
+export const IMPORT_GROUPS = ['Ad hoc', 'Profiles'];
+
+export const defaultImportExtensions = () =>
+  RECOGNIZED_IMPORT_EXTENSIONS.concat(PLASO_IMPORT_EXTENSIONS, pluginExtensions());
+
+export function importProfileEntries(profiles) {
+  const entries = [{
+    key: CUSTOM_IMPORT, label: 'Custom (not saved)', group: 'Ad hoc',
+    title: 'Every file type Winnow reads and no patterns, to build your own here',
+  }];
+  const byName = [...profiles].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+  for (const p of byName) {
+    const inc = p.include_patterns || [];
+    const exc = p.exclude_patterns || [];
+    const title = [inc.length ? `Includes ${inc.join(', ')}` : 'Every file its types let in',
+                   exc.length ? `excludes ${exc.join(', ')}` : ''].filter(Boolean).join('; ');
+    entries.push({ key: String(p.id), label: p.name, group: 'Profiles', profile: p, title });
+  }
+  return entries;
+}
+
+/* Does the search box's text find this entry? By its name, or — for a
+   profile — by one of its patterns or file types, which the hit then
+   names: "amcache" finds a KAPE profile through the pattern that leaves
+   out Amcache's unassociated entries, the way "filetime" finds Parse a
+   timestamp in the derive dialog. */
+export function matchesImportSearch(entry, query) {
+  if (sideRailMatch(entry, query)) return {};
+  const p = entry.profile;
+  if (!p) return null;
+  const terms = String(query || '').toLowerCase().split(/\s+/).filter(Boolean);
+  for (const [verb, list] of [['includes', p.include_patterns], ['excludes', p.exclude_patterns], ['reads', p.extensions]]) {
+    for (const x of list || []) {
+      const shown = x === '*' ? 'other text files' : x;
+      const text = `${entry.label} ${entry.group} ${shown}`.toLowerCase();
+      if (terms.every((t) => text.includes(t))) return { hint: `${verb} ${shown}` };
+    }
+  }
+  return null;
+}
+
+/* A label and its controls on one line, the derive dialog's row — a div
+   rather than labeledRow's <label>, because a label passes its clicks to
+   the first control inside it, and here that would be Browse… or the
+   .csv chip. */
+function paneRow(label, ...controls) {
+  const row = el('div', 'derived-row');
+  row.append(el('span', 'derived-row-label', label), ...controls);
+  return row;
+}
+
 /* Point at a folder — a KAPE triage output or any other bulk-collection
    directory — and import every file inside that matches an extension plus
    include/exclude glob pattern set, instead of picking files one at a time
@@ -723,12 +779,23 @@ export async function loadImportProfiles() {
    profile, so a profile built once for "KAPE" keeps working on every future
    triage without re-typing its exclusions.
 
+   The derive dialog's shape (sideRail, the .side-* rules): the profiles
+   down the left, searchable, with pinned ones on top; on the right, the
+   folder, the settings a profile holds, and a preview of what the scan
+   found; the buttons under both. The frame is a fixed height and so is
+   every part of the right pane but the preview's file list, which takes
+   what is left and scrolls — so picking a profile, a rescan finding three
+   files or three thousand, or a profile's buttons coming and going moves
+   nothing. It used to be a centred column sized to the scan: the card
+   grew with the list until the buttons left the screen, and re-centred
+   on every rescan.
+
    Async at the top level (unlike every other open* modal function here,
    which stay synchronous and do async work via inner handlers) because
    S.importProfiles — unlike S.savedFilters/S.tags/etc. — has no earlier,
    source-open-triggered load point to piggyback on; this is the one place
    that ever needs it, so it's simplest to just await a fresh copy before
-   building the profile <select> at all, rather than rendering once with a
+   building the side list at all, rather than rendering once with a
    possibly-stale/empty list and re-rendering again once a background fetch
    resolves.
 
@@ -743,30 +810,169 @@ export async function openDirectoryImportModal(state = {}) {
     root: state.root || null,
     profileId: state.profileId || null,
     recursive: state.recursive ?? true,
-    extensions: state.extensions || RECOGNIZED_IMPORT_EXTENSIONS.concat(PLASO_IMPORT_EXTENSIONS, pluginExtensions()),
+    extensions: state.extensions || defaultImportExtensions(),
     includeText: state.includeText || '',
     excludeText: state.excludeText || '',
   };
+  // Deleted from another window since the state was taken: the list has
+  // no row for it, so start from Custom with what was set.
+  if (st.profileId && !S.importProfiles.some((p) => p.id === st.profileId)) st.profileId = null;
   let scanResult = null; // {root, matched, excluded, truncated}
+  let scanError = null;
   let checked = new Set(); // indices into scanResult.matched
-  let showExcluded = false;
+  let showing = 'matched'; // which of the scan's two lists the preview shows
   let scanSeq = 0; // guards a slow scan response from overwriting a newer one
+  let pending = false; // a scan has been asked for and its answer isn't in
 
   modal('Import a folder', (b) => {
-    b.append(el('p', null,
-      'Point at a folder and import every file inside that matches — built for a KAPE triage or '
-      + 'similar bulk-collection output. Pick a saved profile or build patterns ad hoc; the preview '
-      + 'below updates as you edit them.'));
+    const profileOf = (id) => S.importProfiles.find((p) => p.id === id) || null;
 
-    const resultsBox = el('div', 'search-all-results');
+    /* ---------------------------------------------- the side list */
+    const side = sideRail({
+      entries: () => importProfileEntries(S.importProfiles),
+      groups: IMPORT_GROUPS,
+      selected: () => (st.profileId ? String(st.profileId) : CUSTOM_IMPORT),
+      onPick: (entry) => pickProfile(entry.profile || null),
+      match: matchesImportSearch,
+      pinsKey: IMPORT_PINS,
+      label: 'Profiles',
+      notes: { Profiles: 'None saved yet. Save as profile… keeps the file types and patterns for every case on this machine.' },
+    });
+
+    // Custom starts from every file type and no patterns, as it always
+    // has; a profile brings its own.
+    function pickProfile(p) {
+      if ((p ? p.id : null) === st.profileId) return;
+      st.profileId = p ? p.id : null;
+      st.recursive = p ? (p.recursive ?? true) : true;
+      st.extensions = (p && p.extensions) || defaultImportExtensions();
+      st.includeText = p ? (p.include_patterns || []).join('\n') : '';
+      st.excludeText = p ? (p.exclude_patterns || []).join('\n') : '';
+      side.sync();
+      syncSettings();
+      syncProfileButtons();
+      scheduleScan();
+    }
+
+    /* ---------------------------------------------- the right pane */
+    const folderPath = el('span', 'import-folder-path');
+    const browseBtn = el('button', 'btn ghost', 'Browse…');
+    browseBtn.onclick = () => {
+      openFolderBrowser(st.root || undefined, (path) => {
+        openDirectoryImportModal({ ...st, root: path });
+      }, () => openDirectoryImportModal(st));
+    };
+    const folderRow = paneRow('Folder', folderPath, browseBtn);
+    folderRow.classList.add('import-folder-row');
+
+    const recLabel = el('label', 'import-subfolders');
+    const recCb = el('input');
+    recCb.type = 'checkbox';
+    recCb.onchange = () => { st.recursive = recCb.checked; scheduleScan(); };
+    recLabel.append(recCb, document.createTextNode(' Include subfolders'));
+
+    // '*' is the raw-text catch-all: any other file that isn't binary,
+    // one line per row. Off by default — a triage tree is full of text
+    // nobody wants as a table — and remembered by profiles like an
+    // extension (it rides in the same list).
+    const extRow = el('div', 'import-types');
+    for (const ext of defaultImportExtensions().concat(['*'])) {
+      const chip = el('button', 'btn ghost', ext === '*' ? 'other text files' : ext);
+      chip.dataset.ext = ext;
+      if (ext === '*') chip.title = 'Any other file that is not binary, imported as raw text — one line per row';
+      chip.onclick = () => {
+        st.extensions = st.extensions.includes(ext)
+          ? st.extensions.filter((e) => e !== ext)
+          : [...st.extensions, ext];
+        chip.setAttribute('aria-pressed', String(st.extensions.includes(ext)));
+        scheduleScan();
+      };
+      extRow.append(chip);
+    }
+
+    const patternBox = (caption, placeholder, onText) => {
+      const col = el('label', 'import-pattern');
+      const area = el('textarea');
+      area.rows = 3;
+      area.spellcheck = false;
+      area.wrap = 'off'; // a glob per line; one broken across two reads as two
+      area.placeholder = placeholder;
+      area.oninput = () => { onText(area.value); scheduleScan(); };
+      col.append(el('span', 'import-pattern-caption', caption), area);
+      return [col, area];
+    };
+    const [includeCol, includeArea] = patternBox('Include (blank = every file the types let in)',
+      'One glob per line,\ne.g. *EvtxECmd*', (v) => { st.includeText = v; });
+    const [excludeCol, excludeArea] = patternBox('Exclude',
+      'One glob per line,\ne.g. *_Amcache_Unassociated*', (v) => { st.excludeText = v; });
+    const patterns = el('div', 'import-patterns');
+    patterns.append(includeCol, excludeCol);
+
+    const settingsBox = el('div', 'side-settings');
+    const typesRow = paneRow('File types', extRow);
+    const patternRow = paneRow('Patterns', patterns);
+    // Labels on the first line of what they label, which is two lines.
+    typesRow.classList.add('import-top');
+    patternRow.classList.add('import-top');
+    settingsBox.append(typesRow, recLabel, patternRow);
+
+    // What a profile holds, put on screen — after a pick, and once to start.
+    function syncSettings() {
+      recCb.checked = st.recursive;
+      for (const chip of extRow.children) chip.setAttribute('aria-pressed', String(st.extensions.includes(chip.dataset.ext)));
+      includeArea.value = st.includeText;
+      excludeArea.value = st.excludeText;
+    }
+
+    /* The preview: the scan's two lists, one at a time, chosen beside the
+       word Preview the way the derive dialog chooses its sample, and a
+       verdict line under them that stays put. */
+    const previewBox = el('div', 'side-preview import-preview');
+    const previewRows = el('div', 'side-preview-rows');
+    const previewFoot = el('div', 'side-preview-foot');
+    previewBox.append(previewRows, previewFoot);
+    const previewHead = el('div', 'side-preview-title', 'Preview');
+    const listSeg = el('div', 'vp-seg import-lists');
+    const listBtns = {};
+    for (const [key, title] of [
+      ['matched', 'The files the scan matched; untick any you want left out'],
+      ['excluded', 'The files the scan passed over, and why'],
+    ]) {
+      const btn = el('button', 'btn ghost');
+      btn.dataset.list = key;
+      btn.title = title;
+      btn.onclick = () => { if (showing !== key) { showing = key; renderResults(); } };
+      listBtns[key] = btn;
+      listSeg.append(btn);
+    }
+    previewHead.append(listSeg);
+
+    const pane = el('div', 'side-pane');
+    pane.append(folderRow, settingsBox, previewHead, previewBox);
+    const panes = el('div', 'side-panes');
+    panes.append(side.rail, pane);
+    b.append(panes);
+
     const actions = el('div', 'row-actions');
     const importBtn = el('button', 'btn primary', 'Import checked (0)');
     importBtn.disabled = true;
 
+    /* While a new scan is on its way, the last answer stays on screen,
+       dimmed — the derive preview's rule, for the same reason: a list
+       that empties to "Scanning…" and refills on every keystroke in a
+       pattern is a flicker. aria-busy says the rows are the old answer's. */
+    function previewBusy(on) {
+      previewBox.classList.toggle('stale', on);
+      previewBox.setAttribute('aria-busy', String(on));
+      syncCount();
+    }
+
     async function runScan() {
       const seq = ++scanSeq;
-      if (!st.root) { scanResult = null; checked = new Set(); renderResults(); return; }
-      resultsBox.replaceChildren(el('div', 'note-status', 'Scanning…'));
+      if (!st.root) { pending = false; scanResult = null; scanError = null; checked = new Set(); renderResults(); return; }
+      pending = true;
+      previewBusy(true);
+      if (!scanResult && !scanError) renderResults(); // the first scan says so; later ones dim the last
       let r;
       try {
         r = await post('/api/ingest/dir/scan', {
@@ -778,11 +984,17 @@ export async function openDirectoryImportModal(state = {}) {
         });
       } catch (e) {
         if (seq !== scanSeq) return; // a newer scan already started; don't clobber it with a stale error
-        resultsBox.replaceChildren(el('div', 'note-status', 'Scan failed: ' + e.message));
+        pending = false;
+        scanResult = null;
+        scanError = e.message;
+        checked = new Set();
+        renderResults();
         return;
       }
       if (seq !== scanSeq) return; // a newer scan resolved first
+      pending = false;
       scanResult = r;
+      scanError = null;
       // Pre-check everything except what's already in the case — the
       // common case is "import the new stuff", and already_imported exists
       // precisely so a second pass over the same folder doesn't default to
@@ -791,168 +1003,105 @@ export async function openDirectoryImportModal(state = {}) {
       r.matched.forEach((m, i) => { if (!m.already_imported) checked.add(i); });
       renderResults();
     }
-    const scheduleScan = debounce(runScan, 300);
+    // Dimmed at once rather than after the debounce, so a keystroke
+    // never leaves an answer on screen looking current.
+    const scheduleScan = () => {
+      if (st.root) { pending = true; previewBusy(true); }
+      debouncedScan();
+    };
+    const debouncedScan = debounce(runScan, 300);
+
+    const foot = (text, bad) => {
+      const line = el('div', 'fb-help' + (bad ? ' bad' : ''), text);
+      line.title = text;
+      return line;
+    };
 
     function renderResults() {
-      resultsBox.replaceChildren();
-      const n = checked.size;
-      importBtn.disabled = n === 0;
-      importBtn.textContent = `Import checked (${n})`;
-      if (!st.root) { resultsBox.append(el('div', 'note-status', 'Choose a folder to preview matches.')); return; }
-      if (!scanResult) return; // "Scanning…" is already showing
-      if (scanResult.truncated) {
-        resultsBox.append(el('div', 'note-status', `Showing the first ${scanResult.matched.length + scanResult.excluded.length} files — narrow the folder or patterns to see the rest.`));
+      const r = scanResult;
+      listBtns.matched.textContent = r ? `Will import (${r.matched.length})` : 'Will import';
+      listBtns.excluded.textContent = r ? `Excluded (${r.excluded.length})` : 'Excluded';
+      for (const [key, btn] of Object.entries(listBtns)) btn.setAttribute('aria-pressed', String(key === showing));
+      const rows = el('div', 'import-files');
+      previewRows.replaceChildren(rows);
+      previewFoot.replaceChildren();
+      previewRows.scrollTop = 0;
+      previewBusy(pending);
+      if (!st.root) {
+        previewFoot.append(foot('Choose a folder to see what it would import.'));
+        return;
       }
-      if (!scanResult.matched.length) {
-        resultsBox.append(el('div', 'note-status', 'No files match.'));
-      } else {
-        resultsBox.append(el('div', 'fb-help', `Will import (${scanResult.matched.length})`));
-        scanResult.matched.forEach((m, i) => {
-          const row = el('div', 'search-all-row');
+      if (scanError) {
+        previewFoot.append(foot('Scan failed: ' + scanError, true));
+        return;
+      }
+      if (!r) { previewFoot.append(foot('Scanning…')); return; }
+      if (showing === 'matched') {
+        if (!r.matched.length) rows.append(el('div', 'fb-help', 'No files match.'));
+        r.matched.forEach((m, i) => {
+          const row = el('label', 'import-file');
           const cb = el('input');
           cb.type = 'checkbox';
           cb.checked = checked.has(i);
-          cb.onchange = () => { cb.checked ? checked.add(i) : checked.delete(i); renderResults(); };
-          row.append(cb, el('span', 'search-all-name', m.rel_path + (m.already_imported ? '  (already in case)' : '')));
-          resultsBox.append(row);
+          cb.onchange = () => { cb.checked ? checked.add(i) : checked.delete(i); syncCount(); };
+          const name = el('span', 'import-file-path', m.rel_path);
+          name.title = m.rel_path;
+          row.append(cb, name);
+          if (m.already_imported) row.append(el('span', 'import-file-note', 'already in case'));
+          rows.append(row);
         });
-      }
-      if (scanResult.excluded.length) {
-        const toggle = el('button', 'btn ghost', (showExcluded ? '▾ ' : '▸ ') + `Excluded (${scanResult.excluded.length})`);
-        toggle.onclick = () => { showExcluded = !showExcluded; renderResults(); };
-        resultsBox.append(toggle);
-        if (showExcluded) {
-          for (const e of scanResult.excluded) {
-            const row = el('div', 'search-all-row');
-            row.append(el('span', 'search-all-name', e.rel_path), el('span', 'search-all-count', e.reason));
-            resultsBox.append(row);
-          }
+      } else {
+        if (!r.excluded.length) rows.append(el('div', 'fb-help', 'Nothing was passed over.'));
+        for (const e of r.excluded) {
+          const row = el('div', 'import-file excluded');
+          const name = el('span', 'import-file-path', e.rel_path);
+          name.title = e.rel_path;
+          const why = el('span', 'import-file-note', e.reason);
+          why.title = e.reason;
+          row.append(name, why);
+          rows.append(row);
         }
       }
+      const total = r.matched.length + r.excluded.length;
+      previewFoot.append(foot(total
+        ? `${r.matched.length.toLocaleString()} of ${total.toLocaleString()} file${total === 1 ? '' : 's'} ${r.matched.length === 1 ? 'matches' : 'match'}.`
+        : 'There are no files in this folder.'));
+      const already = r.matched.filter((m) => m.already_imported).length;
+      const more = [];
+      if (already) more.push(`${already.toLocaleString()} already in the case ${already === 1 ? 'starts' : 'start'} unticked.`);
+      if (r.truncated) more.push(`The scan stopped at the first ${total.toLocaleString()} files: narrow the folder or patterns to see the rest.`);
+      if (more.length) previewFoot.append(foot(more.join(' ')));
+      previewBusy(pending);
     }
 
-    // --- folder row
-    const folderRow = el('div', 'row-actions');
-    const folderLabel = el('span', 'note-status', st.root || 'No folder chosen');
-    folderLabel.style.cssText = 'font-family:var(--mono);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
-    const browseBtn = el('button', 'btn ghost', 'Browse…');
-    browseBtn.onclick = () => {
-      openFolderBrowser(st.root || undefined, (path) => {
-        openDirectoryImportModal({ ...st, root: path });
-      }, () => openDirectoryImportModal(st));
-    };
-    folderRow.append(folderLabel, browseBtn);
-    b.append(folderRow);
-
-    // --- profile row
-    const profileRow = el('div', 'row-actions');
-    const profileSel = el('select');
-    profileSel.style.cssText = 'flex:1;background:var(--ink);color:var(--text);border:1px solid var(--line-2);padding:6px 8px;font:inherit';
-    const customOpt = document.createElement('option');
-    customOpt.value = '';
-    customOpt.textContent = 'Custom (not saved)';
-    profileSel.append(customOpt);
-    for (const p of S.importProfiles) {
-      const opt = document.createElement('option');
-      opt.value = String(p.id);
-      opt.textContent = p.name;
-      profileSel.append(opt);
+    // A tick changes the count, not the list. Nothing imports while the
+    // list on screen is the last answer, dimmed: what it would import is
+    // about to change.
+    function syncCount() {
+      importBtn.disabled = checked.size === 0 || pending;
+      importBtn.textContent = `Import checked (${checked.size})`;
     }
-    profileSel.value = st.profileId ? String(st.profileId) : '';
-    profileSel.onchange = () => {
-      const id = profileSel.value ? Number(profileSel.value) : null;
-      const p = id ? S.importProfiles.find((x) => x.id === id) : null;
-      openDirectoryImportModal({
-        ...st,
-        profileId: id,
-        recursive: p ? p.recursive : true,
-        extensions: (p && p.extensions) || RECOGNIZED_IMPORT_EXTENSIONS.concat(PLASO_IMPORT_EXTENSIONS, pluginExtensions()),
-        includeText: p ? (p.include_patterns || []).join('\n') : '',
-        excludeText: p ? (p.exclude_patterns || []).join('\n') : '',
-      });
-    };
-    profileRow.append(profileSel);
-    if (st.profileId) {
-      const delBtn = el('button', 'btn ghost', 'Delete profile');
-      delBtn.onclick = async () => {
-        const name = S.importProfiles.find((p) => p.id === st.profileId)?.name || 'this profile';
-        if (!(await confirmDialog(`Delete the "${name}" profile?`, { danger: true, okLabel: 'Delete' }))) return;
-        try {
-          await api(`/api/import_profiles/${st.profileId}`, { method: 'DELETE' });
-        } catch (e) { toast(`Could not delete the "${name}" profile: ${e.message}`, 6000); return; }
-        openDirectoryImportModal({ ...st, profileId: null });
-      };
-      profileRow.append(delBtn);
+
+    function syncFolder() {
+      folderPath.textContent = st.root || 'No folder chosen';
+      folderPath.title = st.root || '';
+      folderPath.classList.toggle('unset', !st.root);
     }
-    b.append(profileRow);
 
-    // --- recursive checkbox
-    const recLabel = el('label');
-    recLabel.style.cssText = 'display:block;margin-bottom:10px';
-    const recCb = el('input');
-    recCb.type = 'checkbox';
-    recCb.checked = st.recursive;
-    recCb.onchange = () => { st.recursive = recCb.checked; scheduleScan(); };
-    recLabel.append(recCb, document.createTextNode(' Include subfolders'));
-    b.append(recLabel);
-
-    // --- extension chips
-    b.append(el('label', null, 'File types'));
-    const extRow = el('div', 'row-actions');
-    extRow.style.flexWrap = 'wrap';
-    // '*' is the raw-text catch-all: any other file that isn't binary,
-    // one line per row. Off by default — a triage tree is full of text
-    // nobody wants as a table — and remembered by profiles like an
-    // extension (it rides in the same list).
-    for (const ext of RECOGNIZED_IMPORT_EXTENSIONS.concat(PLASO_IMPORT_EXTENSIONS, pluginExtensions(), ['*'])) {
-      const chip = el('button', 'btn ghost', ext === '*' ? 'other text files' : ext);
-      if (ext === '*') chip.title = 'Any other file that is not binary, imported as raw text — one line per row';
-      chip.setAttribute('aria-pressed', String(st.extensions.includes(ext)));
-      chip.onclick = () => {
-        st.extensions = st.extensions.includes(ext)
-          ? st.extensions.filter((e) => e !== ext)
-          : [...st.extensions, ext];
-        chip.setAttribute('aria-pressed', String(st.extensions.includes(ext)));
-        scheduleScan();
-      };
-      extRow.append(chip);
+    /* ---------------------------------------------- the profile's buttons */
+    // On the bottom row, left of the import: the profile is the last thing
+    // done with a set of choices, the import the first.
+    const saveBtn = el('button', 'btn ghost');
+    const deleteBtn = el('button', 'btn ghost', 'Delete profile');
+    // Delete is in the row only while a profile is chosen — taken out,
+    // not hidden, so the row reads the same to a test as on screen.
+    function syncProfileButtons() {
+      saveBtn.textContent = st.profileId ? 'Update profile' : 'Save as profile…';
+      if (!st.profileId) deleteBtn.remove();
+      else if (!deleteBtn.isConnected) saveBtn.after(deleteBtn);
     }
-    b.append(extRow);
-
-    // --- include/exclude patterns
-    const patRow = el('div', 'row-actions');
-    patRow.style.alignItems = 'stretch';
-    const includeCol = el('div');
-    includeCol.style.cssText = 'flex:1;display:flex;flex-direction:column;gap:4px;min-width:0';
-    includeCol.append(el('label', null, 'Include patterns (blank = every recognized file)'));
-    const includeArea = el('textarea');
-    includeArea.rows = 3;
-    includeArea.spellcheck = false;
-    includeArea.placeholder = 'One glob per line, e.g. *EvtxECmd*';
-    includeArea.value = st.includeText;
-    includeArea.oninput = () => { st.includeText = includeArea.value; scheduleScan(); };
-    includeCol.append(includeArea);
-
-    const excludeCol = el('div');
-    excludeCol.style.cssText = 'flex:1;display:flex;flex-direction:column;gap:4px;min-width:0';
-    excludeCol.append(el('label', null, 'Exclude patterns'));
-    const excludeArea = el('textarea');
-    excludeArea.rows = 3;
-    excludeArea.spellcheck = false;
-    excludeArea.placeholder = 'One glob per line, e.g. *_Amcache_UnassociatedFileEntries.csv';
-    excludeArea.value = st.excludeText;
-    excludeArea.oninput = () => { st.excludeText = excludeArea.value; scheduleScan(); };
-    excludeCol.append(excludeArea);
-
-    patRow.append(includeCol, excludeCol);
-    b.append(patRow);
-
-    // --- save-as-profile (rendered into the bottom row, beside the
-    // import button — it's the last thing done with a set of choices, so
-    // it sits where the choices end rather than between them and the list)
-    const saveBtn = el('button', 'btn ghost', st.profileId ? 'Update profile' : 'Save as profile…');
     saveBtn.onclick = async () => {
-      let name = S.importProfiles.find((p) => p.id === st.profileId)?.name;
+      let name = profileOf(st.profileId)?.name;
       if (!name) {
         name = await promptDialog('Name this profile:', 'KAPE');
         if (!name || !name.trim()) return;
@@ -966,10 +1115,25 @@ export async function openDirectoryImportModal(state = {}) {
         });
       } catch (e) { toast('Could not save profile: ' + e.message, 4000); return; }
       toast(`Saved profile "${rec.name}"`);
-      openDirectoryImportModal({ ...st, profileId: rec.id });
+      await loadImportProfiles();
+      st.profileId = rec.id;
+      side.paint();
+      syncProfileButtons();
     };
-
-    b.append(resultsBox);
+    deleteBtn.onclick = async () => {
+      const id = st.profileId;
+      const name = profileOf(id)?.name || 'this profile';
+      if (!(await confirmDialog(`Delete the "${name}" profile?`, { danger: true, okLabel: 'Delete' }))) return;
+      try {
+        await api(`/api/import_profiles/${id}`, { method: 'DELETE' });
+      } catch (e) { toast(`Could not delete the "${name}" profile: ${e.message}`, 6000); return; }
+      await loadImportProfiles();
+      side.pins.remove(String(id));
+      // What it held stays on screen, as Custom, to tweak or save again.
+      st.profileId = null;
+      side.paint();
+      syncProfileButtons();
+    };
 
     const cancelBtn = el('button', 'btn ghost', 'Cancel');
     cancelBtn.onclick = () => { $('modal').hidden = true; };
@@ -1017,15 +1181,17 @@ export async function openDirectoryImportModal(state = {}) {
       $('modal').hidden = true;
       toast(`Queued ${ok} import${ok === 1 ? '' : 's'}${failed ? ` — ${failed} failed to queue` : ''} — progress in the corner panel`, 4000);
     });
-    // Save-as-profile on the left, the import on the right: the profile
-    // is the last thing done with these choices, the import the first.
     importBtn.style.marginLeft = 'auto';
-    actions.append(saveBtn, importBtn, cancelBtn);
+    actions.append(saveBtn, deleteBtn, importBtn, cancelBtn);
     b.append(actions);
 
+    syncFolder();
+    syncSettings();
+    syncProfileButtons();
+    side.paint();
     renderResults();
     if (st.root) runScan();
-  }, { wide: true });
+  }, { wide: true, tall: true, focus: '.side-search' });
 }
 
 /* Options form for one queued plugin-format file, rendered generically

@@ -396,35 +396,56 @@ into one schema and adds a `.log` chip to folder import. Without it, turn on
 ### Folders and KAPE output
 
 **Import a whole folder…** imports every matching file under a directory — a
-KAPE triage output, an expanded archive.
+KAPE triage output, an expanded archive. The window lists your profiles down
+the left and shows the folder, its settings and what the scan found on the
+right. It stays the same size whatever you pick or the scan finds.
 
-1. **Browse…** to the folder. **Include subfolders** (on) walks the tree.
-2. Pick **File types**. `.csv`, `.tsv`, `.txt`, `.psv`, `.json`, `.jsonl`,
+1. **Browse…** to the folder.
+2. Pick a profile on the left, or stay on **Custom (not saved)** to set
+   things up yourself. A profile fills in everything below it.
+3. Pick **File types**. `.csv`, `.tsv`, `.txt`, `.psv`, `.json`, `.jsonl`,
    `.ndjson`, `.plaso` and any extension an enabled plugin claims are on;
    **other text files** (off) adds every other non-binary file as raw text.
-3. Narrow with **Include patterns** and **Exclude patterns**, one glob per
-   line, case-insensitive. A pattern containing `/` matches the path from the
+   **Include subfolders** (on) walks the tree.
+4. Narrow with **Patterns**: **Include** and **Exclude**, one glob per line,
+   case-insensitive. A pattern containing `/` matches the path from the
    chosen folder (`RegistryHives/*`); one without matches the file name
    anywhere (`*_Amcache_UnassociatedFileEntries.csv`). Include patterns only
    narrow what the file types let through.
-4. Check the preview, which updates as you type: *Will import* with a box per
-   file, and *Excluded* with each reason (`extension`,
-   `no include pattern matched`, `excluded by pattern: …`, `binary`,
-   `unreadable`, `not a regular file`).
-5. **Import checked (N)**.
+5. Check the **Preview**, which updates as you type. **Will import** lists
+   the matches with a box per file; **Excluded** lists the rest with each
+   reason (`extension`, `no include pattern matched`,
+   `excluded by pattern: …`, `binary`, `unreadable`, `not a regular file`).
+   The line under the list counts them.
+6. **Import checked (N)**.
 
 Each table is named after its file. Files in subfolders are filed in table
 folders mirroring the tree and arrive closed — open them from the sidebar —
 so a hundred files don't become a hundred tabs; files at the top level open
-as tabs. A file already imported from that path shows *(already in case)*
+as tabs. A file already imported from that path shows *already in case*
 and starts unticked. Plugin-claimed files use the plugin's default options.
 SQLite files and workbooks are never picked up and archives in the folder are
 not expanded; import those on their own. The scan stops at 5,000 files and
 says so.
 
-**Save as profile…** stores the file types, patterns and subfolder choice
-under a name, for every case on this machine; **Update profile** and
-**Delete profile** manage it.
+**Profiles.** **Save as profile…** stores the file types, patterns and
+subfolder choice under a name, for every case on this machine, and lists it
+under **Profiles**. With a profile chosen, **Update profile** saves your
+changes to it and **Delete profile** removes it; what it held stays on
+screen under **Custom (not saved)**.
+
+**Finding a profile.** Type in the **Search…** box at the top of the list to
+narrow it. A profile is found by its name or by one of its patterns or file
+types, and then says which one under its name: `unassociated` finds a
+profile that excludes `*_Amcache_UnassociatedFileEntries.csv` and shows
+*excludes \*_Amcache_UnassociatedFileEntries.csv*. The arrow keys move through the
+list, and `Enter` in the search box picks the first match. `Esc` clears the
+search; with the search empty, it closes the window.
+
+**Pinning favourites.** Point at a profile and click the ☆ beside it to pin
+it to a **Pinned** section at the top of the list. Click its ✕ to put it
+back. Pins stay in this browser, like the ones in the
+[derived column](Derived-columns.md) list.
 
 ### Plugin formats
 

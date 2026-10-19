@@ -38,7 +38,7 @@ def test_first_non_empty_value_and_the_chips_build_the_param(page, format_detect
     # the dialog over.
     page.locator("#modalBody select[data-role=column]").select_option("Timestamp")
     format_detected()
-    assert page.locator('#modalBody .derived-rail-item[aria-selected="true"]').inner_text() == "First non-empty value"
+    assert page.locator('#modalBody .side-rail-item[aria-selected="true"]').inner_text() == "First non-empty value"
     assert page.locator(".derived-columns .fb-groupby-chip").count() == 2
     page.locator("#modalBody select[data-role=column]").select_option("Host")
     format_detected()

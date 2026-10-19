@@ -19,7 +19,7 @@ GROUPS = ["Time", "Extract", "Decode", "Combine", "Join"]
 
 def _open(page, format_detected, column="CommandLine"):
     page.evaluate("(c) => __winnow.openDerivedColumnModal(c)", column)
-    page.wait_for_selector("#modal:not([hidden]) .derived-rail-item")
+    page.wait_for_selector("#modal:not([hidden]) .side-rail-item")
     format_detected()
 
 
@@ -27,17 +27,17 @@ def _rail(page):
     """The list as it reads: [heading, [entry labels]] per section."""
     return page.evaluate("""() => {
       const out = [];
-      for (const n of document.querySelectorAll('#modalBody .derived-rail-list > *')) {
-        if (n.classList.contains('derived-rail-group')) out.push([n.textContent, []]);
-        else if (n.classList.contains('derived-rail-row'))
-          out[out.length - 1][1].push(n.querySelector('.derived-rail-label').textContent);
+      for (const n of document.querySelectorAll('#modalBody .side-rail-list > *')) {
+        if (n.classList.contains('side-rail-group')) out.push([n.textContent, []]);
+        else if (n.classList.contains('side-rail-row'))
+          out[out.length - 1][1].push(n.querySelector('.side-rail-label').textContent);
       }
       return out;
     }""")
 
 
 def _selected(page):
-    return page.locator('#modalBody .derived-rail-item[aria-selected="true"] .derived-rail-label').inner_text()
+    return page.locator('#modalBody .side-rail-item[aria-selected="true"] .side-rail-label').inner_text()
 
 
 @pytest.fixture
@@ -91,7 +91,7 @@ def test_nothing_in_the_dialog_moves_as_the_choices_change(page, format_detected
     where = """() => {
       const r = (sel) => { const n = document.querySelector(sel); if (!n) return null;
         const b = n.getBoundingClientRect(); return [Math.round(b.left), Math.round(b.top), Math.round(b.width), Math.round(b.height)]; };
-      return { card: r('.modal-card'), list: r('#modalBody .derived-rail-list'),
+      return { card: r('.modal-card'), list: r('#modalBody .side-rail-list'),
                column: r('#modalBody select[data-role=column]'), name: r('#modalBody .derived-name-row'),
                preview: r('#modalBody .derived-preview'),
                // its left and top: the label says how many columns, so its width may change
@@ -119,9 +119,9 @@ def test_nothing_in_the_dialog_moves_as_the_choices_change(page, format_detected
 
 def test_the_search_box_narrows_the_list(page, format_detected, no_pins):
     _open(page, format_detected)
-    search = page.locator("#modalBody .derived-search")
+    search = page.locator("#modalBody .side-search")
     # The dialog opens with the caret in it, so typing searches.
-    assert page.evaluate("() => document.activeElement.classList.contains('derived-search')")
+    assert page.evaluate("() => document.activeElement.classList.contains('side-search')")
     page.keyboard.type("base64")
     assert _rail(page) == [["Decode", ["Base64 decode"]]]
 
@@ -129,13 +129,13 @@ def test_the_search_box_narrows_the_list(page, format_detected, no_pins):
     # which one matched — and picking the hit picks that format.
     search.fill("filetime")
     assert _rail(page) == [["Time", ["Parse a timestamp"]]]
-    hit = page.locator("#modalBody .derived-rail-item")
-    assert hit.locator(".derived-rail-hint").inner_text() == "Windows FILETIME"
+    hit = page.locator("#modalBody .side-rail-item")
+    assert hit.locator(".side-rail-hint").inner_text() == "Windows FILETIME"
     hit.click()
     assert page.locator('#modalBody select[data-role="format"]').input_value() == "windows_filetime"
 
     search.fill("qqqq")   # not "zzzz": the Apache log format describes its offset as +zzzz
-    assert page.locator("#modalBody .derived-rail-empty").inner_text() == "Nothing matches “qqqq”."
+    assert page.locator("#modalBody .side-rail-empty").inner_text() == "Nothing matches “qqqq”."
 
     # Escape clears the search first; only an empty search lets Escape
     # close the dialog.
@@ -147,7 +147,7 @@ def test_the_search_box_narrows_the_list(page, format_detected, no_pins):
 
 def test_the_arrow_keys_walk_the_list(page, format_detected, no_pins):
     _open(page, format_detected)
-    search = page.locator("#modalBody .derived-search")
+    search = page.locator("#modalBody .side-search")
     search.fill("decode")
     search.press("ArrowDown")
     assert _selected(page) == "URL decode"
@@ -155,7 +155,7 @@ def test_the_arrow_keys_walk_the_list(page, format_detected, no_pins):
     assert _selected(page) == "Base64 decode"
     page.keyboard.press("ArrowUp")
     page.keyboard.press("ArrowUp")    # from the top of the list, back to the search box
-    assert page.evaluate("() => document.activeElement.classList.contains('derived-search')")
+    assert page.evaluate("() => document.activeElement.classList.contains('side-search')")
     search.fill("json")
     search.press("Enter")             # Enter takes the first match
     assert _selected(page) == "JSON field"
@@ -163,14 +163,14 @@ def test_the_arrow_keys_walk_the_list(page, format_detected, no_pins):
 
 def test_a_pinned_entry_sits_on_top_and_stays_there(page, format_detected, derive_pick, no_pins):
     _open(page, format_detected)
-    row = page.locator("#modalBody .derived-rail-row", has_text="Regex capture")
+    row = page.locator("#modalBody .side-rail-row", has_text="Regex capture")
     row.hover()
-    row.locator(".derived-rail-pin").click()
+    row.locator(".side-rail-pin").click()
     rail = _rail(page)
     assert rail[0] == ["Pinned", ["Regex capture"]], rail
     # Moved, not copied: it leaves its own group.
     assert dict(rail)["Extract"] == ["JSON field", "XML field"], rail
-    page.locator("#modalBody .derived-rail-row", has_text="URL decode").locator(".derived-rail-pin").click()
+    page.locator("#modalBody .side-rail-row", has_text="URL decode").locator(".side-rail-pin").click()
     assert _rail(page)[0] == ["Pinned", ["Regex capture", "URL decode"]]   # in the order pinned
 
     # Kept for the next time the dialog opens — on this machine.
@@ -178,14 +178,14 @@ def test_a_pinned_entry_sits_on_top_and_stays_there(page, format_detected, deriv
     _open(page, format_detected)
     assert _rail(page)[0] == ["Pinned", ["Regex capture", "URL decode"]]
     # A pinned entry is found by the search like any other.
-    page.locator("#modalBody .derived-search").fill("regex")
+    page.locator("#modalBody .side-search").fill("regex")
     assert _rail(page) == [["Pinned", ["Regex capture"]]]
-    page.locator("#modalBody .derived-search").fill("")
+    page.locator("#modalBody .side-search").fill("")
 
     # ✕ puts it back where it came from.
-    pinned = page.locator("#modalBody .derived-rail-row", has_text="Regex capture")
-    assert pinned.locator(".derived-rail-pin").inner_text() == "✕"
-    pinned.locator(".derived-rail-pin").click()
+    pinned = page.locator("#modalBody .side-rail-row", has_text="Regex capture")
+    assert pinned.locator(".side-rail-pin").inner_text() == "✕"
+    pinned.locator(".side-rail-pin").click()
     rail = _rail(page)
     assert rail[0] == ["Pinned", ["URL decode"]], rail
     assert dict(rail)["Extract"] == ["JSON field", "XML field", "Regex capture"], rail

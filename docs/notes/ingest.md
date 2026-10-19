@@ -238,7 +238,12 @@ see [docs/notes/README.md](README.md) for the whole set.
   async work via inner handlers) — `S.importProfiles`, unlike
   `S.savedFilters`/`S.tags`/etc., has no earlier source-open-triggered load
   point to piggyback on, so it just awaits a fresh copy before building the
-  profile `<select>` at all.
+  profile list at all. The dialog is the derive dialog's frame (`sideRail`,
+  `.side-*`; see ui.md): the profiles down the left, and a pick fills the
+  settings in place rather than reopening the dialog, so the list keeps
+  the focus and the arrow keys can walk it. Only Browse… still reopens it,
+  because the folder browser borrows the modal — that round trip is what
+  `state` carries.
 - **Raw text is the catch-all importer, and it is a different reader.**
   `Store.ingest_text` (kind `text`): one row per physical line, the whole
   line in the one `Message` column (`TEXT_COLUMN`), no header, nothing

@@ -1048,6 +1048,40 @@ see [docs/notes/README.md](README.md) for the whole set.
     The keymap already ignores everything but Escape and the opening key
     while a dialog is up, so the arrows never reach the grid behind it.
   `tests/ui/test_settings_two_pane.py`.
+- **A side-list dialog is one frame, shared** (`sideRail` in ui.js, the
+  `.side-*` rules in style.css): what to choose down the left under a
+  search box, pinned favourites on top, everything about the choice on
+  the right, the buttons under both. Add derived column and Import a
+  folder are the two. Decisions held in common:
+  - **Fixed height, top-anchored.** `.side-panes` is one height and the
+    card is `.tall`; on the right, exactly one box takes what is left and
+    scrolls (the derive settings, the folder import's file list) and
+    everything else is a fixed size. Both dialogs were centred columns
+    sized to their content, so every choice slid the header; each has a
+    test that walks its choices and asserts nothing moved
+    (test_derived_op_groups.py, test_import_side_list.py). A control
+    added to either goes inside its scrolling box, or the jump is back.
+  - **The rail repaints; the choice syncs.** `paint()` rebuilds the rows
+    (search, pin, a list that changed) and puts the focus back where it
+    was; a pick only calls `sync()`, so the row that was clicked or
+    arrowed to keeps the focus. The caller owns the choice
+    (`selected()`/`onPick`), so the rail holds no state of its own.
+  - **A search hit can name what it matched** (`match` returns
+    `{hint}`): a timestamp format, a profile's pattern. An entry found by
+    its own name shows no hint.
+  - **Pins are `menuPins(key)`** ('derive', 'import'), per browser like
+    the row menu's. A pin whose entry is gone shows nothing; the folder
+    import also drops a deleted profile's pin when it deletes one,
+    because profile ids are max+1 (`workspace._next_id`) — delete the
+    newest profile and the next one saved gets its id, and would arrive
+    already pinned. A profile deleted from another browser can still
+    leave that pin behind; it is one row, and unpinning fixes it.
+  - **The preview keeps its last answer, dimmed** (`.side-preview.stale`,
+    `aria-busy`), with the verdict in a fixed-height footer — so a test
+    waits for `aria-busy="false"`, not for rows.
+  - **No `labeledRow` around buttons.** It is a `<label>`, which passes a
+    click anywhere on it to its first control: Browse… or the `.csv` chip
+    in the folder import. Those rows are a `div.derived-row`.
 - **Appearance is the look; Grid & layout and Remote session took the
   rest.** The always-on filter row, Pages as a dropdown and the autofit
   limit change what is on screen and where, not how it looks, so they are
