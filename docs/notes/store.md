@@ -405,6 +405,16 @@ see [docs/notes/README.md](README.md) for the whole set.
   name. Every merge read goes through `_member_from`,
   `_member_join_target`, `_member_rows_from` or `merge_select_list`;
   nothing may write a merge column into a member table directly.
+  A member's *derived* column is never its copy of a merge *file* column
+  of the same name (`_member_column`, shared by `_member_projection`,
+  `merge_select_list` and the missing-columns count): that member reads
+  it as NULL. Matching
+  on name alone made such a member look already-shaped, so it was read
+  as its bare table — no sidecar — and every build of the merge failed
+  with "no such column"; with the From table column on, the projection
+  instead showed the analyst's derived values as the other member's
+  evidence. `_member_read_src` drops the shadowed derived column too, or
+  the timeframe takes the member as having that column and reads NULL.
   `_ensure_purpose_index_building` builds under the member's own spelling
   (`_table_own_spelling`) and skips a member that lacks the column. A
   derived column is the exception that still needs every member: one is

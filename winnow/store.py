@@ -1130,30 +1130,65 @@ def _ascii_fold(name: str) -> str:
     return name.translate(_ASCII_FOLD)
 
 
-def _rename_in_layout(payload: dict, olds: set[str], new: str) -> bool:
+def _member_column(member_src: dict, column: dict) -> str | None:
+    """The member's own name for one of a merge's columns (matched by
+    _col_key), or None when it has none. A file column and a derived one
+    are never the same column, whatever their names: _merge_columns
+    matches file columns across members and exposes a derived one only
+    when every member derives it, so a member whose "Host" is derived,
+    beside another member's "Host" read from its file, lacks the merge's
+    "Host" — showing the two as one would put the analyst's own values
+    in a column of evidence under the evidence's name (the same reason a
+    rename on the merge refuses that name). Before this, the member was
+    read as its bare table and every build of the merge failed with
+    "no such column"."""
+    key = _col_key(column["name"])
+    for c in member_src["columns"]:
+        if _col_key(c["name"]) == key:
+            return c["name"] if bool(c.get("derived")) == bool(column.get("derived")) else None
+    return None
+
+
+def _rename_in_layout(payload: dict, olds: set[str], new: str, new_is_live: bool = False) -> bool:
     """A saved layout (columns.js saveLayout's payload) with a renamed
     column's entries moved to its new name: its per-column settings, its
     place in the order and any sort on it. `olds` are the old names
     _ascii_fold-ed. An entry already under the new name is a leftover of
     a column that is gone (the rename was checked against every column
     the table has), so the renamed column's own settings replace it.
+
+    Except on a merge with a member the rename didn't touch that has a
+    column of the new name (`new_is_live`): that column is still there,
+    so its entries are the ones kept, and any the renamed column had go.
     True when anything changed."""
     def renamed(n):
         return isinstance(n, str) and _ascii_fold(n) in olds
 
-    def stale(n):
+    def is_new(n):
         return isinstance(n, str) and _ascii_fold(n) == _ascii_fold(new) and not renamed(n)
+
+    def kept(names):
+        # Which of two entries for the one column survives.
+        if new_is_live and any(is_new(n) for n in names):
+            return lambda n: not renamed(n)
+        return lambda n: not is_new(n)
 
     before = json.dumps(payload, sort_keys=True)
     cols = payload.get("columns")
     if isinstance(cols, dict):
-        payload["columns"] = {(new if renamed(k) else k): v for k, v in cols.items() if not stale(k)}
+        keep = kept(cols)
+        payload["columns"] = {(new if renamed(k) else k): v for k, v in cols.items() if keep(k)}
     order = payload.get("order")
     if isinstance(order, list):
-        payload["order"] = [new if renamed(n) else n for n in order if not stale(n)]
-    for s in payload.get("sort") or []:
-        if isinstance(s, dict) and renamed(s.get("column")):
-            s["column"] = new
+        keep = kept(order)
+        payload["order"] = [new if renamed(n) else n for n in order if keep(n)]
+    sort = payload.get("sort")
+    if isinstance(sort, list):
+        if new_is_live and any(isinstance(x, dict) and is_new(x.get("column")) for x in sort):
+            payload["sort"] = sort = [x for x in sort if not (isinstance(x, dict) and renamed(x.get("column")))]
+        for x in sort:
+            if isinstance(x, dict) and renamed(x.get("column")):
+                x["column"] = new
     return json.dumps(payload, sort_keys=True) != before
 
 
@@ -6138,9 +6173,8 @@ class Store:
         return cols
 
     def _member_missing_columns(self, row: sqlite3.Row, members: list[dict], member: dict) -> list[str]:
-        have = {_col_key(c["name"]) for c in member["columns"]}
         return [c["name"] for c in self._merge_columns(row, members)
-                if not c.get("source_column") and _col_key(c["name"]) not in have]
+                if not c.get("source_column") and _member_column(member, c) is None]
 
     @staticmethod
     def _member_projection(merge_src: dict, msrc: dict) -> list[str] | None:
@@ -6155,10 +6189,11 @@ class Store:
         column is the member's label as a constant. The member's own
         columns the merge doesn't expose (col_mode 'shared') are kept too,
         so the search blob — always the member's own base columns — still
-        resolves inside the projection."""
-        have: dict[str, str] = {}
-        for c in msrc["columns"]:
-            have.setdefault(_col_key(c["name"]), c["name"])
+        resolves inside the projection.
+
+        A member's derived column is not its copy of a file column another
+        member has under the same name (_member_column): that member lacks
+        the merge's column like any other, and reads it as NULL."""
         exprs: list[str] = []
         plain = True
         used: set[str] = set()
@@ -6168,7 +6203,7 @@ class Store:
                 exprs.append(f"{_sql_text_literal(msrc.get('nickname') or msrc['name'])} AS {q(name)}")
                 plain = False
                 continue
-            actual = have.get(_col_key(name))
+            actual = _member_column(msrc, c)
             if actual is None:
                 exprs.append(f"NULL AS {q(name)}")
                 plain = False
@@ -6197,10 +6232,19 @@ class Store:
         # where a column only some members have would be "Unknown".
         if self._member_projection(merge_src, msrc) is None:
             return {**msrc, "merge_id": merge_src["id"]}
-        rename = {_col_key(c["name"]): c["name"] for c in merge_src["columns"] if not c.get("source_column")}
-        return {**msrc, "merge_id": merge_src["id"],
-                "columns": [{**c, "name": rename.get(_col_key(c["name"]), c["name"])}
-                            for c in msrc["columns"]]}
+        rename = {_col_key(c["name"]): c for c in merge_src["columns"] if not c.get("source_column")}
+        columns = []
+        for c in msrc["columns"]:
+            mc = rename.get(_col_key(c["name"]))
+            if mc is None:
+                columns.append(c)
+            elif _member_column(msrc, mc) is not None:
+                columns.append({**c, "name": mc["name"]})
+            # Otherwise a derived column under the name of the merge's file
+            # column, which is not the member's copy of it (_member_column):
+            # left in, the timeframe would take the member as having that
+            # column and read the projection's NULL.
+        return {**msrc, "merge_id": merge_src["id"], "columns": columns}
 
     def _member_ref_src(self, merge_src: dict, msrc: dict) -> dict:
         """The src dict to resolve a merge's column references against for
@@ -7067,6 +7111,7 @@ class Store:
         olds = {_ascii_fold(d["name"]) for d in scope}
         renamed_on = {d["source_id"] for d in scope}
         layout_ids = set(renamed_on)
+        live_new: set[int] = set()
         for mid in {m["id"] for d in scope for m in self.merges_using(d["source_id"])}:
             try:
                 members = [m["source_id"] for m in self._resolve_members(-mid)]
@@ -7076,6 +7121,10 @@ class Store:
                                                 for c in self._source_lite(sid)["columns"])
                    for sid in members):
                 layout_ids.add(-mid)
+                if any(sid not in renamed_on and any(_ascii_fold(c["name"]) == _ascii_fold(new)
+                                                     for c in self._source_lite(sid)["columns"])
+                       for sid in members):
+                    live_new.add(-mid)
         labels = {d["id"]: self._member_label(d, scope) for d in scope}
         with self.lock:
             self.db.execute("BEGIN IMMEDIATE")
@@ -7113,7 +7162,7 @@ class Store:
                     if not row:
                         continue
                     payload = json.loads(row[0])
-                    if _rename_in_layout(payload, olds, new):
+                    if _rename_in_layout(payload, olds, new, sid in live_new):
                         self.db.execute("UPDATE layouts SET payload=? WHERE source_id=?",
                                         (json.dumps(payload), sid))
                 self.db.commit()
@@ -15682,12 +15731,10 @@ class Store:
         positional, so a member lacking a column pads it with NULL, and the
         source column is the member's label. Public: the bundled plugins
         build their merge scopes with it."""
-        own = {_col_key(c["name"]): c["name"] for c in member_src["columns"]}
-
         def _cell(c: dict) -> str:
             if c.get("source_column"):
                 return f"{_sql_text_literal(member_src.get('nickname') or member_src['name'])} AS {q(c['name'])}"
-            actual = own.get(_col_key(c["name"]))
+            actual = _member_column(member_src, c)
             if actual is None:
                 return f"NULL AS {q(c['name'])}"
             return f"{self._col_ref(member_src, actual, 's', 'd')} AS {q(c['name'])}"
