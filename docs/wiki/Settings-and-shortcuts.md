@@ -294,8 +294,9 @@ the case's setting, which beats this one. A case sets its own under
 ## Default tags for new cases
 
 The tag set every new case starts with. Each row is a colour, a name, a
-one-character key and **✕** to remove it; **+ tag** adds a row. Every change
-is saved as you make it, the same way as in the tag editor (see
+one-character key and **✕** to remove it; **+ tag** adds a row, with the first
+free key and colour picked the way **Add tag** picks them. Every change is
+saved as you make it, the same way as in the tag editor (see
 [Editing tags](Tagging-and-notes.md#editing-tags)). Winnow ships with three:
 
 | Tag | Key | Colour |
