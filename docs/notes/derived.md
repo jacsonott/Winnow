@@ -87,6 +87,36 @@ see [docs/notes/README.md](README.md) for the whole set.
   started on the first column whatever it was, and now starts on the
   first that looks like a timestamp (`defaultParseColumn` in derived.js).
 
+- **The add dialog is a fixed frame; its content never sizes it**
+  (`openDerivedColumnModal`, `.derived-panes`). It was a column of rows
+  in a centred card: picking a type rebuilt the operation list, an
+  operation rebuilt its parameters, the preview emptied to "Checking…"
+  and refilled, and each of those changed the card's height, so the card
+  re-centred and its header slid (1,860px of header travel over one walk
+  through the choices, in a replica built to measure it). Now the card is `.tall` (top
+  anchored), the two panes are one fixed height, and every part of the
+  right pane is fixed except `.derived-settings`, which takes what is
+  left and scrolls. Three details hold that: the preview keeps its last
+  answer on screen, dimmed (`.stale`, `aria-busy="true"`), instead of
+  emptying; the verdict sits in a footer of fixed height; and the name
+  row hides its input with `visibility` (`.by-group`) when a regex's
+  named groups take over, so the row keeps its height. A new control in
+  the dialog goes inside `.derived-settings`, or it brings the jump
+  back. test_derived_op_groups.py measures the frame through every
+  entry. Because the preview can now be stale, a test that waits for
+  `.derived-preview-row` alone can read the previous answer's rows; wait
+  on the `derive_preview` fixture (aria-busy false) instead.
+
+- **The timestamp formats are one side-list entry; detection only fills
+  in its Format** (`deriveEntries`, `TIMESTAMP_ENTRY`). Detection runs on
+  every column change and is cached per column, but it picks the format
+  only while "Parse a timestamp" is chosen and the analyst hasn't picked
+  one by hand since the column changed (`formatTouched`) — it used to be
+  able to move the Type select out from under a half-built Combine.
+  `data-detected` on the modal body is the test hook for "the answer is
+  in". The side list's pins are `menuPins('derive')`, the row menu's
+  store, so they are per browser like every other pin.
+
 - **A regex derive addresses its group by NAME where the pattern names
   one.** `regex_extract` takes `group_name` alongside the numbered
   `group`, and the name wins. This is not a nicety: a pattern gets edited
@@ -145,7 +175,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   `size` must stay positional, since a column per file name would fill
   the picker with one-row fields.
 - **URL decode keeps what it cannot decode, escape by escape**
-  (`decode.py`, family `"decode"`, its own type in the modal). A run of
+  (`decode.py`, family `"decode"`, its own group in the modal's list). A run of
   `%XX` escapes is decoded as UTF-8 together, since one character spans
   several, and a byte that is not part of valid UTF-8 is written back as
   the escape the cell held, hex case included. Not U+FFFD: Latin-1's

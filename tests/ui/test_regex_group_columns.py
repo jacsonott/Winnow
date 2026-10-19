@@ -23,22 +23,7 @@ PATTERN = r"^(?P<exe>\S+) -Enc (?P<payload>\S+)"
 def _open_regex_derive(page):
     page.evaluate("() => __winnow.openDerivedColumnModal('CommandLine')")
     page.wait_for_selector("#modal:not([hidden])")
-    # Type → Extract part of a value, Operation → Regex capture.
-    page.wait_for_function("() => document.querySelectorAll('#modalBody select').length >= 3")
-    page.evaluate("""() => {
-      const sels = [...document.querySelectorAll('#modalBody select')];
-      const type = sels[0];
-      type.value = [...type.options].find((o) => o.value.startsWith('Extract')).value;
-      type.dispatchEvent(new Event('change'));
-    }""")
-    page.wait_for_function("""() => [...document.querySelectorAll('#modalBody select')]
-      .some((s) => [...s.options].some((o) => o.value === 'regex_extract'))""")
-    page.evaluate("""() => {
-      const op = [...document.querySelectorAll('#modalBody select')]
-        .find((s) => [...s.options].some((o) => o.value === 'regex_extract'));
-      op.value = 'regex_extract';
-      op.dispatchEvent(new Event('change'));
-    }""")
+    page.locator('#modalBody .derived-rail-item[data-key="regex_extract"]').click()
     page.wait_for_selector("#modalBody .derived-params input", timeout=10_000)
 
 
@@ -67,10 +52,12 @@ def test_a_named_pattern_offers_one_column_per_group(page):
         names = page.evaluate("""() => [...document.querySelectorAll('#modalBody .derived-group-name')]
           .map((i) => i.value)""")
         assert names == ["exe", "payload"]
-        # The button counts them, and the one-column name field steps aside.
+        # The button counts them, and the one-column name field steps aside
+        # for a line saying why.
         go = page.locator("#modalBody .row-actions .btn").first
         assert go.inner_text() == "Add 2 columns"
         assert page.locator("#modalBody .derived-name").is_hidden()
+        assert page.locator("#modalBody .derived-name-aside").is_visible()
     finally:
         page.keyboard.press("Escape")
 
@@ -85,6 +72,7 @@ def test_unticking_the_groups_puts_the_single_column_back(page):
         go = page.locator("#modalBody .row-actions .btn").first
         assert go.inner_text() == "Add column"
         assert page.locator("#modalBody .derived-name").is_visible()
+        assert page.locator("#modalBody .derived-name-aside").is_hidden()
     finally:
         page.keyboard.press("Escape")
 

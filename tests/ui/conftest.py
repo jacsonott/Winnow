@@ -23,6 +23,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import time
 import urllib.request
 from pathlib import Path
@@ -630,14 +631,47 @@ def layout_saved(page, api, until):
 def format_detected(page):
     """Wait for the Add derived column dialog's format detection to
     answer, and return what it said. Opening the dialog and changing its
-    column each ask the server; the answer can move Type and Operation
+    column each ask the server; the answer can pick the timestamp format
     and rebuilds the parameters, so a test that goes on before it lands
-    can have its choices redrawn under it, or check a Type the answer
-    hasn't had a chance to move yet."""
+    can have its choices redrawn under it. The dialog copies the note's
+    text onto the body as data-detected once the answer is in, and
+    clears it while a new one is on its way."""
     def _wait():
         return page.wait_for_function(
-            "() => { const n = document.querySelector('#modalBody .fb-help');"
-            " return n && n.textContent && n.textContent !== 'Detecting format…' && n.textContent; }").json_value()
+            "() => { const b = document.getElementById('modalBody');"
+            " return (b && b.dataset.detected) || false; }").json_value()
+    return _wait
+
+
+@pytest.fixture
+def derive_pick(page):
+    """derive_pick(entry, fmt=None): choose what to make in the Add
+    derived column dialog — click `entry` (its label, as the side list
+    shows it: "Regex capture", "Parse a timestamp") and, for the
+    timestamp entry, pick `fmt` (a format's label) from the Format list.
+    Clicked rather than set, so a list that stopped answering clicks
+    fails here."""
+    def _pick(entry, fmt=None):
+        item = page.locator("#modalBody .derived-rail-item", has=page.locator(
+            ".derived-rail-label", has_text=re.compile("^" + re.escape(entry) + "$")))
+        item.click()
+        page.wait_for_selector(f'#modalBody .derived-rail-item[aria-selected="true"] >> text="{entry}"')
+        if fmt is not None:
+            page.locator('#modalBody select[data-role="format"]').select_option(label=fmt)
+    return _pick
+
+
+@pytest.fixture
+def derive_preview(page):
+    """Wait for the Add derived column dialog's preview to show the
+    answer to the latest change, and return its text. While a request is
+    on its way the previous answer stays on screen (dimmed, aria-busy),
+    so waiting for .derived-preview-row alone can return the stale rows."""
+    def _wait(timeout=15_000):
+        page.wait_for_function(
+            "() => { const p = document.querySelector('#modalBody .derived-preview');"
+            " return !!p && p.getAttribute('aria-busy') === 'false'; }", timeout=timeout)
+        return page.locator("#modalBody .derived-preview").inner_text()
     return _wait
 
 

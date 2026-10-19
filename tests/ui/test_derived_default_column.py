@@ -40,16 +40,17 @@ def test_opened_from_the_table_it_starts_on_the_timestamp(page, evtx_table, form
     assert "Mac absolute" not in format_detected()
 
 
-def test_a_counter_gets_no_confident_guess_but_can_still_be_converted(page, evtx_table, format_detected):
+def test_a_counter_gets_no_confident_guess_but_can_still_be_converted(page, evtx_table, format_detected,
+                                                                      derive_pick, derive_preview):
     page.evaluate("() => __winnow.openDerivedColumnModal('RecordNumber')")
     page.wait_for_selector("#modalBody select[data-role=column]")
     note = format_detected()
-    assert note == "No format detected — pick one below to see what it produces.", note
+    assert note == "No format detected — pick one to see what it produces.", note
     # The analyst's own choice still stands: picked by hand, Mac time reads
     # every value and the preview says so.
-    page.locator("#modalBody select[data-role=op]").select_option(label="Mac absolute (Cocoa) time")
-    page.wait_for_function(
-        "() => (document.querySelector('#modalBody .derived-verdict') || {}).textContent?.startsWith('All ')")
+    derive_pick("Parse a timestamp", "Mac absolute (Cocoa) time")
+    derive_preview()
+    assert page.locator("#modalBody .derived-verdict").inner_text().startswith("All ")
     assert page.locator("#modalBody .derived-out").first.inner_text() == "2001-01-01 00:00:01"
     assert page.locator("#modalBody .btn.primary", has_text="Add column").is_enabled()
 

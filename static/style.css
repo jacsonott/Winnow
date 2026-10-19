@@ -2763,6 +2763,10 @@ textarea:focus { border-color: var(--accent); outline: none; }
   border: 1px solid var(--line-2); border-radius: var(--radius-sm); padding: 5px 8px; font: inherit;
 }
 .derived-param-help { flex: 1; min-width: 0; margin: 0; }
+.derived-param.derived-param-wrap { align-items: flex-start; flex-wrap: wrap; }
+.derived-param.derived-param-wrap .derived-param-label { padding-top: 4px; }
+.derived-param.derived-param-wrap .derived-param-help { flex-basis: 100%; padding-left: 160px; }
+.derived-param-wrap .derived-columns { flex: 1; min-width: 0; }
 /* "A column per named group" — one row per (?P<name>…) the pattern
    declares: tick it, name the column it becomes, and see what it would
    pull out of the sampled values. A grid rather than a flex row so the
@@ -2789,21 +2793,108 @@ textarea:focus { border-color: var(--accent); outline: none; }
 
 /* The scope buttons sit on this line, so it becomes a row. */
 .derived-preview-title {
-  font-size: 12px; color: var(--text-dim); margin-top: 12px;
+  font-size: 12px; color: var(--text-dim); margin-top: 4px;
   display: flex; align-items: center; gap: 10px;
 }
 .derived-scope { margin-left: auto; }
+/* A fixed height, rows scrolling above a verdict line that stays put. */
 .derived-preview {
   border: 1px solid var(--line); border-radius: var(--radius-sm);
-  padding: 8px 10px; margin-top: 4px; max-height: 240px; overflow: auto;
+  margin-top: 4px; height: 168px; display: flex; flex-direction: column; overflow: hidden;
 }
+.derived-preview-rows { flex: 1 1 0; min-height: 0; overflow: auto; padding: 8px 10px 4px; }
+.derived-preview-rows > .fb-help { margin: 0; }
+/* Two lines' room whether it holds one or two, each line cut short
+   rather than wrapped (the whole sentence is in its title). */
+.derived-preview-foot {
+  flex: 0 0 auto; height: 40px; padding: 3px 10px; border-top: 1px solid var(--line);
+  display: flex; flex-direction: column; justify-content: center; overflow: hidden;
+}
+.derived-preview-foot .fb-help { margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* The last answer stays on screen, dimmed, while the next is on its way. */
+.derived-preview.stale .derived-preview-rows,
+.derived-preview.stale .derived-preview-foot { opacity: .45; transition: opacity 120ms ease; }
 .derived-preview-row { display: flex; align-items: baseline; gap: 8px; font-family: var(--mono); font-size: 11px; }
 .derived-in { flex: 0 1 auto; max-width: 45%; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .derived-arrow { flex: 0 0 auto; color: var(--text-dim); }
 .derived-out { flex: 1 1 auto; min-width: 0; }
 .derived-out.bad, .fb-help.bad { color: var(--danger, #c0392b); }
-.derived-verdict { margin: 8px 0 0; }
 .derived-name { font-family: var(--mono); }
+
+/* The dialog's two panes: what to make on the left, its settings and
+   preview on the right. The frame is a FIXED height, like
+   .settings-panes, and so is every part of the right pane except the
+   settings box, which takes whatever is left and scrolls — so choosing a
+   different entry, a format with more settings, or a regex whose named
+   groups appear changes what is inside the boxes and moves none of them.
+   It used to be a column of rows sized to its content and centred, so
+   each of those resized the card and slid its header. The calc keeps the
+   card inside .tall's 82vh with the head, the buttons and the padding. */
+.derived-panes {
+  display: grid; grid-template-columns: 220px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr);
+  gap: 14px; height: max(400px, min(600px, calc(82vh - 130px)));
+}
+.derived-rail {
+  min-height: 0; display: flex; flex-direction: column; gap: 6px;
+  border-right: 1px solid var(--line); padding-right: 10px;
+}
+.derived-search {
+  flex: 0 0 auto; background: var(--ink); color: var(--text);
+  border: 1px solid var(--line-2); border-radius: var(--radius-sm); padding: 5px 8px; font: inherit; font-size: 12px;
+}
+.derived-search:focus { border-color: var(--accent); outline: none; }
+.derived-rail-list { flex: 1 1 0; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 1px; }
+.derived-rail-group {
+  flex: 0 0 auto; padding: 10px 8px 3px;
+  font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--dim);
+}
+.derived-rail-group:first-child { padding-top: 2px; }
+/* The Settings dialog's section list, item for item, plus a pin. */
+.derived-rail-row { flex: 0 0 auto; display: flex; align-items: stretch; border-radius: var(--radius-sm); }
+.derived-rail-row:hover { background: var(--panel-2); }
+.derived-rail-item {
+  flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px;
+  text-align: left; background: none; border: 0; border-radius: var(--radius-sm);
+  padding: 5px 8px; font: inherit; font-size: 12px; color: var(--text); cursor: pointer;
+}
+.derived-rail-item[aria-selected="true"] { background: var(--panel-2); box-shadow: inset 2px 0 0 var(--accent); }
+.derived-rail-item:disabled { color: var(--dim); cursor: default; }
+/* Drawn inside the item: the list is a scroller and clips the global ring. */
+.derived-rail-item:focus-visible, .derived-rail-pin:focus-visible { outline-offset: -2px; }
+.derived-rail-hint { font-size: 11px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Out of the way until wanted — on the row under the pointer, the row
+   with focus, and the chosen row, which is where pinning is found. */
+.derived-rail-pin {
+  flex: 0 0 auto; background: none; border: 0; border-radius: var(--radius-sm);
+  color: var(--dim); font: inherit; font-size: 11px; padding: 0 7px; cursor: pointer; opacity: 0;
+}
+.derived-rail-row:hover .derived-rail-pin, .derived-rail-row:focus-within .derived-rail-pin,
+.derived-rail-row.selected .derived-rail-pin { opacity: 1; }
+.derived-rail-pin:hover { color: var(--text); }
+.derived-rail-empty { padding: 8px; font-size: 12px; color: var(--dim); }
+.derived-pane { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.derived-pane > * { flex: 0 0 auto; }
+.derived-pane > .derived-row:first-child { margin-top: 0; }
+.derived-settings {
+  flex: 1 1 0; min-height: 0; overflow: auto; position: relative;
+  margin: 4px 0; padding: 8px 4px 4px 0;
+  border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
+}
+/* A shadow along the bottom edge while more settings sit below it. */
+.derived-settings.more { box-shadow: inset 0 -16px 14px -14px color-mix(in srgb, var(--text) 35%, transparent); }
+.derived-settings > .derived-row:first-child { margin-top: 0; }
+.derived-settings .derived-params { margin: 0 0 6px; }
+.derived-detect { margin: -4px 0 8px 160px; }
+.derived-desc { margin: 0 0 6px; font-size: 12px; line-height: 1.45; color: var(--dim); }
+/* While a regex's named groups stand in for the one column, the field
+   keeps its room (hidden, not removed) and a line over it says why. */
+.derived-name-row { position: relative; }
+.derived-name-aside {
+  display: none; position: absolute; left: 160px; right: 0; top: 50%; transform: translateY(-50%);
+  font-size: 12px; font-style: italic; color: var(--dim);
+}
+.derived-name-row.by-group .derived-name { visibility: hidden; }
+.derived-name-row.by-group .derived-name-aside { display: block; }
 
 /* Shown while dragging OS files over the window (wireFileDrop in app.js) —
    above .modal's own z-index so it's visible even if a modal happens to be
