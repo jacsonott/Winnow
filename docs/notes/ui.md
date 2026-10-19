@@ -1901,6 +1901,27 @@ see [docs/notes/README.md](README.md) for the whole set.
   tags to have come along, or the subset's to appear on the parent, and
   the tooltip is where both expectations get corrected.
 
+- **The note box is ahead of the server while a save is pending, and
+  `showDetail` must not undo that** (detail.js `keepsUnsavedNote`,
+  `flushNoteSave`, `writeNote`). The box saves 500 ms after the last
+  keystroke, so every row object a fetch brings back in that window (and
+  while the POST is out) has the old note. `showDetail` is not only a
+  cursor move: `ensurePage` re-shows the cursor row whenever a visible
+  page lands, and anything that clears the row caches makes one land — a
+  derived column finishing, an import, a tag written elsewhere — so
+  setting the box to `r.note` there emptied it mid-sentence and the rest
+  of the sentence was then saved alone. The box keeps its text when it is
+  already bound to that row (`dataset.rid`/`sourceId`) and `noteUnsaved`
+  is set — on a keystroke, cleared only when a save of exactly what the
+  box holds, for the row it is bound to, has come back. Not on focus:
+  a box with focus and nothing typed should still show a note a session
+  load or another window wrote. Any other row takes the box over, and
+  the save still pending for the row being left is **flushed before the
+  rebind**: it reads its row when it fires, so a cursor move inside the
+  500 ms used to post the new row's own note back to it and drop what
+  was typed on the old one. "Saved" only appears when the box still holds
+  what that save carried. tests/ui/test_detail_note_autosave.py.
+
 - **The detail pane's field list is a two-column read, and reads like
   one.** The names are painted as the column writes them; the uppercasing
   they used to get from CSS cost a beat per field in a list of forty (the

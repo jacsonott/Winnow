@@ -1,7 +1,7 @@
 /* The detail pane, its notes field, and the JSON/XML pretty-printing in it.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
-import { $, debounce, el, post, toast } from './core.js';
+import { $, el, post, toast } from './core.js';
 import { addExtractedColumn, openFlattenModal, quotePredicate } from './derived.js';
 import { ellipsize, setColumnFilter, setSearchMode } from './filters.js';
 import { clearPageCache, render, rowAt } from './grid.js';
@@ -761,7 +761,9 @@ export function showDetail(pos) {
     dl.append(dd);
   });
   const note = $('noteInput');
-  note.value = r.note || '';
+  // r.note is the server's copy, which is behind the box while a save is
+  // pending — see keepsUnsavedNote.
+  if (!keepsUnsavedNote(note, r)) note.value = r.note || '';
   note.dataset.rid = r.rid;
   note.dataset.sourceId = r.source_id;
   $('noteStatus').textContent = '';
@@ -898,12 +900,65 @@ export async function searchForText(text) {
   toast(`Searching for ${ellipsize(value)}`);
 }
 
-export const saveNote = debounce(async () => {
+/* The note box saves 500 ms after the last keystroke, so for that long —
+   and for as long as the POST then takes — the box is ahead of the
+   server, and so of every row object a page fetch brings back. Two things
+   follow, both in showDetail (keepsUnsavedNote):
+
+   - a page that lands while the analyst types re-shows the same row
+     (grid.js ensurePage, after anything that clears the row caches: a
+     derived column finishing, an import, a tag written elsewhere), and
+     setting the box to that row's `note` threw away what was typed since
+     the last save — mid-sentence, and the rest of the sentence was then
+     saved on its own. `noteUnsaved` is what says the box is ahead: set on
+     a keystroke, cleared only once a save of exactly what the box holds,
+     for the row it is bound to, has come back.
+   - a cursor move rebinds the box to another row, and a save still
+     waiting out its delay read the binding when it fired: it posted the
+     new row's own note back to it, and what was typed on the old row in
+     the last half second was lost. flushNoteSave sends it first, against
+     the row it was typed on. */
+let noteSaveTimer = null;
+let noteUnsaved = false;
+
+export function saveNote() {
+  noteUnsaved = true;
+  clearTimeout(noteSaveTimer);
+  noteSaveTimer = setTimeout(writeNote, 500);
+}
+
+export function flushNoteSave() {
+  if (noteSaveTimer === null) return;
+  clearTimeout(noteSaveTimer);
+  writeNote();
+}
+
+/* Whether showDetail should leave the note box's text alone for row `r`:
+   only when the box is already that row's and holds typing the server
+   hasn't confirmed. Any other row takes the box over, so a save still
+   pending for the row it is leaving goes now, before the rebind. */
+export function keepsUnsavedNote(note, r) {
+  if (note.dataset.rid === String(r.rid) && note.dataset.sourceId === String(r.source_id)) return noteUnsaved;
+  flushNoteSave();
+  noteUnsaved = false;
+  return false;
+}
+
+export async function writeNote() {
+  noteSaveTimer = null;
   const note = $('noteInput');
   const rid = Number(note.dataset.rid);
   const sourceId = Number(note.dataset.sourceId);
   if (!rid) return;
-  await post('/api/note', { source_id: sourceId, rid, note: note.value });
+  const value = note.value;
+  await post('/api/note', { source_id: sourceId, rid, note: value });
+  // Still this row's box, holding what was just saved: nothing is pending.
+  // Otherwise the analyst has typed on since, or the box shows another row
+  // now (a cursor move flushed this save), and "Saved" under it would be
+  // about text this save didn't carry.
+  const current = Number(note.dataset.rid) === rid && Number(note.dataset.sourceId) === sourceId
+    && note.value === value;
+  if (current) noteUnsaved = false;
   const r = rowAt(S.cursor);
   if (r && r.rid === rid) r.note = note.value;
   // Same rule as tagRowsAtPositions: under a grouping the row just patched
@@ -914,9 +969,9 @@ export const saveNote = debounce(async () => {
   // means the object under the cursor is not the input's row, so nothing
   // above was patched and the cached copy of this rid is the stale one.
   if (!r || r.rid !== rid || S.groupByCols.length) clearPageCache();
-  $('noteStatus').textContent = 'Saved';
+  if (current) $('noteStatus').textContent = 'Saved';
   render();
-}, 500);
+}
 
 /* ------------------------------------------------------------- detail pane */
 
