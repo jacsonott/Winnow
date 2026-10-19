@@ -1,4 +1,4 @@
-fastapi
+fastapi<0.147  # 0.147 reads a bool Form field the client leaves out as False, not its Form(True) default; the importer never sends build_fts, so no import would get a search index
 uvicorn[standard]
 python-multipart
 openpyxl
