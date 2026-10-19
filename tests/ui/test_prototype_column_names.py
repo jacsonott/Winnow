@@ -109,6 +109,25 @@ def test_the_filter_bar_renders_the_grid_and_filters(page, proto):
     page.wait_for_function("() => __winnow.S.view.row_count === 1")
 
 
+def test_z_undoes_a_filter_on_a_trap_column(page, proto):
+    # The undo history compares snapshots of S.filters, and a snapshot is a
+    # plain object: `toString` read off it is Object.prototype's function.
+    _open(page, proto, "row")
+    for col, value, n in (("toString", "x", 1), ("__proto__", "d", 0)):
+        box = page.locator(f'.fcell input[data-col="{col}"]')
+        box.fill(value)
+        box.press("Enter")
+        page.wait_for_function("(n) => __winnow.S.view.row_count === n", arg=n)
+    page.locator("#body").focus()
+    page.keyboard.press("z")
+    page.wait_for_function("() => __winnow.S.view.row_count === 1")
+    assert page.locator('.fcell input[data-col="__proto__"]').input_value() == ""
+    assert page.locator('.fcell input[data-col="toString"]').input_value() == "x"
+    page.keyboard.press("z")
+    page.wait_for_function("() => __winnow.S.view.row_count === 3")
+    assert page.locator('.fcell input[data-col="toString"]').input_value() == ""
+
+
 @pytest.mark.parametrize("filter_ui", ["row", "bar"])
 def test_the_value_picker_lists_a_trap_columns_values(page, proto, filter_ui):
     _open(page, proto, filter_ui)

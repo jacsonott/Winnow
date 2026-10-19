@@ -5,6 +5,7 @@ import { renderHead } from './columns.js';
 import { $, OVERSCAN, PAGE, ROW_H, api, debounce, nameMap, post, setBusy, toast, toastAction } from './core.js';
 import { syncRowOpenHint } from './detail.js';
 import { currentSpec, renderAdvancedChips, updateSearchHint } from './filters.js';
+import { recordFilterState } from './filterundo.js';
 import { clearPageCache, headH, rScroll, render, rowAt, spacerPx, vScroll } from './grid.js';
 import { drawRail, regroupAll } from './grouping.js';
 import { armOpCancel, createNotice, followFtsBuild, opCancelCurrent, opToken } from './jobs.js';
@@ -350,7 +351,7 @@ function restoreViewState(st) {
 }
 
 /* Every piece of chrome that paints from the state above. */
-function repaintSearchChrome() {
+export function repaintSearchChrome() {
   $('search').value = S.searchMode === 'advanced' ? '' : S.search;
   document.querySelectorAll('#searchModeToggle button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.mode === S.searchMode)));
   if (S.searchMode === 'advanced') renderAdvancedChips();
@@ -604,6 +605,9 @@ async function runBuild({ keepScroll = true, keepRow = true, detachAfterMs = nul
   // screen spot — and typing pays for no lookup (see the one below).
   const anchor = keepRow && (!keepScroll || !$('detail').hidden) ? cursorRowAnchor({ cursorOnly: keepScroll }) : null;
   const spec = currentSpec();
+  // Before anything is sent, so a build that is superseded, cancelled or
+  // refused still counts as the change the analyst made (see filterundo.js).
+  recordFilterState(S.sourceId);
   // The cache key is the spec as the analyst set it: the op_token added
   // next is fresh per rebuild, and keying on it meant no reopen ever hit.
   const cacheKey = specKey(spec);

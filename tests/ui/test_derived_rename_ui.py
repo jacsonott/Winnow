@@ -78,3 +78,51 @@ def test_rename_keeps_the_filter_and_width_on_the_column(page, api, tmp_path):
           await __winnow.openSource(home);
         })()""", home)
         page.wait_for_selector(".row")
+
+
+def test_z_after_a_rename_puts_the_filter_back_on_the_renamed_column(page, api, tmp_path, view_rebuilt):
+    """The filter-undo history names columns too. A filter cleared before
+    the rename comes back under the new name, rather than being dropped
+    as a filter on a column the table no longer has."""
+    home = page.evaluate("() => __winnow.S.sourceId")
+    f = tmp_path / "dr_undo.csv"
+    f.write_text("DrWhen,DrWho\n2026-04-01 09:00:00,u=alice\n2026-04-01 10:00:00,u=bob\n"
+                 "2026-04-01 11:00:00,u=carol\n", encoding="utf-8")
+    sid = api("/api/ingest/path", "POST", {"path": str(f), "name": "dr_undo.csv", "build_fts": False})["id"]
+    try:
+        api("/api/derived", "POST", {"source_id": sid, "name": "DrUser", "input_column": "DrWho",
+                                     "op_id": "regex_extract", "params": {"pattern": r"u=(\w+)"}})
+        _wait_ready(api, sid)
+        page.evaluate("(id) => __winnow.loadSources().then(() => __winnow.openSource(id))", sid)
+        page.wait_for_function("(id) => __winnow.S.sourceId === id && __winnow.busyCount === 0", arg=sid)
+        page.wait_for_selector('.hcell[data-col="DrUser"]')
+
+        with view_rebuilt(page):
+            page.locator('.fcell input[data-col="DrUser"]').fill("alice")
+        assert page.evaluate("() => __winnow.S.view.row_count") == 1
+        with view_rebuilt(page):
+            page.locator("#body").focus()
+            page.keyboard.press("c")
+        assert page.evaluate("() => __winnow.S.view.row_count") == 3
+
+        page.locator('.hcell[data-col="DrUser"]').click(button="right")
+        page.locator(".menu .menu-item", has_text="Rename derived column").click()
+        page.wait_for_selector(".confirm-input")
+        page.locator(".confirm-input").fill("DrAccount")
+        page.locator(".confirm-card .btn", has_text="Rename").click()
+        page.wait_for_selector('.hcell[data-col="DrAccount"]')
+        page.wait_for_function("(id) => __winnow.S.view.source_id === id && __winnow.busyCount === 0", arg=sid)
+        with view_rebuilt(page):
+            page.locator("#body").focus()
+            page.keyboard.press("z")
+        assert page.evaluate("() => __winnow.S.view.row_count") == 1
+        assert page.locator('.fcell input[data-col="DrAccount"]').input_value() == "alice"
+        assert "DrAccount filter" in page.locator("#toast").inner_text()
+    finally:
+        api(f"/api/source/{sid}", "DELETE")
+        page.evaluate("""(home) => (async () => {
+          __winnow.S.sourceId = null;
+          await __winnow.loadSources();
+          await __winnow.openSource(home);
+        })()""", home)
+        page.wait_for_selector(".row")

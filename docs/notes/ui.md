@@ -1605,6 +1605,47 @@ see [docs/notes/README.md](README.md) for the whole set.
   didn't exist. When retiring an alias later, remember both halves: the
   DEFAULT_KEYMAP entry and a migration for maps that carry it.
 
+- **`z` undoes filter changes, and it is recorded in the rebuild, not at
+  the call sites** (filterundo.js). Forty-odd places change a filter and
+  every one of them ends in `runBuild`, which calls `recordFilterState`
+  with the table it is about to build; the history is a baseline per
+  table (what it was last built with) plus a stack of what changed. A new
+  way to change a filter needs nothing from this — as long as it goes
+  through a rebuild. Five things it relies on:
+  - **Compared by what the view is built from, restored from the raw
+    text.** Each part (column filters, search, tree, tag filter,
+    timeframe) has a key in the spec's terms — parsed filters, `null` for
+    an empty tree, `''` for a disabled timeframe — so a stray space, a box
+    emptied to `''` rather than deleted, or a mode toggle with nothing
+    typed is not a step to undo through. An entry holds only the parts
+    that changed and undo puts back only those, which is why sort,
+    grouping and Hide empty rows are never touched.
+  - **Typing coalesces.** A header box rebuilds on every pause past the
+    220ms debounce, so builds that only change one box's text (or the
+    search text) within `FILTER_UNDO_COALESCE_MS` of the last one fold
+    into it; typed back to where it started, the entry drops. Only while
+    that box has the focus: `c` pressed straight after typing changes the
+    same one column, and folded into the word it dropped the entry, so
+    `z` found nothing to bring back.
+  - **A derived-column rename moves the history too.**
+    `renameColumnInStash` runs `renameColumnIn` over
+    `filterHistoryStates` as well as the stash, or undo past the rename
+    put a filter back on a column that no longer exists by that name —
+    and `put` drops those, silently.
+  - **`openSource` re-baselines** (`syncFilterBaseline`) before it builds.
+    Opening a table is not a change to it — and without that, a case-wide
+    timeframe set on one table (`timeframeAcrossTables`) turned up as an
+    undo step on the next table opened.
+  - **It dies with the stash** — `clearViewStateStash` and
+    `dropViewStateFor` drop it too, which is why `closeTab` and
+    `closeAllTabs` call those rather than touching the Map. Source ids
+    restart in a new case and SQLite reuses a removed table's id; an
+    entry kept past either would put one table's filters on another.
+  Baselines and entries are deep copies: `setPickerTreeNode` edits
+  `S.filterTree.children` in place, and a baseline holding the live tree
+  would change along with it and see no difference at the next build.
+  `tests/ui/test_undo_filter_change.py`.
+
 - **Stack view** (stack.js) — the column-header menu's "Stack values (rarest first)…" opens a modal of the current view's distinct values by count (via group_summary, order=count direction=asc), drawn with charts.js. Click a bar to filter the grid to that value. Least-frequency-of-occurrence triage. **The box is sized to its bars** — `max-height: min(60vh,520px)` over a canvas whose height is `rows × 22`, not a fixed height: a column that stacks to nine distinct values used to open a screen-high modal with nine bars in the top corner and four fifths of nothing under them. See docs/design/analysis-suite.md.
 
 - **Case notes tab** (notes.js) — a free-form Markdown scratchpad for the investigation narrative, stored in the case file (Store.case_notes) so it travels with the .db — distinct from the per-row notes, which the page now LISTS below the split (see below). The editor and a live preview sit side by side (`#notesSplit`, a flex row inside `.page-main`) split by a draggable divider; Edit / Split / Preview collapse one pane or the other through `data-mode` on the row, and the stylesheet does the hiding. Debounced autosave, a tiny dependency-free Markdown renderer (airgap). Page tabs now route visibility through sql.js's showMainView(id)/MAIN_VIEWS registry so adding a tab is a one-place edit. See docs/design/analysis-suite.md. Things that bite here:

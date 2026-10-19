@@ -188,6 +188,7 @@ with the action names Settings uses.
 | Filter by selected cell's value | `f` |
 | Filter by selected cell's value, dropping every other filter | `F` |
 | Clear all filters, search and tag filter | `c` |
+| Undo the last filter change (press again to keep stepping back) | `z` |
 | Select every row in the current view (same as the header checkbox) | `Ctrl+a` |
 | Copy the unique values of the cursor's column — from the selected rows, else the whole view | `Ctrl+Shift+U`, `Meta+Shift+U` |
 | Open Tables manager | `t` |
@@ -233,7 +234,7 @@ keys**, below **Reset to defaults**, in the same groups as here.
 | `Shift+1` – `Shift+9` | Apply that tag to every row in the current view, or take it off them if they all have it. Asks first. |
 | `Ctrl+C` / `⌘+C` | Copy the cell selection, or the picked rows, as tab-separated text, the way the grid displays them. Up to 20,000 rows. |
 | `Ctrl+Shift+C` / `⌘+Shift+C` | The same, with a header row. |
-| `Ctrl+Z` / `⌘+Z` | Undo the last tag applied or removed. Repeat to keep stepping back. |
+| `Ctrl+Z` / `⌘+Z` | Undo the last tag applied or removed. Repeat to keep stepping back. Filter changes have their own undo, `z`. |
 | `Esc` | Let go of the picked rows and the cell selection. |
 
 **Anywhere in a case**

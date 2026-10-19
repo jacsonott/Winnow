@@ -3,6 +3,7 @@
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { autofitAllColumnWidths, openColumnFilter, resetAllColumnWidths, saveDefaultLayout, visibleCols } from './columns.js';
 import { openFilterBuilder } from './filterbuilder.js';
+import { undoFilterChange } from './filterundo.js';
 import { $, ROW_H } from './core.js';
 import { currentModalAction, repaintOpenMenus, closeMenu, closeModal } from './ui.js';
 import { toggleDetailPane } from './detail.js';
@@ -82,6 +83,10 @@ export const DEFAULT_KEYMAP = {
   filterBySelectedCell: ['f'],
   filterBySelectedCellOnly: ['F'],
   clearFilters: ['c'],
+  // A bare z, next to c, and not Ctrl+Z: that one undoes TAGS (the
+  // dispatcher's fixed chord), and tags are evidence while filters are
+  // only where the analyst is looking — two undo stacks, two keys.
+  undoFilterChange: ['z'],
   // Ctrl+A, like everywhere else. The typing guard above the dispatcher
   // keeps it native inside inputs; grouped mode no-ops (the header
   // checkbox is disabled there for the same reason).
@@ -129,6 +134,7 @@ export const ACTION_LABELS = {
   filterBySelectedCell: "Filter by selected cell's value",
   filterBySelectedCellOnly: "Filter by selected cell's value, dropping every other filter",
   clearFilters: 'Clear all filters, search and tag filter',
+  undoFilterChange: 'Undo the last filter change (press again to keep stepping back)',
   selectAllRows: 'Select every row in the current view (same as the header checkbox)',
   copyUniqueValues: "Copy the unique values of the cursor's column — from the selected rows, else the whole view",
   openTables: 'Open Tables manager',
@@ -160,7 +166,7 @@ export const ACTION_LABELS = {
    over it on every load. */
 export const KEYMAP_VERSION_KEY = 'winnow.keymap.v';
 
-export const KEYMAP_VERSION = 6;
+export const KEYMAP_VERSION = 7;
 
 /* The four spec strings one Ctrl/⌘+F press can produce. keySpecFromEvent
    spells the plain chord 'Ctrl+f'; ⌘ makes it 'Meta+f', and Shift — or Caps
@@ -257,6 +263,17 @@ export const KEYMAP_MIGRATIONS = [
       && Array.isArray(keys) && keys.includes('p'));
     if (!taken && wasDefault('openPluginBundles', ['M'])) map.openPluginBundles = ['p'];
     else if (taken && !map.openPluginBundles) map.openPluginBundles = ['M'];
+  },
+  // v7 (2026-10): undoFilterChange arrives on `z`. A new action needs no
+  // migration to get its default — but `z` was unbound until now, so
+  // Settings would have accepted it for anything, and the default landing
+  // beside that would put two actions on one key (the earlier one in the
+  // list wins, with both chips showing). Where it is taken, the new action
+  // starts with no key; the analyst's binding is left as it was.
+  (map) => {
+    const taken = Object.entries(map).some(([action, keys]) => action !== 'undoFilterChange'
+      && Array.isArray(keys) && keys.includes('z'));
+    if (taken && !map.undoFilterChange) map.undoFilterChange = [];
   },
 ];
 
@@ -528,6 +545,7 @@ export const ACTION_HANDLERS = {
   filterBySelectedCell: () => filterBySelectedCell(),
   filterBySelectedCellOnly: () => filterBySelectedCell({ only: true }),
   clearFilters: () => clearAllFilters(),
+  undoFilterChange: () => undoFilterChange(),
   openTables: () => openTablesManager(),
   toggleSidebar: () => setSidebarVisible($('sidebar').hidden),
   openTableMenu: () => openTableMenu(),
