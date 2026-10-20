@@ -231,9 +231,16 @@ def test_create_table_closes_its_dialog_at_once_and_lands_in_the_background(fl, 
         assert pg.locator("#search").input_value() == "H007"
 
         made.locator("button", has_text="Open table").click()
+        # The table's own view, not just S.sourceId, which openSource swaps
+        # before it reads anything for the table. The finally below removes
+        # the table, and Open table doesn't await the open: when the removal
+        # beat the open's tags read, that read's 404 ("That table is no
+        # longer in this case") went uncaught and failed this test.
         pg.wait_for_function(
             """(name) => { const s = __winnow.S.sources.find((x) => x.name === name);
-                           return s && __winnow.S.sourceId === s.id; }""", arg=name, timeout=10_000)
+                           return s && __winnow.S.sourceId === s.id
+                             && !!__winnow.S.view && __winnow.S.view.source_id === s.id; }""",
+            arg=name, timeout=10_000)
     finally:
         pg.unroute(START)
         pg.evaluate("""async (name) => {
