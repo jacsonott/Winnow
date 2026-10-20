@@ -144,6 +144,63 @@ def test_a_click_in_the_first_moments_does_not_skip_it(own_page, server):
         assert pg.locator("#splash").get_attribute("hidden") is None   # still playing
 
 
+def _wordmark_on_screen(pg):
+    """Where the settled wordmark is, read off the canvas in CSS pixels: from
+    the brand mark's first bar (its own amber) to the letters' far edge (the
+    skin's accent), and the letters' top to bottom."""
+    return pg.evaluate("""() => {
+      const c = document.getElementById('splashCanvas');
+      const a = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim().slice(1);
+      const [ar, ag, ab] = [0, 2, 4].map((i) => parseInt(a.slice(i, i + 2), 16));
+      const k = c.width / c.clientWidth;
+      const { data, width, height } = c.getContext('2d').getImageData(0, 0, c.width, c.height);
+      const near = (i, r, g, b) => data[i + 3] > 128 &&
+        Math.abs(data[i] - r) + Math.abs(data[i + 1] - g) + Math.abs(data[i + 2] - b) < 40;
+      let left = Infinity, right = -1, top = Infinity, bottom = -1;
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          const i = (y * width + x) * 4;
+          if (near(i, 184, 132, 58)) left = Math.min(left, x);
+          if (near(i, ar, ag, ab)) {
+            right = Math.max(right, x); top = Math.min(top, y); bottom = Math.max(bottom, y);
+          }
+        }
+      }
+      return { left: left / k, right: right / k, top: top / k, bottom: bottom / k,
+               canvas: [c.clientWidth, c.clientHeight], window: [innerWidth, innerHeight] };
+    }""")
+
+
+def test_a_window_resized_mid_launch_gets_the_wordmark_laid_out_for_it(own_page, server):
+    """Maximising the window a second into the launch left the canvas at its
+    launch size: the word stayed where the small window had centred it, the
+    chaff was cut off partway across, and the tagline (placed by CSS, so it
+    did move) no longer sat under the word. Shrinking it ran the word off
+    the edge. The scene now maps onto the window as it is, centred and
+    scaled the way a launch at that size would lay it out — including a
+    resize while the finished word is held, when nothing else is drawing."""
+    # Phosphor: a green accent nothing else on the canvas is close to.
+    with _ctx(own_page, '{ "style": "phosphor", "themeMode": "dark" }') as pg:
+        pg.goto(server, wait_until="commit")
+        pg.wait_for_selector("#splash:not([hidden])", timeout=10_000)
+        pg.wait_for_timeout(400)          # some grain in the air, some not thrown yet
+        pg.set_viewport_size({"width": 1600, "height": 1000})
+        pg.wait_for_selector("#splashTagline.visible", timeout=25_000)
+        grown = _wordmark_on_screen(pg)
+        pg.set_viewport_size({"width": 900, "height": 600})
+        pg.wait_for_timeout(150)
+        shrunk = _wordmark_on_screen(pg)
+
+    for box in (grown, shrunk):
+        w, h = box["window"]
+        assert box["canvas"] == [w, h], box
+        assert abs((box["left"] + box["right"]) / 2 - w / 2) < 20, box     # centred across
+        assert abs((box["top"] + box["bottom"]) / 2 - h * 0.44) < 20, box  # at the word's height
+    # Sized for the window too: the font is 13% of the width, capped at 190px.
+    ratio = (shrunk["right"] - shrunk["left"]) / (grown["right"] - grown["left"])
+    assert abs(ratio - 900 * 0.13 / 190) < 0.05, ratio
+
+
 # Edge on Windows, as the app window reports itself. Winnow reads the
 # platform, so both are set; Playwright's user_agent alone leaves
 # navigator.platform saying Linux.

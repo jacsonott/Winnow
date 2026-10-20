@@ -107,6 +107,12 @@ const NOISE_FONT = '10px ui-monospace, monospace';
 /* How long the completed wordmark stays up. Any key or click cuts it
    short, so this is a ceiling on the patient case, not a toll on anyone. */
 const SETTLE_HOLD_MS = 2200;
+/* Where the wordmark goes in a window of a given size: a font that follows
+   the width within limits, the whole mark centred across and a little above
+   the middle. The landing spots are laid out by it, and so is a resize
+   mid-launch (see start()), so the two can't disagree. */
+const wordFontSize = (w) => Math.max(48, Math.min(w * 0.13, 190));
+const WORD_Y = 0.44;
 
 const rand = (a, b) => a + Math.random() * (b - a);
 const pick = (a) => a[(Math.random() * a.length) | 0];
@@ -250,6 +256,7 @@ export function runSplash() {
     $('splashTagline').style.color = colors.ink;
 
     let finished = false;
+    let unwatchResize = () => {};
     degradeNote = '';
     const startedAt = performance.now();
     const finish = (reason) => {
@@ -262,8 +269,9 @@ export function runSplash() {
       window.removeEventListener('wheel', skip, true);
       window.removeEventListener('touchstart', skip, true);
       root.classList.add('splash-out');
-      // Matches the CSS fade; the app is already behind it by then.
-      setTimeout(() => { root.hidden = true; root.classList.remove('splash-out'); resolve(); }, 420);
+      // Matches the CSS fade; the app is already behind it by then. The
+      // canvas follows the window until it's gone, fade included.
+      setTimeout(() => { unwatchResize(); root.hidden = true; root.classList.remove('splash-out'); resolve(); }, 420);
     };
     // A skip inside the first moments isn't a choice — it's the click that
     // focused a just-opened app window, or scroll inertia carried in from
@@ -280,7 +288,7 @@ export function runSplash() {
     window.addEventListener('wheel', skip, true, { passive: true });
     window.addEventListener('touchstart', skip, true, { passive: true });
 
-    start(canvas, colors, () => {
+    unwatchResize = start(canvas, colors, () => {
       // Hold on the finished wordmark before handing over. The grain
       // settling is the payoff, and cutting away the moment the last one
       // lands throws it away — the eye needs time to read WINNOW as a word
@@ -297,26 +305,31 @@ export function endSplash() { if (onDone) onDone(); }
 
 function start(canvas, colors, done) {
   const ctx = canvas.getContext('2d');
-  let W = 0, H = 0;
+  /* The scene — landing spots, throws, chaff — is laid out once, for the
+     window the launch starts in, and simulated in that W×H. The window can
+     change under it (maximised a second in, dragged smaller), so drawing
+     goes through a view that maps the scene onto the window as it is now,
+     scaled and centred the way the wordmark would be laid out there: grain
+     already in the air keeps its arc and still lands on the word, and the
+     word sits where a launch at that size would put it. Without it the
+     canvas kept its launch size — the word stayed off-centre or ran off the
+     edge, the chaff was cut off mid-screen, and the tagline (placed by CSS,
+     so it did follow the window) no longer sat under the word. */
+  const W = window.innerWidth, H = window.innerHeight;
+  let VW = 0, VH = 0;   // the window now
+  let view = null;      // the scene → window mapping, see resize()
   // Backing pixels are what a machine without a GPU pays for — every frame
   // clears and composites all of them on the CPU. A 2560×1440 display at
   // 2× is 14.7M pixels; the reports of a "laggy" launch came from exactly
   // that shape of VM. Budget the backing store, then lower it further if
   // frames still run slow (see adapt()).
   const PIXEL_BUDGET = 3.2e6;
-  let DPR = Math.min(window.devicePixelRatio || 1, 2,
-    Math.max(1, Math.sqrt(PIXEL_BUDGET / (window.innerWidth * window.innerHeight))));
-
-  function resize() {
-    W = window.innerWidth;
-    H = window.innerHeight;
-    canvas.width = Math.round(W * DPR);
-    canvas.height = Math.round(H * DPR);
-    canvas.style.width = W + 'px';
-    canvas.style.height = H + 'px';
-    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  let DPR = 0;
+  let level = 0;        // how many times adapt() has traded detail for motion
+  function backingScale() {
+    const fit = Math.min(window.devicePixelRatio || 1, 2, Math.max(1, Math.sqrt(PIXEL_BUDGET / (VW * VH))));
+    return level ? Math.max(0.6, fit * 0.75 ** level) : fit;
   }
-  resize();
 
   const CHAFF_RGB = `rgb(${colors.chaff.join(',')})`;
 
@@ -344,7 +357,27 @@ function start(canvas, colors, done) {
       atlas.set(t, { c, w, h, base });
     }
   }
-  buildAtlas();
+
+  function resize() {
+    VW = window.innerWidth;
+    VH = window.innerHeight;
+    // Re-budgeted for the new size. The atlas is redrawn only when that
+    // changes the scale, not on every step of a drag.
+    const dpr = backingScale();
+    if (dpr !== DPR) { DPR = dpr; buildAtlas(); }
+    canvas.width = Math.round(VW * DPR);
+    canvas.height = Math.round(VH * DPR);
+    canvas.style.width = VW + 'px';
+    canvas.style.height = VH + 'px';
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    const s = wordFontSize(VW) / wordFontSize(W);
+    const ox = (VW - s * W) / 2, oy = (VH - s * H) * WORD_Y;
+    // Plus the part of the scene the window shows, in scene units: where
+    // tokens are thrown in from and where they count as gone.
+    view = { s, ox, oy, left: -ox / s, right: (VW - ox) / s, top: -oy / s, bottom: (VH - oy) / s };
+  }
+  resize();
+
   function drawToken(tok, x, y) {
     const g = atlas.get(tok);
     ctx.drawImage(g.c, x - g.w / 2, y - g.base, g.w, g.h);
@@ -358,7 +391,7 @@ function start(canvas, colors, done) {
     const off = document.createElement('canvas');
     off.width = W; off.height = H;
     const octx = off.getContext('2d');
-    const fontSize = Math.max(48, Math.min(W * 0.13, 190));
+    const fontSize = wordFontSize(W);
     octx.fillStyle = '#fff';
     octx.textAlign = 'left';
     octx.textBaseline = 'middle';
@@ -369,12 +402,12 @@ function start(canvas, colors, done) {
     // letters with a padded gap (they visibly disagreed on screen).
     const tm = octx.measureText('WINNOW');
     const inkH = (tm.actualBoundingBoxAscent + tm.actualBoundingBoxDescent) || fontSize * 0.72;
-    const inkCY = H * 0.44 + ((tm.actualBoundingBoxDescent - tm.actualBoundingBoxAscent) / 2 || 0);
+    const inkCY = H * WORD_Y + ((tm.actualBoundingBoxDescent - tm.actualBoundingBoxAscent) / 2 || 0);
     const markBox = inkH / (MARK_INK.y1 - MARK_INK.y0);
     const markW = markBox * (MARK_INK.x1 - MARK_INK.x0);
     const gap = fontSize * 0.3;
     const left = (W - (markW + gap + tm.width)) / 2;
-    octx.fillText('WINNOW', left + markW + gap, H * 0.44);
+    octx.fillText('WINNOW', left + markW + gap, H * WORD_Y);
     const stride = Math.max(3, Math.round(fontSize / 26));
     const img = octx.getImageData(0, 0, W, H).data;
     const pts = [];
@@ -400,32 +433,38 @@ function start(canvas, colors, done) {
 
   const targets = computeTargets();
 
-  const grains = targets.map((target) => {
-    const startX = -rand(30, 130);
+  const grains = targets.map((target) => ({
+    x: 0, y: 0, vx: 0, vy: 0, flightFrames: 0,   // set by throwGrain()
+    target, token: pick(TOKENS),
+    launchFrame: (LAUNCH_START + rand(0, 45)) | 0,
+    stiff: rand(0.008, 0.014), drag: rand(0.16, 0.22), maxFall: rand(1.6, 2.4),
+    homeAge: 0, age: 0, phase: 'wait', r: rand(1.1, 2.1),
+  }));
+
+  /* Thrown at its launch frame rather than when the scene is built, from
+     just off the left edge of the window as it is by then: a window widened
+     in the first second would otherwise show grain appearing out of thin
+     air partway across it. */
+  function throwGrain(p) {
+    const startX = view.left - rand(30, 130) / view.s;
     const startY = H * rand(0.52, 0.72);
     // Thrown just hard enough that the arc peaks above the landing spot, so
     // the last thing a grain does is fall ONTO the word rather than into it.
-    const apexMargin = rand(30, 80) + (target.x / W) * 60;
-    const drop = Math.max(30, startY - target.y + apexMargin);
-    const vy0 = -Math.sqrt(2 * GRAIN_GRAVITY * drop);
-    const flightFrames = ((-vy0 / GRAIN_GRAVITY) + rand(6, 16)) | 0;
-    return {
-      x: startX, y: startY,
-      vx: (target.x - startX) * rand(0.91, 0.96) / flightFrames,
-      vy: vy0,
-      target, token: pick(TOKENS),
-      launchFrame: (LAUNCH_START + rand(0, 45)) | 0,
-      flightFrames,
-      stiff: rand(0.008, 0.014), drag: rand(0.16, 0.22), maxFall: rand(1.6, 2.4),
-      homeAge: 0, age: 0, phase: 'wait', r: rand(1.1, 2.1),
-    };
-  });
+    const apexMargin = rand(30, 80) + (p.target.x / W) * 60;
+    const drop = Math.max(30, startY - p.target.y + apexMargin);
+    p.vy = -Math.sqrt(2 * GRAIN_GRAVITY * drop);
+    p.flightFrames = ((-p.vy / GRAIN_GRAVITY) + rand(6, 16)) | 0;
+    p.vx = (p.target.x - startX) * rand(0.91, 0.96) / p.flightFrames;
+    p.x = startX;
+    p.y = startY;
+    p.phase = 'fly';
+  }
 
   let chaff = [];
   const chaffCount = Math.min(1100, Math.round(targets.length * 1.5));
   for (let i = 0; i < chaffCount; i++) {
     chaff.push({
-      x: -rand(30, 160), y: H * rand(0.5, 0.74),
+      x: 0, y: H * rand(0.5, 0.74),   // x set at launch, like a grain's
       vx: rand(2.8, 6.5), vy: -rand(2.6, 4.8),
       windAccel: rand(0.015, 0.04),
       launched: false,
@@ -460,11 +499,15 @@ function start(canvas, colors, done) {
      whatever a 10fps canvas makes of 400 frames. */
   function simulate() {
     frame++;
+    // Chaff is done once it's off the window as it is now.
+    const goneRight = view.right + 140 / view.s;
+    const goneTop = view.top - 80 / view.s, goneBottom = view.bottom + 60 / view.s;
     for (let i = chaff.length - 1; i >= 0; i--) {
       const c = chaff[i];
       if (!c.launched) {
-        if (frame >= c.launchFrame) c.launched = true;
-        else continue;
+        if (frame < c.launchFrame) continue;
+        c.launched = true;
+        c.x = view.left - rand(30, 160) / view.s;
       }
       c.age++;
       c.vy += CHAFF_GRAVITY + (Math.random() - 0.5) * 0.02;
@@ -473,12 +516,12 @@ function start(canvas, colors, done) {
       c.y += c.vy;
       if (c.age > c.fadeDelay) c.alpha -= 0.02;
       if (Math.random() < 0.02) c.token = pick(TOKENS);
-      if (c.alpha <= 0 || c.x > W + 140 || c.y < -80 || c.y > H + 60) chaff.splice(i, 1);
+      if (c.alpha <= 0 || c.x > goneRight || c.y < goneTop || c.y > goneBottom) chaff.splice(i, 1);
     }
     settled = 0;
     for (const p of grains) {
       if (p.phase === 'wait') {
-        if (frame >= p.launchFrame) p.phase = 'fly';
+        if (frame >= p.launchFrame) throwGrain(p);
         else continue;
       }
       p.age++;
@@ -513,18 +556,23 @@ function start(canvas, colors, done) {
     }
   }
 
+  /* Positions go through the view; sizes don't. Tokens stay 10px and a
+     grain keeps its radius at any scale, as at a launch in a window that
+     size — only the spacing of the dots follows the font. */
   function render() {
-    ctx.clearRect(0, 0, W, H);
+    const { s, ox, oy } = view;
+    ctx.clearRect(0, 0, VW, VH);
     for (const c of chaff) {
       if (!c.launched) continue;
       ctx.globalAlpha = Math.max(c.alpha, 0);
-      drawToken(c.token, c.x, c.y);
+      drawToken(c.token, ox + c.x * s, oy + c.y * s);
     }
     ctx.globalAlpha = 1;
     for (const p of grains) {
       if (p.phase === 'wait') continue;
+      const x = ox + p.x * s, y = oy + p.y * s;
       if (p.phase === 'fly') {
-        drawToken(p.token, p.x, p.y);
+        drawToken(p.token, x, y);
         continue;
       }
       const mix = p.phase === 'locked' ? 1 : Math.min(1, p.homeAge / 45);
@@ -532,12 +580,12 @@ function start(canvas, colors, done) {
       // in a single frame.
       if (mix < 0.5) {
         ctx.globalAlpha = 1 - mix * 2;
-        drawToken(p.token, p.x, p.y);
+        drawToken(p.token, x, y);
       }
       ctx.globalAlpha = 0.3 + 0.7 * Math.min(1, mix * 1.6);
       ctx.fillStyle = grainColor(p.target.rgb || colors.grain, mix);   // bar points keep the icon's colors
       ctx.beginPath();
-      ctx.arc(p.x, p.y, p.r * (0.55 + 0.45 * Math.min(1, mix * 1.4)), 0, Math.PI * 2);
+      ctx.arc(x, y, p.r * (0.55 + 0.45 * Math.min(1, mix * 1.4)), 0, Math.PI * 2);
       ctx.fill();
     }
     ctx.globalAlpha = 1;
@@ -547,15 +595,13 @@ function start(canvas, colors, done) {
      for motion: a coarser backing store (the text is 10px; a little soft
      beats a slideshow) and half the chaff, up to three times. Noted for
      Settings → Launch animation's last-launch readout. */
-  let gapEma = 16.7, sinceAdapt = 0, level = 0;
+  let gapEma = 16.7, sinceAdapt = 0;
   function adapt(dt) {
     gapEma = gapEma * 0.8 + dt * 0.2;
     if (++sinceAdapt < 20 || level >= 3 || gapEma < 40) return;
     sinceAdapt = 0;
     level++;
-    DPR = Math.max(0.6, DPR * 0.75);
-    resize();
-    buildAtlas();
+    resize();      // backingScale() now takes the extra step down
     chaff = chaff.filter((_, i) => i % 2 === 0);
     degradeNote = 'detail reduced for a slow display';
   }
@@ -581,5 +627,12 @@ function start(canvas, colors, done) {
     else raf = null;
   }
 
+  // Resizing a canvas clears it, so repaint there and then rather than wait
+  // for the loop: once everything has landed the loop has stopped, and the
+  // held wordmark would otherwise vanish for the rest of the hold.
+  function onResize() { resize(); render(); }
+  window.addEventListener('resize', onResize);
+
   raf = requestAnimationFrame(loop);
+  return () => window.removeEventListener('resize', onResize);
 }
