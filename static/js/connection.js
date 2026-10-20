@@ -21,6 +21,7 @@ const GRACE_MS = 5000;
 let stream = null;
 let pending = null;
 let down = false;
+let shutDown = false;   // the server said it was going (onShutdown), not just vanished
 
 function banner() { return $('connBanner'); }
 
@@ -30,9 +31,11 @@ function show() {
   const b = banner();
   if (!b) return;
   b.replaceChildren();
-  const msg = el('span', 'conn-msg',
-    'Lost the connection to Winnow’s server. It shuts down on its own a couple of minutes '
-    + 'after the last window closes — if that happened, start Winnow again.');
+  const msg = el('span', 'conn-msg', shutDown
+    ? 'Winnow’s server has shut down. Start Winnow again to carry on — your case file and '
+      + 'everything saved in it are untouched.'
+    : 'Lost the connection to Winnow’s server. It shuts down on its own a couple of minutes '
+      + 'after the last window closes — if that happened, start Winnow again.');
   const retry = el('button', 'btn ghost', 'Try again');
   retry.onclick = async () => {
     retry.disabled = true;
@@ -55,6 +58,7 @@ function show() {
 
 function hide() {
   if (pending) { clearTimeout(pending); pending = null; }
+  shutDown = false;   // a server is answering again
   if (!down) return;
   down = false;
   const b = banner();
@@ -62,9 +66,14 @@ function hide() {
 }
 
 /* Presence: the open connection is how the server knows a browser is still
-   attached — it shuts itself down once every window is gone. No data ever
+   attached — it shuts itself down once every window is gone. No data
    flows over it; the connection itself is the message, which is exactly
-   why its open/error edges are the earliest notice we get either way. */
+   why its open/error edges are the earliest notice we get either way.
+   The one exception is its last word: a server going down on purpose
+   (Shut down in any window, Ctrl+C, the idle exit) ends every stream with
+   a `shutdown` event, so the windows still open can say that rather than
+   "lost the connection … a couple of minutes after the last window
+   closes", which is not what happened. */
 /* Tell the server this window is going, so it can tell a closed window
    from a suspended one. Without it the server sees the same thing either
    way — the presence stream stopping — and has to wait out a much longer
@@ -79,7 +88,7 @@ function hide() {
    stream's end arrive in either order, and one window's goodbye standing
    when the other later went quiet put that survivor on the closed-window
    fuse (server.py _presence_close). */
-const PAGE_ID = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+export const PAGE_ID = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
 
 function sayGoodbye(e) {
   if (e && e.persisted) return;
@@ -91,10 +100,34 @@ function sayGoodbye(e) {
   } catch { /* unload is a hostile place; never throw here */ }
 }
 
+/* Stop holding the presence stream, for the window that shut the server
+   down: it is a static note from then on, with nothing to reconnect to.
+   Every other window keeps its EventSource retrying, so it picks a
+   restarted server back up on its own as it always has. */
+export function closePresence() {
+  if (stream) { stream.close(); stream = null; }
+}
+
+function onShutdown() {
+  shutDown = true;
+  if (pending) { clearTimeout(pending); pending = null; }
+  // Repaint even if a request failed a moment earlier and already put
+  // the lost-connection text up.
+  down = false;
+  show();
+}
+
 export function wireConnection() {
-  onConnectionChange((up) => (up ? hide() : show()));
+  // A request answered after the server said it was going is one it
+  // finished on the way down, not a sign it is back; a stream that
+  // reconnects (onopen) is.
+  onConnectionChange((up) => {
+    if (!up) show();
+    else if (!shutDown) hide();
+  });
   window.addEventListener('pagehide', sayGoodbye);
   stream = new EventSource(`/api/presence?page=${PAGE_ID}`);
+  stream.addEventListener('shutdown', onShutdown);
   stream.onopen = hide;
   stream.onerror = () => {
     // readyState CLOSED means it gave up; CONNECTING means it is retrying,

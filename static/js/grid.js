@@ -1243,7 +1243,9 @@ $('body').addEventListener('scroll', () => {
 if (typeof ResizeObserver !== 'undefined') {
   new ResizeObserver(() => {
     const b = $('body');
-    if (b.clientWidth && b.scrollLeft + b.clientWidth > paintedRight) render();
+    // Gone once Shut down replaces the page with its farewell — and
+    // taking the grid out of the page is itself a resize this sees.
+    if (b && b.clientWidth && b.scrollLeft + b.clientWidth > paintedRight) render();
   }).observe($('body'));
 }
 

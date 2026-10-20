@@ -2,6 +2,7 @@
 
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { applyBundle } from './bundles.js';
+import { PAGE_ID, closePresence } from './connection.js';
 import { $, api, dragHas, el, post, setBusy, toast } from './core.js';
 import { pad2 } from './tsformat.js';
 import { loadPlugins, openImportModal, queueFiles } from './importer.js';
@@ -52,29 +53,50 @@ export function showApp() {
    the terminal it was started in. Confirmed because it's outward-facing in
    the one way this app has (every tab pointed at this server dies), then a
    static farewell replaces the page: there is deliberately no "restart"
-   affordance, because there's no server left to serve one. */
+   affordance, because there's no server left to serve one.
+
+   The server stops at once, open windows or not (server.py
+   _end_presence_streams), so the other windows on it are named here,
+   where the analyst can still say Keep running — and each of them is told
+   it was shut down when it happens (connection.js). */
 export async function shutdownWinnow() {
   // Warn if work is still running — committed data is safe, but an
   // in-flight import/sweep/build/query would be interrupted.
   const busy = inFlightWork();
-  const warn = busy.length
+  let warn = busy.length
     ? `\n\n\u26a0 Still running: ${busy.join(', ')}. Shutting down now interrupts ${busy.length === 1 ? 'it' : 'them'} — `
       + 'anything already committed is saved, but unfinished work is not.'
     : '';
+  const others = await otherWindows();
+  if (others > 0) {
+    warn += `\n\n\u26a0 ${others} other Winnow window${others === 1 ? ' is' : 's are'} open on this server `
+      + 'and will stop working too.';
+  }
+  const thisPage = others === null
+    ? 'This page (and any other tab using this server) will stop working'
+    : 'This page will stop working';
   const go = await confirmDialog(
     'Shut down the Winnow server?' + warn
     + '\n\nEverything already committed is saved in the case file on disk — tags, notes and finished '
-    + 'imports are never lost. This page (and any other tab using this server) will stop working until you '
-    + 'start Winnow again.',
+    + `imports are never lost. ${thisPage} until you start Winnow again.`,
     { okLabel: busy.length ? 'Shut down anyway' : 'Shut down', cancelLabel: 'Keep running', danger: true });
   if (!go) return;
   try { await post('/api/shutdown', {}); } catch { /* the server may drop before the response lands */ }
+  closePresence();
   const note = el('div', 'shutdown-note');
   note.append(
     el('div', 'shutdown-note-title', 'Winnow is off'),
     el('div', null, 'The server has shut down. You can close this tab — start Winnow again with "python server.py".'),
   );
   document.body.replaceChildren(note);
+}
+
+/* Windows other than this one with a presence stream open, or null when
+   the server can't say — the confirm then keeps its general wording. */
+export async function otherWindows() {
+  try {
+    return (await api(`/api/presence/others?page=${PAGE_ID}`)).others;
+  } catch { return null; }
 }
 
 export function showHome() { $('app').hidden = true; $('home').hidden = false; setBrandLabel(null); }
