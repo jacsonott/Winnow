@@ -2947,6 +2947,23 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .import-file.excluded .import-file-path { color: var(--text-dim); }
 .import-file-note { flex: 0 1 auto; max-width: 45%; font-size: 11px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* Copy a layout from another table (columns.js openCopyLayoutModal): the
+   side list is tables and the preview is the order the copy would leave.
+   No pins: a table's id names a different table in every case, and pins
+   are kept per browser. */
+.copy-layout .side-rail-pin { display: none; }
+.copy-layout-preview { flex: 1 1 0; min-height: 0; }
+.copy-layout-preview .side-preview-rows { padding: 4px; }
+.copy-layout-cols { display: flex; flex-direction: column; gap: 1px; }
+.copy-layout-col {
+  display: flex; align-items: baseline; gap: 10px; min-height: 22px; padding: 2px 6px;
+  border-radius: var(--radius-sm); font-family: var(--mono); font-size: 12px; color: var(--text);
+}
+.copy-layout-col.hidden-col .copy-layout-name { color: var(--dim); text-decoration: line-through; }
+.copy-layout-col.own { background: var(--panel-2); }
+.copy-layout-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.copy-layout-note { flex: 0 0 auto; font-family: var(--ui); font-size: 11px; color: var(--dim); }
+
 /* Shown while dragging OS files over the window (wireFileDrop in app.js) —
    above .modal's own z-index so it's visible even if a modal happens to be
    open underneath (dropping a file works regardless of what's on screen,
