@@ -25,12 +25,19 @@ Then pick the **Pivot** page tab.
   "Distinct count of Host" is a normal thing to want.
 - **Filters** with the same vocabulary as the grid's header filter box
   (is any of / is none of / contains / starts with / >, < / is empty).
+- **Tag chips** at the top of the Filters area — the grid's tag ribbon, with
+  the same clicks: click a tag to count only rows carrying it (two tags mean
+  rows carrying either), right-click it for **Exclude**, and **Any tag** /
+  **No tags** for everything tagged or everything not looked at yet. Each
+  chip shows how many rows of the pivot's table carry it. Coming back to the
+  tab from the grid re-runs a pivot filtered on tags, since rows may have
+  been tagged in the meantime.
 - **Click any cell** for the underlying rows.
 - **Copy** (TSV — pastes straight into a spreadsheet) and **CSV** download.
 - Sort the rows by any value column: click its header, again to reverse,
   a third time for key order.
 - **The pivots come back when the case is reopened.** Their DEFINITIONS
-  (table, field areas, filters, subtotal switches, which pivot was on top)
+  (table, field areas, filters and tag filter, subtotal switches, which pivot was on top)
   are kept in the case file through `winnow.tabState`; the cross-tab itself
   is re-queried against the case as it is then. A line at the top says they
   were restored, when they were saved, and offers **Start fresh** — and a
@@ -43,6 +50,10 @@ Then pick the **Pivot** page tab.
 Winnow's scratch database, which the supported plugin read path
 (`Store.run_sql`, a read-only connection to the case file) can't see. So the
 Filters area is the pivot's own filtering — which is how Excel works anyway.
+Tags are the exception that isn't one: they live in the case file
+(`row_tags`), so the tag chips compile into the same query as everything
+else, in the grid's own spelling — a tag id, `"!<id>"` for an exclusion,
+`"__any__"` and `"__none__"` — and select the rows the grid's ribbon would.
 
 **Subtotals are queried, not summed from the cells above them.** Add up the
 per-host distinct user counts and you'll double-count anyone who appears on
@@ -76,7 +87,8 @@ the column.
 | Drill-down rows | 500 |
 
 Merged tables work too: a merge is read as the union of its member
-tables.
+tables, and its tag filter matches each row through the member it came
+from, since that is where a merged row's tags live.
 
 ## Files
 

@@ -271,7 +271,19 @@ see [docs/notes/README.md](README.md) for the whole set.
     to the *case file*; `v.view_N` lives in the scratch database that only
     the reader pool attaches. Any plugin that wants "what the grid is
     showing" has to be handed the filter spec and recompile it, or do what
-    the pivot does and own its filtering outright.
+    the pivot does and own its filtering outright. Tags are the part it
+    *can* see: `row_tags` is in the case file, so the pivot's tag chips
+    compile straight into its query, from the grid's own `S.tagFilter`
+    spelling (`_tag_clauses`).
+  - **On a merge, match tags per member, not with a row-value IN.**
+    `(s.source_id, s.rid) IN (SELECT source_id, rid FROM row_tags …)` is
+    correct over `_scope`'s union and fine when it keeps rows, but SQLite
+    builds no lookup table for a row-value IN, so under `NOT` (an
+    exclusion, or No tags) it rescans the subquery once per merged row:
+    minutes on two 600k-row members with 50k rows excluded. One
+    `s.source_id = N AND s.rid IN (SELECT rid … WHERE source_id = N)` arm
+    per member is about a second (`_tagged`). Matching on `rid` alone is
+    the other way to get it wrong — rids collide across members.
   - **Iterating on a plugin's Python needs a reload.** The module is
     imported once when the server loads plugins; editing the file and re-requesting a
     route runs the *old* code with the *new* line numbers, which makes
