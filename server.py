@@ -117,6 +117,10 @@ class _Presence:
         self.pages: dict[str, int] = {}
         self.farewells: set[str] = set()
         self.last_gone: str | None = None
+        # The server is going down: every stream ends (_end_presence_streams).
+        # One event per open stream, made on the loop that waits on it.
+        self.closing = False
+        self.wakers: set[asyncio.Event] = set()
 
 
 PRESENCE = _Presence()
@@ -988,6 +992,9 @@ def _sweep_quicklook(max_age_days: int = 7) -> int:
     return removed
 
 
+_SHUTDOWN_ONCE = threading.Lock()
+
+
 def _trigger_shutdown() -> None:
     """Deliver SIGINT to this process shortly after the response flushes.
 
@@ -996,9 +1003,16 @@ def _trigger_shutdown() -> None:
     works on Windows (where SIGINT can't be delivered via kill); uvicorn
     treats it exactly like Ctrl+C — graceful shutdown, so _lifespan's
     Store.close() still runs and the views scratch files are deleted. The
-    short delay is what lets the HTTP response reach the browser first."""
+    short delay is what lets the HTTP response reach the browser first.
+
+    Once only: uvicorn reads a SECOND SIGINT as the impatient Ctrl+C and
+    force-quits, skipping the lifespan — Store.close() never runs, the
+    case lock and views file are left behind. Two windows pressing Shut
+    down together, or the idle monitor firing during one, must not be
+    that."""
     import signal
-    import threading
+    if not _SHUTDOWN_ONCE.acquire(blocking=False):
+        return
     threading.Timer(0.3, lambda: signal.raise_signal(signal.SIGINT)).start()
 
 
@@ -1072,13 +1086,49 @@ async def api_presence(page: str = ""):
 
     async def stream():
         _presence_open(page)
+        wake = asyncio.Event()
+        PRESENCE.wakers.add(wake)
         try:
-            while True:
+            while not PRESENCE.closing:
                 yield ": ping\n\n"
-                await asyncio.sleep(15)
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(wake.wait(), 15)
+            # Said, not just dropped: a page that only sees its stream end
+            # tells the analyst the connection was lost. Non-empty data, or
+            # EventSource never dispatches the event.
+            yield "event: shutdown\ndata: shutdown\n\n"
         finally:
+            PRESENCE.wakers.discard(wake)
             _presence_close(page)
     return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+def _end_presence_streams() -> None:
+    """End every presence stream, because the server is going down.
+
+    uvicorn's graceful shutdown waits for every open connection to finish
+    its response BEFORE it runs the lifespan's shutdown half, and a
+    presence stream's response never finishes — that is its whole job. So
+    Shut down answered {"ok": true}, the page said "Winnow is off", and the
+    process ran on, case lock held, until the analyst closed the last
+    window: the very window that pressed the button holds a stream. Ctrl+C
+    and SIGTERM waited the same way. Runs on the event loop, from
+    _Server.shutdown in main(), before uvicorn starts waiting."""
+    PRESENCE.closing = True
+    for wake in list(PRESENCE.wakers):
+        wake.set()
+
+
+@app.get("/api/presence/others")
+async def api_presence_others(page: str = ""):
+    """How many OTHER windows are using this server — what Shut down
+    names before it asks, since stopping the server stops those too.
+    `page` is the asking window's id (connection.js); a stream that came
+    with no id (an older client) counts as a window of its own. `async`
+    for the same reason as the goodbye: presence is read on the loop."""
+    page = _presence_page(page)
+    unnamed = max(PRESENCE.streams - sum(PRESENCE.pages.values()), 0)
+    return {"others": sum(1 for p in PRESENCE.pages if p != page) + unnamed}
 
 
 @app.post("/api/goodbye")
@@ -1270,7 +1320,9 @@ def api_shutdown():
     process running forever is how a case file stays locked all weekend.
     Nothing to save: every write already went to the case file. A SQL
     pane query in flight is stopped by the signal this sends (see
-    _stop_pane_queries) — uvicorn would otherwise wait on it for ever."""
+    _stop_pane_queries) — uvicorn would otherwise wait on it for ever —
+    and so is every open window's presence stream (_end_presence_streams),
+    which otherwise kept the server up until the last window closed."""
     _trigger_shutdown()
     return {"ok": True}
 
@@ -6324,8 +6376,15 @@ def main() -> None:
             _stop_pane_queries()
             super().handle_exit(sig, frame)
 
+        async def shutdown(self, sockets=None):
+            # First, while nothing is waiting yet: an open window's presence
+            # stream would otherwise hold the wait below for as long as the
+            # window stays open (_end_presence_streams).
+            _end_presence_streams()
+            await super().shutdown(sockets=sockets)
+
     # uvicorn.run, less the reload/workers branches Winnow never takes, so
-    # that the signal handler above can be the one uvicorn installs.
+    # that the signal handler and shutdown above are the ones uvicorn runs.
     server = _Server(uvicorn.Config(app, host=args.host, port=args.port, log_level="warning"))
     with contextlib.suppress(KeyboardInterrupt):
         server.run()
