@@ -1854,6 +1854,12 @@ def test_pivot_detail_on_a_blank_cell_means_blank_not_empty_string(pivot_client)
       "filters": [{"column": "Host", "op": "wat", "values": ["x"]}]}, "Unknown filter operator", False),
     ({"values": [{"agg": "count"}], "group_sets": [[]],
       "filters": [{"column": "Bytes", "op": "gt", "value": "abc"}]}, "needs a number", False),
+    ({"values": [{"agg": "count"}], "group_sets": [[]], "tags": ["wat"]}, "Unknown tag filter", False),
+    ({"values": [{"agg": "count"}], "group_sets": [[]], "tags": [True]}, "Unknown tag filter", False),
+    ({"values": [{"agg": "count"}], "group_sets": [[]], "tags": "1"}, "must be a list", False),
+    # A deleted tag: filtered to it, the pivot would say "no rows" with confidence.
+    ({"values": [{"agg": "count"}], "group_sets": [[]], "tags": [999]}, "No tag 999", False),
+    ({"values": [{"agg": "count"}], "group_sets": [[]], "tags": ["!999"]}, "No tag 999", False),
 ])
 def test_pivot_validation_rejects_bad_requests(pivot_client, body, fragment, own_source_id):
     """Everything the analyst can cause is a 400 with a message they can act
@@ -1978,6 +1984,108 @@ def test_pivot_distinct_count_ignores_blanks_like_count_does(pivot_client):
     present, distinct = out["sets"][0]["rows"][0]
     assert present == 4                  # 100, 200, N/A, 40
     assert distinct == 4 and distinct <= present
+
+
+# The pivot's tag chips, in the grid's own spelling. PIVOT_ROWS are rids 1-5:
+# Suspicious on 1, 2 and 4; Benign on 2 (so 2 carries both); TA on 3; 5 is
+# untagged.
+@pytest.fixture
+def tagged_pivot(pivot_client, store):
+    client, source_id = pivot_client
+    tags = {t["name"]: t["id"] for t in store.list_tags()}
+    store.set_tags(source_id, [1, 2, 4], tags["Suspicious"], True)
+    store.set_tags(source_id, [2], tags["Benign"], True)
+    store.set_tags(source_id, [3], tags["TA"], True)
+    return client, source_id, tags
+
+
+def _tag_keys(tags, *names):
+    """"Suspicious" -> its id, "!Benign" -> "!<its id>", sentinels as-is."""
+    out = []
+    for n in names:
+        if n.startswith("__"):
+            out.append(n)
+        elif n.startswith("!"):
+            out.append(f"!{tags[n[1:]]}")
+        else:
+            out.append(tags[n])
+    return out
+
+
+def _count(client, source_id, **body):
+    return _agg(client, source_id, values=[{"agg": "count"}], group_sets=[[]], **body)["sets"][0]["rows"][0][0]
+
+
+TAG_FILTER_CASES = [
+    (["Suspicious"], 3),
+    (["Suspicious", "TA"], 4),               # two chips: rows carrying either
+    (["Suspicious", "!Benign"], 2),          # 2 carries both, so it goes
+    (["!Benign"], 4),                        # an exclusion alone keeps untagged rows
+    (["__any__"], 4),
+    (["__none__"], 1),
+    (["__none__", "TA"], 2),                 # untagged, plus TA's
+    (["__any__", "!Benign"], 3),
+]
+
+
+@pytest.mark.parametrize("names, expected", TAG_FILTER_CASES)
+def test_pivot_tag_filter_counts_what_its_chips_say(tagged_pivot, names, expected):
+    client, source_id, tags = tagged_pivot
+    assert _count(client, source_id, tags=_tag_keys(tags, *names)) == expected
+
+
+@pytest.mark.parametrize("names, _", TAG_FILTER_CASES)
+def test_pivot_tag_filter_keeps_the_rows_the_grid_keeps(tagged_pivot, store, names, _):
+    """The chips are the grid ribbon's, so they have to select the grid's
+    rows: the same keys through Store.build_view and through the pivot."""
+    client, source_id, tags = tagged_pivot
+    keys = _tag_keys(tags, *names)
+    assert _count(client, source_id, tags=keys) == store.build_view(source_id, {"tags": keys})["row_count"]
+
+
+def test_pivot_tag_filter_groups_and_combines_with_field_filters(tagged_pivot):
+    """Tag clauses go in after the field filters' bound values, and the Sum's
+    numeric guard carries `?`s of its own — so this is the shape that would
+    shift a parameter if the tag SQL ever grew a placeholder."""
+    client, source_id, tags = tagged_pivot
+    out = _agg(client, source_id,
+               values=[{"agg": "sum", "column": "Bytes"}, {"agg": "count"}],
+               group_sets=[["Host"]],
+               filters=[{"column": "Channel", "op": "in", "values": ["Security"]}],
+               tags=_tag_keys(tags, "Suspicious", "!Benign"))
+    assert {r[0]: r[1:] for r in out["sets"][0]["rows"]} == {"SRV1": [100, 1], "SRV2": [None, 1]}
+
+
+def test_pivot_detail_keeps_the_tag_filter(tagged_pivot):
+    """A cell counted over Suspicious-but-not-Benign rows opens on those
+    rows, not on every row behind the cell."""
+    client, source_id, tags = tagged_pivot
+    r = client.post("/api/plugin/pivot/detail", json={
+        "source_id": source_id, "cell": [{"column": "Host", "value": "SRV1"}],
+        "tags": _tag_keys(tags, "Suspicious", "!Benign"),
+    })
+    assert r.status_code == 200, r.text
+    assert [row[0] for row in r.json()["rows"]] == [1]
+
+
+def test_pivot_tag_filter_on_a_merge_matches_each_row_through_its_own_member(tagged_pivot, store, write_csv):
+    """Invariant #9. A merge's tags live on its members, keyed by the
+    member's own rid — and rids collide across members, so matching on rid
+    alone would count the second table's rows 1, 2 and 4 as Suspicious
+    too."""
+    client, source_id, tags = tagged_pivot
+    other = store.ingest_csv(write_csv(PIVOT_ROWS, "pivot2.csv"), name="pivot2", build_fts=False)["id"]
+    store.set_tags(other, [5], tags["Suspicious"], True)
+    mid = store.create_merge("pivtags", [source_id, other])["id"]
+    for names, expected in [(["Suspicious"], 4), (["__none__"], 5), (["Suspicious", "!Benign"], 3),
+                            (["!Suspicious"], 6)]:
+        keys = _tag_keys(tags, *names)
+        assert _count(client, mid, tags=keys) == expected, names
+        assert expected == store.build_view(mid, {"tags": keys})["row_count"], names
+    r = client.post("/api/plugin/pivot/detail", json={"source_id": mid, "cell": [],
+                                                      "tags": _tag_keys(tags, "Suspicious")})
+    assert r.status_code == 200, r.text
+    assert len(r.json()["rows"]) == 4
 
 
 # ------------------------------------------------- bundled dir + scopes
