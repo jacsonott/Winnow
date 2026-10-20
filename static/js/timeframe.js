@@ -727,7 +727,7 @@ export function buildColumnsPanel(container, refresh = openTableMenu) {
       S.layout[name] = { ...(S.layout[name] || {}), hidden: !cb.checked };
       renderHead(); render(); saveLayout();
     };
-    lab.append(cb, el('span', null, name));
+    lab.append(cb, el('span', 'collist-name', name));
     // Pinning sits beside visibility: both are decisions about where a
     // column is, rather than what it contains.
     // Its own class, not collist-pick: that one is the value-picker
@@ -745,7 +745,10 @@ export function buildColumnsPanel(container, refresh = openTableMenu) {
     paintPin();
     pin.onclick = () => { togglePin(name); paintPin(); };
     const c = columnMeta(name);
-    lab.append(el('span', 'collist-type', ' ' + (c ? c.type : '') + (c && c.derived ? ' · derived' : '')));
+    const type = (c ? c.type : '') + (c && c.derived ? ' · derived' : '');
+    lab.append(el('span', 'collist-type', ' ' + type));
+    // A narrow window cuts a long name short; hovering shows it whole.
+    lab.title = `${name} ${type}`;
     row.append(lab, pin);
     // Per-column value-picker override, in the same row as the visibility
     // box because they're the same kind of decision about the same column.
