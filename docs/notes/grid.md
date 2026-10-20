@@ -180,6 +180,63 @@ see [docs/notes/README.md](README.md) for the whole set.
   pass (`prefetchGroupPages`) because it has two kinds of boundary: the
   next page inside a big expanded group, and the first page of the next
   expanded group.
+- **A jump paints from a glimpse, and asks for pages only where the grid
+  will still be** (grid.js's jumps block). Every frame of a scrollbar drag
+  lands on a different page, and `render()` used to `ensurePage` each one:
+  nothing cancelled the pages the thumb had left, Chromium sends six
+  requests to one host at a time, and the page the analyst let go on
+  queued behind all of them. On a 1M-row EvtxECmd table (27 columns,
+  8.6 MB a page, 110–390 ms to serve one warm and seconds cold) a
+  one-second drag sent ~31 page requests and its rows showed ~24 s after
+  release; a single jump to a far spot took 1.3–5.4 s and a drag on a
+  sorted view 20–22 s. Now the rows the screen is missing are fetched on
+  their own (`fetchGlimpse`, ~60 rows, ~7 ms to serve), one at a time
+  with the latest position winning, and the page is held back while the
+  grid is *jumping* (a paint moved `JUMP_ROWS` or more in the last
+  `SETTLE_MS`) or *outrunning* a page or prefetch it asked for and has
+  since left. The settle timer, or the stale fetch landing, comes back
+  for the page from where the grid came to rest. Measured on the same
+  table, headless: ~0.1 s from release to rows for the drag, the single
+  jump and the sorted drag alike, with frames across page boundaries
+  under the wheel unchanged — most of what is left is the paint itself
+  (~48 ms a frame there, three quarters of it the layout
+  `titleClippedCells` forces). Five things to keep:
+  - A glimpse's rows go into `S.rowsByPos`, so `rowAt` and everything on
+    it read them, but only where their page is not cached (the page's own
+    row objects are what tags and notes patch in place) and only until the
+    next glimpse. Anything that needs whole pages (copy, a tag key)
+    still goes through `S.pages`/`waitForPages` and never sees one.
+  - **Rows can now be written to before their page lands**, which the old
+    grid never allowed: a row was a placeholder until then. The note box
+    is the one write that patches the row under it without loading its
+    page first, and the page asked for at the settle was answered before
+    the note was saved — landing over the row, it put the old, empty note
+    on the row and, through `showDetail`, in the box. `saveNote` calls
+    `refetchPageOf`, which disowns that fetch (ensurePage drops a page
+    whose `S.pending` entry is no longer its own, which is also why its
+    `finally` deletes only its own entry) and the paint after asks again.
+    A new write path that patches `rowAt()` in place needs the same.
+  - `S.rowsByPos` is the only record of whether the screen has its rows.
+    A glimpse's rows disappear when a page lands over them and is evicted
+    later, so a check that trusted `screenGlimpse`'s own range said a
+    revisited spot was covered and left it blank until its pages came back,
+    4–5 s cold.
+  - A glimpse that fails is not retried for that view; the page after the
+    settle is the fallback and has its own recovery. Retrying on every
+    paint is the request-per-repaint loop
+    `tests/ui/test_expired_view_recovers_once.py` counts.
+  - Grouped mode has the deferral (`groupRowAt` doesn't ask mid-jump) but
+    no glimpse: a drag through a big expanded group shows placeholders
+    until the settle and one page round trip (0.9–1.5 s on the same
+    table grouped by Level, against 1.7–5.2 s before).
+  `tests/ui/test_scrollbar_drag_lands.py` holds it on a stubbed 1M-row
+  view: every page asked for once the drag starts is held, and the rows it
+  stopped on have to paint anyway; the old grid asks for a page every few
+  frames and never paints there. It also holds the page following the
+  settle, and a note written before that page lands surviving it. A test
+  that holds a page back to keep rows pending has to hold every request
+  reaching into those rows, glimpses included
+  (test_tag_picks_across_pages.py does).
 - **The spacer that gives the grid its scroll height is capped**
   (`MAX_SPACER_PX`, 16M px) and above that cap `scrollTop` is no longer a
   row offset. A DOM element can't be arbitrarily tall — Blink clamps at

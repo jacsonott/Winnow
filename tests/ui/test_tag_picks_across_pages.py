@@ -119,12 +119,16 @@ def test_select_all_then_a_tag_key_tags_every_row_but_the_one_unticked(page, api
 
 
 def test_picks_running_into_a_page_still_loading_are_all_tagged(page, api, big, tag):
-    # Hold back the second page, so the run of picks crosses into rows the
-    # grid is still waiting for when the key is pressed.
+    # Hold back the second page's rows, so the run of picks crosses into
+    # rows the grid is still waiting for when the key is pressed. Every
+    # request that reaches into them: the page, and the screenful a jump
+    # asks for on its own ahead of it (grid.js's jumps block).
     held = []
 
     def hold_second_page(route):
-        if parse_qs(urlparse(route.request.url).query).get("start") == ["5000"]:
+        qs = parse_qs(urlparse(route.request.url).query)
+        start, count = int(qs["start"][0]), int(qs["count"][0])
+        if start < 10_000 and start + count > 5_000:
             held.append(route)
         else:
             route.continue_()
