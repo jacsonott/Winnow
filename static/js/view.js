@@ -6,7 +6,7 @@ import { $, OVERSCAN, PAGE, ROW_H, api, debounce, nameMap, post, setBusy, toast,
 import { syncRowOpenHint } from './detail.js';
 import { currentSpec, renderAdvancedChips, updateSearchHint } from './filters.js';
 import { recordFilterState } from './filterundo.js';
-import { clearPageCache, headH, rScroll, render, rowAt, spacerPx, vScroll } from './grid.js';
+import { clearPageCache, headH, rScroll, render, rowAt, syncSpacer, vScroll } from './grid.js';
 import { drawRail, regroupAll } from './grouping.js';
 import { histogramFollowBuild, histogramViewLanded } from './histogram.js';
 import { armOpCancel, createNotice, followFtsBuild, opCancelCurrent, opToken } from './jobs.js';
@@ -918,7 +918,7 @@ export async function installView(v, { seq, forSourceId, cacheKey, seeded = [], 
       drop();
     }
   }
-  $('spacerY').style.height = spacerPx(v.row_count) + 'px';
+  syncSpacer(v.row_count);
   syncNoRows();
   $('body').scrollTop = rScroll($('body'), v.row_count, scroll, headH());
   if (S.groupByCols.length) {
