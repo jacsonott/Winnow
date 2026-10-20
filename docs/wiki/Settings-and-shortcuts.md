@@ -198,6 +198,7 @@ with the action names Settings uses.
 | Open/close the detail pane | `d` |
 | Drop all grouping, restore column order | `x` |
 | Save this column order/visibility as the default for this header set | `L` |
+| Apply the default saved for this header set to this table's column order/visibility | none |
 | Toggle the timeframe filter on/off | `r` |
 | Open the timeframe filter (set column/range) | `R` |
 | Show/hide the histogram of when the rows in this view happened | `h` |

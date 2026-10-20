@@ -3,7 +3,7 @@ in the case.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { recordTabVisit } from './tabhistory.js';
-import { renderHead, saveLayout } from './columns.js';
+import { findDefaultLayout, placeUnorderedColumns, renderHead, saveLayout } from './columns.js';
 import { $, ROW_H, api, el, nameMap, post, toast } from './core.js';
 import { derivedOps, renameColumnIn } from './derived.js';
 import { hideDetailPane, syncRowOpenHint } from './detail.js';
@@ -30,7 +30,6 @@ import { S, clearCellSelection, selClear, selCount, selFirst, specKey } from './
 import { compactCaseFile, mergesUsing, openTablesManager, removeRefusal, removeSource } from './tables.js';
 import { loadTags, refreshTagCounts, renderTagRibbon } from './tags.js';
 import { openTableMenu, timeframeAcrossTables, updateFiltersButton, updateTimeRangeButton } from './timeframe.js';
-import { baseColumns } from './tsformat.js';
 import { confirmDialog, contextMenu, dropdownMenu, modal, promptDialog } from './ui.js';
 import { dropPendingSelection, pendingViewStatsText, rebuildView, syncNoRows, writeStatsLine } from './view.js';
 
@@ -965,13 +964,7 @@ export async function openSource(id, { skipBuild = false } = {}) {
   // check for a cross-case default saved for this exact set of column
   // names (Settings > "save default layout" hotkey), same seed-once
   // pattern as the default tag template for a brand-new case.
-  let defaultLayout = null;
-  if (!saved.order) {
-    const qp = new URLSearchParams();
-    for (const c of baseColumns()) qp.append('col_names', c.name);
-    const found = await api(`/api/column_layouts/find?${qp.toString()}`).catch(() => null);
-    if (found && found.order) defaultLayout = found;
-  }
+  const defaultLayout = saved.order ? null : await findDefaultLayout().catch(() => null);
   S.layout = nameMap(saved.columns || (defaultLayout && defaultLayout.columns));
   // Per-source, unlike the per-column overrides inside S.layout: this one is
   // a judgement about *this table's* size, and a cross-case default layout
@@ -985,23 +978,8 @@ export async function openSource(id, { skipBuild = false } = {}) {
     || (defaultLayout && defaultLayout.order.filter((n) => S.columns.some((c) => c.name === n)))
     || S.columns.filter((c) => !c.derived).map((c) => c.name);
   // A column the order has never seen — a derived column added since the
-  // layout was last saved — goes right after the column it was derived
-  // from, after any siblings already sitting there (a flatten adds several
-  // from one input, in order), not at the far end where nobody scrolls.
-  // Anything else (no derived_from, or an input that's hidden from the
-  // order) appends as before. Re-derive keeps its name, so it never moves.
-  let placed = false;
-  for (const c of S.columns) {
-    if (S.order.includes(c.name)) continue;
-    let at = c.derived_from ? S.order.indexOf(c.derived_from) : -1;
-    if (at === -1) { S.order.push(c.name); continue; }
-    while (at + 1 < S.order.length) {
-      const next = S.columns.find((x) => x.name === S.order[at + 1]);
-      if (next && next.derived_from === c.derived_from) at++; else break;
-    }
-    S.order.splice(at + 1, 0, c.name);
-    placed = true;
-  }
+  // layout was last saved — goes beside the column it was derived from.
+  const placed = placeUnorderedColumns(S.order);
 
   // Default sort: first datetime column, ascending — a timeline wants time order.
   const dt = S.columns.find((c) => c.type === 'datetime');

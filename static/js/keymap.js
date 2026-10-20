@@ -1,7 +1,7 @@
 /* Keybindings: the default map, its migrations, and the action handlers.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
-import { autofitAllColumnWidths, openColumnFilter, resetAllColumnWidths, saveDefaultLayout, visibleCols } from './columns.js';
+import { applyDefaultLayout, autofitAllColumnWidths, openColumnFilter, resetAllColumnWidths, saveDefaultLayout, visibleCols } from './columns.js';
 import { openFilterBuilder } from './filterbuilder.js';
 import { undoFilterChange } from './filterundo.js';
 import { $, ROW_H } from './core.js';
@@ -103,6 +103,9 @@ export const DEFAULT_KEYMAP = {
   toggleDetail: ['d'],
   dropGrouping: ['x'],
   saveDefaultLayout: ['L'],
+  // No default key: it replaces a layout, so it should take a choice to
+  // put it on a key. The table menu has it as a button.
+  applyDefaultLayout: [],
   toggleTimeRange: ['r'],
   openTimeRange: ['R'],
   toggleHistogram: ['h'],
@@ -144,6 +147,7 @@ export const ACTION_LABELS = {
   toggleDetail: 'Open/close the detail pane',
   dropGrouping: 'Drop all grouping, restore column order',
   saveDefaultLayout: "Save this column order/visibility as the default for this header set",
+  applyDefaultLayout: "Apply the default saved for this header set to this table's column order/visibility",
   toggleTimeRange: 'Toggle the timeframe filter on/off',
   openTimeRange: 'Open the timeframe filter (set column/range)',
   toggleHistogram: 'Show/hide the histogram of when the rows in this view happened',
@@ -553,6 +557,7 @@ export const ACTION_HANDLERS = {
   openSearchAll: () => openSearchAllModal(),
   dropGrouping: () => { if (S.groupByCols.length) dropGrouping(); },
   saveDefaultLayout: () => saveDefaultLayout(),
+  applyDefaultLayout: () => applyDefaultLayout(),
   toggleTimeRange: () => toggleTimeRange(),
   openTimeRange: () => openTimeRangeModal(),
   toggleHistogram: () => toggleHistogram(),

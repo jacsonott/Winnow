@@ -2,7 +2,7 @@
 navigation that survive everything else being cleared.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
-import { isPinned, moveColumn, renderHead, saveDefaultLayout, saveLayout, togglePin } from './columns.js';
+import { applyDefaultLayout, isPinned, moveColumn, renderHead, saveDefaultLayout, saveLayout, togglePin } from './columns.js';
 import { $, api, el, post, toast } from './core.js';
 import { openDerivedColumnModal } from './derived.js';
 import { hasActiveFilterTree, openFilterBuilder } from './filterbuilder.js';
@@ -876,6 +876,11 @@ export function buildTableActionsPanel(container, refresh) {
   const dflt = el('button', 'btn ghost', 'Save layout as default for these columns');
   dflt.title = 'Reuse this column order/visibility for any table imported with the same headers';
   dflt.onclick = () => saveDefaultLayout();
+  // A table opens to the default only until it has a layout of its own,
+  // so one that was open before the default was saved needs telling.
+  const useDflt = el('button', 'btn ghost', 'Apply default layout for these columns');
+  useDflt.title = 'Replace this table\'s column order/visibility with the default saved for these headers';
+  useDflt.onclick = () => { $('modal').hidden = true; applyDefaultLayout(); };
   const nick = el('button', 'btn ghost', 'Name this header set…');
   nick.onclick = () => setNicknameFor(baseColumns().map((c) => c.name), nicknameFor(baseColumns().map((c) => c.name)));
   const nickTable = el('button', 'btn ghost', src && src.is_merge ? 'Rename this merge…' : 'Nickname this table…');
@@ -897,7 +902,7 @@ export function buildTableActionsPanel(container, refresh) {
     if (!src) return;
     openMergeBuilder(src.is_merge ? { edit: src } : { preselect: [src.id] });
   };
-  acts.append(dflt, nick, nickTable, merge);
+  acts.append(dflt, useDflt, nick, nickTable, merge);
   container.append(acts);
 }
 
@@ -913,7 +918,7 @@ export function buildTableStripPanel(container) {
   tables.title = 'Every table in the case — indexes, row counts, dropping a table';
   tables.onclick = () => openTablesManager();
   const reset = el('button', 'btn ghost', 'Reset view');
-  reset.title = 'Back to the just-opened state: clear filters, search, tag filter and grouping, and restore the default sort. Column layout and the timeframe filter stay.';
+  reset.title = 'Back to the just-opened state: clear filters, search, tag filter and grouping, and restore the default sort. Column layout and the timeframe filter stay (Apply default layout for these columns, below, resets the layout).';
   reset.onclick = async () => {
     $('modal').hidden = true;
     const dt = S.columns.find((c) => c.type === 'datetime');
