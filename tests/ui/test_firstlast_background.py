@@ -124,10 +124,17 @@ def test_the_grid_answers_while_first_last_works_out_a_big_result(fl, until):
 
     # The grid in another tab answers: a scroll paints rows from the middle
     # of the table while the last preview is still being worked out.
+    # Scrolled from inside the wait, not once before it: opening the table
+    # puts back its own scroll position when its view is in (openSource),
+    # which can land after a scroll made the moment the first rows painted
+    # and leave the grid at the top, waiting for rows nobody asked for.
     _to_grid(pg)
-    pg.evaluate("() => { const b = document.querySelector('#body'); b.scrollTop = b.scrollHeight / 2; }")
-    pg.wait_for_function("() => [...document.querySelectorAll('#rows .row:not(.pending)')]"
-                         ".some((r) => Number(r.dataset.pos) > 100000)", timeout=15_000)
+    pg.wait_for_function("""() => {
+      const b = document.querySelector('#body');
+      if (b.scrollTop < b.scrollHeight / 3) b.scrollTop = b.scrollHeight / 2;
+      return [...document.querySelectorAll('#rows .row:not(.pending)')]
+        .some((r) => Number(r.dataset.pos) > 100000);
+    }""", timeout=15_000)
 
     # Because nothing was held open for the work. It used to be all eight
     # previews, each a POST answered only when its preview was — seconds
