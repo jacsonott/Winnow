@@ -372,10 +372,14 @@ def test_a_read_that_failed_is_not_mistaken_for_nothing_saved(fl_page, server):
         assert "Could not read" in unread.inner_text()
 
         # Two edits, each waited out through its own preview round trip —
-        # well past the save debounce that would otherwise have fired.
+        # well past the save debounce that would otherwise have fired. The
+        # preview is a background job now (a start, then polls when it
+        # runs long), so its round trip ends when the tab stops saying so.
         for field in ("Host", "EventId"):
-            with pg.expect_response(lambda r: "/api/plugin/first_last/preview" in r.url, timeout=15_000):
+            with pg.expect_request(lambda r: "/api/plugin/first_last/job/start" in r.url, timeout=15_000):
                 pg.evaluate(DRAG, [f"[data-field='{field}']", "[data-zone='groupBy']"])
+            pg.wait_for_function("() => ![...document.querySelectorAll('.pluginview .note-status')]"
+                                 ".some((n) => n.textContent === 'Previewing…')", timeout=15_000)
         pg.wait_for_selector(".pluginview tbody tr", timeout=15_000)
         assert not writes, f"a mount that could not read wrote anyway: {writes}"
         # And the warning stays: it is about what is happening now.
