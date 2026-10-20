@@ -188,6 +188,8 @@ def test_a_window_resized_mid_launch_gets_the_wordmark_laid_out_for_it(own_page,
         pg.wait_for_selector("#splashTagline.visible", timeout=25_000)
         grown = _wordmark_on_screen(pg)
         pg.set_viewport_size({"width": 900, "height": 600})
+        # Only for the resize event to land: the handler repaints there and
+        # then, and the old code changes nothing, so there's no signal to await.
         pg.wait_for_timeout(150)
         shrunk = _wordmark_on_screen(pg)
 
@@ -195,7 +197,9 @@ def test_a_window_resized_mid_launch_gets_the_wordmark_laid_out_for_it(own_page,
         w, h = box["window"]
         assert box["canvas"] == [w, h], box
         assert abs((box["left"] + box["right"]) / 2 - w / 2) < 20, box     # centred across
-        assert abs((box["top"] + box["bottom"]) / 2 - h * 0.44) < 20, box  # at the word's height
+        # The word's line is at 44% of the height; the capitals' ink sits a
+        # font-dependent ~0.1em off it (23px at 190px on CI's fonts).
+        assert abs((box["top"] + box["bottom"]) / 2 - h * 0.44) < h * 0.05, box
     # Sized for the window too: the font is 13% of the width, capped at 190px.
     ratio = (shrunk["right"] - shrunk["left"]) / (grown["right"] - grown["left"])
     assert abs(ratio - 900 * 0.13 / 190) < 0.05, ratio
