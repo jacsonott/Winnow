@@ -652,10 +652,10 @@ def derive_pick(page):
     Clicked rather than set, so a list that stopped answering clicks
     fails here."""
     def _pick(entry, fmt=None):
-        item = page.locator("#modalBody .derived-rail-item", has=page.locator(
-            ".derived-rail-label", has_text=re.compile("^" + re.escape(entry) + "$")))
+        item = page.locator("#modalBody .side-rail-item", has=page.locator(
+            ".side-rail-label", has_text=re.compile("^" + re.escape(entry) + "$")))
         item.click()
-        page.wait_for_selector(f'#modalBody .derived-rail-item[aria-selected="true"] >> text="{entry}"')
+        page.wait_for_selector(f'#modalBody .side-rail-item[aria-selected="true"] >> text="{entry}"')
         if fmt is not None:
             page.locator('#modalBody select[data-role="format"]').select_option(label=fmt)
     return _pick

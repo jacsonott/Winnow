@@ -88,7 +88,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   first that looks like a timestamp (`defaultParseColumn` in derived.js).
 
 - **The add dialog is a fixed frame; its content never sizes it**
-  (`openDerivedColumnModal`, `.derived-panes`). It was a column of rows
+  (`openDerivedColumnModal`, `.side-panes`). It was a column of rows
   in a centred card: picking a type rebuilt the operation list, an
   operation rebuilt its parameters, the preview emptied to "Checking…"
   and refilled, and each of those changed the card's height, so the card
@@ -105,7 +105,10 @@ see [docs/notes/README.md](README.md) for the whole set.
   back. test_derived_op_groups.py measures the frame through every
   entry. Because the preview can now be stale, a test that waits for
   `.derived-preview-row` alone can read the previous answer's rows; wait
-  on the `derive_preview` fixture (aria-busy false) instead.
+  on the `derive_preview` fixture (aria-busy false) instead. The frame,
+  the side list and the preview box are shared with Import a folder
+  (`sideRail` in ui.js, the `.side-*` rules in style.css), so a change
+  to one is a change to both; see ui.md.
 
 - **The timestamp formats are one side-list entry; detection only fills
   in its Format** (`deriveEntries`, `TIMESTAMP_ENTRY`). Detection runs on

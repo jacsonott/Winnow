@@ -431,6 +431,161 @@ export function menuPins(key) {
   };
 }
 
+/* ------------------------------------------------------- side list */
+
+/* Every word of the search has to appear somewhere in the entry's name
+   or group. The side list's default match; a caller with more to search
+   (formats, patterns) passes its own. */
+export function sideRailMatch(entry, query) {
+  const terms = String(query || '').toLowerCase().split(/\s+/).filter(Boolean);
+  const text = `${entry.label} ${entry.group}`.toLowerCase();
+  return terms.every((t) => text.includes(t)) ? {} : null;
+}
+
+/* The left pane of a two-pane dialog: what to choose, listed by group
+   under a search box, with the analyst's pinned favourites in a section
+   on top. The Add derived column dialog (what to make) and Import a
+   folder (which profile) both use it, so the two lists behave as one:
+   typing narrows, Escape clears the search before it closes the dialog,
+   the arrow keys walk the list choosing as they go, and ☆ pins a row.
+
+   Entries are {key, label, group, title?}. The caller owns which one is
+   chosen (`selected()` returns its key) and what choosing does
+   (`onPick(entry, hit)`), and calls sync() once it has moved the
+   choice. `entries` is a thunk, so a list that changes while the dialog
+   is open repaints with paint(). `match(entry, query)` returns null for
+   no match, else a hit: its `hint` is a second line under the label,
+   which says what a search found an entry by when that was not its name
+   (a timestamp format, a profile's pattern), and the hit goes to onPick.
+   `notes` maps a group to a line shown in its place while it has no
+   entries at all. `locked` (a re-derive, where what to make is fixed)
+   disables the search and every row but the chosen one. Pins are
+   menuPins(pinsKey): per browser, beside the row menu's. */
+export function sideRail({ entries, groups, selected, onPick, pinsKey, match = sideRailMatch,
+                           notes = {}, locked = false, label = 'What to choose' }) {
+  const pins = menuPins(pinsKey);
+  const search = el('input', 'side-search');
+  search.type = 'search';
+  search.placeholder = 'Search…';
+  search.setAttribute('aria-label', 'Search ' + label.toLowerCase());
+  search.disabled = locked;
+  const list = el('div', 'side-rail-list');
+  list.setAttribute('role', 'listbox');
+  list.setAttribute('aria-label', label);
+  const rail = el('div', 'side-rail');
+  rail.append(search, list);
+
+  // In place rather than a repaint, so the item that was clicked (or
+  // arrowed to) keeps the focus.
+  function sync() {
+    const key = selected();
+    for (const item of list.querySelectorAll('.side-rail-item')) {
+      const on = item.dataset.key === key;
+      item.setAttribute('aria-selected', String(on));
+      item.parentElement.classList.toggle('selected', on);
+    }
+  }
+
+  function row(entry, hit, pinned) {
+    const r = el('div', 'side-rail-row');
+    const item = el('button', 'side-rail-item');
+    item.type = 'button';
+    item.dataset.key = entry.key;
+    item.setAttribute('role', 'option');
+    const on = entry.key === selected();
+    item.setAttribute('aria-selected', String(on));
+    r.classList.toggle('selected', on);
+    item.disabled = locked && !on;
+    item.append(el('span', 'side-rail-label', entry.label));
+    if (hit.hint) item.append(el('span', 'side-rail-hint', hit.hint));
+    item.title = entry.title || '';
+    item.onclick = () => onPick(entry, hit);
+    const pin = el('button', 'side-rail-pin', pinned ? '✕' : '☆');
+    pin.type = 'button';
+    pin.title = pinned ? 'Unpin from the top of this list' : 'Pin to the top of this list';
+    pin.setAttribute('aria-label', `${pinned ? 'Unpin' : 'Pin'} ${entry.label}`);
+    pin.onclick = () => {
+      if (pinned) pins.remove(entry.key); else pins.add(entry.key);
+      paint();
+    };
+    r.append(item, pin);
+    return r;
+  }
+
+  /* Pinned entries come off their group and sit in a Pinned section on
+     top, in the order they were pinned — the list is one column of a
+     fixed height, so an entry shown twice costs a row and lights two
+     rows for one choice. A pin whose entry is gone (a deleted profile)
+     shows nothing. */
+  function paint() {
+    // A repaint replaces every row; whatever had the focus in the list
+    // gets it back in its new place (a pin moves its row to the top).
+    const had = list.contains(document.activeElement) ? document.activeElement : null;
+    const hadRow = had && had.closest('.side-rail-row');
+    const hadKey = hadRow ? hadRow.querySelector('.side-rail-item').dataset.key : null;
+    const hadPin = !!had && had.classList.contains('side-rail-pin');
+    const all = entries();
+    const q = search.value;
+    const pinned = pins.ids.map((k) => all.find((e) => e.key === k)).filter(Boolean);
+    const sections = [['Pinned', pinned, true]];
+    for (const g of groups) sections.push([g, all.filter((e) => e.group === g && !pins.has(e.key)), false]);
+    const nodes = [];
+    for (const [title, members, isPinned] of sections) {
+      const rows = [];
+      for (const entry of members) {
+        const hit = match(entry, q);
+        if (hit) rows.push(row(entry, hit, isPinned));
+      }
+      if (rows.length) nodes.push(el('div', 'side-rail-group', title), ...rows);
+      else if (notes[title] && !q.trim() && !all.some((e) => e.group === title)) {
+        nodes.push(el('div', 'side-rail-group', title), el('div', 'side-rail-note', notes[title]));
+      }
+    }
+    if (!nodes.length) nodes.push(el('div', 'side-rail-empty', `Nothing matches “${q.trim()}”.`));
+    list.replaceChildren(...nodes);
+    const again = hadKey && list.querySelector(`.side-rail-item[data-key="${CSS.escape(hadKey)}"]`);
+    if (again) (hadPin ? again.nextElementSibling : again).focus();
+  }
+
+  const visibleItems = () => [...list.querySelectorAll('.side-rail-item:not(:disabled)')];
+  search.oninput = () => paint();
+  search.addEventListener('keydown', (e) => {
+    const first = visibleItems()[0];
+    if (e.key === 'ArrowDown' && first) {
+      e.preventDefault();
+      first.focus();
+      first.click();
+    } else if (e.key === 'Enter' && first) {
+      e.preventDefault();
+      first.click();
+      const now = list.querySelector(`.side-rail-item[data-key="${CSS.escape(selected())}"]`);
+      if (now) now.focus();
+    } else if (e.key === 'Escape' && search.value) {
+      // Clears the search; the next Escape closes the dialog (the global
+      // handler leaves a prevented Escape alone).
+      e.preventDefault();
+      search.value = '';
+      paint();
+    }
+  });
+  // Up and down walk the list, choosing as they go — the Settings
+  // dialog's section list behaves the same way. Up from the top goes
+  // back to the search box.
+  list.addEventListener('keydown', (e) => {
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    const items = visibleItems();
+    const i = items.indexOf(document.activeElement);
+    if (i < 0) return;
+    e.preventDefault();
+    if (e.key === 'ArrowUp' && i === 0) { if (!search.disabled) search.focus(); return; }
+    const next = items[Math.max(0, Math.min(items.length - 1, i + (e.key === 'ArrowDown' ? 1 : -1)))];
+    next.focus();
+    next.click();
+  });
+
+  return { rail, search, list, pins, paint, sync };
+}
+
 /* `items` may be an array or a thunk — the thunk is what a keepOpen item
    re-runs to repaint with fresh state. */
 const itemsOf = (x) => (typeof x === 'function' ? x() : x) || [];

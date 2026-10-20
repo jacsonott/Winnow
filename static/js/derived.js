@@ -17,7 +17,7 @@ import { S, dashboardCreatorMode } from './state.js';
 import { clearRowCaches } from './tags.js';
 import { updateFiltersButton, updateTimeRangeButton } from './timeframe.js';
 import { TS_FORMATS, baseColumns, columnMeta, parseTimestamp, tsFormatFor } from './tsformat.js';
-import { confirmDialog, menuPins, modal, promptDialog } from './ui.js';
+import { confirmDialog, modal, promptDialog, sideRail } from './ui.js';
 import { rebuildView } from './view.js';
 
 /* ------------------------------------------------------- derived columns */
@@ -801,7 +801,6 @@ export async function openDerivedColumnModal(prefill, editing) {
     params: {},
     name: editing ? editing.name : '',
   };
-  const pins = menuPins(DERIVE_PINS);
 
   /* Which rows the preview samples. The head of the file is the one
      region a triage filter exists to escape, so a preview taken from it
@@ -825,10 +824,10 @@ export async function openDerivedColumnModal(prefill, editing) {
     const formatSelect = el('select');
     const detectNote = el('div', 'fb-help derived-detect');
     const descBox = el('p', 'derived-desc');
-    const settingsBox = el('div', 'derived-settings');
-    const previewBox = el('div', 'derived-preview');
-    const previewRows = el('div', 'derived-preview-rows');
-    const previewFoot = el('div', 'derived-preview-foot');
+    const settingsBox = el('div', 'side-settings derived-settings');
+    const previewBox = el('div', 'side-preview derived-preview');
+    const previewRows = el('div', 'side-preview-rows');
+    const previewFoot = el('div', 'side-preview-foot');
     previewBox.append(previewRows, previewFoot);
 
     for (const c of textCols) {
@@ -1315,15 +1314,6 @@ export async function openDerivedColumnModal(prefill, editing) {
     }
 
     /* ---------------------------------------------- the side list */
-    const search = el('input', 'derived-search');
-    search.type = 'search';
-    search.placeholder = 'Search…';
-    search.setAttribute('aria-label', 'Search what to make');
-    search.disabled = !!editing;
-    const railList = el('div', 'derived-rail-list');
-    railList.setAttribute('role', 'listbox');
-    railList.setAttribute('aria-label', 'What to make');
-
     function setEntry(key, format) {
       if (editing) return;
       if (key === state.entry && !format) return;
@@ -1337,121 +1327,28 @@ export async function openDerivedColumnModal(prefill, editing) {
         applyDetection();
       }
       suggestName();
-      syncSelected();
+      side.sync();
       renderSettings();
       refreshBoth();
     }
 
-    // In place rather than a repaint, so the item that was clicked (or
-    // arrowed to) keeps the focus.
-    function syncSelected() {
-      for (const item of railList.querySelectorAll('.derived-rail-item')) {
-        const on = item.dataset.key === state.entry;
-        item.setAttribute('aria-selected', String(on));
-        item.parentElement.classList.toggle('selected', on);
-      }
-    }
-
-    function railRow(entry, hit, pinned) {
-      const row = el('div', 'derived-rail-row');
-      const item = el('button', 'derived-rail-item');
-      item.type = 'button';
-      item.dataset.key = entry.key;
-      if (hit.format) item.dataset.format = hit.format;
-      item.setAttribute('role', 'option');
-      const selected = entry.key === state.entry;
-      item.setAttribute('aria-selected', String(selected));
-      row.classList.toggle('selected', selected);
-      item.disabled = !!editing && !selected;
-      item.append(el('span', 'derived-rail-label', entry.label));
-      // A search that found the timestamp entry by one of its formats
-      // names the format, and picking the hit picks it.
-      if (hit.format) {
+    // The shared side list (ui.js), with the search reaching into the
+    // timestamp entry's formats: a hit found through one names it, and
+    // picking the hit picks it.
+    const side = sideRail({
+      entries: () => entries,
+      groups: DERIVE_GROUPS.map(([name]) => name).concat('Other'),
+      selected: () => state.entry,
+      onPick: (entry, hit) => setEntry(entry.key, hit.format),
+      match: (entry, q) => {
+        const hit = matchesDeriveSearch(entry, q);
+        if (!hit || !hit.format) return hit;
         const f = entry.formats.find((x) => x.id === hit.format);
-        item.append(el('span', 'derived-rail-hint', f ? f.label : hit.format));
-      }
-      item.title = entry.description || '';
-      item.onclick = () => setEntry(entry.key, hit.format);
-      const pin = el('button', 'derived-rail-pin', pinned ? '✕' : '☆');
-      pin.type = 'button';
-      pin.title = pinned ? 'Unpin from the top of this list' : 'Pin to the top of this list';
-      pin.setAttribute('aria-label', `${pinned ? 'Unpin' : 'Pin'} ${entry.label}`);
-      pin.onclick = () => {
-        if (pinned) pins.remove(entry.key); else pins.add(entry.key);
-        paintRail();
-      };
-      row.append(item, pin);
-      return row;
-    }
-
-    /* Pinned entries come off their group and sit in a Pinned section on
-       top, in the order they were pinned — the list is one column of a
-       fixed height, so an entry shown twice costs a row and lights two
-       rows for one choice. The pins are menuPins(), per machine, beside
-       the row menu's. */
-    function paintRail() {
-      // A repaint replaces every row; whatever had the focus in the list
-      // gets it back in its new place (a pin moves its row to the top).
-      const had = railList.contains(document.activeElement) ? document.activeElement : null;
-      const hadRow = had && had.closest('.derived-rail-row');
-      const hadKey = hadRow ? hadRow.querySelector('.derived-rail-item').dataset.key : null;
-      const hadPin = !!had && had.classList.contains('derived-rail-pin');
-      const q = search.value;
-      const pinned = pins.ids.map((k) => entries.find((e) => e.key === k)).filter(Boolean);
-      const sections = [['Pinned', pinned, true]];
-      for (const g of DERIVE_GROUPS.map(([name]) => name).concat('Other')) {
-        sections.push([g, entries.filter((e) => e.group === g && !pins.has(e.key)), false]);
-      }
-      const nodes = [];
-      for (const [title, list, isPinned] of sections) {
-        const rows = [];
-        for (const entry of list) {
-          const hit = matchesDeriveSearch(entry, q);
-          if (hit) rows.push(railRow(entry, hit, isPinned));
-        }
-        if (!rows.length) continue;
-        nodes.push(el('div', 'derived-rail-group', title), ...rows);
-      }
-      if (!nodes.length) nodes.push(el('div', 'derived-rail-empty', `Nothing matches “${q.trim()}”.`));
-      railList.replaceChildren(...nodes);
-      const again = hadKey && railList.querySelector(`.derived-rail-item[data-key="${hadKey}"]`);
-      if (again) (hadPin ? again.nextElementSibling : again).focus();
-    }
-
-    const visibleItems = () => [...railList.querySelectorAll('.derived-rail-item:not(:disabled)')];
-    search.oninput = () => paintRail();
-    search.addEventListener('keydown', (e) => {
-      const first = visibleItems()[0];
-      if (e.key === 'ArrowDown' && first) {
-        e.preventDefault();
-        first.focus();
-        first.click();
-      } else if (e.key === 'Enter' && first) {
-        e.preventDefault();
-        first.click();
-        const now = railList.querySelector(`.derived-rail-item[data-key="${state.entry}"]`);
-        if (now) now.focus();
-      } else if (e.key === 'Escape' && search.value) {
-        // Clears the search; the next Escape closes the dialog (the global
-        // handler leaves a prevented Escape alone).
-        e.preventDefault();
-        search.value = '';
-        paintRail();
-      }
-    });
-    // Up and down walk the list, choosing as they go — the Settings
-    // dialog's section list behaves the same way. Up from the top goes
-    // back to the search box.
-    railList.addEventListener('keydown', (e) => {
-      if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
-      const items = visibleItems();
-      const i = items.indexOf(document.activeElement);
-      if (i < 0) return;
-      e.preventDefault();
-      if (e.key === 'ArrowUp' && i === 0) { if (!search.disabled) search.focus(); return; }
-      const next = items[Math.max(0, Math.min(items.length - 1, i + (e.key === 'ArrowDown' ? 1 : -1)))];
-      next.focus();
-      next.click();
+        return { ...hit, hint: f ? f.label : hit.format };
+      },
+      pinsKey: DERIVE_PINS,
+      locked: !!editing,
+      label: 'What to make',
     });
 
     colSelect.onchange = () => pickColumn(colSelect.value);
@@ -1467,9 +1364,7 @@ export async function openDerivedColumnModal(prefill, editing) {
 
     /* Left: the search box and the list. Right, top to bottom: the column
        it reads, the settings box, the new column's name, the preview. */
-    const rail = el('div', 'derived-rail');
-    rail.append(search, railList);
-    const pane = el('div', 'derived-pane');
+    const pane = el('div', 'side-pane');
     pane.append(labeledRow('Parse column', colSelect), settingsBox);
     // The name row keeps its place when a regex's named groups take over
     // (syncGo): the input steps aside for a line saying why, rather than
@@ -1486,7 +1381,7 @@ export async function openDerivedColumnModal(prefill, editing) {
        what it changes is which rows the answer below is about. Same
        shape and the same two labels as the value picker's (filters.js),
        so an analyst who has met one has met both. */
-    const previewHead = el('div', 'derived-preview-title', 'Preview');
+    const previewHead = el('div', 'side-preview-title', 'Preview');
     const scopeSeg = el('div', 'vp-seg derived-scope');
     for (const [key, label, title] of [
       ['view', 'This view', 'Sample the rows the current filters leave — what you are actually looking at'],
@@ -1500,8 +1395,8 @@ export async function openDerivedColumnModal(prefill, editing) {
     }
     previewHead.append(scopeSeg);
     pane.append(previewHead, previewBox);
-    const panes = el('div', 'derived-panes');
-    panes.append(rail, pane);
+    const panes = el('div', 'side-panes');
+    panes.append(side.rail, pane);
     body.append(panes);
     syncScope();
 
@@ -1573,7 +1468,7 @@ export async function openDerivedColumnModal(prefill, editing) {
     body.append(actions);
 
     suggestName();
-    paintRail();
+    side.paint();
     renderSettings();
     if (editing) {
       api(`/api/derived?source_id=${S.sourceId}`).then((defs) => {
@@ -1584,7 +1479,7 @@ export async function openDerivedColumnModal(prefill, editing) {
     } else {
       pickColumn(state.column);
     }
-  }, { wide: true, tall: true, focus: editing ? null : '.derived-search' });
+  }, { wide: true, tall: true, focus: editing ? null : '.side-search' });
 }
 
 /* After an import, if a column looks strongly like a timestamp the app

@@ -23,7 +23,7 @@ PATTERN = r"^(?P<exe>\S+) -Enc (?P<payload>\S+)"
 def _open_regex_derive(page):
     page.evaluate("() => __winnow.openDerivedColumnModal('CommandLine')")
     page.wait_for_selector("#modal:not([hidden])")
-    page.locator('#modalBody .derived-rail-item[data-key="regex_extract"]').click()
+    page.locator('#modalBody .side-rail-item[data-key="regex_extract"]').click()
     page.wait_for_selector("#modalBody .derived-params input", timeout=10_000)
 
 
