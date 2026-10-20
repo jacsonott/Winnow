@@ -783,6 +783,17 @@ section.page-with-panels { flex-direction: row; }
    would need a redraw on a timer. */
 .histogram-panel[aria-busy="true"] .th-info { animation: th-busy 1s var(--ease) infinite; }
 @keyframes th-busy { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
+/* …and while the chart is not the answer for the grid as it is now (a
+   rebuild in flight, or its answer not back — histogram.js fresh()), the
+   bars are the previous view's, so they say so: faded and grey, tag
+   colours included. Kept up rather than dropped so the strip holds its
+   height and the grid does not jump on every filter change. The fade
+   waits a beat going in and none coming out, so a small table whose
+   answer is back within it never blinks. */
+.histogram-panel.is-outdated .th-canvas {
+  opacity: .3; filter: grayscale(1); cursor: progress;
+  transition: opacity .2s var(--ease) .12s, filter .2s var(--ease) .12s;
+}
 /* The tag legend: only the layers actually in the chart, each with the
    tag's own colour — the same swatch the ribbon uses, so the two read as
    one palette. Wraps to nothing when the chart is not stacked. */

@@ -21,6 +21,13 @@
    The grid's render() asks for that through histogramFollowGrid, so a
    scroll or a cursor move repaints the canvas and never refetches.
 
+   And it never passes the previous view's chart off as this one's. From
+   the moment a rebuild starts until the answer for the view it lands has
+   come back, the bars are faded and grey, the position marks are gone and
+   the count line says "Updating…" (fresh(), and view.js calls
+   histogramFollowBuild / histogramViewLanded to say when). The answer is
+   asked for as the view lands, not after the grid has painted it.
+
    Declarations only. wireHistogram() builds the chrome and attaches the
    document listeners once, for the page's life (session.js does the same
    for the diff banner): the strip is not a plugin mount, so there is
@@ -33,7 +40,7 @@ import { syncPluginPanels } from './plugins.js';
 import { S } from './state.js';
 import { datetimeColumns, updateTimeRangeButton } from './timeframe.js';
 import { parseTimestamp } from './tsformat.js';
-import { rebuildView } from './view.js';
+import { rebuildInFlight, rebuildView } from './view.js';
 
 /* Per browser, like the appearance and keymap prefs: {open, column}. */
 export const HISTOGRAM_PREFS_KEY = 'winnow.histogram';
@@ -55,6 +62,7 @@ let inflight = 0;
 let seq = 0;            // request counter: only the newest answer lands
 let problem = null;     // a 400's message, shown in place of the chart
 let drawnFor = null;    // the view id the chart on screen describes
+let askedFor = null;    // the view id of the newest ask, in flight or answered (not 409'd)
 let retries = 0;        // consecutive re-asks after an answer we could not use
 /* Set when the re-ask budget runs out with the chart still describing a
    view the grid has moved on from. Keeping the old chart up is right —
@@ -109,7 +117,9 @@ export function histogramStacked() { return !!prefs().stack; }
 
 export function toggleHistogramStack(on = !histogramStacked()) {
   savePrefs({ stack: !!on });
-  data = null;          // the split is asked for at fetch time, not derived
+  // The split is asked for at fetch time, not derived. Until it is back
+  // the chart stays up, faded — fresh() knows an answer without a split
+  // cannot be drawn as a stacked one.
   schedule();
   draw();
 }
@@ -164,6 +174,7 @@ export function resetHistogram() {
   data = null;
   problem = null;
   drawnFor = null;
+  askedFor = null;
   stale = false;
   retries = 0;
   brush = null;
@@ -187,6 +198,52 @@ export function histogramPosition() {
     ticks: marks.ticks.map((tk) => tk.t), cursor: marks.cursor && marks.cursor.t };
 }
 
+/* Whether the chart on screen is the answer for the grid as it is now.
+   It is not while a rebuild for this table is in flight (the grid is
+   about to change under it), once a new view has landed and its answer
+   is not back, or when the column or the tag split was changed and the
+   answer for that is not back. Turning the split OFF needs no new answer:
+   the plain bars are in every one.
+
+   The previous view's chart stays up while it is not — a strip that
+   collapsed to a line and back on every filter change would move the
+   grid under the pointer — but faded, without the grid's position, and
+   with "Updating…" in the count line. A chart kept at full strength there
+   looked like the new view's for as long as the answer took, scrolling
+   and all, which on a 500k-row table was seconds, and then "suddenly
+   updated". */
+function fresh() {
+  return !!data && !!S.view && drawnFor === S.view.view_id && !rebuildInFlight()
+    && data.column === column && (!histogramStacked() || !!data.stack);
+}
+
+/* A rebuild started, or ended without landing a view (cancelled,
+   superseded, refused, or left to finish in the background) — view.js
+   calls this at both. The first fades the chart; the second brings it
+   back, since the view it describes is still the grid's. A build that
+   lands a view says so through histogramViewLanded instead. */
+export function histogramFollowBuild() {
+  if (!shown || !ui) return;
+  draw();
+  if (!rebuildInFlight() && S.view && S.view.view_id !== drawnFor && S.view.view_id !== askedFor) schedule();
+}
+
+/* A rebuild landed: S.view is the new view. Called by view.js's
+   installView the moment it swaps the view in, before the selection
+   remap, the regroup and the paint, rather than leaving the ask to
+   winnow:viewchange — which fires after all of those, and then waited
+   REFRESH_MS more. Not any earlier: asked while the grid's first page was
+   still being fetched, the aggregate (a Python function per row, so it
+   holds the GIL) took that fetch from ~2 ms to 40–80 ms on a 500k-row
+   table, and the grid is the thing the analyst is waiting on. */
+export function histogramViewLanded() {
+  if (!shown || !ui || opening) return;
+  clearTimeout(timer);
+  retries = 0;
+  stale = false;
+  load();
+}
+
 /* ------------------------------------------------------------- chrome */
 
 function buildChrome(container) {
@@ -194,7 +251,7 @@ function buildChrome(container) {
   const title = el('span', 'th-title', 'Histogram');
   const colSel = el('select');
   colSel.title = 'Which datetime column to chart';
-  colSel.onchange = () => { column = colSel.value || null; savePrefs({ column }); schedule(); };
+  colSel.onchange = () => { column = colSel.value || null; savePrefs({ column }); draw(); schedule(); };
   const info = el('span', 'th-info', '');
   const legend = el('span', 'th-legend');
   const stackBtn = el('button', 'btn ghost th-stack', 'Tags');
@@ -220,7 +277,9 @@ function buildChrome(container) {
 
   /* ------------------------------------------------------------ brush */
   canvas.addEventListener('mousedown', (e) => {
-    if (!data || !data.total) return;
+    // A faded chart is the previous view's: its axis is not this view's
+    // span, so a drag across it would set a timeframe from the wrong one.
+    if (!data || !data.total || !fresh()) return;
     const r = canvas.getBoundingClientRect();
     brush = { x0: e.clientX - r.left, x1: e.clientX - r.left };
     draw();
@@ -230,7 +289,8 @@ function buildChrome(container) {
     const r = canvas.getBoundingClientRect();
     const x = e.clientX - r.left;
     if (brush) { brush.x1 = x; draw(); }
-    if (data && data.total) {
+    if (data && data.total && !fresh()) canvas.title = 'Updating for the current view…';
+    else if (data && data.total) {
       const w = canvas.clientWidth || 1;
       const tt = tOf(x, w);
       const b = data.buckets.find((bb) => tt >= bb[0] && tt < bb[0] + data.bucket_seconds);
@@ -426,10 +486,10 @@ function marksTitle(x) {
    page landing. Coalesced to one look per frame, and the canvas is only
    repainted when the marks would land somewhere else. */
 export function histogramFollowGrid() {
-  if (!shown || !chartUp || marksRaf) return;
+  if (!shown || !chartUp || marksRaf || !fresh()) return;
   marksRaf = requestAnimationFrame(() => {
     marksRaf = null;
-    if (!shown || !chartUp || !ui) return;
+    if (!shown || !chartUp || !ui || !fresh()) return;
     const w = ui.canvas.clientWidth || 1;
     if (gridMarks(w).key !== (marks ? marks.key : '')) paintChart();
   });
@@ -472,11 +532,13 @@ function stackLayers() {
 /* A swatch and a name per layer, beside the count line. Only what is
    actually in the chart: a case with twelve tags and two of them in this
    view lists two. */
-function drawLegend() {
+function drawLegend(current = true) {
   const { legend, stackBtn } = ui;
   stackBtn.setAttribute('aria-pressed', String(histogramStacked()));
   legend.replaceChildren();
-  const stack = stackLayers();
+  // A faded chart is drawn grey (style.css), so a legend of tag colours
+  // would be naming colours that are not on screen.
+  const stack = current ? stackLayers() : null;
   if (!stack) return;
   const present = stack.rows.length
     ? stack.labels.map((_, i) => stack.rows.some(([, c]) => c[i] > 0))
@@ -504,15 +566,17 @@ function draw() {
      what most of "the histogram isn't updating" turns out to be. An
      attribute on the chrome rather than pixels on the canvas: a canvas
      does not inherit CSS (see the module header), so anything drawn into
-     it would need a redraw on a timer to animate. */
+     it would need a redraw on a timer to animate. A rebuild in flight is
+     working too: its answer is the next thing this strip will ask for. */
   const panel = $('histogramPanel');
+  const building = rebuildInFlight();
   /* Written out longhand rather than with toggleAttribute, which sets the
      EMPTY string: the stylesheet asks for [aria-busy="true"] — as every
      other busy cue in the app does, and as ARIA requires, the attribute
      having no boolean form — so `aria-busy=""` left the cue switched on
      in the markup and invisible on screen. */
   if (panel) {
-    if (inflight > 0) panel.setAttribute('aria-busy', 'true');
+    if (inflight > 0 || building) panel.setAttribute('aria-busy', 'true');
     else panel.removeAttribute('aria-busy');
   }
   // Ahead of the S.sourceId test: mid case switch it still names the
@@ -532,21 +596,30 @@ function draw() {
     info.textContent = '';
     return;
   }
-  if (problem) {
+  // A 400 is about the view it was asked of; a rebuild may fix it.
+  if (problem && !building) {
     showEmpty(problem);
     info.textContent = '';
     return;
   }
   if (!data || !data.total) {
-    showEmpty(inflight ? 'Loading…'
+    showEmpty(inflight || building ? 'Loading…'
       : stale ? 'Could not read the histogram for this view — change a filter to try again.'
       : 'No rows with a parsable timestamp in this view.');
     info.textContent = data ? '0 rows' : '';
     return;
   }
   showChart();   // before measuring: a hidden canvas has no width
-  const max = paintChart();
-  drawLegend();
+  const current = fresh();
+  if (panel) panel.classList.toggle('is-outdated', !current);
+  const max = paintChart(current);
+  drawLegend(current);
+  if (!current && !stale) {
+    // Not the previous answer's numbers: they describe the faded chart,
+    // and beside it they read as the new view's.
+    info.textContent = 'Updating…';
+    return;
+  }
   const tr = S.timeRange;
   info.textContent = `${data.total.toLocaleString()} rows · ${humanBucket(data.bucket_seconds)} buckets · max ${max.toLocaleString()}`
     + (tr && tr.enabled && (tr.start || tr.end) ? ' · timeframe on' : '')
@@ -560,7 +633,7 @@ function draw() {
    scroll can repaint it without touching the chrome around it. Returns
    the tallest bar, which the count line reports. */
 const LANE = 6;   // the strip above the plot the position marks sit in
-function paintChart() {
+function paintChart(current = true) {
   chartUp = true;
   const { canvas } = ui;
   const w = canvas.clientWidth || canvas.parentElement.clientWidth || 600;
@@ -576,7 +649,9 @@ function paintChart() {
   const max = Math.max(...data.buckets.map((b) => b[1]));
   const s = span();
   const bw = Math.max(1, (data.bucket_seconds / (s.t1 - s.t0)) * w - 1);
-  marks = gridMarks(w);
+  // No position on a faded chart: the rows on screen are (or are about to
+  // be) another view's, placed on this one's axis.
+  marks = current ? gridMarks(w) : { key: '', band: null, ticks: [], cursor: null };
   // The rows on screen, as a column lit BEHIND the bars: over them it
   // would tint every bar it crossed, and the bars' colour is what the
   // tag split is read by.
@@ -733,9 +808,12 @@ async function load() {
   const v = S.view;
   // Nothing to ask about is still the newest answer: one still out for
   // the table that just went away must not land on top of it.
-  if (!S.sourceId || !v || !pickColumn()) { seq += 1; data = null; problem = null; drawnFor = null; draw(); return; }
+  if (!S.sourceId || !v || !pickColumn()) {
+    seq += 1; data = null; problem = null; drawnFor = null; askedFor = null; draw(); return;
+  }
   const mine = ++seq;
   inflight++;
+  askedFor = v.view_id;
   draw();
   // Ask for as many buckets as the canvas can actually show, rather than
   // a fixed 160: at 900px that was 5px slivers, and a zoomed-in view came
@@ -762,6 +840,9 @@ async function load() {
   // column the table no longer has, or one that is not a datetime — is
   // worth a line of text, and waiting would fix nothing.
   else if (err.status !== 409) { data = null; problem = err.message; drawnFor = v.view_id; }
+  // A 409 answered nothing, so the view's landing must not take it as
+  // already asked (see the viewchange listener).
+  else askedFor = null;
   draw();
   // An answer describes the view it was asked about. If the chart on
   // screen is not about the view the grid has now, ask again rather than
@@ -773,6 +854,10 @@ async function load() {
   // rebuild the view. Bounded: a view that is current and keeps 409ing is
   // re-asked a few times and then left alone, rather than polled forever.
   if (!shown || !S.view || S.view.view_id === drawnFor) return;
+  // A rebuild in flight evicted that view and will land the next one,
+  // and landing is an ask (histogramViewLanded) — re-asking about the view
+  // it is replacing would spend the bounded re-asks on a 409 apiece.
+  if (rebuildInFlight()) return;
   if (S.view.view_id !== v.view_id) { retries = 0; schedule(); }
   else if (retries < RETRY_MAX) { retries += 1; schedule(); }
   // Out of re-asks with the chart still about an older view. Stop, and
@@ -794,9 +879,17 @@ export function wireHistogram() {
   // once for a canvas nobody could see, again on the way back.
   // A view landing ends a case switch whether or not the strip is on
   // screen: hidden, the show edge's load() is what asks about it.
+  // A view that landed through a rebuild was asked about already, as it
+  // landed (histogramViewLanded): asking again here would only throw that
+  // answer away. A view change with no rebuild behind it (a table
+  // reopened on its cached view) asks here, and fades the chart first.
   document.addEventListener('winnow:viewchange', () => {
     opening = false;
-    if (shown) { retries = 0; stale = false; schedule(); }
+    if (!shown) return;
+    retries = 0;
+    stale = false;
+    if (!(S.view && askedFor === S.view.view_id)) schedule();
+    draw();
   });
   // Tokens are read at draw time, so a skin/accent change is one redraw.
   document.addEventListener('winnow:appearance', () => { if (shown) draw(); });

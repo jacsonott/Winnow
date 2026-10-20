@@ -175,6 +175,8 @@ The same switch is in Settings, under **Filter & search syntax**.
 
 Click **Histogram** or press `h` to show a bar chart above the grid of when the rows in the current view happened. Choose which datetime column to chart from its list. The line beside it gives the row count, the bucket size and the tallest bar. Winnow picks a bucket size, from one second up to a year, that gives bars a few pixels wide across the strip, so narrowing the timeframe gives finer buckets. Hover a bar to see its time range and row count. **Tags** colours the bars by tag: each row counts under the first tag it carries, with untagged rows underneath.
 
+While the view is changing (a filter, a search, a sort, the timeframe) and until its new chart has loaded, the old chart is faded and grey and the line beside it says "Updating…", so a chart at full strength is always the one for the rows in the grid.
+
 Drag across the bars to set the timeframe filter to that range on the charted column. **Clear timeframe** removes it again. The histogram follows every filter, so it is a quick way to see where a search's hits cluster in time. It stays open when you open another case and charts that case's table once it has loaded; a case with no table open shows "Open a table to chart when its rows happened."
 
 The histogram also shows where you are in the table. A mark along the top of the chart covers the time span of the rows on screen and moves as you scroll, and a line through the bars marks the selected row. When the rows on screen are not in time order, as when the table is sorted by a process ID, they are spread across the chart, so each one gets a short tick of its own instead. Hover a mark to see the times it stands for.
