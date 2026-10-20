@@ -182,6 +182,34 @@ see [docs/notes/README.md](README.md) for the whole set.
   count line, because a chart that is quietly wrong is worse than one
   that is obviously absent.
 
+- **…and an old chart is faded from the moment the view starts to
+  change, not from when the new answer is asked for.** The breathe above
+  was the only cue, and it started late: the strip asked only on
+  `winnow:viewchange` (after the build, the seed page, the remap, the
+  regroup and the paint) plus `REFRESH_MS`, and the answer took seconds
+  on a big table, so for all of that the previous view's chart sat at
+  full strength under the new view's rows — scrolling moved nothing on
+  it — and then "suddenly updated". Now `fresh()` decides whether the
+  chart is the answer for the grid as it is now; when it is not, the
+  canvas is faded and grey (`.is-outdated`, after a 120 ms beat so a
+  small table never blinks), the position marks and the tag legend are
+  dropped, the drag and the hover are off, and the count line says
+  "Updating…". Not fresh means a rebuild in flight (`rebuildInFlight()`,
+  so view.js's own notion, not a second flag), a landed view whose answer
+  is not back, or a column or split changed and not yet answered. view.js
+  says when: `histogramFollowBuild()` as a build starts and whenever it
+  ends without landing (cancelled, superseded, refused, detached — the old
+  view and its chart are current again), and `histogramViewLanded()` from
+  `installView` the moment `S.view` is swapped, which is the ask. Not
+  earlier: asked as `POST /api/view` returned, the aggregate (a Python
+  function per row, so it holds the GIL) took the grid's seed page from
+  ~2 ms to 40–80 ms on a 500k-row table. The viewchange listener skips
+  its ask when the view was asked about as it landed (`askedFor`); a 409
+  clears `askedFor` so the landing asks again. The strip is still not
+  emptied: one that collapsed to a line and back would move the grid
+  under the pointer on every filter change.
+  tests/ui/test_histogram_fades_while_updating.py.
+
 - **A case switch resets the histogram strip; it does not wait for a
   view change.** The strip only ever redrew on `winnow:viewchange`, so
   after opening another case it went on showing the previous case's
