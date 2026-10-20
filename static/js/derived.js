@@ -253,7 +253,7 @@ export function renameColumnIn(st, from, to) {
   const rekey = (m) => nameMap(Object.fromEntries(Object.entries(m).map(([k, v]) => [swap(k), v])));
   if (st.filters) st.filters = rekey(st.filters);
   if (st.layout) st.layout = rekey(st.layout);
-  for (const key of ['filterOpen', 'groupBy', 'groupByCols', 'order', 'preGroupOrder']) {
+  for (const key of ['filterOpen', 'groupBy', 'groupByCols', 'order']) {
     if (Array.isArray(st[key])) st[key] = st[key].map(swap);
   }
   for (const s of st.sort || []) s.column = swap(s.column);

@@ -948,7 +948,6 @@ export async function openSource(id, { skipBuild = false } = {}) {
   dropPendingSelection();
   await closeAllGroupViews();
   S.groupByCols = [];
-  S.preGroupOrder = null;
   S.groups = [];
   S.groupPages.clear();
   S.groupPending.clear();

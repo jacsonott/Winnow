@@ -45,7 +45,11 @@ export function fillWidth() {
   return Math.max(360, (body ? body.clientWidth : 0) - GUTTER_W - 20);
 }
 
-export const visibleCols = () => S.order.filter((n) => !(S.layout[n] || {}).hidden);
+/* The grid's columns: S.order less the hidden ones and the ones grouped
+   on, which are in the group headers instead. S.order itself keeps every
+   column, grouped or not, so the layout saved while grouped and the place
+   a column comes back to on Ungroup are the analyst's (see addGroupLevel). */
+export const visibleCols = () => S.order.filter((n) => !(S.layout[n] || {}).hidden && !S.groupByCols.includes(n));
 
 export const isPinned = (name) => !!(S.layout[name] || {}).pinned;
 
