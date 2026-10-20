@@ -524,13 +524,8 @@ export function renderHead() {
       renderHead();
       rebuildView();
     };
-    const grip = el('div', 'grip');
-    grip.draggable = false;
-    grip.onmousedown = (e) => startResize(e, name);
-    grip.onclick = (e) => e.stopPropagation();
-    grip.ondblclick = (e) => { e.stopPropagation(); autofitOneColumn(name); };
-    grip.title = 'Drag to resize, double-click to autofit this column';
-    h.append(grip);
+    // No resize grip in here: the divider is found by distance from the
+    // line, across the whole row — see wireColumnDividers.
     head.append(h);
 
     // Under the bar the row is mostly empty cells: a column whose box is
@@ -630,6 +625,94 @@ export function startResize(e, name) {
   document.addEventListener('mouseup', up);
 }
 
+/* ------------------------------------------------------ column dividers */
+
+/* How far either side of a header's dividing line (the cell's 1px right
+   border) still counts as grabbing the line. The grab used to be a 7px
+   .grip inside each header, meant to straddle the line — but `.hcell`'s
+   `overflow: hidden` (load-bearing, see .fcell in style.css) clipped it to
+   the 4px left of it. The line itself and everything to its right were
+   the header, so a double-click aimed at the line sorted the column twice
+   instead of fitting it. 5px either side stays inside both cells' 8px of
+   padding, so the zone never covers a label, a sort arrow or a button. */
+const DIVIDER_REACH = 5;
+
+/* The main grid's header cell painted at (x, y), or null. What is on TOP
+   there, so a column that has scrolled under a pinned one or under the
+   gutter is never the answer for the part of it that is covered. */
+function headCellAt(x, y) {
+  const at = document.elementFromPoint(x, y);
+  const h = at && at.closest('.hcell');
+  return h && h.parentElement === $('headRow') ? h : null;
+}
+
+/* The column whose divider is within DIVIDER_REACH of (x, y), or null —
+   whichever line is nearer: the right edge of the cell under the pointer,
+   or the edge of whatever is painted to its left, found by reading
+   leftwards a pixel at a time. By what is painted rather than by the
+   cells' order or boxes, because pinning breaks both: the line beside a
+   pin belongs to the pin, whichever column's box happens to sit behind
+   it. The gutter has an edge but nothing to resize, so it never answers. */
+export function dividerAt(x, y) {
+  const here = headCellAt(x, y);
+  const toRight = here && here.dataset.col ? here.getBoundingClientRect().right - 1 - x : Infinity;
+  for (let d = 1; d <= DIVIDER_REACH && d < toRight; d++) {
+    const left = headCellAt(x - d, y);
+    if (left === here) continue;
+    if (left && left.dataset.col) return left.dataset.col;
+    break;
+  }
+  return toRight <= DIVIDER_REACH ? here.dataset.col : null;
+}
+
+/* Wired once, on the row, rather than as a grip inside each header: half
+   the zone lies over the NEXT column's cell, which nothing inside this one
+   can reach through the clip, and whose own handlers would take the press.
+   Capture phase, so a press that grabs a line never reaches the header
+   under it: no sort, no reorder drag. A right-click is left alone — it is
+   still the column menu of whichever header it lands on. */
+export function wireColumnDividers() {
+  const head = $('headRow');
+  let grabbed = null;   // the column whose divider the current press took
+  // The divider's tooltip, worn by whatever the pointer is over while it is
+  // on a line (an element of its own would be one more thing to keep
+  // positioned). Put back on the way off; a cell renderHead has replaced
+  // since is detached, and nothing reads it.
+  let tipped = null;
+  let tipWas = null;
+  const tip = (on) => {
+    if (on === tipped) return;
+    if (tipped) {
+      if (tipWas === null) tipped.removeAttribute('title'); else tipped.title = tipWas;
+    }
+    tipped = on;
+    tipWas = on && on.getAttribute('title');
+    if (on) on.title = 'Drag to resize, double-click to autofit this column';
+  };
+  head.addEventListener('mousemove', (e) => {
+    const col = dividerAt(e.clientX, e.clientY);
+    head.classList.toggle('at-divider', !!col);
+    tip(col ? headCellAt(e.clientX, e.clientY) || head : null);
+  });
+  head.addEventListener('mouseleave', () => {
+    head.classList.remove('at-divider');
+    tip(null);
+  });
+  head.addEventListener('mousedown', (e) => {
+    grabbed = e.button === 0 ? dividerAt(e.clientX, e.clientY) : null;
+    if (grabbed) startResize(e, grabbed);
+  }, true);
+  // startResize's preventDefault already stops the header's reorder drag
+  // from starting; this is the same promise, made where it can't be lost.
+  head.addEventListener('dragstart', (e) => { if (grabbed) e.preventDefault(); }, true);
+  head.addEventListener('click', (e) => { if (grabbed) e.stopPropagation(); }, true);
+  head.addEventListener('dblclick', (e) => {
+    if (!grabbed) return;
+    e.stopPropagation();
+    autofitOneColumn(grabbed);
+  }, true);
+}
+
 /* saveLayout's write without the wait, for a caller about to read the
    layout back (a derived column's rename re-opens the table): a resize
    or move made in the last 400ms would otherwise still be pending, and
@@ -690,8 +773,7 @@ export function autofitMaxWidth() {
    That's how a fit-to-content pass could leave "EVEN…▾" sitting over a
    column of 1s. `scrollWidth` gives the label's full text width even while
    it's clipped; the difference between the cell's own clientWidth (which
-   includes its padding) and the label's is everything else in the row. The
-   grip is absolutely positioned, so it isn't in that difference.
+   includes its padding) and the label's is everything else in the row.
 
    Returns 0 for a column with no header on screen (hidden, or a caller
    running before the first renderHead) — callers fall back to the estimate. */
@@ -704,8 +786,7 @@ export function headerWidthFor(name) {
   // the chrome while the cell is exactly as wide as its contents. On a column
   // that's wider than it needs to be, that difference is mostly slack, so the
   // header reported needing roughly the current width and autofit could never
-  // shrink a column back to its content. (.grip is absolutely positioned and
-  // occupies no track, so it isn't counted; .label can shrink but not grow,
+  // shrink a column back to its content. (.label can shrink but not grow,
   // so its scrollWidth is the text width whether it's clipped or not.)
   const cs = getComputedStyle(h);
   const pad = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight);
@@ -713,7 +794,7 @@ export function headerWidthFor(name) {
   let extras = 0;
   let siblings = 0;
   for (const child of h.children) {
-    if (child === label || child.classList.contains('grip')) continue;
+    if (child === label) continue;
     extras += child.getBoundingClientRect().width;
     siblings += 1;
   }
