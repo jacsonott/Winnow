@@ -4,7 +4,7 @@
 import { draggedCol, renderHead, saveLayout, visibleCols } from './columns.js';
 import { $, OVERSCAN, PAGE, ROW_H, api, el, post, setBusy, toast } from './core.js';
 import { displayValue, ellipsize, filterByValue } from './filters.js';
-import { buildDataRow, ensurePage, headH, moveCursor, render, renderTagToolbar, rowAt, rowPaintContext, rowsPaintY, schedulePrefetch, setCellRange, spacerPx, syncRowsTop, syncRowsWidth, titleClippedCells, vScroll } from './grid.js';
+import { buildDataRow, ensurePage, headH, isJumping, moveCursor, noteViewportMove, render, renderTagToolbar, rowAt, rowPaintContext, rowsPaintY, schedulePrefetch, setCellRange, spacerPx, syncRowsTop, syncRowsWidth, titleClippedCells, vScroll } from './grid.js';
 import { armOpCancel, opToken } from './jobs.js';
 import { openRowContextMenu } from './rowmenu.js';
 import { S, cellInRange, cellRangeRows, clearCellSelection, selClear, selCount, selHas, selPositions, selRemap, selSetRange, selSnapshot, selViewRows } from './state.js';
@@ -103,10 +103,14 @@ export function clearGroupPageCache() {
   S.groupPageGen++;
 }
 
+/* Mid-jump it does not ask for the page: a drag through a big expanded
+   group would queue one per frame, as the flat grid did (grid.js's jumps
+   block). The paint the settle timer makes asks for it from wherever the
+   grid came to rest. */
 export function groupRowAt(g, localIdx) {
   const pageIdx = Math.floor(localIdx / PAGE);
   const page = S.groupPages.get(`${g.viewId}:${pageIdx}`);
-  if (!page) { ensureGroupPage(g, pageIdx); return null; }
+  if (!page) { if (!isJumping()) ensureGroupPage(g, pageIdx); return null; }
   return page[localIdx - pageIdx * PAGE] || null;
 }
 
@@ -215,6 +219,7 @@ export function renderGrouped() {
   const first = Math.max(0, Math.floor(virt / ROW_H) - OVERSCAN);
   const visible = Math.ceil(body.clientHeight / ROW_H) + OVERSCAN * 2;
   const last = Math.min(total, first + visible);
+  noteViewportMove(first);
 
   rowsEl.style.transform = `translateY(${rowsPaintY(body, virt, first)}px)`;
   const frag = document.createDocumentFragment();
