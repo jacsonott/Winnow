@@ -8128,9 +8128,11 @@ class Store:
         if src.get("is_merge"):
             for frag in self._raw_fragments(spec.get("filter_tree")):
                 self.validate_where_fragment(source_id, frag)
-            collist = ", ".join(q(c) for c in colnames)
             sid_col = q(self._member_id_alias(colnames))
-            branches = []
+            # (member id, FROM ... WHERE ...) per member; the columns that go
+            # between the two depend on the sort shape chosen below.
+            parts = []
+            filtered = False
             params: list[Any] = []
             for m in self._resolve_members(source_id):
                 msrc = m["src"]
@@ -8139,17 +8141,45 @@ class Store:
                     self._ensure_sort_index_building(
                         m["source_id"], col,
                         self._index_table_for(src, col, msrc["table_name"], m["source_id"]))
-                branches.append(
-                    f"SELECT {int(m['source_id'])} AS {sid_col}, rid, {collist} FROM {self._member_from(src, m)}"
-                    + (f" WHERE {where}" if where else "")
-                )
+                parts.append((int(m["source_id"]),
+                              f" FROM {self._member_from(src, m)}" + (f" WHERE {where}" if where else "")))
+                filtered = filtered or bool(where)
                 params.extend(p)
-            union_sql = " UNION ALL ".join(branches)
+
+            def union(cols: str) -> str:
+                return " UNION ALL ".join(f"SELECT {mid} AS {sid_col}, rid{cols}{rest}" for mid, rest in parts)
+
             vid = self._next_view_id()
-            sql = (
-                f"INSERT INTO v.{q(vid)}(source_id, rid) "
-                f"SELECT {sid_col}, rid FROM ({union_sql}) {order}"
-            )
+            # Each member SELECTs its id, rid and what the sort needs, and
+            # nothing else. This used to project every column, so SQLite
+            # read every column of every row of every member — the whole
+            # table, whatever indexes it had — and dragged the lot through
+            # the sort: clearing the filters on a 500k-row, five-member
+            # merge read all 739 MB of its tables, each time, where a
+            # single table reads its sort index.
+            if filtered:
+                # Filtered: one sort over what the members matched, as
+                # before. The compound's own ORDER BY (below) would have
+                # SQLite walk each member's sort index and look every row
+                # up to test the filter, measured slower than scanning.
+                need = dict.fromkeys(s.get("column") for s in (spec.get("sort") or [])
+                                     if s.get("column") in colnames)
+                select = f"SELECT {sid_col}, rid FROM ({union(''.join(f', {q(c)}' for c in need))}) {order}"
+            else:
+                # Unfiltered (Clear filters, a sort change): the ORDER BY is
+                # the compound's own, so SQLite streams each member in its
+                # sort index's order and merges them (MERGE (UNION ALL) in
+                # the plan) — 18 MB of index for that merge, and no sort.
+                # The outer SELECT has no ORDER BY of its own, which is what
+                # keeps SQLite from dropping the inner one (its OmitOrderBy
+                # rule), so the INSERT still assigns pos in sorted order.
+                # With no sort keys (rid order, or the Line column) the
+                # compound is already (member id, rid) and goes in as is.
+                keys, merge_order = self._compile_merge_order(spec, colnames)
+                union_sql = union("".join(f", {k}" for k in keys))
+                select = (f"SELECT {sid_col}, rid FROM ({union_sql} {merge_order})" if keys
+                          else f"{union_sql} {merge_order}")
+            sql = f"INSERT INTO v.{q(vid)}(source_id, rid) {select}"
         else:
             table = src["table_name"]
             where, params = self._compile_where(source_id, src, spec, colnames)
@@ -9877,6 +9907,31 @@ class Store:
                 parts.append(f"{q(col)} COLLATE NOCASE {direction}")
         parts.append("rid ASC")
         return "ORDER BY " + ", ".join(parts)
+
+    @staticmethod
+    def _compile_merge_order(spec, colnames) -> tuple[list[str], str]:
+        """_compile_order for a merge's UNION ALL, which build_view sorts as
+        a compound rather than as a subquery (see the comment there).
+        Returns the sort keys each member SELECTs after `<member id>, rid`,
+        and an ORDER BY naming them by position, since a compound's ORDER
+        BY can only name its own result columns. Term for term the same
+        order _compile_order gives, with the member id added last: rows
+        that tie on every key and on rid keep member order by construction,
+        which is the order the old temp B-tree sort gave them."""
+        keys: list[str] = []
+        terms: list[str] = []
+        for s in spec.get("sort") or []:
+            col = s.get("column")
+            direction = "DESC" if str(s.get("dir", "asc")).lower() == "desc" else "ASC"
+            if col == "__line__":
+                terms.append(f"2 {direction}")
+                continue
+            if col not in colnames:
+                continue
+            keys.append(_numeric_expr(q(col)) if colnames[col] == "number" else f"{q(col)} COLLATE NOCASE")
+            terms.append(f"{len(keys) + 2} {direction}")
+        terms += ["2 ASC", "1 ASC"]
+        return keys, "ORDER BY " + ", ".join(terms)
 
     @staticmethod
     def _inline_sql_params(sql: str, params: list) -> str:
