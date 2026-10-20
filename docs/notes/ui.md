@@ -56,7 +56,12 @@ see [docs/notes/README.md](README.md) for the whole set.
   sidebar and dashboards without moving anyone; it still opens a table
   when nothing is on screen, which is what makes the FIRST import land.
   Any new background caller wants that option — `refreshSourcesQuietly()`
-  in tables.js exists for the same reason on the polling path.
+  in tables.js exists for the same reason on the polling path. The plugin
+  context's `refreshSources()` is one: it was a plain `loadSources()`,
+  harmless while First/Last's Create table always called `openSource` on
+  the new table right after, and wrong once a create could land while the
+  analyst was on the grid with a filter set — it reset the filter, and
+  pulled anyone still on the First/Last tab to the grid.
 
 - **Row striping is a preference, saved per skin** (`STYLES[].stripes` is
   the default, `S.appearance.stripes` holds only the skins the analyst has
@@ -584,7 +589,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   !== id`, decided before `S.sourceId` is overwritten): every refresh idiom
   — `loadSources()` with no select after a column add, a sidebar folder
   op or closing some *other* tab, `openSource(S.sourceId)` from the
-  derived-column modal, the plugin API's `refreshSources()` — re-enters
+  derived-column modal — re-enters
   `openSource` for the table already open, and an unconditional hide there
   took the pane away under the analyst on all of them. `loadSources`'
   empty-state branch (last tab closed, the table on screen removed) and

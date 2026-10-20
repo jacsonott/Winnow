@@ -73,6 +73,31 @@ see [docs/notes/README.md](README.md) for the whole set.
   plain `def`, which FastAPI threadpools for you); if you add another
   plugin entry point from an `async def`, thread it the same way.
 
+- **A plugin route the tab holds open for seconds locks up the other
+  tabs, even though the server is fine.** The worker thread above keeps
+  the *server* answering; the *browser* is the bottleneck. It opens six
+  connections to Winnow, the presence EventSource keeps one, and every
+  `post()` a tab awaits keeps another until it answers. First/Last
+  awaited a 15-second preview POST per edit on a 1M-row table, and
+  Auto-update never stopped the previous one, so a few edits took all
+  six: a grid scroll in another tab queued in the browser behind them
+  and took 67 s to paint (`/api/rows` itself answered in milliseconds).
+  Create table did the same inside a modal that covers the app. The fix
+  is first_last's `job/start` / `job` / `job/cancel` routes: start runs
+  the work on a thread of its own and answers within 250 ms (inline
+  when a small table already had the result), the tab polls, and an
+  edit cancels the job it supersedes. Two parts of that are easy to
+  drop and both matter: the cancel has to reach the SQL (each job's
+  queries pass the job id as `run_sql(op_token=…)`, and `cancel_op`
+  interrupts them; a job that was only forgotten still owned a core
+  for its 15 s), and the id is made by the client, so a cancel can
+  land before its start does (`cancel_op` remembers a token it has
+  not seen yet). The job threads are not the plugin pool of 8: a job
+  ties up no request, so `PLUGIN_THREADS` would only cap how many
+  superseded previews could queue. Copy this shape for any plugin
+  route that can run long; tests/ui/test_firstlast_background.py fails
+  on a tab that holds requests open, by the browser's own timings.
+
 - **Plugin tables are namespaced against ACCIDENTS, not against a plugin
   that means harm.** A plugin's own tables live in the case file as
   `plugin:<fs_name>:<table>` (`req.table("chat")`). The separator is a

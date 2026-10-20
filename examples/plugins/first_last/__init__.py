@@ -51,6 +51,23 @@ bookends by their group values, and capped at MAX_LISTED_VALUES per cell
 (the rest counted, not dropped silently). The preview asks only for the
 groups it shows.
 
+**The tab asks for results as background jobs** (`job/start`, `job`,
+`job/cancel`), never by holding a request open for the work. On a big table
+the work is long — 15 s for a preview and 18 s for Create on 1M rows — and
+a request held that long holds one of the six connections a browser opens
+to Winnow, one of which is always the presence stream. The tab used to
+wait on preview/rows/create directly, and an edit under Auto-update left
+the preview before it running: a handful of edits held every connection,
+and a scroll in another tab took 67 s to paint because the grid's page
+fetch queued in the browser behind them. Now the work runs on a thread
+here, start answers within JOB_START_WAIT_MS (with the result, when a
+small table had it by then), the tab polls with short requests, and it
+cancels the job an edit supersedes. A job's queries run under its id as
+the op token, so a cancel interrupts the SQL itself (Store.cancel_op), and
+the id is made by the client, like the app's op tokens, so a cancel sent
+before start has answered still lands. The synchronous routes stay, for
+scripts and tests; a job runs exactly their code.
+
 The filter helpers (_where/_esc_like/OPERATORS) are copied from the pivot
 example rather than imported — plugins are deliberately standalone
 (plugin_api gives them no way to import each other), and each example is
@@ -59,8 +76,11 @@ meant to be readable alone.
 
 import json
 import re
+import threading
+import time
+import traceback
 
-from winnow.store import q
+from winnow.store import OpCancelled, q
 
 PLUGIN = {
     "name": "first-last",
@@ -86,6 +106,16 @@ DEFAULT_TEMPLATE = "{which} of {count}"
 # The auto-created timeline tag's colour — fixed so every bookend tag
 # reads the same across cases (amber, matching the app's accent family).
 TIMELINE_TAG_COLOR = "#d2a04a"
+# How long job/start waits for its job before answering "running". A small
+# table's result is back well inside it, so it comes back inline and the
+# tab never polls; holding a connection this long costs nothing.
+JOB_START_WAIT_MS = 250
+# A finished job nobody has collected is dropped after JOB_KEEP_S, and at
+# most JOB_KEEP_FINISHED are kept at all: a Copy result is up to
+# MAX_COPY_ROWS rows, held in memory until the tab picks it up.
+JOB_KEEP_S = 600
+JOB_KEEP_FINISHED = 8
+JOB_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,80}$")
 
 OPERATORS = {
     "in": ("is any of", "many"),
@@ -117,6 +147,9 @@ def register(api):
     api.register_api("preview", preview, methods=["POST"])
     api.register_api("rows", rows, methods=["POST"])
     api.register_api("create", create, methods=["POST"])
+    api.register_api("job/start", job_start, methods=["POST"])
+    api.register_api("job", job_status, methods=["GET"])
+    api.register_api("job/cancel", job_cancel, methods=["POST"])
 
 
 # --------------------------------------------------------------- helpers
@@ -430,10 +463,11 @@ def _template_columns(template, src, sums=()):
 
 
 def _bookend_rows(req, src, group_cols, sort_col, carry, where, params, limit,
-                  row_json=False, sums=(), template=""):
+                  row_json=False, sums=(), template="", op_token=None):
     """One windowed pass: rank each row inside its group both directions,
     keep rank 1 of each. Selected values are the *row's own* — the first
-    row's user, not the group's."""
+    row's user, not the group's. `op_token` (a job's id) makes the pass
+    stoppable through Store.cancel_op."""
     # Every column the template or output might need, deduped, stable order
     # — or the whole row when the JSON cell is requested. The template's
     # own columns ride along so {Col} resolves for ANY column, not only
@@ -483,7 +517,7 @@ def _bookend_rows(req, src, group_cols, sort_col, carry, where, params, limit,
         f"SELECT * FROM ({sql}) WHERE rn_first = 1 OR rn_last = 1"
         f" ORDER BY {_order_keys(q(sort_col), number)[0]}, rn_first"
     )
-    res = req.store.run_sql(_inline(outer, params), limit=limit)
+    res = req.store.run_sql(_inline(outer, params), limit=limit, op_token=op_token)
     cols = res["columns"]
     return [dict(zip(cols, r)) for r in res["rows"]], res["truncated"]
 
@@ -520,7 +554,7 @@ def _template_value_columns(template):
 _VALUE_SEP = "\x1f"
 
 
-def _group_values(req, src, group_cols, where, params, cols, bookends):
+def _group_values(req, src, group_cols, where, params, cols, bookends, op_token=None):
     """{column: {group key: cell}} — each group's distinct, non-blank values
     of each column, sorted (numbers by value), at most MAX_LISTED_VALUES
     named and the rest counted. A group key is the tuple of the bookend's
@@ -568,7 +602,7 @@ def _group_values(req, src, group_cols, where, params, cols, bookends):
             f"{scoped}{' AND '.join(conds)})"
             f") WHERE rn <= {MAX_LISTED_VALUES} GROUP BY {kcols}"
         )
-        res = req.store.run_sql(_inline(sql, params + rparams), limit=MAX_GROUPS)
+        res = req.store.run_sql(_inline(sql, params + rparams), limit=MAX_GROUPS, op_token=op_token)
         cells = {}
         for row in res["rows"]:
             key = tuple(row[:len(group_cols)])
@@ -733,19 +767,23 @@ def values(req):
             "truncated": res["truncated"]}
 
 
-def _result(req, body, limit, *, whole=False):
+def _result(req, body, limit, *, whole=False, op_token=None):
     """What preview, rows and create share: validate, run the windowed
     pass, list the distinct values it asks for, render. `whole` is create's
-    rule that a result cut short by `limit` is refused, not written."""
+    rule that a result cut short by `limit` is refused, not written.
+    `op_token` rides on every query, so a job's cancel stops whichever one
+    is running."""
     (src, group_cols, sort_col, carry, sums, listed,
      where, params, template, row_json) = _validated(req, body)
     bookends, truncated = _bookend_rows(req, src, group_cols, sort_col, carry, where, params,
-                                        limit=limit, row_json=row_json, sums=sums, template=template)
+                                        limit=limit, row_json=row_json, sums=sums, template=template,
+                                        op_token=op_token)
     if whole and truncated:
         raise ValueError(f"More than {MAX_GROUPS:,} groups — narrow the grouping or add a filter")
     wanted = list(dict.fromkeys(listed + _template_value_columns(template)))
     _attach_values(bookends, group_cols,
-                   _group_values(req, src, group_cols, where, params, wanted, bookends))
+                   _group_values(req, src, group_cols, where, params, wanted, bookends,
+                                 op_token=op_token))
     json_cols = [c["name"] for c in src["columns"]] if row_json else None
     return {
         "src": src, "group_cols": group_cols, "where": where, "params": params,
@@ -759,11 +797,16 @@ def preview(req):
     """POST .../preview — the first PREVIEW_GROUPS groups' bookends, plus the
     total group count, so 'Create table' says what it will make before it
     makes it."""
-    res = _result(req, req.body or {}, PREVIEW_GROUPS * 2 + 2)
+    return _preview(req, req.body or {})
+
+
+def _preview(req, body, op_token=None, stopped=None):
+    res = _result(req, body, PREVIEW_GROUPS * 2 + 2, op_token=op_token)
     src = res["src"]
     part = ", ".join(_col(src, c) for c in res["group_cols"])
     count_sql = f"SELECT COUNT(*) FROM (SELECT 1 FROM {_scope(req, src)}{res['where']} GROUP BY {part})"
-    total_groups = req.store.run_sql(_inline(count_sql, res["params"]), limit=1)["rows"][0][0]
+    total_groups = req.store.run_sql(_inline(count_sql, res["params"]), limit=1,
+                                     op_token=op_token)["rows"][0][0]
     return {"columns": res["columns"], "rows": res["rows"], "total_groups": total_groups}
 
 
@@ -771,7 +814,11 @@ def rows(req):
     """POST .../rows — the ENTIRE result as rows, for "Copy result": the
     preview shows only the first few groups, and copying should hand over
     what Create would have made, not what happened to be on screen."""
-    res = _result(req, req.body or {}, MAX_COPY_ROWS)
+    return _rows(req, req.body or {})
+
+
+def _rows(req, body, op_token=None, stopped=None):
+    res = _result(req, body, MAX_COPY_ROWS, op_token=op_token)
     return {"columns": res["columns"], "rows": res["rows"], "truncated": res["truncated"]}
 
 
@@ -785,8 +832,18 @@ def create(req):
     path that routes _apply_tag_change (invariant #7), so undo works on it
     like any other tag write. Rids are contiguous from 1 on every ingest
     path (invariant #2), which is what makes range(1, n+1) exact."""
-    body = req.body or {}
-    res = _result(req, body, MAX_GROUPS * 2, whole=True)
+    return _create(req, req.body or {})
+
+
+def _create(req, body, op_token=None, stopped=None):
+    """`stopped` is a job's cancel flag, asked once the result is computed:
+    the queries before it are interrupted through `op_token`, but nothing
+    interrupts ingest_rows, so a cancel that lands after the queries is
+    honoured only if it lands before the table is written. One that comes
+    later is too late — the job finishes and says what it made."""
+    res = _result(req, body, MAX_GROUPS * 2, whole=True, op_token=op_token)
+    if stopped is not None and stopped():
+        raise OpCancelled("Cancelled")
     src, header, out_rows = res["src"], res["columns"], res["rows"]
     # The table's label as the analyst knows it — its nickname when it has
     # one, as everywhere else in the app.
@@ -801,3 +858,142 @@ def create(req):
         req.store.set_tags(rec["id"], list(range(1, rec["row_count"] + 1)), tag["id"], True)
         out["timeline_tag"] = {"id": tag["id"], "name": tag["name"]}
     return out
+
+
+# ------------------------------------------------------------------ jobs
+
+# preview, rows and create as the tab runs them: on a thread, polled, and
+# stoppable. The module docstring says why.
+JOB_KINDS = {"preview": _preview, "rows": _rows, "create": _create}
+
+_jobs = {}                      # job id -> the record job_start builds
+_jobs_lock = threading.Lock()
+
+
+def _job_id(value):
+    """A job's id. The client makes it, as the app makes its op tokens, so
+    a cancel can name a job whose start has not answered yet; it is held
+    to a plain shape because it doubles as the job's op token."""
+    jid = str(value or "")
+    if not JOB_ID_RE.match(jid):
+        raise ValueError("A job id is 8 to 80 letters, digits, - or _")
+    return jid
+
+
+def _prune_jobs(now):
+    """Under _jobs_lock. A finished job nobody collected goes after
+    JOB_KEEP_S, or once JOB_KEEP_FINISHED newer ones have finished. A
+    running job is never dropped: its thread still has to land its result
+    somewhere a poll can find it."""
+    finished = sorted((j for j in _jobs.values() if j["status"] != "running"),
+                      key=lambda j: j["finished"], reverse=True)
+    for i, j in enumerate(finished):
+        if i >= JOB_KEEP_FINISHED or now - j["finished"] > JOB_KEEP_S:
+            del _jobs[j["id"]]
+
+
+def _job_view(job):
+    """What start and a poll answer. A finished job's result (or error) is
+    handed over once and the job is dropped with it — a Copy result can be
+    thousands of rows, and nothing asks twice."""
+    with _jobs_lock:
+        end = job["finished"] or time.monotonic()
+        out = {"id": job["id"], "kind": job["kind"], "status": job["status"],
+               "elapsed_ms": int((end - job["started"]) * 1000)}
+        if job["status"] == "done":
+            out["result"] = job["result"]
+        elif job["status"] != "running":
+            out["error"] = job["error"]
+        if job["status"] != "running":
+            _jobs.pop(job["id"], None)
+    return out
+
+
+def _run_job(job, req, spec):
+    """The job's thread: the synchronous route's own code, under the job's
+    id as op token and with its cancel flag, and the outcome recorded the
+    way the route would have answered it — ValueError is the analyst's to
+    fix, OpCancelled is a cancel (or the case closing under it)."""
+    result, error = None, None
+    try:
+        result = JOB_KINDS[job["kind"]](req, spec, op_token=job["id"], stopped=job["stop"].is_set)
+        status = "done"
+    except OpCancelled as e:
+        status, error = "cancelled", str(e) or "Cancelled"
+    except ValueError as e:
+        status, error = "error", str(e)
+    except Exception as e:  # noqa: BLE001 — a thread has nobody to raise to
+        # The route would have been a 500 with this traceback on the
+        # console; the job keeps both halves of that.
+        traceback.print_exc()
+        status, error = "error", f"{type(e).__name__}: {e}"
+    with _jobs_lock:
+        job.update(status=status, result=result, error=error, finished=time.monotonic())
+    job["done"].set()
+
+
+def job_start(req):
+    """POST .../job/start {id, kind, spec[, wait_ms]} — run `kind` (preview,
+    rows or create) over `spec`, the very body that route takes, on a
+    thread. Answers within `wait_ms` (default JOB_START_WAIT_MS, at most
+    2 s): the finished job when it was that quick, {status: "running"}
+    otherwise, to be polled at GET job. The spec is validated here first,
+    so a grouping the route would refuse is the same 400, now, rather than
+    a job that fails a moment later."""
+    body = req.body or {}
+    jid = _job_id(body.get("id"))
+    kind = body.get("kind")
+    if kind not in JOB_KINDS:
+        raise ValueError(f"Unknown job kind {kind!r} — one of {', '.join(JOB_KINDS)}")
+    spec = body.get("spec")
+    if not isinstance(spec, dict):
+        raise ValueError("spec must be an object: the body the preview, rows or create route takes")
+    _validated(req, spec)
+    try:
+        wait_ms = max(0, min(int(body.get("wait_ms", JOB_START_WAIT_MS)), 2000))
+    except (TypeError, ValueError):
+        raise ValueError("wait_ms must be a number of milliseconds")
+    now = time.monotonic()
+    job = {"id": jid, "kind": kind, "store": req.store, "status": "running",
+           "result": None, "error": None, "started": now, "finished": None,
+           "done": threading.Event(), "stop": threading.Event()}
+    with _jobs_lock:
+        _prune_jobs(now)
+        if jid in _jobs:
+            raise ValueError(f"There is already a job {jid}")
+        _jobs[jid] = job
+    threading.Thread(target=_run_job, args=(job, req, spec), daemon=True,
+                     name=f"first-last {kind} {jid}").start()
+    job["done"].wait(wait_ms / 1000)
+    return _job_view(job)
+
+
+def job_status(req):
+    """GET .../job?id= — the job's state, and a finished job's result or
+    error, handed over once. A job already collected, expired, or started
+    in another case is gone, and the 400 says so."""
+    jid = _job_id(req.query.get("id"))
+    with _jobs_lock:
+        job = _jobs.get(jid)
+    if job is None or job["store"] is not req.store:
+        raise ValueError("No such First/Last job: it was collected already, expired, "
+                         "or belongs to another case")
+    return _job_view(job)
+
+
+def job_cancel(req):
+    """POST .../job/cancel {id} — stop a job. The query it is running is
+    interrupted (Store.cancel_op on its id) and create looks at its flag
+    once more before it writes the table. Safe on a job that has finished,
+    and on one whose start has not arrived: cancel_op marks the token
+    either way, so a start that lands later stops at its first query."""
+    jid = _job_id((req.body or {}).get("id"))
+    with _jobs_lock:
+        job = _jobs.get(jid)
+        running = job is not None and job["status"] == "running"
+    if job is not None:
+        job["stop"].set()
+    store = job["store"] if job is not None else req.store
+    if store is not None and not getattr(store, "closed", False):
+        store.cancel_op(jid)
+    return {"cancelled": running}

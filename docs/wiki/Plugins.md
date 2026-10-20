@@ -286,6 +286,20 @@ Timeline (tags every row)** to do the first two at once. A result is
 limited to 100,000 groups. Merged tables work, and sheets are kept per case
 like pivots.
 
+On a big table a preview can take several seconds, and the rest of Winnow
+stays usable while it runs: switch tables, scroll, filter or search as
+usual. Each change stops the preview it replaces, so quick edits don't pile
+up. If you leave the tab while a preview runs, a card in the jobs panel says
+so, then reads `N groups — the preview is ready` when it lands; its
+**Show** button takes you back to that sheet. **Copy result** works the
+same way: the button reads **Copying…**, and if you have left the tab by
+the time the result is ready, the card has a **Copy** button rather than
+writing to the clipboard behind your back. **Create table** closes its
+dialog straight away and shows a `Creating "<name>"` card with **Cancel**.
+A quick create opens the new table as before; a slow one, or one that
+finishes while you are elsewhere, leaves you where you are and shows
+`Created "<name>"` with **Open table**.
+
 ### mft_usn
 
 Reads raw NTFS artifacts directly, with no MFTECmd or other tool needed. It

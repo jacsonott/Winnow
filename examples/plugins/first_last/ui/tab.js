@@ -228,6 +228,8 @@ export function planRestore(payload, sources, tags) {
 let state = null;
 let refresh = null;
 let hideCompletion = null;
+let tabHidden = null;
+let tabShown = null;
 
 export default function mount(container, winnow) {
   const { el, post, api, toast, modal } = winnow;
@@ -246,6 +248,7 @@ export default function mount(container, winnow) {
     template: '',         // empty renders DEFAULT_TEMPLATE; see its comment
     meta: sharedMeta, preview: null, error: null, loading: false, stale: false,
     selRows: new Set(), selAnchor: null,
+    run: null,            // the preview job in flight, {job, rec} — see runPreview
   });
   const sheets = [newSheet('Bookends 1')];
   let active = 0;
@@ -346,6 +349,7 @@ export default function mount(container, winnow) {
   async function startFresh() {
     hideBanner();
     if (winnow.tabState) await winnow.tabState.clear();
+    for (const sh of sheets) stopPreview(sh);
     sheets.splice(0, sheets.length, newSheet('Bookends 1'));
     active = 0;
     state = sheets[0];
@@ -354,6 +358,101 @@ export default function mount(container, winnow) {
     fillSources();
     renderControls();
     renderPreview();
+  }
+
+  /* -------------------------------------------------- background jobs */
+
+  /* Every result is a job on the server — job/start, then short polls of
+     job — and never a request held open for the work. The backend's
+     docstring has the numbers: on a big table each edit's 15-second
+     preview held one of the six connections a browser allows Winnow, a
+     few edits held them all, and the grid in another tab stopped
+     answering. Start answers at once, with the result when a small table
+     had it ready; a running job is polled, and cancel() stops it on the
+     server, query and all. The id is made here, so a cancel reaches a job
+     whose start has not answered yet.
+
+     A tab that has been torn down — a case switch, a plugin reload — stops
+     polling and cancels: its jobs describe a case that is no longer open. */
+  const POLL_FIRST_MS = 200, POLL_MAX_MS = 1000;
+  const jobId = () => `fl_${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
+  function startJob(kind, spec) {
+    const id = jobId();
+    const job = {
+      id, kind, cancelled: false,
+      cancel() {
+        if (job.cancelled) return;
+        job.cancelled = true;
+        post(`${winnow.base}/job/cancel`, { id }).catch(() => { /* it had finished */ });
+      },
+    };
+    job.done = (async () => {
+      let st = await post(`${winnow.base}/job/start`, { id, kind, spec });
+      for (let wait = POLL_FIRST_MS; st.status === 'running'; wait = Math.min(POLL_MAX_MS, wait * 1.5)) {
+        await new Promise((r) => setTimeout(r, wait));
+        if (!container.isConnected) {
+          job.cancel();
+          throw Object.assign(new Error('Cancelled'), { cancelled: true });
+        }
+        st = await api(`${winnow.base}/job?id=${encodeURIComponent(id)}`);
+      }
+      if (st.status === 'done') return st.result;
+      throw Object.assign(new Error(st.error || 'Cancelled'), { cancelled: st.status === 'cancelled' });
+    })();
+    return job;
+  }
+
+  /* Leaving the tab stops nothing. A preview or a Copy result still running
+     carries on, and says so in the jobs panel — the card an import gets —
+     which turns into the answer when it lands: "ready" with Show for a
+     preview, a Copy button for a result. Back on the tab, a preview's
+     cards go, since the tab itself now says what they said. Create table
+     has a card of its own from the moment it starts (createTable). */
+  const away = new Set();   // {title, detail, show, notice}: running jobs a card may stand for
+  const seen = new Set();   // finished preview cards, closed when the tab is looked at again
+  function background(title, detail, show, notice = null) {
+    const rec = { title, detail, show, notice };
+    away.add(rec);
+    if (container.hidden) card(rec);
+    return rec;
+  }
+  function card(rec) {
+    if (!rec.notice || !rec.notice.open) {
+      rec.notice = winnow.notify({ title: rec.title, detail: rec.detail, progress: null,
+        actions: [{ label: 'Show', onClick: rec.show }] });
+    }
+    return rec.notice;
+  }
+  /* The job behind `rec` is over. Seen from the tab there is nothing to
+     announce; away from it, `finish(card)` says how it went, or the error
+     does — and the card is returned. A null `finish` is a job that was let
+     go (its sheet closed, its table changed): nothing to tell anyone. */
+  function settle(rec, finish, error) {
+    away.delete(rec);
+    if (!finish || !container.hidden) {
+      if (rec.notice) rec.notice.close();
+      return null;
+    }
+    const n = card(rec);
+    if (error) n.fail({ detail: error.message, progress: false });
+    else finish(n);
+    return n;
+  }
+  tabHidden = () => { for (const rec of away) card(rec); };
+  tabShown = () => {
+    for (const rec of away) {
+      if (rec.notice) rec.notice.close();
+      rec.notice = null;
+    }
+    for (const n of seen) n.close();
+    seen.clear();
+  };
+  /* A card's Show: back to this tab — reopened if it was closed from the
+     strip — and to the sheet the card is about. */
+  async function showSheet(sh) {
+    await winnow.showTab();
+    const i = sheets.indexOf(sh);
+    if (i >= 0 && i !== active) activateSheet(i);
   }
 
   /* ------------------------------------------------------- sheet strip */
@@ -421,6 +520,7 @@ export default function mount(container, winnow) {
     if (state.stale) queuePreview();
   }
   function closeSheet(i) {
+    stopPreview(sheets[i]);
     sheets.splice(i, 1);
     activateSheet(Math.max(0, Math.min(i <= active ? active - (i < active ? 1 : 0) : active, sheets.length - 1)));
   }
@@ -1204,30 +1304,67 @@ export default function mount(container, winnow) {
 
   const ready = () => state.sourceId != null && state.groupBy.length > 0 && !!state.sortColumn;
 
+  /* One preview job per sheet. An edit's run cancels the one it supersedes
+     — on the server, not just here: left to finish, they were what piled
+     up (startJob). It takes over that run's card too, so a sheet edited
+     while the analyst is away keeps one card rather than flickering a new
+     one in. A run that comes back to find itself superseded does nothing:
+     the sheet belongs to the newer run. */
   async function runPreview() {
+    const mine = state;
     if (!ready()) {
-      state.preview = null;
-      state.error = null;
-      state.stale = false;   // nothing to run, so nothing is pending either
+      stopPreview(mine);
+      mine.preview = null;
+      mine.error = null;
+      mine.stale = false;   // nothing to run, so nothing is pending either
       renderPreview();
       return;
     }
-    state.loading = true;
-    state.stale = false;
-    renderPreview();
-    const mine = state;
-    try {
-      const p = await post(`${winnow.base}/preview`, requestBody());
-      mine.preview = p;
-      mine.error = null;
-    } catch (e) {
-      mine.preview = null;
-      mine.error = e.message;
+    const prev = mine.run;
+    if (prev) {
+      prev.job.cancel();
+      away.delete(prev.rec);
     }
+    mine.loading = true;
+    mine.stale = false;
+    renderPreview();
+    const run = {
+      job: startJob('preview', requestBody()),
+      rec: background(`First/Last · ${mine.name}`, `Previewing ${labelOf(currentSource())}…`,
+        () => showSheet(mine), prev ? prev.rec.notice : null),
+    };
+    mine.run = run;
+    let preview = null, error = null;
+    try {
+      preview = await run.job.done;
+    } catch (e) {
+      error = e;
+    }
+    if (mine.run !== run || !container.isConnected) return;
+    mine.run = null;
+    mine.preview = preview;
+    mine.error = error ? error.message : null;
     mine.loading = false;
     mine.selRows = new Set();
     mine.selAnchor = null;
     if (mine === state) renderPreview();
+    const n = settle(run.rec, (c) => {
+      const g = preview.total_groups;
+      c.done({ phase: 'ready', progress: false,
+        detail: `${g.toLocaleString()} group${g === 1 ? '' : 's'} — the preview is ready` });
+    }, error);
+    if (n) seen.add(n);
+  }
+
+  /* A sheet letting its preview go — closed, switched to another table, or
+     emptied: the job stops on the server and its card, if it has one,
+     goes with nothing to say. */
+  function stopPreview(sh) {
+    if (!sh.run) return;
+    sh.run.job.cancel();
+    settle(sh.run.rec, null);
+    sh.run = null;
+    sh.loading = false;
   }
 
   const headCss = 'position:sticky;top:0;background:var(--panel-2);color:var(--dim);'
@@ -1417,19 +1554,55 @@ export default function mount(container, winnow) {
     return n;
   }
 
-  /* The whole result (backend rows route), TSV, to the clipboard. */
+  /* The whole result (the backend's rows job), TSV, to the clipboard. On a
+     big table that takes a while, and nothing waits on it: the button says
+     Copying… and the analyst can go anywhere. Still on this tab when it
+     lands, it goes straight to the clipboard. Elsewhere, the clipboard is
+     not this tab's to write — the analyst may have copied something else
+     since — so the card offers the copy instead, and the click on it is
+     the gesture a clipboard write may want anyway. */
+  let copying = false;
   async function copyResult() {
     if (!ready()) { toast('Build a grouping first'); return; }
-    let res;
-    try { res = await post(`${winnow.base}/rows`, requestBody()); }
-    catch (e) { toast('Could not compute the result: ' + e.message, 5000); return; }
+    if (copying) { toast('Still working out the result to copy'); return; }
+    copying = true;
+    copyBtn.disabled = true;
+    copyBtn.textContent = 'Copying…';
+    const job = startJob('rows', requestBody());
+    const rec = background('First/Last result', `Working out ${state.name} to copy…`, () => winnow.showTab());
+    let res = null, error = null;
+    try {
+      res = await job.done;
+    } catch (e) {
+      error = e;
+    }
+    copying = false;
+    copyBtn.disabled = false;
+    copyBtn.textContent = 'Copy result';
+    if (!container.isConnected) return;
+    if (error) {
+      if (!settle(rec, () => {}, error)) toast('Could not compute the result: ' + error.message, 5000);
+      return;
+    }
     const text = [res.columns.join('\t'),
       ...res.rows.map((r) => r.map((v) => (v == null ? '' : String(v))).join('\t'))].join('\n');
-    try {
-      await navigator.clipboard.writeText(text);
-      toast(`Copied ${res.rows.length.toLocaleString()} row${res.rows.length === 1 ? '' : 's'}`
-        + (res.truncated ? ' (truncated — Create a table for the full result)' : ''));
-    } catch { toast('Copy failed — the browser blocked clipboard access', 4000); }
+    const what = `${res.rows.length.toLocaleString()} row${res.rows.length === 1 ? '' : 's'}`
+      + (res.truncated ? ' (truncated — Create a table for the full result)' : '');
+    const offer = (c) => c.done({ phase: 'ready', progress: false, detail: `${what} ready to copy`,
+      actions: [{ label: 'Copy', onClick: () => writeClipboard(text, what, false) }] });
+    if (!settle(rec, offer, null)) writeClipboard(text, what, true);
+  }
+  /* `offer`: a write that fails is offered again on a card — a long wait
+     can cost the page the focus a clipboard write needs, and a click on
+     the card gives it back. From the card itself, a failure is final. */
+  function writeClipboard(text, what, offer) {
+    navigator.clipboard.writeText(text).then(
+      () => toast(`Copied ${what}`),
+      () => {
+        if (!offer) { toast('Copy failed — the browser blocked clipboard access', 4000); return; }
+        winnow.notify({ title: 'First/Last result' }).done({ phase: 'ready', detail: `${what} ready to copy`,
+          actions: [{ label: 'Copy', onClick: () => writeClipboard(text, what, false) }] });
+      });
   }
 
   /* Create table…: name it, and optionally put the bookends on the unified
@@ -1468,27 +1641,66 @@ export default function mount(container, winnow) {
 
       const acts = el('div', 'row-actions');
       const go = el('button', 'btn primary', 'Create table');
-      go.onclick = async () => {
-        go.disabled = true;
-        try {
-          const bodyReq = { ...requestBody(), name: name.value.trim() };
-          if (tlCb.checked) bodyReq.timeline_tag = tagName.value.trim() || defaultName;
-          const res = await post(`${winnow.base}/create`, bodyReq);
-          document.getElementById('modal').hidden = true;
-          toast(`Created "${res.source.name}" · ${res.source.row_count.toLocaleString()} rows`
-            + (res.timeline_tag ? ` · tagged "${res.timeline_tag.name}"` : ''));
-          // create is a synchronous ingest with no job record — refresh the
-          // app's source list ourselves, then jump to the new table.
-          if (winnow.refreshSources) await winnow.refreshSources();
-          winnow.openSource(res.source.id);
-        } catch (e) {
-          toast('Could not create the table: ' + e.message, 6000);
-          go.disabled = false;
-        }
+      go.onclick = () => {
+        const bodyReq = { ...requestBody(), name: name.value.trim() };
+        if (tlCb.checked) bodyReq.timeline_tag = tagName.value.trim() || defaultName;
+        // The dialog goes now, not when the table lands: it covers the
+        // whole app, and waiting in it on a big table was the whole app
+        // locked for as long as the create took.
+        winnow.closeModal();
+        createTable(bodyReq, bodyReq.name || defaultName);
       };
       acts.append(go);
       b.append(acts);
       setTimeout(() => name.focus(), 0);
+    });
+  }
+
+  /* Create table, once the dialog has gone: a job with a card in the jobs
+     panel from the start — Cancel while it runs, Open table once it has
+     landed — so the analyst can do anything else meanwhile. A quick one
+     (under CREATE_OPEN_MS) that lands while this tab is still showing opens
+     the new table, as Create always has. A slow one, or one that lands
+     while the analyst is elsewhere, waits on its card instead of pulling
+     them away from whatever they went to do. A card dismissed while it ran
+     is put back when the table lands: that is the news it was waiting for. */
+  const CREATE_OPEN_MS = 1500;
+  async function createTable(bodyReq, label) {
+    const began = Date.now();
+    const job = startJob('create', bodyReq);
+    const n = winnow.notify({ title: `Creating "${label}"`, detail: 'First/Last — this says when it lands',
+      phase: 'creating', progress: null, actions: [{ label: 'Cancel', onClick: () => job.cancel() }] });
+    let res;
+    try {
+      res = await job.done;
+    } catch (e) {
+      if (!container.isConnected) return;
+      if (e.cancelled && job.cancelled) {
+        n.close();
+        toast(`Cancelled — "${label}" was not created`);
+        return;
+      }
+      (n.open ? n : winnow.notify({})).fail({ title: `Could not create "${label}"`, detail: e.message,
+        phase: null, progress: false, actions: [] });
+      return;
+    }
+    // A plugin route's ingest announces itself through no import job, so
+    // nothing else refreshes the app's table list: without this the new
+    // table is invisible until a reload.
+    if (winnow.refreshSources) await winnow.refreshSources();
+    const made = `${res.source.row_count.toLocaleString()} rows`
+      + (res.timeline_tag ? ` · tagged "${res.timeline_tag.name}"` : '');
+    if (!container.isConnected) return;
+    if (!container.hidden && !job.cancelled && Date.now() - began < CREATE_OPEN_MS) {
+      n.close();
+      toast(`Created "${res.source.name}" · ${made}`);
+      winnow.openSource(res.source.id);
+      return;
+    }
+    (n.open ? n : winnow.notify({})).done({
+      title: `Created "${res.source.name}"`, phase: null, progress: false,
+      detail: job.cancelled ? `${made} — it was written before the cancel reached it` : made,
+      actions: [{ label: 'Open table', onClick: () => winnow.openSource(res.source.id) }],
     });
   }
 
@@ -1517,6 +1729,7 @@ export default function mount(container, winnow) {
   function selectSource(id) {
     if (state.sourceId === id) return;
     acHide();   // the column set changes under the popup
+    stopPreview(state);   // a preview of the old table is nobody's answer now
     state.sourceId = id;
     state.groupBy = [];
     state.carry = [];
@@ -1578,11 +1791,14 @@ export default function mount(container, winnow) {
 
 export function onShow() {
   if (refresh) refresh();
+  if (tabShown) tabShown();
 }
 
 /* Tab switches reach here (Alt+digit works while typing, so the popup can
    be open); the container's `hidden` already hides the popup with it, but
-   the accept state must not survive to the next visit. */
+   the accept state must not survive to the next visit. Whatever is still
+   running carries on, and gets a card in the jobs panel (tabHidden). */
 export function onHide() {
   if (hideCompletion) hideCompletion();
+  if (tabHidden) tabHidden();
 }

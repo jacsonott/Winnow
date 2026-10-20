@@ -77,19 +77,44 @@ Three ways out, on the bar's right edge:
   "every tagged row across the case", so that tag is what puts the
   bookends on it (and the write goes through the undoable tag path).
 
+## Working in the background
+
+On a big table a preview, a **Copy result** or a **Create table…** can take
+a while — seconds per preview on a million rows. None of it holds up the
+rest of Winnow: switch to a table, scroll, filter or search while it runs.
+
+- **Preview.** Each change starts a fresh preview and stops the one it
+  replaced on the server, so a run of quick edits never piles up work.
+  Leave the tab while one runs and a card in the jobs panel says it is
+  still going; when it lands the card reads `N groups — the preview is
+  ready`, and **Show** brings you back to that sheet. Coming back to the
+  tab yourself clears the cards, since the tab now says what they said.
+- **Copy result.** The button reads *Copying…* while the result is worked
+  out. Still on the tab when it lands, it goes straight to the clipboard;
+  elsewhere, a card offers **Copy** instead, so nothing overwrites a
+  clipboard you have used since.
+- **Create table….** The dialog closes as soon as you press *Create
+  table*, and a `Creating "<name>"` card carries the work, with
+  **Cancel**. A quick create opens the new table as it always has; a slow
+  one, or one that lands while you are elsewhere, leaves you where you
+  are and turns its card into `Created "<name>"` with **Open table**.
+
 ## Files
 
 ```
 first_last/
-├── __init__.py   routes: meta, values, preview, rows, create
+├── __init__.py   routes: meta, values, preview, rows, create,
+│                 job/start, job, job/cancel (what the tab calls)
 ├── ui/tab.js     the tab
 └── README.md
 ```
 
 Backend tests live in `tests/test_plugins.py` (`-k first_last`),
-`tests/test_firstlast_timeline.py` and `tests/test_firstlast_values.py`; the
+`tests/test_firstlast_timeline.py`, `tests/test_firstlast_values.py` and
+`tests/test_firstlast_jobs.py` (the background jobs); the
 tab itself is driven by `tests/ui/test_firstlast_rework.py`,
 `tests/ui/test_firstlast_autocomplete.py`,
 `tests/ui/test_firstlast_filter_search.py` and
-`tests/ui/test_firstlast_values_and_nicknames.py`, and the saved sheets by
-`tests/ui/test_firstlast_state.py`.
+`tests/ui/test_firstlast_values_and_nicknames.py`, the saved sheets by
+`tests/ui/test_firstlast_state.py`, and the work in the background by
+`tests/ui/test_firstlast_background.py`.

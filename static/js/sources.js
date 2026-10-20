@@ -899,7 +899,7 @@ export async function openSource(id, { skipBuild = false } = {}) {
   // Every refresh idiom re-enters here for the table already open —
   // loadSources() with no select after a column add, a folder op or
   // closing some OTHER tab, openSource(S.sourceId) from the derived-column
-  // modal, the plugin API's refreshSources() — and none of those leaves
+  // modal — and none of those leaves
   // the table, so none of them is a reason to take the detail pane away.
   // Decided before S.sourceId is overwritten below.
   const leaving = S.sourceId !== id;
