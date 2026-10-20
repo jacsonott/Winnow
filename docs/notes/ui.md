@@ -1236,10 +1236,40 @@ see [docs/notes/README.md](README.md) for the whole set.
   sitting over a column of `1`s. `headerWidthFor` now reads the live DOM
   instead: the label's `scrollWidth` (its full text, even while clipped)
   plus `hcell.clientWidth - label.clientWidth` (padding, gaps and every
-  non-label child; the grip is absolutely positioned, so it isn't in
-  that difference). It's idempotent by construction — once the label
+  non-label child). It's idempotent by construction — once the label
   isn't clipped, both terms stop changing — and returns 0 for a column
   with no header on screen, where callers fall back to the old estimate.
+- **A column divider is found by distance, not by an element under the
+  pointer** (columns.js `dividerAt`, wired once on `#headRow` by
+  `wireColumnDividers`). The grab used to be a 7px `.grip` inside each
+  header at `right: -3px`, meant to straddle the 1px line — but
+  `.hcell`'s `overflow: hidden` (the `.fcell` entry above says why it
+  stays) clipped it to the 4px left of the line. The line itself and
+  everything right of it were headers, so the double-click analysts aimed
+  at the line sorted that column twice instead of fitting the one they
+  meant, which analysts reported as extremely easy to do. The zone
+  is now `DIVIDER_REACH` (5px) either side of the line, 11px in all,
+  which stays inside both cells' 8px padding and so never covers a name,
+  a sort arrow or a button. Two things make it work, and a "just give
+  each header a wider grip again" would lose both. **Half the zone
+  lies over the next column's cell**, which nothing inside this one can
+  reach through the clip — hence one set of listeners on the row, in the
+  capture phase, so a press that grabs a line never reaches the header
+  under it (no sort, no reorder drag; a right-click is left alone and is
+  still that header's column menu). **Which line is under the pointer is
+  read off what is painted** (`elementFromPoint`), not off the cells'
+  order or boxes: a pinned header is drawn over whatever scrolls under it
+  and two pins park side by side whatever lies between them in the order,
+  so the line beside a pin is the pin's, and a scrolled-under column's
+  line never pokes through a pinned header. A per-header grip with a
+  z-index gets one of those wrong whichever z-index it picks — the next
+  pin covers the outer half of a pin's grip, or a scrolled-under grip
+  covers a pin. The cursor (`.head-row.at-divider`) is the zone's only
+  visible sign, and its tooltip is borrowed: the header the pointer is
+  over wears "Drag to resize, double-click to autofit this column" while
+  the pointer is on a line. tests/ui/test_column_divider.py presses on
+  the line and either side of it, between two parked pins, and on the
+  names beside it.
 - **The autofit cap is a user setting** (`S.appearance.autofitMax`,
   Settings → Grid & layout, default `AUTOFIT_MAX_W_DEFAULT` = 900px, `0`
   meaning uncapped), not the old hardcoded 480. A cap still exists by
