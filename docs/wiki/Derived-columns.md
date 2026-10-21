@@ -477,7 +477,10 @@ finish*.
 A [merged table](Working-with-tables.md) shows a derived column when every
 member table has a derived column of that name. Add one while the merge is
 open and Winnow adds it to each member table, checking all of them first,
-so a name clash on one member stops it everywhere. The preview samples the
+so a name clash on one member stops it everywhere. One job fills it in,
+working through the member tables one after another; its row in the jobs
+panel says which table it is on, such as `User — 2/4: b.csv`. Cancelling
+it removes the new column from every member table. The preview samples the
 first member, or the merged view under **This view**.
 
 A derived column on one member table is never shown as another member's
@@ -494,10 +497,12 @@ Two things work differently on a merge:
 **Remove derived column…** on a merge change every member table's copy.
 Winnow checks all of them first: if another derived column on any member
 is built from it, or the members compute it with different operations,
-nothing changes. Each member
-is recomputed as its own job in the jobs panel; the merged column's ƒ
+nothing changes. The members are recomputed by one job, one table after
+another; the merged column's ƒ
 tooltip says *building…* until all of them finish, and its **Show N unparsed rows**
-count covers every member. **Remove derived column…** says it removes the
+count covers every member. Cancelling that job part-way keeps the tables it
+finished, marks the one it was on *incomplete*, and leaves the rest as they
+were. **Remove derived column…** says it removes the
 column from all the tables in the merge. A rename on a merge checks the new
 name against every member table, including one without the column.
 

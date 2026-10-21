@@ -5333,26 +5333,37 @@ class Store:
             elif job["kind"] == "derive":
                 # options carries def_ids (a flatten adding several columns
                 # in one pass) or def_id (the single-column create and
-                # re-derive paths) — one job either way.
-                res = self.backfill_derived_columns(
-                    opts.get("def_ids") or [opts["def_id"]], progress=progress, cancel=cancel,
-                    drop_on_cancel=opts.get("drop_on_cancel", False),
-                    previous=opts.get("previous"),
-                )
+                # re-derive paths) — one job either way. A merge's carries
+                # `parts`, one per member, which this one job walks in turn
+                # (_backfill_derive_parts).
+                if opts.get("parts"):
+                    out = self._backfill_derive_parts(
+                        job, opts["parts"], progress=progress, cancel=cancel,
+                        drop_on_cancel=opts.get("drop_on_cancel", False),
+                    )
+                else:
+                    out = [self.backfill_derived_columns(
+                        opts.get("def_ids") or [opts["def_id"]], progress=progress, cancel=cancel,
+                        drop_on_cancel=opts.get("drop_on_cancel", False),
+                        previous=opts.get("previous"),
+                    )]
+                rows = sum(res["rows"] for res in out)
                 with self._ingest_jobs_lock:
                     job["status"] = "done"
-                    job["rows_done"] = res["rows"]
-                    job["source_ids"] = [res["source_id"]]
-                    job["result"] = [dict(c, rows=res["rows"]) for c in res["columns"]]
+                    job["rows_done"] = rows
+                    job["source_ids"] = [res["source_id"] for res in out]
+                    job["result"] = self._derive_job_result(out)
                 # Chained columns: anything derived FROM a column this job
                 # just recomputed is now stale — re-derive it, which
                 # cascades down the chain one job at a time (each named
                 # for why it's running). A fresh create has no dependents
                 # (its name is new), so this only fires on re-derives.
-                self._cascade_dependent_derives(res["source_id"],
-                                                [c["name"] for c in res["columns"]])
-                wlog.record("info", f"Derive finished: {job['name']} — {res['rows']:,} rows in "
-                                    f"{self._job_elapsed(job):.1f}s (table {res['source_id']})")
+                self._cascade_dependent_derives(
+                    [(res["source_id"], [c["name"] for c in res["columns"]]) for res in out])
+                tables = ", ".join(str(res["source_id"]) for res in out)
+                wlog.record("info", f"Derive finished: {job['name']} — {rows:,} rows in "
+                                    f"{self._job_elapsed(job):.1f}s "
+                                    f"(table{'s' if len(out) != 1 else ''} {tables})")
                 return
             elif job["kind"] == "text":
                 results = [self.ingest_text(
@@ -6749,12 +6760,68 @@ class Store:
                 for col in timeparse.op_inputs(op_id, input_column, params):
                     if self._find_column(msrc, col) is None:
                         raise ValueError(f"Member table {msrc['name']!r} has no column {col!r}")
-            results = [self.add_derived_column(m["source_id"], name, input_column, op_id, params)
-                       for m in members]
-            return {"definition": results[0]["definition"],
-                    "member_definitions": [r["definition"] for r in results],
-                    "job_id": results[0]["job_id"],
-                    "job_ids": [r["job_id"] for r in results]}
+            def_ids: list[int] = []
+            try:
+                for m in members:
+                    def_ids.append(self._define_derived_column(
+                        m["source_id"], name, input_column, op_id, params))
+            except Exception:
+                # A check only a member's own definition makes (an input
+                # still building there) — the members before it go too.
+                self._rollback_derive_definitions(def_ids)
+                raise
+            definitions = [self.get_derived_column(d) for d in def_ids]
+            job = self._start_merge_derive_job(definitions[0]["name"], [[d] for d in def_ids], members)
+            return {"definition": definitions[0],
+                    "member_definitions": definitions,
+                    "job_id": job["job_id"],
+                    "job_ids": [job["job_id"]]}
+        def_id = self._define_derived_column(source_id, name, input_column, op_id, params)
+        # Read back BEFORE the job starts: a backfill that fails at once
+        # removes the column (_fail_derive_backfill), and on a busy machine
+        # it can do that before this thread gets to the return below.
+        definition = self.get_derived_column(def_id)
+        try:
+            job = self.start_ingest_job(
+                "derive", "", name=definition["name"],
+                options={"def_id": def_id, "drop_on_cancel": True,
+                         "units_total": self._source_lite(source_id)["row_count"]},
+            )
+        except OpCancelled:
+            # The definition is committed and the backfill was refused (the
+            # case is closing). `drop_on_cancel` above is this path's own
+            # promise that a cancelled create leaves no half-column behind,
+            # and a job that never started is that same cancel one moment
+            # earlier — so drop the definition and let the refusal out.
+            # Left standing it survives the close as a column stuck
+            # 'building' with nothing to finish it: "(building…)" in the
+            # header on every reopen, save_view_as_source refusing the
+            # whole table, and nothing able to chain off it.
+            self._rollback_derive_definitions([def_id])
+            raise
+        return {"definition": definition, "job_id": job["job_id"]}
+
+    def _start_merge_derive_job(self, name: str, parts: list[list[int]], members: list[dict]) -> dict:
+        """The one backfill job for columns just created on a merge:
+        `parts` is each member's definition ids, in member order. A job
+        refused because the case is closing takes every member's
+        definitions with it, as add_derived_column's own refusal does."""
+        units = sum(self._source_lite(m["source_id"])["row_count"] for m in members)
+        try:
+            return self.start_ingest_job(
+                "derive", "", name=name,
+                options={"parts": [{"def_ids": ids} for ids in parts], "drop_on_cancel": True,
+                         "units_total": units},
+            )
+        except OpCancelled:
+            self._rollback_derive_definitions([d for ids in parts for d in ids])
+            raise
+
+    def _define_derived_column(self, source_id: int, name: str, input_column: str,
+                               op_id: str, params: dict | None) -> int:
+        """add_derived_column's checks and its definition row (status
+        'building'), on one real table, without the job — so a merge can
+        make every member's before starting the one job that fills them."""
         op = timeparse.OPERATIONS.get(op_id)
         if op is None:
             raise ValueError(f"Unknown operation: {op_id}")
@@ -6811,29 +6878,7 @@ class Store:
                 (source_id, name, input_column, op_id, json.dumps(params),
                  time.strftime("%Y-%m-%dT%H:%M:%S")),
             )
-            def_id = cur.lastrowid
-        # Read back BEFORE the job starts: a backfill that fails at once
-        # removes the column (_fail_derive_backfill), and on a busy machine
-        # it can do that before this thread gets to the return below.
-        definition = self.get_derived_column(def_id)
-        try:
-            job = self.start_ingest_job(
-                "derive", "", name=name,
-                options={"def_id": def_id, "drop_on_cancel": True, "units_total": src["row_count"]},
-            )
-        except OpCancelled:
-            # The definition is committed and the backfill was refused (the
-            # case is closing). `drop_on_cancel` above is this path's own
-            # promise that a cancelled create leaves no half-column behind,
-            # and a job that never started is that same cancel one moment
-            # earlier — so drop the definition and let the refusal out.
-            # Left standing it survives the close as a column stuck
-            # 'building' with nothing to finish it: "(building…)" in the
-            # header on every reopen, save_view_as_source refusing the
-            # whole table, and nothing able to chain off it.
-            self._rollback_derive_definitions([def_id])
-            raise
-        return {"definition": definition, "job_id": job["job_id"]}
+            return cur.lastrowid
 
     STRUCT_SAMPLE = 200
 
@@ -6901,11 +6946,45 @@ class Store:
                     if self._find_column(msrc, spec.get("input_column")) is None:
                         raise ValueError(
                             f"Member table {msrc['name']!r} has no column {spec.get('input_column')!r}")
-            results = [self.add_derived_columns(m["source_id"], specs) for m in members]
-            first = results[0]
-            return {**first,
-                    "member_results": results,
-                    "job_ids": [j for r in results for j in (r.get("job_ids") or [r.get("job_id")]) if j]}
+            parts: list[list[int]] = []
+            try:
+                for m in members:
+                    parts.append(self._define_derived_columns(m["source_id"], specs)[0])
+            except Exception:
+                self._rollback_derive_definitions([d for ids in parts for d in ids])
+                raise
+            label = self._derive_batch_label(specs)
+            job = self._start_merge_derive_job(label, parts, members)
+            results = [{"definitions": [self.get_derived_column(d) for d in ids], "job_id": job["job_id"]}
+                       for ids in parts]
+            return {**results[0], "member_results": results, "job_ids": [job["job_id"]]}
+        def_ids, label = self._define_derived_columns(source_id, specs)
+        # Before the job, for add_derived_column's reason.
+        definitions = [self.get_derived_column(d) for d in def_ids]
+        try:
+            job = self.start_ingest_job(
+                "derive", "", name=label,
+                options={"def_ids": def_ids, "drop_on_cancel": True,
+                         "units_total": self._source_lite(source_id)["row_count"]},
+            )
+        except OpCancelled:
+            # All-or-nothing all the way to the job: this batch is
+            # created in one step and cancelled in one step (the backfill
+            # drops every column it was filling), so a refused job takes
+            # the whole batch with it rather than leaving eight columns
+            # stuck 'building' — see add_derived_column.
+            self._rollback_derive_definitions(def_ids)
+            raise
+        return {"definitions": definitions, "job_id": job["job_id"]}
+
+    @staticmethod
+    def _derive_batch_label(specs: list[dict]) -> str:
+        return (specs[0].get("name") or "").strip() if len(specs) == 1 else f"{len(specs)} columns"
+
+    def _define_derived_columns(self, source_id: int, specs: list[dict]) -> tuple[list[int], str]:
+        """add_derived_columns' checks and definition rows on one real
+        table, without the job: (the new definition ids, the job's
+        label). See _define_derived_column."""
         src = self._source_lite(source_id)
         drv = self._derived_table(source_id)
 
@@ -6966,24 +7045,7 @@ class Store:
                      json.dumps(pspec["params"]), time.strftime("%Y-%m-%dT%H:%M:%S")),
                 )
                 def_ids.append(cur.lastrowid)
-
-        label = prepared[0]["name"] if len(prepared) == 1 else f"{len(prepared)} columns"
-        # Before the job, for add_derived_column's reason.
-        definitions = [self.get_derived_column(d) for d in def_ids]
-        try:
-            job = self.start_ingest_job(
-                "derive", "", name=label,
-                options={"def_ids": def_ids, "drop_on_cancel": True, "units_total": src["row_count"]},
-            )
-        except OpCancelled:
-            # All-or-nothing all the way to the job: this batch is
-            # created in one step and cancelled in one step (the backfill
-            # drops every column it was filling), so a refused job takes
-            # the whole batch with it rather than leaving eight columns
-            # stuck 'building' — see add_derived_column.
-            self._rollback_derive_definitions(def_ids)
-            raise
-        return {"definitions": definitions, "job_id": job["job_id"]}
+        return def_ids, self._derive_batch_label(specs)
 
     def _rollback_derive_definitions(self, def_ids: list[int]) -> None:
         """Undo the definition rows a create has just committed, for a
@@ -7294,19 +7356,31 @@ class Store:
                 out.append(d)
         return out
 
-    def _cascade_dependent_derives(self, source_id: int, names: list[str]) -> None:
-        for d in self.dependent_derived_columns(source_id, names):
+    def _cascade_dependent_derives(self, changed: list[tuple[int, list[str]]]) -> None:
+        """Re-derive what was computed from the columns a derive job just
+        wrote: `changed` holds (source_id, names) for each table it wrote.
+        A merge's job wrote one per member, and the same child on every
+        member is then recomputed by one job walking them in turn, for
+        the reason the parent was (_backfill_derive_parts)."""
+        groups: dict[str, list[dict]] = {}
+        for source_id, names in changed:
+            for d in self.dependent_derived_columns(source_id, names):
+                key = _ascii_fold(d["name"]) if len(changed) > 1 else str(d["id"])
+                groups.setdefault(key, []).append(dict(d, parents=names))
+        for defs in groups.values():
+            d, names = defs[0], defs[0]["parents"]
             try:
                 with self.lock, self.db:
-                    self.db.execute(
+                    self.db.executemany(
                         "UPDATE derived_columns SET status='building', parse_failures=NULL WHERE id=?",
-                        (d["id"],),
+                        [(x["id"],) for x in defs],
                     )
-                src = self._source_lite(source_id)
+                units = sum(self._source_lite(x["source_id"])["row_count"] for x in defs)
+                which = ({"def_id": d["id"]} if len(defs) == 1
+                         else {"parts": [{"def_ids": [x["id"]]} for x in defs]})
                 self.start_ingest_job(
                     "derive", "", name=f"{d['name']} (recomputed — its input changed)",
-                    options={"def_id": d["id"], "drop_on_cancel": False,
-                             "units_total": src["row_count"]},
+                    options={**which, "drop_on_cancel": False, "units_total": units},
                 )
             except Exception as e:  # noqa: BLE001 — recorded below, then on to the next child
                 # One broken child shouldn't stop its siblings — but it must
@@ -7332,9 +7406,9 @@ class Store:
                                     f"({type(e).__name__}: {e})")
                 try:
                     with self.lock, self.db:
-                        self.db.execute(
+                        self.db.executemany(
                             "UPDATE derived_columns SET status='partial' WHERE id=? AND status='building'",
-                            (d["id"],),
+                            [(x["id"],) for x in defs],
                         )
                 except Exception:  # noqa: BLE001 — a closing connection has nothing left to record on
                     pass
@@ -7351,15 +7425,16 @@ class Store:
         nothing computed.
 
         On a merge (`source_id` negative) every member that carries the
-        column is re-derived with the same params (_derived_scope), one
-        job per member — the shape creating on a merge has, so each member
-        shows, and cancels, in the jobs panel on its own, and a cancelled
-        member keeps its values marked 'partial', which the merge's column
-        then reports (_merge_columns). All-or-nothing up to the jobs, as
-        create is: every member's definition is checked against the new
-        params before any is rewritten, so params one member cannot take
-        refuse the whole re-derive instead of leaving the merge's one
-        column computed two ways."""
+        column is re-derived with the same params (_derived_scope), by one
+        job that walks the members in turn — the shape creating on a merge
+        has (_backfill_derive_parts). Cancelled part-way, the member it
+        was on keeps its values marked 'partial', which the merge's column
+        then reports (_merge_columns); the members it had not reached keep
+        the column they had. All-or-nothing up to the job, as create is:
+        every member's definition is checked against the new params
+        before any is rewritten, so params one member cannot take refuse
+        the whole re-derive instead of leaving the merge's one column
+        computed two ways."""
         scope = self._derived_scope(def_id, source_id)
         if params is not None and len({d["op_id"] for d in scope}) > 1:
             ways = ", ".join(
@@ -7378,56 +7453,46 @@ class Store:
                 # 'building' and the job got as far as loading it.
                 op["check"](self, new_params)
             prepared.append((d, new_params))
-        results = [self._rederive_one(d, new_params) for d, new_params in prepared]
-        if len(results) == 1:
-            return results[0]
-        cascades, seen = [], set()
-        for r in results:
-            for n in r["cascades_to"]:
-                if _ascii_fold(n) not in seen:
-                    seen.add(_ascii_fold(n))
-                    cascades.append(n)
-        return {"definition": results[0]["definition"],
-                "member_definitions": [r["definition"] for r in results],
-                "job_id": results[0]["job_id"],
-                "job_ids": [r["job_id"] for r in results],
-                "cascades_to": cascades}
-
-    def _rederive_one(self, d: dict, new_params: dict) -> dict:
-        """rederive_column for one definition whose params are already
-        validated. A refusal part-way through a merge (the case closing)
-        restores the member it was refused on; the members before it
-        have jobs running, which the close cancels like any other — so
-        they end 'partial', as a cancelled re-derive does."""
-        def_id = d["id"]
         with self.lock, self.db:
-            self.db.execute(
+            self.db.executemany(
                 "UPDATE derived_columns SET params=?, status='building', parse_failures=NULL WHERE id=?",
-                (json.dumps(new_params), def_id),
+                [(json.dumps(new_params), d["id"]) for d, new_params in prepared],
             )
-        src = self._source_lite(d["source_id"])
+        # `previous` lets a backfill that fails before writing a value put
+        # the definition back as it was (_fail_derive_backfill).
+        if len(scope) == 1:
+            which = {"def_id": scope[0]["id"], "previous": [scope[0]]}
+        else:
+            which = {"parts": [{"def_ids": [d["id"]], "previous": [d]} for d in scope]}
+        units = sum(self._source_lite(d["source_id"])["row_count"] for d in scope)
         try:
-            # `previous` lets a backfill that fails before writing a value
-            # put the definition back as it was (_fail_derive_backfill).
             job = self.start_ingest_job(
-                "derive", "", name=d["name"],
-                options={"def_id": def_id, "drop_on_cancel": False, "units_total": src["row_count"],
-                         "previous": [d]},
+                "derive", "", name=scope[0]["name"],
+                options={**which, "drop_on_cancel": False, "units_total": units},
             )
         except OpCancelled:
-            # Refused because the case is closing. The row above now says
+            # Refused because the case is closing. The rows above now say
             # 'building' under the new params and no job will ever make
             # that true — the column would come back from the reopen
             # reading "(building…)" over the values it had all along. A
             # re-derive is not a delete (the cancelled-mid-backfill case
             # keeps the column and marks it 'partial'), so put the
-            # definition back exactly as it was: this call raised, so
+            # definitions back exactly as they were: this call raised, so
             # nothing about it took effect.
-            self._restore_derive_definition(d)
+            for d in scope:
+                self._restore_derive_definition(d)
             raise
-        return {"definition": self.get_derived_column(def_id), "job_id": job["job_id"],
-                "cascades_to": [c["name"] for c in
-                                self.dependent_derived_columns(d["source_id"], [d["name"]])]}
+        definitions = [self.get_derived_column(d["id"]) for d in scope]
+        cascades, seen = [], set()
+        for d in scope:
+            for c in self.dependent_derived_columns(d["source_id"], [d["name"]]):
+                if _ascii_fold(c["name"]) not in seen:
+                    seen.add(_ascii_fold(c["name"]))
+                    cascades.append(c["name"])
+        out = {"definition": definitions[0], "job_id": job["job_id"], "cascades_to": cascades}
+        if len(scope) > 1:
+            out.update(member_definitions=definitions, job_ids=[job["job_id"]])
+        return out
 
     def backfill_derived_column(self, def_id: int, progress=None, cancel=None,
                                 drop_on_cancel: bool = False) -> dict:
@@ -7438,6 +7503,99 @@ class Store:
             [def_id], progress=progress, cancel=cancel, drop_on_cancel=drop_on_cancel,
         )
         return out["columns"][0] | {"rows": out["rows"]}
+
+    def _backfill_derive_parts(self, job: dict, parts: list[dict], progress=None, cancel=None,
+                               drop_on_cancel: bool = False) -> list[dict]:
+        """A merge's derive in one job: each member's definitions (`parts`,
+        in member order, each {"def_ids", "previous"?}) backfilled one
+        member after another. Returns backfill_derived_columns' result for
+        each member.
+
+        Creating on a merge used to start a job per member, and those ran
+        two at a time (MAX_CONCURRENT_INGESTS) — two CPU-bound passes
+        fighting over the GIL and the writer lock. A merge of four
+        250k-row tables took twice as long as the same four passes run one
+        after another, which is also what the same rows take in one table;
+        and the analyst watched the column fill in a table or two at a
+        time, behind one job per table. One job is one row in the panel,
+        one progress bar over the merge's rows and one Cancel.
+
+        A cancel or a failure stops at the member it reached, which
+        backfill_derived_columns settles as it always has. The members it
+        had not reached are settled as a pass that wrote nothing
+        (_fail_derive_backfill with wrote=False): a create removes them, a
+        re-derive puts their definitions back as they were. A create also
+        removes the members it had finished, since a create that does not
+        finish is removed (drop_on_cancel) and here that is the merge's
+        column: left on some members it is one the merge doesn't show
+        (_merge_columns), and its name, taken on those members, would
+        refuse the analyst's retry on the merge."""
+        grand = (job.get("options") or {}).get("units_total") or 0
+        done = 0
+        out: list[dict] = []
+        for i, part in enumerate(parts):
+            try:
+                name = self._source_lite(self.get_derived_column(part["def_ids"][0])["source_id"])
+                name = name.get("nickname") or name["name"]
+            except Exception:  # noqa: BLE001 — the label only; the backfill below says what is wrong
+                name = None
+            with self._ingest_jobs_lock:
+                job["tables_total"] = len(parts)
+                job["tables_done"] = i
+                job["current_table"] = name
+
+            def part_progress(rows: int, units: int, units_total: int, base: int = done) -> None:
+                if progress:
+                    progress(base + rows, base + units, max(grand, base + units_total))
+
+            try:
+                res = self.backfill_derived_columns(
+                    part["def_ids"], progress=part_progress, cancel=cancel,
+                    drop_on_cancel=drop_on_cancel, previous=part.get("previous"),
+                )
+            except Exception:   # IngestCancelled included
+                self._settle_unrun_derive_parts(parts[i + 1:], drop=drop_on_cancel)
+                if drop_on_cancel:
+                    self._rollback_derive_definitions([d for p in parts[:i] for d in p["def_ids"]])
+                raise
+            out.append(res)
+            done += res["rows"]
+        with self._ingest_jobs_lock:
+            job["tables_done"] = len(parts)
+        return out
+
+    def _settle_unrun_derive_parts(self, parts: list[dict], *, drop: bool) -> None:
+        """The members a merge's derive job stopped before reaching: each
+        is a backfill that wrote nothing. Best-effort, as
+        _fail_derive_backfill is — the cancel or error being raised is the
+        answer."""
+        for part in parts:
+            defs = []
+            for def_id in part["def_ids"]:
+                with contextlib.suppress(Exception):
+                    defs.append(self.get_derived_column(def_id))
+            if defs:
+                with contextlib.suppress(Exception):
+                    self._fail_derive_backfill(defs, wrote=False, drop=drop, previous=part.get("previous"))
+
+    @staticmethod
+    def _derive_job_result(out: list[dict]) -> list[dict]:
+        """A finished derive job's `result`: one entry per column, with
+        `rows` the length of the pass. A merge's job wrote each column on
+        every member; it reports the merge's column — the rows of every
+        member, and their failures summed, as _merge_columns counts them."""
+        rows = sum(res["rows"] for res in out)
+        merged: dict[str, dict] = {}
+        for res in out:
+            for c in res["columns"]:
+                key = _ascii_fold(c["name"])
+                if key not in merged:
+                    merged[key] = dict(c, rows=rows)
+                    continue
+                m = merged[key]
+                m["parse_failures"] = (None if m["parse_failures"] is None or c["parse_failures"] is None
+                                       else m["parse_failures"] + c["parse_failures"])
+        return list(merged.values())
 
     def backfill_derived_columns(self, def_ids: list[int], progress=None, cancel=None,
                                  drop_on_cancel: bool = False,
