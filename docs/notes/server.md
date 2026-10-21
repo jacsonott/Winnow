@@ -106,6 +106,50 @@ see [docs/notes/README.md](README.md) for the whole set.
   refusal rather than a prompt — 409 `case_in_use`, no "anyway" — since
   there is no version of deleting a case somebody has open that they
   would want; it takes the -wal/-shm and a stale marker with it.
+- **A Winnow binds its port before it does anything else, and its window
+  waits for its own pid.** main() used to open the case, import `--open`
+  files and start the browser thread, and only then have uvicorn bind;
+  the thread waited for "something answers on the port". A second Winnow
+  started while the first held 8777 got that answer from the FIRST one,
+  opened its window there, failed to bind and exited — silently, under the
+  no-console launchers — and the analyst worked in the first Winnow's case
+  through a window they believed was the second's. Reported as tags from
+  one case showing up in another. Now `_claim_port` binds first (the next
+  free port after `DEFAULT_PORT` when none was asked for; an explicit
+  `--port` is that port or exit 3, before any case is touched), uvicorn
+  serves on that socket (`server.run(sockets=[...])`), and
+  `browser.open_when_ready(expect_pid=...)` opens nothing until
+  `/api/version`'s `pid` is this process. Keep both: binding is what makes
+  the port ours, the pid check is what catches anything that ever makes it
+  not. `tests/test_second_winnow.py`.
+- **Every page request names its case, and a request about any other case
+  is refused.** One server, one open case, any number of windows: when one
+  window opened another case, the rest went on sending requests whose
+  source ids, rids and tag ids every case reuses, so a window left on A
+  painted B's rows under A's tabs and wrote its tags onto B's rows at the
+  same rid. core.js's `api()` (and the upload XHR in jobs.js) sends
+  `X-Winnow-Case` — the token `/api/case/current` and every case-switching
+  route return as `case_token` — and `require_same_case` answers a
+  mismatch with 409 `case_changed`, touching nothing. Plain-navigation
+  downloads carry it as `?case_token=` and get an HTML page back instead,
+  since the refusal replaces the app. No token, no check: scripts, the
+  launcher and old pages are let through. `_CASE_FREE_PATHS` is what a
+  stale window can still do (switch, list cases, presence, version,
+  shutdown, log); a new route is guarded unless it is added there, which is
+  the safe default. The token names the case FILE (realpath + normcase,
+  like `_same_case_path`), so a window outliving a restart on the same case
+  carries on, and a quick-look save-as (the file moves) hands the saving
+  page a new one. A route that swaps `STORE` returns `case_token` and calls
+  `_announce_case()`; the client wraps the request in `switchCase()`, which
+  is what keeps its own switch from reading as another window's.
+  `tests/test_case_guard.py`, `tests/ui/test_two_windows_one_case.py`.
+- **The presence stream says which case is open.** A `case` event when the
+  stream opens and whenever `_announce_case()` wakes it (a sync route on a
+  worker thread, so the wake goes through `loop.call_soon_threadsafe`):
+  how a window learns another switched the server before it asks for
+  anything, and how one reconnecting to a server restarted on another case
+  finds out at once. The page covers itself (`#caseGone`) and offers a
+  reload; on the home screen it just drops its token.
 - `/api/case/open` short-circuits when the requested path is **already the
   open case** — necessary, because the open-before-close ordering would
   otherwise make the process probe its own lock and refuse itself. Guarded

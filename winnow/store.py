@@ -14341,7 +14341,17 @@ class Store:
     _SESSION_NAME_RE = re.compile(r"[^A-Za-z0-9_ -]")
 
     def _sessions_dir(self) -> str:
-        d = os.path.join(os.path.dirname(os.path.abspath(self.path)), "sessions")
+        """Where the file-based named sessions (/api/sessions) of THIS case
+        live: sessions/<case file name>/ beside it. It was sessions/ alone,
+        which every case in the folder shared, so listing showed another
+        case's sessions, and loading one brought that case's tags and notes
+        into this one (onto any table here with the same file hash) and
+        re-imported its tables from their recorded paths. Files an older
+        build left in sessions/ itself stay there and are no longer listed.
+        The sessions the UI saves are in the case file (invariant #10),
+        which has no such problem; only scripts use these."""
+        d = os.path.join(os.path.dirname(os.path.abspath(self.path)), "sessions",
+                         os.path.basename(self.path))
         os.makedirs(d, exist_ok=True)
         return d
 

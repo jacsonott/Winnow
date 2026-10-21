@@ -176,7 +176,7 @@ and deletes it when you unregister the last one.
 | `--case FILE` | none (home screen) | Open this case file, creating it if it does not exist. The case is added to the home screen's list. |
 | `--open FILE …` | | Import these delimited text files (CSV, TSV and the like) into the case at startup. Without `--case`, the case is `case.db-winnow` in the current folder. |
 | `--no-fts` | off | Skip the full-text index for the `--open` imports. Import is faster; search falls back to scanning. |
-| `--port PORT` | `8777` | Port to listen on. |
+| `--port PORT` | `8777`, or the next free port | Port to listen on. Without it, a Winnow started while another has 8777 takes the next free port and opens its own window there. With it, Winnow uses that port or stops. |
 | `--host HOST` | `127.0.0.1` | Address to bind. See [Reaching Winnow from another machine](#reaching-winnow-from-another-machine). |
 | `--allow-host NAME` | | Accept this name in the Host header as well. Repeatable. |
 | `--force` | off | Open `--case` even if another Winnow has it open. |

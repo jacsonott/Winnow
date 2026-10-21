@@ -55,7 +55,7 @@ Windows and Linux **Settings → File associations** puts Winnow in the OS's
 | --- | --- |
 | `--case FILE` | Open this case file (`.db-winnow`), creating it if missing |
 | `--open A.csv B.csv` | Import delimited files into the case at startup |
-| `--port`, `--host` | Defaults 8777 / 127.0.0.1 |
+| `--port`, `--host` | Defaults 8777 (the next free port when another Winnow has it) / 127.0.0.1 |
 | `--force` | Open a case another Winnow still holds |
 | `--no-browser` | Open no window; browse to the printed address yourself |
 | `--no-idle-shutdown` | Keep running with no window connected, for scripts |

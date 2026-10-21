@@ -3,7 +3,7 @@
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { applyBundle } from './bundles.js';
 import { PAGE_ID, closePresence } from './connection.js';
-import { $, api, dragHas, el, post, setBusy, toast } from './core.js';
+import { $, api, dragHas, el, post, setBusy, setCaseToken, switchCase, toast } from './core.js';
 import { pad2 } from './tsformat.js';
 import { loadPlugins, openImportModal, queueFiles } from './importer.js';
 import { inFlightWork, startJobsPoll } from './jobs.js';
@@ -17,7 +17,7 @@ import { resetWatchlist } from './watchlist.js';
 import { resetDashboard } from './dashboard.js';
 import { loadAppSettings, loadCaseSettings, loadHeaderNicknames, loadSavedFilters } from './savedfilters.js';
 import { updateSearchAllButton } from './search.js';
-import { clearViewStateStash, applyPageTabsSize, loadSources } from './sources.js';
+import { clearViewStateStash, applyPageTabsSize, loadCollapsedFolders, loadSources } from './sources.js';
 import { clearTabHistory } from './tabhistory.js';
 import { resetSqlPane, showGridTab } from './sql.js';
 import { openSettings, syncAppearanceFromServer } from './settings.js';
@@ -160,7 +160,9 @@ export async function openCaseNow(path, opts = {}) {
   dropPendingTabState();
   let res;
   try {
-    res = await post('/api/case/open', { path, force: !!opts.force });
+    // switchCase: from here, a request this page made about the case it is
+    // leaving is refused by the server and dropped here without a word.
+    res = await switchCase(() => post('/api/case/open', { path, force: !!opts.force }));
   } catch (e) {
     note.dataset.rid = boundRid;   // nothing was opened: same case, same row
     if (e.status === 409 && e.detail && e.detail.error === 'case_in_use') {
@@ -198,6 +200,8 @@ export async function openCaseNow(path, opts = {}) {
   S.tabOrder = [];
   // Another case's tab history points at ids that mean nothing here.
   clearTabHistory();
+  // Folder ids too: this case's collapsed folders are its own.
+  S.collapsedFolders = loadCollapsedFolders();
   // Unlike a tab switch within the *same* case (where the timeframe filter
   // deliberately survives — see clearAllFilters()/applyPreset()), a
   // different case is a different investigation; a timeframe pinned in
@@ -636,7 +640,8 @@ export function openNewCaseModal(state = {}) {
       if (saving) {
         let res;
         try {
-          res = await post('/api/case/save_as', { path, name, group: groupInput.value.trim() });
+          // The file moves, so the case's token does too (switchCase).
+          res = await switchCase(() => post('/api/case/save_as', { path, name, group: groupInput.value.trim() }));
         } catch (e) {
           toast('Could not save the case: ' + e.message, 6000);
           return;
@@ -1115,7 +1120,7 @@ export async function tempDiscard({ confirm = true } = {}) {
     'Discard this quick look?\n\nIts tables, tags and notes are deleted. '
     + 'Anything you copied into a real case stays there.',
     { danger: true, okLabel: 'Discard' }))) return false;
-  try { await post('/api/case/discard', {}); }
+  try { await switchCase(() => post('/api/case/discard', {})); }
   catch (e) { toast(e.message, 6000); return false; }
   paintTempBanner(false);
   showHome();
@@ -1163,6 +1168,8 @@ export async function boot() {
   // window on a free port is a different origin — see saveAppearance).
   syncAppearanceFromServer();
   const cur = await api('/api/case/current').catch(() => ({ open: false }));
+  setCaseToken(cur.case_token);   // what every request from here on says it is about
+  S.collapsedFolders = loadCollapsedFolders();
   if (cur.open) {
     setBrandLabel(cur.temp ? 'Quick look' : cur.name);
     paintTempBanner(!!cur.temp);

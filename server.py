@@ -13,7 +13,9 @@ import contextlib
 import errno
 import functools
 import anyio
+import hashlib
 import heapq
+import html
 import ipaddress
 import json
 import os
@@ -31,7 +33,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form, Query
 from starlette.concurrency import run_in_threadpool
-from fastapi.responses import StreamingResponse, FileResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import StreamingResponse, FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -122,6 +124,9 @@ class _Presence:
         # One event per open stream, made on the loop that waits on it.
         self.closing = False
         self.wakers: set[asyncio.Event] = set()
+        # The loop the streams wait on, so a case switch — a sync route, on
+        # a worker thread — can wake them to say so (_announce_case).
+        self.loop: asyncio.AbstractEventLoop | None = None
 
 
 PRESENCE = _Presence()
@@ -596,6 +601,93 @@ async def op_cancelled_handler(request: Request, exc: OpCancelled):
     return JSONResponse({"detail": "Cancelled"}, status_code=499)
 
 
+# ------------------------------------------------------------------ case guard
+#
+# A server has one case open, and any number of windows can be pointed at
+# it. When one of them opens another case, the others are still showing the
+# old one, and nothing on the wire said which case a request was about: a
+# source id, a rid and a tag id are small numbers that every case reuses. So
+# a window left on case A, after another window opened B on the same server,
+# read B's rows under A's tabs and wrote its tags onto B's rows, on whatever
+# line had the same rid. Reported as tags from one case "showing up in the
+# other", applied to the wrong lines.
+#
+# Every request from a page carries the case its state belongs to
+# (CASE_HEADER, from core.js's api(); `case_token` in the query for the
+# downloads that are plain navigations), and a request naming any other
+# case is refused, touching nothing, with a 409 the page turns into "this
+# window is out of date". A request that names no case is let through: a
+# script, the launcher, an older page.
+#
+# The token names the case FILE (realpath + normcase, the same canonical
+# form as _same_case_path), not the Store: a window that outlives a restart
+# of its server on the same case carries on as it always has; one that
+# finds another case there is stopped.
+CASE_HEADER = "X-Winnow-Case"
+
+# What a window may still ask while its case isn't the one open here: the
+# switch itself, the home screen's list, and the plumbing that has no case.
+_CASE_FREE_PATHS = ("/api/case/open", "/api/case/current", "/api/case/quicklook/new",
+                    "/api/cases", "/api/presence", "/api/goodbye", "/api/version",
+                    "/api/shutdown", "/api/log")
+
+
+@functools.lru_cache(maxsize=64)
+def _case_token_for(path: str) -> str:
+    canon = os.path.normcase(os.path.realpath(path))
+    return hashlib.sha256(canon.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+
+
+def _case_token() -> str | None:
+    """The open case's token, or None when no case is open."""
+    s = STORE
+    if s is None or s.closed:
+        return None
+    return _case_token_for(s.path)
+
+
+def _open_case_brief() -> dict | None:
+    """The open case as a page is told about it: what to call it, and its
+    token. None when no case is open."""
+    token = _case_token()
+    if token is None:
+        return None
+    s = STORE
+    return {"token": token, "name": "Quick look" if _is_temp_case(s.path) else _case_display_name(s.path)}
+
+
+def _case_is_free(path: str) -> bool:
+    return any(path == p or path.startswith(p + "/") for p in _CASE_FREE_PATHS)
+
+
+# Added before the Host and client-header checks, so it runs after both
+# (the last middleware added is the outermost): a page that may not talk
+# to this server at all is refused before this says what case is open.
+@app.middleware("http")
+async def require_same_case(request: Request, call_next):
+    claimed = request.headers.get(CASE_HEADER)
+    navigation = False
+    if not claimed:
+        claimed = request.query_params.get("case_token")
+        navigation = bool(claimed)
+    path = request.url.path
+    if claimed and path.startswith("/api/") and not _case_is_free(path) and claimed != _case_token():
+        now = await run_in_threadpool(_open_case_brief)   # reads the case registry
+        theirs = f"“{now['name']}”" if now else "no case"
+        message = (f"This window is out of date: Winnow now has {theirs} open, opened from another "
+                   "window. Nothing was changed. Reload this window to carry on.")
+        if navigation:
+            # A download is a plain navigation, so this page replaces the
+            # app; it has to say what happened and how to get back.
+            return HTMLResponse(
+                "<!doctype html><meta charset='utf-8'><title>Winnow</title>"
+                f"<p style='font:14px system-ui;margin:2em'>{html.escape(message)} "
+                "<a href='/'>Back to Winnow</a></p>", status_code=409)
+        return JSONResponse({"detail": {"error": "case_changed", "message": message, "open": now}},
+                            status_code=409)
+    return await call_next(request)
+
+
 @app.middleware("http")
 async def check_host_header(request: Request, call_next):
     """Refuse a Host this server was never meant to answer to. See
@@ -841,9 +933,11 @@ def _case_display_name(path: str) -> str:
 @app.get("/api/case/current")
 def api_case_current():
     if STORE is None:
-        return {"open": False}
+        return {"open": False, "case_token": None}
+    # case_token is what the page sends back on every request from here on
+    # (see the case guard): the case its state belongs to.
     return {"open": True, "path": STORE.path, "name": _case_display_name(STORE.path),
-            "temp": _is_temp_case(STORE.path)}
+            "temp": _is_temp_case(STORE.path), "case_token": _case_token()}
 
 
 # ------------------------------------------------------------ quick-look cases
@@ -900,7 +994,12 @@ def _remove_case_file(path: str) -> None:
 def _new_temp_case_path() -> str:
     d = os.path.join(_cases_dir(), QUICKLOOK_DIRNAME)
     os.makedirs(d, exist_ok=True)
+    # The pid as well as the time: "doesn't exist yet" is checked here and
+    # the file only made when the case opens, so two Winnows started by
+    # double-clicks in the same second picked the same name and opened ONE
+    # quick look between them, each importing its file into the other's.
     stamp = __import__("datetime").datetime.now().strftime("%Y%m%d-%H%M%S")
+    stamp = f"{stamp}-{os.getpid()}"
     path = os.path.join(d, f"quicklook-{stamp}{CASE_SUFFIX}")
     n = 1
     while os.path.exists(path):
@@ -1082,16 +1181,30 @@ async def api_presence(page: str = ""):
     is attached. EventSource on the client, a comment-ping stream here —
     no data ever flows, the CONNECTION is the message. Disconnect is
     noticed at the next ping (≤15s), which is well inside the idle grace.
-    `page` names the page load, so its goodbye can be matched to it."""
+    `page` names the page load, so its goodbye can be matched to it.
+
+    One thing does flow: a `case` event naming the case open here, when the
+    stream opens and whenever it changes. That is how a window learns that
+    another window switched this server to a different case, before it
+    asks for anything (the case guard refuses it then, too); and how one
+    that reconnects to a server restarted on another case finds out."""
     page = _presence_page(page)
 
     async def stream():
         _presence_open(page)
         wake = asyncio.Event()
         PRESENCE.wakers.add(wake)
+        PRESENCE.loop = asyncio.get_running_loop()
+        said = object()   # nothing said about the case yet
         try:
             while not PRESENCE.closing:
-                yield ": ping\n\n"
+                wake.clear()
+                if _case_token() != said:
+                    now = await run_in_threadpool(_open_case_brief)   # reads the case registry
+                    said = now["token"] if now else None
+                    yield f"event: case\ndata: {json.dumps(now)}\n\n"
+                else:
+                    yield ": ping\n\n"
                 with contextlib.suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(wake.wait(), 15)
             # Said, not just dropped: a page that only sees its stream end
@@ -1102,6 +1215,21 @@ async def api_presence(page: str = ""):
             PRESENCE.wakers.discard(wake)
             _presence_close(page)
     return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+def _announce_case() -> None:
+    """Wake every presence stream to say which case is open now. Called by
+    each route that swaps STORE, from a worker thread, so the waking is
+    handed to the loop the streams wait on."""
+    loop = PRESENCE.loop
+    if loop is not None:
+        with contextlib.suppress(RuntimeError):   # that loop has closed
+            loop.call_soon_threadsafe(_wake_presence_streams)
+
+
+def _wake_presence_streams() -> None:
+    for wake in PRESENCE.wakers:
+        wake.set()
 
 
 def _end_presence_streams() -> None:
@@ -1268,8 +1396,10 @@ def api_version():
     tester who reported only "0.1.0" would be describing a build nobody
     can reproduce."""
     src = updater.installed_source()
+    # `pid` says WHICH Winnow answered: main() opens its window only once
+    # the server on its port is itself (browser.open_when_ready).
     return {"version": version.VERSION, "source": src,
-            "is_release": src == "release"}
+            "is_release": src == "release", "pid": os.getpid()}
 
 
 @app.post("/api/updates/check")
@@ -1368,7 +1498,8 @@ def _case_open(body: CaseOpen):
         # a registry that disagreed with the case disagreeing however often
         # the analyst re-opened it.
         _reload_plugins()
-        return {"sources": STORE.list_sources(), "name": rec["name"], "temp": _is_temp_case(STORE.path)}
+        return {"sources": STORE.list_sources(), "name": rec["name"], "temp": _is_temp_case(STORE.path),
+                "case_token": _case_token()}
     if not body.force:
         holder = probe_case_lock(body.path)
         if holder:
@@ -1416,7 +1547,9 @@ def _case_open(body: CaseOpen):
     # exists the moment the case does, and an "off in this case" plugin's
     # code is unloaded rather than merely unlisted.
     _reload_plugins()
-    return {"sources": STORE.list_sources(), "name": rec["name"], "temp": _is_temp_case(STORE.path)}
+    _announce_case()
+    return {"sources": STORE.list_sources(), "name": rec["name"], "temp": _is_temp_case(STORE.path),
+            "case_token": _case_token()}
 
 
 class CopySourcesBody(BaseModel):
@@ -1500,6 +1633,7 @@ def _assoc_open(request: Request, body: AssocOpenBody):
         with contextlib.suppress(Exception):
             instances.set_case(temp)
         _reload_plugins()
+        _announce_case()
 
     started, skipped = [], []
     for f in files:
@@ -1851,7 +1985,9 @@ def _case_save_as(request: Request, body: CaseSaveAsBody):
     WS.cases.touch_opened(rec["id"])
     with contextlib.suppress(Exception):
         instances.set_case(dest)
-    return {"path": dest, "name": name, "temp": False}
+    _announce_case()
+    # The case moved, so its token did too: this page carries on in it.
+    return {"path": dest, "name": name, "temp": False, "case_token": _case_token()}
 
 
 @app.post("/api/case/discard")
@@ -1881,7 +2017,8 @@ def _case_discard():
     # on the home screen (the case switch in api_case_open, for the same
     # reason).
     _reload_plugins()
-    return {"ok": True}
+    _announce_case()
+    return {"ok": True, "case_token": None}
 
 
 @app.post("/api/case/compact")
@@ -6125,10 +6262,67 @@ def _run_assoc(files: list[str], no_browser: bool = False) -> int | None:
     return None   # become the server
 
 
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+DEFAULT_PORT = 8777
+# How many ports past DEFAULT_PORT a second Winnow tries before it takes
+# whatever the OS hands out. Nearby and in order, so a second copy started
+# the same way lands on the same port each time and keeps its browser
+# storage (which is per port) from one run to the next.
+PORT_FALLBACK_SPAN = 20
+
+
+def _listener(host: str, port: int) -> socket.socket:
+    """A socket bound to `host`:`port` (0: any free port) for uvicorn to
+    serve on. Bound, not listening: until uvicorn starts serving, a
+    connection is refused rather than left hanging.
+
+    Bound here rather than by uvicorn because the port has to be this
+    process's BEFORE a window is opened on it. uvicorn binds as it starts
+    serving, which is after main() has opened the case and started the
+    browser thread, and that thread only waited for the port to answer. A
+    second Winnow started while the first held 8777 opened its window on
+    8777 — the FIRST Winnow — and then failed to bind and exited, with no
+    console to say so: the analyst was working in the other case without
+    knowing it.
+
+    No SO_REUSEADDR on Windows, where it would let a second socket bind a
+    port that is in use; SO_EXCLUSIVEADDRUSE instead, so nothing else can
+    bind a more specific address under this one. Elsewhere SO_REUSEADDR is
+    what asyncio sets too: it only lets a restart past the old process's
+    TIME_WAIT, never two listeners."""
+    infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM, flags=socket.AI_PASSIVE)
+    infos.sort(key=lambda i: i[0] != socket.AF_INET)   # "localhost": 127.0.0.1, as before
+    family, kind, proto, _, addr = infos[0]
+    sock = socket.socket(family, kind, proto)
+    try:
+        if os.name == "nt":
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        else:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if family == socket.AF_INET6:
+            sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+        sock.bind(addr)
+    except BaseException:
+        sock.close()
+        raise
+    return sock
+
+
+def _claim_port(host: str, port: int | None) -> socket.socket:
+    """The listener main() serves on. An explicit `port` is that port or an
+    OSError: a script that asked for one port must not be answered on
+    another. With none, DEFAULT_PORT, else the next free one after it, else
+    any — the second Winnow on a machine is a normal thing to start."""
+    if port is not None:
+        return _listener(host, port)
+    tried: OSError | None = None
+    for p in (*range(DEFAULT_PORT, DEFAULT_PORT + PORT_FALLBACK_SPAN + 1), 0):
+        try:
+            return _listener(host, p)
+        except socket.gaierror:
+            raise                # the host, not the port: no other port will do better
+        except OSError as e:     # in use, or reserved (Windows' excluded port ranges)
+            tried = e
+    raise tried
 
 
 def _ensure_console_streams() -> None:
@@ -6229,7 +6423,9 @@ def main() -> None:
                          "names are always accepted; see ALLOWED_HOSTS.")
     ap.add_argument("--force", action="store_true",
                     help="Open --case even if another Winnow already has it open")
-    ap.add_argument("--port", type=int, default=8777)
+    ap.add_argument("--port", type=int, default=None,
+                    help=f"Port to listen on. Default {DEFAULT_PORT}, or the next free one "
+                         "when another Winnow has it; a port given here is used or refused")
     ap.add_argument("--no-fts", action="store_true", help="Skip full-text index (faster import)")
     ap.add_argument("--assoc", nargs="+", metavar="FILE",
                     help="opened via a file association: reuse a running Winnow when "
@@ -6286,7 +6482,7 @@ def main() -> None:
             sys.exit(handed_off)
         # Nobody could take it — this process becomes the server, on its own
         # port so it can never collide with a Winnow already listening.
-        args.port = _free_port()
+        args.port = 0
         if len(args.assoc) == 1 and is_winnow_case_file(args.assoc[0]):
             args.case = args.assoc[0]
         else:
@@ -6295,6 +6491,23 @@ def main() -> None:
             # associated file may be a workbook or a SQLite db. These go
             # through the kind-aware quick-look ingest after the store opens.
             args.assoc_ingest = list(args.assoc)
+
+    # The port before the case: a Winnow that can't serve must not open a
+    # case, import into it, or open a window — least of all on the port
+    # another Winnow already has (see _listener).
+    try:
+        listener = _claim_port(args.host, args.port)
+    except OSError as e:
+        print(f"ERROR: Winnow can't listen on {args.host}:{args.port or DEFAULT_PORT}: {e}\n"
+              "  Another program (often another Winnow) has that port. "
+              "Leave out --port and Winnow picks a free one.",
+              file=sys.stderr)
+        sys.exit(3)
+    asked = args.port
+    args.port = listener.getsockname()[1]
+    if asked is None and args.port != DEFAULT_PORT:
+        print(f"Port {DEFAULT_PORT} is in use (another Winnow?), so this one is on {args.port}.",
+              flush=True)
 
     case_path = args.case or (f"case{CASE_SUFFIX}" if args.open_files else None)
     url = f"http://{args.host}:{args.port}"
@@ -6370,7 +6583,8 @@ def main() -> None:
         # landing on a connection error has no address bar to retry from.
         browser.open_when_ready(url, args.host, args.port,
                                 app_mode=not args.browser_tab,
-                                profile_dir=args.browser_profile)
+                                profile_dir=args.browser_profile,
+                                expect_pid=os.getpid())
 
     if args.no_idle_shutdown:
         PRESENCE.enabled = False
@@ -6401,9 +6615,9 @@ def main() -> None:
     # that the signal handler and shutdown above are the ones uvicorn runs.
     server = _Server(uvicorn.Config(app, host=args.host, port=args.port, log_level="warning"))
     with contextlib.suppress(KeyboardInterrupt):
-        server.run()
+        server.run(sockets=[listener])
     if not server.started:
-        sys.exit(3)   # uvicorn.run's STARTUP_FAILURE: the port was taken, or startup raised
+        sys.exit(3)   # uvicorn.run's STARTUP_FAILURE: startup raised (the port is already ours)
 
 
 def _stop_pane_queries() -> None:

@@ -4,7 +4,7 @@ in the case.
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { recordTabVisit } from './tabhistory.js';
 import { findDefaultLayout, placeUnorderedColumns, renderHead, saveLayout } from './columns.js';
-import { $, ROW_H, api, el, nameMap, post, toast } from './core.js';
+import { $, ROW_H, api, caseUrl, el, nameMap, pageCaseToken, post, toast } from './core.js';
 import { derivedOps, renameColumnIn } from './derived.js';
 import { hideDetailPane, syncRowOpenHint } from './detail.js';
 import { currentSpec, renderAdvancedChips, setSearchMode, updateSearchHint } from './filters.js';
@@ -1133,14 +1133,34 @@ export async function openSource(id, { skipBuild = false } = {}) {
    folder" button on the row, and dragged back out via the root drop
    zone. */
 
-export const FOLDERS_KEY = 'winnow.folders';   // collapsed folder ids, per browser
+/* Collapsed folder ids, per browser AND per case: {caseToken: [ids]}.
+   Folder ids are numbered per case, so one list for every case collapsed
+   folder 3 of whichever case opened next — and every case Winnow opens on
+   one port shares this storage. An older plain list (no case to file it
+   under) reads as nothing collapsed. */
+export const FOLDERS_KEY = 'winnow.folders';
+const FOLDERS_CASES_KEPT = 50;
+
+function readCollapsedByCase() {
+  try {
+    const v = JSON.parse(localStorage.getItem(FOLDERS_KEY) || '{}');
+    return v && typeof v === 'object' && !Array.isArray(v) ? v : {};
+  } catch { return {}; }
+}
 
 export function loadCollapsedFolders() {
-  try { return new Set(JSON.parse(localStorage.getItem(FOLDERS_KEY) || '[]')); }
-  catch { return new Set(); }
+  const ids = pageCaseToken() && readCollapsedByCase()[pageCaseToken()];
+  return new Set(Array.isArray(ids) ? ids : []);
 }
 function saveCollapsedFolders() {
-  localStorage.setItem(FOLDERS_KEY, JSON.stringify([...S.collapsedFolders]));
+  const token = pageCaseToken();
+  if (!token) return;
+  const all = readCollapsedByCase();
+  delete all[token];                       // re-added last: the most recent case
+  if (S.collapsedFolders.size) all[token] = [...S.collapsedFolders];
+  const keys = Object.keys(all);
+  for (const k of keys.slice(0, Math.max(0, keys.length - FOLDERS_CASES_KEPT))) delete all[k];
+  try { localStorage.setItem(FOLDERS_KEY, JSON.stringify(all)); } catch { /* full or blocked: this page keeps it */ }
 }
 
 /* Within a folder, tables sort alphabetically by label — "what's open" is
@@ -1865,9 +1885,9 @@ export function openExportModal() {
       b.append(el('p', null, 'Exports what you are looking at now — current filters, sort and search — with Line, Tags and Note columns added in front.'));
       const acts = el('div', 'row-actions');
       const all = el('button', 'btn', 'Export current view');
-      all.onclick = () => { window.location = `/api/export?view_id=${S.view.view_id}`; $('modal').hidden = true; };
+      all.onclick = () => { window.location = caseUrl(`/api/export?view_id=${S.view.view_id}`); $('modal').hidden = true; };
       const tagged = el('button', 'btn', 'Export tagged rows only');
-      tagged.onclick = () => { window.location = `/api/export?view_id=${S.view.view_id}&tagged_only=true`; $('modal').hidden = true; };
+      tagged.onclick = () => { window.location = caseUrl(`/api/export?view_id=${S.view.view_id}&tagged_only=true`); $('modal').hidden = true; };
       acts.append(all, tagged);
       b.append(acts);
     }
@@ -1875,7 +1895,7 @@ export function openExportModal() {
       + 'Tagged rows only, or everything. A merge has no sheet of its own: its rows are on its members’ sheets.'));
     const xlsxActs = el('div', 'row-actions');
     const xlsx = el('button', 'btn', 'Export tagged rows from all tables (.xlsx)');
-    xlsx.onclick = () => { window.location = '/api/export/tagged_xlsx'; $('modal').hidden = true; };
+    xlsx.onclick = () => { window.location = caseUrl('/api/export/tagged_xlsx'); $('modal').hidden = true; };
     const every = el('button', 'btn', 'Export all tables (.xlsx)');
     every.title = 'Every row of every table, each on its own worksheet. Big cases take a while.';
     every.onclick = async () => {
@@ -1897,7 +1917,7 @@ export function openExportModal() {
           { okLabel: 'Export anyway' });
         if (!ok) return;
       }
-      window.location = '/api/export/all_xlsx';
+      window.location = caseUrl('/api/export/all_xlsx');
       $('modal').hidden = true;
     };
     xlsxActs.append(xlsx, every);

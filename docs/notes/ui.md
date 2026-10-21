@@ -419,8 +419,11 @@ see [docs/notes/README.md](README.md) for the whole set.
   sends the file's subfolder as `folder_path`, the ingest job creates the
   folders via `ensure_folder_path`). Folder membership is keyed by the
   *signed* source id, so a merge folds like any table. Folder collapse
-  state is per-browser `localStorage` (`FOLDERS_KEY`), but the folders
-  themselves are case data that travels with the `.db`. Page tabs still get
+  state is per-browser `localStorage` (`FOLDERS_KEY`), filed under the
+  case's token (core.js `pageCaseToken`): folder ids are numbered per case,
+  and every case opened on one port shares that storage, so a single list
+  collapsed folder 3 of whatever case came next. The folders themselves
+  are case data that travels with the `.db`. Page tabs still get
   their own Pages section below the tree — same rows, same drag/▲/▼
   reorder against the other strip; see the two-strips entry below. Its
   active-row highlight isn't simply `s.id === S.sourceId`:
