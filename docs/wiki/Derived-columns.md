@@ -28,6 +28,17 @@ Things to know before you rely on one:
   include it. A derived datetime column can be chosen in the timeframe
   filter, the histogram and the [Timeline](Timeline-search-and-watchlist.md)
   like any other datetime column.
+- **Numbers sort as numbers.** A column of extracted, decoded, combined
+  or looked-up values is a number column when every value in it is a
+  plain number such as `2048` or `-1.5`, the rule an imported column
+  follows, so a byte count captured with a regex sorts by size and
+  `>1000` compares numbers. Empty cells don't count either way; one value
+  that isn't a plain number (`1,024`, `0x1F`, `N/A`) keeps the column
+  text. The type is decided when the column finishes building, and again
+  after **Re-derive…**, and the table menu shows it as `number · derived`.
+  On a merged table the column is a number column when no member table's
+  copy holds text. A timestamp column is always a datetime column, and
+  **Duration between two columns** always a number column.
 - **It doesn't change what the table is.** Saved filters,
   [Timeline configurations](Timeline-search-and-watchlist.md#choosing-the-timestamp-type-and-body)
   and merging are matched on the file's own columns, so adding a derived
@@ -306,6 +317,9 @@ is the first capture group, or the whole match if there is no group.
 **Capture group** picks a different numbered group; **Named group** picks
 a `(?P<name>…)` group by name, which keeps working if you later edit the
 pattern and the numbers shift. Patterns are limited to 512 characters.
+A capture that is always a number, such as a size, a count or a status
+code, gives a number column that sorts by value (see
+[What a derived column is](#what-a-derived-column-is)).
 
 | Regex | Input | Output |
 | --- | --- | --- |

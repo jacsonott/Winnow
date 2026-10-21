@@ -59,7 +59,7 @@ Equals (`=`), not-equals (`!=`) and lists (`a|b|c`) compare the exact text, case
 
 ### Numbers, dates and text
 
-When a table is imported, Winnow decides each column's type from its first 500 rows. A column is a number column if every non-empty value in that sample is a plain number such as `-12` or `3.5`. It is a datetime column if at least 80% of the sampled values look like dates. Every other column is text. You can see each column's type in the table menu (`C`, or right-click a tab and choose **Columns…**).
+When a table is imported, Winnow decides each column's type from its first 500 rows. A column is a number column if every non-empty value in that sample is a plain number such as `-12` or `3.5`. It is a datetime column if at least 80% of the sampled values look like dates. Every other column is text. A [derived column](Derived-columns.md) that extracts, decodes, combines or looks up values follows the same number rule, over all of its values rather than a sample, once it finishes building: a regex capture of byte counts is a number column. You can see each column's type in the table menu (`C`, or right-click a tab and choose **Columns…**).
 
 The comparison filters (`>`, `>=`, `<`, `<=`) compare numbers only on number columns. On a text column they compare text, character by character, so `>1000` counts `30` and `N/A` as greater than `1000`. On a number column, a cell that isn't a number (such as `N/A` or a blank) never matches a comparison, and typing something that isn't a number after the operator shows a "Filter error" message.
 

@@ -528,3 +528,32 @@ see [docs/notes/README.md](README.md) for the whole set.
   the 400ms debounce: the re-open fetches the server's copy, and a
   width changed just before the rename was still waiting to be written,
   so it came back without it (tests/ui/test_derived_rename_ui.py).
+- **A text-valued op's column is typed by its values, not by the op**
+  (`derived_columns.inferred_type`, `_infer_derived_type`). A timestamp
+  parse is datetime and a duration is a number whatever they hold, but
+  the same regex capture is a host name in one column and a byte count
+  in the next, so `value_type: "text"` used to make every regex, JSON,
+  XML, decode, lookup and combine column text — and a size pulled out
+  with a regex sorted 10 before 9 and compared `> 1000` as strings. The
+  rule is infer_type's (every non-empty value matches NUM_RE), run in
+  SQL with REGEXP over the whole `drv_` column rather than a 500-row
+  sample, and NUM_RE exactly rather than a cheaper GLOB: `_numeric_expr`
+  gates the sort and the comparisons on the same pattern, so a column
+  this calls a number has no value they would turn into NULL. A text
+  column answers at its first non-number; a number column is one scan
+  (~0.7s for 1.3M values, against a pass of seconds per million rows).
+  Read off the column as stored, never tallied by the pass, so one
+  function covers every way values arrive. When it runs: at the end of
+  every pass ('ready'); on a cancel ('partial' — half one pass and half
+  another, so it is cleared and looked at again, at the next open if
+  the cancel is the case closing); cleared with the values on 'error'.
+  A re-derive keeps the old answer while it builds rather than clearing
+  it up front, so the column does not flicker to text and back for the
+  length of the pass. A case from before this has NULL everywhere and is
+  typed once at open (`_type_unlooked_derived_columns`); 'empty' is
+  stored rather than NULL so an empty column is not rescanned every
+  open. A merge's twin is a number only when no member's copy holds text
+  — an EMPTY member (a host whose log never has the field) says nothing,
+  or one quiet host would put the whole merge back to sorting as text.
+  `derived_kind` is untouched: the menus that key on "extracted" still
+  see one.
