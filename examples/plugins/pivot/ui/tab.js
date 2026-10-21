@@ -16,6 +16,17 @@ const BLANK = '(blank)';           // Excel's spelling for an empty grouping key
 const REFRESH_MS = 250;            // debounce after a field change
 const MAX_COLS = 60;               // rendered column groups before we stop and say so
 
+/* Built once, not per call. localeCompare and toLocaleString construct an
+   Intl.Collator or Intl.NumberFormat every time they are called, and a
+   pivot of a few thousand rows calls them hundreds of thousands of times
+   between its sorts and its cells: sorting 4,000 keys took 265 ms through
+   localeCompare with options and 16 ms through one shared collator. The
+   same locale and options, so the same order and the same text. */
+const byKey = new Intl.Collator(undefined, { numeric: true }).compare;
+const byText = new Intl.Collator().compare;
+const wholeNumber = new Intl.NumberFormat();
+const twoDecimals = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 });
+
 /* The tag filter, spelled as the grid's ribbon spells it (S.tagFilter in
    static/js/tags.js) so a chip means the same thing on both: a tag id keeps
    rows carrying it, TAG_ANY rows carrying any tag, TAG_NONE rows carrying
@@ -957,7 +968,22 @@ export default function mount(container, winnow) {
       state.error = `Too many nesting levels — ${sets.length} grouping queries, the cap is ${state.meta.limits.group_sets}. Turn subtotals off or use fewer row fields.`;
       state.data = null; render(); return;
     }
-    state.loading = true; state.error = null; render();
+    // Only the status line changes while the query runs, and the table on
+    // screen is dimmed and made inert until the answer replaces it: it is
+    // the previous answer, and a click on one of its cells would open the
+    // rows for the NEW field layout. A full render here used to rebuild the
+    // whole table before the request even went out — that previous answer
+    // under the new layout, mostly an empty table — which on a few thousand
+    // rows added a few hundred ms to every edit.
+    const drawn = state.data && !state.error && main.querySelector('table');
+    state.loading = true; state.error = null;
+    if (drawn) {
+      paintStatus();
+      drawn.inert = true;
+      drawn.style.opacity = '0.5';
+    } else {
+      render();
+    }
     const started = performance.now();
     const seq = ++querySeq;
     try {
@@ -1051,7 +1077,7 @@ export default function mount(container, winnow) {
     // as if they were one.
     return [...seen.values()].sort((a, b) => {
       for (let i = 0; i < Math.max(a.length, b.length); i++) {
-        const c = String(a[i] ?? '').localeCompare(String(b[i] ?? ''), undefined, { numeric: true });
+        const c = byKey(String(a[i] ?? ''), String(b[i] ?? ''));
         if (c) return c;
       }
       return 0;
@@ -1067,10 +1093,10 @@ export default function mount(container, winnow) {
         const bv = (lookup(b.path, colVals) || [])[measure];
         const an = av == null ? -Infinity : Number(av);
         const bn = bv == null ? -Infinity : Number(bv);
-        return an === bn ? String(a.key).localeCompare(String(b.key)) : (an - bn) * dir;
+        return an === bn ? byText(String(a.key), String(b.key)) : (an - bn) * dir;
       });
     } else {
-      kids.sort((a, b) => String(a.key).localeCompare(String(b.key), undefined, { numeric: true }));
+      kids.sort((a, b) => byKey(String(a.key), String(b.key)));
     }
     return kids;
   }
@@ -1280,7 +1306,7 @@ export default function mount(container, winnow) {
     if (typeof v === 'number') {
       // Averages keep two decimals; counts and sums of integers shouldn't
       // grow a ".00" they never had.
-      return Number.isInteger(v) ? v.toLocaleString() : v.toLocaleString(undefined, { maximumFractionDigits: 2 });
+      return Number.isInteger(v) ? wholeNumber.format(v) : twoDecimals.format(v);
     }
     return String(v);
   }

@@ -8,6 +8,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import sqlite3
 import struct
 import sys
 import textwrap
@@ -1984,6 +1985,84 @@ def test_pivot_distinct_count_ignores_blanks_like_count_does(pivot_client):
     present, distinct = out["sets"][0]["rows"][0]
     assert present == 4                  # 100, 200, N/A, 40
     assert distinct == 4 and distinct <= present
+
+
+PIVOT_EVERY_AGG = [{"agg": "count"}, {"agg": "count", "column": "Bytes"},
+                   {"agg": "count_distinct", "column": "User"}, {"agg": "sum", "column": "Bytes"},
+                   {"agg": "avg", "column": "Bytes"}, {"agg": "max", "column": "User"}]
+
+
+def test_pivot_rolled_up_levels_match_each_level_aggregated_alone(pivot_client):
+    """Every level comes out of one base grouped by all of the keys, so each
+    subtotal is assembled from the base's partials. That is only right if
+    every aggregation assembles to what aggregating the level straight from
+    the rows gives — worked out by hand below from PIVOT_ROWS. The one that
+    can't be assembled is Distinct count: Security holds alice under both
+    hosts, so the per-(Host, Channel) counts add up to 3 where the answer is
+    2. An average is its sum over its count, not the average of averages."""
+    client, source_id = pivot_client
+    out = _agg(client, source_id, values=PIVOT_EVERY_AGG,
+               group_sets=[["Host", "Channel"], ["Host"], ["Channel"], []])
+    got = [{tuple(r[:len(s["keys"])]): r[len(s["keys"]):] for r in s["rows"]} for s in out["sets"]]
+    #        rows, COUNTA Bytes, distinct users, sum, avg, max user
+    assert got[0] == {("SRV1", "Security"): [2, 1, 2, 100, 100, "bob"],
+                      ("SRV1", "System"): [1, 1, 1, 200, 200, "alice"],
+                      ("SRV2", "Security"): [1, 1, 1, None, None, "alice"],   # N/A: a value, not a number
+                      ("SRV2", "System"): [1, 1, 1, 40, 40, "carol"]}
+    assert got[1] == {("SRV1",): [3, 2, 2, 300, 150, "bob"], ("SRV2",): [2, 2, 2, 40, 40, "carol"]}
+    assert got[2] == {("Security",): [3, 2, 2, 100, 100, "bob"], ("System",): [2, 2, 2, 240, 120, "carol"]}
+    total = got[3][()]
+    assert total[:4] + total[5:] == [5, 4, 3, 340, "carol"]
+    assert total[4] == pytest.approx(340 / 3)
+
+
+def test_pivot_levels_over_no_rows_answer_as_before(pivot_client):
+    """Filtered down to nothing, the grouped levels are empty and the grand
+    total is still one row: a COUNT(*) of 0, not the NULL a SUM over an
+    empty base would give, and a distinct count of 0."""
+    client, source_id = pivot_client
+    out = _agg(client, source_id, values=PIVOT_EVERY_AGG, group_sets=[["Host"], []],
+               filters=[{"column": "Host", "op": "in", "values": ["nope"]}])
+    assert out["sets"][0]["rows"] == []
+    assert out["sets"][1]["rows"] == [[0, None, 0, None, None, None]]
+
+
+def test_pivot_reads_the_table_once_however_many_levels(pivot_client, store, monkeypatch):
+    """What made a pivot several times slower than the same GROUP BY typed
+    into the SQL pane: a full scan of the table per grouping level — four
+    for one row field and one column field, six with a nested row. Now one
+    statement, whose plan scans the source once and reads every level from
+    the materialised base."""
+    client, source_id = pivot_client
+    ran = []
+    real = store.run_sql
+    monkeypatch.setattr(store, "run_sql", lambda sql, **kw: ran.append(sql) or real(sql, **kw))
+    _agg(client, source_id, values=[{"agg": "sum", "column": "Bytes"}],
+         group_sets=[["Host", "Channel"], ["Host"], ["Channel"], []],
+         filters=[{"column": "User", "op": "not_in", "values": ["bob"]}])
+    assert len(ran) == 1, ran
+    if sqlite3.sqlite_version_info < (3, 35, 0):
+        pytest.skip("SQLite before 3.35 inlines a CTE into every arm rather than materialising it")
+    plan = [r[3] for r in real("EXPLAIN QUERY PLAN " + ran[0])["rows"]]
+    source_scans = [d for d in plan if d.startswith("SCAN s")]
+    assert len(source_scans) == 1, plan
+    assert any("MATERIALIZE pivot_base" in d for d in plan), plan
+
+
+def test_pivot_truncates_each_level_on_its_own(pivot_client, monkeypatch):
+    """One statement answers every level, but the group cap is still per
+    level: a level with too many groups says so without crowding out the
+    others, and exactly the cap is not truncated."""
+    import server
+
+    client, source_id = pivot_client
+    mod = server.PLUGINS.get_api("pivot", "aggregate")["handler"].__globals__
+    monkeypatch.setitem(mod, "MAX_GROUPS", 2)
+    out = _agg(client, source_id, values=[{"agg": "count"}], group_sets=[["User"], ["Host"], []])
+    users, hosts, total = out["sets"]
+    assert (len(users["rows"]), users["truncated"]) == (2, True)     # alice, bob, carol
+    assert (len(hosts["rows"]), hosts["truncated"]) == (2, False)    # SRV1, SRV2: exactly the cap
+    assert (total["rows"], total["truncated"]) == ([[5]], False)
 
 
 # The pivot's tag chips, in the grid's own spelling. PIVOT_ROWS are rids 1-5:
