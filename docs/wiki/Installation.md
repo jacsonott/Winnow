@@ -282,7 +282,12 @@ notes, finished imports) is in the case file.
 - `Ctrl+C` in the terminal it was started from.
 - Closing every window, then waiting (see above).
 
-The buttons ask first, and warn if an import or other work is still running.
+The buttons ask first, and warn if an import or other work is still running
+or if other Winnow windows are open on the same server. The server then stops
+straight away, with its windows still open: the window you pressed it in says
+"Winnow is off", and any other shows "Winnow’s server has shut down" with a
+**Try again** button. A download already in progress, such as a long export,
+is allowed to finish first.
 
 ## Where things live on disk
 

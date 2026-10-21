@@ -170,7 +170,7 @@ The menu item's second line says which, for example "of Host in the whole view".
 
 Grouping collapses a table into one heading per distinct value, with a row count on each, like a pivot you can open. Drag a column header into the **Group by** strip above the grid. The column leaves the grid while it is grouped. Click a heading to expand or collapse its rows.
 
-- Drag another header into the strip to group within each group. The levels read left to right, separated by ›. Drag them to change their order, and ✕ removes one.
+- Drag another header into the strip to group within each group. The levels read left to right, separated by ›. Drag them to change their order, and ✕ removes one, putting its column back in the grid where it was.
 - **+ Tag** adds a level that groups by tag: one group per tag plus one for untagged rows. A row with two tags appears under both, so these counts can add up to more than the view.
 - **Sort:** orders the groups at every level: **Count — most first** (the default), **Count — fewest first**, **Value — low to high** or **Value — high to low**.
 - A datetime column groups by calendar day rather than by exact timestamp.
@@ -178,7 +178,7 @@ Grouping collapses a table into one heading per distinct value, with a row count
 
 Right-click a group heading to expand or collapse it, **Select these *N* rows** (when it is expanded), tag or untag every row in the group, **Filter to** or **Exclude** its value (not offered for a datetime column's day groups), or **Copy group value**. Tagging a whole group asks first when it has 10,000 rows or more. See [Tagging and notes](Tagging-and-notes.md) for more on tagging.
 
-**Ungroup** in the strip, or `x`, removes the grouping and puts the columns back. `X` turns grouping off and on again, remembering the last grouping. A grouping can also be set in the filter builder and kept in a saved filter.
+**Ungroup** in the strip, or `x`, removes the grouping and puts the columns back where they were, including any moves you made to the other columns while grouped. `X` turns grouping off and on again, remembering the last grouping. A grouping can also be set in the filter builder and kept in a saved filter.
 
 ## Merging tables
 

@@ -489,9 +489,10 @@ the command-line updater, airgapped updates and rollback.
 ## Shut down
 
 **⏻ Shut down Winnow** stops the server, after asking and warning about any
-import or other work still running. Everything already committed is saved
-in the case file. Every window using this server stops working until you
-start Winnow again. See [Stopping Winnow](Installation.md#stopping-winnow).
+import or other work still running and any other Winnow window open on it.
+Everything already committed is saved in the case file. Every window using
+this server stops working until you start Winnow again. See
+[Stopping Winnow](Installation.md#stopping-winnow).
 
 ## Case settings
 

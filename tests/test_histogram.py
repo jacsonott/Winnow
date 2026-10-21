@@ -108,6 +108,101 @@ def test_a_1601_minimum_is_labelled_without_gmtime(store, write_csv, monkeypatch
     assert h["total"] == 2
 
 
+# ------------------------------------------------------------ one pass
+
+# Every shape the normaliser has a branch for, the ones the SQL fast path
+# takes and the ones it must leave alone, plus the near misses between.
+NORMALIZE_CORPUS = [
+    "2026-03-14 08:00:00", "2026-03-14T08:00:00", "2026-03-14T08:00:00.1234567Z",
+    "2026-03-14 08:00:00.123456", "2026-03-14T08:00:00+02:00", "2026-03-14 08:00:00 UTC",
+    "2026-03-14 08:00", "2026-03-14T08:00", "2026-03-14", "2026-03-14 8:00:00",
+    "2026-03-14t08:00:00", "2026-03-14_08:00:00", "  2026-03-14 08:00:00", "2026-03-14 08:00:00  ",
+    "1601-01-01 00:00:00", "1969-12-31 23:59:59", "2026-13-45 99:99:99", "0000-00-00 00:00:00",
+    "２０２６-03-14 08:00:00", "2026-03-14 08:00:0١",
+    "3/14/2026 8:00:00 PM", "03/14/2026 20:00", "3/14/2026", "Mar 14 2026 08:00:00",
+    "14 March 2026", "March 14th, 2026 8:00 pm", "not a date", "", "20260314080000",
+]
+
+
+def _normalize_both(values):
+    """(TS_NORMALIZE in Python, ts_normalize_sql in SQLite) per value."""
+    import sqlite3
+
+    from winnow.store import _ts_normalize, ts_normalize_sql
+
+    db = sqlite3.connect(":memory:")
+    db.create_function("TS_NORMALIZE", 1, _ts_normalize, deterministic=True)
+    db.execute("CREATE TABLE t (i INTEGER PRIMARY KEY, v)")
+    db.executemany("INSERT INTO t (v) VALUES (?)", [(v,) for v in values])
+    got = [r[0] for r in db.execute(f"SELECT {ts_normalize_sql('v')} FROM t ORDER BY i")]
+    db.close()
+    return [_ts_normalize(v) for v in values], got
+
+
+def test_the_sql_fast_path_normalises_exactly_as_ts_normalize_does():
+    """time_histogram takes the ISO shape out of Python with
+    ts_normalize_sql. A value it read differently would put a row in a
+    different bar from the one the timeframe filter (TS_NORMALIZE in
+    Python) puts it in, and a drag across that bar would miss it."""
+    values = NORMALIZE_CORPUS + [b"2026-03-14 08:00:00", 1773475200, 1773475200.5, None]
+    want, got = _normalize_both(values)
+    assert got == want
+
+
+def test_the_sql_fast_path_agrees_on_random_timestamp_shaped_text():
+    import random
+
+    rng = random.Random(20261020)
+    alphabet = "0123456789-: T./Z+"
+    base = "2026-03-14 08:00:00.123Z"
+    values = []
+    for _ in range(3000):
+        chars = list(base)
+        for _ in range(rng.randint(1, 3)):
+            chars[rng.randrange(len(chars))] = rng.choice(alphabet)
+        values.append("".join(chars)[: rng.randint(8, len(chars))])
+    want, got = _normalize_both(values)
+    assert got == want
+
+
+def test_each_row_is_parsed_once(write_csv, tmp_path, monkeypatch):
+    """The cost this removed. The span and the per-bucket counts were two
+    passes over the view and the tag split a third, each calling
+    TS_NORMALIZE (Python) on every row again — 4.8 s on a 500k-row view,
+    for a strip that refreshes on every filter change. Counted on values
+    the SQL fast path does not take, so each of them reaches Python."""
+    from winnow import store as store_mod
+
+    calls = {"n": 0}
+    real = store_mod._ts_normalize
+
+    def counting(raw):
+        calls["n"] += 1
+        return real(raw)
+
+    monkeypatch.setattr(store_mod, "_ts_normalize", counting)
+    rows = [["When", "Host"]] + [[f"3/14/2026 {h}:00:00 AM", "A"] for h in range(1, 13)]
+    s = store_mod.Store(str(tmp_path / "once.db"))   # its connections register the counting one
+    try:
+        sid = s.ingest_csv(write_csv(rows, "us.csv"), name="us", build_fts=False)["id"]
+        other = s.ingest_csv(write_csv(rows, "us2.csv"), name="us2", build_fts=False)["id"]
+        mid = s.create_merge("both", [sid, other])["id"]
+        # Every shape the query takes: the virtual root reads the table, a
+        # sorted view joins v.view_N, and a merge is a UNION ALL — which
+        # SQLite optimises differently again (it pushes the WHERE into
+        # each branch rather than flattening).
+        for table, sort, total in ((sid, [], 12), (sid, [{"column": "Host", "dir": "asc"}], 12),
+                                   (mid, [], 24), (mid, [{"column": "Host", "dir": "asc"}], 24)):
+            view = s.build_view(table, {"source_id": table, "sort": sort})
+            for stack in (None, "tags"):
+                calls["n"] = 0
+                h = s.time_histogram(view["view_id"], "When", stack=stack)
+                assert h["total"] == total
+                assert calls["n"] == total, (table, sort, stack, calls["n"])
+    finally:
+        s.close()
+
+
 # ---------------------------------------------------------------- route
 
 def test_route_returns_the_buckets_of_the_view(client, store, src):

@@ -8,6 +8,7 @@ import { currentSpec, renderAdvancedChips, updateSearchHint } from './filters.js
 import { recordFilterState } from './filterundo.js';
 import { clearPageCache, headH, rScroll, render, rowAt, spacerPx, vScroll } from './grid.js';
 import { drawRail, regroupAll } from './grouping.js';
+import { histogramFollowBuild, histogramViewLanded } from './histogram.js';
 import { armOpCancel, createNotice, followFtsBuild, opCancelCurrent, opToken } from './jobs.js';
 import { syncSearchExpansion } from './search.js';
 import { openSource } from './sources.js';
@@ -692,6 +693,9 @@ async function runBuild({ keepScroll = true, keepRow = true, detachAfterMs = nul
   setBusy(true);
   if (!fetchView) armChip();
   startIndicator(seq, forSourceId, spec);
+  // The histogram strip fades its chart now rather than when the new
+  // answer is back: until then it is this view's, not the one building.
+  histogramFollowBuild();
   // The chrome comes down once, whichever way this build leaves — the
   // detach takes it down early and keeps the stats text from before the
   // build for a later Discard; the finally is for every other exit.
@@ -721,6 +725,7 @@ async function runBuild({ keepScroll = true, keepRow = true, detachAfterMs = nul
           // follow.
           if (seq !== rebuildSeq) return;
           const before = settle(false);
+          histogramFollowBuild();   // the old view stays the grid's, and so does its chart
           // The picks stay live in the old view; an apply re-reads them.
           pendingKeys = null;
           detachBuild({ jobId: job.job_id, token: spec.op_token, sourceId: forSourceId, spec, cacheKey, state, before, viewId: oldViewId });
@@ -815,6 +820,9 @@ async function runBuild({ keepScroll = true, keepRow = true, detachAfterMs = nul
     // didn't gets the old one back. (A superseded build owns neither —
     // no-op.)
     settle(!v);
+    // Same for the histogram: a landing tells it from installView, which
+    // runs next; anything else leaves the old view, and its chart, current.
+    if (!v) histogramFollowBuild();
   }
   // anchored, not the anchor itself: installView only needs to know whether
   // a row was captured to resolve (the rule the comment below spells out).
@@ -844,6 +852,9 @@ export async function installView(v, { seq, forSourceId, cacheKey, seeded = [], 
   // wrong id, so the poison survives the next open.
   if (S.sourceId !== forSourceId) return;
   S.view = v;
+  // Ahead of the remap, the regroup and the paint below: its answer is the
+  // slowest thing a rebuild waits on, and it needs only the view id.
+  histogramViewLanded();
   S.viewCache.set(S.sourceId, { key: cacheKey, view_id: v.view_id, row_count: v.row_count, elapsed_ms: v.elapsed_ms });
   clearPageCache();
   for (const [idx, rows] of seeded) {

@@ -4,7 +4,7 @@
 import { $, el, post, toast } from './core.js';
 import { addExtractedColumn, openFlattenModal, quotePredicate } from './derived.js';
 import { ellipsize, parseFilter, setColumnFilter, setSearchMode } from './filters.js';
-import { clearPageCache, render, rowAt } from './grid.js';
+import { clearPageCache, refetchPageOf, render, rowAt } from './grid.js';
 import { writeClipboardText } from './grouping.js';
 import { syncSearchExpansion } from './search.js';
 import { clearAllFilters, sourceLabel } from './sources.js';
@@ -1086,7 +1086,7 @@ export async function writeNote() {
     && note.value === value;
   if (current) noteUnsaved = false;
   const r = rowAt(S.cursor);
-  if (r && r.rid === rid) r.note = note.value;
+  if (r && r.rid === rid) { r.note = note.value; refetchPageOf(S.cursor); }
   // Same rule as tagRowsAtPositions: under a grouping the row just patched
   // is a group-page object, and the flat cache still holds this rid with
   // the old note for dropGrouping to paint — the ✎ mark would go missing

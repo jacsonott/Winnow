@@ -223,18 +223,29 @@ Average ignore text that isn't a number. Filters use `is any of`,
 `is none of`, `contains`, `does not contain`, `starts with`,
 `> (numeric)`, `< (numeric)`, `is empty` and `is not empty`.
 
+The top of **Filters** carries the case's tags as chips, and they work as
+the tag ribbon above the grid does (see [Tagging and notes](Tagging-and-notes.md)):
+click a tag to count only the rows carrying it, click a second one to add
+its rows, and right-click a tag for **Filter to *tag***, **Exclude *tag***
+and **Clear the tag filter**. **Any tag** counts every tagged row and
+**No tags** every row nobody has tagged yet. The number on a chip is how
+many rows of the pivot's table carry that tag. When you come back to the
+Pivot tab from the grid, a pivot filtered on tags runs again, so rows you
+tagged in the meantime are counted.
+
 - **Subtotals** and **Grand totals** toggle the total rows and columns.
 - **Copy** puts the result on the clipboard as tab-separated text; **CSV**
   downloads it as a file.
 - Click any number to see the rows behind it (up to 500).
 - Several pivots can be open as sub-tabs (`+` at the end of the sub-tabs
-  adds one; double-click one to rename it). They are saved in the case and
-  restored when you come back; **Start fresh** on the restore banner
-  forgets them.
+  adds one; double-click one to rename it). They are saved in the case,
+  tag filter included, and restored when you come back; **Start fresh** on
+  the restore banner forgets them.
 
-A pivot reads the whole table, not the grid's current filtered view. It
-stops at 16 grouping levels and 20,000 groups per level, and draws at most
-60 column groups.
+A pivot reads the whole table, not the grid's current filtered view: the
+grid's filters, search and timeframe don't apply to it, and its tag chips
+are its own. It stops at 16 grouping levels and 20,000 groups per level,
+and draws at most 60 column groups.
 
 ### first_last
 
@@ -285,6 +296,20 @@ the Timeline and export like any other; tick **Add these rows to the
 Timeline (tags every row)** to do the first two at once. A result is
 limited to 100,000 groups. Merged tables work, and sheets are kept per case
 like pivots.
+
+On a big table a preview can take several seconds, and the rest of Winnow
+stays usable while it runs: switch tables, scroll, filter or search as
+usual. Each change stops the preview it replaces, so quick edits don't pile
+up. If you leave the tab while a preview runs, a card in the jobs panel says
+so, then reads `N groups — the preview is ready` when it lands; its
+**Show** button takes you back to that sheet. **Copy result** works the
+same way: the button reads **Copying…**, and if you have left the tab by
+the time the result is ready, the card has a **Copy** button rather than
+writing to the clipboard behind your back. **Create table** closes its
+dialog straight away and shows a `Creating "<name>"` card with **Cancel**.
+A quick create opens the new table as before; a slow one, or one that
+finishes while you are elsewhere, leaves you where you are and shows
+`Created "<name>"` with **Open table**.
 
 ### mft_usn
 

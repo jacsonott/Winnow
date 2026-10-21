@@ -435,7 +435,7 @@ Prefer it to reaching into the app's globals — this is what's supported.
 | `notesPage` | The case notes: `show()`, `text()`, `setText(md)`, `insert(text)`, `onChange(cb)` |
 | `tabState` | This mount's own state in the case file: `get()`, `set(obj)`, `clear()` — see [Keeping a tab's state](#keeping-a-tabs-state-across-a-case-close) |
 | `openSource(id)` | Switch the app to a source's grid tab |
-| `refreshSources()` | Re-fetch the app's source list — call after your backend creates a table via `ingest_rows` (a sync ingest announces itself through no job), then `openSource(new_id)` |
+| `refreshSources()` | Re-fetch the app's source list — call after your backend creates a table via `ingest_rows` (a sync ingest announces itself through no job), then `openSource(new_id)` if the analyst should see it. It moves nobody: the page and table on screen, and that table's filters, stay as they are, so it is safe after work that finished while the analyst was elsewhere |
 | `state.sources` | Live source list (`{id, name, columns, row_count, is_merge, error}`) |
 | `state.sourceId` | Currently selected source id |
 | `state.tags` | Tag definitions |
@@ -961,6 +961,21 @@ req.storage.update(lambda d: d.__setitem__("calls", d.get("calls", 0) + 1))
 
 A plugin table is not affected by any of this — SQLite serialises the
 writes.
+
+**Blocking the server is fine; holding the browser is not.** A browser
+opens six connections to Winnow, Winnow's own live updates keep one, and
+every request your tab is waiting on keeps another until it answers. A
+tab that awaits a few long requests at once — one per edit, say — takes
+the rest, and then the grid in another tab cannot fetch its rows: the
+whole app looks frozen while the server sits idle. If a handler can run
+for more than a second or so on a big table, don't make the tab wait on
+it. Start the work on a thread of your own and answer at once, let the
+tab poll for the result, and stop the old work when a newer request
+replaces it. The bundled `first_last` example does exactly this (its
+`job/start`, `job` and `job/cancel` routes, and `startJob` in its
+`ui/tab.js`), and tells the analyst through `winnow.notify` when a
+result lands while they are on another tab — copy it rather than
+starting from scratch.
 
 ### Errors
 

@@ -461,8 +461,11 @@ export function buildPluginTabContext(tab, kind = 'tab') {
     // a synchronous server-side ingest announces itself through no job, so
     // nothing else refreshes the app's source list — the tab must, or its
     // freshly created table is invisible until a reload. Await this, then
-    // openSource(new_id).
-    refreshSources: () => loadSources(),
+    // openSource(new_id). It moves nobody (navigate: false): a plain
+    // loadSources() re-opens the table on screen, which switches to the
+    // grid and resets its filters — and a plugin may refresh from the
+    // background, after a job the analyst left running on another tab.
+    refreshSources: () => loadSources(undefined, { navigate: false }),
     state: {
       get sources() { return S.sources; },
       get sourceId() { return S.sourceId; },
