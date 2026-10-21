@@ -53,6 +53,7 @@ from . import combine  # noqa: F401 — registers the multi-column ops (coalesce
 from . import decode  # noqa: F401 — registers the decode ops (URL decode) the same way
 from . import structparse  # noqa: F401 — registers the JSON/XML extraction ops into timeparse.OPERATIONS
 from . import timeparse
+from . import iisread
 from . import plasoread
 from . import rxguard
 from . import xlsxread
@@ -162,6 +163,11 @@ XLSX_IMPORT_EXTENSIONS = {".xlsx", ".xlsm"}
 # a .plaso must never fall into the generic table picker: its raw tables
 # are serialized attribute containers, useless without the decode step.
 PLASO_IMPORT_EXTENSIONS = {".plaso"}
+# IIS web server logs are recognised by NAME (u_ex240501.log, nc2405.log —
+# iisread.log_format), since their extension is the .log every other log
+# has. In a folder scan's extension list this token stands for them the way
+# "*" stands for other text files: a chip of its own, on by default.
+IIS_IMPORT_TYPE = "iis"
 # scan_import_directory stops walking once matched+excluded together hit
 # this many entries — same "cap and say so" reasoning as
 # SEARCH_ALL_COUNT_CAP, guarding against an analyst accidentally pointing
@@ -1248,7 +1254,7 @@ def _ingest_record(kind: str, **options) -> str:
     a session names rows by rid, so the re-import has to produce the same
     rows in the same order, and the defaults do not (a headerless CSV
     gains a header and every rid slides by one). `kind` names a Store
-    reader: csv, text, json, sqlite, xlsx, plaso — or rows, for a table
+    reader: csv, text, json, sqlite, xlsx, plaso, iis — or rows, for a table
     produced in-process (a plugin's parser, a SQL save), which nothing
     here can re-run."""
     return json.dumps({"kind": kind, **{k: v for k, v in options.items() if v is not None}})
@@ -4251,6 +4257,147 @@ class Store:
         return {"delimiter": None, "columns": [TEXT_COLUMN],
                 "sample_rows": [[ln] for ln in lines], "inferred_types": ["text"]}
 
+    def ingest_iis(self, path: str, name: str | None = None, build_fts: bool = True,
+                   progress=None, cancel=None, log_format: str | None = None) -> dict:
+        """Import an IIS web server log (W3C extended, NCSA or IIS native)
+        as one table — iisread.py has the formats and why W3C's columns
+        come from its #Fields: lines. The file's name says which format it
+        is; `log_format` overrides that (a session re-import, which
+        recorded it).
+
+        Two passes, as ingest_json: the first finds the columns (the union
+        of every #Fields: line), the second inserts. The first runs before
+        the source exists, so a cancel there leaves nothing to drop; the
+        second reads exactly as many lines as the first did, so a log the
+        server is still appending to can't hand it a field it never
+        planned for. Otherwise ingest_text's contract: batched commits,
+        byte progress, cancel drops the partial source, a mid-file error
+        keeps what committed. No binary refusal — a log IIS was writing
+        when the power went holds NUL runs, which are read as gaps."""
+        name = name or os.path.basename(path)
+        fmt = log_format or iisread.log_format(path)
+        if fmt not in iisread.FORMATS:
+            raise ValueError(f"{name} is not named like an IIS log (u_ex…, nc…, in….log)")
+        size = os.path.getsize(path)
+        file_hash = self._quick_hash(path)
+        encoding = sniff_text_encoding(path)
+
+        def open_log():
+            # newline="\n": a lone \r is the line's own text (_text_line).
+            return open(path, "r", encoding=encoding, errors=TEXT_DECODE_ERRORS,
+                        newline="\n", buffering=1 << 20)
+
+        counted = [0]
+
+        def first_pass(lines):
+            for line in lines:
+                counted[0] += 1
+                if counted[0] % BATCH == 0 and cancel is not None and cancel():
+                    raise IngestCancelled(f"Import of {name} cancelled")
+                yield line
+
+        with open_log() as fh:
+            if fh.read(1) == "":
+                raise ValueError("File is empty")
+            fh.seek(0)
+            plan = iisread.plan(fmt, first_pass(iisread.logical_lines(fh, {})))
+        if not plan["columns"]:
+            raise ValueError(f"{name} has no {iisread.FORMATS[fmt]} log lines in it")
+
+        cols = sanitize_columns(plan["columns"])
+        ncols = len(cols)
+        source_id, table = self._create_source_shell(
+            name, cols, path=path, file_hash=file_hash, ingest=_ingest_record("iis", format=fmt))
+        insert = f"INSERT INTO {q(table)} ({','.join(q(c) for c in cols)}) VALUES ({','.join('?' * ncols)})"
+
+        stats: dict = {}
+        sample: list[list[str]] = []
+        batch: list[tuple] = []
+        total = 0
+        t0 = time.time()
+        error: Exception | None = None
+        fallback0 = _cp1252_fallback_count()   # pass two only, or the file counts twice
+        fh = open_log()
+        with self._ingest_synchronous_off():
+            try:
+                lines = itertools.islice(iisread.logical_lines(fh, stats), counted[0])
+                for row in iisread.rows(lines, plan, stats):
+                    batch.append(tuple(row))
+                    if len(sample) < SAMPLE_ROWS:
+                        sample.append(row)
+                    if len(batch) >= BATCH:
+                        if cancel is not None and cancel():
+                            raise IngestCancelled(f"Import of {name} cancelled")
+                        total = self._commit_ingest_batch(insert, batch, source_id, total)
+                        batch.clear()
+                        if progress:
+                            progress(total, fh.buffer.tell(), size)
+                if batch:
+                    if cancel is not None and cancel():
+                        raise IngestCancelled(f"Import of {name} cancelled")
+                    total = self._commit_ingest_batch(insert, batch, source_id, total)
+                    batch.clear()
+                if progress:
+                    progress(total, size, size)
+            except IngestCancelled:
+                self.drop_source(source_id)   # as ingest_csv: a cancel discards the partial import
+                raise
+            except Exception as e:
+                if batch:
+                    with contextlib.suppress(Exception):
+                        total = self._commit_ingest_batch(insert, batch, source_id, total)
+                        batch.clear()
+                kept = f" — import stopped there; the {total:,} rows before it were kept" if total else ""
+                error = ValueError(f"Row {total + 1:,}: {e}{kept}")
+                error.__cause__ = e
+            finally:
+                fh.close()
+
+        types = [t or (infer_type([r[i] for r in sample]) if sample else "text")
+                 for i, t in enumerate(plan["types"])]
+        colmeta = [{"name": c, "type": t} for c, t in zip(cols, types)]
+        decoded = _encoding_report(encoding, _cp1252_fallback_count() - fallback0)
+        self._finish_source_columns(source_id, colmeta, decoded, name)
+        if stats.get("nul_lines"):
+            wlog.record("warn", f"{name}: {stats['nul_lines']:,} line(s) held runs of NUL bytes — the gap a "
+                                "server leaves in its log when it stops without closing it (a crash or "
+                                "power loss). The text either side of each run was imported.")
+        if error is not None:
+            if total == 0:
+                self.drop_source(source_id)
+            raise error
+        if build_fts and total:
+            self._ensure_fts_building(source_id)
+        elapsed = time.time() - t0
+        rec = self.get_source(source_id)
+        rec["elapsed_sec"] = round(elapsed, 2)
+        rec["rows_per_sec"] = int(total / elapsed) if elapsed > 0 else 0
+        rec["ragged_rows"] = stats.get("ragged", 0)
+        rec["suspect_quote_rows"] = 0
+        rec["log_format"] = fmt
+        rec["encoding"], rec["cp1252_bytes"] = decoded["encoding"], decoded["cp1252_bytes"]
+        return rec
+
+    @staticmethod
+    def preview_iis_text(text: str, log_format: str, complete: bool = True, max_rows: int = 50) -> dict:
+        """The first rows of an IIS log as ingest_iis would make them, in
+        preview_csv_text's shape. The columns are the ones the sample
+        names — a #Fields: line further into the file adds its own on
+        import. `complete` is whether `text` is the whole file; when it
+        isn't, its last line may be cut and is left out."""
+        if not text:
+            raise ValueError("File is empty")
+        physical = text.split("\n")
+        if not complete and len(physical) > 1:
+            physical.pop()
+        lines = list(iisread.logical_lines(physical, {}))
+        plan = iisread.plan(log_format, lines)
+        sample = list(itertools.islice(iisread.rows(lines, plan, {}), max_rows))
+        types = [t or (infer_type([r[i] for r in sample]) if sample else "text")
+                 for i, t in enumerate(plan["types"])]
+        return {"delimiter": None, "columns": sanitize_columns(plan["columns"]),
+                "sample_rows": sample, "inferred_types": types, "log_format": log_format}
+
     def _finish_source_columns(self, source_id: int, colmeta: list[dict], decoded: dict,
                                name: str) -> None:
         """The last write of a text import: the typed columns, and — when
@@ -5059,7 +5206,9 @@ class Store:
         paths, so this is safe to call live as the analyst edits patterns.
 
         A file is excluded for exactly one of: its extension isn't
-        recognized ("extension"), include_patterns is non-empty and nothing
+        recognized ("extension"; "IIS logs not selected" for a file named
+        like an IIS log when `extensions` leaves out IIS_IMPORT_TYPE),
+        include_patterns is non-empty and nothing
         in it matched ("no include pattern matched"), a pattern in
         exclude_patterns matched ("excluded by pattern: <pattern>"), it
         couldn't be stat'd ("unreadable" — a broken symlink, a permission
@@ -5092,13 +5241,16 @@ class Store:
         # as tables. A file that gets in this way is checked for NULs
         # first; a binary is excluded with its own reason.
         other_text = any(e in ("*", ".*") for e in (extensions or []))
+        # IIS logs: admitted by name, on unless the list leaves the token
+        # out (a profile saved before the chip existed does).
+        iis_logs = extensions is None or IIS_IMPORT_TYPE in (e.lower() for e in extensions)
         # None means "the defaults"; an empty list means exactly that — the
         # analyst turned every chip off. `or` conflated the two, so a scan
         # with nothing selected matched the default set.
         exts = {
             (e if e.startswith(".") else "." + e).lower()
             for e in (DEFAULT_IMPORT_EXTENSIONS if extensions is None else extensions)
-            if e not in ("*", ".*")
+            if e not in ("*", ".*") and e.lower() != IIS_IMPORT_TYPE
         }
         includes = [p for p in (include_patterns or []) if p.strip()]
         excludes = [p for p in (exclude_patterns or []) if p.strip()]
@@ -5139,11 +5291,12 @@ class Store:
                     continue
                 entry = {"path": fpath, "rel_path": rel, "size_bytes": st.st_size}
                 ext = os.path.splitext(fname)[1].lower()
+                is_iis = iisread.log_format(fname) is not None
                 by_filename_pattern = any(fnmatch.fnmatch(fname.lower(), p.lower()) for p in fname_pats)
                 by_ext = ext in exts
-                unclaimed = not by_ext and not by_filename_pattern
+                unclaimed = not by_ext and not by_filename_pattern and not (is_iis and iis_logs)
                 if unclaimed and not other_text:
-                    excluded.append({**entry, "reason": "extension"})
+                    excluded.append({**entry, "reason": "IIS logs not selected" if is_iis else "extension"})
                     continue
                 if includes and not any(self._import_pattern_matches(p, fname, rel) for p in includes):
                     excluded.append({**entry, "reason": "no include pattern matched"})
@@ -5155,15 +5308,20 @@ class Store:
                 # The binary probe reads the file, so it runs last: only a
                 # file the name gates let through gets opened — a tree of
                 # excluded build output is never sniffed.
-                if unclaimed and looks_binary(fpath):
+                if unclaimed and not is_iis and looks_binary(fpath):
                     excluded.append({**entry, "reason": "binary"})
                     continue
                 # kind routes the frontend's per-file import call: the two
                 # built-in parsers by their own extensions, everything else
                 # ("plugin") resolved client-side against the loaded plugin
                 # formats — the scan doesn't know which format claimed an
-                # extension/pattern, and doesn't need to.
-                if ext in (".json", ".jsonl", ".ndjson"):
+                # extension/pattern, and doesn't need to. An IIS log is
+                # read as one however it got in — a plugin claiming .log
+                # (esxi_logs) or "other text files" included: built-in
+                # recognition wins, as built-in extensions do.
+                if is_iis:
+                    kind = "iis"
+                elif ext in (".json", ".jsonl", ".ndjson"):
                     kind = "json"
                 elif ext in PLASO_IMPORT_EXTENSIONS:
                     kind = "plaso"
@@ -5200,7 +5358,7 @@ class Store:
         sat behind with no progress, no way to tell "working" from
         "crashed", and a browser tab they couldn't use meanwhile.
 
-        `kind` is 'csv' | 'text' | 'json' | 'sqlite' | 'xlsx' | 'plaso'. For 'sqlite',
+        `kind` is 'csv' | 'text' | 'json' | 'sqlite' | 'xlsx' | 'plaso' | 'iis'. For 'sqlite',
         options['tables'] is [{table, name?, timestamp_columns?}, ...] —
         one uploaded file, one job, N sources, so the file is spooled and
         read once rather than re-uploaded per table. `delete_after` removes
@@ -5242,7 +5400,7 @@ class Store:
         (add_derived_column, add_derived_columns, rederive_column) undo
         that definition on the refusal — a column whose only job was never
         started would otherwise be 'building' for good."""
-        if kind not in ("csv", "text", "json", "sqlite", "xlsx", "plaso", "derive"):
+        if kind not in ("csv", "text", "json", "sqlite", "xlsx", "plaso", "iis", "derive"):
             raise ValueError(f"Unknown ingest kind: {kind}")
         try:
             size = os.path.getsize(path)
@@ -5363,6 +5521,11 @@ class Store:
                 results = [self.ingest_plaso(
                     job["path"], name=job["name"],
                     build_fts=opts.get("build_fts", True),
+                    progress=progress, cancel=cancel,
+                )]
+            elif job["kind"] == "iis":
+                results = [self.ingest_iis(
+                    job["path"], name=job["name"], build_fts=opts.get("build_fts", True),
                     progress=progress, cancel=cancel,
                 )]
             elif job["kind"] == "json":
@@ -14066,7 +14229,7 @@ class Store:
                 "so there is no file to re-import it from, and this case does not have it or a "
                 "copy of it")
 
-    _SESSION_READERS = ("csv", "text", "json", "sqlite", "xlsx", "plaso")
+    _SESSION_READERS = ("csv", "text", "json", "sqlite", "xlsx", "plaso", "iis")
 
     def _reimport_session_source(self, s_meta: dict) -> tuple[int | None, str | None]:
         """(source_id, None) after re-importing a session source from its
@@ -14130,6 +14293,8 @@ class Store:
                                                timestamp_columns=how.get("timestamp_columns"))
             elif kind == "xlsx":
                 rec = self.ingest_xlsx_sheet(path, how["sheet"], name=name)
+            elif kind == "iis":
+                rec = self.ingest_iis(path, name=name, log_format=how.get("format"))
             else:
                 rec = self.ingest_plaso(path, name=name)
         except Exception as e:
@@ -14152,6 +14317,8 @@ class Store:
             return {}
         if ext in PLASO_IMPORT_EXTENSIONS:
             return {"kind": "plaso"}
+        if iisread.log_format(path):
+            return {"kind": "iis"}
         if ext in (".json", ".jsonl", ".ndjson"):
             return {"kind": "json"}
         return {"kind": "csv" if ext in DEFAULT_IMPORT_EXTENSIONS else "text"}

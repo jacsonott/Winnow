@@ -1,4 +1,4 @@
-# Ingest: CSV, raw text, JSON, SQLite, Excel, Plaso, archives, folders, drops, jobs
+# Ingest: CSV, raw text, JSON, SQLite, Excel, Plaso, IIS logs, archives, folders, drops, jobs
 
 Every path that turns a file on disk into a `src_<id>` table, and the
 background-job machinery all of them run through. Invariant #1 (source
@@ -198,6 +198,54 @@ see [docs/notes/README.md](README.md) for the whole set.
   `key_collisions` counts the records it happened in (preview status
   line, jobs toast). A duplicated key inside a container stored as text
   is written twice, as the file had it.
+- **IIS web server logs are recognised by name, not by extension**
+  (`iisread.log_format`, `Store.ingest_iis`, kind `iis`). Their `.log` is
+  every log's, and the name is the one thing IIS makes distinctive:
+  `u_ex240501.log` (W3C extended, daily; `u_` = UTF-8), `ex24050113.log`
+  (hourly), `ex2405.log` (monthly), `u_extend1.log` (by size), `nc…`
+  (NCSA), `in…` (native). The dated stem must be a date, so `in1234.log`
+  is not one. Every router asks the name FIRST — `_ingest_kind_for_path`,
+  `importKindFor` (merge.js keeps a twin of the regex and the date
+  check), `_guess_session_reader`, the folder scan — and asks it before
+  plugin formats too (`pluginFormatFor`, `_assoc_ingest`): esxi_logs
+  claims `.log`, and an IIS log routed to it came out as one ESXi
+  `Message` per line. In the folder scan the `iis` token
+  (`IIS_IMPORT_TYPE`) is the chip that admits them by name, on in the
+  defaults; a file named like one that got in any other way (a `.log`
+  chip, `*`) is still kind `iis`. A profile saved before the chip lacks
+  the token, so its scan excludes them as "IIS logs not selected".
+  **W3C columns are the file's `#Fields:` lines, never a fixed list.** A
+  site logs the fields it is configured to, IIS writes a new header on
+  every restart, and a changed setting changes the fields mid-file. So
+  `ingest_iis` makes two passes, JSON's shape: `plan` collects the union
+  of every directive's fields (case-insensitive, first-seen order) before
+  the source exists — a cancel there has nothing to drop — and `rows`
+  reads each line against the directive in effect where it sits. The
+  second pass reads exactly as many lines as the first (`islice` on the
+  first pass's count), because a live server's current log grows while
+  it is imported in place, and a header the plan never saw would have
+  nowhere to go; a last line that grew between the passes raises
+  `FileChanged` instead of landing in the wrong column. Values the
+  header in effect doesn't name (more values than fields, or a line
+  before any header) go to an `Unnamed values` column that exists only
+  when a file needs it — NCSA/native's equivalent is `Unparsed line`,
+  the whole line — and count as `ragged_rows`. Values stay as logged:
+  "-" for empty and "+" for a space are IIS's substitutions, which the
+  file cannot tell from a literal "-" or "+", so decoding them would
+  invent certainty. The one added column is the timestamp
+  (`Timestamp (UTC)` for W3C's always-UTC date+time and NCSA's
+  offset-bearing time, `Timestamp (local)` for native, which logs no
+  offset) — declared, not sampled, and the raw date column of native
+  format is pinned to text so it is not offered beside it. **NUL runs
+  are gaps**: a server that loses power leaves zeros where its unflushed
+  tail was and resumes writing after them, so a run can sit mid-line,
+  glued to the restart's header block; `logical_lines` splits there,
+  drops the zeros, and the import logs that it happened. There is no
+  binary refusal for this kind, for the same reason. The three formats'
+  header sets in defaults/headers.json give them Timeline summaries
+  (W3C's by containment, so any site that logs the default fields).
+  tests/test_iis_logs.py.
+
 - Ragged rows are padded/trimmed to the header width, never dropped, and
   counted — `ingest_csv`'s return dict has a `ragged_rows` count surfaced to
   the analyst (toast in the UI, printed in the CLI path). If that first row

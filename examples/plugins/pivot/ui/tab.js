@@ -1498,8 +1498,15 @@ export default function mount(container, winnow) {
   /* Back from the grid, where tags may have been edited, deleted or put on
      rows: the chips and their counts are read again, and a pivot filtered
      on tags is re-run, because the rows it counted may not be the rows
-     carrying those tags any more. */
+     carrying those tags any more.
+     Not before the saved pivots have been read back, though. The tab is
+     shown the moment it mounts, and a field list drawn then could take a
+     drag that is neither saved (saveOn is still false) nor kept (a
+     restore replaces the pivots); the read draws the same things itself
+     when it lands. */
+  let readBack = false;
   refresh = () => {
+    if (!readBack) return;
     fillSources();
     renderFields();
     const dropped = dropDeletedTags();
@@ -1548,6 +1555,7 @@ export default function mount(container, winnow) {
     render();
     // Saving only starts once we know what a save would replace.
     saveOn = !unreadable;
+    readBack = true;
     // The cross-tab is re-queried against the case as it is now.
     if (restored) runQuery();
   })();
