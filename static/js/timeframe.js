@@ -2,7 +2,7 @@
 navigation that survive everything else being cleared.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
-import { applyDefaultLayout, isPinned, moveColumn, renderHead, saveDefaultLayout, saveLayout, togglePin } from './columns.js';
+import { applyDefaultLayout, isPinned, moveColumn, openCopyLayoutModal, renderHead, saveDefaultLayout, saveLayout, togglePin } from './columns.js';
 import { $, api, el, post, toast } from './core.js';
 import { openDerivedColumnModal } from './derived.js';
 import { hasActiveFilterTree, openFilterBuilder } from './filterbuilder.js';
@@ -884,6 +884,9 @@ export function buildTableActionsPanel(container, refresh) {
   const useDflt = el('button', 'btn ghost', 'Apply default layout for these columns');
   useDflt.title = 'Replace this table\'s column order/visibility with the default saved for these headers';
   useDflt.onclick = () => { $('modal').hidden = true; applyDefaultLayout(); };
+  const copyFrom = el('button', 'btn ghost', 'Copy layout from another table…');
+  copyFrom.title = 'Give this table the column order, visibility and widths of another table in the case, for the columns they share';
+  copyFrom.onclick = () => openCopyLayoutModal();
   const nick = el('button', 'btn ghost', 'Name this header set…');
   nick.onclick = () => setNicknameFor(baseColumns().map((c) => c.name), nicknameFor(baseColumns().map((c) => c.name)));
   const nickTable = el('button', 'btn ghost', src && src.is_merge ? 'Rename this merge…' : 'Nickname this table…');
@@ -905,7 +908,7 @@ export function buildTableActionsPanel(container, refresh) {
     if (!src) return;
     openMergeBuilder(src.is_merge ? { edit: src } : { preselect: [src.id] });
   };
-  acts.append(dflt, useDflt, nick, nickTable, merge);
+  acts.append(dflt, useDflt, copyFrom, nick, nickTable, merge);
   container.append(acts);
 }
 

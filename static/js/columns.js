@@ -7,8 +7,9 @@ import { columnFilterChips, openValuePicker, pickerTreeNode, removeColumnFilter,
 import { render, setCellRange } from './grid.js';
 import { renderGroupStrip } from './grouping.js';
 import { S, clearCellSelection, gridRowCount, selClear, selSetAll, selSnapshot } from './state.js';
+import { sourceLabel } from './sources.js';
 import { baseColumns, columnMeta } from './tsformat.js';
-import { anchoredPanel, contextMenu } from './ui.js';
+import { anchoredPanel, closeModal, contextMenu, modal, sideRail, sideRailMatch } from './ui.js';
 import { rebuildSoon, rebuildView } from './view.js';
 
 /* ---------------------------------------------------------------- header */
@@ -808,7 +809,6 @@ export async function applyDefaultLayout() {
     toast('No default layout is saved for these columns yet — "Save layout as default for these columns" on a table with them saves one', 5000);
     return;
   }
-  const before = { order: [...S.order], layout: S.layout };
   const layout = nameMap(found.columns);
   for (const c of S.columns) {
     if (!c.derived) continue;
@@ -816,15 +816,177 @@ export async function applyDefaultLayout() {
   }
   const order = found.order.filter((n) => S.columns.some((c) => c.name === n));
   placeUnorderedColumns(order);
+  replaceLayout(order, layout, 'Applied the default layout for these columns');
+}
+
+/* Puts a whole new order and set of per-column settings on the table on
+   screen, saves it, and says so in a toast whose Undo puts the old ones
+   back. A grouped column stays in S.order (visibleCols() leaves it out),
+   so grouping needs nothing here. */
+export function replaceLayout(order, layout, message) {
+  const id = S.sourceId;
+  const before = { order: [...S.order], layout: S.layout };
   S.layout = layout;
   S.order = order;
   renderHead(); render(); saveLayout();
-  toastAction('Applied the default layout for these columns', 'Undo', () => {
+  toastAction(message, 'Undo', () => {
     if (S.sourceId !== id) return;
     S.order = before.order;
     S.layout = before.layout;
     renderHead(); render(); saveLayout();
   });
+}
+
+/* --------------------------------------- copying another table's layout */
+
+/* The order the table on screen gets from another table's: the columns
+   both have, in the other table's order, and each column only this one
+   has right after the column it follows now, so a derived column stays
+   beside its input and an extra column beside its neighbour. One
+   computation for the preview and the copy, so they cannot disagree. */
+export function copiedOrder(fromOrder) {
+  const mine = new Set(S.columns.map((c) => c.name));
+  const shared = fromOrder.filter((n) => mine.has(n));
+  const isShared = new Set(shared);
+  const after = new Map();
+  let anchor = '';
+  for (const n of S.order) {
+    if (isShared.has(n)) { anchor = n; continue; }
+    if (!mine.has(n)) continue;
+    if (!after.has(anchor)) after.set(anchor, []);
+    after.get(anchor).push(n);
+  }
+  const order = [...(after.get('') || [])];
+  for (const n of shared) order.push(n, ...(after.get(n) || []));
+  placeUnorderedColumns(order);
+  return { order, shared: isShared };
+}
+
+/* The per-column settings that go with it: a shared column takes the
+   other table's entry outright (none there means none here, so a width
+   it never had set is not kept from this one), and a column only this
+   table has keeps its own. */
+export function copiedColumns(fromColumns, shared) {
+  const layout = nameMap(S.layout);
+  for (const n of shared) {
+    if (fromColumns[n]) layout[n] = { ...fromColumns[n] }; else delete layout[n];
+  }
+  return layout;
+}
+
+const COPY_SAME = 'Same columns';
+const COPY_SOME = 'Some columns in common';
+
+/* Another table's column order, visibility, widths, pins and formats,
+   onto the table on screen, for the columns the two share. The default
+   for a header set does this only between tables with the same columns,
+   in two steps, and changes what every later import of them opens to;
+   this is the one-off, for any two tables. Tables are listed down the
+   side, the same columns first, then by how many they share, and the
+   right pane shows the order the copy would leave before anything
+   changes. */
+export function openCopyLayoutModal() {
+  const id = S.sourceId;
+  const here = S.sources.find((s) => s.id === id);
+  if (!here || !S.columns.length) return;
+  const mine = new Set(S.columns.map((c) => c.name));
+  const headerSet = (cols) => cols.filter((c) => !c.derived).map((c) => c.name.toLowerCase()).sort().join('\n');
+  const myHeaders = headerSet(S.columns);
+  const entries = S.sources.filter((s) => s.id !== id).map((s) => {
+    const cols = s.columns || [];
+    const shared = cols.filter((c) => mine.has(c.name)).length;
+    return {
+      key: String(s.id), label: sourceLabel(s), src: s, shared,
+      group: headerSet(cols) === myHeaders ? COPY_SAME : COPY_SOME,
+      hint: shared === mine.size ? `all ${shared} columns` : `${shared} of ${mine.size} columns`,
+    };
+  }).filter((e) => e.shared > 0)
+    .sort((a, b) => b.shared - a.shared || a.label.localeCompare(b.label));
+  if (!entries.length) {
+    toast('No other table in this case has any of these columns', 4000);
+    return;
+  }
+  let chosen = entries[0];
+  let result = null;   // { order, layout } for `chosen`, once its layout is in
+  const layouts = new Map();   // source id -> its saved layout, asked once
+
+  modal(`Copy a layout onto ${sourceLabel(here)}`, (b) => {
+    const side = sideRail({
+      entries: () => entries,
+      groups: [COPY_SAME, COPY_SOME],
+      selected: () => chosen.key,
+      onPick: (entry) => { if (entry !== chosen) { chosen = entry; side.sync(); preview(); } },
+      match: (entry, q) => (sideRailMatch(entry, q) ? { hint: entry.hint } : null),
+      pinsKey: 'copyLayout',
+      label: 'Tables',
+    });
+
+    const head = el('div', 'side-preview-title', 'Columns after copying');
+    const box = el('div', 'side-preview copy-layout-preview');
+    const rows = el('div', 'side-preview-rows');
+    const foot = el('div', 'side-preview-foot');
+    box.append(rows, foot);
+    const pane = el('div', 'side-pane');
+    pane.append(head, box);
+    const panes = el('div', 'side-panes copy-layout');
+    panes.append(side.rail, pane);
+    b.append(panes);
+
+    const actions = el('div', 'row-actions');
+    const copy = el('button', 'btn primary', 'Copy layout');
+    copy.disabled = true;
+    const cancel = el('button', 'btn ghost', 'Cancel');
+    cancel.onclick = () => closeModal();
+    actions.append(copy, cancel);
+    b.append(actions);
+
+    copy.onclick = () => {
+      if (!result || S.sourceId !== id) return;
+      closeModal();
+      replaceLayout(result.order, result.layout, `Copied the layout of ${chosen.label}`);
+    };
+
+    async function preview() {
+      const entry = chosen;
+      result = null;
+      copy.disabled = true;
+      box.classList.add('stale');
+      if (!layouts.has(entry.src.id)) {
+        layouts.set(entry.src.id, api(`/api/layout?source_id=${entry.src.id}`).catch(() => ({})));
+      }
+      const saved = await layouts.get(entry.src.id);
+      if (entry !== chosen || !b.isConnected) return;
+      // A table never laid out shows its columns as the file had them.
+      const fromOrder = saved.order || (entry.src.columns || []).map((c) => c.name);
+      const { order, shared } = copiedOrder(fromOrder);
+      result = { order, layout: copiedColumns(nameMap(saved.columns), shared) };
+      const list = el('div', 'copy-layout-cols');
+      for (const n of order) {
+        const l = result.layout[n] || {};
+        const r = el('div', 'copy-layout-col' + (l.hidden ? ' hidden-col' : '') + (shared.has(n) ? '' : ' own'));
+        r.dataset.col = n;
+        r.append(el('span', 'copy-layout-name', n));
+        const notes = [];
+        if (l.hidden) notes.push('hidden');
+        if (l.pinned) notes.push('pinned');
+        if (!shared.has(n)) notes.push('only this table has it, stays where it is');
+        if (notes.length) r.append(el('span', 'copy-layout-note', notes.join(' · ')));
+        list.append(r);
+      }
+      rows.replaceChildren(list);
+      const own = order.length - shared.size;
+      const line = `${shared.size} column${shared.size === 1 ? ' takes' : 's take'} the order, visibility and widths of ${entry.label}.`
+        + (own ? ` ${own} only this table has ${own === 1 ? 'stays beside the column it follows' : 'stay beside the columns they follow'} now.` : '');
+      const p = el('p', 'fb-help', line);
+      p.title = line;
+      foot.replaceChildren(p);
+      box.classList.remove('stale');
+      copy.disabled = false;
+    }
+
+    side.paint();
+    preview();
+  }, { wide: true, tall: true, focus: '.side-search' });
 }
 
 /* ------------------------------------------------------- column autosize */

@@ -1352,6 +1352,24 @@ see [docs/notes/README.md](README.md) for the whole set.
   A grouped table needs nothing extra: grouped columns stay in `S.order`
   and `visibleCols()` leaves them out.
   tests/ui/test_apply_default_layout.py.
+- **Copy layout from another table… is the one-off, for tables whose
+  columns differ** (columns.js `openCopyLayoutModal`, `copiedOrder`,
+  `copiedColumns`). The header-set default only matches identical column
+  sets, and saving one changes what every later import opens to, which is
+  wrong for "make this table look like that one". It is a sideRail dialog:
+  tables sharing at least one column, the same header set first, then by
+  columns shared; the right pane is the order the copy would leave,
+  computed by the same function the copy uses. Shared columns take the
+  other table's order and per-column entry outright (no entry there
+  clears this table's, or a width it never had would survive the copy);
+  a column only this table has keeps its entry and goes right after the
+  column it follows now, so a derived column stays beside its input and
+  an extra column beside its neighbour. The other table's order is its
+  saved layout, or its columns in file order when it has none. Pins are
+  hidden in this side list: they are per browser and a table id names a
+  different table in every case. Applying goes through `replaceLayout`,
+  shared with the default, which offers Undo.
+  tests/ui/test_copy_layout_from_table.py.
 - **Right-clicking a table is a short menu, not the table menu**
   (`tableMenuItems`/`openTableContextMenu` in sources.js, one handler for
   the tab and both kinds of sidebar row). The right-click used to open the
