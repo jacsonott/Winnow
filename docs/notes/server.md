@@ -388,6 +388,25 @@ see [docs/notes/README.md](README.md) for the whole set.
   hostile page in another tab from turning the server off. A SQL pane
   query in flight is stopped by that SIGINT (`handle_exit` →
   `stop_pane_queries`, above), not by this route.
+  **Open windows used to hold it up the same way a runaway query did.**
+  Every page's `/api/presence` stream is a response that never finishes,
+  and uvicorn's graceful shutdown waits for every open response — so Shut
+  down answered 200, the page said "Winnow is off", and the process ran on
+  with the case lock held until the last window closed (the window that
+  pressed the button included; Ctrl+C and SIGTERM likewise). `main()`'s
+  `_Server.shutdown` now calls `_end_presence_streams()` before uvicorn
+  starts waiting: each stream sends `event: shutdown` (non-empty `data:`,
+  or EventSource never dispatches it) and ends, so the other windows say
+  "has shut down" instead of the lost-connection text, and the exit is
+  under a second. Under a bare `uvicorn server:app` there is no
+  `_Server`, so streams still hold it. Other in-flight requests (an
+  export downloading) are still waited for — that is the graceful part.
+  `_trigger_shutdown` raises its SIGINT **once**: uvicorn reads a second
+  one as the impatient Ctrl+C and force-quits without the lifespan, which
+  skips `Store.close()` (two windows pressing Shut down together).
+  Before asking, the confirm names the other windows on the server
+  (`GET /api/presence/others?page=`, the asking page excluded).
+  `tests/test_shutdown.py`, `tests/ui/test_shutdown_and_log.py`.
 
 - **Idle shutdown rides the presence stream, not request traffic.** An
   analyst reading the grid makes no requests for hours, so "last request

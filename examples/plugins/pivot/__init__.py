@@ -13,7 +13,9 @@ temp table in Winnow's scratch database, which `run_sql`'s read-only
 connection to the case file can't see — and reaching for the private reader
 that could is exactly what the plugin guide says not to do. That's why the
 Filters area exists: it's the pivot's own filtering, the way Excel's is, and
-it compiles into the same WHERE clause the aggregation runs under.
+it compiles into the same WHERE clause the aggregation runs under. Its tag
+chips are in that clause too: tags are a sidecar in the case file
+(`row_tags`), not part of a view, so `run_sql` reads them directly.
 
 **Subtotals come from grouping sets, not from re-adding the leaves.** Ask for
 a Count Distinct subtotal and summing the child cells gives you the wrong
@@ -73,6 +75,15 @@ OPERATORS = {
     "empty": ("is empty", "none"),
     "not_empty": ("is not empty", "none"),
 }
+
+# The tag filter, in the grid's own spelling (S.tagFilter, compiled by
+# Store._compile_where) so the chips mean here what they mean on the grid's
+# ribbon: a tag id keeps rows carrying that tag, TAG_ANY rows carrying any
+# tag, TAG_NONE rows carrying none — those three OR'd, because two chips
+# mean rows carrying either — and "!<id>" drops rows carrying that tag,
+# AND'd onto everything else, so "Suspicious, but not Benign" loses a row
+# that carries both.
+TAG_ANY, TAG_NONE = "__any__", "__none__"
 
 
 def register(api):
@@ -216,12 +227,14 @@ def _esc_like(value):
     return str(value).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-def _where(src, filters, coltypes):
+def _where(src, filters, coltypes, tag_clauses=()):
     """Compiles the Filters area into a WHERE clause plus its parameters.
 
     Values are bound, never interpolated — the identifiers are the only thing
     that goes into the SQL text, and those are validated against the source's
-    real column list first.
+    real column list first. `tag_clauses` is _tag_clauses' output, ANDed on
+    after the field filters; it carries no placeholders, so the parameter
+    order _inline relies on is the field filters' alone.
     """
     clauses, params = [], []
     for f in filters or []:
@@ -262,7 +275,74 @@ def _where(src, filters, coltypes):
         else:
             clauses.append(f"({ident} IS NULL OR {ident} = '')" if op == "empty"
                            else f"({ident} IS NOT NULL AND {ident} != '')")
+    clauses.extend(tag_clauses)
     return (" WHERE " + " AND ".join(clauses)) if clauses else "", params
+
+
+def _tagged(src, tag_ids=None):
+    """SQL that is true for a row carrying any of `tag_ids` — any tag at all
+    when None.
+
+    `row_tags` is keyed (source_id, rid) on the REAL table, so a merge's rows
+    are matched through the member each one came from: _scope's union
+    carries source_id for exactly this, and a merge's tags live on its
+    members (invariant #9). Every id is an int() by the time it gets here,
+    which is what lets them sit in the SQL text with no placeholder."""
+    only = f" AND tag_id IN ({','.join(str(int(t)) for t in tag_ids)})" if tag_ids else ""
+
+    # rid IN (subquery), the shape Store._compile_where uses, rather than a
+    # correlated EXISTS: filtered to a tag, SQLite walks the few tagged rids
+    # and seeks each one, instead of probing row_tags once per table row.
+    def one(source_id):
+        return f"s.rid IN (SELECT rid FROM row_tags WHERE source_id = {int(source_id)}{only})"
+
+    if not src.get("is_merge"):
+        return f"({one(src['id'])})"
+    # One arm per member, not `(s.source_id, s.rid) IN (SELECT source_id,
+    # rid ...)`. Both are right, but SQLite builds no lookup table for a
+    # row-value IN, so under NOT — an exclusion, or No tags — it rescans the
+    # subquery once per merged row: minutes on two 600k-row members with
+    # 50k rows excluded, where this takes under a second.
+    return "(" + " OR ".join(f"(s.source_id = {int(m)} AND {one(m)})"
+                             for m in src["member_source_ids"]) + ")"
+
+
+def _tag_clauses(req, src, tags):
+    """The tag filter as WHERE clauses: one for the exclusions, one for the
+    OR of everything kept. See TAG_ANY for the spelling and why it's that.
+
+    A tag id that isn't in the case is refused rather than compiled. Filtered
+    to a deleted tag, the pivot would otherwise answer "no rows" — a
+    confident zero, which in triage reads as "none of these happened"."""
+    if not tags:
+        return []
+    if not isinstance(tags, list):
+        raise ValueError("tags must be a list")
+    known = {int(t["id"]) for t in req.store.list_tags()}
+    kept, dropped, any_tag, no_tag = [], [], False, False
+    for key in tags:
+        if key == TAG_ANY:
+            any_tag = True
+            continue
+        if key == TAG_NONE:
+            no_tag = True
+            continue
+        text = "" if isinstance(key, bool) else str(key)
+        excluded = text.startswith("!")
+        digits = text[1:] if excluded else text
+        if not digits.isdecimal():
+            raise ValueError(f"Unknown tag filter {key!r}")
+        if int(digits) not in known:
+            raise ValueError(f"No tag {int(digits)} in this case — it may have been deleted")
+        (dropped if excluded else kept).append(int(digits))
+    clauses = []
+    if dropped:
+        clauses.append(f"NOT {_tagged(src, dropped)}")
+    either = ([_tagged(src)] if any_tag else []) + ([f"NOT {_tagged(src)}"] if no_tag else []) \
+        + ([_tagged(src, kept)] if kept else [])
+    if either:
+        clauses.append("(" + " OR ".join(either) + ")")
+    return clauses
 
 
 def _inline(sql, params):
@@ -328,7 +408,7 @@ def meta(req):
 def aggregate(req):
     """POST /api/plugin/pivot/aggregate
     body: {source_id, values: [{column?, agg}], group_sets: [[col, ...], ...],
-           filters: [...]}
+           filters: [...], tags?: [...]}
     -> {sets: [{keys: [col, ...], rows: [[k1, .., m1, ..], ...], truncated}], ...}
 
     One entry per requested grouping level, in the order asked for. `[]` is
@@ -356,7 +436,7 @@ def aggregate(req):
 
     for f in body.get("filters") or []:
         _check_columns(src, [f.get("column")])
-    where, params = _where(src, body.get("filters"), coltypes)
+    where, params = _where(src, body.get("filters"), coltypes, _tag_clauses(req, src, body.get("tags")))
     frm = _scope(req, src)
 
     out = []
@@ -391,7 +471,8 @@ def detail(req):
 
     Excel's "Show Details". `cell` is the row/column field values that
     identify the cell; they're turned into equality filters and AND'ed onto
-    whatever the Filters area already says.
+    whatever the Filters area already says — its tag filter included, or a
+    cell counted over Suspicious rows would open on every row behind it.
     """
     body = req.body or {}
     src = _source(req, body)
@@ -411,7 +492,7 @@ def detail(req):
         filters.append({"column": pair["column"], "op": "empty"} if value in (None, "")
                        else {"column": pair["column"], "op": "in", "values": [value]})
 
-    where, params = _where(src, filters, coltypes)
+    where, params = _where(src, filters, coltypes, _tag_clauses(req, src, body.get("tags")))
     cols = [c["name"] for c in src["columns"]]
     # s.rid, not a bare rid: with the sidecar joined, an unqualified rid is
     # ambiguous. Derived columns come from `d`, which is also why they show

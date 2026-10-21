@@ -713,7 +713,10 @@ export function buildColumnsPanel(container, refresh = openTableMenu) {
     for (const [name, row] of rows) row.hidden = !!q && !name.toLowerCase().includes(q);
   };
   search.oninput = applySearch;
-  S.order.forEach((name) => {
+  // A column grouped on is in the group strip, not the grid, so it is left
+  // out here as it is from the header (visibleCols). It is still in S.order
+  // — the drag order below runs over that — and is listed again on Ungroup.
+  S.order.filter((n) => !S.groupByCols.includes(n)).forEach((name) => {
     const row = el('div', 'collist-row');
     rows.set(name, row);
     const lab = el('label');

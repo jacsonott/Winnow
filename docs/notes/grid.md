@@ -180,6 +180,63 @@ see [docs/notes/README.md](README.md) for the whole set.
   pass (`prefetchGroupPages`) because it has two kinds of boundary: the
   next page inside a big expanded group, and the first page of the next
   expanded group.
+- **A jump paints from a glimpse, and asks for pages only where the grid
+  will still be** (grid.js's jumps block). Every frame of a scrollbar drag
+  lands on a different page, and `render()` used to `ensurePage` each one:
+  nothing cancelled the pages the thumb had left, Chromium sends six
+  requests to one host at a time, and the page the analyst let go on
+  queued behind all of them. On a 1M-row EvtxECmd table (27 columns,
+  8.6 MB a page, 110–390 ms to serve one warm and seconds cold) a
+  one-second drag sent ~31 page requests and its rows showed ~24 s after
+  release; a single jump to a far spot took 1.3–5.4 s and a drag on a
+  sorted view 20–22 s. Now the rows the screen is missing are fetched on
+  their own (`fetchGlimpse`, ~60 rows, ~7 ms to serve), one at a time
+  with the latest position winning, and the page is held back while the
+  grid is *jumping* (a paint moved `JUMP_ROWS` or more in the last
+  `SETTLE_MS`) or *outrunning* a page or prefetch it asked for and has
+  since left. The settle timer, or the stale fetch landing, comes back
+  for the page from where the grid came to rest. Measured on the same
+  table, headless: ~0.1 s from release to rows for the drag, the single
+  jump and the sorted drag alike, with frames across page boundaries
+  under the wheel unchanged — most of what is left is the paint itself
+  (~48 ms a frame there, three quarters of it the layout
+  `titleClippedCells` forces). Five things to keep:
+  - A glimpse's rows go into `S.rowsByPos`, so `rowAt` and everything on
+    it read them, but only where their page is not cached (the page's own
+    row objects are what tags and notes patch in place) and only until the
+    next glimpse. Anything that needs whole pages (copy, a tag key)
+    still goes through `S.pages`/`waitForPages` and never sees one.
+  - **Rows can now be written to before their page lands**, which the old
+    grid never allowed: a row was a placeholder until then. The note box
+    is the one write that patches the row under it without loading its
+    page first, and the page asked for at the settle was answered before
+    the note was saved — landing over the row, it put the old, empty note
+    on the row and, through `showDetail`, in the box. `saveNote` calls
+    `refetchPageOf`, which disowns that fetch (ensurePage drops a page
+    whose `S.pending` entry is no longer its own, which is also why its
+    `finally` deletes only its own entry) and the paint after asks again.
+    A new write path that patches `rowAt()` in place needs the same.
+  - `S.rowsByPos` is the only record of whether the screen has its rows.
+    A glimpse's rows disappear when a page lands over them and is evicted
+    later, so a check that trusted `screenGlimpse`'s own range said a
+    revisited spot was covered and left it blank until its pages came back,
+    4–5 s cold.
+  - A glimpse that fails is not retried for that view; the page after the
+    settle is the fallback and has its own recovery. Retrying on every
+    paint is the request-per-repaint loop
+    `tests/ui/test_expired_view_recovers_once.py` counts.
+  - Grouped mode has the deferral (`groupRowAt` doesn't ask mid-jump) but
+    no glimpse: a drag through a big expanded group shows placeholders
+    until the settle and one page round trip (0.9–1.5 s on the same
+    table grouped by Level, against 1.7–5.2 s before).
+  `tests/ui/test_scrollbar_drag_lands.py` holds it on a stubbed 1M-row
+  view: every page asked for once the drag starts is held, and the rows it
+  stopped on have to paint anyway; the old grid asks for a page every few
+  frames and never paints there. It also holds the page following the
+  settle, and a note written before that page lands surviving it. A test
+  that holds a page back to keep rows pending has to hold every request
+  reaching into those rows, glimpses included
+  (test_tag_picks_across_pages.py does).
 - **The spacer that gives the grid its scroll height is capped**
   (`MAX_SPACER_PX`, 16M px) and above that cap `scrollTop` is no longer a
   row offset. A DOM element can't be arbitrarily tall — Blink clamps at
@@ -356,15 +413,30 @@ see [docs/notes/README.md](README.md) for the whole set.
   is sticky — so grouping while scrolled right painted a screen of header
   rows with every label off past the left edge: the view that was asked
   for, with the part naming each group not on it. The column just grouped
-  on has also left `S.order`, which makes the horizontal position it was
-  read at a description of a column set that no longer exists. Both
-  entries into a grouping do it — `addGroupLevel` (the strip's drop
-  target, the column menu, Group by tag) and `toggleGrouping`'s restore
-  branch — and `setGrouping` deliberately does **not**: a table switch
+  on has also left the grid (`visibleCols()`), which makes the horizontal
+  position it was read at a description of a column set that no longer
+  exists. Both entries into a grouping do it — `addGroupLevel` (the
+  strip's drop target, the column menu, Group by tag) and
+  `toggleGrouping`'s restore branch — and `setGrouping` deliberately does
+  **not**: a table switch
   restores its stashed grouping through there, and that path is putting
   the analyst back where they were, horizontal position included.
   `tests/ui/test_group_scrolls_left.py` asserts the symptom (the first
   header's label inside the scroller's box), not the `scrollLeft` alone.
+- **A grouped column never leaves `S.order`.** `visibleCols()` leaves out
+  whatever `S.groupByCols` holds, and that is the whole of how a column
+  grouped on stops being a data column; the Columns panel lists the same
+  set. `S.order` stayed the full layout through every grouping, so Ungroup,
+  a removed pill, a failed Group-by and a table switch have nothing to put
+  back. It used to be cut out of `S.order` and restored from a snapshot
+  (`S.preGroupOrder`), and every way the two drifted apart lost a column:
+  a failed Group-by turned the grouping off without the restore, leaving
+  the column out of the grid *and* the Columns panel until the table was
+  opened again; a layout saved while grouped (any resize or sort) was saved
+  without it, so it reopened at the far right; a level removed from its
+  pill was appended at the far right; a column moved while grouped jumped
+  back on Ungroup. Anything that writes `S.order` writes the full order,
+  grouped columns included. `tests/ui/test_ungroup_keeps_columns.py`.
 - **`cellRangeRowCount()` exists because the toolbar asks every paint.**
   Ctrl+Shift+Down makes the answer "the whole view", and materialising
   200,000 positions per scroll frame just to read `.length` off them is

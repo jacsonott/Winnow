@@ -16,6 +16,18 @@ const BLANK = '(blank)';           // Excel's spelling for an empty grouping key
 const REFRESH_MS = 250;            // debounce after a field change
 const MAX_COLS = 60;               // rendered column groups before we stop and say so
 
+/* The tag filter, spelled as the grid's ribbon spells it (S.tagFilter in
+   static/js/tags.js) so a chip means the same thing on both: a tag id keeps
+   rows carrying it, TAG_ANY rows carrying any tag, TAG_NONE rows carrying
+   none — those OR'd, as two chips are on the ribbon — and '!<id>' drops
+   rows carrying that tag, AND'd onto the rest. The backend's _tag_clauses
+   compiles exactly this list. */
+const TAG_ANY = '__any__';
+const TAG_NONE = '__none__';
+const tagExcludeKey = (id) => `!${id}`;
+const isTagExclusion = (key) => typeof key === 'string' && key.startsWith('!');
+const tagIdOf = (key) => (isTagExclusion(key) ? Number(key.slice(1)) : key);
+
 /* ------------------------------------------------ saved pivots */
 
 /* The pivots survive the case being closed, because they live in the case
@@ -35,7 +47,7 @@ const STATE_VERSION = 1;
 const MAX_SAVED_PIVOTS = 24;
 
 const emptySpec = (name) => ({
-  name, sourceId: null, rows: [], cols: [], values: [], filters: [],
+  name, sourceId: null, rows: [], cols: [], values: [], filters: [], tags: [],
   subtotals: true, grandTotals: true,
 });
 
@@ -62,7 +74,7 @@ export function pivotSpec(p, sources) {
   return {
     name: p.name,
     source: savedSource(src),
-    rows: p.rows, cols: p.cols, values: p.values, filters: p.filters,
+    rows: p.rows, cols: p.cols, values: p.values, filters: p.filters, tags: p.tags,
     subtotals: p.subtotals, grandTotals: p.grandTotals,
   };
 }
@@ -91,10 +103,32 @@ function resolveSource(saved, sources) {
   return (name === null ? null : sources.find((s) => s.name === name)) || null;
 }
 
+/* A saved tag filter, against the case's tags as they are now. Tag ids are
+   never reused (tag_defs is AUTOINCREMENT), so an id that is still listed is
+   still the tag that was meant, and one that isn't was deleted: dropped, and
+   said, because "only rows tagged X" against a tag nothing carries any more
+   would be a pivot of nothing. A list that can't be read (`tags` null) is
+   kept as saved, and the backend refuses a dead id by name. */
+function restoreTags(keys, tags, gone) {
+  const out = [];
+  const live = Array.isArray(tags) ? new Map(tags.map((t) => [t.id, t])) : null;
+  for (const key of Array.isArray(keys) ? keys : []) {
+    let kept = null;
+    if (key === TAG_ANY || key === TAG_NONE) kept = key;
+    else if (Number.isInteger(tagIdOf(key))) {
+      if (!live || live.has(tagIdOf(key))) kept = key;
+      else gone.push(key);
+    }
+    if (kept !== null && !out.includes(kept)) out.push(kept);
+  }
+  return out;
+}
+
 /* What of a saved payload this case can still honour: the pivot specs, the
    one that was on top, and a line per pivot that lost something. Pure — it
-   reads the payload and the live source list and nothing else. */
-export function planRestore(payload, sources) {
+   reads the payload, the live source list and the case's tags, and nothing
+   else. */
+export function planRestore(payload, sources, tags = null) {
   if (!payload || payload.v !== STATE_VERSION) return null;
   const saved = Array.isArray(payload.pivots) ? payload.pivots.slice(0, MAX_SAVED_PIVOTS) : [];
   if (!saved.length) return null;
@@ -141,6 +175,12 @@ export function planRestore(payload, sources) {
       return false;
     });
     if (gone.length) notes.push(`${name}: dropped ${[...new Set(gone)].join(', ')} — not in ${src.name} any more`);
+    const goneTags = [];
+    spec.tags = restoreTags(p.tags, tags, goneTags);
+    if (goneTags.length) {
+      notes.push(`${name}: dropped ${goneTags.length === 1 ? 'a tag' : `${goneTags.length} tags`}`
+        + ' from its tag filter — not in this case any more');
+    }
     pivots.push(spec);
   }
   if (!pivots.length) return null;
@@ -164,7 +204,7 @@ export default function mount(container, winnow) {
   const newPivotState = (name) => ({
     name,
     sourceId: null,
-    rows: [], cols: [], values: [], filters: [],
+    rows: [], cols: [], values: [], filters: [], tags: [],
     meta: sharedMeta, data: null, index: null,
     sort: null,               // {measure: idx, dir: 1|-1} — null = by key
     subtotals: true, grandTotals: true,
@@ -183,7 +223,7 @@ export default function mount(container, winnow) {
      is also how an analyst says "forget this", and a null payload is how
      that reaches the case file. */
   const worthKeeping = () => pivots.length > 1 || pivots.some((p) => (
-    p.rows.length || p.cols.length || p.values.length || p.filters.length
+    p.rows.length || p.cols.length || p.values.length || p.filters.length || p.tags.length
     || !p.subtotals || !p.grandTotals));
   function saveState() {
     if (!saveOn || !winnow.tabState) return;   // an older Winnow has no tabState
@@ -269,6 +309,7 @@ export default function mount(container, winnow) {
     renderPivotTabs();
     fillSources();
     renderFields();
+    renderTagRibbon();
     render();
   }
 
@@ -293,10 +334,10 @@ export default function mount(container, winnow) {
   csvBtn.title = 'Download the pivot as a CSV file';
   csvBtn.onclick = () => downloadCsv();
   const clearBtn = el('button', 'btn ghost', 'Clear');
-  clearBtn.title = 'Empty every field area';
+  clearBtn.title = 'Empty every field area, and turn the tag filter off';
   clearBtn.onclick = () => {
-    state.rows = []; state.cols = []; state.values = []; state.filters = [];
-    state.sort = null; renderFields(); scheduleRefresh();
+    state.rows = []; state.cols = []; state.values = []; state.filters = []; state.tags = [];
+    state.sort = null; renderFields(); renderTagRibbon(); scheduleRefresh();
   };
   const status = el('span', 'note-status', '');
   status.style.cssText = 'margin-left:auto;text-align:right';
@@ -355,6 +396,8 @@ export default function mount(container, winnow) {
     renderPivotTabs();
     fillSources();
     renderFields();
+    renderTagRibbon();
+    loadTagCounts();
     render();
     // Which pivot is on top is part of what gets restored, and one that
     // was restored has no data until something asks for it. Both silent:
@@ -406,6 +449,10 @@ export default function mount(container, winnow) {
     ['values', 'Values', 'What each cell measures'],
   ];
   const zoneBodies = {};
+  // The grid's own .tag-ribbon / .tag-chip classes, so the chips look as
+  // they do on the ribbon in every skin and theme with no CSS of ours.
+  const tagRibbon = el('div', 'tag-ribbon');
+  tagRibbon.style.cssText = 'margin-bottom:2px';
   for (const [id, label, hint] of ZONES) {
     const box = el('div');
     box.style.cssText = 'border:1px dashed var(--line-2);border-radius:var(--radius-sm);'
@@ -416,7 +463,12 @@ export default function mount(container, winnow) {
     head.style.cssText = 'font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--dim)';
     const list = el('div');
     list.style.cssText = 'display:flex;flex-direction:column;gap:4px';
-    box.append(head, list);
+    box.append(head);
+    // The tag chips head the Filters well: they decide which rows the
+    // pivot counts, as the field filters below them do, and a pivot that
+    // is only counting Suspicious rows should say so where its filters are.
+    if (id === 'filters') box.append(tagRibbon);
+    box.append(list);
     zoneBodies[id] = list;
     wireDropTarget(box, id);
     zoneWrap.append(box);
@@ -713,6 +765,137 @@ export default function mount(container, winnow) {
     return wrap;
   }
 
+  /* ----------------------------------------------------- tag filter */
+
+  /* The grid's tag ribbon, in the Filters well: the same chips, the same
+     clicks and the same right-click menu (static/js/tags.js), so an analyst
+     who knows one knows the other. The chip counts are this TABLE's — the
+     grid's are its view's — because the pivot's own answer is the cross-tab
+     beside them; the tooltip says which. */
+
+  // How many rows of the pivot's table carry each tag, for the chips.
+  // Keyed like the grid's S.tagCountsAll; read again whenever the table
+  // changes or the tab comes back into view (rows may have been tagged).
+  let tagCounts = {};
+  let tagCountsSeq = 0;
+
+  const caseTags = () => winnow.state.tags || [];
+
+  async function loadTagCounts() {
+    const id = state.sourceId;
+    const seq = ++tagCountsSeq;
+    if (id == null) { tagCounts = {}; renderTagRibbon(); return; }
+    let res;
+    try {
+      res = await api(`/api/tags?source_id=${id}`);
+    } catch (e) {
+      return;   // the chips keep the numbers they had; the filter itself is unaffected
+    }
+    if (seq !== tagCountsSeq) return;   // a newer table's counts are on the way
+    tagCounts = res.counts || {};
+    renderTagRibbon();
+  }
+
+  function setTagFilter(next) {
+    state.tags = next;
+    renderTagRibbon();
+    scheduleRefresh();
+  }
+
+  /* The ribbon's click rules, copied rather than imported (a plugin sees
+     the app through `winnow` only): click adds, click again removes, a
+     specific tag drops Any tag, and an exclusion stays put except for the
+     tag being picked, which can't be both. */
+  function toggleTagFilterKey(key) {
+    const has = state.tags.includes(key);
+    const out = state.tags.filter(isTagExclusion).filter((k) => k !== tagExcludeKey(key));
+    let next = state.tags.filter((k) => !isTagExclusion(k) && k !== key);
+    if (key === TAG_ANY) next = has ? [] : [TAG_ANY];
+    else if (!has) next = [...next.filter((k) => k !== TAG_ANY), key];
+    setTagFilter([...next, ...out]);
+  }
+
+  // Excluding a tag that was filtered TO swaps it, rather than leaving both
+  // on and the pivot empty.
+  function toggleTagExclusion(id) {
+    const key = tagExcludeKey(id);
+    const has = state.tags.includes(key);
+    const next = state.tags.filter((k) => k !== key && k !== id);
+    setTagFilter(has ? next : [...next, key]);
+  }
+
+  function tagChipMenuItems(t) {
+    return [
+      { label: `Filter to ${t.name}`, checked: state.tags.includes(t.id),
+        title: 'Count only rows carrying this tag — the same as clicking the chip',
+        onclick: () => toggleTagFilterKey(t.id) },
+      { label: `Exclude ${t.name}`, checked: state.tags.includes(tagExcludeKey(t.id)),
+        title: 'Leave out every row carrying this tag. Combines with the rest of the tag filter: Suspicious with this one excluded means Suspicious rows that are not also this.',
+        onclick: () => toggleTagExclusion(t.id) },
+      '-',
+      { label: 'Clear the tag filter', disabled: !state.tags.length, onclick: () => setTagFilter([]) },
+    ];
+  }
+
+  function renderTagRibbon() {
+    tagRibbon.replaceChildren();
+    for (const t of caseTags()) {
+      const chip = el('button', 'tag-chip');
+      const on = state.tags.includes(t.id);
+      const out = state.tags.includes(tagExcludeKey(t.id));
+      chip.dataset.tag = String(t.id);
+      chip.setAttribute('aria-pressed', String(on));
+      chip.classList.toggle('excluded', out);
+      chip.style.color = on || out ? t.color : '';
+      const sw = el('span', 'swatch');
+      sw.style.background = t.color;
+      chip.append(sw, el('span', 'name', t.name));
+      const n = tagCounts[t.id] || 0;
+      if (n) chip.append(el('span', 'n', n.toLocaleString()));
+      // No hotkey badge: the keys tag rows in the grid, and there are no
+      // rows to tag here.
+      chip.title = out
+        ? `Excluded: rows tagged ${t.name} are left out of the pivot. Click to count them again.`
+        : `${n.toLocaleString()} row${n === 1 ? '' : 's'} in this table tagged ${t.name}. Click to count only those`
+          + ' — chips add up, so two of them mean rows carrying either. Right-click to exclude it instead.';
+      chip.onclick = () => (out ? toggleTagExclusion(t.id) : toggleTagFilterKey(t.id));
+      chip.oncontextmenu = (e) => {
+        e.preventDefault();
+        winnow.dropdownMenu(chip, tagChipMenuItems(t));
+      };
+      tagRibbon.append(chip);
+    }
+    const any = el('button', 'tag-chip');
+    any.dataset.tag = TAG_ANY;
+    any.setAttribute('aria-pressed', String(state.tags.includes(TAG_ANY)));
+    any.title = 'Rows carrying any tag at all. Picking a specific tag replaces it — it already includes every tag.';
+    any.append(el('span', null, 'Any tag'));
+    any.onclick = () => toggleTagFilterKey(TAG_ANY);
+    const none = el('button', 'tag-chip');
+    none.dataset.tag = TAG_NONE;
+    none.setAttribute('aria-pressed', String(state.tags.includes(TAG_NONE)));
+    none.title = 'Rows with no tag on them — what is left to go through. Adds to any tags picked beside it.';
+    none.append(el('span', null, 'No tags'));
+    none.onclick = () => toggleTagFilterKey(TAG_NONE);
+    tagRibbon.append(any, none);
+  }
+
+  /* A tag deleted in the grid while this tab was open: its key would name
+     nothing, and the backend refuses it rather than count no rows. Dropped
+     from every pivot; returns the pivots that lost one. */
+  function dropDeletedTags() {
+    const live = new Set(caseTags().map((t) => t.id));
+    const changed = new Set();
+    for (const p of pivots) {
+      const kept = p.tags.filter((k) => k === TAG_ANY || k === TAG_NONE || live.has(tagIdOf(k)));
+      if (kept.length === p.tags.length) continue;
+      p.tags = kept;
+      p.data = null;
+      changed.add(p);
+    }
+    return changed;
+  }
+
   const aggLabel = (id) => (state.meta.aggregations.find((a) => a.id === id) || {}).label || id;
   /* Excel's naming, and for the same reason: three Count measures over three
      different fields are three different columns, and labelling them all
@@ -783,6 +966,7 @@ export default function mount(container, winnow) {
         values: measures,
         group_sets: sets,
         filters: state.filters,
+        tags: state.tags,
       });
       if (seq !== querySeq) return;   // a newer request already answered
       state.data = res;
@@ -1131,7 +1315,7 @@ export default function mount(container, winnow) {
     const label = cell.map((c) => `${c.column}=${c.value === '' ? BLANK : c.value}`).join(' · ');
     modal(`Rows behind ${label}`, (b) => {
       b.append(el('p', 'note-status', 'Reading…'));
-      post(`${winnow.base}/detail`, { source_id: state.sourceId, cell, filters: state.filters })
+      post(`${winnow.base}/detail`, { source_id: state.sourceId, cell, filters: state.filters, tags: state.tags })
         .then((res) => {
           b.replaceChildren();
           if (!res.rows.length) { b.append(el('p', 'note-status', 'No rows.')); return; }
@@ -1245,9 +1429,13 @@ export default function mount(container, winnow) {
     state.sourceId = id;
     // Fields are per-table: keeping them across a switch would leave a
     // pivot referring to columns the new table doesn't have.
-    state.rows = []; state.cols = []; state.values = []; state.filters = [];
+    // The tag filter goes with them, though tags are case-wide: a switch
+    // starts the pivot over, as the grid starts each table on its own filter.
+    state.rows = []; state.cols = []; state.values = []; state.filters = []; state.tags = [];
     state.sort = null; state.data = null;
     renderFields();
+    renderTagRibbon();
+    loadTagCounts();
     render();
     saveEdit();   // the table is the pivot's first fact; nothing else fires here
   }
@@ -1307,7 +1495,22 @@ export default function mount(container, winnow) {
     if (again) again.focus();
   }
 
-  refresh = () => { fillSources(); renderFields(); };
+  /* Back from the grid, where tags may have been edited, deleted or put on
+     rows: the chips and their counts are read again, and a pivot filtered
+     on tags is re-run, because the rows it counted may not be the rows
+     carrying those tags any more. */
+  refresh = () => {
+    fillSources();
+    renderFields();
+    const dropped = dropDeletedTags();
+    renderTagRibbon();
+    loadTagCounts();
+    // Not an edit, so no saveEdit: the restore line stays, as it does when
+    // a restore drops a tag.
+    if (dropped.size) saveState();
+    for (const p of pivots) if (p !== state && p.tags.length) p.data = null;
+    if (dropped.has(state) || state.tags.length) queueQuery();
+  };
 
   (async () => {
     try {
@@ -1321,7 +1524,8 @@ export default function mount(container, winnow) {
     // A read that FAILED is not a mount with nothing saved: the row may be
     // sitting there unread. See saveOn below.
     const unreadable = !!(saved && saved.error);
-    const restored = saved && !unreadable ? planRestore(saved.payload, winnow.state.sources) : null;
+    const restored = saved && !unreadable
+      ? planRestore(saved.payload, winnow.state.sources, winnow.state.tags || null) : null;
     if (restored) {
       pivots.splice(0, pivots.length,
         // The ordering a header click applied is deliberately not restored:
@@ -1339,6 +1543,8 @@ export default function mount(container, winnow) {
     renderPivotTabs();
     fillSources();
     renderFields();
+    renderTagRibbon();
+    loadTagCounts();
     render();
     // Saving only starts once we know what a save would replace.
     saveOn = !unreadable;

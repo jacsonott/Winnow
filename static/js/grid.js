@@ -79,6 +79,7 @@ export function clearPageCache() {
   S.rowsByPos.clear();
   S.pending.clear();
   S.pageGen++;
+  screenGlimpse = null;   // its rows went with rowsByPos; a glimpse in flight checks pageGen
 }
 
 /* The view handle the last recovery rebuild was started for — the two in
@@ -116,6 +117,7 @@ export function ensurePage(idx, { keep, prefetch } = {}) {
     try {
       const data = await api(`/api/rows?view_id=${vid}&start=${idx * PAGE}&count=${PAGE}`);
       if (!S.view || S.view.view_id !== vid || S.pageGen !== gen) return;
+      if (S.pending.get(idx) !== p) return;   // disowned by refetchPageOf
       /* An in-range page that comes back empty means this client's view
          handle and the server's view disagree about how many rows there
          are. Caching the empty array would be the worst possible response:
@@ -153,7 +155,9 @@ export function ensurePage(idx, { keep, prefetch } = {}) {
       // spec over. Nothing in flight means nobody else will: rebuild.
       if (String(e.message).includes('expired') && !rebuildInFlight()) recoverView(view);
     } finally {
-      S.pending.delete(idx);
+      // Only its own entry: after clearPageCache or refetchPageOf the
+      // entry, if any, is a newer fetch's.
+      if (S.pending.get(idx) === p) S.pending.delete(idx);
     }
   })();
   S.pending.set(idx, p);
@@ -209,9 +213,14 @@ export function prefetchFlatPages() {
   if (!S.view) return;   // exported: not every caller is schedulePrefetch
   const maxPage = Math.floor(Math.max(0, S.view.row_count - 1) / PAGE);
   const [firstPage, lastPage] = visiblePageRange();
+  // Mid-jump the pages either side are pages the grid is about to leave,
+  // and while it is outrunning its fetches these would queue behind them
+  // (see the jumps block below). The paint that ends either schedules
+  // this again.
+  if (isJumping() || outrunning(firstPage, lastPage)) return;
   for (let d = 1; d <= PREFETCH_RADIUS; d++) {
     for (const idx of [lastPage + d, firstPage - d]) {
-      if (idx >= 0 && idx <= maxPage) ensurePage(idx, { prefetch: true });
+      if (idx >= 0 && idx <= maxPage && !S.pages.has(idx) && !S.pending.has(idx)) gridFetch(idx, { prefetch: true });
     }
   }
 }
@@ -220,6 +229,7 @@ export function prefetchFlatPages() {
    the next page *within* a big expanded group, and the first page of the
    *next* expanded group. Both stall the same way, so both get warmed. */
 export function prefetchGroupPages() {
+  if (isJumping()) return;   // as in prefetchFlatPages
   const body = $('body');
   const virt = vScroll(body, S.groupTotalRows, headH());
   const first = Math.max(0, Math.floor(virt / ROW_H) - OVERSCAN);
@@ -245,6 +255,181 @@ export function nextExpandedLeaf(gi, step) {
     if (g.expanded && isLeafLevel(g.level) && g.rowCount) return i;
   }
   return null;
+}
+
+/* ---------------------------------------------------------------- jumps */
+
+/* A long jump — the scrollbar's thumb dragged, Ctrl+End, a click on the
+   histogram — paints the rows it lands on by fetching just those rows, and
+   fetches the page around them only once the grid has stopped moving.
+
+   What it replaced: every frame of a thumb drag lands on a different page,
+   and render() asked for each one with nothing to cancel the pages the
+   thumb had already passed. The browser sends six requests to one host at
+   a time, so the page the analyst let go on queued behind every page the
+   drag crossed. Measured on a 1M-row EvtxECmd table (27 columns, 8.6 MB a
+   page, 110–390 ms to serve one warm, seconds cold): a one-second drag sent
+   ~31 page requests, and the rows it stopped on showed ~24 s after the
+   button came up. Those rows are ~60 of the page's 5,000, and fetching
+   only them takes ~7 ms.
+
+   So the screen never waits for a page: rows it is missing are fetched on
+   their own (a glimpse), whatever else is in flight. One glimpse is in
+   flight at a time and nothing queues behind it — when it lands it
+   repaints, and that paint asks for wherever the grid is by then, so a
+   drag shows rows as it goes and the rows it stops on are at most one
+   small round trip behind it.
+
+   And pages are only asked for where the grid will still be when they
+   land. Not while it is *jumping* — a paint in the last SETTLE_MS moved
+   further than JUMP_ROWS, which no wheel or key does (a notch is three
+   rows, PageDown a screen) and a thumb drag on any big table does — and
+   not while it is *outrunning* them: a page it or the prefetch asked for
+   is still on its way, for a place it has since left (a slow drag, one
+   that paused and went on, a jump before the last one's pages came back).
+   Asking for more then is the queue starting over. Either way the grid
+   comes back for the page — the settle timer, or the stale fetch's
+   landing — from wherever it came to rest, so the page cache, the
+   prefetch and everything that reads S.pages carry on as before, and a
+   glimpse only ever stands in for a page that is about to arrive. */
+export const JUMP_ROWS = 1000;
+export const SETTLE_MS = 150;
+
+let lastPaintFirst = null;   // the first row the last flat paint drew
+let jumpedAt = -Infinity;
+let settleTimer = null;
+const gridFetches = new Set();   // { page, gen }: asked for by a paint or the prefetch, not landed yet
+let waitingOnStale = false;      // a page or prefetch was held back for one of gridFetches
+
+export function isJumping() { return performance.now() - jumpedAt < SETTLE_MS; }
+
+function settleLater() {
+  clearTimeout(settleTimer);
+  settleTimer = setTimeout(() => { settleTimer = null; render(); }, SETTLE_MS);
+}
+
+export function noteViewportMove(first) {
+  if (lastPaintFirst !== null && Math.abs(first - lastPaintFirst) >= JUMP_ROWS) {
+    jumpedAt = performance.now();
+    settleLater();
+  }
+  lastPaintFirst = first;
+}
+
+/* A page the grid asked for, for pages pFirst..pLast and the prefetch
+   radius around them, that has not landed — the grid has moved on. */
+function outrunning(pFirst, pLast) {
+  for (const f of gridFetches) {
+    if (f.gen === S.pageGen && (f.page < pFirst - PREFETCH_RADIUS || f.page > pLast + PREFETCH_RADIUS)
+        && !S.pages.has(f.page)) {
+      waitingOnStale = true;
+      return true;
+    }
+  }
+  return false;
+}
+
+export function gridFetch(idx, opts) {
+  const f = { page: idx, gen: S.pageGen };
+  gridFetches.add(f);
+  ensurePage(idx, opts).finally(() => {
+    gridFetches.delete(f);
+    if (waitingOnStale) { waitingOnStale = false; settleLater(); }
+  });
+}
+
+/* What render() asks for, for rows [first, last) on pages pFirst..pLast. */
+function loadScreen(first, last, pFirst, pLast) {
+  let uncached = false;
+  for (let p = pFirst; p <= pLast; p++) if (!S.pages.has(p)) uncached = true;
+  if (!uncached) return;
+  glimpseIfMissing(first, last);
+  // Held back, the page is asked for again by the settle timer
+  // noteViewportMove armed, or by the stale fetch landing (gridFetch).
+  if (isJumping() || outrunning(pFirst, pLast)) return;
+  for (let p = pFirst; p <= pLast; p++) if (!S.pages.has(p) && !S.pending.has(p)) gridFetch(p);
+}
+
+/* The rows on screen, fetched on their own: { view, gen, start, end, rows }.
+   Its rows sit in S.rowsByPos, so rowAt and everything built on it read
+   them like any other — but only where their page isn't cached (a cached
+   page's row objects are the ones a tag or a note patches in place), and
+   only until the next glimpse replaces them or their page lands over them.
+   That keeps S.rowsByPos what trimPageCache assumes it is: the cached
+   pages' rows, plus at most one screenful. */
+export let screenGlimpse = null;
+let glimpseInFlight = null;   // { view, gen }
+/* The view a glimpse failed on. The page is the fallback, with its own
+   recovery; a glimpse retried on every paint would be the
+   request-per-repaint loop test_expired_view_recovers_once.py holds the
+   page fetches to. */
+let glimpseFailedView = null;
+
+/* A note written to a row whose page isn't cached went onto a glimpse
+   row, and the page that will land over it may have been asked for before
+   the write — answered with the old note, and showDetail would put that
+   in the note box the moment it landed. Disown that fetch, and a glimpse
+   in flight for the same reason (both drop what they bring), so the next
+   paint asks for the page afresh. */
+export function refetchPageOf(pos) {
+  if (S.groupByCols.length) return;
+  const idx = Math.floor(pos / PAGE);
+  if (S.pages.has(idx)) return;
+  S.pending.delete(idx);
+  glimpseInFlight = null;
+}
+
+/* S.rowsByPos is the only record of what the screen has: a glimpse's
+   rows go when a page lands over them and that page is evicted later. */
+function glimpseIfMissing(first, last) {
+  for (let pos = first; pos < last; pos++) {
+    if (!S.rowsByPos.has(pos)) { fetchGlimpse(first, last); return; }
+  }
+}
+
+function fetchGlimpse(first, last) {
+  if (last <= first) return;   // scrolled past the end of a view that just got shorter
+  const view = S.view;
+  const gen = S.pageGen;
+  if (glimpseFailedView === view) return;
+  if (glimpseInFlight && glimpseInFlight.view === view && glimpseInFlight.gen === gen) return;
+  const req = { view, gen };
+  glimpseInFlight = req;
+  (async () => {
+    try {
+      const data = await api(`/api/rows?view_id=${view.view_id}&start=${first}&count=${last - first}`);
+      if (S.view !== view || S.pageGen !== gen || glimpseInFlight !== req) return;
+      // In range and empty: the same desync ensurePage guards against.
+      if (!data.rows.length && first < view.row_count) {
+        glimpseFailedView = view;
+        recoverView(view);
+        return;
+      }
+      glimpseInFlight = null;   // before anything below asks for the next one
+      // Mid-drag the grid has usually moved on by the time a glimpse lands.
+      // Off the screen it paints nothing, so skip the paint (it is most of
+      // a frame on a wide table) and go straight for where the grid is.
+      if (S.groupByCols.length) return;
+      const now = paintWindow();
+      if (now.last <= first || now.first >= first + data.rows.length) {
+        glimpseIfMissing(now.first, now.last);
+        return;
+      }
+      if (screenGlimpse) {
+        for (const r of screenGlimpse.rows) if (S.rowsByPos.get(r.pos) === r) S.rowsByPos.delete(r.pos);
+      }
+      for (const r of data.rows) if (!S.pages.has(Math.floor(r.pos / PAGE))) S.rowsByPos.set(r.pos, r);
+      screenGlimpse = { view, gen, start: first, end: first + data.rows.length, rows: data.rows };
+      render();
+      if (!$('detail').hidden && S.cursor >= first && S.cursor < last && rowAt(S.cursor)) showDetail(S.cursor);
+    } catch (e) {
+      glimpseFailedView = view;
+      // Same reading of "expired" as ensurePage's.
+      if (String(e.message).includes('expired') && !rebuildInFlight()) recoverView(view);
+    } finally {
+      if (glimpseInFlight === req) glimpseInFlight = null;
+    }
+  })();
 }
 
 /* `pos` is a view position in flat mode and a position in the flattened
@@ -351,6 +536,15 @@ export function syncRowsWidth(widths, cols) {
   if (rowsEl.style.width !== w) rowsEl.style.width = w;
 }
 
+/* The rows a flat paint draws: the screen, and OVERSCAN either side. */
+export function paintWindow(body = $('body')) {
+  const total = S.view.row_count;
+  const virt = vScroll(body, total, headH());
+  const first = Math.max(0, Math.floor(virt / ROW_H) - OVERSCAN);
+  const last = Math.min(total, first + Math.ceil(body.clientHeight / ROW_H) + OVERSCAN * 2);
+  return { virt, first, last };
+}
+
 export function render() {
   if (!S.view) return;
   syncSelectAllCheckbox();
@@ -359,10 +553,7 @@ export function render() {
   const body = $('body');
   const rowsEl = $('rows');
   const total = S.view.row_count;
-  const virt = vScroll(body, total, headH());
-  const first = Math.max(0, Math.floor(virt / ROW_H) - OVERSCAN);
-  const visible = Math.ceil(body.clientHeight / ROW_H) + OVERSCAN * 2;
-  const last = Math.min(total, first + visible);
+  const { virt, first, last } = paintWindow(body);
 
   /* Clamped to the pages the view actually has. Without the cap, a grid
      still scrolled past the end of a view that just got shorter asks for a
@@ -371,7 +562,8 @@ export function render() {
      on purpose would spin rebuilds for no reason. */
   const lastPage = Math.floor(Math.max(0, total - 1) / PAGE);
   const wantLast = Math.min(lastPage, Math.floor(Math.max(first, last - 1) / PAGE));
-  for (let p = Math.floor(first / PAGE); p <= wantLast; p++) ensurePage(p);
+  noteViewportMove(first);
+  loadScreen(first, last, Math.floor(first / PAGE), wantLast);
   schedulePrefetch();
 
   const ctx = rowPaintContext();
@@ -1051,7 +1243,9 @@ $('body').addEventListener('scroll', () => {
 if (typeof ResizeObserver !== 'undefined') {
   new ResizeObserver(() => {
     const b = $('body');
-    if (b.clientWidth && b.scrollLeft + b.clientWidth > paintedRight) render();
+    // Gone once Shut down replaces the page with its farewell — and
+    // taking the grid out of the page is itself a resize this sees.
+    if (b && b.clientWidth && b.scrollLeft + b.clientWidth > paintedRight) render();
   }).observe($('body'));
 }
 

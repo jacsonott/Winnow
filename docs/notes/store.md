@@ -513,15 +513,29 @@ see [docs/notes/README.md](README.md) for the whole set.
   row_tags' primary key, skipped entirely for a member with no tags at
   all — the same short-circuit `tag_counts_in_view` makes.
 - **Histogram buckets are floored, and 1601 is a real minimum.** A bucket
-  is `[b, b + bucket_seconds)` — the strip finds a row's bar that way —
-  but SQLite's `/` truncates toward zero, so `(e / w) * w` put every
-  pre-1970 row one bar late. `time_histogram` shifts the epoch by whole
-  buckets past the span's minimum before dividing (non-negative dividends
-  floor and truncate alike, and `EPOCH`, a strftime over TS_NORMALIZE, is
-  still evaluated once per row). The `start`/`end` labels come from
-  SQLite's `datetime(…, 'unixepoch')` rather than `time.gmtime`, which
-  raises OSError on Windows for any negative epoch — FILETIME zero is
-  exactly that. `tests/test_histogram.py`.
+  is `[b, b + bucket_seconds)` — the strip finds a row's bar that way.
+  The fold into buckets is Python's `//`, which floors; it was SQLite's
+  `/` once, which truncates toward zero and put every pre-1970 row one
+  bar late. The `start`/`end` labels come from SQLite's
+  `datetime(…, 'unixepoch')` rather than `time.gmtime`, which raises
+  OSError on Windows for any negative epoch — FILETIME zero is exactly
+  that. `tests/test_histogram.py`.
+- **The histogram parses each row once, and SQLite will not do that by
+  itself.** `time_histogram` is one query grouped by the exact second
+  (and by tag, when split), with the bucket width picked from the first
+  and last second it returns and the fold done in Python over distinct
+  seconds — not the span pass, count pass and tag pass it used to be. Two
+  things it depends on, both counted in `test_each_row_is_parsed_once`:
+  the union subquery ends in `LIMIT -1`, without which SQLite flattens a
+  one-member subquery (or pushes `e IS NOT NULL` into each branch of a
+  merge's union) and copies the epoch expression to every place `e` is
+  named, two or three `TS_NORMALIZE` calls a row; and `ts_normalize_sql`
+  does the full-ISO shape in SQLite rather than Python, keeping
+  `TS_NORMALIZE` for everything else, held to the same answer by a
+  corpus and a fuzz test. The old three passes called `TS_NORMALIZE` six
+  times a row; on a 500k-row view that was 5–6 s against 0.9 s now (1.7 s
+  with the tag split). The same `LIMIT -1` applies to any aggregate here
+  that names a Python-function column more than once.
 
 - **`tag_counts_in_view`** is what the tag ribbon shows once a filter or
   search is on: the same shape `tag_counts` returns, counted over one view.

@@ -78,7 +78,6 @@ export const S = {
   groupByCols: [],         // ordered column names — [] for normal flat mode, nested grouping otherwise
   groupSort: 'count',      // 'count' | 'value' — how each level's groups are ordered
   groupSortDir: 'desc',    // 'asc' | 'desc' — direction within groupSort
-  preGroupOrder: null,     // S.order snapshot from just before the first column was dragged into grouping
   groups: [],              // flat array reflecting the currently-visible tree — see the group-by section below
   groupPrefix: [],         // prefix sums: virtual position where each group's header row starts
   groupTotalRows: 0,

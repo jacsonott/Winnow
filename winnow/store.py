@@ -38,6 +38,7 @@ import sys
 import tempfile
 import threading
 import time
+from array import array
 from typing import Any, Callable, Iterable, Iterator, Sequence
 
 from openpyxl import Workbook
@@ -754,6 +755,37 @@ def _ts_normalize(raw: Any) -> str | None:
         y, mo, d, hh, mi, sec = _month_parts(m)
         return f"{y:04d}-{mo:02d}-{d:02d} {hh:02d}:{mi:02d}:{sec:02d}"
     return None
+
+
+# The value _TS_ISO_RE reads with every part present, as a GLOB: four
+# digits, two, two, a space or a T, then HH:MM:SS, and anything after.
+_TS_ISO_GLOB = "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9][ T][0-9][0-9]:[0-9][0-9]:[0-9][0-9]*"
+
+
+def ts_normalize_sql(expr: str) -> str:
+    """TS_NORMALIZE(expr) as SQL, with the common case done by SQLite.
+
+    TS_NORMALIZE is a Python function, so calling it is a trip through the
+    interpreter per row, and on an aggregate over a whole view that trip
+    is most of the cost. Most datetime columns hold the ISO shape with the
+    time in full — EvtxECmd's and MFTECmd's timestamps, among others — and for a
+    TEXT value matching _TS_ISO_GLOB, _ts_normalize returns exactly its
+    first ten characters, a space, and characters 12–19: _TS_ISO_RE's
+    groups sit at fixed offsets once every part is present, it ignores
+    what follows the seconds (a fraction, a Z, an offset), and a value
+    starting with a digit has no leading space for strip() to remove.
+    Everything else — a US date, a month name, a missing seconds field,
+    padding, a non-ASCII digit, a number or a BLOB — still goes to
+    TS_NORMALIZE, so the two cannot disagree. typeof() keeps BLOBs out of
+    the fast branch: GLOB and substr read a BLOB's bytes, where
+    _ts_normalize sees `b'…'` and returns None. tests/test_histogram.py
+    holds the two to the same answer.
+
+    `expr` appears several times in the result, so pass a column
+    reference, not something expensive."""
+    return (f"CASE WHEN typeof({expr}) = 'text' AND {expr} GLOB '{_TS_ISO_GLOB}' "
+            f"THEN substr({expr}, 1, 10) || ' ' || substr({expr}, 12, 8) "
+            f"ELSE TS_NORMALIZE({expr}) END")
 
 
 # The Timeline's summary line (see build_timeline). Both caps are about a
@@ -9021,17 +9053,29 @@ class Store:
                        op_token: str | None = None, stack: str | None = None) -> dict:
         """Time buckets over the rows of the CURRENT view — filtered, searched,
         timeframe'd, exactly what the grid shows — for a datetime column.
-        Two aggregate passes on the reader pool (invariant #4), shaped like
+        One aggregate pass on the reader pool (invariant #4), shaped like
         group_summary's column branch: a root_virtual/unfiltered view reads
         the member tables directly, a materialised one joins v.view_N; a
-        merge unions its members. Pass 1 finds the span, pass 2 counts per
-        bucket at the width HISTOGRAM_BUCKETS gives that span.
+        merge unions its members.
 
         TS_NORMALIZE turns whatever the column stores into a sortable
         'YYYY-MM-DD HH:MM:SS…' (a derived datetime column already is one),
         and strftime('%s') turns that into epoch seconds — rows the
         normaliser can't parse have no epoch and fall out of the histogram
-        rather than piling into bucket zero."""
+        rather than piling into bucket zero.
+
+        **Each row's epoch is worked out once.** This used to be two passes
+        — the span first, then a count per bucket at the width the span
+        called for — and a third for the tag split, and SQLite copied the
+        epoch expression into each place a pass named it: six calls of
+        TS_NORMALIZE (a Python function) a row, 5–6 s on a 500k-row view,
+        for a strip that refreshes on every filter change. The one pass
+        groups by the exact second instead (and by tag, when split), and
+        the bucket width is picked from the first and last second it
+        returns, so folding into buckets is a walk over distinct seconds,
+        not rows. ts_normalize_sql takes the common ISO shape out of Python
+        altogether. Together: ~1 s on the same view, the same answer
+        (tests/test_histogram.py)."""
         handle = self._views.get(view_id)
         if not handle:
             raise ViewExpired("View expired — rebuild it")
@@ -9045,12 +9089,13 @@ class Store:
             raise ValueError(f"{column} is not a datetime column")
         direct = self._grouping_covers_whole_source(handle, src) or handle.get("kind") == "root_virtual"
         is_derived = self._is_derived(src, column)
+        stacked = stack == "tags"
 
         def branch(m: dict, select: str) -> str:
             derived_alias = None if direct else "d"
             rsrc = self._ref_src_for(src, m)
             ref = self._col_ref(rsrc, column, "s", derived_alias)
-            ts = ref if is_derived else f"TS_NORMALIZE({ref})"
+            ts = ref if is_derived else ts_normalize_sql(ref)
             epoch = f"CAST(strftime('%s', {ts}) AS INTEGER)"
             if direct:
                 scope = f"FROM {self._member_from(src, m, 's')}"
@@ -9060,89 +9105,98 @@ class Store:
                          f"{self._member_derived_join(rsrc, m, 's')}")
             return f"SELECT {select.replace('EPOCH', epoch)} {scope}"
 
-        span_union = " UNION ALL ".join(branch(m, "EPOCH AS e") for m in members)
+        # Distinct seconds in order, as flat int arrays rather than a list
+        # of row tuples: a view whose every row is its own second holds as
+        # many of these as it has rows. Untagged is 0 — tag ids start at 1.
+        secs, tags, counts = array("q"), array("q"), array("q")
         with self._reader() as ro, self._dropped_view_is_expired(), self._interruptible(op_token, ro):
+            tag_of = self._histogram_tag_exprs(ro, members) if stacked else {}
+            union = " UNION ALL ".join(
+                branch(m, "EPOCH AS e" + (f", {tag_of[m['source_id']]} AS tag" if stacked else ""))
+                for m in members)
+            keys = "e, tag" if stacked else "e"
+            # LIMIT -1 limits nothing; it is what keeps EPOCH to one call
+            # per row. Without it SQLite flattens a one-member subquery
+            # into this query, or pushes the IS NOT NULL down into each
+            # branch of a merge's union, and either way copies the
+            # expression to every place `e` is named — two or three
+            # TS_NORMALIZE calls a row, counted. Neither is allowed past a
+            # LIMIT, since moving a WHERE across one changes what it means.
+            for row in ro.execute(f"SELECT {keys}, COUNT(*) FROM ({union} LIMIT -1) WHERE e IS NOT NULL "
+                                  f"GROUP BY {keys} ORDER BY {keys}"):
+                secs.append(row[0])
+                counts.append(row[-1])
+                if stacked:
+                    tags.append(row[1] or 0)
+            if not secs:
+                return {"column": column, "bucket_seconds": 0, "start": None, "end": None,
+                        "total": 0, "buckets": []}
+            lo, hi = secs[0], secs[-1]
             # The labels come from SQLite too, not time.gmtime: on Windows
             # that raises OSError for anything before 1970 (a 500 for a
             # column holding FILETIME zero), and SQLite formats every year
             # its own strftime('%s') could have produced.
-            lo, hi, n, lo_text, hi_text = ro.execute(
-                "SELECT MIN(e), MAX(e), COUNT(*), datetime(MIN(e), 'unixepoch'), "
-                f"datetime(MAX(e), 'unixepoch') FROM ({span_union}) WHERE e IS NOT NULL").fetchone()
-        if not n:
-            return {"column": column, "bucket_seconds": 0, "start": None, "end": None,
-                    "total": 0, "buckets": []}
-        span = max(0, int(hi) - int(lo))
+            lo_text, hi_text = ro.execute(
+                "SELECT datetime(?, 'unixepoch'), datetime(?, 'unixepoch')", (lo, hi)).fetchone()
+        span = hi - lo
         bucket = next((b for b in self.HISTOGRAM_BUCKETS if span / b <= max_buckets),
                       self.HISTOGRAM_BUCKETS[-1])
         # A bucket starts at floor(e / bucket) * bucket, which is what the
         # strip assumes when it finds a row's bar (b <= t < b + bucket).
-        # SQLite's integer division truncates toward zero instead, so a
-        # pre-1970 (negative) epoch landed in the bucket AFTER its own —
-        # and 1601, FILETIME zero, is a value real artefacts carry. Shifting
-        # by a whole number of buckets past the span's minimum makes every
-        # dividend non-negative, where the two agree, and keeps EPOCH (a
-        # strftime over TS_NORMALIZE) evaluated once per row.
-        shift = max(0, -(int(lo) // bucket)) * bucket
-        bucket_sql = f"((EPOCH + {shift}) / {bucket}) * {bucket} - {shift}"
-        count_union = " UNION ALL ".join(
-            branch(m, f"{bucket_sql} AS b, 1 AS one") for m in members)
-        with self._reader() as ro, self._dropped_view_is_expired(), self._interruptible(op_token, ro):
-            rows = ro.execute(
-                f"SELECT b, COUNT(*) AS n FROM ({count_union}) WHERE b IS NOT NULL GROUP BY b ORDER BY b"
-            ).fetchall()
+        # Python's // floors; SQLite's integer division truncates toward
+        # zero, which bucketed a pre-1970 (negative) epoch one bar late
+        # while this was done in SQL — and 1601, FILETIME zero, is a value
+        # real artefacts carry.
+        per_bucket: dict[int, int] = {}
+        for e, n in zip(secs, counts):
+            b = e // bucket * bucket
+            per_bucket[b] = per_bucket.get(b, 0) + n
         out = {"column": column, "bucket_seconds": bucket,
-               "start": lo_text, "end": hi_text, "total": int(n),
-               "buckets": [[int(r[0]), int(r[1])] for r in rows]}
-        if stack == "tags":
-            out["stack"] = self._histogram_tag_stack(branch, members, bucket_sql, op_token)
+               "start": lo_text, "end": hi_text, "total": sum(counts),
+               "buckets": [[b, per_bucket[b]] for b in sorted(per_bucket)]}
+        if stacked:
+            out["stack"] = self._histogram_tag_stack(secs, tags, counts, bucket)
         return out
 
-    def _histogram_tag_stack(self, branch, members: list[dict], bucket_sql: str,
-                             op_token: str | None) -> dict:
-        """The same buckets split by tag, as {tags: [id…], buckets: [[epoch,
-        [untagged, n_first_tag, …]], …]}.
+    def _histogram_tag_exprs(self, ro: sqlite3.Connection, members: list[dict]) -> dict[int, str]:
+        """Per member, the SQL for the tag a row is counted under in the
+        histogram's tag split — the FIRST tag it carries in ribbon order,
+        which is the lowest tag id, since the ribbon renders tag_defs in id
+        order; NULL for an untagged row.
 
-        **One row, one segment.** Each row counts under the FIRST tag it
-        carries in ribbon order — which is the lowest tag id, since the
-        ribbon renders tag_defs in id order — and untagged rows make the
-        base segment. So a stacked bar is exactly as tall as the plain one
-        and the stacked chart and the flat chart are the same chart, read
-        two ways. Counting a two-tag row under both segments (which is what
-        grouping by tag does, deliberately — see _tag_group_branches) would
-        make bars taller than the rows they describe, and a height that
-        stops meaning "rows" is not worth the extra truth about one tag's
-        total: the ribbon already carries those numbers exactly.
+        **One row, one segment.** Untagged rows make the base segment, so a
+        stacked bar is exactly as tall as the plain one and the stacked
+        chart and the flat chart are the same chart, read two ways.
+        Counting a two-tag row under both segments (which is what grouping
+        by tag does, deliberately — see _tag_group_branches) would make bars
+        taller than the rows they describe, and a height that stops meaning
+        "rows" is not worth the extra truth about one tag's total: the
+        ribbon already carries those numbers exactly.
 
         The per-row lookup is a correlated MIN over row_tags' primary key
         (source_id, rid, tag_id) — a prefix probe per row, not a join the
-        planner can turn inside out. Skipped entirely for a member with no
-        tags at all, the same short-circuit tag_counts_in_view makes,
-        because that is the common case and it costs nothing to notice.
-        """
-        with self._reader() as ro, self._dropped_view_is_expired(), self._interruptible(op_token, ro):
-            tagged = {m["source_id"] for m in members
-                      if ro.execute("SELECT 1 FROM row_tags WHERE source_id=? LIMIT 1",
-                                    (m["source_id"],)).fetchone()}
-            parts = []
-            for m in members:
-                if m["source_id"] in tagged:
-                    tag = ("(SELECT MIN(rt.tag_id) FROM row_tags rt "
-                           f"WHERE rt.source_id = {int(m['source_id'])} AND rt.rid = s.rid)")
-                else:
-                    tag = "NULL"
-                parts.append(branch(m, f"{bucket_sql} AS b, {tag} AS tag"))
-            union = " UNION ALL ".join(parts)
-            rows = ro.execute(
-                f"SELECT b, tag, COUNT(*) AS n FROM ({union}) WHERE b IS NOT NULL "
-                "GROUP BY b, tag ORDER BY b"
-            ).fetchall()
-        ids = sorted({int(r[1]) for r in rows if r[1] is not None})
+        planner can turn inside out. A member with no tags at all gets a
+        bare NULL instead, the same short-circuit tag_counts_in_view makes,
+        because that is the common case and it costs nothing to notice."""
+        out = {}
+        for m in members:
+            sid = int(m["source_id"])
+            has_tags = ro.execute("SELECT 1 FROM row_tags WHERE source_id=? LIMIT 1", (sid,)).fetchone()
+            out[sid] = (f"(SELECT MIN(rt.tag_id) FROM row_tags rt WHERE rt.source_id = {sid} AND rt.rid = s.rid)"
+                        if has_tags else "NULL")
+        return out
+
+    @staticmethod
+    def _histogram_tag_stack(secs: array, tags: array, counts: array, bucket: int) -> dict:
+        """time_histogram's (second, tag, count) rows folded into the same
+        buckets as the plain chart, split by tag: {tags: [id…], buckets:
+        [[epoch, [untagged, n_first_tag, …]], …]}, the tags in id order."""
+        ids = sorted({t for t in tags if t})
         slot = {tid: i + 1 for i, tid in enumerate(ids)}
         by_bucket: dict[int, list[int]] = {}
-        for b, tag, cnt in rows:
-            counts = by_bucket.setdefault(int(b), [0] * (len(ids) + 1))
-            counts[0 if tag is None else slot[int(tag)]] += int(cnt)
+        for e, t, n in zip(secs, tags, counts):
+            split = by_bucket.setdefault(e // bucket * bucket, [0] * (len(ids) + 1))
+            split[slot[t] if t else 0] += n
         return {"tags": ids,
                 "buckets": [[b, by_bucket[b]] for b in sorted(by_bucket)]}
 

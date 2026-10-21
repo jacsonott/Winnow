@@ -56,7 +56,12 @@ see [docs/notes/README.md](README.md) for the whole set.
   sidebar and dashboards without moving anyone; it still opens a table
   when nothing is on screen, which is what makes the FIRST import land.
   Any new background caller wants that option — `refreshSourcesQuietly()`
-  in tables.js exists for the same reason on the polling path.
+  in tables.js exists for the same reason on the polling path. The plugin
+  context's `refreshSources()` is one: it was a plain `loadSources()`,
+  harmless while First/Last's Create table always called `openSource` on
+  the new table right after, and wrong once a create could land while the
+  analyst was on the grid with a filter set — it reset the filter, and
+  pulled anyone still on the First/Last tab to the grid.
 
 - **Row striping is a preference, saved per skin** (`STYLES[].stripes` is
   the default, `S.appearance.stripes` holds only the skins the analyst has
@@ -181,6 +186,34 @@ see [docs/notes/README.md](README.md) for the whole set.
   slightly old one — and appends "showing the previous filter" to the
   count line, because a chart that is quietly wrong is worse than one
   that is obviously absent.
+
+- **…and an old chart is faded from the moment the view starts to
+  change, not from when the new answer is asked for.** The breathe above
+  was the only cue, and it started late: the strip asked only on
+  `winnow:viewchange` (after the build, the seed page, the remap, the
+  regroup and the paint) plus `REFRESH_MS`, and the answer took seconds
+  on a big table, so for all of that the previous view's chart sat at
+  full strength under the new view's rows — scrolling moved nothing on
+  it — and then "suddenly updated". Now `fresh()` decides whether the
+  chart is the answer for the grid as it is now; when it is not, the
+  canvas is faded and grey (`.is-outdated`, after a 120 ms beat so a
+  small table never blinks), the position marks and the tag legend are
+  dropped, the drag and the hover are off, and the count line says
+  "Updating…". Not fresh means a rebuild in flight (`rebuildInFlight()`,
+  so view.js's own notion, not a second flag), a landed view whose answer
+  is not back, or a column or split changed and not yet answered. view.js
+  says when: `histogramFollowBuild()` as a build starts and whenever it
+  ends without landing (cancelled, superseded, refused, detached — the old
+  view and its chart are current again), and `histogramViewLanded()` from
+  `installView` the moment `S.view` is swapped, which is the ask. Not
+  earlier: asked as `POST /api/view` returned, the aggregate (a Python
+  function per row, so it holds the GIL) took the grid's seed page from
+  ~2 ms to 40–80 ms on a 500k-row table. The viewchange listener skips
+  its ask when the view was asked about as it landed (`askedFor`); a 409
+  clears `askedFor` so the landing asks again. The strip is still not
+  emptied: one that collapsed to a line and back would move the grid
+  under the pointer on every filter change.
+  tests/ui/test_histogram_fades_while_updating.py.
 
 - **A case switch resets the histogram strip; it does not wait for a
   view change.** The strip only ever redrew on `winnow:viewchange`, so
@@ -556,7 +589,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   !== id`, decided before `S.sourceId` is overwritten): every refresh idiom
   — `loadSources()` with no select after a column add, a sidebar folder
   op or closing some *other* tab, `openSource(S.sourceId)` from the
-  derived-column modal, the plugin API's `refreshSources()` — re-enters
+  derived-column modal — re-enters
   `openSource` for the table already open, and an unconditional hide there
   took the pane away under the analyst on all of them. `loadSources`'
   empty-state branch (last tab closed, the table on screen removed) and
@@ -756,10 +789,10 @@ see [docs/notes/README.md](README.md) for the whole set.
     that's what keeps `activeSavedFilterRecord()`'s JSON-stringify
     matching honest, and it gives apply-time the same leniency `sort:
     p.sort || S.sort` has (a payload without the key leaves the current
-    grouping alone; setGrouping() replaces wholesale, restoring
-    `S.preGroupOrder` first so a formerly-grouped column doesn't leak out
-    of the visible layout). `clearAllFilters()` now drops grouping too —
-    stashed in `S.lastGroupBy` first, which is also what the `X`
+    grouping alone; setGrouping() replaces wholesale, and a
+    formerly-grouped column is back in the grid by itself because grouping
+    never takes it out of `S.order` — see grid.md). `clearAllFilters()`
+    now drops grouping too — stashed in `S.lastGroupBy` first, which is also what the `X`
     toggleGrouping keybind restores (the deliberate contrast with lowercase
     `x` dropGrouping, which just drops).
   - **Jump to timestamp** (`Store.find_nearest_timestamp`,
@@ -1236,10 +1269,40 @@ see [docs/notes/README.md](README.md) for the whole set.
   sitting over a column of `1`s. `headerWidthFor` now reads the live DOM
   instead: the label's `scrollWidth` (its full text, even while clipped)
   plus `hcell.clientWidth - label.clientWidth` (padding, gaps and every
-  non-label child; the grip is absolutely positioned, so it isn't in
-  that difference). It's idempotent by construction — once the label
+  non-label child). It's idempotent by construction — once the label
   isn't clipped, both terms stop changing — and returns 0 for a column
   with no header on screen, where callers fall back to the old estimate.
+- **A column divider is found by distance, not by an element under the
+  pointer** (columns.js `dividerAt`, wired once on `#headRow` by
+  `wireColumnDividers`). The grab used to be a 7px `.grip` inside each
+  header at `right: -3px`, meant to straddle the 1px line — but
+  `.hcell`'s `overflow: hidden` (the `.fcell` entry above says why it
+  stays) clipped it to the 4px left of the line. The line itself and
+  everything right of it were headers, so the double-click analysts aimed
+  at the line sorted that column twice instead of fitting the one they
+  meant, which analysts reported as extremely easy to do. The zone
+  is now `DIVIDER_REACH` (5px) either side of the line, 11px in all,
+  which stays inside both cells' 8px padding and so never covers a name,
+  a sort arrow or a button. Two things make it work, and a "just give
+  each header a wider grip again" would lose both. **Half the zone
+  lies over the next column's cell**, which nothing inside this one can
+  reach through the clip — hence one set of listeners on the row, in the
+  capture phase, so a press that grabs a line never reaches the header
+  under it (no sort, no reorder drag; a right-click is left alone and is
+  still that header's column menu). **Which line is under the pointer is
+  read off what is painted** (`elementFromPoint`), not off the cells'
+  order or boxes: a pinned header is drawn over whatever scrolls under it
+  and two pins park side by side whatever lies between them in the order,
+  so the line beside a pin is the pin's, and a scrolled-under column's
+  line never pokes through a pinned header. A per-header grip with a
+  z-index gets one of those wrong whichever z-index it picks — the next
+  pin covers the outer half of a pin's grip, or a scrolled-under grip
+  covers a pin. The cursor (`.head-row.at-divider`) is the zone's only
+  visible sign, and its tooltip is borrowed: the header the pointer is
+  over wears "Drag to resize, double-click to autofit this column" while
+  the pointer is on a line. tests/ui/test_column_divider.py presses on
+  the line and either side of it, between two parked pins, and on the
+  names beside it.
 - **The autofit cap is a user setting** (`S.appearance.autofitMax`,
   Settings → Grid & layout, default `AUTOFIT_MAX_W_DEFAULT` = 900px, `0`
   meaning uncapped), not the old hardcoded 480. A cap still exists by
