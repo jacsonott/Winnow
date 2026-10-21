@@ -1336,6 +1336,40 @@ see [docs/notes/README.md](README.md) for the whole set.
   opens that source first when it isn't the one on screen — not a
   convenience, a precondition, since every panel reads the live
   `S.layout`/`S.order`/`S.columns` rather than the record it was handed.
+- **A header set's default layout seeds a table once, so it needs its
+  own way onto the rest** (columns.js `applyDefaultLayout`, the table
+  menu's "Apply default layout for these columns"). `openSource` reads
+  the default only when the table has no layout of its own, and almost
+  every table has one by the second visit: a resize, a sort, a hidden
+  column and Reset view all call `saveLayout`. Reset view keeps the
+  layout on purpose (it is the clear-everything button, used many times
+  an hour), so a default saved after a table was first opened had no
+  way to reach it, which is how it was reported. Applying takes the
+  default's order and per-column settings for the imported columns,
+  keeps each derived column's own entry and re-places it beside its
+  input with `placeUnorderedColumns` (the same helper `openSource` uses),
+  and offers Undo, since nothing else brings back the layout it replaced.
+  A grouped table needs nothing extra: grouped columns stay in `S.order`
+  and `visibleCols()` leaves them out.
+  tests/ui/test_apply_default_layout.py.
+- **Copy layout from another table… is the one-off, for tables whose
+  columns differ** (columns.js `openCopyLayoutModal`, `copiedOrder`,
+  `copiedColumns`). The header-set default only matches identical column
+  sets, and saving one changes what every later import opens to, which is
+  wrong for "make this table look like that one". It is a sideRail dialog:
+  tables sharing at least one column, the same header set first, then by
+  columns shared; the right pane is the order the copy would leave,
+  computed by the same function the copy uses. Shared columns take the
+  other table's order and per-column entry outright (no entry there
+  clears this table's, or a width it never had would survive the copy);
+  a column only this table has keeps its entry and goes right after the
+  column it follows now, so a derived column stays beside its input and
+  an extra column beside its neighbour. The other table's order is its
+  saved layout, or its columns in file order when it has none. Pins are
+  hidden in this side list: they are per browser and a table id names a
+  different table in every case. Applying goes through `replaceLayout`,
+  shared with the default, which offers Undo.
+  tests/ui/test_copy_layout_from_table.py.
 - **Right-clicking a table is a short menu, not the table menu**
   (`tableMenuItems`/`openTableContextMenu` in sources.js, one handler for
   the tab and both kinds of sidebar row). The right-click used to open the

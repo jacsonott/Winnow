@@ -2245,14 +2245,23 @@ textarea:focus { border-color: var(--accent); outline: none; }
   font-family: var(--mono); font-size: 11px; background: var(--ink);
   border: 1px solid var(--line-2); border-radius: var(--radius-sm); padding: 1px 5px; justify-self: start;
 }
-.collist { display: grid; gap: 2px; max-height: 46vh; overflow: auto; }
+/* One column, never wider than the list. A bare grid's implicit `auto`
+   column grows to its widest row's min-content, so a single long column
+   name made EVERY row wider than the list, and in a narrow window each
+   row's ⤒ ⤓ buttons sat off the right edge behind a sideways scrollbar. */
+.collist { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; max-height: 46vh; overflow: auto; }
 .collist-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .collist-row.dragging { opacity: .4; }
 .collist-row.drop-before { box-shadow: inset 0 2px 0 var(--accent); }
 .collist-row.drop-after { box-shadow: inset 0 -2px 0 var(--accent); }
 .collist-row:hover { background: var(--panel-2); }
 .collist label { display: flex; align-items: center; gap: 8px; padding: 3px 4px; font-family: var(--mono); font-size: 12px; flex: 1; min-width: 0; }
-.collist-type { color: var(--col-type); }
+/* What gives way when a row is short of room: the name first, cut with
+   an ellipsis down to a few letters (the label's title keeps it whole),
+   then the type. The buttons never do. */
+.collist-name, .collist-type { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.collist-name { flex: 0 1000 auto; min-width: 4ch; }
+.collist-type { flex: 0 1 auto; min-width: 0; color: var(--col-type); }
 .modal-body .row-actions { display: flex; gap: 6px; margin-top: 12px; align-items: center; }
 .modal-body .row-actions h4 { flex: 1; margin: 0; }
 /* A form dialog's field captions (New case / Save as a case, Edit case,
@@ -3030,6 +3039,23 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .import-file-path { flex: 1 1 auto; min-width: 0; font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .import-file.excluded .import-file-path { color: var(--text-dim); }
 .import-file-note { flex: 0 1 auto; max-width: 45%; font-size: 11px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Copy a layout from another table (columns.js openCopyLayoutModal): the
+   side list is tables and the preview is the order the copy would leave.
+   No pins: a table's id names a different table in every case, and pins
+   are kept per browser. */
+.copy-layout .side-rail-pin { display: none; }
+.copy-layout-preview { flex: 1 1 0; min-height: 0; }
+.copy-layout-preview .side-preview-rows { padding: 4px; }
+.copy-layout-cols { display: flex; flex-direction: column; gap: 1px; }
+.copy-layout-col {
+  display: flex; align-items: baseline; gap: 10px; min-height: 22px; padding: 2px 6px;
+  border-radius: var(--radius-sm); font-family: var(--mono); font-size: 12px; color: var(--text);
+}
+.copy-layout-col.hidden-col .copy-layout-name { color: var(--dim); text-decoration: line-through; }
+.copy-layout-col.own { background: var(--panel-2); }
+.copy-layout-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.copy-layout-note { flex: 0 0 auto; font-family: var(--ui); font-size: 11px; color: var(--dim); }
 
 /* Shown while dragging OS files over the window (wireFileDrop in app.js) —
    above .modal's own z-index so it's visible even if a modal happens to be

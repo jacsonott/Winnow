@@ -1,14 +1,15 @@
 /* Column layout: header rendering, drag-to-reorder, widths and autofit.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
-import { $, AUTOFIT_MAX_W_DEFAULT, GUTTER_W, api, debounce, el, nameMap, post, toast } from './core.js';
+import { $, AUTOFIT_MAX_W_DEFAULT, GUTTER_W, api, debounce, el, nameMap, post, toast, toastAction } from './core.js';
 import { columnMenuItems, opLabel } from './derived.js';
 import { columnFilterChips, openValuePicker, pickerTreeNode, removeColumnFilter, valueFilterEnabled } from './filters.js';
 import { render, setCellRange } from './grid.js';
 import { renderGroupStrip } from './grouping.js';
 import { S, clearCellSelection, gridRowCount, selClear, selSetAll, selSnapshot } from './state.js';
+import { sourceLabel } from './sources.js';
 import { baseColumns, columnMeta } from './tsformat.js';
-import { anchoredPanel, contextMenu } from './ui.js';
+import { anchoredPanel, closeModal, contextMenu, modal, sideRail, sideRailMatch } from './ui.js';
 import { rebuildSoon, rebuildView } from './view.js';
 
 /* ---------------------------------------------------------------- header */
@@ -746,10 +747,246 @@ export async function saveDefaultLayout() {
       // matching this layout when it's opened somewhere else.
       col_names: baseColumns().map((c) => c.name), order: S.order, columns: S.layout,
     });
-    toast('Saved as the default layout for this set of columns');
+    // Said here because it is exactly what went wrong: a table that
+    // already has a layout keeps it, and nothing else said so.
+    toast('Saved as the default layout for these columns. A table that already has a layout keeps it until "Apply default layout for these columns" in its table menu', 6000);
   } catch (e) {
     toast('Could not save default layout: ' + e.message, 4000);
   }
+}
+
+/* The saved default for this table's header set, or null when there is
+   none. Asked by the base columns, for the reason saveDefaultLayout gives. */
+export async function findDefaultLayout() {
+  const qp = new URLSearchParams();
+  for (const c of baseColumns()) qp.append('col_names', c.name);
+  const found = await api(`/api/column_layouts/find?${qp.toString()}`);
+  return found && found.order ? found : null;
+}
+
+/* Adds every column of the table that `order` doesn't name yet, in place.
+   A derived column goes right after the column it was derived from, after
+   any siblings already sitting there (a flatten adds several from one
+   input, in order), not at the far end where nobody scrolls. Anything
+   else (no derived_from, or an input the order doesn't name) appends.
+   Re-derive keeps its name, so it never moves. Returns whether any column
+   was placed beside its input. */
+export function placeUnorderedColumns(order) {
+  let placed = false;
+  for (const c of S.columns) {
+    if (order.includes(c.name)) continue;
+    let at = c.derived_from ? order.indexOf(c.derived_from) : -1;
+    if (at === -1) { order.push(c.name); continue; }
+    while (at + 1 < order.length) {
+      const next = S.columns.find((x) => x.name === order[at + 1]);
+      if (next && next.derived_from === c.derived_from) at++; else break;
+    }
+    order.splice(at + 1, 0, c.name);
+    placed = true;
+  }
+  return placed;
+}
+
+/* The other half of saveDefaultLayout, for a table that already has a
+   layout of its own. Opening a table seeds the default only into one that
+   has never saved a layout, and almost every table has (a resize, a sort
+   or Reset view saves one), so a default saved after a table's first open
+   never reached it, and Reset view keeps the layout on purpose. The
+   imported columns take the default's order, visibility, widths, pins and
+   formats outright; a derived column keeps its own settings and goes back
+   beside its input, as on open. Undo is offered because nothing else
+   brings back the layout this replaces. */
+export async function applyDefaultLayout() {
+  const id = S.sourceId;
+  if (!id || !S.columns.length) return;
+  let found;
+  try { found = await findDefaultLayout(); } catch (e) {
+    toast('Could not read the default layout: ' + e.message, 4000);
+    return;
+  }
+  if (S.sourceId !== id) return;
+  if (!found) {
+    toast('No default layout is saved for these columns yet — "Save layout as default for these columns" on a table with them saves one', 5000);
+    return;
+  }
+  const layout = nameMap(found.columns);
+  for (const c of S.columns) {
+    if (!c.derived) continue;
+    if (S.layout[c.name]) layout[c.name] = S.layout[c.name]; else delete layout[c.name];
+  }
+  const order = found.order.filter((n) => S.columns.some((c) => c.name === n));
+  placeUnorderedColumns(order);
+  replaceLayout(order, layout, 'Applied the default layout for these columns');
+}
+
+/* Puts a whole new order and set of per-column settings on the table on
+   screen, saves it, and says so in a toast whose Undo puts the old ones
+   back. A grouped column stays in S.order (visibleCols() leaves it out),
+   so grouping needs nothing here. */
+export function replaceLayout(order, layout, message) {
+  const id = S.sourceId;
+  const before = { order: [...S.order], layout: S.layout };
+  S.layout = layout;
+  S.order = order;
+  renderHead(); render(); saveLayout();
+  toastAction(message, 'Undo', () => {
+    if (S.sourceId !== id) return;
+    S.order = before.order;
+    S.layout = before.layout;
+    renderHead(); render(); saveLayout();
+  });
+}
+
+/* --------------------------------------- copying another table's layout */
+
+/* The order the table on screen gets from another table's: the columns
+   both have, in the other table's order, and each column only this one
+   has right after the column it follows now, so a derived column stays
+   beside its input and an extra column beside its neighbour. One
+   computation for the preview and the copy, so they cannot disagree. */
+export function copiedOrder(fromOrder) {
+  const mine = new Set(S.columns.map((c) => c.name));
+  const shared = fromOrder.filter((n) => mine.has(n));
+  const isShared = new Set(shared);
+  const after = new Map();
+  let anchor = '';
+  for (const n of S.order) {
+    if (isShared.has(n)) { anchor = n; continue; }
+    if (!mine.has(n)) continue;
+    if (!after.has(anchor)) after.set(anchor, []);
+    after.get(anchor).push(n);
+  }
+  const order = [...(after.get('') || [])];
+  for (const n of shared) order.push(n, ...(after.get(n) || []));
+  placeUnorderedColumns(order);
+  return { order, shared: isShared };
+}
+
+/* The per-column settings that go with it: a shared column takes the
+   other table's entry outright (none there means none here, so a width
+   it never had set is not kept from this one), and a column only this
+   table has keeps its own. */
+export function copiedColumns(fromColumns, shared) {
+  const layout = nameMap(S.layout);
+  for (const n of shared) {
+    if (fromColumns[n]) layout[n] = { ...fromColumns[n] }; else delete layout[n];
+  }
+  return layout;
+}
+
+const COPY_SAME = 'Same columns';
+const COPY_SOME = 'Some columns in common';
+
+/* Another table's column order, visibility, widths, pins and formats,
+   onto the table on screen, for the columns the two share. The default
+   for a header set does this only between tables with the same columns,
+   in two steps, and changes what every later import of them opens to;
+   this is the one-off, for any two tables. Tables are listed down the
+   side, the same columns first, then by how many they share, and the
+   right pane shows the order the copy would leave before anything
+   changes. */
+export function openCopyLayoutModal() {
+  const id = S.sourceId;
+  const here = S.sources.find((s) => s.id === id);
+  if (!here || !S.columns.length) return;
+  const mine = new Set(S.columns.map((c) => c.name));
+  const headerSet = (cols) => cols.filter((c) => !c.derived).map((c) => c.name.toLowerCase()).sort().join('\n');
+  const myHeaders = headerSet(S.columns);
+  const entries = S.sources.filter((s) => s.id !== id).map((s) => {
+    const cols = s.columns || [];
+    const shared = cols.filter((c) => mine.has(c.name)).length;
+    return {
+      key: String(s.id), label: sourceLabel(s), src: s, shared,
+      group: headerSet(cols) === myHeaders ? COPY_SAME : COPY_SOME,
+      hint: shared === mine.size ? `all ${shared} columns` : `${shared} of ${mine.size} columns`,
+    };
+  }).filter((e) => e.shared > 0)
+    .sort((a, b) => b.shared - a.shared || a.label.localeCompare(b.label));
+  if (!entries.length) {
+    toast('No other table in this case has any of these columns', 4000);
+    return;
+  }
+  let chosen = entries[0];
+  let result = null;   // { order, layout } for `chosen`, once its layout is in
+  const layouts = new Map();   // source id -> its saved layout, asked once
+
+  modal(`Copy a layout onto ${sourceLabel(here)}`, (b) => {
+    const side = sideRail({
+      entries: () => entries,
+      groups: [COPY_SAME, COPY_SOME],
+      selected: () => chosen.key,
+      onPick: (entry) => { if (entry !== chosen) { chosen = entry; side.sync(); preview(); } },
+      match: (entry, q) => (sideRailMatch(entry, q) ? { hint: entry.hint } : null),
+      pinsKey: 'copyLayout',
+      label: 'Tables',
+    });
+
+    const head = el('div', 'side-preview-title', 'Columns after copying');
+    const box = el('div', 'side-preview copy-layout-preview');
+    const rows = el('div', 'side-preview-rows');
+    const foot = el('div', 'side-preview-foot');
+    box.append(rows, foot);
+    const pane = el('div', 'side-pane');
+    pane.append(head, box);
+    const panes = el('div', 'side-panes copy-layout');
+    panes.append(side.rail, pane);
+    b.append(panes);
+
+    const actions = el('div', 'row-actions');
+    const copy = el('button', 'btn primary', 'Copy layout');
+    copy.disabled = true;
+    const cancel = el('button', 'btn ghost', 'Cancel');
+    cancel.onclick = () => closeModal();
+    actions.append(copy, cancel);
+    b.append(actions);
+
+    copy.onclick = () => {
+      if (!result || S.sourceId !== id) return;
+      closeModal();
+      replaceLayout(result.order, result.layout, `Copied the layout of ${chosen.label}`);
+    };
+
+    async function preview() {
+      const entry = chosen;
+      result = null;
+      copy.disabled = true;
+      box.classList.add('stale');
+      if (!layouts.has(entry.src.id)) {
+        layouts.set(entry.src.id, api(`/api/layout?source_id=${entry.src.id}`).catch(() => ({})));
+      }
+      const saved = await layouts.get(entry.src.id);
+      if (entry !== chosen || !b.isConnected) return;
+      // A table never laid out shows its columns as the file had them.
+      const fromOrder = saved.order || (entry.src.columns || []).map((c) => c.name);
+      const { order, shared } = copiedOrder(fromOrder);
+      result = { order, layout: copiedColumns(nameMap(saved.columns), shared) };
+      const list = el('div', 'copy-layout-cols');
+      for (const n of order) {
+        const l = result.layout[n] || {};
+        const r = el('div', 'copy-layout-col' + (l.hidden ? ' hidden-col' : '') + (shared.has(n) ? '' : ' own'));
+        r.dataset.col = n;
+        r.append(el('span', 'copy-layout-name', n));
+        const notes = [];
+        if (l.hidden) notes.push('hidden');
+        if (l.pinned) notes.push('pinned');
+        if (!shared.has(n)) notes.push('only this table has it, stays where it is');
+        if (notes.length) r.append(el('span', 'copy-layout-note', notes.join(' · ')));
+        list.append(r);
+      }
+      rows.replaceChildren(list);
+      const own = order.length - shared.size;
+      const line = `${shared.size} column${shared.size === 1 ? ' takes' : 's take'} the order, visibility and widths of ${entry.label}.`
+        + (own ? ` ${own} only this table has ${own === 1 ? 'stays beside the column it follows' : 'stay beside the columns they follow'} now.` : '');
+      const p = el('p', 'fb-help', line);
+      p.title = line;
+      foot.replaceChildren(p);
+      box.classList.remove('stale');
+      copy.disabled = false;
+    }
+
+    side.paint();
+    preview();
+  }, { wide: true, tall: true, focus: '.side-search' });
 }
 
 /* ------------------------------------------------------- column autosize */

@@ -2,7 +2,7 @@
 navigation that survive everything else being cleared.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
-import { isPinned, moveColumn, renderHead, saveDefaultLayout, saveLayout, togglePin } from './columns.js';
+import { applyDefaultLayout, isPinned, moveColumn, openCopyLayoutModal, renderHead, saveDefaultLayout, saveLayout, togglePin } from './columns.js';
 import { $, api, el, post, toast } from './core.js';
 import { openDerivedColumnModal } from './derived.js';
 import { hasActiveFilterTree, openFilterBuilder } from './filterbuilder.js';
@@ -727,7 +727,7 @@ export function buildColumnsPanel(container, refresh = openTableMenu) {
       S.layout[name] = { ...(S.layout[name] || {}), hidden: !cb.checked };
       renderHead(); render(); saveLayout();
     };
-    lab.append(cb, el('span', null, name));
+    lab.append(cb, el('span', 'collist-name', name));
     // Pinning sits beside visibility: both are decisions about where a
     // column is, rather than what it contains.
     // Its own class, not collist-pick: that one is the value-picker
@@ -745,7 +745,10 @@ export function buildColumnsPanel(container, refresh = openTableMenu) {
     paintPin();
     pin.onclick = () => { togglePin(name); paintPin(); };
     const c = columnMeta(name);
-    lab.append(el('span', 'collist-type', ' ' + (c ? c.type : '') + (c && c.derived ? ' · derived' : '')));
+    const type = (c ? c.type : '') + (c && c.derived ? ' · derived' : '');
+    lab.append(el('span', 'collist-type', ' ' + type));
+    // A narrow window cuts a long name short; hovering shows it whole.
+    lab.title = `${name} ${type}`;
     row.append(lab, pin);
     // Per-column value-picker override, in the same row as the visibility
     // box because they're the same kind of decision about the same column.
@@ -879,6 +882,14 @@ export function buildTableActionsPanel(container, refresh) {
   const dflt = el('button', 'btn ghost', 'Save layout as default for these columns');
   dflt.title = 'Reuse this column order/visibility for any table imported with the same headers';
   dflt.onclick = () => saveDefaultLayout();
+  // A table opens to the default only until it has a layout of its own,
+  // so one that was open before the default was saved needs telling.
+  const useDflt = el('button', 'btn ghost', 'Apply default layout for these columns');
+  useDflt.title = 'Replace this table\'s column order/visibility with the default saved for these headers';
+  useDflt.onclick = () => { $('modal').hidden = true; applyDefaultLayout(); };
+  const copyFrom = el('button', 'btn ghost', 'Copy layout from another table…');
+  copyFrom.title = 'Give this table the column order, visibility and widths of another table in the case, for the columns they share';
+  copyFrom.onclick = () => openCopyLayoutModal();
   const nick = el('button', 'btn ghost', 'Name this header set…');
   nick.onclick = () => setNicknameFor(baseColumns().map((c) => c.name), nicknameFor(baseColumns().map((c) => c.name)));
   const nickTable = el('button', 'btn ghost', src && src.is_merge ? 'Rename this merge…' : 'Nickname this table…');
@@ -900,7 +911,7 @@ export function buildTableActionsPanel(container, refresh) {
     if (!src) return;
     openMergeBuilder(src.is_merge ? { edit: src } : { preselect: [src.id] });
   };
-  acts.append(dflt, nick, nickTable, merge);
+  acts.append(dflt, useDflt, copyFrom, nick, nickTable, merge);
   container.append(acts);
 }
 
@@ -916,7 +927,7 @@ export function buildTableStripPanel(container) {
   tables.title = 'Every table in the case — indexes, row counts, dropping a table';
   tables.onclick = () => openTablesManager();
   const reset = el('button', 'btn ghost', 'Reset view');
-  reset.title = 'Back to the just-opened state: clear filters, search, tag filter and grouping, and restore the default sort. Column layout and the timeframe filter stay.';
+  reset.title = 'Back to the just-opened state: clear filters, search, tag filter and grouping, and restore the default sort. Column layout and the timeframe filter stay (Apply default layout for these columns, below, resets the layout).';
   reset.onclick = async () => {
     $('modal').hidden = true;
     const dt = S.columns.find((c) => c.type === 'datetime');
@@ -966,6 +977,8 @@ export async function openTableMenu(sourceId) {
   if (id !== S.sourceId || S.activeTab !== 'grid') await openSource(id);
   if (S.sourceId !== id) return; // openSource no-ops on an id it can't find
   const src = S.sources.find((x) => x.id === id);
+  // Wide: each column row carries its name, its type and four buttons, and
+  // the default 680px left a long name little room beside them.
   modal(`Table — ${src ? sourceLabel(src) : ''}`, (b) => {
     for (const section of TABLE_MENU_SECTIONS) {
       const wrap = el('div', 'table-menu-section');
@@ -973,7 +986,7 @@ export async function openTableMenu(sourceId) {
       section.build(wrap, () => openTableMenu(id));
       b.append(wrap);
     }
-  });
+  }, { wide: true });
 }
 
 /* The case's tags, saved as they change (tagEditRow, in tags.js — the
