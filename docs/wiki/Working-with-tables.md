@@ -38,7 +38,7 @@ Click a folder's name to collapse or expand it, and double-click it to rename it
 
 ### Renaming a table
 
-A table is named after its file. To give it a clearer name, right-click its tab or its row in the sidebar and choose **Nickname this table…** (it is also in the table menu), or use **Nickname…** in the table's **⋯** menu in the Tables manager. The nickname is shown in place of the file name everywhere. Leave it empty to go back to the file name. A merge has no file name, so the same command reads **Rename this merge…**.
+A table is named after its file. To give it a clearer name, right-click its tab or its row in the sidebar and choose **Nickname this table…** (it is also the **Nickname** box in the table menu's **Name & merge** section), or use **Nickname…** in the table's **⋯** menu in the Tables manager. The nickname is shown in place of the file name everywhere. Leave it empty to go back to the file name. A merge has no file name, so the same command reads **Rename this merge…**.
 
 ### The Tables manager
 
@@ -52,11 +52,14 @@ Filtering, grouping or opening the value picker on a column builds a small index
 
 ## The table menu
 
-Press `C` to open the table menu, or right-click a tab or a table in the sidebar and choose **Columns…**. Its top row has **Tables manager…**, **Reset view** (clears filters, search, tag filter and grouping and restores the default sort; the column layout and the timeframe stay) and **Close this tab**. Below that are three sections:
+Press `C` to open the table menu, or right-click a tab or a table in the sidebar and choose **Columns…**. Its sections are listed down the left, each with a line saying what is set in it, and the one you pick fills the right. Up and Down move between them. Along the bottom, under every section, are **Tables manager…**, **Reset view** (clears filters, search, tag filter and grouping and restores the default sort; the column layout and the timeframe stay) and **Close this tab**.
 
-- **Columns**: show, hide, pin and reorder columns (see below), plus **Add derived column…** (see [Derived columns](Derived-columns.md)).
-- **Value filter dropdowns**: when the ▾ value picker appears on this table's filter boxes (see [Filtering and searching](Filtering-and-searching.md#the-value-picker)).
-- **This table**: **Save layout as default for these columns**, **Apply default layout for these columns**, **Copy layout from another table…**, **Name this header set…**, **Nickname this table…** and **Merge with other tables…** (on a merge, **Edit merge…**; see [Merging tables](#merging-tables)).
+- **Show, hide & order**: show, hide, pin and reorder columns (see below), plus **Add derived column…** (see [Derived columns](Derived-columns.md)).
+- **Value dropdowns**: when the ▾ value picker appears on this table's filter boxes, for the table and for each column (see [Filtering and searching](Filtering-and-searching.md#the-value-picker)).
+- **Layout**: put the default layout for these columns, or another table's layout, on this table, and save this table's layout as the default (see [Layouts](#layouts)).
+- **Name & merge**: how many rows, columns, tagged rows and notes the table has, where it was imported from, its nickname, the name of its set of columns, and its merges. The two names are saved when you press Enter or leave the box; Escape takes back what you typed. **Merge with other tables…** (on a merge, **Edit merge…**; see [Merging tables](#merging-tables)) sits beside the tables that share columns with this one, best fit first.
+
+In a narrow window the sections go across the top instead.
 
 ## Columns
 
@@ -90,11 +93,11 @@ The same right-click menu has **Stack values (rarest first)…** (see [Filtering
 
 ### Layouts
 
-Column order, visibility, widths, pins and timestamp formats are saved with the table in the case file. To reuse an arrangement for every table with the same column names, including in other cases, choose **Save layout as default for these columns** in the table menu or press `L`. A table with that set of columns and no layout of its own then opens with that arrangement.
+Column order, visibility, widths, pins and timestamp formats are saved with the table in the case file. To reuse an arrangement for every table with the same column names, including in other cases, open the table menu's **Layout** section and choose **Save this layout as the default**, or press `L`. A table with that set of columns and no layout of its own then opens with that arrangement.
 
-A table that already has a layout keeps it, and so does **Reset view**. To put the saved arrangement on such a table, open its table menu and choose **Apply default layout for these columns**. Its imported columns take the saved order, visibility, widths, pins and formats; its derived columns keep their own settings and sit beside the columns they came from. **Undo** in the message that follows puts the table's previous layout back. The action has no key by default; you can give it one in [Settings and shortcuts](Settings-and-shortcuts.md).
+A table that already has a layout keeps it, and so does **Reset view**. To put another arrangement on it, open the **Layout** section. **Take the layout from** chooses where it comes from: the default saved for these columns, which it starts on when there is one, or any other table in the case that shares a column with this one (tables with the same columns first, then the rest by how many columns they share). Below it, **Columns after applying** shows the columns as they would be, with each one that would change marked (shown, hidden, pinned, unpinned, moved or width) and a count. **Apply layout** puts it on the table, and **Undo** in the message that follows puts the previous layout back.
 
-To give one table another table's arrangement without saving a default, open its table menu and choose **Copy layout from another table…**. The list on the left shows every other table in the case that shares a column with this one: tables with the same columns first, then the rest by how many columns they share. The right side shows the column order the copy would leave. The columns both tables have take the other table's order, visibility, widths, pins and formats. A column only this table has keeps its own settings and stays after the column it follows now, so an extra column in a newer export of the same log stays where it was. **Copy layout** applies it, and **Undo** in the message that follows puts the previous layout back.
+From the default, the imported columns take the saved order, visibility, widths, pins and formats, and derived columns keep their own settings and sit beside the columns they came from. From another table, the columns both tables have take that table's order, visibility, widths, pins and formats. A column only this table has keeps its own settings and stays after the column it follows now, so an extra column in a newer export of the same log stays where it was. Applying the default also has a shortcut with no key by default, which you can give one in [Settings and shortcuts](Settings-and-shortcuts.md).
 
 ## Sorting
 

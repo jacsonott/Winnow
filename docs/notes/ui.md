@@ -1332,44 +1332,78 @@ see [docs/notes/README.md](README.md) for the whole set.
   (`TABLE_MENU_SECTIONS`/`openTableMenu`: press `C`, the Tables manager's
   Settings…, or Columns… on a table's right-click menu). Same registry
   reasoning as the row menu: it's where per-table features land, and the
-  tab strip can't grow an icon per feature. `openTableMenu(sourceId)`
-  opens that source first when it isn't the one on screen — not a
-  convenience, a precondition, since every panel reads the live
+  tab strip can't grow an icon per feature. `openTableMenu(sourceId,
+  section)` opens that source first when it isn't the one on screen — not
+  a convenience, a precondition, since every pane reads the live
   `S.layout`/`S.order`/`S.columns` rather than the record it was handed.
+- **The table menu is two panes, the shape of Settings and the side-list
+  dialogs** (`.side-panes.table-menu`). It used to be one long scroll with
+  a list scroller inside the dialog's scroller. Each registry entry is
+  `{id, group, title, hint | asyncHint, build}`: the side list shows the
+  groups and, under each title, the hint (what is set there now), and the
+  chosen section is built fresh into `.table-menu-pane`, because another
+  dialog opened from it (the merge builder) can change what it reads. A
+  pane dispatches `tablemenu:changed` when it changes something, and the
+  hints repaint. The frame is a fixed height, so the column list is the
+  one box that scrolls and moving to a short pane moves nothing. **Focus
+  starts on the side list, not the filter box**: Up/Down/Home/End walk it
+  from the first keystroke, and `C` still closes the menu it opened (a
+  caret in a box would take the C as typing, test_modal_toggle.py). The
+  everyday actions (Tables manager, Reset view, Close this tab) are the
+  `.table-menu-foot` under every section. Under 640px the side list
+  becomes a wrapping row of tabs without groups or hints. The panes after
+  Columns borrow the merge builder's vocabulary (`.mb-stats`, `.mb-seg`,
+  `.mb-notes`, `.mb-field`) rather than adding their own.
+  tests/ui/test_table_menu_sections.py, test_table_menu_strip.py.
 - **A header set's default layout seeds a table once, so it needs its
-  own way onto the rest** (columns.js `applyDefaultLayout`, the table
-  menu's "Apply default layout for these columns"). `openSource` reads
-  the default only when the table has no layout of its own, and almost
-  every table has one by the second visit: a resize, a sort, a hidden
-  column and Reset view all call `saveLayout`. Reset view keeps the
-  layout on purpose (it is the clear-everything button, used many times
-  an hour), so a default saved after a table was first opened had no
-  way to reach it, which is how it was reported. Applying takes the
-  default's order and per-column settings for the imported columns,
-  keeps each derived column's own entry and re-places it beside its
-  input with `placeUnorderedColumns` (the same helper `openSource` uses),
-  and offers Undo, since nothing else brings back the layout it replaced.
-  A grouped table needs nothing extra: grouped columns stay in `S.order`
-  and `visibleCols()` leaves them out.
+  own way onto the rest** (the table menu's Layout section with the
+  default chosen; columns.js `applyDefaultLayout` is the same as a
+  keymap action, unbound by default). `openSource` reads the default only
+  when the table has no layout of its own, and almost every table has one
+  by the second visit: a resize, a sort, a hidden column and Reset view
+  all call `saveLayout`. Reset view keeps the layout on purpose (it is the
+  clear-everything button, used many times an hour), so a default saved
+  after a table was first opened had no way to reach it, which is how it
+  was reported. Applying takes the default's order and per-column
+  settings for the imported columns, keeps each derived column's own
+  entry and re-places it beside its input with `placeUnorderedColumns`
+  (the same helper `openSource` uses), and offers Undo, since nothing
+  else brings back the layout it replaced. `defaultLayoutResult` is that
+  computation, shared by applying and the Layout section's preview. A
+  grouped table needs nothing extra: grouped columns stay in `S.order`
+  and `visibleCols()` leaves them out (the preview leaves them out too).
   tests/ui/test_apply_default_layout.py.
-- **Copy layout from another table… is the one-off, for tables whose
-  columns differ** (columns.js `openCopyLayoutModal`, `copiedOrder`,
-  `copiedColumns`). The header-set default only matches identical column
-  sets, and saving one changes what every later import opens to, which is
-  wrong for "make this table look like that one". It is a sideRail dialog:
-  tables sharing at least one column, the same header set first, then by
-  columns shared; the right pane is the order the copy would leave,
-  computed by the same function the copy uses. Shared columns take the
-  other table's order and per-column entry outright (no entry there
-  clears this table's, or a width it never had would survive the copy);
-  a column only this table has keeps its entry and goes right after the
-  column it follows now, so a derived column stays beside its input and
-  an extra column beside its neighbour. The other table's order is its
-  saved layout, or its columns in file order when it has none. Pins are
-  hidden in this side list: they are per browser and a table id names a
-  different table in every case. Applying goes through `replaceLayout`,
-  shared with the default, which offers Undo.
-  tests/ui/test_copy_layout_from_table.py.
+- **Another table's layout is the one-off, for tables whose columns
+  differ** (`buildLayoutPanel`/`layoutSources` in timeframe.js, columns.js
+  `copiedOrder`, `copiedColumns`). The header-set default only matches
+  identical column sets, and saving one changes what every later import
+  opens to, which is wrong for "make this table look like that one". The
+  Layout section's "Take the layout from" lists the default, then tables
+  sharing at least one column, the same header set first, then by columns
+  shared. Shared columns take the other table's order and per-column
+  entry outright (no entry there clears this table's, or a width it never
+  had would survive the copy); a column only this table has keeps its
+  entry and goes right after the column it follows now, so a derived
+  column stays beside its input and an extra column beside its
+  neighbour. The other table's order is its saved layout, or its columns
+  in file order when it has none. It was its own sideRail dialog (Copy
+  layout from another table…) until the table menu became two panes;
+  putting the default and the tables in one list gave the default the
+  preview copying always had. **The preview marks only what would
+  change**: shown, hidden, pinned, unpinned, width (`w`), and "moved" for
+  the columns outside the longest run still in their old relative order
+  (`movedColumns`), since comparing positions marks every column after
+  one dragged to the top as moved too. Apply layout is greyed when
+  nothing would change. Applying goes through `replaceLayout`, which
+  offers Undo. tests/ui/test_copy_layout_from_table.py.
+- **Names in Name & merge save as they are typed**, the way the tag
+  editor saves: Enter or leaving the box saves, Escape takes back the
+  edit (and stops there, so the dialog stays open). The table's nickname
+  posts `/api/source/{id}/nickname`; the header set's name goes through
+  `saveHeaderNickname` (savedfilters.js), which `setNicknameFor`'s prompt
+  also uses. A merge refuses a blank name. The merge row lists the tables
+  sharing columns with this one, best fit first, which is what the merge
+  builder will offer.
 - **Right-clicking a table is a short menu, not the table menu**
   (`tableMenuItems`/`openTableContextMenu` in sources.js, one handler for
   the tab and both kinds of sidebar row). The right-click used to open the

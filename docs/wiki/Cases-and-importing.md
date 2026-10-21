@@ -494,8 +494,8 @@ Recognition gets you:
 - **Shipped dashboards**, such as the KAPE triage profile's, which find their
   tables by header set. See [Dashboards](Dashboards.md).
 
-You can name your own header sets from the table menu's
-**Name this header set…**.
+You can name your own header sets in the table menu's
+**Name & merge** section, under **These N columns**.
 
 ## Import jobs
 

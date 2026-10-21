@@ -86,7 +86,7 @@ def test_tab_right_click_reaches_the_table_menu(page):
     page.locator(".menu:not(.menu-sub) .menu-item", has_text="Columns…").click()
     page.wait_for_selector("#modal:not([hidden])")
     assert page.locator("#modalTitle").inner_text().upper().startswith("TABLE —")
-    assert page.locator(".table-menu-section h4").count() >= 3
+    assert page.locator(".table-menu .side-rail-item").count() >= 3
 
 
 def test_value_picker_writes_a_filter_the_grid_applies(page, view_rebuilt):

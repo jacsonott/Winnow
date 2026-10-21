@@ -17,7 +17,7 @@ def test_settings_opens_the_table_menu(page):
     name = row.locator(".session-name").inner_text()
     row.locator(".tables-more").click()
     page.locator(".menu .menu-item", has_text="Settings…").click()
-    page.wait_for_selector("#modal:not([hidden]) .table-menu-section")
+    page.wait_for_selector("#modal:not([hidden]) .table-menu")
     title = page.locator("#modalTitle").inner_text().lower()   # CSS uppercases it
     assert title.startswith("table"), title
     assert name.split(" ·")[0].strip().lower() in title, (name, title)
