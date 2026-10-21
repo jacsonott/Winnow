@@ -808,7 +808,7 @@ export async function applyDefaultLayout() {
     toast('No default layout is saved for these columns yet — "Save layout as default for these columns" on a table with them saves one', 5000);
     return;
   }
-  const before = { order: [...S.order], preGroupOrder: S.preGroupOrder && [...S.preGroupOrder], layout: S.layout };
+  const before = { order: [...S.order], layout: S.layout };
   const layout = nameMap(found.columns);
   for (const c of S.columns) {
     if (!c.derived) continue;
@@ -817,19 +817,11 @@ export async function applyDefaultLayout() {
   const order = found.order.filter((n) => S.columns.some((c) => c.name === n));
   placeUnorderedColumns(order);
   S.layout = layout;
-  // Grouped, S.order is the layout minus the grouped columns and the full
-  // one waits in preGroupOrder for dropGrouping to put back.
-  if (S.preGroupOrder) {
-    S.preGroupOrder = order;
-    S.order = order.filter((n) => !S.groupByCols.includes(n));
-  } else {
-    S.order = order;
-  }
+  S.order = order;
   renderHead(); render(); saveLayout();
   toastAction('Applied the default layout for these columns', 'Undo', () => {
     if (S.sourceId !== id) return;
     S.order = before.order;
-    S.preGroupOrder = before.preGroupOrder;
     S.layout = before.layout;
     renderHead(); render(); saveLayout();
   });

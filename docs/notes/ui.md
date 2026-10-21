@@ -1335,8 +1335,9 @@ see [docs/notes/README.md](README.md) for the whole set.
   default's order and per-column settings for the imported columns,
   keeps each derived column's own entry and re-places it beside its
   input with `placeUnorderedColumns` (the same helper `openSource` uses),
-  writes `preGroupOrder` rather than `order` while grouped, and offers
-  Undo, since nothing else brings back the layout it replaced.
+  and offers Undo, since nothing else brings back the layout it replaced.
+  A grouped table needs nothing extra: grouped columns stay in `S.order`
+  and `visibleCols()` leaves them out.
   tests/ui/test_apply_default_layout.py.
 - **Right-clicking a table is a short menu, not the table menu**
   (`tableMenuItems`/`openTableContextMenu` in sources.js, one handler for

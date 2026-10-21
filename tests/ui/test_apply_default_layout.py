@@ -148,3 +148,39 @@ def test_with_no_default_saved_it_says_so_and_leaves_the_layout(page, api, tmp_p
     finally:
         api(f"/api/source/{sid}", "DELETE")
         _go_home(page, home)
+
+
+def test_applying_while_grouped_keeps_the_grouped_column_out_until_ungrouped(page, api, tmp_path, layout_saved):
+    """Grouping keeps its column in S.order and hides it from the grid
+    (#423); a layout applied meanwhile must not put it back on screen,
+    and Ungroup shows it where the default puts it."""
+    home = page.evaluate("() => __winnow.S.sourceId")
+    a = api("/api/ingest/path", "POST", {"path": str(_csv(tmp_path, "adl_ga.csv")),
+                                         "name": "adl_ga.csv", "build_fts": False})["id"]
+    b = api("/api/ingest/path", "POST", {"path": str(_csv(tmp_path, "adl_gb.csv")),
+                                         "name": "adl_gb.csv", "build_fts": False})["id"]
+    try:
+        # A opens to the default the first test saved for these headers,
+        # which hides AdlHost; this one wants every column showing.
+        _open(page, a)
+        page.evaluate("""() => { __winnow.S.order = ['AdlCmd', 'AdlUser', 'AdlWhen', 'AdlHost'];
+          __winnow.S.layout = __winnow.nameMap(); __winnow.renderHead(); __winnow.saveLayout(); }""")
+        layout_saved()
+        with page.expect_response(lambda r: r.request.method == "POST"
+                                  and r.url.endswith("/api/column_layouts")):
+            _table_menu_button(page, "Save layout as default for these columns")
+
+        _open(page, b)
+        page.evaluate("() => __winnow.addGroupLevel('AdlHost')")
+        page.wait_for_function("() => !document.querySelector('.hcell[data-col=\"AdlHost\"]')")
+        _table_menu_button(page, "Apply default layout for these columns")
+        page.wait_for_function("() => __winnow.S.order[0] === 'AdlCmd'")
+        assert _headers(page) == ["AdlCmd", "AdlUser", "AdlWhen"]
+        page.evaluate("() => __winnow.dropGrouping()")
+        page.wait_for_function("() => document.querySelector('.hcell[data-col=\"AdlHost\"]')")
+        assert _headers(page) == ["AdlCmd", "AdlUser", "AdlWhen", "AdlHost"]
+        layout_saved()
+    finally:
+        for sid in (a, b):
+            api(f"/api/source/{sid}", "DELETE")
+        _go_home(page, home)
