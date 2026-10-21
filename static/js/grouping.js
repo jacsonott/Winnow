@@ -4,7 +4,7 @@
 import { draggedCol, renderHead, visibleCols } from './columns.js';
 import { $, OVERSCAN, PAGE, ROW_H, api, el, post, setBusy, toast } from './core.js';
 import { displayValue, ellipsize, filterByValue } from './filters.js';
-import { buildDataRow, ensurePage, headH, isJumping, moveCursor, noteViewportMove, render, renderTagToolbar, rowAt, rowPaintContext, rowsPaintY, schedulePrefetch, setCellRange, spacerPx, syncRowsTop, syncRowsWidth, titleClippedCells, vScroll } from './grid.js';
+import { buildDataRow, ensurePage, headH, isJumping, moveCursor, noteViewportMove, render, renderTagToolbar, rowAt, rowPaintContext, rowsPaintY, schedulePrefetch, setCellRange, syncRowsTop, syncRowsWidth, syncSpacer, titleClippedCells, vScroll } from './grid.js';
 import { armOpCancel, opToken } from './jobs.js';
 import { openRowContextMenu } from './rowmenu.js';
 import { S, cellInRange, cellRangeRows, clearCellSelection, selClear, selCount, selHas, selPositions, selRemap, selSetRange, selSnapshot, selViewRows } from './state.js';
@@ -213,7 +213,7 @@ export function renderGrouped() {
   const rowsEl = $('rows');
   rebuildGroupPrefix();
   const total = S.groupTotalRows;
-  $('spacerY').style.height = spacerPx(total) + 'px';
+  syncSpacer(total);
 
   const virt = vScroll(body, total, headH());
   const first = Math.max(0, Math.floor(virt / ROW_H) - OVERSCAN);

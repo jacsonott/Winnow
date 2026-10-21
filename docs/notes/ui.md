@@ -232,6 +232,19 @@ see [docs/notes/README.md](README.md) for the whole set.
   closing within a case goes through, which had the same stale chart.
   tests/ui/test_case_switch.py and test_histogram_empty_state.py.
 
+- **A case switch must not stash what is on screen.** `openCaseNow`
+  clears the per-tab stash (`clearViewStateStash`), then `loadSources`
+  opens the new case's first table, and `openSource` stashes the table it
+  is leaving before it reads the arriving one's. `S.sourceId` is kept
+  across the switch on purpose, so that stash wrote the previous case's
+  filters and search under the old id; ids restart at 1 in every case, so
+  the arriving table almost always had that id and opened with them,
+  usually showing 0 rows. `clearViewStateStash` now makes the next
+  `stashViewState` a no-op (`stashOnScreen`). Nulling `S.view` or
+  `S.sourceId` in `openCaseNow` instead would also stop it, but both are
+  read by the rest of the switch: loadSources picks its tab from
+  `S.sourceId`. tests/ui/test_case_switch.py.
+
 - **The histogram strip** (`static/js/histogram.js`, `GET /api/histogram`
   over `Store.time_histogram`, toggled by `#btnHistogram` or `h`) was the
   `table_histogram` example plugin until 2026-09 and is built in now;
@@ -2124,7 +2137,13 @@ see [docs/notes/README.md](README.md) for the whole set.
   rebind**: it reads its row when it fires, so a cursor move inside the
   500 ms used to post the new row's own note back to it and drop what
   was typed on the old one. "Saved" only appears when the box still holds
-  what that save carried. tests/ui/test_detail_note_autosave.py.
+  what that save carried, and **only a new row or a new note clears it**:
+  a landing that re-shows the same row with the same text leaves it. It
+  used to be blanked on every `showDetail`, and a save on a row whose page
+  isn't cached asks for that page itself (`refetchPageOf`, after a
+  scrollbar jump), so its own repaint took "Saved" away a few ms after it
+  came — test_scrollbar_drag_lands.py only passed when a frame happened
+  to fall in between. tests/ui/test_detail_note_autosave.py.
 
 - **The detail pane's field list is a two-column read, and reads like
   one.** The names are painted as the column writes them; the uppercasing

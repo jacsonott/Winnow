@@ -840,12 +840,20 @@ export function showDetail(pos) {
   dl.dataset.pos = pos;
   dl.replaceChildren();
   const note = $('noteInput');
+  // "Saving…"/"Saved" is about the text in the box, so it goes when the
+  // box takes another row or another note, and not on a repaint of the
+  // same one. Every page or glimpse that lands re-shows the cursor row,
+  // and a save on a row whose page isn't cached asks for that page itself
+  // (refetchPageOf), so "Saved" used to be gone again a few ms after it
+  // appeared.
+  const sameRow = note.dataset.rid === String(r.rid) && note.dataset.sourceId === String(r.source_id);
+  const shown = note.value;
   // r.note is the server's copy, which is behind the box while a save is
   // pending — see keepsUnsavedNote.
   if (!keepsUnsavedNote(note, r)) note.value = r.note || '';
   note.dataset.rid = r.rid;
   note.dataset.sourceId = r.source_id;
-  $('noteStatus').textContent = '';
+  if (!sameRow || note.value !== shown) $('noteStatus').textContent = '';
   // The fields go last, once the title, the Copy target and the note box
   // all name this row. A value whose layout threw used to stop showDetail
   // before the note box was rebound, so the pane said Line 2 and a note

@@ -1,6 +1,6 @@
 # Filtering and searching
 
-Filtering is how a table of two million rows becomes the forty that matter. Winnow gives you several ways to narrow a table: a filter box under every column, a value picker, a filter builder for AND/OR logic, saved and shipped triage filters, a timeframe, a search box that reads every column, and the tag filter. They all stack, and none of them touches your data. Clearing them brings every row back.
+Filtering is how a table of two million rows becomes the forty that matter. Winnow gives you several ways to narrow a table: a filter box under every column, a value picker, a filter builder for AND/OR logic, saved and shipped triage filters, a timeframe, a search box that reads every column, and the tag filter. They all stack, and none of them touches your data. Clearing them brings every row back. Each open table keeps its own filters and search when you switch to another tab and back; opening another case starts its tables with none.
 
 ## How filters combine
 
