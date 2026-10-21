@@ -210,6 +210,14 @@ plasoread.py       Plaso storage (.plaso) reading for import — both on-disk
                     version number. Fixed column shape plus an
                     Attributes (JSON) catch-all the structparse derived-column
                     ops can lift fields out of. Stdlib only.
+iisread.py         IIS web server logs (W3C extended, NCSA, IIS native) for
+                    import — recognised by the NAME IIS gives them (u_ex…,
+                    nc…, in….log; log_format), which every router consults
+                    before extensions and before plugin formats. W3C columns
+                    are the union of the file's #Fields: lines, each line read
+                    against the header in effect where it sits (two passes,
+                    as JSON). Stdlib only; imports timeparse. See
+                    docs/notes/ingest.md.
 defaults/          The defaults Winnow ships, as JSON rather than Python:
                     headers.json names the header sets common tools emit
                     (EvtxECmd, MFTECmd, Amcache, ...) and, per set, how to

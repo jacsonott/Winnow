@@ -46,6 +46,7 @@ from winnow import updater
 from winnow import userenv
 from winnow import version
 from winnow import archive
+from winnow import iisread
 from winnow import workspace as WS
 from winnow.sqlresults import ResultExpired, TooBig
 from winnow.store import (CASE_SUFFIX, DEFAULT_IMPORT_EXTENSIONS, PLASO_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, MissingTable, OpCancelled, RecordGone, Store, ViewExpired,
@@ -1528,7 +1529,10 @@ def _assoc_ingest(path: str) -> dict:
     # is also what makes plugin file ASSOCIATIONS real: registering a
     # plugin's extension (Settings → File associations) hands the file to
     # this path, which must then actually use the plugin's parser.
-    fmt = PLUGINS.format_for_filename(os.path.basename(path))
+    # An IIS log is the exception: recognised by its name, it is a built-in
+    # reader's even when a plugin claims .log (esxi_logs does) — the import
+    # queue's own rule (pluginFormatFor).
+    fmt = None if iisread.log_format(path) else PLUGINS.format_for_filename(os.path.basename(path))
     if fmt is not None:
         # Synchronous, like every plugin ingest (no background job): the
         # source exists by the time this returns, so there is no job_id
@@ -2541,7 +2545,11 @@ def _ingest_kind_for_path(path: str) -> str:
     or missing extension is still a log. Plugin formats are consulted
     before this by the callers that honour them (_assoc_ingest, the
     import queue); it used to fall through to csv, which is how a
-    hostd.log got a sniffed delimiter and its first line as a header."""
+    hostd.log got a sniffed delimiter and its first line as a header.
+    An IIS log is recognised by its whole name (iisread.log_format) —
+    its .log says nothing."""
+    if iisread.log_format(path):
+        return "iis"
     suffix = Path(path).suffix.lower()
     if suffix in SQLITE_IMPORT_EXTENSIONS:
         return "sqlite"
@@ -2656,13 +2664,19 @@ def api_ingest_preview_path(body: PreviewPath):
         raise HTTPException(400, f"No file at {body.path}")
     kind = body.kind or _ingest_kind_for_path(body.path)
     try:
-        if kind in ("csv", "text"):
+        if kind in ("csv", "text", "iis"):
             # Same bounded sample the upload preview reads — never the file.
             with open(body.path, "rb") as f:
                 raw = f.read(PREVIEW_SAMPLE_BYTES)
             text, encoding = _decode_preview_bytes(raw, body.path)
             if kind == "text":
                 return {**store().preview_text_lines(text), "encoding": encoding}
+            if kind == "iis":
+                fmt = iisread.log_format(body.path)
+                if fmt is None:
+                    raise ValueError("Not named like an IIS log (u_ex…, nc…, in….log)")
+                return {**store().preview_iis_text(text, fmt, complete=len(raw) < PREVIEW_SAMPLE_BYTES),
+                        "encoding": encoding}
             return {**store().preview_csv_text(text, delimiter=body.delimiter or None,
                                                has_header=body.has_header, name=body.path),
                     "encoding": encoding}
@@ -2714,7 +2728,7 @@ def _ingest_job_options(kind: str, *, build_fts: bool, delimiter=None, has_heade
     if kind == "json":
         return {**base, "build_fts": build_fts, "flatten_mode": flatten_mode,
                 "flatten_depth": flatten_depth}
-    if kind in ("plaso", "text"):
+    if kind in ("plaso", "text", "iis"):
         return {**base, "build_fts": build_fts}   # one file, one table, no options
     return {**base, "build_fts": build_fts, "tables": tables or []}
 
