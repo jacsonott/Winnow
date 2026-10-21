@@ -330,8 +330,13 @@ CREATE TABLE IF NOT EXISTS derived_columns (
     params         TEXT NOT NULL DEFAULT '{}',
     status         TEXT NOT NULL DEFAULT 'building',  -- building | ready | partial | error
     parse_failures INTEGER,            -- non-empty inputs that produced NULL; set at backfill end
-    created_at     TEXT
+    created_at     TEXT,
+    inferred_type  TEXT                -- number | text | empty, NULL until looked at; see below
 );
+-- inferred_type is what a text-valued op's values turned out to be, read
+-- off the drv_ column when a backfill ends (_infer_derived_type). 'number'
+-- is what types the column as one (_derived_col_entry), so sizes and
+-- counts captured with a regex sort as numbers rather than as text.
 -- No index on source_id on purpose: this table holds one row per derived
 -- column in the whole case (tens at the very most), so a scan is one page
 -- either way, and at the 64KB page size _tune sets, an index would cost
@@ -2665,6 +2670,11 @@ class Store:
                 self.db.execute("ALTER TABLE merges ADD COLUMN col_mode TEXT NOT NULL DEFAULT 'all'")
             if "source_column" not in merge_cols:
                 self.db.execute("ALTER TABLE merges ADD COLUMN source_column INTEGER NOT NULL DEFAULT 0")
+            # ...and derived_columns.inferred_type. NULL on every column a
+            # case already has, which _type_unlooked_derived_columns fills
+            # in below.
+            if not any(r[1] == "inferred_type" for r in self.db.execute("PRAGMA table_info(derived_columns)")):
+                self.db.execute("ALTER TABLE derived_columns ADD COLUMN inferred_type TEXT")
             # The single-row `dashboard` becomes one named "Dashboard" entry
             # the first time a case with that older shape is opened.
             has_named = self.db.execute("SELECT 1 FROM dashboards LIMIT 1").fetchone()
@@ -2806,6 +2816,7 @@ class Store:
         self._build_yields: dict[str, int] = {}
         self._build_waiting = 0   # builds for the open table queued on the writer
         self._downgrade_legacy_fts()
+        self._type_unlooked_derived_columns()
 
     def _downgrade_legacy_fts(self) -> None:
         """Sources whose fts_<id> predates the current index shape still
@@ -2844,6 +2855,30 @@ class Store:
             t = threading.Thread(target=self._drop_stale_fts_worker, args=(stale,), daemon=True)
             self._fts_janitor = t
             t.start()
+
+    def _type_unlooked_derived_columns(self) -> None:
+        """Type the derived columns nothing has looked at yet
+        (inferred_type NULL): every one in a case from before the column
+        was recorded, and any whose pass ended without managing to (the
+        case closing under it). Once each — the answer is stored, and a
+        column is looked at again only when a pass rewrites its values.
+        'building' and 'error' are left alone: one is mid-pass or was
+        abandoned by a crash, the other's values were cleared. An op with
+        a type of its own is skipped by _infer_derived_type and stays
+        NULL, which costs a row in this SELECT and nothing else."""
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT id, source_id, name, op_id FROM derived_columns "
+                "WHERE inferred_type IS NULL AND status IN ('ready', 'partial')").fetchall()
+            for r in rows:
+                # A drv_ table a damaged case lost is that column's problem
+                # (it reads as text, as it did before), not the case's.
+                with contextlib.suppress(sqlite3.Error):
+                    t = self._infer_derived_type(dict(r), self.db)
+                    if t:
+                        with self.db:
+                            self.db.execute("UPDATE derived_columns SET inferred_type=? WHERE id=?",
+                                            (t, r["id"]))
 
     def _drop_stale_fts_worker(self, source_ids: list[int]) -> None:
         for source_id in source_ids:
@@ -6187,9 +6222,18 @@ class Store:
         type the column; the `derived` flag is what the handful of
         base-only sites (_base_cols) filter on."""
         op = timeparse.OPERATIONS.get(r["op_id"]) or {}
+        # A text-valued op's column is typed by what it holds, as an
+        # imported column is: sizes or counts pulled out with a regex are
+        # a number column, and sort, compare and group as numbers. The op
+        # can't say so up front — the same regex capture is a host name
+        # in one column and a byte count in the next.
+        typ = op.get("value_type", "datetime")
+        if typ == "text" and r["inferred_type"] == "number":
+            typ = "number"
         return {
             "name": r["name"],
-            "type": op.get("value_type", "datetime"),
+            "type": typ,
+            "inferred_type": r["inferred_type"],
             "derived": True,
             "derived_id": r["id"],
             "derived_from": r["input_column"],
@@ -6354,7 +6398,18 @@ class Store:
             # every member's definition (_derived_scope).
             every = [c] + twins
             failures = [x.get("parse_failures") for x in every]
+            # Typed by every member's values, not the first member's: a
+            # number on the merge only when no member holds text. A
+            # member with nothing in the column (a host whose log never
+            # has the field) says nothing either way, or one quiet host
+            # would put the whole merge back to sorting as text.
+            held = {x.get("inferred_type") for x in every} - {None, "empty"}
+            typ = c["type"]
+            if held and all(timeparse.OPERATIONS.get(x.get("derived_op"), {}).get("value_type") == "text"
+                            for x in every):
+                typ = "number" if held == {"number"} else "text"
             cols.append({**c,
+                         "type": typ,
                          "derived_status": max((x.get("derived_status") for x in every),
                                                key=lambda s: _DERIVED_STATUS_RANK.get(s, 4)),
                          "parse_failures": None if None in failures else sum(failures)})
@@ -7758,9 +7813,20 @@ class Store:
             else:
                 with self.lock, self.db:
                     self.db.executemany(
-                        "UPDATE derived_columns SET status='partial' WHERE id=?",
+                        "UPDATE derived_columns SET status='partial', inferred_type=NULL WHERE id=?",
                         [(d["id"],) for d in defs],
                     )
+                # Half this pass's values and half the last one's, so its
+                # type is looked at again: now, or at the next open when
+                # the cancel is the case closing (no scan to hold that up).
+                if not self._closing:
+                    for d in defs:
+                        with contextlib.suppress(Exception):
+                            inferred = self._infer_derived_type(d)
+                            with self.lock, self.db:
+                                self.db.execute(
+                                    "UPDATE derived_columns SET inferred_type=? WHERE id=?",
+                                    (inferred, d["id"]))
             raise
         except Exception:
             self._fail_derive_backfill(defs, wrote=rows_done > 0, drop=drop_on_cancel,
@@ -7778,10 +7844,16 @@ class Store:
                 failures = self._count_parse_failures(src, d)
             except Exception:  # noqa: BLE001 — see above
                 failures = None
+            # The same for its type: unknown (NULL) keeps the op's own until
+            # the next open looks again (_type_unlooked_derived_columns).
+            try:
+                inferred = self._infer_derived_type(d)
+            except Exception:  # noqa: BLE001 — see above
+                inferred = None
             with self.lock, self.db:
                 self.db.execute(
-                    "UPDATE derived_columns SET status='ready', parse_failures=? WHERE id=?",
-                    (failures, d["id"]),
+                    "UPDATE derived_columns SET status='ready', parse_failures=?, inferred_type=? WHERE id=?",
+                    (failures, inferred, d["id"]),
                 )
             out_cols.append({"def_id": d["id"], "source_id": source_id, "name": d["name"],
                              "parse_failures": failures})
@@ -7854,7 +7926,7 @@ class Store:
         with contextlib.suppress(Exception):
             with self.lock, self.db:
                 self.db.executemany(
-                    "UPDATE derived_columns SET status='error', parse_failures=NULL WHERE id=?",
+                    "UPDATE derived_columns SET status='error', parse_failures=NULL, inferred_type=NULL WHERE id=?",
                     [(d["id"],) for d in defs],
                 )
         source_id = defs[0]["source_id"]
@@ -7894,6 +7966,39 @@ class Store:
                 f"SELECT COUNT(*) FROM {self._from_clause(src, 's')} "
                 f"WHERE {self._had_input_sql(src, d, 's')} AND {q(drv)}.{q(d['name'])} IS NULL"
             ).fetchone()[0]
+
+    def _infer_derived_type(self, d: dict, conn: sqlite3.Connection | None = None) -> str | None:
+        """What a text-valued derived column holds, by the rule an imported
+        column is typed by (infer_type): 'number' when every non-empty
+        value matches NUM_RE, 'text' when one doesn't, 'empty' when there
+        are none. None for an op that has a type of its own (a timestamp
+        parse, a duration), which never needs looking at.
+
+        Read off the drv_ column as stored rather than tallied by the pass
+        that wrote it, so it says the same thing however the values got
+        there: a finished pass, a cancelled one, a copy from another case,
+        a case from before this was recorded. NUM_RE itself, not something
+        cheaper that approximates it, because _numeric_expr gates the sort
+        and the comparisons on the same pattern — a column this calls
+        'number' holds no value those would turn into NULL. A text column
+        answers at its first non-numeric value; a number column costs one
+        scan (~0.7s for 1.3M values), beside a pass that took seconds per
+        million rows."""
+        op = timeparse.OPERATIONS.get(d["op_id"]) or {}
+        if op.get("value_type") != "text":
+            return None
+        drv, col = q(self._derived_table(d["source_id"])), q(d["name"])
+
+        def ask(c: sqlite3.Connection) -> str:
+            if c.execute(f"SELECT 1 FROM {drv} WHERE {col} <> '' AND NOT ({col} REGEXP ?) LIMIT 1",
+                         (NUM_RE.pattern,)).fetchone():
+                return "text"
+            return "number" if c.execute(f"SELECT 1 FROM {drv} WHERE {col} <> '' LIMIT 1").fetchone() else "empty"
+
+        if conn is not None:
+            return ask(conn)
+        with self._reader() as ro:
+            return ask(ro)
 
     def _had_input_sql(self, src: dict, d: dict, alias: str | None = None) -> str:
         """The row had something to read. One column, non-empty, for the
@@ -14496,9 +14601,11 @@ class Store:
                         dd = dict(d)
                         t.db.execute(
                             "INSERT INTO derived_columns(source_id, name, input_column, op_id, "
-                            " params, status, parse_failures, created_at) VALUES (?,?,?,?,?,?,?,?)",
+                            " params, status, parse_failures, created_at, inferred_type) "
+                            "VALUES (?,?,?,?,?,?,?,?,?)",
                             (new_id, dd["name"], dd["input_column"], dd["op_id"], dd["params"],
-                             dd["status"], dd.get("parse_failures"), dd.get("created_at")))
+                             dd["status"], dd.get("parse_failures"), dd.get("created_at"),
+                             dd.get("inferred_type")))
                     stats["derived"] = len(dcols)
 
                     t.db.execute("INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", (new_id,))
