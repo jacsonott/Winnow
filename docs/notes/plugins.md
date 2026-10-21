@@ -211,7 +211,14 @@ see [docs/notes/README.md](README.md) for the whole set.
   because "nothing saved" and "could not tell" are the same picture to a
   plugin that does not distinguish them and the second one ends in a save
   over unread state. The rows are never collected: a plugin toggled off
-  keeps its state for when it comes back.
+  keeps its state for when it comes back. The read takes time, and
+  `showPluginTab` calls onShow straight after mounting, without waiting
+  for the read to return. So a mount that draws its fields on show
+  offers drags before saving has started. That drag is not saved, and a
+  restore would replace it anyway. Pivot's onShow therefore draws
+  nothing until the read is back; the read draws the fields itself.
+  First/Last still draws on show, and its tests drag straight after the
+  tab appears.
 
   The module's default export gets `(container, winnow)` where
   `winnow` is `buildPluginTabContext`'s stable surface (api/post/el/
