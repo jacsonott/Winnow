@@ -57,7 +57,7 @@ from . import plasoread
 from . import rxguard
 from . import xlsxread
 from . import log as wlog
-from .paths import sqlite_ro_uri
+from .paths import sqlite_header_is_wal, sqlite_peek_uri, sqlite_ro_uri, sqlite_rw_uri
 from .sqlresults import SqlResults, js_str as _sql_js_str, pane_cell_json, pane_cell_text  # noqa: F401 — server.py imports pane_cell_json from here
 
 BATCH = 20_000
@@ -1410,15 +1410,6 @@ def infer_type(values: Iterable[str]) -> str:
     return "text"
 
 
-def _sqlite_header_is_wal(path: str) -> bool:
-    try:
-        with open(path, "rb") as f:
-            head = f.read(20)
-    except OSError:
-        return False
-    return len(head) == 20 and head.startswith(b"SQLite format 3\x00") and head[18] == 2
-
-
 def _open_evidence_sqlite(path: str) -> tuple[sqlite3.Connection, Callable[[], None]]:
     """A read-only connection to an external SQLite file that writes
     nothing beside it. Returns (connection, cleanup): close the
@@ -1443,7 +1434,7 @@ def _open_evidence_sqlite(path: str) -> tuple[sqlite3.Connection, Callable[[], N
     and a file on a share open the same way they do everywhere else."""
     tmpdir = None
     target, extra = path, ""
-    if _sqlite_header_is_wal(path):
+    if sqlite_header_is_wal(path):
         if os.path.exists(path + "-wal"):
             tmpdir = tempfile.mkdtemp(prefix="winnow-sqlite-")
             target = os.path.join(tmpdir, "evidence.db")
@@ -2222,7 +2213,9 @@ def is_winnow_case_file(path: str) -> bool:
         with open(path, "rb") as f:
             if f.read(16) != b"SQLite format 3\x00":
                 return False
-        conn = sqlite3.connect(sqlite_ro_uri(path), uri=True)
+        # sqlite_peek_uri: plain mode=ro on a case nothing has open left a
+        # -wal/-shm pair beside it that no read-only connection can remove.
+        conn = sqlite3.connect(sqlite_peek_uri(path), uri=True)
         try:
             names = {r[0] for r in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'")}
@@ -2231,6 +2224,46 @@ def is_winnow_case_file(path: str) -> bool:
         return {"sources", "tag_defs", "row_tags"} <= names
     except Exception:  # noqa: BLE001 — unreadable means "not a case"
         return False
+
+
+def fold_leftover_wal(path: str) -> bool:
+    """Fold a -wal left beside a case that nothing has open back into the
+    case file, and let SQLite remove it and the -shm. True if they're gone.
+
+    What leaves one: a Winnow that was killed before it closed the case
+    (power cut, Task Manager, a second Ctrl+C), and — until
+    sqlite_peek_uri — every read-only look at a closed case, which made an
+    empty pair beside it that nothing could remove. Opening the case again
+    folds a leftover in either way; this does it for a case listed on the
+    home screen, so the pair doesn't sit there until then.
+
+    Nothing here deletes a file. SQLite's own last close does: a
+    connection that can write, closing while no other connection has the
+    file open, checkpoints every frame into the case file first and only
+    then removes the -wal and -shm, and if anything else does have it
+    open it skips both and leaves the files exactly as they were. Deleting
+    a -wal by hand is how committed rows get lost; this never does. A case
+    a Winnow holds (probe_case_lock) is not opened at all, a file that
+    isn't a case is never opened read-write (is_winnow_case_file — it
+    could be evidence), and read-only media fail the open, or open
+    read-only, and keep their files."""
+    if not os.path.exists(path + "-wal") or probe_case_lock(path) is not None:
+        return False
+    if not is_winnow_case_file(path):
+        return False
+    try:
+        # A short busy timeout: this runs inside a listing, and a file
+        # someone is busy with is one to leave for next time.
+        conn = sqlite3.connect(sqlite_rw_uri(path), uri=True, timeout=1.0)
+        try:
+            # Reading is what opens the WAL; a connection that never read
+            # closes without checkpointing anything.
+            conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return False
+    return not os.path.exists(path + "-wal")
 
 
 def case_lock_path(case_path: str) -> str:
@@ -2606,6 +2639,11 @@ class Store:
         self._reader_pool: list[sqlite3.Connection] = []
         self._reader_lock = threading.Lock()
         self._readers_closed = False
+        # Readers checked out right now, so close() can wait for them: one
+        # still open when the writer closes stops SQLite checkpointing the
+        # -wal and removing it and the -shm (see close()).
+        self._readers_out = 0
+        self._readers_back = threading.Condition(self._reader_lock)
         with self.db:
             # Detect *before* CREATE TABLE IF NOT EXISTS runs, so a case file
             # that predates open_tabs gets every existing source/merge
@@ -3482,8 +3520,10 @@ class Store:
         every committed write to be copied out of the -wal into the case
         file itself and that couldn't be done — see the end of this method.
         Only a caller about to move the file without its -wal (save_as)
-        needs to ask; every other close leaves the -wal beside the file,
-        where the next open replays it."""
+        needs to ask. Every other close is the case's last connection when
+        it can be, which is what has SQLite checkpoint the -wal and remove
+        it and the -shm; when a long read is still open it folds the -wal
+        in instead, and the files left hold nothing the case file lacks."""
         # SQL pane queries first: one can run for ever, and it has no job
         # record or thread of its own to stop cooperatively, so it is
         # interrupted outright — now, so it unwinds while the waits below
@@ -3567,21 +3607,56 @@ class Store:
         # top of close for the other half of the same problem: stopping the
         # jobs above means reading, and those reads are on the pool now.)
         self._drain_idle_readers(permanent=True)
+        # A search-all sweep reads table by table on readers of its own; told
+        # to stop, it ends after the count it is in (the latch above would
+        # fail its next table anyway, as an error nobody is polling for).
+        with self._search_job_lock:
+            if self._search_job is not None:
+                self._search_job["cancelled"] = True
         folded = True
         with self.lock:
             # The drain only reaches idle readers. One checked out by a
-            # request still in flight — a CSV export streaming, a search-all
-            # sweep — keeps the case file open past the writer's close, so
-            # SQLite skips the checkpoint it does on the last close, and
-            # save_as deleting the -wal took every write since the last
-            # checkpoint with it (with 64 KB pages that is ~64 MB of WAL: on
-            # a quick look, usually the whole import and every tag). So fold
-            # it in here, under the lock, so nothing commits after the
-            # check. A reader whose snapshot already has every write doesn't
-            # stop the frames being copied back, only the WAL being reset,
-            # which is why "folded" is enough and "truncated" is not needed.
+            # request or a worker still running — a page fetch, a CSV export
+            # streaming, a search-all count, a search-index build reading its
+            # table's row — keeps the case file open past the writer's close,
+            # so SQLite skips the checkpoint it does on the last close: the
+            # -wal and -shm stay beside the case, the -wal holding every
+            # write since the last checkpoint.
+            #
+            # save_as can't have that at all, since it deletes the -wal —
+            # doing so took every write since the last checkpoint with it
+            # (with 64 KB pages that is ~64 MB of WAL: on a quick look,
+            # usually the whole import and every tag). So it folds the -wal
+            # into the case file here, under the lock, so nothing commits
+            # after the check, and returns whether that worked. A reader
+            # whose snapshot already has every write doesn't stop the frames
+            # being copied back, only the WAL being reset, which is why
+            # "folded" is enough and "truncated" is not needed.
             if fold_wal:
                 folded = self._checkpoint_truncate(self.FOLD_TIMEOUT_S, folded_is_enough=True)
+            else:
+                # Any other close waits for those readers to come back, so
+                # that it is the last close and SQLite tidies up after it. No
+                # new one can be checked out now (the drain latched the pool),
+                # and a page fetch or a count is over well inside the budget.
+                # Under the lock, so a background writer (an index build)
+                # can't meanwhile put frames into the -wal newer than an open
+                # reader's snapshot, which would stop the fold below copying
+                # them back.
+                with self._readers_back:
+                    self._readers_back.wait_for(lambda: not self._readers_out,
+                                                timeout=self.FOLD_TIMEOUT_S)
+                    readers_open = self._readers_out
+                # A long download isn't back in time, and isn't cut off. Then
+                # this close won't be the last, so fold what it can now: the
+                # -wal left behind holds nothing the case file lacks, and goes
+                # the next time the case is opened or listed on the home
+                # screen (fold_leftover_wal). One attempt: frames newer than
+                # an open reader's snapshot can't be copied until it ends,
+                # and waiting out a download is what this just declined.
+                if readers_open:
+                    with contextlib.suppress(sqlite3.Error):
+                        self._checkpoint_truncate(0, folded_is_enough=True)
             self.db.close()
         # Release the flock (see __init__) before unlinking, so that if the
         # remove below is the one that fails, what's left behind is an
@@ -3661,7 +3736,11 @@ class Store:
         On any exception the connection is closed, not returned: the only
         realistic errors here are a view/source table dropped mid-read or
         the store closing, and a connection whose last statement died is
-        cheaper to replace than to prove clean. The pool refills lazily."""
+        cheaper to replace than to prove clean. The pool refills lazily.
+
+        Checked-out connections are counted, so that close() can wait for
+        them to come back: one still open when the writer closes keeps
+        SQLite from tidying the -wal and -shm away (see close())."""
         with self._reader_lock:
             # A store whose case has been closed under a request in flight
             # (a case switch, with two browsers on one server) must fail
@@ -3674,20 +3753,28 @@ class Store:
             if self._readers_closed:
                 raise sqlite3.ProgrammingError("Cannot operate on a closed database.")
             conn = self._reader_pool.pop() if self._reader_pool else None
-        if conn is None:
-            conn = self._open_reader()
+            self._readers_out += 1
+        pooled = False
         try:
+            if conn is None:
+                conn = self._open_reader()
             yield conn
-        except BaseException:
-            with contextlib.suppress(sqlite3.Error):
-                conn.close()
-            raise
-        with self._reader_lock:
-            if not self._readers_closed and len(self._reader_pool) < self.READER_POOL_CAP:
-                self._reader_pool.append(conn)
-                conn = None
-        if conn is not None:
-            conn.close()
+            with self._reader_lock:
+                if not self._readers_closed and len(self._reader_pool) < self.READER_POOL_CAP:
+                    self._reader_pool.append(conn)
+                    pooled = True
+                    self._readers_out -= 1
+                    self._readers_back.notify_all()
+        finally:
+            if not pooled:
+                if conn is not None:
+                    with contextlib.suppress(sqlite3.Error):
+                        conn.close()
+                # Counted back only once it is closed, so close() never sees
+                # "none out" while one still has the case file open.
+                with self._reader_lock:
+                    self._readers_out -= 1
+                    self._readers_back.notify_all()
 
     @staticmethod
     @contextlib.contextmanager
@@ -12092,7 +12179,7 @@ class Store:
         if os.path.abspath(path) == os.path.abspath(self.path):
             raise ValueError("That is the currently open case")
         try:
-            ro = sqlite3.connect(sqlite_ro_uri(path), uri=True)
+            ro = sqlite3.connect(sqlite_peek_uri(path), uri=True)
         except sqlite3.Error as e:
             raise ValueError(f"Could not open case file: {e}")
         ro.row_factory = sqlite3.Row

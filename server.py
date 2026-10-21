@@ -49,8 +49,8 @@ from winnow import archive
 from winnow import workspace as WS
 from winnow.sqlresults import ResultExpired, TooBig
 from winnow.store import (CASE_SUFFIX, DEFAULT_IMPORT_EXTENSIONS, PLASO_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, MissingTable, OpCancelled, RecordGone, Store, ViewExpired,
-                   case_lock_path, decode_text_sample, describe_case_lock, is_winnow_case_file, probe_case_lock, q,
-                   sniff_text_encoding, sweep_orphan_views)
+                   case_lock_path, decode_text_sample, describe_case_lock, fold_leftover_wal, is_winnow_case_file,
+                   probe_case_lock, q, sniff_text_encoding, sweep_orphan_views)
 from winnow.store import case_session_document_problem, pane_cell_json, session_document_problem
 
 HERE = paths.INSTALL_ROOT  # static/, plugins/, examples/plugins/ all hang off the install root
@@ -971,7 +971,7 @@ def _sweep_quicklook(max_age_days: int = 7) -> int:
             # and the janitor has no business deleting those at all.
             if not is_winnow_case_file(path):
                 continue
-            conn = sqlite3.connect(paths.sqlite_ro_uri(path), uri=True)
+            conn = sqlite3.connect(paths.sqlite_peek_uri(path), uri=True)
             try:
                 busy = _case_holds_work(conn)
             finally:
@@ -2161,8 +2161,16 @@ def api_cases_list():
         rec = dict(c)
         if os.path.isfile(c["path"]):
             rec["exists"] = True
+            # A -wal/-shm pair left beside a case nobody has open (a killed
+            # Winnow, or an older build's look at it) is folded in and
+            # removed here, by SQLite itself — see fold_leftover_wal.
+            with contextlib.suppress(Exception):
+                fold_leftover_wal(c["path"])
             try:
-                ro = sqlite3.connect(paths.sqlite_ro_uri(c["path"]), uri=True)
+                # sqlite_peek_uri, not sqlite_ro_uri: this runs for every
+                # case on the home screen, and a plain mode=ro look left a
+                # -wal/-shm pair beside each one that nothing removed.
+                ro = sqlite3.connect(paths.sqlite_peek_uri(c["path"]), uri=True)
                 row = ro.execute("SELECT count(*), COALESCE(sum(row_count),0) FROM sources").fetchone()
                 ro.close()
                 rec["source_count"], rec["row_count"] = row[0], row[1]
@@ -4444,7 +4452,7 @@ def api_watchlist_cases():
         if os.path.abspath(c["path"]) == current or not os.path.isfile(c["path"]):
             continue
         try:
-            ro = sqlite3.connect(paths.sqlite_ro_uri(c["path"]), uri=True)
+            ro = sqlite3.connect(paths.sqlite_peek_uri(c["path"]), uri=True)
             row = ro.execute(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='watchlist'").fetchone()
             n = ro.execute("SELECT COUNT(*) FROM watchlist").fetchone()[0] if row[0] else 0

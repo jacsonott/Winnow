@@ -784,6 +784,24 @@ see [docs/notes/README.md](README.md) for the whole set.
   per attempt so its own budget is the real wall-clock bound, and uses a
   monotonic deadline — it runs under `self.lock`, so overshooting stalls
   every writer.
+- **Only the last connection to close removes the `-wal` and `-shm`, and
+  only if it can write.** It checkpoints first, then deletes both; a
+  close with any other connection still open skips both, and a read-only
+  connection never does either. Two things left a pair beside closed
+  cases for good. A `mode=ro` look at a case nothing has open *creates*
+  the pair (the home screen's case list, registration's
+  `is_winnow_case_file`, the watchlist's case picker, multicase), so
+  every such look goes through `paths.sqlite_peek_uri`, which reads the
+  file `immutable=1` when there is no `-wal` to read and plain `mode=ro`
+  when there is. And `close()` with a reader still checked out wasn't the
+  last close: it now waits up to `FOLD_TIMEOUT_S` (under `self.lock`, so
+  no index build adds frames meanwhile) for `_readers_out` to reach zero,
+  and when a long download outlasts that, folds the `-wal` in with one
+  checkpoint attempt so what is left holds nothing the case file lacks.
+  A pair left anyway (a killed Winnow) is folded in and removed by
+  `fold_leftover_wal` when the home screen lists the case — through a
+  read-write connection's own last close, never by deleting files: a
+  `-wal` can hold the only copy of committed rows.
 - **compact's sizes are `main + -wal` on both sides, measured before any
   checkpoint**, which is what makes `reclaimed_bytes` honest without
   depending on a checkpoint succeeding. A checkpoint that can't complete

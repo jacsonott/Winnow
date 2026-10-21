@@ -84,3 +84,62 @@ def sqlite_ro_uri(path: str | os.PathLike, _path=os.path) -> str:
     if not p.startswith("/"):          # a Windows drive path, "C:/..."
         p = "/" + p
     return "file://" + quote(p, safe="/:") + "?mode=ro"
+
+
+def sqlite_rw_uri(path: str | os.PathLike) -> str:
+    """sqlite_ro_uri's spelling of `path`, opened read-write. `mode=rw`
+    never creates: a path that names nothing fails to open, where a plain
+    `sqlite3.connect(path)` makes an empty database there."""
+    return sqlite_ro_uri(path)[: -len("ro")] + "rw"
+
+
+def sqlite_header_is_wal(path: str | os.PathLike) -> bool:
+    """Whether the file's header says WAL mode (bytes 18-19 are 2) — read
+    from the file itself, without opening it as a database."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(20)
+    except OSError:
+        return False
+    return len(head) == 20 and head.startswith(b"SQLite format 3\x00") and head[18] == 2
+
+
+def sqlite_peek_uri(path: str | os.PathLike) -> str:
+    """sqlite_ro_uri for a short read of a database this process doesn't
+    have open — another case on the home screen, in a picker or a
+    cross-case search — that leaves nothing beside it.
+
+    `mode=ro` alone does leave something beside a WAL database, and every
+    case is one: opening it creates the `-shm`, and a `-wal` when there
+    isn't one, and a read-only connection can never remove them again.
+    SQLite only does that on the last close of a connection that can
+    write. So listing the recent cases on the home screen left a
+    -wal/-shm pair beside every case in the list, for good.
+
+    No `-wal` beside the file means no connection has it open (SQLite
+    makes the -wal on the first read and removes it on the last close),
+    so nothing is waiting in one to be checkpointed: the file as it stands
+    is all of it, and `immutable=1` reads exactly that, creating nothing.
+    With a -wal there, rows may live only in it, so this is plain
+    `mode=ro`, which reads them; the -wal is already there, and the -shm
+    almost always is.
+
+    The -wal is looked for under the real path as well as the given one:
+    SQLite names it after the file a symlink points at, so a case reached
+    through a link has its -wal beside the target, and missing it would
+    read a live case without the rows only its -wal has yet.
+
+    For a read that is over within a request, not a connection kept
+    around: immutable tells SQLite nobody else will change the file, so it
+    takes no locks, and a Winnow that opened the case and checkpointed
+    into it mid-read could hand this connection a mix of old and new
+    pages. A checkpoint needs ~64 MB of writes (1000 of the case's 64 KB
+    pages) or that Winnow closing the case again, which a look like this
+    is long over before. A rollback-journal database creates nothing
+    under `mode=ro` and gets it unchanged."""
+    uri = sqlite_ro_uri(path)
+    p = os.fspath(path)
+    if sqlite_header_is_wal(p) and not any(
+            os.path.exists(q + "-wal") for q in (p, os.path.realpath(p))):
+        uri += "&immutable=1"
+    return uri
