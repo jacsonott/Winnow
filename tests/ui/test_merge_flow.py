@@ -94,7 +94,7 @@ def test_merge_builder_merges_mismatched_tables_and_edits_in_place(page, tmp_pat
         page.wait_for_selector(".hcell-partial", state="attached")
 
         # Edit it from the table menu: add merge_b, drop the source column.
-        page.evaluate("(id) => __winnow.openTableMenu(id)", merge_id)
+        page.evaluate("(id) => __winnow.openTableMenu(id, 'name')", merge_id)
         page.locator("#modal button", has_text="Edit merge").click()
         page.wait_for_selector("#modal .mb")
         page.locator("#modal label.mb-trow", has_text="merge_b.csv").locator("input").check()

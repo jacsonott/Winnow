@@ -85,7 +85,7 @@ The picker writes an ordinary filter into the column's filter box: one value bec
 
 The list holds the 1,000 most common values at most. When a column has more, the picker says so. The **Find a value…** box only searches the values already listed, so to reach a rarer value, narrow the column first (for example with a contains filter) and reopen the picker.
 
-The ▾ buttons appear automatically on tables under 250,000 rows, because reading a column's values means scanning it. To change that, open the table menu and use **Value filter dropdowns**: **Auto (on under 250,000 rows)**, **On for every column** or **Off**. Each column in the table menu's **Columns** list also has its own ▾ button to force the dropdown on or off for that column.
+The ▾ buttons appear automatically on tables under 250,000 rows, because reading a column's values means scanning it. To change that, open the table menu's **Value dropdowns** section and choose **Auto · under 250,000 rows**, **On** or **Off** for the table. The same section lists every column with its own **Auto**, **On** and **Off**, to force the dropdown on or off for that column; **Set back to Auto** at the bottom undoes those. Each column in the **Show, hide & order** list also has a ▾ button that does the same for its column.
 
 ### Stacking a column
 

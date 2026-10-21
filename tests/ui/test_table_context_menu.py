@@ -111,9 +111,9 @@ def test_columns_opens_the_table_dialog_and_c_still_toggles_it(page):
     # The table on screen carries the dialog's own key beside the entry.
     assert _item(page, "Columns…").locator(".menu-item-hint").inner_text() == "C"
     _item(page, "Columns…").click()
-    page.wait_for_selector("#modal:not([hidden]) .table-menu-section")
+    page.wait_for_selector("#modal:not([hidden]) .table-menu")
     assert page.locator("#modalTitle").inner_text().upper().startswith("TABLE —")
-    assert page.locator(".table-menu-section h4").count() >= 3
+    assert page.locator(".table-menu .side-rail-item").count() >= 3
     strip = page.locator("#modalBody .table-menu-strip button").all_inner_texts()
     assert strip == ["Tables manager…", "Reset view", "Close this tab"], strip
     # Still the openTableMenu dialog, so its key closes it however it was opened.
@@ -139,7 +139,7 @@ def test_the_context_menu_key_opens_it_under_the_focused_tab(page):
     page.keyboard.press("ArrowDown")
     assert page.evaluate("() => document.activeElement.querySelector('.menu-item-text').textContent") == "Columns…"
     page.keyboard.press("Enter")
-    page.wait_for_selector("#modal:not([hidden]) .table-menu-section")
+    page.wait_for_selector("#modal:not([hidden]) .table-menu")
     page.keyboard.press("Escape")
     page.wait_for_selector("#modal[hidden]", state="attached")
 
@@ -160,7 +160,7 @@ def test_close_matches_the_tab_x_and_a_closed_table_has_no_close(page, extra):
     assert _item(page, "Columns…").locator(".menu-item-hint").count() == 0
     # Columns… on a closed table opens it first, then the dialog on it.
     _item(page, "Columns…").click()
-    page.wait_for_selector("#modal:not([hidden]) .table-menu-section")
+    page.wait_for_selector("#modal:not([hidden]) .table-menu")
     assert EXTRA.upper() in page.locator("#modalTitle").inner_text().upper()
     assert page.evaluate("(id) => __winnow.S.sourceId === id", extra["id"])
     page.keyboard.press("Escape")

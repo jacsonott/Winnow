@@ -2259,13 +2259,8 @@ textarea:focus { border-color: var(--accent); outline: none; }
 
 /* ------------------------------------------------------------ table menu */
 
-/* Sections of the table menu modal (TABLE_MENU_SECTIONS in app.js) — one
-   rule for all of them so a new section needs no CSS of its own. */
-.table-menu-section + .table-menu-section { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 6px; }
-.table-menu-section h4 { margin: 10px 0 8px; }
-/* The top strip: no heading, the three everyday actions in a row, with
-   "Close this tab" pushed to the far side so it isn't the neighbour of
-   "Reset view". */
+/* The foot strip: the three everyday actions in a row, with "Close this
+   tab" pushed to the far side so it isn't the neighbour of "Reset view". */
 .table-menu-strip { display: flex; gap: 6px; align-items: center; }
 .table-menu-strip .table-menu-close { margin-left: auto; }
 .collist-search { width: 100%; box-sizing: border-box; margin-bottom: 6px; }
@@ -2274,7 +2269,7 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .collist-move { flex: 0 0 auto; font-size: 11px; line-height: 1; padding: 0 5px; opacity: .35; }
 .collist-row:hover .collist-move, .collist-move:focus-visible { opacity: 1; }
 .collist-pick { flex: 0 0 auto; font-size: 10px; padding: 2px 6px; font-family: var(--mono); }
-.collist-pick[aria-pressed="true"] { color: var(--accent); border-color: var(--accent-dim); }
+
 
 /* --------------------------------------------------------------- sessions */
 
@@ -2967,22 +2962,115 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .import-file.excluded .import-file-path { color: var(--text-dim); }
 .import-file-note { flex: 0 1 auto; max-width: 45%; font-size: 11px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-/* Copy a layout from another table (columns.js openCopyLayoutModal): the
-   side list is tables and the preview is the order the copy would leave.
-   No pins: a table's id names a different table in every case, and pins
-   are kept per browser. */
-.copy-layout .side-rail-pin { display: none; }
-.copy-layout-preview { flex: 1 1 0; min-height: 0; }
-.copy-layout-preview .side-preview-rows { padding: 4px; }
+/* The columns a layout would leave (the table menu's Layout section,
+   buildLayoutPanel in timeframe.js), one row each. */
+.tm-layout-preview .side-preview-rows { padding: 4px; }
 .copy-layout-cols { display: flex; flex-direction: column; gap: 1px; }
 .copy-layout-col {
   display: flex; align-items: baseline; gap: 10px; min-height: 22px; padding: 2px 6px;
   border-radius: var(--radius-sm); font-family: var(--mono); font-size: 12px; color: var(--text);
 }
 .copy-layout-col.hidden-col .copy-layout-name { color: var(--dim); text-decoration: line-through; }
-.copy-layout-col.own { background: var(--panel-2); }
 .copy-layout-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .copy-layout-note { flex: 0 0 auto; font-family: var(--ui); font-size: 11px; color: var(--dim); }
+
+/* The table menu in two panes (openTableMenu, in timeframe.js): its
+   sections down a side list with what each one holds under its name, the
+   chosen one on the right, and the everyday actions along the foot. The
+   frame is .side-panes', a fixed height, so the column list and a pane of
+   three rows open the card to the same size and switching moves nothing. */
+.table-menu .side-rail { padding-right: 12px; }
+.table-menu-pane { overflow: auto; padding-right: 2px; }
+.table-menu-pane[data-section="columns"] { overflow: hidden; }
+.table-menu-foot { margin-top: 12px; }
+.table-menu-pane .tm-cols-top { display: flex; align-items: center; gap: 10px; }
+.table-menu-pane .tm-cols-top .collist-search { flex: 1 1 auto; width: auto; min-width: 0; margin: 0; }
+.tm-cols-count { flex: 0 0 auto; font-size: 12px; color: var(--dim); }
+.table-menu-pane .tm-cols-top .side-search { flex: 1 1 auto; min-width: 0; }
+/* The list is the part that takes the room that is left, and scrolls. */
+.table-menu-pane .tm-cols-box { flex: 1 1 0; min-height: 0; margin-top: 8px; }
+.tm-cols-box .side-preview-rows { padding: 4px; }
+.tm-cols-box .collist { max-height: none; overflow: visible; }
+.tm-cols-box .side-preview-foot { height: 30px; }
+.table-menu-pane .row-actions { flex-wrap: wrap; margin-top: 10px; }
+/* A row's controls say something only where they differ from every
+   other row's: a pinned column, a dropdown set by hand. The rest stay
+   faint until the row is under the pointer, as ⤒ ⤓ already do. */
+/* Each a fixed width, so "pinned" or "▾ on" doesn't nudge the buttons
+   after it out of line with every other row's. */
+.collist-pin { min-width: 60px; }
+.collist-pick { min-width: 76px; text-align: center; }
+.collist-pin, .collist-pick { opacity: .35; }
+.collist-row:hover .collist-pin, .collist-row:hover .collist-pick,
+.collist-pin:focus-visible, .collist-pick:focus-visible,
+.collist-pin[aria-pressed="true"], .collist-pick.set { opacity: 1; }
+/* Pressed is the builders' tint (see .vp-seg), not the filled accent:
+   a filled "▾ auto·on" on every one of twenty-seven rows was the loudest
+   thing in the dialog. */
+.collist-pin[aria-pressed="true"], .collist-pick[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  border-color: var(--accent-dim); color: var(--text);
+}
+/* The other three panes are in the builders' shape: a summary or a
+   field on top, then a box that takes the room that is left (the Columns
+   pane's list, the layout preview), so they fill the frame the way the
+   column list does rather than leaving a pane of air under three rows. */
+.table-menu-pane[data-section="valueFilters"], .table-menu-pane[data-section="layout"] { overflow: hidden; }
+.table-menu-pane .mb-summary { margin-bottom: 10px; }
+.table-menu-pane .mb-notes { list-style: none; margin: 0 0 10px; padding: 0; display: grid; gap: 5px; }
+.tm-vf-list { display: flex; flex-direction: column; gap: 1px; }
+.tm-vf-row {
+  display: flex; align-items: center; gap: 10px; min-height: 26px; padding: 1px 4px;
+  border-radius: var(--radius-sm); font-family: var(--mono); font-size: 12px;
+}
+.tm-vf-row:hover { background: var(--panel-2); }
+.tm-vf-name { flex: 1 1 auto; min-width: 0; display: flex; gap: 8px; overflow: hidden; }
+.tm-vf-name .collist-name { flex: 0 1000 auto; }
+.tm-vf-row .mb-seg { flex: 0 0 auto; font-family: var(--ui); }
+.tm-vf-row .mb-seg button { font-size: 11px; padding: 2px 9px; min-width: 38px; }
+.tm-vf-row .mb-seg button:first-child { min-width: 64px; }
+/* As in the Columns pane: a row following the table is faint until the
+   pointer is on it, and one set by hand is drawn in full. */
+.tm-vf-row:not(.set) .mb-seg { opacity: .45; }
+.tm-vf-row:hover .mb-seg, .tm-vf-row .mb-seg:focus-within { opacity: 1; }
+.tm-vf-foot { flex-direction: row; align-items: center; justify-content: space-between; gap: 10px; }
+.tm-vf-foot .btn { flex: 0 0 auto; font-size: 11px; padding: 2px 8px; }
+.table-menu-pane .tm-field { margin-bottom: 14px; }
+.tm-field small { font-size: 11.5px; color: var(--dim); line-height: 1.4; }
+.tm-field select, .tm-input input {
+  background: var(--ink); color: var(--text); border: var(--border-w) solid var(--line-2);
+  border-radius: var(--radius-sm); padding: 6px 9px; font: inherit; font-size: 13px; width: 100%; min-width: 0;
+}
+.tm-field select:focus, .tm-input input:focus { border-color: var(--accent); outline: none; }
+.tm-input { display: flex; align-items: center; gap: 10px; }
+.tm-saved { flex: 0 0 auto; min-width: 4em; font-size: 11px; color: var(--dim); }
+.table-menu-pane .tm-layout-preview { flex: 1 1 0; min-height: 0; }
+.copy-layout-col.tm-changed { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.tm-change { margin-left: auto; flex: 0 0 auto; font-family: var(--ui); font-size: 11px; color: var(--accent); }
+.table-menu-pane .tm-foot-actions { justify-content: space-between; margin-top: 10px; }
+.tm-about { margin: 0 0 6px; }
+.tm-file {
+  display: flex; gap: 12px; margin-bottom: 16px; font-size: 11.5px; color: var(--dim);
+  white-space: nowrap; overflow: hidden;
+}
+.tm-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-family: var(--mono); }
+.tm-merge-head { display: flex; align-items: center; gap: 12px; font-size: 12px; color: var(--text-dim); }
+.tm-merge-head > span { flex: 1 1 auto; min-width: 0; }
+.tm-merge-head .btn { flex: 0 0 auto; }
+.tm-merge-list { display: flex; flex-direction: column; gap: 1px; margin-top: 4px; border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 4px; }
+.tm-merge-list:empty { display: none; }
+.tm-merge-row { display: flex; align-items: center; gap: 12px; min-height: 24px; padding: 1px 6px; font-family: var(--mono); font-size: 12px; }
+.tm-merge-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tm-merge-rows { flex: 0 0 auto; color: var(--dim); font-size: 11px; }
+/* A phone-narrow window has no room for a side list beside the column
+   rows and their four buttons each, so the sections go across the top,
+   by name alone, and the pane gets the whole width under them. */
+@media (max-width: 640px) {
+  .table-menu.side-panes { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  .table-menu .side-rail { border-right: 0; padding: 0 0 6px; border-bottom: 1px solid var(--line); }
+  .table-menu .side-rail-list { flex: 0 0 auto; flex-direction: row; flex-wrap: wrap; gap: 2px; overflow: visible; }
+  .table-menu .side-rail-group, .table-menu .side-rail-hint { display: none; }
+}
 
 /* Shown while dragging OS files over the window (wireFileDrop in app.js) —
    above .modal's own z-index so it's visible even if a modal happens to be

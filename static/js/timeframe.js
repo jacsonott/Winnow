@@ -2,22 +2,22 @@
 navigation that survive everything else being cleared.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
-import { applyDefaultLayout, isPinned, moveColumn, openCopyLayoutModal, renderHead, saveDefaultLayout, saveLayout, togglePin } from './columns.js';
-import { $, api, el, post, toast } from './core.js';
+import { copiedColumns, copiedOrder, defaultLayoutResult, findDefaultLayout, isPinned, moveColumn, renderHead, replaceLayout, saveDefaultLayout, saveLayout, togglePin } from './columns.js';
+import { $, api, el, nameMap, post, toast } from './core.js';
 import { openDerivedColumnModal } from './derived.js';
 import { hasActiveFilterTree, openFilterBuilder } from './filterbuilder.js';
 import { VALUE_FILTER_AUTO_MAX, setColumnValueFilter, setValueFilterMode, valueFilterAutoOn, valueFilterEnabled } from './filters.js';
 import { moveCursor, render } from './grid.js';
 import { drawRail, regroupIfGroupedByTag } from './grouping.js';
 import { openMergeBuilder } from './merge.js';
-import { applyPreset, filtersForCurrentSource, headerSig, loadSavedFilters, matchingSavedFilters, nicknameFor, setNicknameFor } from './savedfilters.js';
+import { applyPreset, filtersForCurrentSource, headerSig, loadSavedFilters, matchingSavedFilters, nicknameFor, saveHeaderNickname, setNicknameFor } from './savedfilters.js';
 import { saveAppearance } from './settings.js';
-import { clearAllFilters, closeTab, editSourceNickname, openSource, sourceLabel, wireDragReorder } from './sources.js';
+import { clearAllFilters, closeTab, loadSources, openSource, sourceLabel, wireDragReorder } from './sources.js';
 import { normalizeTree, S } from './state.js';
-import { openTablesManager } from './tables.js';
+import { mergesUsing, openTablesManager } from './tables.js';
 import { clearRowCaches, loadTags, newTagDefaults, tagEditRow } from './tags.js';
 import { baseColumns, columnMeta, parseTimestamp } from './tsformat.js';
-import { datePickerButton, dropdownMenu, markModalAction, confirmDialog, modal, oneAtATime, promptDialog } from './ui.js';
+import { closeModal, datePickerButton, dropdownMenu, markModalAction, confirmDialog, modal, oneAtATime, promptDialog } from './ui.js';
 import { rebuildView } from './view.js';
 
 /* ------------------------------------------------------ jump to timestamp */
@@ -688,25 +688,40 @@ export function openSavedFiltersModal({ returnTo = null } = {}) {
   });
 }
 
-/* `refresh` re-renders whatever surface is hosting the panel after a bulk
-   action ("Show all"/"Hide empty") — the per-column checkboxes repaint the
-   grid directly and don't need it. */
-export function buildColumnsPanel(container, refresh = openTableMenu) {
+/* The Columns pane of the table menu. `refresh` repaints the pane after a
+   bulk action ("Show all"/"Hide empty") — the per-column checkboxes
+   repaint the grid directly and don't need it. Anything that changes what
+   the side list says about this pane (how many columns are shown) sends
+   `tablemenu:changed` up from the container instead. */
+export function buildColumnsPanel(container, refresh = () => openTableMenu()) {
   if (!S.sourceId) {
     container.append(el('p', null, 'Open a table to manage its columns.'));
     return;
   }
+  const changed = () => container.dispatchEvent(new CustomEvent('tablemenu:changed', { bubbles: true }));
   // A filter box first: a KAPE table has a few hundred columns, and the
   // one to hide or pin is somewhere in the middle. Rows not matching are
   // hidden, not removed — the drag order still runs over all of S.order,
   // so a drop between two visible rows lands where the list shows it.
-  const search = el('input', 'panel-search collist-search');
+  const top = el('div', 'tm-cols-top');
+  const search = el('input', 'side-search collist-search');
   search.type = 'search';
   search.placeholder = 'Filter columns…';
   search.autocomplete = 'off';
   search.setAttribute('aria-label', 'Filter columns');
-  container.append(search);
+  const count = el('span', 'tm-cols-count');
+  top.append(search, count);
+  container.append(top);
+  // The list is the one part of the pane that takes what is left and
+  // scrolls, the way the derive dialog's settings and the folder import's
+  // file list do, so the filter box and the buttons under it stay put.
+  const box = el('div', 'side-preview tm-cols-box');
+  const scroller = el('div', 'side-preview-rows');
   const list = el('div', 'collist');
+  scroller.append(list);
+  const foot = el('div', 'side-preview-foot');
+  foot.append(el('p', 'fb-help', 'Drag a row, or a column header in the grid, to reorder. ⤒ ⤓ send one straight to an end.'));
+  box.append(scroller, foot);
   const rows = new Map();
   const applySearch = () => {
     const q = search.value.trim().toLowerCase();
@@ -716,7 +731,13 @@ export function buildColumnsPanel(container, refresh = openTableMenu) {
   // A column grouped on is in the group strip, not the grid, so it is left
   // out here as it is from the header (visibleCols). It is still in S.order
   // — the drag order below runs over that — and is listed again on Ungroup.
-  S.order.filter((n) => !S.groupByCols.includes(n)).forEach((name) => {
+  const listed = S.order.filter((n) => !S.groupByCols.includes(n));
+  const paintCount = () => {
+    const shown = listed.filter((n) => !(S.layout[n] || {}).hidden).length;
+    count.textContent = `${shown} of ${listed.length} shown`;
+  };
+  paintCount();
+  listed.forEach((name) => {
     const row = el('div', 'collist-row');
     rows.set(name, row);
     const lab = el('label');
@@ -726,6 +747,7 @@ export function buildColumnsPanel(container, refresh = openTableMenu) {
     cb.onchange = () => {
       S.layout[name] = { ...(S.layout[name] || {}), hidden: !cb.checked };
       renderHead(); render(); saveLayout();
+      paintCount(); changed();
     };
     lab.append(cb, el('span', 'collist-name', name));
     // Pinning sits beside visibility: both are decisions about where a
@@ -736,14 +758,14 @@ export function buildColumnsPanel(container, refresh = openTableMenu) {
     const pin = el('button', 'btn ghost collist-pin');
     const paintPin = () => {
       const on = isPinned(name);
-      pin.textContent = on ? '📌 pinned' : 'pin';
+      pin.textContent = on ? 'pinned' : 'pin';
       pin.setAttribute('aria-pressed', String(on));
       pin.title = on
         ? `"${name}" stays put when you scroll sideways — click to unpin`
         : `Keep "${name}" visible while scrolling sideways`;
     };
     paintPin();
-    pin.onclick = () => { togglePin(name); paintPin(); };
+    pin.onclick = () => { togglePin(name); paintPin(); changed(); };
     const c = columnMeta(name);
     const type = (c ? c.type : '') + (c && c.derived ? ' · derived' : '');
     lab.append(el('span', 'collist-type', ' ' + type));
@@ -755,36 +777,49 @@ export function buildColumnsPanel(container, refresh = openTableMenu) {
     // Three states, not two: following the table's setting is distinct from
     // being explicitly on or off, and only an explicit choice survives the
     // table default changing later.
-    const override = (S.layout[name] || {}).valuePicker;
-    const state = override === undefined ? 'auto' : (override ? 'on' : 'off');
-    // 'auto' alone lied when the table setting was "on for every column" —
-    // every row read auto while every dropdown was actually on. Show what
-    // auto currently RESOLVES to.
-    const label = state === 'auto' ? `auto·${valueFilterEnabled(name) ? 'on' : 'off'}` : state;
-    const pick = el('button', 'btn ghost collist-pick', '▾ ' + label);
-    pick.setAttribute('aria-pressed', String(valueFilterEnabled(name)));
-    pick.title = state === 'auto'
-      ? `Value dropdown follows this table's setting (currently ${valueFilterEnabled(name) ? 'on' : 'off'}) — click to pin it on`
-      : `Value dropdown pinned ${state} for this column — click to cycle`;
+    const pick = el('button', 'btn ghost collist-pick');
+    const pickState = () => {
+      const override = (S.layout[name] || {}).valuePicker;
+      return override === undefined ? 'auto' : (override ? 'on' : 'off');
+    };
+    const paintPick = () => {
+      const state = pickState();
+      // 'auto' alone lied when the table setting was "on for every column" —
+      // every row read auto while every dropdown was actually on. Show what
+      // auto currently RESOLVES to.
+      const on = valueFilterEnabled(name);
+      pick.textContent = '▾ ' + (state === 'auto' ? `auto·${on ? 'on' : 'off'}` : state);
+      // Only a choice made for this column is drawn at full strength; a row
+      // following the table's setting says the same as every other row, so
+      // it stays faint until the row is under the pointer, like ⤒ ⤓.
+      pick.classList.toggle('set', state !== 'auto');
+      pick.setAttribute('aria-pressed', String(on));
+      pick.title = state === 'auto'
+        ? `Value dropdown follows this table's setting (currently ${on ? 'on' : 'off'}) — click to pin it on`
+        : `Value dropdown pinned ${state} for this column — click to cycle`;
+    };
+    paintPick();
     pick.onclick = () => {
       // auto → on → off → auto: all three states reachable in one direction,
-      // including pinning a column on while the table default is off.
+      // including pinning a column on while the table default is off. The
+      // button repaints in place, so the filter and the scroll stay put.
+      const state = pickState();
       setColumnValueFilter(name, state === 'auto' ? true : (state === 'on' ? false : null));
-      refresh();
+      paintPick(); changed();
     };
     row.append(pick);
     // To either end in one click. Drag handles the rest; these handle the
     // case drag is worst at — the column that belongs first on a table
     // with two hundred of them.
-    const top = el('button', 'btn ghost collist-move', '⤒');
-    top.title = `Move "${name}" to the top`;
+    const topBtn = el('button', 'btn ghost collist-move', '⤒');
+    topBtn.title = `Move "${name}" to the top`;
     // The row moves in place rather than the panel re-rendering, so a
     // filter typed into the box above survives the click.
-    top.onclick = () => { moveColumn(name, 'top'); list.prepend(row); };
+    topBtn.onclick = () => { moveColumn(name, 'top'); list.prepend(row); };
     const bottom = el('button', 'btn ghost collist-move', '⤓');
     bottom.title = `Move "${name}" to the bottom`;
     bottom.onclick = () => { moveColumn(name, 'bottom'); list.append(row); };
-    row.append(top, bottom);
+    row.append(topBtn, bottom);
     // Reorder from here too — the grid's header drag is invisible to
     // anyone working from this panel, and hidden columns can ONLY be
     // repositioned here. Same DnD vocabulary as the tab strip.
@@ -804,8 +839,7 @@ export function buildColumnsPanel(container, refresh = openTableMenu) {
     });
     list.append(row);
   });
-  container.append(list);
-  container.append(el('p', 'fb-help', 'Drag rows here — or the column headers in the grid — to reorder columns. ⤒ ⤓ send one straight to an end.'));
+  container.append(box);
   const acts = el('div', 'row-actions');
   const addDerived = el('button', 'btn ghost', 'Add derived column…');
   addDerived.title = 'Parse a timestamp, or extract part of a value — JSON/XML field or a regex capture — into its own sortable, filterable column';
@@ -841,85 +875,450 @@ export function buildColumnsPanel(container, refresh = openTableMenu) {
   container.append(acts);
 }
 
-/* The table menu's value-filter section: the table-wide default the
-   per-column overrides above fall back to. */
-export function buildValueFilterPanel(container, refresh) {
+/* A figure over a dim caps label, the merge builder's (.mb-stat). */
+function tableMenuStat(value, label) {
+  const s = el('div', 'mb-stat');
+  s.append(el('b', null, typeof value === 'number' ? value.toLocaleString() : value), el('span', null, label));
+  return s;
+}
+
+/* A segmented control in the builders' tint (.mb-seg): `options` is
+   [key, label, title], `current()` the pressed key, `pick(key)` what a
+   click does. Returns the node and a paint() for after a change. */
+function tableMenuSeg(options, current, pick, cls = '') {
+  const seg = el('div', 'mb-seg ' + cls);
+  const buttons = options.map(([key, label, title]) => {
+    const b = el('button', null, label);
+    b.type = 'button';
+    b.dataset.key = key;
+    if (title) b.title = title;
+    b.onclick = () => pick(key);
+    seg.append(b);
+    return b;
+  });
+  const paint = () => { for (const b of buttons) b.setAttribute('aria-pressed', String(b.dataset.key === current())); };
+  paint();
+  return { seg, buttons, paint };
+}
+
+/* A field in the builders' shape (.mb-field): a dim caps label above
+   whatever the field holds. */
+function tableMenuField(label, ...nodes) {
+  const f = el('div', 'mb-field tm-field');
+  f.append(el('label', null, label), ...nodes);
+  return f;
+}
+
+/* The table menu's value-dropdown section, in the merge builder's shape:
+   what the table's setting comes to on top with the setting itself
+   beside it, then every column with its own Auto / On / Off. The list is
+   the Columns pane's order, and a click changes the row in place rather
+   than re-sorting it, so the row under the pointer stays there. */
+export function buildValueFilterPanel(container) {
+  const changed = () => container.dispatchEvent(new CustomEvent('tablemenu:changed', { bubbles: true }));
   const src = S.sources.find((s) => s.id === S.sourceId);
   const rows = src ? src.row_count : 0;
-  container.append(el('p', null,
-    'A ▾ button on each column filter box lists that column’s distinct values with counts, '
-    + 'so you can tick the ones to filter to. Reading those values is a scan, which is why big '
-    + 'tables start with it off.'));
-  const seg = el('div', 'vp-seg');
-  for (const [key, label, title] of [
-    ['auto', `Auto (on under ${VALUE_FILTER_AUTO_MAX.toLocaleString()} rows)`,
-      `This table has ${rows.toLocaleString()} rows — auto means ${valueFilterAutoOn() ? 'on' : 'off'} here`],
-    ['on', 'On for every column', 'Show the picker on every column regardless of size'],
-    ['off', 'Off', 'No picker buttons — the row menu’s "Filter by values…" still opens one'],
-  ]) {
-    const b = el('button', 'btn ghost', label);
-    b.setAttribute('aria-pressed', String(S.valueFilterMode === key));
-    b.title = title;
-    b.onclick = () => { setValueFilterMode(key); refresh(); };
-    seg.append(b);
+  const listed = S.order.filter((n) => !S.groupByCols.includes(n));
+  const setByHand = () => listed.filter((n) => (S.layout[n] || {}).valuePicker !== undefined);
+
+  const summary = el('div', 'mb-summary');
+  const stats = el('div', 'mb-stats');
+  const table = tableMenuSeg([
+    ['auto', `Auto · under ${VALUE_FILTER_AUTO_MAX.toLocaleString()} rows`, `This table has ${rows.toLocaleString()} rows`],
+    ['on', 'On', 'A ▾ on every column, whatever the table’s size'],
+    ['off', 'Off', 'No ▾ buttons — the row menu’s "Filter by values…" still opens one'],
+  ], () => S.valueFilterMode, (key) => { setValueFilterMode(key); paint(); changed(); });
+  summary.append(stats, table.seg);
+  const notes = el('ul', 'mb-notes');
+  container.append(summary, notes);
+
+  const top = el('div', 'tm-cols-top');
+  const search = el('input', 'side-search');
+  search.type = 'search';
+  search.placeholder = 'Filter columns…';
+  search.setAttribute('aria-label', 'Filter columns');
+  top.append(search);
+  container.append(top);
+  const box = el('div', 'side-preview tm-cols-box');
+  const scroller = el('div', 'side-preview-rows');
+  const list = el('div', 'tm-vf-list');
+  scroller.append(list);
+  const foot = el('div', 'side-preview-foot tm-vf-foot');
+  const footText = el('p', 'fb-help');
+  const clear = el('button', 'btn ghost');
+  clear.onclick = () => { for (const n of setByHand()) setColumnValueFilter(n, null); paint(); changed(); };
+  foot.append(footText, clear);
+  box.append(scroller, foot);
+  container.append(box);
+
+  const rowsByName = new Map();
+  for (const name of listed) {
+    const row = el('div', 'tm-vf-row');
+    row.dataset.col = name;
+    const c = columnMeta(name);
+    const label = el('span', 'tm-vf-name');
+    label.append(el('span', 'collist-name', name), el('span', 'collist-type', ' ' + (c ? c.type : '')));
+    label.title = name;
+    const state = () => {
+      const v = (S.layout[name] || {}).valuePicker;
+      return v === undefined ? 'auto' : (v ? 'on' : 'off');
+    };
+    const seg = tableMenuSeg([
+      ['auto', 'Auto', 'Follow this table’s setting'],
+      ['on', 'On', `Always a ▾ on "${name}"`],
+      ['off', 'Off', `Never a ▾ on "${name}"`],
+    ], state, (key) => {
+      setColumnValueFilter(name, key === 'auto' ? null : key === 'on');
+      paint(); changed();
+    }, 'tm-vf-seg');
+    row.append(label, seg.seg);
+    list.append(row);
+    rowsByName.set(name, { row, seg, state });
   }
-  container.append(seg);
-  const pinned = S.order.filter((n) => (S.layout[n] || {}).valuePicker !== undefined);
-  if (pinned.length) {
-    const clear = el('button', 'btn ghost', `Clear ${pinned.length} per-column override${pinned.length > 1 ? 's' : ''}`);
-    clear.style.marginTop = '10px';
-    clear.onclick = () => { for (const n of pinned) setColumnValueFilter(n, null); refresh(); };
-    container.append(clear);
+  search.oninput = () => {
+    const q = search.value.trim().toLowerCase();
+    for (const [name, r] of rowsByName) r.row.hidden = !!q && !name.toLowerCase().includes(q);
+  };
+
+  function paint() {
+    table.paint();
+    const withPicker = listed.filter((n) => valueFilterEnabled(n)).length;
+    const byHand = setByHand();
+    stats.replaceChildren(
+      tableMenuStat(withPicker, 'with a ▾'),
+      tableMenuStat(byHand.length, 'set by hand'),
+      tableMenuStat(rows, 'rows'));
+    const on = valueFilterAutoOn();
+    const line = S.valueFilterMode === 'auto'
+      ? `Auto is ${on ? 'on' : 'off'} here: ${rows.toLocaleString()} rows is ${on ? 'under' : 'over'} the ${VALUE_FILTER_AUTO_MAX.toLocaleString()} where listing a column’s values gets slow.`
+      : S.valueFilterMode === 'on'
+        ? 'Every column gets a ▾, whatever the table’s size. On a big table the first open of one can take a while.'
+        : 'No column gets a ▾ unless it is set On below. The row menu’s "Filter by values…" still opens one.';
+    const li = el('li', null, line);
+    notes.replaceChildren(li);
+    for (const [name, { row, seg, state }] of rowsByName) {
+      seg.paint();
+      const auto = state() === 'auto';
+      row.classList.toggle('set', !auto);
+      // Auto's own button says what auto comes to for this column.
+      seg.buttons[0].textContent = auto ? `Auto · ${valueFilterEnabled(name) ? 'on' : 'off'}` : 'Auto';
+    }
+    footText.textContent = `${withPicker} of ${listed.length} columns get a ▾${byHand.length ? `, ${byHand.length} of them set by hand` : ''}.`;
+    clear.textContent = byHand.length > 1 ? `Set all ${byHand.length} back to Auto` : 'Set back to Auto';
+    clear.hidden = !byHand.length;
   }
+  paint();
 }
 
-export function buildTableActionsPanel(container, refresh) {
-  const src = S.sources.find((s) => s.id === S.sourceId);
-  const acts = el('div', 'row-actions');
-  // Four long labels don't fit one row of the dialog; squeezed, each one
-  // folded onto two lines. Wrap the row instead of the labels.
-  acts.style.flexWrap = 'wrap';
-  const dflt = el('button', 'btn ghost', 'Save layout as default for these columns');
-  dflt.title = 'Reuse this column order/visibility for any table imported with the same headers';
-  dflt.onclick = () => saveDefaultLayout();
-  // A table opens to the default only until it has a layout of its own,
-  // so one that was open before the default was saved needs telling.
-  const useDflt = el('button', 'btn ghost', 'Apply default layout for these columns');
-  useDflt.title = 'Replace this table\'s column order/visibility with the default saved for these headers';
-  useDflt.onclick = () => { $('modal').hidden = true; applyDefaultLayout(); };
-  const copyFrom = el('button', 'btn ghost', 'Copy layout from another table…');
-  copyFrom.title = 'Give this table the column order, visibility and widths of another table in the case, for the columns they share';
-  copyFrom.onclick = () => openCopyLayoutModal();
-  const nick = el('button', 'btn ghost', 'Name this header set…');
-  nick.onclick = () => setNicknameFor(baseColumns().map((c) => c.name), nicknameFor(baseColumns().map((c) => c.name)));
-  const nickTable = el('button', 'btn ghost', src && src.is_merge ? 'Rename this merge…' : 'Nickname this table…');
-  nickTable.title = src && src.is_merge
-    ? 'Rename this merge'
-    : 'A display name shown in place of the file name — clear it to go back';
-  nickTable.onclick = async () => {
-    if (!src) return;
-    if (await editSourceNickname(src)) refresh();
+/* The tables the Layout pane can take a layout from, after the default
+   saved for this header set: every other table sharing a column with this
+   one, the same header set first, then by how many columns they share. */
+const LAYOUT_SAME = 'Same columns';
+const LAYOUT_SOME = 'Some columns in common';
+function layoutSources() {
+  const id = S.sourceId;
+  const mine = new Set(S.columns.map((c) => c.name));
+  const headerSet = (cols) => cols.filter((c) => !c.derived).map((c) => c.name.toLowerCase()).sort().join('\n');
+  const myHeaders = headerSet(S.columns);
+  const base = baseColumns().length;
+  return S.sources.filter((s) => s.id !== id && !s.error).map((s) => {
+    const cols = s.columns || [];
+    const shared = cols.filter((c) => mine.has(c.name)).length;
+    return {
+      key: String(s.id), label: sourceLabel(s), src: s, shared,
+      group: headerSet(cols) === myHeaders ? LAYOUT_SAME : LAYOUT_SOME,
+      hint: shared >= base ? `all ${shared} columns` : `${shared} of ${base} columns`,
+    };
+  }).filter((e) => e.shared > 0)
+    .sort((a, b) => (a.group === b.group ? 0 : a.group === LAYOUT_SAME ? -1 : 1)
+      || b.shared - a.shared || a.label.localeCompare(b.label));
+}
+
+/* The columns a new order actually moves. Comparing positions marks
+   every column after one that moved to the top as "moved" too; what
+   moved is what falls outside the longest run of columns still in their
+   old relative order. */
+function movedColumns(before, after) {
+  const at = after.map((n) => before.indexOf(n));
+  const tails = [];   // tails[k]: index into `after` ending the best run of length k+1
+  const prev = new Array(after.length).fill(-1);
+  at.forEach((pos, i) => {
+    if (pos < 0) return;
+    let lo = 0, hi = tails.length;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (at[tails[mid]] < pos) lo = mid + 1; else hi = mid; }
+    if (lo > 0) prev[i] = tails[lo - 1];
+    tails[lo] = i;
+  });
+  const kept = new Set();
+  for (let i = tails.length ? tails[tails.length - 1] : -1; i >= 0; i = prev[i]) kept.add(after[i]);
+  return new Set(after.filter((n, i) => at[i] >= 0 && !kept.has(n)));
+}
+
+/* The table menu's layout section: where to take a layout from, the
+   columns as they would be after it with what changes marked, and one
+   button that applies it. The default for this header set and the other
+   tables are places in one list, so applying the default gets the same
+   preview copying another table's layout had in its own dialog (Copy
+   layout from another table…, which this replaced). Saving this table's
+   layout as that default sits on the left of the foot, the way Import a
+   folder keeps Save as profile… */
+export function buildLayoutPanel(container) {
+  const id = S.sourceId;
+  const changed = () => container.dispatchEvent(new CustomEvent('tablemenu:changed', { bubbles: true }));
+  const others = layoutSources();
+  const from = el('select', 'tm-layout-from');
+  from.setAttribute('aria-label', 'Take the layout from');
+  const dfltOpt = new Option('The default for these columns — looking…', 'default');
+  dfltOpt.disabled = true;
+  from.append(dfltOpt);
+  for (const group of [LAYOUT_SAME, LAYOUT_SOME]) {
+    const members = others.filter((e) => e.group === group);
+    if (!members.length) continue;
+    const og = el('optgroup');
+    og.label = group;
+    for (const e of members) og.append(new Option(`${e.label} — ${e.hint}`, e.key));
+    from.append(og);
+  }
+  container.append(tableMenuField('Take the layout from', from));
+  const notes = el('ul', 'mb-notes');
+  container.append(notes);
+
+  const head = el('div', 'side-preview-title', 'Columns after applying');
+  const box = el('div', 'side-preview tm-layout-preview');
+  const rows = el('div', 'side-preview-rows');
+  const foot = el('div', 'side-preview-foot');
+  box.append(rows, foot);
+  container.append(head, box);
+
+  const acts = el('div', 'row-actions tm-foot-actions');
+  const save = el('button', 'btn ghost', 'Save this layout as the default');
+  save.title = 'Reuse this table’s column order and visibility for any table imported with the same headers';
+  save.onclick = async () => { await saveDefaultLayout(); picked = false; loadDefault(); changed(); };
+  const apply = el('button', 'btn primary', 'Apply layout');
+  apply.disabled = true;
+  acts.append(save, apply);
+  container.append(acts);
+
+  let found;          // the saved default once asked: an object, or null for none
+  let result = null;  // { order, layout, message } for what is chosen
+  const layouts = new Map();   // source id -> its saved layout, asked once
+
+  function loadDefault() {
+    findDefaultLayout().then((f) => {
+      found = f;
+      if (!box.isConnected) return;
+      const name = nicknameFor(baseColumns().map((c) => c.name));
+      dfltOpt.disabled = !f;
+      dfltOpt.textContent = f
+        ? `The default saved for ${name || 'these columns'}`
+        : `The default for ${name || 'these columns'} — none saved yet`;
+      // The saved default is the first place to look, until the analyst
+      // has picked another.
+      if (f && !picked) from.value = 'default';
+      else if (!f && from.value === 'default' && others.length) from.value = others[0].key;
+      preview();
+    }).catch(() => { found = null; if (box.isConnected) preview(); });
+  }
+
+  async function preview() {
+    const key = from.value;
+    result = null;
+    apply.disabled = true;
+    box.classList.add('stale');
+    let order, layout, line, message;
+    if (key === 'default' && found) {
+      ({ order, layout } = defaultLayoutResult(found));
+      line = `Saved for every table imported with these ${baseColumns().length} headers. A table that already has a layout keeps it until one is applied here.`;
+      message = 'Applied the default layout for these columns';
+    } else if (key && key !== 'default') {
+      const entry = others.find((e) => e.key === key);
+      if (!layouts.has(entry.src.id)) {
+        layouts.set(entry.src.id, api(`/api/layout?source_id=${entry.src.id}`).catch(() => ({})));
+      }
+      const saved = await layouts.get(entry.src.id);
+      if (from.value !== key || !box.isConnected || S.sourceId !== id) return;
+      // A table never laid out shows its columns as the file had them.
+      const fromOrder = saved.order || (entry.src.columns || []).map((c) => c.name);
+      const copied = copiedOrder(fromOrder);
+      order = copied.order;
+      layout = copiedColumns(nameMap(saved.columns), copied.shared);
+      const own = order.length - copied.shared.size;
+      line = `The order, visibility and widths of ${entry.label}, for the ${copied.shared.size} columns the two share.`
+        + (own ? ` ${own} only this table has ${own === 1 ? 'stays beside the column it follows' : 'stay beside the columns they follow'}.` : '');
+      message = `Copied the layout of ${entry.label}`;
+    } else {
+      notes.replaceChildren(el('li', null, 'Nothing to take a layout from yet: no default is saved for these columns, and no other table shares any of them.'));
+      rows.replaceChildren();
+      foot.replaceChildren();
+      box.classList.remove('stale');
+      return;
+    }
+    notes.replaceChildren(el('li', null, line));
+    // What applying would change, row by row, against the table now.
+    const before = S.order.filter((n) => !S.groupByCols.includes(n));
+    const after = order.filter((n) => !S.groupByCols.includes(n));
+    const moved = movedColumns(before, after);
+    const list = el('div', 'copy-layout-cols');
+    let changes = 0;
+    after.forEach((n) => {
+      const now = S.layout[n] || {};
+      const then = layout[n] || {};
+      const what = [];
+      if (!!now.hidden !== !!then.hidden) what.push(then.hidden ? 'hidden' : 'shown');
+      if (!!now.pinned !== !!then.pinned) what.push(then.pinned ? 'pinned' : 'unpinned');
+      if (moved.has(n)) what.push('moved');
+      if ((now.w || null) !== (then.w || null)) what.push('width');
+      const r = el('div', 'copy-layout-col' + (then.hidden ? ' hidden-col' : '') + (what.length ? ' tm-changed' : ''));
+      r.dataset.col = n;
+      r.append(el('span', 'copy-layout-name', n));
+      const notesFor = [];
+      if (then.hidden && !what.includes('hidden')) notesFor.push('hidden');
+      if (then.pinned && !what.includes('pinned')) notesFor.push('pinned');
+      if (notesFor.length) r.append(el('span', 'copy-layout-note', notesFor.join(' · ')));
+      if (what.length) r.append(el('span', 'tm-change', what.join(' · ')));
+      if (what.length) changes++;
+      list.append(r);
+    });
+    rows.replaceChildren(list);
+    const verdict = changes
+      ? `${changes} of ${after.length} columns change.`
+      : 'Nothing changes: this table already has this layout.';
+    const p = el('p', 'fb-help', verdict);
+    foot.replaceChildren(p);
+    box.classList.remove('stale');
+    result = { order, layout, message };
+    apply.disabled = !changes;
+  }
+
+  let picked = false;
+  from.onchange = () => { picked = true; preview(); };
+  apply.onclick = () => {
+    if (!result || S.sourceId !== id) return;
+    closeModal();
+    replaceLayout(result.order, result.layout, result.message);
   };
-  // The merge builder, started from this table: ticked, with the tables
-  // that fit it listed first — or, on a merge, opened on its own tables
-  // to change them in place.
-  const merge = el('button', 'btn ghost', src && src.is_merge ? 'Edit merge…' : 'Merge with other tables…');
-  merge.title = src && src.is_merge
+  if (others.length) from.value = others[0].key;
+  loadDefault();
+}
+
+/* The table menu's name-and-merge section: the names saved as they are
+   typed, the way the tag editor saves, what the table holds, and the
+   merge builder with what it would find. */
+export function buildNamePanel(container, refresh) {
+  const src = S.sources.find((s) => s.id === S.sourceId);
+  if (!src) return;
+  const merge = !!src.is_merge;
+  const changed = () => container.dispatchEvent(new CustomEvent('tablemenu:changed', { bubbles: true }));
+
+  /* A text box that saves on Enter or on leaving it, and says so. */
+  function savingInput(value, placeholder, saveFn) {
+    const wrap = el('div', 'tm-input');
+    const input = el('input');
+    input.value = value;
+    input.placeholder = placeholder;
+    input.spellcheck = false;
+    const said = el('span', 'tm-saved');
+    let last = value;
+    const commit = async () => {
+      const v = input.value.trim();
+      if (v === last) return;
+      try {
+        await saveFn(v);
+        last = v;
+        said.textContent = 'Saved';
+        setTimeout(() => { said.textContent = ''; }, 1600);
+        changed();
+      } catch (e) {
+        toast('Could not save that: ' + e.message, 4000);
+      }
+    };
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); commit(); }
+      else if (e.key === 'Escape' && input.value !== last) { e.preventDefault(); e.stopPropagation(); input.value = last; }
+    });
+    input.addEventListener('blur', commit);
+    wrap.append(input, said);
+    return wrap;
+  }
+
+  const stats = el('div', 'mb-stats tm-about');
+  const cols = baseColumns();
+  const derived = S.columns.length - cols.length;
+  stats.append(
+    tableMenuStat(src.row_count, 'rows'),
+    tableMenuStat(cols.length, derived ? `columns + ${derived} derived` : 'columns'),
+    tableMenuStat(src.tagged_row_count || 0, 'tagged'),
+    tableMenuStat(src.note_count || 0, 'notes'));
+  const fileLine = el('div', 'tm-file');
+  if (!merge && src.path) fileLine.append(el('span', 'tm-path', src.path));
+  if (src.imported_at) fileLine.append(el('span', null, (merge ? 'Made ' : 'Imported ') + src.imported_at.replace('T', ' ')));
+  fileLine.title = src.path || '';
+  container.append(stats, fileLine);
+  const name = savingInput(merge ? src.name : (src.nickname || ''), merge ? 'Name this merge' : src.name, async (v) => {
+    if (merge && !v) throw new Error('a merge needs a name');
+    await post(`/api/source/${src.id}/nickname`, { nickname: v });
+    await loadSources();
+    const fresh = S.sources.find((s) => s.id === src.id);
+    if (fresh) $('modalTitle').textContent = `Table — ${sourceLabel(fresh)}`;
+  });
+  container.append(tableMenuField(merge ? 'Name' : 'Nickname', name,
+    el('small', null, merge ? 'On its tab and in the sidebar.' : 'Shown on its tab and in the sidebar in place of the file name. Blank goes back to the file name.')));
+
+
+  if (!merge) {
+    const names = cols.map((c) => c.name);
+    const sig = headerSig(names);
+    const alike = S.sources.filter((s) => !s.is_merge && !s.error
+      && headerSig((s.columns || []).filter((c) => !c.derived).map((c) => c.name)) === sig);
+    const setName = savingInput(nicknameFor(names) || '', `A name for these ${names.length} columns`, async (v) => {
+      await saveHeaderNickname(names, v);
+    });
+    container.append(tableMenuField(`These ${names.length} columns`, setName,
+      el('small', null, `${alike.length === 1 ? 'Only this table has' : `${alike.length} tables have`} them. The name groups them in the merge builder, Saved filters and the Timeline.`)));
+  }
+
+  const mergeBtn = el('button', 'btn ghost', merge ? 'Edit merge…' : 'Merge with other tables…');
+  mergeBtn.title = merge
     ? 'Add or remove tables, or change which columns this merge keeps. Its layout stays.'
     : 'One table across this and others, matched by column name';
-  merge.onclick = () => {
-    if (!src) return;
-    openMergeBuilder(src.is_merge ? { edit: src } : { preselect: [src.id] });
+  mergeBtn.onclick = () => openMergeBuilder(merge ? { edit: src } : { preselect: [src.id] });
+  // What the merge builder would offer, best fit first: the tables
+  // sharing columns with this one, or a merge's own tables.
+  const mergeHead = el('div', 'tm-merge-head');
+  const mergeList = el('div', 'tm-merge-list');
+  const mergeRow = (s, chipText, chipKind) => {
+    const r = el('div', 'tm-merge-row');
+    r.append(el('span', 'tm-merge-name', sourceLabel(s)), el('span', 'tm-merge-rows', `${(s.row_count || 0).toLocaleString()} rows`));
+    if (chipText) r.append(el('span', 'mb-chip ' + chipKind, chipText));
+    mergeList.append(r);
   };
-  acts.append(dflt, useDflt, copyFrom, nick, nickTable, merge);
-  container.append(acts);
+  if (merge) {
+    const members = (src.member_source_ids || []).map((mid) => S.sources.find((s) => s.id === mid)).filter(Boolean);
+    mergeHead.append(el('span', null, `A merge of ${members.length} tables.`));
+    for (const m of members) mergeRow(m, null);
+  } else {
+    const usedBy = mergesUsing(src);
+    const mine = new Set(cols.map((c) => c.name));
+    const fits = S.sources.filter((s) => s.id !== src.id && !s.is_merge && !s.error).map((s) => ({
+      s, shared: (s.columns || []).filter((c) => !c.derived && mine.has(c.name)).length,
+    })).filter((f) => f.shared > 0).sort((a, b) => b.shared - a.shared || sourceLabel(a.s).localeCompare(sourceLabel(b.s)));
+    mergeHead.append(el('span', null, usedBy.length
+      ? `In ${usedBy.map((m) => `“${sourceLabel(m)}”`).join(', ')}. Tables that share its columns:`
+      : fits.length ? 'Not in a merge. Tables that share its columns, best fit first:'
+        : 'Not in a merge, and no other table shares any of its columns.'));
+    for (const f of fits) {
+      const all = f.shared === mine.size;
+      mergeRow(f.s, `${f.shared} of ${mine.size} columns`, all ? 'ok' : 'info');
+    }
+  }
+  mergeHead.append(mergeBtn);
+  container.append(tableMenuField('Merge', mergeHead, mergeList));
 }
 
-/* The strip along the top of the table menu: the three things this menu
-   is opened FOR most of the time. They used to sit last, under the column
-   list — on a wide table that meant scrolling past two hundred rows to
-   close a tab. Naming and layout defaults stay at the bottom; those are
-   set once per table, not once per hour. */
+/* Along the foot of the table menu: the three things this menu is opened
+   FOR most of the time, under whichever section is showing. They sat last,
+   under the column list, until a two-hundred-column table put closing a
+   tab a long scroll away. */
 export function buildTableStripPanel(container) {
   const src = S.sources.find((s) => s.id === S.sourceId);
   const strip = el('div', 'table-menu-strip');
@@ -927,7 +1326,7 @@ export function buildTableStripPanel(container) {
   tables.title = 'Every table in the case — indexes, row counts, dropping a table';
   tables.onclick = () => openTablesManager();
   const reset = el('button', 'btn ghost', 'Reset view');
-  reset.title = 'Back to the just-opened state: clear filters, search, tag filter and grouping, and restore the default sort. Column layout and the timeframe filter stay (Apply default layout for these columns, below, resets the layout).';
+  reset.title = 'Back to the just-opened state: clear filters, search, tag filter and grouping, and restore the default sort. Column layout and the timeframe filter stay (Layout, taking the default for these columns, resets the layout).';
   reset.onclick = async () => {
     $('modal').hidden = true;
     const dt = S.columns.find((c) => c.type === 'datetime');
@@ -945,11 +1344,37 @@ export function buildTableStripPanel(container) {
   container.append(strip);
 }
 
+/* What the side list says under each section's name: its state at a
+   glance, so the list answers "is anything set here?" without opening
+   each one. */
+function columnsHint() {
+  const listed = S.order.filter((n) => !S.groupByCols.includes(n));
+  const shown = listed.filter((n) => !(S.layout[n] || {}).hidden).length;
+  const pinned = listed.filter((n) => isPinned(n)).length;
+  return `${shown} of ${listed.length} shown` + (pinned ? ` · ${pinned} pinned` : '');
+}
+
+function valueFilterHint() {
+  const mode = S.valueFilterMode === 'auto' ? `Auto, ${valueFilterAutoOn() ? 'on' : 'off'} here`
+    : S.valueFilterMode === 'on' ? 'On for every column' : 'Off';
+  const set = S.order.filter((n) => !S.groupByCols.includes(n) && (S.layout[n] || {}).valuePicker !== undefined).length;
+  return mode + (set ? ` · ${set} set by hand` : '');
+}
+
+function nameHint() {
+  const src = S.sources.find((s) => s.id === S.sourceId);
+  if (!src) return '';
+  if (src.is_merge) return `${(src.member_source_ids || []).length} tables`;
+  const usedBy = mergesUsing(src);
+  return (src.nickname ? 'Nicknamed' : 'No nickname') + (usedBy.length ? ' · in a merge' : '');
+}
+
 /* The table menu — everything that's about *this table* rather than the
    case or the app. Sections are a registry for the same reason the row
    menu's are: this is where per-table features are expected to land, and
-   adding one should be adding an entry. `build` gets (container, refresh)
-   and may render nothing at all.
+   adding one should be adding an entry. `build` gets (container, refresh);
+   `hint` says what the side list shows under its name, and a section with
+   `asyncHint` fills that in once it has asked the server.
 
    It lives behind the openTableMenu keybind, the Tables manager's
    Settings… and Columns… on a table's right-click menu (tableMenuItems in
@@ -959,34 +1384,110 @@ export function buildTableStripPanel(container) {
    directly until it got a short menu of its own: a full-height modal was a
    lot to put up for closing or renaming a tab. */
 export const TABLE_MENU_SECTIONS = [
-  { id: 'strip', title: null, build: buildTableStripPanel },
-  { id: 'columns', title: 'Columns', build: buildColumnsPanel },
-  { id: 'valueFilters', title: 'Value filter dropdowns', build: buildValueFilterPanel },
-  { id: 'table', title: 'This table', build: buildTableActionsPanel },
+  { id: 'columns', group: 'Columns', title: 'Show, hide & order', hint: columnsHint, build: buildColumnsPanel },
+  { id: 'valueFilters', group: 'Columns', title: 'Value dropdowns', hint: valueFilterHint, build: buildValueFilterPanel },
+  { id: 'layout', group: 'This table', title: 'Layout', build: buildLayoutPanel,
+    asyncHint: async () => ((await findDefaultLayout()) ? 'Default saved' : 'No default saved') },
+  { id: 'name', group: 'This table', title: 'Name & merge', hint: nameHint, build: buildNamePanel },
 ];
 
 /* `sourceId` is optional — the right-click menu's Columns… and the Tables
    manager pass the table they were opened on, which may not be the one on
    screen. The panels all
    read S.layout/S.order/S.columns (this table's live state), so opening
-   that source first isn't a convenience, it's the precondition. */
-export async function openTableMenu(sourceId) {
+   that source first isn't a convenience, it's the precondition. `section`
+   picks the pane it opens on; Columns otherwise, since that is what `C`
+   and Columns… are pressed for.
+
+   Two panes, the shape of Settings and the side-list dialogs: the sections
+   down the left, the chosen one on the right, in a frame of a FIXED height
+   so going from the column list to a pane of three rows moves nothing.
+   Choosing a section builds its pane fresh (they read live state that
+   another dialog opened from here, like the merge builder, may change),
+   and the everyday actions sit along the foot under every one of them. */
+export async function openTableMenu(sourceId, section = 'columns') {
   markModalAction('openTableMenu');
   const id = sourceId === undefined ? S.sourceId : sourceId;
   if (id == null) { toast('Open a table first'); return; }
   if (id !== S.sourceId || S.activeTab !== 'grid') await openSource(id);
   if (S.sourceId !== id) return; // openSource no-ops on an id it can't find
   const src = S.sources.find((x) => x.id === id);
-  // Wide: each column row carries its name, its type and four buttons, and
-  // the default 680px left a long name little room beside them.
   modal(`Table — ${src ? sourceLabel(src) : ''}`, (b) => {
-    for (const section of TABLE_MENU_SECTIONS) {
-      const wrap = el('div', 'table-menu-section');
-      if (section.title) wrap.append(el('h4', null, section.title));
-      section.build(wrap, () => openTableMenu(id));
-      b.append(wrap);
+    const panes = el('div', 'side-panes table-menu');
+    const rail = el('div', 'side-rail');
+    const nav = el('div', 'side-rail-list');
+    nav.setAttribute('role', 'tablist');
+    nav.setAttribute('aria-orientation', 'vertical');
+    nav.setAttribute('aria-label', 'Table menu sections');
+    rail.append(nav);
+    const pane = el('div', 'side-pane table-menu-pane');
+    pane.setAttribute('role', 'tabpanel');
+    panes.append(rail, pane);
+    b.append(panes);
+    const foot = el('div', 'table-menu-foot');
+    buildTableStripPanel(foot);
+    b.append(foot);
+
+    const entries = [];
+    let group = null;
+    for (const s of TABLE_MENU_SECTIONS) {
+      if (s.group !== group) { group = s.group; nav.append(el('div', 'side-rail-group', group)); }
+      const row = el('div', 'side-rail-row');
+      const item = el('button', 'side-rail-item');
+      item.type = 'button';
+      item.dataset.section = s.id;
+      item.setAttribute('role', 'tab');
+      const hint = el('span', 'side-rail-hint');
+      item.append(el('span', 'side-rail-label', s.title), hint);
+      item.onclick = () => show(s.id);
+      row.append(item);
+      nav.append(row);
+      entries.push({ s, item, hint });
     }
-  }, { wide: true });
+    let current = entries.find((e) => e.s.id === section) || entries[0];
+
+    function paintHints() {
+      for (const e of entries) {
+        if (e.s.hint) e.hint.textContent = e.s.hint();
+        else if (e.s.asyncHint) e.s.asyncHint().then((h) => { if (e.hint.isConnected) e.hint.textContent = h; }).catch(() => {});
+      }
+    }
+    function refresh() {
+      pane.replaceChildren();
+      current.s.build(pane, refresh);
+      paintHints();
+    }
+    function show(sid, { focus = false } = {}) {
+      current = entries.find((e) => e.s.id === sid) || entries[0];
+      for (const e of entries) {
+        const on = e === current;
+        e.item.setAttribute('aria-selected', String(on));
+        e.item.tabIndex = on ? 0 : -1;
+        e.item.parentElement.classList.toggle('selected', on);
+      }
+      pane.dataset.section = current.s.id;
+      refresh();
+      if (focus) current.item.focus();
+    }
+    pane.addEventListener('tablemenu:changed', paintHints);
+    nav.addEventListener('keydown', (e) => {
+      const at = entries.findIndex((x) => x.item === document.activeElement);
+      if (at < 0 || e.altKey || e.ctrlKey || e.metaKey) return;
+      const last = entries.length - 1;
+      let to;
+      if (e.key === 'ArrowDown') to = at === last ? 0 : at + 1;
+      else if (e.key === 'ArrowUp') to = at === 0 ? last : at - 1;
+      else if (e.key === 'Home') to = 0;
+      else if (e.key === 'End') to = last;
+      else return;
+      e.preventDefault();
+      show(entries[to].s.id, { focus: true });
+    });
+    show(current.s.id);
+    // The side list, like Settings: arrow keys move between sections from
+    // the start, and C still closes the menu it opened (a caret in the
+    // filter box would take the C as typing).
+  }, { wide: true, tall: true, focus: (b) => b.querySelector('.side-rail-item[aria-selected="true"]') });
 }
 
 /* The case's tags, saved as they change (tagEditRow, in tags.js — the
