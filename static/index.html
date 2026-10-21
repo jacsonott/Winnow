@@ -172,6 +172,14 @@ try {
         <div class="spacer-y" id="spacerY"></div>
         <div class="rows" id="rows"></div>
       </div>
+      <!-- The grid's vertical scrollbar, from the header's foot down. A
+           scroller of its own with nothing in it but a fill: #body's own
+           bar is hidden, since it would run up beside the sticky header,
+           and syncVbar (static/js/grid.js) keeps this one's range and
+           position equal to #body's. Outside #body, so it is not one of
+           the rows' event targets. display:none where the browser can't
+           hide #body's bar (style.css, .vbar). -->
+      <div class="vbar" id="vbar" aria-hidden="true"><div class="vbar-fill" id="vbarFill"></div></div>
       <!-- The tag rail. It sits in the strip .grid-body's margin-right keeps
            clear for it, never over the grid or its scrollbar — that is what
            lets it take pointer events, and the title is why it wants them:

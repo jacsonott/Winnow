@@ -541,10 +541,90 @@ export function rowsPaintY(scroller, virt, first, rowH = ROW_H) {
   return scroller.scrollTop - (virt - anchor * rowH) - (anchor - first) * rowH;
 }
 
+/* Also hands the same height to the stylesheet as --grid-head-h, which is
+   where #vbar's track and the tag rail start (style.css, .vbar) — the one
+   measurement, taken on every paint, rather than a second one of its own
+   that could go stale on a path that repaints the head. */
 export function syncRowsTop() {
   const t = headH() + 'px';
   const rowsEl = $('rows');
   if (rowsEl.style.top !== t) rowsEl.style.top = t;
+  const grid = $('grid');
+  if (grid.style.getPropertyValue('--grid-head-h') !== t) grid.style.setProperty('--grid-head-h', t);
+}
+
+/* ----------------------------------------------- the stand-in scrollbar */
+
+/* #vbar is the grid's vertical scrollbar wherever the browser can hide
+   #body's own (style.css, .vbar, behind the same test): a scroller beside
+   #body whose only content is a fill, so that its thumb and track say
+   what #body's would, from the header's foot down. Everything else about
+   scrolling — the wheel over the rows, keyboard paging, scrollIntoView,
+   the jumps logic — still happens on #body; this only has to mirror it. */
+export let vbarSupported = null;
+export function vbarInUse() {
+  if (vbarSupported === null) {
+    vbarSupported = typeof CSS !== 'undefined' && CSS.supports('selector(::-webkit-scrollbar)');
+  }
+  return vbarSupported;
+}
+
+/* How much of #body's right edge #vbar covers: its width while it is
+   showing, otherwise nothing (#body's own bar is outside clientWidth). */
+export function vbarCover() {
+  const bar = $('vbar');
+  return bar && vbarInUse() && !bar.hidden ? bar.offsetWidth : 0;
+}
+
+/* The scrollTop each side was last given by the other, until that write's
+   scroll event comes back. Passing an echo on would set the side that
+   started the move back to where it was a frame ago — a thumb drag or a
+   smooth wheel scroll fighting itself — so the echo is recognised by its
+   value and dropped. Null when nothing is in flight. */
+export let vbarSetTo = null;
+export let bodySetTo = null;
+
+/* Assigns a scrollTop and returns what the element actually took (it
+   clamps to its own range), or null when nothing moved — no scroll event
+   is coming then, so there is no echo to wait for. */
+export function pushScrollTop(node, top) {
+  const was = node.scrollTop;
+  node.scrollTop = top;
+  return node.scrollTop !== was ? node.scrollTop : null;
+}
+
+/* #body moved: bring the bar's thumb with it. */
+export function vbarFollowBody() {
+  const bar = $('vbar'), body = $('body');
+  if (!bar || bar.hidden || !vbarInUse()) return;
+  if (Math.abs(bar.scrollTop - body.scrollTop) >= 1) vbarSetTo = pushScrollTop(bar, body.scrollTop);
+}
+
+/* The bar's scroll range made equal to #body's: a fill as tall as the
+   bar's own box plus #body's range, so the thumb is the share of the rows
+   on screen and its travel is #body's. The bar's box is the viewport less
+   the header (its top) and #body's horizontal bar (its bottom, written
+   here), so its height is worked out rather than read back after that
+   write. Hidden with nothing to scroll, as #body's own bar would be.
+   Both painters call it on every paint, after the spacer and the header
+   have their sizes; the ResizeObserver in wireGrid covers a viewport that
+   changes size with no paint. The position is only pushed when the range
+   changed — between paints the scroll handlers keep the two together,
+   and pushing on every paint could land on a drag mid-frame. */
+export function syncVbar() {
+  const bar = $('vbar'), body = $('body');
+  if (!bar || !body || !vbarInUse()) return;
+  const range = body.scrollHeight - body.clientHeight;
+  const idle = range <= 0;
+  let changed = bar.hidden !== idle;
+  if (changed) bar.hidden = idle;
+  if (idle) return;
+  const bottom = (body.offsetHeight - body.clientHeight) + 'px';
+  const fill = Math.max(0, body.clientHeight - headH()) + range + 'px';
+  const fillEl = $('vbarFill');
+  if (bar.style.bottom !== bottom) { bar.style.bottom = bottom; changed = true; }
+  if (fillEl.style.height !== fill) { fillEl.style.height = fill; changed = true; }
+  if (changed) vbarFollowBody();
 }
 
 /* Explicit pixel width for #rows — the exact gutter + visible-column
@@ -598,6 +678,7 @@ export function render() {
   for (let pos = first; pos < last; pos++) frag.append(buildDataRow(pos, rowAt(pos), ctx));
   rowsEl.replaceChildren(frag);
   renderTagToolbar();
+  syncVbar();
   titleClippedCells();
   histogramFollowGrid();
 }
@@ -1124,8 +1205,11 @@ export function scrollColIntoView(ci) {
   let stuck = GUTTER_W;
   for (const n of cols) if (pins[n] !== undefined) stuck += colWidth(n);
   const w = colWidth(name);
+  // The stand-in scrollbar sits over the viewport's right edge, so a cell
+  // brought in from the right stops at its left edge rather than under it.
+  const viewW = body.clientWidth - vbarCover();
   if (left < body.scrollLeft + stuck) body.scrollLeft = left - stuck;
-  else if (left + w > body.scrollLeft + body.clientWidth) body.scrollLeft = left + w - body.clientWidth;
+  else if (left + w > body.scrollLeft + viewW) body.scrollLeft = left + w - viewW;
 }
 
 /* One step of the cell cursor. dr/dc are -1, 0 or 1; `edge` turns the
@@ -1254,7 +1338,21 @@ export function selectCellRangeRows() {
    startup steps that DO depend on order live in main.js instead. */
 export function wireGrid() {
 $('body').addEventListener('scroll', () => {
+  // The bar's own move coming back (see vbarSetTo) is not passed on.
+  const b = $('body');
+  if (bodySetTo !== null && Math.abs(b.scrollTop - bodySetTo) < 1) bodySetTo = null;
+  else { bodySetTo = null; vbarFollowBody(); }
   if (!bodyScrollRaf) bodyScrollRaf = requestAnimationFrame(() => { bodyScrollRaf = null; render(); });
+}, { passive: true });
+
+/* The stand-in scrollbar moved — a drag of its thumb, a click on its
+   track, the wheel over it: #body follows, and #body's own scroll event
+   paints from there exactly as a drag of its own bar used to. */
+$('vbar').addEventListener('scroll', () => {
+  const bar = $('vbar'), b = $('body');
+  if (vbarSetTo !== null && Math.abs(bar.scrollTop - vbarSetTo) < 1) { vbarSetTo = null; return; }
+  vbarSetTo = null;
+  if (Math.abs(b.scrollTop - bar.scrollTop) >= 1) bodySetTo = pushScrollTop(b, bar.scrollTop);
 }, { passive: true });
 
 /* The rows only hold the columns the last paint could see (paintedColumns),
@@ -1268,7 +1366,11 @@ if (typeof ResizeObserver !== 'undefined') {
     const b = $('body');
     // Gone once Shut down replaces the page with its farewell — and
     // taking the grid out of the page is itself a resize this sees.
-    if (b && b.clientWidth && b.scrollLeft + b.clientWidth > paintedRight) render();
+    if (!b) return;
+    // A taller or shorter viewport is a different scroll range with no
+    // paint to say so (a detail-pane drag, the window).
+    syncVbar();
+    if (b.clientWidth && b.scrollLeft + b.clientWidth > paintedRight) render();
   }).observe($('body'));
 }
 
@@ -1281,7 +1383,7 @@ if (typeof ResizeObserver !== 'undefined') {
    trackpad pixel deltas into the same discrete row steps. */
 let wheelAcc = 0;
 const REMOTE_PX_PER_ROW = 33; // ≈ one Chrome wheel notch (100px) → 3 rows, the Windows default
-$('body').addEventListener('wheel', (e) => {
+const remoteWheel = (e) => {
   if (!S.appearance.remoteSession) return;
   if (e.ctrlKey || !e.deltaY) return; // browser zoom / horizontal-only: leave native
   e.preventDefault();
@@ -1296,7 +1398,11 @@ $('body').addEventListener('wheel', (e) => {
   if (!rows) return;
   const b = $('body');
   b.scrollTop = Math.max(0, Math.round(b.scrollTop / ROW_H) * ROW_H + rows * ROW_H);
-}, { passive: false });
+};
+$('body').addEventListener('wheel', remoteWheel, { passive: false });
+// The wheel over the stand-in scrollbar is the wheel over #body's own bar
+// as far as the analyst can tell, so it steps the same whole rows.
+$('vbar').addEventListener('wheel', remoteWheel, { passive: false });
 
 $('body').addEventListener('click', (e) => {
   const groupHeader = e.target.closest('.group-header-row');

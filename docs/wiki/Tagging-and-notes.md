@@ -85,7 +85,7 @@ The ribbon in the toolbar has one chip per tag: its colour, name, key and a coun
 
 Each tagged row has a coloured stripe per tag in its gutter, beside the line number, and a ✎ when it carries a note.
 
-The rail is the narrow strip down the right-hand edge of the grid. Every tagged row in the view puts a mark on it at its position in the whole view, so you can see where findings cluster in a million rows without scrolling to them. Hover a mark to see which tags it is and which rows it covers (*TA · rows 1,180–1,214 of 52,000*). Scrolling the mouse wheel over the rail scrolls the grid.
+The rail is the narrow strip down the right-hand edge of the grid, beside the scrollbar, and like the scrollbar it starts below the column headers. Every tagged row in the view puts a mark on it at its position in the whole view, so you can see where findings cluster in a million rows without scrolling to them. Hover a mark to see which tags it is and which rows it covers (*TA · rows 1,180–1,214 of 52,000*). Scrolling the mouse wheel over the rail scrolls the grid.
 
 ## Filtering by tag
 

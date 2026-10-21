@@ -31,6 +31,11 @@
      drawRail sets it from clientWidth, which is this less the left
      border, so the marks paint one device pixel per CSS pixel. */
   --rail-w: 14px;
+  /* The grid's scrollbars: #vbar's width and #body's horizontal bar's
+     height, where the browser draws them from ::-webkit-scrollbar (see
+     .vbar). Also the room .grid-head leaves past the last column, so the
+     bar never sits over that column for good. */
+  --vbar-w: 10px;
 }
 
 * { box-sizing: border-box; }
@@ -1266,6 +1271,56 @@ section.page-with-panels { flex-direction: row; }
   margin-right: var(--rail-w);
 }
 .spacer-y { width: 1px; }
+
+/* The grid's vertical scrollbar starts below the header, and the header
+   runs all the way across to the rail. #body's own vertical scrollbar
+   can't do either: the sticky header lives inside #body, so its bar runs
+   up beside the header, and anything that only shortens that bar's track
+   (a ::-webkit-scrollbar-track margin) still leaves the header cut off a
+   bar's width short of the edge. So #body's own is hidden, and #vbar —
+   a scroller of its own holding nothing but a fill (index.html) — stands
+   in for it from the header's foot down, over the right-hand strip of
+   the rows the way a scrollbar would be. syncVbar in grid.js keeps its
+   scroll range equal to #body's and the two positions together.
+
+   Only where ::-webkit-scrollbar exists (Chromium, so Edge and Chrome),
+   since nothing standard hides one axis's bar and keeps the other's. The
+   standard scrollbar-width/scrollbar-color above have to be `auto` on
+   both for Chromium to read the ::-webkit-scrollbar rules at all, so the
+   theme comes from the thumb rules here instead. Anywhere else #vbar
+   stays display:none and #body keeps its own scrollbar, as it always has.
+
+   --grid-head-h is the header's height, written by syncRowsTop on every
+   paint. .grid-head's padding-right is the room past the last column the
+   bar sits over at the far right, so no column stays under it.
+
+   The rail moves down with the track — see the @supports block after
+   .rail below. */
+.vbar { display: none; }
+@supports selector(::-webkit-scrollbar) {
+  .grid-body, .vbar { scrollbar-width: auto; scrollbar-color: auto; }
+  .grid-body::-webkit-scrollbar { width: 0; height: var(--vbar-w); }
+  .vbar::-webkit-scrollbar { width: var(--vbar-w); }
+  .grid-body::-webkit-scrollbar-thumb, .vbar::-webkit-scrollbar-thumb {
+    background-color: var(--line-2); border-radius: calc(var(--vbar-w) / 2);
+    border: 2px solid transparent; background-clip: padding-box;
+  }
+  .grid-body::-webkit-scrollbar-thumb:hover, .vbar::-webkit-scrollbar-thumb:hover {
+    background-color: var(--dim);
+  }
+  .grid-body::-webkit-scrollbar-track, .vbar::-webkit-scrollbar-track,
+  .grid-body::-webkit-scrollbar-corner { background: transparent; }
+  /* z-index 4: over the rows it covers, level with the rail beside it.
+     `bottom` is the height of #body's horizontal bar, set by syncVbar. */
+  .vbar {
+    display: block; position: absolute; z-index: 4;
+    top: var(--grid-head-h, 0px); right: var(--rail-w); bottom: 0;
+    width: var(--vbar-w); overflow-x: hidden; overflow-y: scroll;
+    background: var(--ink);
+  }
+  .vbar-fill { width: 1px; }
+  .grid-head { padding-right: var(--vbar-w); }
+}
 /* The row-width contract: render() sets an explicit pixel `width` on this
    box — gutter + the sum of the visible columns' widths, floored at the
    viewport via min-width — and every .row/.group-header-row (width: auto)
@@ -1477,6 +1532,24 @@ section.page-with-panels { flex-direction: row; }
   position: absolute; top: 0; right: 0; width: var(--rail-w); height: 100%;
   background: var(--panel); border-left: 1px solid var(--line);
   z-index: 4;
+}
+/* Where #vbar stands in for #body's scrollbar (see .vbar), its track
+   starts at the header's foot, and the rail starts there with it: the
+   rail is a map of the same rows the thumb travels over, and a mark beside
+   the thumb is only beside it if the two run over the same height. Still
+   no JS on the rail itself — --grid-head-h is the header height
+   syncRowsTop hands the stylesheet on every paint, the same value the
+   bar's own `top` reads. The strip above it, beside the header, is drawn
+   as more rail (.grid::after) so the column still reads as one strip from
+   top to bottom; it takes no pointer events, having nothing to say. */
+@supports selector(::-webkit-scrollbar) {
+  .rail { top: var(--grid-head-h, 0px); height: calc(100% - var(--grid-head-h, 0px)); }
+  .grid::after {
+    content: ''; position: absolute; top: 0; right: 0; z-index: 4;
+    width: var(--rail-w); height: var(--grid-head-h, 0px);
+    background: var(--panel); border-left: 1px solid var(--line);
+    pointer-events: none;
+  }
 }
 
 .empty {

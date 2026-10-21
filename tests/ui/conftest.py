@@ -58,6 +58,23 @@ def browser():
 
 
 @pytest.fixture(scope="session")
+def scrollbar_browser(browser):
+    """A second Chromium, one that draws its scrollbars. Playwright launches
+    with --hide-scrollbars, which takes every scrollbar's thickness to zero
+    — the ::-webkit-scrollbar ones the grid draws included — so in
+    `browser` a scrollbar can be neither seen nor grabbed, and a test about
+    where the grid's scrollbar is, what it covers or what colour it is
+    passes whatever the stylesheet says. Open the page here instead:
+
+        with own_page(browser=scrollbar_browser) as pg:
+            ...
+    """
+    b = browser.browser_type.launch(ignore_default_args=["--hide-scrollbars"])
+    yield b
+    b.close()
+
+
+@pytest.fixture(scope="session")
 def ui_csv(tmp_path_factory) -> Path:
     """Small, but shaped for the things the UI tests measure: a column whose
     *header* is far longer than its values (autofit), one whose values are far
@@ -328,9 +345,12 @@ class OwnPage:
 
 @pytest.fixture(scope="session")
 def own_page(browser, server):
-    """OwnPage against the shared server; pass `base=` for another one."""
-    def _make(*, base=None, **kw):
-        return OwnPage(browser, base or server, **kw)
+    """OwnPage against the shared server; pass `base=` for another one,
+    and `browser=` for another browser (scrollbar_browser)."""
+    shared = browser
+
+    def _make(*, base=None, browser=None, **kw):
+        return OwnPage(browser or shared, base or server, **kw)
     return _make
 
 
