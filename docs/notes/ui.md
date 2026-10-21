@@ -789,10 +789,10 @@ see [docs/notes/README.md](README.md) for the whole set.
     that's what keeps `activeSavedFilterRecord()`'s JSON-stringify
     matching honest, and it gives apply-time the same leniency `sort:
     p.sort || S.sort` has (a payload without the key leaves the current
-    grouping alone; setGrouping() replaces wholesale, restoring
-    `S.preGroupOrder` first so a formerly-grouped column doesn't leak out
-    of the visible layout). `clearAllFilters()` now drops grouping too —
-    stashed in `S.lastGroupBy` first, which is also what the `X`
+    grouping alone; setGrouping() replaces wholesale, and a
+    formerly-grouped column is back in the grid by itself because grouping
+    never takes it out of `S.order` — see grid.md). `clearAllFilters()`
+    now drops grouping too — stashed in `S.lastGroupBy` first, which is also what the `X`
     toggleGrouping keybind restores (the deliberate contrast with lowercase
     `x` dropGrouping, which just drops).
   - **Jump to timestamp** (`Store.find_nearest_timestamp`,

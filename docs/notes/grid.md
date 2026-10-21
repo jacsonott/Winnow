@@ -413,15 +413,30 @@ see [docs/notes/README.md](README.md) for the whole set.
   is sticky — so grouping while scrolled right painted a screen of header
   rows with every label off past the left edge: the view that was asked
   for, with the part naming each group not on it. The column just grouped
-  on has also left `S.order`, which makes the horizontal position it was
-  read at a description of a column set that no longer exists. Both
-  entries into a grouping do it — `addGroupLevel` (the strip's drop
-  target, the column menu, Group by tag) and `toggleGrouping`'s restore
-  branch — and `setGrouping` deliberately does **not**: a table switch
+  on has also left the grid (`visibleCols()`), which makes the horizontal
+  position it was read at a description of a column set that no longer
+  exists. Both entries into a grouping do it — `addGroupLevel` (the
+  strip's drop target, the column menu, Group by tag) and
+  `toggleGrouping`'s restore branch — and `setGrouping` deliberately does
+  **not**: a table switch
   restores its stashed grouping through there, and that path is putting
   the analyst back where they were, horizontal position included.
   `tests/ui/test_group_scrolls_left.py` asserts the symptom (the first
   header's label inside the scroller's box), not the `scrollLeft` alone.
+- **A grouped column never leaves `S.order`.** `visibleCols()` leaves out
+  whatever `S.groupByCols` holds, and that is the whole of how a column
+  grouped on stops being a data column; the Columns panel lists the same
+  set. `S.order` stayed the full layout through every grouping, so Ungroup,
+  a removed pill, a failed Group-by and a table switch have nothing to put
+  back. It used to be cut out of `S.order` and restored from a snapshot
+  (`S.preGroupOrder`), and every way the two drifted apart lost a column:
+  a failed Group-by turned the grouping off without the restore, leaving
+  the column out of the grid *and* the Columns panel until the table was
+  opened again; a layout saved while grouped (any resize or sort) was saved
+  without it, so it reopened at the far right; a level removed from its
+  pill was appended at the far right; a column moved while grouped jumped
+  back on Ungroup. Anything that writes `S.order` writes the full order,
+  grouped columns included. `tests/ui/test_ungroup_keeps_columns.py`.
 - **`cellRangeRowCount()` exists because the toolbar asks every paint.**
   Ctrl+Shift+Down makes the answer "the whole view", and materialising
   200,000 positions per scroll frame just to read `.length` off them is

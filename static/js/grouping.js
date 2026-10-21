@@ -1,7 +1,7 @@
 /* Group-by: the group strip, nested levels, and grouped-mode rendering.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
-import { draggedCol, renderHead, saveLayout, visibleCols } from './columns.js';
+import { draggedCol, renderHead, visibleCols } from './columns.js';
 import { $, OVERSCAN, PAGE, ROW_H, api, el, post, setBusy, toast } from './core.js';
 import { displayValue, ellipsize, filterByValue } from './filters.js';
 import { buildDataRow, ensurePage, headH, isJumping, moveCursor, noteViewportMove, render, renderTagToolbar, rowAt, rowPaintContext, rowsPaintY, schedulePrefetch, setCellRange, spacerPx, syncRowsTop, syncRowsWidth, titleClippedCells, vScroll } from './grid.js';
@@ -423,8 +423,10 @@ export async function regroupAll() {
   } catch (e) {
     if (gen !== regroupGen) return;
     toast('Group-by failed: ' + e.message, 4000);
+    // The grouping is off, so the columns it held are data columns again:
+    // the head is repainted, not just the strip.
     S.groupByCols = [];
-    renderGroupStrip();
+    renderHead();
   }
   if (wasOpen.size && JSON.stringify(S.groupByCols) === prevCols) {
     // Walk forward so a reopened parent's freshly spliced children are
@@ -474,13 +476,6 @@ export function groupValueLabel(column, value) {
   return value === null || value === '' ? '(empty)' : String(value);
 }
 
-/* Adds a column as the innermost (last) grouping level — the drop target
-   for dragging a header into the group strip. Removes it from the normal
-   column list (S.order) so it doesn't also render as a data column while
-   grouped; S.preGroupOrder snapshots S.order the first time this happens,
-   so dropGrouping() can restore the original layout exactly. The tag
-   pseudo-column isn't in S.order to begin with, so that filter is a no-op
-   for it and it stays out of the way. */
 /* Back to the left edge, because a grouped view is read from there. A
    group header is an ordinary row with its label at the left (indented
    per level — see .group-header-row), and nothing about it is sticky, so
@@ -493,21 +488,31 @@ function scrollGridLeft() {
   if (body) body.scrollLeft = 0;
 }
 
+/* Adds a column as the innermost (last) grouping level — the drop target
+   for dragging a header into the group strip. The column stays where it
+   is in S.order: visibleCols() leaves out whatever is grouped on, so it
+   doesn't also render as a data column while grouped, and Ungroup has
+   nothing to put back.
+
+   It used to be cut out of S.order and restored from a snapshot taken
+   here (S.preGroupOrder), and every way the two drifted apart lost a
+   column. A Group-by that failed turned the grouping off without the
+   restore, so the column was gone from the grid and the Columns panel
+   until the table was opened again; a layout saved while grouped (a
+   resize, a sort) was saved without it, so it came back at the far end;
+   a level taken off its pill went to the far end too; and a column
+   moved while grouped jumped back on Ungroup. */
 export function addGroupLevel(column) {
   if (S.groupByCols.includes(column)) return;
-  if (!S.preGroupOrder) S.preGroupOrder = [...S.order];
   S.groupByCols.push(column);
-  S.order = S.order.filter((n) => n !== column);
   renderHead();
   scrollGridLeft();
   regroupAll();
 }
 
 export function removeGroupLevel(i) {
-  const [removed] = S.groupByCols.splice(i, 1);
+  S.groupByCols.splice(i, 1);
   if (!S.groupByCols.length) { dropGrouping(); return; }
-  // The tag pseudo-column has no column to give back to the layout.
-  if (!isTagGroupCol(removed) && !S.order.includes(removed)) S.order.push(removed);
   renderHead();
   regroupAll();
 }
@@ -517,30 +522,19 @@ export async function dropGrouping() {
   S.groupByCols = [];
   S.groups = [];
   clearGroupSelectionState(); // grouped positions don't mean anything in the flat view
-
-  if (S.preGroupOrder) { S.order = S.preGroupOrder; S.preGroupOrder = null; }
   renderHead();
-  renderGroupStrip();
   render();
   drawRail();
-  saveLayout();
 }
 
-/* Replace the whole grouping set at once (preset apply, toggle restore) —
-   the incremental addGroupLevel/removeGroupLevel path exists for drag
-   interactions, but swapping one saved grouping for another needs the
-   pre-grouping column order restored first, or a formerly-grouped column
-   leaks out of the visible layout. Caller renders + regroups (or lets
+/* Replace the whole grouping set at once (preset apply, toggle restore,
+   coming back to a table) — the incremental addGroupLevel/removeGroupLevel
+   path exists for drag interactions. Only the grouping changes: the
+   columns stay in S.order (see addGroupLevel), so a formerly-grouped
+   column is back in the grid by itself. Caller renders + regroups (or lets
    rebuildView's own regroupAll do it). */
 export function setGrouping(cols, gsort, gdir) {
-  if (S.preGroupOrder) { S.order = S.preGroupOrder; S.preGroupOrder = null; }
-  const valid = (cols || []).filter((c) => isTagGroupCol(c) || S.columns.some((x) => x.name === c));
-  S.groupByCols = [];
-  if (valid.length) {
-    S.preGroupOrder = [...S.order];
-    S.groupByCols = valid;
-    S.order = S.order.filter((n) => !valid.includes(n));
-  }
+  S.groupByCols = (cols || []).filter((c) => isTagGroupCol(c) || S.columns.some((x) => x.name === c));
   if (gsort) S.groupSort = gsort;
   if (gdir) S.groupSortDir = gdir;
 }
