@@ -9,7 +9,7 @@ import { derivedOps, renameColumnIn } from './derived.js';
 import { hideDetailPane, syncRowOpenHint } from './detail.js';
 import { currentSpec, renderAdvancedChips, setSearchMode, updateSearchHint } from './filters.js';
 import { clearFilterHistory, dropFilterHistory, filterHistoryStates, syncFilterBaseline } from './filterundo.js';
-import { clearPageCache, headH, rScroll, render, rowAt, spacerPx } from './grid.js';
+import { clearPageCache, headH, rScroll, render, rowAt, syncSpacer } from './grid.js';
 import { closeAllGroupViews, drawRail, dropGrouping, regroupAll, renderGroupStrip, setGrouping } from './grouping.js';
 import { refreshHistogram } from './histogram.js';
 import { shutdownWinnow } from './home.js';
@@ -1075,7 +1075,7 @@ export async function openSource(id, { skipBuild = false } = {}) {
     S.selHidden = 0;
     S.anchor = -1;
     clearCellSelection();
-    $('spacerY').style.height = spacerPx(cached.row_count) + 'px';
+    syncSpacer(cached.row_count);
     // The cached view is a real answer, empty or not — this path never
     // went through installView, so nothing else puts the empty state back
     // after the blanket hide above.

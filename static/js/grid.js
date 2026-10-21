@@ -482,6 +482,27 @@ export function headH() { return $('gridHead').offsetHeight; }
    ROW_H; the SQL pane's virtualized result passes its row height instead. */
 export function spacerPx(total, rowH = ROW_H) { return Math.min(total * rowH, MAX_SPACER_PX); }
 
+/* Sizes #spacerY — and so the scrollbar — for `total` rows. Both painters
+   call it with the count they are about to draw, flat and grouped alike,
+   so the scrollbar always describes the table on screen rather than
+   whichever count last happened to write it. The flat paint used to leave
+   that to the callers that change the count, and leaving a grouping is
+   not one of them: Ungroup, its hotkey and dragging off the last pill
+   repaint the flat rows with no rebuild, so the spacer kept the grouped
+   tree's height (a few collapsed headers' worth under the whole table).
+   The thumb was then sized by the painted rows block alone — far too
+   big at the top, shrinking as each scroll pushed the block further
+   down — and never sat beside the tag rail's marks for the rows on
+   screen, until the next filter change happened to rebuild the view.
+   Writes only on a change, since render() runs on every scroll frame.
+   Callers that set scrollTop before painting call it first: a scroller
+   still sized for the old count clamps the assignment. */
+export function syncSpacer(total) {
+  const h = spacerPx(total) + 'px';
+  const sp = $('spacerY');
+  if (sp.style.height !== h) sp.style.height = h;
+}
+
 /* scrollTop as the rest of the grid means it: an offset into `total * ROW_H`
    pixels of rows. Identity below the spacer cap; a linear rescale above it.
    `head` is the in-scroller sticky header's height — headH() for the grid, 0
@@ -553,6 +574,8 @@ export function render() {
   const body = $('body');
   const rowsEl = $('rows');
   const total = S.view.row_count;
+  // Before paintWindow reads scrollTop: a spacer that shrinks clamps it.
+  syncSpacer(total);
   const { virt, first, last } = paintWindow(body);
 
   /* Clamped to the pages the view actually has. Without the cap, a grid

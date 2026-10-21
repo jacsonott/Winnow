@@ -279,6 +279,24 @@ see [docs/notes/README.md](README.md) for the whole set.
   Ctrl+ArrowDown each land where they should. The pre-fix code stops at
   row 1,398,098 there. It does not cover the grid-row pins: with the
   spacer capped, removing them leaves that view intact.
+- **Every paint sizes the spacer for the rows it draws** (`syncSpacer`,
+  called by `render` and `renderGrouped` with the count each is about to
+  paint). The flat painter used to leave the spacer to whoever changed the
+  row count — `installView`, the cached-view path in `openSource`,
+  `applyDensity` — and leaving a grouping is not one of them: Ungroup, its
+  `x`/`X` hotkeys and removing the last pill all end in `dropGrouping`,
+  which repaints the flat rows with no rebuild. The spacer kept the grouped
+  tree's height, a few headers' worth under the whole table, so the scroll
+  height was whatever the painted rows block reached: the thumb took half
+  the track at the top of a 200-row view and shrank as each scroll pushed
+  the block further down, and the tag rail's marks — placed at their row's
+  share of `row_count` — no longer sat beside the thumb for the rows on
+  screen. It lasted until the next filter change rebuilt the view, which
+  is why it read as "sometimes". The callers that set `scrollTop` before a
+  paint still call `syncSpacer` first, since a scroller sized for the old
+  count clamps the assignment; the write is skipped when the height has not
+  changed, because `render` runs on every scroll frame.
+  `tests/ui/test_scrollbar_after_ungroup.py` holds each way out.
 - **The tag rail has its own gutter; it overlays nothing** (`.rail` and
   `.grid-body`'s `margin-right: var(--rail-w)` in style.css, `drawRail`
   in grouping.js). It is absolutely positioned against `.grid`, and for

@@ -6,7 +6,7 @@ import { autofitMaxWidth, fillsGrid, renderHead, renderHeadResized } from './col
 import { $, AUTOFIT_MAX_W_DEFAULT, ROW_H, ROW_H_COMFORTABLE, ROW_H_COMPACT, api, debounce, el, post, setRowH, toast } from './core.js';
 import { labeledRow } from './derived.js';
 import { VALUE_FILTER_AUTO_MAX, syncSearchKeyCopy } from './filters.js';
-import { headH, rScroll, render, spacerPx, vScroll } from './grid.js';
+import { headH, rScroll, render, syncSpacer, vScroll } from './grid.js';
 import { drawRail, rebuildGroupPrefix, renderGrouped } from './grouping.js';
 import { syncHistogramPanel } from './histogram.js';
 import { shutdownWinnow } from './home.js';
@@ -348,9 +348,9 @@ export function applyDensity(density) {
   if (!S.view) return;
   if (S.groupByCols.length) {
     rebuildGroupPrefix();
-    $('spacerY').style.height = spacerPx(S.groupTotalRows) + 'px';
+    syncSpacer(S.groupTotalRows);
   } else {
-    $('spacerY').style.height = spacerPx(S.view.row_count) + 'px';
+    syncSpacer(S.view.row_count);
   }
   body.scrollTop = rScroll(body, total(), topRow * ROW_H, headH());
   S.groupByCols.length ? renderGrouped() : render();
