@@ -297,6 +297,30 @@ see [docs/notes/README.md](README.md) for the whole set.
   rather than the raw column name, since a column name is arbitrary CSV-
   header text and this sidesteps identifier-safety entirely rather than
   leaning on `q()` for a human-readable name nobody needs to read.
+- **A merge's view build selects only what it sorts on.** Each member's
+  branch of the `UNION ALL` projects its member id, `rid` and the sort
+  columns, never the merge's whole column list. It used to project every
+  column, and that one detail made SQLite read every column of every row
+  of every member on every build, whatever indexes existed: clearing the
+  filters on a 500k-row, five-member merge of EvtxECmd output read all
+  739 MB of its member tables per click (the sort indexes
+  `_ensure_sort_index_building` puts on each member were never used),
+  where a single table reads its 4 MB sort index. Measured with mmap off
+  so every page shows up in `/proc/self/io`: 739 MB → 20 MB, and ~370 →
+  ~190 ms with everything cached; on a machine where the case doesn't stay
+  in the OS cache that read is the whole cost. Two shapes, chosen by
+  whether any member has a `WHERE` (`build_view`): **unfiltered**, the
+  `ORDER BY` belongs to the compound (`_compile_merge_order`, terms by
+  position since a compound can only name its own result columns), so
+  each member streams in its sort index's order and SQLite merges them —
+  `MERGE (UNION ALL)` in the plan, no temp B-tree; **filtered**, the old
+  outer `ORDER BY` over the narrowed subquery, one sort of what matched.
+  The compound shape on a filtered merge has SQLite walk each member's
+  sort index and look every row up to test the filter, which measured
+  5–9% slower than scanning. Both keep every position where it was,
+  including rows tying on every key across members (member order — the
+  compound shape says so with a last `1 ASC`); tests/test_merge_view_build.py
+  holds the plan and the order.
 - **Nothing binds one parameter per row or per list item.** Stock SQLite
   stops at 32,766 variables per statement (999 before 3.32), and the box
   the suite usually runs on raises that to 250,000 — so a statement that
