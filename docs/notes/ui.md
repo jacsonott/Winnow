@@ -2090,7 +2090,13 @@ see [docs/notes/README.md](README.md) for the whole set.
   rebind**: it reads its row when it fires, so a cursor move inside the
   500 ms used to post the new row's own note back to it and drop what
   was typed on the old one. "Saved" only appears when the box still holds
-  what that save carried. tests/ui/test_detail_note_autosave.py.
+  what that save carried, and **only a new row or a new note clears it**:
+  a landing that re-shows the same row with the same text leaves it. It
+  used to be blanked on every `showDetail`, and a save on a row whose page
+  isn't cached asks for that page itself (`refetchPageOf`, after a
+  scrollbar jump), so its own repaint took "Saved" away a few ms after it
+  came — test_scrollbar_drag_lands.py only passed when a frame happened
+  to fall in between. tests/ui/test_detail_note_autosave.py.
 
 - **The detail pane's field list is a two-column read, and reads like
   one.** The names are painted as the column writes them; the uppercasing

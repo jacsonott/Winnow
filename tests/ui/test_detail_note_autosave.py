@@ -13,6 +13,10 @@ lead away:
 - a cursor move rebound the box to the next row before the pending save
   fired, and the save read its row when it fired: it posted the new row's
   own note back to it, and what was typed on the row being left was lost.
+
+And "Saved" under the box went the same way: every landing blanked it,
+so on a row whose page wasn't cached — just after a scrollbar jump, where
+the save asks for that page itself — it was gone a few ms after it came.
 """
 from urllib.parse import urlparse
 
@@ -85,6 +89,8 @@ def test_a_page_landing_while_a_note_is_typed_keeps_the_typing(page, api):
         page.evaluate(REFETCH)
         page.wait_for_function(PANE_REPAINTED)
         assert page.input_value("#noteInput") == "written elsewhere"
+        # and "Saved" was about the text it replaced.
+        assert page.text_content("#noteStatus") == ""
     finally:
         _release(page, held)
         if row:
@@ -115,3 +121,22 @@ def test_moving_to_another_row_saves_the_note_on_the_row_it_was_typed_on(page, a
     finally:
         for row in (first, second):
             api("/api/note", "POST", {"source_id": row["sid"], "rid": row["rid"], "note": ""})
+
+
+def test_saved_stays_under_the_note_when_a_page_lands_under_its_row(page, api):
+    _open_pane(page, 0)
+    first = _row_at(page, 0)
+    try:
+        page.click("#noteInput")
+        page.keyboard.type("seen at 03:12")
+        page.wait_for_function(STATUS_SAVED)
+        page.evaluate(REFETCH)
+        page.wait_for_function(PANE_REPAINTED)
+        assert page.text_content("#noteStatus") == "Saved"
+        # Another row's box says nothing about this one's save.
+        page.evaluate("() => __winnow.moveCursor(1)")
+        page.wait_for_function("(rid) => document.getElementById('noteInput').dataset.rid === String(rid)",
+                               arg=_row_at(page, 1)["rid"])
+        assert page.text_content("#noteStatus") == ""
+    finally:
+        api("/api/note", "POST", {"source_id": first["sid"], "rid": first["rid"], "note": ""})
