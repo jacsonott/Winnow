@@ -846,9 +846,19 @@ export async function loadSources(select, { navigate = true, openOpts = undefine
    already persists those per source. */
 const viewStateStash = new Map();
 
+/* Cleared, the stash stays clear of what is still on screen. A case
+   switch clears it and then opens the new case's first table, and
+   openSource stashes the table being left before it reads the arriving
+   one's: the previous case's filters and search, under S.sourceId, which
+   a case switch keeps (see loadSources). Source ids restart at 1 in every
+   case, so the new table usually has that id, and it opened filtered by
+   the old case's values. So the first stash after a clear is skipped;
+   closeAllTabs nulls S.sourceId as well, so there it skips nothing. */
+let stashOnScreen = true;
+
 /* The filter-undo history goes with the stash, for the same reasons —
    see filterundo.js. */
-export function clearViewStateStash() { viewStateStash.clear(); clearFilterHistory(); }
+export function clearViewStateStash() { viewStateStash.clear(); clearFilterHistory(); stashOnScreen = false; }
 
 /* One table's stash, dropped when that table is. SQLite reuses a deleted
    source's id, so a re-import can land on it and inherit the previous
@@ -874,7 +884,9 @@ export function renameColumnInStash(ids, from, to) {
 }
 
 function stashViewState() {
-  if (S.sourceId == null || !S.view) return;
+  const keep = stashOnScreen;
+  stashOnScreen = true;
+  if (!keep || S.sourceId == null || !S.view) return;
   viewStateStash.set(S.sourceId, {
     filters: { ...S.filters },
     search: S.search,
