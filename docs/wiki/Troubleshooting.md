@@ -340,8 +340,12 @@ import), both in the system temp folder. They are safe to delete when no
 Winnow is running.
 
 A crash can also leave `<case>.db-winnow-wal` and `-shm` files and a
-`.winnow-lock` file beside the case. Leave them: the next open uses or
-replaces them.
+`.winnow-lock` file beside the case. Leave them: the `-wal` can hold your
+latest work that isn't in the case file yet. The next open uses or
+replaces them, and the home screen folds the `-wal` back into the case and
+removes both files the next time it lists that case, as long as no Winnow
+has it open. Earlier versions also left an empty pair beside every case
+the home screen listed; those go the same way.
 
 ## Where the log is
 
