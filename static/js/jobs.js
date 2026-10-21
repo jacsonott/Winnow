@@ -2,7 +2,7 @@
 progress, and armOpCancel.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
-import { $, api, el, post, toast } from './core.js';
+import { $, api, caseHeaders, caseRefused, el, pageCaseToken, post, toast } from './core.js';
 import { markDashboardStale } from './dashboard.js';
 import { clientLog } from './errlog.js';
 import { offerTimestampColumns, refreshAfterDerive } from './derived.js';
@@ -80,6 +80,11 @@ export function uploadWithProgress(url, fd, name) {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', url);
     xhr.setRequestHeader('X-Timeline-Lite-Client', '1');
+    // An import is the biggest write there is: it names its case like
+    // every api() call does (core.js's case token), so one asked for in
+    // case A never lands in a case another window opened since.
+    const sentCase = pageCaseToken();
+    for (const [k, v] of Object.entries(caseHeaders())) xhr.setRequestHeader(k, v);
     xhr.upload.onprogress = (e) => {
       const u = activeUploads.get(id);
       if (u && e.lengthComputable) { u.loaded = e.loaded; u.total = e.total; renderJobsPanel(); }
@@ -91,8 +96,11 @@ export function uploadWithProgress(url, fd, name) {
       if (xhr.status >= 200 && xhr.status < 300) { startJobsPoll(); resolve(body); }
       else {
         renderJobsPanel();
-        const err = new Error((body && body.detail) || xhr.statusText);
+        const detail = body && body.detail;
+        const err = new Error((typeof detail === 'string' ? detail : detail && detail.message) || xhr.statusText);
         err.status = xhr.status;
+        err.detail = detail;
+        caseRefused(err, sentCase);
         reject(err);
       }
     };

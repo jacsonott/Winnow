@@ -3299,6 +3299,23 @@ html.remote .row.selected:hover { background: var(--row-selected); }
 .conn-msg { font-size: 12px; line-height: 1.45; }
 .conn-banner .btn { white-space: nowrap; flex: 0 0 auto; }
 
+/* Another window switched this Winnow to a different case (caseGone in
+   static/js/connection.js). Over everything, modals included: nothing on
+   the page underneath can be saved any more, so nothing there should
+   look clickable. */
+.case-gone {
+  position: fixed; inset: 0; z-index: 9000;
+  display: grid; place-items: center; background: rgba(8,10,12,.7);
+}
+.case-gone-card {
+  width: min(520px, 92vw); padding: 18px 20px; border-radius: var(--radius-md);
+  background: var(--panel); color: var(--text);
+  border: var(--border-w) solid var(--danger); box-shadow: var(--shadow-modal);
+  font-size: 13px; line-height: 1.5;
+}
+.case-gone-title { font-weight: 600; font-size: 15px; margin-bottom: 6px; }
+.case-gone-card p { margin: 0 0 10px; }
+
 /* Running as administrator (maybeWarnElevated in static/js/importer.js).
    Bottom left, clear of the toast and the connection banner (centre) and
    the jobs panel (right), so it can sit there on the home screen and in a

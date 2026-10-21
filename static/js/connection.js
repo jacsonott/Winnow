@@ -12,7 +12,7 @@
    Two signals, because each catches what the other misses: the presence
    stream drops when the server goes (even if nobody clicks anything), and
    a failed request proves it (even if the stream is mid-retry). */
-import { $, api, el, onConnectionChange } from './core.js';
+import { $, api, el, noticeServerCase, onCaseChanged, onConnectionChange, setCaseToken } from './core.js';
 
 // EventSource reconnects by itself every few seconds, so a single error is
 // usually a blip — a restart, a proxy hiccup. Wait before crying wolf.
@@ -117,6 +117,40 @@ function onShutdown() {
   show();
 }
 
+/* Another window switched this server to a different case (or the server
+   came back with another one open): everything this page shows and holds —
+   source ids, rids, tag ids, views — belongs to a case the server no
+   longer has. The server already refuses every request from here (the case
+   guard in server.py); this says so, and the only way on is a reload,
+   which picks up whatever case is open now. Covers the page rather than
+   sitting in a corner: a page that can't save anything must not look like
+   one that can. On the home screen nothing of the old case is showing, so
+   the page just stops speaking for it — the next case opened there sets a
+   new one. */
+function caseGone(now) {
+  if (!$('home').hidden) { setCaseToken(null); return; }
+  const box = $('caseGone');
+  if (!box) return;
+  const mine = ($('brandLabel') && $('brandLabel').textContent) || 'its case';
+  const theirs = now ? `“${now.name}”` : 'no case';
+  const card = el('div', 'case-gone-card');
+  const title = el('div', 'case-gone-title', 'This window is out of date');
+  title.id = 'caseGoneTitle';
+  const reload = el('button', 'btn primary', 'Reload this window');
+  reload.onclick = () => location.reload();
+  card.append(
+    title,
+    el('p', null, `It was showing “${mine}”, but Winnow now has ${theirs} open — another `
+      + 'window on this Winnow opened it. Nothing more from this window is saved, so none of it can '
+      + 'land in the wrong case.'),
+    el('p', null, 'To work on two cases side by side, start Winnow a second time and open the other '
+      + 'case there: each one runs on its own and has its own window.'),
+    reload);
+  box.replaceChildren(card);
+  box.hidden = false;
+  reload.focus();
+}
+
 export function wireConnection() {
   // A request answered after the server said it was going is one it
   // finished on the way down, not a sign it is back; a stream that
@@ -125,9 +159,18 @@ export function wireConnection() {
     if (!up) show();
     else if (!shutDown) hide();
   });
+  onCaseChanged(caseGone);
   window.addEventListener('pagehide', sayGoodbye);
   stream = new EventSource(`/api/presence?page=${PAGE_ID}`);
   stream.addEventListener('shutdown', onShutdown);
+  // Which case the server has open: said when the stream opens (so a
+  // reconnect to a server restarted on another case is caught at once)
+  // and whenever another window switches it.
+  stream.addEventListener('case', (e) => {
+    let now;
+    try { now = JSON.parse(e.data); } catch { return; }
+    noticeServerCase(now && now.token ? now : null);
+  });
   stream.onopen = hide;
   stream.onerror = () => {
     // readyState CLOSED means it gave up; CONNECTING means it is retrying,

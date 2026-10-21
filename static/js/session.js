@@ -13,7 +13,7 @@
    what did they add, what did they drop, and where did we disagree.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
-import { $, api, el, post, setBusy, toast } from './core.js';
+import { $, api, caseUrl, el, post, setBusy, toast } from './core.js';
 import { diffMarkNode } from './grid.js';
 import { loadSources, openSource, replaceFilters } from './sources.js';
 import { S } from './state.js';
@@ -101,7 +101,7 @@ export function openSessionManager() {
 
       const dl = el('button', 'btn ghost', 'Download');
       dl.title = 'Save as a file to send to another analyst';
-      dl.onclick = () => { window.location = `/api/case_sessions/${encodeURIComponent(s.name)}/download`; };
+      dl.onclick = () => { window.location = caseUrl(`/api/case_sessions/${encodeURIComponent(s.name)}/download`); };
 
       const ren = el('button', 'btn ghost', 'Rename');
       ren.onclick = async () => {

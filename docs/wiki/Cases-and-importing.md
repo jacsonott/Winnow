@@ -93,6 +93,41 @@ network share (SMB, NFS) and the file can be corrupted there. Two analysts
 work in separate case files and exchange session files — see
 [Sessions and export](Sessions-and-export.md).
 
+**Two cases at once means two Winnows.** A Winnow has one case open, and
+every window on it shows that case. To work on a second case side by side,
+start Winnow again: the second one takes the next free port (8778, 8779, …)
+and opens its own window. Opening another case from **Home** switches every
+window on that Winnow instead, and any other window on it says **This window
+is out of date** and saves nothing more until it is reloaded.
+
+### Checking a case for misplaced tags
+
+Before this version, two Winnows on one computer could mix up their cases.
+A second Winnow started while the first was running opened its window on
+the first Winnow's case. And a window left showing one case after another
+window opened a different one went on saving: its tags, notes and imports
+went into the case that was open then, onto the rows at the same row
+numbers. If an analyst did either, check the cases they had open then.
+
+Winnow keeps no record of which window made a tag, so it cannot pick the
+misplaced ones out for you. What can:
+
+- **A session saved before the mix-up.** In **Case ▾ → Sessions… → Compare
+  two sessions**, compare that session (**From**) with **Current work
+  (live)** (**to**). **Only in** *Current work* lists every row tagged
+  since, and clicking the count opens those rows. Untag the ones that don't
+  belong, or **Load** the session to put the whole case back as it was then
+  (save the current work first if some of the later tags are real; see
+  [Sessions and export](Sessions-and-export.md#comparing-two-sessions)).
+- **Tags you know you applied then.** Filter the case by those tags and
+  check each tagged row is one you meant. A misplaced tag sits on the row
+  with the same **Line** number (the row number in the gutter) as the row
+  it was meant for in the other case, usually in the table imported in the
+  same order.
+- **Tags, tables and notes that don't belong.** A tag name, an imported
+  table or a note that belongs to the other case came from a window that
+  was showing that case. Delete them here and add them to the right case.
+
 ## Quick-look cases
 
 A quick look is a temporary case for looking at a file without filing it.

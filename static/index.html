@@ -370,6 +370,9 @@ Markdown: # headings, - bullets, **bold**, `code`, tables. Link ▾ points at a 
 
 <!-- Shown when Winnow's server stops answering (static/js/connection.js). -->
 <div id="connBanner" class="conn-banner" role="status" hidden></div>
+<!-- Shown when another window switches this Winnow to a different case
+     (caseGone in static/js/connection.js). -->
+<div id="caseGone" class="case-gone" role="alertdialog" aria-modal="true" aria-labelledby="caseGoneTitle" hidden></div>
 <!-- Shown when Winnow runs as administrator on Windows, which stops files
      being dragged in (maybeWarnElevated in static/js/importer.js). -->
 <div id="elevNotice" class="elev-notice" role="status" hidden></div>

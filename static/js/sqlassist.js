@@ -7,7 +7,7 @@
    that — tags, a copy, a file — asks the server for it by the result's
    id. Dependency-free by CLAUDE.md's rule, so the autocomplete dropdown
    and the caret measurement are hand-rolled. */
-import { toast, $, api, el, post } from './core.js';
+import { toast, $, api, caseUrl, el, post } from './core.js';
 import { regroupIfGroupedByTag, writeClipboardText } from './grouping.js';
 import { sqlSchemaForLLM } from './plugins.js';
 import { paneTable, sourceLabel } from './sources.js';
@@ -460,7 +460,7 @@ async function downloadSqlResult(r, ext, filename, extra = '') {
     return;
   }
   const a = document.createElement('a');
-  a.href = sqlResultUrl(r, `export.${ext}?filename=${encodeURIComponent(filename)}${sqlSortQuery(r)}${extra}`);
+  a.href = caseUrl(sqlResultUrl(r, `export.${ext}?filename=${encodeURIComponent(filename)}${sqlSortQuery(r)}${extra}`));
   a.download = filename;
   a.click();
 }
