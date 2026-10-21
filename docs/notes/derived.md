@@ -479,12 +479,38 @@ see [docs/notes/README.md](README.md) for the whole set.
   params against every member's definition before rewriting any —
   refusing outright when the members compute the column with different
   operations (made per table before the merge), since one set of params
-  cannot mean the same to both. One job per member, as create starts,
-  so each cancels on its own and a cancelled member is left 'partial'.
+  cannot mean the same to both. One job for the whole merge, as create
+  starts (next entry); cancelled, the member it was on is left
+  'partial' and the ones it had not reached keep their definitions.
   The merge's column therefore reports all of them: the least finished
   status (`_DERIVED_STATUS_RANK` — building, error, partial, ready) and
   the failures SUMMED, because the "Show N unparsed rows" filter it
   offers matches rows in every member; it used to count the first.
+- **A merge's derive is ONE job that backfills the members in turn**
+  (`_backfill_derive_parts`, options `parts`: each member's def ids,
+  plus `previous` on a re-derive). Create, a batch (named groups, a
+  flatten), re-derive and the cascade a re-derive sets off all start it
+  that way. It used to be a job per member, and with
+  `MAX_CONCURRENT_INGESTS = 2` two members' passes ran at once: two
+  CPU-bound Python loops fighting over the GIL and the writer lock,
+  each about three times slower than alone. A merge of four 250k-row
+  tables took 7.5 s for a regex column where one 1M-row table took
+  4.5 s; one member at a time takes what the single table does, and
+  the analyst sees one row in the jobs panel (`User — 2/4: b.csv`, from
+  `tables_done`/`tables_total`/`current_table`) instead of a column
+  filling a table or two at a time. Don't split it back up to "use the
+  second slot": the slot doesn't buy CPU, the GIL is the limit.
+  Stopped part-way, the member it was on ends as
+  `backfill_derived_columns` leaves any pass, and the members after it
+  as a pass that wrote nothing (`_fail_derive_backfill(wrote=False)`):
+  a create removes them, a re-derive restores their old definitions. A
+  create that stops (cancel or error) also removes the members it had
+  FINISHED — one left on some members is a column the merge doesn't
+  show, and its name, taken there, refuses the retry on the merge. A
+  re-derive keeps the members it finished. The job's `result` is
+  the merge's column, not one entry per member (`_derive_job_result`:
+  rows and failures summed), so the toast reads `"User": 1,000,000 rows
+  read` rather than "4 columns".
 - **"Change the field path…" is offered only for an op that has a
   `path` param** (`derived.js`'s `hasFieldPath` — JSON field and XML
   field), not for every `derived_kind: "text"` column. Regex capture
