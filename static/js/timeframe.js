@@ -969,6 +969,8 @@ export async function openTableMenu(sourceId) {
   if (id !== S.sourceId || S.activeTab !== 'grid') await openSource(id);
   if (S.sourceId !== id) return; // openSource no-ops on an id it can't find
   const src = S.sources.find((x) => x.id === id);
+  // Wide: each column row carries its name, its type and four buttons, and
+  // the default 680px left a long name little room beside them.
   modal(`Table — ${src ? sourceLabel(src) : ''}`, (b) => {
     for (const section of TABLE_MENU_SECTIONS) {
       const wrap = el('div', 'table-menu-section');
@@ -976,7 +978,7 @@ export async function openTableMenu(sourceId) {
       section.build(wrap, () => openTableMenu(id));
       b.append(wrap);
     }
-  });
+  }, { wide: true });
 }
 
 /* The case's tags, saved as they change (tagEditRow, in tags.js — the

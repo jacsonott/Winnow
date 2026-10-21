@@ -6,6 +6,10 @@ wider than the list. Below roughly 560px of window, the ⤒ ⤓ buttons on
 EVERY row went off the right edge behind a horizontal scrollbar. A long
 name now gives way with an ellipsis instead, and keeps its whole text in
 the row's tooltip.
+
+It was also the app's default 680px dialog at any window size, which left
+a long name little room beside its type and four buttons; it opens as wide
+as the other wide dialogs now.
 """
 
 from __future__ import annotations
@@ -56,3 +60,10 @@ def test_a_long_name_is_cut_short_and_kept_whole_in_the_tooltip(own_page):
         assert row.locator(".collist-type").evaluate("(e) => e.scrollWidth <= e.clientWidth"), \
             "the type should stay whole while the name still has letters to give"
         assert row.locator("label").get_attribute("title").startswith("ExtremelyLongColumnHeaderName ")
+
+
+def test_a_desktop_window_opens_the_table_menu_wide(own_page):
+    with own_page(viewport=(1440, 900)) as pg:
+        _open(pg)
+        width = pg.locator(".modal-card").first.evaluate("(e) => e.getBoundingClientRect().width")
+        assert width >= 900, f"the table menu is {width}px wide in a 1440px window"
