@@ -139,6 +139,14 @@ update.py          Update this install in place. Root, for the same reason —
                     see its fuller entry below.
 winnow/            Everything the app is made of. The modules below all
                     live here.
+console.py         Console output that cannot stall the server. main()
+                    puts a queue in front of sys.stdout/sys.stderr
+                    wherever a write could block — a Windows console with
+                    a QuickEdit selection open (one stray click), Ctrl+S,
+                    a pipe nobody reads — and one thread does the real
+                    writes. Before it, the next log line froze whatever
+                    thread said it, the event loop included. See
+                    docs/notes/server.md.
 store.py           All SQLite: ingest, view materialisation, tags, sessions, export.
 sqlresults.py      The SQL pane's results, held server-side: a run's rows
                     copied in batches into a scratch SQLite file in the

@@ -37,6 +37,7 @@ from pydantic import BaseModel
 
 from winnow import assoc as file_assoc
 from winnow import browser
+from winnow import console
 from winnow import elevation
 from winnow import instances
 from winnow import multicase
@@ -6201,6 +6202,10 @@ def main() -> None:
     # Before anything that might log or print: with no console there is
     # no stdout, and the crash that causes is invisible by construction.
     _ensure_console_streams()
+    # And a console that is there but has stopped taking output (one click
+    # in a QuickEdit window does it) must stall only the thread that writes
+    # to it, never a request or the event loop: winnow/console.py.
+    console.install()
     # Stored WINNOW_* variables (tokens plugins read) join the process
     # environment here, not at import — `import server` in a test must
     # never read the developer's real store. A real export wins.
