@@ -1336,6 +1336,22 @@ see [docs/notes/README.md](README.md) for the whole set.
   opens that source first when it isn't the one on screen — not a
   convenience, a precondition, since every panel reads the live
   `S.layout`/`S.order`/`S.columns` rather than the record it was handed.
+- **A header set's default layout seeds a table once, so it needs its
+  own way onto the rest** (columns.js `applyDefaultLayout`, the table
+  menu's "Apply default layout for these columns"). `openSource` reads
+  the default only when the table has no layout of its own, and almost
+  every table has one by the second visit: a resize, a sort, a hidden
+  column and Reset view all call `saveLayout`. Reset view keeps the
+  layout on purpose (it is the clear-everything button, used many times
+  an hour), so a default saved after a table was first opened had no
+  way to reach it, which is how it was reported. Applying takes the
+  default's order and per-column settings for the imported columns,
+  keeps each derived column's own entry and re-places it beside its
+  input with `placeUnorderedColumns` (the same helper `openSource` uses),
+  and offers Undo, since nothing else brings back the layout it replaced.
+  A grouped table needs nothing extra: grouped columns stay in `S.order`
+  and `visibleCols()` leaves them out.
+  tests/ui/test_apply_default_layout.py.
 - **Right-clicking a table is a short menu, not the table menu**
   (`tableMenuItems`/`openTableContextMenu` in sources.js, one handler for
   the tab and both kinds of sidebar row). The right-click used to open the

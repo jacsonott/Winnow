@@ -56,7 +56,7 @@ Press `C` to open the table menu, or right-click a tab or a table in the sidebar
 
 - **Columns**: show, hide, pin and reorder columns (see below), plus **Add derived column…** (see [Derived columns](Derived-columns.md)).
 - **Value filter dropdowns**: when the ▾ value picker appears on this table's filter boxes (see [Filtering and searching](Filtering-and-searching.md#the-value-picker)).
-- **This table**: **Save layout as default for these columns**, **Name this header set…**, **Nickname this table…** and **Merge with other tables…** (on a merge, **Edit merge…**; see [Merging tables](#merging-tables)).
+- **This table**: **Save layout as default for these columns**, **Apply default layout for these columns**, **Name this header set…**, **Nickname this table…** and **Merge with other tables…** (on a merge, **Edit merge…**; see [Merging tables](#merging-tables)).
 
 ## Columns
 
@@ -91,6 +91,8 @@ The same right-click menu has **Stack values (rarest first)…** (see [Filtering
 ### Layouts
 
 Column order, visibility, widths, pins and timestamp formats are saved with the table in the case file. To reuse an arrangement for every table with the same column names, including in other cases, choose **Save layout as default for these columns** in the table menu or press `L`. A table with that set of columns and no layout of its own then opens with that arrangement.
+
+A table that already has a layout keeps it, and so does **Reset view**. To put the saved arrangement on such a table, open its table menu and choose **Apply default layout for these columns**. Its imported columns take the saved order, visibility, widths, pins and formats; its derived columns keep their own settings and sit beside the columns they came from. **Undo** in the message that follows puts the table's previous layout back. The action has no key by default; you can give it one in [Settings and shortcuts](Settings-and-shortcuts.md).
 
 ## Sorting
 

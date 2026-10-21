@@ -1,7 +1,7 @@
 /* Column layout: header rendering, drag-to-reorder, widths and autofit.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
-import { $, AUTOFIT_MAX_W_DEFAULT, GUTTER_W, api, debounce, el, nameMap, post, toast } from './core.js';
+import { $, AUTOFIT_MAX_W_DEFAULT, GUTTER_W, api, debounce, el, nameMap, post, toast, toastAction } from './core.js';
 import { columnMenuItems, opLabel } from './derived.js';
 import { columnFilterChips, openValuePicker, pickerTreeNode, removeColumnFilter, valueFilterEnabled } from './filters.js';
 import { render, setCellRange } from './grid.js';
@@ -746,10 +746,85 @@ export async function saveDefaultLayout() {
       // matching this layout when it's opened somewhere else.
       col_names: baseColumns().map((c) => c.name), order: S.order, columns: S.layout,
     });
-    toast('Saved as the default layout for this set of columns');
+    // Said here because it is exactly what went wrong: a table that
+    // already has a layout keeps it, and nothing else said so.
+    toast('Saved as the default layout for these columns. A table that already has a layout keeps it until "Apply default layout for these columns" in its table menu', 6000);
   } catch (e) {
     toast('Could not save default layout: ' + e.message, 4000);
   }
+}
+
+/* The saved default for this table's header set, or null when there is
+   none. Asked by the base columns, for the reason saveDefaultLayout gives. */
+export async function findDefaultLayout() {
+  const qp = new URLSearchParams();
+  for (const c of baseColumns()) qp.append('col_names', c.name);
+  const found = await api(`/api/column_layouts/find?${qp.toString()}`);
+  return found && found.order ? found : null;
+}
+
+/* Adds every column of the table that `order` doesn't name yet, in place.
+   A derived column goes right after the column it was derived from, after
+   any siblings already sitting there (a flatten adds several from one
+   input, in order), not at the far end where nobody scrolls. Anything
+   else (no derived_from, or an input the order doesn't name) appends.
+   Re-derive keeps its name, so it never moves. Returns whether any column
+   was placed beside its input. */
+export function placeUnorderedColumns(order) {
+  let placed = false;
+  for (const c of S.columns) {
+    if (order.includes(c.name)) continue;
+    let at = c.derived_from ? order.indexOf(c.derived_from) : -1;
+    if (at === -1) { order.push(c.name); continue; }
+    while (at + 1 < order.length) {
+      const next = S.columns.find((x) => x.name === order[at + 1]);
+      if (next && next.derived_from === c.derived_from) at++; else break;
+    }
+    order.splice(at + 1, 0, c.name);
+    placed = true;
+  }
+  return placed;
+}
+
+/* The other half of saveDefaultLayout, for a table that already has a
+   layout of its own. Opening a table seeds the default only into one that
+   has never saved a layout, and almost every table has (a resize, a sort
+   or Reset view saves one), so a default saved after a table's first open
+   never reached it, and Reset view keeps the layout on purpose. The
+   imported columns take the default's order, visibility, widths, pins and
+   formats outright; a derived column keeps its own settings and goes back
+   beside its input, as on open. Undo is offered because nothing else
+   brings back the layout this replaces. */
+export async function applyDefaultLayout() {
+  const id = S.sourceId;
+  if (!id || !S.columns.length) return;
+  let found;
+  try { found = await findDefaultLayout(); } catch (e) {
+    toast('Could not read the default layout: ' + e.message, 4000);
+    return;
+  }
+  if (S.sourceId !== id) return;
+  if (!found) {
+    toast('No default layout is saved for these columns yet — "Save layout as default for these columns" on a table with them saves one', 5000);
+    return;
+  }
+  const before = { order: [...S.order], layout: S.layout };
+  const layout = nameMap(found.columns);
+  for (const c of S.columns) {
+    if (!c.derived) continue;
+    if (S.layout[c.name]) layout[c.name] = S.layout[c.name]; else delete layout[c.name];
+  }
+  const order = found.order.filter((n) => S.columns.some((c) => c.name === n));
+  placeUnorderedColumns(order);
+  S.layout = layout;
+  S.order = order;
+  renderHead(); render(); saveLayout();
+  toastAction('Applied the default layout for these columns', 'Undo', () => {
+    if (S.sourceId !== id) return;
+    S.order = before.order;
+    S.layout = before.layout;
+    renderHead(); render(); saveLayout();
+  });
 }
 
 /* ------------------------------------------------------- column autosize */
