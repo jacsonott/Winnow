@@ -94,11 +94,11 @@ let ui = null;          // {colSel, info, canvas, hint, empty} once wired
 let chartUp = false;    // the canvas holds a chart (draw() reached paintChart)
 let marks = null;       // the grid position the canvas last painted (gridMarks)
 let marksRaf = null;    // one repaint per frame, however often the grid renders
-/* The Value view's value: {column, value}. The selected cell's — it
-   follows the cell focus — or the one "Show in histogram" named, which
-   holds until the focus moves again. Kept when the focus goes away (a
-   group heading, Escape), so the chart does not drop back to plain under
-   a click that was not about it. */
+/* The Value view's value: {column, value} — the selected cell's. It
+   follows the cell focus, so a right-click charts the cell too (that
+   moves the focus). Kept when the focus goes away (a group heading,
+   Escape), so the chart does not drop back to plain under a click that
+   was not about it. */
 let picked = null;
 let pickedFocus = null; // the S.cellFocus object `picked` was last taken from (followSplit)
 let askedSplit = null;  // the split key of the newest ask
@@ -107,6 +107,12 @@ let splitTimerKey = null;
 /* A cell move is a new ask. Waited out briefly so holding an arrow key
    down a column asks once where it stops, not once per row. */
 const SPLIT_MS = 200;
+/* The values ride in the GET's query string, as JSON, so a cell holding a
+   whole command line or JSON document would make a request line the
+   server refuses. This many characters of JSON, percent-encoded at worst
+   three bytes apiece, stays well inside uvicorn's limit; a value past it
+   is not charted, and a group past it falls into "Other". */
+const SPLIT_JSON_MAX = 3000;
 /* The Groups view's colours follow the VALUE, not its rank: a filter that
    reorders the top groups must not repaint the survivors, or the colour
    an analyst learnt for "admin" means someone else after it. A value
@@ -170,17 +176,6 @@ export function setHistogramView(view) {
 export function histogramStacked() { return histogramView() === 'tags'; }
 export function toggleHistogramStack(on = !histogramStacked()) { setHistogramView(on ? 'tags' : 'plain'); }
 
-/* "Show in histogram" on a cell's menu: that value, in the Value view,
-   with the strip opened if it was closed. */
-export function showValueInHistogram(column, value) {
-  picked = { column, value };
-  pickedFocus = S.cellFocus;
-  savePrefs({ view: 'value', stack: false });
-  if (!histogramOpen()) { toggleHistogram(true); return; }
-  schedule();
-  draw();
-}
-
 /* How many groups the Groups view colours. */
 export const GROUPS_TOP = [3, 5, 8];
 export function histogramGroupsTop() {
@@ -221,7 +216,11 @@ export function syncHistogramPanel() {
   // Coming back into view: the grid may have rebuilt while a page tab
   // hid the strip, and a resize meanwhile left the canvas unmeasured.
   if (show && !shown) load();
+  const edge = show !== shown;
   shown = show;
+  // The group headings wear the Groups view's colours only while the
+  // strip that explains them is on screen.
+  if (edge && S.activeTab === 'grid' && S.groupByCols.length && histogramView() === 'groups') render();
 }
 
 /* Re-read the grid's state now rather than on the next view change —
@@ -310,7 +309,7 @@ function splitAnswered() {
 function wantedSplit() {
   const view = histogramView();
   if (view === 'value') {
-    if (!picked || !S.columns.some((c) => c.name === picked.column)) return null;
+    if (!picked || !S.columns.some((c) => c.name === picked.column) || pickedTooLong()) return null;
     return { kind: 'value', column: picked.column, values: [picked.value],
       key: `value\u0000${picked.column}\u0000${JSON.stringify(picked.value)}` };
   }
@@ -334,8 +333,11 @@ function topGroups() {
   if (!col || isTagGroupCol(col)) return null;
   const n = histogramGroupsTop();
   const values = [];
+  let size = 2;
   for (const g of S.groups) {
     if (g.level !== 0) continue;
+    size += JSON.stringify(g.value).length + 1;
+    if (size > SPLIT_JSON_MAX) break;
     values.push(g.value);
     if (values.length === n) break;
   }
@@ -386,6 +388,8 @@ function focusedValue() {
   if (!r || ci < 0) return null;
   return { column: f.name, value: r.cells[ci] };
 }
+
+const pickedTooLong = () => !!picked && JSON.stringify(picked.value).length > SPLIT_JSON_MAX;
 
 function takeFocusedValue() {
   const v = focusedValue();
@@ -473,7 +477,7 @@ function buildChrome(container) {
     + 'untagged underneath, so the bars stay as tall as the rows they count');
   const valueBtn = viewBtn('value', 'th-view-value', 'Value',
     'Colour the rows holding the selected cell\'s value, as if they were tagged — '
-    + 'click another cell to chart its value, or right-click one → Show in histogram');
+    + 'click another cell to chart its value');
   const groupsBtn = viewBtn('groups', 'th-view-groups', 'Groups',
     'While the grid is grouped, give its first groups a colour each — the same colour '
     + 'beside each group\'s heading — and the rest "Other"');
@@ -793,7 +797,8 @@ function drawLegend(current = true) {
   // than drawing the plain chart under a pressed button with no word on
   // why the bars are not coloured.
   const view = histogramView();
-  const hint = view === 'value' && !wantedSplit() ? 'Select a cell to colour the rows holding its value'
+  const hint = view === 'value' && pickedTooLong() ? 'That cell\'s value is too long to chart — select another'
+    : view === 'value' && !wantedSplit() ? 'Select a cell to colour the rows holding its value'
     : view === 'groups' && !wantedSplit()
       ? (isTagGroupCol(S.groupByCols[0]) ? 'Grouped by tag — the Tags view colours these'
         : 'Group by a column to colour its first groups')

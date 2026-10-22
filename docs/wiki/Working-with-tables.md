@@ -185,6 +185,7 @@ Grouping collapses a table into one heading per distinct value, with a row count
 - **Sort:** orders the groups at every level: **Count — most first** (the default), **Count — fewest first**, **Value — low to high** or **Value — high to low**.
 - A datetime column groups by calendar day rather than by exact timestamp.
 - Each level shows at most 1,000 groups. When there are more, Winnow says it is showing the top ones.
+- With the histogram's **Groups** view on, the first few groups' headings get a coloured swatch matching their bars in the histogram. See [The histogram](Filtering-and-searching.md#the-histogram).
 
 Right-click a group heading to expand or collapse it, **Select these *N* rows** (when it is expanded), tag or untag every row in the group, **Filter to** or **Exclude** its value (not offered for a datetime column's day groups), or **Copy group value**. Tagging a whole group asks first when it has 10,000 rows or more. See [Tagging and notes](Tagging-and-notes.md) for more on tagging.
 
