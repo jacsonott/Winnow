@@ -141,6 +141,19 @@ To keep the server running with no window open, start it with
 `--no-idle-shutdown`. The double-click launchers pass no options, so run
 `python server.py --no-idle-shutdown` from a terminal in the Winnow folder.
 
+### The console window's title starts with "Select" (Windows)
+
+With QuickEdit Mode on, which is the Windows default, clicking in the
+console window Winnow runs in (PowerShell, Command Prompt, or the window
+`winnow.bat` opens) starts selecting text, and the window's title then
+starts with **Select**. While a selection is open, Windows shows no new
+output in that window. Winnow keeps working; what it prints in the
+meantime appears once you end the selection with **Esc**, **Enter** or a
+right-click. Errors and job messages are in **Case ▾ → Log…** either way.
+
+Winnow 0.3.0 and earlier stopped responding instead, until the selection
+ended. If one does, press **Esc** in its console window.
+
 ### The grid reloads, or a view "expired"
 
 Each filtered and sorted view is built into a scratch file that lives only

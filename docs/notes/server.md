@@ -719,3 +719,44 @@ see [docs/notes/README.md](README.md) for the whole set.
   does already, which is why log.record (stderr) only broke through the
   null stream. Anything new that opens a text stream to print through
   needs an explicit encoding for the same reason.
+
+- **A console that stops taking output used to stop Winnow.** Reported as
+  "launching in PowerShell with QuickEdit enabled can freeze it". With
+  QuickEdit on (the Windows default), one click in the console window
+  opens a selection, and until it ends (Esc, Enter, a right-click) the
+  console accepts no output: every write to it blocks inside
+  WriteConsole. Edit ▸ Mark, the Pause key, Ctrl+S in a Unix terminal and
+  a pipe nobody reads do the same. Every `log.record` entry prints to
+  stderr from whichever thread logged it, and some of those threads are
+  the event loop (the catch-all exception handler, `_idle_monitor`,
+  uvicorn's own warnings) — so the next line Winnow said froze whatever
+  said it, and a frozen event loop is every request frozen. Measured with
+  an unread pipe: the browser's own `/api/log/client` route hung on its
+  ~130th line.
+
+  `main()` calls `console.install()` straight after
+  `_ensure_console_streams()`, which puts a queue in front of each std
+  stream that can stall (`console.can_stall`: anything with a descriptor
+  that is not a regular file — and not the null stream, which can't).
+  One daemon thread does every real write, in order, flushing after each,
+  so a stalled console stalls that thread and nothing else; the queue is
+  bounded (`console.LIMIT`) and says how many lines it skipped once the
+  console takes output again. Three things lean on the order of
+  `main()`: install runs before `uvicorn.Config`, whose
+  `configure_logging()` resolves `ext://sys.stderr` there (built the other
+  way round, uvicorn's handlers hold the real stream); a handler that
+  captured `sys.stderr` at import time would skip the queue the same way;
+  and anything that writes straight to the descriptor (`os.write(2, …)`,
+  `sys.stderr.buffer`) skips it by construction.
+
+  Exit is the other half. The writer is a daemon thread, so `_at_exit`
+  drains for `EXIT_GRACE_S` first — `main()` prints a refusal and calls
+  `sys.exit(1)` straight after, and that line must not die in the queue.
+  It leaves the queued streams installed even then: interpreter exit
+  flushes `sys.stdout`, and with the real stream there that flush waits
+  on the writer stuck inside it, so a console still stalled at exit
+  would hang the process (`test_handing_the_real_streams_back_at_exit_would_hang_it`
+  shows it). `tests/test_console_stall.py` covers both halves against a
+  spawned server with `ServerLog.pause()` as the stalled console, and
+  runs those with buffered streams (`PYTHONUNBUFFERED` empty), as a
+  Windows console's are — unbuffered, the lock exit trips over isn't there.

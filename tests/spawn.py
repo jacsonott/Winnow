@@ -79,14 +79,25 @@ class ServerLog:
         self._lines: collections.deque[str] = collections.deque(maxlen=self.MAX_LINES)
         self._total = 0
         self._lock = threading.Lock()
+        self._reading = threading.Event()
+        self._reading.set()
         self._thread = threading.Thread(target=self._pump, args=(stream,), daemon=True)
         self._thread.start()
 
     def _pump(self, stream):
-        for raw in iter(stream.readline, b""):
+        while self._reading.wait() and (raw := stream.readline()):
             with self._lock:
                 self._lines.append(raw.decode(errors="replace").rstrip("\r\n"))
                 self._total += 1
+
+    def pause(self):
+        """Stop reading, as a console does while a selection is open in it
+        (or a terminal after Ctrl+S): once the pipe is full, the server's
+        next write to it waits until `resume()`."""
+        self._reading.clear()
+
+    def resume(self):
+        self._reading.set()
 
     def mark(self) -> int:
         with self._lock:
@@ -102,6 +113,7 @@ class ServerLog:
 
     def finish(self, timeout: float = 5) -> str:
         """Everything still held, once the process has exited."""
+        self.resume()
         self._thread.join(timeout)
         return self.text()
 
