@@ -2547,18 +2547,35 @@ def _decode_preview_bytes(raw: bytes, path: str | None = None) -> tuple[str, str
                               encoding=sniff_text_encoding(path) if path else None)
 
 
+def _iis_preview_format(log_format: str | None, name: str) -> str:
+    """The IIS format a preview reads with: the one the analyst picked in
+    the preview, else the one the file's name says."""
+    fmt = log_format or iisread.log_format(name)
+    if fmt is None:
+        raise ValueError("Not named like an IIS log (u_ex…, nc…, in….log)")
+    if fmt not in iisread.FORMATS:
+        raise ValueError(f"Unknown IIS log format {fmt!r}")
+    return fmt
+
+
 @app.post("/api/ingest/preview")
 async def api_ingest_preview(
     file: UploadFile = File(...),
     delimiter: str | None = Form(None),
     has_header: bool = Form(True),
     kind: str = Form("csv"),   # "text": the raw-text importer's line-per-row preview
+    log_format: str | None = Form(None),   # iis: w3c, ncsa or native; None reads the file's name
 ):
     raw = await file.read(PREVIEW_SAMPLE_BYTES)  # bounded sample — full parse happens at real ingest time
     text, encoding = _decode_preview_bytes(raw)
     try:
         if kind == "text":
             return {**await run_in_threadpool(store().preview_text_lines, text), "encoding": encoding}
+        if kind == "iis":
+            fmt = _iis_preview_format(log_format, file.filename or "")
+            return {**await run_in_threadpool(
+                store().preview_iis_text, text, fmt, complete=len(raw) < PREVIEW_SAMPLE_BYTES),
+                "encoding": encoding}
         # The uploaded file's own name goes through: the delimiter is read
         # from the extension first (Store._sniff), and a preview that
         # sniffed without it would show a different table from the one the
@@ -2799,6 +2816,8 @@ class PreviewPath(BaseModel):
     # csv
     delimiter: str | None = None
     has_header: bool = True
+    # iis: w3c, ncsa or native; None reads the file's name
+    log_format: str | None = None
     # json
     flatten_mode: str = "none"
     flatten_depth: int = 0
@@ -2818,9 +2837,7 @@ def api_ingest_preview_path(body: PreviewPath):
             if kind == "text":
                 return {**store().preview_text_lines(text), "encoding": encoding}
             if kind == "iis":
-                fmt = iisread.log_format(body.path)
-                if fmt is None:
-                    raise ValueError("Not named like an IIS log (u_ex…, nc…, in….log)")
+                fmt = _iis_preview_format(body.log_format, body.path)
                 return {**store().preview_iis_text(text, fmt, complete=len(raw) < PREVIEW_SAMPLE_BYTES),
                         "encoding": encoding}
             return {**store().preview_csv_text(text, delimiter=body.delimiter or None,
@@ -2851,7 +2868,11 @@ class IngestJobPath(BaseModel):
     # csv options
     delimiter: str | None = None
     has_header: bool = True
-    column_types: list[str] | None = None
+    # csv: one type per column, in order. iis: {column name: type}, since
+    # the preview sees only the start of a log a later #Fields: line adds to
+    column_types: list[str] | dict[str, str] | None = None
+    # iis: w3c, ncsa or native; None reads the file's name
+    log_format: str | None = None
     # json options
     flatten_mode: str = "none"
     flatten_depth: int = 0
@@ -2863,8 +2884,8 @@ class IngestJobPath(BaseModel):
 
 
 def _ingest_job_options(kind: str, *, build_fts: bool, delimiter=None, has_header=True,
-                        column_types=None, flatten_mode="none", flatten_depth=0,
-                        tables=None, folder_path=None) -> dict:
+                        column_types=None, log_format=None, flatten_mode="none",
+                        flatten_depth=0, tables=None, folder_path=None) -> dict:
     # folder_path rides along on every kind — the job worker files each new
     # source under it when the ingest completes (directory import).
     base = {"folder_path": folder_path} if folder_path else {}
@@ -2874,7 +2895,10 @@ def _ingest_job_options(kind: str, *, build_fts: bool, delimiter=None, has_heade
     if kind == "json":
         return {**base, "build_fts": build_fts, "flatten_mode": flatten_mode,
                 "flatten_depth": flatten_depth}
-    if kind in ("plaso", "text", "iis"):
+    if kind == "iis":
+        return {**base, "build_fts": build_fts, "log_format": log_format,
+                "column_types": column_types}
+    if kind in ("plaso", "text"):
         return {**base, "build_fts": build_fts}   # one file, one table, no options
     return {**base, "build_fts": build_fts, "tables": tables or []}
 
@@ -2894,6 +2918,7 @@ def api_ingest_job_path(body: IngestJobPath):
             options=_ingest_job_options(
                 kind, build_fts=body.build_fts, delimiter=body.delimiter,
                 has_header=body.has_header, column_types=body.column_types,
+                log_format=body.log_format,
                 flatten_mode=body.flatten_mode, flatten_depth=body.flatten_depth,
                 tables=body.tables, folder_path=body.folder_path,
             ),
@@ -2910,7 +2935,8 @@ async def api_ingest_job_upload(
     build_fts: bool = Form(True),
     delimiter: str | None = Form(None),
     has_header: bool = Form(True),
-    column_types: str | None = Form(None),   # JSON-encoded list[str] — multipart forms are flat
+    column_types: str | None = Form(None),   # JSON — a list (csv) or {column: type} (iis); forms are flat
+    log_format: str | None = Form(None),     # iis: w3c, ncsa or native; None reads the file's name
     flatten_mode: str = Form("none"),
     flatten_depth: int = Form(0),
     tables: str | None = Form(None),         # sqlite: JSON [{table, name?, timestamp_columns?}]
@@ -2940,7 +2966,7 @@ async def api_ingest_job_upload(
             spool_dir=spool_dir, recorded_path=os.path.basename(tmp),
             options=_ingest_job_options(
                 kind, build_fts=build_fts, delimiter=delimiter or None,
-                has_header=has_header, column_types=types,
+                has_header=has_header, column_types=types, log_format=log_format or None,
                 flatten_mode=flatten_mode, flatten_depth=flatten_depth,
                 tables=table_list,
             ),

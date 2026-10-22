@@ -410,3 +410,110 @@ def test_a_session_reimports_an_iis_log_as_one(store, tmp_path):
         assert stem == "/aspnet_client/shell.aspx"
     finally:
         other.close()
+
+
+# ------------------------------------------- the import preview's settings
+# The queue's "Preview & configure": the format the name says, or another
+# of the three, and a type per column. The types are by column NAME,
+# because the preview reads the start of the log and a #Fields: line
+# further in can add columns ahead of the ones it showed.
+
+RESHAPED = [
+    "#Fields: cs-method cs-uri-stem sc-status",
+    "GET /a 200",
+    "#Fields: date time cs-method cs-uri-stem sc-status time-taken",
+    "2024-05-01 00:00:02 POST /b 500 31",
+]
+
+
+def test_the_upload_preview_reads_an_iis_log_as_named_or_as_picked(client, tmp_path):
+    p = _write(tmp_path, "u_ex240501.log", W3C)
+
+    def preview(name, **form):
+        with open(p, "rb") as f:
+            return client.post("/api/ingest/preview", data={"kind": "iis", **form},
+                               files={"file": (name, f, "text/plain")})
+
+    r = preview("u_ex240501.log")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["log_format"] == "w3c" and body["complete"] is True
+    assert body["columns"][:3] == ["Timestamp (UTC)", "date", "time"] and len(body["sample_rows"]) == 2
+    # Picked as NCSA, W3C lines don't split: they are kept whole, not lost.
+    body = preview("u_ex240501.log", log_format="ncsa").json()
+    assert body["log_format"] == "ncsa" and body["columns"][1:8] == iisread.NCSA_COLUMNS
+    assert body["columns"][-1] == iisread.UNPARSED_LINE
+    assert preview("u_ex240501.log", log_format="apache").status_code == 400
+    assert preview("access.log").status_code == 400          # no IIS name, no format picked
+
+
+def test_the_path_preview_takes_the_picked_format_and_says_when_it_saw_only_the_start(
+        client, tmp_path, monkeypatch):
+    import server
+
+    p = _write(tmp_path, "u_ex240501.log", W3C)
+    body = client.post("/api/ingest/preview/path", json={"path": p, "kind": "iis", "log_format": "native"}).json()
+    assert body["log_format"] == "native" and body["columns"][1:16] == iisread.NATIVE_COLUMNS
+    assert client.post("/api/ingest/preview/path",
+                       json={"path": p, "kind": "iis", "log_format": "apache"}).status_code == 400
+    monkeypatch.setattr(server, "PREVIEW_SAMPLE_BYTES", 200)
+    body = client.post("/api/ingest/preview/path", json={"path": p, "kind": "iis"}).json()
+    assert body["complete"] is False
+
+
+def test_column_types_from_the_preview_apply_by_name(store, tmp_path):
+    p = _write(tmp_path, "u_ex240501.log", RESHAPED)
+    # What the preview of the first two lines offers: three columns.
+    assert Store.preview_iis_text("\n".join(RESHAPED[:2]), "w3c")["columns"] == ["cs-method", "cs-uri-stem", "sc-status"]
+    rec = store.ingest_iis(p, build_fts=False, column_types={"sc-status": "text", "cs-method": "text"})
+    types = {c["name"]: c["type"] for c in rec["columns"]}
+    # The later header put Timestamp first: a list by position would have
+    # typed it text. By name, sc-status is text and the rest are inferred.
+    assert [c["name"] for c in rec["columns"]][:2] == ["Timestamp (UTC)", "cs-method"]
+    assert types == {"Timestamp (UTC)": "datetime", "cs-method": "text", "cs-uri-stem": "text",
+                     "sc-status": "text", "date": "text", "time": "text", "time-taken": "number"}
+    assert store.get_source(rec["id"])["ingest"] == {
+        "kind": "iis", "format": "w3c", "column_types": {"sc-status": "text", "cs-method": "text"}}
+    with pytest.raises(ValueError, match="name their columns"):
+        store.ingest_iis(p, column_types=["text", "text"])
+    with pytest.raises(ValueError, match="name their columns"):
+        store.ingest_iis(p, column_types={"sc-status": "ipv4"})
+    with pytest.raises(ValueError, match="Unknown IIS log format"):
+        store.ingest_iis(p, log_format="apache")
+
+
+def test_the_jobs_routes_carry_the_picked_format_and_types(client, store, tmp_path):
+    p = _write(tmp_path, "u_ex240501.log", W3C)
+    r = client.post("/api/ingest/jobs/path", json={
+        "path": p, "kind": "iis", "log_format": "w3c", "column_types": {"sc-status": "text"}})
+    assert r.status_code == 200, r.text
+    done = store.wait_for_ingest_job(r.json()["job_id"], timeout=30)
+    assert done["status"] == "done", done
+    src = store.get_source(done["source_ids"][0])
+    assert {c["name"]: c["type"] for c in src["columns"]}["sc-status"] == "text"
+    assert src["ingest"]["column_types"] == {"sc-status": "text"}
+    # The upload transport, the format picked against the file's name.
+    with open(p, "rb") as f:
+        r = client.post("/api/ingest/jobs/upload",
+                        data={"kind": "iis", "log_format": "ncsa", "column_types": '{"Status": "number"}'},
+                        files={"file": ("u_ex240502.log", f, "text/plain")})
+    assert r.status_code == 200, r.text
+    done = store.wait_for_ingest_job(r.json()["job_id"], timeout=30)
+    assert done["status"] == "done", done
+    src = store.get_source(done["source_ids"][0])
+    assert src["ingest"]["format"] == "ncsa"
+    assert [c["name"] for c in src["columns"]][1:8] == iisread.NCSA_COLUMNS
+    assert {c["name"]: c["type"] for c in src["columns"]}["Status"] == "number"
+
+
+def test_a_session_reimport_keeps_the_types_the_preview_set(store, tmp_path):
+    p = _write(tmp_path, "u_ex240501.log", W3C)
+    store.ingest_iis(p, build_fts=False, column_types={"sc-status": "text"})
+    session = store.export_case_session()
+    other = Store(str(tmp_path / "b.db"))
+    try:
+        assert other.import_case_session(session)["sources_reimported"] == 1
+        src = other.list_sources()[0]
+        assert {c["name"]: c["type"] for c in src["columns"]}["sc-status"] == "text"
+    finally:
+        other.close()

@@ -563,11 +563,29 @@ export function openMergeBuilder(opts = {}) {
    nothing here reads src.file.name — one contract, one spelling. */
 export function openImportPreview(src, opts = {}) {
   let preview = null;
-  let columnTypes = opts.initial && opts.initial.column_types ? opts.initial.column_types.slice() : null;
+  const initialTypes = opts.initial && opts.initial.column_types;
+  // A delimited file's types are a list, one per column in order. An IIS
+  // log's are {column: type}: the preview reads the start of the log, and
+  // a #Fields: line further in can add columns ahead of the ones it shows
+  // (store.ingest_iis). Held here until the first preview names columns.
+  let columnTypes = Array.isArray(initialTypes) ? initialTypes.slice() : null;
+  let iisTypes = initialTypes && !Array.isArray(initialTypes) ? initialTypes : null;
 
   modal(`Import: ${src.name}`, (b) => {
     const controls = el('div', 'row-actions');
     const delimSel = el('select');
+    // A file named like an IIS log can be read as one in any of its three
+    // formats: the name picks one, and the pick is here for the log that
+    // was renamed or is not what its name says.
+    const nameFormat = iisLogFormat(src.name);
+    if (nameFormat) {
+      for (const [label, val] of [['IIS log — W3C extended', 'iis:w3c'], ['IIS log — NCSA common', 'iis:ncsa'],
+        ['IIS log — IIS native', 'iis:native']]) {
+        const opt = document.createElement('option');
+        opt.value = val; opt.textContent = label;
+        delimSel.append(opt);
+      }
+    }
     // 'lines' is not a delimiter: it switches the item to the raw-text
     // importer (one line per row, nothing split, no header) — the way to
     // force a .txt log, or a mis-sniffed .csv, into that path.
@@ -579,14 +597,21 @@ export function openImportPreview(src, opts = {}) {
     }
     const initialKind = (opts.initial && opts.initial.kind) || src.kind;
     if (initialKind === 'text') delimSel.value = 'lines';
-    else if (opts.initial && opts.initial.delimiter) delimSel.value = opts.initial.delimiter;
+    else if (initialKind === 'iis' && nameFormat) delimSel.value = `iis:${(opts.initial && opts.initial.log_format) || nameFormat}`;
+    // Not left to the select: on an IIS-named file its first option is an IIS format.
+    else delimSel.value = (opts.initial && opts.initial.delimiter) || '';
     const isLines = () => delimSel.value === 'lines';
+    const iisFormat = () => (delimSel.value.startsWith('iis:') ? delimSel.value.slice(4) : null);
     const headerLabel = el('label');
     const headerCb = el('input');
     headerCb.type = 'checkbox';
     headerCb.checked = opts.initial ? opts.initial.has_header !== false : true;
     headerLabel.append(headerCb, document.createTextNode(' First row is headers'));
-    const syncHeader = () => { headerCb.disabled = isLines(); headerLabel.title = isLines() ? 'Raw text has no header row — every line is data' : ''; };
+    const syncHeader = () => {
+      headerCb.disabled = isLines() || !!iisFormat();
+      headerLabel.title = isLines() ? 'Raw text has no header row — every line is data'
+        : iisFormat() ? 'An IIS log names its own columns' : '';
+    };
     syncHeader();
     controls.append(delimSel, headerLabel);
     b.append(controls);
@@ -600,7 +625,11 @@ export function openImportPreview(src, opts = {}) {
       tableWrap.replaceChildren();
       status.textContent = (isLines()
         ? `One line per row, nothing split · showing first ${preview.sample_rows.length} lines`
-        : `Detected delimiter: ${JSON.stringify(preview.delimiter)} · showing first ${preview.sample_rows.length} rows`)
+        : iisFormat()
+          ? `IIS log, ${IIS_FORMAT_LABELS[iisFormat()]} · showing first ${preview.sample_rows.length} rows`
+            // Only W3C's columns can grow: NCSA's and native's are fixed.
+            + (iisFormat() === 'w3c' && !preview.complete ? ' · a #Fields: line further into the file can add columns' : '')
+          : `Detected delimiter: ${JSON.stringify(preview.delimiter)} · showing first ${preview.sample_rows.length} rows`)
         + (preview.encoding === 'cp1252' ? ' · not UTF-8 — read as Windows-1252' : '');
       const t = el('table', 'preview-tbl');
       const hr = el('tr');
@@ -633,28 +662,34 @@ export function openImportPreview(src, opts = {}) {
         // A path-queued item (the "Add from this machine…" picker) previews
         // in place; a browser-picked File uploads its sample. Which one is
         // a fact about how the item arrived, not a guess about the disk.
-        const kind = isLines() ? 'text' : 'csv';
+        const kind = isLines() ? 'text' : iisFormat() ? 'iis' : 'csv';
+        const delimiter = kind === 'csv' ? (delimSel.value || null) : null;
         if (src.path) {
           preview = await post('/api/ingest/preview/path', {
-            path: src.path, kind,
-            delimiter: isLines() ? null : (delimSel.value || null), has_header: headerCb.checked,
+            path: src.path, kind, delimiter, has_header: headerCb.checked, log_format: iisFormat(),
           });
         } else {
           const fd = new FormData();
           fd.append('file', src.file);
           fd.append('kind', kind);
-          if (!isLines() && delimSel.value) fd.append('delimiter', delimSel.value);
+          if (delimiter) fd.append('delimiter', delimiter);
+          if (iisFormat()) fd.append('log_format', iisFormat());
           fd.append('has_header', headerCb.checked ? 'true' : 'false');
           preview = await api('/api/ingest/preview', { method: 'POST', body: fd });
         }
-        if (!columnTypes || columnTypes.length !== preview.columns.length) columnTypes = preview.inferred_types.slice();
+        if (iisTypes && kind === 'iis') {
+          columnTypes = preview.columns.map((c, i) => iisTypes[c] || preview.inferred_types[i]);
+          iisTypes = null;
+        } else if (!columnTypes || columnTypes.length !== preview.columns.length) {
+          columnTypes = preview.inferred_types.slice();
+        }
         renderTable();
       } catch (e) {
         status.textContent = 'Preview failed: ' + e.message;
       }
     }
 
-    delimSel.onchange = () => { syncHeader(); columnTypes = null; refreshPreview(); };
+    delimSel.onchange = () => { syncHeader(); columnTypes = null; iisTypes = null; refreshPreview(); };
     headerCb.onchange = refreshPreview;
     refreshPreview();
 
@@ -664,8 +699,13 @@ export function openImportPreview(src, opts = {}) {
       // `kind` rides in the settings: choosing Lines turns a csv queue item
       // into a text one (and back), which is what the queue row shows.
       const settings = isLines()
-        ? { kind: 'text', delimiter: null, has_header: false, column_types: null }
-        : { kind: 'csv', delimiter: delimSel.value || null, has_header: headerCb.checked, column_types: columnTypes };
+        ? { kind: 'text', delimiter: null, has_header: false, column_types: null, log_format: null }
+        : iisFormat()
+          ? { kind: 'iis', log_format: iisFormat(), delimiter: null, has_header: true,
+              column_types: preview && columnTypes
+                ? Object.fromEntries(preview.columns.map((c, i) => [c, columnTypes[i]])) : iisTypes }
+          : { kind: 'csv', delimiter: delimSel.value || null, has_header: headerCb.checked,
+              column_types: columnTypes, log_format: null };
       if (opts.onConfirm) {
         $('modal').hidden = true;
         opts.onConfirm(settings);
@@ -677,7 +717,7 @@ export function openImportPreview(src, opts = {}) {
           await post('/api/ingest/jobs/path', {
             path: src.path, name: src.name, kind: settings.kind,
             delimiter: settings.delimiter, has_header: settings.has_header,
-            column_types: settings.column_types,
+            column_types: settings.column_types, log_format: settings.log_format,
           });
           startJobsPoll();
         } catch (e) {
@@ -689,6 +729,7 @@ export function openImportPreview(src, opts = {}) {
       fd.append('file', src.file);
       fd.append('kind', settings.kind);
       if (settings.delimiter) fd.append('delimiter', settings.delimiter);
+      if (settings.log_format) fd.append('log_format', settings.log_format);
       fd.append('has_header', settings.has_header ? 'true' : 'false');
       if (settings.column_types) fd.append('column_types', JSON.stringify(settings.column_types));
       // Same background pipeline as the queue: transfer with progress, then

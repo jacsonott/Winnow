@@ -244,6 +244,13 @@ see [docs/notes/README.md](README.md) for the whole set.
   binary refusal for this kind, for the same reason. The three formats'
   header sets in defaults/headers.json give them Timeline summaries
   (W3C's by containment, so any site that logs the default fields).
+  **The preview's column types are a `{column: type}` map, not
+  ingest_csv's list.** The preview reads only the start of the log, and
+  a `#Fields:` line further in can add columns ahead of the ones it saw
+  (`Timestamp (UTC)` arrives at position 0 once any header has date and
+  time), so a list by position would type the wrong columns. The map
+  rides through the jobs routes and the ingest record (`column_types`,
+  with the picked `log_format`), so a session re-import types the same.
   tests/test_iis_logs.py.
 
 - Ragged rows are padded/trimmed to the header width, never dropped, and
