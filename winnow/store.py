@@ -3025,6 +3025,30 @@ class Store:
             self._fts_threads[source_id] = t
         t.start()
 
+    @staticmethod
+    def search_index_supported() -> bool:
+        """Whether this runtime's SQLite can use a search index at all — the
+        trigram LIKE pushdown arrived in 3.45, and _ensure_fts_building
+        builds nothing on anything older."""
+        return sqlite3.sqlite_version_info >= TRIGRAM_LIKE_MIN_SQLITE
+
+    def start_search_index(self, source_id: int) -> dict:
+        """Start this table's search index now, in the background, rather
+        than on the first Contains or Advanced search that wants it: the
+        Tables manager's Build. Nothing happens to a table that has one or
+        is building one (_ensure_fts_building's dedup). A merge has no index
+        of its own (it searches through its tables'), so it is refused; no
+        such table is a KeyError."""
+        if source_id < 0:
+            raise ValueError("A merge has no search index of its own — it uses its tables'")
+        with self._reader() as ro:
+            self._source_lite_on(ro, source_id)
+        self._ensure_fts_building(source_id)
+        with self._reader() as ro:
+            ready = bool(self._source_lite_on(ro, source_id).get("has_fts"))
+        return {"ready": ready, "building": self._is_fts_building(source_id),
+                "supported": self.search_index_supported()}
+
     def _build_fts_worker(self, source_id: int) -> None:
         # The thread is registered (so _is_fts_building sees it and the
         # per-source dedup holds) before it waits here for a build slot —

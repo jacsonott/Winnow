@@ -586,6 +586,101 @@ export function sideRail({ entries, groups, selected, onPick, pinsKey, match = s
   return { rail, search, list, pins, paint, sync };
 }
 
+/* The two-pane frame of a dialog made of sections: the table menu and the
+   Tables manager. The sections go down a side list by group, each with a
+   line under its name saying what is set there now, and the chosen one is
+   built fresh into the pane on the right, in a frame of a fixed height
+   (.side-panes), so moving to a short section moves nothing.
+
+   `sections` are {id, group, title, hint | asyncHint, build}. `build(pane,
+   refresh)` fills the pane, and may return {update}: what a caller's
+   background poll runs to repaint the pane in place, so a half-typed
+   filter or a scrolled list survives it (refresh() rebuilds instead). A
+   pane dispatches `changedEvent` when it changes something, and the hints
+   repaint. The list is a vertical tablist: one tab stop, and Up/Down/Home/
+   End walk it showing what they land on. Returns the node to append and
+   the controls: the caller appends `panes`, then calls show() — a pane is
+   built into the dialog, not into a detached node. */
+export function sectionPanes({ sections, label, cls = '', paneCls = '', changedEvent = 'sections:changed' }) {
+  const panes = el('div', 'side-panes' + (cls ? ' ' + cls : ''));
+  const rail = el('div', 'side-rail');
+  const nav = el('div', 'side-rail-list');
+  nav.setAttribute('role', 'tablist');
+  nav.setAttribute('aria-orientation', 'vertical');
+  nav.setAttribute('aria-label', label);
+  rail.append(nav);
+  const pane = el('div', 'side-pane' + (paneCls ? ' ' + paneCls : ''));
+  pane.setAttribute('role', 'tabpanel');
+  panes.append(rail, pane);
+
+  const entries = [];
+  let group = null;
+  for (const s of sections) {
+    if (s.group !== group) { group = s.group; nav.append(el('div', 'side-rail-group', group)); }
+    const row = el('div', 'side-rail-row');
+    const item = el('button', 'side-rail-item');
+    item.type = 'button';
+    item.dataset.section = s.id;
+    item.setAttribute('role', 'tab');
+    const hint = el('span', 'side-rail-hint');
+    item.append(el('span', 'side-rail-label', s.title), hint);
+    item.onclick = () => show(s.id);
+    row.append(item);
+    nav.append(row);
+    entries.push({ s, item, hint });
+  }
+  let current = entries[0];
+  let built = null;
+
+  function paintHints() {
+    for (const e of entries) {
+      if (e.s.hint) e.hint.textContent = e.s.hint();
+      else if (e.s.asyncHint) e.s.asyncHint().then((h) => { if (e.hint.isConnected) e.hint.textContent = h; }).catch(() => {});
+    }
+  }
+  function refresh() {
+    pane.replaceChildren();
+    built = current.s.build(pane, refresh) || null;
+    paintHints();
+  }
+  function update() {
+    if (built && built.update) built.update();
+    else refresh();
+    paintHints();
+  }
+  function show(sid, { focus = false } = {}) {
+    current = entries.find((e) => e.s.id === sid) || entries[0];
+    for (const e of entries) {
+      const on = e === current;
+      e.item.setAttribute('aria-selected', String(on));
+      e.item.tabIndex = on ? 0 : -1;
+      e.item.parentElement.classList.toggle('selected', on);
+    }
+    pane.dataset.section = current.s.id;
+    refresh();
+    if (focus) current.item.focus();
+  }
+  pane.addEventListener(changedEvent, paintHints);
+  nav.addEventListener('keydown', (e) => {
+    const at = entries.findIndex((x) => x.item === document.activeElement);
+    if (at < 0 || e.altKey || e.ctrlKey || e.metaKey) return;
+    const last = entries.length - 1;
+    let to;
+    if (e.key === 'ArrowDown') to = at === last ? 0 : at + 1;
+    else if (e.key === 'ArrowUp') to = at === 0 ? last : at - 1;
+    else if (e.key === 'Home') to = 0;
+    else if (e.key === 'End') to = last;
+    else return;
+    e.preventDefault();
+    show(entries[to].s.id, { focus: true });
+  });
+  return {
+    panes, pane, show, refresh, update, paintHints,
+    current: () => current.s.id,
+    focusTarget: () => current.item,
+  };
+}
+
 /* `items` may be an array or a thunk — the thunk is what a keepOpen item
    re-runs to repaint with fresh state. */
 const itemsOf = (x) => (typeof x === 'function' ? x() : x) || [];

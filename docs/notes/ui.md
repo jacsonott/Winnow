@@ -467,7 +467,8 @@ see [docs/notes/README.md](README.md) for the whole set.
   pointed at). Five buttons a row was the complaint: the actions an
   analyst reaches for once in a while went into the menu, and only the
   everyday one stayed visible (the name itself in Saved filters, which
-  applies the filter; Open/Close in the Tables manager). Pass the items as
+  applies the filter; the open tick in the Tables manager, whose ⋯ is
+  the table's right-click menu, `tableMenuItems`). Pass the items as
   a *function* so a menu reads the row's state when it opens, not when the
   list was drawn — Move up/Move down are disabled at the ends of their
   header set. Those two exist so the order can still be changed without a
@@ -477,9 +478,12 @@ see [docs/notes/README.md](README.md) for the whole set.
   redraw under its own open menu — the Tables manager's 1.5 s poll
   replaced every row, which left the menu anchored to a detached button
   (and dropped a keyboard user's focus each tick). It now skips a tick
-  while `openMenuAnchor` is inside the list, and any tick whose sources
-  and indexes match what was last painted
-  (`tests/ui/test_tables_manager_row_menu.py`).
+  while `openMenuAnchor` is inside the panes, and any tick whose sources,
+  folders and indexes match what was last painted; a tick that does
+  repaint puts the focus back on the same control in the same row
+  (`keepingFocus` in tables.js, by `data-id` and `data-role`)
+  (`tests/ui/test_tables_manager_row_menu.py`,
+  `test_tables_manager_panes.py`).
 - **Two tab strips share the header bar**: `#sourceTabs` (tables, ordered
   by `S.tabOrder`) and `#pageTabs` (SQL, Timeline and plugin tabs, ordered
   by `S.pageTabPrefs.order`), split by the `#tabSplit` divider. Page tabs
@@ -1345,8 +1349,8 @@ see [docs/notes/README.md](README.md) for the whole set.
   look-and-feel prefs rather than in the layout — it's a statement about
   this screen, not about this table's columns.
 - **The table menu replaced the tab strip's `▦` column-chooser button**
-  (`TABLE_MENU_SECTIONS`/`openTableMenu`: press `C`, the Tables manager's
-  Settings…, or Columns… on a table's right-click menu). Same registry
+  (`TABLE_MENU_SECTIONS`/`openTableMenu`: press `C`, or Columns… on a
+  table's right-click menu or its ⋯ in the Tables manager). Same registry
   reasoning as the row menu: it's where per-table features land, and the
   tab strip can't grow an icon per feature. `openTableMenu(sourceId,
   section)` opens that source first when it isn't the one on screen — not
@@ -1371,6 +1375,35 @@ see [docs/notes/README.md](README.md) for the whole set.
   Columns borrow the merge builder's vocabulary (`.mb-stats`, `.mb-seg`,
   `.mb-notes`, `.mb-field`) rather than adding their own.
   tests/ui/test_table_menu_sections.py, test_table_menu_strip.py.
+- **The Tables manager is the same two panes, sharing the frame**
+  (`sectionPanes` in ui.js, which `openTableMenu` builds on too;
+  `TABLES_MANAGER_SECTIONS` in tables.js). Its sections are case-wide
+  rather than one table's (a table's own settings are the table menu, a
+  click away on its ⋯), so it is not a master/detail list: **Every
+  table**, **Merges & saved tables** and **Indexes**. A section's
+  `build(pane, refresh)` may return `{update}`, which the poll calls to
+  repaint in place; without one the pane is rebuilt. Every table was one
+  list with Open/Close, a search-index chip and a ⋯ on every row and the
+  filter indexes between rows: the open state is now a tick (opening with
+  `navigate: false`, so the analyst stays in the manager), the counts are
+  columns with a dim dash for none so the tables with tagged rows or notes
+  stand out, and both kinds of index moved to their own pane, where
+  "index ready" is said once as a count rather than on every row.
+  **Kinds** groups by `columnGroupKey`, named by `nicknameFor` or the
+  first columns, which is how a KAPE import is read (every host's
+  EvtxECmd output together), with Merge… on the group preselecting its
+  imported tables — not the saved ones, whose rows are already in the
+  table they came from. The row's ⋯ is `tableMenuItems`, so it can't drift
+  from the tab's right-click menu; errored rows get Remove… alone, as
+  before. Build (`POST /api/source/{id}/search_index`,
+  `Store.start_search_index`) starts the index `_ensure_fts_building`
+  would start on the first slow search; `GET /api/search_index` says
+  whether this SQLite can have one at all (3.45+), so the pane says so
+  rather than offering Build and showing "not indexed" forever. Compact
+  case file stays in the Case menu (case upkeep, not table upkeep).
+  `tablesView` keeps the filter, grouping and sort for the page, so they
+  survive a trip into the table menu and back.
+  tests/ui/test_tables_manager_panes.py, test_tables_density.py.
 - **A header set's default layout seeds a table once, so it needs its
   own way onto the rest** (the table menu's Layout section with the
   default chosen; columns.js `applyDefaultLayout` is the same as a
@@ -1440,9 +1473,10 @@ see [docs/notes/README.md](README.md) for the whole set.
   (`mergesUsing`/`removeRefusal` in tables.js): the manager's button
   refuses with an alert, the menu greys its entry out and names the merge
   in the `desc` line, and both read the same rule — the menu can say it
-  before the click, which a button in a list of buttons can't. Errored
-  rows (a broken merge) still get no menu; the Tables manager is where
-  those are removed. tests/ui/test_table_context_menu.py.
+  before the click, which a button in a list of buttons can't. The
+  Tables manager's ⋯ is this menu too now. Errored rows (a broken merge)
+  still get no right-click menu; the Tables manager's ⋯ offers them
+  Remove… alone, which is where those are removed. tests/ui/test_table_context_menu.py.
 - **"Hide empty rows" is a view predicate, not a layout edit.** Unlike
   its neighbour "Hide empty columns" (a one-shot client-side sample that
   writes `S.layout`), the row toggle is `S.hideEmptyRows` →
@@ -2162,8 +2196,9 @@ see [docs/notes/README.md](README.md) for the whole set.
   keeps the parent's name and size from creation so a deleted parent
   still reads right (ids are reused, so the live table under
   `parent_source_id` only counts while its name still matches). The
-  Tables manager row uses `subsetParentLabel(s)` — the same line without
-  the "(N of M rows)", since the row count follows on the same line. The
+  Tables manager row says "from <parent>" (`subsetParentLabel(s)`) —
+  without the "(N of M rows)", since the Rows column is beside it; its
+  Merges & saved tables pane has the N of M. The
   its-own-tags line is deliberate: an analyst may expect the parent's
   tags to have come along, or the subset's to appear on the parent, and
   the tooltip is where both expectations get corrected.
@@ -2384,7 +2419,8 @@ see [docs/notes/README.md](README.md) for the whole set.
   setBusy(false) }`, or a bare `await api(...)`, turns a 409 with a
   perfectly good reason into an unhandled rejection: no toast, the busy
   bar gone, and a button that looks as if it did nothing. Session Load,
-  Start a fresh pass, the Tables manager's Close/Remove, a tab's ✕ and
+  Start a fresh pass, the Tables manager's Close/Remove (its open tick
+  and ⋯ now), a tab's ✕ and
   five others shipped like that. Catch, toast `e.message`, and return
   before the success path (closing the dialog, reloading, a "Saved"
   toast) — a dialog the action failed in stays open so the analyst can

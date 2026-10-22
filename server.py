@@ -4278,6 +4278,24 @@ def api_column_index_drop(source_id: int, column: str):
     return {"ok": True}
 
 
+@app.get("/api/search_index")
+def api_search_index():
+    """Whether searches on this machine can use a search index at all, and
+    the SQLite that decides it — the Tables manager says so rather than
+    showing "not indexed" on every table forever."""
+    return {"supported": Store.search_index_supported(), "sqlite": sqlite3.sqlite_version}
+
+
+@app.post("/api/source/{source_id}/search_index")
+def api_search_index_start(source_id: int):
+    try:
+        return store().start_search_index(source_id)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
 @app.get("/api/column_maxlen")
 def api_column_maxlen(source_id: int):
     try:

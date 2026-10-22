@@ -98,10 +98,16 @@ def test_row_menu_saves_the_picked_rows_as_a_badged_table(page, row_menu, flyout
         assert rows.count() == page.locator(".sidebar-row .menu-item", has_text="⊂ picked-rows").count()
         # the Tables manager row names the parent and reads the count ONCE
         page.keyboard.press("t")
-        page.wait_for_selector("#modal:not([hidden])")
-        line = page.locator("#modal .session-row", has_text="picked-rows").locator(".count").inner_text()
-        assert line.startswith("Subset of ui.csv · 3 rows ·"), line
-        assert "(3 of 200 rows)" not in line
+        page.wait_for_selector("#modal:not([hidden]) .tables-list .tables-row")
+        row = page.locator("#modal .tables-list .tables-row", has_text="picked-rows")
+        assert row.locator(".tables-sub").inner_text() == "from ui.csv"
+        assert row.locator(".tables-rows").inner_text() == "3"
+        assert "(3 of 200 rows)" not in row.inner_text()
+        # and Merges & saved tables says what it was saved from
+        page.locator('.side-rail-item[data-section="merges"]').click()
+        made = page.locator("#modal .tables-made-row", has_text="picked-rows")
+        assert made.locator(".tables-made-sub").inner_text().startswith("3 of 200 rows · saved from picked rows")
+        assert made.locator(".tables-member").inner_text().startswith("ui.csv")
         page.keyboard.press("Escape")
         page.wait_for_selector("#modal[hidden]", state="attached")
     finally:
