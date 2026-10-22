@@ -9692,8 +9692,14 @@ class Store:
     HISTOGRAM_BUCKETS = (1, 5, 10, 30, 60, 300, 600, 900, 1800, 3600, 3 * 3600, 6 * 3600,
                          12 * 3600, 86400, 7 * 86400, 30 * 86400, 365 * 86400)
 
+    # How many values a value split may colour: the categorical palette's
+    # eight slots. A ninth would be a generated hue, and it belongs in
+    # "Other" instead.
+    HISTOGRAM_SPLIT_MAX = 8
+
     def time_histogram(self, view_id: str, column: str, max_buckets: int = 160,
-                       op_token: str | None = None, stack: str | None = None) -> dict:
+                       op_token: str | None = None, stack: str | None = None,
+                       split_column: str | None = None, split_values: list | None = None) -> dict:
         """Time buckets over the rows of the CURRENT view — filtered, searched,
         timeframe'd, exactly what the grid shows — for a datetime column.
         One aggregate pass on the reader pool (invariant #4), shaped like
@@ -9718,7 +9724,16 @@ class Store:
         returns, so folding into buckets is a walk over distinct seconds,
         not rows. ts_normalize_sql takes the common ISO shape out of Python
         altogether. Together: ~1 s on the same view, the same answer
-        (tests/test_histogram.py)."""
+        (tests/test_histogram.py).
+
+        `stack` splits each bar. "tags" by the first tag a row carries
+        (_histogram_tag_exprs). "value" and "groups" by which of
+        `split_values` the row holds in `split_column` — up to
+        HISTOGRAM_SPLIT_MAX of them, everything else in slot 0 — which is
+        the same one-row-one-segment shape, since a row holds one value per
+        column. The two differ only in how a datetime column is compared:
+        "groups" names the group-by strip's values, which are DAY_BUCKETs
+        there (group_summary), and "value" a cell's stored value."""
         handle = self._views.get(view_id)
         if not handle:
             raise ViewExpired("View expired — rebuild it")
@@ -9732,7 +9747,25 @@ class Store:
             raise ValueError(f"{column} is not a datetime column")
         direct = self._grouping_covers_whole_source(handle, src) or handle.get("kind") == "root_virtual"
         is_derived = self._is_derived(src, column)
-        stacked = stack == "tags"
+        by_values = stack in ("value", "groups")
+        stacked = stack == "tags" or by_values
+        if by_values:
+            if split_column == TAG_GROUP_COLUMN:
+                raise ValueError("Grouped by tag — the Tags view colours these")
+            if split_column not in colnames:
+                raise KeyError(split_column)
+            split_values = list(split_values or [])
+            if not 1 <= len(split_values) <= self.HISTOGRAM_SPLIT_MAX:
+                raise ValueError(f"A value split takes 1 to {self.HISTOGRAM_SPLIT_MAX} values")
+            split_day = stack == "groups" and colnames[split_column] == "datetime"
+
+        def split_expr(m: dict) -> str:
+            # Slot 1..N for the value a row holds, 0 for anything else. IS,
+            # not =, so the "(empty)" group's None finds its NULL rows.
+            ref = self._col_ref(self._ref_src_for(src, m), split_column, "s", None if direct else "d")
+            expr = f"DAY_BUCKET({ref})" if split_day else ref
+            whens = " ".join(f"WHEN {expr} IS ? THEN {i + 1}" for i in range(len(split_values)))
+            return f"CASE {whens} ELSE 0 END"
 
         def branch(m: dict, select: str) -> str:
             derived_alias = None if direct else "d"
@@ -9753,7 +9786,12 @@ class Store:
         # many of these as it has rows. Untagged is 0 — tag ids start at 1.
         secs, tags, counts = array("q"), array("q"), array("q")
         with self._reader() as ro, self._dropped_view_is_expired(), self._interruptible(op_token, ro):
-            tag_of = self._histogram_tag_exprs(ro, members) if stacked else {}
+            if by_values:
+                tag_of = {m["source_id"]: split_expr(m) for m in members}
+                params = [v for _ in members for v in split_values]
+            else:
+                tag_of = self._histogram_tag_exprs(ro, members) if stacked else {}
+                params = []
             union = " UNION ALL ".join(
                 branch(m, "EPOCH AS e" + (f", {tag_of[m['source_id']]} AS tag" if stacked else ""))
                 for m in members)
@@ -9766,7 +9804,7 @@ class Store:
             # TS_NORMALIZE calls a row, counted. Neither is allowed past a
             # LIMIT, since moving a WHERE across one changes what it means.
             for row in ro.execute(f"SELECT {keys}, COUNT(*) FROM ({union} LIMIT -1) WHERE e IS NOT NULL "
-                                  f"GROUP BY {keys} ORDER BY {keys}"):
+                                  f"GROUP BY {keys} ORDER BY {keys}", params):
                 secs.append(row[0])
                 counts.append(row[-1])
                 if stacked:
@@ -9797,7 +9835,11 @@ class Store:
         out = {"column": column, "bucket_seconds": bucket,
                "start": lo_text, "end": hi_text, "total": sum(counts),
                "buckets": [[b, per_bucket[b]] for b in sorted(per_bucket)]}
-        if stacked:
+        if by_values:
+            out["stack"] = {"kind": stack, "column": split_column, "values": split_values,
+                            "buckets": self._histogram_slot_buckets(
+                                secs, tags, counts, bucket, len(split_values) + 1)}
+        elif stacked:
             out["stack"] = self._histogram_tag_stack(secs, tags, counts, bucket)
         return out
 
@@ -9842,6 +9884,18 @@ class Store:
             split[slot[t] if t else 0] += n
         return {"tags": ids,
                 "buckets": [[b, by_bucket[b]] for b in sorted(by_bucket)]}
+
+    @staticmethod
+    def _histogram_slot_buckets(secs: array, slots: array, counts: array, bucket: int,
+                                width: int) -> list:
+        """A value split's (second, slot, count) rows in the plain chart's
+        buckets: [[epoch, [other, n_value_1, …]], …]. The slot is already
+        the position — the CASE that made it numbered the values in the
+        order they were asked for."""
+        by_bucket: dict[int, list[int]] = {}
+        for e, s, n in zip(secs, slots, counts):
+            by_bucket.setdefault(e // bucket * bucket, [0] * width)[s] += n
+        return [[b, by_bucket[b]] for b in sorted(by_bucket)]
 
     def _tag_group_branches(self, view_id: str, src: dict, members: list[dict], direct: bool,
                             member_rows: dict[int, int], path_for) -> tuple[list[str], list]:

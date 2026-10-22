@@ -283,9 +283,38 @@ see [docs/notes/README.md](README.md) for the whole set.
   toggled off from hiding an open histogram; and `#btnHistogram` sits
   AFTER `#pluginToolbarButtons`, never inside it, because
   `renderPluginPanelButtons` wipes that span on every plugin reload (boot
-  and every case switch). Prefs are `winnow.histogram` `{open, column}`
-  per browser; the plugin's `winnow.panels['table-histogram.histogram']`
+  and every case switch). Prefs are `winnow.histogram` `{open, column,
+  view, groupsTop}` per browser (`stack`, the Tags toggle's flag from
+  before there were other views, is still written beside `view` and read
+  when `view` is missing); the plugin's `winnow.panels['table-histogram.histogram']`
   is migrated to `open` once and deleted.
+- **The strip's colour-by views — Tags, Value, Groups — are one pref,
+  one pressed at a time** (histogram.js `histogramView`; the store side
+  is in store.md). Four things to know before touching them. **Value
+  follows the cell focus by identity, not position**: every move assigns
+  `S.cellFocus` a new object, and `followSplit` (run from
+  `histogramFollowGrid`, so on every grid render) takes the focused
+  cell's value only when that object changes. Keyed on position, a view
+  rebuild that left the focus at the same position — now naming another
+  row — re-charted a value nobody picked. A focus on a group heading, or
+  none, keeps the last value. **Groups' colours follow the value, not its
+  rank** (`groupSlots`): a filter that reorders the first groups must not
+  repaint the survivors, or the colour an analyst learnt for one group
+  means another after it. A value keeps its slot while it stays in the
+  first N; one that joins takes the lowest free slot; the map resets
+  with the column or N. While a regroup has emptied `S.groups`,
+  `lastGroups` stands in, so the chart does not drop to plain and back.
+  **The values ride in the GET's query string**, so `SPLIT_JSON_MAX`
+  caps their JSON: a cell holding a whole document is not charted (the
+  legend says so), and a group past the cap falls into "Other" — without
+  it the request line outgrew what uvicorn accepts. **The group headings
+  ask the strip for their colour** (`histogramGroupColour`, from
+  `renderGroupHeaderRow`), and only while the strip is on screen, so
+  anything that changes the answer repaints the grid: the view buttons,
+  First N, and the strip's show/hide edge. The palette is
+  `--series-1…8` in style.css, per theme rather than per skin, because
+  its order is what keeps neighbouring segments apart for colour-blind
+  readers and was checked as a whole. tests/ui/test_histogram_value_views.py.
 - **The strip marks where the grid is** (histogram.js `gridMarks`,
   grid.js `onScreenRows`). The rows on screen — no overscan, none under
   the sticky header — are a band when their times run one way (a veil

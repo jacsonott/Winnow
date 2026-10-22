@@ -173,7 +173,13 @@ The same switch is in Settings, under **Filter & search syntax**.
 
 ## The histogram
 
-Click **Histogram** or press `h` to show a bar chart above the grid of when the rows in the current view happened. Choose which datetime column to chart from its list. The line beside it gives the row count, the bucket size and the tallest bar. Winnow picks a bucket size, from one second up to a year, that gives bars a few pixels wide across the strip, so narrowing the timeframe gives finer buckets. Hover a bar to see its time range and row count. **Tags** colours the bars by tag: each row counts under the first tag it carries, with untagged rows underneath.
+Click **Histogram** or press `h` to show a bar chart above the grid of when the rows in the current view happened. Choose which datetime column to chart from its list. The line beside it gives the row count, the bucket size and the tallest bar. Winnow picks a bucket size, from one second up to a year, that gives bars a few pixels wide across the strip, so narrowing the timeframe gives finer buckets. Hover a bar to see its time range and row count.
+
+Three buttons colour the bars, one at a time; click the pressed one again to go back to plain bars. In each, a row counts once, so the bars stay as tall as the plain ones.
+
+- **Tags** colours the bars by tag: each row counts under the first tag it carries, with untagged rows underneath.
+- **Value** colours the rows holding the selected cell's value, as if they were tagged, and greys out everything else. Click another cell, or move to one with the arrow keys, to chart its value instead. The line beside the chart names the value and how many rows hold it. A cell holding a very long value, such as a whole JSON document, is too long to chart, and the strip says so.
+- **Groups** works while the grid is grouped: the first 3, 5 or 8 groups (pick with **First 3**, **First 5** or **First 8**) each get a colour, and everything else counts as "Other". Each of those groups' headings in the grid gets a swatch in the same colour. A group keeps its colour when a filter moves it up or down the list. With nested grouping, the colours go to the first level's groups.
 
 While the view is changing (a filter, a search, a sort, the timeframe) and until its new chart has loaded, the old chart is faded and grey and the line beside it says "Updating…", so a chart at full strength is always the one for the rows in the grid.
 

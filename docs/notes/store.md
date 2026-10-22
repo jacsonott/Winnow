@@ -541,6 +541,23 @@ see [docs/notes/README.md](README.md) for the whole set.
   already carries exactly. The lookup is a correlated `MIN` over
   row_tags' primary key, skipped entirely for a member with no tags at
   all — the same short-circuit `tag_counts_in_view` makes.
+- **The histogram's value split names its values; it does not group
+  them.** `stack=value` (the strip's Value view: the selected cell's
+  value) and `stack=groups` (its Groups view: the grid's first N groups)
+  send the values themselves, a JSON list in `split_values`, at most
+  `HISTOGRAM_SPLIT_MAX` (8, the palette's slots). Each row's slot is a
+  `CASE WHEN expr IS ? THEN 1 …` over them, numbered in the order they
+  were sent, because the client colours slot i as the i-th value it
+  asked for. Three things it has to agree with. `IS`, not `=`: the
+  "(empty)" group is NULL on some columns, and `= NULL` matches nothing,
+  so its rows went to "Other". "groups" compares a datetime column's
+  `DAY_BUCKET`, since that is what group_summary grouped by and so what
+  the group strip's values are; "value" compares the stored value, since
+  that is what a cell holds. And the expression goes through `_col_ref`
+  per member, so a derived column and a merge resolve the way the
+  charted column does. Same one-row-one-segment shape as the tag split
+  (a row holds one value per column), same single pass.
+  tests/test_histogram_value_split.py.
 - **Histogram buckets are floored, and 1601 is a real minimum.** A bucket
   is `[b, b + bucket_seconds)` — the strip finds a row's bar that way.
   The fold into buckets is Python's `//`, which floors; it was SQLite's

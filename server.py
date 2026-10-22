@@ -4143,7 +4143,8 @@ def api_distinct_values(view_id: str, column: str, op_token: str | None = None):
 
 @app.get("/api/histogram")
 def api_histogram(view_id: str, column: str, max_buckets: int = 160, op_token: str | None = None,
-                  stack: str | None = None):
+                  stack: str | None = None, split_column: str | None = None,
+                  split_values: str | None = None):
     """Time buckets of a datetime column over the CURRENT view — what the
     histogram strip between the toolbar and the grid draws
     (static/js/histogram.js). A side-effect-free view-summary read like
@@ -4163,17 +4164,29 @@ def api_histogram(view_id: str, column: str, max_buckets: int = 160, op_token: s
     change that would fix nothing."""
     try:
         # `stack=tags` adds a per-bucket split by tag beside the plain
-        # counts; anything else is ignored rather than refused, so an old
-        # client and a new server agree on the chart they already share.
+        # counts; `stack=value` / `stack=groups` one by the values
+        # `split_values` (a JSON list) names in `split_column`. Anything
+        # else is ignored rather than refused, so an old client and a new
+        # server agree on the chart they already share.
+        values = None
+        if stack in ("value", "groups"):
+            try:
+                values = json.loads(split_values or "[]")
+            except ValueError:
+                values = None
+            if not isinstance(values, list):
+                raise HTTPException(400, "split_values must be a JSON list")
         return JSONResponse(store().time_histogram(
             view_id, column, max_buckets=max(20, min(max_buckets, 400)), op_token=op_token,
-            stack="tags" if stack == "tags" else None))
+            stack=stack if stack in ("tags", "value", "groups") else None,
+            split_column=split_column, split_values=values))
     except ValueError as e:
         raise HTTPException(400, str(e))
     except ViewExpired as e:
         raise HTTPException(409, str(e))
-    except KeyError:
-        raise HTTPException(400, f"No column named {column!r} on this table")
+    except KeyError as e:
+        name = e.args[0] if e.args else column
+        raise HTTPException(400, f"No column named {name!r} on this table")
 
 
 class GroupExpand(BaseModel):
