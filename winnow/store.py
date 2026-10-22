@@ -7059,9 +7059,20 @@ class Store:
         eligibility, and the session file's column list."""
         return [c for c in src["columns"] if not c.get("derived")]
 
-    def _from_clause(self, src: dict, alias: str | None = None) -> str:
+    def _from_clause(self, src: dict, alias: str | None = None, uses: Iterable[str] | None = None) -> str:
         """FROM-clause text for reading a source's rows: the source table
         alone, or LEFT JOIN'd to its derived-value sidecar.
+
+        `uses`, when a caller passes it, is every column the statement
+        reads; one that reads no derived column gets the table alone. That
+        is not something SQLite works out for itself in the aggregates that
+        pass it: it drops an unused LEFT JOIN from a plain SELECT, but not
+        once the SELECT is flattened into a GROUP BY or a count(*), so a
+        Values list or a group count on a base column paid a sidecar lookup
+        per row for a column it never read — Computer's values on a 2.1M-row
+        EvtxECmd table took 14.3 s instead of 0.11 s with one derived column
+        added. Naming a derived column the caller left out of `uses` is "no
+        such column", an error, never a wrong answer.
 
         `USING(rid)` rather than `ON a.rid = b.rid` so an unqualified `rid`
         stays legal on both sides (every read path selects it that way).
@@ -7074,6 +7085,8 @@ class Store:
         if alias:
             t = f"{t} {alias}"
         if not any(c.get("derived") for c in src["columns"]):
+            return t
+        if uses is not None and not any(self._is_derived(src, c) for c in uses):
             return t
         return f"{t} LEFT JOIN {q(self._derived_table(src['id']))} USING(rid)"
 
@@ -7096,21 +7109,22 @@ class Store:
         return any(c.get("derived") and c["name"].lower() == str(column).lower()
                    for c in src["columns"])
 
-    def _member_from(self, src: dict, m: dict, alias: str | None = None) -> str:
+    def _member_from(self, src: dict, m: dict, alias: str | None = None,
+                     uses: Iterable[str] | None = None) -> str:
         """FROM text for one member table of a (possibly merged) view. A
         plain source picks up its own sidecar join; a merge that exposes
         derived columns (present on every member) reads each member through
         that member's OWN sidecar — same USING(rid) shape, so bare column
-        and rid references stay legal."""
+        and rid references stay legal. `uses` as in _from_clause."""
         if not src.get("is_merge") and m["source_id"] == src["id"]:
-            return self._from_clause(src, alias)
+            return self._from_clause(src, alias, uses)
         if src.get("is_merge"):
             msrc = m.get("src") or self._source_lite(m["source_id"])
             if self._member_projection(src, msrc) is not None:
                 t = self._member_join_target(src, {**m, "src": msrc})
                 return f"{t} {alias}" if alias else t
             if any(c.get("derived") for c in src["columns"]):
-                return self._from_clause(msrc, alias)
+                return self._from_clause(msrc, alias, uses)
         t = q(m["table_name"])
         return f"{t} {alias}" if alias else t
 
@@ -7123,12 +7137,16 @@ class Store:
             return ""
         return f" LEFT JOIN {q(self._derived_table(src['id']))} {alias} ON {alias}.rid = {on_alias}.rid"
 
-    def _member_derived_join(self, src: dict, m: dict, on_alias: str) -> str:
+    def _member_derived_join(self, src: dict, m: dict, on_alias: str,
+                             uses: Iterable[str] | None = None) -> str:
         """_derived_join's per-member counterpart for the view-join shapes:
         a merge's rows resolve derived values through each member's own
         sidecar. For a plain source it emits exactly what _derived_join
-        would."""
+        would. `uses` as in _from_clause: nothing when no column it names
+        is derived."""
         if not any(c.get("derived") for c in src["columns"]):
+            return ""
+        if uses is not None and not any(self._is_derived(src, c) for c in uses):
             return ""
         mid = m["source_id"]
         msrc = src if (not src.get("is_merge") and mid == src["id"]) else self._source_lite(mid)
@@ -8512,13 +8530,13 @@ class Store:
             rsrc = self._ref_src_for(src, m)
             ref = self._col_ref(rsrc, column, "s", None if direct else "d")
             if direct:
-                scope = f"FROM {self._member_from(src, m, 's')}"
+                scope = f"FROM {self._member_from(src, m, 's', (column,))}"
                 order = "s.rid"
             else:
                 scope = (f"FROM v.{q(view_id)} vv "
                          f"JOIN {self._member_join_target(src, m)} s ON s.rid = vv.rid "
                          f"AND vv.source_id = {int(m['source_id'])}"
-                         f"{self._member_derived_join(rsrc, m, 's')}")
+                         f"{self._member_derived_join(rsrc, m, 's', (column,))}")
                 # The view's own order, which is what the analyst is
                 # looking at, and free: pos is the view table's rowid.
                 order = "vv.pos"
@@ -9626,6 +9644,8 @@ class Store:
             return "".join(f" AND {c}" for c in clauses), p
 
         has_path = bool(path)
+        # The only columns a branch reads: the one grouped and the path's.
+        uses = [column, *(p.get("column") for p in path or [] if isinstance(p, dict))]
         whole_source = not has_path and self._grouping_covers_whole_source(handle, src)
         # A root_virtual view has no v.view_N to join at all (it was never
         # materialised — see _build_virtual_root_view), path or no path, so
@@ -9649,18 +9669,19 @@ class Store:
         branches: list[str] = []
         params: list[Any] = []
         if by_tag:
-            branches, params = self._tag_group_branches(view_id, src, members, direct, member_rows, _path_for)
+            branches, params = self._tag_group_branches(view_id, src, members, direct, member_rows, _path_for,
+                                                        uses)
         else:
             for m in members:
                 derived_alias = None if direct else "d"
                 extra_where, path_params = _path_for(m, derived_alias)
                 if direct:
-                    scope = f"FROM {self._member_from(src, m, 's')} WHERE 1=1{extra_where}"
+                    scope = f"FROM {self._member_from(src, m, 's', uses)} WHERE 1=1{extra_where}"
                 else:
                     scope = (
                         f"FROM v.{q(view_id)} vv "
                         f"JOIN {self._member_join_target(src, m)} s ON s.rid = vv.rid AND vv.source_id = {int(m['source_id'])}"
-                        f"{self._member_derived_join(self._ref_src_for(src, m), m, 's')} "
+                        f"{self._member_derived_join(self._ref_src_for(src, m), m, 's', uses)} "
                         f"WHERE 1=1{extra_where}"
                     )
                 branches.append(f"SELECT {_val_expr(m, derived_alias)} AS val, count(*) AS n {scope} GROUP BY 1")
@@ -9816,6 +9837,7 @@ class Store:
             if not 1 <= len(split_values) <= self.HISTOGRAM_SPLIT_MAX:
                 raise ValueError(f"A value split takes 1 to {self.HISTOGRAM_SPLIT_MAX} values")
             split_day = stack == "groups" and colnames[split_column] == "datetime"
+        uses = (column, split_column) if by_values else (column,)
 
         def slot_of(expr: str) -> str:
             # Slot 1..N for the value a row holds, 0 for anything else. IS,
@@ -9841,13 +9863,13 @@ class Store:
                 # USING(rid) sidecar join in _member_from unambiguous.
                 scope = (f"FROM (SELECT rid AS trid, MIN(tag_id) AS tag FROM row_tags "
                          f"WHERE source_id = {int(m['source_id'])} GROUP BY rid) t "
-                         f"CROSS JOIN {self._member_from(src, m, 's')} WHERE s.rid = t.trid")
+                         f"CROSS JOIN {self._member_from(src, m, 's', uses)} WHERE s.rid = t.trid")
             elif direct:
-                scope = f"FROM {self._member_from(src, m, 's')}"
+                scope = f"FROM {self._member_from(src, m, 's', uses)}"
             else:
                 scope = (f"FROM v.{q(view_id)} vv "
                          f"JOIN {self._member_join_target(src, m)} s ON s.rid = vv.rid AND vv.source_id = {int(m['source_id'])}"
-                         f"{self._member_derived_join(rsrc, m, 's')}")
+                         f"{self._member_derived_join(rsrc, m, 's', uses)}")
             return f"SELECT {select.replace('EPOCH', epoch)} {scope}"
 
         # Distinct seconds in order, as flat int arrays rather than a list
@@ -9993,7 +10015,7 @@ class Store:
         for m in members:
             ref = self._col_ref(self._ref_src_for(src, m), column, "s", None)
             stray = ro.execute(
-                f"SELECT 1 FROM (SELECT {ref} AS v FROM {self._member_from(src, m, 's')} LIMIT 256) "
+                f"SELECT 1 FROM (SELECT {ref} AS v FROM {self._member_from(src, m, 's', (column,))} LIMIT 256) "
                 f"WHERE v IS NOT NULL AND NOT (typeof(v) = 'text' AND v GLOB '{_TS_ISO_GLOB}') LIMIT 1").fetchone()
             if stray:
                 return False
@@ -10008,7 +10030,8 @@ class Store:
         ends = []
         for m in members:
             ref = self._col_ref(self._ref_src_for(src, m), column, "s", None)
-            ends += ro.execute(f"SELECT MIN({ref}), MAX({ref}) FROM {self._member_from(src, m, 's')}").fetchone()
+            ends += ro.execute(
+                f"SELECT MIN({ref}), MAX({ref}) FROM {self._member_from(src, m, 's', (column,))}").fetchone()
         epochs = []
         for v in ends:
             ts = _ts_normalize(v) if v is not None else None
@@ -10108,7 +10131,8 @@ class Store:
         return [[b, by_bucket[b]] for b in sorted(by_bucket)]
 
     def _tag_group_branches(self, view_id: str, src: dict, members: list[dict], direct: bool,
-                            member_rows: dict[int, int], path_for) -> tuple[list[str], list]:
+                            member_rows: dict[int, int], path_for,
+                            uses: Iterable[str] | None = None) -> tuple[list[str], list]:
         """The UNION ALL branches behind grouping by tag: one group per tag,
         plus one for the untagged remainder. A row carrying two tags is
         counted under both — that's what makes "group by tag" answer the
@@ -10164,7 +10188,7 @@ class Store:
 
         for m, path_clause, path_params in per_member:
             sid = int(m["source_id"])
-            member_from = self._member_from(src, m, "s")
+            member_from = self._member_from(src, m, "s", uses)
             if direct and not path_clause:
                 branches.append(
                     f"SELECT tag_id AS val, count(*) AS n FROM row_tags WHERE source_id = {sid} GROUP BY 1"
@@ -10234,6 +10258,7 @@ class Store:
         # (bare refs), the view-join shape chains a second ON join and
         # refers to it by alias.
         d_alias = None if is_root_virtual else "d"
+        uses = [column, *(p.get("column") for p in path or [] if isinstance(p, dict))]
 
         def _conds(m: dict) -> tuple[str, list]:
             """This group's predicate for one member. Per member because
@@ -10259,13 +10284,13 @@ class Store:
                 where_sql, where_params = _conds(m)
                 if is_root_virtual:
                     n = self.db.execute(
-                        f"SELECT count(*) FROM {self._member_from(src, m, 's')} WHERE {where_sql}",
+                        f"SELECT count(*) FROM {self._member_from(src, m, 's', uses)} WHERE {where_sql}",
                         where_params,
                     ).fetchone()[0]
                 else:
                     n = self.db.execute(
                         f"SELECT count(*) FROM v.{q(view_id)} vv JOIN {self._member_join_target(src, m)} s "
-                        f"ON s.rid = vv.rid AND vv.source_id = ?{self._member_derived_join(self._ref_src_for(src, m), m, 's')} WHERE {where_sql}",
+                        f"ON s.rid = vv.rid AND vv.source_id = ?{self._member_derived_join(self._ref_src_for(src, m), m, 's', uses)} WHERE {where_sql}",
                         [m["source_id"], *where_params],
                     ).fetchone()[0]
                 total += n
@@ -10304,13 +10329,13 @@ class Store:
                 if is_root_virtual:
                     branches.append(
                         f"SELECT s.rid AS root_pos, {int(m['source_id'])} AS source_id, s.rid AS rid "
-                        f"FROM {self._member_from(src, m, 's')} WHERE {where_sql}"
+                        f"FROM {self._member_from(src, m, 's', uses)} WHERE {where_sql}"
                     )
                     params.extend(where_params)
                 else:
                     branches.append(
                         f"SELECT vv.pos AS root_pos, vv.source_id, vv.rid FROM v.{q(view_id)} vv "
-                        f"JOIN {self._member_join_target(src, m)} s ON s.rid = vv.rid AND vv.source_id = ?{self._member_derived_join(self._ref_src_for(src, m), m, 's')} "
+                        f"JOIN {self._member_join_target(src, m)} s ON s.rid = vv.rid AND vv.source_id = ?{self._member_derived_join(self._ref_src_for(src, m), m, 's', uses)} "
                         f"WHERE {where_sql}"
                     )
                     params.extend([m["source_id"], *where_params])
@@ -11441,7 +11466,7 @@ class Store:
                     m["source_id"], column, self._index_table_for(src, column, m["table_name"], m["source_id"])
                 )
             union_sql = " UNION ALL ".join(
-                f"SELECT {q(column)} AS val FROM {self._member_from(src, m)}" for m in members
+                f"SELECT {q(column)} AS val FROM {self._member_from(src, m, uses=(column,))}" for m in members
             )
             rows = ro.execute(
                 f"SELECT val, count(*) AS n FROM ({union_sql}) GROUP BY 1 ORDER BY n DESC LIMIT ?",

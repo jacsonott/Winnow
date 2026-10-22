@@ -285,6 +285,18 @@ see [docs/notes/README.md](README.md) for the whole set.
     (invariant #2), pinned by an EXPLAIN QUERY PLAN test in
     `test_derived.py`. A source with no derived columns compiles
     byte-identical SQL, which is why `bench --vs-ref` is flat.
+  - **An aggregate that reads no derived column leaves the join out.**
+    SQLite drops an unused LEFT JOIN from a plain SELECT but not once it
+    is flattened into a GROUP BY or a count(*), so adding one derived
+    column made a Values list or a group count on a *base* column pay a
+    sidecar lookup per row: Computer's values on a 2.1M-row EvtxECmd
+    table went from 0.11 s to 14.3 s. `_from_clause`, `_member_from` and
+    `_member_derived_join` take `uses` (every column the statement
+    reads); `column_values`, `group_summary` (the grouped column plus the
+    path's), `expand_group`, `time_histogram` (plus the split column) and
+    the histogram probes pass it. Leaving a derived column out of `uses`
+    is "no such column", never a wrong count, and omitting `uses` keeps
+    the old always-join behaviour for every other reader.
   - **Two join shapes, not one.** `group_summary`/`expand_group`'s
     view-join branch already chains `JOIN … ON`, and an `ON` after a
     `USING` join binds to the wrong join — so those use `_derived_join`
