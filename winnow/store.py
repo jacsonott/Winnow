@@ -4461,12 +4461,19 @@ class Store:
                 "sample_rows": [[ln] for ln in lines], "inferred_types": ["text"]}
 
     def ingest_iis(self, path: str, name: str | None = None, build_fts: bool = True,
-                   progress=None, cancel=None, log_format: str | None = None) -> dict:
+                   progress=None, cancel=None, log_format: str | None = None,
+                   column_types: dict[str, str] | None = None) -> dict:
         """Import an IIS web server log (W3C extended, NCSA or IIS native)
         as one table — iisread.py has the formats and why W3C's columns
         come from its #Fields: lines. The file's name says which format it
-        is; `log_format` overrides that (a session re-import, which
-        recorded it).
+        is; `log_format` overrides that (the import preview's pick, or a
+        session re-import, which recorded it).
+
+        `column_types` maps a column's name to the type the preview set
+        for it. By name, not position, as ingest_csv's list is: the
+        preview reads the start of the file, and a #Fields: line further
+        in can add columns ahead of ones it saw (Timestamp, Unnamed
+        values). A column it does not name keeps the inferred type.
 
         Two passes, as ingest_json: the first finds the columns (the union
         of every #Fields: line), the second inserts. The first runs before
@@ -4479,8 +4486,14 @@ class Store:
         when the power went holds NUL runs, which are read as gaps."""
         name = name or os.path.basename(path)
         fmt = log_format or iisread.log_format(path)
+        if log_format and fmt not in iisread.FORMATS:
+            raise ValueError(f"Unknown IIS log format {log_format!r}")
         if fmt not in iisread.FORMATS:
             raise ValueError(f"{name} is not named like an IIS log (u_ex…, nc…, in….log)")
+        if column_types is not None and (
+                not isinstance(column_types, dict)
+                or any(t not in ("text", "number", "datetime") for t in column_types.values())):
+            raise ValueError("An IIS log's column types name their columns: {column: text|number|datetime}")
         size = os.path.getsize(path)
         file_hash = self._quick_hash(path)
         encoding = sniff_text_encoding(path)
@@ -4510,7 +4523,8 @@ class Store:
         cols = sanitize_columns(plan["columns"])
         ncols = len(cols)
         source_id, table = self._create_source_shell(
-            name, cols, path=path, file_hash=file_hash, ingest=_ingest_record("iis", format=fmt))
+            name, cols, path=path, file_hash=file_hash,
+            ingest=_ingest_record("iis", format=fmt, column_types=column_types or None))
         insert = f"INSERT INTO {q(table)} ({','.join(q(c) for c in cols)}) VALUES ({','.join('?' * ncols)})"
 
         stats: dict = {}
@@ -4558,6 +4572,8 @@ class Store:
 
         types = [t or (infer_type([r[i] for r in sample]) if sample else "text")
                  for i, t in enumerate(plan["types"])]
+        if column_types:
+            types = [column_types.get(c, t) for c, t in zip(cols, types)]
         colmeta = [{"name": c, "type": t} for c, t in zip(cols, types)]
         decoded = _encoding_report(encoding, _cp1252_fallback_count() - fallback0)
         self._finish_source_columns(source_id, colmeta, decoded, name)
@@ -4587,7 +4603,8 @@ class Store:
         preview_csv_text's shape. The columns are the ones the sample
         names — a #Fields: line further into the file adds its own on
         import. `complete` is whether `text` is the whole file; when it
-        isn't, its last line may be cut and is left out."""
+        isn't, its last line may be cut and is left out, and the answer
+        says so, since then more columns may follow."""
         if not text:
             raise ValueError("File is empty")
         physical = text.split("\n")
@@ -4599,7 +4616,8 @@ class Store:
         types = [t or (infer_type([r[i] for r in sample]) if sample else "text")
                  for i, t in enumerate(plan["types"])]
         return {"delimiter": None, "columns": sanitize_columns(plan["columns"]),
-                "sample_rows": sample, "inferred_types": types, "log_format": log_format}
+                "sample_rows": sample, "inferred_types": types, "log_format": log_format,
+                "complete": complete}
 
     def _finish_source_columns(self, source_id: int, colmeta: list[dict], decoded: dict,
                                name: str) -> None:
@@ -5740,7 +5758,8 @@ class Store:
             elif job["kind"] == "iis":
                 results = [self.ingest_iis(
                     job["path"], name=job["name"], build_fts=opts.get("build_fts", True),
-                    progress=progress, cancel=cancel,
+                    progress=progress, cancel=cancel, log_format=opts.get("log_format"),
+                    column_types=opts.get("column_types"),
                 )]
             elif job["kind"] == "json":
                 results = [self.ingest_json(
@@ -14725,7 +14744,8 @@ class Store:
             elif kind == "xlsx":
                 rec = self.ingest_xlsx_sheet(path, how["sheet"], name=name)
             elif kind == "iis":
-                rec = self.ingest_iis(path, name=name, log_format=how.get("format"))
+                rec = self.ingest_iis(path, name=name, log_format=how.get("format"),
+                                      column_types=how.get("column_types"))
             else:
                 rec = self.ingest_plaso(path, name=name)
         except Exception as e:

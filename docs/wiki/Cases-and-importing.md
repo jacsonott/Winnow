@@ -200,7 +200,7 @@ machine):
 | `sqlite` | **Pick tables…** | Must be done before **Import all queued** will run. |
 | `xlsx` | **Pick sheets…** | The same, for sheets. |
 | `plaso`, `archive` | greyed out | Nothing to configure. |
-| `IIS log · W3C` (or `· NCSA`, `· native`) | greyed out, **As text** | Nothing to configure; **As text** reads a file that only looks like an IIS log one line per row. |
+| `IIS log · W3C` (or `· NCSA`, `· native`) | **Preview & configure**, **As text** | Format and column types. **As text** reads a file that only looks like an IIS log one line per row. |
 | a plugin format's name | **Options**, **As text** | **As text** (uploads only) skips the plugin and reads the file one line per row. |
 
 Without **Preview & configure** a file imports with the detected settings;
@@ -421,6 +421,14 @@ become `Timestamp (local)` and the format's fifteen fields, `Client IP address`
 to `Parameters`; native format logs the server's local time with no offset,
 so that timestamp is not converted. In both, a line that isn't in the format
 is kept whole in an `Unparsed line` column.
+
+**Preview & configure** shows the first rows as they will import, from the
+start of the file; for W3C it says when a `#Fields:` line further in can still
+add columns. The first list picks the format: the one the name says is
+selected, and the other two are there for a log that was renamed or isn't what
+its name says. The delimited and **Lines** choices read the file as any other
+text file. Each column's type can be changed; a type set here sticks to that
+column by name, so a column a later header adds keeps its detected type.
 
 A server that loses power mid-write leaves a run of zero bytes in its log,
 and IIS carries on after them when it comes back. The text either side of the

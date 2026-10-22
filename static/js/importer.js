@@ -115,9 +115,11 @@ export function queueItem(transport, name, fmt = pluginFormatFor(name)) {
   const kind = importKindFor(name);
   return kind === 'json' ? { ...transport, name, kind, flatten_mode: 'none', flatten_depth: 1, configured: false }
     : kind === 'sqlite' || kind === 'xlsx' ? { ...transport, name, kind, tables: null, configured: false }
-    // A .plaso is one file → one timeline table with nothing to configure;
-    // so is an IIS log, whose columns its own #Fields: lines name.
-    : kind === 'plaso' || kind === 'iis' ? { ...transport, name, kind, configured: true }
+    // A .plaso is one file → one timeline table with nothing to configure.
+    : kind === 'plaso' ? { ...transport, name, kind, configured: true }
+    // An IIS log names its own columns; the preview can still pick another
+    // of the three formats (log_format, null = the name's) and set types.
+    : kind === 'iis' ? { ...transport, name, kind, log_format: null, column_types: null, configured: false }
     // An archive expands on import, then you pick files from its contents.
     : kind === 'archive' ? { ...transport, name, kind, configured: true }
     // Raw text (a log with an extension nothing else claims) is the delimited
@@ -212,7 +214,7 @@ export function openImportModal() {
         const kindLabel = item.kind === 'plugin'
           ? (pluginFormatById(item.format_id)?.label || item.format_id)
           : item.kind === 'text' ? 'text · one line per row'
-          : item.kind === 'iis' ? `IIS log · ${IIS_FORMAT_LABELS[iisLogFormat(item.name)] || 'W3C'}`
+          : item.kind === 'iis' ? `IIS log · ${IIS_FORMAT_LABELS[item.log_format || iisLogFormat(item.name)] || 'W3C'}`
           : item.kind;
         const unitNoun = item.kind === 'xlsx' ? 'sheet' : 'table';
         const stateLabel = item.kind === 'sqlite' || item.kind === 'xlsx'
@@ -233,10 +235,6 @@ export function openImportModal() {
         if (item.kind === 'plaso') {
           cfg.disabled = true;
           cfg.title = 'A Plaso storage file imports as one flat timeline table — nothing to configure';
-        }
-        if (item.kind === 'iis') {
-          cfg.disabled = true;
-          cfg.title = 'An IIS log imports as one table, its columns named by the log itself — nothing to configure';
         }
         if (item.kind === 'archive') {
           cfg.disabled = true;
@@ -277,7 +275,7 @@ export function openImportModal() {
             ? 'Import this file as raw text, one line per row, instead of as an IIS log'
             : 'Skip the plugin and import this file as raw text, one line per row';
           asText.onclick = () => {
-            Object.assign(item, { kind: 'text', format_id: null, options: null, delimiter: null, has_header: false, column_types: null, configured: false });
+            Object.assign(item, { kind: 'text', format_id: null, options: null, delimiter: null, has_header: false, column_types: null, log_format: null, configured: false });
             renderQueue();
           };
           row.append(cfg, asText, rm);
@@ -403,6 +401,7 @@ export function openImportModal() {
                   delimiter: item.delimiter || null,
                   has_header: item.has_header !== false,
                   column_types: item.column_types || null,
+                  log_format: item.log_format || null,
                   flatten_mode: item.flatten_mode || 'none',
                   flatten_depth: item.flatten_depth || 0,
                   tables: item.tables || null,
@@ -438,6 +437,7 @@ export function openImportModal() {
             fd.append('tables', JSON.stringify(item.tables));
           } else {
             if (item.delimiter) fd.append('delimiter', item.delimiter);
+            if (item.log_format) fd.append('log_format', item.log_format);
             fd.append('has_header', item.has_header ? 'true' : 'false');
             if (item.column_types) fd.append('column_types', JSON.stringify(item.column_types));
           }
