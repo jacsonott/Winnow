@@ -307,6 +307,21 @@ see [docs/notes/README.md](README.md) for the whole set.
     *can* see: `row_tags` is in the case file, so the pivot's tag chips
     compile straight into its query, from the grid's own `S.tagFilter`
     spelling (`_tag_clauses`).
+  - **One statement for every grouping level, or the pivot is a table
+    scan per level.** It used to run one `GROUP BY` per level, each a full
+    scan of the source, and on a wide table the scan is most of the cost:
+    one row field and one column field (four levels) took three to four
+    times what the same `GROUP BY` takes in the SQL pane. `_rollup_sql`
+    reads the source once into a `pivot_base` CTE grouped by every key any
+    level uses, and each level is a `UNION ALL` arm grouped from it. What
+    that leans on: SQLite materialises a CTE that is referenced more than
+    once only from 3.35 (an older build inlines it into every arm, which
+    is right but costs the old scan per level); each arm's `LIMIT
+    MAX_GROUPS + 1` sits inside its own subquery, since a `LIMIT` on a
+    compound applies to the whole of it; the base's partials are
+    `_agg_expr`'s own SQL, so a rolled-up cell is the same expression over
+    the same rows; and Distinct count can't be rolled up, so its column
+    joins the base's keys instead.
   - **On a merge, match tags per member, not with a row-value IN.**
     `(s.source_id, s.rid) IN (SELECT source_id, rid FROM row_tags …)` is
     correct over `_scope`'s union and fine when it keeps rows, but SQLite

@@ -55,11 +55,17 @@ Tags are the exception that isn't one: they live in the case file
 else, in the grid's own spelling — a tag id, `"!<id>"` for an exclusion,
 `"__any__"` and `"__none__"` — and select the rows the grid's ribbon would.
 
-**Subtotals are queried, not summed from the cells above them.** Add up the
-per-host distinct user counts and you'll double-count anyone who appears on
-two hosts. Each nesting level is aggregated from the source independently,
-so every aggregation is right rather than just the associative ones. It
-costs one `GROUP BY` per level; the level count is capped.
+**Subtotals are worked out, not summed from the cells above them.** Add up
+the per-host distinct user counts and you'll double-count anyone who appears
+on two hosts. Every nesting level is its own grouping set, and all of them
+come from one pass over the table: the rows are grouped once by every field
+in Rows and Columns, keeping counts, sums, minimums and maximums that do add
+up (an average as its sum and its count), and each level is grouped from
+that. Distinct count is the one that doesn't add up, so its field is kept in
+that first grouping and each level counts the distinct values under it. So
+every aggregation is right, not just the associative ones, and the table is
+read once per refresh rather than once per level; the level count is
+capped.
 
 **Count means Excel's COUNTA.** "Count of Bytes" is how many rows *have* a
 Bytes value, not how many rows exist — otherwise putting a specific field in
