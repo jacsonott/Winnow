@@ -337,7 +337,11 @@ see [docs/notes/README.md](README.md) for the whole set.
   whole list as one JSON parameter read through `json_each` — a merge
   compiles the WHERE once per member, so 3,000 pasted hashes on an
   11-member merge was 33,000 parameters — and still gets the column index
-  (`SEARCH … USING INDEX (x=?)` with a `LIST SUBQUERY`); and
+  (`SEARCH … USING INDEX (x=?)` with a `LIST SUBQUERY`), except a list
+  of one or two values, which keeps its `?`s: SQLite compares a list that
+  short directly instead of building a lookup table, and the json_each
+  form cost `views/filter.in_list` 30% (19.7ms → 25.5ms at 200k rows; no
+  difference from three values up); and
   `export_tagged_xlsx`, which put every tagged rid in one `IN (...)` and
   now pages them by keyset, reading cells through a `rid IN (SELECT …
   LIMIT n)` subquery and tags/notes by the page's rid range. Its sheets
