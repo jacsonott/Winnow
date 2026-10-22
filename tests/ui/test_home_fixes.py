@@ -71,16 +71,17 @@ def test_fresh_origin_adopts_the_machine_s_saved_look(own_page, server_post):
         server_post("/api/settings/app", {"appearance": restore})
 
 
-def test_double_clicking_a_case_card_opens_it_once(page, until):
-    """A double-click on a case card is two clicks, and each one used to
+def test_double_clicking_a_case_opens_it_once(page, until):
+    """A double-click on a case is two clicks, and each one used to
     POST /api/case/open: two opens racing on the server (which left a
     Store open behind the switch, and the case reading as "open in another
     Winnow") and two state resets interleaving here. The open is held in
     flight until the second click has landed, so the second click cannot
     miss the first by being slower than the server."""
     page.evaluate("() => { __winnow.showHome(); return __winnow.refreshCases(); }")
-    path = page.evaluate("() => fetch('/api/case/current').then((r) => r.json()).then((c) => c.path)")
-    card = page.locator("#home .home-case-row", has_text=path).locator(".home-case-main")
+    cid = page.evaluate("""() => Promise.all([fetch('/api/case/current'), fetch('/api/cases')].map((p) => p.then((r) => r.json())))
+      .then(([cur, cases]) => cases.find((c) => c.path === cur.path).id)""")
+    card = page.locator(f"#home .home-row[data-id='{cid}'] .home-name")
     card.wait_for()
     held = []
     page.route("**/api/case/open", lambda route: held.append(route))

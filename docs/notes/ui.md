@@ -1505,6 +1505,40 @@ see [docs/notes/README.md](README.md) for the whole set.
     imports; a full one has no line to spare.
   tests/ui/test_import_queue_ui.py, test_iis_queue.py,
   test_xlsx_picker_ui.py, test_text_import_ui.py.
+- **The home screen's case list is the Tables manager's frame too**
+  (`renderHome`, `homeSections`, `buildCasesPane` in home.js; `.home-*`
+  in style.css). Sections down the side: Recent (opened in the last 30
+  days, or never), All cases (grouped under each group's heading), one
+  per group by its newest open, and No group. It used to be one column
+  of cards, each with its full path, the counts and the opened time on
+  one line and Open/Edit/Remove/Delete on every row; the path took the
+  line and an ellipsis took what came after it. Decisions:
+  - **The row is the Tables manager's row.** Tables, Rows, Tagged with a
+    dim dash for none and the tagged count in the accent, then Opened as
+    people say it (`openedAgo`: counted in calendar days, so last night is
+    yesterday). The path is in the name's tooltip and Copy case file path.
+    Tagged is `tagged_row_count` from `/api/cases`: distinct rows in
+    `row_tags`, in the same read-only peek as the other counts.
+  - **One ⋯ per row** (`caseMenuItems`, also the row's right-click), and
+    the whole row still opens the case, behind `openCase`'s double-click
+    guard. A missing file's Open and Delete are disabled, not hidden.
+  - **The filter looks inside its section**, and says when a match is in
+    another one ("1 more match in All cases"): the old "Show N cases not
+    opened in over 30 days…" fold hid older cases from the search box too.
+  - **`S.homeSection`, `S.homeSearch` and `S.homeSort` outlive a repaint**,
+    since `refreshCases` rebuilds the whole screen after Remove from list,
+    Edit, or coming back from a case.
+  - **Quick look at files…** (`startQuickLook`: `POST
+    /api/case/quicklook/new`, open it, then the Import dialog) is the drop
+    gesture as a button; nothing on screen said the drop existed.
+  - **The CSS is scoped under `.home-box`/`.home-list`**: the home rules
+    sit before `.side-pane > *` and the `.tables-head` grid in the file,
+    and at equal specificity those won (the box collapsed to its content
+    and the heads took the Tables manager's columns).
+  - Under 640px the side list goes across the top as in the other
+    two-pane dialogs, and Tables, Tagged, notes and the group chip drop
+    out of the row.
+  tests/ui/test_home_screen.py, test_home_fixes.py.
 - **A header set's default layout seeds a table once, so it needs its
   own way onto the rest** (the table menu's Layout section with the
   default chosen; columns.js `applyDefaultLayout` is the same as a

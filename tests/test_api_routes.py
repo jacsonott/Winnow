@@ -1223,3 +1223,29 @@ def test_a_stale_delete_with_file_never_deletes_another_case(client, tmp_path):
     assert r.status_code == 409
     assert (tmp_path / "NewHost.db-winnow").exists()
     assert {c["id"] for c in client.get("/api/cases").json()} >= {a["id"], new["id"]}
+
+
+def test_the_cases_list_counts_tagged_rows_not_tag_assignments(client, tmp_path, write_csv):
+    """The home screen's Tagged column, read in the same read-only look
+    /api/cases already takes for tables and rows: a row with two tags is
+    one tagged row, as it is in the Tables manager."""
+    from winnow.store import Store
+
+    path = str(tmp_path / "tagged.db-winnow")
+    other = Store(path)
+    try:
+        sid = other.ingest_csv(write_csv([["A"], ["1"], ["2"], ["3"]]), name="t.csv")["id"]
+        first, second = (t["id"] for t in other.list_tags()[:2])
+        other.set_tags(sid, [1, 2], first, True)
+        other.set_tags(sid, [2], second, True)
+    finally:
+        other.close()
+    empty = str(tmp_path / "empty.db-winnow")
+    Store(empty).close()
+    for p, name in ((path, "Tagged"), (empty, "Empty")):
+        assert client.post("/api/cases", json={"path": p, "name": name}).status_code == 200
+
+    listed = {c["name"]: c for c in client.get("/api/cases").json()}
+    assert (listed["Tagged"]["source_count"], listed["Tagged"]["row_count"]) == (1, 3)
+    assert listed["Tagged"]["tagged_row_count"] == 2
+    assert listed["Empty"]["tagged_row_count"] == 0

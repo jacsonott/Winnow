@@ -2803,57 +2803,92 @@ textarea:focus { border-color: var(--accent); outline: none; }
 
 /* ------------------------------------------------------------------ home */
 
-.home-inner { max-width: 920px; margin: 0 auto; padding: 40px 20px 60px; }
-.home-head { display: flex; align-items: center; gap: 12px; margin-bottom: 28px; flex-wrap: wrap; }
+/* The home screen (renderHome, in home.js): the wordmark, then one card in
+   the Tables manager's frame — the case list's sections down a side list,
+   the chosen one on the right, the buttons along the foot. Unlike the
+   dialogs that frame lives in, the card is not a fixed height: it takes
+   the window's, down to a floor, and the list box inside it is the one
+   thing that scrolls. */
+.home-inner {
+  max-width: 1240px; height: 100%; margin: 0 auto; padding: 22px 28px 24px;
+  display: flex; flex-direction: column;
+}
+.home-head { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+.home-head .btn { font-size: 12px; }
 /* The home screen's wordmark is a canvas (see splash.drawWordmark), so it
    sizes itself; this just keeps it from being stretched by the flex row. */
 .home-brand { display: flex; align-items: center; flex: 0 0 auto; }
 .home-brand-mark { display: block; }
 .home-head-spacer { flex: 1; }
-.home-empty { color: var(--dim); font-size: 13px; padding: 30px 0; text-align: center; }
-.home-search-row { margin-bottom: 16px; }
-.home-search {
-  width: 100%; background: var(--panel); color: var(--text);
-  border: var(--border-w) solid var(--line-2); border-radius: var(--radius-sm);
-  padding: 8px 12px; font: inherit; font-size: 13px;
+.home-card {
+  flex: 1 1 0; min-height: 380px; display: flex; flex-direction: column;
+  background: var(--panel); border: var(--border-w) solid var(--line-2); border-radius: var(--radius-md);
+  padding: 14px 14px 12px;
 }
-.home-search:focus { border-color: var(--accent); outline: none; }
-/* minmax(0, 1fr): a bare `display:grid` with no grid-template-columns
-   gives the single implicit column an `auto` track, which sizes to the
-   widest row's max-content (here, a long unbroken path/stats line) rather
-   than the container's actual available width -- and since nothing clips
-   it, every row silently overflows past the search box/header above it by
-   however much that longest row needed. 1fr caps the column at the
-   container's real width; min-width:0 on .home-case-main already handles
-   truncating that long text via text-overflow:ellipsis once the column
-   stops handing it unlimited room to grow into. */
-.home-case-list { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; }
-.home-case-row {
-  display: flex; align-items: center; gap: 14px;
-  background: var(--panel); border: var(--border-w) solid var(--line); border-radius: var(--radius-md);
-  padding: 10px 12px;
-  transition: border-color var(--transition-fast) var(--ease), transform var(--transition-fast) var(--ease);
+.side-panes.home-panes { height: auto; flex: 1 1 0; min-height: 0; }
+.home-panes .side-rail { padding-right: 12px; }
+.side-rail-label.mono { font-family: var(--mono); font-size: 11.5px; }
+.home-pane { overflow: hidden; }
+.home-pane .tm-cols-top { display: flex; align-items: center; gap: 10px; }
+.home-pane .tm-cols-top .side-search { flex: 1 1 auto; min-width: 0; font-size: 12.5px; padding: 6px 9px; }
+.home-pane .tm-cols-top .tm-cols-count { white-space: nowrap; }
+.home-pane .home-box { flex: 1 1 0; min-height: 0; margin-top: 8px; }
+.home-box .side-preview-foot { height: 30px; }
+.home-foot { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; margin-top: 12px; flex-wrap: wrap; }
+.home-foot-spacer { flex: 1; }
+.home-empty { flex: 1 1 auto; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; text-align: center; }
+.home-empty-title { font-size: 15px; color: var(--text); }
+.home-empty .fb-help { max-width: 460px; }
+/* The Tables manager's list, for cases: one grid for the heads and every
+   row, so the counts line up down the list. The name cell takes what is
+   left and ellipsizes, its notes first.
+   Scoped under .home-box because .tables-head's own grid comes later in
+   this file and would otherwise win. */
+.home-box .home-list-head, .home-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) 56px 84px 60px 96px 26px;
+  align-items: center; column-gap: 12px;
 }
-.home-case-row:hover { border-color: var(--line-2); }
-.home-case-row.missing { opacity: .6; border-style: dashed; }
+.home-box .home-list-head .tables-name-h { grid-column: auto; }
+.home-box .home-list-head .home-opened-h { text-align: right; }
+.home-row { min-height: 30px; padding: 2px 6px 2px 8px; border-radius: var(--radius-sm); font-size: 13px; cursor: pointer; }
+.home-row:hover { background: var(--panel-2); }
+.home-row.missing { cursor: default; }
 /* Drag-and-drop import targets: a case row (import into it) or the home
    area outside any row (a fresh quick-look case). */
-.home-case-row.home-case-drop { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.home-row.home-case-drop { box-shadow: inset 0 0 0 1px var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
 .home.home-drop { box-shadow: inset 0 0 0 2px var(--accent); }
-.home-case-main { flex: 1; min-width: 0; cursor: pointer; }
-.home-case-name { font-size: 13px; color: var(--text); display: flex; align-items: center; gap: 8px; }
-.home-case-group-badge {
-  font-size: 10px; letter-spacing: .04em; text-transform: uppercase; color: var(--dim);
-  border: 1px solid var(--line-2); border-radius: var(--radius-sm); padding: 1px 6px;
-  font-family: var(--mono);
+.home-name-cell { min-width: 0; display: flex; align-items: baseline; gap: 10px; overflow: hidden; }
+.home-name {
+  flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  background: none; border: 0; padding: 0; text-align: left; cursor: pointer;
+  font: inherit; font-size: 13px; color: var(--text);
 }
-.home-case-meta {
-  font-family: var(--mono); font-size: 11px; color: var(--dim);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 2px;
+.home-row:not(.missing):hover .home-name { text-decoration: underline; }
+.home-row.missing .home-name { color: var(--dim); cursor: default; }
+.home-sub { flex: 0 1000 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; color: var(--dim); }
+.home-sub.warn { color: var(--danger); }
+.home-group-chip {
+  flex: 0 0 auto; font-family: var(--mono); font-size: 10.5px; color: var(--dim);
+  border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 0 6px; line-height: 16px;
 }
-.home-case-notes { font-size: 11px; color: var(--dim); margin-top: 3px; max-width: 640px; }
-.home-case-actions { display: flex; gap: 6px; flex: 0 0 auto; }
-.home-show-older { margin-top: 4px; width: 100%; }
+.home-row .tables-num.home-tables.some { color: color-mix(in srgb, var(--text) 62%, var(--dim)); }
+.home-opened { text-align: right; font-size: 11.5px; color: color-mix(in srgb, var(--text) 62%, var(--dim)); white-space: nowrap; }
+.home-opened.never { color: var(--dim); font-style: italic; }
+.home-list .home-group { padding-left: 4px; }
+.home-group.code .tables-group-name { font-family: var(--mono); font-size: 11.5px; letter-spacing: .02em; }
+.home-elsewhere { align-self: flex-start; margin: 6px 4px; }
+/* A narrow window: the sections go across the top, as the table menu's
+   do, and the list keeps the columns that say the most — rows and when. */
+@media (max-width: 640px) {
+  .home-inner { padding: 14px 12px 12px; }
+  .home-panes.side-panes { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  .home-panes .side-rail { border-right: 0; padding: 0 0 6px; border-bottom: 1px solid var(--line); }
+  .home-panes .side-rail-list { flex: 0 0 auto; flex-direction: row; flex-wrap: wrap; gap: 2px; overflow: visible; }
+  .home-panes .side-rail-group, .home-panes .side-rail-hint { display: none; }
+  .home-box .home-list-head, .home-row { grid-template-columns: minmax(0, 1fr) 76px 84px 26px; }
+  .home-box .home-list-head > :nth-child(2), .home-box .home-list-head > :nth-child(4),
+  .home-row > .home-tables, .home-row > .tables-tagged, .home-row .home-sub:not(.warn), .home-row .home-group-chip { display: none; }
+}
 
 /* The page shutdownWinnow leaves behind once the server is gone — plain
    static text, since nothing dynamic can be served anymore. */

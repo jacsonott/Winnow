@@ -603,13 +603,16 @@ export function sideRail({ entries, groups, selected, onPick, pinsKey, match = s
   return { rail, search, list, pins, paint, sync };
 }
 
-/* The two-pane frame of a dialog made of sections: the table menu and the
-   Tables manager. The sections go down a side list by group, each with a
-   line under its name saying what is set there now, and the chosen one is
-   built fresh into the pane on the right, in a frame of a fixed height
-   (.side-panes), so moving to a short section moves nothing.
+/* The two-pane frame of a dialog made of sections: the table menu, the
+   Tables manager and the home screen's case list. The sections go down a
+   side list by group, each with a line under its name saying what is set
+   there now, and the chosen one is built fresh into the pane on the right,
+   in a frame of a fixed height (.side-panes), so moving to a short section
+   moves nothing.
 
-   `sections` are {id, group, title, hint | asyncHint, build}. `build(pane,
+   `sections` are {id, group, title, hint | asyncHint, build, labelCls?};
+   labelCls is a class for the name (the home screen sets a case group's
+   in mono, as a group is usually an engagement code). `build(pane,
    refresh)` fills the pane, and may return {update}: what a caller's
    background poll runs to repaint the pane in place, so a half-typed
    filter or a scrolled list survives it (refresh() rebuilds instead). A
@@ -640,7 +643,7 @@ export function sectionPanes({ sections, label, cls = '', paneCls = '', changedE
     item.dataset.section = s.id;
     item.setAttribute('role', 'tab');
     const hint = el('span', 'side-rail-hint');
-    item.append(el('span', 'side-rail-label', s.title), hint);
+    item.append(el('span', 'side-rail-label' + (s.labelCls ? ' ' + s.labelCls : ''), s.title), hint);
     item.onclick = () => show(s.id);
     row.append(item);
     nav.append(row);
