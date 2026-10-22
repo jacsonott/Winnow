@@ -6,6 +6,7 @@ import { quickAddWidget } from './dashboard.js';
 import { tableOf, widgetFrom } from './dashwidgets.js';
 import { displayValue, ellipsize, filterByValue, openValuePickerForColumn } from './filters.js';
 import { rowAt } from './grid.js';
+import { showValueInHistogram } from './histogram.js';
 import { copyRowsAsText, copyUniqueValues, loadRowsForPositions, uniqueRowsTooMany, wholeViewPicked, writeClipboardText } from './grouping.js';
 import { keyLabel } from './keymap.js';
 import { showPluginTab } from './plugins.js';
@@ -265,6 +266,13 @@ export function rowMenuCellItems(ctx) {
       // on — the picker's own buttons decide that later.
       label: 'Filter by values…',
       onclick: () => openValuePickerForColumn(ctx.colName),
+    },
+    {
+      // Not a filter — nothing about the view changes — but about this
+      // value, so it sits with the verbs that are.
+      label: 'Show in histogram',
+      title: `Colours the rows where ${ctx.colName} is this value in the histogram strip, as if they were tagged`,
+      onclick: () => showValueInHistogram(ctx.colName, ctx.value),
     },
   ];
 }

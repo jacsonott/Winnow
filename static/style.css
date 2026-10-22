@@ -60,6 +60,22 @@ html { scrollbar-color: var(--line-2) transparent; }
 html[data-theme="dark"] { color-scheme: dark; }
 html[data-theme="light"] { color-scheme: light; }
 
+/* The categorical palette the histogram's Groups view colours groups in,
+   slot by slot in this order. Per theme rather than per skin: the order is
+   what keeps neighbouring segments apart for colour-blind readers (checked
+   adjacent pair by adjacent pair, both themes, against the panel colours
+   the skins draw the strip on), and a skin that re-hued one slot would
+   have to re-check the whole order. A ninth group is "Other", never a
+   ninth hue. */
+:root, html[data-theme="dark"] {
+  --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500;
+  --series-5: #d55181; --series-6: #008300; --series-7: #9085e9; --series-8: #e66767;
+}
+html[data-theme="light"] {
+  --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a; --series-4: #eda100;
+  --series-5: #e87ba4; --series-6: #008300; --series-7: #6250d6; --series-8: #e34948;
+}
+
 /* `clip`, not just `hidden`: a `hidden` box is still a scroll container.
    Once the window is narrower than the toolbar's min-content (~717px
    with a few tables open), opening a dialog scrolled <body> sideways to
@@ -811,6 +827,21 @@ section.page-with-panels { flex-direction: row; }
    filter each say so); this is the histogram's. */
 .th-legend-item .swatch { width: 8px; height: 8px; border-radius: 1px; flex: 0 0 auto; }
 .th-stack[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
+/* The three colour-by views (histogram.js histogramView): one pressed at a
+   time, joined into one control so they read as a choice between them. */
+.th-views { display: flex; align-items: center; flex: 0 0 auto; }
+.th-views .btn { border-radius: 0; margin-left: -1px; }
+.th-views .btn:first-child { border-radius: var(--radius-sm) 0 0 var(--radius-sm); margin-left: 0; }
+.th-views .btn:nth-last-child(2) { border-radius: 0 var(--radius-sm) var(--radius-sm) 0; }
+/* Pressed reads as the segmented control's (Appearance): an accent tint
+   behind the label in --text, not the global pressed fill, whose
+   --accent-fg on --accent-dim left the label unreadable on some skins. */
+.th-views .btn[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--text);
+  border-color: var(--accent); position: relative; z-index: 1;
+}
+.histogram-head .th-views .th-top { margin-left: 6px; }
+.th-legend-hint { font-size: 11px; color: var(--dim); font-style: italic; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .histogram-head .btn { font-size: 11px; padding: 1px 7px; }
 .th-canvas { display: block; width: 100%; cursor: crosshair; user-select: none; }
 .th-hint { padding: 0 10px 4px; font-size: 10px; }

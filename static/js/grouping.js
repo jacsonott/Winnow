@@ -4,6 +4,7 @@
 import { draggedCol, renderHead, visibleCols } from './columns.js';
 import { $, OVERSCAN, PAGE, ROW_H, api, el, post, setBusy, toast } from './core.js';
 import { displayValue, ellipsize, filterByValue } from './filters.js';
+import { histogramGroupColour } from './histogram.js';
 import { buildDataRow, ensurePage, headH, isJumping, moveCursor, noteViewportMove, render, renderTagToolbar, rowAt, rowPaintContext, rowsPaintY, schedulePrefetch, setCellRange, syncRowsTop, syncRowsWidth, syncSpacer, syncVbar, titleClippedCells, vScroll } from './grid.js';
 import { armOpCancel, opToken } from './jobs.js';
 import { openRowContextMenu } from './rowmenu.js';
@@ -196,9 +197,13 @@ export function renderGroupHeaderRow(g, gi) {
   // A tag level's swatch, so a grouped-by-tag list reads the same way the
   // tag ribbon and the row stripes do.
   const tag = isTagGroupCol(colName) ? S.tags.find((x) => x.id === g.value) : null;
-  if (tag) {
+  // And the histogram's colour for this group while its Groups view is on,
+  // so a segment of the bars and the heading it counts read as one.
+  const series = tag ? null : histogramGroupColour(g);
+  if (tag || series) {
     const sw = el('span', 'swatch');
-    sw.style.background = tag.color;
+    sw.style.background = tag ? tag.color : series;
+    if (series) sw.title = 'This group\'s colour in the histogram';
     label.append(sw);
   }
   label.append(el('span', 'group-header-value', groupValueLabel(colName, g.value)));
