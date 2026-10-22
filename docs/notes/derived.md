@@ -576,10 +576,27 @@ see [docs/notes/README.md](README.md) for the whole set.
   A re-derive keeps the old answer while it builds rather than clearing
   it up front, so the column does not flicker to text and back for the
   length of the pass. A case from before this has NULL everywhere and is
-  typed once at open (`_type_unlooked_derived_columns`); 'empty' is
-  stored rather than NULL so an empty column is not rescanned every
-  open. A merge's twin is a number only when no member's copy holds text
-  — an EMPTY member (a host whose log never has the field) says nothing,
+  typed once, after it opens (`_type_unlooked_derived_columns`, below);
+  'empty' is stored rather than NULL so an empty column is not rescanned
+  every open. A merge's twin is a number only when no member's copy holds
+  text — an EMPTY member (a host whose log never has the field) says nothing,
   or one quiet host would put the whole merge back to sorting as text.
   `derived_kind` is untouched: the menus that key on "extracted" still
   see one.
+- **That open-time typing runs on a thread, never inside `Store()`.**
+  It shipped inline at the end of `__init__`, under the writer lock, and
+  one number column is a full scan — so a case with a few million rows
+  in a handful of regex columns took seconds to minutes to open, on a
+  case switch under server.py's `_CASE_SWITCH` too. The home screen's
+  Open did nothing visible for that long, and every click after it was
+  dropped as a second open (home.js keeps one in flight). The worker
+  scans on a pool reader with a progress handler that interrupts it
+  once `_closing` is up, so close() (which joins it) is not held for a
+  scan's length; a column it doesn't reach stays NULL for the next
+  open. Its UPDATE is conditional on the column still being NULL and
+  'ready'/'partial' under the same op, so a pass that rewrote the
+  values meanwhile keeps its own answer rather than this one, read off
+  the old values. Until the answer lands the column reads as the op's
+  own type, which is what every derived column read before any of this
+  (tests/test_derived_types.py holds `Store()` and /api/case/open to
+  returning while it is held).

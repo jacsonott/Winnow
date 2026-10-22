@@ -2710,7 +2710,7 @@ class Store:
                 self.db.execute("ALTER TABLE merges ADD COLUMN source_column INTEGER NOT NULL DEFAULT 0")
             # ...and derived_columns.inferred_type. NULL on every column a
             # case already has, which _type_unlooked_derived_columns fills
-            # in below.
+            # in on a thread of its own once the case is open.
             if not any(r[1] == "inferred_type" for r in self.db.execute("PRAGMA table_info(derived_columns)")):
                 self.db.execute("ALTER TABLE derived_columns ADD COLUMN inferred_type TEXT")
             # The single-row `dashboard` becomes one named "Dashboard" entry
@@ -2769,6 +2769,9 @@ class Store:
         # after all. Never held while acquiring any other lock.
         self._threads_lock = threading.Lock()
         self._fts_janitor: threading.Thread | None = None
+        # The open-time typing pass over derived columns nothing has
+        # typed yet (_type_unlooked_derived_columns). Joined by close().
+        self._derived_typer: threading.Thread | None = None
         # Search-all job state. Its own lock, not self.lock: the worker
         # mutates the job record between per-source counts, and making that
         # wait on the connection lock would reintroduce exactly the
@@ -2902,21 +2905,68 @@ class Store:
         column is looked at again only when a pass rewrites its values.
         'building' and 'error' are left alone: one is mid-pass or was
         abandoned by a crash, the other's values were cleared. An op with
-        a type of its own is skipped by _infer_derived_type and stays
-        NULL, which costs a row in this SELECT and nothing else."""
+        a type of its own never needs looking at (_infer_derived_type), so
+        it isn't queued.
+
+        On a thread of its own, never here: a number column costs a full
+        scan of its values, and this runs at the end of __init__, which is
+        the case opening. Done inline, a case with a few million rows and
+        a handful of derived columns took seconds to minutes to open, all
+        of it under the writer lock and, on a case switch, server.py's
+        _CASE_SWITCH — the home screen's Open did nothing visible for that
+        long, and every click after it was dropped as a second open. Until
+        a column's answer lands it reads as the op's own type ('text'),
+        which is what every derived column read as before it was typed at
+        all."""
         with self.lock:
             rows = self.db.execute(
                 "SELECT id, source_id, name, op_id FROM derived_columns "
                 "WHERE inferred_type IS NULL AND status IN ('ready', 'partial')").fetchall()
-            for r in rows:
-                # A drv_ table a damaged case lost is that column's problem
-                # (it reads as text, as it did before), not the case's.
-                with contextlib.suppress(sqlite3.Error):
-                    t = self._infer_derived_type(dict(r), self.db)
-                    if t:
-                        with self.db:
-                            self.db.execute("UPDATE derived_columns SET inferred_type=? WHERE id=?",
-                                            (t, r["id"]))
+        todo = [dict(r) for r in rows
+                if (timeparse.OPERATIONS.get(r["op_id"]) or {}).get("value_type") == "text"]
+        if todo:
+            t = threading.Thread(target=self._type_derived_worker, args=(todo,),
+                                 name="winnow-derived-types", daemon=True)
+            self._derived_typer = t
+            t.start()
+
+    def _type_derived_worker(self, todo: list[dict]) -> None:
+        for d in todo:
+            if self._closing:
+                return
+            # A drv_ table a damaged case lost is that column's problem
+            # (it reads as text, as it did before), not the case's. So is a
+            # scan the case closing interrupts: the column stays NULL, and
+            # the next open looks again.
+            with contextlib.suppress(Exception):
+                with self._reader() as ro:
+                    ro.set_progress_handler(lambda: 1 if self._closing else 0, 100_000)
+                    try:
+                        inferred = self._infer_derived_type(d, ro)
+                    finally:
+                        ro.set_progress_handler(None, 0)
+                if not inferred:
+                    continue
+                with self.lock:
+                    if self._closing:
+                        return
+                    # Only if nothing has typed it since the list was read: a
+                    # pass that rewrote the values meanwhile (a re-derive, a
+                    # re-parse) wrote its own answer, read off the new values,
+                    # and this one was read off the old.
+                    with self.db:
+                        self.db.execute(
+                            "UPDATE derived_columns SET inferred_type=? WHERE id=? AND op_id=?"
+                            " AND inferred_type IS NULL AND status IN ('ready', 'partial')",
+                            (inferred, d["id"], d["op_id"]))
+            time.sleep(0.02)  # same anti-starvation yield build_fts uses
+
+    def wait_for_derived_types(self, timeout: float | None = None) -> None:
+        """Blocks until the open-time typing pass finishes (or `timeout`
+        elapses). Used by tests."""
+        t = self._derived_typer
+        if t:
+            t.join(timeout)
 
     def _drop_stale_fts_worker(self, source_ids: list[int]) -> None:
         for source_id in source_ids:
@@ -3595,6 +3645,13 @@ class Store:
             t = j.get("thread")
             if t and t is not threading.current_thread() and t.is_alive():
                 t.join(15)
+        # The open-time typing pass reads on a reader of its own and writes
+        # one UPDATE per column; `_closing` interrupts its scan at the next
+        # progress tick, and a column it hadn't reached stays NULL for the
+        # next open (_type_unlooked_derived_columns).
+        t = self._derived_typer
+        if t and t is not threading.current_thread() and t.is_alive():
+            t.join(15)
         # Same for view builds running in the background: a worker queued
         # on self.lock at this point would otherwise take it after the
         # close below and run its INSERT on a closed connection. `closing`

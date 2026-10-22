@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 
 import pytest
 
@@ -179,20 +180,127 @@ def test_a_cancelled_pass_is_typed_by_what_it_left(store, write_csv):
     assert (col["derived_status"], col["type"]) == ("partial", "number")
 
 
-def test_a_case_from_before_this_is_typed_when_it_opens(case_path, write_csv):
-    s = Store(case_path)
+def _older_case(path, write_csv):
+    """A closed case as an older Winnow left it: two regex columns, a number
+    and a host name, and no inferred_type column at all."""
+    s = Store(path)
     sid = _ingest(s, write_csv, LOG_ROWS)
     _derive(s, sid, "Bytes", "Line", "regex_extract", BYTES)
     _derive(s, sid, "Host", "Line", "regex_extract", {"pattern": r"GET (\S+)"})
     s.close()
-    # The case as an older Winnow left it: no inferred_type column at all.
-    with sqlite3.connect(case_path) as raw:
+    with sqlite3.connect(path) as raw:
         raw.execute("ALTER TABLE derived_columns DROP COLUMN inferred_type")
+    return sid
+
+
+def _held_typing(monkeypatch):
+    """Typing that doesn't finish until it is let go — a scan the size of a
+    real case's (seconds to minutes), as a Store() that waits for it never
+    coming back rather than coming back a little late."""
+    release = threading.Event()
+    real = Store._infer_derived_type
+
+    def held(self, d, conn=None):
+        release.wait(30)
+        return real(self, d, conn)
+
+    monkeypatch.setattr(Store, "_infer_derived_type", held)
+    return release
+
+
+def test_a_case_from_before_this_is_typed_once_it_opens(case_path, write_csv):
+    sid = _older_case(case_path, write_csv)
     s = Store(case_path)
     try:
+        s.wait_for_derived_types(10)
         assert _col(s, sid, "Bytes")["type"] == "number"
         assert _col(s, sid, "Host")["type"] == "text"
         assert _sorted(s, sid, "Bytes")[1:4] == ["-1.5", "9", "10"]
+    finally:
+        s.close()
+
+
+def test_opening_it_does_not_wait_for_the_typing(case_path, write_csv, monkeypatch):
+    # The regression: typing ran inside Store(), so a case with a few
+    # million rows in its derived columns took seconds to minutes to open —
+    # the home screen's Open did nothing visible for that long.
+    sid = _older_case(case_path, write_csv)
+    release = _held_typing(monkeypatch)
+    opened: list[Store] = []
+    t = threading.Thread(target=lambda: opened.append(Store(case_path)), daemon=True)
+    t.start()
+    t.join(10)
+    try:
+        assert opened, "opening the case waited for its derived columns to be typed"
+        s = opened[0]
+        # Until the answer lands the column reads as the op's own type, the
+        # way every derived column read before they were typed at all, and
+        # the table pages and sorts meanwhile.
+        assert _col(s, sid, "Bytes")["type"] == "text"
+        assert len(_sorted(s, sid, "Bytes")) == len(LOG_ROWS) - 1
+        release.set()
+        s.wait_for_derived_types(10)
+        assert _col(s, sid, "Bytes")["type"] == "number"
+    finally:
+        release.set()
+        t.join(10)
+        for s in opened:
+            s.close()
+
+
+def test_the_home_screens_open_does_not_wait_for_it(client, tmp_path, write_csv, monkeypatch):
+    # What Open on a home-screen case card posts. It runs Store() under the
+    # case-switch lock, so a wait there held every other open behind it too.
+    path = str(tmp_path / "older.db-winnow")
+    sid = _older_case(path, write_csv)
+    release = _held_typing(monkeypatch)
+    answers = []
+    t = threading.Thread(target=lambda: answers.append(
+        client.post("/api/case/open", json={"path": path})), daemon=True)
+    t.start()
+    t.join(10)
+    try:
+        assert answers, "/api/case/open waited for the case's derived columns to be typed"
+        assert answers[0].status_code == 200, answers[0].text
+        assert [x["id"] for x in answers[0].json()["sources"]] == [sid]
+    finally:
+        release.set()
+        t.join(10)
+
+
+def test_closing_the_case_stops_the_scan(case_path, write_csv, monkeypatch):
+    sid = _older_case(case_path, write_csv)
+    # Enough values that the scan runs well past a progress tick.
+    with sqlite3.connect(case_path) as raw:
+        raw.execute(
+            f"WITH RECURSIVE n(x) AS (SELECT 1000 UNION ALL SELECT x + 1 FROM n WHERE x < 300000) "
+            f"INSERT INTO drv_{sid}(rid, \"Bytes\") SELECT x, '5' FROM n")
+    raised = []
+    real = Store._infer_derived_type
+
+    def closing_meanwhile(self, d, conn=None):
+        self._closing = True   # the first thing close() does
+        try:
+            return real(self, d, conn)
+        except sqlite3.Error as e:
+            raised.append(e)
+            raise
+
+    monkeypatch.setattr(Store, "_infer_derived_type", closing_meanwhile)
+    s = Store(case_path)
+    s.wait_for_derived_types(10)
+    s.close()
+    # Interrupted rather than waited out: close() joins this thread, and a
+    # full scan of a big column is seconds.
+    assert raised and "interrupt" in str(raised[0])
+    with sqlite3.connect(case_path) as raw:
+        assert raw.execute("SELECT inferred_type FROM derived_columns").fetchall() == [(None,), (None,)]
+    # ...and left for the next open.
+    monkeypatch.undo()
+    s = Store(case_path)
+    try:
+        s.wait_for_derived_types(10)
+        assert _col(s, sid, "Bytes")["type"] == "number"
     finally:
         s.close()
 
