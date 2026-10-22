@@ -1183,6 +1183,29 @@ def test_downloads_take_any_filename_rather_than_500(client, store, write_csv):
     assert _disposition_name(r.headers["content-disposition"]) == "журнал_событий.tls.json"
 
 
+def test_tagged_xlsx_goes_out_in_megabyte_reads(client, store, write_csv):
+    """StreamingResponse iterates a file object by lines, and a zip has a
+    newline byte every few hundred bytes: a 217 MB workbook went out as
+    856,000 chunks and took 109 s to download. A workbook under 1 MB is now
+    one chunk, and still the whole workbook."""
+    import asyncio
+
+    import server
+    from openpyxl import load_workbook
+
+    sid = store.ingest_csv(write_csv([["x"]] + [[f"value {i}"] for i in range(2000)], "t.csv"),
+                           name="t.csv", build_fts=False)["id"]
+    store.set_tags(sid, list(range(1, 2001)), store.list_tags()[0]["id"], True)
+
+    async def body():
+        return [part async for part in server.api_export_tagged_xlsx().body_iterator]
+    parts = asyncio.run(body())
+    assert len(parts) == 1 and parts[0].count(b"\n") > 10
+    for raw in (parts[0], client.get("/api/export/tagged_xlsx").content):
+        rows = list(load_workbook(io.BytesIO(raw), read_only=True).worksheets[0].iter_rows(values_only=True))
+        assert len(rows) == 2001 and rows[-1][-1] == "value 1999"
+
+
 def test_a_download_name_cannot_split_the_header(client, store, write_csv):
     """CR/LF in a typed name would end the header line (uvicorn refuses
     the response outright); the name keeps its text, never its line break."""
