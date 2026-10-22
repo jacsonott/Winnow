@@ -489,8 +489,9 @@ function scrollGridLeft() {
   if (body) body.scrollLeft = 0;
 }
 
-/* Adds a column as the innermost (last) grouping level — the drop target
-   for dragging a header into the group strip. The column stays where it
+/* Adds a column as a grouping level: the innermost (last) one, unless `at`
+   says which — a header dropped into the group strip lands in the slot
+   its ghost showed (see the strip's drop zone below). The column stays where it
    is in S.order: visibleCols() leaves out whatever is grouped on, so it
    doesn't also render as a data column while grouped, and Ungroup has
    nothing to put back.
@@ -503,9 +504,9 @@ function scrollGridLeft() {
    resize, a sort) was saved without it, so it came back at the far end;
    a level taken off its pill went to the far end too; and a column
    moved while grouped jumped back on Ungroup. */
-export function addGroupLevel(column) {
+export function addGroupLevel(column, at = S.groupByCols.length) {
   if (S.groupByCols.includes(column)) return;
-  S.groupByCols.push(column);
+  S.groupByCols.splice(at, 0, column);
   renderHead();
   scrollGridLeft();
   regroupAll();
@@ -564,6 +565,8 @@ export async function toggleGrouping() {
 
 export let draggedPillIdx = null;
 
+/* A pill is only a drag SOURCE. Where it can be dropped is the strip's
+   business (wireGrouping), the same as for a header being dragged in. */
 export function wireGroupPillDrag(pill, idx) {
   pill.addEventListener('dragstart', (e) => {
     draggedPillIdx = idx;
@@ -571,24 +574,158 @@ export function wireGroupPillDrag(pill, idx) {
     e.dataTransfer.setData('text/plain', S.groupByCols[idx]);
     pill.classList.add('dragging');
   });
-  pill.addEventListener('dragend', () => {
-    draggedPillIdx = null;
-    document.querySelectorAll('.group-pill').forEach((p) => p.classList.remove('dragging'));
+  pill.addEventListener('dragend', endStripDrag);
+}
+
+/* ---------------------------------------------- the strip as a drop zone
+
+   Dropping into the strip used to count only on the exact element that
+   listened for it: a pill, for a reorder, and the strip's own background,
+   for a header. The strip is a 26px-tall box with pills filling most of
+   it, so a reorder released a few pixels under a pill, or on the › between
+   two, did nothing; and a header released ON a pill did nothing either,
+   worse than nothing, because the strip lit up as if it would take it
+   (the pill's drop handler stopped the event the strip needed). Nothing
+   showed where a drop would land until after it had.
+
+   Now one drop zone covers the whole strip and DROP_SLACK px round it,
+   kept inside the toolbar so it can't reach the grid header the drag
+   came from. Which slot a drop lands in is worked out from where the
+   pointer is against the pills as they are laid out at that moment, not
+   from which element is under it, and a dashed ghost pill stands in that
+   slot while the drag is over the zone, so what is on screen before the
+   release is what the release does. A dragged pill is taken out of the
+   strip while its ghost stands in for it, and comes back if the drag
+   leaves the zone.
+
+   Two things that look simplifiable and aren't. The listeners sit on the
+   document, not the strip, because the margin is outside the strip's box
+   and dragover only reaches an element the pointer is over. And the
+   slot is measured with the ghost already in place: putting the ghost in
+   pushes the pill beside it away from the pointer, so a pointer resting
+   on a pill's midpoint settles on one side rather than flicking the
+   ghost between two slots on every dragover. */
+const DROP_SLACK = 12;
+
+let dropSlot = null;   // the slot the ghost is showing; null while it isn't
+
+/* What a drag would add to or move within the strip, if it is one the
+   strip takes: a pill (`from` is its level) or a header not already
+   grouped on (`from` null). */
+function stripDrag() {
+  if (draggedPillIdx !== null && draggedPillIdx < S.groupByCols.length) {
+    return { from: draggedPillIdx, name: S.groupByCols[draggedPillIdx] };
+  }
+  if (draggedCol && !S.groupByCols.includes(draggedCol)) return { from: null, name: draggedCol };
+  return null;
+}
+
+function inDropZone(x, y) {
+  const strip = $('groupStrip');
+  if (!strip.offsetParent) return false;   // toolbar hidden: SQL, Timeline, a plugin page
+  const s = strip.getBoundingClientRect();
+  const bar = $('toolbar').getBoundingClientRect();
+  return x >= Math.max(bar.left, s.left - DROP_SLACK) && x <= Math.min(bar.right, s.right + DROP_SLACK)
+    && y >= Math.max(bar.top, s.top - DROP_SLACK) && y <= Math.min(bar.bottom, s.bottom + DROP_SLACK);
+}
+
+/* The levels' pills, in level order — the dragged one's included. */
+const levelPills = () => [...$('groupStrip').querySelectorAll('.group-pill[data-level]')];
+
+/* Which slot among the levels left once the dragged pill is out a drop
+   at (x, y) lands in. The pills wrap onto a second line in a narrow
+   strip, so the pointer is read against the line nearest it — which is
+   also what a pointer out in the margin, above or below every pill, is
+   measured against. */
+function dropSlotAt(x, y, drag) {
+  const boxes = levelPills().filter((p, i) => i !== drag.from).map((p) => p.getBoundingClientRect());
+  if (!boxes.length) return 0;
+  const off = (b) => (y < b.top ? b.top - y : y > b.bottom ? y - b.bottom : 0);
+  const line = Math.round(boxes.reduce((a, b) => (off(b) < off(a) ? b : a)).top);
+  return boxes.filter((b) => Math.round(b.top) < line
+    || (Math.round(b.top) === line && b.left + b.width / 2 < x)).length;
+}
+
+/* Lay the strip out as `slot` would leave it: the ghost there, the
+   dragged pill out, the › separators between whatever is showing. Done
+   with flex `order` rather than by moving nodes, because one of the pills
+   is the drag's source, and a source node taken out of the document
+   mid-drag is one dragend may never reach. slot null puts it all back
+   the way renderGroupStrip drew it. */
+function layoutStrip(slot, drag) {
+  const strip = $('groupStrip');
+  strip.querySelectorAll('.group-strip-arrow, .group-pill-ghost').forEach((n) => n.remove());
+  const pills = levelPills();
+  const lifted = drag && drag.from !== null ? pills[drag.from] : null;
+  const seq = pills.filter((p) => p !== lifted);
+  if (slot !== null) {
+    const ghost = el('div', 'group-pill group-pill-ghost');
+    // The ✕'s room too, unseen, so the ghost is the pill's own size.
+    ghost.append(el('span', null, groupColLabel(drag.name)), el('span', 'group-pill-rm'));
+    strip.append(ghost);
+    seq.splice(slot, 0, ghost);
+  } else if (lifted) {
+    seq.splice(drag.from, 0, lifted);
+  }
+  if (lifted) lifted.classList.toggle('lifted', slot !== null);
+  strip.classList.toggle('drag-over', slot !== null);
+  const hint = strip.querySelector('.group-strip-hint');
+  if (hint) hint.hidden = slot !== null;
+  let n = 1;
+  seq.forEach((p, i) => {
+    if (i) {
+      const arrow = el('span', 'group-strip-arrow', '›');
+      arrow.style.order = n++;
+      strip.append(arrow);
+    }
+    p.style.order = n++;
   });
-  pill.addEventListener('dragover', (e) => {
-    if (draggedPillIdx === null) return;
-    e.preventDefault();
-    e.dataTransfer.dropEffect = 'move';
-  });
-  pill.addEventListener('drop', (e) => {
-    e.preventDefault();
-    e.stopPropagation(); // don't also fall through to the strip's own "add new column" drop
-    if (draggedPillIdx === null || draggedPillIdx === idx) return;
-    const [moved] = S.groupByCols.splice(draggedPillIdx, 1);
-    S.groupByCols.splice(idx, 0, moved);
+  // Everything after the levels (hint, Sort, + Tag, Ungroup) stays after
+  // them; the label keeps order 0 and so stays first.
+  for (const c of strip.children) {
+    if (!seq.includes(c) && !c.classList.contains('group-strip-arrow') && !c.classList.contains('group-strip-label')) {
+      c.style.order = n;
+    }
+  }
+  dropSlot = slot;
+}
+
+function showDropSlot(slot, drag) {
+  if (slot === dropSlot && $('groupStrip').querySelector('.group-pill-ghost')) return;
+  layoutStrip(slot, drag);
+}
+
+function hideDropSlot() {
+  if (dropSlot === null) return;
+  layoutStrip(null, stripDrag());
+}
+
+/* Every way a strip drag ends — a drop anywhere, Esc, a release outside
+   the window — comes through here, from the pill's own dragend or the
+   document's. Both, because a pill that something redrew mid-drag
+   (renderHead redraws the strip) is no longer in the document, and a
+   dragend on it never bubbles up to the document's listener. A drop in
+   the strip has already cleared everything, so this is a no-op then. */
+function endStripDrag() {
+  const wasPill = draggedPillIdx !== null;
+  draggedPillIdx = null;
+  if (wasPill || dropSlot !== null) {
+    dropSlot = null;
     renderGroupStrip();
-    regroupAll();
-  });
+  }
+}
+
+function dropInStrip(drag, slot) {
+  draggedPillIdx = null;
+  dropSlot = null;
+  if (drag.from === null) {
+    addGroupLevel(drag.name, slot);   // renders the strip
+    return;
+  }
+  const moved = slot !== drag.from;
+  if (moved) S.groupByCols.splice(slot, 0, ...S.groupByCols.splice(drag.from, 1));
+  renderGroupStrip();
+  if (moved) regroupAll();
 }
 
 /* Both dimensions ('count' vs 'value' — the latter meaning alphabetical
@@ -637,6 +774,7 @@ export function renderGroupStrip() {
   const strip = $('groupStrip');
   strip.replaceChildren();
   strip.classList.toggle('has-groups', S.groupByCols.length > 0);
+  strip.classList.remove('drag-over');   // a drop preview's, and this draws none
   strip.append(el('span', 'group-strip-label', 'Group by'));
   if (!S.groupByCols.length) {
     strip.append(el('span', 'group-strip-hint', 'drag a column header here'));
@@ -645,6 +783,7 @@ export function renderGroupStrip() {
   }
   S.groupByCols.forEach((name, i) => {
     const pill = el('div', 'group-pill');
+    pill.dataset.level = i;
     pill.draggable = true;
     pill.title = 'Drag to reorder the grouping levels';
     pill.style.cursor = 'grab';
@@ -1210,20 +1349,34 @@ export function uniqueRowsTooMany(n) {
    fire during load, so the order these run in doesn't matter — the
    startup steps that DO depend on order live in main.js instead. */
 export function wireGrouping() {
-$('groupStrip').addEventListener('dragover', (e) => {
-  if (!draggedCol || S.groupByCols.includes(draggedCol)) return;
+/* The group strip's drop zone — see "the strip as a drop zone" above for
+   why on the document. Outside the zone a strip drag takes the ghost
+   down and leaves the event alone, so a header still reorders among the
+   other headers exactly as before. */
+document.addEventListener('dragover', (e) => {
+  const drag = stripDrag();
+  if (!drag) return;
+  if (!inDropZone(e.clientX, e.clientY)) { hideDropSlot(); return; }
   e.preventDefault();
   e.dataTransfer.dropEffect = 'move';
-  $('groupStrip').classList.add('drag-over');
+  showDropSlot(dropSlotAt(e.clientX, e.clientY, drag), drag);
 });
 
-$('groupStrip').addEventListener('dragleave', () => $('groupStrip').classList.remove('drag-over'));
-
-$('groupStrip').addEventListener('drop', (e) => {
+document.addEventListener('drop', (e) => {
+  const drag = stripDrag();
+  if (!drag || !inDropZone(e.clientX, e.clientY)) return;
   e.preventDefault();
-  $('groupStrip').classList.remove('drag-over');
-  if (draggedCol && !S.groupByCols.includes(draggedCol)) addGroupLevel(draggedCol);
+  // Where the ghost was, which is what the analyst let go on.
+  dropInStrip(drag, dropSlot ?? dropSlotAt(e.clientX, e.clientY, drag));
 });
+
+document.addEventListener('dragend', endStripDrag);
+
+// A dragend can still go missing (Firefox sends none to a source node
+// that left the document), and a stale draggedPillIdx would make the next
+// header drag look like a reorder. A new drag starting is the one sure
+// sign the last one is over; capture, so it runs before the source's own.
+document.addEventListener('dragstart', () => { draggedPillIdx = null; dropSlot = null; }, true);
 
 /* The rail's readout. A `title` rather than a floating element: it is the
    idiom every other hover hint here uses, it needs no z-order argument

@@ -1003,6 +1003,23 @@ section.page-with-panels { flex-direction: row; }
   padding: 2px 4px 2px 10px; font-size: 12px; color: var(--text); cursor: grab; white-space: nowrap;
 }
 .group-pill.dragging { opacity: .4; }
+/* Mid-drag (grouping.js, "the strip as a drop zone"): the pill being
+   moved leaves the strip, and the ghost stands where a release would put
+   it — a pill's box, so the strip takes the shape the drop will give it,
+   but dashed and in the accent so it can't be read as a level that's
+   already there. */
+.group-pill.lifted { display: none; }
+.group-pill-ghost {
+  border-style: dashed; border-color: var(--accent); background: var(--accent-dim);
+  color: var(--accent-fg); pointer-events: none;
+}
+.group-pill-ghost .group-pill-rm { visibility: hidden; }
+/* An empty strip is squeezed to 150px and clips (above), which would cut
+   the ghost off at the very moment it is the thing to read. While one is
+   showing, the strip asks for its content width and drops "+ Tag", which
+   nobody is reaching for mid-drag. */
+.toolbar > .group-strip.drag-over:not(.has-groups) { flex-basis: auto; }
+.group-strip.drag-over:not(.has-groups) .group-tag-btn { display: none; }
 .group-pill-rm {
   background: none; border: 0; color: var(--dim); cursor: pointer; font-size: 10px;
   border-radius: 50%; width: 16px; height: 16px; line-height: 16px; flex: 0 0 auto;
