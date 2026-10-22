@@ -407,15 +407,18 @@ const seriesColor = (cs, slot) => cs.getPropertyValue(`--series-${slot}`).trim()
 
 /* The color a top-level group heading wears in the grid while the Groups
    view is on screen — the same color as its segment of the bars — or
-   null. grouping.js's renderGroupHeaderRow asks. */
+   null. grouping.js's renderGroupHeaderRow asks, for each heading it
+   paints. As the palette token itself rather than the color it computes
+   to: a computed-style read in the middle of a paint that has just moved
+   the rows forces a style recalculation there, and the token follows a
+   theme switch on its own. */
 export function histogramGroupColor(g) {
   if (!shown || histogramView() !== 'groups' || !g || g.level !== 0) return null;
   const top = topGroups();
   if (!top) return null;
   const i = top.values.findIndex((v) => Object.is(v, g.value));
   if (i < 0) return null;
-  const slots = groupSlotsFor(top.column, top.values);
-  return seriesColor(getComputedStyle(document.documentElement), slots[i]);
+  return `var(--series-${groupSlotsFor(top.column, top.values)[i]})`;
 }
 
 /* The focused cell's column and value, or null when the focus is not on a

@@ -200,6 +200,25 @@ def test_the_sql_day_agrees_with_day_bucket():
     assert got == want
 
 
+def test_unixepoch_reads_a_normalized_timestamp_as_strftime_does():
+    """epoch_sql uses unixepoch() where SQLite has it (3.38+), strftime('%s')
+    cast where it does not. The two must agree on everything TS_NORMALIZE
+    can produce, 1601 and the seconds either side of 1970 included."""
+    import sqlite3
+
+    from winnow.store import _ts_normalize
+
+    if sqlite3.sqlite_version_info < (3, 38, 0):
+        pytest.skip("no unixepoch() in this SQLite; epoch_sql uses strftime")
+    values = [_ts_normalize(v) for v in NORMALIZE_CORPUS]
+    values += ["1601-01-01 00:00:00", "1969-12-31 23:59:59", "1970-01-01 00:00:00",
+               "1970-01-01 00:00:01", "9999-12-31 23:59:59", "2026-02-30 00:00:00", None]
+    db = sqlite3.connect(":memory:")
+    got = [db.execute("SELECT unixepoch(?), CAST(strftime('%s', ?) AS INTEGER)", (v, v)).fetchone() for v in values]
+    db.close()
+    assert [a for a, _ in got] == [b for _, b in got]
+
+
 def test_each_row_is_parsed_once(write_csv, tmp_path, monkeypatch):
     """The cost this removed. The span and the per-bucket counts were two
     passes over the view and the tag split a third, each calling

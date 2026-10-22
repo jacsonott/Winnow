@@ -161,29 +161,150 @@ def test_the_route_400s_what_it_cannot_split_by(client, store, src):
     assert r.status_code == 400
 
 
-@pytest.mark.parametrize("kw", [
+@pytest.fixture
+def passes(store, monkeypatch):
+    """The aggregate passes time_histogram runs, by shape: "span" (MIN/MAX
+    of the epoch), "bars" (grouped by bar width), "seconds" (grouped by
+    exact second) and "tagged" (the tagged rows' bars, from row_tags)."""
+    import contextlib
+
+    seen = []
+    real = store._reader
+
+    def shape(sql):
+        if "MIN(tag_id) AS tag FROM row_tags" in sql:
+            seen.append("tagged")
+        elif sql.startswith("SELECT MIN(e), MAX(e)"):
+            seen.append("span")
+        elif sql.startswith("SELECT e - (("):
+            seen.append("bars")
+        elif sql.startswith("SELECT e,"):
+            seen.append("seconds")
+
+    @contextlib.contextmanager
+    def traced():
+        with real() as ro:
+            ro.set_trace_callback(shape)
+            try:
+                yield ro
+            finally:
+                ro.set_trace_callback(None)
+
+    monkeypatch.setattr(store, "_reader", traced)
+    return seen
+
+
+KINDS = [
     {},
     {"stack": "tags"},
     {"stack": "value", "split_column": "User", "split_values": ["admin"]},
     {"stack": "groups", "split_column": "User", "split_values": ["carol", "", "bob"]},
     {"stack": "groups", "split_column": "When", "split_values": ["2026-03-14"]},
-])
-def test_a_re_ask_groups_by_bar_and_answers_the_same(store, src, monkeypatch, kw):
-    """The strip asks about one view many times — the plain chart as it
-    lands, then Tags, each Value, Groups, First N — and every ask after the
-    first groups by the bar width the first one found rather than by the
-    second. Same rows, same bars: the answer must not change with the
-    path. The width check runs once more on that path, which is how it is
-    told apart here."""
-    v = store.build_view(src, {"source_id": src})["view_id"]
-    sized = []
-    real = store._histogram_width
-    monkeypatch.setattr(store, "_histogram_width", lambda *a: sized.append(a) or real(*a))
+]
+
+
+def _per_second(store, monkeypatch, view_id, **kw):
+    """The answer the one-pass-by-second shape gives — the reference the
+    faster shapes are held to."""
+    with monkeypatch.context() as mp:
+        mp.setattr(store, "_histogram_parsed_in_sql", lambda *a: False)
+        store._histogram_widths.clear()
+        return store.time_histogram(view_id, "When", **kw)
+
+
+@pytest.mark.parametrize("kw", KINDS)
+@pytest.mark.parametrize("spec", [{}, {"filters": [{"column": "Host", "op": "equals", "value": "H1"}]}],
+                         ids=["whole-table", "filtered"])
+def test_sql_read_timestamps_skip_the_pass_by_second(store, src, passes, monkeypatch, kw, spec):
+    """A column SQLite reads itself (ISO text, here) needs no pass by
+    second, which sends Python every distinct second to fold. The width
+    comes first — from the column's raw MIN/MAX on a whole table, from a
+    MIN/MAX pass over a filtered view's rows — and then one pass groups by
+    bar. A re-ask about the same view goes straight to the bars: the strip
+    asks about one view many times (the plain chart as it lands, then Tags,
+    each Value, Groups, First N) and the width is the same each time. Every
+    path, the same bars."""
+    v = store.build_view(src, {"source_id": src, **spec})["view_id"]
     first = store.time_histogram(v, "When", **kw)
-    assert len(sized) == 1
-    again = store.time_histogram(v, "When", **kw)
-    assert len(sized) == 3, "the re-ask went the per-second way"
-    assert again == first
+    assert passes == (["bars"] if not spec else ["span", "bars"])
+    passes.clear()
+    assert store.time_histogram(v, "When", **kw) == first
+    assert passes == ["bars"]
+    passes.clear()
+    assert _per_second(store, monkeypatch, v, **kw) == first
+    assert passes == ["seconds"]
+
+
+def test_a_wrong_guess_costs_a_pass_not_the_chart(store, write_csv, passes, monkeypatch):
+    """The raw MIN/MAX is text order. A column mixing 'T' and ' ' after the
+    date sorts every T one after every spaced one on the same day, so here
+    it reads an hour where the rows span 23: the pass that tried that width
+    found the real span, and one more pass draws the right bars."""
+    rows = [["When"], ["2026-03-14 01:00:00"], ["2026-03-14T00:00:00"], ["2026-03-14 23:00:00"]]
+    sid = store.ingest_csv(write_csv(rows, "mixed.csv"), name="mixed", build_fts=False)["id"]
+    v = store.build_view(sid, {"source_id": sid})["view_id"]
+    got = store.time_histogram(v, "When")
+    assert passes == ["bars", "bars"]
+    assert got == _per_second(store, monkeypatch, v)
+    assert got["start"] == "2026-03-14 00:00:00" and got["end"] == "2026-03-14 23:00:00"
+
+
+def _tags_in_the_one_pass(store, monkeypatch, view_id):
+    """The tag split with every row's first tag looked up in the one pass,
+    as on a filtered view — the reference the tagged-rows-apart shape is
+    held to."""
+    with monkeypatch.context() as mp:
+        mp.setattr(store, "_histogram_tagged_count", lambda ro, members, cap: cap)
+        return store.time_histogram(view_id, "When", stack="tags")
+
+
+def test_few_tagged_rows_are_counted_by_themselves(store, src, write_csv, passes, monkeypatch):
+    """Tags over a whole table with a few rows tagged: the bars without
+    the split, then the tagged rows on their own, reached from row_tags,
+    and the untagged segment is what each bar has left. The lookup of
+    every row's first tag was a third of the pass. Row 2 carries both tags
+    and is counted once, under the first; on a merge only one member is
+    tagged."""
+    red = store.upsert_tag(None, "Red", "#ff0000", "1")
+    blue = store.upsert_tag(None, "Blue", "#0000ff", "2")
+    store.set_tags(src, [1, 2, 9], red["id"], True)
+    store.set_tags(src, [2, 20], blue["id"], True)
+    other = store.ingest_csv(write_csv(ROWS, "more.csv"), name="more", build_fts=False)["id"]
+    merge = store.create_merge("both", [src, other])["id"]
+    for sid in (src, merge):
+        v = store.build_view(sid, {"source_id": sid})["view_id"]
+        passes.clear()
+        got = store.time_histogram(v, "When", stack="tags")
+        assert passes == ["bars", "tagged"]
+        assert got == _tags_in_the_one_pass(store, monkeypatch, v)
+        per_tag = [sum(c[i] for _, c in got["stack"]["buckets"]) for i in range(3)]
+        assert per_tag == [got["total"] - 4, 3, 1]
+
+
+def test_a_mostly_tagged_table_looks_its_tags_up_in_the_one_pass(store, src, passes, monkeypatch):
+    """Past a third of the rows tagged, reaching each from row_tags costs
+    more than the lookup it saves, so the split stays in the one pass."""
+    red = store.upsert_tag(None, "Red", "#ff0000", "1")
+    store.set_tags(src, list(range(1, 10)), red["id"], True)   # 9 of 24
+    v = store.build_view(src, {"source_id": src})["view_id"]
+    got = store.time_histogram(v, "When", stack="tags")
+    assert passes == ["bars"]
+    assert sum(got["stack"]["buckets"][i][1][1] for i in range(len(got["stack"]["buckets"]))) == 9
+
+
+@pytest.mark.parametrize("kw", KINDS[:2])
+def test_python_read_timestamps_are_read_once(store, write_csv, passes, kw):
+    """A column TS_NORMALIZE (Python) has to read would be read twice by
+    the span-then-bars shape, which costs more than the fold it saves; it
+    keeps the one pass by second, and a re-ask goes by bar."""
+    rows = [["When", "User"]] + [[f"3/14/2026 {h}:{m:02d}:00 AM", "x"] for h in range(1, 12) for m in (0, 30)]
+    sid = store.ingest_csv(write_csv(rows, "us.csv"), name="us", build_fts=False)["id"]
+    v = store.build_view(sid, {"source_id": sid})["view_id"]
+    first = store.time_histogram(v, "When", **kw)
+    assert passes == ["seconds"] and first["total"] == 22
+    passes.clear()
+    assert store.time_histogram(v, "When", **kw) == first
+    assert passes == ["bars"]
 
 
 def test_a_width_that_no_longer_fits_falls_back(store, src):

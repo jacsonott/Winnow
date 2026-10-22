@@ -540,7 +540,15 @@ see [docs/notes/README.md](README.md) for the whole set.
   bars taller than the rows they describe, for a per-tag total the ribbon
   already carries exactly. The lookup is a correlated `MIN` over
   row_tags' primary key, skipped entirely for a member with no tags at
-  all — the same short-circuit `tag_counts_in_view` makes.
+  all — the same short-circuit `tag_counts_in_view` makes. On a whole
+  table with at most a third of its rows tagged it is not made per row at
+  all: the bars come without the split, the tagged rows are reached from
+  row_tags (`MIN(tag_id) … GROUP BY rid`, then the row by rid) and
+  bucketed on their own, and untagged is what each bar has left. That
+  lookup was a third of the Tags pass (1.0 s against 0.7 s on 500k rows,
+  60k tagged); past a third tagged, reaching each from row_tags costs
+  more than it saves. Never for a derived column, which can change
+  between the two passes while it fills in.
 - **The histogram's value split names its values; it does not group
   them.** `stack=value` (the strip's Value view: one value, chosen from a
   cell's right-click menu or followed from the selected cell) and
@@ -566,18 +574,26 @@ see [docs/notes/README.md](README.md) for the whole set.
   `day_bucket_sql` — DAY_BUCKET with the full-ISO shape done by SQLite,
   the same shortcut as `ts_normalize_sql`, held to the same answer by
   tests/test_histogram.py. tests/test_histogram_value_split.py.
-- **A re-ask about the same view groups by bar, not by second.** The
-  single pass groups by exact second because the bar width depends on
-  the span, which nothing knows before the pass — but that means sorting
-  and walking hundreds of thousands of distinct seconds, most of the
-  cost. The strip asks about one view many times (the plain chart as it
-  lands, then Tags, each Value, Groups, First N), so `_histogram_widths`
-  remembers the width per `(view, column, max_buckets)` and a later ask
-  groups by `e - ((e % w) + w) % w` (floored, like the fold — `%` keeps
-  a pre-1970 epoch's sign), with MIN/MAX alongside for the span. It is a
-  hint: the width the span calls for is checked against it, and any
-  disagreement runs the per-second pass instead, so nothing invalidates
-  it. Groups on 500k rows: 1.8 s first, 0.95 s after.
+- **The histogram finds its bar width first, then makes one pass by
+  bar.** Grouping sorts every row, so a pass costs about the same
+  whatever it groups by, and the number of passes is what matters. The
+  width depends on the span, so it comes first, as cheaply as it can be
+  had: the width this view was last drawn at (`_histogram_widths`, per
+  `(view, column, max_buckets)` — the strip asks about one view many
+  times: the plain chart as it lands, then Tags, each Value, Groups,
+  First N), or on a whole table one from the column's raw MIN/MAX
+  (`_histogram_guess_width`: a scan of one column, no parsing). One
+  pass then groups by `e - ((e % w) + w) % w` (floored, like the fold —
+  `%` keeps a pre-1970 epoch's sign) with MIN/MAX of `e` alongside, and
+  if the span it found calls for another width, one more pass draws the
+  right bars — so a width is only ever a hint, and nothing has to
+  invalidate it. The raw MIN/MAX is text order, which a column mixing
+  `T` and a space after the date can mislead; that costs the second
+  pass, never the chart. A filtered view with no width to try takes a
+  MIN/MAX pass first. A column whose first rows are not ISO text
+  (`_histogram_parsed_in_sql`) would pay `TS_NORMALIZE` in every pass,
+  so it takes the one pass by exact second below instead. Plain on 500k
+  rows: 1.15 s to 0.6 s.
 - **Histogram buckets are floored, and 1601 is a real minimum.** A bucket
   is `[b, b + bucket_seconds)` — the strip finds a row's bar that way.
   The fold into buckets is Python's `//`, which floors; it was SQLite's
@@ -586,22 +602,28 @@ see [docs/notes/README.md](README.md) for the whole set.
   `datetime(…, 'unixepoch')` rather than `time.gmtime`, which raises
   OSError on Windows for any negative epoch — FILETIME zero is exactly
   that. `tests/test_histogram.py`.
-- **The histogram parses each row once, and SQLite will not do that by
-  itself.** `time_histogram` is one query grouped by the exact second
-  (and by tag, when split), with the bucket width picked from the first
-  and last second it returns and the fold done in Python over distinct
-  seconds — not the span pass, count pass and tag pass it used to be. Two
-  things it depends on, both counted in `test_each_row_is_parsed_once`:
+- **The histogram parses each row once a pass, and SQLite will not do
+  that by itself.** For a column parsed in Python, `time_histogram` is
+  one query grouped by the exact second (and by split, when there is
+  one), with the bucket width picked from the first and last second it
+  returns and the fold done in Python over distinct seconds — not the
+  span pass, count pass and tag pass it used to be. Two things it
+  depends on, both counted in `test_each_row_is_parsed_once`:
   the union subquery ends in `LIMIT -1`, without which SQLite flattens a
   one-member subquery (or pushes `e IS NOT NULL` into each branch of a
   merge's union) and copies the epoch expression to every place `e` is
   named, two or three `TS_NORMALIZE` calls a row; and `ts_normalize_sql`
   does the full-ISO shape in SQLite rather than Python, keeping
   `TS_NORMALIZE` for everything else, held to the same answer by a
-  corpus and a fuzz test. The old three passes called `TS_NORMALIZE` six
-  times a row; on a 500k-row view that was 5–6 s against 0.9 s now (1.7 s
-  with the tag split). The same `LIMIT -1` applies to any aggregate here
-  that names a Python-function column more than once.
+  corpus and a fuzz test (`raw_epoch_sql` goes one step further on that
+  shape: SQLite reads `YYYY-MM-DDTHH:MM:SS` as it reads the spaced form,
+  so the first 19 characters go to `unixepoch` as they are). The old
+  three passes called `TS_NORMALIZE` six times a row; on a 500k-row view
+  that was 5–6 s. The same `LIMIT -1` applies to any aggregate here that
+  names a Python-function column more than once. The timeframe filter's
+  WHERE (`_compile_where`, what a drag across the strip builds) uses
+  `ts_normalize_sql` for the same reason: 0.64 s to 0.36 s to build a
+  timeframe'd view of 500k rows.
 
 - **`tag_counts_in_view`** is what the tag ribbon shows once a filter or
   search is on: the same shape `tag_counts` returns, counted over one view.

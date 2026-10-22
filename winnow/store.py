@@ -13,6 +13,7 @@ Design notes
 
 from __future__ import annotations
 
+import calendar
 import codecs
 import contextlib
 import csv
@@ -771,6 +772,28 @@ def _ts_normalize(raw: Any) -> str | None:
 # The value _TS_ISO_RE reads with every part present, as a GLOB: four
 # digits, two, two, a space or a T, then HH:MM:SS, and anything after.
 _TS_ISO_GLOB = "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9][ T][0-9][0-9]:[0-9][0-9]:[0-9][0-9]*"
+
+
+# unixepoch() is SQLite 3.38's; on older builds the same number comes from
+# strftime('%s') as text, cast. A third cheaper a row where it exists
+# (`ts` is TEXT 'YYYY-MM-DD HH:MM:SS…' — whole seconds out of
+# TS_NORMALIZE, which both read alike; tests/test_histogram.py).
+_HAS_UNIXEPOCH = sqlite3.sqlite_version_info >= (3, 38, 0)
+
+
+def epoch_sql(ts: str) -> str:
+    """Epoch seconds of a normalized timestamp, as SQL."""
+    return f"unixepoch({ts})" if _HAS_UNIXEPOCH else f"CAST(strftime('%s', {ts}) AS INTEGER)"
+
+
+def raw_epoch_sql(expr: str) -> str:
+    """epoch_sql(ts_normalize_sql(expr)), a step shorter: on the fast path
+    the first 19 characters go to SQLite as they are, since it reads
+    'YYYY-MM-DDTHH:MM:SS' exactly as it reads the same with a space, and
+    building the spaced copy was a fifth of a histogram pass. `expr`
+    appears several times; pass a column reference."""
+    return (f"CASE WHEN typeof({expr}) = 'text' AND {expr} GLOB '{_TS_ISO_GLOB}' "
+            f"THEN {epoch_sql(f'substr({expr}, 1, 19)')} ELSE {epoch_sql(f'TS_NORMALIZE({expr})')} END")
 
 
 def day_bucket_sql(expr: str) -> str:
@@ -9731,32 +9754,30 @@ class Store:
         normaliser can't parse have no epoch and fall out of the histogram
         rather than piling into bucket zero.
 
-        **Each row's epoch is worked out once.** This used to be two passes
-        — the span first, then a count per bucket at the width the span
-        called for — and a third for the tag split, and SQLite copied the
-        epoch expression into each place a pass named it: six calls of
-        TS_NORMALIZE (a Python function) a row, 5–6 s on a 500k-row view,
-        for a strip that refreshes on every filter change. The one pass
-        groups by the exact second instead (and by tag, when split), and
-        the bucket width is picked from the first and last second it
-        returns, so folding into buckets is a walk over distinct seconds,
-        not rows. ts_normalize_sql takes the common ISO shape out of Python
-        altogether. Together: ~1 s on the same view, the same answer
-        (tests/test_histogram.py).
+        **Each row's epoch is worked out once a pass, and in SQL.** Every
+        SQLite statement here groups by something, and grouping sorts every
+        row, so what a pass costs is mostly that sort; what decides how many
+        passes there are is the bar width, which depends on the span. The
+        width comes first, as cheaply as it can be had: the width this view
+        was last drawn at (_histogram_widths — the strip asks about one view
+        many times: the plain chart as it lands, then Tags, each Value,
+        Groups, First N), or, on a whole table, one from the column's raw
+        MIN/MAX (_histogram_guess_width). Then ONE pass groups by bar with
+        MIN/MAX of the epoch alongside, and if the span it found calls for a
+        different width — a remembered width after a derived column filled
+        in, a guess the text order misled — one more pass draws the right
+        bars. A filtered view with no width to try takes a MIN/MAX pass
+        first. raw_epoch_sql reads the common ISO shape without TS_NORMALIZE
+        (a Python call per row); a column whose first rows do not have that
+        shape (_histogram_parsed_in_sql) would pay that call in every pass,
+        so it takes one pass by exact second instead and the bars are folded
+        here, in Python. On a 500k-row view: about 0.6 s against 1.15 s
+        when every chart was the pass by second, the same answer
+        (tests/test_histogram_value_split.py's pass-shape tests).
 
-        **A re-ask groups by bucket.** Grouping by second is what lets one
-        pass find the width, but most of what it costs is the sort over
-        hundreds of thousands of distinct seconds and the walk over them
-        afterwards. The strip asks about one view many times — the plain
-        chart as it lands, then Tags, Value (each cell picked), Groups and
-        First N over the same rows — and the width is the same every time,
-        so the first answer's width is remembered (_histogram_widths) and
-        later asks group by bucket instead, with MIN/MAX riding along for
-        the span. The span decides the width, so the width the remembered
-        one would have been is checked against the span that pass found;
-        on any disagreement — a derived column still filling in, a
-        different max_buckets — the per-second pass runs as before. Half
-        the time on a 500k-row view, the same answer.
+        The Tags view on a whole table with few rows tagged counts the
+        tagged rows apart (see the comment at tags_apart): the first-tag
+        lookup per row was a third of its pass.
 
         `stack` splits each bar. "tags" by the first tag a row carries
         (_histogram_tag_exprs). "value" and "groups" by which of
@@ -9808,13 +9829,20 @@ class Store:
             # outside; anything else is a column read, cheap to name N times.
             return day_bucket_sql(ref) if split_day else slot_of(ref)
 
-        def branch(m: dict, select: str) -> str:
+        def branch(m: dict, select: str, tagged: bool = False) -> str:
             derived_alias = None if direct else "d"
             rsrc = self._ref_src_for(src, m)
             ref = self._col_ref(rsrc, column, "s", derived_alias)
-            ts = ref if is_derived else ts_normalize_sql(ref)
-            epoch = f"CAST(strftime('%s', {ts}) AS INTEGER)"
-            if direct:
+            epoch = epoch_sql(ref) if is_derived else raw_epoch_sql(ref)
+            if direct and tagged:
+                # Each tagged row once, as `t.tag` under its first tag (the
+                # lowest id, as in _histogram_tag_exprs), then the row by
+                # rid. CROSS JOIN keeps row_tags outside; `trid` keeps a
+                # USING(rid) sidecar join in _member_from unambiguous.
+                scope = (f"FROM (SELECT rid AS trid, MIN(tag_id) AS tag FROM row_tags "
+                         f"WHERE source_id = {int(m['source_id'])} GROUP BY rid) t "
+                         f"CROSS JOIN {self._member_from(src, m, 's')} WHERE s.rid = t.trid")
+            elif direct:
                 scope = f"FROM {self._member_from(src, m, 's')}"
             else:
                 scope = (f"FROM v.{q(view_id)} vv "
@@ -9830,17 +9858,30 @@ class Store:
         with self._histogram_widths_lock:
             hint = self._histogram_widths.get(width_key)
         with self._reader() as ro, self._dropped_view_is_expired(), self._interruptible(op_token, ro):
+            # Tags over a whole table where few of its rows carry one: the
+            # bars without the split, then the tagged rows by themselves,
+            # reached from row_tags, and untagged is what each bar has left.
+            # Looking up every row's first tag was a third of the pass, and
+            # a table holds far fewer findings than rows. Past a third of
+            # the rows tagged, the lookup in the one pass is cheaper again.
+            # Not for a derived column: one still filling in can change
+            # between the two passes, and the tagged rows' bars must be
+            # bars the first pass found.
+            tagged_n = (self._histogram_tagged_count(ro, members, src["row_count"] // 3 + 1)
+                        if stack == "tags" and direct and not is_derived else None)
+            tags_apart = tagged_n is not None and tagged_n <= src["row_count"] // 3
+            split_in_pass = stacked and not tags_apart
             if by_values:
                 tag_of = {m["source_id"]: split_expr(m) for m in members}
                 # The day's slot is worked out outside the union, so its
                 # values are bound once rather than once per member.
                 params = list(split_values) if split_day else [v for _ in members for v in split_values]
             else:
-                tag_of = self._histogram_tag_exprs(ro, members) if stacked else {}
+                tag_of = self._histogram_tag_exprs(ro, members) if split_in_pass else {}
                 params = []
             union = " UNION ALL ".join(
                 branch(m, "EPOCH AS e" + (f", {tag_of[m['source_id']]} AS {'sv' if split_day else 'tag'}"
-                                          if stacked else ""))
+                                          if split_in_pass else ""))
                 for m in members)
             tag = slot_of("sv") if by_values and split_day else "tag"
             # LIMIT -1 limits nothing; it is what keeps EPOCH to one call
@@ -9851,42 +9892,70 @@ class Store:
             # TS_NORMALIZE calls a row, counted. Neither is allowed past a
             # LIMIT, since moving a WHERE across one changes what it means.
             rows_from = f"FROM ({union} LIMIT -1) WHERE e IS NOT NULL"
-            split = f", {tag}" if stacked else ""
-            keys = "1, 2" if stacked else "1"
+            split = f", {tag}" if split_in_pass else ""
+            keys = "1, 2" if split_in_pass else "1"
 
             def take(rows, n_at: int) -> None:
                 for row in rows:
                     secs.append(row[0])
                     counts.append(row[n_at])
-                    if stacked:
+                    if split_in_pass:
                         tags.append(row[1] or 0)
 
-            rows = None
-            if hint:
+            def by_bar(width: int, span: bool = False, split: str = split, keys: str = keys,
+                       rows_from: str = rows_from) -> list:
                 # Floored like the fold below, not truncated: SQLite's %
                 # keeps the sign of a pre-1970 epoch.
-                rows = ro.execute(f"SELECT e - ((e % {hint}) + {hint}) % {hint}{split}, COUNT(*), MIN(e), MAX(e) "
-                                  f"{rows_from} GROUP BY {keys} ORDER BY {keys}", params).fetchall()
+                return ro.execute(f"SELECT e - ((e % {width}) + {width}) % {width}{split}, COUNT(*)"
+                                  f"{', MIN(e), MAX(e)' if span else ''} {rows_from} "
+                                  f"GROUP BY {keys} ORDER BY {keys}", params).fetchall()
+
+            in_sql = is_derived or self._histogram_parsed_in_sql(ro, src, members, column)
+            # A width to try: this view's last one, or for a whole table
+            # read in SQL, one from the column's raw MIN/MAX — a scan of
+            # one column with nothing parsed, a fifteenth of a pass.
+            width = hint or (self._histogram_guess_width(ro, src, members, column, max_buckets)
+                             if in_sql and direct else None)
+            if width:
+                # One pass by bar, with the true span alongside to check
+                # the width against: right, it is the answer; wrong, the
+                # span it found is what the second pass needs.
+                rows = by_bar(width, span=True)
                 if rows:
                     lo, hi = min(r[-2] for r in rows), max(r[-1] for r in rows)
-                    if self._histogram_width(hi - lo, max_buckets) != hint:
-                        rows = None
-            if rows is None:
+                    right = self._histogram_width(hi - lo, max_buckets)
+                    if right == width:
+                        take(rows, -3)
+                    else:
+                        take(by_bar(right), -1)
+            elif in_sql:
+                # The span first, then the bars: two scans of SQL arithmetic
+                # and a few hundred rows back, where one pass by second
+                # sends Python every distinct second to fold.
+                spans = " UNION ALL ".join(branch(m, "EPOCH AS e") for m in members)
+                lo, hi = ro.execute(f"SELECT MIN(e), MAX(e) FROM ({spans} LIMIT -1)").fetchone()
+                if lo is not None:
+                    take(by_bar(self._histogram_width(hi - lo, max_buckets)), -1)
+            else:
+                # Parsed in Python, a row is parsed once: one pass by second.
                 take(ro.execute(f"SELECT e{split}, COUNT(*) {rows_from} GROUP BY {keys} ORDER BY {keys}", params), -1)
                 if secs:
                     lo, hi = secs[0], secs[-1]
-            else:
-                take(rows, -3)
             if not secs:
                 return {"column": column, "bucket_seconds": 0, "start": None, "end": None,
                         "total": 0, "buckets": []}
+            bucket = self._histogram_width(hi - lo, max_buckets)
+            apart = []
+            if tags_apart and tagged_n:
+                tagged = " UNION ALL ".join(branch(m, "EPOCH AS e, t.tag AS tag", tagged=True) for m in members)
+                apart = by_bar(bucket, split=", tag", keys="1, 2",
+                               rows_from=f"FROM ({tagged} LIMIT -1) WHERE e IS NOT NULL")
             # The labels come from SQLite too, not time.gmtime: on Windows
             # that raises OSError for anything before 1970 (a 500 for a
             # column holding FILETIME zero), and SQLite formats every year
             # its own strftime('%s') could have produced.
             lo_text, hi_text = ro.execute(
                 "SELECT datetime(?, 'unixepoch'), datetime(?, 'unixepoch')", (lo, hi)).fetchone()
-        bucket = self._histogram_width(hi - lo, max_buckets)
         with self._histogram_widths_lock:
             self._histogram_widths[width_key] = bucket
             while len(self._histogram_widths) > 64:
@@ -9909,14 +9978,80 @@ class Store:
                             "buckets": self._histogram_slot_buckets(
                                 secs, tags, counts, bucket, len(split_values) + 1)}
         elif stacked:
+            if tags_apart:
+                secs, tags, counts = self._histogram_untagged_rest(per_bucket, apart)
             out["stack"] = self._histogram_tag_stack(secs, tags, counts, bucket)
         return out
+
+    def _histogram_parsed_in_sql(self, ro: sqlite3.Connection, src: dict, members: list[dict],
+                                 column: str) -> bool:
+        """Whether SQLite reads this column's timestamps itself
+        (ts_normalize_sql's fast path) rather than handing them to
+        TS_NORMALIZE, judged on the first rows of each member. A guess
+        about cost only: a column that strays later is still parsed right,
+        just in Python, twice."""
+        for m in members:
+            ref = self._col_ref(self._ref_src_for(src, m), column, "s", None)
+            stray = ro.execute(
+                f"SELECT 1 FROM (SELECT {ref} AS v FROM {self._member_from(src, m, 's')} LIMIT 256) "
+                f"WHERE v IS NOT NULL AND NOT (typeof(v) = 'text' AND v GLOB '{_TS_ISO_GLOB}') LIMIT 1").fetchone()
+            if stray:
+                return False
+        return True
+
+    def _histogram_guess_width(self, ro: sqlite3.Connection, src: dict, members: list[dict],
+                               column: str, max_buckets: int) -> int | None:
+        """A bar width from the column's raw MIN/MAX — text order, which is
+        time order for the ISO values _histogram_parsed_in_sql found — or
+        None when either end does not read as a timestamp. A guess:
+        time_histogram checks it against the span its pass finds."""
+        ends = []
+        for m in members:
+            ref = self._col_ref(self._ref_src_for(src, m), column, "s", None)
+            ends += ro.execute(f"SELECT MIN({ref}), MAX({ref}) FROM {self._member_from(src, m, 's')}").fetchone()
+        epochs = []
+        for v in ends:
+            ts = _ts_normalize(v) if v is not None else None
+            try:
+                epochs.append(calendar.timegm(time.strptime(ts, "%Y-%m-%d %H:%M:%S")))
+            except (TypeError, ValueError, OverflowError):
+                return None
+        return self._histogram_width(max(epochs) - min(epochs), max_buckets)
 
     def _histogram_width(self, span: int, max_buckets: int) -> int:
         """The bucket width for a span: the narrowest that fits it in
         max_buckets bars."""
         return next((b for b in self.HISTOGRAM_BUCKETS if span / b <= max_buckets),
                     self.HISTOGRAM_BUCKETS[-1])
+
+    @staticmethod
+    def _histogram_tagged_count(ro: sqlite3.Connection, members: list[dict], cap: int) -> int:
+        """How many tags the members' rows carry, counted no further than
+        `cap` — a bound on the tagged rows, which is all time_histogram
+        needs to know, without counting every tag on a table full of
+        them."""
+        ids = ",".join(str(int(m["source_id"])) for m in members)
+        return ro.execute(f"SELECT COUNT(*) FROM (SELECT 1 FROM row_tags WHERE source_id IN ({ids}) "
+                          f"LIMIT {int(cap)})").fetchone()[0]
+
+    @staticmethod
+    def _histogram_untagged_rest(per_bucket: dict[int, int], tagged: list) -> tuple[array, array, array]:
+        """The plain bars and the tagged rows' (bar, tag, count) as the
+        (bar, tag, count) rows _histogram_tag_stack folds, the untagged
+        segment being what each bar has left once its tagged rows are
+        taken out."""
+        secs, tags, counts = array("q"), array("q"), array("q")
+        rest = dict(per_bucket)
+        for b, t, n in tagged:
+            secs.append(b)
+            tags.append(t)
+            counts.append(n)
+            rest[b] -= n
+        for b, n in rest.items():
+            secs.append(b)
+            tags.append(0)
+            counts.append(n)
+        return secs, tags, counts
 
     def _histogram_tag_exprs(self, ro: sqlite3.Connection, members: list[dict]) -> dict[int, str]:
         """Per member, the SQL for the tag a row is counted under in the
@@ -10634,7 +10769,11 @@ class Store:
             if ts_cols and (start_norm or end_norm):
                 parts = []
                 for c in ts_cols:
-                    expr = f"TS_NORMALIZE({q(c)})"
+                    # ts_normalize_sql, not a TS_NORMALIZE call per row: a
+                    # drag across the histogram builds this filter, and on
+                    # the usual ISO column the Python call was most of the
+                    # build (tests/test_histogram.py holds the two alike).
+                    expr = ts_normalize_sql(q(c))
                     if start_norm is not None and end_norm is not None:
                         parts.append(f"{expr} BETWEEN ? AND ?")
                         params.extend([start_norm, end_norm])
