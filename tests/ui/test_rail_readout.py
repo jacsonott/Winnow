@@ -40,11 +40,17 @@ GEOMETRY = """() => {
         r = document.getElementById('rail');
   const gb = g.getBoundingClientRect(), bb = b.getBoundingClientRect(),
         rb = r.getBoundingClientRect();
-  // What the browser hands the pointer just inside the scroller's right
-  // edge — the pixels the rail used to sit on. `null` when nothing is
-  // there, the id/class when it is something other than the grid.
-  const at = document.elementFromPoint(bb.right - 2, bb.top + bb.height / 2);
+  // The scroller's visible right edge: #vbar's left while the stand-in
+  // scrollbar is showing over the rows' right-hand strip (style.css
+  // .vbar), #body's own edge otherwise.
+  const v = document.getElementById('vbar'), vb = v.getBoundingClientRect();
+  const edge = !v.hidden && vb.width ? vb.left : bb.right;
+  // What the browser hands the pointer just inside that edge — the
+  // pixels the rail used to sit on. `null` when nothing is there, the
+  // id/class when it is something other than the grid.
+  const at = document.elementFromPoint(edge - 2, bb.top + bb.height / 2);
   return { gridTop: gb.top, gridBottom: gb.bottom, gridRight: gb.right,
+           headBottom: document.getElementById('gridHead').getBoundingClientRect().bottom,
            bodyTop: bb.top, bodyRight: bb.right,
            railLeft: rb.left, railRight: rb.right, railTop: rb.top,
            railBottom: rb.bottom, railWidth: rb.width,
@@ -94,16 +100,18 @@ def test_the_rail_stands_beside_the_grid_not_on_it(page):
     page.evaluate("() => __winnow.drawRail()")
     g = page.evaluate(GEOMETRY)
     _assert_clear_of_the_grid(g)
-    # Placed by the stylesheet alone — top to bottom of .grid, beside the
-    # scroll track it maps, with no per-draw JS writing top/right/bottom.
-    # An inline style here means the measuring version is back.
+    # Placed by the stylesheet alone — beside the scroll track it maps,
+    # with no per-draw JS writing top/right/bottom. An inline style here
+    # means the measuring version is back.
     assert g["inlineStyle"] == "", g
-    # Top to bottom of .grid. Worth stating as the whole height and not
-    # "tall enough": with `top: 0; bottom: 0` and no `height`, a canvas —
-    # a replaced element — takes its intrinsic height from the attribute
-    # and drops `bottom` on the floor, which leaves the strip 150px long
-    # and every mark crammed into the top sixth of the grid.
-    assert abs(g["railTop"] - g["gridTop"]) <= 0.5, g
+    # From the header's foot, where the scrollbar's track starts (#vbar,
+    # style.css), to the bottom of .grid. Worth stating as the whole
+    # height and not "tall enough": with `top: 0; bottom: 0` and no
+    # `height`, a canvas — a replaced element — takes its intrinsic height
+    # from the attribute and drops `bottom` on the floor, which leaves the
+    # strip 150px long and every mark crammed into the top sixth of the
+    # grid.
+    assert abs(g["railTop"] - g["headBottom"]) <= 0.5, g
     assert abs(g["railBottom"] - g["gridBottom"]) <= 0.5, g
     # And the bitmap is the box, so a mark is one device pixel per CSS
     # pixel and the hover's arithmetic is the paint's.

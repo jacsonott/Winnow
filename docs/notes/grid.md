@@ -336,6 +336,62 @@ see [docs/notes/README.md](README.md) for the whole set.
   wheel is forwarded to `#body` by hand, since the rail is a sibling of
   the scroller rather than a child of it and a wheel over it would
   otherwise scroll nothing at all.
+
+  The rail starts at the header's foot rather than at the top of
+  `.grid`, because the scrollbar's track does now (next entry): a mark
+  is only beside the thumb when the two run over the same height. Still
+  stylesheet-only — `top` reads `--grid-head-h`, which `syncRowsTop`
+  writes on every paint — and the strip above it, beside the header, is
+  `.grid::after` drawn as more rail.
+- **The grid's vertical scrollbar is `#vbar`, not `#body`'s own**
+  (`.vbar` in style.css, `syncVbar` and the two scroll listeners in
+  grid.js). The sticky header lives inside `#body` (that is what keeps
+  it in step with the columns on the compositor), so `#body`'s own bar
+  ran the full height of the scroller, up beside the header. Shortening
+  that bar's track with a `::-webkit-scrollbar-track` margin was mocked up
+  first and turned down: the header still stopped a bar's width short of
+  the rail, cut off beside an empty strip. So `#body`'s vertical bar is
+  hidden (`::-webkit-scrollbar { width: 0 }`) and `#vbar`, a scroller of
+  its own with nothing in it but a fill, stands over the rows' right-hand
+  strip from the header's foot down. Things to keep:
+  - **Chromium only, on purpose.** Nothing standard hides one axis's bar
+    and keeps the other's, so the whole arrangement sits behind
+    `@supports selector(::-webkit-scrollbar)` and `vbarInUse()` asks the
+    same question. Chromium ignores `::-webkit-scrollbar` on any element
+    whose `scrollbar-width`/`scrollbar-color` aren't `auto`, so `#body` and
+    `#vbar` set both back to `auto` and wear the theme through the thumb
+    rules instead — which is also why the horizontal bar is drawn by the
+    same rules rather than left to the OS. Anywhere else `#vbar` is
+    `display:none` and `#body` keeps its own bar, exactly as before.
+  - **The range is mirrored, not shared.** The fill is the bar's own
+    height plus `#body`'s `scrollHeight - clientHeight`, so the bar
+    scrolls exactly as far as `#body`, pixel for pixel, and the thumb is
+    the share of the rows on screen. Both painters call `syncVbar` on
+    every paint (after the spacer and the header have their sizes —
+    #422's every-paint `syncSpacer` is what keeps that range honest), and
+    the `#body` ResizeObserver calls it for a viewport that changes size
+    with no paint. It hides the bar when there is nothing to scroll, as
+    `#body`'s own would have.
+  - **Every write comes back as a scroll event, a frame later.** The two
+    listeners pass a move across only when it isn't the echo of their own
+    write (`vbarSetTo` / `bodySetTo`, matched by value). Without that, a
+    smooth wheel scroll or a thumb drag that has moved on by the time its
+    echo lands gets put back where it was a frame earlier, and fights
+    itself — `test_a_scroll_is_not_pulled_back_by_its_own_echo` drives
+    exactly that order by hand, since headless Chromium doesn't animate
+    the wheel. `syncVbar` only pushes the position when the range changed,
+    for the same reason.
+  - **It covers the rows the way a scrollbar does,** but a scrollbar
+    shortens `clientWidth` and this doesn't. Two places pay for that:
+    `.grid-head`'s `padding-right: var(--vbar-w)` leaves room past the
+    last column at the far right, and `scrollColIntoView` stops a cell at
+    the bar's left edge (`vbarCover()`). Anything new that anchors to the
+    viewport's right edge needs the same.
+  - **The shared test browser can't see it.** Playwright launches with
+    `--hide-scrollbars`, which takes every scrollbar — custom ones too —
+    to zero thickness. `scrollbar_browser` (tests/ui/conftest.py) is a
+    second Chromium without that flag; tests/ui/test_scrollbar_below_header.py
+    and the theme check in test_scrollbars.py open their pages there.
 - **The row gutter and its header share one three-slot CSS grid**
   (`.gutter` / `.gutter-head` / `.gutter-filter`: checkbox | tag stripes +
   note mark | row number). The gutter used to be `justify-content:
@@ -424,7 +480,8 @@ see [docs/notes/README.md](README.md) for the whole set.
   `position: sticky` over the left edge of the scroller, so a cell scrolled
   flush to `scrollLeft` parks *underneath* them and the ring vanishes. The
   real left edge is `GUTTER_W` plus the widths of the pinned columns —
-  the same sum `pinnedOffsets()` already computes for the paint.
+  the same sum `pinnedOffsets()` already computes for the paint. The
+  right edge is short by `vbarCover()`, the stand-in scrollbar over it.
 - **Grouping a column scrolls the grid back to the left**
   (`scrollGridLeft`, grouping.js). A group header is an ordinary `.row`
   whose label sits at the row's left, indented per level, and none of it
