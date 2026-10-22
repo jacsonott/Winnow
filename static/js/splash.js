@@ -14,8 +14,9 @@
      and moves on. An analyst opening their fifth case of the day should
      never be waiting on us.
    - **Disable-able.** Settings → Appearance turns it off entirely, and
-     `prefers-reduced-motion` skips it without being asked — except on
-     Windows, where that hint means something else (see osSkipsSplash).
+     Remote session mode and `prefers-reduced-motion` skip it without
+     being asked — the latter except on Windows, where that hint means
+     something else (see osSkipsSplash).
    - **Themed.** It reads the same appearance the rest of the app does, so
      a light-mode install gets ink-on-parchment rather than a black
      rectangle. Colours come from the Harvest palette either way.
@@ -232,13 +233,22 @@ export function osSkipsSplash() {
 
 /* Three states, not two. `false` is off. `'always'` — what the Settings
    checkbox writes when the analyst ticks it themselves — plays regardless
-   of the OS hint. Anything else (the default `true`, or unset) is "on,
-   unless the OS asks for reduced motion" (osSkipsSplash). */
+   of the OS hint or Remote session mode. Anything else (the default
+   `true`, or unset) is "on, unless the machine is in Remote session mode
+   or the OS asks for reduced motion" (osSkipsSplash). Remote session mode
+   promises to stop animations, and a full-screen one is the worst case
+   for a remote display: every frame is re-encoded whole, so it arrives
+   choppy however fast the machine draws it. */
 export function splashEnabled(appearance) {
   if (appearance && appearance.splash === false) { recordSplash('skipped', 'off in Settings'); return false; }
   if (appearance && appearance.splash === 'always') return true;
+  if (remoteSkipsSplash(appearance)) { recordSplash('skipped', 'Remote session mode is on'); return false; }
   if (osSkipsSplash()) { recordSplash('skipped', 'system asks for reduced motion'); return false; }
   return true;
+}
+
+export function remoteSkipsSplash(appearance) {
+  return !!(appearance && appearance.remoteSession);
 }
 
 /* Runs the animation over the whole viewport and resolves when it's done
@@ -378,9 +388,17 @@ function start(canvas, colors, done) {
   }
   resize();
 
+  /* Placed on a whole device pixel and drawn at the bitmap's own size, so
+     each token is a straight copy. Anywhere between pixels, or a fraction
+     of a pixel off its size, and every one of ~1,900 draws a frame is
+     resampled instead: a filtered 10px label nobody can tell from the
+     copied one. Measured on a throttled CPU, the copy takes a quarter to a
+     third off the main thread's busy time and as much off the slow
+     frames. */
   function drawToken(tok, x, y) {
     const g = atlas.get(tok);
-    ctx.drawImage(g.c, x - g.w / 2, y - g.base, g.w, g.h);
+    const dx = Math.round((x - g.w / 2) * DPR) / DPR, dy = Math.round((y - g.base) * DPR) / DPR;
+    ctx.drawImage(g.c, dx, dy, g.c.width / DPR, g.c.height / DPR);
   }
 
   // Sample the mark + wordmark into a field of landing spots. The grain
@@ -514,7 +532,8 @@ function start(canvas, colors, done) {
       c.vx += c.windAccel;
       c.x += c.vx;
       c.y += c.vy;
-      if (c.age > c.fadeDelay) c.alpha -= 0.02;
+      if (c.thinned) c.alpha -= 0.08;   // let go by adapt(): gone in a fifth of a second
+      else if (c.age > c.fadeDelay) c.alpha -= 0.02;
       if (Math.random() < 0.02) c.token = pick(TOKENS);
       if (c.alpha <= 0 || c.x > goneRight || c.y < goneTop || c.y > goneBottom) chaff.splice(i, 1);
     }
@@ -594,15 +613,33 @@ function start(canvas, colors, done) {
   /* If painted frames are still slow after the pixel budget, trade detail
      for motion: a coarser backing store (the text is 10px; a little soft
      beats a slideshow) and half the chaff, up to three times. Noted for
-     Settings → Launch animation's last-launch readout. */
+     Settings → Launch animation's last-launch readout.
+
+     Thinning is most of what it buys — measured, the frames it leaves
+     slow double without it. Two things about how it lands:
+     - Steps come ten frames apart, not twenty. On the display this is
+       for, twenty slow frames is well over a second, so the three steps
+       took most of the launch to arrive and the toss played out at full
+       weight; the average restarts at the threshold each step, so the
+       shorter wait still needs the new level's own frames to call it slow.
+     - The chaff let go fades out rather than vanishing. Dropping half of
+       it in one frame read as a stutter of its own, three times over. */
+  const SLOW_GAP_MS = 40;
   let gapEma = 16.7, sinceAdapt = 0;
   function adapt(dt) {
     gapEma = gapEma * 0.8 + dt * 0.2;
-    if (++sinceAdapt < 20 || level >= 3 || gapEma < 40) return;
+    if (++sinceAdapt < 10 || level >= 3 || gapEma < SLOW_GAP_MS) return;
     sinceAdapt = 0;
+    gapEma = SLOW_GAP_MS;
     level++;
     resize();      // backingScale() now takes the extra step down
-    chaff = chaff.filter((_, i) => i % 2 === 0);
+    let kept = 0;
+    chaff = chaff.filter((c) => {
+      if (c.thinned || kept++ % 2 === 0) return true;
+      if (!c.launched) return false;   // not thrown yet: nothing on screen to fade
+      c.thinned = true;
+      return true;
+    });
     degradeNote = 'detail reduced for a slow display';
   }
 

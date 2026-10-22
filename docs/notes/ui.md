@@ -1154,6 +1154,19 @@ see [docs/notes/README.md](README.md) for the whole set.
   The CSS kill switch at the end of style.css still reads the same hint,
   so on those machines the splash's own fade is instant.
   `tests/ui/test_splash.py` spoofs Edge on Windows for it.
+- **Remote session mode arrives with the page, not with boot().** The
+  setting is machine-side (`/api/settings/app`), and boot() only fetches
+  it after main.js has already decided whether to run the launch
+  animation — so the one full-screen animation in the app played on the
+  remote displays the mode exists to spare, and choppily: an RDP encoder
+  re-sends the whole canvas every frame however fast the VM draws it.
+  `server.py` `index()` now stamps `class="remote"` on `<html>` when the
+  mode is on, `initAppearance` seeds `S.appearance.remoteSession` from it
+  (its `paintRemote()` would otherwise strip the class again), and
+  `splash.splashEnabled` skips the default there; `'always'` still
+  plays. The stamp also means the CSS kill switch for animations is on
+  from the first paint. If "/" ever goes back to serving the file as is,
+  `tests/test_api_routes.py` fails before the splash quietly regresses.
 - **`S.keymap` must hold its own key arrays, not `DEFAULT_KEYMAP`'s.**
   The settings UI's "+ key"/"✕" handlers splice and push those arrays in
   place, so the old shallow `{...DEFAULT_KEYMAP}` handed them the

@@ -95,8 +95,11 @@ default, it is skipped when your system asks for reduced motion, and the box
 shows unticked; tick it to play the animation anyway. On Windows it plays
 even with **Accessibility → Visual effects → Animation effects** off, because
 many managed and virtual machines turn that off as a performance setting
-rather than a preference; untick the box if you don't want it. The note
-under the box says what happened at the last launch and why.
+rather than a preference; untick the box if you don't want it. With
+[Remote session mode](#remote-session) on it is skipped too, and the box
+shows unticked; tick it to play the animation anyway. On a slow machine it
+draws less noise rather than drop frames. The note under the box says what
+happened at the last launch and why.
 
 ## Grid & layout
 
@@ -128,8 +131,9 @@ gets room for its name.
 **Remote session mode** is for running Winnow inside RDP, VNC or another
 remote desktop: the mouse wheel scrolls the grid by whole rows, and
 animations and hover effects stop, so the remote display has far less to
-send. Winnow asks about this once on first run. It is a machine setting, so
-it holds for every browser and port.
+send. That includes the launch animation, unless you have ticked
+**Launch animation** yourself. Winnow asks about this once on first run. It
+is a machine setting, so it holds for every browser and port.
 
 ## Imports
 

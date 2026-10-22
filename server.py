@@ -6172,7 +6172,16 @@ def api_plugin_state_set(body: PluginStateWrite):
 
 @app.get("/")
 def index():
-    return FileResponse(HERE / "static" / "index.html")
+    """The app shell, with Remote session mode already on <html> when this
+    machine has it on. The page otherwise learns the setting from a fetch
+    in boot(), which lands after the launch animation has started — so the
+    one thing that animates hardest ran on exactly the remote displays the
+    mode exists to spare, and the mode's CSS switch-off came in a beat
+    after the first paint."""
+    page = (HERE / "static" / "index.html").read_text(encoding="utf-8")
+    if WS.app_settings.get().get("remote_session"):
+        page = page.replace("<html ", '<html class="remote" ', 1)
+    return HTMLResponse(page)
 
 
 app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
