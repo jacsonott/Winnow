@@ -5,8 +5,8 @@ this start and stop" and throws away everything in between. A total is the
 part of the middle worth keeping: bytes moved in a session, events in a
 burst, minutes logged on.
 
-It rides the window that is already partitioned by the group — the same
-one behind `{count}` — so it costs no extra pass over the table.
+It rides the grouping pass that already counts each group — the one
+behind `{count}` — so it costs no extra pass over the table.
 """
 
 from __future__ import annotations

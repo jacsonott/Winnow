@@ -17,14 +17,22 @@ gives every ingest convention (all-TEXT, contiguous rids, batched commits,
 background FTS) for free, and invariant #1 holds untouched: the source
 table is only ever read.
 
-**First/last come from one window-function pass.** ROW_NUMBER() twice over
-(PARTITION BY the group columns ORDER BY sort ASC/DESC, rid as the
-tiebreak) plus COUNT() over the same partition — a single scan of the
-filtered source, no N+1 per group. `rid` tie-breaking makes the answer
-deterministic when timestamps collide, which EVTX at second resolution
-does constantly. A number-typed sort column is ordered by value, like the
-grid's numeric sort, never as text ("10" < "9"); a cell that isn't a
-number wins neither end (`_order_keys`).
+**First/last come from one grouping pass, then a lookup by rid.** A
+group's first row is the one `ORDER BY sort, rid` puts first and its last
+the one `ORDER BY sort DESC, rid DESC` puts first; `rid` tie-breaking
+makes the answer deterministic when timestamps collide, which EVTX at
+second resolution does constantly. _row_key spells (sort value, rid) as one
+text that sorts the same way, so a plain GROUP BY's MIN and MAX of it name
+both rows (_groups_sql), and only those rows' columns are read afterwards.
+It used to be window functions — ROW_NUMBER() both ways and a COUNT() —
+and SQLite sorts the whole filtered table once per window, carrying every
+column the output needs through each sort: with the preview's separate
+group count, 9.5 s on a 693k-row table that the same GROUP BY typed into
+the SQL pane reads in 1.5 s, and nearly a minute with the JSON cell on. A
+number-typed sort column is ordered by value, like the grid's numeric
+sort, never as text ("10" < "9"); a cell that isn't a number wins neither
+end (`_order_dir`). No text spells a REAL in order, so that case finds
+each group's smallest and largest value first and their rows second.
 
 **The description is rendered server-side, per row.** `{ColumnName}` takes
 that row's value (so the first row shows the first event's user),
@@ -33,19 +41,20 @@ that row's value (so the first row shows the first event's user),
 the group size for the last). Unknown
 placeholders are a ValueError naming the offender — a template typo should
 fail the preview, not silently emit `{Usre}` into 400 descriptions. Any
-column of the source can be named: the windowed pass projects whatever the
+column of the source can be named: the bookend query reads whatever the
 template references on top of the grouped/ordered/carried columns
 (`_template_columns`), so a column need not be dragged into Include
 columns just to appear in the description. The one exception is a column
 named like one of the pass's own aliases (`_reserved_aliases`): that is
 never projected on the template's behalf, so `{count}` and the Sum column
-keep reading the window's numbers rather than the file's.
+keep reading the group's numbers rather than the file's.
 
 **Distinct values are a second, separate pass** (`_group_values`). A
 column under List values, or named by `{values:Column}`, becomes each
 group's distinct non-blank values, sorted, in one cell. It cannot ride the
-bookend window: SQLite refuses DISTINCT inside a window aggregate, and a
-plain group_concat OVER would build the whole list once per ROW. So it is
+bookend pass: group_concat(DISTINCT …) can neither sort its values nor stop
+at MAX_LISTED_VALUES, so a column of ids grouped by host would gather every
+id of the host only to cut the list down afterwards. So it is
 one GROUP BY per column over the same filtered rows, keyed back onto the
 bookends by their group values, and capped at MAX_LISTED_VALUES per cell
 (the rest counted, not dropped silently). The preview asks only for the
@@ -76,6 +85,7 @@ meant to be readable alone.
 
 import json
 import re
+import sqlite3
 import threading
 import time
 import traceback
@@ -116,6 +126,11 @@ JOB_START_WAIT_MS = 250
 JOB_KEEP_S = 600
 JOB_KEEP_FINISHED = 8
 JOB_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,80}$")
+# A CTE the query reads twice is computed once only when it is marked
+# MATERIALIZED: SQLite flattens a plain SELECT into each place it is used,
+# and so reads the table once per use. The hint is 3.35 syntax; an older
+# SQLite gets the CTE inlined, which is the same answer at that cost.
+_ONCE = "MATERIALIZED " if sqlite3.sqlite_version_info >= (3, 35, 0) else ""
 
 OPERATORS = {
     "in": ("is any of", "many"),
@@ -230,21 +245,18 @@ def _numeric_of(ident):
     return f"(CASE WHEN {ident} REGEXP '{NUM_RE_SQL}' THEN CAST({ident} AS REAL) ELSE NULL END)"
 
 
-def _order_keys(ident, number):
-    """(first-window key, last-window key) for the sort column, each with
-    its direction. A number column is ordered by value, as the grid's
+def _order_dir(number):
+    """The direction the bookends' `ord` values (_groups_sql) list them in,
+    first to last. A number column is ordered by value, as the grid's
     numeric sort orders it: its cells are TEXT, so "10" < "9" < "100", and
     a group of record ids came back First=10, Last=9. A cell that isn't a
     number (blank, "-", "n/a") must not win either end, so it sorts LAST
     both ways. SQLite sorts NULL first ascending and last descending, so
-    ascending-NULLs-last is spelled `-v DESC` (negation flips the order
-    exactly and leaves NULL NULL). That evaluates the REGEXP-guarded cast
-    once per row per window: a separate `v IS NULL` key would run it twice
-    and cost about twice as much, and `NULLS LAST` needs SQLite 3.30."""
-    if not number:
-        return f"{ident} ASC", f"{ident} DESC"
-    v = _numeric_of(ident)
-    return f"-{v} DESC", f"{v} DESC"
+    ascending-NULLs-last is the negated value DESC (negation flips the
+    order exactly and leaves NULL NULL); `NULLS LAST` needs SQLite 3.30.
+    A text column's `ord` is its _row_key without the tie, which sorts as
+    the value does, ascending."""
+    return "DESC" if number else "ASC"
 
 
 def _where(src, filters):
@@ -414,9 +426,9 @@ def _sum_alias(col):
 
 
 # Group-wide aggregates a Total-up column carries besides its sum. Only the
-# sum becomes an output column; min and max ride the same window for the
-# {min:Column} / {max:Column} placeholders, so asking for either costs no
-# extra pass and needs nothing new under Total up.
+# sum becomes an output column; min and max ride the same grouping pass for
+# the {min:Column} / {max:Column} placeholders, so asking for either costs
+# no extra pass and needs nothing new under Total up.
 AGGREGATES = {"sum": "SUM", "min": "MIN", "max": "MAX"}
 
 
@@ -425,10 +437,10 @@ def _agg_alias(kind, col):
 
 
 def _reserved_aliases(sums):
-    """The names the windowed pass gives its own outputs. A source column
+    """The names the bookend query gives its own outputs. A source column
     that happens to share one must not be projected beside it: the inner
     SELECT would then carry the name twice — the file's, then the
-    window's — and SQLite labels the outer SELECT *'s second copy
+    query's — and SQLite labels the outer SELECT *'s second copy
     `group_n:1`, so dict(zip(cols, row)) would hand _render and the Sum
     column the file's value in place of the group's, silently."""
     return {"rn_first", "rn_last", "group_n"} | {
@@ -443,7 +455,7 @@ def _template_columns(template, src, sums=()):
     {count}, the colon forms, a typo — is left for _render to resolve or
     refuse by name. A column named like one of the pass's own aliases is
     skipped (see _reserved_aliases): the template route must not shadow
-    the window's outputs, so `{group_n}` reads the pass's count, not the
+    the query's outputs, so `{group_n}` reads the pass's count, not the
     file's column. The same column grouped or carried still shadows — a
     pre-existing edge, left as is; headers shaped like that are rare."""
     names = {c["name"] for c in src["columns"]} - _reserved_aliases(sums)
@@ -462,12 +474,123 @@ def _template_columns(template, src, sums=()):
     return out
 
 
+def _tie(src, alias):
+    """The row's place in file order as fixed-width text, so it can ride on
+    the end of a key that MIN and MAX compare as text: rid, or (source_id,
+    rid) on a merge, where rid alone collides across members. 20 digits
+    each holds any rid."""
+    if src.get("is_merge"):
+        return f"printf('%020d%020d', {alias}.source_id, {alias}.rid)"
+    return f"printf('%020d', {alias}.rid)"
+
+
+def _untie(src, key, prefix):
+    """_tie's text back as [sid,] rid columns named `<prefix>_sid` and
+    `<prefix>_rid`, read off the END of `key` so it can be a whole _row_key."""
+    out = [f"CAST(substr({key}, -20) AS INTEGER) AS {prefix}_rid"]
+    if src.get("is_merge"):
+        out.insert(0, f"CAST(substr({key}, -40, 20) AS INTEGER) AS {prefix}_sid")
+    return ", ".join(out)
+
+
+def _row_key(src, ident):
+    """A text key per row that sorts as `ORDER BY ident, <tie>` does, so a
+    group's MIN of it is its first row and its MAX its last. hex() keeps the
+    byte order the BINARY collation compares in and leaves no byte that can
+    collide with the separator, and the space before the tie sorts below
+    every hex digit, so a value that is a prefix of another stays before it.
+    The first letter is the storage class in SQLite's own order: NULL sorts
+    first ascending and last descending, which MIN and MAX then do too, and
+    a BLOB after all text. Numbers, which SQLite sorts between NULL and
+    text, never reach here: every source column has TEXT affinity, which
+    stores a number as its text."""
+    tie = _tie(src, "s")
+    return (f"CASE WHEN {ident} IS NULL THEN 'A' || {tie}"
+            f" WHEN typeof({ident}) = 'blob' THEN 'U' || hex({ident}) || ' ' || {tie}"
+            f" ELSE 'T' || hex({ident}) || ' ' || {tie} END")
+
+
+def _groups_sql(req, src, group_cols, sort_col, number, where, aggs, count_groups):
+    """The CTEs behind `fl_groups`: one row per group with group_n, the
+    first and last row's place (f_[sid,]rid, l_[sid,]rid) and the value
+    they are listed by (f_ord, l_ord; see _order_dir), `pos` — where
+    the last row stands in first-to-last order, which is what
+    {which:number} prints for it — and each Total-up aggregate as agg<i>.
+    With `count_groups` it is marked to be computed once, because the
+    count of groups reads it a second time.
+
+    Text and datetime columns take ONE grouping pass: _row_key folds the
+    tie-break into the value, so the group's MIN and MAX are its first and
+    last rows outright. A number column is ordered by the REAL its text
+    casts to, and no text spells a REAL in order, so it takes two: the
+    group's smallest and largest value, then a pass over the rows holding
+    them for the one first in file order (`fl_rows` holds the
+    REGEXP-guarded cast, done once per row; see _ONCE). A non-number cell
+    sorts after every number at both ends, so it is first or last only in
+    a group with no number at all.
+
+    The window functions this replaced ranked every row in both directions
+    and counted the groups, one sort of the whole table each — over every
+    column the output needed. A grouping pass sorts once, on the group
+    columns, and carries none of them."""
+    keys = [f"k{i}" for i in range(len(group_cols))]
+    keysel = ", ".join(f"{_col(src, g)} AS {k}" for g, k in zip(group_cols, keys))
+    klist = ", ".join(keys)
+    # Each Total-up input is cast once per row and aggregated from there.
+    inputs = list(dict.fromkeys(c for c, _ in aggs))
+    insel = "".join(f", {_numeric(src, c)} AS n{inputs.index(c)}" for c in inputs)
+    aggsel = "".join(f", {fn}(n{inputs.index(c)}) AS agg{i}" for i, (c, fn) in enumerate(aggs))
+    once = _ONCE if count_groups else ""
+    if not number:
+        inner = f"SELECT {keysel}, {_row_key(src, _col(src, sort_col))} AS key{insel} FROM {_scope(req, src)}{where}"
+        # LIMIT keeps the subquery from being flattened into the GROUP BY
+        # (SQLite won't flatten a LIMIT under an aggregate), so the key is
+        # built once per row rather than once for MIN and again for MAX.
+        tie = 40 if src.get("is_merge") else 20
+        return (f"fl_groups AS {once}(SELECT COUNT(*) AS group_n, COUNT(*) AS pos,"
+                f" {_untie(src, 'MIN(key)', 'f')}, {_untie(src, 'MAX(key)', 'l')},"
+                f" substr(MIN(key), 1, length(MIN(key)) - {tie}) AS f_ord,"
+                f" substr(MAX(key), 1, length(MAX(key)) - {tie}) AS l_ord{aggsel}"
+                f" FROM ({inner} LIMIT -1) GROUP BY {klist})")
+    sid = "s.source_id AS source_id, " if src.get("is_merge") else ""
+    match = " AND ".join(f"b.{k} IS r.{k}" for k in keys)
+    return (
+        f"fl_rows AS {_ONCE}(SELECT {keysel}, {sid}s.rid AS rid, {_numeric(src, sort_col)} AS v{insel}"
+        f" FROM {_scope(req, src)}{where}),"
+        f" fl_bounds AS {_ONCE}(SELECT {klist}, COUNT(*) AS group_n, COUNT(v) AS nv, MIN(v) AS lo, MAX(v) AS hi,"
+        f" MIN(CASE WHEN v IS NULL THEN {_tie(src, 'fl_rows')} END) AS nf,"
+        f" MAX(CASE WHEN v IS NULL THEN {_tie(src, 'fl_rows')} END) AS nl{aggsel}"
+        f" FROM fl_rows GROUP BY {klist}),"
+        f" fl_ties AS (SELECT {', '.join(f'b.{k} AS {k}' for k in keys)},"
+        f" MIN(CASE WHEN r.v = b.lo THEN {_tie(src, 'r')} END) AS tf,"
+        f" MAX(CASE WHEN r.v = b.hi THEN {_tie(src, 'r')} END) AS tl"
+        f" FROM fl_rows r JOIN fl_bounds b ON {match} AND r.v IN (b.lo, b.hi)"
+        f" GROUP BY {', '.join(f'b.{k}' for k in keys)}),"
+        f" fl_groups AS {once}(SELECT b.group_n AS group_n, CASE WHEN b.nv > 0 THEN b.nv ELSE b.group_n END AS pos,"
+        f" {_untie(src, 'CASE WHEN b.nv > 0 THEN t.tf ELSE b.nf END', 'f')},"
+        f" {_untie(src, 'CASE WHEN b.nv > 0 THEN t.tl ELSE b.nl END', 'l')},"
+        f" CASE WHEN b.nv > 0 THEN -b.lo END AS f_ord, CASE WHEN b.nv > 0 THEN -b.hi END AS l_ord"
+        f"{''.join(f', b.agg{i} AS agg{i}' for i in range(len(aggs)))}"
+        f" FROM fl_bounds b LEFT JOIN fl_ties t ON {' AND '.join(f'b.{k} IS t.{k}' for k in keys)})"
+    )
+
+
 def _bookend_rows(req, src, group_cols, sort_col, carry, where, params, limit,
-                  row_json=False, sums=(), template="", op_token=None):
-    """One windowed pass: rank each row inside its group both directions,
-    keep rank 1 of each. Selected values are the *row's own* — the first
-    row's user, not the group's. `op_token` (a job's id) makes the pass
-    stoppable through Store.cancel_op."""
+                  row_json=False, sums=(), template="", op_token=None, count_groups=False):
+    """Each group's first and last row (one row, labelled Only, when they
+    are the same row), ranked as `ORDER BY sort, <file order>` ranks them
+    both ways, with the per-group values _emit and _render read: rn_first
+    (the row's position first to last), rn_last (1 for the last row),
+    group_n and the Total-up aggregates. Selected values are the *row's
+    own* — the first row's user, not the group's. Returns (rows,
+    truncated, total groups — counted only with `count_groups`).
+    `op_token` (a job's id) makes the query stoppable through
+    Store.cancel_op.
+
+    The groups come from _groups_sql, which finds each bookend's place in
+    the table; only then are the bookends' own columns read, by rid and only
+    for the bookends within `limit`, so the table is never carried through a
+    sort to find two rows a group."""
     # Every column the template or output might need, deduped, stable order
     # — or the whole row when the JSON cell is requested. The template's
     # own columns ride along so {Col} resolves for ANY column, not only
@@ -479,47 +602,81 @@ def _bookend_rows(req, src, group_cols, sort_col, carry, where, params, limit,
     for c in pool:
         if c not in needed:
             needed.append(c)
-    sel = ", ".join(f"{_col(src, c)} AS {q(c)}" for c in needed)
-    part = ", ".join(_col(src, c) for c in group_cols)
-    # Totals ride the window that is already partitioned by the group, so
-    # they cost no extra pass — the same reason group_n does. Every row of
-    # the group carries the total, and the bookends we keep are rows of it.
-    # _numeric's guarded cast, not a bare CAST: a number column can still
-    # hold the odd "-" or "n/a", and CAST turns those into 0, which is a
-    # wrong total rather than a missing one.
+    # Totals ride the grouping pass that already counts each group, so they
+    # cost no extra pass — the same reason group_n does. Both bookends carry
+    # the total. _numeric's guarded cast, not a bare CAST: a number column
+    # can still hold the odd "-" or "n/a", and CAST turns those into 0,
+    # which is a wrong total rather than a missing one.
     # The sum is always an output column; min and max only exist for the
-    # {min:}/{max:} placeholders, and each window term re-runs the
-    # REGEXP-guarded cast per row, so they are added only when the
-    # template actually names one.
+    # {min:}/{max:} placeholders, so they are added only when the template
+    # actually names one.
     wanted = {"sum"} | {k for k in ("min", "max") if f"{{{k}:" in (template or "")}
-    sum_sel = "".join(
-        f", {fn}({_numeric(src, c)}) OVER (PARTITION BY {part}) AS {q(_agg_alias(kind, c))}"
-        for c in sums for kind, fn in AGGREGATES.items() if kind in wanted)
-    # Direction must be stated PER COLUMN: "ORDER BY ts, rid DESC" flips only
-    # rid, leaving the last-window ranked by ascending time — every group's
-    # "Last" would be its earliest row with the biggest rid. On a merge,
-    # rid alone collides across members, so (source_id, rid) is the
-    # deterministic tie-break.
+    aggs = [(c, fn, _agg_alias(kind, c)) for c in sums for kind, fn in AGGREGATES.items() if kind in wanted]
     number = _is_number_column(src, sort_col)
-    first_key, last_key = _order_keys(_col(src, sort_col), number)
-    tie_cols = ["s.source_id", "s.rid"] if src.get("is_merge") else ["s.rid"]
-    order_asc = ", ".join([first_key] + [f"{t} ASC" for t in tie_cols])
-    order_desc = ", ".join([last_key] + [f"{t} DESC" for t in tie_cols])
+    merge = bool(src.get("is_merge"))
+    groups = _groups_sql(req, src, group_cols, sort_col, number, where,
+                         [(c, fn) for c, fn, _ in aggs], count_groups)
+    # One row per bookend. A group whose first row is its last gives one.
+    # They are put in order and cut to the limit here, before any row is
+    # read: Host + User on a 693k-row table is 486k groups, and Copy result
+    # would otherwise look up nearly a million rows to keep 20,000.
+    # The preview's count of groups reads fl_groups again, one row per
+    # group. COUNT(*) OVER () there buffered every group to count them and
+    # took two of the five seconds on 486k groups.
+    counted = ", (SELECT COUNT(*) FROM fl_groups) AS total" if count_groups else ""
+    same = "f_rid = l_rid" + (" AND f_sid = l_sid" if merge else "")
+    order = f"ord {_order_dir(number)}, rn_first, {'sid, ' if merge else ''}rid"
+    ends = (
+        f"fl_ends AS (SELECT {'CASE WHEN w = 1 THEN f_sid ELSE l_sid END AS sid, ' if merge else ''}"
+        f"CASE WHEN w = 1 THEN f_rid ELSE l_rid END AS rid,"
+        f" CASE WHEN w = 1 THEN f_ord ELSE l_ord END AS ord,"
+        f" CASE WHEN w = 1 THEN 1 ELSE pos END AS rn_first,"
+        f" CASE WHEN w = 2 OR ({same}) THEN 1 ELSE pos END AS rn_last,"
+        f" group_n{''.join(f', agg{i}' for i in range(len(aggs)))}{counted}"
+        f" FROM fl_groups CROSS JOIN (SELECT 1 AS w UNION ALL SELECT 2) WHERE w = 1 OR NOT ({same})),"
+        f" fl_top AS {_ONCE if merge else ''}(SELECT * FROM fl_ends ORDER BY {order} LIMIT {int(limit) + 1})"
+    )
+    # Laid out as the window query this replaced laid its rows out — the
+    # columns, then rn_first, rn_last, group_n and the aggregates — so a
+    # column named like one of those reads the same as it always did. What
+    # follows is this query's own and is cut off before the rows are named.
+    extra = (([", e.total"] if count_groups else []) + [", e.ord"]
+             + ([", e.sid"] if merge else []) + [", e.rid"])
+    cols = (", ".join(f"{_col(src, c)} AS {q(c)}" for c in needed)
+            + ", e.rn_first AS rn_first, e.rn_last AS rn_last, e.group_n AS group_n"
+            + "".join(f", e.agg{i} AS {q(alias)}" for i, (_, _, alias) in enumerate(aggs))
+            + "".join(extra))
+    # A CROSS JOIN keeps fl_top the outer loop, so each bookend is one
+    # lookup by rid. A merge looks each member up in its own table: a join
+    # to _scope's union would read every member whole to find them.
+    if merge:
+        arms = []
+        for mid in src["member_source_ids"]:
+            m = req.store.get_source(mid)
+            member = (f"(SELECT {int(m['id'])} AS source_id, s.rid AS rid,"
+                      f" {req.store.merge_select_list(src, m)} FROM {_from_clause(m)}) s")
+            arms.append(f"SELECT {cols} FROM fl_top e CROSS JOIN {member}"
+                        f" ON s.rid = e.rid WHERE e.sid = {int(m['id'])}")
+        fetch = " UNION ALL ".join(arms)
+    else:
+        target = f"{q(src['table_name'])} s ON s.rid = e.rid"
+        if _derived_names(src):
+            target += f" LEFT JOIN {q('drv_' + str(src['id']))} d ON d.rid = s.rid"
+        fetch = f"SELECT {cols} FROM fl_top e CROSS JOIN {target}"
+    # fl_top's order again, now that the lookups have shuffled it, by
+    # position: a source column can have any of these names.
+    width = len(needed) + 3 + len(aggs) + len(extra)
+    at = width - len(extra) + 1 + (1 if count_groups else 0)
+    ties = ", ".join(str(i) for i in range(at + 1, width + 1))
     sql = (
-        f"SELECT {sel},"
-        f" ROW_NUMBER() OVER (PARTITION BY {part} ORDER BY {order_asc}) AS rn_first,"
-        f" ROW_NUMBER() OVER (PARTITION BY {part} ORDER BY {order_desc}) AS rn_last,"
-        f" COUNT(*) OVER (PARTITION BY {part}) AS group_n"
-        f"{sum_sel}"
-        f" FROM {_scope(req, src)}{where}"
+        f"WITH {groups}, {ends} SELECT * FROM ({fetch})"
+        f" ORDER BY {at} {_order_dir(number)}, {len(needed) + 1}, {ties}"
     )
-    outer = (
-        f"SELECT * FROM ({sql}) WHERE rn_first = 1 OR rn_last = 1"
-        f" ORDER BY {_order_keys(q(sort_col), number)[0]}, rn_first"
-    )
-    res = req.store.run_sql(_inline(outer, params), limit=limit, op_token=op_token)
-    cols = res["columns"]
-    return [dict(zip(cols, r)) for r in res["rows"]], res["truncated"]
+    res = req.store.run_sql(_inline(sql, params), limit=limit, op_token=op_token)
+    keep = width - len(extra)
+    cols = res["columns"][:keep]
+    total = res["rows"][0][keep] if count_groups and res["rows"] else 0
+    return [dict(zip(cols, r[:keep])) for r in res["rows"]], res["truncated"], total
 
 
 def _values_alias(col):
@@ -716,7 +873,7 @@ def _emit(rows, sort_col, carry, template, json_cols=None, sums=(), listed=()):
     first and its last — emitted once, labelled Only (a story with one
     event has no separate ending, and "First of 1" read as if a Last had
     gone missing). `json_cols` non-None adds a cell with the bookend's
-    ENTIRE row as a JSON object — the synthetic window columns
+    ENTIRE row as a JSON object — the synthetic columns
     (rn_first/rn_last/group_n) and the attached value lists never appear
     in it."""
     out = []
@@ -767,17 +924,18 @@ def values(req):
             "truncated": res["truncated"]}
 
 
-def _result(req, body, limit, *, whole=False, op_token=None):
-    """What preview, rows and create share: validate, run the windowed
-    pass, list the distinct values it asks for, render. `whole` is create's
-    rule that a result cut short by `limit` is refused, not written.
+def _result(req, body, limit, *, whole=False, op_token=None, count_groups=False):
+    """What preview, rows and create share: validate, find the bookends,
+    list the distinct values it asks for, render. `whole` is create's
+    rule that a result cut short by `limit` is refused, not written;
+    `count_groups` is the preview's, which says how many groups there are.
     `op_token` rides on every query, so a job's cancel stops whichever one
     is running."""
     (src, group_cols, sort_col, carry, sums, listed,
      where, params, template, row_json) = _validated(req, body)
-    bookends, truncated = _bookend_rows(req, src, group_cols, sort_col, carry, where, params,
-                                        limit=limit, row_json=row_json, sums=sums, template=template,
-                                        op_token=op_token)
+    bookends, truncated, total_groups = _bookend_rows(
+        req, src, group_cols, sort_col, carry, where, params, limit=limit, row_json=row_json,
+        sums=sums, template=template, op_token=op_token, count_groups=count_groups)
     if whole and truncated:
         raise ValueError(f"More than {MAX_GROUPS:,} groups — narrow the grouping or add a filter")
     wanted = list(dict.fromkeys(listed + _template_value_columns(template)))
@@ -789,7 +947,7 @@ def _result(req, body, limit, *, whole=False, op_token=None):
         "src": src, "group_cols": group_cols, "where": where, "params": params,
         "columns": _header(sort_col, carry, sums, listed, row_json),
         "rows": _emit(bookends, sort_col, carry, template, json_cols, sums, listed),
-        "truncated": truncated,
+        "truncated": truncated, "total_groups": total_groups,
     }
 
 
@@ -801,13 +959,10 @@ def preview(req):
 
 
 def _preview(req, body, op_token=None, stopped=None):
-    res = _result(req, body, PREVIEW_GROUPS * 2 + 2, op_token=op_token)
-    src = res["src"]
-    part = ", ".join(_col(src, c) for c in res["group_cols"])
-    count_sql = f"SELECT COUNT(*) FROM (SELECT 1 FROM {_scope(req, src)}{res['where']} GROUP BY {part})"
-    total_groups = req.store.run_sql(_inline(count_sql, res["params"]), limit=1,
-                                     op_token=op_token)["rows"][0][0]
-    return {"columns": res["columns"], "rows": res["rows"], "total_groups": total_groups}
+    # The group count comes out of the same pass that finds the bookends;
+    # it used to be a GROUP BY of its own, a second read of the table.
+    res = _result(req, body, PREVIEW_GROUPS * 2 + 2, op_token=op_token, count_groups=True)
+    return {"columns": res["columns"], "rows": res["rows"], "total_groups": res["total_groups"]}
 
 
 def rows(req):

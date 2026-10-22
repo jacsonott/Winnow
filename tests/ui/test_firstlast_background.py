@@ -93,6 +93,7 @@ def test_the_grid_answers_while_first_last_works_out_a_big_result(fl, until):
     pg = fl
     sent, ended = [], set()     # every First/Last request; the ones that have finished
     starts, cancels = [], []
+    order = []                  # previews going out and jobs answering finished, as they happened
 
     def went(r):
         if "/api/plugin/first_last/" not in r.url:
@@ -100,11 +101,20 @@ def test_the_grid_answers_while_first_last_works_out_a_big_result(fl, until):
         sent.append(r)
         if PREVIEW_ASKED.search(r.url):
             starts.append((r.post_data_json or {}).get("id"))
+            order.append(("start", starts[-1]))
         elif r.url.endswith("/job/cancel"):
             cancels.append(r.post_data_json["id"])
 
     def done(r):
         ended.add(r)
+        if "/api/plugin/first_last/job" in r.url and not r.url.endswith("/job/cancel"):
+            at = len(order)
+            order.append(None)  # its place, held while the answer is read
+            try:
+                st = r.response().json()
+            except Exception:   # failed, or not a job's state
+                st = {}
+            order[at] = ("finished", st.get("id")) if st.get("status") not in (None, "running") else ()
 
     pg.on("request", went)
     pg.on("requestfinished", done)
@@ -149,9 +159,15 @@ def test_the_grid_answers_while_first_last_works_out_a_big_result(fl, until):
 
     # And every preview an edit superseded was stopped on the server, not
     # just forgotten here: left running, each kept a core busy for the rest
-    # of its few seconds.
+    # of its few seconds. One the tab had already been told was finished
+    # has nothing to stop: Host alone, the first drag's 400 groups, can be
+    # done before the second drag lands.
     assert len(starts) == 8
-    assert set(starts[:-1]) <= set(cancels), f"superseded and still running: {set(starts[:-1]) - set(cancels)}"
+    at = {e: i for i, e in enumerate(order) if e}
+    left = [s for s, then in zip(starts, starts[1:])
+            if s not in cancels and at.get(("finished", s), len(order)) > at[("start", then)]]
+    assert not left, f"superseded and still running: {left}"
+    assert cancels, "no preview was still running when an edit superseded it — the table is too small here"
 
 
 def test_a_preview_that_lands_while_away_says_so_and_show_goes_back_to_it(fl, until):

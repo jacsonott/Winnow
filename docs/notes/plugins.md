@@ -337,6 +337,68 @@ see [docs/notes/README.md](README.md) for the whole set.
     tracebacks point at unrelated lines. Toggle the plugin off and on in
     Settings → Plugins (that's what `_reload_plugins` is for) or restart.
 
+- **First/Last finds its bookends with one GROUP BY, not window
+  functions.** Window functions are the obvious spelling (ROW_NUMBER()
+  both ways and a COUNT(), partitioned by the group), and SQLite sorts
+  the whole filtered table once per window, carrying every column the
+  result names through each sort; a whole-row JSON cell carries the whole
+  row. On a 1M-row table that was 9.5 s for a preview the SQL pane groups
+  in 1.5 s, and nearly a minute with the JSON cell, plus a second scan to
+  count the groups. `_groups_sql` groups once and takes MIN and MAX of a
+  text key that sorts the way the ordering column does, with the rid (and
+  the source id on a merge) zero-padded on the end as the file-order
+  tiebreak; the two rows per group are then fetched by rid. What that
+  leans on:
+  - **The key keeps BINARY's order only as `hex()`.** The value goes
+    behind a storage-class letter (`A` NULL, `T` text, `U` blob, which is
+    SQLite's NULL < TEXT < BLOB) and is hexed: hex keeps the byte order
+    BINARY compares in, and the space before the tie sorts below every
+    hex digit, so `ab` sorts before `abc` as it should. Raw text would
+    not do, since a value can contain the separator or a NUL. Numbers
+    never reach the key, because a TEXT-affinity column never stores
+    one. A column with a non-BINARY collation would break it; source
+    columns are declared without one (only indexes say NOCASE).
+  - **A number-sorted column is two passes.** Hex of a REAL does not sort
+    numerically, so `fl_bounds` takes each group's MIN/MAX of the guarded
+    cast and `fl_ties` picks the earliest/latest row equal to them. Both
+    read `fl_rows`, which has to be `MATERIALIZED` (3.35 syntax, behind
+    `_ONCE`) or SQLite flattens it into each reader and scans the table
+    twice. A cell that isn't a number sorts after the numbers at both
+    ends, so it is a bookend only in a group with no number at all, and
+    the Last row's `{which:number}` is the count of numbers, not the
+    group size, whenever there is one.
+  - **Put the bookends in order and cut them to the limit before reading
+    any row.** Fetching every bookend by rid and sorting afterwards made
+    Host + User (486k groups on the 693k-row table) slower than the
+    window functions had been: nearly a million random lookups to keep
+    the 20,000 Copy result wants. `fl_top` orders the bookends by an
+    `ord` value (the key without its tie, or the negated number) and
+    takes the limit, and only those rows are fetched; the outer query
+    sorts them again by position, since the lookups shuffle them.
+  - **The key is built once only because of `LIMIT -1`.** Without it
+    SQLite flattens the inner select into the aggregate and evaluates the
+    CASE once for MIN and again for MAX.
+  - **The preview's group count is a second read of the grouped rows**,
+    `(SELECT COUNT(*) FROM fl_groups)`, with `fl_groups` marked
+    `MATERIALIZED` so the read does not rerun the grouping. The separate
+    `GROUP BY` it replaced was a second scan of the table. `COUNT(*) OVER
+    ()` on the grouped rows looks free and is not: it buffers every group
+    first, and took two of the five seconds on 486k groups.
+  - **The result keeps the old query's shape on purpose.** `SELECT *`
+    over the fetch keeps the `:1` suffix SQLite gives a repeated column
+    name, the helper columns (total, ord, sid, rid) are sliced off by
+    position, and the ORDER BY names its columns by position too, since
+    an included column may share their names.
+  - **On a merge, fetch per member.** Each `UNION ALL` arm joins one
+    member's rows by rid with `e.sid = <member>`; rids collide across
+    members, the same trap as the tag lookup above.
+  The proof that nothing changed is a harness that runs the old and new
+  plugin on random specs (filters, tags, merges, derived columns, Total
+  up, List values, placeholders, the JSON cell, truncation) and compares
+  row for row; the old one needs file order added to its ORDER BY first,
+  because its ties were in no particular order. It and the timings are in
+  the project's benchmarks folder (2026-10-22-firstlast).
+
 - **lateral_movement's event builder previews through the graph's own
   SQL.** `preview` and `edges` both build on `_prepare`, so "273 rows
   match, 12 links" in the builder is the row set Build turns into edges
