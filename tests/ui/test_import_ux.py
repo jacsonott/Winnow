@@ -1,6 +1,6 @@
-"""Import UX: the queue modal's Import-all button sits on the right and
-says so when nothing is queued; the folder modal's Save-as-profile lives
-on the bottom row; the file picker can filter and sort (closes #211)."""
+"""Import UX: the Import dialog's import button sits on the right and
+waits for a file; the folder modal's Save-as-profile lives on the bottom
+row; the file picker can filter and sort (closes #211)."""
 
 from __future__ import annotations
 
@@ -11,19 +11,19 @@ import pytest
 pytestmark = pytest.mark.ui
 
 
-def test_import_all_is_right_aligned_and_complains_about_an_empty_queue(page):
+def test_the_import_button_is_right_aligned_and_waits_for_a_file(page):
     page.evaluate("() => { __winnow.S.importQueue = []; __winnow.openImportModal(); }")
     page.wait_for_selector("#modal:not([hidden])")
-    btn = page.locator("#modalBody .btn", has_text="Import all queued")
+    btn = page.locator("#modalBody .import-foot .btn.primary")
     folder = page.locator("#modalBody .btn", has_text="Import a whole folder…")
     bb, fb = btn.bounding_box(), folder.bounding_box()
     row = btn.evaluate("(n) => n.parentElement.getBoundingClientRect().right")
     assert bb["x"] > fb["x"] + fb["width"] + 40, "pushed away from the folder button"
     assert row - (bb["x"] + bb["width"]) < 4, "flush with the row's right edge"
-    btn.click()
-    page.wait_for_selector(".toast", state="visible")
-    assert "No files queued" in page.locator(".toast").last.inner_text()
-    assert page.locator("#modal").is_visible(), "an empty click keeps the modal open"
+    # Nothing to import yet: the button can't be pressed, and the pane
+    # says how to give it something.
+    assert btn.is_disabled()
+    assert "Drop files here" in page.locator("#modalBody .import-empty").inner_text()
     page.keyboard.press("Escape")
 
 
@@ -114,7 +114,8 @@ def test_the_drop_overlay_and_import_intro_name_everything_that_imports(page):
     """The drop overlay said "CSV/TSV/JSON, or a single SQLite file" and
     the Import window left out Plaso, archives and raw text, so an
     analyst holding a .plaso or a support bundle was told it would not
-    take one. Both list every kind the queue routes a file to."""
+    take one. Both list every kind the queue routes a file to: the
+    Import window where its empty queue's pane says what to drop."""
     kinds = page.evaluate("(names) => names.map((n) => __winnow.importKindFor(n))", list(IMPORT_KINDS))
     assert kinds == ["csv", "json", "sqlite", "xlsx", "plaso", "archive", "text"]
     drag = """(type) => {
@@ -129,7 +130,7 @@ def test_the_drop_overlay_and_import_intro_name_everything_that_imports(page):
     page.wait_for_selector("#dropOverlay", state="hidden")
     page.evaluate("() => { __winnow.S.importQueue = []; __winnow.openImportModal(); }")
     page.wait_for_selector("#modal:not([hidden])")
-    intro = page.locator("#modalBody p").first.inner_text().lower()
+    intro = page.locator("#modalBody .import-empty").inner_text().lower()
     page.keyboard.press("Escape")
     for word in IMPORT_KINDS.values():
         assert word.lower() in overlay, (word, overlay)

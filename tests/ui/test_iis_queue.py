@@ -69,40 +69,49 @@ def _type_select(page, column):
                         has=page.locator(".preview-colname", has_text=column)).locator("select")
 
 
+def _hint(page, name):
+    return page.locator("#modalBody .side-rail-item", has_text=name).locator(".side-rail-hint").inner_text()
+
+
+def _pressed(page, seg):
+    return page.locator(f"#modalBody .{seg} button[aria-pressed=true]").get_attribute("data-key")
+
+
+def _heads_are(page, want):
+    page.wait_for_function("(want) => JSON.stringify([...document.querySelectorAll('#modalBody .preview-colname')]"
+                           ".map((n) => n.textContent)) === JSON.stringify(want)", arg=want, timeout=10_000)
+
+
 def test_an_iis_log_previews_configures_and_imports(page, ui_csv):
     """Preview & configure was greyed out on an IIS log: the analyst could
-    neither see the table before importing it nor change a column's type."""
+    neither see the table before importing it nor change a column's type.
+    The Import dialog shows a queued log's pane with both."""
     p = Path(ui_csv).parent / "u_ex240501.log"
     p.write_text(LOG, newline="")
     try:
         page.evaluate("(p) => { __winnow.S.importQueue = []; __winnow.queuePaths([{ path: p, name: 'u_ex240501.log' }]); __winnow.openImportModal(); }", str(p))
-        page.wait_for_selector("#modal:not([hidden])")
-        row = page.locator("#modalBody .session-row", has_text="u_ex240501.log")
-        assert "default settings · IIS log · W3C" in row.inner_text()
-        assert row.locator("button", has_text="As text").is_visible()
-        row.locator("button", has_text="Preview & configure").click()
-        page.wait_for_selector("#modalBody .preview-tbl")
-        assert page.locator("#modalBody select").first.input_value() == "iis:w3c"
-        assert page.locator("#modalBody input[type=checkbox]").is_disabled()
-        assert "IIS log, W3C · showing first 2 rows" in page.locator("#modalBody .note-status").first.inner_text()
+        page.wait_for_selector("#modal:not([hidden]) .import-pane .preview-tbl")
+        assert _hint(page, "u_ex240501.log") == "IIS log · W3C"
+        # Read as an IIS log, in the format the name says; the delimited
+        # and one-line-per-row readings are the way out of it.
+        assert _pressed(page, "import-readas") == "iis"
+        assert page.locator("#modalBody .import-readas button").all_inner_texts() == ["IIS log", "Delimited", "One line per row"]
+        assert _pressed(page, "import-iis-format") == "w3c"
+        assert "IIS log, W3C" in page.locator("#modalBody .import-preview .side-preview-foot").inner_text()
         # Both headers' fields, the second's c-ip included.
         assert _heads(page) == W3C_COLUMNS
         assert _type_select(page, "sc-status").input_value() == "number"
         _type_select(page, "sc-status").select_option("text")
-        page.locator("#modalBody button", has_text="Use these settings").click()
 
-        row = page.locator("#modalBody .session-row", has_text="u_ex240501.log")
-        assert "configured · IIS log · W3C" in row.inner_text()
         item = page.evaluate("() => __winnow.S.importQueue[0]")
-        assert item["kind"] == "iis" and item["log_format"] == "w3c"
+        assert item["kind"] == "iis"
         assert item["column_types"]["sc-status"] == "text"
-        # Opened again, it shows what was set rather than starting over.
-        row.locator("button", has_text="Preview & configure").click()
-        page.wait_for_selector("#modalBody .preview-tbl")
+        # Shown again, the pane shows what was set rather than starting over.
+        page.evaluate("() => __winnow.openImportModal()")
+        page.wait_for_selector("#modalBody .import-pane .preview-tbl")
         assert _type_select(page, "sc-status").input_value() == "text"
-        page.locator("#modalBody button", has_text="Use these settings").click()
 
-        page.locator("#modalBody button", has_text="Import all queued").click()
+        page.locator("#modalBody .import-foot .btn.primary").click()
         page.wait_for_function("() => __winnow.S.sources.some((s) => s.name === 'u_ex240501.log' && s.row_count === 2)", timeout=20_000)
         cols = page.evaluate("() => __winnow.S.sources.find((s) => s.name === 'u_ex240501.log').columns")
         assert [c["name"] for c in cols] == W3C_COLUMNS
@@ -121,22 +130,35 @@ def test_an_uploaded_iis_log_previews_in_the_format_picked(page):
           await __winnow.queueFiles([new File([text], 'nc240501.log')]);
           __winnow.openImportModal();
         }""", LOG)
-        page.wait_for_selector("#modal:not([hidden])")
-        row = page.locator("#modalBody .session-row", has_text="nc240501.log")
-        assert "IIS log · NCSA" in row.inner_text()
-        row.locator("button", has_text="Preview & configure").click()
-        page.wait_for_selector("#modalBody .preview-tbl")
-        assert page.locator("#modalBody select").first.input_value() == "iis:ncsa"
+        page.wait_for_selector("#modal:not([hidden]) .import-pane .preview-tbl")
+        assert _hint(page, "nc240501.log") == "IIS log · NCSA"
+        assert _pressed(page, "import-iis-format") == "ncsa"
         assert _heads(page)[1:8] == iisread.NCSA_COLUMNS
-        page.locator("#modalBody select").first.select_option("iis:w3c")
-        page.wait_for_function("(want) => JSON.stringify([...document.querySelectorAll('#modalBody .preview-colname')]"
-                               ".map((n) => n.textContent)) === JSON.stringify(want)", arg=W3C_COLUMNS, timeout=10_000)
-        page.locator("#modalBody button", has_text="Use these settings").click()
-        row = page.locator("#modalBody .session-row", has_text="nc240501.log")
-        assert "configured · IIS log · W3C" in row.inner_text()
-        page.locator("#modalBody button", has_text="Import all queued").click()
+        page.locator("#modalBody .import-iis-format button[data-key=w3c]").click()
+        _heads_are(page, W3C_COLUMNS)
+        assert _hint(page, "nc240501.log") == "IIS log · W3C"
+        page.locator("#modalBody .import-foot .btn.primary").click()
         page.wait_for_function("() => __winnow.S.sources.some((s) => s.name === 'nc240501.log' && s.row_count === 2)", timeout=20_000)
         cols = page.evaluate("() => __winnow.S.sources.find((s) => s.name === 'nc240501.log').columns.map((c) => c.name)")
         assert cols == W3C_COLUMNS
     finally:
         page.evaluate(DROP, "nc240501.log")
+
+
+def test_an_iis_named_file_reads_as_text_and_back(page, ui_csv):
+    """The queue row's "As text" is the Read as switch now: a file that only
+    looks like an IIS log reads one line per row, and back as a log."""
+    p = Path(ui_csv).parent / "u_ex240502.log"
+    p.write_text(LOG, newline="")
+    try:
+        page.evaluate("(p) => { __winnow.S.importQueue = []; __winnow.queuePaths([{ path: p, name: 'u_ex240502.log' }]); __winnow.openImportModal(); }", str(p))
+        page.wait_for_selector("#modal:not([hidden]) .import-pane .preview-tbl")
+        page.locator("#modalBody .import-readas button[data-key=text]").click()
+        _heads_are(page, ["Message"])
+        assert _hint(page, "u_ex240502.log") == "Text · one line per row"
+        assert page.locator("#modalBody .import-iis-format").count() == 0
+        page.locator("#modalBody .import-readas button[data-key=iis]").click()
+        _heads_are(page, W3C_COLUMNS)
+        assert _hint(page, "u_ex240502.log") == "IIS log · W3C"
+    finally:
+        page.evaluate("() => { __winnow.closeModal(); __winnow.S.importQueue = []; }")

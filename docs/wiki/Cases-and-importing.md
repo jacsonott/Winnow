@@ -175,9 +175,12 @@ the pointer turns into a no-entry sign instead, see
 
 ### The Import window
 
-The Import window is a queue: add any mix of files, adjust the ones that
-need it, then **Import all queued**. The window closes and the imports run
-in the background while you work (see [Import jobs](#import-jobs)).
+The Import window is a queue in two panes, like **Import a folder** and the
+Tables manager: the queued files down the left, the chosen file's settings
+and preview on the right, and the buttons along the foot. Add any mix of
+files, set the ones that need it, then **Import N files**. The window closes
+and the imports run in the background while you work (see
+[Import jobs](#import-jobs)).
 
 - **Add from this machine…** browses the disk Winnow runs on and imports in
   place, with no copy — the fast route for big files. Type a path or click
@@ -187,28 +190,35 @@ in the background while you work (see [Import jobs](#import-jobs)).
 - **Upload from browser…** is the browser's own picker. The file is copied
   to the server's temporary folder first, which needs the space and takes
   longer; a file over 1 GB gets a reminder to add it by path.
+- **Import a whole folder…** is [folder import](#folders-and-kape-output).
 
-Each queued file names the reader that will take it, after
-`default settings` or `configured` (and `by path ·` when added from this
-machine):
+Under each file's name the list says how it will be read: *Delimited ·
+auto-detect*, *JSON · nested kept as JSON*, *SQLite · 2 tables*, *Text · one
+line per row* and so on. **Filter queued files…** narrows a long queue, and
+**✕** takes a file off it. The chosen file's pane, from the top:
 
-| Reader | Button | Notes |
-| --- | --- | --- |
-| `csv` | **Preview & configure** | Delimiter, header and column types. |
-| `json` | **Preview & configure** | How nested objects are flattened. |
-| `text · one line per row` | **Preview & configure** | Can be switched to delimited. |
-| `sqlite` | **Pick tables…** | Must be done before **Import all queued** will run. |
-| `xlsx` | **Pick sheets…** | The same, for sheets. |
-| `plaso`, `archive` | greyed out | Nothing to configure. |
-| `IIS log · W3C` (or `· NCSA`, `· native`) | **Preview & configure**, **As text** | Format and column types. **As text** reads a file that only looks like an IIS log one line per row. |
-| a plugin format's name | **Options**, **As text** | **As text** (uploads only) skips the plugin and reads the file one line per row. |
+| Part | What it holds |
+| --- | --- |
+| **File** | Its name, the folder it is in, its size, and *read in place* (added from this machine) or *uploaded when it imports*. |
+| **Read as** | Only for a file that can be read more than one way: **Delimited** or **One line per row** for delimited and other text; **JSON** or **One line per row**; **IIS log**, **Delimited** or **One line per row**; a plugin's format or **One line per row** for an uploaded file a plugin claims. |
+| Settings | The reader's own: **Delimiter** and **Header**, JSON's **Nested objects**, an IIS log's **Format**, a plugin format's options. Plaso files and archives have none. |
+| **Preview** | The first 50 rows as they will import, a type picker in each column's heading where the type can be set, and a line under it saying what was detected. A SQLite file or workbook lists its **Tables** or **Sheets** here instead, to tick. |
 
-Without **Preview & configure** a file imports with the detected settings;
-**✕** takes it off the queue. A file headed for the raw-text reader that
-looks binary (a NUL in its first 8 KB; a UTF-16 byte-order mark is exempt)
-is dropped from the queue with *Skipped N binary files (not text)*, so an
-`.exe` or `.evtx` picked by mistake is never uploaded. Added by path, it
-fails when its import starts.
+A setting is kept as you change it, and choosing another file keeps it, so
+there is nothing to confirm; a file whose pane you never open imports with
+the detected settings. A SQLite file or workbook can't import until its
+tables or sheets are ticked: the list says *SQLite · pick tables* in the
+accent colour until then, and **Import N files** takes you to it.
+
+An uploaded file previews from its first 1 MB, which is more than the
+preview reads. JSON, SQLite and Excel previews need the whole file, so over
+32 MB the pane asks first with **Load preview (uploads …)**. A file added
+from this machine previews in place at any size.
+
+A file headed for the raw-text reader that looks binary (a NUL in its first
+8 KB; a UTF-16 byte-order mark is exempt) is dropped from the queue with
+*Skipped N binary files (not text)*, so an `.exe` or `.evtx` picked by
+mistake is never uploaded. Added by path, it fails when its import starts.
 
 ### From the command line
 
@@ -254,18 +264,20 @@ add a [derived column](Derived-columns.md).
 `.psv` pipe — if the file agrees: that character on every sampled line, the
 same number of times on at least 90% of them. Otherwise, and for `.txt` and
 extensionless files, the content is sniffed for comma, tab, semicolon or
-pipe. **Preview & configure** shows *Detected delimiter: …* and can override
-it (**Auto-detect**, **Comma**, **Tab**, **Semicolon**, **Pipe**), or choose
-**Lines — one line per row (logs)** to read the file as
-[raw text](#plain-text-and-log-files). KAPE writes some delimited output as
-`.txt`, so `.txt` comes here by default; a `.txt` log wants **Lines**.
+pipe. The line under the file's preview says what was found
+(*Comma-delimited (detected) · 12 columns · first 50 rows*), and
+**Delimiter** overrides it (**Auto-detect**, **Comma**, **Tab**,
+**Semicolon**, **Pipe**). **Read as** → **One line per row** reads the file as
+[raw text](#plain-text-and-log-files) instead. KAPE writes some delimited
+output as `.txt`, so `.txt` comes here by default; a `.txt` log wants
+**One line per row**.
 
 **Header.** **First row is headers** is on by default, and the first
 non-blank line is the header. Off, columns are named `col_1`, `col_2`… and
 the first line is data. A blank header becomes `col_N`, a repeated one gets
 `_1`, `_2`, and `rid`, `rank` or `rowid` get `_1` because those names are
-taken. Each column in the preview also has a text / number / datetime
-picker; **Use these settings** keeps your choices.
+taken. Each column's heading in the preview has a text / number / datetime
+picker, and what you pick is kept as you pick it.
 
 **Encodings.** Winnow decides from the first 1 MB:
 
@@ -306,13 +318,14 @@ that isn't an object lands in a column called `value`. The import reads the
 file twice, once to find every column, so it is slower than a CSV of the
 same size.
 
-**Preview & configure** chooses how nested objects become columns:
+**Nested objects**, in the file's pane, chooses how nested objects become
+columns:
 
 | Option | `{"user": {"name": "a", "id": 1}, "tags": ["x"]}` becomes |
 | --- | --- |
-| **Don't flatten** (default) | `user` = `{"name": "a", "id": 1}`, `tags` = `["x"]` |
-| **Flatten completely** | `user.name` = `a`, `user.id` = `1`, `tags` = `["x"]` |
-| **Flatten to depth…** N | Objects unfolded N levels; anything deeper stays JSON text. |
+| **Keep as JSON** (default) | `user` = `{"name": "a", "id": 1}`, `tags` = `["x"]` |
+| **Flatten** | `user.name` = `a`, `user.id` = `1`, `tags` = `["x"]` |
+| **Flatten to depth** N | Objects unfolded N levels; anything deeper stays JSON text. |
 
 Arrays are never split, at any depth — their length varies record to record
 — so they stay as JSON text in one column. Columns appear in the order keys
@@ -328,18 +341,20 @@ field out of a JSON cell later, use [derived columns](Derived-columns.md).
 - A broken line in a `.jsonl` is skipped and counted (*N unreadable records
   skipped*); a truncated `.json` document fails the import.
 - The preview reads the whole file, so an uploaded `.json` is uploaded in
-  full just to preview it. Add big ones with **Add from this machine…**.
+  full just to preview it, and past 32 MB the pane asks first. Add big ones
+  with **Add from this machine…**.
 
 ### SQLite databases
 
-**Pick tables…** lists every table with its row count. Tick the ones you want
-(none are ticked at first) and **Use selected tables**; each becomes its own
-table, named `<file name>.<table>` such as `History.urls`, and all of them
-import as one job.
+A SQLite file's pane lists every table with its row count where the preview
+would be. Tick the ones you want (none are ticked at first; **All** and
+**None** tick or clear the lot). Each becomes its own table, named
+`<file name>.<table>` such as `History.urls`, and all of them import as one
+job.
 
 Chromium browsers store times as microseconds since 1601. A column whose
 name contains `time`, `utc` or `date` and whose values look like that gets a
-button under *Convert to readable datetime:*, already pressed. Pressed
+button under its table, after *Convert to dates:*, already pressed. Pressed
 columns import as ISO 8601 UTC (`2024-05-01T13:07:00.123Z`), and a value
 that doesn't convert keeps its number; unpress a button to keep the raw
 number throughout.
@@ -352,11 +367,9 @@ with *can't be read: …* and can't be ticked; the others still import.
 
 ### Excel workbooks
 
-**Pick sheets…** works like the table picker: tick sheets and
-**Use selected sheets**, and each becomes a table (named
-`<file name>.<sheet>`). Its row counts are
-estimates from the sheet's declared size; the import reads every row there
-is. `.xlsm` imports the same way, and macros never run.
+A workbook's pane works the same way: tick sheets, and each becomes a table
+(named `<file name>.<sheet>`). Its row counts are estimates from the sheet's
+declared size; the import reads every row there is. `.xlsm` imports the same way, and macros never run.
 
 - The header is the first non-empty row, so title rows above it are skipped.
   Data wider than the header lands in `col_N` columns.
@@ -422,13 +435,15 @@ to `Parameters`; native format logs the server's local time with no offset,
 so that timestamp is not converted. In both, a line that isn't in the format
 is kept whole in an `Unparsed line` column.
 
-**Preview & configure** shows the first rows as they will import, from the
-start of the file; for W3C it says when a `#Fields:` line further in can still
-add columns. The first list picks the format: the one the name says is
-selected, and the other two are there for a log that was renamed or isn't what
-its name says. The delimited and **Lines** choices read the file as any other
-text file. Each column's type can be changed; a type set here sticks to that
-column by name, so a column a later header adds keeps its detected type.
+An IIS log's pane previews the first rows as they will import, from the
+start of the file; for W3C the line under the preview says when a `#Fields:`
+line further in can still add columns. **Format** picks **W3C extended**,
+**NCSA common** or **IIS native**: the one the name says is picked, and the
+other two are there for a log that was renamed or isn't what its name says.
+**Read as** → **Delimited** or **One line per row** reads the file as any
+other text file. Each column's type can be changed; a type set here sticks
+to that column by name, so a column a later header adds keeps its detected
+type.
 
 A server that loses power mid-write leaves a run of zero bytes in its log,
 and IIS carries on after them when it comes back. The text either side of the
@@ -447,8 +462,8 @@ dump — imports as raw text: one row per line, the whole line in a single
 `Message` column, no header, nothing split. The row number is the line
 number: blank lines are kept as empty rows, and only a newline ends a line,
 so a carriage return inside a logged value can't fake an extra row. Binary
-files are refused. **Lines — one line per row (logs)** in the delimited
-preview forces any file into this reader.
+files are refused. **Read as** → **One line per row**, in the pane of any
+file that has a **Read as**, forces that file into this reader.
 
 ### Archives
 
@@ -457,7 +472,7 @@ archives and single gzipped files (`hostd.0.gz`) expand, then import. A
 `.bz2` or `.xz` that is a single compressed file, not a tarball, is not
 supported.
 
-**Import all queued** expands the archive into a new folder named after it
+**Import N files** expands the archive into a new folder named after it
 (`bundle.tgz` → `bundle-extracted`) — beside the archive when added from
 this machine, beside the case file when uploaded — and opens
 [folder import](#folders-and-kape-output) on it so you choose what to import.
@@ -551,9 +566,9 @@ Two bundled plugins add formats; both ship switched off (**Settings →
 Plugins**). **mft_usn** reads a raw NTFS `$MFT` and `$UsnJrnl:$J`, recognised
 by name (`$MFT`, `$J`, `*$UsnJrnl*`…), without EZTools. **esxi_logs** reads
 ESXi support-bundle and UAC Linux host logs. A claimed file shows the
-format's name in the queue, with **Options** if it has any. Built-in
-extensions always win, so no plugin can take over `.csv` or `.json`, and
-neither do built-in names: **esxi_logs** claims `.log`, but an
+format's name in the queue, and its options, if it has any, in the file's
+pane. Built-in extensions always win, so no plugin can take over `.csv` or
+`.json`, and neither do built-in names: **esxi_logs** claims `.log`, but an
 [IIS log](#iis-web-server-logs) is still read as one. Plugin
 imports don't run as background jobs: they show an *Importing …* notice, not
 a progress row, and can't be cancelled. See [Plugins](Plugins.md).

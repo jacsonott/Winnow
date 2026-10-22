@@ -1104,8 +1104,8 @@ see [docs/notes/README.md](README.md) for the whole set.
 - **A side-list dialog is one frame, shared** (`sideRail` in ui.js, the
   `.side-*` rules in style.css): what to choose down the left under a
   search box, pinned favourites on top, everything about the choice on
-  the right, the buttons under both. Add derived column and Import a
-  folder are the two. Decisions held in common:
+  the right, the buttons under both. Add derived column, Import a folder
+  and Import are the three. Decisions held in common:
   - **Fixed height, top-anchored.** `.side-panes` is one height and the
     card is `.tall`; on the right, exactly one box takes what is left and
     scrolls (the derive settings, the folder import's file list) and
@@ -1123,7 +1123,9 @@ see [docs/notes/README.md](README.md) for the whole set.
     `{hint}`): a timestamp format, a profile's pattern. An entry found by
     its own name shows no hint.
   - **Pins are `menuPins(key)`** ('derive', 'import'), per browser like
-    the row menu's. A pin whose entry is gone shows nothing; the folder
+    the row menu's. A list with nothing to pin passes `action` instead
+    (Import's queue: ✕ to take a file out), and its button sits where ☆
+    would. A pin whose entry is gone shows nothing; the folder
     import also drops a deleted profile's pin when it deletes one,
     because profile ids are max+1 (`workspace._next_id`) — delete the
     newest profile and the next one saved gets its id, and would arrive
@@ -1431,6 +1433,38 @@ see [docs/notes/README.md](README.md) for the whole set.
   `tablesView` keeps the filter, grouping and sort for the page, so they
   survive a trip into the table menu and back.
   tests/ui/test_tables_manager_panes.py, test_tables_density.py.
+- **The Import dialog is the side-list frame too** (`openImportModal`
+  in importer.js, `.import-*` in style.css). The queue is the rail: a
+  queued file by name, with how it will be read under it (`queueHint`),
+  and a SQLite file or workbook with nothing ticked says *pick tables* in
+  the accent colour (`entry.warn`). The pane is the chosen file: File,
+  Read as (`readAsOptions`/`switchKind`; the kind a file was queued as is
+  kept in `queuedAs`, so the way back from One line per row restores a
+  plugin's format and options), the kind's settings, and the preview box
+  that takes the rest — a SQLite file's or workbook's tables to tick
+  stand in that box. It used to be a column of rows with a button on
+  each (Preview & configure, Pick tables…, Options, As text) that swapped
+  the whole dialog for a one-file dialog (`openImportPreview`,
+  `openJsonImportPreview`, `openUnitPicker`, `openPluginOptionsForm`, all
+  gone), whose settings only stuck on Use these settings. Decisions:
+  - **A setting is the queue item's as it changes.** There is nothing to
+    confirm, so choosing another file can't lose one. The chosen file is
+    a `qid` (`importSel`), kept across the dialog's reopening, which is
+    how the server-disk picker comes back to it.
+  - **The preview loads when a file is chosen**, so choosing one must be
+    cheap: an upload's delimited, text or IIS preview sends its first
+    `PREVIEW_HEAD_BYTES`, and a whole-file one (JSON, SQLite, Excel) past
+    `AUTO_PREVIEW_UPLOAD_BYTES` waits for Load preview. `previewRunner`
+    keeps the last answer dimmed behind a sequence number, like the
+    folder import's preview.
+  - **Import goes to the file that still needs a choice** instead of only
+    saying so: it selects that file and toasts what to pick.
+  - **Not `sectionPanes`.** The left side is a list of like things to
+    filter, as in Import a folder, not a fixed set of sections.
+  - **No intro line.** The empty queue's pane says what to drop and what
+    imports; a full one has no line to spare.
+  tests/ui/test_import_queue_ui.py, test_iis_queue.py,
+  test_xlsx_picker_ui.py, test_text_import_ui.py.
 - **A header set's default layout seeds a table once, so it needs its
   own way onto the rest** (the table menu's Layout section with the
   default chosen; columns.js `applyDefaultLayout` is the same as a

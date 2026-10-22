@@ -67,7 +67,7 @@ see [docs/notes/README.md](README.md) for the whole set.
 - Excel ingest (`ingest_xlsx_sheet`/`preview_xlsx_sheets`, xlsxread.py) is
   the sheet-shaped sibling of the SQLite path — one workbook, N picked
   sheets, one background job, the same `{tables: [{table, name?}]}` option
-  shape and the same frontend picker (`openUnitPicker` serves both). It
+  shape and the same frontend list (`buildUnitSettings` serves both). It
   reads through **openpyxl's read-only mode** (already a runtime dependency
   — the XLSX *export* writes through it), not a hand-rolled parser; what
   xlsxread.py owns is the typed-cell→TEXT conversion. Three traps worth
@@ -271,7 +271,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   The frontend decides what actually gets imported and does it by looping
   over `/api/ingest/path` / the new `/api/ingest/json/path` sibling, one
   file at a time — same per-file, try/catch, toast-per-file loop
-  `openImportModal`'s "Import all queued" already used, just fed by the
+  `openImportModal`'s import (`importQueued`) already used, just fed by the
   scan's matches instead of a manual file picker. A pattern containing `/`
   matches the file's path relative to the scan root; one without matches
   the bare filename anywhere in the tree — this is what lets
@@ -358,24 +358,26 @@ see [docs/notes/README.md](README.md) for the whole set.
 - **There is one import entry point** — the Case menu's "Import…" →
   `openImportModal`, whose queue now takes CSV/TSV, JSON/JSONL *and*
   SQLite files (`importKindFor` routes by extension; a sqlite item's
-  "Pick tables…" opens `openSqliteTablePicker`, the old standalone
-  sqlite modal reshaped into the same `{initial, onConfirm, onCancel}`
-  contract the CSV/JSON previews already had, storing
+  pane lists its tables to tick, `buildUnitSettings`, storing
   `{tables: [{table, timestamp_columns}]}` on the queue item). The
   directory-import modal is reached from inside it ("Import a whole
   folder…") and both flows start background jobs rather than awaiting
-  sync uploads — "Import all queued" closes the modal immediately and a
+  sync uploads — "Import N files" closes the modal immediately and a
   detached async chain uploads sequentially (one disk, one spool at a
   time) while the jobs panel tracks everything. Don't add a second
   menu entry per format again; the queue is the router.
   Every queue item carries its transport explicitly — `{file: File}` for
   a browser pick/drop, `{path}` for one added from the server's own disk —
-  and the import loop, the three configure previews and the SQLite table
-  picker all branch on which field is set. A path item reads **in place**
+  and the import loop and the pane's previews (`fetchPreview`) all branch
+  on which field is set. A path item reads **in place**
   (`/api/ingest/jobs/path`, `/api/ingest/preview/path` — no upload leg, no
   tempfile spool, no 50 GB copied to produce a file already on the disk;
   the preview half matters most for JSON, whose upload preview round-trips
-  the whole file). The visible door to the path transport is the import
+  the whole file). An upload's delimited, text or IIS preview sends only
+  its first `PREVIEW_HEAD_BYTES` (1 MB, more than the server's 512 KB
+  sample); a JSON, SQLite or Excel one needs the whole file, and past
+  `AUTO_PREVIEW_UPLOAD_BYTES` (32 MB) the pane asks before sending it,
+  since the preview loads when a file is chosen, not on a button. The visible door to the path transport is the import
   modal's **"Add from this machine…"** (`openFolderBrowser` in files
   mode → `browse_dir?files=true` → `queuePaths`), deliberately listed
   first: browser and server are the same machine here, so the path
@@ -410,15 +412,15 @@ see [docs/notes/README.md](README.md) for the whole set.
   silently works only sometimes made the upload path untrustworthy ("did
   it copy or not?"). The lesson recorded here is the *pair*: implicit
   transport selection traded a click for uncertainty, and the click won.
-  If a resolver-like idea comes back, it must be visible in the queue row
-  the way `by path ·` is now.
+  If a resolver-like idea comes back, it must be visible in the queue
+  the way the pane's *read in place* is now.
 - **Dragging a file from the OS onto the window** (`wireFileDrop`,
   `handleDroppedFiles`) is an alternative entry point into the *existing*
   import flows, not a new one — every dropped file (CSV/JSON *and*
   SQLite) queues into the same `S.importQueue`/`openImportModal` a picked
   file does (via `queueFiles`, factored out of the file `<input>`'s own
-  `onchange`); a queued SQLite item still has to go through "Pick
-  tables…" (`openSqliteTablePicker`) before it can import — which
+  `onchange`); a queued SQLite item still has to have its tables ticked
+  in its pane before it can import — which
   table(s) to pull out is a real choice, so it can't just auto-import the
   way CSV/JSON does. There is nothing for the drop itself to
   recognize: `handleDroppedFiles` puts every dropped file through `queueFiles`

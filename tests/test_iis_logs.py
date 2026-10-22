@@ -413,7 +413,7 @@ def test_a_session_reimports_an_iis_log_as_one(store, tmp_path):
 
 
 # ------------------------------------------- the import preview's settings
-# The queue's "Preview & configure": the format the name says, or another
+# The Import dialog's IIS pane: the format the name says, or another
 # of the three, and a type per column. The types are by column NAME,
 # because the preview reads the start of the log and a #Fields: line
 # further in can add columns ahead of the ones it showed.
