@@ -520,7 +520,7 @@ export function openFolderBrowser(startPath, onSelect, onCancel, { mode = 'folde
    there's no surviving DOM to read values back out of afterward; the only
    way to preserve what the analyst already typed is to snapshot it into
    plain values and re-invoke this function with them as the new initial
-   state, same pattern openImportPreview's onConfirm/onCancel already use.
+   state, the pattern Import a folder's Browse… uses too.
 
    `state.saveQuickLook` makes this the quick look's "Save as a case…"
    (tempSaveAs): the same fields, but the open quick look's file moves to

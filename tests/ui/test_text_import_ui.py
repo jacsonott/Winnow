@@ -1,6 +1,6 @@
 """A log with an extension nothing claims, end to end through the import
 queue: queued as raw text, imported one line per row into a Message
-column. Also that the CSV preview's Lines option is there to force it.
+column. Also that the Read as switch is there to force it either way.
 """
 from pathlib import Path
 
@@ -19,19 +19,21 @@ def log_file(ui_csv) -> Path:
 def test_log_queues_as_text_and_imports_one_line_per_row(page, log_file):
     try:
         page.evaluate("(p) => { __winnow.S.importQueue = []; __winnow.queuePaths([{ path: p, name: 'hostd.log.1' }]); __winnow.openImportModal(); }", str(log_file))
-        page.wait_for_selector("#modal:not([hidden])")
-        row = page.locator("#modalBody .session-row", has_text="hostd.log.1")
-        assert "text · one line per row" in row.inner_text()
-        # The preview opens on the Lines option, header control disabled
-        row.locator("button", has_text="Preview").click()
-        page.wait_for_selector("#modalBody select")
-        assert page.locator("#modalBody select").first.input_value() == "lines"
-        assert page.locator("#modalBody input[type=checkbox]").is_disabled()
-        page.wait_for_selector("#modalBody .preview-tbl")
-        assert "One line per row" in page.locator("#modalBody .note-status").first.inner_text()
-        page.locator("#modalBody button", has_text="Use these settings").click()
-        page.wait_for_selector("#modalBody .session-row")
-        page.locator("#modalBody button", has_text="Import all queued").click()
+        page.wait_for_selector("#modal:not([hidden]) .import-pane .preview-tbl")
+        item = page.locator("#modalBody .side-rail-item", has_text="hostd.log.1")
+        assert item.locator(".side-rail-hint").inner_text() == "Text · one line per row"
+        # Its pane opens on one line per row, with no delimiter to set.
+        pressed = "#modalBody .import-readas button[aria-pressed=true]"
+        assert page.locator(pressed).inner_text() == "One line per row"
+        assert page.locator("#modalBody .import-delims").count() == 0
+        assert "One line per row" in page.locator("#modalBody .import-preview .side-preview-foot").inner_text()
+        # Delimited and back: the switch goes both ways.
+        page.locator("#modalBody .import-readas button[data-key=csv]").click()
+        page.wait_for_selector("#modalBody .import-delims")
+        assert item.locator(".side-rail-hint").inner_text() == "Delimited · auto-detect"
+        page.locator("#modalBody .import-readas button[data-key=text]").click()
+        page.wait_for_function("() => document.querySelector('#modalBody .import-preview .side-preview-foot').textContent.includes('One line per row')")
+        page.locator("#modalBody .import-foot .btn.primary").click()
         page.wait_for_function("() => __winnow.S.sources.some((s) => s.name === 'hostd.log.1' && s.row_count === 4)", timeout=20_000)
         sid = page.evaluate("() => __winnow.S.sources.find((s) => s.name === 'hostd.log.1').id")
         page.evaluate("(id) => __winnow.openSource(id)", sid)

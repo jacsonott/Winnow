@@ -460,10 +460,17 @@ export function sideRailMatch(entry, query) {
    `notes` maps a group to a line shown in its place while it has no
    entries at all. `locked` (a re-derive, where what to make is fixed)
    disables the search and every row but the chosen one. Pins are
-   menuPins(pinsKey): per browser, beside the row menu's. */
+   menuPins(pinsKey): per browser, beside the row menu's.
+
+   A list of things the analyst is working through rather than choosing
+   between (the Import dialog's queue) has no favourites to pin: it passes
+   `action` instead — {glyph, title, label(entry), run(entry)} — and that
+   button takes the pin's place on every row. An entry's own `hint` is its
+   second line when a search found it by name (what is set on it now, as
+   the section lists say); `warn` marks that line as needing attention. */
 export function sideRail({ entries, groups, selected, onPick, pinsKey, match = sideRailMatch,
-                           notes = {}, locked = false, label = 'What to choose' }) {
-  const pins = menuPins(pinsKey);
+                           notes = {}, locked = false, label = 'What to choose', action = null }) {
+  const pins = menuPins(action ? null : pinsKey);
   const search = el('input', 'side-search');
   search.type = 'search';
   search.placeholder = 'Search…';
@@ -497,9 +504,19 @@ export function sideRail({ entries, groups, selected, onPick, pinsKey, match = s
     r.classList.toggle('selected', on);
     item.disabled = locked && !on;
     item.append(el('span', 'side-rail-label', entry.label));
-    if (hit.hint) item.append(el('span', 'side-rail-hint', hit.hint));
+    const hint = hit.hint || entry.hint;
+    if (hint) item.append(el('span', 'side-rail-hint' + (entry.warn && !hit.hint ? ' warn' : ''), hint));
     item.title = entry.title || '';
     item.onclick = () => onPick(entry, hit);
+    if (action) {
+      const act = el('button', 'side-rail-pin', action.glyph);
+      act.type = 'button';
+      act.title = action.title;
+      act.setAttribute('aria-label', action.label(entry));
+      act.onclick = () => action.run(entry);
+      r.append(item, act);
+      return r;
+    }
     const pin = el('button', 'side-rail-pin', pinned ? '✕' : '☆');
     pin.type = 'button';
     pin.title = pinned ? 'Unpin from the top of this list' : 'Pin to the top of this list';

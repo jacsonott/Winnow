@@ -3030,6 +3030,72 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .copy-layout-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .copy-layout-note { flex: 0 0 auto; font-family: var(--ui); font-size: 11px; color: var(--dim); }
 
+/* The Import dialog (openImportModal) in the same frame: the queued files
+   down the left, a file's name and how it will be read on the right, then
+   its settings, then the preview, which is the part that takes what is
+   left and scrolls — both ways, since a wide CSV is wide. The side list is
+   wider than the other dialogs': its entries are file names, which run
+   long and are told apart by their ends. */
+.side-panes.import-queue { grid-template-columns: 280px minmax(0, 1fr); }
+.import-queue .side-rail-label { font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.side-rail-hint.warn { color: var(--accent); }
+.import-pane { overflow: hidden; }
+.import-pane .derived-row { margin: 6px 0; }
+.import-pane > .derived-row:first-child { margin-top: 0; }
+.import-file-where { flex: 1 1 auto; min-width: 0; display: flex; align-items: baseline; gap: 8px; }
+.import-file-name { flex: 0 0 auto; max-width: 100%; font-family: var(--mono); font-size: 12px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* rtl so the ellipsis takes the path's start; the marks around the text
+   keep a leading / where it belongs. */
+.import-file-dir { flex: 0 1000 auto; min-width: 0; direction: rtl; text-align: left; font-family: var(--mono); font-size: 11px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.import-file-how { flex: 0 0 auto; font-size: 11px; color: var(--dim); white-space: nowrap; }
+.import-pane .mb-seg button { font-size: 11.5px; padding: 3px 10px; }
+.import-check { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text); cursor: pointer; }
+.import-pane .derived-row input.import-depth { flex: 0 0 64px; padding: 3px 6px; }
+.import-note { margin: 2px 0 4px; line-height: 1.45; }
+.import-settings > .import-note:only-child { margin: 0; }
+.import-preview-aside { margin-left: auto; font-size: 11px; color: var(--dim); }
+.import-pane .import-preview .side-preview-rows { padding: 0; }
+.import-pane .import-preview .side-preview-rows > .fb-help,
+.import-pane .import-preview .side-preview-rows > .btn { margin: 10px; }
+.import-pane .side-preview-foot { height: 30px; }
+.import-pane .preview-tbl { width: max-content; min-width: 100%; }
+.import-pane .preview-tbl th, .import-pane .preview-tbl td { border-top: 0; border-left: 0; }
+.import-units { display: flex; flex-direction: column; gap: 1px; padding: 4px; }
+.import-unit {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; min-height: 26px; padding: 2px 6px;
+  border-radius: var(--radius-sm); font-size: 12px;
+}
+.import-unit:hover { background: var(--panel-2); }
+.import-unit-pick { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.import-unit-pick input { margin: 0; accent-color: var(--accent); }
+.import-unit-name { font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.import-unit.error .import-unit-name { color: var(--dim); }
+.import-unit-count { flex: 0 0 auto; font-family: var(--mono); font-size: 11.5px; color: var(--dim); font-variant-numeric: tabular-nums; }
+.import-unit-chips { flex: 1 0 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 0 0 4px 24px; }
+.import-unit-chips::before { content: 'Convert to dates:'; font-size: 11px; color: var(--dim); margin-right: 2px; }
+.import-unit-chips .btn { font-family: var(--mono); font-size: 10.5px; padding: 1px 7px; }
+.import-unit-chips .btn[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--accent) 16%, transparent); border-color: var(--accent-dim); color: var(--text);
+}
+/* Nothing queued: where a file's pane would be, what to give it. */
+.import-empty {
+  flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 4px; padding: 24px 48px; text-align: center;
+  border: 1px dashed var(--line-2); border-radius: var(--radius-md);
+}
+.import-empty-title { font-size: 15px; color: var(--text); margin-bottom: 4px; }
+.import-empty .fb-help { max-width: 480px; margin: 2px 0; line-height: 1.5; }
+
+/* A phone-narrow window: the queue goes on top as a short list of its
+   own, and the pane gets the whole width under it. */
+@media (max-width: 640px) {
+  .side-panes.import-queue { grid-template-columns: minmax(0, 1fr); grid-template-rows: 150px minmax(0, 1fr); }
+  .import-queue .side-rail { border-right: 0; padding: 0 0 6px; border-bottom: 1px solid var(--line); }
+  .import-pane .derived-row-label { flex-basis: 90px; }
+  .import-file-dir { display: none; }
+  .import-foot { flex-wrap: wrap; }
+}
+
 /* The table menu in two panes (openTableMenu, in timeframe.js): its
    sections down a side list with what each one holds under its name, the
    chosen one on the right, and the everyday actions along the foot. The

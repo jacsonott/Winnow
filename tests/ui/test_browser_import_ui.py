@@ -59,11 +59,12 @@ def test_a_file_picked_in_the_import_dialog_is_uploaded_and_imported(page, api, 
         page.evaluate("() => __winnow.openImportModal()")
         page.wait_for_selector("#modal:not([hidden])")
         page.locator("#modal input[type=file]").set_input_files(str(path))
-        page.wait_for_selector("#modal .session-row .session-name:text-is('picked.csv')")
-        # Queued as a browser file, not a path on this machine.
-        assert "by path" not in page.locator("#modal .session-row").inner_text()
+        page.wait_for_selector("#modal .side-rail-item .side-rail-label:text-is('picked.csv')")
+        # Queued as a browser file, not a path on this machine, and chosen.
+        assert "uploaded when it imports" in page.locator("#modal .import-file-how").inner_text()
+        assert page.locator("#modal .import-file-name").inner_text() == "picked.csv"
         with page.expect_request(_upload) as req:
-            page.locator("#modal button", has_text="Import all queued").click()
+            page.locator("#modal .import-foot .btn.primary", has_text="Import 1 file").click()
         assert req.value.headers["content-type"].startswith("multipart/form-data")
         _assert_imported(_wait_for_table(page, api, "picked.csv"))
     finally:
@@ -93,9 +94,9 @@ def test_a_file_dropped_on_the_window_is_queued_uploaded_and_imported(page, api)
         # Not prevented, the browser would navigate away to the file.
         assert dropped
         assert not page.locator("#dropOverlay").is_visible()
-        page.wait_for_selector("#modal:not([hidden]) .session-row .session-name:text-is('dropped.csv')")
+        page.wait_for_selector("#modal:not([hidden]) .side-rail-item .side-rail-label:text-is('dropped.csv')")
         with page.expect_request(_upload):
-            page.locator("#modal button", has_text="Import all queued").click()
+            page.locator("#modal .import-foot .btn.primary", has_text="Import 1 file").click()
         _assert_imported(_wait_for_table(page, api, "dropped.csv"))
     finally:
         page.evaluate("() => { delete window.__drop; }")

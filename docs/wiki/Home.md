@@ -23,7 +23,7 @@ example:
    and a starter watchlist. ([Cases and importing](Cases-and-importing.md))
 3. **Import.** **Import files…** in the empty case (later, **Case ▾ →
    Import…**), add the CSV with **Add from this machine…**, and
-   **Import all queued**. The new table arrives as a tab, and its search
+   **Import 1 file**. The new table arrives as a tab, and its search
    index finishes building in the background. For a whole KAPE output, use
    **Import a whole folder…** instead.
 4. **Filter.** Open **Filters ▾** and pick **EVTX — Logons** from the

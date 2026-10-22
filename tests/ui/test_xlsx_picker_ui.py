@@ -1,8 +1,9 @@
 """The Excel sheet picker, driven through the real import queue: an .xlsx
 queued by path must demand its sheets be picked (same gate as SQLite),
-open the picker listing every data sheet, and import the checked one as a
+list every data sheet in its pane, and import the checked one as a
 background job. The wiring under test is exactly what a refactor of the
-shared openUnitPicker could silently drop for one of its two callers."""
+pane SQLite and Excel share (buildUnitSettings) could silently drop for
+one of its two kinds."""
 
 from __future__ import annotations
 
@@ -27,27 +28,30 @@ def test_sheet_picker_flow(page, tmp_path):
     path = tmp_path / "mini.xlsx"
     wb.save(path)
 
-    page.evaluate("(p) => __winnow.queuePaths([{ path: p, name: 'mini.xlsx' }])", str(path))
+    page.evaluate("(p) => { __winnow.S.importQueue = []; __winnow.queuePaths([{ path: p, name: 'mini.xlsx' }]); }", str(path))
     page.evaluate("() => __winnow.openImportModal()")
     page.wait_for_selector("#modal:not([hidden])")
 
-    # Queued as an xlsx that still needs its sheets picked — and the gate
-    # refuses to import it before that happens.
-    assert "pick sheets · xlsx" in page.locator(".session-row .count").first.inner_text()
-    page.locator("#modalBody .btn", has_text="Import all queued").click()
+    # Queued as an xlsx that still needs its sheets picked — said in the
+    # side list, in the accent — and the gate refuses to import it before
+    # that happens, keeping the dialog open on it.
+    hint = page.locator("#modalBody .side-rail-item", has_text="mini.xlsx").locator(".side-rail-hint")
+    assert hint.inner_text() == "Excel · pick sheets"
+    assert "warn" in hint.get_attribute("class")
+    page.locator("#modalBody .import-foot .btn.primary").click()
     assert "Pick which sheets" in page.locator("#toast").inner_text()
+    assert page.locator("#modal").is_visible()
 
-    page.locator("#modalBody .btn", has_text="Pick sheets…").click()
-    page.wait_for_selector(".session-name >> text=Events")
-    rows = page.locator("#modalBody .session-row")
+    page.wait_for_selector("#modalBody .import-unit-name >> text=Events")
+    rows = page.locator("#modalBody .import-unit")
     assert rows.count() == 2  # both data sheets listed, with row counts
     assert "2 rows" in rows.first.inner_text()
     rows.first.locator("input[type=checkbox]").check()
-    page.locator("#modalBody .btn", has_text="Use selected sheets").click()
 
-    # Back on the queue: configured, showing what was picked.
-    page.wait_for_selector(".session-row .count >> text=1 sheet · xlsx")
-    page.locator("#modalBody .btn", has_text="Import all queued").click()
+    # The side list says what was picked; the import goes ahead.
+    page.wait_for_function("() => [...document.querySelectorAll('#modalBody .side-rail-hint')].some((n) => n.textContent === 'Excel · 1 sheet')")
+    assert "1 of 2 sheets ticked" in page.locator("#modalBody .import-preview .side-preview-foot").inner_text()
+    page.locator("#modalBody .import-foot .btn.primary").click()
 
     new_id = None
     deadline = time.time() + 30
