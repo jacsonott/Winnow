@@ -1,8 +1,8 @@
 """The Tables manager refuses to remove a table a merge is built on.
 
-The server refuses it too (409). Asking on the client as well is so the
-analyst gets the reason and the merge's NAME without a round trip, and so
-the Remove button never appears to do nothing.
+The server refuses it too (409). Refusing on the client as well is so the
+analyst gets the reason and the merge's NAME without a round trip: Remove…
+is greyed out with the merge named on it, as on the tab's right-click menu.
 
 Refusing rather than warning-and-proceeding is the maintainer's call, and
 the reason is in the store: source ids are reused by the next import, so
@@ -65,24 +65,21 @@ def merged(page, server, server_post, tmp_path):
 def test_removing_a_merged_table_is_refused_and_names_the_merge(page, merged):
     page.evaluate("() => __winnow.openTablesManager()")
     page.wait_for_selector("#modal:not([hidden]) .tables-row", timeout=10_000)
-    row = page.locator("#modal .tables-row", has_text="second.csv").first
+    row = page.locator("#modal .tables-list .tables-row", has_text="second.csv").first
     row.locator(".tables-more").click()
-    page.locator(".menu .menu-item", has_text="Remove…").click()
+    item = page.locator(".menu .menu-item", has_text="Remove…")
 
-    dlg = page.locator(".confirm-overlay")
-    dlg.wait_for(state="visible", timeout=10_000)
-    text = dlg.inner_text()
+    # Greyed out, saying why on the item itself: the row's ⋯ is the
+    # table's right-click menu, which refuses before the click.
+    assert item.is_disabled()
     # The merge by name: "it is used in a merge" sends an analyst hunting
     # the sidebar for which one.
-    assert "Merged for the test" in text, text
+    assert "Merged for the test" in item.inner_text(), item.inner_text()
+    title = item.get_attribute("title")
     # And it says what to do, including the part that makes it safe to do.
-    assert "Delete that merge first" in text, text
-    assert "keeps them" in text, text
-
-    # A refusal, not a confirm: there is no way to proceed from here.
-    assert dlg.locator("button", has_text="Remove").count() == 0, text
+    assert "Delete that merge first" in title, title
+    assert "keeps them" in title, title
     page.keyboard.press("Escape")
-    page.wait_for_selector(".confirm-overlay", state="detached")
 
     # …and the table is still there.
     assert page.evaluate(

@@ -2275,21 +2275,6 @@ textarea:focus { border-color: var(--accent); outline: none; }
 
 .session-list, .session-queue { display: grid; gap: 4px; margin: 6px 0 12px; }
 .session-row { justify-content: flex-start; padding: 5px 8px; background: var(--panel-2); border-radius: var(--radius-sm); }
-/* Tables-manager rows: a fixed grid, not a free flex row — the name gets
-   the flexible column and ellipsizes instead of shoving the buttons off
-   the modal's edge, stats/status/actions right-align in steady columns so
-   fifty rows read as a table rather than a scatter. */
-.tables-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; align-items: center;
-  gap: 10px; padding: 3px 8px; }
-.tables-row .session-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-.tables-row .count { margin-right: 0; white-space: nowrap; }
-.tables-row .tables-acts { display: flex; gap: 4px; align-items: center; }
-.tables-row .tables-acts .btn { padding: 2px 8px; font-size: 11px; }
-/* Open and Close one width, so the chips beside them line up row to row. */
-.tables-row .tables-acts .tables-toggle { min-width: 48px; }
-.tables-row .tables-acts .row-more { padding: 0 7px; font-size: 14px; line-height: 18px; }
-.tables-row.no-index { grid-template-columns: minmax(0, 1fr) auto auto; }
-.session-list .source-indexes { padding: 0 4px 4px 16px; margin-top: -2px; }
 /* Drag-to-reorder feedback for saved-filter rows (wireDragReorder) — same
    vocabulary the tab strip and column headers use, on the vertical axis. */
 .session-row.dragging { opacity: .4; }
@@ -2322,10 +2307,8 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .index-status-building { color: var(--accent); }
 .index-status-idle { color: var(--dim); border-color: var(--line-2); }
 
-/* Per-column filter indexes, listed under their table in the Tables modal.
-   A secondary line under the source row, not a column in it — most tables
-   have none, and it wraps to as many as the analyst has filtered on. */
-.source-indexes { flex-wrap: wrap; gap: 4px; padding: 0 4px 8px 12px; margin-top: -4px; }
+/* A filter index on one column: the Tables manager's Indexes pane lists
+   them per table, each with a ✕ to drop it. */
 .index-chip {
   display: inline-flex; align-items: center; gap: 4px;
   font-family: var(--mono); font-size: 11px; color: var(--dim);
@@ -3070,6 +3053,109 @@ textarea:focus { border-color: var(--accent); outline: none; }
   .table-menu .side-rail { border-right: 0; padding: 0 0 6px; border-bottom: 1px solid var(--line); }
   .table-menu .side-rail-list { flex: 0 0 auto; flex-direction: row; flex-wrap: wrap; gap: 2px; overflow: visible; }
   .table-menu .side-rail-group, .table-menu .side-rail-hint { display: none; }
+}
+
+/* The Tables manager in two panes (openTablesManager, in tables.js): the
+   table menu's frame, with its sections down a side list and the chosen
+   one on the right. Every table and Indexes are the Columns pane's shape:
+   what to narrow by on top, then a box that takes the room that is left
+   and is the one thing that scrolls. */
+.tables-manager .side-rail { padding-right: 12px; }
+.tables-manager-pane { overflow: hidden; }
+.tables-manager-pane .tm-cols-top { display: flex; align-items: center; gap: 10px; }
+.tables-manager-pane .tm-cols-top .side-search { flex: 1 1 auto; min-width: 0; }
+.tables-manager-pane .tm-cols-top .mb-seg { flex: 0 0 auto; }
+.tables-manager-pane .tm-cols-top .mb-seg button { font-size: 11px; padding: 3px 10px; }
+.tables-manager-pane .tm-cols-top .tm-cols-count { white-space: nowrap; }
+.tables-manager-pane .tm-cols-box { flex: 1 1 0; min-height: 0; margin-top: 8px; }
+.tables-manager-pane .row-actions { flex-wrap: wrap; margin-top: 10px; }
+.tables-manager-pane .mb-summary { margin-bottom: 10px; }
+.tables-manager-pane .mb-notes { list-style: none; margin: 0 0 10px; padding: 0; display: grid; gap: 5px; }
+/* One grid for the column heads and every row, so the counts line up
+   down fifty tables. The name cell takes what is left and ellipsizes. */
+.tables-head, .tables-row {
+  display: grid; grid-template-columns: 16px minmax(0, 1fr) 70px 58px 50px 26px;
+  align-items: center; column-gap: 10px;
+}
+.tables-head { padding: 6px 10px 5px; border-bottom: 1px solid var(--line); }
+.tables-head > * {
+  font: inherit; font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--dim);
+  background: none; border: 0; padding: 0; text-align: left; white-space: nowrap;
+}
+.tables-head .tables-name-h { grid-column: span 2; }
+.tables-head .tables-num { text-align: right; }
+.tables-sort { cursor: pointer; }
+.tables-sort:hover, .tables-sort[aria-pressed="true"] { color: var(--text); }
+.tables-sort[aria-pressed="true"]::after { content: ' \2193'; }
+.tables-sort.tables-name-h[aria-pressed="true"]::after { content: ' \2191'; }
+.tables-box .side-preview-rows { padding: 4px; }
+.tables-list { display: flex; flex-direction: column; gap: 1px; }
+.tables-row { min-height: 26px; padding: 1px 6px; border-radius: var(--radius-sm); font-size: 12px; }
+.tables-row:hover { background: var(--panel-2); }
+.tables-row input { margin: 0; accent-color: var(--accent); }
+.tables-name-cell { min-width: 0; display: flex; align-items: baseline; gap: 10px; overflow: hidden; }
+.tables-name {
+  flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  background: none; border: 0; padding: 0; text-align: left; cursor: pointer;
+  font-family: var(--mono); font-size: 12px; color: var(--text);
+}
+.tables-name.static { cursor: default; }
+/* Closed tables a step quieter than open ones: the tick says which, and
+   the names say it again down the list at a glance. */
+.tables-row:not(.open):not(.tables-ix-row) .tables-name { color: color-mix(in srgb, var(--text) 62%, var(--dim)); }
+button.tables-name:not(:disabled):hover { text-decoration: underline; color: var(--text); }
+.tables-sub { flex: 0 1000 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--dim); }
+.tables-sub.warn { color: var(--danger); }
+.tables-num { text-align: right; font-family: var(--mono); font-size: 11.5px; font-variant-numeric: tabular-nums; color: var(--dim); }
+.tables-num.tables-rows.some { color: color-mix(in srgb, var(--text) 62%, var(--dim)); }
+.tables-num.tables-tagged.some { color: var(--accent); }
+.tables-num.tables-notes.some { color: var(--text); }
+/* The ⋯ is faint until its row is under the pointer, as the Columns
+   pane's controls are: fifty bright ⋯ were the loudest thing in the list. */
+.tables-row .tables-more { padding: 0 7px; font-size: 14px; line-height: 18px; opacity: .35; }
+.tables-row:hover .tables-more, .tables-more:focus-visible, .tables-more[aria-expanded="true"] { opacity: 1; }
+.tables-group { display: flex; align-items: baseline; gap: 8px; padding: 10px 6px 3px; min-width: 0; }
+.tables-group:first-child { padding-top: 3px; }
+.tables-group-name { font-size: 12px; font-weight: 600; color: var(--text); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tables-group-meta { flex: 0 0 auto; font-family: var(--mono); font-size: 11px; color: var(--dim); }
+.tables-group .btn { margin-left: auto; }
+.tables-empty { margin: 6px; }
+/* Indexes: the search index's state in a column of its own, then the
+   filter indexes, which wrap to as many as the analyst has filtered on. */
+.tables-indexes .tables-head, .tables-ix-row { grid-template-columns: minmax(0, 1fr) 150px minmax(0, 1.25fr); }
+.tables-indexes .tables-head .tables-name-h { grid-column: auto; }
+.tables-ix-row { padding-top: 2px; padding-bottom: 2px; }
+.tables-si { display: flex; align-items: center; gap: 6px; }
+.tables-si .btn { opacity: .5; }
+.tables-ix-row:hover .tables-si .btn, .tables-si .btn:focus-visible { opacity: 1; }
+.tables-fi { display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; }
+.tables-none { color: var(--dim); font-family: var(--mono); font-size: 11.5px; }
+/* Merges & saved tables: what each is made of, under its name. */
+.tables-made-row { padding: 3px 6px 5px; border-radius: var(--radius-sm); }
+.tables-made-row:hover { background: var(--panel-2); }
+.tables-made-line { display: flex; align-items: center; gap: 12px; min-height: 24px; }
+.tables-made-sub { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--dim); }
+.tables-made-sub.warn { color: var(--danger); }
+.tables-made-line .tables-more { padding: 0 7px; font-size: 14px; line-height: 18px; opacity: .35; }
+.tables-made-row:hover .tables-more, .tables-made-line .tables-more:focus-visible, .tables-made-line .tables-more[aria-expanded="true"] { opacity: 1; }
+.tables-made-details { display: grid; gap: 1px; padding: 0 0 0 18px; border-left: 1px solid var(--line); margin-left: 6px; }
+.tables-member { display: flex; gap: 12px; font-family: var(--mono); font-size: 11.5px; color: color-mix(in srgb, var(--text) 62%, var(--dim)); min-width: 0; }
+.tables-member-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tables-member-rows { flex: 0 0 auto; font-size: 11px; color: var(--dim); }
+.tables-made-sql { display: block; font-family: var(--mono); font-size: 11.5px; color: color-mix(in srgb, var(--text) 62%, var(--dim)); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 640px) {
+  .tables-manager.side-panes { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  .tables-manager .side-rail { border-right: 0; padding: 0 0 6px; border-bottom: 1px solid var(--line); }
+  .tables-manager .side-rail-list { flex: 0 0 auto; flex-direction: row; flex-wrap: wrap; gap: 2px; overflow: visible; }
+  .tables-manager .side-rail-group, .tables-manager .side-rail-hint { display: none; }
+  .tables-manager-pane .tm-cols-top { flex-wrap: wrap; }
+  .tables-manager-pane .tm-cols-top .side-search { flex-basis: 100%; }
+  .tables-head, .tables-row { grid-template-columns: 16px minmax(0, 1fr) 62px 26px; }
+  .tables-head .tables-sort[data-sort="tagged_row_count"], .tables-head .tables-sort[data-sort="note_count"],
+  .tables-row .tables-tagged, .tables-row .tables-notes { display: none; }
+  .tables-indexes .tables-head, .tables-ix-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .tables-indexes .tables-head .tables-fi-h { display: none; }
+  .tables-ix-row .tables-fi { grid-column: 1 / -1; }
 }
 
 /* Shown while dragging OS files over the window (wireFileDrop in app.js) —

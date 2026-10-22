@@ -245,7 +245,12 @@ see [docs/notes/README.md](README.md) for the whole set.
   `self.lock` for the whole build) rather than inline, both right after
   ingest and lazily on a source's first Contains/Advanced search — so
   browsing and searching both work immediately via the LIKE fallback, and
-  get fast once the build catches up. A case file from an earlier build
+  get fast once the build catches up. A third way in is on request:
+  `start_search_index` (the Tables manager's Build) is the same
+  `_ensure_fts_building`, with a KeyError for no such table and a
+  ValueError for a merge (it searches through its members' indexes), and
+  `search_index_supported()` is the 3.45 check the manager asks before
+  offering it (tests/test_search_index_build.py). A case file from an earlier build
   may have `has_fts=1` pointing at a stale-shape table — the original
   word-tokenized one, or the first-generation trigram (multi-column,
   `detail=full`; the doc-LIKE query form would be a SQL error against it);

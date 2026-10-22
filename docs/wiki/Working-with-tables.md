@@ -38,17 +38,23 @@ Click a folder's name to collapse or expand it, and double-click it to rename it
 
 ### Renaming a table
 
-A table is named after its file. To give it a clearer name, right-click its tab or its row in the sidebar and choose **Nickname this table…** (it is also the **Nickname** box in the table menu's **Name & merge** section), or use **Nickname…** in the table's **⋯** menu in the Tables manager. The nickname is shown in place of the file name everywhere. Leave it empty to go back to the file name. A merge has no file name, so the same command reads **Rename this merge…**.
+A table is named after its file. To give it a clearer name, right-click its tab or its row in the sidebar and choose **Nickname this table…** (it is also the **Nickname** box in the table menu's **Name & merge** section), or use the table's **⋯** in the Tables manager. The nickname is shown in place of the file name everywhere. Leave it empty to go back to the file name. A merge has no file name, so the same command reads **Rename this merge…**.
 
 ### The Tables manager
 
-Press `t`, or choose **Case ▾ → Tables…**, to see every table in the case, open or closed, with its row count and the number of tagged rows and notes. Beside them, **index ready**, **indexing…** or **not indexed yet** says whether the table's search index is built. Until it is, Contains and Advanced searches on that table scan every row instead: the results are the same, only slower (see [The search index and slow searches](Filtering-and-searching.md#the-search-index-and-slow-searches)).
+Press `t`, or choose **Case ▾ → Tables…**, to see every table in the case, open or closed. It is laid out like the table menu: its sections are listed down the left, each with a line saying what is in it, and the one you pick fills the right. Along the bottom are **Import…** and **Copy table definitions**, which copies every table's columns as SQL, for help writing a query in the [SQL pane](SQL-pane.md).
 
-Each row has **Open** or **Close** and a **⋯** menu with **Settings…** (the table menu), **Nickname…** and **Remove…**. Closing a table, here or with the ✕ on its tab, only hides it; it stays in the case.
+**Every table** lists the tables with their row count and the number of tagged rows and notes; a dash means none. Type in **Filter tables…** to narrow the list, and click a column heading to sort by it. **Folders** groups the tables the way the sidebar files them, and **Kinds** groups them by their set of columns, so every host's EvtxECmd output is together. A kind held by more than one table has a **Merge…** button, which opens the merge builder with those tables ticked.
 
-**Remove…** deletes the table from the case, along with its tags and notes. It asks first. The same command is on the table's right-click menu. A table that is part of a merge can't be removed until the merge is deleted. Deleting a merge leaves its tables untouched.
+The tick on each row is whether the table is open as a tab: tick it to open the table without leaving the manager, untick it to close the tab. Closing a table, here or with the ✕ on its tab, only hides it; it stays in the case. Click a table's name to go to it. The **⋯** at the end of each row is the table's right-click menu (see [Right-clicking a table](#right-clicking-a-table)). Under the list, **Open all tagged** opens every closed table with tagged rows, and **Close all tabs** closes every tab.
 
-Filtering, grouping or opening the value picker on a column builds a small index for that column in the background. The Tables manager lists them under each table as **Filter indexes:**, and ✕ drops one if they take up too much space. Dropping one costs nothing but a slower first filter on that column next time. **Open all tagged** opens every closed table with tagged rows, and **Copy table definitions** copies every table's columns as SQL, for help writing a query in the [SQL pane](SQL-pane.md).
+**Remove…** deletes the table from the case, along with its tags and notes. It asks first. A table that is part of a merge can't be removed until the merge is deleted. Deleting a merge leaves its tables untouched.
+
+**Merges & saved tables** lists the tables made from other tables: each merge with the tables in it and their row counts, each table saved from a view with the table it came from and how many of its rows, and each table saved from the SQL pane with its query. **Merge tables…** starts a new merge.
+
+**Indexes** shows both kinds of index a case builds on its own. A table's search index says **index ready**, **indexing…** or **not indexed**. Until it is ready, Contains and Advanced searches on that table scan every row instead: the results are the same, only slower (see [The search index and slow searches](Filtering-and-searching.md#the-search-index-and-slow-searches)). **Build** starts a table's search index now, in the background, rather than on the first search that needs it, and **Build *N* missing search indexes** does it for every table without one. If Winnow is running on a Python whose SQLite is older than 3.45, there is no search index, and the pane says so.
+
+Filtering, grouping or opening the value picker on a column builds a small filter index for that column in the background. They are listed beside each table, and ✕ drops one if they take up too much space; **Drop all filter indexes** drops every one, after asking. Dropping one costs nothing but a slower first filter on that column next time.
 
 ## The table menu
 

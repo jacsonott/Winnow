@@ -54,10 +54,15 @@ def test_the_tables_manager_reports_a_refused_close_and_remove(page):
     _refuse(page, "**/api/source/*/open", "database is locked", "POST")
     _refuse(page, "**/api/source/*", "It is merged into \"m\" — delete that merge first", "DELETE", 409)
     page.evaluate("() => __winnow.openTablesManager()")
-    row = page.locator("#modalBody .tables-row").first
+    row = page.locator("#modalBody .tables-list .tables-row", has_text="ui.csv").first
     row.wait_for()
-    row.locator(".btn", has_text="Close").click()
+    tick = row.locator("input[type=checkbox]")
+    tick.uncheck()
     _toast(page, "database is locked")
+    # The tick goes back on: the tab is still open.
+    page.wait_for_function("""() => [...document.querySelectorAll('#modalBody .tables-list .tables-row')]
+      .find((r) => r.querySelector('.tables-name').textContent === 'ui.csv')
+      .querySelector('input[type=checkbox]').checked""")
 
     row.locator(".tables-more").click()
     page.locator(".menu .menu-item", has_text="Remove…").click()

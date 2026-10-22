@@ -17,7 +17,7 @@ import { normalizeTree, S } from './state.js';
 import { mergesUsing, openTablesManager } from './tables.js';
 import { clearRowCaches, loadTags, newTagDefaults, tagEditRow } from './tags.js';
 import { baseColumns, columnMeta, parseTimestamp } from './tsformat.js';
-import { closeModal, datePickerButton, dropdownMenu, markModalAction, confirmDialog, modal, oneAtATime, promptDialog } from './ui.js';
+import { closeModal, datePickerButton, dropdownMenu, markModalAction, confirmDialog, modal, oneAtATime, promptDialog, sectionPanes } from './ui.js';
 import { rebuildView } from './view.js';
 
 /* ------------------------------------------------------ jump to timestamp */
@@ -876,7 +876,7 @@ export function buildColumnsPanel(container, refresh = () => openTableMenu()) {
 }
 
 /* A figure over a dim caps label, the merge builder's (.mb-stat). */
-function tableMenuStat(value, label) {
+export function tableMenuStat(value, label) {
   const s = el('div', 'mb-stat');
   s.append(el('b', null, typeof value === 'number' ? value.toLocaleString() : value), el('span', null, label));
   return s;
@@ -885,7 +885,7 @@ function tableMenuStat(value, label) {
 /* A segmented control in the builders' tint (.mb-seg): `options` is
    [key, label, title], `current()` the pressed key, `pick(key)` what a
    click does. Returns the node and a paint() for after a change. */
-function tableMenuSeg(options, current, pick, cls = '') {
+export function tableMenuSeg(options, current, pick, cls = '') {
   const seg = el('div', 'mb-seg ' + cls);
   const buttons = options.map(([key, label, title]) => {
     const b = el('button', null, label);
@@ -903,7 +903,7 @@ function tableMenuSeg(options, current, pick, cls = '') {
 
 /* A field in the builders' shape (.mb-field): a dim caps label above
    whatever the field holds. */
-function tableMenuField(label, ...nodes) {
+export function tableMenuField(label, ...nodes) {
   const f = el('div', 'mb-field tm-field');
   f.append(el('label', null, label), ...nodes);
   return f;
@@ -1413,77 +1413,15 @@ export async function openTableMenu(sourceId, section = 'columns') {
   if (S.sourceId !== id) return; // openSource no-ops on an id it can't find
   const src = S.sources.find((x) => x.id === id);
   modal(`Table — ${src ? sourceLabel(src) : ''}`, (b) => {
-    const panes = el('div', 'side-panes table-menu');
-    const rail = el('div', 'side-rail');
-    const nav = el('div', 'side-rail-list');
-    nav.setAttribute('role', 'tablist');
-    nav.setAttribute('aria-orientation', 'vertical');
-    nav.setAttribute('aria-label', 'Table menu sections');
-    rail.append(nav);
-    const pane = el('div', 'side-pane table-menu-pane');
-    pane.setAttribute('role', 'tabpanel');
-    panes.append(rail, pane);
-    b.append(panes);
+    const frame = sectionPanes({
+      sections: TABLE_MENU_SECTIONS, label: 'Table menu sections',
+      cls: 'table-menu', paneCls: 'table-menu-pane', changedEvent: 'tablemenu:changed',
+    });
+    b.append(frame.panes);
     const foot = el('div', 'table-menu-foot');
     buildTableStripPanel(foot);
     b.append(foot);
-
-    const entries = [];
-    let group = null;
-    for (const s of TABLE_MENU_SECTIONS) {
-      if (s.group !== group) { group = s.group; nav.append(el('div', 'side-rail-group', group)); }
-      const row = el('div', 'side-rail-row');
-      const item = el('button', 'side-rail-item');
-      item.type = 'button';
-      item.dataset.section = s.id;
-      item.setAttribute('role', 'tab');
-      const hint = el('span', 'side-rail-hint');
-      item.append(el('span', 'side-rail-label', s.title), hint);
-      item.onclick = () => show(s.id);
-      row.append(item);
-      nav.append(row);
-      entries.push({ s, item, hint });
-    }
-    let current = entries.find((e) => e.s.id === section) || entries[0];
-
-    function paintHints() {
-      for (const e of entries) {
-        if (e.s.hint) e.hint.textContent = e.s.hint();
-        else if (e.s.asyncHint) e.s.asyncHint().then((h) => { if (e.hint.isConnected) e.hint.textContent = h; }).catch(() => {});
-      }
-    }
-    function refresh() {
-      pane.replaceChildren();
-      current.s.build(pane, refresh);
-      paintHints();
-    }
-    function show(sid, { focus = false } = {}) {
-      current = entries.find((e) => e.s.id === sid) || entries[0];
-      for (const e of entries) {
-        const on = e === current;
-        e.item.setAttribute('aria-selected', String(on));
-        e.item.tabIndex = on ? 0 : -1;
-        e.item.parentElement.classList.toggle('selected', on);
-      }
-      pane.dataset.section = current.s.id;
-      refresh();
-      if (focus) current.item.focus();
-    }
-    pane.addEventListener('tablemenu:changed', paintHints);
-    nav.addEventListener('keydown', (e) => {
-      const at = entries.findIndex((x) => x.item === document.activeElement);
-      if (at < 0 || e.altKey || e.ctrlKey || e.metaKey) return;
-      const last = entries.length - 1;
-      let to;
-      if (e.key === 'ArrowDown') to = at === last ? 0 : at + 1;
-      else if (e.key === 'ArrowUp') to = at === 0 ? last : at - 1;
-      else if (e.key === 'Home') to = 0;
-      else if (e.key === 'End') to = last;
-      else return;
-      e.preventDefault();
-      show(entries[to].s.id, { focus: true });
-    });
-    show(current.s.id);
+    frame.show(section);
     // The side list, like Settings: arrow keys move between sections from
     // the start, and C still closes the menu it opened (a caret in the
     // filter box would take the C as typing).
