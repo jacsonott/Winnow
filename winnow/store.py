@@ -635,6 +635,7 @@ def _sqlite_has_json_each() -> bool:
 # SQLite before 3.32. `x IN (SELECT value FROM json_each(?))` still uses a
 # column index (EXPLAIN: SEARCH ... USING INDEX (x=?), LIST SUBQUERY), and
 # applies the column's affinity to the values exactly as the list did.
+# A list of one or two values is the exception (_compile_condition says why).
 _HAS_JSON_EACH = _sqlite_has_json_each()
 
 
@@ -10171,7 +10172,13 @@ class Store:
                 # Row ids arrive as strings (the tree is JSON from a picker);
                 # bind them as the integers the column holds.
                 items = [int(s) if str(s).strip().lstrip("-").isdigit() else s for s in items]
-            if _HAS_JSON_EACH:   # one parameter however long the list — see _HAS_JSON_EACH
+            # One or two values stay plain `?`s: SQLite compares a list
+            # that short directly, where any subquery, json_each included,
+            # builds a lookup table first — 30% slower on a 200k-row scan
+            # (bench views/filter.in_list). From three values up a list
+            # builds that table too and the two forms cost the same. Two
+            # parameters per member is what two `equals` conditions bind.
+            if _HAS_JSON_EACH and len(items) > 2:   # one parameter however long the list — see _HAS_JSON_EACH
                 sql, params = f"{c} IN (SELECT value FROM json_each(?))", [json.dumps(items)]
             else:
                 sql, params = f"{c} IN ({','.join('?' * len(items))})", items
