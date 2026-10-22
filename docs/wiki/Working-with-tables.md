@@ -180,6 +180,7 @@ The menu item's second line says which, for example "of Host in the whole view".
 Grouping collapses a table into one heading per distinct value, with a row count on each, like a pivot you can open. Drag a column header into the **Group by** strip above the grid. The column leaves the grid while it is grouped. Click a heading to expand or collapse its rows.
 
 - Drag another header into the strip to group within each group. The levels read left to right, separated by ›. Drag them to change their order, and ✕ removes one, putting its column back in the grid where it was.
+- While you drag a header or a level over the strip, a dashed placeholder shows where it will land, and the other levels move aside to make room. Let go anywhere in the strip, including just outside its border, and it lands there. A header dropped between two levels is inserted at that point rather than added at the end.
 - **+ Tag** adds a level that groups by tag: one group per tag plus one for untagged rows. A row with two tags appears under both, so these counts can add up to more than the view.
 - **Sort:** orders the groups at every level: **Count — most first** (the default), **Count — fewest first**, **Value — low to high** or **Value — high to low**.
 - A datetime column groups by calendar day rather than by exact timestamp.

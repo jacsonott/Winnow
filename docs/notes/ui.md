@@ -1336,6 +1336,33 @@ see [docs/notes/README.md](README.md) for the whole set.
   the pointer is on a line. tests/ui/test_column_divider.py presses on
   the line and either side of it, between two parked pins, and on the
   names beside it.
+- **The Group by strip's drop slot is found by position too, and shown
+  before the release** (grouping.js, "the strip as a drop zone"). Each
+  pill used to be its own drop target for a reorder and the strip's
+  background the target for a header, so a drop counted only on the exact
+  element that listened for it: released just under a pill or on a ›, a
+  reorder did nothing, and a header released ON a pill was swallowed by
+  the pill's `stopPropagation` while the strip had lit up to say it would
+  take it. Analysts called it working half the time. Now one zone, the
+  strip plus `DROP_SLACK` px round it clamped to the toolbar, takes both
+  kinds of drag; the slot is read from the pointer against the pills'
+  boxes (nearest wrapped line, then midpoints), and a dashed ghost pill
+  stands in that slot while the pointer is over the zone. Three things
+  to keep. **The listeners are on the document**: the margin is outside
+  the strip's box, and dragover only reaches an element the pointer is
+  over. **The preview moves things with flex `order`, never by moving
+  nodes**: one of the pills is the drag source, and a source taken out of
+  the document mid-drag gets a dragend that never bubbles (or none at all
+  in Firefox); the lifted pill is `display: none` from the first
+  dragover, never in dragstart, which would cancel the drag. **The slot
+  is measured with the ghost in place**, which is what keeps a pointer
+  resting on a midpoint from flicking the ghost between two slots: the
+  ghost going in pushes the neighbouring pill away from the pointer.
+  tests/ui/test_group_strip_drop.py drops on a pill, under one, outside
+  the border and on a ›, and reads the strip mid-drag. Its `_rest`
+  exists because Playwright sends dragover only when the mouse moves,
+  where Chromium sends one every 50ms; without it a drop is judged on
+  whatever the pointer passed over last.
 - **The autofit cap is a user setting** (`S.appearance.autofitMax`,
   Settings → Grid & layout, default `AUTOFIT_MAX_W_DEFAULT` = 900px, `0`
   meaning uncapped), not the old hardcoded 480. A cap still exists by
