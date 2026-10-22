@@ -60,10 +60,10 @@ html { scrollbar-color: var(--line-2) transparent; }
 html[data-theme="dark"] { color-scheme: dark; }
 html[data-theme="light"] { color-scheme: light; }
 
-/* The categorical palette the histogram's Groups view colours groups in,
+/* The categorical palette the histogram's Groups view colors groups in,
    slot by slot in this order. Per theme rather than per skin: the order is
-   what keeps neighbouring segments apart for colour-blind readers (checked
-   adjacent pair by adjacent pair, both themes, against the panel colours
+   what keeps neighboring segments apart for color-blind readers (checked
+   adjacent pair by adjacent pair, both themes, against the panel colors
    the skins draw the strip on), and a skin that re-hued one slot would
    have to re-check the whole order. A ninth group is "Other", never a
    ninth hue. */
@@ -827,7 +827,7 @@ section.page-with-panels { flex-direction: row; }
    filter each say so); this is the histogram's. */
 .th-legend-item .swatch { width: 8px; height: 8px; border-radius: 1px; flex: 0 0 auto; }
 .th-stack[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
-/* The three colour-by views (histogram.js histogramView): one pressed at a
+/* The three color-by views (histogram.js histogramView): one pressed at a
    time, joined into one control so they read as a choice between them. */
 .th-views { display: flex; align-items: center; flex: 0 0 auto; }
 .th-views .btn { border-radius: 0; margin-left: -1px; }

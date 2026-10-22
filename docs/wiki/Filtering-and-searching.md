@@ -14,7 +14,7 @@ By default every column has a filter box under its header. Type into one and the
 
 If you prefer a less crowded header, turn off **Settings → Grid & layout → Always-on filter row**. A filter bar then appears above the grid. It shows only the filters you have set, as chips you can click to edit or remove with ✕. To filter a new column, click the ⌕ on its header, or use **+ filter a column…**, which lists every visible column and lets you type to find one.
 
-To filter from a cell, select it and press `f` to filter its column to that value. `F` does the same but drops every other filter first. Right-click a cell for the same choices, worded **Narrow to this value**, **Reset to this value** and **Exclude this value**, plus **Filter by values…**, which opens the value picker. **Reset to this value** keeps the timeframe.
+To filter from a cell, select it and press `f` to filter its column to that value. `F` does the same but drops every other filter first. Right-click a cell for the same choices, worded **Narrow to this value**, **Reset to this value** and **Exclude this value**, plus **Filter by values…**, which opens the value picker. **Reset to this value** keeps the timeframe. **Show in histogram**, in the same place, colors the value's rows in the histogram instead of filtering them; see [The histogram](#the-histogram).
 
 ### Filter syntax
 
@@ -175,13 +175,13 @@ The same switch is in Settings, under **Filter & search syntax**.
 
 Click **Histogram** or press `h` to show a bar chart above the grid of when the rows in the current view happened. Choose which datetime column to chart from its list. The line beside it gives the row count, the bucket size and the tallest bar. Winnow picks a bucket size, from one second up to a year, that gives bars a few pixels wide across the strip, so narrowing the timeframe gives finer buckets. Hover a bar to see its time range and row count.
 
-Three buttons colour the bars, one at a time; click the pressed one again to go back to plain bars. In each, a row counts once, so the bars stay as tall as the plain ones.
+Three buttons color the bars, one at a time; click the pressed one again to go back to plain bars. In each, a row counts once, so the bars stay as tall as the plain ones.
 
-- **Tags** colours the bars by tag: each row counts under the first tag it carries, with untagged rows underneath.
-- **Value** colours the rows holding the selected cell's value, as if they were tagged, and greys out everything else. Click another cell, or move to one with the arrow keys, to chart its value instead. The line beside the chart names the value and how many rows hold it. A cell holding a very long value, such as a whole JSON document, is too long to chart, and the strip says so.
-- **Groups** works while the grid is grouped: the first 3, 5 or 8 groups (pick with **First 3**, **First 5** or **First 8**) each get a colour, and everything else counts as "Other". Each of those groups' headings in the grid gets a swatch in the same colour. A group keeps its colour when a filter moves it up or down the list. With nested grouping, the colours go to the first level's groups.
+- **Tags** colors the bars by tag: each row counts under the first tag it carries, with untagged rows underneath.
+- **Value** colors the rows holding one value, as if they were tagged, and grays out everything else. To choose the value, right-click a cell and choose **Show in histogram**; that also opens the histogram if it is closed. The value stays charted while you click around the grid. To have the chart follow the selected cell instead, right-click **Value** and choose **Follow the selected cell**; then clicking another cell, or moving to one with the arrow keys, charts its value. Right-click **Value** again to turn that off. The line beside the chart names the value and how many rows hold it. A very long value, such as a whole JSON document, is too long to chart, and the strip says so.
+- **Groups** works while the grid is grouped: the first 3, 5 or 8 groups (pick with **First 3**, **First 5** or **First 8**) each get a color, and everything else counts as "Other". Each of those groups' headings in the grid gets a swatch in the same color. A group keeps its color when a filter moves it up or down the list. With nested grouping, the colors go to the first level's groups.
 
-While the view is changing (a filter, a search, a sort, the timeframe) and until its new chart has loaded, the old chart is faded and grey and the line beside it says "Updating…", so a chart at full strength is always the one for the rows in the grid.
+While the view is changing (a filter, a search, a sort, the timeframe) and until its new chart has loaded, the old chart is faded and gray and the line beside it says "Updating…", so a chart at full strength is always the one for the rows in the grid.
 
 Drag across the bars to set the timeframe filter to that range on the charted column. **Clear timeframe** removes it again. The histogram follows every filter, so it is a quick way to see where a search's hits cluster in time. It stays open when you open another case and charts that case's table once it has loaded; a case with no table open shows "Open a table to chart when its rows happened."
 

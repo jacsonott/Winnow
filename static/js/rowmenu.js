@@ -7,6 +7,7 @@ import { tableOf, widgetFrom } from './dashwidgets.js';
 import { displayValue, ellipsize, filterByValue, openValuePickerForColumn } from './filters.js';
 import { rowAt } from './grid.js';
 import { copyRowsAsText, copyUniqueValues, loadRowsForPositions, uniqueRowsTooMany, wholeViewPicked, writeClipboardText } from './grouping.js';
+import { showValueInHistogram } from './histogram.js';
 import { keyLabel } from './keymap.js';
 import { showPluginTab } from './plugins.js';
 import { S, cellRangeRows, dashboardCreatorMode, selCount, selHas, selPositions } from './state.js';
@@ -202,7 +203,8 @@ export function rowMenuTagItems(ctx) {
 
 /* The clicked cell's filters: the value named ONCE, in the heading, and
    three verbs under it whose second line says what each does to the
-   filters already on.
+   filters already on. Show in histogram sits with them because it acts
+   on the value too, and its second line says it leaves the filters alone.
 
    These read "Filter to <value>", "Filter to <value> only" and "Exclude
    <value>" until 2026-09. Three siblings repeating a 40-character
@@ -254,6 +256,15 @@ export function rowMenuCellItems(ctx) {
       desc: 'hides it, leaving the other filters on',
       title: `Filters ${ctx.colName} to everything except this value`,
       onclick: () => filterByValue(ctx.colName, ctx.value, { exclude: true }),
+    },
+    {
+      // The histogram's Value view, on this value. Here, with the verbs on
+      // the value, rather than folded: choosing a value to chart is the
+      // whole of how that view is driven unless it follows the selection.
+      label: 'Show in histogram',
+      desc: 'colors its rows, leaving the filters on',
+      title: `Colors the rows where ${ctx.colName} is this value in the histogram strip, as if they were tagged`,
+      onclick: () => showValueInHistogram(ctx.colName, ctx.value),
     },
     {
       // The way in when the column's own picker button is switched off for
