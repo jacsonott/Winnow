@@ -479,12 +479,38 @@ see [docs/notes/README.md](README.md) for the whole set.
   params against every member's definition before rewriting any —
   refusing outright when the members compute the column with different
   operations (made per table before the merge), since one set of params
-  cannot mean the same to both. One job per member, as create starts,
-  so each cancels on its own and a cancelled member is left 'partial'.
+  cannot mean the same to both. One job for the whole merge, as create
+  starts (next entry); cancelled, the member it was on is left
+  'partial' and the ones it had not reached keep their definitions.
   The merge's column therefore reports all of them: the least finished
   status (`_DERIVED_STATUS_RANK` — building, error, partial, ready) and
   the failures SUMMED, because the "Show N unparsed rows" filter it
   offers matches rows in every member; it used to count the first.
+- **A merge's derive is ONE job that backfills the members in turn**
+  (`_backfill_derive_parts`, options `parts`: each member's def ids,
+  plus `previous` on a re-derive). Create, a batch (named groups, a
+  flatten), re-derive and the cascade a re-derive sets off all start it
+  that way. It used to be a job per member, and with
+  `MAX_CONCURRENT_INGESTS = 2` two members' passes ran at once: two
+  CPU-bound Python loops fighting over the GIL and the writer lock,
+  each about three times slower than alone. A merge of four 250k-row
+  tables took 7.5 s for a regex column where one 1M-row table took
+  4.5 s; one member at a time takes what the single table does, and
+  the analyst sees one row in the jobs panel (`User — 2/4: b.csv`, from
+  `tables_done`/`tables_total`/`current_table`) instead of a column
+  filling a table or two at a time. Don't split it back up to "use the
+  second slot": the slot doesn't buy CPU, the GIL is the limit.
+  Stopped part-way, the member it was on ends as
+  `backfill_derived_columns` leaves any pass, and the members after it
+  as a pass that wrote nothing (`_fail_derive_backfill(wrote=False)`):
+  a create removes them, a re-derive restores their old definitions. A
+  create that stops (cancel or error) also removes the members it had
+  FINISHED — one left on some members is a column the merge doesn't
+  show, and its name, taken there, refuses the retry on the merge. A
+  re-derive keeps the members it finished. The job's `result` is
+  the merge's column, not one entry per member (`_derive_job_result`:
+  rows and failures summed), so the toast reads `"User": 1,000,000 rows
+  read` rather than "4 columns".
 - **"Change the field path…" is offered only for an op that has a
   `path` param** (`derived.js`'s `hasFieldPath` — JSON field and XML
   field), not for every `derived_kind: "text"` column. Regex capture
@@ -528,3 +554,49 @@ see [docs/notes/README.md](README.md) for the whole set.
   the 400ms debounce: the re-open fetches the server's copy, and a
   width changed just before the rename was still waiting to be written,
   so it came back without it (tests/ui/test_derived_rename_ui.py).
+- **A text-valued op's column is typed by its values, not by the op**
+  (`derived_columns.inferred_type`, `_infer_derived_type`). A timestamp
+  parse is datetime and a duration is a number whatever they hold, but
+  the same regex capture is a host name in one column and a byte count
+  in the next, so `value_type: "text"` used to make every regex, JSON,
+  XML, decode, lookup and combine column text — and a size pulled out
+  with a regex sorted 10 before 9 and compared `> 1000` as strings. The
+  rule is infer_type's (every non-empty value matches NUM_RE), run in
+  SQL with REGEXP over the whole `drv_` column rather than a 500-row
+  sample, and NUM_RE exactly rather than a cheaper GLOB: `_numeric_expr`
+  gates the sort and the comparisons on the same pattern, so a column
+  this calls a number has no value they would turn into NULL. A text
+  column answers at its first non-number; a number column is one scan
+  (~0.7s for 1.3M values, against a pass of seconds per million rows).
+  Read off the column as stored, never tallied by the pass, so one
+  function covers every way values arrive. When it runs: at the end of
+  every pass ('ready'); on a cancel ('partial' — half one pass and half
+  another, so it is cleared and looked at again, at the next open if
+  the cancel is the case closing); cleared with the values on 'error'.
+  A re-derive keeps the old answer while it builds rather than clearing
+  it up front, so the column does not flicker to text and back for the
+  length of the pass. A case from before this has NULL everywhere and is
+  typed once, after it opens (`_type_unlooked_derived_columns`, below);
+  'empty' is stored rather than NULL so an empty column is not rescanned
+  every open. A merge's twin is a number only when no member's copy holds
+  text — an EMPTY member (a host whose log never has the field) says nothing,
+  or one quiet host would put the whole merge back to sorting as text.
+  `derived_kind` is untouched: the menus that key on "extracted" still
+  see one.
+- **That open-time typing runs on a thread, never inside `Store()`.**
+  It shipped inline at the end of `__init__`, under the writer lock, and
+  one number column is a full scan — so a case with a few million rows
+  in a handful of regex columns took seconds to minutes to open, on a
+  case switch under server.py's `_CASE_SWITCH` too. The home screen's
+  Open did nothing visible for that long, and every click after it was
+  dropped as a second open (home.js keeps one in flight). The worker
+  scans on a pool reader with a progress handler that interrupts it
+  once `_closing` is up, so close() (which joins it) is not held for a
+  scan's length; a column it doesn't reach stays NULL for the next
+  open. Its UPDATE is conditional on the column still being NULL and
+  'ready'/'partial' under the same op, so a pass that rewrote the
+  values meanwhile keeps its own answer rather than this one, read off
+  the old values. Until the answer lands the column reads as the op's
+  own type, which is what every derived column read before any of this
+  (tests/test_derived_types.py holds `Store()` and /api/case/open to
+  returning while it is held).

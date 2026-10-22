@@ -1,9 +1,9 @@
-"""The table menu's top strip, and the Columns panel's filter box and
+"""The table menu's foot strip, and the Columns panel's filter box and
 end-of-list arrows.
 
 The everyday actions — Tables manager, Reset view, Close this tab — sit
-first now. Under a two-hundred-column list they were a scroll away every
-time, which is the wrong price for closing a tab."""
+along the foot, under every section. Under a two-hundred-column list they
+were a scroll away every time, which is the wrong price for closing a tab."""
 
 from __future__ import annotations
 
@@ -21,17 +21,20 @@ def _restore(page, orig):
     page.evaluate("""(o) => { __winnow.S.order = o; __winnow.renderHead(); __winnow.saveLayout(); }""", orig)
 
 
-def test_the_strip_comes_first_and_holds_the_three_everyday_actions(page):
+def test_the_foot_holds_the_three_everyday_actions_under_every_section(page):
     _open(page)
-    strip = page.locator("#modalBody .table-menu-section").first.locator(".table-menu-strip")
-    assert strip.count() == 1, "the first section of the menu is the strip"
-    labels = strip.locator("button").all_inner_texts()
-    assert labels == ["Tables manager…", "Reset view", "Close this tab"], labels
-    # ...and the bottom section no longer repeats them.
-    bottom = page.locator("#modalBody .table-menu-section").last
-    assert "Tables manager" not in bottom.inner_text()
-    assert "Close this tab" not in bottom.inner_text()
-    assert "Save layout as default" in bottom.inner_text()
+    for section in ("columns", "valueFilters", "layout", "name"):
+        page.locator(f'.side-rail-item[data-section="{section}"]').click()
+        page.wait_for_selector(f'.table-menu-pane[data-section="{section}"]')
+        strip = page.locator("#modalBody .table-menu-foot .table-menu-strip")
+        assert strip.count() == 1, section
+        labels = strip.locator("button").all_inner_texts()
+        assert labels == ["Tables manager…", "Reset view", "Close this tab"], (section, labels)
+        # ...and the section itself doesn't repeat them.
+        body = page.locator("#modalBody .table-menu-pane").inner_text()
+        assert "Tables manager" not in body and "Close this tab" not in body, section
+        if section == "layout":
+            assert "Save this layout as the default" in body
 
 
 def test_the_filter_box_narrows_the_rows_and_clearing_it_brings_them_back(page):

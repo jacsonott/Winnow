@@ -93,6 +93,41 @@ network share (SMB, NFS) and the file can be corrupted there. Two analysts
 work in separate case files and exchange session files — see
 [Sessions and export](Sessions-and-export.md).
 
+**Two cases at once means two Winnows.** A Winnow has one case open, and
+every window on it shows that case. To work on a second case side by side,
+start Winnow again: the second one takes the next free port (8778, 8779, …)
+and opens its own window. Opening another case from **Home** switches every
+window on that Winnow instead, and any other window on it says **This window
+is out of date** and saves nothing more until it is reloaded.
+
+### Checking a case for misplaced tags
+
+Before this version, two Winnows on one computer could mix up their cases.
+A second Winnow started while the first was running opened its window on
+the first Winnow's case. And a window left showing one case after another
+window opened a different one went on saving: its tags, notes and imports
+went into the case that was open then, onto the rows at the same row
+numbers. If an analyst did either, check the cases they had open then.
+
+Winnow keeps no record of which window made a tag, so it cannot pick the
+misplaced ones out for you. What can:
+
+- **A session saved before the mix-up.** In **Case ▾ → Sessions… → Compare
+  two sessions**, compare that session (**From**) with **Current work
+  (live)** (**to**). **Only in** *Current work* lists every row tagged
+  since, and clicking the count opens those rows. Untag the ones that don't
+  belong, or **Load** the session to put the whole case back as it was then
+  (save the current work first if some of the later tags are real; see
+  [Sessions and export](Sessions-and-export.md#comparing-two-sessions)).
+- **Tags you know you applied then.** Filter the case by those tags and
+  check each tagged row is one you meant. A misplaced tag sits on the row
+  with the same **Line** number (the row number in the gutter) as the row
+  it was meant for in the other case, usually in the table imported in the
+  same order.
+- **Tags, tables and notes that don't belong.** A tag name, an imported
+  table or a note that belongs to the other case came from a window that
+  was showing that case. Delete them here and add them to the right case.
+
 ## Quick-look cases
 
 A quick look is a temporary case for looking at a file without filing it.
@@ -165,6 +200,7 @@ machine):
 | `sqlite` | **Pick tables…** | Must be done before **Import all queued** will run. |
 | `xlsx` | **Pick sheets…** | The same, for sheets. |
 | `plaso`, `archive` | greyed out | Nothing to configure. |
+| `IIS log · W3C` (or `· NCSA`, `· native`) | greyed out, **As text** | Nothing to configure; **As text** reads a file that only looks like an IIS log one line per row. |
 | a plugin format's name | **Options**, **As text** | **As text** (uploads only) skips the plugin and reads the file one line per row. |
 
 Without **Preview & configure** a file imports with the detected settings;
@@ -197,6 +233,7 @@ SQLite, Excel, Plaso and the rest. Other options are in
 | [SQLite](#sqlite-databases) | `.db` `.sqlite` `.sqlite3` | One table per table you pick. |
 | [Excel](#excel-workbooks) | `.xlsx` `.xlsm` | One table per sheet you pick. |
 | [Plaso](#plaso-storage-files) | `.plaso` | One timeline table. |
+| [IIS web server logs](#iis-web-server-logs) | named `u_ex…`, `ex…`, `nc…`, `in….log` | One table, columns from the log's own `#Fields:` lines. |
 | [Archives](#archives) | `.zip` `.tar` `.tgz` `.gz` `.tbz2` `.txz` `.bz2` `.xz` | A folder, then folder import. |
 | [Any other text](#plain-text-and-log-files) | `.log`, `.1`, no extension… | One row per line. |
 | [Plugin formats](#plugin-formats) | raw `$MFT` and `$J`, ESXi and UAC logs | Whatever the plugin parses. |
@@ -346,6 +383,55 @@ Everything else an event carries is in `Attributes (JSON)`; pull fields out
 with [derived columns](Derived-columns.md). An event that can't be decoded
 still gets a row, with an error note in `Attributes (JSON)`.
 
+### IIS web server logs
+
+IIS names a site's logs after their format and how often they roll over, and
+Winnow recognises them by that name, wherever they sit (usually
+`inetpub\logs\LogFiles\W3SVC<n>\`). No other `.log` is read this way.
+
+| Name | Format |
+| --- | --- |
+| `u_ex240501.log`, `ex240501.log` | W3C extended, one file a day. Hourly is `u_ex24050113.log`, monthly `u_ex2405.log`, weekly `u_ex240502.log` (the week of the month); `u_extend1.log` rolls over by size or never. |
+| `u_nc240501.log`, `nc…`, `ncsa1.log` | NCSA common log format. |
+| `u_in240501.log`, `in…`, `inetsv1.log` | IIS native format. |
+
+`u_` means IIS wrote the file as UTF-8; without it the file is in the server's
+code page, which reads as Windows-1252 and is said so.
+
+**W3C columns come from the log itself.** Which fields a site logs is its own
+setting, so each `#Fields:` line names the columns for the lines under it, and
+the table has every field any of them names. IIS writes a new header whenever
+the site restarts, and a changed setting changes the fields from that point
+on: each line's values land under the field its own header names, and a field
+its header doesn't have is blank on that line. The first column,
+`Timestamp (UTC)`, joins `date` and `time` (always UTC in a W3C log) so the
+Timeframe filter, Histogram and Timeline work straight away; `date` and `time`
+stay too. Values are kept exactly as logged, including `-` for an empty field
+and `+` for a space in `cs(User-Agent)`.
+
+A line with more values than its header names, or one before any header,
+keeps the extras in an `Unnamed values` column, which only appears when a file
+needs it; a short line is padded. Both count as ragged rows in the import
+toast.
+
+**NCSA** lines become `Timestamp (UTC)` (the logged time with its offset
+applied), `Remote host`, `Remote log name`, `User name`,
+`Timestamp (as logged)`, `Request`, `Status` and `Bytes`. **IIS native** lines
+become `Timestamp (local)` and the format's fifteen fields, `Client IP address`
+to `Parameters`; native format logs the server's local time with no offset,
+so that timestamp is not converted. In both, a line that isn't in the format
+is kept whole in an `Unparsed line` column.
+
+A server that loses power mid-write leaves a run of zero bytes in its log,
+and IIS carries on after them when it comes back. The text either side of the
+gap imports as separate rows, and **Case ▾ → Log…** notes that the gap was
+there. A log IIS is still writing can be imported in place: the lines it adds
+during the import are left for next time.
+
+Default-configured W3C tables, and NCSA and native ones, get a one-line
+summary on the [Timeline](Timeline-search-and-watchlist.md): the URL, method,
+status and client address.
+
 ### Plain text and log files
 
 A file no other reader claims — `hostd.log`, `auth.log.1`, an extensionless
@@ -404,8 +490,10 @@ right. It stays the same size whatever you pick or the scan finds.
 2. Pick a profile on the left, or stay on **Custom (not saved)** to set
    things up yourself. A profile fills in everything below it.
 3. Pick **File types**. `.csv`, `.tsv`, `.txt`, `.psv`, `.json`, `.jsonl`,
-   `.ndjson`, `.plaso` and any extension an enabled plugin claims are on;
-   **other text files** (off) adds every other non-binary file as raw text.
+   `.ndjson`, `.plaso`, **IIS logs** and any extension an enabled plugin claims
+   are on; **other text files** (off) adds every other non-binary file as raw
+   text. **IIS logs** picks up [IIS web server logs](#iis-web-server-logs) by
+   name, and a file named like one is read as one however it got in.
    **Include subfolders** (on) walks the tree.
 4. Narrow with **Patterns**: **Include** and **Exclude**, one glob per line,
    case-insensitive. A pattern containing `/` matches the path from the
@@ -414,8 +502,10 @@ right. It stays the same size whatever you pick or the scan finds.
    narrow what the file types let through.
 5. Check the **Preview**, which updates as you type. **Will import** lists
    the matches with a box per file; **Excluded** lists the rest with each
-   reason (`extension`, `no include pattern matched`,
+   reason (`extension`, `IIS logs not selected`, `no include pattern matched`,
    `excluded by pattern: …`, `binary`, `unreadable`, `not a regular file`).
+   A profile saved before **IIS logs** existed leaves them out until you tick
+   it and **Update profile**.
    The line under the list counts them.
 6. **Import checked (N)**.
 
@@ -454,7 +544,9 @@ Plugins**). **mft_usn** reads a raw NTFS `$MFT` and `$UsnJrnl:$J`, recognised
 by name (`$MFT`, `$J`, `*$UsnJrnl*`…), without EZTools. **esxi_logs** reads
 ESXi support-bundle and UAC Linux host logs. A claimed file shows the
 format's name in the queue, with **Options** if it has any. Built-in
-extensions always win, so no plugin can take over `.csv` or `.json`. Plugin
+extensions always win, so no plugin can take over `.csv` or `.json`, and
+neither do built-in names: **esxi_logs** claims `.log`, but an
+[IIS log](#iis-web-server-logs) is still read as one. Plugin
 imports don't run as background jobs: they show an *Importing …* notice, not
 a progress row, and can't be cancelled. See [Plugins](Plugins.md).
 
@@ -494,8 +586,8 @@ Recognition gets you:
 - **Shipped dashboards**, such as the KAPE triage profile's, which find their
   tables by header set. See [Dashboards](Dashboards.md).
 
-You can name your own header sets from the table menu's
-**Name this header set…**.
+You can name your own header sets in the table menu's
+**Name & merge** section, under **These N columns**.
 
 ## Import jobs
 

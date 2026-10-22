@@ -23,18 +23,23 @@ python -m pip install -r requirements.txt
 
 See [Installation](Installation.md) for the requirements.
 
-### "error while attempting to bind on address"
+### "Port 8777 is in use … so this one is on 8778"
 
-The port is already in use, almost always by another Winnow you started
-earlier and forgot about. Winnow prints its usual `Winnow on
-http://127.0.0.1:8777` line, then this error, and exits. It does not move
-to another port by itself.
+Not an error. Another Winnow (or another program) already has port 8777,
+so this Winnow took the next free one and opened its own window there. Two
+Winnows started this way are separate: each has its own case, its own
+window and its own tags. Opening a file through a file association works
+the same way, on any free port.
 
-Either use the Winnow that is already running (open
-<http://127.0.0.1:8777>), shut that one down, or start this one on another
-port with `python server.py --port 8778`. Opening a file through a file
-association is the exception: it either hands the file to a Winnow that is
-already running or starts on a free port.
+### "Winnow can't listen on …"
+
+You gave `--port`, and something else already has that port. Winnow stops
+before it opens the case or a window. Leave out `--port` and it picks a free
+port by itself, or name another one.
+
+Before this version, a second Winnow started while the first had port 8777
+opened its window on the first Winnow, then stopped. The window looked like
+the second Winnow's but showed, and saved into, the first one's case.
 
 ### "is not a Winnow case file"
 
@@ -148,6 +153,25 @@ tags, notes and filters are not affected.
 page" is different. A server has one case open at a time, and every window
 using it shares that case. If another window opened a different case,
 reload this one to see what's open now.
+
+### "This window is out of date"
+
+Another window on the same Winnow opened a different case, so the case this
+window shows is no longer open there. The window covers itself with this
+notice and saves nothing more, so a tag, note or import from it can't land
+in the other case. **Reload this window** shows whatever case is open now.
+Your work in the first case is saved in its case file; open it again from
+the home screen when you need it.
+
+To work on two cases side by side, start Winnow a second time and open the
+second case there. Each Winnow has its own port and its own window. Using
+**Home** in one window to open another case switches every window on that
+Winnow.
+
+Before this version, the other window kept working. It showed the new
+case's rows under the old case's tables and saved tags onto the new case's
+rows. Tags and notes in a case that was open while another window switched
+cases may be on the wrong rows: see [Cases and importing](Cases-and-importing.md#checking-a-case-for-misplaced-tags).
 
 ### A regular expression is refused
 
@@ -340,8 +364,12 @@ import), both in the system temp folder. They are safe to delete when no
 Winnow is running.
 
 A crash can also leave `<case>.db-winnow-wal` and `-shm` files and a
-`.winnow-lock` file beside the case. Leave them: the next open uses or
-replaces them.
+`.winnow-lock` file beside the case. Leave them: the `-wal` can hold your
+latest work that isn't in the case file yet. The next open uses or
+replaces them, and the home screen folds the `-wal` back into the case and
+removes both files the next time it lists that case, as long as no Winnow
+has it open. Earlier versions also left an empty pair beside every case
+the home screen listed; those go the same way.
 
 ## Where the log is
 

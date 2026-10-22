@@ -192,13 +192,14 @@ ANNOUNCED = re.compile(r"Winnow on http://127\.0\.0\.1:(\d+)")
 
 
 def spawn_launcher(tmp: Path, *args, env: dict | None = None, cwd: Path | None = None,
-                   timeout: float = 45) -> Server:
+                   timeout: float = 45, browser: bool = False) -> Server:
     """`python server.py <args>` choosing its own port, as a file
-    association's `--assoc` launch does: the port is read from the line it
-    prints ("Winnow on http://127.0.0.1:<port>/"), which goes out before
-    uvicorn binds, so it then waits for /api/version too. --no-browser is
-    added here."""
-    proc = _popen(tmp, ["--no-browser", *args], env, cwd)
+    association's `--assoc` launch does, and as a plain start does now that
+    a second Winnow moves off a taken port: the port is read from the line
+    it prints ("Winnow on http://127.0.0.1:<port>/"), which goes out before
+    uvicorn serves, so it then waits for /api/version too. --no-browser is
+    added here unless `browser` (point PATH at a stand-in first)."""
+    proc = _popen(tmp, [*([] if browser else ["--no-browser"]), *args], env, cwd)
     log = ServerLog(proc.stdout)
     deadline = time.monotonic() + timeout
     while not (m := ANNOUNCED.search(log.text())):

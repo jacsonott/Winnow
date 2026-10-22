@@ -178,7 +178,11 @@ paths.py           INSTALL_ROOT — the one line that knows where the install
                     sqlite_ro_uri(), the only way Winnow opens a SQLite
                     file read-only — a path pasted into `file:...?mode=ro`
                     opens a different file when it holds # ? or % (see
-                    docs/notes/ingest.md). Imports nothing from the app.
+                    docs/notes/ingest.md). For a look at a case this
+                    process doesn't have open, sqlite_peek_uri() instead:
+                    plain mode=ro leaves a -wal/-shm pair beside a closed
+                    case that nothing removes (docs/notes/store.md).
+                    Imports nothing from the app.
 version.py         The one place Winnow's version number lives. Nothing in
                     it but the string, because update.py reads it out of a
                     downloaded archive it must not execute. Bump it in the
@@ -210,6 +214,14 @@ plasoread.py       Plaso storage (.plaso) reading for import — both on-disk
                     version number. Fixed column shape plus an
                     Attributes (JSON) catch-all the structparse derived-column
                     ops can lift fields out of. Stdlib only.
+iisread.py         IIS web server logs (W3C extended, NCSA, IIS native) for
+                    import — recognised by the NAME IIS gives them (u_ex…,
+                    nc…, in….log; log_format), which every router consults
+                    before extensions and before plugin formats. W3C columns
+                    are the union of the file's #Fields: lines, each line read
+                    against the header in effect where it sits (two passes,
+                    as JSON). Stdlib only; imports timeparse. See
+                    docs/notes/ingest.md.
 defaults/          The defaults Winnow ships, as JSON rather than Python:
                     headers.json names the header sets common tools emit
                     (EvtxECmd, MFTECmd, Amcache, ...) and, per set, how to

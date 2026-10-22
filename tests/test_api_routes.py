@@ -785,6 +785,19 @@ def test_remote_session_is_a_machine_setting(client):
     assert client.get("/api/settings/app").json()["remote_session"] is False
 
 
+def test_the_page_arrives_already_in_remote_session_mode(client):
+    """The launch animation decides whether to play before boot() has
+    fetched the machine settings, so it can only honour the mode if the
+    page itself already says so."""
+    page = client.get("/")
+    assert page.status_code == 200 and page.headers["cache-control"] == "no-cache"
+    assert '<html lang="en"' in page.text
+    client.post("/api/settings/app", json={"remote_session": True})
+    assert '<html class="remote" lang="en"' in client.get("/").text
+    client.post("/api/settings/app", json={"remote_session": False})
+    assert 'class="remote"' not in client.get("/").text
+
+
 # ---------------------------------------------------------------- folders
 
 def test_folder_routes_crud_and_source_assignment(client, store, write_csv):

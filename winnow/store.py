@@ -53,11 +53,12 @@ from . import combine  # noqa: F401 — registers the multi-column ops (coalesce
 from . import decode  # noqa: F401 — registers the decode ops (URL decode) the same way
 from . import structparse  # noqa: F401 — registers the JSON/XML extraction ops into timeparse.OPERATIONS
 from . import timeparse
+from . import iisread
 from . import plasoread
 from . import rxguard
 from . import xlsxread
 from . import log as wlog
-from .paths import sqlite_ro_uri
+from .paths import sqlite_header_is_wal, sqlite_peek_uri, sqlite_ro_uri, sqlite_rw_uri
 from .sqlresults import SqlResults, js_str as _sql_js_str, pane_cell_json, pane_cell_text  # noqa: F401 — server.py imports pane_cell_json from here
 
 BATCH = 20_000
@@ -162,6 +163,11 @@ XLSX_IMPORT_EXTENSIONS = {".xlsx", ".xlsm"}
 # a .plaso must never fall into the generic table picker: its raw tables
 # are serialized attribute containers, useless without the decode step.
 PLASO_IMPORT_EXTENSIONS = {".plaso"}
+# IIS web server logs are recognised by NAME (u_ex240501.log, nc2405.log —
+# iisread.log_format), since their extension is the .log every other log
+# has. In a folder scan's extension list this token stands for them the way
+# "*" stands for other text files: a chip of its own, on by default.
+IIS_IMPORT_TYPE = "iis"
 # scan_import_directory stops walking once matched+excluded together hit
 # this many entries — same "cap and say so" reasoning as
 # SEARCH_ALL_COUNT_CAP, guarding against an analyst accidentally pointing
@@ -324,8 +330,13 @@ CREATE TABLE IF NOT EXISTS derived_columns (
     params         TEXT NOT NULL DEFAULT '{}',
     status         TEXT NOT NULL DEFAULT 'building',  -- building | ready | partial | error
     parse_failures INTEGER,            -- non-empty inputs that produced NULL; set at backfill end
-    created_at     TEXT
+    created_at     TEXT,
+    inferred_type  TEXT                -- number | text | empty, NULL until looked at; see below
 );
+-- inferred_type is what a text-valued op's values turned out to be, read
+-- off the drv_ column when a backfill ends (_infer_derived_type). 'number'
+-- is what types the column as one (_derived_col_entry), so sizes and
+-- counts captured with a regex sort as numbers rather than as text.
 -- No index on source_id on purpose: this table holds one row per derived
 -- column in the whole case (tens at the very most), so a scan is one page
 -- either way, and at the 64KB page size _tune sets, an index would cost
@@ -1248,7 +1259,7 @@ def _ingest_record(kind: str, **options) -> str:
     a session names rows by rid, so the re-import has to produce the same
     rows in the same order, and the defaults do not (a headerless CSV
     gains a header and every rid slides by one). `kind` names a Store
-    reader: csv, text, json, sqlite, xlsx, plaso — or rows, for a table
+    reader: csv, text, json, sqlite, xlsx, plaso, iis — or rows, for a table
     produced in-process (a plugin's parser, a SQL save), which nothing
     here can re-run."""
     return json.dumps({"kind": kind, **{k: v for k, v in options.items() if v is not None}})
@@ -1410,15 +1421,6 @@ def infer_type(values: Iterable[str]) -> str:
     return "text"
 
 
-def _sqlite_header_is_wal(path: str) -> bool:
-    try:
-        with open(path, "rb") as f:
-            head = f.read(20)
-    except OSError:
-        return False
-    return len(head) == 20 and head.startswith(b"SQLite format 3\x00") and head[18] == 2
-
-
 def _open_evidence_sqlite(path: str) -> tuple[sqlite3.Connection, Callable[[], None]]:
     """A read-only connection to an external SQLite file that writes
     nothing beside it. Returns (connection, cleanup): close the
@@ -1443,7 +1445,7 @@ def _open_evidence_sqlite(path: str) -> tuple[sqlite3.Connection, Callable[[], N
     and a file on a share open the same way they do everywhere else."""
     tmpdir = None
     target, extra = path, ""
-    if _sqlite_header_is_wal(path):
+    if sqlite_header_is_wal(path):
         if os.path.exists(path + "-wal"):
             tmpdir = tempfile.mkdtemp(prefix="winnow-sqlite-")
             target = os.path.join(tmpdir, "evidence.db")
@@ -2222,7 +2224,9 @@ def is_winnow_case_file(path: str) -> bool:
         with open(path, "rb") as f:
             if f.read(16) != b"SQLite format 3\x00":
                 return False
-        conn = sqlite3.connect(sqlite_ro_uri(path), uri=True)
+        # sqlite_peek_uri: plain mode=ro on a case nothing has open left a
+        # -wal/-shm pair beside it that no read-only connection can remove.
+        conn = sqlite3.connect(sqlite_peek_uri(path), uri=True)
         try:
             names = {r[0] for r in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'")}
@@ -2231,6 +2235,46 @@ def is_winnow_case_file(path: str) -> bool:
         return {"sources", "tag_defs", "row_tags"} <= names
     except Exception:  # noqa: BLE001 — unreadable means "not a case"
         return False
+
+
+def fold_leftover_wal(path: str) -> bool:
+    """Fold a -wal left beside a case that nothing has open back into the
+    case file, and let SQLite remove it and the -shm. True if they're gone.
+
+    What leaves one: a Winnow that was killed before it closed the case
+    (power cut, Task Manager, a second Ctrl+C), and — until
+    sqlite_peek_uri — every read-only look at a closed case, which made an
+    empty pair beside it that nothing could remove. Opening the case again
+    folds a leftover in either way; this does it for a case listed on the
+    home screen, so the pair doesn't sit there until then.
+
+    Nothing here deletes a file. SQLite's own last close does: a
+    connection that can write, closing while no other connection has the
+    file open, checkpoints every frame into the case file first and only
+    then removes the -wal and -shm, and if anything else does have it
+    open it skips both and leaves the files exactly as they were. Deleting
+    a -wal by hand is how committed rows get lost; this never does. A case
+    a Winnow holds (probe_case_lock) is not opened at all, a file that
+    isn't a case is never opened read-write (is_winnow_case_file — it
+    could be evidence), and read-only media fail the open, or open
+    read-only, and keep their files."""
+    if not os.path.exists(path + "-wal") or probe_case_lock(path) is not None:
+        return False
+    if not is_winnow_case_file(path):
+        return False
+    try:
+        # A short busy timeout: this runs inside a listing, and a file
+        # someone is busy with is one to leave for next time.
+        conn = sqlite3.connect(sqlite_rw_uri(path), uri=True, timeout=1.0)
+        try:
+            # Reading is what opens the WAL; a connection that never read
+            # closes without checkpointing anything.
+            conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return False
+    return not os.path.exists(path + "-wal")
 
 
 def case_lock_path(case_path: str) -> str:
@@ -2606,6 +2650,11 @@ class Store:
         self._reader_pool: list[sqlite3.Connection] = []
         self._reader_lock = threading.Lock()
         self._readers_closed = False
+        # Readers checked out right now, so close() can wait for them: one
+        # still open when the writer closes stops SQLite checkpointing the
+        # -wal and removing it and the -shm (see close()).
+        self._readers_out = 0
+        self._readers_back = threading.Condition(self._reader_lock)
         with self.db:
             # Detect *before* CREATE TABLE IF NOT EXISTS runs, so a case file
             # that predates open_tabs gets every existing source/merge
@@ -2659,6 +2708,11 @@ class Store:
                 self.db.execute("ALTER TABLE merges ADD COLUMN col_mode TEXT NOT NULL DEFAULT 'all'")
             if "source_column" not in merge_cols:
                 self.db.execute("ALTER TABLE merges ADD COLUMN source_column INTEGER NOT NULL DEFAULT 0")
+            # ...and derived_columns.inferred_type. NULL on every column a
+            # case already has, which _type_unlooked_derived_columns fills
+            # in on a thread of its own once the case is open.
+            if not any(r[1] == "inferred_type" for r in self.db.execute("PRAGMA table_info(derived_columns)")):
+                self.db.execute("ALTER TABLE derived_columns ADD COLUMN inferred_type TEXT")
             # The single-row `dashboard` becomes one named "Dashboard" entry
             # the first time a case with that older shape is opened.
             has_named = self.db.execute("SELECT 1 FROM dashboards LIMIT 1").fetchone()
@@ -2715,6 +2769,9 @@ class Store:
         # after all. Never held while acquiring any other lock.
         self._threads_lock = threading.Lock()
         self._fts_janitor: threading.Thread | None = None
+        # The open-time typing pass over derived columns nothing has
+        # typed yet (_type_unlooked_derived_columns). Joined by close().
+        self._derived_typer: threading.Thread | None = None
         # Search-all job state. Its own lock, not self.lock: the worker
         # mutates the job record between per-source counts, and making that
         # wait on the connection lock would reintroduce exactly the
@@ -2800,6 +2857,7 @@ class Store:
         self._build_yields: dict[str, int] = {}
         self._build_waiting = 0   # builds for the open table queued on the writer
         self._downgrade_legacy_fts()
+        self._type_unlooked_derived_columns()
 
     def _downgrade_legacy_fts(self) -> None:
         """Sources whose fts_<id> predates the current index shape still
@@ -2838,6 +2896,77 @@ class Store:
             t = threading.Thread(target=self._drop_stale_fts_worker, args=(stale,), daemon=True)
             self._fts_janitor = t
             t.start()
+
+    def _type_unlooked_derived_columns(self) -> None:
+        """Type the derived columns nothing has looked at yet
+        (inferred_type NULL): every one in a case from before the column
+        was recorded, and any whose pass ended without managing to (the
+        case closing under it). Once each — the answer is stored, and a
+        column is looked at again only when a pass rewrites its values.
+        'building' and 'error' are left alone: one is mid-pass or was
+        abandoned by a crash, the other's values were cleared. An op with
+        a type of its own never needs looking at (_infer_derived_type), so
+        it isn't queued.
+
+        On a thread of its own, never here: a number column costs a full
+        scan of its values, and this runs at the end of __init__, which is
+        the case opening. Done inline, a case with a few million rows and
+        a handful of derived columns took seconds to minutes to open, all
+        of it under the writer lock and, on a case switch, server.py's
+        _CASE_SWITCH — the home screen's Open did nothing visible for that
+        long, and every click after it was dropped as a second open. Until
+        a column's answer lands it reads as the op's own type ('text'),
+        which is what every derived column read as before it was typed at
+        all."""
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT id, source_id, name, op_id FROM derived_columns "
+                "WHERE inferred_type IS NULL AND status IN ('ready', 'partial')").fetchall()
+        todo = [dict(r) for r in rows
+                if (timeparse.OPERATIONS.get(r["op_id"]) or {}).get("value_type") == "text"]
+        if todo:
+            t = threading.Thread(target=self._type_derived_worker, args=(todo,),
+                                 name="winnow-derived-types", daemon=True)
+            self._derived_typer = t
+            t.start()
+
+    def _type_derived_worker(self, todo: list[dict]) -> None:
+        for d in todo:
+            if self._closing:
+                return
+            # A drv_ table a damaged case lost is that column's problem
+            # (it reads as text, as it did before), not the case's. So is a
+            # scan the case closing interrupts: the column stays NULL, and
+            # the next open looks again.
+            with contextlib.suppress(Exception):
+                with self._reader() as ro:
+                    ro.set_progress_handler(lambda: 1 if self._closing else 0, 100_000)
+                    try:
+                        inferred = self._infer_derived_type(d, ro)
+                    finally:
+                        ro.set_progress_handler(None, 0)
+                if not inferred:
+                    continue
+                with self.lock:
+                    if self._closing:
+                        return
+                    # Only if nothing has typed it since the list was read: a
+                    # pass that rewrote the values meanwhile (a re-derive, a
+                    # re-parse) wrote its own answer, read off the new values,
+                    # and this one was read off the old.
+                    with self.db:
+                        self.db.execute(
+                            "UPDATE derived_columns SET inferred_type=? WHERE id=? AND op_id=?"
+                            " AND inferred_type IS NULL AND status IN ('ready', 'partial')",
+                            (inferred, d["id"], d["op_id"]))
+            time.sleep(0.02)  # same anti-starvation yield build_fts uses
+
+    def wait_for_derived_types(self, timeout: float | None = None) -> None:
+        """Blocks until the open-time typing pass finishes (or `timeout`
+        elapses). Used by tests."""
+        t = self._derived_typer
+        if t:
+            t.join(timeout)
 
     def _drop_stale_fts_worker(self, source_ids: list[int]) -> None:
         for source_id in source_ids:
@@ -3482,8 +3611,10 @@ class Store:
         every committed write to be copied out of the -wal into the case
         file itself and that couldn't be done — see the end of this method.
         Only a caller about to move the file without its -wal (save_as)
-        needs to ask; every other close leaves the -wal beside the file,
-        where the next open replays it."""
+        needs to ask. Every other close is the case's last connection when
+        it can be, which is what has SQLite checkpoint the -wal and remove
+        it and the -shm; when a long read is still open it folds the -wal
+        in instead, and the files left hold nothing the case file lacks."""
         # SQL pane queries first: one can run for ever, and it has no job
         # record or thread of its own to stop cooperatively, so it is
         # interrupted outright — now, so it unwinds while the waits below
@@ -3514,6 +3645,13 @@ class Store:
             t = j.get("thread")
             if t and t is not threading.current_thread() and t.is_alive():
                 t.join(15)
+        # The open-time typing pass reads on a reader of its own and writes
+        # one UPDATE per column; `_closing` interrupts its scan at the next
+        # progress tick, and a column it hadn't reached stays NULL for the
+        # next open (_type_unlooked_derived_columns).
+        t = self._derived_typer
+        if t and t is not threading.current_thread() and t.is_alive():
+            t.join(15)
         # Same for view builds running in the background: a worker queued
         # on self.lock at this point would otherwise take it after the
         # close below and run its INSERT on a closed connection. `closing`
@@ -3567,21 +3705,56 @@ class Store:
         # top of close for the other half of the same problem: stopping the
         # jobs above means reading, and those reads are on the pool now.)
         self._drain_idle_readers(permanent=True)
+        # A search-all sweep reads table by table on readers of its own; told
+        # to stop, it ends after the count it is in (the latch above would
+        # fail its next table anyway, as an error nobody is polling for).
+        with self._search_job_lock:
+            if self._search_job is not None:
+                self._search_job["cancelled"] = True
         folded = True
         with self.lock:
             # The drain only reaches idle readers. One checked out by a
-            # request still in flight — a CSV export streaming, a search-all
-            # sweep — keeps the case file open past the writer's close, so
-            # SQLite skips the checkpoint it does on the last close, and
-            # save_as deleting the -wal took every write since the last
-            # checkpoint with it (with 64 KB pages that is ~64 MB of WAL: on
-            # a quick look, usually the whole import and every tag). So fold
-            # it in here, under the lock, so nothing commits after the
-            # check. A reader whose snapshot already has every write doesn't
-            # stop the frames being copied back, only the WAL being reset,
-            # which is why "folded" is enough and "truncated" is not needed.
+            # request or a worker still running — a page fetch, a CSV export
+            # streaming, a search-all count, a search-index build reading its
+            # table's row — keeps the case file open past the writer's close,
+            # so SQLite skips the checkpoint it does on the last close: the
+            # -wal and -shm stay beside the case, the -wal holding every
+            # write since the last checkpoint.
+            #
+            # save_as can't have that at all, since it deletes the -wal —
+            # doing so took every write since the last checkpoint with it
+            # (with 64 KB pages that is ~64 MB of WAL: on a quick look,
+            # usually the whole import and every tag). So it folds the -wal
+            # into the case file here, under the lock, so nothing commits
+            # after the check, and returns whether that worked. A reader
+            # whose snapshot already has every write doesn't stop the frames
+            # being copied back, only the WAL being reset, which is why
+            # "folded" is enough and "truncated" is not needed.
             if fold_wal:
                 folded = self._checkpoint_truncate(self.FOLD_TIMEOUT_S, folded_is_enough=True)
+            else:
+                # Any other close waits for those readers to come back, so
+                # that it is the last close and SQLite tidies up after it. No
+                # new one can be checked out now (the drain latched the pool),
+                # and a page fetch or a count is over well inside the budget.
+                # Under the lock, so a background writer (an index build)
+                # can't meanwhile put frames into the -wal newer than an open
+                # reader's snapshot, which would stop the fold below copying
+                # them back.
+                with self._readers_back:
+                    self._readers_back.wait_for(lambda: not self._readers_out,
+                                                timeout=self.FOLD_TIMEOUT_S)
+                    readers_open = self._readers_out
+                # A long download isn't back in time, and isn't cut off. Then
+                # this close won't be the last, so fold what it can now: the
+                # -wal left behind holds nothing the case file lacks, and goes
+                # the next time the case is opened or listed on the home
+                # screen (fold_leftover_wal). One attempt: frames newer than
+                # an open reader's snapshot can't be copied until it ends,
+                # and waiting out a download is what this just declined.
+                if readers_open:
+                    with contextlib.suppress(sqlite3.Error):
+                        self._checkpoint_truncate(0, folded_is_enough=True)
             self.db.close()
         # Release the flock (see __init__) before unlinking, so that if the
         # remove below is the one that fails, what's left behind is an
@@ -3661,7 +3834,11 @@ class Store:
         On any exception the connection is closed, not returned: the only
         realistic errors here are a view/source table dropped mid-read or
         the store closing, and a connection whose last statement died is
-        cheaper to replace than to prove clean. The pool refills lazily."""
+        cheaper to replace than to prove clean. The pool refills lazily.
+
+        Checked-out connections are counted, so that close() can wait for
+        them to come back: one still open when the writer closes keeps
+        SQLite from tidying the -wal and -shm away (see close())."""
         with self._reader_lock:
             # A store whose case has been closed under a request in flight
             # (a case switch, with two browsers on one server) must fail
@@ -3674,20 +3851,28 @@ class Store:
             if self._readers_closed:
                 raise sqlite3.ProgrammingError("Cannot operate on a closed database.")
             conn = self._reader_pool.pop() if self._reader_pool else None
-        if conn is None:
-            conn = self._open_reader()
+            self._readers_out += 1
+        pooled = False
         try:
+            if conn is None:
+                conn = self._open_reader()
             yield conn
-        except BaseException:
-            with contextlib.suppress(sqlite3.Error):
-                conn.close()
-            raise
-        with self._reader_lock:
-            if not self._readers_closed and len(self._reader_pool) < self.READER_POOL_CAP:
-                self._reader_pool.append(conn)
-                conn = None
-        if conn is not None:
-            conn.close()
+            with self._reader_lock:
+                if not self._readers_closed and len(self._reader_pool) < self.READER_POOL_CAP:
+                    self._reader_pool.append(conn)
+                    pooled = True
+                    self._readers_out -= 1
+                    self._readers_back.notify_all()
+        finally:
+            if not pooled:
+                if conn is not None:
+                    with contextlib.suppress(sqlite3.Error):
+                        conn.close()
+                # Counted back only once it is closed, so close() never sees
+                # "none out" while one still has the case file open.
+                with self._reader_lock:
+                    self._readers_out -= 1
+                    self._readers_back.notify_all()
 
     @staticmethod
     @contextlib.contextmanager
@@ -4250,6 +4435,147 @@ class Store:
         lines = [_text_line(ln) for ln in lines[:max_rows]]
         return {"delimiter": None, "columns": [TEXT_COLUMN],
                 "sample_rows": [[ln] for ln in lines], "inferred_types": ["text"]}
+
+    def ingest_iis(self, path: str, name: str | None = None, build_fts: bool = True,
+                   progress=None, cancel=None, log_format: str | None = None) -> dict:
+        """Import an IIS web server log (W3C extended, NCSA or IIS native)
+        as one table — iisread.py has the formats and why W3C's columns
+        come from its #Fields: lines. The file's name says which format it
+        is; `log_format` overrides that (a session re-import, which
+        recorded it).
+
+        Two passes, as ingest_json: the first finds the columns (the union
+        of every #Fields: line), the second inserts. The first runs before
+        the source exists, so a cancel there leaves nothing to drop; the
+        second reads exactly as many lines as the first did, so a log the
+        server is still appending to can't hand it a field it never
+        planned for. Otherwise ingest_text's contract: batched commits,
+        byte progress, cancel drops the partial source, a mid-file error
+        keeps what committed. No binary refusal — a log IIS was writing
+        when the power went holds NUL runs, which are read as gaps."""
+        name = name or os.path.basename(path)
+        fmt = log_format or iisread.log_format(path)
+        if fmt not in iisread.FORMATS:
+            raise ValueError(f"{name} is not named like an IIS log (u_ex…, nc…, in….log)")
+        size = os.path.getsize(path)
+        file_hash = self._quick_hash(path)
+        encoding = sniff_text_encoding(path)
+
+        def open_log():
+            # newline="\n": a lone \r is the line's own text (_text_line).
+            return open(path, "r", encoding=encoding, errors=TEXT_DECODE_ERRORS,
+                        newline="\n", buffering=1 << 20)
+
+        counted = [0]
+
+        def first_pass(lines):
+            for line in lines:
+                counted[0] += 1
+                if counted[0] % BATCH == 0 and cancel is not None and cancel():
+                    raise IngestCancelled(f"Import of {name} cancelled")
+                yield line
+
+        with open_log() as fh:
+            if fh.read(1) == "":
+                raise ValueError("File is empty")
+            fh.seek(0)
+            plan = iisread.plan(fmt, first_pass(iisread.logical_lines(fh, {})))
+        if not plan["columns"]:
+            raise ValueError(f"{name} has no {iisread.FORMATS[fmt]} log lines in it")
+
+        cols = sanitize_columns(plan["columns"])
+        ncols = len(cols)
+        source_id, table = self._create_source_shell(
+            name, cols, path=path, file_hash=file_hash, ingest=_ingest_record("iis", format=fmt))
+        insert = f"INSERT INTO {q(table)} ({','.join(q(c) for c in cols)}) VALUES ({','.join('?' * ncols)})"
+
+        stats: dict = {}
+        sample: list[list[str]] = []
+        batch: list[tuple] = []
+        total = 0
+        t0 = time.time()
+        error: Exception | None = None
+        fallback0 = _cp1252_fallback_count()   # pass two only, or the file counts twice
+        fh = open_log()
+        with self._ingest_synchronous_off():
+            try:
+                lines = itertools.islice(iisread.logical_lines(fh, stats), counted[0])
+                for row in iisread.rows(lines, plan, stats):
+                    batch.append(tuple(row))
+                    if len(sample) < SAMPLE_ROWS:
+                        sample.append(row)
+                    if len(batch) >= BATCH:
+                        if cancel is not None and cancel():
+                            raise IngestCancelled(f"Import of {name} cancelled")
+                        total = self._commit_ingest_batch(insert, batch, source_id, total)
+                        batch.clear()
+                        if progress:
+                            progress(total, fh.buffer.tell(), size)
+                if batch:
+                    if cancel is not None and cancel():
+                        raise IngestCancelled(f"Import of {name} cancelled")
+                    total = self._commit_ingest_batch(insert, batch, source_id, total)
+                    batch.clear()
+                if progress:
+                    progress(total, size, size)
+            except IngestCancelled:
+                self.drop_source(source_id)   # as ingest_csv: a cancel discards the partial import
+                raise
+            except Exception as e:
+                if batch:
+                    with contextlib.suppress(Exception):
+                        total = self._commit_ingest_batch(insert, batch, source_id, total)
+                        batch.clear()
+                kept = f" — import stopped there; the {total:,} rows before it were kept" if total else ""
+                error = ValueError(f"Row {total + 1:,}: {e}{kept}")
+                error.__cause__ = e
+            finally:
+                fh.close()
+
+        types = [t or (infer_type([r[i] for r in sample]) if sample else "text")
+                 for i, t in enumerate(plan["types"])]
+        colmeta = [{"name": c, "type": t} for c, t in zip(cols, types)]
+        decoded = _encoding_report(encoding, _cp1252_fallback_count() - fallback0)
+        self._finish_source_columns(source_id, colmeta, decoded, name)
+        if stats.get("nul_lines"):
+            wlog.record("warn", f"{name}: {stats['nul_lines']:,} line(s) held runs of NUL bytes — the gap a "
+                                "server leaves in its log when it stops without closing it (a crash or "
+                                "power loss). The text either side of each run was imported.")
+        if error is not None:
+            if total == 0:
+                self.drop_source(source_id)
+            raise error
+        if build_fts and total:
+            self._ensure_fts_building(source_id)
+        elapsed = time.time() - t0
+        rec = self.get_source(source_id)
+        rec["elapsed_sec"] = round(elapsed, 2)
+        rec["rows_per_sec"] = int(total / elapsed) if elapsed > 0 else 0
+        rec["ragged_rows"] = stats.get("ragged", 0)
+        rec["suspect_quote_rows"] = 0
+        rec["log_format"] = fmt
+        rec["encoding"], rec["cp1252_bytes"] = decoded["encoding"], decoded["cp1252_bytes"]
+        return rec
+
+    @staticmethod
+    def preview_iis_text(text: str, log_format: str, complete: bool = True, max_rows: int = 50) -> dict:
+        """The first rows of an IIS log as ingest_iis would make them, in
+        preview_csv_text's shape. The columns are the ones the sample
+        names — a #Fields: line further into the file adds its own on
+        import. `complete` is whether `text` is the whole file; when it
+        isn't, its last line may be cut and is left out."""
+        if not text:
+            raise ValueError("File is empty")
+        physical = text.split("\n")
+        if not complete and len(physical) > 1:
+            physical.pop()
+        lines = list(iisread.logical_lines(physical, {}))
+        plan = iisread.plan(log_format, lines)
+        sample = list(itertools.islice(iisread.rows(lines, plan, {}), max_rows))
+        types = [t or (infer_type([r[i] for r in sample]) if sample else "text")
+                 for i, t in enumerate(plan["types"])]
+        return {"delimiter": None, "columns": sanitize_columns(plan["columns"]),
+                "sample_rows": sample, "inferred_types": types, "log_format": log_format}
 
     def _finish_source_columns(self, source_id: int, colmeta: list[dict], decoded: dict,
                                name: str) -> None:
@@ -5059,7 +5385,9 @@ class Store:
         paths, so this is safe to call live as the analyst edits patterns.
 
         A file is excluded for exactly one of: its extension isn't
-        recognized ("extension"), include_patterns is non-empty and nothing
+        recognized ("extension"; "IIS logs not selected" for a file named
+        like an IIS log when `extensions` leaves out IIS_IMPORT_TYPE),
+        include_patterns is non-empty and nothing
         in it matched ("no include pattern matched"), a pattern in
         exclude_patterns matched ("excluded by pattern: <pattern>"), it
         couldn't be stat'd ("unreadable" — a broken symlink, a permission
@@ -5092,13 +5420,16 @@ class Store:
         # as tables. A file that gets in this way is checked for NULs
         # first; a binary is excluded with its own reason.
         other_text = any(e in ("*", ".*") for e in (extensions or []))
+        # IIS logs: admitted by name, on unless the list leaves the token
+        # out (a profile saved before the chip existed does).
+        iis_logs = extensions is None or IIS_IMPORT_TYPE in (e.lower() for e in extensions)
         # None means "the defaults"; an empty list means exactly that — the
         # analyst turned every chip off. `or` conflated the two, so a scan
         # with nothing selected matched the default set.
         exts = {
             (e if e.startswith(".") else "." + e).lower()
             for e in (DEFAULT_IMPORT_EXTENSIONS if extensions is None else extensions)
-            if e not in ("*", ".*")
+            if e not in ("*", ".*") and e.lower() != IIS_IMPORT_TYPE
         }
         includes = [p for p in (include_patterns or []) if p.strip()]
         excludes = [p for p in (exclude_patterns or []) if p.strip()]
@@ -5139,11 +5470,12 @@ class Store:
                     continue
                 entry = {"path": fpath, "rel_path": rel, "size_bytes": st.st_size}
                 ext = os.path.splitext(fname)[1].lower()
+                is_iis = iisread.log_format(fname) is not None
                 by_filename_pattern = any(fnmatch.fnmatch(fname.lower(), p.lower()) for p in fname_pats)
                 by_ext = ext in exts
-                unclaimed = not by_ext and not by_filename_pattern
+                unclaimed = not by_ext and not by_filename_pattern and not (is_iis and iis_logs)
                 if unclaimed and not other_text:
-                    excluded.append({**entry, "reason": "extension"})
+                    excluded.append({**entry, "reason": "IIS logs not selected" if is_iis else "extension"})
                     continue
                 if includes and not any(self._import_pattern_matches(p, fname, rel) for p in includes):
                     excluded.append({**entry, "reason": "no include pattern matched"})
@@ -5155,15 +5487,20 @@ class Store:
                 # The binary probe reads the file, so it runs last: only a
                 # file the name gates let through gets opened — a tree of
                 # excluded build output is never sniffed.
-                if unclaimed and looks_binary(fpath):
+                if unclaimed and not is_iis and looks_binary(fpath):
                     excluded.append({**entry, "reason": "binary"})
                     continue
                 # kind routes the frontend's per-file import call: the two
                 # built-in parsers by their own extensions, everything else
                 # ("plugin") resolved client-side against the loaded plugin
                 # formats — the scan doesn't know which format claimed an
-                # extension/pattern, and doesn't need to.
-                if ext in (".json", ".jsonl", ".ndjson"):
+                # extension/pattern, and doesn't need to. An IIS log is
+                # read as one however it got in — a plugin claiming .log
+                # (esxi_logs) or "other text files" included: built-in
+                # recognition wins, as built-in extensions do.
+                if is_iis:
+                    kind = "iis"
+                elif ext in (".json", ".jsonl", ".ndjson"):
                     kind = "json"
                 elif ext in PLASO_IMPORT_EXTENSIONS:
                     kind = "plaso"
@@ -5200,7 +5537,7 @@ class Store:
         sat behind with no progress, no way to tell "working" from
         "crashed", and a browser tab they couldn't use meanwhile.
 
-        `kind` is 'csv' | 'text' | 'json' | 'sqlite' | 'xlsx' | 'plaso'. For 'sqlite',
+        `kind` is 'csv' | 'text' | 'json' | 'sqlite' | 'xlsx' | 'plaso' | 'iis'. For 'sqlite',
         options['tables'] is [{table, name?, timestamp_columns?}, ...] —
         one uploaded file, one job, N sources, so the file is spooled and
         read once rather than re-uploaded per table. `delete_after` removes
@@ -5242,7 +5579,7 @@ class Store:
         (add_derived_column, add_derived_columns, rederive_column) undo
         that definition on the refusal — a column whose only job was never
         started would otherwise be 'building' for good."""
-        if kind not in ("csv", "text", "json", "sqlite", "xlsx", "plaso", "derive"):
+        if kind not in ("csv", "text", "json", "sqlite", "xlsx", "plaso", "iis", "derive"):
             raise ValueError(f"Unknown ingest kind: {kind}")
         try:
             size = os.path.getsize(path)
@@ -5333,26 +5670,37 @@ class Store:
             elif job["kind"] == "derive":
                 # options carries def_ids (a flatten adding several columns
                 # in one pass) or def_id (the single-column create and
-                # re-derive paths) — one job either way.
-                res = self.backfill_derived_columns(
-                    opts.get("def_ids") or [opts["def_id"]], progress=progress, cancel=cancel,
-                    drop_on_cancel=opts.get("drop_on_cancel", False),
-                    previous=opts.get("previous"),
-                )
+                # re-derive paths) — one job either way. A merge's carries
+                # `parts`, one per member, which this one job walks in turn
+                # (_backfill_derive_parts).
+                if opts.get("parts"):
+                    out = self._backfill_derive_parts(
+                        job, opts["parts"], progress=progress, cancel=cancel,
+                        drop_on_cancel=opts.get("drop_on_cancel", False),
+                    )
+                else:
+                    out = [self.backfill_derived_columns(
+                        opts.get("def_ids") or [opts["def_id"]], progress=progress, cancel=cancel,
+                        drop_on_cancel=opts.get("drop_on_cancel", False),
+                        previous=opts.get("previous"),
+                    )]
+                rows = sum(res["rows"] for res in out)
                 with self._ingest_jobs_lock:
                     job["status"] = "done"
-                    job["rows_done"] = res["rows"]
-                    job["source_ids"] = [res["source_id"]]
-                    job["result"] = [dict(c, rows=res["rows"]) for c in res["columns"]]
+                    job["rows_done"] = rows
+                    job["source_ids"] = [res["source_id"] for res in out]
+                    job["result"] = self._derive_job_result(out)
                 # Chained columns: anything derived FROM a column this job
                 # just recomputed is now stale — re-derive it, which
                 # cascades down the chain one job at a time (each named
                 # for why it's running). A fresh create has no dependents
                 # (its name is new), so this only fires on re-derives.
-                self._cascade_dependent_derives(res["source_id"],
-                                                [c["name"] for c in res["columns"]])
-                wlog.record("info", f"Derive finished: {job['name']} — {res['rows']:,} rows in "
-                                    f"{self._job_elapsed(job):.1f}s (table {res['source_id']})")
+                self._cascade_dependent_derives(
+                    [(res["source_id"], [c["name"] for c in res["columns"]]) for res in out])
+                tables = ", ".join(str(res["source_id"]) for res in out)
+                wlog.record("info", f"Derive finished: {job['name']} — {rows:,} rows in "
+                                    f"{self._job_elapsed(job):.1f}s "
+                                    f"(table{'s' if len(out) != 1 else ''} {tables})")
                 return
             elif job["kind"] == "text":
                 results = [self.ingest_text(
@@ -5363,6 +5711,11 @@ class Store:
                 results = [self.ingest_plaso(
                     job["path"], name=job["name"],
                     build_fts=opts.get("build_fts", True),
+                    progress=progress, cancel=cancel,
+                )]
+            elif job["kind"] == "iis":
+                results = [self.ingest_iis(
+                    job["path"], name=job["name"], build_fts=opts.get("build_fts", True),
                     progress=progress, cancel=cancel,
                 )]
             elif job["kind"] == "json":
@@ -6024,9 +6377,18 @@ class Store:
         type the column; the `derived` flag is what the handful of
         base-only sites (_base_cols) filter on."""
         op = timeparse.OPERATIONS.get(r["op_id"]) or {}
+        # A text-valued op's column is typed by what it holds, as an
+        # imported column is: sizes or counts pulled out with a regex are
+        # a number column, and sort, compare and group as numbers. The op
+        # can't say so up front — the same regex capture is a host name
+        # in one column and a byte count in the next.
+        typ = op.get("value_type", "datetime")
+        if typ == "text" and r["inferred_type"] == "number":
+            typ = "number"
         return {
             "name": r["name"],
-            "type": op.get("value_type", "datetime"),
+            "type": typ,
+            "inferred_type": r["inferred_type"],
             "derived": True,
             "derived_id": r["id"],
             "derived_from": r["input_column"],
@@ -6191,7 +6553,18 @@ class Store:
             # every member's definition (_derived_scope).
             every = [c] + twins
             failures = [x.get("parse_failures") for x in every]
+            # Typed by every member's values, not the first member's: a
+            # number on the merge only when no member holds text. A
+            # member with nothing in the column (a host whose log never
+            # has the field) says nothing either way, or one quiet host
+            # would put the whole merge back to sorting as text.
+            held = {x.get("inferred_type") for x in every} - {None, "empty"}
+            typ = c["type"]
+            if held and all(timeparse.OPERATIONS.get(x.get("derived_op"), {}).get("value_type") == "text"
+                            for x in every):
+                typ = "number" if held == {"number"} else "text"
             cols.append({**c,
+                         "type": typ,
                          "derived_status": max((x.get("derived_status") for x in every),
                                                key=lambda s: _DERIVED_STATUS_RANK.get(s, 4)),
                          "parse_failures": None if None in failures else sum(failures)})
@@ -6749,12 +7122,68 @@ class Store:
                 for col in timeparse.op_inputs(op_id, input_column, params):
                     if self._find_column(msrc, col) is None:
                         raise ValueError(f"Member table {msrc['name']!r} has no column {col!r}")
-            results = [self.add_derived_column(m["source_id"], name, input_column, op_id, params)
-                       for m in members]
-            return {"definition": results[0]["definition"],
-                    "member_definitions": [r["definition"] for r in results],
-                    "job_id": results[0]["job_id"],
-                    "job_ids": [r["job_id"] for r in results]}
+            def_ids: list[int] = []
+            try:
+                for m in members:
+                    def_ids.append(self._define_derived_column(
+                        m["source_id"], name, input_column, op_id, params))
+            except Exception:
+                # A check only a member's own definition makes (an input
+                # still building there) — the members before it go too.
+                self._rollback_derive_definitions(def_ids)
+                raise
+            definitions = [self.get_derived_column(d) for d in def_ids]
+            job = self._start_merge_derive_job(definitions[0]["name"], [[d] for d in def_ids], members)
+            return {"definition": definitions[0],
+                    "member_definitions": definitions,
+                    "job_id": job["job_id"],
+                    "job_ids": [job["job_id"]]}
+        def_id = self._define_derived_column(source_id, name, input_column, op_id, params)
+        # Read back BEFORE the job starts: a backfill that fails at once
+        # removes the column (_fail_derive_backfill), and on a busy machine
+        # it can do that before this thread gets to the return below.
+        definition = self.get_derived_column(def_id)
+        try:
+            job = self.start_ingest_job(
+                "derive", "", name=definition["name"],
+                options={"def_id": def_id, "drop_on_cancel": True,
+                         "units_total": self._source_lite(source_id)["row_count"]},
+            )
+        except OpCancelled:
+            # The definition is committed and the backfill was refused (the
+            # case is closing). `drop_on_cancel` above is this path's own
+            # promise that a cancelled create leaves no half-column behind,
+            # and a job that never started is that same cancel one moment
+            # earlier — so drop the definition and let the refusal out.
+            # Left standing it survives the close as a column stuck
+            # 'building' with nothing to finish it: "(building…)" in the
+            # header on every reopen, save_view_as_source refusing the
+            # whole table, and nothing able to chain off it.
+            self._rollback_derive_definitions([def_id])
+            raise
+        return {"definition": definition, "job_id": job["job_id"]}
+
+    def _start_merge_derive_job(self, name: str, parts: list[list[int]], members: list[dict]) -> dict:
+        """The one backfill job for columns just created on a merge:
+        `parts` is each member's definition ids, in member order. A job
+        refused because the case is closing takes every member's
+        definitions with it, as add_derived_column's own refusal does."""
+        units = sum(self._source_lite(m["source_id"])["row_count"] for m in members)
+        try:
+            return self.start_ingest_job(
+                "derive", "", name=name,
+                options={"parts": [{"def_ids": ids} for ids in parts], "drop_on_cancel": True,
+                         "units_total": units},
+            )
+        except OpCancelled:
+            self._rollback_derive_definitions([d for ids in parts for d in ids])
+            raise
+
+    def _define_derived_column(self, source_id: int, name: str, input_column: str,
+                               op_id: str, params: dict | None) -> int:
+        """add_derived_column's checks and its definition row (status
+        'building'), on one real table, without the job — so a merge can
+        make every member's before starting the one job that fills them."""
         op = timeparse.OPERATIONS.get(op_id)
         if op is None:
             raise ValueError(f"Unknown operation: {op_id}")
@@ -6811,29 +7240,7 @@ class Store:
                 (source_id, name, input_column, op_id, json.dumps(params),
                  time.strftime("%Y-%m-%dT%H:%M:%S")),
             )
-            def_id = cur.lastrowid
-        # Read back BEFORE the job starts: a backfill that fails at once
-        # removes the column (_fail_derive_backfill), and on a busy machine
-        # it can do that before this thread gets to the return below.
-        definition = self.get_derived_column(def_id)
-        try:
-            job = self.start_ingest_job(
-                "derive", "", name=name,
-                options={"def_id": def_id, "drop_on_cancel": True, "units_total": src["row_count"]},
-            )
-        except OpCancelled:
-            # The definition is committed and the backfill was refused (the
-            # case is closing). `drop_on_cancel` above is this path's own
-            # promise that a cancelled create leaves no half-column behind,
-            # and a job that never started is that same cancel one moment
-            # earlier — so drop the definition and let the refusal out.
-            # Left standing it survives the close as a column stuck
-            # 'building' with nothing to finish it: "(building…)" in the
-            # header on every reopen, save_view_as_source refusing the
-            # whole table, and nothing able to chain off it.
-            self._rollback_derive_definitions([def_id])
-            raise
-        return {"definition": definition, "job_id": job["job_id"]}
+            return cur.lastrowid
 
     STRUCT_SAMPLE = 200
 
@@ -6901,11 +7308,45 @@ class Store:
                     if self._find_column(msrc, spec.get("input_column")) is None:
                         raise ValueError(
                             f"Member table {msrc['name']!r} has no column {spec.get('input_column')!r}")
-            results = [self.add_derived_columns(m["source_id"], specs) for m in members]
-            first = results[0]
-            return {**first,
-                    "member_results": results,
-                    "job_ids": [j for r in results for j in (r.get("job_ids") or [r.get("job_id")]) if j]}
+            parts: list[list[int]] = []
+            try:
+                for m in members:
+                    parts.append(self._define_derived_columns(m["source_id"], specs)[0])
+            except Exception:
+                self._rollback_derive_definitions([d for ids in parts for d in ids])
+                raise
+            label = self._derive_batch_label(specs)
+            job = self._start_merge_derive_job(label, parts, members)
+            results = [{"definitions": [self.get_derived_column(d) for d in ids], "job_id": job["job_id"]}
+                       for ids in parts]
+            return {**results[0], "member_results": results, "job_ids": [job["job_id"]]}
+        def_ids, label = self._define_derived_columns(source_id, specs)
+        # Before the job, for add_derived_column's reason.
+        definitions = [self.get_derived_column(d) for d in def_ids]
+        try:
+            job = self.start_ingest_job(
+                "derive", "", name=label,
+                options={"def_ids": def_ids, "drop_on_cancel": True,
+                         "units_total": self._source_lite(source_id)["row_count"]},
+            )
+        except OpCancelled:
+            # All-or-nothing all the way to the job: this batch is
+            # created in one step and cancelled in one step (the backfill
+            # drops every column it was filling), so a refused job takes
+            # the whole batch with it rather than leaving eight columns
+            # stuck 'building' — see add_derived_column.
+            self._rollback_derive_definitions(def_ids)
+            raise
+        return {"definitions": definitions, "job_id": job["job_id"]}
+
+    @staticmethod
+    def _derive_batch_label(specs: list[dict]) -> str:
+        return (specs[0].get("name") or "").strip() if len(specs) == 1 else f"{len(specs)} columns"
+
+    def _define_derived_columns(self, source_id: int, specs: list[dict]) -> tuple[list[int], str]:
+        """add_derived_columns' checks and definition rows on one real
+        table, without the job: (the new definition ids, the job's
+        label). See _define_derived_column."""
         src = self._source_lite(source_id)
         drv = self._derived_table(source_id)
 
@@ -6966,24 +7407,7 @@ class Store:
                      json.dumps(pspec["params"]), time.strftime("%Y-%m-%dT%H:%M:%S")),
                 )
                 def_ids.append(cur.lastrowid)
-
-        label = prepared[0]["name"] if len(prepared) == 1 else f"{len(prepared)} columns"
-        # Before the job, for add_derived_column's reason.
-        definitions = [self.get_derived_column(d) for d in def_ids]
-        try:
-            job = self.start_ingest_job(
-                "derive", "", name=label,
-                options={"def_ids": def_ids, "drop_on_cancel": True, "units_total": src["row_count"]},
-            )
-        except OpCancelled:
-            # All-or-nothing all the way to the job: this batch is
-            # created in one step and cancelled in one step (the backfill
-            # drops every column it was filling), so a refused job takes
-            # the whole batch with it rather than leaving eight columns
-            # stuck 'building' — see add_derived_column.
-            self._rollback_derive_definitions(def_ids)
-            raise
-        return {"definitions": definitions, "job_id": job["job_id"]}
+        return def_ids, self._derive_batch_label(specs)
 
     def _rollback_derive_definitions(self, def_ids: list[int]) -> None:
         """Undo the definition rows a create has just committed, for a
@@ -7294,19 +7718,31 @@ class Store:
                 out.append(d)
         return out
 
-    def _cascade_dependent_derives(self, source_id: int, names: list[str]) -> None:
-        for d in self.dependent_derived_columns(source_id, names):
+    def _cascade_dependent_derives(self, changed: list[tuple[int, list[str]]]) -> None:
+        """Re-derive what was computed from the columns a derive job just
+        wrote: `changed` holds (source_id, names) for each table it wrote.
+        A merge's job wrote one per member, and the same child on every
+        member is then recomputed by one job walking them in turn, for
+        the reason the parent was (_backfill_derive_parts)."""
+        groups: dict[str, list[dict]] = {}
+        for source_id, names in changed:
+            for d in self.dependent_derived_columns(source_id, names):
+                key = _ascii_fold(d["name"]) if len(changed) > 1 else str(d["id"])
+                groups.setdefault(key, []).append(dict(d, parents=names))
+        for defs in groups.values():
+            d, names = defs[0], defs[0]["parents"]
             try:
                 with self.lock, self.db:
-                    self.db.execute(
+                    self.db.executemany(
                         "UPDATE derived_columns SET status='building', parse_failures=NULL WHERE id=?",
-                        (d["id"],),
+                        [(x["id"],) for x in defs],
                     )
-                src = self._source_lite(source_id)
+                units = sum(self._source_lite(x["source_id"])["row_count"] for x in defs)
+                which = ({"def_id": d["id"]} if len(defs) == 1
+                         else {"parts": [{"def_ids": [x["id"]]} for x in defs]})
                 self.start_ingest_job(
                     "derive", "", name=f"{d['name']} (recomputed — its input changed)",
-                    options={"def_id": d["id"], "drop_on_cancel": False,
-                             "units_total": src["row_count"]},
+                    options={**which, "drop_on_cancel": False, "units_total": units},
                 )
             except Exception as e:  # noqa: BLE001 — recorded below, then on to the next child
                 # One broken child shouldn't stop its siblings — but it must
@@ -7332,9 +7768,9 @@ class Store:
                                     f"({type(e).__name__}: {e})")
                 try:
                     with self.lock, self.db:
-                        self.db.execute(
+                        self.db.executemany(
                             "UPDATE derived_columns SET status='partial' WHERE id=? AND status='building'",
-                            (d["id"],),
+                            [(x["id"],) for x in defs],
                         )
                 except Exception:  # noqa: BLE001 — a closing connection has nothing left to record on
                     pass
@@ -7351,15 +7787,16 @@ class Store:
         nothing computed.
 
         On a merge (`source_id` negative) every member that carries the
-        column is re-derived with the same params (_derived_scope), one
-        job per member — the shape creating on a merge has, so each member
-        shows, and cancels, in the jobs panel on its own, and a cancelled
-        member keeps its values marked 'partial', which the merge's column
-        then reports (_merge_columns). All-or-nothing up to the jobs, as
-        create is: every member's definition is checked against the new
-        params before any is rewritten, so params one member cannot take
-        refuse the whole re-derive instead of leaving the merge's one
-        column computed two ways."""
+        column is re-derived with the same params (_derived_scope), by one
+        job that walks the members in turn — the shape creating on a merge
+        has (_backfill_derive_parts). Cancelled part-way, the member it
+        was on keeps its values marked 'partial', which the merge's column
+        then reports (_merge_columns); the members it had not reached keep
+        the column they had. All-or-nothing up to the job, as create is:
+        every member's definition is checked against the new params
+        before any is rewritten, so params one member cannot take refuse
+        the whole re-derive instead of leaving the merge's one column
+        computed two ways."""
         scope = self._derived_scope(def_id, source_id)
         if params is not None and len({d["op_id"] for d in scope}) > 1:
             ways = ", ".join(
@@ -7378,56 +7815,46 @@ class Store:
                 # 'building' and the job got as far as loading it.
                 op["check"](self, new_params)
             prepared.append((d, new_params))
-        results = [self._rederive_one(d, new_params) for d, new_params in prepared]
-        if len(results) == 1:
-            return results[0]
-        cascades, seen = [], set()
-        for r in results:
-            for n in r["cascades_to"]:
-                if _ascii_fold(n) not in seen:
-                    seen.add(_ascii_fold(n))
-                    cascades.append(n)
-        return {"definition": results[0]["definition"],
-                "member_definitions": [r["definition"] for r in results],
-                "job_id": results[0]["job_id"],
-                "job_ids": [r["job_id"] for r in results],
-                "cascades_to": cascades}
-
-    def _rederive_one(self, d: dict, new_params: dict) -> dict:
-        """rederive_column for one definition whose params are already
-        validated. A refusal part-way through a merge (the case closing)
-        restores the member it was refused on; the members before it
-        have jobs running, which the close cancels like any other — so
-        they end 'partial', as a cancelled re-derive does."""
-        def_id = d["id"]
         with self.lock, self.db:
-            self.db.execute(
+            self.db.executemany(
                 "UPDATE derived_columns SET params=?, status='building', parse_failures=NULL WHERE id=?",
-                (json.dumps(new_params), def_id),
+                [(json.dumps(new_params), d["id"]) for d, new_params in prepared],
             )
-        src = self._source_lite(d["source_id"])
+        # `previous` lets a backfill that fails before writing a value put
+        # the definition back as it was (_fail_derive_backfill).
+        if len(scope) == 1:
+            which = {"def_id": scope[0]["id"], "previous": [scope[0]]}
+        else:
+            which = {"parts": [{"def_ids": [d["id"]], "previous": [d]} for d in scope]}
+        units = sum(self._source_lite(d["source_id"])["row_count"] for d in scope)
         try:
-            # `previous` lets a backfill that fails before writing a value
-            # put the definition back as it was (_fail_derive_backfill).
             job = self.start_ingest_job(
-                "derive", "", name=d["name"],
-                options={"def_id": def_id, "drop_on_cancel": False, "units_total": src["row_count"],
-                         "previous": [d]},
+                "derive", "", name=scope[0]["name"],
+                options={**which, "drop_on_cancel": False, "units_total": units},
             )
         except OpCancelled:
-            # Refused because the case is closing. The row above now says
+            # Refused because the case is closing. The rows above now say
             # 'building' under the new params and no job will ever make
             # that true — the column would come back from the reopen
             # reading "(building…)" over the values it had all along. A
             # re-derive is not a delete (the cancelled-mid-backfill case
             # keeps the column and marks it 'partial'), so put the
-            # definition back exactly as it was: this call raised, so
+            # definitions back exactly as they were: this call raised, so
             # nothing about it took effect.
-            self._restore_derive_definition(d)
+            for d in scope:
+                self._restore_derive_definition(d)
             raise
-        return {"definition": self.get_derived_column(def_id), "job_id": job["job_id"],
-                "cascades_to": [c["name"] for c in
-                                self.dependent_derived_columns(d["source_id"], [d["name"]])]}
+        definitions = [self.get_derived_column(d["id"]) for d in scope]
+        cascades, seen = [], set()
+        for d in scope:
+            for c in self.dependent_derived_columns(d["source_id"], [d["name"]]):
+                if _ascii_fold(c["name"]) not in seen:
+                    seen.add(_ascii_fold(c["name"]))
+                    cascades.append(c["name"])
+        out = {"definition": definitions[0], "job_id": job["job_id"], "cascades_to": cascades}
+        if len(scope) > 1:
+            out.update(member_definitions=definitions, job_ids=[job["job_id"]])
+        return out
 
     def backfill_derived_column(self, def_id: int, progress=None, cancel=None,
                                 drop_on_cancel: bool = False) -> dict:
@@ -7438,6 +7865,99 @@ class Store:
             [def_id], progress=progress, cancel=cancel, drop_on_cancel=drop_on_cancel,
         )
         return out["columns"][0] | {"rows": out["rows"]}
+
+    def _backfill_derive_parts(self, job: dict, parts: list[dict], progress=None, cancel=None,
+                               drop_on_cancel: bool = False) -> list[dict]:
+        """A merge's derive in one job: each member's definitions (`parts`,
+        in member order, each {"def_ids", "previous"?}) backfilled one
+        member after another. Returns backfill_derived_columns' result for
+        each member.
+
+        Creating on a merge used to start a job per member, and those ran
+        two at a time (MAX_CONCURRENT_INGESTS) — two CPU-bound passes
+        fighting over the GIL and the writer lock. A merge of four
+        250k-row tables took twice as long as the same four passes run one
+        after another, which is also what the same rows take in one table;
+        and the analyst watched the column fill in a table or two at a
+        time, behind one job per table. One job is one row in the panel,
+        one progress bar over the merge's rows and one Cancel.
+
+        A cancel or a failure stops at the member it reached, which
+        backfill_derived_columns settles as it always has. The members it
+        had not reached are settled as a pass that wrote nothing
+        (_fail_derive_backfill with wrote=False): a create removes them, a
+        re-derive puts their definitions back as they were. A create also
+        removes the members it had finished, since a create that does not
+        finish is removed (drop_on_cancel) and here that is the merge's
+        column: left on some members it is one the merge doesn't show
+        (_merge_columns), and its name, taken on those members, would
+        refuse the analyst's retry on the merge."""
+        grand = (job.get("options") or {}).get("units_total") or 0
+        done = 0
+        out: list[dict] = []
+        for i, part in enumerate(parts):
+            try:
+                name = self._source_lite(self.get_derived_column(part["def_ids"][0])["source_id"])
+                name = name.get("nickname") or name["name"]
+            except Exception:  # noqa: BLE001 — the label only; the backfill below says what is wrong
+                name = None
+            with self._ingest_jobs_lock:
+                job["tables_total"] = len(parts)
+                job["tables_done"] = i
+                job["current_table"] = name
+
+            def part_progress(rows: int, units: int, units_total: int, base: int = done) -> None:
+                if progress:
+                    progress(base + rows, base + units, max(grand, base + units_total))
+
+            try:
+                res = self.backfill_derived_columns(
+                    part["def_ids"], progress=part_progress, cancel=cancel,
+                    drop_on_cancel=drop_on_cancel, previous=part.get("previous"),
+                )
+            except Exception:   # IngestCancelled included
+                self._settle_unrun_derive_parts(parts[i + 1:], drop=drop_on_cancel)
+                if drop_on_cancel:
+                    self._rollback_derive_definitions([d for p in parts[:i] for d in p["def_ids"]])
+                raise
+            out.append(res)
+            done += res["rows"]
+        with self._ingest_jobs_lock:
+            job["tables_done"] = len(parts)
+        return out
+
+    def _settle_unrun_derive_parts(self, parts: list[dict], *, drop: bool) -> None:
+        """The members a merge's derive job stopped before reaching: each
+        is a backfill that wrote nothing. Best-effort, as
+        _fail_derive_backfill is — the cancel or error being raised is the
+        answer."""
+        for part in parts:
+            defs = []
+            for def_id in part["def_ids"]:
+                with contextlib.suppress(Exception):
+                    defs.append(self.get_derived_column(def_id))
+            if defs:
+                with contextlib.suppress(Exception):
+                    self._fail_derive_backfill(defs, wrote=False, drop=drop, previous=part.get("previous"))
+
+    @staticmethod
+    def _derive_job_result(out: list[dict]) -> list[dict]:
+        """A finished derive job's `result`: one entry per column, with
+        `rows` the length of the pass. A merge's job wrote each column on
+        every member; it reports the merge's column — the rows of every
+        member, and their failures summed, as _merge_columns counts them."""
+        rows = sum(res["rows"] for res in out)
+        merged: dict[str, dict] = {}
+        for res in out:
+            for c in res["columns"]:
+                key = _ascii_fold(c["name"])
+                if key not in merged:
+                    merged[key] = dict(c, rows=rows)
+                    continue
+                m = merged[key]
+                m["parse_failures"] = (None if m["parse_failures"] is None or c["parse_failures"] is None
+                                       else m["parse_failures"] + c["parse_failures"])
+        return list(merged.values())
 
     def backfill_derived_columns(self, def_ids: list[int], progress=None, cancel=None,
                                  drop_on_cancel: bool = False,
@@ -7595,9 +8115,20 @@ class Store:
             else:
                 with self.lock, self.db:
                     self.db.executemany(
-                        "UPDATE derived_columns SET status='partial' WHERE id=?",
+                        "UPDATE derived_columns SET status='partial', inferred_type=NULL WHERE id=?",
                         [(d["id"],) for d in defs],
                     )
+                # Half this pass's values and half the last one's, so its
+                # type is looked at again: now, or at the next open when
+                # the cancel is the case closing (no scan to hold that up).
+                if not self._closing:
+                    for d in defs:
+                        with contextlib.suppress(Exception):
+                            inferred = self._infer_derived_type(d)
+                            with self.lock, self.db:
+                                self.db.execute(
+                                    "UPDATE derived_columns SET inferred_type=? WHERE id=?",
+                                    (inferred, d["id"]))
             raise
         except Exception:
             self._fail_derive_backfill(defs, wrote=rows_done > 0, drop=drop_on_cancel,
@@ -7615,10 +8146,16 @@ class Store:
                 failures = self._count_parse_failures(src, d)
             except Exception:  # noqa: BLE001 — see above
                 failures = None
+            # The same for its type: unknown (NULL) keeps the op's own until
+            # the next open looks again (_type_unlooked_derived_columns).
+            try:
+                inferred = self._infer_derived_type(d)
+            except Exception:  # noqa: BLE001 — see above
+                inferred = None
             with self.lock, self.db:
                 self.db.execute(
-                    "UPDATE derived_columns SET status='ready', parse_failures=? WHERE id=?",
-                    (failures, d["id"]),
+                    "UPDATE derived_columns SET status='ready', parse_failures=?, inferred_type=? WHERE id=?",
+                    (failures, inferred, d["id"]),
                 )
             out_cols.append({"def_id": d["id"], "source_id": source_id, "name": d["name"],
                              "parse_failures": failures})
@@ -7691,7 +8228,7 @@ class Store:
         with contextlib.suppress(Exception):
             with self.lock, self.db:
                 self.db.executemany(
-                    "UPDATE derived_columns SET status='error', parse_failures=NULL WHERE id=?",
+                    "UPDATE derived_columns SET status='error', parse_failures=NULL, inferred_type=NULL WHERE id=?",
                     [(d["id"],) for d in defs],
                 )
         source_id = defs[0]["source_id"]
@@ -7731,6 +8268,39 @@ class Store:
                 f"SELECT COUNT(*) FROM {self._from_clause(src, 's')} "
                 f"WHERE {self._had_input_sql(src, d, 's')} AND {q(drv)}.{q(d['name'])} IS NULL"
             ).fetchone()[0]
+
+    def _infer_derived_type(self, d: dict, conn: sqlite3.Connection | None = None) -> str | None:
+        """What a text-valued derived column holds, by the rule an imported
+        column is typed by (infer_type): 'number' when every non-empty
+        value matches NUM_RE, 'text' when one doesn't, 'empty' when there
+        are none. None for an op that has a type of its own (a timestamp
+        parse, a duration), which never needs looking at.
+
+        Read off the drv_ column as stored rather than tallied by the pass
+        that wrote it, so it says the same thing however the values got
+        there: a finished pass, a cancelled one, a copy from another case,
+        a case from before this was recorded. NUM_RE itself, not something
+        cheaper that approximates it, because _numeric_expr gates the sort
+        and the comparisons on the same pattern — a column this calls
+        'number' holds no value those would turn into NULL. A text column
+        answers at its first non-numeric value; a number column costs one
+        scan (~0.7s for 1.3M values), beside a pass that took seconds per
+        million rows."""
+        op = timeparse.OPERATIONS.get(d["op_id"]) or {}
+        if op.get("value_type") != "text":
+            return None
+        drv, col = q(self._derived_table(d["source_id"])), q(d["name"])
+
+        def ask(c: sqlite3.Connection) -> str:
+            if c.execute(f"SELECT 1 FROM {drv} WHERE {col} <> '' AND NOT ({col} REGEXP ?) LIMIT 1",
+                         (NUM_RE.pattern,)).fetchone():
+                return "text"
+            return "number" if c.execute(f"SELECT 1 FROM {drv} WHERE {col} <> '' LIMIT 1").fetchone() else "empty"
+
+        if conn is not None:
+            return ask(conn)
+        with self._reader() as ro:
+            return ask(ro)
 
     def _had_input_sql(self, src: dict, d: dict, alias: str | None = None) -> str:
         """The row had something to read. One column, non-empty, for the
@@ -12092,7 +12662,7 @@ class Store:
         if os.path.abspath(path) == os.path.abspath(self.path):
             raise ValueError("That is the currently open case")
         try:
-            ro = sqlite3.connect(sqlite_ro_uri(path), uri=True)
+            ro = sqlite3.connect(sqlite_peek_uri(path), uri=True)
         except sqlite3.Error as e:
             raise ValueError(f"Could not open case file: {e}")
         ro.row_factory = sqlite3.Row
@@ -14066,7 +14636,7 @@ class Store:
                 "so there is no file to re-import it from, and this case does not have it or a "
                 "copy of it")
 
-    _SESSION_READERS = ("csv", "text", "json", "sqlite", "xlsx", "plaso")
+    _SESSION_READERS = ("csv", "text", "json", "sqlite", "xlsx", "plaso", "iis")
 
     def _reimport_session_source(self, s_meta: dict) -> tuple[int | None, str | None]:
         """(source_id, None) after re-importing a session source from its
@@ -14130,6 +14700,8 @@ class Store:
                                                timestamp_columns=how.get("timestamp_columns"))
             elif kind == "xlsx":
                 rec = self.ingest_xlsx_sheet(path, how["sheet"], name=name)
+            elif kind == "iis":
+                rec = self.ingest_iis(path, name=name, log_format=how.get("format"))
             else:
                 rec = self.ingest_plaso(path, name=name)
         except Exception as e:
@@ -14152,6 +14724,8 @@ class Store:
             return {}
         if ext in PLASO_IMPORT_EXTENSIONS:
             return {"kind": "plaso"}
+        if iisread.log_format(path):
+            return {"kind": "iis"}
         if ext in (".json", ".jsonl", ".ndjson"):
             return {"kind": "json"}
         return {"kind": "csv" if ext in DEFAULT_IMPORT_EXTENSIONS else "text"}
@@ -14174,7 +14748,17 @@ class Store:
     _SESSION_NAME_RE = re.compile(r"[^A-Za-z0-9_ -]")
 
     def _sessions_dir(self) -> str:
-        d = os.path.join(os.path.dirname(os.path.abspath(self.path)), "sessions")
+        """Where the file-based named sessions (/api/sessions) of THIS case
+        live: sessions/<case file name>/ beside it. It was sessions/ alone,
+        which every case in the folder shared, so listing showed another
+        case's sessions, and loading one brought that case's tags and notes
+        into this one (onto any table here with the same file hash) and
+        re-imported its tables from their recorded paths. Files an older
+        build left in sessions/ itself stay there and are no longer listed.
+        The sessions the UI saves are in the case file (invariant #10),
+        which has no such problem; only scripts use these."""
+        d = os.path.join(os.path.dirname(os.path.abspath(self.path)), "sessions",
+                         os.path.basename(self.path))
         os.makedirs(d, exist_ok=True)
         return d
 
@@ -14329,9 +14913,11 @@ class Store:
                         dd = dict(d)
                         t.db.execute(
                             "INSERT INTO derived_columns(source_id, name, input_column, op_id, "
-                            " params, status, parse_failures, created_at) VALUES (?,?,?,?,?,?,?,?)",
+                            " params, status, parse_failures, created_at, inferred_type) "
+                            "VALUES (?,?,?,?,?,?,?,?,?)",
                             (new_id, dd["name"], dd["input_column"], dd["op_id"], dd["params"],
-                             dd["status"], dd.get("parse_failures"), dd.get("created_at")))
+                             dd["status"], dd.get("parse_failures"), dd.get("created_at"),
+                             dd.get("inferred_type")))
                     stats["derived"] = len(dcols)
 
                     t.db.execute("INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", (new_id,))

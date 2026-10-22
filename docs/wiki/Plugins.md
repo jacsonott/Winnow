@@ -234,6 +234,9 @@ Pivot tab from the grid, a pivot filtered on tags runs again, so rows you
 tagged in the meantime are counted.
 
 - **Subtotals** and **Grand totals** toggle the total rows and columns.
+- While a change is being worked out, the status line says
+  **Aggregating…** and the table already on screen stays, dimmed, until the
+  new one replaces it. Its numbers can't be clicked in the meantime.
 - **Copy** puts the result on the clipboard as tab-separated text; **CSV**
   downloads it as a file.
 - Click any number to see the rows behind it (up to 500).

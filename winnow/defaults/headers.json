@@ -1,5 +1,5 @@
 {
-  "version": 3,
+  "version": 4,
   "nicknames": [
     {
       "name": "Event logs (EvtxECmd)",
@@ -997,6 +997,102 @@
         ],
         "labels": {
           "SourceIP": "from"
+        }
+      }
+    },
+    {
+      "name": "IIS web logs (W3C)",
+      "columns": [
+        "Timestamp (UTC)",
+        "date",
+        "time",
+        "s-ip",
+        "cs-method",
+        "cs-uri-stem",
+        "cs-uri-query",
+        "s-port",
+        "cs-username",
+        "c-ip",
+        "cs(User-Agent)",
+        "cs(Referer)",
+        "sc-status",
+        "sc-substatus",
+        "sc-win32-status",
+        "time-taken"
+      ],
+      "summary": {
+        "lead": [
+          "cs-uri-stem"
+        ],
+        "details": [
+          "cs-method",
+          "sc-status",
+          "c-ip"
+        ],
+        "labels": {
+          "sc-status": "status",
+          "c-ip": "from"
+        }
+      }
+    },
+    {
+      "name": "IIS web logs (NCSA)",
+      "columns": [
+        "Timestamp (UTC)",
+        "Remote host",
+        "Remote log name",
+        "User name",
+        "Timestamp (as logged)",
+        "Request",
+        "Status",
+        "Bytes"
+      ],
+      "summary": {
+        "lead": [
+          "Request"
+        ],
+        "details": [
+          "Status",
+          "Remote host"
+        ],
+        "labels": {
+          "Status": "status",
+          "Remote host": "from"
+        }
+      }
+    },
+    {
+      "name": "IIS web logs (IIS native)",
+      "columns": [
+        "Timestamp (local)",
+        "Client IP address",
+        "User name",
+        "Date",
+        "Time",
+        "Service and instance",
+        "Server name",
+        "Server IP address",
+        "Time taken",
+        "Client bytes sent",
+        "Server bytes sent",
+        "Service status code",
+        "Windows status code",
+        "Request type",
+        "Target of operation",
+        "Parameters"
+      ],
+      "summary": {
+        "lead": [
+          "Target of operation"
+        ],
+        "details": [
+          "Request type",
+          "Service status code",
+          "Client IP address"
+        ],
+        "labels": {
+          "Service status code": "status",
+          "Client IP address": "from"
         }
       }
     }

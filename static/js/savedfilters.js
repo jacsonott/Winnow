@@ -39,6 +39,12 @@ export async function loadHeaderNicknames() {
 export async function setNicknameFor(colNames, currentName) {
   const name = await promptDialog('Nickname for this header set (blank to clear):', currentName || '');
   if (name == null) return; // cancelled
+  return saveHeaderNickname(colNames, name);
+}
+
+/* Name a header set, or clear its name with a blank one, without asking:
+   the table menu's field saves as it is edited. */
+export async function saveHeaderNickname(colNames, name) {
   const sig = headerSig(colNames);
   const existing = S.headerNicknames.find((n) => headerSig(n.col_names) === sig);
   if (!name.trim()) {

@@ -6,7 +6,7 @@ import { $, api, debounce, dragHas, el, post, toast } from './core.js';
 import { maybeOfferAssociation } from './assoc.js';
 import { openFolderBrowser } from './home.js';
 import { startJobsPoll, uploadWithProgress } from './jobs.js';
-import { ARCHIVE_IMPORT_EXTENSIONS, PLASO_IMPORT_EXTENSIONS, RECOGNIZED_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, extOf, importKindFor, openImportPreview, openJsonImportPreview } from './merge.js';
+import { ARCHIVE_IMPORT_EXTENSIONS, IIS_FORMAT_LABELS, IIS_IMPORT_TYPE, PLASO_IMPORT_EXTENSIONS, RECOGNIZED_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, extOf, iisLogFormat, importKindFor, openImportPreview, openJsonImportPreview } from './merge.js';
 import { renderPluginTabs, renderPluginPanelButtons } from './plugins.js';
 import { fmtBytes } from './tables.js';
 import { loadSources } from './sources.js';
@@ -47,11 +47,13 @@ export function globMatches(pattern, name) {
 
 /* The plugin format claiming this filename, or null. Built-in extensions
    win outright — a plugin claiming .csv doesn't hijack default routing; it
-   stays reachable through the Plugins modal's explicit per-format picker. */
+   stays reachable through the Plugins modal's explicit per-format picker.
+   So do built-in names: an IIS log is .log, which esxi_logs claims. */
 export function pluginFormatFor(filename) {
   const base = filename.split(/[\\/]/).pop();
   const ext = extOf(base);
   if (RECOGNIZED_IMPORT_EXTENSIONS.includes(ext) || SQLITE_IMPORT_EXTENSIONS.includes(ext) || XLSX_IMPORT_EXTENSIONS.includes(ext) || PLASO_IMPORT_EXTENSIONS.includes(ext) || ARCHIVE_IMPORT_EXTENSIONS.includes(ext)) return null;
+  if (iisLogFormat(base)) return null;
   return S.pluginFormats.find((f) =>
     (ext && (f.extensions || []).includes(ext))
     || (f.filename_patterns || []).some((p) => globMatches(p, base))) || null;
@@ -113,8 +115,9 @@ export function queueItem(transport, name, fmt = pluginFormatFor(name)) {
   const kind = importKindFor(name);
   return kind === 'json' ? { ...transport, name, kind, flatten_mode: 'none', flatten_depth: 1, configured: false }
     : kind === 'sqlite' || kind === 'xlsx' ? { ...transport, name, kind, tables: null, configured: false }
-    // A .plaso is one file → one timeline table with nothing to configure.
-    : kind === 'plaso' ? { ...transport, name, kind, configured: true }
+    // A .plaso is one file → one timeline table with nothing to configure;
+    // so is an IIS log, whose columns its own #Fields: lines name.
+    : kind === 'plaso' || kind === 'iis' ? { ...transport, name, kind, configured: true }
     // An archive expands on import, then you pick files from its contents.
     : kind === 'archive' ? { ...transport, name, kind, configured: true }
     // Raw text (a log with an extension nothing else claims) is the delimited
@@ -208,7 +211,9 @@ export function openImportModal() {
         const row = el('div', 'row-actions session-row');
         const kindLabel = item.kind === 'plugin'
           ? (pluginFormatById(item.format_id)?.label || item.format_id)
-          : item.kind === 'text' ? 'text · one line per row' : item.kind;
+          : item.kind === 'text' ? 'text · one line per row'
+          : item.kind === 'iis' ? `IIS log · ${IIS_FORMAT_LABELS[iisLogFormat(item.name)] || 'W3C'}`
+          : item.kind;
         const unitNoun = item.kind === 'xlsx' ? 'sheet' : 'table';
         const stateLabel = item.kind === 'sqlite' || item.kind === 'xlsx'
           ? (item.configured ? `${item.tables.length} ${unitNoun}${item.tables.length === 1 ? '' : 's'}` : `pick ${unitNoun}s`) + ` · ${kindLabel}`
@@ -228,6 +233,10 @@ export function openImportModal() {
         if (item.kind === 'plaso') {
           cfg.disabled = true;
           cfg.title = 'A Plaso storage file imports as one flat timeline table — nothing to configure';
+        }
+        if (item.kind === 'iis') {
+          cfg.disabled = true;
+          cfg.title = 'An IIS log imports as one table, its columns named by the log itself — nothing to configure';
         }
         if (item.kind === 'archive') {
           cfg.disabled = true;
@@ -259,11 +268,14 @@ export function openImportModal() {
         };
         const rm = el('button', 'btn ghost', '✕');
         rm.onclick = () => { S.importQueue.splice(i, 1); renderQueue(); };
-        if (item.kind === 'plugin' && !item.path) {
-          // A plugin claimed this by extension (.log is ESXi's, say) — the
-          // way out when it is some other program's log: one line per row.
+        if ((item.kind === 'plugin' && !item.path) || item.kind === 'iis') {
+          // A plugin claimed this by extension (.log is ESXi's, say), or
+          // its name reads like an IIS log's — the way out when it is some
+          // other program's log: one line per row.
           const asText = el('button', 'btn ghost', 'As text');
-          asText.title = 'Skip the plugin and import this file as raw text, one line per row';
+          asText.title = item.kind === 'iis'
+            ? 'Import this file as raw text, one line per row, instead of as an IIS log'
+            : 'Skip the plugin and import this file as raw text, one line per row';
           asText.onclick = () => {
             Object.assign(item, { kind: 'text', format_id: null, options: null, delimiter: null, has_header: false, column_types: null, configured: false });
             renderQueue();
@@ -723,7 +735,11 @@ export const CUSTOM_IMPORT = 'custom';
 export const IMPORT_GROUPS = ['Ad hoc', 'Profiles'];
 
 export const defaultImportExtensions = () =>
-  RECOGNIZED_IMPORT_EXTENSIONS.concat(PLASO_IMPORT_EXTENSIONS, pluginExtensions());
+  RECOGNIZED_IMPORT_EXTENSIONS.concat(PLASO_IMPORT_EXTENSIONS, [IIS_IMPORT_TYPE], pluginExtensions());
+
+/* How a folder-import file type reads on its chip and in a profile's
+   search hint: the two that aren't extensions get words. */
+export const importTypeLabel = (x) => (x === '*' ? 'other text files' : x === IIS_IMPORT_TYPE ? 'IIS logs' : x);
 
 export function importProfileEntries(profiles) {
   const entries = [{
@@ -753,7 +769,7 @@ export function matchesImportSearch(entry, query) {
   const terms = String(query || '').toLowerCase().split(/\s+/).filter(Boolean);
   for (const [verb, list] of [['includes', p.include_patterns], ['excludes', p.exclude_patterns], ['reads', p.extensions]]) {
     for (const x of list || []) {
-      const shown = x === '*' ? 'other text files' : x;
+      const shown = importTypeLabel(x);
       const text = `${entry.label} ${entry.group} ${shown}`.toLowerCase();
       if (terms.every((t) => text.includes(t))) return { hint: `${verb} ${shown}` };
     }
@@ -877,9 +893,10 @@ export async function openDirectoryImportModal(state = {}) {
     // extension (it rides in the same list).
     const extRow = el('div', 'import-types');
     for (const ext of defaultImportExtensions().concat(['*'])) {
-      const chip = el('button', 'btn ghost', ext === '*' ? 'other text files' : ext);
+      const chip = el('button', 'btn ghost', importTypeLabel(ext));
       chip.dataset.ext = ext;
       if (ext === '*') chip.title = 'Any other file that is not binary, imported as raw text — one line per row';
+      if (ext === IIS_IMPORT_TYPE) chip.title = 'IIS web server logs, recognised by name: u_ex…, ex…, nc…, in….log';
       chip.onclick = () => {
         st.extensions = st.extensions.includes(ext)
           ? st.extensions.filter((e) => e !== ext)
@@ -1168,7 +1185,7 @@ export async function openDirectoryImportModal(state = {}) {
             });
             pluginOk++;
           } else {
-            await post('/api/ingest/jobs/path', { path: m.path, name: base, folder_path, kind: ['json', 'plaso', 'text'].includes(m.kind) ? m.kind : 'csv' });
+            await post('/api/ingest/jobs/path', { path: m.path, name: base, folder_path, kind: ['json', 'plaso', 'text', 'iis'].includes(m.kind) ? m.kind : 'csv' });
           }
           ok++;
         } catch (e) {

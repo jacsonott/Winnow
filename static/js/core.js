@@ -100,6 +100,70 @@ const connListeners = [];
 export function onConnectionChange(fn) { connListeners.push(fn); }
 function announce(up) { for (const fn of connListeners) fn(up); }
 
+/* Which case this page's state belongs to: the token the server named it
+   by (case_token, on /api/case/current and on every route that switches
+   case). Every request carries it, and the server refuses (409
+   case_changed, nothing touched) one whose case isn't the one it has
+   open. That is the whole of what stops a window left on case A, after
+   ANOTHER window opened case B on the same server, from reading B's rows
+   under A's tabs and tagging them: source ids, rids and tag ids are small
+   numbers every case reuses, so nothing else on the wire tells them apart
+   (server.py's case guard). Null on a page with no case open: nothing to
+   check, and nothing is sent. */
+let caseToken = null;
+let caseSwitching = 0;
+const caseListeners = [];
+export function onCaseChanged(fn) { caseListeners.push(fn); }
+export function setCaseToken(token) { caseToken = token || null; }
+export function pageCaseToken() { return caseToken; }
+export function caseHeaders() { return caseToken ? { 'X-Winnow-Case': caseToken } : {}; }
+
+/* A download that is a plain navigation can't carry a header, so it
+   carries the token in its query instead. */
+export function caseUrl(path) {
+  if (!caseToken) return path;
+  return `${path}${path.includes('?') ? '&' : '?'}case_token=${caseToken}`;
+}
+
+/* `now` is the case the server has open ({token, name}), or null for none —
+   from the presence stream (connection.js) or a refused request. Not this
+   page's case means another window switched the server: say so. Ignored
+   mid-switch, when it is this page's own switch landing. */
+export function noticeServerCase(now) {
+  if (!caseToken || caseSwitching || (now && now.token === caseToken)) return;
+  for (const fn of caseListeners) fn(now);
+}
+
+/* Run a request that switches the server's case (open, save-as, discard)
+   and adopt the case_token its answer names. Until it lands, a refusal of
+   one of this page's own earlier requests is that switch, not another
+   window's, and a request that asked about the case being left is dropped
+   quietly rather than reported. */
+export async function switchCase(request) {
+  caseSwitching += 1;
+  try {
+    const res = await request();
+    if (res && 'case_token' in res) setCaseToken(res.case_token);
+    return res;
+  } finally {
+    caseSwitching -= 1;
+  }
+}
+
+/* Whether a failed request was the server refusing it for naming a case it
+   no longer has open. `sentCase` is the token the request went out with.
+   A refusal of a request this page sent before its own switch is marked
+   `aborted` (see api()): it asked about the case being left, and nobody
+   needs telling. Shared with jobs.js's upload XHR. */
+export function caseRefused(err, sentCase) {
+  const d = err.detail;
+  if (err.status !== 409 || !d || d.error !== 'case_changed') return false;
+  err.caseChanged = true;
+  if (caseSwitching || sentCase !== caseToken) err.aborted = true;
+  else noticeServerCase(d.open || null);
+  return true;
+}
+
 /* `opts.signal` (an AbortController's) rides through to fetch. A request
    this client aborted itself — a view build a newer one superseded, see
    view.js — rejects with `aborted: true` and no status, and says nothing
@@ -110,6 +174,8 @@ export async function api(path, opts) {
   if (o.method && o.method !== 'GET') {
     o.headers = { ...(o.headers || {}), 'X-Timeline-Lite-Client': '1' };
   }
+  const sentCase = caseToken;
+  if (sentCase) o.headers = { ...(o.headers || {}), 'X-Winnow-Case': sentCase };
   let r;
   try {
     r = await fetch(path, o);
@@ -146,6 +212,7 @@ export async function api(path, opts) {
     const err = new Error(msg);
     err.status = r.status;
     err.detail = detail;
+    caseRefused(err, sentCase);
     throw err;
   }
   return r.json();

@@ -387,6 +387,11 @@ def _quicklook_with_work(server, c, tmp_path):
     body = c.post("/api/assoc/open", json={"files": [str(p)]}, headers=HEADERS).json()
     server.STORE.wait_for_ingest_job(body["started"][0]["job_id"], timeout=30)
     src = server.STORE.list_sources()[0]["id"]
+    # The import starts a search-index build that writes on its own thread.
+    # Still running when a test opens its reader, it commits after that
+    # reader's snapshot, so the save is refused for a write the test never
+    # made (about one run in ten on a loaded CI runner).
+    server.STORE.wait_for_fts(src, timeout=30)
     tag = server.STORE.upsert_tag(None, "Suspicious", "#c94f4f", None)["id"]
     server.STORE.set_tags(src, [1, 2, 3], tag, True)
     server.STORE.set_note(src, 2, "lateral movement from here")

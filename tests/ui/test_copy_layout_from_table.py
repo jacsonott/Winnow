@@ -5,9 +5,10 @@ The default layout for a header set reaches only tables with exactly the
 same columns, and saving one changes what every later import of them
 opens to. What was asked for was one table's order put on another, and
 two exports of the same log from two tool versions differ by a column or
-two. "Copy layout from another table…" in the table menu does that: the
-shared columns take the other table's order, visibility and widths, and
-a column only this table has stays beside the column it follows."""
+two. Taking the layout from another table in the table menu's Layout
+section does that: the shared columns take the other table's order,
+visibility and widths, and a column only this table has stays beside the
+column it follows."""
 
 from __future__ import annotations
 
@@ -54,19 +55,22 @@ def test_copying_a_layout_between_tables_whose_columns_differ(page, api, tmp_pat
         own = page.evaluate("() => [...__winnow.S.order]")
         assert own == ["CpWhen", "CpExtra", "CpHost", "CpUser", "CpCmd"]
 
-        page.evaluate("() => __winnow.openTableMenu()")
-        page.wait_for_selector(".collist-row")
-        page.locator("#modalBody .btn", has_text="Copy layout from another table").click()
-        page.wait_for_selector(".copy-layout-col")
-        listed = page.locator(".copy-layout .side-rail-item").all_inner_texts()
+        page.evaluate("() => __winnow.openTableMenu(undefined, 'layout')")
+        page.wait_for_selector(".tm-layout-from")
+        listed = page.locator(".tm-layout-from option").all_inner_texts()
         assert any("cl_a.csv" in t and "4 of 5 columns" in t for t in listed), listed
         assert not any("cl_unrelated.csv" in t for t in listed), "a table with no column in common is not offered"
-        page.locator(".copy-layout .side-rail-item", has_text="cl_a.csv").click()
-        page.wait_for_function("() => !document.querySelector('.copy-layout-preview.stale')"
+        key = page.locator(".tm-layout-from option", has_text="cl_a.csv").get_attribute("value")
+        page.locator(".tm-layout-from").select_option(key)
+        page.wait_for_function("() => !document.querySelector('.tm-layout-preview.stale')"
                                " && document.querySelector('.copy-layout-col').dataset.col === 'CpCmd'")
         want = ["CpCmd", "CpUser", "CpWhen", "CpExtra", "CpHost"]
         assert page.locator(".copy-layout-col").evaluate_all("(rs) => rs.map((r) => r.dataset.col)") == want
-        page.locator("#modalBody .btn", has_text="Copy layout").click()
+        # Only what applying would change is marked: CpExtra keeps its
+        # place after CpWhen, and the moves are the shared columns'.
+        changed = page.locator(".copy-layout-col.tm-changed").evaluate_all("(rs) => rs.map((r) => r.dataset.col)")
+        assert "CpExtra" not in changed and "CpCmd" in changed and "CpHost" in changed, changed
+        page.locator("#modalBody .btn", has_text="Apply layout").click()
         page.wait_for_function("(w) => __winnow.S.order.join() === w.join()", arg=want)
 
         # A's order, A's hidden column hidden, A's width; B's extra column

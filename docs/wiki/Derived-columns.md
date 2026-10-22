@@ -28,6 +28,17 @@ Things to know before you rely on one:
   include it. A derived datetime column can be chosen in the timeframe
   filter, the histogram and the [Timeline](Timeline-search-and-watchlist.md)
   like any other datetime column.
+- **Numbers sort as numbers.** A column of extracted, decoded, combined
+  or looked-up values is a number column when every value in it is a
+  plain number such as `2048` or `-1.5`, the rule an imported column
+  follows, so a byte count captured with a regex sorts by size and
+  `>1000` compares numbers. Empty cells don't count either way; one value
+  that isn't a plain number (`1,024`, `0x1F`, `N/A`) keeps the column
+  text. The type is decided when the column finishes building, and again
+  after **Re-derive…**, and the table menu shows it as `number · derived`.
+  On a merged table the column is a number column when no member table's
+  copy holds text. A timestamp column is always a datetime column, and
+  **Duration between two columns** always a number column.
 - **It doesn't change what the table is.** Saved filters,
   [Timeline configurations](Timeline-search-and-watchlist.md#choosing-the-timestamp-type-and-body)
   and merging are matched on the file's own columns, so adding a derived
@@ -42,7 +53,7 @@ Things to know before you rely on one:
 | From | Do this |
 | --- | --- |
 | A column header | Right-click the header → **Derive a column from this…** |
-| The table menu | Press `C` (that is Shift+C), or right-click the table's tab and choose **Columns…**, then **Columns** → **Add derived column…** |
+| The table menu | Press `C` (that is Shift+C), or right-click the table's tab and choose **Columns…**, then **Show, hide & order** → **Add derived column…** |
 | The detail pane | Right-click a field inside a JSON or XML document → **Add as a column** |
 | After an import | When a column looks like a timestamp Winnow can't already read, a notice says so; click **Add datetime column** |
 | A whole document | Right-click the header → **Flatten JSON/XML into columns…**, or right-click a document node in the detail pane → **Flatten this document into columns…** |
@@ -306,6 +317,9 @@ is the first capture group, or the whole match if there is no group.
 **Capture group** picks a different numbered group; **Named group** picks
 a `(?P<name>…)` group by name, which keeps working if you later edit the
 pattern and the numbers shift. Patterns are limited to 512 characters.
+A capture that is always a number, such as a size, a count or a status
+code, gives a number column that sorts by value (see
+[What a derived column is](#what-a-derived-column-is)).
 
 | Regex | Input | Output |
 | --- | --- | --- |
@@ -477,7 +491,10 @@ finish*.
 A [merged table](Working-with-tables.md) shows a derived column when every
 member table has a derived column of that name. Add one while the merge is
 open and Winnow adds it to each member table, checking all of them first,
-so a name clash on one member stops it everywhere. The preview samples the
+so a name clash on one member stops it everywhere. One job fills it in,
+working through the member tables one after another; its row in the jobs
+panel says which table it is on, such as `User — 2/4: b.csv`. Cancelling
+it removes the new column from every member table. The preview samples the
 first member, or the merged view under **This view**.
 
 A derived column on one member table is never shown as another member's
@@ -494,10 +511,12 @@ Two things work differently on a merge:
 **Remove derived column…** on a merge change every member table's copy.
 Winnow checks all of them first: if another derived column on any member
 is built from it, or the members compute it with different operations,
-nothing changes. Each member
-is recomputed as its own job in the jobs panel; the merged column's ƒ
+nothing changes. The members are recomputed by one job, one table after
+another; the merged column's ƒ
 tooltip says *building…* until all of them finish, and its **Show N unparsed rows**
-count covers every member. **Remove derived column…** says it removes the
+count covers every member. Cancelling that job part-way keeps the tables it
+finished, marks the one it was on *incomplete*, and leaves the rest as they
+were. **Remove derived column…** says it removes the
 column from all the tables in the merge. A rename on a merge checks the new
 name against every member table, including one without the column.
 

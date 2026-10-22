@@ -6,6 +6,8 @@ resolves it per member."""
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 A_ROWS = [["When", "Who"],
@@ -263,3 +265,134 @@ def test_the_merges_column_reports_every_member(store, write_csv):
         store.backfill_derived_column(b_def, cancel=lambda: True, drop_on_cancel=False)
     assert _merge_col(store, mid)["derived_status"] == "partial"
     assert "User" in _names(store, a) and "User" in _names(store, b)
+
+
+# ------------------------------------------ one job for the whole merge
+#
+# Creating on a merge started a job per member, and those ran two at a
+# time (MAX_CONCURRENT_INGESTS): two CPU-bound passes fighting over the
+# GIL and the writer lock, so a merge of four 250k-row tables took about
+# twice as long as one table of the same rows, and the column filled in a
+# table or two at a time. One job now walks the members in turn.
+
+C_ROWS = [["When", "Who"],
+          ["2024-01-03 08:00:00", "u=dave;h=DC1"]]
+
+
+def _mk3(store, write_csv):
+    ids = [store.ingest_csv(write_csv(rows, f"{n}.csv"), name=n, build_fts=False)["id"]
+           for n, rows in (("a", A_ROWS), ("b", B_ROWS), ("c", C_ROWS))]
+    return (*ids, store.create_merge("three", ids)["id"])
+
+
+def _new_jobs(store, before):
+    return [j for j in store.list_ingest_jobs() if j["job_id"] not in before]
+
+
+def test_creating_on_a_merge_is_one_job_over_every_member(store, write_csv):
+    a, b, c, mid = _mk3(store, write_csv)
+    before = {j["job_id"] for j in store.list_ingest_jobs()}
+    res = _fanout(store, mid, params={"pattern": r"h=(SRV\d)"})   # matches only a's rows
+    jobs = _new_jobs(store, before)
+    assert len(jobs) == 1, [j["source_ids"] for j in jobs]   # used to be one per member
+    assert res["job_ids"] == [res["job_id"]] == [jobs[0]["job_id"]]
+    job = jobs[0]
+    assert job["status"] == "done"
+    assert job["source_ids"] == [a, b, c]
+    assert (job["rows_done"], job["tables_done"], job["tables_total"]) == (5, 3, 3)
+    # What the toast reads: the merge's one column, its rows and failures
+    # over every member — not "3 columns: 2 rows read".
+    assert [(r["name"], r["rows"], r["parse_failures"]) for r in job["result"]] == [("User", 5, 3)]
+    assert _merge_values(store, mid) == ["SRV1", "SRV1", None, None, None]
+
+
+def test_a_batch_on_a_merge_is_one_job_too(store, write_csv):
+    a, b, mid = _mk(store, write_csv)
+    before = {j["job_id"] for j in store.list_ingest_jobs()}
+    res = store.add_derived_columns(mid, [
+        {"name": "User", "input_column": "Who", "op_id": "regex_extract", "params": RX},
+        {"name": "Host", "input_column": "Who", "op_id": "regex_extract", "params": {"pattern": r"h=(\w+)"}},
+    ])
+    _wait_all(store, res)
+    (job,) = _new_jobs(store, before)
+    assert res["job_ids"] == [job["job_id"]]
+    assert [len(r["definitions"]) for r in res["member_results"]] == [2, 2]
+    assert [(r["name"], r["rows"]) for r in job["result"]] == [("User", 4), ("Host", 4)]
+    assert _merge_values(store, mid, "Host") == ["SRV1", "SRV1", "WKS2", "WKS2"]
+
+
+def test_rederive_and_its_cascade_on_a_merge_are_one_job_each(store, write_csv):
+    a, b, mid = _mk(store, write_csv)
+    _fanout(store, mid)
+    _wait_all(store, store.add_derived_column(mid, "Initial", "User", "regex_extract", {"pattern": r"^(\w)"}))
+    before = {j["job_id"] for j in store.list_ingest_jobs()}
+    res = store.rederive_column(_merge_col(store, mid)["derived_id"], {"pattern": r"h=(\w+)"}, mid)
+    assert res["cascades_to"] == ["Initial"]
+    deadline = time.monotonic() + 30
+    while any(j["status"] in ("queued", "running") for j in _new_jobs(store, before)) or \
+            len(_new_jobs(store, before)) < 2:
+        assert time.monotonic() < deadline, _new_jobs(store, before)
+        time.sleep(0.02)
+    jobs = sorted(_new_jobs(store, before), key=lambda j: j["job_id"])
+    assert [(j["name"], j["source_ids"]) for j in jobs] == [
+        ("User", [a, b]), ("Initial (recomputed — its input changed)", [a, b])]
+    assert _merge_values(store, mid, "Initial") == ["S", "S", "W", "W"]
+
+
+def _stop_on_member(store, monkeypatch, n, how):
+    """Stop a merge's derive job on its `n`th member (1-based): `how` is
+    "cancel" (the job's own cancel, seen at that member's first batch) or
+    "fail" (an error after that member's first batch is written)."""
+    real = store.backfill_derived_columns
+    seen = []
+
+    def backfill(def_ids, **kw):
+        seen.append(def_ids)
+        if len(seen) == n:
+            if how == "cancel":
+                kw["cancel"] = lambda: True
+            else:
+                def boom(*_):
+                    raise OSError("disk full")
+                kw["progress"] = boom
+        return real(def_ids, **kw)
+
+    monkeypatch.setattr(store, "backfill_derived_columns", backfill)
+    return seen
+
+
+@pytest.mark.parametrize("how", ["cancel", "fail"])
+def test_a_create_stopped_part_way_leaves_no_member_with_the_column(store, write_csv, monkeypatch, how):
+    """Member one finished, member two stopped, member three never ran:
+    the column goes from all three, so the merge has no half-made column
+    hidden on some members whose name would refuse the retry."""
+    a, b, c, mid = _mk3(store, write_csv)
+    seen = _stop_on_member(store, monkeypatch, 2, how)
+    res = store.add_derived_column(mid, "User", "Who", "regex_extract", RX)
+    job = store.wait_for_ingest_job(res["job_id"], timeout=30)
+    assert job["status"] == ("cancelled" if how == "cancel" else "error"), job
+    assert len(seen) == 2   # the third member was never started
+    for sid in (a, b, c):
+        assert "User" not in _names(store, sid), sid
+        assert store.list_derived_columns(sid) == []
+    monkeypatch.undo()
+    _wait_all(store, store.add_derived_column(mid, "User", "Who", "regex_extract", RX))
+    assert _merge_values(store, mid) == ["alice", "bob", "carol", "alice", "dave"]
+
+
+def test_a_rederive_cancelled_part_way_keeps_what_each_member_has(store, write_csv, monkeypatch):
+    """The member it finished is re-derived, the one it was on is
+    'partial' (kept, not dropped — a re-derive is not a delete), and the
+    one it never reached is the column it was, under its old params."""
+    a, b, c, mid = _mk3(store, write_csv)
+    _fanout(store, mid)
+    _stop_on_member(store, monkeypatch, 2, "cancel")
+    res = store.rederive_column(_merge_col(store, mid)["derived_id"], {"pattern": r"h=(\w+)"}, mid)
+    assert store.wait_for_ingest_job(res["job_id"], timeout=30)["status"] == "cancelled"
+    (da,), (db,), (dc,) = (store.list_derived_columns(sid) for sid in (a, b, c))
+    assert (da["status"], da["params"]["pattern"]) == ("ready", r"h=(\w+)")
+    assert db["status"] == "partial"
+    assert (dc["status"], dc["params"]["pattern"]) == ("ready", r"u=(\w+)")
+    assert _merge_col(store, mid)["derived_status"] == "partial"
+    vals = _merge_values(store, mid)
+    assert vals[:2] == ["SRV1", "SRV1"] and vals[-1] == "dave"

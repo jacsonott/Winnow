@@ -21,6 +21,12 @@ actively writing (WAL) reads fine through `mode=ro`, and SQLite attaches
 at most 10 databases at once (`MAX_ATTACHED=10`) — which is why the
 cross-case query path attaches in batches and everything else uses one
 connection per case.
+
+Opened through `sqlite_peek_uri`, not plain `mode=ro`: on a case nothing
+has open, `mode=ro` creates a -wal/-shm pair beside it that a read-only
+connection can never remove, so every cross-case search left one beside
+every case it read. A case another Winnow has open has its -wal, and still
+reads through plain `mode=ro`, as above.
 """
 
 from __future__ import annotations
@@ -34,7 +40,7 @@ import re
 import sqlite3
 from typing import Any, Iterator
 
-from winnow.paths import sqlite_ro_uri
+from winnow.paths import sqlite_peek_uri
 from winnow.store import _esc_like, _ts_normalize, q, read_only_authorizer
 
 # `v` is already attached to the writable Store's connection; leave room.
@@ -65,7 +71,7 @@ class CaseReader:
         self.name = name or os.path.splitext(os.path.basename(self.path))[0]
         if not os.path.isfile(self.path):
             raise NotACaseFile(f"No case file at {self.path}")
-        self.db = sqlite3.connect(sqlite_ro_uri(self.path), uri=True, check_same_thread=False)
+        self.db = sqlite3.connect(sqlite_peek_uri(self.path), uri=True, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         # The timeline orders and windows by this, as the case's own
         # timeframe filter and Timeline do. A function, not a write.
@@ -333,11 +339,12 @@ def query_across(paths: list[str], sql: str, *, limit: int = 5000,
     """Run ONE read-only SELECT across several cases, each attached under
     `c1`, `c2`, … in the order given.
 
-    A fresh in-memory connection with the cases attached `mode=ro`, so the
-    query cannot reach the open case's writer connection, cannot write
-    anywhere, and disappears with the request. ATTACH/DETACH/PRAGMA/VACUUM
-    are refused for the same reason Store.run_sql refuses them: the caller
-    picks which cases are visible, not the SQL.
+    A fresh in-memory connection with the cases attached read-only
+    (sqlite_peek_uri), so the query cannot reach the open case's writer
+    connection, cannot write anywhere, and disappears with the request.
+    ATTACH/DETACH/PRAGMA/VACUUM are refused for the same reason
+    Store.run_sql refuses them: the caller picks which cases are visible,
+    not the SQL.
     """
     if not paths:
         raise ValueError("Pick at least one case")
@@ -363,7 +370,7 @@ def query_across(paths: list[str], sql: str, *, limit: int = 5000,
         try:
             conn.row_factory = sqlite3.Row
             for alias, r in zip(aliases, readers):
-                conn.execute(f"ATTACH DATABASE ? AS {alias}", (sqlite_ro_uri(r.path),))
+                conn.execute(f"ATTACH DATABASE ? AS {alias}", (sqlite_peek_uri(r.path),))
             # After the attaches, so they are still allowed: from here the
             # connection can only read. The main database here is :memory:
             # and therefore writable, so the keyword scan above was the only

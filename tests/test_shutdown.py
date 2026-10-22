@@ -74,6 +74,9 @@ def test_shut_down_does_not_wait_for_the_windows_to_close(tmp_path, how):
         assert code is not None, f"still running 15s after being told to shut down:\n{out}"
         assert not os.path.exists(lock), \
             f"the case lock was left behind — the exit skipped Store.close():\n{out}"
+        # ...and closed it as the last connection, which is what has SQLite
+        # fold the -wal into the case file and remove it and the -shm.
+        assert [s for s in ("-wal", "-shm") if os.path.exists(f"{case}{s}")] == [], out
         for w in windows:
             w.thread.join(5)
             assert b"event: shutdown" in w.rest, \

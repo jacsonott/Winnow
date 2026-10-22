@@ -877,7 +877,33 @@ export function extOf(filename) {
   return i === -1 ? '' : filename.slice(i).toLowerCase();
 }
 
+/* IIS web server logs, recognised by name — mirrors winnow/iisread.py's
+   log_format (the regex and the date check both). u_ is IIS's UTF-8
+   prefix; ex/nc/in say the format and YYMM, YYMMDD (or YYMMWW), YYMMDDHH
+   the rollover period; extend/ncsa/inetsv plus a number are the by-size
+   names; " (2)" is a second copy an archive expansion kept. */
+const IIS_LOG_NAME = /^(?:u_)?(?:(ex|nc|in)(\d{4}|\d{6}|\d{8})|(extend|ncsa|inetsv)\d+)(?: \(\d+\))?\.log$/i;
+const IIS_FORMAT_OF = { ex: 'w3c', extend: 'w3c', nc: 'ncsa', ncsa: 'ncsa', in: 'native', inetsv: 'native' };
+export const IIS_FORMAT_LABELS = { w3c: 'W3C', ncsa: 'NCSA', native: 'native' };
+/* The folder-import chip that stands for them (store.IIS_IMPORT_TYPE). */
+export const IIS_IMPORT_TYPE = 'iis';
+
+export function iisLogFormat(filename) {
+  const m = IIS_LOG_NAME.exec(filename.split(/[\\/]/).pop());
+  if (!m) return null;
+  const stamp = m[2];
+  if (stamp) {
+    const month = +stamp.slice(2, 4);
+    if (month < 1 || month > 12) return null;
+    if (stamp.length >= 6 && (+stamp.slice(4, 6) < 1 || +stamp.slice(4, 6) > 31)) return null;
+    if (stamp.length === 8 && +stamp.slice(6, 8) > 23) return null;
+  }
+  return IIS_FORMAT_OF[(m[1] || m[3]).toLowerCase()];
+}
+
 export function importKindFor(filename) {
+  // Before the extension checks: an IIS log's .log says nothing.
+  if (iisLogFormat(filename)) return 'iis';
   if (SQLITE_IMPORT_EXTENSIONS.includes(extOf(filename))) return 'sqlite';
   if (XLSX_IMPORT_EXTENSIONS.includes(extOf(filename))) return 'xlsx';
   if (PLASO_IMPORT_EXTENSIONS.includes(extOf(filename))) return 'plaso';

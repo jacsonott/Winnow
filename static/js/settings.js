@@ -17,7 +17,7 @@ import { buildAssocPanel } from './assoc.js';
 import { buildEnvPanel } from './userenv.js';
 import { loadCaseVariables, loadSavedFilters } from './savedfilters.js';
 import { applyPageTabsSize, renderPageTabs, syncTabOverflow } from './sources.js';
-import { lastSplash, osSkipsSplash, reducedMotion } from './splash.js';
+import { lastSplash, osSkipsSplash, reducedMotion, remoteSkipsSplash } from './splash.js';
 import { S, gridRowCount, dashboardCreatorMode } from './state.js';
 import { buildDefaultTagsEditor } from './tags.js';
 import { openSavedFiltersModal, setTimeframeAcrossTables, timeframeAcrossTables, updateFiltersButton, updateTimeRangeButton } from './timeframe.js';
@@ -359,6 +359,11 @@ export function applyDensity(density) {
 
 export function initAppearance() {
   S.appearance = loadAppearance();
+  // The server marks <html> when the machine is in Remote session mode
+  // (server.py index()), so the launch animation, which decides before
+  // loadAppSettings has answered, sees the machine's setting rather than
+  // the default. paintRemote() below would otherwise take the mark off.
+  if (document.documentElement.classList.contains('remote')) S.appearance.remoteSession = true;
   document.documentElement.setAttribute('data-style', S.appearance.style);
   paintStripes();   // before paintTheme, whose announce carries the value
   paintTheme();
@@ -890,15 +895,21 @@ export function openSettings(where) {
        will actually play: left at the default where the OS asks for reduced
        motion (anywhere but Windows — splash.osSkipsSplash) it is skipped,
        so it shows unticked. A ticked box over an animation that never
-       played is what had analysts unticking and re-ticking it to get it. */
+       played is what had analysts unticking and re-ticking it to get it.
+       Remote session mode skips the default the same way (and can be
+       switched further down this dialog, hence a function). */
     const splashLabel = el('label', 'check-row');
     const splashCb = el('input');
     splashCb.type = 'checkbox';
-    splashCb.checked = S.appearance.splash === 'always'
-      || (S.appearance.splash !== false && !osSkipsSplash());
+    const syncSplashBox = () => {
+      splashCb.checked = S.appearance.splash === 'always'
+        || (S.appearance.splash !== false && !remoteSkipsSplash(S.appearance) && !osSkipsSplash());
+    };
+    syncSplashBox();
     splashCb.onchange = () => {
       // Ticked by hand means "play it" — including on a machine whose OS
-      // asks for reduced motion (see splash.splashEnabled).
+      // asks for reduced motion, or in Remote session mode (see
+      // splash.splashEnabled).
       S.appearance.splash = splashCb.checked ? 'always' : false;
       saveAppearance();
       paintSplashNote();
@@ -909,7 +920,13 @@ export function openSettings(where) {
     const paintSplashNote = () => {
       const last = lastSplash();
       const parts = ['The winnowing animation Winnow starts with. Any key or click skips it.'];
-      if (reducedMotion()) {
+      if (remoteSkipsSplash(S.appearance)) {
+        if (S.appearance.splash === 'always') {
+          parts.push('Remote session mode is on; it plays anyway because you ticked this yourself.');
+        } else if (S.appearance.splash !== false) {
+          parts.push('Remote session mode is on, so it is skipped — tick the box to play it anyway.');
+        }
+      } else if (reducedMotion()) {
         if (S.appearance.splash === 'always') {
           parts.push('Your system asks for reduced motion; it plays anyway because you ticked this yourself.');
         } else if (S.appearance.splash !== false) {
@@ -1064,6 +1081,8 @@ export function openSettings(where) {
     remoteCb.onchange = async () => {
       S.appearance.remoteSession = remoteCb.checked;
       paintRemote();
+      syncSplashBox();
+      paintSplashNote();
       // Machine setting, saved server-side — localStorage proved fragile
       // (per-origin AND per-profile, so update restarts and quick-look
       // ports kept resetting it).

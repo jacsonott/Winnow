@@ -304,3 +304,42 @@ def test_a_slow_display_still_finishes_in_seconds(own_page, server):
         pg.wait_for_selector("#splash[hidden]", state="attached", timeout=60_000)
         took = time.monotonic() - t0
         assert took < 18, f"splash took {took:.1f}s under throttling"
+
+
+def _set_remote_session(server, on):
+    import json
+    import urllib.request
+    req = urllib.request.Request(
+        server.rstrip("/") + "/api/settings/app",
+        data=json.dumps({"remote_session": on}).encode(),
+        headers={"Content-Type": "application/json", "X-Timeline-Lite-Client": "1"})
+    urllib.request.urlopen(req, timeout=5).read()
+
+
+def test_remote_session_mode_skips_it_unless_ticked(own_page, server):
+    """Remote session mode promises to stop animations, and a full-viewport
+    one is the worst case for a remote display: every frame is re-encoded
+    whole, so it arrives choppy however fast the machine draws it. It
+    played anyway, because the page learned the (machine-side) setting
+    only after the animation had started. A hand-ticked box still plays."""
+    _set_remote_session(server, True)
+    try:
+        with _ctx(own_page) as pg:
+            pg.goto(server)
+            # The splash runs alongside boot(), so had it started it would
+            # still be up when the grid paints.
+            pg.wait_for_selector(".row", timeout=15_000)
+            assert pg.locator("#splash").get_attribute("hidden") is not None
+            last = pg.evaluate("() => JSON.parse(localStorage.getItem('winnow.splash.last'))")
+            assert last["result"] == "skipped" and "Remote session mode" in last["reason"]
+            box = _splash_box(pg)
+            assert not box.is_checked()
+            assert "Remote session mode is on, so it is skipped" in _splash_note(pg)
+            box.check()
+            assert pg.evaluate("() => __winnow.S.appearance.splash") == "always"
+            assert "plays anyway" in _splash_note(pg)
+        with _ctx(own_page, "{ splash: 'always' }") as pg2:
+            pg2.goto(server, wait_until="commit")
+            pg2.wait_for_selector("#splash:not([hidden])", timeout=10_000)
+    finally:
+        _set_remote_session(server, False)

@@ -68,6 +68,35 @@ def _use_ui_csv(pg):
     return want
 
 
+# The saved pivots read back slowly, as they do on a busy runner.
+SLOW_STATE_READ = """(() => {
+  const fetch = window.fetch;
+  window.fetch = (url, opts) => (String(url).includes('/api/plugin_state?key=') && !(opts && opts.method === 'POST')
+    ? new Promise((resolve) => setTimeout(resolve, 1500)).then(() => fetch(url, opts))
+    : fetch(url, opts));
+})()"""
+
+
+def test_a_field_placed_as_soon_as_the_list_shows_is_saved(pv_page, own_page, server_post):
+    """The field list was drawn when the tab was shown, before the mount
+    had read back what it saved, and saving only starts after that read.
+    A field dragged in between was not saved, which CI found as the next
+    test timing out on a slow runner; a slow read makes the gap wide
+    enough to land in every time."""
+    try:
+        with own_page(init=SLOW_STATE_READ) as pg:
+            pg.evaluate("() => __winnow.loadPlugins()")
+            pg.wait_for_function("() => __winnow.S.pluginTabs.some((t) => t.id.includes('pivot'))",
+                                 timeout=10_000)
+            _open_tab(pg)
+            _use_ui_csv(pg)
+            with pg.expect_response(_is_state_post, timeout=15_000) as saved:
+                pg.evaluate(DRAG_FIELD, ["[data-field='Host']", "[data-zone='rows']"])
+            assert saved.value.json()["payload"]["pivots"][0]["rows"] == ["Host"]
+    finally:
+        server_post("/api/plugin_state", {"key": KEY, "payload": None})
+
+
 def test_two_pivots_come_back_with_their_wells_and_a_re_run_cross_tab(pv_page):
     pg = pv_page
     _open_tab(pg)
