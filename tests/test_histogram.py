@@ -165,6 +165,41 @@ def test_the_sql_fast_path_agrees_on_random_timestamp_shaped_text():
     assert got == want
 
 
+def _day_both(values):
+    """(DAY_BUCKET in Python, day_bucket_sql in SQLite) per value."""
+    import sqlite3
+
+    from winnow.store import _day_bucket, day_bucket_sql
+
+    db = sqlite3.connect(":memory:")
+    db.create_function("DAY_BUCKET", 1, _day_bucket, deterministic=True)
+    db.execute("CREATE TABLE t (i INTEGER PRIMARY KEY, v)")
+    db.executemany("INSERT INTO t (v) VALUES (?)", [(v,) for v in values])
+    got = [r[0] for r in db.execute(f"SELECT {day_bucket_sql('v')} FROM t ORDER BY i")]
+    db.close()
+    return [_day_bucket(v) for v in values], got
+
+
+def test_the_sql_day_agrees_with_day_bucket():
+    """The Groups view's day for a datetime grouping comes from
+    day_bucket_sql; the grid's group strip from DAY_BUCKET. A value the two
+    read differently would be counted under one group in the grid and
+    another in the bars."""
+    import random
+
+    rng = random.Random(20261022)
+    alphabet = "0123456789-: T./Z+"
+    base = "2026-03-14 08:00:00.123Z"
+    values = NORMALIZE_CORPUS + [b"2026-03-14 08:00:00", 1773475200, 1773475200.5, None]
+    for _ in range(3000):
+        chars = list(base)
+        for _ in range(rng.randint(1, 3)):
+            chars[rng.randrange(len(chars))] = rng.choice(alphabet)
+        values.append("".join(chars)[: rng.randint(8, len(chars))])
+    want, got = _day_both(values)
+    assert got == want
+
+
 def test_each_row_is_parsed_once(write_csv, tmp_path, monkeypatch):
     """The cost this removed. The span and the per-bucket counts were two
     passes over the view and the tag split a third, each calling

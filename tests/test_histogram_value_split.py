@@ -55,8 +55,8 @@ def test_the_segments_add_up_to_the_bar(store, src):
 
 
 def test_slots_follow_the_order_the_values_were_asked_in(store, src):
-    """The client colours slot i as the i-th value it sent; a server that
-    sorted them would hand bob's rows carol's colour."""
+    """The client colors slot i as the i-th value it sent; a server that
+    sorted them would hand bob's rows carol's color."""
     h = _hist(store, src, stack="groups", split_column="User", split_values=["carol", "admin", "bob"])
     assert h["stack"]["values"] == ["carol", "admin", "bob"]
     assert _per_slot(h) == [6, 6, 6, 6]
@@ -120,6 +120,10 @@ def test_a_merge_splits_through_each_member(store, src, write_csv):
         h = _hist(store, mid, spec, stack="groups", split_column="User", split_values=["admin", "dave"])
         assert h["total"] == 26
         assert _per_slot(h) == [18, 7, 1], spec
+        # A date's day is worked out in the union and compared outside it,
+        # so its values are bound once, not once per member.
+        h = _hist(store, mid, spec, stack="groups", split_column="When", split_values=["2026-03-14"])
+        assert _per_slot(h) == [0, 26], spec
 
 
 def test_refusals(store, src):
@@ -155,3 +159,45 @@ def test_the_route_400s_what_it_cannot_split_by(client, store, src):
     assert r.status_code == 400 and "'Gone'" in r.json()["detail"]
     r = client.get("/api/histogram", params={**base, "split_column": "User", "split_values": "[]"})
     assert r.status_code == 400
+
+
+@pytest.mark.parametrize("kw", [
+    {},
+    {"stack": "tags"},
+    {"stack": "value", "split_column": "User", "split_values": ["admin"]},
+    {"stack": "groups", "split_column": "User", "split_values": ["carol", "", "bob"]},
+    {"stack": "groups", "split_column": "When", "split_values": ["2026-03-14"]},
+])
+def test_a_re_ask_groups_by_bar_and_answers_the_same(store, src, monkeypatch, kw):
+    """The strip asks about one view many times — the plain chart as it
+    lands, then Tags, each Value, Groups, First N — and every ask after the
+    first groups by the bar width the first one found rather than by the
+    second. Same rows, same bars: the answer must not change with the
+    path. The width check runs once more on that path, which is how it is
+    told apart here."""
+    v = store.build_view(src, {"source_id": src})["view_id"]
+    sized = []
+    real = store._histogram_width
+    monkeypatch.setattr(store, "_histogram_width", lambda *a: sized.append(a) or real(*a))
+    first = store.time_histogram(v, "When", **kw)
+    assert len(sized) == 1
+    again = store.time_histogram(v, "When", **kw)
+    assert len(sized) == 3, "the re-ask went the per-second way"
+    assert again == first
+
+
+def test_a_width_that_no_longer_fits_falls_back(store, src):
+    """The remembered width is a hint. A wrong one — a derived column that
+    filled in since, a stale entry — must cost a second pass, never a
+    chart in the wrong bars."""
+    v = store.build_view(src, {"source_id": src})["view_id"]
+    want = store.time_histogram(v, "When", stack="groups", split_column="User", split_values=["bob"])
+    for wrong in (1, 86400):
+        store._histogram_widths[(v, "When", 160)] = wrong
+        assert store.time_histogram(v, "When", stack="groups", split_column="User", split_values=["bob"]) == want
+
+
+def test_a_re_ask_about_an_empty_view_is_empty(store, src):
+    v = store.build_view(src, {"source_id": src, "filters": [{"column": "User", "op": "equals", "value": "nobody"}]})["view_id"]
+    store._histogram_widths[(v, "When", 160)] = 300
+    assert store.time_histogram(v, "When")["total"] == 0

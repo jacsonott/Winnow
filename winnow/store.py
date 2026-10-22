@@ -773,6 +773,17 @@ def _ts_normalize(raw: Any) -> str | None:
 _TS_ISO_GLOB = "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9][ T][0-9][0-9]:[0-9][0-9]:[0-9][0-9]*"
 
 
+def day_bucket_sql(expr: str) -> str:
+    """DAY_BUCKET(expr) as SQL, the common case done by SQLite — the same
+    shortcut as ts_normalize_sql below, for the same reason: for a TEXT
+    value matching _TS_ISO_GLOB, _day_bucket returns exactly its first ten
+    characters (_TS_ISO_RE's date groups, at fixed offsets). Everything
+    else still goes to DAY_BUCKET. `expr` appears several times in the
+    result, so pass a column reference."""
+    return (f"CASE WHEN typeof({expr}) = 'text' AND {expr} GLOB '{_TS_ISO_GLOB}' "
+            f"THEN substr({expr}, 1, 10) ELSE DAY_BUCKET({expr}) END")
+
+
 def ts_normalize_sql(expr: str) -> str:
     """TS_NORMALIZE(expr) as SQL, with the common case done by SQLite.
 
@@ -2743,6 +2754,13 @@ class Store:
         # describes a table it does not own.
         self._view_seq_lock = threading.Lock()
         self._views: dict[str, dict] = {}
+        # time_histogram's bucket width per (view, column, max_buckets), so
+        # a re-ask about the same view aggregates by bucket rather than by
+        # second (see there). A hint, checked on every use, so its own lock
+        # and no invalidation: reader threads write it, and it must not
+        # queue behind the writer.
+        self._histogram_widths: dict[tuple, int] = {}
+        self._histogram_widths_lock = threading.Lock()
         self._undo_seq = 0
         # Tag-change undo history. Entries are newest-last; each owns a
         # v.undo_<n> delta table listing the rows the op *actually*
@@ -9692,7 +9710,7 @@ class Store:
     HISTOGRAM_BUCKETS = (1, 5, 10, 30, 60, 300, 600, 900, 1800, 3600, 3 * 3600, 6 * 3600,
                          12 * 3600, 86400, 7 * 86400, 30 * 86400, 365 * 86400)
 
-    # How many values a value split may colour: the categorical palette's
+    # How many values a value split may color: the categorical palette's
     # eight slots. A ninth would be a generated hue, and it belongs in
     # "Other" instead.
     HISTOGRAM_SPLIT_MAX = 8
@@ -9726,6 +9744,20 @@ class Store:
         altogether. Together: ~1 s on the same view, the same answer
         (tests/test_histogram.py).
 
+        **A re-ask groups by bucket.** Grouping by second is what lets one
+        pass find the width, but most of what it costs is the sort over
+        hundreds of thousands of distinct seconds and the walk over them
+        afterwards. The strip asks about one view many times — the plain
+        chart as it lands, then Tags, Value (each cell picked), Groups and
+        First N over the same rows — and the width is the same every time,
+        so the first answer's width is remembered (_histogram_widths) and
+        later asks group by bucket instead, with MIN/MAX riding along for
+        the span. The span decides the width, so the width the remembered
+        one would have been is checked against the span that pass found;
+        on any disagreement — a derived column still filling in, a
+        different max_buckets — the per-second pass runs as before. Half
+        the time on a 500k-row view, the same answer.
+
         `stack` splits each bar. "tags" by the first tag a row carries
         (_histogram_tag_exprs). "value" and "groups" by which of
         `split_values` the row holds in `split_column` — up to
@@ -9733,7 +9765,11 @@ class Store:
         the same one-row-one-segment shape, since a row holds one value per
         column. The two differ only in how a datetime column is compared:
         "groups" names the group-by strip's values, which are DAY_BUCKETs
-        there (group_summary), and "value" a cell's stored value."""
+        there (group_summary), and "value" a cell's stored value. The day
+        is worked out once a row, in the union, and the slot from it
+        outside: a CASE naming DAY_BUCKET in each WHEN called it once per
+        group, and grouping by a date took four times as long as by a
+        name."""
         handle = self._views.get(view_id)
         if not handle:
             raise ViewExpired("View expired — rebuild it")
@@ -9749,9 +9785,10 @@ class Store:
         is_derived = self._is_derived(src, column)
         by_values = stack in ("value", "groups")
         stacked = stack == "tags" or by_values
+        split_day = False
         if by_values:
             if split_column == TAG_GROUP_COLUMN:
-                raise ValueError("Grouped by tag — the Tags view colours these")
+                raise ValueError("Grouped by tag — the Tags view colors these")
             if split_column not in colnames:
                 raise KeyError(split_column)
             split_values = list(split_values or [])
@@ -9759,13 +9796,17 @@ class Store:
                 raise ValueError(f"A value split takes 1 to {self.HISTOGRAM_SPLIT_MAX} values")
             split_day = stack == "groups" and colnames[split_column] == "datetime"
 
-        def split_expr(m: dict) -> str:
+        def slot_of(expr: str) -> str:
             # Slot 1..N for the value a row holds, 0 for anything else. IS,
             # not =, so the "(empty)" group's None finds its NULL rows.
-            ref = self._col_ref(self._ref_src_for(src, m), split_column, "s", None if direct else "d")
-            expr = f"DAY_BUCKET({ref})" if split_day else ref
             whens = " ".join(f"WHEN {expr} IS ? THEN {i + 1}" for i in range(len(split_values)))
             return f"CASE {whens} ELSE 0 END"
+
+        def split_expr(m: dict) -> str:
+            ref = self._col_ref(self._ref_src_for(src, m), split_column, "s", None if direct else "d")
+            # A date's day as the union's own column (`sv`), compared
+            # outside; anything else is a column read, cheap to name N times.
+            return day_bucket_sql(ref) if split_day else slot_of(ref)
 
         def branch(m: dict, select: str) -> str:
             derived_alias = None if direct else "d"
@@ -9785,17 +9826,23 @@ class Store:
         # of row tuples: a view whose every row is its own second holds as
         # many of these as it has rows. Untagged is 0 — tag ids start at 1.
         secs, tags, counts = array("q"), array("q"), array("q")
+        width_key = (view_id, column, max_buckets)
+        with self._histogram_widths_lock:
+            hint = self._histogram_widths.get(width_key)
         with self._reader() as ro, self._dropped_view_is_expired(), self._interruptible(op_token, ro):
             if by_values:
                 tag_of = {m["source_id"]: split_expr(m) for m in members}
-                params = [v for _ in members for v in split_values]
+                # The day's slot is worked out outside the union, so its
+                # values are bound once rather than once per member.
+                params = list(split_values) if split_day else [v for _ in members for v in split_values]
             else:
                 tag_of = self._histogram_tag_exprs(ro, members) if stacked else {}
                 params = []
             union = " UNION ALL ".join(
-                branch(m, "EPOCH AS e" + (f", {tag_of[m['source_id']]} AS tag" if stacked else ""))
+                branch(m, "EPOCH AS e" + (f", {tag_of[m['source_id']]} AS {'sv' if split_day else 'tag'}"
+                                          if stacked else ""))
                 for m in members)
-            keys = "e, tag" if stacked else "e"
+            tag = slot_of("sv") if by_values and split_day else "tag"
             # LIMIT -1 limits nothing; it is what keeps EPOCH to one call
             # per row. Without it SQLite flattens a one-member subquery
             # into this query, or pushes the IS NOT NULL down into each
@@ -9803,25 +9850,47 @@ class Store:
             # expression to every place `e` is named — two or three
             # TS_NORMALIZE calls a row, counted. Neither is allowed past a
             # LIMIT, since moving a WHERE across one changes what it means.
-            for row in ro.execute(f"SELECT {keys}, COUNT(*) FROM ({union} LIMIT -1) WHERE e IS NOT NULL "
-                                  f"GROUP BY {keys} ORDER BY {keys}", params):
-                secs.append(row[0])
-                counts.append(row[-1])
-                if stacked:
-                    tags.append(row[1] or 0)
+            rows_from = f"FROM ({union} LIMIT -1) WHERE e IS NOT NULL"
+            split = f", {tag}" if stacked else ""
+            keys = "1, 2" if stacked else "1"
+
+            def take(rows, n_at: int) -> None:
+                for row in rows:
+                    secs.append(row[0])
+                    counts.append(row[n_at])
+                    if stacked:
+                        tags.append(row[1] or 0)
+
+            rows = None
+            if hint:
+                # Floored like the fold below, not truncated: SQLite's %
+                # keeps the sign of a pre-1970 epoch.
+                rows = ro.execute(f"SELECT e - ((e % {hint}) + {hint}) % {hint}{split}, COUNT(*), MIN(e), MAX(e) "
+                                  f"{rows_from} GROUP BY {keys} ORDER BY {keys}", params).fetchall()
+                if rows:
+                    lo, hi = min(r[-2] for r in rows), max(r[-1] for r in rows)
+                    if self._histogram_width(hi - lo, max_buckets) != hint:
+                        rows = None
+            if rows is None:
+                take(ro.execute(f"SELECT e{split}, COUNT(*) {rows_from} GROUP BY {keys} ORDER BY {keys}", params), -1)
+                if secs:
+                    lo, hi = secs[0], secs[-1]
+            else:
+                take(rows, -3)
             if not secs:
                 return {"column": column, "bucket_seconds": 0, "start": None, "end": None,
                         "total": 0, "buckets": []}
-            lo, hi = secs[0], secs[-1]
             # The labels come from SQLite too, not time.gmtime: on Windows
             # that raises OSError for anything before 1970 (a 500 for a
             # column holding FILETIME zero), and SQLite formats every year
             # its own strftime('%s') could have produced.
             lo_text, hi_text = ro.execute(
                 "SELECT datetime(?, 'unixepoch'), datetime(?, 'unixepoch')", (lo, hi)).fetchone()
-        span = hi - lo
-        bucket = next((b for b in self.HISTOGRAM_BUCKETS if span / b <= max_buckets),
-                      self.HISTOGRAM_BUCKETS[-1])
+        bucket = self._histogram_width(hi - lo, max_buckets)
+        with self._histogram_widths_lock:
+            self._histogram_widths[width_key] = bucket
+            while len(self._histogram_widths) > 64:
+                del self._histogram_widths[next(iter(self._histogram_widths))]
         # A bucket starts at floor(e / bucket) * bucket, which is what the
         # strip assumes when it finds a row's bar (b <= t < b + bucket).
         # Python's // floors; SQLite's integer division truncates toward
@@ -9842,6 +9911,12 @@ class Store:
         elif stacked:
             out["stack"] = self._histogram_tag_stack(secs, tags, counts, bucket)
         return out
+
+    def _histogram_width(self, span: int, max_buckets: int) -> int:
+        """The bucket width for a span: the narrowest that fits it in
+        max_buckets bars."""
+        return next((b for b in self.HISTOGRAM_BUCKETS if span / b <= max_buckets),
+                    self.HISTOGRAM_BUCKETS[-1])
 
     def _histogram_tag_exprs(self, ro: sqlite3.Connection, members: list[dict]) -> dict[int, str]:
         """Per member, the SQL for the tag a row is counted under in the

@@ -23,19 +23,21 @@
 
    And it never passes the previous view's chart off as this one's. From
    the moment a rebuild starts until the answer for the view it lands has
-   come back, the bars are faded and grey, the position marks are gone and
+   come back, the bars are faded and gray, the position marks are gone and
    the count line says "Updating…" (fresh(), and view.js calls
    histogramFollowBuild / histogramViewLanded to say when). The answer is
    asked for as the view lands, not after the grid has painted it.
 
-   The bars can be coloured four ways, each its own view (histogramView):
-   plain; by tag (Tags — the first tag a row carries); by the value of the
-   selected cell (Value — that value's rows in the accent, everything else
-   grey, as if it were a tag); and, while the grid is grouped, by the first
-   N groups of its first level (Groups — one palette colour each, the rest
-   "Other", and the same colour beside each group's heading in the grid).
-   All four are one row, one segment, so every view's bars are as tall as
-   the plain chart's.
+   The bars can be colored four ways, each its own view (histogramView):
+   plain; by tag (Tags — the first tag a row carries); by a value (Value —
+   that value's rows in the accent, everything else gray, as if it were a
+   tag), chosen with "Show in histogram" on a cell's right-click menu, or
+   the selected cell's, followed as it moves, when "Follow the selected
+   cell" is on (a right-click on the Value button); and, while the grid is
+   grouped, by the first N groups of its first level (Groups — one palette
+   color each, the rest "Other", and the same color beside each group's
+   heading in the grid). All four are one row, one segment, so every
+   view's bars are as tall as the plain chart's.
 
    Declarations only. wireHistogram() builds the chrome and attaches the
    document listeners once, for the page's life (session.js does the same
@@ -51,9 +53,11 @@ import { syncPluginPanels } from './plugins.js';
 import { S } from './state.js';
 import { datetimeColumns, updateTimeRangeButton } from './timeframe.js';
 import { parseTimestamp } from './tsformat.js';
+import { contextMenu } from './ui.js';
 import { rebuildInFlight, rebuildView } from './view.js';
 
-/* Per browser, like the appearance and keymap prefs: {open, column}. */
+/* Per browser, like the appearance and keymap prefs:
+   {open, column, view, groupsTop, valueFollow}. */
 export const HISTOGRAM_PREFS_KEY = 'winnow.histogram';
 /* Where the example plugin kept its toggle, and its panel id there. */
 const LEGACY_PANELS_KEY = 'winnow.panels';
@@ -94,9 +98,10 @@ let ui = null;          // {colSel, info, canvas, hint, empty} once wired
 let chartUp = false;    // the canvas holds a chart (draw() reached paintChart)
 let marks = null;       // the grid position the canvas last painted (gridMarks)
 let marksRaf = null;    // one repaint per frame, however often the grid renders
-/* The Value view's value: {column, value} — the selected cell's. It
-   follows the cell focus, so a right-click charts the cell too (that
-   moves the focus). Kept when the focus goes away (a group heading,
+/* The Value view's value: {column, value}. Chosen — "Show in histogram"
+   on a cell's right-click menu — and kept while the analyst clicks
+   around, unless "Follow the selected cell" is on, when it is the
+   selected cell's. Kept when the focus goes away (a group heading,
    Escape), so the chart does not drop back to plain under a click that
    was not about it. */
 let picked = null;
@@ -104,8 +109,11 @@ let pickedFocus = null; // the S.cellFocus object `picked` was last taken from (
 let askedSplit = null;  // the split key of the newest ask
 let splitTimer = null;  // a split change waiting out SPLIT_MS
 let splitTimerKey = null;
-/* A cell move is a new ask. Waited out briefly so holding an arrow key
-   down a column asks once where it stops, not once per row. */
+/* A cell move is a new ask while the Value view follows the selection.
+   Waited out briefly so holding an arrow key down a column asks once
+   where it stops, not once per row. Nothing else waits: a button, a menu
+   item and a regroup are one change each, and the answer is what the
+   analyst is waiting for. */
 const SPLIT_MS = 200;
 /* The values ride in the GET's query string, as JSON, so a cell holding a
    whole command line or JSON document would make a request line the
@@ -113,9 +121,9 @@ const SPLIT_MS = 200;
    three bytes apiece, stays well inside uvicorn's limit; a value past it
    is not charted, and a group past it falls into "Other". */
 const SPLIT_JSON_MAX = 3000;
-/* The Groups view's colours follow the VALUE, not its rank: a filter that
-   reorders the top groups must not repaint the survivors, or the colour
-   an analyst learnt for "admin" means someone else after it. A value
+/* The Groups view's colors follow the VALUE, not its rank: a filter that
+   reorders the top groups must not repaint the survivors, or the color
+   an analyst learned for "admin" means someone else after it. A value
    keeps its slot while it stays in the top N; one that joins takes the
    lowest free slot. Reset with the column or N. */
 let groupSlots = { key: null, map: new Map() };
@@ -146,7 +154,7 @@ export function migrateHistogramPrefs() {
 
 export function histogramOpen() { return !!prefs().open; }
 
-/* How the bars are coloured: 'plain', 'tags', 'value' or 'groups'. Per
+/* How the bars are colored: 'plain', 'tags', 'value' or 'groups'. Per
    browser like the open flag and the chosen column. Plain by default: the
    plain chart answers "when did this view happen", and the others answer
    questions you only have once you have started reading the rows. Before
@@ -161,22 +169,55 @@ export function histogramView() {
 export function setHistogramView(view) {
   if (!HISTOGRAM_VIEWS.includes(view)) return;
   savePrefs({ view, stack: view === 'tags' });
-  // The Value view starts from the cell already selected, if there is one.
-  if (view === 'value') takeFocusedValue();
+  // Following, the Value view starts from the cell already selected.
+  if (view === 'value' && histogramValueFollows()) takeFocusedValue();
   // The split is asked for at fetch time, not derived. Until it is back
   // the chart stays up, faded — fresh() knows an answer without the split
-  // cannot be drawn as one.
-  schedule();
-  draw();
+  // cannot be drawn as one. One that needs no split (plain, or Value with
+  // nothing chosen) is in the answer already: every answer has the plain
+  // bars.
+  if (fresh()) draw(); else ask();
   // The group headings carry the Groups view's swatches.
   if (S.groupByCols.length) render();
+}
+
+/* Whether the Value view follows the selected cell, rather than keeping
+   the value it was shown. Per browser. Off by default: a chart that
+   changes under every click is the wrong default for reading the rows
+   around a finding. */
+export function histogramValueFollows() { return !!prefs().valueFollow; }
+export function setHistogramValueFollow(on) {
+  savePrefs({ valueFollow: !!on });
+  if (on) setHistogramView('value');
+  else draw();
+}
+
+/* "Show in histogram" on a cell's right-click menu: that value, in the
+   Value view, opening the strip if it is closed. The right-click moved
+   the focus to the cell, so following would pick the same value; taking
+   the focus as seen keeps it from re-picking on the next render. */
+export function showValueInHistogram(column, value) {
+  picked = { column, value };
+  pickedFocus = S.cellFocus;
+  savePrefs({ view: 'value', stack: false });
+  // Opening asks on its own show edge, with the value already in place.
+  if (!histogramOpen()) { toggleHistogram(true); return; }
+  ask();
+  if (S.groupByCols.length) render();
+}
+
+/* An ask for a change the analyst made on purpose: now, not on a timer.
+   Hidden, the strip asks on its way back (syncHistogramPanel). */
+function ask() {
+  if (shown) load();
+  else draw();
 }
 
 /* The Tags view, under the name it had while it was the only one. */
 export function histogramStacked() { return histogramView() === 'tags'; }
 export function toggleHistogramStack(on = !histogramStacked()) { setHistogramView(on ? 'tags' : 'plain'); }
 
-/* How many groups the Groups view colours. */
+/* How many groups the Groups view colors. */
 export const GROUPS_TOP = [3, 5, 8];
 export function histogramGroupsTop() {
   const n = Number(prefs().groupsTop);
@@ -184,8 +225,7 @@ export function histogramGroupsTop() {
 }
 function setGroupsTop(n) {
   savePrefs({ groupsTop: n });
-  schedule();
-  draw();
+  if (fresh()) draw(); else ask();
   render();
 }
 
@@ -218,7 +258,7 @@ export function syncHistogramPanel() {
   if (show && !shown) load();
   const edge = show !== shown;
   shown = show;
-  // The group headings wear the Groups view's colours only while the
+  // The group headings wear the Groups view's colors only while the
   // strip that explains them is on screen.
   if (edge && S.activeTab === 'grid' && S.groupByCols.length && histogramView() === 'groups') render();
 }
@@ -324,8 +364,8 @@ function wantedSplit() {
 
 /* The first N groups of the grid's first grouping level, in the order the
    grid lists them — {column, values} — or null when there are none to
-   colour: not grouped, or grouped by tag (the Tags view already colours
-   those, in the tags' own colours). While a regroup has emptied S.groups
+   color: not grouped, or grouped by tag (the Tags view already colors
+   those, in the tags' own colors). While a regroup has emptied S.groups
    to refetch them, the last ones read stand in, so the chart does not
    drop to plain and back on every filter change. */
 function topGroups() {
@@ -363,19 +403,19 @@ function groupSlotsFor(column, values) {
   return keys.map((k) => groupSlots.map.get(k));
 }
 
-const seriesColour = (cs, slot) => cs.getPropertyValue(`--series-${slot}`).trim() || '#3987e5';
+const seriesColor = (cs, slot) => cs.getPropertyValue(`--series-${slot}`).trim() || '#3987e5';
 
-/* The colour a top-level group heading wears in the grid while the Groups
-   view is on screen — the same colour as its segment of the bars — or
+/* The color a top-level group heading wears in the grid while the Groups
+   view is on screen — the same color as its segment of the bars — or
    null. grouping.js's renderGroupHeaderRow asks. */
-export function histogramGroupColour(g) {
+export function histogramGroupColor(g) {
   if (!shown || histogramView() !== 'groups' || !g || g.level !== 0) return null;
   const top = topGroups();
   if (!top) return null;
   const i = top.values.findIndex((v) => Object.is(v, g.value));
   if (i < 0) return null;
   const slots = groupSlotsFor(top.column, top.values);
-  return seriesColour(getComputedStyle(document.documentElement), slots[i]);
+  return seriesColor(getComputedStyle(document.documentElement), slots[i]);
 }
 
 /* The focused cell's column and value, or null when the focus is not on a
@@ -396,10 +436,11 @@ function takeFocusedValue() {
   if (v) { picked = v; pickedFocus = S.cellFocus; }
 }
 
-/* Called from histogramFollowGrid — every grid render. The Value view
-   follows the cell focus; the Groups view follows the grid's groups. When
-   what the view asks for has changed, the chart fades (fresh()) and the
-   new split is asked for once the changes stop. */
+/* Called from histogramFollowGrid — every grid render. The Groups view
+   follows the grid's groups, and the Value view the cell focus while it
+   is set to. When what the view asks for has changed, the chart fades
+   (fresh()) and the new split is asked for: at once for new groups, and
+   once the focus stops moving for a followed cell. */
 function followSplit() {
   if (!shown || !ui || opening || !S.view) return;
   const view = histogramView();
@@ -407,17 +448,27 @@ function followSplit() {
   // Every move of the cell focus assigns S.cellFocus a new object, so
   // "moved" is identity, not position: a view rebuild leaves a position
   // naming another row, and that is not the analyst picking it.
-  if (view === 'value' && S.cellFocus && S.cellFocus !== pickedFocus) {
+  const follows = view === 'value' && histogramValueFollows();
+  if (follows && S.cellFocus && S.cellFocus !== pickedFocus) {
     const v = focusedValue();
     // A focus on a row whose page is not back yet has no value to read;
     // the next render, once it lands, takes it.
     if (v) { picked = v; pickedFocus = S.cellFocus; }
   }
+  // Regrouped, and the new groups not back yet: the next render after
+  // they land asks for them. Asking now would be for no split at all.
+  if (view === 'groups' && S.groupByCols.length && !isTagGroupCol(S.groupByCols[0])
+    && !S.groups.length && !topGroups()) return;
   const want = wantedSplit();
   const key = want ? want.key : null;
   if (key === askedSplit || key === splitTimerKey) return;
-  splitTimerKey = key;
   clearTimeout(splitTimer);
+  splitTimerKey = null;
+  // Nothing to split by any more (ungrouped, say): the plain bars are in
+  // every answer, so that is a repaint, not an ask.
+  if (!key) { askedSplit = null; draw(); return; }
+  if (!follows) { load(); return; }
+  splitTimerKey = key;
   splitTimer = setTimeout(() => { splitTimerKey = null; load(); }, SPLIT_MS);
   draw();
 }
@@ -461,10 +512,10 @@ function buildChrome(container) {
   const legend = el('span', 'th-legend');
   // Three views, one pressed at a time; pressing the pressed one goes
   // back to the plain chart. Separate buttons rather than one menu,
-  // because which one is on is what the bars' colours mean.
+  // because which one is on is what the bars' colors mean.
   const views = el('span', 'th-views');
   views.setAttribute('role', 'group');
-  views.setAttribute('aria-label', 'Colour the bars by');
+  views.setAttribute('aria-label', 'Color the bars by');
   const viewBtn = (view, cls, label, tip) => {
     const b = el('button', `btn ghost ${cls}`, label);
     b.title = tip;
@@ -473,16 +524,27 @@ function buildChrome(container) {
     return b;
   };
   const stackBtn = viewBtn('tags', 'th-stack', 'Tags',
-    'Colour the bars by tag — each row under the first tag it carries, '
+    'Color the bars by tag — each row under the first tag it carries, '
     + 'untagged underneath, so the bars stay as tall as the rows they count');
-  const valueBtn = viewBtn('value', 'th-view-value', 'Value',
-    'Colour the rows holding the selected cell\'s value, as if they were tagged — '
-    + 'click another cell to chart its value');
+  const valueBtn = viewBtn('value', 'th-view-value', 'Value', '');
+  // The way to "follow the selected cell": a right-click here, beside the
+  // view it changes, rather than a fourth control on the strip.
+  valueBtn.oncontextmenu = (e) => {
+    e.preventDefault();
+    const follows = histogramValueFollows();
+    contextMenu(e, () => [{
+      label: 'Follow the selected cell',
+      checked: follows,
+      desc: follows ? 'the chart changes with each cell you select' : 'chart each cell you select, as you select it',
+      title: 'Color the rows holding the selected cell\'s value, and change with the selection',
+      onclick: () => setHistogramValueFollow(!follows),
+    }]);
+  };
   const groupsBtn = viewBtn('groups', 'th-view-groups', 'Groups',
-    'While the grid is grouped, give its first groups a colour each — the same colour '
+    'While the grid is grouped, give its first groups a color each — the same color '
     + 'beside each group\'s heading — and the rest "Other"');
   const topSel = el('select', 'th-top');
-  topSel.title = 'How many groups get a colour of their own';
+  topSel.title = 'How many groups get a color of their own';
   for (const n of GROUPS_TOP) { const o = el('option', null, `First ${n}`); o.value = String(n); topSel.append(o); }
   topSel.onchange = () => setGroupsTop(Number(topSel.value));
   views.append(topSel);
@@ -728,35 +790,40 @@ export function histogramFollowGrid() {
 /* The stacked layers to paint, or null when the chart is a plain one.
    Layer 0 is the untagged remainder; the rest follow the server's tag
    order, which is tag id order, which is ribbon order — the same order
-   the row attribution used, so a segment's colour and the tag it counts
+   the row attribution used, so a segment's color and the tag it counts
    can't drift apart.
 
-   A tag deleted since the answer came back has no colour to draw in and
+   A tag deleted since the answer came back has no color to draw in and
    is folded into the untagged base rather than dropped: the rows are
    still in the view, and a bar that shrank would be a lie about them. */
 function stackLayers() {
   if (!data || !data.stack) return null;
   const view = histogramView();
   if (view === 'tags' && data.stack.tags) return tagLayers();
-  if ((view === 'value' || view === 'groups') && data.stack.kind === view) return valueLayers();
+  // Only the split the view asks for now: an answer about groups the grid
+  // no longer has would color bars with nothing on screen to match.
+  if ((view === 'value' || view === 'groups') && data.stack.kind === view) {
+    const want = wantedSplit();
+    return want && data.splitKey === want.key ? valueLayers() : null;
+  }
   return null;
 }
 
 /* A value split's layers: slot 0 is every other row, then the values in
    the order they were asked for. The Value view draws its one value in the
-   accent — the plain chart's own colour, so "these bars, and the rest
-   greyed" — and the Groups view each group in its palette slot. */
+   accent — the plain chart's own color, so "these bars, and the rest
+   grayed" — and the Groups view each group in its palette slot. */
 function valueLayers() {
   const cs = tokens();
   const { kind, column: col, values } = data.stack;
   if (kind === 'value') {
-    return { colours: [cs.line2, cs.accent], labels: ['Everything else', `${col} = ${ellipsize(displayValue(values[0]), 40)}`],
+    return { colors: [cs.line2, cs.accent], labels: ['Everything else', `${col} = ${ellipsize(displayValue(values[0]), 40)}`],
       rows: data.stack.buckets, kind };
   }
   const root = getComputedStyle(document.documentElement);
   const slots = groupSlotsFor(col, values);
   return {
-    colours: [cs.line2, ...slots.map((sl) => seriesColour(root, sl))],
+    colors: [cs.line2, ...slots.map((sl) => seriesColor(root, sl))],
     labels: ['Other', ...values.map((v) => ellipsize(groupValueLabel(col, v), 32))],
     rows: data.stack.buckets, kind,
   };
@@ -769,13 +836,13 @@ function tagLayers() {
   // plain chart draws), and a base the eye cannot separate from the panel
   // throws that away. Quiet enough that the tagged segments still lead,
   // which they should — untagged is usually most of the view.
-  const colours = [cs.line2];
+  const colors = [cs.line2];
   const labels = ['Untagged'];
   const fold = [];
   data.stack.tags.forEach((id, i) => {
     const tag = S.tags.find((x) => x.id === id);
     if (!tag) { fold.push(i + 1); return; }
-    colours.push(tag.color);
+    colors.push(tag.color);
     labels.push(tag.name);
   });
   const rows = data.stack.buckets.map(([b, counts]) => {
@@ -783,7 +850,7 @@ function tagLayers() {
     for (const i of fold) kept[0] += counts[i];
     return [b, kept];
   });
-  return { colours, labels, rows };
+  return { colors, labels, rows };
 }
 
 /* A swatch and a name per layer, beside the count line. Only what is
@@ -795,17 +862,20 @@ function drawLegend(current = true) {
   legend.replaceChildren();
   // A view with nothing to split by says what it is waiting for, rather
   // than drawing the plain chart under a pressed button with no word on
-  // why the bars are not coloured.
+  // why the bars are not colored.
   const view = histogramView();
-  const hint = view === 'value' && pickedTooLong() ? 'That cell\'s value is too long to chart — select another'
-    : view === 'value' && !wantedSplit() ? 'Select a cell to colour the rows holding its value'
+  const follows = histogramValueFollows();
+  const hint = view === 'value' && pickedTooLong() ? 'That value is too long to chart — choose another'
+    : view === 'value' && !wantedSplit()
+      ? (follows ? 'Select a cell to color the rows holding its value'
+        : 'Right-click a cell and choose Show in histogram')
     : view === 'groups' && !wantedSplit()
-      ? (isTagGroupCol(S.groupByCols[0]) ? 'Grouped by tag — the Tags view colours these'
-        : 'Group by a column to colour its first groups')
+      ? (isTagGroupCol(S.groupByCols[0]) ? 'Grouped by tag — the Tags view colors these'
+        : 'Group by a column to color its first groups')
       : null;
   if (hint) { legend.append(el('span', 'th-legend-hint', hint)); return; }
-  // A faded chart is drawn grey (style.css), so a legend of tag colours
-  // would be naming colours that are not on screen.
+  // A faded chart is drawn gray (style.css), so a legend of tag colors
+  // would be naming colors that are not on screen.
   const stack = current ? stackLayers() : null;
   if (!stack) return;
   const totals = stack.labels.map((_, i) => stack.rows.reduce((a, [, c]) => a + c[i], 0));
@@ -815,7 +885,7 @@ function drawLegend(current = true) {
     if (!totals[i] && !(stack.kind === 'value' && i === 1)) return;
     const chip = el('span', 'th-legend-item');
     const sw = el('span', 'swatch');
-    sw.style.background = stack.colours[i];
+    sw.style.background = stack.colors[i];
     chip.append(sw, el('span', null, stack.kind === 'value' && i === 1
       ? `${name} · ${totals[i].toLocaleString()} row${totals[i] === 1 ? '' : 's'}` : name));
     if (stack.kind === 'groups' && i > 0) chip.title = `${data.stack.column} = ${displayValue(data.stack.values[i - 1])} — ${totals[i].toLocaleString()} rows in this chart`;
@@ -823,10 +893,16 @@ function drawLegend(current = true) {
   });
 }
 
-/* The view buttons' pressed state, and the Top N picker beside Groups. */
+/* The view buttons' pressed state, the Value button's word on how its
+   value is chosen, and the Top N picker beside Groups. */
 function syncViewButtons() {
   const view = histogramView();
   for (const [v, b] of Object.entries(ui.viewBtns)) b.setAttribute('aria-pressed', String(view === v));
+  ui.viewBtns.value.title = histogramValueFollows()
+    ? 'Color the rows holding the selected cell\'s value, as if they were tagged — it follows the selection. '
+      + 'Right-click to keep one value instead'
+    : 'Color the rows holding a value, as if they were tagged — right-click a cell and choose Show in histogram. '
+      + 'Right-click this button to follow the selected cell instead';
   ui.topSel.hidden = view !== 'groups';
   ui.topSel.value = String(histogramGroupsTop());
 }
@@ -931,7 +1007,7 @@ function paintChart(current = true) {
   // be) another view's, placed on this one's axis.
   marks = current ? gridMarks(w) : { key: '', band: null, ticks: [], cursor: null };
   // The rows on screen, as a column lit BEHIND the bars: over them it
-  // would tint every bar it crossed, and the bars' colour is what the
+  // would tint every bar it crossed, and the bars' color is what the
   // tag split is read by.
   if (marks.band) {
     ctx.save();
@@ -957,7 +1033,7 @@ function paintChart(current = true) {
         // Proportional to this bar's own height, so rounding cannot make
         // the segments add up to more or less than the bar.
         const h = (n / total) * full;
-        ctx.fillStyle = stack.colours[i];
+        ctx.fillStyle = stack.colors[i];
         ctx.fillRect(x, y - h, bw, h);
         y -= h;
       });
@@ -985,7 +1061,7 @@ function paintChart(current = true) {
   if (marks.band) ctx.fillRect(marks.band.x0, 0, marks.band.x1 - marks.band.x0, LANE - 1);
   for (const tk of marks.ticks) ctx.fillRect(tk.x, 0, 1, LANE - 1);
   // The row cursor: a line through the plot, over the bars, which would
-  // otherwise hide it. On a halo of the panel colour, because a bare
+  // otherwise hide it. On a halo of the panel color, because a bare
   // 1px line laid over a bar, or in the gap between two tall ones, all
   // but disappeared into it. Plot only, never the lane: the cursor is
   // usually one of the rows on screen, and a mark of its own up there

@@ -63,10 +63,12 @@ def test_top_level_is_short_and_keeps_the_filters_broken_out(page, row_menu):
     assert any(l.startswith("Save as table") for l in subs)
     # the filters are plain items at the top, not folded
     assert any(l.startswith("Narrow to this value") for l in labels) and any(l.startswith("Exclude this value") for l in labels)
-    # Eight at most, the folds included. Undo is counted apart: it is only
-    # there while a tag write is on the stack, which depends on what ran
-    # before this module, and the budget should not depend on that.
-    assert len([l for l in labels if not l.startswith("Undo")]) <= 8, labels
+    # Nine at most, the folds included: eight until Show in histogram
+    # joined the value's verbs in 2026-10, since that is how the
+    # histogram's Value view is given its value. Undo is counted apart:
+    # it is only there while a tag write is on the stack, which depends on
+    # what ran before this module, and the budget should not depend on that.
+    assert len([l for l in labels if not l.startswith("Undo")]) <= 9, labels
     page.keyboard.press("Escape")
 
 
