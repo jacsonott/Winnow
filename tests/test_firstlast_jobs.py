@@ -158,8 +158,8 @@ def test_a_running_job_is_polled_and_its_result_handed_over_once(fl, held_run_sq
 @pytest.fixture
 def slow_table(client, store, write_csv, example_registry, monkeypatch):
     """A number sort column and a REGEXP that takes 5 ms a row: the
-    windowed pass calls it a few times per row, so the job's query would
-    run for most of a minute unless something interrupts it."""
+    bookend pass calls it once a row, so the job's query would run for 15
+    seconds unless something interrupts it."""
     import server
 
     monkeypatch.setattr(server, "PLUGINS", example_registry)
@@ -182,7 +182,7 @@ def slow_table(client, store, write_csv, example_registry, monkeypatch):
 def test_cancel_interrupts_the_query_the_job_is_running(slow_table):
     """The load-bearing one: a cancel stops the SQL itself. A job whose
     cancel only flipped a flag, or whose queries ran without the job's id
-    as their op token, would run out its minute and fail the deadline."""
+    as their op token, would run out its 15 seconds and fail the deadline."""
     client, _store, spec, called = slow_table
     st = _start(client, "preview", spec, wait_ms=0)
     assert st["status"] == "running"

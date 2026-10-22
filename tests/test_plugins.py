@@ -2833,6 +2833,68 @@ def test_first_last_orders_a_number_column_by_value(fl_client, store):
     assert [(r[0], r[-1]) for r in out["rows"]] == [("10", "First"), ("9", "Last")]
 
 
+def test_first_last_a_value_sorts_before_the_longer_values_it_begins(fl_client, store):
+    """The bookends are MIN and MAX of a text key that spells the value in
+    hex with file order on the end. The separator between the two sorts
+    below every hex digit, which is what keeps "10:00" before "10:00:05"
+    as ORDER BY has it; one that sorted above would swap them."""
+    client, _ = fl_client
+    sid = store.ingest_rows(["Host", "When"], [["A", "2026-03-14 10:00:05"], ["A", "2026-03-14 10:00"],
+                                               ["A", "2026-03-14 10:00:0"]],
+                            name="prefixes", column_types=["text", "text"], build_fts=False)["id"]
+    out = _fl(client, "preview", source_id=sid, group_by=["Host"], sort_column="When",
+              columns=[], template="{which}")
+    assert [(r[0], r[-1]) for r in out["rows"]] == [("2026-03-14 10:00", "First"),
+                                                    ("2026-03-14 10:00:05", "Last")]
+
+
+def test_first_last_a_cut_result_keeps_the_bookends_first_in_order(fl_client, store, monkeypatch):
+    """The bookends are put in order and cut to the limit before any of
+    their rows is read, so the cut has to keep the ones first in order: by
+    value, then a group's first row before another group's last, then file
+    order. Y's first row shares its time with A's and B's last rows and
+    comes after both in the file, and still makes the cut ahead of them."""
+    import server
+
+    client, _ = fl_client
+    mod = server.PLUGINS.get_api("first_last", "rows")["handler"].__globals__
+    monkeypatch.setitem(mod, "MAX_COPY_ROWS", 3)
+    sid = store.ingest_rows(["G", "T"], [["A", "01"], ["A", "05"], ["B", "02"], ["B", "05"],
+                                         ["Y", "05"], ["Y", "09"]],
+                            name="cut", column_types=["text", "text"], build_fts=False)["id"]
+    out = _fl(client, "rows", source_id=sid, group_by=["G"], sort_column="T",
+              columns=["G"], template="{which}")
+    assert [(r[1], r[-1]) for r in out["rows"]] == [("A", "First"), ("B", "First"), ("Y", "First")]
+    assert out["truncated"] is True
+
+
+@pytest.mark.parametrize("sort_column", ["When", "EventId"])
+def test_first_last_reads_the_table_once(fl_client, store, monkeypatch, sort_column):
+    """What made First/Last several times slower than the same GROUP BY
+    typed into the SQL pane: window functions, each a sort of the whole
+    table carrying every column the result names, and a second statement
+    to count the groups. Now one statement, whose plan scans the source
+    once and reads each bookend it lists by rid. A number column takes two
+    passes over the rows it materialised, still one scan of the table."""
+    client, sid = fl_client
+    store.ingest_rows(["Host", "EventId"], [["SRV1", "10"], ["SRV1", "9"]], name="nums",
+                      column_types=["text", "number"], build_fts=False)
+    if sort_column == "EventId":
+        sid = next(x["id"] for x in store.list_sources() if x["name"] == "nums")
+    ran = []
+    real = store.run_sql
+    monkeypatch.setattr(store, "run_sql", lambda sql, **kw: ran.append(sql) or real(sql, **kw))
+    out = _fl(client, "preview", source_id=sid, group_by=["Host"], sort_column=sort_column,
+              columns=["Host"], template="{which} of {count}")
+    assert out["total_groups"] >= 1
+    assert len(ran) == 1, ran
+    if sqlite3.sqlite_version_info < (3, 35, 0):
+        pytest.skip("SQLite before 3.35 inlines a CTE into each place it is read")
+    plan = [r[3] for r in real("EXPLAIN QUERY PLAN " + ran[0])["rows"]]
+    assert len([d for d in plan if d.startswith("SCAN s")]) == 1, plan
+    assert any(d.startswith("SEARCH s USING INTEGER PRIMARY KEY") for d in plan), plan
+
+
 def test_first_last_works_on_a_merge(fl_client, store, write_csv):
     """Invariant #9: bookends over a merged table — one windowed pass over
     a UNION ALL of the members, ties broken by (source_id, rid)."""
