@@ -264,7 +264,7 @@ SQLite, Excel, Plaso and the rest. Other options are in
 
 | File | Extensions | You get |
 | --- | --- | --- |
-| [Delimited text](#csv-tsv-and-other-delimited-text) | `.csv` `.tsv` `.psv` `.txt` | One table, columns from the header row. |
+| [Delimited text](#csv-tsv-and-other-delimited-text) | `.csv` `.tsv` `.tab` `.psv` `.txt` | One table, columns from the header row. |
 | [JSON](#json-and-json-lines) | `.json` `.jsonl` `.ndjson` | One table, one row per record. |
 | [SQLite](#sqlite-databases) | `.db` `.sqlite` `.sqlite3` | One table per table you pick. |
 | [Excel](#excel-workbooks) | `.xlsx` `.xlsm` | One table per sheet you pick. |
@@ -287,11 +287,15 @@ add a [derived column](Derived-columns.md).
 
 ### CSV, TSV and other delimited text
 
-**Delimiter.** The extension is believed first — `.csv` comma, `.tsv` tab,
-`.psv` pipe — if the file agrees: that character on every sampled line, the
-same number of times on at least 90% of them. Otherwise, and for `.txt` and
-extensionless files, the content is sniffed for comma, tab, semicolon or
-pipe. The line under the file's preview says what was found
+**Delimiter.** The extension is believed first — `.csv` comma, `.tsv` and
+`.tab` tab, `.psv` pipe — if the file agrees. For a tab that means the tab
+splits at least half of the first 20 rows, so short rows, a title line or a
+cell running over several lines don't put a `.tsv` off; a `.tsv` with no
+tab in it is sniffed instead. For the others it means that character on
+every sampled line, the same number of times on at least 90% of them.
+Otherwise, and for `.txt` and extensionless files, the content is sniffed:
+tab first, if it is on every sampled line, then comma, semicolon or pipe.
+The line under the file's preview says what was found
 (*Comma-delimited (detected) · 12 columns · first 50 rows*), and
 **Delimiter** overrides it (**Auto-detect**, **Comma**, **Tab**,
 **Semicolon**, **Pipe**). **Read as** → **One line per row** reads the file as
@@ -592,7 +596,7 @@ right. It stays the same size whatever you pick or the scan finds.
 1. **Browse…** to the folder.
 2. Pick a profile on the left, or stay on **Custom (not saved)** to set
    things up yourself. A profile fills in everything below it.
-3. Pick **File types**. `.csv`, `.tsv`, `.txt`, `.psv`, `.json`, `.jsonl`,
+3. Pick **File types**. `.csv`, `.tsv`, `.tab`, `.txt`, `.psv`, `.json`, `.jsonl`,
    `.ndjson`, `.plaso`, **IIS logs** and any extension an enabled plugin claims
    are on; **other text files** (off) adds every other non-binary file as raw
    text. **IIS logs** picks up [IIS web server logs](#iis-web-server-logs) by

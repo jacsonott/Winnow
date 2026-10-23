@@ -18,6 +18,10 @@ pytestmark = pytest.mark.ui
 
 SEMI = "When;User;Note\n2026-03-14 08:00:00;alice;a\n2026-03-14 08:01:00;bob;b\n"
 COMMA = "When,User\n2026-03-14 08:00:00,carol\n"
+# Tab-separated, a comma in every timestamp, and empty trailing fields left
+# off some rows — the shape that came in as "Comma-delimited (detected)".
+UNEVEN_TSV = "Last Modified (UTC, local)\tPath\tSize\n" + "".join(
+    f"2026-03-14, 08:00:0{i}\tC:\\{i}.txt" + ("\t10" if i % 2 else "") + "\n" for i in range(6))
 NESTED = "".join(json.dumps({"Pid": i, "Hashes": {"MD5": "d41d", "SHA1": "da39"}}) + "\n" for i in range(3))
 
 
@@ -26,6 +30,8 @@ def files(tmp_path):
     (tmp_path / "semi.csv").write_text(SEMI)
     (tmp_path / "comma.csv").write_text(COMMA)
     (tmp_path / "procs.jsonl").write_text(NESTED)
+    (tmp_path / "files.tsv").write_text(UNEVEN_TSV)
+    (tmp_path / "files.tab").write_text(UNEVEN_TSV)
     return tmp_path
 
 
@@ -94,6 +100,20 @@ def test_a_setting_is_kept_when_another_file_is_chosen_and_reaches_the_import(pa
     assert semi["delimiter"] == ";" and semi["column_types"][1] == "datetime"
     assert comma["delimiter"] is None and comma["column_types"] is None
     assert page.evaluate("() => document.getElementById('modal').hidden")
+
+
+def test_a_tsv_and_a_tab_file_are_detected_as_tabs(page, files, fake_import):
+    """A .tsv whose rows were not all the same width failed the server's
+    "is the name telling the truth" check, and the sniffer's tie-break gave
+    it to the comma; a .tab was not offered as delimited at all, and read
+    one line per row."""
+    _queue(page, files, "files.tsv", "files.tab")
+    for name in ("files.tsv", "files.tab"):
+        _choose(page, name)
+        _heads_are(page, ["Last Modified (UTC, local)", "Path", "Size"])
+        assert _hint(page, name) == "Delimited · auto-detect"
+        assert "Tab-delimited (detected) · 3 columns" in page.locator(
+            "#modalBody .import-preview .side-preview-foot").inner_text()
 
 
 def test_json_flattens_in_its_pane(page, files, fake_import):

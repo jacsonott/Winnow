@@ -10,10 +10,16 @@ middle of a column name and every row read down the wrong columns.
 
 So the extension is consulted first, and believed when the bytes agree
 with it. A mislabelled file still falls through to the sniffer: the name
-is evidence, not an instruction.
+is evidence, not an instruction. A name that says tab is held to a looser
+test than "on every line": a title line, short rows or a multi-line cell
+used to fail it, and the sniffer's tie-break took the .tsv as CSV again.
+And on content alone, a tab on every line is taken before the sniffer's
+tie-break can hand the file to the comma.
 """
 
 from __future__ import annotations
+
+import csv
 
 import pytest
 
@@ -37,11 +43,20 @@ def _write(tmp_path, name, text):
 
 # ------------------------------------------------------- the sniff itself
 
-def test_the_tie_really_does_go_to_the_comma_without_a_name():
+def test_the_sniffer_alone_gives_the_tie_to_the_comma():
     """The bug this fixes, pinned as the reason the fix exists. If CPython
-    ever changes its tie-break this fails, and the extension rule becomes
-    belt and braces rather than the thing holding the file together."""
-    assert Store._sniff(TIED) == ","
+    ever changes its tie-break this fails, and the tab rules become belt
+    and braces rather than the thing holding the file together."""
+    assert csv.Sniffer().sniff(TIED, delimiters=",\t;|").delimiter == ","
+
+
+def test_without_a_name_a_tab_on_every_line_still_beats_the_tie():
+    """A .txt (Excel's "Text (Tab delimited)") or an extensionless dump
+    says nothing about its delimiter, and the same bytes have to come in
+    right anyway: a tab on every line is not incidental the way a comma
+    is."""
+    assert Store._sniff(TIED) == "\t"
+    assert Store._sniff(TIED, "export.txt") == "\t"
 
 
 def test_the_extension_settles_it():
@@ -88,6 +103,78 @@ def test_a_line_without_it_at_all_disqualifies():
     assert Store._looks_delimited_by("\n".join(rows), "\t") is False
 
 
+# --------------------------------------- a .tsv that is not perfectly even
+#
+# Real tab-separated files that failed "the tab on every line, the same
+# number of times" and went to the sniffer, which — with a comma in every
+# timestamp — gave them to the comma. The import pane said
+# "Comma-delimited (detected)" over a table two columns wide.
+
+HEADER = "Last Modified (UTC, local)\tPath\tSize\tNote"
+ROWS = [f"2026-01-01, 00:00:0{i}\tC:\\Windows\\{i}.txt\t{i}0\tok" for i in range(9)]
+
+UNEVEN = {
+    # Empty trailing fields left off, as some exporters do.
+    "short rows": HEADER + "\n" + "\n".join(r if i % 3 else "\t".join(r.split("\t")[:2])
+                                            for i, r in enumerate(ROWS)) + "\n",
+    # A quoted cell running over two lines, the second with no tab in it.
+    "multi-line cell": HEADER + "\n" + "\n".join(ROWS[:4])
+    + '\n2026-01-01, 00:00:09\tC:\\x\t1\t"first line, a\nsecond line, b"\n' + "\n".join(ROWS[4:]) + "\n",
+    # A line about the export above the header.
+    "title line": "Exported by SomeTool 2.1, 2026-01-01\n" + HEADER + "\n" + "\n".join(ROWS) + "\n",
+}
+
+
+@pytest.mark.parametrize("shape", sorted(UNEVEN))
+@pytest.mark.parametrize("ext", [".tsv", ".tab"])
+def test_an_uneven_tsv_is_still_read_as_tabs(shape, ext):
+    text = UNEVEN[shape]
+    assert Store._looks_delimited_by(text, "\t") is False   # the test it used to be held to
+    assert Store._sniff(text, "MFTECmd_Output" + ext) == "\t"
+
+
+@pytest.mark.parametrize("shape", ["short rows", "multi-line cell"])
+def test_an_uneven_tsv_previews_and_imports_with_its_columns(store, tmp_path, shape):
+    text = UNEVEN[shape]
+    path = _write(tmp_path, "export.tsv", text)
+    prev = store.preview_csv_text(text, name="export.tsv")
+    rec = store.ingest_csv(path, name="export.tsv")
+    assert prev["delimiter"] == "\t"
+    assert prev["columns"] == [c["name"] for c in rec["columns"]] == HEADER.split("\t")
+    assert rec["row_count"] == len(ROWS) + (shape == "multi-line cell")
+
+
+def test_a_mislabelled_csv_with_a_stray_tab_is_still_not_a_tsv():
+    """The looser test is still a test: a comma-separated file saved as
+    .tsv, with a tab inside one of its fields, is read as commas."""
+    text = "a,b,c\n1,2,3\nx\ty,2,3\n4,5,6\n"
+    assert Store._splits_most_records(text, "\t") is False
+    assert Store._sniff(text, "mislabelled.tsv") == ","
+
+
+def test_half_a_record_at_the_end_of_the_head_is_not_counted():
+    """The head is cut wherever the read stopped, so in a sample short
+    enough to reach the cut, what follows the last line break is a stub —
+    counted, it would decide this one."""
+    assert Store._splits_most_records("a\tb\nno\nstub", "\t") is True
+    assert Store._splits_most_records("a\tb\nno\nwhole\n", "\t") is False
+
+
+def test_the_preview_and_the_import_sniff_the_same_head(store, tmp_path, monkeypatch):
+    """The preview read the delimiter from its first 8 KB and the import
+    from its first 64. With records this wide the preview's sample ran
+    out where the import's did not, and the two could disagree."""
+    seen = []
+    real = Store._sniff.__func__
+    monkeypatch.setattr(Store, "_sniff", classmethod(
+        lambda cls, head, name=None: seen.append(head) or real(cls, head, name)))
+    text = "".join(f"{i}, {'x' * 1000}\t{i}\n" for i in range(100))
+    path = _write(tmp_path, "wide.tsv", text)
+    store.preview_csv_text(text, name="wide.tsv")
+    store.ingest_csv(path, name="wide.tsv")
+    assert len(seen) == 2 and len(seen[0]) > 8192 and seen[0] == seen[1]
+
+
 # ------------------------------------------------------------ end to end
 
 def test_a_tsv_imports_with_its_own_columns(store, tmp_path):
@@ -100,12 +187,12 @@ def test_a_tsv_imports_with_its_own_columns(store, tmp_path):
     assert rows[0]["cells"] == ["2026-01-01, 00:00:01", "C:\\Windows\\a.txt", "10"]
 
 
-def test_without_the_name_the_same_bytes_came_in_wrong(store, tmp_path):
-    """The before picture, as the file an analyst actually had: saved
-    without the extension, the comma wins and the header is cut in half."""
+def test_without_the_name_the_same_bytes_come_in_right_too(store, tmp_path):
+    """The file an analyst actually had, saved without the extension: the
+    comma used to win and cut the header in half."""
     path = _write(tmp_path, "mft_no_ext", TIED)
     rec = store.ingest_csv(path, name="mft_no_ext")
-    assert [c["name"] for c in rec["columns"]][0] == "Last Modified (UTC"
+    assert [c["name"] for c in rec["columns"]] == ["Last Modified (UTC, local)", "Path", "Size"]
 
 
 def test_the_preview_and_the_import_agree(store, tmp_path):

@@ -560,7 +560,7 @@ export function openMergeBuilder(opts = {}) {
    order they render in), and wireFileDrop's own filtering below — a raw
    OS drop has no equivalent of a picker's accept attribute doing that
    filtering natively, so the drop handler has to do it itself. */
-export const RECOGNIZED_IMPORT_EXTENSIONS = ['.csv', '.tsv', '.txt', '.psv', '.json', '.jsonl', '.ndjson'];
+export const RECOGNIZED_IMPORT_EXTENSIONS = ['.csv', '.tsv', '.tab', '.txt', '.psv', '.json', '.jsonl', '.ndjson'];
 
 /* The SQLite extension set — routed by the import queue to a pane whose
    preview box is the file's tables to tick, and recognized by wireFileDrop
