@@ -840,15 +840,31 @@ export async function removeCaseFromList(c) {
 }
 
 export async function deleteCaseFile(c) {
+  // Coming back to this list leaves the case open on the server, so the
+  // case just left is usually the one being deleted here, and the server
+  // closes it first. Said, along with the other windows that would lose
+  // it — the way Shut down names them.
+  let closing = '';
+  if (c.open) {
+    closing = '\n\nWinnow still has this case open (the case list doesn\u2019t close it), so it is closed first.';
+    const others = await otherWindows();
+    if (others > 0) {
+      closing += `\n\n\u26a0 ${others} other Winnow window${others === 1 ? ' is' : 's are'} open on this server. `
+        + 'Any showing this case will stop working.';
+    }
+  }
   if (!(await confirmDialog(
-    `Permanently delete the case file for "${c.name}"?\n\n${c.path}\n\nThis cannot be undone — all tags, notes and imported data in it will be lost.`,
+    `Permanently delete the case file for "${c.name}"?\n\n${c.path}\n\nThis cannot be undone — all tags, notes and imported data in it will be lost.${closing}`,
     { danger: true, okLabel: 'Delete permanently' },
   ))) return;
   // The path as well as the id: this list can be older than the registry
   // (another window forgot this case and registered a new one), and the
   // server refuses rather than delete whichever file the id names now.
+  // switchCase: deleting the open case closes it, and the answer's
+  // case_token (none) is what this page carries from here on.
   try {
-    await api(`/api/cases/${c.id}?delete_file=true&path=${encodeURIComponent(c.path)}`, { method: 'DELETE' });
+    await switchCase(() => api(`/api/cases/${c.id}?delete_file=true&path=${encodeURIComponent(c.path)}`,
+                                { method: 'DELETE' }));
   } catch (e) {
     toast('Could not delete: ' + e.message, 6000);
     // Not always a no-op: a path that is not a case file is still taken

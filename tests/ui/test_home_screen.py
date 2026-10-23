@@ -271,3 +271,44 @@ def test_quick_look_at_files_opens_a_quick_look_ready_to_import(own_page, tmp_pa
             pg.wait_for_function("() => /import/i.test(document.getElementById('modalTitle').textContent)")
             cur = pg.evaluate("() => fetch('/api/case/current').then((r) => r.json())")
             assert cur["temp"] is True
+
+
+def test_the_case_just_left_can_be_deleted_from_the_list(own_page, tmp_path):
+    """Going back to the case list leaves the server's case open, and the
+    delete refused a case the server had open: the one an analyst had just
+    come from answered "Could not delete: Close this case before deleting
+    its file" until they opened another case and came back (reported). Its
+    own server: the case is opened, then deleted."""
+    import os
+
+    with running_server(tmp_path, "--no-fts") as srv:
+        left = str(tmp_path / "cases" / "left.db-winnow")
+        srv.post("/api/cases", {"path": left, "name": "Left behind", "group": "", "notes": ""})
+        # A case on the list already, so no first-run folder prompt.
+        with own_page(base=srv.base + "/", viewport=(1200, 800), wait_until="load", ready="#home:not([hidden]) .home-row",
+                      ready_timeout=20_000) as pg:
+            row = lambda name: pg.locator("#home .home-row", has=pg.locator(".home-name", has_text=name))
+            row("Left behind").locator(".home-name").click()
+            pg.wait_for_selector("#app:not([hidden])")
+            pg.click("#btnHome")
+            pg.wait_for_selector("#home:not([hidden]) .home-row")
+
+            row("Left behind").locator(".tables-more").click()
+            pg.locator(".menu .menu-item", has_text="Delete case file…").click()
+            assert "still has this case open" in pg.locator(".confirm-card").inner_text()
+            pg.locator(".confirm-card .btn", has_text="Delete permanently").click()
+            pg.wait_for_function("() => ![...document.querySelectorAll('#home .home-name')]"
+                                 ".some((n) => n.textContent.includes('Left behind'))", timeout=15_000)
+            assert "Could not delete" not in pg.locator("#toast").inner_text()
+            assert not os.path.exists(left)
+            assert srv.get("/api/case/current")["open"] is False
+
+            # The page carries on with no case: the next one it opens is
+            # its own, not a case another window switched to.
+            nxt = str(tmp_path / "cases" / "next.db-winnow")
+            srv.post("/api/cases", {"path": nxt, "name": "Next one", "group": "", "notes": ""})
+            pg.evaluate("() => __winnow.refreshCases()")
+            row("Next one").locator(".home-name").click()
+            pg.wait_for_selector("#app:not([hidden])")
+            pg.wait_for_function("() => document.getElementById('brandLabel').textContent === 'Next one'")
+            assert pg.locator("#caseGone").is_hidden()

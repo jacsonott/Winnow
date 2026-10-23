@@ -266,9 +266,10 @@ app = FastAPI(title="Winnow", lifespan=_lifespan)
 STORE: Store | None = None
 
 # Held by every route that replaces STORE (case open, the quick-look
-# save-as and discard, the association open) for the whole of the swap —
-# the routes are thin wrappers that take it around the real work. Each swap
-# is a read of STORE, a Store opened or closed, and a write of STORE, and
+# save-as and discard, the association open, deleting the open case's
+# file) for the whole of the swap — the routes are thin wrappers that take
+# it around the real work. Each swap is a read of STORE, a Store opened
+# or closed, and a write of STORE, and
 # two of them interleaving is ordinary: a double-click on a case card is two
 # POSTs to /api/case/open, and sync routes run on parallel worker threads.
 # Unserialised, both read the same `old` and both open; the Store whose
@@ -2025,26 +2026,33 @@ def api_case_discard():
 def _case_discard():
     """Throw a quick-look case away. Refused for real cases — deleting
     those goes through the home screen, where it says what it is doing."""
-    global STORE
     if STORE is None or STORE.closed:
         raise HTTPException(400, "No case is open")
     if not _is_temp_case(STORE.path):
         raise HTTPException(400, "Only a quick-look case can be discarded — "
                                  "delete a real case from the home screen")
     path = STORE.path
+    _close_case()
+    _remove_case_file(path)
+    return {"ok": True, "case_token": None}
+
+
+def _close_case() -> None:
+    """Close the open case and leave none open: what discarding a quick
+    look and deleting the open case's file both do before the file goes.
+    The caller holds _CASE_SWITCH."""
+    global STORE
     old, STORE = STORE, None
     with contextlib.suppress(Exception):
         old.close()
-    _remove_case_file(path)
     with contextlib.suppress(Exception):
         instances.set_case(None)
     # No case is open now, so the machine defaults decide again: a plugin
-    # switched on only for the quick look must not stay imported and routed
-    # on the home screen (the case switch in api_case_open, for the same
+    # switched on only for that case must not stay imported and routed on
+    # the home screen (the case switch in api_case_open, for the same
     # reason).
     _reload_plugins()
     _announce_case()
-    return {"ok": True, "case_token": None}
 
 
 @app.post("/api/case/compact")
@@ -2324,8 +2332,13 @@ def api_prefs_set(request: Request, body: PrefsBody):
 @app.get("/api/cases")
 def api_cases_list():
     out = []
+    here = STORE.path if STORE is not None and not STORE.closed else None
     for c in WS.cases.list():
         rec = dict(c)
+        # The case this server has open — still open on the home screen,
+        # which only changes what the window shows. Deleting it closes it
+        # first, and the dialog says so.
+        rec["open"] = here is not None and _same_case_path(here, c["path"])
         if os.path.isfile(c["path"]):
             rec["exists"] = True
             # A -wal/-shm pair left beside a case nobody has open (a killed
@@ -2402,6 +2415,14 @@ def api_cases_update(case_id: int, body: CaseUpdate):
 
 @app.delete("/api/cases/{case_id}")
 def api_cases_delete(case_id: int, delete_file: bool = False, path: str | None = None):
+    # _CASE_SWITCH: deleting the open case's file closes it (a swap to no
+    # case), and between the close and the unlink no other window may open
+    # it again.
+    with _CASE_SWITCH:
+        return _cases_delete(case_id, delete_file, path)
+
+
+def _cases_delete(case_id: int, delete_file: bool, path: str | None):
     """`path` is the file the client means — the one its list showed under
     this id. An id is only a pointer into the registry as it was when that
     list was painted; registry ids are never reused now, but a home screen
@@ -2413,15 +2434,28 @@ def api_cases_delete(case_id: int, delete_file: bool = False, path: str | None =
     if path is not None and rec is not None and not _same_case_path(path, rec["path"]):
         raise HTTPException(409, "That case list is out of date — it has changed since this window "
                                  "showed it. Nothing was removed; reload the case list and try again.")
+    closed = False
     if delete_file:
         if rec and os.path.isfile(rec["path"]):
-            if STORE is not None and _same_case_path(STORE.path, rec["path"]):
-                raise HTTPException(400, "Close this case before deleting its file")
-            # Open in ANOTHER Winnow is the same refusal for the same reason —
-            # the check above only ever saw this process. Unlinking a case a
-            # live Winnow has open leaves it writing into an inode nobody can
-            # find again (or, on Windows, fails half way through), and the
-            # other analyst learns about it when their work is gone.
+            # The case this server has open is closed first. Going back to
+            # the case list leaves the case open (the home screen only
+            # changes what the window shows), and nothing there closes one,
+            # so refusing it — as this used to, "Close this case before
+            # deleting its file" — meant the case an analyst had just come
+            # from could not be deleted until they opened another case and
+            # came back. Everything in it is already committed, and it is
+            # about to be deleted; every other window on it is told the
+            # case has gone (_announce_case).
+            if STORE is not None and not STORE.closed and _same_case_path(STORE.path, rec["path"]):
+                _close_case()
+                closed = True
+            # Open in ANOTHER Winnow is a refusal, and stays one after the
+            # close above — which has to come first: this server's own flock
+            # reads as a holder to the probe until its Store lets go.
+            # Unlinking a case a live Winnow has open leaves it writing into
+            # an inode nobody can find again (or, on Windows, fails half way
+            # through), and the other analyst learns about it when their
+            # work is gone.
             holder = probe_case_lock(rec["path"])
             if holder:
                 raise HTTPException(409, {
@@ -2442,8 +2476,17 @@ def api_cases_delete(case_id: int, delete_file: bool = False, path: str | None =
                     400, f"{rec['path']} is not a Winnow case file — removed from the "
                          "list, but not deleted from disk")
             _remove_case_file(rec["path"])
+            # Removal is best-effort file by file, and on Windows a file
+            # anything still holds open can't be removed at all — now a
+            # likelier thing to meet, with the case closed a moment ago.
+            # Taking it off the list anyway hid a case whose file was
+            # still on disk behind a "deleted".
+            if os.path.exists(rec["path"]):
+                raise HTTPException(409, f"Could not delete {rec['path']} — something still has it "
+                                         "open. It is still on the case list; try again in a moment.")
     WS.cases.delete(case_id)
-    return {"ok": True}
+    # The window that asked carries on with no case, as after a discard.
+    return {"ok": True, "case_token": None} if closed else {"ok": True}
 
 
 @app.get("/api/sources")
