@@ -884,9 +884,13 @@ export function copiedColumns(fromColumns, shared) {
 
 /* ------------------------------------------------------- column autosize */
 
-export async function fetchColumnMaxLens() {
+/* The longest value in each of `names`, which is all the server measures:
+   a table's every column cost seconds on a big table to fit one. */
+export async function fetchColumnMaxLens(names) {
   if (!S.sourceId) return null;
-  try { return nameMap(await api(`/api/column_maxlen?source_id=${S.sourceId}`)); }
+  const qs = new URLSearchParams({ source_id: S.sourceId });
+  for (const n of names) qs.append('columns', n);
+  try { return nameMap(await api(`/api/column_maxlen?${qs}`)); }
   catch (e) { toast('Could not measure column widths: ' + e.message); return null; }
 }
 
@@ -960,9 +964,10 @@ export function resetAllColumnWidths() {
 export async function autofitAllColumnWidths() {
   if (!S.sourceId) return;
   toast('Measuring columns…', 8000);
-  const maxlens = await fetchColumnMaxLens();
+  const names = visibleCols();
+  const maxlens = await fetchColumnMaxLens(names);
   if (!maxlens) return;
-  for (const name of visibleCols()) {
+  for (const name of names) {
     S.layout[name] = { ...(S.layout[name] || {}), w: widthForLen(name, maxlens[name]) };
   }
   renderHead(); render(); saveLayout();
@@ -971,7 +976,7 @@ export async function autofitAllColumnWidths() {
 
 export async function autofitOneColumn(name) {
   if (!S.sourceId) return;
-  const maxlens = await fetchColumnMaxLens();
+  const maxlens = await fetchColumnMaxLens([name]);
   if (!maxlens) return;
   S.layout[name] = { ...(S.layout[name] || {}), w: widthForLen(name, maxlens[name]) };
   renderHead(); render(); saveLayout();

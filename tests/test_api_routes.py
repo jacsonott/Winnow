@@ -1135,6 +1135,63 @@ def test_a_table_still_importing_is_a_400_on_rows_maxlen_and_search(lenient, ing
         assert r.status_code == 400 and "still importing" in r.json()["detail"], (spec, r.text)
 
 
+def test_column_maxlen_measures_only_the_asked_columns(client, ingested):
+    """Autofit on one column used to measure every column of the table, and
+    on a big table that was seconds spent on columns nobody asked about.
+    `columns` narrows it; a name the table lacks is left out rather than a
+    404, and asking for nothing in particular is still every column."""
+    store, sid = ingested
+    names = [c["name"] for c in store.get_source(sid)["columns"]]
+    whole = client.get("/api/column_maxlen", params={"source_id": sid}).json()
+    assert list(whole) == names
+    one = client.get("/api/column_maxlen", params={"source_id": sid, "columns": names[1]}).json()
+    assert one == {names[1]: whole[names[1]]}
+    two = client.get("/api/column_maxlen",
+                     params=[("source_id", sid), ("columns", names[0]), ("columns", "no such column"),
+                             ("columns", names[-1])]).json()
+    assert two == {names[0]: whole[names[0]], names[-1]: whole[names[-1]]}
+
+
+def test_column_max_lengths_measures_a_column_once(store, ingested):
+    """The cache is per column: a column already measured is not scanned
+    again when it is asked for with others, and the whole-table answer
+    built a column at a time is the one a single pass gives."""
+    store, sid = ingested
+    names = [c["name"] for c in store.get_source(sid)["columns"]]
+    first = store.column_max_lengths(sid, [names[0]])
+    seen = []
+    real_reader = store._reader
+
+    def counting_reader():
+        cm = real_reader()
+        conn = cm.__enter__()
+        conn.set_trace_callback(lambda sql: seen.append(sql) if "MAX(LENGTH(" in sql else None)
+        return _Wrap(cm, conn)
+
+    class _Wrap:
+        def __init__(self, cm, conn):
+            self.cm, self.conn = cm, conn
+
+        def __enter__(self):
+            return self.conn
+
+        def __exit__(self, *exc):
+            self.conn.set_trace_callback(None)
+            return self.cm.__exit__(*exc)
+
+    store._reader = counting_reader
+    try:
+        whole = store.column_max_lengths(sid)
+        again = store.column_max_lengths(sid, names[:2])
+    finally:
+        store._reader = real_reader
+    assert len(seen) == 1 and f'MAX(LENGTH("{names[0]}"))' not in seen[0]
+    assert whole[names[0]] == first[names[0]]
+    assert again == {n: whole[n] for n in names[:2]}
+    store._maxlen_cache.clear()
+    assert store.column_max_lengths(sid) == whole
+
+
 def _disposition_name(header: str) -> str:
     """The filename a browser takes from a Content-Disposition: the RFC
     6266 `filename*` (UTF-8, percent-encoded) when present, else the plain
