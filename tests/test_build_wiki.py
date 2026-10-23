@@ -228,21 +228,37 @@ def test_the_theme_files_docs_site_names_are_staged(site):
         assert (site / "docs" / rel).is_file(), rel
 
 
-def test_every_link_in_the_front_pages_banner_lands(site):
-    """MkDocs checks the links in pages, not in templates."""
+def _anchors(markdown):
+    """The ids the site gives a page's headings: GitHub's, as mkdocs.yml
+    asks pymdownx.slugs for (lower case, punctuation dropped, spaces to
+    hyphens)."""
+    out = set()
+    for heading in re.findall(r"^#{1,6} (.+)$", markdown, re.M):
+        text = re.sub(r"[^\w\s-]", "", heading.replace("`", "")).strip().lower()
+        out.add(re.sub(r"\s", "-", text))
+    return out
+
+
+def test_every_link_on_the_front_page_lands(site):
+    """MkDocs checks the links in pages, not in templates: the banner's,
+    and each feature's picture and its section of the manual."""
     home = (ROOT / "docs" / "site" / "overrides" / "home.html").read_text(encoding="utf-8")
     named = re.findall(r"\{\{ '([^']+)' \| url \}\}", home)
-    assert {"Installation/", "screenshots/triage.gif", "screenshots/grid.png"} <= set(named)
+    assert {"Installation/", "screenshots/triage.gif", "screenshots/grid.png",
+            "screenshots/feature-pivot.png", "Plugins/"} <= set(named)
     docs = site / "docs"
     for rel in named:
         if rel.endswith("/"):
             assert (docs / f"{rel[:-1]}.md").is_file(), rel
         else:
             assert (docs / rel).is_file(), rel
-    index = _site_pages(site)["index.md"]
+    pages = _site_pages(site)
     for anchor in re.findall(r'href="#([\w-]+)"', home):
-        heading = anchor.replace("-", " ")
-        assert re.search(rf"^## {heading}$", index, re.M | re.I), anchor
+        assert anchor in _anchors(pages["index.md"]), anchor
+    deep = re.findall(r"\{\{ '([^']+)/' \| url \}\}#([\w-]+)", home)
+    assert ("Plugins", "first_last") in deep
+    for page, anchor in deep:
+        assert anchor in _anchors(pages[f"{page}.md"]), f"{page}/#{anchor}"
 
 
 def test_the_front_page_is_homes_text_under_the_banner_with_cards(site):

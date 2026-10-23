@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Regenerate the README's screenshots against the app as it is today.
+"""Regenerate the README's and the Pages site's screenshots against the
+app as it is today.
 
-    python3 scripts/screenshots.py                  # -> docs/screenshots/*.png
+    python3 scripts/screenshots.py                  # -> docs/screenshots/*
     python3 scripts/screenshots.py --keep           # leave the demo case behind
     python3 scripts/screenshots.py --only grid      # one shot, while iterating
     python3 scripts/screenshots.py --only triage    # the Pages site's banner GIF
+    python3 scripts/screenshots.py --only feature-sql   # one of its features
 
 Why this exists: the four images the README shows went 766 commits without
 being regenerated, because regenerating them meant hand-building a case,
@@ -230,48 +232,56 @@ def shoot_timeline(pg, win):
     return None
 
 
-def shoot_pivot(pg, win):
-    """A plugin tab, to show the extension point is real rather than claimed.
+def open_plugin_tab(pg, win, fs_name: str, payload: dict, ready: str):
+    """A plugin's tab, opened on state seeded the way the plugin saves it.
 
-    The pivot is built by writing the tab's own saved state and letting the
-    plugin restore it, rather than by scripting drags into the Rows and
-    Columns wells. Drag-and-drop is the most brittle thing a screenshot
-    script can depend on, and tabState is a documented part of the plugin
-    contract — so this exercises a real path instead of pantomiming one.
+    The pivot (and the First/Last sheet) is built by writing the tab's own
+    saved state and letting the plugin restore it, rather than by scripting
+    drags into its wells. Drag-and-drop is the most brittle thing a
+    screenshot script can depend on, and tabState is a documented part of
+    the plugin contract — so this exercises a real path instead of
+    pantomiming one. `ready` is a JS expression true once the result is on
+    screen.
     """
-    win.enable_plugin("pivot")
+    win.enable_plugin(fs_name)
     win.open_table("Security.csv")
-    tab_id = pg.evaluate("""() => {
-      const t = (__winnow.S.pluginTabs || []).find((x) => /pivot/i.test(x.id));
+    tab_id = pg.evaluate("""(n) => {
+      const t = (__winnow.S.pluginTabs || []).find((x) => x.id.replace('-', '_').startsWith(n));
       return t ? t.id : null;
-    }""")
+    }""", fs_name)
     if not tab_id:
-        raise SystemExit("the pivot example did not register a tab — is it still bundled?")
-    pg.evaluate("""async ([key, sid]) => {
-      await __winnow.post('/api/plugin_state', { key, payload: {
-        v: 1, active: 0,
-        pivots: [{ name: 'Pivot 1', source: { id: sid, name: 'Security.csv' },
-                   rows: ['Computer'], cols: ['MapDescription'],
-                   values: [{ column: 'RecordNumber', agg: 'count' }],
-                   filters: [], subtotals: true, grandTotals: true }],
-      } });
-    }""", [f"tab:{tab_id}", win.ids["Security.csv"]])
+        raise SystemExit(f"the {fs_name} example did not register a tab — is it still bundled?")
+    pg.evaluate("async ([key, payload]) => { await __winnow.post('/api/plugin_state', { key, payload }); }",
+                [f"tab:{tab_id}", payload])
     pg.reload()
     pg.wait_for_function("() => window.__winnow && __winnow.S.sources.length > 0", timeout=60_000)
     win.open_table("Security.csv")
     pg.evaluate("async (id) => { await __winnow.showPage('plugin:' + id); }", tab_id)
-    pg.wait_for_function(
-        "() => document.querySelectorAll('.pluginview table td, .pluginview .pv-cell').length > 4",
-        timeout=45_000)
+    pg.wait_for_function(f"() => {ready}", timeout=45_000)
     # The restore banner is a true thing the plugin does, and incidental to
     # what this picture is about — it is here only because seeding the tab
-    # state is how the pivot got built. Same reasoning as clearing a toast.
+    # state is how the result got built. Same reasoning as clearing a toast.
     pg.evaluate("""() => {
       for (const n of document.querySelectorAll('.pluginview *')) {
-        if (/Restored the pivots/i.test(n.textContent || '') && n.children.length < 4) { n.remove(); break; }
+        if (/^Restored the/i.test((n.textContent || '').trim()) && n.children.length < 4) { n.remove(); break; }
       }
     }""")
     win.quiet(700)
+
+
+def open_pivot(pg, win, rows=("Computer",), cols=("MapDescription",)):
+    open_plugin_tab(pg, win, "pivot", {
+        "v": 1, "active": 0,
+        "pivots": [{"name": "Pivot 1", "source": {"id": win.ids["Security.csv"], "name": "Security.csv"},
+                    "rows": list(rows), "cols": list(cols),
+                    "values": [{"column": "RecordNumber", "agg": "count"}],
+                    "filters": [], "subtotals": True, "grandTotals": True}],
+    }, "document.querySelectorAll('.pluginview table td, .pluginview .pv-cell').length > 4")
+
+
+def shoot_pivot(pg, win):
+    """A plugin tab, to show the extension point is real rather than claimed."""
+    open_pivot(pg, win)
     # Crop to the table and the wells; a pivot of four hosts leaves most of
     # a 1000px viewport empty and the whitespace says nothing.
     return pg.evaluate("""() => {
@@ -288,11 +298,145 @@ def shoot_pivot(pg, win):
     }""")
 
 
+# The website's feature list (docs/site/overrides/home.html): one picture
+# per feature, cropped to the part of the window that shows it, small
+# enough that its text stays legible in half the page's width.
+
+def _box(pg, selector: str) -> dict:
+    box = pg.locator(selector).first.bounding_box()
+    if box is None:
+        raise SystemExit(f"{selector!r} is not on screen — did the UI move?")
+    return box
+
+
+def _clip(pg, x: float, y: float, w: float, h: float) -> dict:
+    """A rectangle, moved and then cut to stay inside the window."""
+    vw, vh = pg.viewport_size["width"], pg.viewport_size["height"]
+    x, y = max(0, min(x, vw - w)), max(0, min(y, vh - h))
+    return {"x": x, "y": y, "width": min(w, vw - x), "height": min(h, vh - y)}
+
+
+def shoot_feature_saved_filters(pg, win):
+    """Filters ▾ on an EvtxECmd table: the shipped triage filters, offered
+    because this table's columns are the set they were saved for."""
+    win.open_table("Security.csv")
+    win.hide_columns(*BOOKKEEPING_COLUMNS)
+    pg.click("#btnFilters")
+    pg.hover(".menu .menu-item:has-text('EVTX — Logons')")
+    win.quiet(300)
+    menu = _box(pg, ".menu")
+    return _clip(pg, menu["x"] + menu["width"] + 24 - 760, 40, 760, 500)
+
+
+def shoot_feature_timeframe(pg, win):
+    """The timeframe dialog with a range typed in. Not applied: the picture
+    is of the dialog, and an applied timeframe follows every later shot
+    from table to table."""
+    win.open_table("Security.csv")
+    win.hide_columns(*BOOKKEEPING_COLUMNS)
+    pg.evaluate("() => __winnow.openTimeRangeModal()")
+    ends = pg.locator(".modal-card input.confirm-input")
+    ends.nth(0).fill("2026-03-14 06:00:00")
+    ends.nth(1).fill("2026-03-14 09:30:00")
+    win.quiet(300)
+    card = _box(pg, ".modal-card")
+    return _clip(pg, card["x"] - 40, card["y"] - 44, card["width"] + 80, card["height"] + 88)
+
+
+def shoot_feature_histogram(pg, win):
+    """The histogram under the Logons filter, one user's rows charted by
+    Value against everyone else's — the right-hand end, where the chart
+    names what it is showing."""
+    win.open_table("Security.csv")
+    win.hide_columns(*BOOKKEEPING_COLUMNS)
+    win.apply_shipped_filter("Logons")
+    win.histogram(True)
+    pg.evaluate("([c, v]) => __winnow.showValueInHistogram(c, v)", ["UserName", "ACME\\mreyes"])
+    pg.wait_for_function("() => /mreyes/.test(document.getElementById('histogramPanel').textContent)",
+                         timeout=30_000)
+    win.quiet(900)
+    panel = _box(pg, "#histogramPanel")
+    return _clip(pg, panel["x"] + panel["width"] - 820, 40, 820, panel["y"] + panel["height"] + 190)
+
+
+def shoot_feature_derived(pg, win):
+    """Add derived column, lifting one field out of the JSON in Payload,
+    with the preview showing what each row becomes."""
+    win.open_table("Security.csv")
+    win.hide_columns(*BOOKKEEPING_COLUMNS)
+    pg.evaluate("() => __winnow.openDerivedColumnModal('Payload')")
+    pg.click(".modal-card .side-rail-label:has-text('JSON field')")
+    pg.locator(".modal-card input:not(.side-search):not(.derived-name)").first.fill(
+        "$.EventData.SubjectUserName")
+    pg.fill(".modal-card input.derived-name", "SubjectUserName")
+    pg.wait_for_function(
+        "() => /All \\d+ sampled values in the whole table parse/.test("
+        "document.querySelector('.modal-card').textContent)",
+        timeout=30_000)
+    win.quiet(300)
+    card = _box(pg, ".modal-card")
+    return _clip(pg, card["x"] - 20, card["y"] - 20, card["width"] + 40, card["height"] + 40)
+
+
+def shoot_feature_sql(pg, win):
+    """A query over the case and its answer."""
+    win.open_table("Security.csv")
+    pg.evaluate("() => __winnow.showSqlTab()")
+    pg.fill("#sqlText", (
+        "SELECT UserName, Computer, COUNT(*) AS failed_logons\n"
+        f"FROM src_{win.ids['Security.csv']}\n"
+        "WHERE EventId = 4625\n"
+        "GROUP BY UserName, Computer\n"
+        "ORDER BY failed_logons DESC\n"
+        "LIMIT 8"))
+    pg.click("#btnRunSql")
+    pg.wait_for_function("() => document.querySelectorAll('#sqlResult tr').length > 8", timeout=30_000)
+    win.quiet(300)
+    result = _box(pg, "#sqlResult table")
+    left = _box(pg, "#sqlText")["x"] - 10
+    return _clip(pg, left, 40, 760, result["y"] + result["height"] + 20 - 40)
+
+
+def shoot_feature_first_last(pg, win):
+    """First/Last: each host's first and last event. Four groups, so every
+    First has its Last on screen. In a shorter window, so the zones that
+    say what was grouped sit beside the result rather than below a list of
+    every field."""
+    win.viewport(height=720)
+    open_plugin_tab(pg, win, "first_last", {
+        "v": 1, "active": 0,
+        "sheets": [{"name": "Bookends", "source": {"id": win.ids["Security.csv"], "name": "Security.csv"},
+                    "groupBy": ["Computer"], "carry": ["Computer", "UserName"],
+                    "sums": [], "values": [], "filters": [], "tags": {"mode": "", "ids": []},
+                    "rowJson": False, "sortColumn": "TimeCreated", "colWidths": {},
+                    "template": "{which} of {count}: {MapDescription}"}],
+    }, "document.querySelectorAll('.pluginview table td').length > 8")
+    return _clip(pg, _box(pg, ".pluginview")["x"], 40, 1060, 540)
+
+
+def shoot_feature_pivot(pg, win):
+    """A pivot narrow enough to read at half the page's width: event IDs
+    across, host and user down. In a shorter window for the same reason
+    as First/Last."""
+    win.viewport(height=720)
+    open_pivot(pg, win, rows=("Computer", "UserName"), cols=("EventId",))
+    bottom = pg.evaluate("""() => Math.max(...[...document.querySelectorAll('.pluginview [data-zone]')]
+      .map((n) => n.getBoundingClientRect().bottom))""")
+    return _clip(pg, _box(pg, ".pluginview")["x"], 40, 960, bottom + 16 - 40)
+
+
 SHOTS = {
     "grid": shoot_grid,
     "value-picker": shoot_value_picker,
     "timeline": shoot_timeline,
     "pivot": shoot_pivot,
+    "feature-saved-filters": shoot_feature_saved_filters,
+    "feature-timeframe": shoot_feature_timeframe,
+    "feature-histogram": shoot_feature_histogram,
+    "feature-derived": shoot_feature_derived,
+    "feature-sql": shoot_feature_sql,
+    "feature-first-last": shoot_feature_first_last,
+    "feature-pivot": shoot_feature_pivot,
 }
 
 
@@ -472,6 +616,12 @@ class Win:
 
     def __init__(self, pg, ids):
         self.pg, self.ids = pg, ids
+        self.plugins_on = set()
+        self.size = dict(pg.viewport_size)
+
+    def viewport(self, height: int):
+        """A shorter window for one shot; reset() puts it back."""
+        self.pg.set_viewport_size({"width": self.size["width"], "height": height})
 
     def quiet(self, ms: int = 800):
         """Let the view land, then clear any toast.
@@ -523,12 +673,17 @@ class Win:
         prevents, and it is the sort of thing nobody notices until the image
         is on the front page.
         """
+        if self.pg.viewport_size != self.size:
+            self.pg.set_viewport_size(self.size)
         self.pg.keyboard.press("Escape")
         self.pg.evaluate("""() => {
           for (const p of document.querySelectorAll('.value-picker, .menu, .anchored-panel')) p.remove();
           for (const t of document.querySelectorAll('.toast')) { t.hidden = true; t.textContent = ''; }
           __winnow.S.layout = {};
           if (__winnow.histogramOpen && __winnow.histogramOpen()) __winnow.toggleHistogram(false);
+          // Value and Tags are saved choices: left on, the next shot that
+          // opens the histogram opens it colored.
+          __winnow.setHistogramView('plain');
         }""")
         self.pg.evaluate("() => __winnow.clearAllFilters()")
         self.pg.wait_for_timeout(500)
@@ -548,16 +703,23 @@ class Win:
         self.pg.wait_for_selector("#histogramPanel", state="attached")
         self.quiet()
 
-    def enable_plugin(self, fs_name: str):
-        """Turn a bundled example on, then reload — the registry is rebuilt
-        server-side and the tab strip is built at boot."""
-        self.pg.evaluate("""async (n) => {
-          await __winnow.post('/api/plugins/toggle', { fs_name: n, enabled: true });
-        }""", fs_name)
+    def enable_plugin(self, fs_name: str, on: bool = True):
+        """Turn a bundled example on (or off), then reload — the registry is
+        rebuilt server-side and the tab strip is built at boot."""
+        self.pg.evaluate("""async ([n, on]) => {
+          await __winnow.post('/api/plugins/toggle', { fs_name: n, enabled: on });
+        }""", [fs_name, on])
+        (self.plugins_on.add if on else self.plugins_on.discard)(fs_name)
         self.pg.reload()
         self.pg.wait_for_function("() => window.__winnow && __winnow.S.sources.length > 0",
                                   timeout=60_000)
         self.quiet()
+
+    def plugins_off(self):
+        """Switch off what a shot switched on, so its tab is not in the
+        page strip of every shot after it."""
+        for name in sorted(self.plugins_on):
+            self.enable_plugin(name, False)
 
 
 def record_gif(browser, name: str, a, ids):
@@ -631,6 +793,7 @@ def main() -> int:
                 dest = OUT / f"{name}.png"
                 pg.screenshot(path=str(dest), clip=clip)
                 print(f"  {dest.relative_to(ROOT)}  ({dest.stat().st_size // 1024} KB)")
+                win.plugins_off()
             b.close()
     finally:
         proc.terminate()

@@ -72,12 +72,16 @@ SITE_EXTRA_PAGES = {"docs/writing-plugins.md": "writing-plugins.md"}
 
 # Files the theme uses rather than a page, copied in at build time rather
 # than kept twice: the app's brand mark as logo and favicon (named in
-# docs/site/mkdocs.yml) and the grid screenshot the front page's banner
-# shows (docs/site/overrides/home.html).
+# docs/site/mkdocs.yml), and the pictures the front page shows
+# (docs/site/overrides/home.html): the banner's recording, its still for
+# reduced motion, and one per feature.
 SITE_ASSETS = {"static/icons/winnow-mark.svg": "assets/winnow-mark.svg",
                "static/icons/winnow-icon.svg": "assets/favicon.svg",
                "docs/screenshots/grid.png": "screenshots/grid.png",
-               "docs/screenshots/triage.gif": "screenshots/triage.gif"}
+               "docs/screenshots/triage.gif": "screenshots/triage.gif",
+               **{f"docs/screenshots/feature-{name}.png": f"screenshots/feature-{name}.png"
+                  for name in ("saved-filters", "timeframe", "histogram", "derived",
+                               "sql", "first-last", "pivot")}}
 
 # The icon on each of the front page's section cards, by the group's name
 # in Home.md: a name in Material's icon set, which docs/site/hooks.py

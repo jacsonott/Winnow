@@ -277,7 +277,7 @@ docs/              Long-form documentation. writing-plugins.md — the plugin
                     version, so .github/workflows/pages.yml rebuilds it when
                     a release lands (build_wiki.py --site, then MkDocs;
                     nav from the same "## Pages" list, theme and the
-                    front page's banner in docs/site/; Home.md's list
+                    front page's banner and feature rows in docs/site/; Home.md's list
                     also becomes the front page's cards, and its
                     "# Title" gives way to the banner). PRs that touch the
                     docs run its build with --strict, which also catches a

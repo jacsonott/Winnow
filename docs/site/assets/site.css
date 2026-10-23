@@ -157,10 +157,10 @@
   .wn-hero__shot img { transform: none; }
 }
 
-/* Home.md under the banner: its prose at a reading width, the cards
-   (Home's page list; build_wiki.py writes the grid) across the page, two
-   by two. */
-.wn-home > :not(.grid) {
+/* Home.md under the banner: its prose at a reading width, the features
+   and the cards (Home's page list; build_wiki.py writes the grid) across
+   the page, the cards two by two. */
+.wn-home > :not(.grid, .wn-features) {
   max-width: 40rem;
 }
 .md-typeset .wn-home .grid.cards {
@@ -192,6 +192,76 @@
 }
 .md-typeset .grid.cards li li a {
   font-weight: 600;
+}
+
+/* The features: a line of text beside its picture, sides alternating
+   down the page; on a phone, the text over the picture. */
+.wn-feature {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.7fr);
+  gap: 2.4rem;
+  align-items: center;
+  margin: 0 0 3.2rem;
+}
+.wn-feature:nth-child(even) {
+  grid-template-columns: minmax(0, 1.7fr) minmax(0, 1fr);
+}
+.wn-feature:nth-child(even) > .wn-feature__shot {
+  order: -1;
+}
+.md-typeset .wn-feature h3 {
+  margin: 0 0 .5rem;
+  font-size: 1.05rem;
+  font-weight: 700;
+  letter-spacing: -.01em;
+}
+.md-typeset .wn-feature p {
+  margin: 0 0 .8rem;
+  color: var(--md-default-fg-color--light);
+}
+/* The bundled plugins ship switched off; the badge says which these are. */
+.wn-feature__badge {
+  margin-left: .3em;
+  padding: .1em .45em;
+  border: 1px solid var(--md-default-fg-color--lighter);
+  border-radius: .2rem;
+  color: var(--md-default-fg-color--light);
+  font-family: var(--md-code-font-family);
+  font-size: .55rem;
+  font-weight: 400;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  vertical-align: .25em;
+}
+.md-typeset .wn-feature__more {
+  font-size: .7rem;
+  font-weight: 600;
+}
+.md-typeset .wn-feature__more::after {
+  content: " →";
+}
+/* The picture opens full size. Screenshots of the dark skin, so they keep
+   a dark edge on parchment too. */
+.wn-feature__shot {
+  display: block;
+}
+.md-typeset .wn-feature__shot img {
+  display: block;
+  width: 100%;
+  border: 1px solid #363d38;
+  border-radius: .3rem;
+  box-shadow: 0 .6rem 1.6rem #00000040;
+}
+@media screen and (max-width: 59.984375em) {
+  .wn-feature,
+  .wn-feature:nth-child(even) {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 1rem;
+    margin-bottom: 2.4rem;
+  }
+  .wn-feature:nth-child(even) > .wn-feature__shot {
+    order: 0;
+  }
 }
 
 /* The footer's "Built from docs/wiki/ on main" sits on the footer's dark

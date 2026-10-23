@@ -158,6 +158,6 @@ once, so two runs of identical code report nothing.
   `tests/test_plugin_docs_current.py` fails the build if a public
   `register_*` hook is missing from either.
 - `python3 scripts/screenshots.py` regenerates the README's screenshots
-  and the website's animated banner from a seeded demo case, so a changed
-  image means the UI moved. The animation also needs Pillow
-  (`pip install pillow`).
+  and the website's animated banner and feature pictures from a seeded
+  demo case, so a changed image means the UI moved. The animation also
+  needs Pillow (`pip install pillow`).
