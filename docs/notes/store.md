@@ -413,6 +413,20 @@ see [docs/notes/README.md](README.md) for the whole set.
   LIMIT n)` subquery and tags/notes by the page's rid range. Its sheets
   continue past Excel's row cap through `_xlsx_write_sheets`, the
   all-tables export's continuation rule.
+- **Nothing joins one branch per member with a bare `" UNION ALL ".join`.**
+  SQLite refuses a compound SELECT of more than 500 terms ("too many
+  terms in compound SELECT"; SQLITE_MAX_COMPOUND_SELECT, which
+  `setlimit` can only lower), and every merge read is a branch per
+  member — a merge of 1000 IIS logs could not build its view at all.
+  `store.union_all` is the join: the plain text up to 500, and past it
+  runs of 500 wrapped as `SELECT * FROM (…)` and unioned in turn, branch
+  and `?` order unchanged. SQLite's flattener undoes the nesting, so the
+  unfiltered sort's `MERGE (UNION ALL)` over each member's sort index
+  survives it. Every merge union in store.py and the bundled plugins'
+  `_scope` go through it, and so does any union with a branch per
+  *source* (the Timeline, latest hits, `{{all:…}}`): a case can hold 500
+  tables without a merge in sight. tests/test_merge_compound_limit.py
+  drives each one over a merge of 510 W3C logs.
 - **A regex is checked before it runs, and some are refused**
   (`_compiled_regex`, called by the regex filter op, regex search mode,
   any `REGEXP '…'` literal in a raw fragment or the SQL pane

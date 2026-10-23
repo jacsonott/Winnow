@@ -39,7 +39,7 @@ real zero in a total. NUM_RE gates the cast so junk becomes NULL and drops
 out of the aggregate instead of quietly dragging an average down.
 """
 
-from winnow.store import NUM_RE, q
+from winnow.store import NUM_RE, q, union_all
 
 PLUGIN = {
     "name": "pivot-table",
@@ -174,7 +174,7 @@ def _scope(req, src):
         m = req.store.get_source(mid)
         sel = req.store.merge_select_list(src, m)  # NULL-pads columns a member lacks
         branches.append(f"SELECT {int(m['id'])} AS source_id, s.rid AS rid, {sel} FROM {_from_clause(m)}")
-    return "(" + " UNION ALL ".join(branches) + ") s"
+    return "(" + union_all(branches) + ") s"
 
 
 def _col(src, name):
