@@ -5861,8 +5861,13 @@ def api_export_tagged_xlsx(filename: str = "tagged-export.xlsx"):
     buf = store().export_tagged_xlsx()
     wlog.record("info", f"Export finished: tagged rows from all tables (.xlsx) — "
                         f"{buf.getbuffer().nbytes:,} bytes in {time.time() - t0:.1f}s")
+    # In 1 MB reads, never the BytesIO itself: StreamingResponse iterates a
+    # file object by LINES, and a zip has a newline byte every couple of
+    # hundred bytes, so a 217 MB workbook went out as 856,000 chunks, each
+    # its own trip through the threadpool — 109 s to send what takes 0.2 s
+    # in megabyte reads.
     return StreamingResponse(
-        buf,
+        iter(lambda: buf.read(1 << 20), b""),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers=_attachment(filename),
     )
