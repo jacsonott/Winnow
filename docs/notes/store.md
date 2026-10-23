@@ -494,11 +494,14 @@ see [docs/notes/README.md](README.md) for the whole set.
   otherwise grouping by a full timestamp puts nearly every row in its own
   group of one. Everywhere a group's *value* gets compared back against raw
   rows (`expand_group`, `_virtual_group_where`, and therefore tag/export on
-  a group) has to wrap the column in the same `DAY_BUCKET(...)` — that's
+  a group) has to bucket the column the same way — that's
   `_eq_condition`'s `is_datetime` flag, threaded through `_path_where` too
-  for nested-grouping's outer levels. `_eq_condition`/`_path_where` build
+  for nested-grouping's outer levels. Both sides write the bucket as
+  `day_bucket_sql(col)` (DAY_BUCKET with the full-ISO shape done by
+  SQLite; below), never one as `DAY_BUCKET(...)` and the other not.
+  `_eq_condition`/`_path_where` build
   the alias (`s.`) *inside* the returned fragment now rather than letting
-  the caller string-prepend it — `s.DAY_BUCKET(...)` isn't valid SQL the
+  the caller string-prepend it — `s.CASE ...` isn't valid SQL the
   way `s."col"` is, so a caller that goes back to prepending `s.` onto the
   result will get a syntax error the moment it hits a datetime column.
 - **`expand_group`'s virtual fast path only applies to an unfiltered
@@ -669,6 +672,48 @@ see [docs/notes/README.md](README.md) for the whole set.
   WHERE (`_compile_where`, what a drag across the strip builds) uses
   `ts_normalize_sql` for the same reason: 0.64 s to 0.36 s to build a
   timeframe'd view of 500k rows.
+- **Every other per-row timestamp read is on the fast path too**: day
+  groups and expanding a day (`day_bucket_sql`), jump to timestamp, tag
+  time bounds, and the Timeline's and the Findings pane's `ts`
+  (`ts_normalize_sql`). About twice as fast on a 2.1M-row EvtxECmd
+  table. The lateral_movement plugin keeps `TS_NORMALIZE`: its
+  conditions narrow the rows first (the EventId index), so the call a
+  row measured as nothing, and `ts_normalize_sql` is not part of the
+  plugin surface. `tests/test_timestamp_paths.py` holds each
+  one to what TS_NORMALIZE and DAY_BUCKET say over values the fast path
+  must leave to Python. Jump and tag time bounds take the same `LIMIT -1`
+  as the histogram, so the timestamp is worked out once a row and not
+  once for each place it is named. Dashboard SQL still says
+  `TS_NORMALIZE(col)` and pays the Python call; it is analyst-editable
+  text, so it gets the shortcut only by being rewritten.
+- **A root view holding every row is read through its table, not the
+  view, by expand a day and jump to timestamp.** Reading the view joins
+  the table to it in the view's order, one rid lookup per row, and on
+  any sort but rid's that is random access over the whole table: 30 s to
+  expand a day or jump on a 4.3M-row MFTECmd table sorted by a
+  timestamp, against 2 s and 5 s in the table's own order. A sorted,
+  unfiltered view holds every row (`_grouping_covers_whole_source`), so
+  `expand_group` counts the group from the member tables and gathers a
+  materialised group as `vv.rid IN (SELECT rid FROM member WHERE ...)`,
+  one pass over each, keeping the parent's order from `vv.pos`;
+  `_nearest_in_covering_view` finds the closest rows in the table and
+  asks the view only where they sit, so a tie still goes to the row
+  first in the view's order (and more than `NEAREST_TIES` tied rows read
+  through the view as before). The count still touches the parent's
+  table (`SELECT 1 ... LIMIT 0`) so a vanished parent reports expired.
+  `test_a_sorted_view_is_not_read_through_a_row_at_a_time` fails if any
+  of these goes back to `vv JOIN`.
+- **Jump ignores a timestamp julianday can't read.** `0000-00-00
+  00:00:00` normalises to itself but has no julianday, so its distance
+  is NULL, and `ORDER BY d` puts NULL first: one such row was "the
+  closest", had no distance to compare, and the column answered nothing
+  at all. The filter is `d IS NOT NULL`, not `ts IS NOT NULL`.
+- **Jump breaks a tie by the view's order, in its ORDER BY** (`d, pos,
+  rid`), not by the order the rows happen to be scanned in. Since the
+  first datetime column is indexed at import, SQLite reads an
+  unfiltered table's rid and timestamp out of that index, in timestamp
+  order, so `ORDER BY d LIMIT 1` alone kept whichever tied row the
+  index listed first rather than the first in the grid.
 
 - **`tag_counts_in_view`** is what the tag ribbon shows once a filter or
   search is on: the same shape `tag_counts` returns, counted over one view.
