@@ -240,10 +240,14 @@ see [docs/notes/README.md](README.md) for the whole set.
   `TRIGRAM_MIN_LEN` (3 chars) or a source whose index isn't built yet
   falls back the same way, in `_compile_where`/`_advanced_fts_clause`/
   `search_all_sources`. Building isn't free — `build_fts` is
-  `_ensure_fts_building`'d on a background daemon thread (batched the same
-  BATCH-sized-chunk way `ingest_csv` commits, so it never holds
-  `self.lock` for the whole build) rather than inline, both right after
-  ingest and lazily on a source's first Contains/Advanced search — so
+  `_ensure_fts_building`'d on a background daemon thread (in chunks
+  sized to hold `self.lock` for about `FTS_COMMIT_SECONDS`, 0.5 s, not
+  `ingest_csv`'s BATCH: tokenizing is 2-3 MB/s, so a BATCH of wide
+  EvtxECmd rows held the lock ten seconds a commit and every tag queued
+  behind it; each chunk also advances `fts_progress`, so a build the case
+  closed under resumes there instead of starting over) rather than
+  inline, both right after ingest and lazily on a source's first
+  Contains/Advanced search — so
   browsing and searching both work immediately via the LIKE fallback, and
   get fast once the build catches up. A third way in is on request:
   `start_search_index` (the Tables manager's Build) is the same

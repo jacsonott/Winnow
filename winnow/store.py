@@ -63,6 +63,30 @@ from .paths import sqlite_header_is_wal, sqlite_peek_uri, sqlite_ro_uri, sqlite_
 from .sqlresults import SqlResults, js_str as _sql_js_str, pane_cell_json, pane_cell_text  # noqa: F401 — server.py imports pane_cell_json from here
 
 BATCH = 20_000
+# build_fts's commits are sized by the time they hold the writer lock, not
+# by a row count: the trigram tokenizer indexes about 2-3 MB of text a
+# second, so BATCH rows of a 1.4 KB-a-row EvtxECmd export held the lock
+# for ten seconds a commit, and every tag, undo and group expand queued
+# behind it for the whole build. Each commit aims at FTS_COMMIT_SECONDS,
+# the next one's size scaled from how long the last one took. Shorter costs
+# build time, since every commit flushes a segment FTS5 later merges: on
+# 208k EvtxECmd rows 0.25 s made the build 21% slower (worst hold 0.73 s),
+# 0.5 s 10% (1.15 s) and 1 s 6% (2.3 s).
+FTS_COMMIT_SECONDS = 0.5
+FTS_COMMIT_MIN_ROWS = 50
+FTS_COMMIT_FIRST_ROWS = 500
+
+
+def _next_fts_commit_rows(rows: int, held: float) -> int:
+    """The next build_fts chunk's row count, from how long `rows` held the
+    lock: scaled toward FTS_COMMIT_SECONDS, but never more than doubled in
+    one step (a chunk of short rows followed by a run of long ones should
+    not overshoot by the whole ratio) and kept between FTS_COMMIT_MIN_ROWS
+    and BATCH."""
+    want = rows * FTS_COMMIT_SECONDS / held if held > 0 else rows * 2
+    return int(max(FTS_COMMIT_MIN_ROWS, min(BATCH, rows * 2, want)))
+
+
 SAMPLE_ROWS = 500
 # The csv module's own field limit is 131072 characters, and one field
 # past it stopped the import at that line — an EvtxECmd payload carrying a
@@ -376,6 +400,18 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE TABLE IF NOT EXISTS case_settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
+);
+
+-- How far a search index build (build_fts) has got: the first rid not yet
+-- in fts_<source_id>, written in the same transaction as each chunk, and
+-- the doc view the chunks were read through. A row here means a build was
+-- started and not finished — the case closed under it — so the next build
+-- carries on from next_rid instead of throwing away what is already
+-- indexed. Deleted when the build finishes (has_fts=1).
+CREATE TABLE IF NOT EXISTS fts_progress (
+    source_id INTEGER PRIMARY KEY,
+    next_rid  INTEGER NOT NULL,
+    doc_sql   TEXT NOT NULL
 );
 
 -- Sidebar folders: a per-case tree an analyst sorts tables into, and which
@@ -6000,13 +6036,28 @@ class Store:
           verification recomputes the concat on demand — no second stored
           copy of the data.
 
-        Batches its own commits (DROP/CREATE once, then BATCH-sized INSERT
-        chunks keyed by rid range) instead of one multi-second transaction,
-        so a build never freezes every other request for its duration —
-        same reasoning, and the same BATCH size, as ingest_csv's own
-        chunked commits. Called synchronously here; _ensure_fts_building is
-        what runs this on a background thread so ingest/search never block
-        waiting for it.
+        Batches its own commits (DROP/CREATE once, then INSERT chunks keyed
+        by rid range) instead of one multi-second transaction, so a build
+        never freezes every other request for its duration — same reasoning
+        as ingest_csv's own chunked commits. Not the same size, though:
+        ingest's BATCH rows are cheap to write and expensive to tokenize,
+        and at the trigram tokenizer's 2-3 MB/s a BATCH of wide EvtxECmd
+        rows held the lock for ten seconds a commit, for the whole of a
+        25-minute build that every import starts. So each chunk is sized to
+        hold the lock for about FTS_COMMIT_SECONDS, scaled from the one
+        before it. Measured while a 4.3M-row MFTECmd table built, a tag
+        click every half second waited 1.7 s at the median and 3.3 s at
+        worst before, 0.21 s and 0.89 s after; on EvtxECmd rows the
+        longest single commit had been 10.7 s.
+
+        Resumable: each chunk records the next rid to index in
+        fts_progress, in its own transaction, so a build the case closed
+        under picks up where it stopped on the next call instead of
+        dropping an index that may be most of the way there. Only when the
+        progress row, the index's shape and the doc view all still match —
+        anything else rebuilds from scratch, as before. Called
+        synchronously here; _ensure_fts_building is what runs this on a
+        background thread so ingest/search never block waiting for it.
 
         Each chunk also yields the thread briefly (time.sleep) right after
         releasing the lock, not just released-and-immediately-reacquired:
@@ -6039,28 +6090,66 @@ class Store:
         table, cols = src["table_name"], [c["name"] for c in self._base_cols(src)]
         fts = f"fts_{source_id}"
         doc_view = f"{table}_doc"
+        doc_sql = f"CREATE VIEW {q(doc_view)} AS SELECT rid, {_blob_expr(cols)} AS doc FROM {q(table)}"
         with self.lock, self.db:
-            self.db.execute(f"DROP TABLE IF EXISTS {q(fts)}")
-            self.db.execute(f"DROP VIEW IF EXISTS {q(doc_view)}")
-            self.db.execute(
-                f"CREATE VIEW {q(doc_view)} AS SELECT rid, {_blob_expr(cols)} AS doc FROM {q(table)}"
-            )
-            self.db.execute(
-                f"CREATE VIRTUAL TABLE {q(fts)} USING fts5(doc, "
-                f"content={q(doc_view)}, content_rowid='rid', tokenize='trigram', "
-                f"detail=none, columnsize=0)"
-            )
-            max_rid = self.db.execute(f"SELECT COALESCE(MAX(rid), 0) FROM {q(table)}").fetchone()[0]
-        for start in range(1, max_rid + 1, BATCH):
-            with self.lock, self.db:
+            start = self._fts_resume_point(source_id, fts, doc_view, doc_sql)
+            if start is None:
+                self.db.execute(f"DROP TABLE IF EXISTS {q(fts)}")
+                self.db.execute(f"DROP VIEW IF EXISTS {q(doc_view)}")
+                self.db.execute(doc_sql)
                 self.db.execute(
-                    f"INSERT INTO {q(fts)}(rowid, doc) "
-                    f"SELECT rid, doc FROM {q(doc_view)} WHERE rid >= ? AND rid < ?",
-                    (start, start + BATCH),
+                    f"CREATE VIRTUAL TABLE {q(fts)} USING fts5(doc, "
+                    f"content={q(doc_view)}, content_rowid='rid', tokenize='trigram', "
+                    f"detail=none, columnsize=0)"
                 )
+                start = 1
+                self.db.execute(
+                    "INSERT INTO fts_progress(source_id, next_rid, doc_sql) VALUES (?,?,?)"
+                    " ON CONFLICT(source_id) DO UPDATE SET next_rid=excluded.next_rid,"
+                    " doc_sql=excluded.doc_sql", (source_id, start, doc_sql))
+            max_rid = self.db.execute(f"SELECT COALESCE(MAX(rid), 0) FROM {q(table)}").fetchone()[0]
+        rows = FTS_COMMIT_FIRST_ROWS
+        while start <= max_rid:
+            if self._closing:
+                return   # fts_progress already says where the next build starts
+            with self.lock:
+                t0 = time.perf_counter()
+                with self.db:
+                    self.db.execute(
+                        f"INSERT INTO {q(fts)}(rowid, doc) "
+                        f"SELECT rid, doc FROM {q(doc_view)} WHERE rid >= ? AND rid < ?",
+                        (start, start + rows),
+                    )
+                    self.db.execute("UPDATE fts_progress SET next_rid=? WHERE source_id=?",
+                                    (start + rows, source_id))
+                held = time.perf_counter() - t0
+            start += rows
+            rows = _next_fts_commit_rows(rows, held)
             time.sleep(0.02)
         with self.lock, self.db:
             self.db.execute("UPDATE sources SET has_fts=1 WHERE id=?", (source_id,))
+            self.db.execute("DELETE FROM fts_progress WHERE source_id=?", (source_id,))
+
+    def _fts_resume_point(self, source_id: int, fts: str, doc_view: str, doc_sql: str) -> int | None:
+        """The rid an interrupted build_fts should carry on from, or None
+        to build from scratch. Under the caller's writer transaction.
+
+        Resumes only what this code itself left half done: a progress row
+        read through the same doc view (so the same columns, concatenated
+        the same way), an fts_ table of the current shape, and that view
+        still in place. A missing or different piece — a case from before
+        progress was recorded, a legacy-shape index, a rebuild asked for
+        on a table that already has one — is a fresh build, which is what
+        every build used to be."""
+        row = self.db.execute(
+            "SELECT next_rid, doc_sql FROM fts_progress WHERE source_id=?", (source_id,)).fetchone()
+        if not row or row["doc_sql"] != doc_sql:
+            return None
+        found = {r[0]: r[1] for r in self.db.execute(
+            "SELECT name, sql FROM sqlite_master WHERE name IN (?, ?)", (fts, doc_view))}
+        if "detail=none" not in (found.get(fts) or "") or found.get(doc_view) != doc_sql:
+            return None
+        return int(row["next_rid"])
 
     @staticmethod
     def _looks_delimited_by(head: str, ch: str, sample: int = 20) -> bool:
@@ -7012,6 +7101,7 @@ class Store:
             self._evict_views_of(source_id)
             self.db.execute(f"DROP TABLE IF EXISTS {q(src['table_name'])}")
             self.db.execute(f"DROP TABLE IF EXISTS {q('fts_' + str(source_id))}")
+            self.db.execute("DELETE FROM fts_progress WHERE source_id=?", (source_id,))
             self.db.execute(f"DROP VIEW IF EXISTS {q(src['table_name'] + '_doc')}")
             # The watchlist's two per-table sidecars too: a hit left keyed
             # by the id would be listed under a table that is not there,
