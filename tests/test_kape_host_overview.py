@@ -253,6 +253,34 @@ def test_coverage_says_when_there_is_no_security_log(store, write_csv):
     assert kv["All channels: window"] == "2024-01-01 00:00:00 → 00:00:00"
 
 
+def test_the_window_reads_each_timestamp_once(store, write_csv, monkeypatch):
+    """The window line was MIN(TS_NORMALIZE(TimeCreated)) and
+    MAX(TS_NORMALIZE(TimeCreated)) over the whole log, two Python calls a
+    row: about 4 s on a 2.1M-row log, the card's whole cost (the Security
+    rows come off the Channel index). It works each timestamp out once
+    and takes MIN and MAX of that. No Security events here, so every call
+    counted is the window's."""
+    from winnow import store as store_module
+    calls = []
+    real = store_module._ts_normalize
+    monkeypatch.setattr(store_module, "_ts_normalize", lambda v: calls.append(v) or real(v))
+    rows = [_ev(TimeCreated=f"2024-01-0{1 + i % 9} 0{i % 10}:00:00", EventId="1", Channel="System")
+            for i in range(40)] + [_ev(TimeCreated="", EventId="1", Channel="System")]
+    store.ingest_csv(write_csv([EVTX_COLS] + rows, "e.csv"), name="e", build_fts=False)
+    calls.clear()
+    kv = _kv(store, "Coverage")
+    assert kv["All channels: window"] == "2024-01-01 00:00:00 → 2024-01-09 08:00:00"
+    assert len(calls) == 40
+
+
+def test_coverage_with_no_usable_timestamps(store, write_csv):
+    store.ingest_csv(write_csv([EVTX_COLS, _ev(TimeCreated="", EventId="1", Channel="Security")], "e.csv"),
+                     name="e", build_fts=False)
+    kv = _kv(store, "Coverage")
+    assert kv["All channels: window"] == "(no timestamps)" and kv["Security: events"] == 1
+    assert kv["Security: oldest"] == "(no Security channel events)"
+
+
 def test_defender_alerts_newest_first_with_description_fallback(host):
     rows = _rows(host, "Most recent Defender alerts")
     assert rows == [["2024-01-12 09:00:00", "1117 · Action taken: Quarantine"],
