@@ -150,6 +150,21 @@ def test_a_sorted_merge_past_the_limit_still_merges_its_sort_indexes(big):
     assert not any("TEMP B-TREE" in d for d in plan)
 
 
+def test_opening_a_big_merge_reads_its_columns_once(big, monkeypatch):
+    """get_source on a merge worked its column list out again for every
+    member's "missing columns", which read every member's columns each
+    time: quadratic, ~3 s per open of this merge and four times that at
+    1000 members, on every route that resolves one."""
+    s, ids, mid = big
+    calls = []
+    real = Store._merge_columns
+    monkeypatch.setattr(Store, "_merge_columns",
+                        staticmethod(lambda row, members: calls.append(1) or real(row, members)))
+    src = s.get_source(mid)
+    assert len(calls) == 1
+    assert [m["missing"] for m in src["members"]] == [[]] * len(ids)
+
+
 def test_view_route_past_the_limit(big, monkeypatch):
     """The request in the original report."""
     import server

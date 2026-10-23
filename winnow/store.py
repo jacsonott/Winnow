@@ -6987,13 +6987,17 @@ class Store:
         row = self._merge_row(merge_id)
         member_ids = json.loads(row["source_ids"])
         members = [self.get_source(sid) for sid in member_ids]
+        # Once, not once per member as well: it reads every member's
+        # columns, so per member it made opening a merge quadratic — ~3 s
+        # for 510 members, and four times that at 1000.
+        columns = self._merge_columns(row, members)
         return {
             "id": -merge_id,
             "name": row["name"],
             "path": None,
             "table_name": None,
             "row_count": sum(m["row_count"] for m in members),
-            "columns": self._merge_columns(row, members),
+            "columns": columns,
             "col_mode": row["col_mode"],
             "source_column": bool(row["source_column"]),
             # Per member, which merge columns it lacks — what the builder's
@@ -7001,7 +7005,7 @@ class Store:
             "members": [
                 {"id": m["id"], "label": m.get("nickname") or m["name"], "name": m["name"],
                  "row_count": m["row_count"],
-                 "missing": self._member_missing_columns(row, members, m)}
+                 "missing": self._member_missing_columns(columns, m)}
                 for m in members
             ],
             "file_hash": None,
@@ -7093,8 +7097,9 @@ class Store:
             cols.insert(0, {"name": name, "type": "text", "source_column": True})
         return cols
 
-    def _member_missing_columns(self, row: sqlite3.Row, members: list[dict], member: dict) -> list[str]:
-        return [c["name"] for c in self._merge_columns(row, members)
+    @staticmethod
+    def _member_missing_columns(columns: list[dict], member: dict) -> list[str]:
+        return [c["name"] for c in columns
                 if not c.get("source_column") and _member_column(member, c) is None]
 
     @staticmethod
