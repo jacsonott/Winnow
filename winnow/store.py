@@ -11177,8 +11177,19 @@ class Store:
             })
         return {"start": start, "rows": out}
 
-    def tag_positions(self, view_id: str, limit: int = 20_000) -> list[list[int]]:
-        """Positions of tagged rows inside a view, for the scrollbar rail."""
+    def tag_positions(self, view_id: str, limit: int = 20_000,
+                      height: int | None = None) -> list[list[int]]:
+        """Positions of tagged rows inside a view, for the scrollbar rail:
+        [pos, tag_id] per tagged row, in view order, at most `limit`.
+
+        With `height` (the rail's height in pixels) it is one entry per
+        pixel row and tag instead, [y, tag_id, first pos, last pos], where
+        y is the rail's own round(pos / row_count * height). Every tagged
+        row counts: the flat list stopped at the 20,000th, so on a view
+        with more tagged rows than that the rail showed nothing below it,
+        after sending 20,000 pairs to draw a strip a few hundred pixels
+        tall. Ordered by last pos, so drawing the entries in order paints
+        each pixel the colour drawing every row would have."""
         handle = self._views.get(view_id)
         if not handle:
             raise ViewExpired("View expired — rebuild it")
@@ -11190,32 +11201,37 @@ class Store:
                 # every row of the source in rid order, so a tagged row's rank
                 # IS its rid - no join against a backing view table needed, and
                 # (unlike group_virtual) never a stub — see _build_virtual_root_view.
-                rows = ro.execute(
-                    "SELECT rid - 1 AS p, tag_id FROM row_tags WHERE source_id=? ORDER BY rid LIMIT ?",
-                    (handle["source_id"], limit),
-                ).fetchall()
+                tagged = "SELECT rid - 1 AS p, tag_id FROM row_tags WHERE source_id=?"
+                params: list = [handle["source_id"]]
+            else:
+                # The join below has no better plan than scanning the whole view
+                # probing row_tags per row (the view has no index on rid — measured
+                # ~115ms per 2M view rows even with row_tags empty). An untagged
+                # source is the common case and this runs after every view build,
+                # so check for any tag at all first — one indexed probe per member.
+                if "source_id" in handle:
+                    any_tags = any(
+                        ro.execute(
+                            "SELECT 1 FROM row_tags WHERE source_id=? LIMIT 1", (m["source_id"],)
+                        ).fetchone()
+                        for m in self._resolve_members_on(ro, handle["source_id"])
+                    )
+                    if not any_tags:
+                        return []
+                tagged = (f"SELECT vv.pos - 1 AS p, rt.tag_id FROM v.{q(view_id)} vv "
+                          f"JOIN row_tags rt ON rt.rid = vv.rid AND rt.source_id = vv.source_id")
+                params = []
+            if height is None:
+                order = "rid" if handle.get("kind") == "root_virtual" else "vv.pos"
+                rows = ro.execute(f"{tagged} ORDER BY {order} LIMIT ?", [*params, limit]).fetchall()
                 return [[r["p"], r["tag_id"]] for r in rows]
-            # The join below has no better plan than scanning the whole view
-            # probing row_tags per row (the view has no index on rid — measured
-            # ~115ms per 2M view rows even with row_tags empty). An untagged
-            # source is the common case and this runs after every view build,
-            # so check for any tag at all first — one indexed probe per member.
-            if "source_id" in handle:
-                any_tags = any(
-                    ro.execute(
-                        "SELECT 1 FROM row_tags WHERE source_id=? LIMIT 1", (m["source_id"],)
-                    ).fetchone()
-                    for m in self._resolve_members_on(ro, handle["source_id"])
-                )
-                if not any_tags:
-                    return []
+            n = max(int(handle.get("row_count") or 0), 1)
             rows = ro.execute(
-                f"SELECT vv.pos - 1 AS p, rt.tag_id FROM v.{q(view_id)} vv "
-                f"JOIN row_tags rt ON rt.rid = vv.rid AND rt.source_id = vv.source_id "
-                f"ORDER BY vv.pos LIMIT ?",
-                (limit,),
+                f"SELECT CAST(ROUND(p * 1.0 / ? * ?) AS INTEGER) AS y, tag_id, MIN(p) AS lo, MAX(p) AS hi "
+                f"FROM ({tagged}) GROUP BY y, tag_id ORDER BY hi",
+                [n, int(height), *params],
             ).fetchall()
-        return [[r["p"], r["tag_id"]] for r in rows]
+        return [[r["y"], r["tag_id"], r["lo"], r["hi"]] for r in rows]
 
     def _positions_of(self, ro: sqlite3.Connection, view_id: str, handle: dict,
                       source_id: int, rids: list[int]) -> list[int]:

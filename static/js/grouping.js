@@ -872,20 +872,22 @@ export async function drawRail() {
   cv.height = cv.clientHeight;
   ctx.clearRect(0, 0, cv.width, cv.height);
   railMarks = new Map();
-  if (!S.view || !S.view.row_count) return;
-  let pts = [];
-  try { pts = await api(`/api/tag_positions?view_id=${S.view.view_id}`); } catch { return; }
+  if (!S.view || !S.view.row_count || !cv.height) return;
+  /* One [y, tag, first, last] per pixel row and tag, bucketed by the
+     server: every tagged row counts, where a list of rows stopped at the
+     20,000th and left the rest of the view's tags off the strip. */
+  let marksAt = [];
+  try { marksAt = await api(`/api/tag_positions?view_id=${S.view.view_id}&height=${cv.height}`); } catch { return; }
   const color = Object.fromEntries(S.tags.map((t) => [t.id, t.color]));
   const marks = new Map();
-  for (const [pos, tid] of pts) {
-    const y = Math.round((pos / S.view.row_count) * cv.height);
+  for (const [y, tid, lo, hi] of marksAt) {
     ctx.fillStyle = color[tid] || '#888';
     ctx.fillRect(1, y, cv.width - 2, 2);
     let m = marks.get(y);
-    if (!m) marks.set(y, (m = { tids: new Set(), lo: pos, hi: pos }));
+    if (!m) marks.set(y, (m = { tids: new Set(), lo, hi }));
     m.tids.add(tid);
-    if (pos < m.lo) m.lo = pos;
-    if (pos > m.hi) m.hi = pos;
+    if (lo < m.lo) m.lo = lo;
+    if (hi > m.hi) m.hi = hi;
   }
   railMarks = marks;
 }

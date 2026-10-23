@@ -1328,6 +1328,13 @@ see [docs/notes/README.md](README.md) for the whole set.
     view probing row_tags per row (~115ms per 2M view rows even with
     zero tags), it runs after every view build, and an untagged source
     is the common case.
+  - The rail asks `tag_positions` for `height` (its pixel height) and gets
+    one `[y, tag_id, first pos, last pos]` per pixel row and tag, grouped
+    in SQL with the rail's own `round(pos / row_count * height)`, ordered
+    by last pos so drawing them in order paints what drawing every row
+    would. It used to fetch `[pos, tag_id]` per tagged row with a 20,000
+    `LIMIT`, so a view with more tagged rows than that had no marks below
+    the 20,000th. The flat list without `height` is unchanged.
   - `ingest_csv`'s per-row append loop is deliberate: a chunked
     `list(islice(reader, BATCH))` rewrite measured ~7% *slower* (islice's
     per-item indirection costs more than the tuple() copy it saves, and
