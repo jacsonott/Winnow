@@ -1,0 +1,4 @@
+# Builds the GitHub Pages site (.github/workflows/pages.yml). Not needed to
+# run Winnow or its tests, which is why it isn't in requirements-dev.txt.
+mkdocs==1.6.1
+mkdocs-material==9.7.7

@@ -1,4 +1,5 @@
-"""Turn docs/wiki/ into the pages of the repository's GitHub wiki.
+"""Turn docs/wiki/ into the pages of the repository's GitHub wiki, or into
+the source of its GitHub Pages site.
 
 docs/wiki/ is the source. It is reviewed with the code, ships in the
 release zip, and reads correctly when browsed in the repository. The
@@ -25,23 +26,53 @@ A link to a file that doesn't exist fails the build too, rather than
 publishing a dead link. Links inside code spans and fenced blocks are
 left alone.
 
-    python scripts/build_wiki.py OUT_DIR [--repo OWNER/NAME] [--ref BRANCH]
+With --site, OUT_DIR gets what MkDocs needs to build the Pages site
+instead. The site is the manual for the released version, so
+.github/workflows/pages.yml builds it from main, at each release, with
+--ref main; "Edit this page" still opens the page on develop
+(--edit-ref), where changes to it land. OUT_DIR gets the same pages under
+docs/, with
+Home.md as index.md and docs/writing-plugins.md as a page of its own, the
+images they show copied in beside them, and a generated mkdocs.yml whose
+nav is Home.md's page list, so Home.md stays the one place a page is
+listed. Page links keep their `.md` (MkDocs resolves them), titles stay,
+and links to the rest of the repository go to GitHub as in the wiki. The
+site's look, which doesn't change from build to build, is
+docs/site/mkdocs.yml, which the generated file INHERITs.
 
-Stdlib only.
+    python scripts/build_wiki.py OUT_DIR [--repo OWNER/NAME] [--ref BRANCH]
+    python scripts/build_wiki.py --site OUT_DIR --ref main [--edit-ref BRANCH]
+    mkdocs build --strict -f OUT_DIR/mkdocs.yml     # the site, in OUT_DIR/site
+
+Stdlib only; MkDocs is needed for the last step and nothing else.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import posixpath
 import re
+import shutil
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SOURCE = "docs/wiki"
+SITE_CONFIG = "docs/site"
 DEFAULT_REPO = "jacsonott/Winnow"
 DEFAULT_REF = "develop"
+
+# Pages the site carries besides docs/wiki's own, by repository path, and
+# the name each has there. A link to one of these from a wiki page stays a
+# page link on the site; in the wiki it is a link to GitHub, as before.
+SITE_EXTRA_PAGES = {"docs/writing-plugins.md": "writing-plugins.md"}
+
+# The app's own brand mark, as the site's logo and favicon, copied in at
+# build time rather than kept twice. docs/site/mkdocs.yml names the
+# destinations.
+SITE_ICONS = {"static/icons/winnow-mark.svg": "assets/winnow-mark.svg",
+              "static/icons/winnow-icon.svg": "assets/favicon.svg"}
 
 # A code span (left alone) or a link/image. Only the target is rewritten.
 _TOKEN = re.compile(r"(`+)(?:[\s\S]+?)\1|(!?)\[([^\]]*)\]\(([^)\s]+)\)")
@@ -52,48 +83,52 @@ class BuildError(Exception):
     pass
 
 
-def _rewrite_target(target, *, image, page_names, root, repo, ref, where, errors):
+def _rewrite_target(target, *, image, pages, root, repo, ref, where, errors,
+                    base=SOURCE, images=None):
+    """One link target as the output spells it.
+
+    `pages` maps the repository path of each page the output carries to
+    how a link to it is written there. `images` is None to link images
+    from GitHub; otherwise each image is added to it (repository path ->
+    path in the output) and linked where it will be copied to.
+    """
     if target.startswith("#") or _SCHEME.match(target):
         return target
     path, hash_, anchor = target.partition("#")
-    resolved = posixpath.normpath(posixpath.join(SOURCE, path))
+    resolved = posixpath.normpath(posixpath.join(base, path))
     if resolved.startswith("../") or resolved == "..":
         errors.append(f"{where}: {target} points outside the repository")
         return target
+    if resolved in pages:
+        return pages[resolved] + hash_ + anchor
     if posixpath.dirname(resolved) == SOURCE and resolved.endswith(".md"):
-        name = posixpath.basename(resolved)[:-3]
-        if name not in page_names:
-            errors.append(f"{where}: {target} is not a page in {SOURCE}/")
-            return target
-        return name + hash_ + anchor
+        errors.append(f"{where}: {target} is not a page in {SOURCE}/")
+        return target
     on_disk = root / resolved
     if not on_disk.exists():
         errors.append(f"{where}: {target} names {resolved}, which does not exist")
         return target
+    if image and images is not None:
+        dest = posixpath.relpath(resolved, "docs") if resolved.startswith("docs/") else resolved
+        images[resolved] = dest
+        # Every site page sits at the top of docs_dir, so this is relative
+        # to all of them.
+        return dest
     if image:
         return f"https://raw.githubusercontent.com/{repo}/{ref}/{resolved}"
     kind = "tree" if on_disk.is_dir() else "blob"
     return f"https://github.com/{repo}/{kind}/{ref}/{resolved}{hash_}{anchor}"
 
 
-def convert(text, *, name, page_names, root, repo, ref, errors):
-    """One page's markdown as the wiki should have it."""
-    lines = text.splitlines()
-    # The wiki already titles the page from its name.
-    while lines and not lines[0].strip():
-        lines.pop(0)
-    if lines and lines[0].startswith("# "):
-        lines.pop(0)
-        while lines and not lines[0].strip():
-            lines.pop(0)
+def _relink(lines, *, where, errors, **target_kw):
+    """The lines with every link target outside code rewritten."""
 
     def sub(match):
         if match.group(1):
             return match.group(0)
         bang, label, target = match.group(2), match.group(3), match.group(4)
-        new = _rewrite_target(
-            target, image=bool(bang), page_names=page_names, root=root,
-            repo=repo, ref=ref, where=f"{name}.md", errors=errors)
+        new = _rewrite_target(target, image=bool(bang), where=where,
+                              errors=errors, **target_kw)
         return f"{bang}[{label}]({new})"
 
     # Rewritten a paragraph at a time, not a line at a time: link text
@@ -127,36 +162,72 @@ def convert(text, *, name, page_names, root, repo, ref, errors):
     return "\n".join(out) + "\n"
 
 
-def sidebar(home_text, *, page_names, root, repo, ref, errors):
-    """Home.md's "## Pages" list, without the descriptions."""
+def _wiki_pages(page_names):
+    return {f"{SOURCE}/{name}.md": name for name in page_names}
+
+
+def convert(text, *, name, page_names, root, repo, ref, errors):
+    """One page's markdown as the wiki should have it."""
+    lines = text.splitlines()
+    # The wiki already titles the page from its name.
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    if lines and lines[0].startswith("# "):
+        lines.pop(0)
+        while lines and not lines[0].strip():
+            lines.pop(0)
+    return _relink(lines, pages=_wiki_pages(page_names), root=root, repo=repo,
+                   ref=ref, where=f"{name}.md", errors=errors)
+
+
+def _page_list(home_text, errors):
+    """Home.md's "## Pages" list: [(group or None, [(label, target)])],
+    targets as Home.md writes them. None, and an error, if it has none."""
     lines = home_text.splitlines()
     try:
         start = lines.index("## Pages") + 1
     except ValueError:
         errors.append("Home.md: no '## Pages' section to build the sidebar from")
-        return ""
-    out = ["[Home](Home)", ""]
-    listed = set()
+        return None
+    groups = [(None, [])]
     for line in lines[start:]:
         if line.startswith("## "):
             break
         if line.startswith("**"):
-            if out[-1]:
-                out.append("")
-            out.extend([line.strip(), ""])
+            groups.append((line.strip(), []))
         elif line.startswith("- ["):
             m = _TOKEN.search(line)
-            if not m or m.group(1):
-                continue
-            target = _rewrite_target(
-                m.group(4), image=False, page_names=page_names, root=root,
-                repo=repo, ref=ref, where="Home.md", errors=errors)
-            out.append(f"- [{m.group(3)}]({target})")
-            if "/" not in target:
-                listed.add(target.partition("#")[0])
+            if m and not m.group(1):
+                groups[-1][1].append((m.group(3), m.group(4)))
+    return [g for g in groups if g[0] or g[1]]
+
+
+def _check_listed(listed, page_names, errors):
     for missing in sorted(page_names - listed - {"Home"}):
         errors.append(f"Home.md: '## Pages' does not list {missing}.md, "
                       "so the wiki's sidebar would have no way to it")
+
+
+def sidebar(home_text, *, page_names, root, repo, ref, errors):
+    """Home.md's "## Pages" list, without the descriptions."""
+    groups = _page_list(home_text, errors)
+    if groups is None:
+        return ""
+    out = ["[Home](Home)", ""]
+    listed = set()
+    for group, items in groups:
+        if group:
+            if out[-1]:
+                out.append("")
+            out.extend([group, ""])
+        for label, target in items:
+            target = _rewrite_target(
+                target, image=False, pages=_wiki_pages(page_names), root=root,
+                repo=repo, ref=ref, where="Home.md", errors=errors)
+            out.append(f"- [{label}]({target})")
+            if "/" not in target:
+                listed.add(target.partition("#")[0])
+    _check_listed(listed, page_names, errors)
     return "\n".join(out).rstrip() + "\n"
 
 
@@ -170,13 +241,23 @@ def footer(repo, ref):
     )
 
 
-def build(out_dir, *, root=ROOT, repo=DEFAULT_REPO, ref=DEFAULT_REF):
-    """Write the wiki's pages into out_dir. Raises BuildError listing every
-    broken link and unlisted page, having written nothing."""
+def site_url(repo):
+    owner, name = repo.split("/")
+    return f"https://{owner.lower()}.github.io/{name}/"
+
+
+def _read_pages(root):
     src = root / SOURCE
     pages = {p.stem: p.read_text(encoding="utf-8") for p in sorted(src.glob("*.md"))}
     if "Home" not in pages:
         raise BuildError(f"{SOURCE}/Home.md is missing; the wiki has no front page")
+    return pages
+
+
+def build(out_dir, *, root=ROOT, repo=DEFAULT_REPO, ref=DEFAULT_REF):
+    """Write the wiki's pages into out_dir. Raises BuildError listing every
+    broken link and unlisted page, having written nothing."""
+    pages = _read_pages(root)
     names = set(pages)
     errors = []
     built = {
@@ -196,16 +277,153 @@ def build(out_dir, *, root=ROOT, repo=DEFAULT_REPO, ref=DEFAULT_REF):
     return sorted(built)
 
 
+# --- the Pages site ----------------------------------------------------------
+
+_CODE_SPAN = re.compile(r"(`+)[\s\S]+?\1")
+
+
+def _table_pipes(text):
+    """GitHub needs a pipe in a table's code span escaped (`a\\|b`), or it
+    splits the cell, and prints it without the backslash. Python-Markdown
+    already keeps a code span's pipes in their cell, and prints the
+    backslash, so the site's copy drops it."""
+    out, fence = [], None
+    for line in text.split("\n"):
+        stripped = line.lstrip()
+        if fence:
+            if stripped.startswith(fence):
+                fence = None
+        elif m := re.match(r"(`{3,}|~{3,})", stripped):
+            fence = m.group(1)
+        elif stripped.startswith("|"):
+            line = _CODE_SPAN.sub(lambda c: c.group(0).replace("\\|", "|"), line)
+        out.append(line)
+    return "\n".join(out)
+
+
+def _q(text):
+    """A YAML double-quoted scalar. JSON's escapes are a subset of YAML's."""
+    return json.dumps(text)
+
+
+def _site_config(nav, *, root, repo, ref, edit_ref):
+    """The mkdocs.yml MkDocs reads: per-build settings and the nav, on top
+    of docs/site/mkdocs.yml."""
+    config_dir = (root / SITE_CONFIG).resolve()
+    lines = [
+        "# Generated by scripts/build_wiki.py --site. Edit docs/wiki/Home.md",
+        "# for the nav and docs/site/mkdocs.yml for everything else.",
+        f"INHERIT: {_q(str(config_dir / 'mkdocs.yml'))}",
+        "docs_dir: docs",
+        "site_dir: site",
+        f"site_url: {_q(site_url(repo))}",
+        f"repo_url: {_q(f'https://github.com/{repo}')}",
+        f"repo_name: {_q(repo)}",
+        # Each page names its own source (edit_url, read by hooks.py):
+        # Home.md is published as index.md, so no one edit_uri fits all.
+        'edit_uri: ""',
+        "hooks:",
+        f"  - {_q(str(config_dir / 'hooks.py'))}",
+        "copyright: " + _q(
+            f"Built from <code>{SOURCE}/</code> on <code>{ref}</code>. "
+            f'Edit the pages on <a href="https://github.com/{repo}/tree/{edit_ref}/{SOURCE}">'
+            f"<code>{edit_ref}</code></a>."),
+        "nav:",
+    ]
+    for group, items in nav:
+        if group is None:
+            for label, target in items:
+                lines.append(f"  - {_q(label)}: {_q(target)}")
+            continue
+        lines.append(f"  - {_q(group)}:")
+        for label, target in items:
+            lines.append(f"      - {_q(label)}: {_q(target)}")
+    return "\n".join(lines) + "\n"
+
+
+def build_site(out_dir, *, root=ROOT, repo=DEFAULT_REPO, ref=DEFAULT_REF,
+               edit_ref=DEFAULT_REF):
+    """Write MkDocs' input for the Pages site into out_dir: mkdocs.yml and
+    docs/. Links into the repository point at `ref`, "Edit this page" at
+    `edit_ref`. Raises BuildError as build() does, having written nothing."""
+    pages = _read_pages(root)
+    names = set(pages)
+    sources, site_pages = {}, {}
+    for name, text in pages.items():
+        sources[f"{SOURCE}/{name}.md"] = text
+        site_pages[f"{SOURCE}/{name}.md"] = "index.md" if name == "Home" else f"{name}.md"
+    for path, dest in SITE_EXTRA_PAGES.items():
+        on_disk = root / path
+        if on_disk.exists():
+            sources[path] = on_disk.read_text(encoding="utf-8")
+            site_pages[path] = dest
+
+    errors, images = [], {}
+    built = {}
+    for path, text in sources.items():
+        body = _relink(text.splitlines(), pages=site_pages, root=root, repo=repo,
+                       ref=ref, where=posixpath.basename(path), errors=errors,
+                       base=posixpath.dirname(path), images=images)
+        edit_url = f"https://github.com/{repo}/edit/{edit_ref}/{path}"
+        built[site_pages[path]] = (f"---\nedit_url: {_q(edit_url)}\n---\n\n"
+                                   + _table_pipes(body))
+
+    nav, listed = [(None, [("Home", "index.md")])], set()
+    for group, items in _page_list(pages["Home"], errors) or []:
+        entries = []
+        for label, target in items:
+            target = _rewrite_target(
+                target, image=False, pages=site_pages, root=root, repo=repo,
+                ref=ref, where="Home.md", errors=errors)
+            entries.append((label, target))
+            listed.add(target.partition("#")[0].removesuffix(".md"))
+        nav.append((group.strip("*") if group else None, entries))
+    _check_listed(listed, names, errors)
+    if errors:
+        raise BuildError("\n".join(errors))
+
+    out_dir = Path(out_dir)
+    docs = out_dir / "docs"
+    docs.mkdir(parents=True, exist_ok=True)
+    (out_dir / "mkdocs.yml").write_text(
+        _site_config(nav, root=root, repo=repo, ref=ref, edit_ref=edit_ref),
+        encoding="utf-8")
+    for filename, text in built.items():
+        (docs / filename).write_text(text, encoding="utf-8")
+    for src, dest in images.items():
+        (docs / dest).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(root / src, docs / dest)
+    # The theme's own files go to docs/assets/, where docs/site/mkdocs.yml
+    # points.
+    assets = root / SITE_CONFIG / "assets"
+    if assets.is_dir():
+        shutil.copytree(assets, docs / "assets", dirs_exist_ok=True)
+    for src, dest in SITE_ICONS.items():
+        if (root / src).exists():
+            (docs / dest).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(root / src, docs / dest)
+    return sorted(built)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("out_dir", help="directory to write the wiki's pages into")
+    ap.add_argument("--site", action="store_true",
+                    help="write the Pages site's MkDocs input instead of wiki pages")
     ap.add_argument("--repo", default=DEFAULT_REPO,
                     help=f"OWNER/NAME for absolute links (default {DEFAULT_REPO})")
     ap.add_argument("--ref", default=DEFAULT_REF,
                     help=f"branch repository links point at (default {DEFAULT_REF})")
+    ap.add_argument("--edit-ref", default=DEFAULT_REF,
+                    help="with --site: branch \"Edit this page\" opens "
+                         f"(default {DEFAULT_REF}, where pull requests go)")
     args = ap.parse_args(argv)
     try:
-        written = build(args.out_dir, repo=args.repo, ref=args.ref)
+        if args.site:
+            written = build_site(args.out_dir, repo=args.repo, ref=args.ref,
+                                 edit_ref=args.edit_ref)
+        else:
+            written = build(args.out_dir, repo=args.repo, ref=args.ref)
     except BuildError as e:
         print(f"build_wiki: not built:\n{e}", file=sys.stderr)
         return 1

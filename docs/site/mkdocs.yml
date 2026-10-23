@@ -1,0 +1,102 @@
+# The look of the GitHub Pages site: everything about it that doesn't
+# change from one build to the next.
+#
+# This is not the file MkDocs reads. scripts/build_wiki.py --site writes
+# that one, with the pages, the nav (docs/wiki/Home.md's page list) and
+# the links back to the repository, and it INHERITs this. So there is no
+# nav here, and paths below are inside the docs/ folder that script
+# writes, not this one: assets/ is this folder's assets/ copied in, plus
+# the app's brand mark from static/icons/.
+#
+# Preview locally:
+#
+#   pip install -r docs/site/requirements.txt
+#   python scripts/build_wiki.py --site /tmp/winnow-site
+#   mkdocs serve -f /tmp/winnow-site/mkdocs.yml
+#
+# serve watches the copy, not docs/wiki/, so rerun build_wiki.py after an
+# edit.
+
+site_name: Winnow
+site_description: >-
+  The manual for Winnow, a local viewer for the very large CSV and log
+  exports DFIR triage produces.
+
+theme:
+  name: material
+  logo: assets/winnow-mark.svg
+  favicon: assets/favicon.svg
+  # No web fonts, like the app: the reader's own UI and monospace faces.
+  font: false
+  icon:
+    repo: fontawesome/brands/github
+  palette:
+    - media: "(prefers-color-scheme)"
+      toggle:
+        icon: material/brightness-auto
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/brightness-4
+        name: Follow the system setting
+  features:
+    # The four groups of Home's page list, open in the sidebar.
+    - navigation.sections
+    # Previous / next at the foot of each page, in nav order.
+    - navigation.footer
+    - navigation.top
+    # Pages run to thirty-odd headings: keep the one being read in view
+    # in the "On this page" list, and in the address bar for sharing.
+    - toc.follow
+    - navigation.tracking
+    - search.highlight
+    - search.suggest
+    - search.share
+    - content.action.edit
+    - content.code.copy
+
+plugins:
+  - search
+
+extra_css:
+  - assets/site.css
+
+markdown_extensions:
+  # The pages are written for GitHub, so headings get GitHub's anchors:
+  # links like Installation.md#command-line-options are shared between
+  # the repository, the wiki and here.
+  - toc:
+      permalink: true
+      slugify: !!python/object/apply:pymdownx.slugs.slugify
+        kwds:
+          case: lower
+  - tables
+  - attr_list
+  - sane_lists
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      use_pygments: true
+  - pymdownx.inlinehilite
+
+# A dead link or anchor fails `mkdocs build --strict`, which is how the
+# pull-request check runs it.
+validation:
+  nav:
+    omitted_files: warn
+    not_found: warn
+    absolute_links: warn
+  links:
+    not_found: warn
+    anchors: warn
+    absolute_links: warn
+    unrecognized_links: warn

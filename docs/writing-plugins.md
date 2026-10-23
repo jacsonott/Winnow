@@ -1483,13 +1483,13 @@ def lookup_handler(req):
   cannot do what the analyst cannot: `WINNOW_*` names only, never one of
   Winnow's own settings, and never over a value exported outside Winnow.
 
-  This is not a new privilege — a plugin is arbitrary Python and could
-  always write that file itself. It is the way that lands in the right
-  place with the right permissions, and that the analyst can see and undo.
-  Two things to weigh: saving a secret they didn't ask you to save is a
-  surprise, so say so in your UI; and your route is reachable by whoever
-  can reach Winnow, so check `req.is_loopback` if a remote viewer shouldn't
-  be able to trigger it.
+    This is not a new privilege — a plugin is arbitrary Python and could
+    always write that file itself. It is the way that lands in the right
+    place with the right permissions, and that the analyst can see and undo.
+    Two things to weigh: saving a secret they didn't ask you to save is a
+    surprise, so say so in your UI; and your route is reachable by whoever
+    can reach Winnow, so check `req.is_loopback` if a remote viewer shouldn't
+    be able to trigger it.
 
 - Read it server-side, in the handler that uses it. **Never send the
   value to the browser** — not in a response, not in a tab's HTML. A tab

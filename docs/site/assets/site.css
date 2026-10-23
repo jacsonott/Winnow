@@ -1,0 +1,52 @@
+/* The Pages site in the app's Harvest skin (static/style.css): gold on
+   green-cast greys in dark, gold on parchment in light. The values are
+   Harvest's own tokens; where a token is named, it's the one copied. */
+
+:root {
+  /* The header and tabs are Harvest's dark panel in both schemes, so the
+     brand mark's gold reads the same way on either. */
+  --md-primary-fg-color: #1b201d;          /* dark --panel-2 */
+  --md-primary-fg-color--light: #272d29;   /* dark --line */
+  --md-primary-fg-color--dark: #141816;    /* dark --panel */
+  --md-primary-bg-color: #e3dfd2;
+  --md-primary-bg-color--light: #e3dfd2b3;
+}
+
+[data-md-color-scheme="default"] {
+  --md-default-bg-color: #fdfbf4;          /* light --panel */
+  --md-code-bg-color: #efeade;             /* light --panel-2 */
+  --md-accent-fg-color: #a8792d;           /* light --accent */
+  --md-accent-fg-color--transparent: #a8792d1a;
+  /* --accent-dim for text: --accent itself is under 4.5:1 on parchment. */
+  --md-typeset-a-color: #8a6420;
+  --md-typeset-mark-color: #f0e9d6;        /* light --sel */
+}
+
+[data-md-color-scheme="slate"] {
+  /* Material's slate greys take their cast from --md-hue; Harvest's are
+     green, not Material's default blue. */
+  --md-hue: 140;
+  --md-default-bg-color: #141816;          /* dark --panel */
+  --md-code-bg-color: #1b201d;             /* dark --panel-2 */
+  --md-accent-fg-color: #cfa057;           /* dark --accent */
+  --md-accent-fg-color--transparent: #cfa0571a;
+  --md-typeset-a-color: #cfa057;
+  --md-typeset-mark-color: #cfa05740;
+  --md-footer-bg-color: #0f1211;           /* dark --ink */
+  --md-footer-bg-color--dark: #0b0d0c;
+}
+
+/* The header's search box and the active sidebar entry pick up the gold. */
+.md-nav__link--active,
+.md-nav__item .md-nav__link--active code {
+  color: var(--md-typeset-a-color);
+}
+
+/* Wide reference tables (filter syntax, the keyboard map) scroll inside
+   their own box rather than squeezing every column to a word per line. */
+.md-typeset table:not([class]) {
+  font-size: .7rem;
+}
+.md-typeset table:not([class]) td:first-child code {
+  white-space: nowrap;
+}
