@@ -226,6 +226,35 @@ def test_expand_and_tag_a_derived_column_group(store, write_csv):
     assert store.get_source(sid)["tagged_row_count"] == 2
 
 
+@pytest.mark.parametrize("spec", [{}, {"filters": [{"column": "Msg", "op": "not_contains", "value": "zulu"}]}],
+                         ids=["root", "filtered"])
+def test_reads_that_never_touch_a_derived_column_skip_its_sidecar(store, write_csv, spec):
+    """A read that names only base columns leaves the drv_ join out (SQLite
+    keeps it in an aggregate even when nothing reads it, at a lookup per
+    row), and one that names a derived column at any level — grouped,
+    split, or in the path — still reaches it."""
+    sid = _ingest(store, write_csv, EPOCH_ROWS)
+    _add(store, sid, "Timestamp", "Epoch", "unix_epoch")
+    src = store.get_source(sid)
+    assert "drv_" not in store._from_clause(src, "s", ("Host",))
+    assert "drv_" in store._from_clause(src, "s", ("Host", "timestamp"))
+    assert "drv_" in store._from_clause(src, "s")
+
+    assert {v["value"]: v["count"] for v in store.column_values(sid, "Host")} == {
+        "web01": 2, "web02": 1, "web03": 2}
+    view = store.build_view(sid, spec)["view_id"]
+    by_host = {g["value"]: g["count"] for g in store.group_summary(view, "Host")["groups"]}
+    assert by_host == {"web01": 2, "web02": 1, "web03": 2}
+    day = [{"column": "Timestamp", "value": "2023-11-14"}]
+    assert {g["value"]: g["count"] for g in store.group_summary(view, "Host", path=day)["groups"]} == {
+        "web01": 1, "web02": 1}
+    host = [{"column": "Host", "value": "web01"}]
+    assert {g["value"]: g["count"] for g in store.group_summary(view, "Timestamp", path=host)["groups"]} == {
+        "2023-11-14": 1, "2023-11-15": 1}
+    assert store.expand_group(view, "Host", "web01", path=day)["row_count"] == 1
+    assert store.expand_group(view, "Host", "web03")["row_count"] == 2
+
+
 def test_timeframe_filter_includes_derived_datetime_columns(store, write_csv):
     sid = _ingest(store, write_csv, EPOCH_ROWS)
     _add(store, sid, "Timestamp", "Epoch", "unix_epoch")
