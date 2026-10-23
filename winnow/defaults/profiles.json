@@ -4,7 +4,7 @@
   "profiles": [
     {
       "name": "KAPE triage",
-      "version": 2,
+      "version": 3,
       "description": "Windows host triage from KAPE/EvtxECmd output — logon movement, failed-logon spikes, RDP and explicit-credential use, log-tampering signals, and (if a RECmd batch is imported) host facts from the registry — OS version, role, domain, IPs, Sysmon and PowerShell logging posture — plus registry persistence. Seeds a starter IOC watchlist.",
       "plugins": [
         "lateral_movement"
@@ -378,7 +378,7 @@
           "render": "kv",
           "span": 1,
           "query": {
-            "sql": "SELECT 'Security: oldest' AS k, COALESCE(MIN(TS_NORMALIZE(TimeCreated)), '(no Security channel events)') AS v FROM {{evtx}} WHERE Channel = 'Security' AND TimeCreated <> '' UNION ALL SELECT 'Security: newest', COALESCE(MAX(TS_NORMALIZE(TimeCreated)), '') FROM {{evtx}} WHERE Channel = 'Security' AND TimeCreated <> '' UNION ALL SELECT 'Security: span (days)', COALESCE(ROUND(julianday(MAX(TS_NORMALIZE(TimeCreated))) - julianday(MIN(TS_NORMALIZE(TimeCreated))), 1), '') FROM {{evtx}} WHERE Channel = 'Security' AND TimeCreated <> '' UNION ALL SELECT 'Security: events', COUNT(*) FROM {{evtx}} WHERE Channel = 'Security' UNION ALL SELECT 'All channels: window', CASE WHEN COUNT(*) = 0 THEN '(no timestamps)' WHEN substr(MIN(TS_NORMALIZE(TimeCreated)), 1, 10) = substr(MAX(TS_NORMALIZE(TimeCreated)), 1, 10) THEN MIN(TS_NORMALIZE(TimeCreated)) || ' → ' || substr(MAX(TS_NORMALIZE(TimeCreated)), 12) ELSE MIN(TS_NORMALIZE(TimeCreated)) || ' → ' || MAX(TS_NORMALIZE(TimeCreated)) END FROM {{evtx}} WHERE TimeCreated <> ''"
+            "sql": "SELECT 'Security: oldest' AS k, COALESCE(MIN(TS_NORMALIZE(TimeCreated)), '(no Security channel events)') AS v FROM {{evtx}} WHERE Channel = 'Security' AND TimeCreated <> '' UNION ALL SELECT 'Security: newest', COALESCE(MAX(TS_NORMALIZE(TimeCreated)), '') FROM {{evtx}} WHERE Channel = 'Security' AND TimeCreated <> '' UNION ALL SELECT 'Security: span (days)', COALESCE(ROUND(julianday(MAX(TS_NORMALIZE(TimeCreated))) - julianday(MIN(TS_NORMALIZE(TimeCreated))), 1), '') FROM {{evtx}} WHERE Channel = 'Security' AND TimeCreated <> '' UNION ALL SELECT 'Security: events', COUNT(*) FROM {{evtx}} WHERE Channel = 'Security' UNION ALL SELECT 'All channels: window', CASE WHEN n = 0 THEN '(no timestamps)' WHEN substr(lo, 1, 10) = substr(hi, 1, 10) THEN lo || ' → ' || substr(hi, 12) ELSE lo || ' → ' || hi END FROM (SELECT COUNT(*) AS n, MIN(t) AS lo, MAX(t) AS hi FROM (SELECT TS_NORMALIZE(TimeCreated) AS t FROM {{evtx}} WHERE TimeCreated <> '' LIMIT -1))"
           },
           "drill": {
             "table": "{{evtx}}",
