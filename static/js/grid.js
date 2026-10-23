@@ -379,6 +379,15 @@ export function refetchPageOf(pos) {
   glimpseInFlight = null;
 }
 
+/* A rebuild's first paint, from the rows runBuild fetched for where the
+   grid will land: put up as the glimpse a jump paints from, on a page
+   cache installView has just cleared, so the paint that follows asks for
+   their page in the background. */
+export function seedGlimpse(start, rows) {
+  for (const r of rows) S.rowsByPos.set(r.pos, r);
+  screenGlimpse = { view: S.view, gen: S.pageGen, start, end: start + rows.length, rows };
+}
+
 /* S.rowsByPos is the only record of what the screen has: a glimpse's
    rows go when a page lands over them and that page is evicted later. */
 function glimpseIfMissing(first, last) {

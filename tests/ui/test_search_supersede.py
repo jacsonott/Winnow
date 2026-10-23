@@ -155,6 +155,53 @@ def test_typing_again_cancels_the_build_it_supersedes(page, until):
         _reset(page)
 
 
+def test_enter_lets_the_search_already_running_finish(page, until):
+    """Enter pressed after the debounce has started the build: that build
+    is the one Enter would start (same spec, the grid at the top, no row
+    to come back to), so it runs on. Superseding it cancelled the scan
+    and posted the same spec again, throwing away its time so far."""
+    hold = _HeldViews(page, until)
+    cancels = _cancel_sniffer(page)
+    _arm_recorders(page)
+    page.evaluate("() => { __winnow.S.cursor = -1; }")   # no row to come back to
+    page.click("#btnSearchToggle")
+    try:
+        page.locator("#search").fill("4624")
+        hold.wait_held()
+        page.locator("#search").press("Enter")
+        hold.release()
+        page.wait_for_function("() => __winnow.S.view && __winnow.S.view.row_count === 50 && __winnow.busyCount === 0")
+        assert len(hold.seen) == 1
+        assert cancels == []
+        assert page.evaluate("() => window.__installed") == 1
+    finally:
+        hold.close()
+        _reset(page)
+
+
+def test_enter_still_starts_over_when_it_would_land_elsewhere(page, until):
+    """With a cursor row, Enter's build brings that row back into view and
+    the debounced one doesn't: Enter supersedes it as before."""
+    hold = _HeldViews(page, until)
+    cancels = _cancel_sniffer(page)
+    page.locator("#rows .row").nth(3).click()
+    assert page.evaluate("() => __winnow.S.cursor") >= 0
+    page.click("#btnSearchToggle")
+    try:
+        page.locator("#search").fill("4624")
+        hold.wait_held()
+        first = hold.seen[0]["op_token"]
+        page.locator("#search").press("Enter")
+        page.wait_for_function("() => __winnow.S.view && __winnow.S.view.row_count === 50 && __winnow.busyCount === 0")
+        until(page, lambda: cancels, "no /api/cancel_op was sent for the superseded build")
+        assert [c["token"] for c in cancels] == [first]
+        assert len(hold.seen) == 2
+    finally:
+        hold.close()
+        page.evaluate("() => { __winnow.S.cursor = -1; }")
+        _reset(page)
+
+
 def test_the_chip_cancel_still_says_so_and_keeps_the_old_count(page, until):
     """The analyst's own cancel is not a supersede: it toasts, and the
     count from before the build comes back — the old rows are still the

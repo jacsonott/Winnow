@@ -237,6 +237,15 @@ see [docs/notes/README.md](README.md) for the whole set.
   that holds a page back to keep rows pending has to hold every request
   reaching into those rows, glimpses included
   (test_tag_picks_across_pages.py does).
+- **A rebuild paints from a glimpse too.** runBuild fetches the rows
+  where the grid will land before it swaps anything (so the old rows stay
+  up until the new ones replace them), and installView puts them up with
+  `seedGlimpse`; the paint then asks for their page in the background.
+  That seed used to be the whole page: on the 693k-row EvtxECmd table a
+  page is 7.8 MB, 110–140 ms to serve and about as long to parse, which
+  was most of what a fast search waited on once its build was done. A
+  test that reads `S.pages` right after a rebuild has to wait for the
+  page now.
 - **The spacer that gives the grid its scroll height is capped**
   (`MAX_SPACER_PX`, 16M px) and above that cap `scrollTop` is no longer a
   row offset. A DOM element can't be arbitrarily tall — Blink clamps at

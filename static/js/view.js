@@ -2,11 +2,11 @@
 
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { renderHead } from './columns.js';
-import { $, OVERSCAN, PAGE, ROW_H, api, debounce, nameMap, post, setBusy, toast, toastAction } from './core.js';
+import { $, OVERSCAN, ROW_H, api, debounce, nameMap, post, setBusy, toast, toastAction } from './core.js';
 import { syncRowOpenHint } from './detail.js';
 import { currentSpec, renderAdvancedChips, updateSearchHint } from './filters.js';
 import { recordFilterState } from './filterundo.js';
-import { clearPageCache, headH, rScroll, render, rowAt, syncSpacer, vScroll } from './grid.js';
+import { clearPageCache, headH, rScroll, render, rowAt, seedGlimpse, syncSpacer, vScroll } from './grid.js';
 import { drawRail, regroupAll } from './grouping.js';
 import { histogramFollowBuild, histogramViewLanded } from './histogram.js';
 import { armOpCancel, createNotice, followFtsBuild, opCancelCurrent, opToken } from './jobs.js';
@@ -51,7 +51,7 @@ export function dropPendingSelection() { pendingKeys = null; }
    up, and then even reader-pool page fetches would queue in the browser —
    the one way the grid itself can freeze. (Reasoning from the connection
    budget; nobody measured it.) */
-let inflight = null;   // { token, controller, seq, sourceId }
+let inflight = null;   // { token, controller, seq, sourceId, key, scroll, search }
 
 /* Cancels the build in flight, if any. Returns whether its cancel chip
    was already up: the build superseding it arms its own at once then
@@ -97,6 +97,21 @@ export function syncNoRows() {
    sense: it evicts nothing, so the rows on screen stay valid without it. */
 export function rebuildInFlight() {
   return inflight !== null && inflight.sourceId === S.sourceId;
+}
+
+/* Whether the search box's Enter would only start over the build in
+   flight. The debounce has usually fired by the time Enter is pressed
+   (220 ms after the last key), and Enter superseding it cancelled the
+   scan and ran the same one again from the start: the time between the
+   two, thrown away on every search ended with Enter. It is the same
+   build when it is a search-box build of the same spec for the same
+   table that will land where Enter's would: at the top (Enter doesn't
+   keep the scroll; this one started there) with no row to bring back
+   (Enter's anchor is the cursor, the picks or the cell range; the
+   debounced build's is at most the first of those). */
+export function sameSearchInFlight() {
+  return !!inflight && inflight.search && inflight.sourceId === S.sourceId
+    && inflight.key === specKey(currentSpec()) && inflight.scroll === 0 && !cursorRowAnchor();
 }
 
 /* What #viewStats and the search box say while a build runs. The count
@@ -548,7 +563,7 @@ export function cancelPendingView(sourceId = S.sourceId, only = null) {
    sort, tags and timeframe are put back to what the search was run
    with, the chrome repainted from them, and the held view adopted as
    the table's live one through the same landing every rebuild takes —
-   so the cursor row, the picks and the seeded pages all resolve against
+   so the cursor row, the picks and the seeded rows all resolve against
    the adopted view. */
 export async function applyPendingView(sourceId = S.sourceId) {
   const rec = S.pendingViews.get(sourceId);
@@ -647,7 +662,7 @@ async function runBuild({ keepScroll = true, keepRow = true, detachAfterMs = nul
   // that is already aborted.
   const chipUp = cancelInflight();
   const controller = new AbortController();
-  inflight = { token: spec.op_token, controller, seq, sourceId: forSourceId };
+  inflight = { token: spec.op_token, controller, seq, sourceId: forSourceId, key: cacheKey, scroll, search: detach && !fetchView };
   syncNoRows();   // this table is building; the last view's empty state is not the answer
   // The chip cancels a BUILD — cancel_op interrupts the statement its
   // token is registered under. An adopt registers nothing, and its wait,
@@ -687,7 +702,7 @@ async function runBuild({ keepScroll = true, keepRow = true, detachAfterMs = nul
   if (seq !== rebuildSeq) { if (disarmCancel) disarmCancel(); return; }
   pendingKeys = keys ? { sourceId: forSourceId, keys } : null;
   let v;
-  let seeded = [];
+  let seeded = null;
   let pos = null;
   const t0 = performance.now();
   setBusy(true);
@@ -767,7 +782,7 @@ async function runBuild({ keepScroll = true, keepRow = true, detachAfterMs = nul
     }
     // Where the anchored row landed in the new view. Asked BEFORE the seed
     // fetch below, so that when the viewport is going to move onto that row
-    // the pages seeded are the ones the grid will show — landing on page 0
+    // the rows seeded are the ones the grid will show — landing on page 0
     // and recentring afterwards painted the target rows as placeholders for
     // a round trip, the exact flash the seed exists to remove. With
     // keepScroll the viewport doesn't move and the answer only re-points
@@ -785,34 +800,36 @@ async function runBuild({ keepScroll = true, keepRow = true, detachAfterMs = nul
       // Math.min at the seed and rScroll at the paint clamp it to the view.
       if (pos != null) scroll = Math.max(0, pos * ROW_H + ROW_H / 2 + headH() / 2 - $('body').clientHeight / 2);
     }
-    // Fetch the page(s) covering where the grid will land BEFORE swapping
-    // any state. Swapping first meant clearPageCache() + render() painted
-    // every visible row as a '·' placeholder for the round-trip of the
-    // first page fetch — the whole table visibly vanished on every filter
+    // Fetch the rows where the grid will land BEFORE swapping any state.
+    // Swapping first meant clearPageCache() + render() painted every
+    // visible row as a '·' placeholder for the round-trip of the first
+    // page fetch — the whole table visibly vanished on every filter
     // keystroke and sort click, which reads as sluggishness even when the
     // rebuild itself is fast. With the seed fetched up front, the old rows
     // stay on screen until the new view's rows replace them in one paint.
+    //
+    // Only the rows on screen, as a glimpse (grid.js seedGlimpse): the
+    // paint asks for their page once it is up, the way a jump does. The
+    // seed used to be the whole page, and on a wide table that was most
+    // of what a fast search waited on after its build: 5,000 rows of a
+    // 27-column EvtxECmd table are 7.8 MB, 110–140 ms to serve and as
+    // long again to parse, against ~7 ms for the screenful.
+    //
     // A seed failure is not an error: we fall back to exactly the old
-    // pending-placeholder behaviour, and ensurePage recovers.
+    // pending-placeholder behaviour, and ensurePage recovers. Nor is an
+    // in-range seed that came back empty — the desync ensurePage's guard
+    // is for; left unseeded, the paint's own page fetch meets that guard.
     if (!S.groupByCols.length && v.row_count) {
       const body = $('body');
       const target = Math.min(scroll, Math.max(0, headH() + v.row_count * ROW_H - body.clientHeight));
       const firstRow = Math.max(0, Math.floor(target / ROW_H) - OVERSCAN);
       const lastRow = Math.min(v.row_count - 1,
         firstRow + Math.ceil(body.clientHeight / ROW_H) + OVERSCAN * 2);
-      const pageIdxs = [...new Set([Math.floor(firstRow / PAGE), Math.floor(lastRow / PAGE)])];
       try {
-        seeded = await Promise.all(pageIdxs.map(async (idx) => {
-          const data = await api(`/api/rows?view_id=${v.view_id}&start=${idx * PAGE}&count=${PAGE}`, { signal: controller.signal });
-          // An in-range page that came back empty is not a page — seeding it
-          // would cache the empty array, and ensurePage short-circuits on
-          // S.pages.has(), so nothing would ever refetch it. Same latch the
-          // guard in ensurePage exists to prevent, one layer up: the seed
-          // writes into the cache directly and so bypasses that guard.
-          return (!data.rows.length && idx * PAGE < v.row_count) ? null : [idx, data.rows];
-        }));
-        seeded = seeded.filter(Boolean);
-      } catch { seeded = []; }
+        const data = await api(`/api/rows?view_id=${v.view_id}&start=${firstRow}&count=${lastRow - firstRow + 1}`,
+          { signal: controller.signal });
+        if (data.rows.length) seeded = { start: firstRow, rows: data.rows };
+      } catch { seeded = null; }
     }
     if (keepScroll) pos = await posP;
   } finally {
@@ -837,9 +854,9 @@ async function runBuild({ keepScroll = true, keepRow = true, detachAfterMs = nul
    `winnow:viewchange` fires from here and nowhere else in a rebuild, so
    a search that is still running in the background has not "changed the
    view" until it is applied. `ctx` is what runBuild resolved before the
-   swap: the seq/table guards, the seeded pages, the picks by id, the
+   swap: the seq/table guards, the seeded rows, the picks by id, the
    cursor row's new position and the scroll to land at. */
-export async function installView(v, { seq, forSourceId, cacheKey, seeded = [], keys = null, pos = null, scroll = 0,
+export async function installView(v, { seq, forSourceId, cacheKey, seeded = null, keys = null, pos = null, scroll = 0,
                                       keepRow = true, keepScroll = true, anchored = false, spec }) {
   // A newer rebuild started while this one was in flight — its view has
   // already evicted ours server-side (or this one's cancel landed first);
@@ -857,10 +874,7 @@ export async function installView(v, { seq, forSourceId, cacheKey, seeded = [], 
   histogramViewLanded();
   S.viewCache.set(S.sourceId, { key: cacheKey, view_id: v.view_id, row_count: v.row_count, elapsed_ms: v.elapsed_ms });
   clearPageCache();
-  for (const [idx, rows] of seeded) {
-    S.pages.set(idx, rows);
-    for (const r of rows) S.rowsByPos.set(r.pos, r);
-  }
+  if (seeded) seedGlimpse(seeded.start, seeded.rows);
   // The count goes in before the selection remap below awaits. The
   // indicator, stopped in the finally, left its last "Searching… 3.2 s"
   // frozen in #viewStats, and a rebuild that started during that await
