@@ -84,6 +84,29 @@ see [docs/notes/README.md](README.md) for the whole set.
   half-open `[start, end)` compared with the line's normalised timestamp,
   which leaves lines with no time out while it is set.
   `tests/test_timeline_overview.py`.
+  **The rows around a finding** (`context`, a half-open `[start, end)`)
+  add a branch per table with a timestamp, tagged or not, selecting its
+  rows in the window that carry none of the tags switched on, with
+  `ctx = 1` (`tag1` NULL; the overview splits them as "ctx", and
+  `per_source` counts findings only, `context_rows` the rest). The
+  exact test is the normaliser on every row, which is a full scan — on
+  a 416k-row EvtxECmd table it added 0.44 s to every build, and it
+  grows with the table, not the window. So when every value of
+  the column starts with a date (`_column_is_date_led`: one `NOT GLOB`
+  probe, cached per `(source_id, column)` for the Store's life, which is
+  safe because source tables are never mutated), the branch first
+  narrows on the RAW text by day range, `col >= first_day COLLATE
+  NOCASE AND col < day_after COLLATE NOCASE`, which the import's
+  COLLATE NOCASE sort index on the first datetime column serves as a
+  SEARCH; the exact test then runs on those rows only. A window ending
+  at midnight ends the day before (or the prefilter would read a whole
+  extra day). A column that is not date-led (US dates, epochs, a derived
+  column) gets the exact test alone. `tests/test_timeline_context.py`
+  holds both paths to the same rows and the plan to the SEARCH.
+  `timeline_row` (`GET /api/timeline_row`) is a line's row in full for
+  the details pane: every column (derived included), its tags (all of
+  them, not just those switched on) and note; a merge id or a gone
+  table is a KeyError (404) and a gone rid `RecordGone` (404).
   **The body join is capped at what SQLite's expression depth allows**
   (`_fit_body_cols`, 495 columns at the default limit of 1000). The flat
   `a || ' | ' || b || ...` chain is two tree levels per column, so a

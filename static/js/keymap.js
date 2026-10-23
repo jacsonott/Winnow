@@ -23,6 +23,7 @@ import { openTablesManager } from './tables.js';
 import { applyTag, applyTagToView, undoLastTagChange } from './tags.js';
 import { doJumpTs, openJumpTsModal, openTableMenu, openTimeRangeModal, toggleTimeRange } from './timeframe.js';
 import { clearTimelineSelection, timelineKey } from './timeline.js';
+import { tagTimelineLine } from './timelinepane.js';
 
 /* ------------------------------------------------------ keyboard shortcuts */
 
@@ -593,7 +594,7 @@ document.addEventListener('keydown', (e) => {
     // closeModal, not a bare hide: whatever armed itself for the close
     // (a return-to-Settings hook, the keybinding capture) has to hear it.
     if (!$('modal').hidden) { closeModal(); return; }
-    if (typing) { e.target.blur(); $('body').focus(); return; }
+    if (typing) { e.target.blur(); (S.activeTab === 'timeline' ? $('timelineBody') : $('body')).focus(); return; }
     if (S.activeTab === 'sql' && sqlClearSelection()) return;
     if (S.activeTab === 'timeline' && clearTimelineSelection()) return;
     // Escape lets go of everything picked — rows and the cell range — and
@@ -763,6 +764,12 @@ document.addEventListener('keydown', (e) => {
   if (/^[1-9]$/.test(digit) && S.activeTab === 'sql' && sqlSelectionCount()) {
     const t = S.tags.find((x) => x.hotkey === digit);
     if (t) { e.preventDefault(); sqlTagHotkey(t, () => applySqlTabToEditor()); }
+  }
+  // And the Timeline's selected line, the row its detail pane shows. One
+  // line, so a key toggles it, as the per-row key does in the grid.
+  if (/^[1-9]$/.test(digit) && S.activeTab === 'timeline' && S.timeline.sel && !e.shiftKey) {
+    const t = S.tags.find((x) => x.hotkey === digit);
+    if (t) { e.preventDefault(); tagTimelineLine(t); }
   }
 });
 }

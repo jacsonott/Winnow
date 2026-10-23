@@ -4,7 +4,7 @@ Three pages work across the whole case rather than one table. The **Timeline** r
 
 ## The Timeline
 
-![The Timeline: the overview strip over tagged rows from six tables in one stream, one line selected](../screenshots/timeline.png)
+![The Timeline: the overview strip over tagged rows from six tables in one stream, one line selected and shown in full in the details pane, with the untagged rows from five minutes either side of it hatched between the findings](../screenshots/timeline.png)
 
 Open the **Timeline** tab (top right, beside SQL and Notes). It lists every tagged row in the case, from every table, oldest first; tag a row anywhere and it is here. The header says how many tagged rows there are. It is rebuilt each time you open the tab, so it always reflects the tags as they are now.
 
@@ -15,7 +15,7 @@ Each line has four columns:
 - **Type** — a pill naming the kind of table, in a colour of its own for each table: the type you set (see [Choosing the timestamp, type and body](#choosing-the-timestamp-type-and-body)), else the header set's nickname without the tool's name (**Event logs** for EvtxECmd output), else the table's name. When two tables are of the same kind, what tells their names apart follows the pill — `WKSTN-014` and `SRV-DC01` for `WKSTN-014_EvtxECmd_Output.csv` and `SRV-DC01_EvtxECmd_Output.csv`. Hover the pill for the file name.
 - **Body** — a one-line summary of the row when Winnow knows the artefact, otherwise the whole row with its columns joined by ` | `. Hover it for the whole row. A table with more than 495 columns shows only its first 495 in the Body, and the Timeline header says which table; pick body columns under **Configure tables…** to choose which ones.
 
-**Click a line** to select it. The grid's keys move the selection — `↓`/`j` and `↑`/`k` a line, `Page Down`/`Page Up` a screen, `g` and `G` the first and last line — and a key you rebind in Settings moves the Timeline too. `Esc` lets go of it.
+**Click a line** to select it and read it in the [details pane](#the-details-pane) beside the list. The grid's keys move the selection — `↓`/`j` and `↑`/`k` a line, `Page Down`/`Page Up` a screen, `g` and `G` the first and last line — and a key you rebind in Settings moves the Timeline too. `Esc` lets go of it.
 
 **Double-click a line**, press `Enter` on the selected one, or click its `⤢` to open its table at that row on the grid page. A closed table is opened for you and gets its tab back. When you come back to the Timeline it opens on the line you had selected, even though it is rebuilt; if that line has left the Timeline (its tag was taken off, say), it opens where the line was in time.
 
@@ -31,6 +31,31 @@ The **Overview** strip above the list shows the Timeline's lines over time: how 
 - **Drag across bars** to show only that stretch of time. The Timeline is rebuilt for it, the strip redraws with finer bars, and a chip names the stretch (**Fri 13 Mar 01:30 → 06:15**); click its **✕** for the whole Timeline again. Lines with no timestamp are left out while a stretch is set. Otherwise they are on no bar, and the strip counts them on the right (**3 with no time**).
 
 Tables you switch off and the stretch you drag stay while the case is open; opening another case starts with the whole Timeline again.
+
+### The details pane
+
+The pane to the right of the list shows the selected line in full, so you can read a finding without leaving the Timeline. **Details** in the header hides or shows it, and Winnow remembers which; so does the **✕** in its corner. Under a narrow window it sits below the list instead.
+
+From the top down:
+
+- **The line**: its Type pill, its time in large type with the day and year beside it, and the summary.
+- **Tags**: a chip for each tag in the case, pressed when the row carries it. Click a chip, or press the tag's key (`1`–`9`), to put that tag on the row or take it off. The Timeline is rebuilt straight away, so a row you untag leaves it unless another of its tags is still switched on. `Ctrl+Z` undoes it, as it does on the grid.
+- **Note**: the row's [note](Tagging-and-notes.md#row-notes), which you can edit here (*Why does this row matter?*). It saves as you type (**Saving…**, then **Saved**), and the line's `✎` follows.
+- **Open in table ↦**: opens the row in its table on the grid page, the same as double-clicking the line.
+- **What else happened then**: see [below](#what-else-happened-then).
+- **Every column** of the row, with its table's name and line number above them. JSON and XML values are laid out as in the grid's detail pane, and the `⧉` beside a value copies it. Values are shown as the table stores them, without the display formats you set for the open table.
+
+### What else happened then
+
+A tagged row is rarely the whole story. The rows around it in time, in every table, usually hold the rest, and nobody has tagged them yet. The buttons under **What else happened then** add them to the Timeline: **± 1 min**, **± 5 min**, **± 15 min** or **± 1 h** either side of the selected line.
+
+- The untagged rows in that window, from every table in the case, join the Timeline in time order between the findings. They are hatched and faded, with `○` in the gutter, and the pane calls one an **Untagged row** when you select it.
+- A chip in the header names the window and counts what it added (**± 5 min around 02:00:03 · 28 untagged**). Its **✕**, or pressing the same button again, takes them off. The count of tagged rows beside it does not include them.
+- The overview counts them as **Untagged**, in grey on top of each bar.
+- Tag one and it becomes a finding: it stays on the Timeline when the window is closed.
+- Tables you switch off in the overview's **Tables** view add nothing, and a stretch you drag still applies. A row with only a tag you have switched off counts as untagged here; the pane calls it **Around a finding**.
+
+The window lasts until you close it or open another case. It goes by each table's timestamp column as set under **Configure tables…**, the same one the Timeline sorts by; a table with no timestamp column adds nothing.
 
 ### Narrowing by tag
 

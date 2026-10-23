@@ -9,6 +9,7 @@ import { loadSources, openSource, recenterOnRow, sourceLabel } from './sources.j
 import { showGridTab } from './sql.js';
 import { S } from './state.js';
 import { loadTimelineOverview, renderTimelineOverview, timelineOverviewFollow } from './timelineoverview.js';
+import { refreshTimelinePane, renderTimelineContextChip, syncTimelinePane } from './timelinepane.js';
 import { confirmDialog, modal, oneAtATime } from './ui.js';
 
 /* ---------------------------------------------------------- unified timeline */
@@ -105,6 +106,7 @@ export async function buildTimeline() {
     // "no tag filter," which would mean the opposite (every tagged row).
     S.timeline.view = { view_id: null, row_count: 0 };
     renderTimelineRows();
+    renderTimelineContextChip();
     loadTimelineOverview();
     return;
   }
@@ -115,10 +117,13 @@ export async function buildTimeline() {
     const disarmCancel = armOpCancel(token);
     try {
       // The overview strip's two narrowings: a stretch of time, and the
-      // tables switched off (timelineoverview.js).
+      // tables switched off (timelineoverview.js). And the one widening:
+      // the untagged rows around a finding (timelinepane.js).
+      const ctx = S.timeline.context;
       v = await post('/api/timeline', {
         tag_ids: tagIds, op_token: token, ts_range: S.timeline.range,
         exclude_sources: [...S.timeline.sourcesOff],
+        context: ctx ? [ctx.start, ctx.end] : null,
       });
     } finally {
       disarmCancel();
@@ -133,7 +138,10 @@ export async function buildTimeline() {
   if (reqId !== S.timeline.reqId) return; // a newer build superseded this one
   S.timeline.view = v;
   $('timelineSpacerY').style.height = spacerPx(v.row_count) + 'px';
-  $('timelineStats').innerHTML = `<b>${v.row_count.toLocaleString()}</b> tagged row${v.row_count === 1 ? '' : 's'}`;
+  // The untagged rows around a finding are said by their own chip
+  // (renderTimelineContextChip), so the count here stays the findings.
+  const findings = v.row_count - (v.context_rows || 0);
+  $('timelineStats').innerHTML = `<b>${findings.toLocaleString()}</b> tagged row${findings === 1 ? '' : 's'}`;
   // Tables switched off on the overview strip hide in its Tables view, so
   // the count says it is short of them wherever the strip is.
   const tagged = S.sources.filter((s) => s.tagged_row_count && !s.is_merge);
@@ -156,9 +164,11 @@ export async function buildTimeline() {
       + '\nPick body columns in Configure tables… to choose which ones.';
     $('timelineStats').append(note);
   }
+  renderTimelineContextChip();
   await keepTimelinePlace(v, reqId);
   if (reqId !== S.timeline.reqId) return;
   renderTimelineRows();
+  refreshTimelinePane();
   loadTimelineOverview();
 }
 
@@ -239,7 +249,7 @@ export function renderTimelineRows() {
   if (!total) empty.textContent = emptyReason();
   const body = $('timelineBody');
   const rowsEl = $('timelineRows');
-  if (!total) { rowsEl.replaceChildren(); return; }
+  if (!total) { rowsEl.replaceChildren(); syncTimelinePane(); return; }
 
   // head = 0: the timeline's header sits outside #timelineBody, unlike the
   // grid's sticky one.
@@ -266,6 +276,7 @@ export function renderTimelineRows() {
   rowsEl.replaceChildren(frag);
   syncTimelineDay(timelineRowAt(Math.min(total - 1, Math.floor(virt / ROW_H))));
   timelineOverviewFollow();
+  syncTimelinePane();
 }
 
 /* One Timeline line — gutter, timestamp, type, body — or the empty
@@ -277,13 +288,22 @@ export function renderTimelineRows() {
    The gutter is the grid's (.gutter in grid.js): a stripe per tag the
    row carries, in the tag's colour, then ✎ when it has a note, then ⤢ to
    open it in its table. It was one dot per tag beside the type badge,
-   which put the tags in the column that says where a row came from. */
+   which put the tags in the column that says where a row came from.
+
+   A row around a finding (r.ctx: untagged, on the Timeline because of
+   the window timelinepane.js asked for) is hatched, with ○ where its tag
+   stripes would be. */
 export function timelineRowNode(r, tagColor, fillBody, { open = false } = {}) {
-  const row = el('div', 'timeline-row' + (r ? '' : ' pending'));
+  const row = el('div', 'timeline-row' + (r ? (r.ctx ? ' ctx' : '') : ' pending'));
   const gutter = el('div', 'tl-col-gutter');
   const tsCell = el('div', 'tl-col-ts', r ? (r.ts || '—') : '');
   const typeCell = el('div', 'tl-col-type');
   if (r) {
+    if (r.ctx) {
+      const mark = el('span', 'tl-ctx-mark', '○');
+      mark.title = 'On the Timeline because it is near a finding in time, not because of its tags';
+      gutter.append(mark);
+    }
     for (const tid of r.tags) {
       const stripe = el('span', 'stripe');
       stripe.style.background = tagColor[tid] || '#888';
@@ -382,7 +402,7 @@ export function timelineKinds() {
    then the host when it takes one to tell the table apart. The pill
    keeps .type-badge and the table's name as its title, as the badge it
    replaces did. */
-function typeParts(r) {
+export function typeParts(r) {
   const k = timelineKinds().get(r.source_id);
   // With no Type set, the server's type_label is the table's own name,
   // which the kind says better.
@@ -447,6 +467,7 @@ export function selectTimelineLine(pos) {
   // away never reaches the list's dblclick listener.
   for (const n of $('timelineRows').children) n.classList.toggle('selected', +n.dataset.pos === pos);
   timelineOverviewFollow();
+  syncTimelinePane();
 }
 
 export function openTimelineSelection() {
