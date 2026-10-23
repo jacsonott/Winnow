@@ -237,6 +237,7 @@ def test_each_row_is_parsed_once(write_csv, tmp_path, monkeypatch):
     monkeypatch.setattr(store_mod, "_ts_normalize", counting)
     rows = [["When", "Host"]] + [[f"3/14/2026 {h}:00:00 AM", "A"] for h in range(1, 13)]
     s = store_mod.Store(str(tmp_path / "once.db"))   # its connections register the counting one
+    s.HISTOGRAM_ANSWERS_KEPT = 0   # a sort of the whole table is otherwise answered with no pass at all
     try:
         sid = s.ingest_csv(write_csv(rows, "us.csv"), name="us", build_fts=False)["id"]
         other = s.ingest_csv(write_csv(rows, "us2.csv"), name="us2", build_fts=False)["id"]

@@ -16,6 +16,7 @@ from __future__ import annotations
 import calendar
 import codecs
 import contextlib
+import copy
 import csv
 import datetime
 import errno
@@ -2820,6 +2821,12 @@ class Store:
         # queue behind the writer.
         self._histogram_widths: dict[tuple, int] = {}
         self._histogram_widths_lock = threading.Lock()
+        # time_histogram's answers by the ROWS a view holds rather than by
+        # view id, so a sort or a filter cleared back to the whole table
+        # (a new view, the same rows) is answered without a pass. Exact,
+        # unlike the width hint: see _histogram_rows_key for what may key
+        # one. Under _histogram_widths_lock, newest last.
+        self._histogram_results: dict[tuple, dict] = {}
         self._undo_seq = 0
         # Tag-change undo history. Entries are newest-last; each owns a
         # v.undo_<n> delta table listing the rows the op *actually*
@@ -10037,6 +10044,28 @@ class Store:
         with self._histogram_widths_lock:
             hint = self._histogram_widths.get(width_key)
         with self._reader() as ro, self._dropped_view_is_expired(), self._interruptible(op_token, ro):
+            # The same rows asked the same question have the same answer: a
+            # sort, or a filter cleared back to the whole table, is a new
+            # view of rows already counted, and was a whole pass again
+            # (2.2 s on 2.1M rows, each time). Not for a derived column,
+            # whose values can still be filling in; the tag split also
+            # keys on the tag generation, read before the pass so a write
+            # that lands during it can only make the answer newer than its
+            # key.
+            answer_key = None
+            if not is_derived and not (by_values and self._is_derived(src, split_column)):
+                rows_key = self._histogram_rows_key(ro, view_id, handle, src, members, direct)
+                if rows_key is not None:
+                    answer_key = (rows_key, column, max_buckets, stack,
+                                  split_column if by_values else None,
+                                  json.dumps(split_values) if by_values else None,
+                                  self._state_generation_on(ro) if stack == "tags" else None)
+                    with self._histogram_widths_lock:
+                        cached = self._histogram_results.pop(answer_key, None)
+                        if cached is not None:
+                            self._histogram_results[answer_key] = cached
+                    if cached is not None:
+                        return copy.deepcopy(cached)
             # Tags over a whole table where few of its rows carry one: the
             # bars without the split, then the tagged rows by themselves,
             # reached from row_tags, and untagged is what each bar has left.
@@ -10160,7 +10189,53 @@ class Store:
             if tags_apart:
                 secs, tags, counts = self._histogram_untagged_rest(per_bucket, apart)
             out["stack"] = self._histogram_tag_stack(secs, tags, counts, bucket)
+        if answer_key is not None:
+            with self._histogram_widths_lock:
+                self._histogram_results[answer_key] = copy.deepcopy(out)
+                while len(self._histogram_results) > self.HISTOGRAM_ANSWERS_KEPT:
+                    del self._histogram_results[next(iter(self._histogram_results))]
         return out
+
+    # How many time_histogram answers _histogram_results keeps. One is a
+    # few KB (at most 160 bars, nine segments each), and the strip asks a
+    # handful per view: the plain chart, Tags, a Value or two.
+    HISTOGRAM_ANSWERS_KEPT = 32
+
+    def _histogram_rows_key(self, ro: sqlite3.Connection, view_id: str, handle: dict, src: dict,
+                            members: list[dict], direct: bool) -> tuple | None:
+        """Which rows a view holds, as a key two views holding the same
+        rows share: what _histogram_results files time_histogram's answers
+        under, so a new view of rows already counted needs no pass.
+
+        A view over every row of its source (`direct`) is that source's
+        members at their row count. Nothing else can change which rows
+        that is: a table's rows never change once imported (invariant #1), ids
+        are never reused (AUTOINCREMENT), and a merge edited to other
+        members names other ids. A root view holding some of the rows is
+        fingerprinted from v.view_N instead — its row count and two sums of
+        a hash of (source_id, rid), a 64-bit chance of two row sets
+        agreeing by accident — once, since a built view's rows never
+        change; 0.23 s on 2.1M rows, a tenth of the pass it can save. A
+        group sub-view or the timeline is not cached (None)."""
+        if direct:
+            return ("all", handle["source_id"], tuple(m["source_id"] for m in members), src["row_count"])
+        if handle.get("kind") != "root":
+            return None
+        key = handle.get("rows_key")
+        if key is None:
+            n, a, b = ro.execute(
+                "SELECT COUNT(*), SUM((rid * 2147483629 + source_id * 1500450271) % 4294967291), "
+                f"SUM((rid * 1500450271 + source_id * 2147483629) % 4294967279) FROM v.{q(view_id)}"
+            ).fetchone()
+            key = handle["rows_key"] = ("some", handle["source_id"], n, a, b)
+        return key
+
+    def _state_generation_on(self, ro: sqlite3.Connection) -> str:
+        """STATE_GENERATION_KEY as `ro` sees it: the counter every tag
+        write bumps (_bump_state_generation)."""
+        row = ro.execute("SELECT value FROM case_settings WHERE key=?",
+                         (self.STATE_GENERATION_KEY,)).fetchone()
+        return row["value"] if row else "0"
 
     def _histogram_parsed_in_sql(self, ro: sqlite3.Connection, src: dict, members: list[dict],
                                  column: str) -> bool:
