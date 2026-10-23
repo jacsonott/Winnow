@@ -1213,6 +1213,19 @@ see [docs/notes/README.md](README.md) for the whole set.
   plays. The stamp also means the CSS kill switch for animations is on
   from the first paint. If "/" ever goes back to serving the file as is,
   `tests/test_api_routes.py` fails before the splash quietly regresses.
+- **Settings → Updates has a develop sync nobody is told about.**
+  Alt+right-click on Check for updates (or Install update, when it is
+  showing) is `python update.py --dev` without a terminal:
+  `/api/updates/check` and `/api/updates/apply` with `dev: true`, the
+  develop tip named in a confirm, then the same backup, protected paths
+  and `develop@<sha>` manifest record as the CLI. It is unadvertised on
+  purpose — no `title`, no hint in the panel, nothing in docs/wiki/ — so
+  that an analyst mid-case doesn't wander onto unreleased code; beta
+  testers are told. Don't give it a tooltip or a menu entry "for
+  discoverability". A plain right-click is left to the browser and a left
+  click is still the release path; `tests/ui/test_updates_panel.py`
+  answers every `/api/updates/*` call in the browser, because the real
+  dev apply would overwrite the checkout the suite runs from.
 - **`S.keymap` must hold its own key arrays, not `DEFAULT_KEYMAP`'s.**
   The settings UI's "+ key"/"✕" handlers splice and push those arrays in
   place, so the old shallow `{...DEFAULT_KEYMAP}` handed them the

@@ -1117,10 +1117,20 @@ def _trigger_shutdown() -> None:
     threading.Timer(0.3, lambda: signal.raise_signal(signal.SIGINT)).start()
 
 
+class UpdateCheck(BaseModel):
+    """`dev` asks for the tip of the develop branch rather than the latest
+    release — `update.py --dev --check`, reached from Settings → Updates
+    only by an Alt+right-click nothing on screen mentions (buildUpdatesPanel
+    in settings.js says why). No body is the release check."""
+    dev: bool = False
+
+
 class UpdateApply(BaseModel):
     """Applying is a separate, explicit POST from checking — a check must
-    never be able to install anything as a side effect."""
+    never be able to install anything as a side effect. `dev` syncs to
+    the develop tip instead, as UpdateCheck's does."""
     confirm: bool = False
+    dev: bool = False
 
 
 def _presence_open(page: str = "") -> None:
@@ -1404,13 +1414,18 @@ def api_version():
 
 
 @app.post("/api/updates/check")
-def api_updates_check():
+def api_updates_check(body: UpdateCheck | None = None):
     """Ask GitHub whether there's a newer release. ONLY ever runs because
     the analyst clicked Check — Winnow has no background poll and nothing
     at startup. The box may be airgapped, and a forensic tool that phones
     home unasked is its own problem; the error path says how to update
-    offline instead."""
+    offline instead.
+
+    With `dev`, the develop tip instead (updater.check_branch): a branch
+    has no version to compare, so that answer has no `available`."""
     try:
+        if body and body.dev:
+            return updater.check_branch(updater.DEV_BRANCH)
         return updater.check_for_update(current=version.VERSION)
     except updater.UpdateError as e:
         raise HTTPException(400, str(e))
@@ -1426,6 +1441,15 @@ def api_updates_apply(body: UpdateApply):
     if not body.confirm:
         raise HTTPException(400, "Refusing to update without confirm=true")
     try:
+        if body.dev:
+            # `update.py --dev -y`: whatever develop's tip is now, recorded
+            # in the manifest as develop@<sha> so /api/version can say
+            # which build this is — version.py on develop doesn't.
+            tip = updater.check_branch(updater.DEV_BRANCH)
+            archive = updater.download(
+                tip["url"], Path(tempfile.gettempdir()) / f"winnow-{tip['branch']}-{tip['short']}.zip")
+            res = updater.apply_update(archive, updater.HERE, source=f"{tip['branch']}@{tip['sha']}")
+            return {**res, "branch": tip["branch"], "short": tip["short"], "restart_required": True}
         info = updater.check_for_update(current=version.VERSION)
         if not info["available"]:
             raise HTTPException(400, f"Already on the latest release ({info['latest']})")
