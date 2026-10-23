@@ -5483,6 +5483,8 @@ class TimelineBuild(BaseModel):
     ts_range: list[str] | None = None        # [start, end), the overview strip's drag
     exclude_sources: list[int] = []          # tables switched off on the strip
     context: list[str] | None = None         # [start, end) of the rows around a finding
+    fold: bool = False                       # a run of repeats on one line
+    unfold: list[list[int]] = []             # runs left open, by their first [source_id, rid]
 
 
 @app.post("/api/timeline")
@@ -5491,7 +5493,7 @@ def api_timeline_build(body: TimelineBuild):
         return store().build_timeline(_resolve_timeline_configs(), body.tag_ids or None,
                                       op_token=body.op_token, ts_range=body.ts_range,
                                       exclude_sources=body.exclude_sources or None,
-                                      context=body.context)
+                                      context=body.context, fold=body.fold, unfold=body.unfold)
     except ValueError as e:
         raise HTTPException(400, str(e))
 

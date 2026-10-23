@@ -191,6 +191,12 @@ function drawPane(err = null) {
       `On the Timeline because it is within ${reach(c.minutes)} of ${c.around.slice(11, 19)}, `
       + 'not because of a tag that is switched on. Tag it to keep it here.'));
   }
+  if (line && line.n > 1) {
+    const span = line.ts && line.ts_last ? `, ${line.ts.slice(11, 19)} to ${line.ts_last.slice(11, 19)}` : '';
+    body.append(el('p', 'tl-pane-hint',
+      `The first of ${line.n} rows folded into this line${span}. The tags and note here are this row's; `
+      + `×${line.n} on the line shows each one.`));
+  }
   body.append(noteBox());
   const acts = el('div', 'tl-pane-acts');
   const open = el('button', 'btn primary', 'Open in table ↦');

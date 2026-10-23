@@ -2292,6 +2292,39 @@ see [docs/notes/README.md](README.md) for the whole set.
     `.ctx` (hatched, faded, ○ in the gutter). The header's count is the
     findings (`row_count - context_rows`); the chip carries the rest.
 
+- **The Timeline reads as a story** (`timelineRowNode`'s `story`, which
+  only `renderTimelineRows` passes; Configure tables…' preview keeps the
+  plain timestamp, since its lines are samples rather than neighbours):
+  - **The Timestamp cell holds the time of day**, plus the day on the
+    first line of each, so **a line is found by its `data-ts`**, not by
+    the cell's text. The UI tests' `_line` helpers match
+    `.timeline-row[data-ts^='…']`; matching the cell's text stopped
+    working when it lost the date.
+  - **The rules are borders inside the row** (`day-start`, `gap`), and
+    rows are border-box, so a rule costs no height: the virtual list
+    places every row at `pos * ROW_H`, and a row one pixel taller would
+    drift every line under it. `tests/ui/test_timeline_story_lines.py`
+    holds every row to one height.
+  - **`gap` and `new_day` come from the server** (store.md), since the
+    line above the first line on a page is on another page.
+  - **The lead does not shrink** (`flex: 0 0 auto`, up to 55% of the
+    cell); the note and then the details give way. With the details
+    pane open the Body column is narrow, and a lead that shrank with the
+    rest came out as "PowerShell script…".
+  - **Fold repeats is off by default** (`winnow.timelineFold`): a line on
+    the Timeline is a finding, and a fold nobody asked for hides
+    findings. `S.timeline.unfold` holds the runs opened, by first row,
+    reset on a case switch and on the toggle. A tag on a folded line
+    goes on its first row only, which the pane says. A selected row that
+    folds away (`timeline_position`'s `folded`) leaves its run's line
+    selected, as `{pos, rid: null}`, which the line's row fills in when
+    its page paints, the way a line picked by key before its page
+    arrived does.
+  - **The header's switches are tinted when on, not filled.**
+    `.btn[aria-pressed]` fills with `--accent-dim`; Overview's and
+    Details' rule set the text to `--accent` and kept that fill, which on
+    the light themes was gold on gold.
+
 - **The Timeline's tag filter is the grid's tag chips** (`.tag-chip`,
   renderTimelineTagFilter). It asks what the ribbon asks, from the same
   strip across the top, and was the one tag control in the app answering

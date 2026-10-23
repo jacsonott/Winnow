@@ -81,12 +81,13 @@ def _summary_row(page):
     would resolve to nothing on the line after the toggle and fail the
     assertion it exists to prove. Nor an element handle: the toggle calls
     renderTimelineRows(), which replaceChildren()s the whole window, so the
-    row node itself is a different one afterwards. The Timestamp cell is
-    the one part of the row neither the toggle nor the re-render changes.
+    row node itself is a different one afterwards. The row's timestamp
+    (data-ts) is the one part of it neither the toggle nor the re-render
+    changes.
     """
     page.locator("#tabTimeline").click()
     page.wait_for_selector("#timelineview:not([hidden])")
-    row = page.locator(".timeline-row", has=page.locator(".tl-col-ts", has_text=TS))
+    row = page.locator(f"#timelineRows .timeline-row[data-ts^='{TS}']")
     # Waiting on this row's own lead, not on any `.tl-lead` in the list:
     # the timeline is still building when the tab opens, and a wait that
     # any summarised row could satisfy would hand back a row that is not
@@ -106,8 +107,8 @@ def test_the_row_leads_with_what_happened_not_the_raw_columns(page, tagged_evtx)
     assert " | " not in body, f"still the pipe-joined source row: {body!r}"
     # The timestamp is the column immediately to the left; saying it twice
     # is what made the old body unreadable.
-    ts = row.locator(".tl-col-ts").inner_text().strip()
-    assert ts and ts not in body
+    ts = row.get_attribute("data-ts")
+    assert ts and ts not in body and ts[11:19] not in body
 
     # The raw row is not lost: it's the cell's tooltip on every row.
     assert " | " in (row.locator(".tl-col-body").get_attribute("title") or "")

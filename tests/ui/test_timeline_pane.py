@@ -91,7 +91,9 @@ def _open_timeline(page, lines=2):
 
 
 def _line(page, ts):
-    return page.locator("#timelineRows .timeline-row", has=page.locator(".tl-col-ts", has_text=ts))
+    # By the row's own timestamp: the cell says only the time of day, and
+    # the day once, at the first line of each.
+    return page.locator(f"#timelineRows .timeline-row[data-ts^='{ts}']")
 
 
 def _pane_shows(page, ts):

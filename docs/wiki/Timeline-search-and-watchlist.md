@@ -4,16 +4,17 @@ Three pages work across the whole case rather than one table. The **Timeline** r
 
 ## The Timeline
 
-![The Timeline: the overview strip over tagged rows from six tables in one stream, one line selected and shown in full in the details pane, with the untagged rows from five minutes either side of it hatched between the findings](../screenshots/timeline.png)
+![The Timeline: the overview strip over tagged rows from six tables in one stream, read as a story with the day at the first line of Fri 13 Mar, the gap since the line above beside each time and notes in their lines; a run of 36 failed logons folded onto one line; one line selected and shown in full in the details pane, with the untagged rows from five minutes either side of it hatched between the findings](../screenshots/timeline.png)
 
-Open the **Timeline** tab (top right, beside SQL and Notes). It lists every tagged row in the case, from every table, oldest first; tag a row anywhere and it is here. The header says how many tagged rows there are. It is rebuilt each time you open the tab, so it always reflects the tags as they are now.
+Open the **Timeline** tab (top right, beside SQL and Notes). It lists every tagged row in the case, from every table, oldest first; tag a row anywhere and it is here. The header says how many tagged rows there are, and with [Fold repeats](#fold-repeats) on, how many lines they take (**77 tagged rows in 39 lines**). It is rebuilt each time you open the tab, so it always reflects the tags as they are now.
 
-Each line has four columns:
+Each line has five columns:
 
 - **The gutter**, as on the grid — a stripe per tag on the row in the tag's colour (hover for the tag's name), `✎` when the row has a note (hover to read it), and `⤢` on the line under the mouse to open the row in its table.
-- **Timestamp** — the row's time, always written `YYYY-MM-DD HH:MM:SS` whatever display format Settings uses, so tables with different date formats sort together. A derived datetime column is used as it is, keeping any fractions of a second. Rows with no usable timestamp come last and show `—`. The column's heading names the day of the line at the top of the list (**Timestamp · Fri 13 Mar**).
+- **Timestamp** — the row's time of day. The first line of each day also names the day (**Fri 13 Mar**), over a rule across the list, so the day is read once rather than on every line. Hover for the full timestamp, always written `YYYY-MM-DD HH:MM:SS` whatever display format Settings uses, so tables with different date formats sort together. A derived datetime column is used as it is, keeping any fractions of a second. Rows with no usable timestamp come last and show `—`. The column's heading names the day of the line at the top of the list (**Timestamp · Fri 13 Mar**).
+- **Gap** — how long after the line above this one happened: `+40s`, `+2m 17s`, `+2h 31m`, `+3d 4h`. Half an hour or more is in bold, with a dashed rule over the line, so the quiet stretches between bursts of activity stand out. After a folded run it is counted from the run's last row.
 - **Type** — a pill naming the kind of table, in a colour of its own for each table: the type you set (see [Choosing the timestamp, type and body](#choosing-the-timestamp-type-and-body)), else the header set's nickname without the tool's name (**Event logs** for EvtxECmd output), else the table's name. When two tables are of the same kind, what tells their names apart follows the pill — `WKSTN-014` and `SRV-DC01` for `WKSTN-014_EvtxECmd_Output.csv` and `SRV-DC01_EvtxECmd_Output.csv`. Hover the pill for the file name.
-- **Body** — a one-line summary of the row when Winnow knows the artefact, otherwise the whole row with its columns joined by ` | `. Hover it for the whole row. A table with more than 495 columns shows only its first 495 in the Body, and the Timeline header says which table; pick body columns under **Configure tables…** to choose which ones.
+- **Body** — a one-line summary of the row when Winnow knows the artefact, otherwise the whole row with its columns joined by ` | `. Hover it for the whole row. A row's [note](Tagging-and-notes.md#row-notes) is written into its line, in italics after what happened (`✎ Patient zero: the invoice 'PDF' is a LNK…`). A table with more than 495 columns shows only its first 495 in the Body, and the Timeline header says which table; pick body columns under **Configure tables…** to choose which ones.
 
 **Click a line** to select it and read it in the [details pane](#the-details-pane) beside the list. The grid's keys move the selection — `↓`/`j` and `↑`/`k` a line, `Page Down`/`Page Up` a screen, `g` and `G` the first and last line — and a key you rebind in Settings moves the Timeline too. `Esc` lets go of it.
 
@@ -62,6 +63,18 @@ The window lasts until you close it or open another case. It goes by each table'
 The chips beside **Tags** in the header choose which tags are on the Timeline. Every tag starts switched on; click a chip to take that tag's rows off, and again to put them back. A row with several tags stays while any of its tags is on.
 
 A tag created while the case is open starts switched on as well. A tag you switch off stays off until you click its chip again; reopening the case switches every tag back on.
+
+### Fold repeats
+
+A password spray is one fact, but it is hundreds of lines. **Fold repeats** in the header puts each run of three or more lines in a row that come from one table, say the same thing (the same lead in their [summary](#summary-lines)) and carry the same first tag on one line:
+
+- The line starts with how many rows it holds (`×36`) and ends with the first and last times and how long the run went on (`01:52:28 → 01:55:06 · over 2m 38s`). Its time, tags and note are its first row's, and the details pane says so.
+- Click `×36` to show each row on a line of its own. The run's first line then says **fold**; click it to put the run back on one line.
+- A row with a note always starts a line of its own, so a note is never hidden inside a fold. A row from another table, with another lead or another first tag, or an untagged row from [What else happened then](#what-else-happened-then), ends the run. A table with no summary, or whose body columns you picked under **Configure tables…**, never folds.
+- The header counts both rows and lines. The overview still counts every row at its own time, so folding does not move a bar, and a click on a bar inside a run goes to the run's line. A selected line that folds away leaves the run's line selected, and coming back from a table to a row inside a run lands on the run's line too.
+- Tagging a folded line, from the details pane or with a tag key, tags its first row only. Open the run to tag the others.
+
+**Fold repeats** is off until you switch it on, because every line on the Timeline is a row someone tagged as a finding, and Winnow remembers your choice. Runs you open stay open until you switch it off or open another case.
 
 ### Summary lines
 

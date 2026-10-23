@@ -104,7 +104,9 @@ def _selected_ts(page):
 
 
 def _line(page, ts):
-    return page.locator("#timelineRows .timeline-row", has=page.locator(".tl-col-ts", has_text=ts))
+    # By the row's own timestamp: the cell says only the time of day, and
+    # the day once, at the first line of each.
+    return page.locator(f"#timelineRows .timeline-row[data-ts^='{ts}']")
 
 
 def test_the_legend_counts_each_line_under_its_first_tag(page, two_hosts):
