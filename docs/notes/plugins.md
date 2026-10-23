@@ -337,6 +337,19 @@ see [docs/notes/README.md](README.md) for the whole set.
     tracebacks point at unrelated lines. Toggle the plugin off and on in
     Settings → Plugins (that's what `_reload_plugins` is for) or restart.
 
+- **First/Last's description takes a dropped field, and an `<input>`
+  fights that twice.** The field list's drag sets `text/plain` to the
+  field's name (Firefox will not start a drag without data), so a drop the
+  tab does not `preventDefault()` is one the browser finishes itself, by
+  typing the bare name in at its own caret. And an input reports no caret
+  for a drop point, so `dropIndex` measures the box's text with a canvas
+  in the box's computed font to turn `clientX` into an index, then moves a
+  drop that lands inside a `{…}` to just after it. The same handlers make
+  the function chips drop targets (`{sum:` + a dropped number column).
+  The completion a chip click opens needs the chip's `mousedown`
+  prevented: a blur would let the box's blur handler take it straight
+  back down.
+
 - **First/Last finds its bookends with one GROUP BY, not window
   functions.** Window functions are the obvious spelling (ROW_NUMBER()
   both ways and a COUNT(), partitioned by the group), and SQLite sorts

@@ -390,3 +390,17 @@ def test_a_read_that_failed_is_not_mistaken_for_nothing_saved(fl_page, server):
 
     with urlopen(server + "/api/plugin_state?key=" + quote(KEY), timeout=10) as r:
         assert json.loads(r.read())["payload"] == keep
+
+
+def test_count_unique_is_saved_and_restored_and_an_older_sheet_has_none(fl_page):
+    """Count unique came after the payload format, so a sheet saved before
+    it has no `unique` at all and must restore with the zone empty; a gone
+    column under it is dropped and named like any other."""
+    plan = _plan(fl_page, PLAN, _payload(unique=["EventId", "Gone"]), [_src(1, "ui.csv")])
+    assert plan["sheets"][0]["unique"] == ["EventId"]
+    assert "Gone" in plan["notes"][0]
+    assert _plan(fl_page, PLAN, _payload(), [_src(1, "ui.csv")])["sheets"][0]["unique"] == []
+    sheet = {"name": "Logons", "sourceId": 1, "groupBy": ["Host"], "carry": [], "sums": [],
+             "unique": ["EventId"], "values": [], "filters": [], "tags": {"mode": "", "ids": []},
+             "rowJson": False, "sortColumn": "Timestamp", "colWidths": {}, "template": ""}
+    assert _spec(fl_page, sheet, [_src(1, "ui.csv")])["unique"] == ["EventId"]

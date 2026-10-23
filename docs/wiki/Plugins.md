@@ -271,6 +271,7 @@ replaces ("Replaces Timestamp").
 | **Ordered by** | The column that decides first and last; defaults to the table's first datetime column |
 | **Include columns** | Columns carried onto each result row |
 | **Total up** | Numeric columns to total per group |
+| **Count unique** | Columns whose distinct values each group counts, blanks left out, as a `Unique count of <column>` column |
 | **List values** | Columns whose distinct values each group lists in one cell, as a `Values of <column>` column |
 | Filters | Which source rows take part |
 | Description | A template for each row's description; left empty, it reads `{which} of {count}` |
@@ -279,15 +280,23 @@ The description template accepts `{which}` (`First`, `Last` or `Only`),
 `{which:number}` (the row's position in its group: `1` for the first, the
 group's size for the last), `{count}` (rows in the group), `{ColumnName}`
 (that row's value, any column), `{values:Column}` (the group's distinct
-values of any column, sorted, blanks left out), and `{sum:Column}`,
-`{min:Column}`, `{max:Column}` (the group's total, smallest and largest of
-a **Total up** column). A list names at most 50 values and says how many
+values of any column, sorted, blanks left out), `{unique:Column}` (how
+many there are), and `{sum:Column}`, `{min:Column}`, `{max:Column}` (the
+group's total, smallest and largest of any number column; it need not be
+under **Total up**). A list names at most 50 values and says how many
 more there were. A new sheet starts with the description empty. A
 misspelt placeholder is reported in the preview rather than written into
 the result.
 
+Under the description box are the functions: click `{which}`,
+`{which:number}` or `{count}` to insert it, or click `{sum:…}`, `{min:…}`,
+`{max:…}`, `{values:…}` or `{unique:…}` to start one and pick its column
+from the list that opens. Drag a field from the field list into the box to
+insert it as `{ColumnName}` where you drop it, or onto a function to fill
+that function in. Typing `{` in the box completes names too.
+
 The result's columns are the ordering column, the included columns, any
-`Sum of` and `Values of` columns, the description, and last the
+`Sum of`, `Unique count of` and `Values of` columns, the description, and last the
 **Add the whole row as a JSON cell** column when that is ticked. The table
 picker shows a table's nickname when it has one.
 

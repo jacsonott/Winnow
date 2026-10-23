@@ -231,7 +231,7 @@ def test_pivot_the_keyboard_opens_walks_and_picks(pv):
 # ------------------------------------------------------------- first/last
 
 
-FL_ZONES = ["Group rows on", "Ordered by", "Include columns", "Total up", "List values", "Filters"]
+FL_ZONES = ["Group rows on", "Ordered by", "Include columns", "Total up", "Count unique", "List values", "Filters"]
 
 
 def test_firstlast_a_field_click_opens_a_menu_under_the_field_not_a_dialog(fl):
@@ -299,7 +299,7 @@ def test_firstlast_escape_and_an_outside_click_close_it_and_place_nothing(fl):
     _click_open(fl, "Host")
     fl.locator(".pluginview input[type=search]").first.click()
     fl.wait_for_selector(MENU, state="detached", timeout=10_000)
-    for zone in ("groupBy", "carry", "sums", "values", "filters"):
+    for zone in ("groupBy", "carry", "sums", "unique", "values", "filters"):
         assert _zone(fl, zone) == [], zone
     assert _zone(fl, "sort") == ["Timestamp"]
 
