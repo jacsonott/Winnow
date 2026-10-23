@@ -80,8 +80,10 @@ def test_list_values_adds_a_column_of_each_groups_values(fl_sheet):
     cells = fl_sheet.evaluate("() => [...document.querySelectorAll('table tbody tr')]"
                         ".map((tr) => tr.children[2].textContent)")
     assert cells and set(cells) == {"1, 4624, 4625, 4688"}
-    # It offers its placeholder, and the placeholder renders the same list.
-    fl_sheet.locator("button", has_text="{values:EventId}").click()
+    # The placeholder renders the same list: the field dropped on the
+    # {values:…} function fills it in.
+    fl_sheet.evaluate(DRAG, ["[data-field='EventId']", "[data-fn='values']"])
+    assert fl_sheet.evaluate(f"() => document.querySelector(\"{TMPL}\").value") == "{values:EventId}"
     fl_sheet.wait_for_function(
         "() => [...document.querySelectorAll('table tbody tr td:last-child')]"
         ".every((td) => td.textContent.endsWith('1, 4624, 4625, 4688'))", timeout=10_000)

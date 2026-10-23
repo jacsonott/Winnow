@@ -19,7 +19,7 @@ then open the **First/Last** page tab.
 
 ## Controls
 
-Drag fields from the list into the zones, or click a field (or Tab to it
+Drag fields from the list into the zones (or into the description), or click a field (or Tab to it
 and press Enter — the keyboard/trackpad path) and pick a zone from the
 small **Place in** menu under it. A zone the field can't go into is greyed
 out with the reason — "Already there", "Not a number column" (Total up),
@@ -32,9 +32,10 @@ column it replaces:
 | **Ordered by** | One column that defines first/last (defaults to the first datetime column); ties break by file order, deterministically |
 | **Include columns** | Carried into the output next to the description, valued from each bookend's own row — drag the chips **or the preview's headers** to set their order. Grouped columns arrive here on their own; removing one here leaves the grouping alone, and dragging a chip from here into *Group rows on* moves it rather than copying it |
 | **Total up** | Number columns summed over each group's **whole** set of rows, not just its two bookends — bytes moved across a session, events in a burst. Both bookends of a group carry the same total. A non-number column is refused rather than summed to zero |
+| **Count unique** | Any column, as a `Unique count of <column>` output column: how many **distinct** values the group has across its whole set of rows (users seen on a host, hosts a user logged on to), blanks not counted — the same values List values would list, counted. It rides the grouping pass, like Total up |
 | **List values** | Any column, listed per group as a `Values of <column>` output column: the group's **distinct** values across its whole set of rows (every user seen on a host, not just the two bookends' users), blanks left out, sorted — a number column by value. A cell names at most 50 and says how many more there were (`… (+12 more)`) |
 | **Filters** | Scope which rows participate — same operators as the grid. The value list behind *is any of* / *is none of* has a search box; **All** and **None** act on what the search leaves (so "type `jsmith`, All, Apply" works), and a note says when the list is the 500 most common values rather than every one. The tag list under *Only rows with tags* has the same search |
-| **Description** | Free text + placeholders: `{which}` → First/Last (or Only, for a one-row group), `{which:number}` → the row's position in its group instead (1 for the first, the group size for the last, so `{which:number} of {count}` reads `1 of 40` / `40 of 40`), `{count}` → group size, `{Column}` → that row's own value — **any** column of the table, whether or not it is grouped, ordered or included (the bookend query fetches whatever the template names), `{sum:Column}` / `{min:Column}` / `{max:Column}` → a Total-up column's group total, smallest and largest, formatted like the Sum column (min and max ride the same grouping pass; only the sum is an output column), `{values:Column}` → the group's distinct values of **any** column, as List values lists them (the column need not be under List values). A new sheet starts with the box empty, showing `{which} of {count}` greyed — what an empty description renders as. Click a chip to insert (the column chips follow the field search), or type `{` in the box to complete a name: what follows the brace narrows the list, ↑/↓ pick, Enter or Tab inserts, Escape closes, Ctrl+Space opens it anywhere. A typo'd placeholder fails the preview by name, never ships garbage. The colon form is the namespace for computed values: a plain name is always a field, so a column called `count` or `sum` can't collide with a function |
+| **Description** | Free text + placeholders: `{which}` → First/Last (or Only, for a one-row group), `{which:number}` → the row's position in its group instead (1 for the first, the group size for the last, so `{which:number} of {count}` reads `1 of 40` / `40 of 40`), `{count}` → group size, `{Column}` → that row's own value — **any** column of the table, whether or not it is grouped, ordered or included (the bookend query fetches whatever the template names), `{sum:Column}` / `{min:Column}` / `{max:Column}` → a **number** column's group total, smallest and largest, formatted like the Sum column (the column need not be under Total up; they ride the same grouping pass, and only Total up's sums are output columns), `{values:Column}` → the group's distinct values of **any** column, as List values lists them (the column need not be under List values), `{unique:Column}` → how many there are, as Count unique counts them. A new sheet starts with the box empty, showing `{which} of {count}` greyed — what an empty description renders as. Under the box are the **functions**, not the columns: click `{which}`, `{which:number}` or `{count}` to insert it, click `{sum:…}` (or min, max, values, unique) to start one and pick its column from the completion, or **drop a field on one** to fill it in (sum, min and max take only a number column). **Drag a field from the list into the box** and it lands as `{Column}` where you drop it (after a placeholder, never inside one). Or type `{` in the box to complete a name: what follows the brace narrows the list, ↑/↓ pick, Enter or Tab inserts, Escape closes, Ctrl+Space opens it anywhere. A typo'd placeholder fails the preview by name, never ships garbage. The colon form is the namespace for computed values: a plain name is always a field, so a column called `count` or `sum` can't collide with a function |
 | **Layout** | Drag the rail's right edge to resize it (remembered on this machine; double-click resets). Drag a preview header's right edge to resize that column (per sheet; double-click fits) |
 | **Auto-update** | On by default: the preview re-runs ~350 ms after any change. Off (remembered on this machine), changes mark the preview *Changed — press Refresh* and nothing runs until you do — easier on a very large table |
 
@@ -54,14 +55,14 @@ A one-event group emits a single row whose `{which}` is `Only` — a story
 with one event has no separate ending, and `First of 1` read as if a Last
 had gone missing.
 
-Totals ride the grouping pass that already counts each group (the same
-one behind `{count}`), so asking for them costs no extra pass over the
-table. Values that do not parse as numbers are skipped rather than read as
+Totals and unique counts ride the grouping pass that already counts each
+group (the same one behind `{count}`), so asking for them costs no extra
+pass over the table. Values that do not parse as numbers are skipped rather than read as
 zero, so one `n/a` in a byte column cannot quietly deflate a total.
 
 ## Output
 
-`[ordering column] [included columns…] [Sum of…] [Values of…] [Description] [Row (JSON)]`
+`[ordering column] [included columns…] [Sum of…] [Unique count of…] [Values of…] [Description] [Row (JSON)]`
 — two rows per group. The description reads before the whole-row JSON
 cell: it is the line, the JSON is the long cell opened when needed.
 Three ways out, on the bar's right edge:
@@ -110,10 +111,12 @@ first_last/
 ```
 
 Backend tests live in `tests/test_plugins.py` (`-k first_last`),
-`tests/test_firstlast_timeline.py`, `tests/test_firstlast_values.py` and
+`tests/test_firstlast_timeline.py`, `tests/test_firstlast_values.py`,
+`tests/test_firstlast_unique.py` (Count unique) and
 `tests/test_firstlast_jobs.py` (the background jobs); the
 tab itself is driven by `tests/ui/test_firstlast_rework.py`,
 `tests/ui/test_firstlast_autocomplete.py`,
+`tests/ui/test_firstlast_functions.py` (the description's functions and drops),
 `tests/ui/test_firstlast_filter_search.py` and
 `tests/ui/test_firstlast_values_and_nicknames.py`, the saved sheets by
 `tests/ui/test_firstlast_state.py`, and the work in the background by

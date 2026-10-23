@@ -1,5 +1,6 @@
-"""First/Last, round two: `{sum:Column}` in the description, `Only` for a
-one-row group, and the meta route advertising both."""
+"""First/Last, round two: `{sum:Column}` (and min/max) in the description,
+on any number column, `Only` for a one-row group, and the meta route
+advertising the syntax."""
 
 from __future__ import annotations
 
@@ -61,19 +62,36 @@ def test_min_and_max_placeholders_ride_the_same_total_up_column(fl_client):
     assert descs == ["First: 50–250.5 of 400.5", "Last: 50–250.5 of 400.5", "Only: 7–7 of 7"]
     # Only the sum is an output column; min and max are placeholders only.
     assert [c for c in out["columns"] if c.endswith("of Bytes")] == ["Sum of Bytes"]
-    r = client.post(f"/api/plugin/{PLUGIN}/preview", json={
-        "source_id": sid, "group_by": ["User"], "sort_column": "When", "columns": [],
-        "template": "{max:Bytes}"})
-    assert r.status_code == 400 and "Total up" in r.text
 
 
-def test_sum_placeholder_needs_the_column_under_total_up(fl_client):
+def test_sum_min_and_max_take_any_number_column(fl_client):
+    """Like {values:Column}: the column need not be under Total up first,
+    and naming it in the description adds no output column."""
     client, sid = fl_client
-    r = client.post(f"/api/plugin/{PLUGIN}/preview", json={
-        "source_id": sid, "group_by": ["User"], "sort_column": "When", "columns": [],
-        "template": "{sum:Bytes}"})
-    assert r.status_code == 400
-    assert "Total up" in r.text and "Bytes" in r.text
+    out = _fl(client, "preview", source_id=sid, group_by=["User"], sort_column="When",
+              columns=[], template="{which}: {sum:Bytes} ({min:Bytes}–{max:Bytes})")
+    descs = sorted(r[-1] for r in out["rows"])
+    assert descs == ["First: 400.5 (50–250.5)", "Last: 400.5 (50–250.5)", "Only: 7 (7–7)"]
+    assert out["columns"] == ["When", "Description"]
+    # The same numbers as the Total-up column, which is still the one way
+    # to get a Sum column.
+    both = _fl(client, "preview", source_id=sid, group_by=["User"], sort_column="When",
+               columns=[], sum_columns=["Bytes"], template="{max:Bytes}")
+    assert sorted(r[-1] for r in both["rows"]) == ["250.5", "250.5", "7"]
+    whole = _fl(client, "rows", source_id=sid, group_by=["User"], sort_column="When",
+                columns=[], template="{sum:Bytes}")
+    assert sorted(r[-1] for r in whole["rows"]) == ["400.5", "400.5", "7"]
+
+
+def test_sum_placeholder_refuses_a_text_column_and_an_unknown_one(fl_client):
+    client, sid = fl_client
+    for tmpl, named in (("{sum:User}", "number column"), ("{max:Host}", "number column"),
+                        ("{min:Byets}", "Byets")):
+        r = client.post(f"/api/plugin/{PLUGIN}/preview", json={
+            "source_id": sid, "group_by": ["User"], "sort_column": "When", "columns": [],
+            "template": tmpl})
+        assert r.status_code == 400, tmpl
+        assert named in r.text, r.text
 
 
 def test_a_field_literally_named_sum_is_still_reachable_by_the_colon_rule(fl_client, store, write_csv):
@@ -99,6 +117,6 @@ def test_single_row_groups_say_only_everywhere(fl_client):
 def test_meta_advertises_the_syntax(fl_client):
     client, _ = fl_client
     meta = client.get(f"/api/plugin/{PLUGIN}/meta").json()
-    assert meta["placeholders"] == ["which", "which:number", "count", "values:<column>",
+    assert meta["placeholders"] == ["which", "which:number", "count", "values:<column>", "unique:<column>",
                                     "sum:<column>", "min:<column>", "max:<column>"]
     assert meta["which_values"] == ["First", "Last", "Only"]

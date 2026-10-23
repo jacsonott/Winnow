@@ -60,6 +60,13 @@ bookends by their group values, and capped at MAX_LISTED_VALUES per cell
 (the rest counted, not dropped silently). The preview asks only for the
 groups it shows.
 
+**Counts and totals ride the bookend pass** (`_groups_sql`). A unique
+count needs neither an order nor a cap, so a column under Count unique, or
+named by `{unique:Column}`, is one COUNT(DISTINCT …) in the GROUP BY that
+already counts each group, blanks left out as List values leaves them out.
+Totals work the same way: `{sum:}`, `{min:}` and `{max:}` take any number
+column, under Total up or not; only Total up's sums become output columns.
+
 **The tab asks for results as background jobs** (`job/start`, `job`,
 `job/cancel`), never by holding a request open for the work. On a big table
 the work is long — 15 s for a preview and 18 s for Create on 1M rows — and
@@ -395,7 +402,10 @@ def _validated(req, body):
     listed = body.get("value_columns") or []
     if not isinstance(listed, list):
         raise ValueError("value_columns must be a list of column names")
-    _check_columns(src, group_cols + [sort_col] + carry + sums + listed)
+    uniq = body.get("unique_columns") or []
+    if not isinstance(uniq, list):
+        raise ValueError("unique_columns must be a list of column names")
+    _check_columns(src, group_cols + [sort_col] + carry + sums + listed + uniq)
     for c in sums:
         # SUM over text is 0 in SQLite, and a 0 that looks like a real
         # total is the kind of number that ends up in a report. _numeric
@@ -415,8 +425,20 @@ def _validated(req, body):
     for col in _template_value_columns(template):
         if col not in {c["name"] for c in src["columns"]}:
             raise ValueError(f"{{values:{col}}} names no column of {src['name']}")
+    for col in _template_value_columns(template, "unique"):
+        if col not in {c["name"] for c in src["columns"]}:
+            raise ValueError(f"{{unique:{col}}} names no column of {src['name']}")
+    # {sum:}/{min:}/{max:} take any number column too, not only one under
+    # Total up: the template's ride the same grouping pass (see _result).
+    # A text column is refused here for the reason Total up refuses it.
+    for kind in AGGREGATES:
+        for col in _template_value_columns(template, kind):
+            if col not in {c["name"] for c in src["columns"]}:
+                raise ValueError(f"{{{kind}:{col}}} names no column of {src['name']}")
+            if not _is_number_column(src, col):
+                raise ValueError(f"{{{kind}:{col}}} needs a number column — {col} is not one")
     row_json = bool(body.get("row_json"))
-    return src, group_cols, sort_col, carry, sums, listed, where, params, template, row_json
+    return src, group_cols, sort_col, carry, sums, listed, uniq, where, params, template, row_json
 
 
 def _sum_alias(col):
@@ -425,10 +447,10 @@ def _sum_alias(col):
     return f"Sum of {col}"
 
 
-# Group-wide aggregates a Total-up column carries besides its sum. Only the
-# sum becomes an output column; min and max ride the same grouping pass for
-# the {min:Column} / {max:Column} placeholders, so asking for either costs
-# no extra pass and needs nothing new under Total up.
+# Group-wide aggregates for the {sum:Column} / {min:Column} / {max:Column}
+# placeholders. Only a Total-up column's sum becomes an output column; the
+# rest ride the same grouping pass for the description alone, so asking for
+# one costs no extra pass and needs nothing under Total up.
 AGGREGATES = {"sum": "SUM", "min": "MIN", "max": "MAX"}
 
 
@@ -436,7 +458,12 @@ def _agg_alias(kind, col):
     return _sum_alias(col) if kind == "sum" else f"{kind.capitalize()} of {col}"
 
 
-def _reserved_aliases(sums):
+def _unique_alias(col):
+    """The Count unique output column's name, prefixed like the Sum column."""
+    return f"Unique count of {col}"
+
+
+def _reserved_aliases(sums, uniq=()):
     """The names the bookend query gives its own outputs. A source column
     that happens to share one must not be projected beside it: the inner
     SELECT would then carry the name twice — the file's, then the
@@ -444,10 +471,10 @@ def _reserved_aliases(sums):
     `group_n:1`, so dict(zip(cols, row)) would hand _render and the Sum
     column the file's value in place of the group's, silently."""
     return {"rn_first", "rn_last", "group_n"} | {
-        _agg_alias(kind, c) for c in sums for kind in AGGREGATES}
+        _agg_alias(kind, c) for c in sums for kind in AGGREGATES} | {_unique_alias(c) for c in uniq}
 
 
-def _template_columns(template, src, sums=()):
+def _template_columns(template, src, sums=(), uniq=()):
     """The source columns a description template names as plain `{Name}`
     placeholders, in first-mention order. Tokenised exactly as _render
     does (a `{` runs to the next `}`), so what gets projected is what
@@ -458,7 +485,7 @@ def _template_columns(template, src, sums=()):
     the query's outputs, so `{group_n}` reads the pass's count, not the
     file's column. The same column grouped or carried still shadows — a
     pre-existing edge, left as is; headers shaped like that are rare."""
-    names = {c["name"] for c in src["columns"]} - _reserved_aliases(sums)
+    names = {c["name"] for c in src["columns"]} - _reserved_aliases(sums, uniq)
     out, i, n = [], 0, len(template or "")
     while i < n:
         if template[i] != "{":
@@ -510,7 +537,7 @@ def _row_key(src, ident):
             f" ELSE 'T' || hex({ident}) || ' ' || {tie} END")
 
 
-def _groups_sql(req, src, group_cols, sort_col, number, where, aggs, count_groups):
+def _groups_sql(req, src, group_cols, sort_col, number, where, aggs, count_groups, uniq=()):
     """The CTEs behind `fl_groups`: one row per group with group_n, the
     first and last row's place (f_[sid,]rid, l_[sid,]rid) and the value
     they are listed by (f_ord, l_ord; see _order_dir), `pos` — where
@@ -540,6 +567,12 @@ def _groups_sql(req, src, group_cols, sort_col, number, where, aggs, count_group
     inputs = list(dict.fromkeys(c for c, _ in aggs))
     insel = "".join(f", {_numeric(src, c)} AS n{inputs.index(c)}" for c in inputs)
     aggsel = "".join(f", {fn}(n{inputs.index(c)}) AS agg{i}" for i, (c, fn) in enumerate(aggs))
+    # Count unique rides the same pass: each column's raw value is carried
+    # once per row and counted DISTINCT per group, blanks left out (as List
+    # values leaves them out, and as the pivot's Distinct count does).
+    insel += "".join(f", {_col(src, c)} AS u{j}" for j, c in enumerate(uniq))
+    aggsel += "".join(f", COUNT(DISTINCT CASE WHEN u{j} != '' THEN u{j} END) AS uq{j}"
+                      for j in range(len(uniq)))
     once = _ONCE if count_groups else ""
     if not number:
         inner = f"SELECT {keysel}, {_row_key(src, _col(src, sort_col))} AS key{insel} FROM {_scope(req, src)}{where}"
@@ -571,12 +604,13 @@ def _groups_sql(req, src, group_cols, sort_col, number, where, aggs, count_group
         f" {_untie(src, 'CASE WHEN b.nv > 0 THEN t.tl ELSE b.nl END', 'l')},"
         f" CASE WHEN b.nv > 0 THEN -b.lo END AS f_ord, CASE WHEN b.nv > 0 THEN -b.hi END AS l_ord"
         f"{''.join(f', b.agg{i} AS agg{i}' for i in range(len(aggs)))}"
+        f"{''.join(f', b.uq{j} AS uq{j}' for j in range(len(uniq)))}"
         f" FROM fl_bounds b LEFT JOIN fl_ties t ON {' AND '.join(f'b.{k} IS t.{k}' for k in keys)})"
     )
 
 
 def _bookend_rows(req, src, group_cols, sort_col, carry, where, params, limit,
-                  row_json=False, sums=(), template="", op_token=None, count_groups=False):
+                  row_json=False, sums=(), template="", op_token=None, count_groups=False, uniq=()):
     """Each group's first and last row (one row, labelled Only, when they
     are the same row), ranked as `ORDER BY sort, <file order>` ranks them
     both ways, with the per-group values _emit and _render read: rn_first
@@ -597,7 +631,7 @@ def _bookend_rows(req, src, group_cols, sort_col, carry, where, params, limit,
     # one that happens to be grouped, ordered or carried; they are
     # projected for _render alone and never become output columns.
     pool = ([c["name"] for c in src["columns"]] if row_json
-            else group_cols + [sort_col] + carry + _template_columns(template, src, sums))
+            else group_cols + [sort_col] + carry + _template_columns(template, src, sums, uniq))
     needed = []
     for c in pool:
         if c not in needed:
@@ -615,7 +649,7 @@ def _bookend_rows(req, src, group_cols, sort_col, carry, where, params, limit,
     number = _is_number_column(src, sort_col)
     merge = bool(src.get("is_merge"))
     groups = _groups_sql(req, src, group_cols, sort_col, number, where,
-                         [(c, fn) for c, fn, _ in aggs], count_groups)
+                         [(c, fn) for c, fn, _ in aggs], count_groups, uniq)
     # One row per bookend. A group whose first row is its last gives one.
     # They are put in order and cut to the limit here, before any row is
     # read: Host + User on a 693k-row table is 486k groups, and Copy result
@@ -632,7 +666,8 @@ def _bookend_rows(req, src, group_cols, sort_col, carry, where, params, limit,
         f" CASE WHEN w = 1 THEN f_ord ELSE l_ord END AS ord,"
         f" CASE WHEN w = 1 THEN 1 ELSE pos END AS rn_first,"
         f" CASE WHEN w = 2 OR ({same}) THEN 1 ELSE pos END AS rn_last,"
-        f" group_n{''.join(f', agg{i}' for i in range(len(aggs)))}{counted}"
+        f" group_n{''.join(f', agg{i}' for i in range(len(aggs)))}"
+        f"{''.join(f', uq{j}' for j in range(len(uniq)))}{counted}"
         f" FROM fl_groups CROSS JOIN (SELECT 1 AS w UNION ALL SELECT 2) WHERE w = 1 OR NOT ({same})),"
         f" fl_top AS {_ONCE if merge else ''}(SELECT * FROM fl_ends ORDER BY {order} LIMIT {int(limit) + 1})"
     )
@@ -645,6 +680,7 @@ def _bookend_rows(req, src, group_cols, sort_col, carry, where, params, limit,
     cols = (", ".join(f"{_col(src, c)} AS {q(c)}" for c in needed)
             + ", e.rn_first AS rn_first, e.rn_last AS rn_last, e.group_n AS group_n"
             + "".join(f", e.agg{i} AS {q(alias)}" for i, (_, _, alias) in enumerate(aggs))
+            + "".join(f", e.uq{j} AS {q(_unique_alias(c))}" for j, c in enumerate(uniq))
             + "".join(extra))
     # A CROSS JOIN keeps fl_top the outer loop, so each bookend is one
     # lookup by rid. A merge looks each member up in its own table: a join
@@ -665,7 +701,7 @@ def _bookend_rows(req, src, group_cols, sort_col, carry, where, params, limit,
         fetch = f"SELECT {cols} FROM fl_top e CROSS JOIN {target}"
     # fl_top's order again, now that the lookups have shuffled it, by
     # position: a source column can have any of these names.
-    width = len(needed) + 3 + len(aggs) + len(extra)
+    width = len(needed) + 3 + len(aggs) + len(uniq) + len(extra)
     at = width - len(extra) + 1 + (1 if count_groups else 0)
     ties = ", ".join(str(i) for i in range(at + 1, width + 1))
     sql = (
@@ -685,9 +721,9 @@ def _values_alias(col):
     return f"Values of {col}"
 
 
-def _template_value_columns(template):
-    """The columns `{values:Column}` names, in first-mention order —
-    tokenised the way _render does it."""
+def _template_value_columns(template, kind="values"):
+    """The columns `{values:Column}` (or `{<kind>:Column}`) names, in
+    first-mention order — tokenised the way _render does it."""
     out, i, n = [], 0, len(template or "")
     while i < n:
         if template[i] != "{":
@@ -697,7 +733,7 @@ def _template_value_columns(template):
         if j == -1:
             break
         key = template[i + 1:j]
-        if key.startswith("values:"):
+        if key.startswith(kind + ":"):
             col = key.split(":", 1)[1].strip()
             if col not in out:
                 out.append(col)
@@ -790,10 +826,12 @@ def _value_sort_key(number):
 def _render(template, row, which, sums=()):
     """{ColumnName} → the row's value, {count} → group size, {which} →
     First/Last/Only, {which:number} → the row's position in its group,
-    {sum:Column} / {min:Column} / {max:Column} → that Total-up column's
-    group total, smallest and largest, formatted like the Sum column,
-    {values:Column} → the group's distinct values of any column (attached
-    by _attach_values). Unknown names raise, naming the offender.
+    {sum:Column} / {min:Column} / {max:Column} → a number column's group
+    total, smallest and largest, formatted like the Sum column (`sums` is
+    every column the pass totalled), {values:Column} → the group's
+    distinct values of any column (attached by _attach_values),
+    {unique:Column} → how many there are. Unknown names raise, naming the
+    offender.
 
     The colon form is the namespace for anything computed rather than
     read: a plain name is always a field, so no column name can shadow a
@@ -815,22 +853,25 @@ def _render(template, row, which, sums=()):
                 out.append(str(row.get("rn_first", "")))
             elif key.startswith("values:"):
                 out.append(row.get(("values", key.split(":", 1)[1].strip()), ""))
+            elif key.startswith("unique:"):
+                got = row.get(_unique_alias(key.split(":", 1)[1].strip()))
+                out.append("" if got is None else str(got))
             elif key == "count":
                 out.append(str(row.get("group_n", "")))
             elif ":" in key and key.split(":", 1)[0] in AGGREGATES:
                 kind, col = key.split(":", 1)
                 col = col.strip()
                 if col not in sums:
-                    raise ValueError(
-                        f"{{{key}}} needs {col!r} under Total up first"
-                        + (f" — totals available: {', '.join(sums)}" if sums else ""))
+                    # _validated checks these and _result totals them, so
+                    # this is a caller that skipped one or the other.
+                    raise ValueError(f"{{{key}}} needs a number column of this table")
                 out.append(_fmt_sum(row.get(_agg_alias(kind, col))))
             elif key in row:
                 val = row.get(key)
                 out.append("" if val is None else str(val))
             else:
                 raise ValueError(f"Unknown placeholder {{{key}}} — use a column name, {{count}}, {{which}}, "
-                                 f"{{which:number}}, {{values:Column}}, {{sum:Column}}, {{min:Column}} "
+                                 f"{{which:number}}, {{values:Column}}, {{unique:Column}}, {{sum:Column}}, {{min:Column}} "
                                  f"or {{max:Column}}")
             i = j + 1
             continue
@@ -859,16 +900,17 @@ def _attach_values(bookends, group_cols, listed):
             r[("values", col)] = cells.get(key, "")
 
 
-def _header(sort_col, carry, sums, listed, row_json):
+def _header(sort_col, carry, sums, listed, row_json, uniq=()):
     """The output columns, in the order _emit fills them. The description
     sits before the JSON cell: it is the line an analyst reads, and the
     JSON is the long cell they open when they need it."""
     return ([sort_col] + carry + [_sum_alias(c) for c in sums]
+            + [_unique_alias(c) for c in uniq]
             + [_values_alias(c) for c in listed] + ["Description"]
             + ([ROW_JSON_COLUMN] if row_json else []))
 
 
-def _emit(rows, sort_col, carry, template, json_cols=None, sums=(), listed=()):
+def _emit(rows, sort_col, carry, template, json_cols=None, sums=(), listed=(), uniq=(), totalled=None):
     """The output rows: one per bookend. A single-row group is both its own
     first and its last — emitted once, labelled Only (a story with one
     event has no separate ending, and "First of 1" read as if a Last had
@@ -886,10 +928,11 @@ def _emit(rows, sort_col, carry, template, json_cols=None, sums=(), listed=()):
         elif r.get("rn_last") == 1:
             labels.append("Last")
         for which in labels:
-            desc = _render(template, r, which, sums)
+            desc = _render(template, r, which, sums if totalled is None else totalled)
             row = ([r.get(sort_col, "")]
                    + [("" if r.get(c) is None else str(r.get(c))) for c in carry]
                    + [_fmt_sum(r.get(_sum_alias(c))) for c in sums]
+                   + [str(r.get(_unique_alias(c)) or 0) for c in uniq]
                    + [r.get(("values", c), "") for c in listed]
                    + [desc])
             if json_cols is not None:
@@ -905,7 +948,7 @@ def meta(req):
     return {
         "operators": [{"id": k, "label": v[0], "value_kind": v[1]} for k, v in OPERATORS.items()],
         "limits": {"groups": MAX_GROUPS, "group_cols": MAX_GROUP_COLS, "preview_groups": PREVIEW_GROUPS},
-        "placeholders": ["which", "which:number", "count", "values:<column>",
+        "placeholders": ["which", "which:number", "count", "values:<column>", "unique:<column>",
                          "sum:<column>", "min:<column>", "max:<column>"],
         "which_values": ["First", "Last", "Only"],
     }
@@ -931,11 +974,18 @@ def _result(req, body, limit, *, whole=False, op_token=None, count_groups=False)
     `count_groups` is the preview's, which says how many groups there are.
     `op_token` rides on every query, so a job's cancel stops whichever one
     is running."""
-    (src, group_cols, sort_col, carry, sums, listed,
+    (src, group_cols, sort_col, carry, sums, listed, uniq,
      where, params, template, row_json) = _validated(req, body)
+    # The zone's columns become output columns; {unique:Column} counts any
+    # column, so the template's ride the same pass without one.
+    counted = list(dict.fromkeys(uniq + _template_value_columns(template, "unique")))
+    # Likewise totals: Total up's columns are output columns, and any number
+    # column a {sum:}/{min:}/{max:} names is totalled for the description.
+    totalled = list(dict.fromkeys(
+        sums + [c for kind in AGGREGATES for c in _template_value_columns(template, kind)]))
     bookends, truncated, total_groups = _bookend_rows(
         req, src, group_cols, sort_col, carry, where, params, limit=limit, row_json=row_json,
-        sums=sums, template=template, op_token=op_token, count_groups=count_groups)
+        sums=totalled, template=template, op_token=op_token, count_groups=count_groups, uniq=counted)
     if whole and truncated:
         raise ValueError(f"More than {MAX_GROUPS:,} groups — narrow the grouping or add a filter")
     wanted = list(dict.fromkeys(listed + _template_value_columns(template)))
@@ -945,8 +995,8 @@ def _result(req, body, limit, *, whole=False, op_token=None, count_groups=False)
     json_cols = [c["name"] for c in src["columns"]] if row_json else None
     return {
         "src": src, "group_cols": group_cols, "where": where, "params": params,
-        "columns": _header(sort_col, carry, sums, listed, row_json),
-        "rows": _emit(bookends, sort_col, carry, template, json_cols, sums, listed),
+        "columns": _header(sort_col, carry, sums, listed, row_json, uniq),
+        "rows": _emit(bookends, sort_col, carry, template, json_cols, sums, listed, uniq, totalled),
         "truncated": truncated, "total_groups": total_groups,
     }
 

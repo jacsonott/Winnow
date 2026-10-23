@@ -61,21 +61,23 @@ def test_auto_update_off_waits_for_refresh_and_is_remembered(fl_page):
     assert pg.evaluate("() => localStorage.getItem('winnow.firstlast.auto')") == "1"
 
 
-def test_a_total_up_column_offers_a_sum_chip(fl_page):
+def test_a_function_chip_starts_a_total_and_the_completion_finishes_it(fl_page):
+    """{sum:…} takes any number column: EventId is not under Total up."""
     pg = fl_page
     if not pg.locator("input.fl-auto").is_checked():
         pg.locator("input.fl-auto").check()
-    pg.evaluate(DRAG, ["[data-field='EventId']", "[data-zone='sums']"])
-    pg.wait_for_selector("button:has-text('{sum:EventId}')", timeout=5_000)
-    assert pg.locator("button", has_text="{min:EventId}").count() == 1
-    assert pg.locator("button", has_text="{max:EventId}").count() == 1
-    pg.locator("button", has_text="{sum:EventId}").click()
-    tmpl_value = pg.evaluate("() => document.querySelector(\"input[style*='var(--mono)']\").value")
-    assert "{sum:EventId}" in tmpl_value
-    # The chip inserted the placeholder; now a template that renders the
-    # total on its own so the assertion is on the NUMBER — every group's
-    # EventId total is a 4+ digit figure here, and a bare "First of N"
-    # must not satisfy this.
-    assert "{sum:EventId}" in pg.evaluate("() => document.querySelector(\"input[style*='var(--mono)']\").value")
-    pg.locator("input[style*='var(--mono)']").first.fill("{which} of {count} — {sum:EventId}")
+    if not pg.locator("[data-zone='groupBy'] [data-field]").count():
+        pg.evaluate(DRAG, ["[data-field='Host']", "[data-zone='groupBy']"])
+    tmpl = pg.locator("input[style*='var(--mono)']").first
+    tmpl.fill("{which} of {count} — ")
+    pg.locator("[data-fn='sum']").click()
+    assert pg.evaluate("() => document.querySelector(\"input[style*='var(--mono)']\").value") == "{which} of {count} — {sum:"
+    pg.wait_for_selector(".fl-ac .menu-item", timeout=5_000)
+    names = pg.evaluate("() => [...document.querySelectorAll('.fl-ac .menu-item')].map((n) => n.firstChild.textContent)")
+    assert names and all(n.startswith("sum:") for n in names) and "sum:EventId" in names, names
+    pg.locator(".fl-ac .menu-item", has_text="sum:EventId").click()
+    assert pg.evaluate("() => document.querySelector(\"input[style*='var(--mono)']\").value") == "{which} of {count} — {sum:EventId}"
+    # The assertion is on the NUMBER — every group's EventId total is a 4+
+    # digit figure here, and a bare "First of N" must not satisfy this.
     pg.wait_for_function("() => /^(First|Last|Only) of \\d+ — \\d{4,}$/.test(document.querySelector('table tbody tr td:last-child').textContent.trim())", timeout=10_000)
+    assert not pg.locator("[data-zone='sums'] [data-field]").count()

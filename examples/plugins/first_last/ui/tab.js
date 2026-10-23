@@ -3,9 +3,9 @@
    The pivot tab's interaction model, applied here: drag fields from the
    list into Group rows on / Ordered by / Include columns / Filters (or
    click one: placeMenu, a small menu under the field, is the keyboard and
-   trackpad path), several bookend sheets live as sub-tabs so two
-   groupings can be compared without saving either, and the result
-   actions sit top-right on the bar. The preview table is a working
+   trackpad path) or into the description, several bookend sheets live
+   as sub-tabs so two groupings can be compared without saving either,
+   and the result actions sit top-right on the bar. The preview table is a working
    surface, not a printout: drag its included-column headers to reorder
    the output, click/Shift/Ctrl rows to select, Ctrl+C
    copies the selection as TSV. "Copy result" copies the ENTIRE result
@@ -53,7 +53,7 @@ const writeAuto = (on) => { try { localStorage.setItem(AUTO_KEY, on ? '1' : '0')
    - the table. A dropped source's id is handed straight to the next
      import, so the id is only believed when the name still matches; a
      table re-imported under a new id is found by name instead.
-   - the columns. groupBy/carry/sums/filters go into the request
+   - the columns. groupBy/carry/sums/unique/filters go into the request
      unvalidated, and the backend's _check_columns answers a missing one
      with a 400 (renderControls only ever re-defaults the sort column), so
      restore drops what no longer resolves and says which. */
@@ -76,7 +76,7 @@ const labelOf = (s) => (s && (s.nickname || s.name)) || '';
 const emptySpec = (name) => ({
   name,
   sourceId: null,
-  groupBy: [], carry: [], sums: [], values: [], filters: [],
+  groupBy: [], carry: [], sums: [], unique: [], values: [], filters: [],
   tags: { mode: '', ids: [] }, rowJson: false,
   sortColumn: null, colWidths: {}, template: '',
 });
@@ -107,7 +107,7 @@ export function sheetSpec(sh, sources) {
   return {
     name: sh.name,
     source: savedSource(src),
-    groupBy: sh.groupBy, carry: sh.carry, sums: sh.sums, values: sh.values, filters: sh.filters,
+    groupBy: sh.groupBy, carry: sh.carry, sums: sh.sums, unique: sh.unique, values: sh.values, filters: sh.filters,
     tags: sh.tags, rowJson: sh.rowJson, sortColumn: sh.sortColumn,
     colWidths: sh.colWidths, template: sh.template,
   };
@@ -176,6 +176,7 @@ export function planRestore(payload, sources, tags) {
     spec.groupBy = kept(sh.groupBy);
     spec.carry = kept(sh.carry);
     spec.sums = kept(sh.sums);
+    spec.unique = kept(sh.unique);
     spec.values = kept(sh.values);
     spec.filters = (Array.isArray(sh.filters) ? sh.filters : []).filter((f) => {
       if (!f || typeof f !== 'object' || !f.column) return false;
@@ -242,7 +243,7 @@ export default function mount(container, winnow) {
   const newSheet = (name) => ({
     name,
     sourceId: null,
-    groupBy: [], carry: [], sums: [], values: [], filters: [], tags: { mode: '', ids: [] }, rowJson: false,
+    groupBy: [], carry: [], sums: [], unique: [], values: [], filters: [], tags: { mode: '', ids: [] }, rowJson: false,
     sortColumn: null,
     colWidths: {},        // preview column name -> px, dragged on the header's edge
     template: '',         // empty renders DEFAULT_TEMPLATE; see its comment
@@ -264,7 +265,7 @@ export default function mount(container, winnow) {
      is also how an analyst says "forget this", and a null payload is how
      that reaches the case file. */
   const worthKeeping = () => sheets.length > 1 || sheets.some((sh) => (
-    sh.groupBy.length || sh.carry.length || sh.sums.length || sh.values.length || sh.filters.length
+    sh.groupBy.length || sh.carry.length || sh.sums.length || sh.unique.length || sh.values.length || sh.filters.length
     || sh.tags.mode || sh.rowJson || Object.keys(sh.colWidths).length
     || (sh.template && sh.template !== DEFAULT_TEMPLATE)));
   function saveState() {
@@ -650,6 +651,7 @@ export default function mount(container, winnow) {
     ['sort', 'Ordered by', 'The column that orders each group; first/last are meaningless without one'],
     ['carry', 'Include columns', 'Columns carried into the result — drag chips (or the preview headers) to set their order'],
     ['sums', 'Total up', 'Number columns summed over each WHOLE group — bytes moved in a session, not just the two bookends'],
+    ['unique', 'Count unique', 'How many different values of a column each WHOLE group has — users seen on a host, hosts a user logged on to (blanks not counted)'],
     ['values', 'List values', 'Each group’s distinct values of a column, in one cell — every user seen on a host, not just the two bookends’ users'],
     ['filters', 'Filters', 'Only rows matching these are grouped'],
   ];
@@ -699,19 +701,145 @@ export default function mount(container, winnow) {
     'Free text plus placeholders — {which} is First/Last (Only, for a one-row group) and '
     + '{which:number} the row’s position in its group instead (1, or the group size for the last), '
     + '{count} the group size, {Column} that row’s value (any column — it need not be grouped or '
-    + 'included), {values:Column} the group’s distinct values of any column, '
-    + '{sum:Column} / {min:Column} / {max:Column} a Total-up column’s group total, smallest and '
-    + 'largest. Left empty, it reads ' + DEFAULT_TEMPLATE + '. Click a chip to insert it, or type '
-    + '{ in the box to complete a name.'));
+    + 'included), {values:Column} the group’s distinct values of any column and {unique:Column} '
+    + 'how many there are, {sum:Column} / {min:Column} / {max:Column} a number column’s group '
+    + 'total, smallest and largest. Left empty, it reads ' + DEFAULT_TEMPLATE + '. Type { in the box '
+    + 'to complete a name, or drag a field into it. Click a function to start it, or drop a field '
+    + 'on one to fill it in.'));
   side.append(tmplWrap);
+
+  /* The chips are the functions, not the columns. A chip per column was
+     thirty-odd buttons on an EVTX table and sixty on a wide one, and every
+     column is already in the field list above: drag one into the box and
+     it lands as {Name} where it was dropped. A function that takes a
+     column starts on a click — `{sum:` and the completion, narrowed to
+     what it can take — or takes a field dropped on it whole. */
+  const FUNCS = [
+    { ph: '{which}', title: 'First or Last (Only, for a one-row group)' },
+    { ph: '{which:number}', title: 'The row’s position in its group: 1 for the first, the group size for the last' },
+    { ph: '{count}', title: 'How many rows the group has' },
+    { fn: 'sum', title: 'A number column added up over the whole group', numbers: true },
+    { fn: 'min', title: 'The smallest value of a number column in the group', numbers: true },
+    { fn: 'max', title: 'The largest value of a number column in the group', numbers: true },
+    { fn: 'values', title: 'The group’s different values of a column, listed' },
+    { fn: 'unique', title: 'How many different values of a column the group has' },
+  ];
+
+  /* `run: false` is for a fragment the completion is about to finish:
+     `{sum:` alone would fail the preview the moment the debounce ran. */
+  function insertAtCaret(text, { run = true } = {}) {
+    tmplInput.focus();
+    const at = tmplInput.selectionStart ?? tmplInput.value.length;
+    tmplInput.setRangeText(text, at, tmplInput.selectionEnd ?? at, 'end');
+    state.template = tmplInput.value;
+    if (run) schedule();
+  }
+
+  /* A field dragged from the list (or out of a zone — a preview header is
+     a reorder, not a field). A brace in its name cannot be a placeholder,
+     since the renderer stops at the first `}`, so that one is refused. */
+  function draggedField() {
+    if (!dragging || dragging.from === 'header') return null;
+    if (/[{}]/.test(dragging.name)) {
+      toast(`${dragging.name} has a brace in its name — the description cannot name it`, 4000);
+      return null;
+    }
+    return dragging.name;
+  }
+
+  for (const f of FUNCS) {
+    const b = el('button', 'btn ghost', f.ph || `{${f.fn}:…}`);
+    b.style.cssText = 'font-size:10px;padding:1px 5px;font-family:var(--mono)';
+    if (!f.fn) {
+      b.title = f.title;
+      b.onclick = () => insertAtCaret(f.ph);
+      chipRow.append(b);
+      continue;
+    }
+    b.dataset.fn = f.fn;
+    b.title = `${f.title} — click to start it, or drop a field on it`;
+    // Keep the box's focus and caret: a blur would take the completion
+    // this click opens straight back down (the box's blur handler).
+    b.onmousedown = (e) => e.preventDefault();
+    b.onclick = () => { insertAtCaret(`{${f.fn}:`, { run: false }); acRefresh(); };
+    b.addEventListener('dragover', (e) => {
+      if (!dragging || dragging.from === 'header') return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      b.style.outline = '1px solid var(--accent)';
+    });
+    b.addEventListener('dragleave', () => { b.style.outline = ''; });
+    b.addEventListener('drop', (e) => {
+      e.preventDefault();
+      b.style.outline = '';
+      const name = draggedField();
+      dragging = null;
+      if (!name) return;
+      // Only a number column has a total, as Total up says.
+      const col = (currentSource()?.columns || []).find((c) => c.name === name);
+      if (f.numbers && (!col || col.type !== 'number')) {
+        toast(`{${f.fn}:…} takes a number column — ${name} is not one`, 4000);
+        return;
+      }
+      insertAtCaret(`{${f.fn}:${name}}`);
+    });
+    chipRow.append(b);
+  }
+
+  /* Where in the box a drop at clientX lands. An input reports no caret
+     for a drop point, so the text is measured up to it; and a drop inside
+     an existing {…} goes after that placeholder, never into it. */
+  const measure = document.createElement('canvas').getContext('2d');
+  function dropIndex(clientX) {
+    const cs = getComputedStyle(tmplInput);
+    const r = tmplInput.getBoundingClientRect();
+    const x = clientX - r.left - parseFloat(cs.borderLeftWidth) - parseFloat(cs.paddingLeft) + tmplInput.scrollLeft;
+    measure.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+    const v = tmplInput.value;
+    let at = v.length;
+    for (let i = 0, prev = 0; i <= v.length; i++) {
+      const w = measure.measureText(v.slice(0, i)).width;
+      if (w >= x) { at = i > 0 && x - prev < w - x ? i - 1 : i; break; }
+      prev = w;
+    }
+    // (at 0 there is nothing before it: lastIndexOf would read -1 as 0.)
+    const open = at ? v.lastIndexOf('{', at - 1) : -1, close = at ? v.lastIndexOf('}', at - 1) : -1;
+    if (open > close) {
+      const end = v.indexOf('}', at);
+      if (end !== -1) at = end + 1;
+    }
+    return at;
+  }
+  tmplInput.addEventListener('dragover', (e) => {
+    if (!dragging || dragging.from === 'header') return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    tmplInput.style.borderColor = 'var(--accent)';
+  });
+  tmplInput.addEventListener('dragleave', () => { tmplInput.style.borderColor = ''; });
+  tmplInput.addEventListener('drop', (e) => {
+    // Always: left to itself the browser drops the dragged text in as is.
+    e.preventDefault();
+    tmplInput.style.borderColor = '';
+    const name = draggedField();
+    dragging = null;
+    if (!name) return;
+    const at = dropIndex(e.clientX);
+    acHide();
+    tmplInput.focus();
+    tmplInput.setRangeText(`{${name}}`, at, at, 'end');
+    state.template = tmplInput.value;
+    schedule();
+  });
 
   /* ------------------------------------------- placeholder completion */
 
   /* Typing `{` in the description offers every name the template can
-     resolve — {which}, {count}, the sum:/min:/max: forms of each Total-up
-     column, and every column of the table (the backend projects whatever
-     the template names, so none has to be grouped or carried first) —
-     narrowed by what follows the brace. Hand-rolled the way the SQL
+     resolve — {which}, {count}, every column of the table (the backend
+     projects whatever the template names, so none has to be grouped or
+     carried first), the sum:/min:/max: forms of each number column, and
+     the values:/unique: forms of every column — narrowed by what follows
+     the brace. Hand-rolled the way the SQL
      pane's is: the winnow context exposes no dropdown, and riding the same
      .menu/.sql-ac classes makes it look identical across the five styles.
      It lives in this container rather than document.body so it dies with
@@ -728,15 +856,21 @@ export default function mount(container, winnow) {
     const needle = partial.toLowerCase();
     const all = [{ name: 'which', kind: 'First/Last' }, { name: 'count', kind: 'group size' },
       { name: 'which:number', kind: 'position' }];
-    for (const c of state.sums) for (const k of ['sum', 'min', 'max']) all.push({ name: `${k}:${c}`, kind: 'total' });
     const src = currentSource();
     // A brace inside a column name cannot be a placeholder at all — the
     // renderer stops at the first `}` — so it is not offered.
     const named = (src ? src.columns : []).filter((c) => !/[{}]/.test(c.name));
     for (const c of named) all.push({ name: c.name, kind: c.derived ? 'derived' : 'column' });
     // After the plain names, so a bare `{` still opens on the columns;
-    // typing `{val` narrows to these.
+    // typing `{sum:` (or a click on the chip) narrows to these. Total up's
+    // columns first: they are the ones the analyst already said they
+    // wanted added up.
+    const numbers = named.filter((c) => c.type === 'number').map((c) => c.name)
+      .sort((a, b) => Number(!state.sums.includes(a)) - Number(!state.sums.includes(b)));
+    const AGG = { sum: 'total', min: 'smallest', max: 'largest' };
+    for (const c of numbers) for (const k of ['sum', 'min', 'max']) all.push({ name: `${k}:${c}`, kind: AGG[k] });
     for (const c of named) all.push({ name: `values:${c.name}`, kind: 'distinct values' });
+    for (const c of named) all.push({ name: `unique:${c.name}`, kind: 'unique count' });
     return all.filter((it) => it.name.toLowerCase().includes(needle)).slice(0, 12);
   }
   function acPaint() {
@@ -857,8 +991,8 @@ export default function mount(container, winnow) {
         return;
       }
       if (!state.sums.includes(name)) state.sums.push(name);
-    } else if (zone === 'values') {
-      if (!state.values.includes(name)) state.values.push(name);
+    } else if (zone === 'unique' || zone === 'values') {
+      if (!state[zone].includes(name)) state[zone].push(name);
     } else if (zone === 'groupBy' || zone === 'carry') {
       const list = state[zone];
       if (from !== zone && !list.includes(name)) list.push(name);
@@ -928,7 +1062,7 @@ export default function mount(container, winnow) {
     fieldList.replaceChildren();
     for (const col of cols) {
       if (needle && !col.name.toLowerCase().includes(needle)) continue;
-      const c = chip(col.name, { title: `${col.name} — ${col.type} · click to place it, or drag it to a zone` });
+      const c = chip(col.name, { title: `${col.name} — ${col.type} · click to place it, or drag it to a zone or into the description` });
       const type = el('span', 'count', col.type === 'number' ? '#' : col.type === 'datetime' ? '🕑' : '');
       c.insertBefore(type, c.firstChild);
       wireDragSource(c, { from: 'list', name: col.name });
@@ -961,31 +1095,8 @@ export default function mount(container, winnow) {
       }
     }
 
-    chipRow.replaceChildren();
     acHide();   // the value is rewritten below; the popup's brace index was for the old one
     tmplInput.value = state.template;
-    const insert = (text) => {
-      const at = tmplInput.selectionStart ?? tmplInput.value.length;
-      tmplInput.value = tmplInput.value.slice(0, at) + text + tmplInput.value.slice(tmplInput.selectionEnd ?? at);
-      state.template = tmplInput.value;
-      tmplInput.focus();
-      schedule();
-    };
-    // Totals first among the computed ones: a chip per Total-up column,
-    // in the colon form that keeps functions and fields from colliding.
-    const sumChips = state.sums.flatMap((c) => [`{sum:${c}}`, `{min:${c}}`, `{max:${c}}`]);
-    // A chip per List values column too; any other column's list is a
-    // `{values:` away in the completion.
-    const valueChips = state.values.map((c) => `{values:${c}}`);
-    // The column chips follow the field search above, so a wide table is
-    // not sixty buttons; typing { in the input completes the same names.
-    const colChips = cols.filter((c) => !needle || c.name.toLowerCase().includes(needle)).map((c) => `{${c.name}}`);
-    for (const ph of ['{which}', '{which:number}', '{count}', ...sumChips, ...valueChips, ...colChips]) {
-      const chipBtn = el('button', 'btn ghost', ph);
-      chipBtn.style.cssText = 'font-size:10px;padding:1px 5px;font-family:var(--mono)';
-      chipBtn.onclick = () => insert(ph);
-      chipRow.append(chipBtn);
-    }
 
     rowJsonCb.checked = state.rowJson;
     renderTagFilter();
@@ -1294,6 +1405,7 @@ export default function mount(container, winnow) {
       sort_column: state.sortColumn,
       columns: state.carry,
       sum_columns: state.sums,
+      unique_columns: state.unique,
       value_columns: state.values,
       filters: state.filters,
       tags: state.tags.mode ? state.tags : null,
@@ -1734,6 +1846,7 @@ export default function mount(container, winnow) {
     state.groupBy = [];
     state.carry = [];
     state.sums = [];      // a total from the old table would 400 on the new one
+    state.unique = [];
     state.values = [];
     state.colWidths = {};
     state.filters = [];

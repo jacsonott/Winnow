@@ -1,6 +1,7 @@
 """First/Last's description completes placeholder names: an unclosed `{`
-before the caret lists {which}, {count}, a Total-up column's sum:/min:/max:
-forms and every column of the table, narrowed by what follows the brace.
+before the caret lists {which}, {count}, every column of the table, each
+number column's sum:/min:/max: forms and every column's values:/unique:
+forms, narrowed by what follows the brace.
 Enter or a click inserts the whole `{name}` and leaves the caret in the
 box; Escape closes the list without the app's Escape blurring the field;
 and an inserted column renders whether or not it is grouped or included."""
@@ -51,8 +52,10 @@ def test_a_brace_offers_names_and_enter_inserts_a_placeholder_that_renders(fl_pa
     pg.keyboard.type("{Eve")
     pg.wait_for_selector(ITEMS, timeout=5_000)
     # What follows the brace narrows the list to the names containing it:
-    # the column, then its distinct-values form.
-    assert _items(pg) == ["EventId", "values:EventId"]
+    # the column, then (a number column) its totals, then its distinct
+    # values and their count.
+    assert _items(pg) == ["EventId", "sum:EventId", "min:EventId", "max:EventId",
+                          "values:EventId", "unique:EventId"]
     pg.keyboard.press("Enter")
     pg.wait_for_function("() => !document.querySelector('.fl-ac')")
     assert _value(pg) == "{which} of {count} — {EventId}"
@@ -67,23 +70,24 @@ def test_a_brace_offers_names_and_enter_inserts_a_placeholder_that_renders(fl_pa
     pg.wait_for_function(f"() => /^(First|Last|Only) of \\d+$/.test({DESC})", timeout=10_000)
 
 
-def test_a_total_up_column_completes_its_aggregate_forms_and_a_click_inserts(fl_page):
+def test_a_number_column_completes_its_aggregate_forms_and_a_click_inserts(fl_page):
     pg = fl_page
+    # Under Total up, so it is offered first; but any number column is.
     pg.evaluate(DRAG, ["[data-field='EventId']", "[data-zone='sums']"])
-    pg.wait_for_selector("button:has-text('{sum:EventId}')", timeout=5_000)
+    pg.wait_for_selector("[data-zone='sums'] [data-field='EventId']", timeout=5_000)
     tmpl = pg.locator(TMPL).first
     tmpl.fill("{which} of {count} — ")
     pg.keyboard.type("{sum:")
     pg.wait_for_selector(ITEMS, timeout=5_000)
-    assert _items(pg) == ["sum:EventId"]
+    items = _items(pg)
+    assert items[0] == "sum:EventId" and all(n.startswith("sum:") for n in items), items
     # A click on the row must insert, not blur the input and lose the list.
     pg.locator(ITEMS).first.click()
     pg.wait_for_function("() => !document.querySelector('.fl-ac')")
     assert _value(pg) == "{which} of {count} — {sum:EventId}"
     assert _focused(pg)
     pg.wait_for_function(f"() => /^(First|Last|Only) of \\d+ — \\d{{4,}}$/.test({DESC})", timeout=10_000)
-    # Leave the sheet as found: the template first (a total the chip no
-    # longer covers would fail the preview), then the Total-up chip.
+    # Leave the sheet as found.
     tmpl.fill("{which} of {count}")
     pg.wait_for_function(f"() => /^(First|Last|Only) of \\d+$/.test({DESC})", timeout=10_000)
     pg.locator("[data-zone='sums'] [data-field='EventId'] button").click()
