@@ -67,7 +67,7 @@ Each row's **⋯** button, or right-clicking the row, opens its menu:
 | **Edit name, group and notes…** | Changes the name, group and notes on this machine's list. The file keeps its name on disk. |
 | **Copy case file path** | Copies the full path of the case file. |
 | **Remove from list…** | Forgets the case on this machine; the file is left untouched. |
-| **Delete case file…** | Permanently deletes the case file and everything in it. Refused for the case Winnow has open, or one open in another Winnow. |
+| **Delete case file…** | Permanently deletes the case file and everything in it. Going back to the case list leaves the last case open, so deleting that one closes it first; the confirmation says so. Refused for a case open in another Winnow. |
 
 ### The cases folder
 

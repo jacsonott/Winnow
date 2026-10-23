@@ -105,7 +105,16 @@ see [docs/notes/README.md](README.md) for the whole set.
   /api/cases/{id}?delete_file=true`) is the one place the probe is a
   refusal rather than a prompt — 409 `case_in_use`, no "anyway" — since
   there is no version of deleting a case somebody has open that they
-  would want; it takes the -wal/-shm and a stale marker with it.
+  would want; it takes the -wal/-shm and a stale marker with it. The
+  case THIS server has open is the exception, and is closed first
+  (`_close_case`, under `_CASE_SWITCH`): going back to the case list
+  doesn't close a case, and nothing there does, so refusing it ("Close
+  this case before deleting its file") left the case an analyst had just
+  come from undeletable until they opened another one. The probe runs
+  after that close, not before — this process's own flock reads as a
+  holder until its Store lets go. And the registry entry only goes once
+  the file has: on Windows a file something still holds can't be
+  removed, and dropping the entry anyway hid a case still on disk.
 - **A Winnow binds its port before it does anything else, and its window
   waits for its own pid.** main() used to open the case, import `--open`
   files and start the browser thread, and only then have uvicorn bind;

@@ -200,6 +200,100 @@ def test_a_heartbeat_alone_also_refuses_the_delete(client, tmp_path):
     assert os.path.isfile(other)
 
 
+def _open_case(client, tmp_path, name):
+    """A registered case this server has open, the way the home screen
+    gets one: + New case creates the file, then it is opened."""
+    path = str(tmp_path / f"{name}.db-winnow")
+    cid = _register(client, path, name=name)
+    r = client.post("/api/case/open", json={"path": path})
+    assert r.status_code == 200, r.text
+    return cid, path
+
+
+def test_the_case_left_for_the_home_screen_can_be_deleted(client, tmp_path):
+    """Going back to the case list leaves the server's case open — the home
+    screen only changes what the window shows — and the delete refused a
+    case this server had open ("Close this case before deleting its
+    file"). Nothing on the home screen closes one, so the case the analyst
+    had just come from could not be deleted until they opened another one
+    and came back. The delete closes it first now."""
+    import server
+
+    cid, path = _open_case(client, tmp_path, "last")
+    r = client.delete(f"/api/cases/{cid}", params={"delete_file": "true", "path": path})
+    assert r.status_code == 200, r.text
+    # No case is open now, and the window that asked adopts that.
+    assert r.json()["case_token"] is None
+    assert server.STORE is None
+    assert client.get("/api/case/current").json()["open"] is False
+    assert sorted(p.name for p in tmp_path.iterdir() if p.name.startswith("last")) == []
+    assert all(c["id"] != cid for c in server.WS.cases.list())
+
+
+def test_deleting_another_case_leaves_the_open_one_open(client, tmp_path):
+    """Only the case being deleted is closed for it: deleting a different
+    one from the list must not take the open case away from a window
+    still working in it."""
+    import server
+
+    _, open_path = _open_case(client, tmp_path, "working")
+    other = str(tmp_path / "old.db-winnow")
+    Store(other, default_tags=DEFAULT_TAGS).close()
+    cid = _register(client, other, name="old")
+    r = client.delete(f"/api/cases/{cid}", params={"delete_file": "true", "path": other})
+    assert r.status_code == 200, r.text
+    assert "case_token" not in r.json()
+    assert server.STORE is not None and not server.STORE.closed
+    assert server.STORE.path == open_path
+    assert not os.path.exists(other)
+
+
+def test_the_open_case_is_still_refused_when_another_winnow_has_it_too(client, tmp_path):
+    """Closing this server's copy is not leave to delete one another Winnow
+    holds: the probe still runs after the close, and still refuses."""
+    import server
+
+    cid, path = _open_case(client, tmp_path, "shared")
+    # Another machine's heartbeat, written over this one's record — what a
+    # second Winnow on a flock-less share does. Closing this server's Store
+    # leaves a marker that names someone else where it is (release()), so
+    # the probe after the close still sees them.
+    _write_marker(path, heartbeat_at=time.time() - 3)
+    r = client.delete(f"/api/cases/{cid}", params={"delete_file": "true", "path": path})
+    assert r.status_code == 409
+    assert r.json()["detail"]["error"] == "case_in_use"
+    assert os.path.isfile(path)
+    assert any(c["id"] == cid for c in server.WS.cases.list())
+
+
+def test_a_case_file_that_survives_the_delete_stays_on_the_list(client, tmp_path, monkeypatch):
+    """Removing the file is best-effort (a -wal or a stale marker may well
+    not be there), and on Windows a file something still has open can't be
+    removed at all. The registry entry used to go regardless, so the case
+    left the list while its file stayed on disk, and the analyst was told
+    it was deleted."""
+    import server
+
+    cid, path = _open_case(client, tmp_path, "stuck")
+    monkeypatch.setattr(server, "_remove_case_file", lambda p: None)
+    r = client.delete(f"/api/cases/{cid}", params={"delete_file": "true", "path": path})
+    assert r.status_code == 409
+    assert "still on the case list" in r.json()["detail"]
+    assert os.path.isfile(path)
+    assert any(c["id"] == cid for c in server.WS.cases.list())
+
+
+def test_the_case_list_says_which_case_is_open(client, tmp_path):
+    """What the delete dialog reads to say the case will be closed first."""
+    cid, _ = _open_case(client, tmp_path, "here")
+    other = str(tmp_path / "there.db-winnow")
+    Store(other, default_tags=DEFAULT_TAGS).close()
+    oid = _register(client, other, name="there")
+    listed = {c["id"]: c for c in client.get("/api/cases").json()}
+    assert listed[cid]["open"] is True
+    assert listed[oid]["open"] is False
+
+
 def test_deleting_a_case_file_takes_what_lives_beside_it(client, tmp_path):
     """-wal/-shm stay behind whenever the last connection didn't close
     cleanly, and a killed Winnow leaves its stale lock marker. Deleting only
