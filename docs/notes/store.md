@@ -302,6 +302,19 @@ see [docs/notes/README.md](README.md) for the whole set.
   rather than the raw column name, since a column name is arbitrary CSV-
   header text and this sidesteps identifier-safety entirely rather than
   leaning on `q()` for a human-readable name nobody needs to read.
+- **Some columns are indexed at import, by shape** (`_build_shape_indexes`,
+  from a header set's `indexes` in defaults/headers.json: EventId for
+  EvtxECmd). Not for the first filter's sake but for the planner's: once
+  the grid has lazily indexed a column, SQLite plans `WHERE EventId = 'x'
+  GROUP BY RemoteHost` as a walk of the RemoteHost index with a table
+  lookup per row, about 15x slower than scanning, and ANALYZE (with or
+  without `analysis_limit`) leaves that plan alone. An index on the WHERE
+  column makes it an index search. On 2.1M EvtxECmd rows: the KAPE board
+  45 s -> 10 s, Top remote hosts 10.3 s -> 0.55 s, lateral movement's
+  preview 10.7 s -> 0.05 s, for 1.5-2.7 s of build at the end of the
+  import. Same index name as the lazy filter index, so there is only ever
+  one; every import path and save-as-table call it before starting the
+  search index, whatever `build_fts` says.
 - **A merge's view build selects only what it sorts on.** Each member's
   branch of the `UNION ALL` projects its member id, `rid` and the sort
   columns, never the merge's whole column list. It used to project every

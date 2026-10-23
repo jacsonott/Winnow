@@ -54,7 +54,7 @@ The tick on each row is whether the table is open as a tab: tick it to open the 
 
 **Indexes** shows both kinds of index a case builds on its own. A table's search index says **index ready**, **indexing…** or **not indexed**. Until it is ready, Contains and Advanced searches on that table scan every row instead: the results are the same, only slower (see [The search index and slow searches](Filtering-and-searching.md#the-search-index-and-slow-searches)). **Build** starts a table's search index now, in the background, rather than on the first search that needs it, and **Build *N* missing search indexes** does it for every table without one. If Winnow is running on a Python whose SQLite is older than 3.45, there is no search index, and the pane says so.
 
-Filtering, grouping or opening the value picker on a column builds a small filter index for that column in the background. They are listed beside each table, and ✕ drops one if they take up too much space; **Drop all filter indexes** drops every one, after asking. Dropping one costs nothing but a slower first filter on that column next time.
+Filtering, grouping or opening the value picker on a column builds a small filter index for that column in the background. An EvtxECmd event log gets one on EventId as part of its import, because the KAPE dashboard and lateral movement filter on it in nearly every query; it adds a second or two to the import of a large log and saves far more on the first dashboard. They are listed beside each table, and ✕ drops one if they take up too much space; **Drop all filter indexes** drops every one, after asking. Dropping one costs nothing but a slower first filter on that column next time.
 
 ## The table menu
 

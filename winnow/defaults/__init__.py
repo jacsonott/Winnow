@@ -11,7 +11,8 @@ same tables already labelled. Each set may also carry a `summary` block
 saying how to render one of its rows in a line — the Timeline's Body reads
 "Special privileges assigned  svc_backup · WKSTN-4471 · id 4672" rather
 than the whole source row pipe-joined. See `_summary` for the shape and
-why a wrong column name in one is a load-time error. **filters.json** is a working analyst's
+why a wrong column name in one is a load-time error. A set may also name
+`indexes`, columns an import of that shape indexes up front (`_indexes`). **filters.json** is a working analyst's
 Timeline Explorer triage set, converted to filter trees.
 
 The one thing the Python version got for free was the binding between
@@ -104,19 +105,43 @@ def _summary(name: str, cols: list[str], rec: dict) -> dict | None:
     return {"lead": list(lead), "details": [(c, labels.get(c, "")) for c in details]}
 
 
+def _indexes(name: str, cols: list[str], rec: dict) -> list[str]:
+    """One header set's `indexes`: the columns an import of that shape
+    indexes before the analyst asks (Store._build_shape_indexes), because
+    the shipped dashboards and lateral movement filter on them in nearly
+    every query. Without one, a query that filters on EventId and groups
+    by a column the grid has indexed walks the grouped column's index
+    with a table lookup per row: the KAPE board took 45 s on 2.1M rows
+    instead of 10 s. Same rule as a summary's columns: each has to be
+    one of the set's own, or it would index nothing on every import."""
+    want = rec.get("indexes")
+    if want is None:
+        return []
+    if not isinstance(want, list) or not all(isinstance(c, str) for c in want):
+        raise DefaultsError(f"headers.json entry {name!r}: indexes must be a list of column names")
+    for c in want:
+        if c not in cols:
+            raise DefaultsError(
+                f"headers.json entry {name!r}: indexes names column {c!r}, which that "
+                f"header set does not define — it would index nothing")
+    return list(want)
+
+
 @lru_cache(maxsize=1)
 def headers() -> dict:
     """{"version": int, "nicknames": [(name, [columns]), ...],
-    "summaries": {name: {"lead": [...], "details": [(column, label), ...]}}}
+    "summaries": {name: {"lead": [...], "details": [(column, label), ...]}},
+    "indexes": {name: [column, ...]}}
     — tuples so callers read the same shape the Python module handed them.
 
-    `summaries` is a separate key rather than a third element of each
-    nickname tuple because half the callers do `dict(headers()
-    ["nicknames"])`; a shape with a summary but no entry here is simply
-    absent from the dict."""
+    `summaries` and `indexes` are separate keys rather than more elements
+    of each nickname tuple because half the callers do `dict(headers()
+    ["nicknames"])`; a shape with no summary or no indexes is simply
+    absent from that dict."""
     data = _load(HEADERS_FILE)
     out = []
     summaries = {}
+    indexes = {}
     for i, rec in enumerate(data.get("nicknames") or []):
         name, cols = rec.get("name"), rec.get("columns")
         if not name or not isinstance(cols, list) or not cols:
@@ -125,9 +150,13 @@ def headers() -> dict:
         spec = _summary(name, cols, rec)
         if spec:
             summaries[name] = spec
+        want = _indexes(name, cols, rec)
+        if want:
+            indexes[name] = want
     if not out:
         raise DefaultsError("headers.json lists no header sets")
-    return {"version": int(data.get("version") or 0), "nicknames": out, "summaries": summaries}
+    return {"version": int(data.get("version") or 0), "nicknames": out, "summaries": summaries,
+            "indexes": indexes}
 
 
 @lru_cache(maxsize=1)
