@@ -33,7 +33,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form, Query
 from starlette.concurrency import run_in_threadpool
-from fastapi.responses import StreamingResponse, FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import StreamingResponse, FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -4243,8 +4243,11 @@ def api_rows(view_id: str, start: int = 0, count: int = 200):
         # jsonable_encoder's per-value walk over every cell of every row —
         # pure overhead for payloads that are already plain
         # str/int/None — and go straight to json.dumps. This endpoint is
-        # hit on every scroll, so the saving is felt continuously.
-        return JSONResponse(store().fetch_rows(view_id, start, min(count, 10000)))
+        # hit on every scroll, so the saving is felt continuously. Now a
+        # step further: the page arrives already encoded, its cells
+        # written by SQLite (Store.fetch_rows_json), the same bytes.
+        return Response(store().fetch_rows_json(view_id, start, min(count, 10000)),
+                        media_type="application/json")
     except ValueError as e:
         # Store._require_columns: the table is still importing (or an
         # import was killed mid-way). The analyst's tab says so rather
