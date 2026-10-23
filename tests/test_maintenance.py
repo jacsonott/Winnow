@@ -160,13 +160,17 @@ def test_compact_refuses_without_enough_free_disk(ingested, monkeypatch):
         store.compact()
 
 
-def test_compact_restores_temp_store_to_memory(ingested):
-    # VACUUM's scratch copy obeys temp_store, so compact() forces FILE for
-    # the duration — but leaving it there would push every later sort and
-    # temp b-tree onto disk.
+def test_temp_store_is_file_for_vacuum_and_the_sorter(ingested):
+    # VACUUM's scratch copy obeys temp_store, so MEMORY would hold a whole
+    # case in RAM during compact(); and SQLite runs no sorter threads on a
+    # MEMORY connection, which made _tune's threads=4 a no-op. FILE before
+    # and after compact().
     store, _ = ingested
+    assert store.db.execute("PRAGMA temp_store").fetchone()[0] == 1  # 1 == FILE
     store.compact()
-    assert store.db.execute("PRAGMA temp_store").fetchone()[0] == 2  # 2 == MEMORY
+    assert store.db.execute("PRAGMA temp_store").fetchone()[0] == 1
+    with store._reader() as ro:
+        assert ro.execute("PRAGMA temp_store").fetchone()[0] == 1
 
 
 # ------------------------------------------- orphaned views databases (temp)
