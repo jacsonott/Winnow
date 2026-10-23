@@ -259,8 +259,10 @@ def test_indexes_are_built_only_where_the_column_exists(store, abc):
     mid = store.create_merge("m", [a, b, c])["id"]
     _view(store, mid, filters=[{"column": "EventId", "op": "equals", "value": "4624"}])
     assert store.wait_for_column_index(b, "EventID", timeout=10)
-    assert [i["column"] for i in store.list_column_indexes(b)] == ["EventID"]
-    assert store.list_column_indexes(c) == []
+    # TIME is each member's own sort index from its import; EventID is
+    # the filter's, on b alone.
+    assert [i["column"] for i in store.list_column_indexes(b)] == ["TIME", "EventID"]
+    assert [i["column"] for i in store.list_column_indexes(c)] == ["Time"]
     with store.lock:
         tables = {r[0] for r in store.db.execute(
             "SELECT tbl_name FROM sqlite_master WHERE type='index' AND name LIKE 'ix_%'")}

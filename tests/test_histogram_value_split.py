@@ -165,9 +165,12 @@ def test_the_route_400s_what_it_cannot_split_by(client, store, src):
 def passes(store, monkeypatch):
     """The aggregate passes time_histogram runs, by shape: "span" (MIN/MAX
     of the epoch), "bars" (grouped by bar width), "seconds" (grouped by
-    exact second) and "tagged" (the tagged rows' bars, from row_tags)."""
+    exact second) and "tagged" (the tagged rows' bars, from row_tags).
+    With no answers kept, so a re-ask runs its passes rather than being
+    answered from _histogram_results (tests/test_histogram_answers.py)."""
     import contextlib
 
+    monkeypatch.setattr(store, "HISTOGRAM_ANSWERS_KEPT", 0)
     seen = []
     real = store._reader
 
@@ -208,7 +211,9 @@ def _per_second(store, monkeypatch, view_id, **kw):
     faster shapes are held to."""
     with monkeypatch.context() as mp:
         mp.setattr(store, "_histogram_parsed_in_sql", lambda *a: False)
+        mp.setattr(store, "HISTOGRAM_ANSWERS_KEPT", 0)
         store._histogram_widths.clear()
+        store._histogram_results.clear()
         return store.time_histogram(view_id, "When", **kw)
 
 
@@ -255,6 +260,8 @@ def _tags_in_the_one_pass(store, monkeypatch, view_id):
     held to."""
     with monkeypatch.context() as mp:
         mp.setattr(store, "_histogram_tagged_count", lambda ro, members, cap: cap)
+        mp.setattr(store, "HISTOGRAM_ANSWERS_KEPT", 0)
+        store._histogram_results.clear()
         return store.time_histogram(view_id, "When", stack="tags")
 
 
@@ -307,10 +314,11 @@ def test_python_read_timestamps_are_read_once(store, write_csv, passes, kw):
     assert passes == ["bars"]
 
 
-def test_a_width_that_no_longer_fits_falls_back(store, src):
+def test_a_width_that_no_longer_fits_falls_back(store, src, monkeypatch):
     """The remembered width is a hint. A wrong one — a derived column that
     filled in since, a stale entry — must cost a second pass, never a
     chart in the wrong bars."""
+    monkeypatch.setattr(store, "HISTOGRAM_ANSWERS_KEPT", 0)
     v = store.build_view(src, {"source_id": src})["view_id"]
     want = store.time_histogram(v, "When", stack="groups", split_column="User", split_values=["bob"])
     for wrong in (1, 86400):

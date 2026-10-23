@@ -186,8 +186,8 @@ def test_build_a_search_index_and_drop_filter_indexes(page, api, server_call, se
     server_call(f"/api/column_values?source_id={second}&column=EventId")
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
-        idx = server_call(f"/api/column_indexes?source_id={second}")
-        if idx and not idx[0]["building"]:
+        idx = {ix["column"]: ix for ix in server_call(f"/api/column_indexes?source_id={second}")}
+        if "EventId" in idx and not idx["EventId"]["building"]:
             break
         time.sleep(0.2)
     _open(page, "indexes")
@@ -204,10 +204,10 @@ def test_build_a_search_index_and_drop_filter_indexes(page, api, server_call, se
     assert chip.count() == 1
     assert page.locator(".tables-indexes .side-preview-foot .btn", has_text="Drop all filter indexes").is_enabled()
     chip.locator(".index-chip-drop").click()
-    page.wait_for_function("""(n) => ![...document.querySelectorAll('.tables-ix-row')]
-      .find((r) => r.querySelector('.tables-name').textContent === n).querySelector('.index-chip')""",
-                           arg=NAME, timeout=5000)
-    assert server_call(f"/api/column_indexes?source_id={second}") == []
+    chip.wait_for(state="detached", timeout=5000)
+    # What is left is the import's own: the sort index on its first
+    # datetime column (Store._build_import_indexes).
+    assert [ix["column"] for ix in server_call(f"/api/column_indexes?source_id={second}")] == ["Timestamp"]
     page.keyboard.press("Escape")
 
 

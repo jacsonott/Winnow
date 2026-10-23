@@ -16,6 +16,7 @@ from __future__ import annotations
 import calendar
 import codecs
 import contextlib
+import copy
 import csv
 import datetime
 import errno
@@ -2820,6 +2821,12 @@ class Store:
         # queue behind the writer.
         self._histogram_widths: dict[tuple, int] = {}
         self._histogram_widths_lock = threading.Lock()
+        # time_histogram's answers by the ROWS a view holds rather than by
+        # view id, so a sort or a filter cleared back to the whole table
+        # (a new view, the same rows) is answered without a pass. Exact,
+        # unlike the width hint: see _histogram_rows_key for what may key
+        # one. Under _histogram_widths_lock, newest last.
+        self._histogram_results: dict[tuple, dict] = {}
         self._undo_seq = 0
         # Tag-change undo history. Entries are newest-last; each owns a
         # v.undo_<n> delta table listing the rows the op *actually*
@@ -3241,33 +3248,47 @@ class Store:
             out += [have[c.strip().lower()] for c in want if have[c.strip().lower()] not in out]
         return out
 
-    def _build_shape_indexes(self, source_id: int) -> None:
-        """Builds _shape_index_columns' indexes as the last step of an
-        import, before the job reads as done — the same index, by name,
-        that _ensure_column_index_building would build on the first
-        equals filter, so either way there is one.
+    def _build_import_indexes(self, source_id: int) -> None:
+        """The indexes an import builds as its last step, before the job
+        reads as done: _shape_index_columns' filter indexes, and the sort
+        index on the table's first datetime column. Each is the very index,
+        by name, that first use would build in the background
+        (_ensure_column_index_building, _ensure_sort_index_building), so
+        either way there is one. Best-effort: the rows are in, and a table
+        without an index is only slower.
 
-        Up front rather than on first use because what it prevents is not
-        a slow first filter but a slow plan: once the grid has indexed a
-        column (any sort, filter or Values list does), SQLite answers
-        `WHERE EventId = '4624' GROUP BY RemoteHost` by walking the
-        RemoteHost index with a table lookup per row, about 15x slower than
-        a scan, and ANALYZE does not change its mind. With EventId indexed
-        the WHERE is an index search instead. Measured on a 2.1M-row
-        EvtxECmd table: the KAPE board 45 s -> 10 s, Top remote hosts
-        10.3 s -> 0.55 s, the lateral movement preview 10.7 s -> 0.05 s,
-        for 1.5 s of index build. Best-effort: the rows are in, and a table
-        without the index is only slower."""
+        The shape indexes are up front not for the first filter's sake but
+        for the planner's: once the grid has indexed a column (any sort,
+        filter or Values list does), SQLite answers `WHERE EventId = '4624'
+        GROUP BY RemoteHost` by walking the RemoteHost index with a table
+        lookup per row, about 15x slower than a scan, and ANALYZE does not
+        change its mind. With EventId indexed the WHERE is an index search
+        instead. Measured on a 2.1M-row EvtxECmd table: the KAPE board
+        45 s -> 10 s, Top remote hosts 10.3 s -> 0.55 s, the lateral
+        movement preview 10.7 s -> 0.05 s, for 1.5 s of index build.
+
+        The first datetime column is the one the Timeline and the histogram
+        read a table by, and the first column most analysts sort it by. A
+        first sort with no index sorts every row while the index builds
+        beside it, for the writer lock: 5.6 s on that EvtxECmd table, 11 to
+        14 s on a 4.3M-row MFTECmd one, against 0.8 s once it exists. On
+        the EvtxECmd table it costs 2.4 s of import."""
         src = self._source_lite(source_id)
         table = src["table_name"]
-        for col in self._shape_index_columns(src):
+        wanted = [(col, "filter") for col in self._shape_index_columns(src)]
+        when = next((c["name"] for c in self._base_cols(src) if c["type"] == "datetime"), None)
+        if when is not None:
+            wanted.append((when, "sort"))
+        for col, purpose in wanted:
             col = self._table_spelling(table, col)
-            name = self._column_index_name(table, col)
+            name = self._column_index_name(table, col, purpose)
+            collate = " COLLATE NOCASE" if purpose == "sort" else ""
             try:
                 with self.lock, self.db:
-                    self.db.execute(f"CREATE INDEX IF NOT EXISTS {q(name)} ON {q(table)}({q(col)})")
+                    self.db.execute(f"CREATE INDEX IF NOT EXISTS {q(name)} ON {q(table)}({q(col)}{collate})")
             except sqlite3.Error as e:
-                wlog.record("warn", f"{src['name']}: no index on {col} ({e}) — filters on it scan the table")
+                does = "filters on it scan" if purpose == "filter" else "a first sort by it sorts"
+                wlog.record("warn", f"{src['name']}: no index on {col} ({e}) — {does} the table")
 
     def _ensure_sort_index_building(self, source_id: int, column: str, table_name: str | None = None) -> None:
         """Same fire-and-forget background build as
@@ -4447,7 +4468,7 @@ class Store:
             raise error
 
         if total:
-            self._build_shape_indexes(source_id)
+            self._build_import_indexes(source_id)
         if build_fts and total:
             # Backgrounded, not built inline: the trigram index takes real
             # time to build (see build_fts) and ingest_csv should return as
@@ -4564,7 +4585,7 @@ class Store:
                 self.drop_source(source_id)
             raise error
         if total:
-            self._build_shape_indexes(source_id)
+            self._build_import_indexes(source_id)
         if build_fts and total:
             self._ensure_fts_building(source_id)
         elapsed = time.time() - t0
@@ -4718,7 +4739,7 @@ class Store:
                 self.drop_source(source_id)
             raise error
         if total:
-            self._build_shape_indexes(source_id)
+            self._build_import_indexes(source_id)
         if build_fts and total:
             self._ensure_fts_building(source_id)
         elapsed = time.time() - t0
@@ -4995,7 +5016,7 @@ class Store:
             raise error
 
         if total:
-            self._build_shape_indexes(source_id)
+            self._build_import_indexes(source_id)
         if build_fts and total:
             self._ensure_fts_building(source_id)
 
@@ -5084,7 +5105,7 @@ class Store:
             raise error
 
         if total:
-            self._build_shape_indexes(source_id)
+            self._build_import_indexes(source_id)
         if build_fts and total:
             self._ensure_fts_building(source_id)
 
@@ -5213,7 +5234,7 @@ class Store:
             raise error
 
         if total:
-            self._build_shape_indexes(source_id)
+            self._build_import_indexes(source_id)
         if build_fts and total:
             self._ensure_fts_building(source_id)
 
@@ -5403,7 +5424,7 @@ class Store:
             raise error
 
         if total:
-            self._build_shape_indexes(source_id)
+            self._build_import_indexes(source_id)
         if build_fts and total:
             self._ensure_fts_building(source_id)
 
@@ -5531,7 +5552,7 @@ class Store:
             raise error
 
         if total:
-            self._build_shape_indexes(source_id)
+            self._build_import_indexes(source_id)
         if build_fts and total:
             self._ensure_fts_building(source_id)
 
@@ -10039,6 +10060,28 @@ class Store:
         with self._histogram_widths_lock:
             hint = self._histogram_widths.get(width_key)
         with self._reader() as ro, self._dropped_view_is_expired(), self._interruptible(op_token, ro):
+            # The same rows asked the same question have the same answer: a
+            # sort, or a filter cleared back to the whole table, is a new
+            # view of rows already counted, and was a whole pass again
+            # (2.2 s on 2.1M rows, each time). Not for a derived column,
+            # whose values can still be filling in; the tag split also
+            # keys on the tag generation, read before the pass so a write
+            # that lands during it can only make the answer newer than its
+            # key.
+            answer_key = None
+            if not is_derived and not (by_values and self._is_derived(src, split_column)):
+                rows_key = self._histogram_rows_key(ro, view_id, handle, src, members, direct)
+                if rows_key is not None:
+                    answer_key = (rows_key, column, max_buckets, stack,
+                                  split_column if by_values else None,
+                                  json.dumps(split_values) if by_values else None,
+                                  self._state_generation_on(ro) if stack == "tags" else None)
+                    with self._histogram_widths_lock:
+                        cached = self._histogram_results.pop(answer_key, None)
+                        if cached is not None:
+                            self._histogram_results[answer_key] = cached
+                    if cached is not None:
+                        return copy.deepcopy(cached)
             # Tags over a whole table where few of its rows carry one: the
             # bars without the split, then the tagged rows by themselves,
             # reached from row_tags, and untagged is what each bar has left.
@@ -10162,7 +10205,53 @@ class Store:
             if tags_apart:
                 secs, tags, counts = self._histogram_untagged_rest(per_bucket, apart)
             out["stack"] = self._histogram_tag_stack(secs, tags, counts, bucket)
+        if answer_key is not None:
+            with self._histogram_widths_lock:
+                self._histogram_results[answer_key] = copy.deepcopy(out)
+                while len(self._histogram_results) > self.HISTOGRAM_ANSWERS_KEPT:
+                    del self._histogram_results[next(iter(self._histogram_results))]
         return out
+
+    # How many time_histogram answers _histogram_results keeps. One is a
+    # few KB (at most 160 bars, nine segments each), and the strip asks a
+    # handful per view: the plain chart, Tags, a Value or two.
+    HISTOGRAM_ANSWERS_KEPT = 32
+
+    def _histogram_rows_key(self, ro: sqlite3.Connection, view_id: str, handle: dict, src: dict,
+                            members: list[dict], direct: bool) -> tuple | None:
+        """Which rows a view holds, as a key two views holding the same
+        rows share: what _histogram_results files time_histogram's answers
+        under, so a new view of rows already counted needs no pass.
+
+        A view over every row of its source (`direct`) is that source's
+        members at their row count. Nothing else can change which rows
+        that is: a table's rows never change once imported (invariant #1), ids
+        are never reused (AUTOINCREMENT), and a merge edited to other
+        members names other ids. A root view holding some of the rows is
+        fingerprinted from v.view_N instead — its row count and two sums of
+        a hash of (source_id, rid), a 64-bit chance of two row sets
+        agreeing by accident — once, since a built view's rows never
+        change; 0.23 s on 2.1M rows, a tenth of the pass it can save. A
+        group sub-view or the timeline is not cached (None)."""
+        if direct:
+            return ("all", handle["source_id"], tuple(m["source_id"] for m in members), src["row_count"])
+        if handle.get("kind") != "root":
+            return None
+        key = handle.get("rows_key")
+        if key is None:
+            n, a, b = ro.execute(
+                "SELECT COUNT(*), SUM((rid * 2147483629 + source_id * 1500450271) % 4294967291), "
+                f"SUM((rid * 1500450271 + source_id * 2147483629) % 4294967279) FROM v.{q(view_id)}"
+            ).fetchone()
+            key = handle["rows_key"] = ("some", handle["source_id"], n, a, b)
+        return key
+
+    def _state_generation_on(self, ro: sqlite3.Connection) -> str:
+        """STATE_GENERATION_KEY as `ro` sees it: the counter every tag
+        write bumps (_bump_state_generation)."""
+        row = ro.execute("SELECT value FROM case_settings WHERE key=?",
+                         (self.STATE_GENERATION_KEY,)).fetchone()
+        return row["value"] if row else "0"
 
     def _histogram_parsed_in_sql(self, ro: sqlite3.Connection, src: dict, members: list[dict],
                                  column: str) -> bool:
@@ -17655,7 +17744,7 @@ class Store:
         if layout:
             self.save_layout(new_id, layout)
         if total:
-            self._build_shape_indexes(new_id)
+            self._build_import_indexes(new_id)
         if build_fts and total:
             self._ensure_fts_building(new_id)
         return {"source": {"id": new_id, "name": name, "row_count": total}}

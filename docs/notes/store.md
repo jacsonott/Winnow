@@ -306,7 +306,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   rather than the raw column name, since a column name is arbitrary CSV-
   header text and this sidesteps identifier-safety entirely rather than
   leaning on `q()` for a human-readable name nobody needs to read.
-- **Some columns are indexed at import, by shape** (`_build_shape_indexes`,
+- **Some columns are indexed at import, by shape** (`_build_import_indexes`,
   from a header set's `indexes` in defaults/headers.json: EventId for
   EvtxECmd). Not for the first filter's sake but for the planner's: once
   the grid has lazily indexed a column, SQLite plans `WHERE EventId = 'x'
@@ -319,6 +319,17 @@ see [docs/notes/README.md](README.md) for the whole set.
   import. Same index name as the lazy filter index, so there is only ever
   one; every import path and save-as-table call it before starting the
   search index, whatever `build_fts` says.
+- **The first datetime column gets its sort index at import too**, in
+  the same step (`_build_import_indexes`): the `COLLATE NOCASE` index
+  `_ensure_sort_index_building` would otherwise start on the first sort,
+  by the same name. That column is the one the Timeline and the histogram
+  read a table by, and the one most analysts sort by first. Without it the
+  first sort sorts every row in a temp b-tree while the index builds
+  beside it, both after the writer lock: 5.6 s on 2.1M EvtxECmd rows,
+  11-14 s on 4.3M MFTECmd rows, against about 0.8 s with the index. It
+  costs 2.4 s of import on the EvtxECmd table. Only the first: a table
+  with several timestamps (MFT has eight) would pay for each, and the
+  others build on first use as before. `tests/test_shape_indexes.py`.
 - **A merge's view build selects only what it sorts on.** Each member's
   branch of the `UNION ALL` projects its member id, `rid` and the sort
   columns, never the merge's whole column list. It used to project every
@@ -614,6 +625,23 @@ see [docs/notes/README.md](README.md) for the whole set.
   (`_histogram_parsed_in_sql`) would pay `TS_NORMALIZE` in every pass,
   so it takes the one pass by exact second below instead. Plain on 500k
   rows: 1.15 s to 0.6 s.
+- **A histogram answer is kept by the rows it counted, not by view
+  id.** A sort, or a filter cleared back to the whole table, is a new
+  view of rows already counted, and each was a whole pass again (2.2 s
+  on a 2.1M-row event log, every sort). `_histogram_results` files each
+  answer under `_histogram_rows_key`: a view over every row of its
+  source is that source's members at their row count (rows never change
+  after import, ids are AUTOINCREMENT, a merge given other tables names
+  other ids); a root view holding some rows is its count plus two sums
+  of a hash of `(source_id, rid)` over `v.view_N`, worked out once per
+  view (0.23 s on 2.1M rows) and kept on the handle. The tag split also
+  keys on the state generation every tag write bumps
+  (`_bump_state_generation`), read before the pass. A derived column,
+  as the charted column or the split, is never kept: its values can
+  still be filling in. Group sub-views and the timeline are not keyed.
+  Sort and clear on the 2.1M-row log: 1.8 to 2.1 s to under 1 ms.
+  Tests that count passes set `HISTOGRAM_ANSWERS_KEPT = 0`, or a re-ask
+  would run none. `tests/test_histogram_answers.py`.
 - **Histogram buckets are floored, and 1601 is a real minimum.** A bucket
   is `[b, b + bucket_seconds)` — the strip finds a row's bar that way.
   The fold into buckets is Python's `//`, which floors; it was SQLite's
