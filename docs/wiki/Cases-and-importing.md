@@ -236,8 +236,10 @@ accent colour until then, and **Import N files** takes you to it.
 
 An uploaded file previews from its first 1 MB, which is more than the
 preview reads. JSON, SQLite and Excel previews need the whole file, so over
-32 MB the pane asks first with **Load preview (uploads …)**. A file added
-from this machine previews in place at any size.
+32 MB the pane asks first with **Load preview (uploads …)**. A SQLite file's
+tables or a workbook's sheets are read once: choosing the file again shows
+the same list without sending it again. A file added from this machine
+previews in place at any size.
 
 A file headed for the raw-text reader that looks binary (a NUL in its first
 8 KB; a UTF-16 byte-order mark is exempt) is dropped from the queue with

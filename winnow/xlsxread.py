@@ -49,6 +49,7 @@ guarantee holds by construction.
 from __future__ import annotations
 
 import datetime
+import re
 from typing import Iterator
 
 import openpyxl
@@ -116,6 +117,45 @@ def _cell_value(cell, epoch):
     return v
 
 
+# A <row ...> start tag, under any namespace prefix (<x:row> from the
+# OpenXML SDK), and the r="" it may carry. Never <rowBreaks>: \b.
+_ROW_TAG = re.compile(rb"<(?:[A-Za-z_][\w.-]*:)?row\b([^>]*)>")
+_ROW_INDEX = re.compile(rb"""\sr\s*=\s*["'](\d+)["']""")
+
+
+def _count_rows(ws) -> int:
+    """How many rows a sheet with no <dimension> runs to, counted the way
+    iter_rows counts them — up to the last row's r="", the gaps before it
+    included — from the sheet's XML rather than through openpyxl's row
+    parser. That parser builds every cell of every row to be counted and
+    thrown away: 16 of the 20 seconds a 33 MB workbook took to list its
+    sheets, the whole time holding the GIL every other import needed
+    (a 1 s CSV import took 18 s beside it). The tags alone take one.
+
+    Text content can't fake a tag (a "<" in a cell is written &lt;). The
+    sheet's XML is reached through the read-only sheet's own private
+    _get_source; where that isn't what openpyxl 3.x keeps there, the rows
+    are counted the slow way, which gives the same number."""
+    source = getattr(ws, "_get_source", None)
+    if source is None:
+        return sum(1 for _ in ws.iter_rows(values_only=True))
+    last = top = 0
+    tail = b""
+    with source() as xml:
+        while chunk := xml.read(1 << 20):
+            buf = tail + chunk
+            done = 0
+            for m in _ROW_TAG.finditer(buf):
+                r = _ROW_INDEX.search(m.group(1))
+                last = int(r.group(1)) if r else last + 1
+                top = max(top, last)
+                done = m.end()
+            # A tag the chunk cut in two is matched whole in the next one.
+            cut = buf.rfind(b"<", done)
+            tail = buf[cut:] if cut >= 0 else b""
+    return top
+
+
 def workbook_sheets(path: str) -> list[dict]:
     """Every data sheet, for the import picker: [{name, row_count, columns}]
     in workbook order (chartsheets never appear). row_count is *data* rows
@@ -131,7 +171,7 @@ def workbook_sheets(path: str) -> list[dict]:
             # real end, not to a column the declaration stopped at.
             ws.reset_dimensions()
             if rows_hint is None:  # no <dimension> — count the rows
-                rows_hint = sum(1 for _ in ws.iter_rows(values_only=True))
+                rows_hint = _count_rows(ws)
             header: list[str] = []
             for row in ws.iter_rows(values_only=True):
                 texts = [cell_text(v).strip() for v in row]
