@@ -63,7 +63,7 @@ def test_copying_a_layout_between_tables_whose_columns_differ(page, api, tmp_pat
         key = page.locator(".tm-layout-from option", has_text="cl_a.csv").get_attribute("value")
         page.locator(".tm-layout-from").select_option(key)
         page.wait_for_function("() => !document.querySelector('.tm-layout-preview.stale')"
-                               " && document.querySelector('.copy-layout-col').dataset.col === 'CpCmd'")
+                               " && document.querySelector('.copy-layout-col')?.dataset.col === 'CpCmd'")
         want = ["CpCmd", "CpUser", "CpWhen", "CpExtra", "CpHost"]
         assert page.locator(".copy-layout-col").evaluate_all("(rs) => rs.map((r) => r.dataset.col)") == want
         # Only what applying would change is marked: CpExtra keeps its
