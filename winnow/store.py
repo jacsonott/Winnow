@@ -153,7 +153,7 @@ TIMELINE_BODY_DEPTH_HEADROOM = 10
 # Deliberately mirrors app.js's file-picker <input accept> list rather than
 # inventing a separate notion of "supported" — one format list, two places
 # it has to be spelled out (a browser <input> can't read a Python constant).
-DEFAULT_IMPORT_EXTENSIONS = {".csv", ".tsv", ".txt", ".psv", ".json", ".jsonl", ".ndjson"}
+DEFAULT_IMPORT_EXTENSIONS = {".csv", ".tsv", ".tab", ".txt", ".psv", ".json", ".jsonl", ".ndjson"}
 # The extensions that NAME their delimiter. A file called .tsv is a
 # tab-separated file — that is what the suffix means, and it is better
 # evidence than a content sniffer's tie-break, which is decided by
@@ -163,6 +163,10 @@ DEFAULT_IMPORT_EXTENSIONS = {".csv", ".tsv", ".txt", ".psv", ".json", ".jsonl", 
 # with its header split down the middle.
 # .txt is deliberately absent: it names no delimiter, so it is sniffed.
 EXTENSION_DELIMITERS = {".tsv": "\t", ".tab": "\t", ".csv": ",", ".psv": "|"}
+# How much of a delimited file's start the delimiter is read from — the
+# same for the preview and the import, or the two can disagree on a file
+# whose first records are long.
+SNIFF_HEAD_CHARS = 64 * 1024
 # The SQLite set is separate because these files can't be bulk-imported
 # blind — which tables to pull out is a per-file choice (see
 # preview_sqlite_tables) — so directory import ignores them while the
@@ -4468,7 +4472,7 @@ class Store:
         encoding = sniff_text_encoding(path)
         fh = open(path, "r", encoding=encoding, errors=TEXT_DECODE_ERRORS,
                   newline="", buffering=1 << 20)
-        head = fh.read(64 * 1024)
+        head = fh.read(SNIFF_HEAD_CHARS)
         fh.seek(0)
         fallback0 = _cp1252_fallback_count()   # after the seek: the head is read twice
         if delimiter is None:
@@ -5035,7 +5039,7 @@ class Store:
         the ingest must reach the same delimiter or the analyst agrees to
         one table and gets another."""
         if delimiter is None:
-            delimiter = self._sniff(text[:8192], name)
+            delimiter = self._sniff(text[:SNIFF_HEAD_CHARS], name)
         _, rows = _csv_rows(io.StringIO(text), delimiter)
         first_row = _first_nonblank_row(rows)
         if has_header:
@@ -6488,6 +6492,35 @@ class Store:
         modal = max(set(counts), key=counts.count)
         return counts.count(modal) / len(counts) >= 0.9
 
+    @staticmethod
+    def _splits_most_records(head: str, ch: str, sample: int = 20) -> bool:
+        """Whether `ch` splits at least half of this text's records — the
+        looser test a name that says TAB is held to (_sniff).
+
+        Records, not lines: they are parsed the way the import reads them,
+        so a quoted cell running over several lines is one record rather
+        than a run of lines with no tab in them. And half of them, not
+        every one, and not all to the same width: a title line above the
+        header, a tool that leaves empty trailing fields off, a comment
+        line — none of those stop a file being tab-separated, and each was
+        enough to send a .tsv to the sniffer, whose tie-break is the comma.
+        A comma-separated file saved as .tsv has no tab to split on, so it
+        still fails here and is sniffed."""
+        try:
+            _, rows = _csv_rows(io.StringIO(head), ch)
+            records = list(itertools.islice((r for r in rows if any(c.strip() for c in r)), sample + 1))
+        except csv.Error:
+            return False
+        # The head is cut wherever the read stopped, so a short sample's
+        # last record can be half a line.
+        if len(records) > sample:
+            records = records[:sample]
+        elif len(records) > 1 and not head.endswith(("\n", "\r")):
+            records = records[:-1]
+        if not records:
+            return False
+        return 2 * sum(len(r) > 1 for r in records) >= len(records)
+
     @classmethod
     def _sniff(cls, head: str, name: str | None = None) -> str:
         """The delimiter, from the file's name first and its content second.
@@ -6496,15 +6529,27 @@ class Store:
         that reaches here). An extension in EXTENSION_DELIMITERS names a
         delimiter outright, and that beats sniffing the bytes — but only
         when the bytes agree, so a mislabelled file still falls through to
-        the sniffer rather than being read down the wrong column.
+        the sniffer rather than being read down the wrong column. A name
+        that says tab only needs the tab to split most records
+        (_splits_most_records); the others need their character on every
+        line (_looks_delimited_by). The difference is what turns up inside
+        a field: a comma in a TSV's text is routine, a tab in a CSV's is
+        not, so a tab is far better evidence than a comma is.
 
-        Content-only sniffing stays underneath, unchanged, for .txt, for
-        extensionless dumps, and for the named file whose named delimiter
-        is not in it."""
+        For the same reason, on content alone a tab on every sampled line,
+        as many times on nearly all of them, is taken before csv.Sniffer
+        is asked: when a comma is just as consistent (one in every line's
+        timestamp is enough) the sniffer's tie-break is CPython's
+        `preferred` list, which starts with the comma — and that is how a
+        tab-separated .txt (Excel's "Text (Tab delimited)") came in as
+        CSV. Everything else is sniffed as before."""
         ext = os.path.splitext(name or "")[1].lower()
         named = EXTENSION_DELIMITERS.get(ext)
-        if named and cls._looks_delimited_by(head, named):
+        agrees = cls._splits_most_records if named == "\t" else cls._looks_delimited_by
+        if named and agrees(head, named):
             return named
+        if cls._looks_delimited_by(head, "\t"):
+            return "\t"
         try:
             return csv.Sniffer().sniff(head[:8192], delimiters=",\t;|").delimiter
         except csv.Error:

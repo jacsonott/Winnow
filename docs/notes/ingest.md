@@ -624,9 +624,26 @@ see [docs/notes/README.md](README.md) for the whole set.
   The name is **evidence, not an instruction**: `_looks_delimited_by`
   requires the named character on every sampled line with a consistent
   count (90%, for the ragged rows this importer pads rather than refuses),
-  so a comma-separated file somebody saved as `.tsv` still falls through
-  to the sniffer instead of being read as one very wide column. An
-  explicit `delimiter=` from the preview still beats both.
+  so a `.csv` or `.psv` whose bytes don't agree with its name still falls
+  through to the sniffer. An explicit `delimiter=` from the preview still
+  beats both.
+
+  **A name that says tab is held to a looser test**
+  (`_splits_most_records`): the tab has to split at least half of the
+  first 20 *records*, parsed the way the import reads them. "Every line,
+  the same number of times" sent real `.tsv` files straight back to the
+  comma — an exporter that leaves empty trailing fields off, a title line
+  above the header, a quoted cell running over two lines — and the
+  analyst saw *Comma-delimited (detected)* again. The asymmetry is the
+  point: a comma inside a TSV's text is routine, a tab inside a CSV's is
+  not. A CSV saved as `.tsv` has no tab to split on, so it still fails and
+  is sniffed. For the same reason, on content alone (`.txt`, no
+  extension) a tab passing `_looks_delimited_by` is taken before
+  `csv.Sniffer` is asked — Excel's *Text (Tab delimited)* is a `.txt`.
+
+  **The preview and the import read the same head** (`SNIFF_HEAD_CHARS`,
+  64K characters). The preview used to sniff its first 8 KB, so with wide
+  rows its 20-record sample was cut short where the import's was not.
 
   **The name has to reach both ends.** `ingest_csv` passes `path` rather
   than `name` — the display name is the caller's to override and often
