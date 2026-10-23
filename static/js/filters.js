@@ -10,7 +10,7 @@ import { clearAllFilters } from './sources.js';
 import { S, normalizeTree } from './state.js';
 import { updateFiltersButton } from './timeframe.js';
 import { anchoredPanel, closeMenu } from './ui.js';
-import { SEARCH_DETACH_MS, rebuildView } from './view.js';
+import { SEARCH_DETACH_MS, rebuildView, sameSearchInFlight } from './view.js';
 
 /* -------------------------------------------------------------- filters */
 
@@ -893,8 +893,19 @@ $('search').onkeydown = (e) => {
   // Escape is also how a search left running in the background is
   // called off from the box: a search-box rebuild cancels this table's
   // pending search before it starts its own (view.js runBuild).
-  if (e.key === 'Escape') { e.target.value = ''; S.search = ''; rebuildView({ keepScroll: false, detachAfterMs: SEARCH_DETACH_MS }); $('body').focus(); }
-  if (e.key === 'Enter') { rebuildView({ keepScroll: false, detachAfterMs: SEARCH_DETACH_MS }); $('body').focus(); }
+  //
+  // Both build now, so the debounced build from the last keystroke goes:
+  // left waiting, it fired up to 220 ms later and superseded this one —
+  // the scan cancelled and started over, landing where typing lands
+  // (keepScroll) instead of where Enter does. And when that build has
+  // already started, Enter lets it run if it is the one Enter would
+  // start (sameSearchInFlight).
+  if (e.key === 'Escape') { searchSoon.cancel(); e.target.value = ''; S.search = ''; rebuildView({ keepScroll: false, detachAfterMs: SEARCH_DETACH_MS }); $('body').focus(); }
+  if (e.key === 'Enter') {
+    searchSoon.cancel();
+    if (!sameSearchInFlight()) rebuildView({ keepScroll: false, detachAfterMs: SEARCH_DETACH_MS });
+    $('body').focus();
+  }
 };
 
 $('search').addEventListener('blur', collapseSearchIfEmpty);

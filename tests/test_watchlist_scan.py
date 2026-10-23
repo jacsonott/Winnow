@@ -206,15 +206,15 @@ def test_hits_are_identical_with_and_without_the_index_and_the_index_is_used(sto
         del store._reader
     # Same rows either way (case-insensitive, mid-token) …
     assert _hit_rids(store, wid, a) == _hit_rids(store, wid, b) == [1, 3]
-    # … and the indexed table really took the trigram path, the other the blob LIKE.
-    assert sql_a and not any("doc LIKE" in s for s in sql_a) and all("ESCAPE" in s for s in sql_a)
-    assert sql_b and all("doc LIKE" in s for s in sql_b) and not any("ESCAPE" in s for s in sql_b)
+    # … and the indexed table really took the trigram index, the other a scan.
+    assert sql_a and not any("MATCH" in s for s in sql_a) and all("ESCAPE" in s for s in sql_a)
+    assert sql_b and all("MATCH" in s for s in sql_b) and all("ESCAPE" in s for s in sql_b)
 
 
 def test_wildcard_characters_in_an_indicator_stay_literal_with_the_index_built(store, write_csv):
-    """`%`/`_` cannot take the bare (unescaped) trigram pushdown — they
-    would match as wildcards, a silently-wrong superset — so those values
-    route through the escaped fallback even with the index ready."""
+    """`%`/`_` are ordinary characters to the trigram index, and the
+    escaped check after it keeps them literal — a wildcard match would be a
+    silently-wrong superset."""
     rows = [["Note"], ["progress 100% done"], ["progress 100X done"], ["under_score"], ["underXscore"]]
     sid = _ingest(store, write_csv, "wild.csv", rows, build_fts=True)
     assert store.wait_for_fts(sid, timeout=10)

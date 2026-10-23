@@ -190,7 +190,7 @@ see [docs/notes/README.md](README.md) for the whole set.
 - **…and an old chart is faded from the moment the view starts to
   change, not from when the new answer is asked for.** The breathe above
   was the only cue, and it started late: the strip asked only on
-  `winnow:viewchange` (after the build, the seed page, the remap, the
+  `winnow:viewchange` (after the build, the seed fetch, the remap, the
   regroup and the paint) plus `REFRESH_MS`, and the answer took seconds
   on a big table, so for all of that the previous view's chart sat at
   full strength under the new view's rows — scrolling moved nothing on
@@ -1659,7 +1659,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   (cursor first — the highlighted row is the place; picks and the cell
   range only stand in for a missing cursor) is captured before the build,
   its position in the new view is asked for **before the seed fetch** so
-  the pages seeded are the ones the grid will show (recentring after a
+  the rows seeded are the ones the grid will show (recentring after a
   page-0 seed painted the target rows as placeholders for a round trip),
   and after the seq/source guards the cursor is re-pointed by identity.
   Three rules. With `keepScroll: true` (header-box typing, a sort click)
@@ -1749,6 +1749,18 @@ see [docs/notes/README.md](README.md) for the whole set.
   — the index-build test plays the server for `/api/sources` (route +
   reload) rather than writing `fts_building` into client state, so it
   proves the refresh is issued, not just that the hint renders.
+- **Enter in the search box doesn't supersede the build it would start.**
+  The box's debounce fires 220 ms after the last key, so by the time
+  most analysts press Enter the same search is already running, and
+  Enter's own build cancelled it and started the scan over: on the
+  693k-row EvtxECmd table, "Windows" + Enter 400 ms later painted at
+  2.1 s instead of 1.4 s. Enter now cancels a debounce still waiting
+  (`.cancel()` on core.js's `debounce` — left waiting, it superseded
+  Enter's build instead), and lets a build in flight run when
+  `sameSearchInFlight` says it is Enter's: a search-box build of the same
+  spec for the same table, started at the top of the grid, with no
+  cursor, pick or cell range for Enter to bring back. Otherwise Enter
+  supersedes it as before, since it would land somewhere else.
 - **The jobs panel has a Clear all, and what it will not clear is the
   point of it.** A folder import queues one job per file and every one of
   them leaves a finished row behind. The server keeps the last
@@ -1844,7 +1856,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   was run with (a snapshot of S, not the compiled spec — `S.filters` is
   raw header-box text), repaints the chrome from them, and adopts the
   view through the same landing every rebuild takes, so the cursor row,
-  the picks and the seeded pages resolve against the adopted view. A
+  the picks and the seeded rows resolve against the adopted view. A
   409 "expired" on the adopt (a build landed in between and evicted the
   held view) toasts and runs the same spec again inside the chrome that
   is already up. Only search-box rebuilds detach: filter, sort, tag-chip

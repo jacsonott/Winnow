@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from winnow.store import _fts_like_pattern, _blob_expr, TRIGRAM_MIN_LEN, q
+from winnow.store import _blob_expr, _contains_clause, _trigram_match_query, TRIGRAM_MIN_LEN, q
 
 
 def _cells(store, view_id):
@@ -58,9 +58,8 @@ def test_contains_works_without_fts_too(store, write_csv):
 
 def test_contains_short_term_falls_back_to_like(ingested):
     # "ja" is under the trigram tokenizer's 3-character floor — the index
-    # has nothing to look up for it, so this must still go through the
-    # blob-LIKE fallback even once the index is built, and still find the
-    # real substring match.
+    # has nothing to look up for it, so this must still scan even once the
+    # index is built, and still find the real substring match.
     store, source_id = ingested
     assert store.wait_for_fts(source_id, timeout=5)
     spec = {"source_id": source_id, "filters": [], "sort": [], "search": "ja", "search_mode": "contains"}
@@ -106,8 +105,8 @@ def test_advanced_and_or(ingested):
 
 def test_advanced_short_term_falls_back_to_like(ingested):
     # "ja" is under the 3-char trigram floor even inside an Advanced-mode
-    # term chip — must still find the real match via the per-term LIKE
-    # fallback in _advanced_fts_clause, not silently drop the term.
+    # term chip — must still find the real match via a per-term scan in
+    # _advanced_clause, not silently drop the term.
     store, source_id = ingested
     assert store.wait_for_fts(source_id, timeout=5)
     terms = [{"term": "ja", "connector": "AND", "exclude": False}]
@@ -117,7 +116,7 @@ def test_advanced_short_term_falls_back_to_like(ingested):
 
 
 def test_advanced_leading_not(ingested):
-    # _advanced_fts_clause's own docstring documents a prior bug: FTS5's NOT
+    # _advanced_clause's own docstring documents a prior bug: FTS5's NOT
     # has no unary form, and an earlier version silently dropped a *leading*
     # term's exclude flag, so "NOT svchost" as the first term matched rows
     # *containing* svchost instead of excluding them. This is the regression
@@ -133,8 +132,8 @@ def test_advanced_leading_not(ingested):
 
 
 def test_advanced_leading_not_without_fts(store, write_csv):
-    # Same regression, exercised through _advanced_like_clause (the non-FTS
-    # fallback) instead of _advanced_fts_clause.
+    # Same regression, on a table with no index, where every term is a
+    # scan.
     path = write_csv([
         ["Process"],
         ["svchost.exe"],
@@ -148,18 +147,130 @@ def test_advanced_leading_not_without_fts(store, write_csv):
     assert rows == [["cmd.exe"]]
 
 
-def test_fts_like_pattern_routing():
-    # Indexable terms get the bare pattern (no escaping — safe only
-    # because wildcard-bearing terms are refused below).
-    assert _fts_like_pattern("jacso") == "%jacso%"
-    assert _fts_like_pattern("hello world") == "%hello world%"  # space preserved -> literal substring
-    assert _fts_like_pattern("C:\\Windows") == "%C:\\Windows%"  # backslash is literal in bare LIKE
-    # Refused: under the trigram floor, or containing a LIKE wildcard the
-    # unescaped pushdown form would misinterpret — these must take the
-    # escaped blob-LIKE fallback instead.
-    assert _fts_like_pattern("ja") is None
-    assert _fts_like_pattern("100%") is None
-    assert _fts_like_pattern("under_score") is None
+def test_trigram_match_query_routing():
+    # One quoted string per distinct trigram, ANDed: a longer string would
+    # be a phrase, which a detail=none index refuses.
+    assert _trigram_match_query("jacso") == '"jac" AND "acs" AND "cso"'
+    assert _trigram_match_query("abab") == '"aba" AND "bab"'   # deduped
+    assert _trigram_match_query('a"bc') == '"a""b" AND """bc"'  # a quote doubles
+    # A LIKE wildcard is an ordinary character to the index (it is the
+    # check that keeps it literal), so these terms use it now.
+    assert _trigram_match_query("100%") == '"100" AND "00%"'
+    assert _trigram_match_query("under_score") is not None
+    # Under the trigram floor there is nothing to look up.
+    assert _trigram_match_query("ja") is None
+    assert _trigram_match_query("ab\x00c") is None
+
+
+def test_contains_clause_asks_each_column_unless_the_term_has_a_space():
+    clause, params = _contains_clause(["A", "B"], "jacso")
+    assert params == [] and "COALESCE" not in clause
+    assert '"A" LIKE \'%jacso%\' ESCAPE' in clause and '"B" LIKE \'%jacso%\' ESCAPE' in clause
+    # A space can straddle the separator between two columns: that term
+    # asks the joined text — after each word of three characters or more
+    # has been found in some column on its own.
+    clause, params = _contains_clause(["A", "B"], "o w")
+    assert _blob_expr(["A", "B"]) in clause and "%o w%" in clause and params == []
+    assert "'%o%'" not in clause and "'%w%'" not in clause
+    clause, params = _contains_clause(["A", "B"], "hello wo")
+    assert clause.index("'%hello%'") < clause.index(_blob_expr(["A", "B"]))
+    assert '"B" LIKE \'%hello%\' ESCAPE' in clause and "'%wo%'" not in clause and params == []
+    # The longest three words at most: a pasted sentence doesn't nest a
+    # CASE per word.
+    clause, _ = _contains_clause(["A"], "aaaa bbbbbb ccc ddddd eeeeeee")
+    assert clause.count("CASE WHEN") == 3 and "'%ccc%'" not in clause and "'%aaaa%'" not in clause
+    assert clause.index("'%eeeeeee%'") < clause.index("'%bbbbbb%'") < clause.index("'%ddddd%'")
+    # A NUL can't be written into the SQL: that one binds.
+    clause, params = _contains_clause(["A", "B"], "a\x00b")
+    assert params == ["%a\x00b%"]
+    # With an index, its candidates come first and the same check follows.
+    clause, params = _contains_clause(["A", "B"], "jacso", q("fts_1"))
+    assert clause.startswith('(rid IN (SELECT rowid FROM "fts_1" WHERE "fts_1" MATCH ?) AND (CASE WHEN')
+    assert params == ['"jac" AND "acs" AND "cso"']
+
+
+# One table, every way a substring can go wrong: a match that straddles
+# two columns (only with a space), NULL cells, LIKE wildcards and the
+# escape character, both quote characters, non-ASCII case (LIKE folds ASCII
+# only, the index folds every script), and a term found only in a late
+# column of a row.
+EQUIV_ROWS = [
+    ["A", "B", "C"],
+    ["hello", "world", ""],
+    ["progress 100% done", "", "x"],
+    ["progress 100X done", "", "y"],
+    ["under_score", "", ""],
+    ["underXscore", "", ""],
+    ["C:\\Users\\jacso", "it's", 'say "hi"'],
+    ["Администратор", "", ""],
+    ["", "", "ADMINISTRATOR late"],
+    ["lo w", "o", "rld"],
+]
+EQUIV_TERMS = ["hello world", "o w", "lo", "100%", "00%", "under_score", "r_s", "\\users\\", "jacso",
+               "it's", '"hi"', "администратор", "Администратор", "administrator", "o", "zzz", "llo wor",
+               "w o rld", "lo w o rld", "rld o", "w o r", "hello  world", "progress 100% done", "100% done",
+               "ADMINISTRATOR lat", "world hello"]
+
+
+def _reference(rows, term):
+    """What Contains means, in Python: the row's columns joined by a space
+    hold the term, folding ASCII case only (SQLite's LIKE)."""
+    fold = lambda s: "".join(ch.lower() if ch.isascii() else ch for ch in s)
+    return [i + 1 for i, r in enumerate(rows) if fold(term) in fold(" ".join(r))]
+
+
+@pytest.mark.parametrize("indexed", [False, True])
+def test_contains_matches_the_joined_text_exactly_indexed_or_not(store, write_csv, indexed):
+    path = write_csv(EQUIV_ROWS, name=f"equiv{int(indexed)}.csv")
+    rec = store.ingest_csv(path, name="equiv.csv", build_fts=indexed)
+    if indexed:
+        assert store.wait_for_fts(rec["id"], timeout=10)
+    else:
+        store._ensure_fts_building = lambda *a, **k: None   # keep it scanning
+    sid = rec["id"]
+    # NULL cells, not just empty ones: CSV ingest stores "" — put real
+    # NULLs in, the case COALESCE in the joined text exists for.
+    with store.lock, store.db:
+        store.db.execute(f"UPDATE {q(rec['table_name'])} SET C=NULL WHERE C=''")
+    for term in EQUIV_TERMS:
+        want = _reference(EQUIV_ROWS[1:], term)
+        spec = {"source_id": sid, "filters": [], "sort": [], "search": term, "search_mode": "contains"}
+        v = store.build_view(sid, spec)
+        got = [r["rid"] for r in store.fetch_rows(v["view_id"], 0, 100)["rows"]]
+        assert got == want, term
+        # Excluded in Advanced is the exact complement — the check is never
+        # NULL, so a row with a NULL cell is not lost from both sides.
+        adv = {"source_id": sid, "filters": [], "sort": [], "search_mode": "advanced",
+               "search_terms": [{"term": term, "connector": "AND", "exclude": True}]}
+        v = store.build_view(sid, adv)
+        got = [r["rid"] for r in store.fetch_rows(v["view_id"], 0, 100)["rows"]]
+        assert got == [i for i in range(1, len(EQUIV_ROWS)) if i not in want], term
+        # Search all counts the same rows.
+        hits = store.search_all_sources(query=term, source_ids=[sid])
+        assert (hits[0]["match_count"] if hits else 0) == len(want), term
+
+
+def test_a_wildcard_term_takes_the_index(store, write_csv):
+    path = write_csv([["Note"], ["under_score"], ["underXscore"]])
+    rec = store.ingest_csv(path, name="wild3.csv")
+    assert store.wait_for_fts(rec["id"], timeout=5)
+    src = store._source_lite(rec["id"])
+    where, params = store._compile_where(rec["id"], src, {"search": "under_score"}, {"Note": "text"})
+    assert "MATCH" in where
+
+
+def test_contains_binds_nothing_per_column(store, write_csv, stock_sqlite_limits):
+    # A merge compiles the search once per member: a parameter per column
+    # would be thousands on wide members. The pattern is inlined instead.
+    header = [f"c{i}" for i in range(600)]
+    path = write_csv([header, ["x"] * 599 + ["needle"]], name="wide_search.csv")
+    rec = store.ingest_csv(path, name="wide_search.csv", build_fts=False)
+    src = store._source_lite(rec["id"])
+    where, params = store._compile_where(rec["id"], src, {"search": "needle"}, {})
+    assert params == []
+    v = store.build_view(rec["id"], {"source_id": rec["id"], "filters": [], "sort": [],
+                                     "search": "needle", "search_mode": "contains"})
+    assert v["row_count"] == 1
 
 
 def test_blob_expr_concatenates_every_column():
@@ -207,8 +318,8 @@ def test_legacy_word_tokenized_fts_gets_downgraded_on_open(store, write_csv, cas
 
 def test_legacy_fat_trigram_fts_gets_downgraded_and_dropped_on_open(store, write_csv, case_path):
     # The first-generation trigram shape (multi-column, detail=full) is
-    # also stale now: the doc-LIKE query form would be a SQL error against
-    # it, and it's ~6x bigger than the index needs to be. Opening such a
+    # also stale now: not the one-doc-column shape the search query is
+    # written for, and ~6x bigger than the index needs to be. Opening such a
     # case must reset has_fts AND reclaim the space by dropping the table
     # (on the background janitor thread).
     path = write_csv([["Process"], ["svchost.exe"]])
@@ -262,9 +373,9 @@ def test_fts_index_shape_is_detail_none_single_doc_over_view(ingested):
 
 def test_contains_wildcard_chars_stay_literal_with_index_built(store, write_csv):
     # '%' and '_' in a search term must match literally, not as LIKE
-    # wildcards — these terms can't take the unescaped indexed form (bare
-    # LIKE pushdown), so they route through the escaped fallback even when
-    # the index is ready. "under_score" must NOT match "underXscore".
+    # wildcards — with the index ready too, where they are ordinary
+    # characters to its trigrams and the escaped check after it is what
+    # keeps them literal. "under_score" must NOT match "underXscore".
     path = write_csv([
         ["Note"],
         ["progress 100% done"],

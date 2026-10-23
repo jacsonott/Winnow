@@ -60,7 +60,7 @@ def _(env):
 
 
 @benchmark("search/contains.rare_fallback",
-           note="same term, same row count, no index — the blob LIKE scan")
+           note="same term, same row count, no index — the scan")
 def _(env):
     fx = env.case()
     return _search(fx, fx.nofts, TERM_RARE)
@@ -79,10 +79,10 @@ def _(env):
     return _search(fx, fx.main, "4c")
 
 
-@benchmark("search/contains.wildcard_term_fallback",
-           note="contains a LIKE wildcard, so _fts_like_pattern refuses the "
-                "unescaped pushdown; measures the escaped blob-LIKE route "
-                "(the wildcard is escaped, so this matches literally)")
+@benchmark("search/contains.wildcard_term_fts",
+           note="contains a LIKE wildcard: an ordinary character to the "
+                "index's trigrams, kept literal by the escaped check after "
+                "it (this used to be a full scan)")
 def _(env):
     fx = env.case()
     return _search(fx, fx.main, "netsvcs_id")

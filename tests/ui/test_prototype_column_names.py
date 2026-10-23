@@ -71,6 +71,9 @@ def _rows(page):
 
 
 def _cells(page, col):
+    # A rebuild paints from the screenful it fetched (a glimpse); the page
+    # follows in the background.
+    page.wait_for_function("() => __winnow.S.pages.has(0)")
     return page.evaluate("""(col) => {
       const i = __winnow.S.columns.findIndex((c) => c.name === col);
       return [...__winnow.S.pages.values()].flat().map((r) => r.cells[i]).sort();

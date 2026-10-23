@@ -262,9 +262,13 @@ export function toastAction(msg, label, onclick, ms = 12000) {
 export const dragHas = (e, type) =>
   !!(e.dataTransfer && e.dataTransfer.types && Array.prototype.includes.call(e.dataTransfer.types, type));
 
+/* `.cancel()` drops a call still waiting — for a caller that is about
+   to do the same work at once (the search box's Enter). */
 export const debounce = (fn, ms) => {
   let t;
-  return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
+  const d = (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
+  d.cancel = () => clearTimeout(t);
+  return d;
 };
 
 /* A map keyed by column name — or by any other name an analyst or a file
