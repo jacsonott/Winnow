@@ -862,14 +862,85 @@ def test_check_route_surfaces_an_offline_box_as_a_400(store, monkeypatch):
     assert "--from" in res.json()["detail"]
 
 
-def test_apply_route_refuses_without_confirmation(store, monkeypatch):
+@pytest.mark.parametrize("body", [{"confirm": False}, {"confirm": False, "dev": True}])
+def test_apply_route_refuses_without_confirmation(store, monkeypatch, body):
     server, client = _client(store, monkeypatch)
     called = []
     monkeypatch.setattr(server.updater, "apply_update",
                         lambda *a, **k: called.append(a) or {})
-    res = client.post("/api/updates/apply", json={"confirm": False}, headers=HEADERS)
+    res = client.post("/api/updates/apply", json=body, headers=HEADERS)
     assert res.status_code == 400
     assert not called, "a POST without confirm must not install anything"
+
+
+_TIP = {"branch": "develop", "sha": "abc1234def5678", "short": "abc1234",
+        "message": "Resizable sidebar", "committed_at": "2026-08-29T10:00:00Z",
+        "url": "https://github.com/jacsonott/Winnow/archive/refs/heads/develop.zip"}
+
+
+def _no_release_lookup(**kwargs):
+    raise AssertionError("the develop path must not ask for the latest release")
+
+
+def test_check_route_reads_the_develop_tip_when_asked(store, monkeypatch):
+    """Settings → Updates' Alt+right-click: `update.py --dev --check`."""
+    server, client = _client(store, monkeypatch)
+    monkeypatch.setattr(server.updater, "check_branch", lambda b: {**_TIP, "branch": b})
+    monkeypatch.setattr(server.updater, "check_for_update", _no_release_lookup)
+    res = client.post("/api/updates/check", json={"dev": True}, headers=HEADERS)
+    assert res.status_code == 200
+    assert res.json()["branch"] == "develop"
+    assert res.json()["short"] == "abc1234"
+
+
+def test_check_route_with_no_body_is_still_the_release_check(store, monkeypatch):
+    server, client = _client(store, monkeypatch)
+    monkeypatch.setattr(server.updater, "check_for_update",
+                        lambda **k: {"available": False, "current": "1.0.0", "latest": "1.0.0"})
+    monkeypatch.setattr(server.updater, "check_branch",
+                        lambda *a: pytest.fail("a plain check must not read a branch"))
+    res = client.post("/api/updates/check", headers=HEADERS)
+    assert res.status_code == 200
+    assert res.json()["latest"] == "1.0.0"
+
+
+def test_apply_route_dev_records_the_develop_commit(store, monkeypatch):
+    """The manifest has to say develop@<sha>: version.py on develop still
+    reads as the last release, so without it /api/version would describe
+    a build nobody can reproduce."""
+    server, client = _client(store, monkeypatch)
+    monkeypatch.setattr(server.updater, "check_branch", lambda b: {**_TIP, "branch": b})
+    monkeypatch.setattr(server.updater, "check_for_update", _no_release_lookup)
+    fetched = []
+    monkeypatch.setattr(server.updater, "download",
+                        lambda url, dest: fetched.append((url, dest)) or Path(dest))
+    applied = []
+    monkeypatch.setattr(server.updater, "apply_update",
+                        lambda archive, root, source="release": applied.append(source) or {
+                            "version": "1.0.0", "previous_version": "1.0.0", "added": [],
+                            "changed": [], "removed": [], "protected": [],
+                            "first_update": False, "backup": "/tmp/b"})
+    res = client.post("/api/updates/apply", json={"confirm": True, "dev": True}, headers=HEADERS)
+    assert res.status_code == 200
+    assert fetched[0][0] == _TIP["url"]
+    assert Path(fetched[0][1]).name == "winnow-develop-abc1234.zip"
+    assert applied == ["develop@abc1234def5678"]
+    body = res.json()
+    assert (body["branch"], body["short"], body["restart_required"]) == ("develop", "abc1234", True)
+
+
+def test_apply_route_dev_surfaces_an_unreachable_github_as_a_400(store, monkeypatch):
+    server, client = _client(store, monkeypatch)
+
+    def boom(branch):
+        raise UpdateError("Could not reach GitHub to read develop (no route to host).")
+
+    monkeypatch.setattr(server.updater, "check_branch", boom)
+    monkeypatch.setattr(server.updater, "apply_update",
+                        lambda *a, **k: pytest.fail("nothing to install"))
+    res = client.post("/api/updates/apply", json={"confirm": True, "dev": True}, headers=HEADERS)
+    assert res.status_code == 400
+    assert "develop" in res.json()["detail"]
 
 
 def test_apply_route_reports_the_restart_requirement(store, monkeypatch):

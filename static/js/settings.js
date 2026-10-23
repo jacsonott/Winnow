@@ -1463,6 +1463,45 @@ export function buildUpdatesPanel(b) {
     status.textContent = `Updated ${res.previous_version} → ${res.version}. Restart Winnow to run it.`;
     toast(`Updated to ${res.version} — restart Winnow to run the new version`, 12000);
   };
+
+  /* Alt+right-click on either button syncs to the tip of develop instead —
+     `python update.py --dev` without a terminal, for beta testers and
+     development. Semi-hidden on purpose: no title, no hint, nothing in
+     the wiki, because an analyst who stumbles onto unreleased code mid-case
+     is worse off than one who never knew it was there. A plain right-click
+     is left to the browser, and a left click is the release path above.
+     It still asks first and names the commit, as the CLI does. */
+  const devSync = async (e) => {
+    if (!e.altKey) return;
+    e.preventDefault();
+    if (checkBtn.disabled || installBtn.disabled) return;
+    checkBtn.disabled = true;
+    const before = status.textContent;
+    status.textContent = 'Checking develop…';
+    try {
+      const tip = await post('/api/updates/check', { dev: true });
+      const ok = await confirmDialog(
+        `Sync to ${tip.branch} build ${tip.short}?\n\n`
+        + (tip.message ? `${tip.message}${tip.committed_at ? ` (${tip.committed_at.slice(0, 10)})` : ''}\n\n` : '')
+        + 'This is unreleased code. Your saved filters, tags, installed plugins, case list and '
+        + 'case files are kept, and the current version is backed up first — '
+        + '"python update.py --rollback" undoes it.\n\n'
+        + 'Winnow has to be restarted afterwards to run it.',
+        { okLabel: `Sync to ${tip.short}` });
+      if (!ok) { status.textContent = before; return; }
+      status.textContent = `Downloading and installing ${tip.branch} build ${tip.short}…`;
+      const res = await post('/api/updates/apply', { confirm: true, dev: true });
+      installBtn.hidden = true;
+      status.textContent = `Synced to ${res.branch} build ${res.short}. Restart Winnow to run it.`;
+      toast(`Synced to ${res.branch} build ${res.short} — restart Winnow to run it`, 12000);
+    } catch (err) {
+      status.textContent = err.message;
+    } finally {
+      checkBtn.disabled = false;
+    }
+  };
+  checkBtn.oncontextmenu = devSync;
+  installBtn.oncontextmenu = devSync;
 }
 
 /* DOM wiring for this module, called once by main.js. Handlers can't

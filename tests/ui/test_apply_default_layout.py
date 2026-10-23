@@ -206,7 +206,7 @@ def test_applying_while_grouped_keeps_the_grouped_column_out_until_ungrouped(pag
         page.wait_for_function("() => !document.querySelector('.hcell[data-col=\"AdlHost\"]')")
         _layout_section(page)
         page.wait_for_function("() => !document.querySelector('.tm-layout-preview.stale')"
-                               " && document.querySelector('.copy-layout-col').dataset.col === 'AdlCmd'")
+                               " && document.querySelector('.copy-layout-col')?.dataset.col === 'AdlCmd'")
         listed = page.locator(".copy-layout-col").evaluate_all("(rs) => rs.map((r) => r.dataset.col)")
         assert listed == ["AdlCmd", "AdlUser", "AdlWhen"], "the grouped column is left out of the preview"
         _apply_default(page)
