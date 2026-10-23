@@ -11685,6 +11685,10 @@ class Store:
                     # the ISO shape (ts_normalize_sql). A row whose
                     # distance is NULL (a timestamp julianday can't read,
                     # like 0000-00-00) can't win: ORDER BY puts NULL first.
+                    # A tie goes to the row first in the view's order, said
+                    # outright (pos, or rid for the kinds that page in rid
+                    # order): the scan's own order is the planner's choice,
+                    # and an index on the column makes it the column's.
                     if covers:
                         row = self._nearest_in_covering_view(ro, view_id, msrc, m["source_id"], c, norm)
                         if row is not False:
@@ -11710,7 +11714,7 @@ class Store:
                     row = ro.execute(
                         f"SELECT rid, pos, ts, d FROM (SELECT rid, pos, ts, "
                         f"ABS(julianday(ts) - julianday(?)) AS d FROM ({inner} LIMIT -1)) "
-                        f"WHERE d IS NOT NULL ORDER BY d LIMIT 1",
+                        f"WHERE d IS NOT NULL ORDER BY d, pos, rid LIMIT 1",
                         params,
                     ).fetchone()
                     if row and row["d"] is not None and (best is None or row["d"] < best[0]):

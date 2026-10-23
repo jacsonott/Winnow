@@ -708,6 +708,12 @@ see [docs/notes/README.md](README.md) for the whole set.
   is NULL, and `ORDER BY d` puts NULL first: one such row was "the
   closest", had no distance to compare, and the column answered nothing
   at all. The filter is `d IS NOT NULL`, not `ts IS NOT NULL`.
+- **Jump breaks a tie by the view's order, in its ORDER BY** (`d, pos,
+  rid`), not by the order the rows happen to be scanned in. Since the
+  first datetime column is indexed at import, SQLite reads an
+  unfiltered table's rid and timestamp out of that index, in timestamp
+  order, so `ORDER BY d LIMIT 1` alone kept whichever tied row the
+  index listed first rather than the first in the grid.
 
 - **`tag_counts_in_view`** is what the tag ribbon shows once a filter or
   search is on: the same shape `tag_counts` returns, counted over one view.
