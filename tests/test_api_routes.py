@@ -464,15 +464,18 @@ def test_any_other_key_error_is_still_a_500(client, ingested, monkeypatch):
 
 def test_column_index_routes_list_and_drop(client, ingested):
     store, source_id = ingested
-    assert client.get(f"/api/column_indexes?source_id={source_id}").json() == []
+
+    def listed():
+        return [ix["column"] for ix in client.get(f"/api/column_indexes?source_id={source_id}").json()]
+
+    assert listed() == ["Timestamp"]   # the import's sort index on its first datetime column
     client.get(f"/api/column_values?source_id={source_id}&column=Process")
     assert store.wait_for_column_index(source_id, "Process", timeout=5)
-    listed = client.get(f"/api/column_indexes?source_id={source_id}").json()
-    assert [ix["column"] for ix in listed] == ["Process"]
+    assert listed() == ["Timestamp", "Process"]
 
     r = client.delete(f"/api/column_indexes?source_id={source_id}&column=Process")
     assert r.status_code == 200
-    assert client.get(f"/api/column_indexes?source_id={source_id}").json() == []
+    assert listed() == ["Timestamp"]
 
     assert client.delete(f"/api/column_indexes?source_id={source_id}&column=Nope").status_code == 404
 

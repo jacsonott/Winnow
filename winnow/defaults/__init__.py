@@ -107,7 +107,7 @@ def _summary(name: str, cols: list[str], rec: dict) -> dict | None:
 
 def _indexes(name: str, cols: list[str], rec: dict) -> list[str]:
     """One header set's `indexes`: the columns an import of that shape
-    indexes before the analyst asks (Store._build_shape_indexes), because
+    indexes before the analyst asks (Store._build_import_indexes), because
     the shipped dashboards and lateral movement filter on them in nearly
     every query. Without one, a query that filters on EventId and groups
     by a column the grid has indexed walks the grouped column's index

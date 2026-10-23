@@ -3248,33 +3248,47 @@ class Store:
             out += [have[c.strip().lower()] for c in want if have[c.strip().lower()] not in out]
         return out
 
-    def _build_shape_indexes(self, source_id: int) -> None:
-        """Builds _shape_index_columns' indexes as the last step of an
-        import, before the job reads as done — the same index, by name,
-        that _ensure_column_index_building would build on the first
-        equals filter, so either way there is one.
+    def _build_import_indexes(self, source_id: int) -> None:
+        """The indexes an import builds as its last step, before the job
+        reads as done: _shape_index_columns' filter indexes, and the sort
+        index on the table's first datetime column. Each is the very index,
+        by name, that first use would build in the background
+        (_ensure_column_index_building, _ensure_sort_index_building), so
+        either way there is one. Best-effort: the rows are in, and a table
+        without an index is only slower.
 
-        Up front rather than on first use because what it prevents is not
-        a slow first filter but a slow plan: once the grid has indexed a
-        column (any sort, filter or Values list does), SQLite answers
-        `WHERE EventId = '4624' GROUP BY RemoteHost` by walking the
-        RemoteHost index with a table lookup per row, about 15x slower than
-        a scan, and ANALYZE does not change its mind. With EventId indexed
-        the WHERE is an index search instead. Measured on a 2.1M-row
-        EvtxECmd table: the KAPE board 45 s -> 10 s, Top remote hosts
-        10.3 s -> 0.55 s, the lateral movement preview 10.7 s -> 0.05 s,
-        for 1.5 s of index build. Best-effort: the rows are in, and a table
-        without the index is only slower."""
+        The shape indexes are up front not for the first filter's sake but
+        for the planner's: once the grid has indexed a column (any sort,
+        filter or Values list does), SQLite answers `WHERE EventId = '4624'
+        GROUP BY RemoteHost` by walking the RemoteHost index with a table
+        lookup per row, about 15x slower than a scan, and ANALYZE does not
+        change its mind. With EventId indexed the WHERE is an index search
+        instead. Measured on a 2.1M-row EvtxECmd table: the KAPE board
+        45 s -> 10 s, Top remote hosts 10.3 s -> 0.55 s, the lateral
+        movement preview 10.7 s -> 0.05 s, for 1.5 s of index build.
+
+        The first datetime column is the one the Timeline and the histogram
+        read a table by, and the first column most analysts sort it by. A
+        first sort with no index sorts every row while the index builds
+        beside it, for the writer lock: 5.6 s on that EvtxECmd table, 11 to
+        14 s on a 4.3M-row MFTECmd one, against 0.8 s once it exists. On
+        the EvtxECmd table it costs 2.4 s of import."""
         src = self._source_lite(source_id)
         table = src["table_name"]
-        for col in self._shape_index_columns(src):
+        wanted = [(col, "filter") for col in self._shape_index_columns(src)]
+        when = next((c["name"] for c in self._base_cols(src) if c["type"] == "datetime"), None)
+        if when is not None:
+            wanted.append((when, "sort"))
+        for col, purpose in wanted:
             col = self._table_spelling(table, col)
-            name = self._column_index_name(table, col)
+            name = self._column_index_name(table, col, purpose)
+            collate = " COLLATE NOCASE" if purpose == "sort" else ""
             try:
                 with self.lock, self.db:
-                    self.db.execute(f"CREATE INDEX IF NOT EXISTS {q(name)} ON {q(table)}({q(col)})")
+                    self.db.execute(f"CREATE INDEX IF NOT EXISTS {q(name)} ON {q(table)}({q(col)}{collate})")
             except sqlite3.Error as e:
-                wlog.record("warn", f"{src['name']}: no index on {col} ({e}) — filters on it scan the table")
+                does = "filters on it scan" if purpose == "filter" else "a first sort by it sorts"
+                wlog.record("warn", f"{src['name']}: no index on {col} ({e}) — {does} the table")
 
     def _ensure_sort_index_building(self, source_id: int, column: str, table_name: str | None = None) -> None:
         """Same fire-and-forget background build as
@@ -4454,7 +4468,7 @@ class Store:
             raise error
 
         if total:
-            self._build_shape_indexes(source_id)
+            self._build_import_indexes(source_id)
         if build_fts and total:
             # Backgrounded, not built inline: the trigram index takes real
             # time to build (see build_fts) and ingest_csv should return as
@@ -4571,7 +4585,7 @@ class Store:
                 self.drop_source(source_id)
             raise error
         if total:
-            self._build_shape_indexes(source_id)
+            self._build_import_indexes(source_id)
         if build_fts and total:
             self._ensure_fts_building(source_id)
         elapsed = time.time() - t0
@@ -4725,7 +4739,7 @@ class Store:
                 self.drop_source(source_id)
             raise error
         if total:
-            self._build_shape_indexes(source_id)
+            self._build_import_indexes(source_id)
         if build_fts and total:
             self._ensure_fts_building(source_id)
         elapsed = time.time() - t0
@@ -5002,7 +5016,7 @@ class Store:
             raise error
 
         if total:
-            self._build_shape_indexes(source_id)
+            self._build_import_indexes(source_id)
         if build_fts and total:
             self._ensure_fts_building(source_id)
 
@@ -5091,7 +5105,7 @@ class Store:
             raise error
 
         if total:
-            self._build_shape_indexes(source_id)
+            self._build_import_indexes(source_id)
         if build_fts and total:
             self._ensure_fts_building(source_id)
 
@@ -5220,7 +5234,7 @@ class Store:
             raise error
 
         if total:
-            self._build_shape_indexes(source_id)
+            self._build_import_indexes(source_id)
         if build_fts and total:
             self._ensure_fts_building(source_id)
 
@@ -5410,7 +5424,7 @@ class Store:
             raise error
 
         if total:
-            self._build_shape_indexes(source_id)
+            self._build_import_indexes(source_id)
         if build_fts and total:
             self._ensure_fts_building(source_id)
 
@@ -5538,7 +5552,7 @@ class Store:
             raise error
 
         if total:
-            self._build_shape_indexes(source_id)
+            self._build_import_indexes(source_id)
         if build_fts and total:
             self._ensure_fts_building(source_id)
 
@@ -17652,7 +17666,7 @@ class Store:
         if layout:
             self.save_layout(new_id, layout)
         if total:
-            self._build_shape_indexes(new_id)
+            self._build_import_indexes(new_id)
         if build_fts and total:
             self._ensure_fts_building(new_id)
         return {"source": {"id": new_id, "name": name, "row_count": total}}
