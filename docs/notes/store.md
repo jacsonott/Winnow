@@ -611,6 +611,23 @@ see [docs/notes/README.md](README.md) for the whole set.
   (`_histogram_parsed_in_sql`) would pay `TS_NORMALIZE` in every pass,
   so it takes the one pass by exact second below instead. Plain on 500k
   rows: 1.15 s to 0.6 s.
+- **A histogram answer is kept by the rows it counted, not by view
+  id.** A sort, or a filter cleared back to the whole table, is a new
+  view of rows already counted, and each was a whole pass again (2.2 s
+  on a 2.1M-row event log, every sort). `_histogram_results` files each
+  answer under `_histogram_rows_key`: a view over every row of its
+  source is that source's members at their row count (rows never change
+  after import, ids are AUTOINCREMENT, a merge given other tables names
+  other ids); a root view holding some rows is its count plus two sums
+  of a hash of `(source_id, rid)` over `v.view_N`, worked out once per
+  view (0.23 s on 2.1M rows) and kept on the handle. The tag split also
+  keys on the state generation every tag write bumps
+  (`_bump_state_generation`), read before the pass. A derived column,
+  as the charted column or the split, is never kept: its values can
+  still be filling in. Group sub-views and the timeline are not keyed.
+  Sort and clear on the 2.1M-row log: 1.8 to 2.1 s to under 1 ms.
+  Tests that count passes set `HISTOGRAM_ANSWERS_KEPT = 0`, or a re-ask
+  would run none. `tests/test_histogram_answers.py`.
 - **Histogram buckets are floored, and 1601 is a real minimum.** A bucket
   is `[b, b + bucket_seconds)` — the strip finds a row's bar that way.
   The fold into buckets is Python's `//`, which floors; it was SQLite's
