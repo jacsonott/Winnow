@@ -276,10 +276,13 @@ docs/              Long-form documentation. writing-plugins.md — the plugin
                     main, not develop: it is the manual for the released
                     version, so .github/workflows/pages.yml rebuilds it when
                     a release lands (build_wiki.py --site, then MkDocs;
-                    nav from the same "## Pages" list, theme in
-                    docs/site/). PRs that touch the docs run its build with
-                    --strict, which also catches a link to a missing
-                    #anchor — the wiki test checks files, not headings.
+                    nav from the same "## Pages" list, theme and the
+                    front page's banner in docs/site/; Home.md's list
+                    also becomes the front page's cards, and its
+                    "# Title" gives way to the banner). PRs that touch the
+                    docs run its build with --strict, which also catches a
+                    link to a missing #anchor — the wiki test checks
+                    files, not headings.
                     Pages are written for GitHub's Markdown; the site's
                     Python-Markdown needs 4-space indents for a second
                     paragraph inside a list item.

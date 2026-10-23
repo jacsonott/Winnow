@@ -211,7 +211,7 @@ def test_every_site_link_resolves_where_it_lands(site):
 
 def test_site_pages_open_their_source_on_develop_for_editing(site):
     for filename, text in _site_pages(site).items():
-        m = re.match(r'---\nedit_url: "([^"]+)"\n---\n', text)
+        m = re.match(r'---\nedit_url: "([^"]+)"\n', text)
         assert m, filename
         prefix = f"https://github.com/{REPO}/edit/develop/"
         assert m.group(1).startswith(prefix), filename
@@ -226,6 +226,59 @@ def test_the_theme_files_docs_site_names_are_staged(site):
     assert named
     for rel in named:
         assert (site / "docs" / rel).is_file(), rel
+
+
+def test_every_link_in_the_front_pages_banner_lands(site):
+    """MkDocs checks the links in pages, not in templates."""
+    home = (ROOT / "docs" / "site" / "overrides" / "home.html").read_text(encoding="utf-8")
+    named = re.findall(r"\{\{ '([^']+)' \| url \}\}", home)
+    assert "Installation/" in named and "screenshots/grid.png" in named
+    docs = site / "docs"
+    for rel in named:
+        if rel.endswith("/"):
+            assert (docs / f"{rel[:-1]}.md").is_file(), rel
+        else:
+            assert (docs / rel).is_file(), rel
+    index = _site_pages(site)["index.md"]
+    for anchor in re.findall(r'href="#([\w-]+)"', home):
+        heading = anchor.replace("-", " ")
+        assert re.search(rf"^## {heading}$", index, re.M | re.I), anchor
+
+
+def test_the_front_page_is_homes_text_under_the_banner_with_cards(site):
+    index = _site_pages(site)["index.md"]
+    front, _, body = index.partition("\n---\n\n")
+    assert "template: home.html" in front
+    assert "hide:\n  - navigation\n  - toc" in front
+    # The banner is the title, so Home.md's own goes; the rest stays.
+    home = (ROOT / "docs/wiki/Home.md").read_text(encoding="utf-8")
+    assert not body.lstrip().startswith("# ")
+    assert body.lstrip().startswith(home.split("\n\n")[1].split("\n")[0])
+    for heading in re.findall(r"^## .+$", home, re.M):
+        assert heading in body
+    # One card per group in Home's page list, each with an icon.
+    cards = body[body.index('<div class="grid cards" markdown>'):body.index("</div>")]
+    groups = re.findall(r"^\*\*(.+)\*\*$", home, re.M)
+    assert re.findall(r'^-   <span class="twemoji lg middle" data-icon="[\w/-]+"></span> \*\*(.+)\*\*$',
+                      cards, re.M) == groups
+    for icon in re.findall(r'data-icon="([\w/-]+)"', cards):
+        assert icon in build_wiki.SITE_GROUP_ICONS.values()
+
+
+def test_the_front_page_hook_inlines_each_icon(tmp_path, monkeypatch):
+    spec = importlib.util.spec_from_file_location("site_hooks", ROOT / "docs" / "site" / "hooks.py")
+    hooks = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(hooks)
+    (tmp_path / "material").mkdir()
+    (tmp_path / "material" / "star.svg").write_text("<svg>*</svg>", encoding="utf-8")
+    monkeypatch.setattr(hooks, "_icons_dir", lambda: tmp_path)
+    html = '<li><span class="twemoji lg middle" data-icon="material/star"></span> <strong>G</strong></li>'
+    assert hooks.on_page_content(html, page=None) == (
+        '<li><span class="twemoji lg middle" data-icon="material/star"><svg>*</svg></span>'
+        ' <strong>G</strong></li>')
+    # A page with no icon is left alone, without looking for the theme.
+    monkeypatch.setattr(hooks, "_icons_dir", lambda: 1 / 0)
+    assert hooks.on_page_content("<p>hh:mm:ss</p>", page=None) == "<p>hh:mm:ss</p>"
 
 
 def test_the_hook_sets_each_pages_edit_link_from_its_front_matter():
@@ -272,7 +325,27 @@ def test_links_are_rewritten_for_the_site(tmp_path):
     assert "[top](#other)" in other and "`[code](Missing.md)`" in other
     assert "![shot](shots/a.png)" in other
     assert (out / "docs" / "shots" / "a.png").is_file()
-    assert (out / "docs" / "index.md").read_text(encoding="utf-8").count("# Home title") == 1
+
+
+def test_homes_page_list_becomes_cards_on_the_site(tmp_path):
+    home = HOME.replace("## After", "**Odd one**\n\n- [Third](Third.md): more.\n\n## After")
+    root = _tree(tmp_path / "src", {"Home.md": home, "Other.md": "# Other\n",
+                                    "Third.md": "# Third\n"})
+    index = (_build_site(root, tmp_path) / "docs" / "index.md").read_text(encoding="utf-8")
+    body = index.split("\n---\n\n", 1)[1]
+    assert body.startswith("Intro.\n\n## Pages\n")
+    assert "# Home title" not in body
+    icon = build_wiki.SITE_GROUP_ICONS[None]
+    assert (
+        '<div class="grid cards" markdown>\n'
+        f'\n-   <span class="twemoji lg middle" data-icon="{icon}"></span> **Group**\n'
+        "\n    ---\n\n"
+        "    - [Other](Other.md): about it,\n"
+        "      wrapped.\n"
+    ) in body
+    assert f'data-icon="{icon}"></span> **Odd one**' in body
+    assert "    - [Third](Third.md): more.\n" in body
+    assert body.endswith("</div>\n\n## After\n")
 
 
 def test_the_site_nav_follows_homes_groups(tmp_path):

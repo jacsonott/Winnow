@@ -6,7 +6,9 @@
 # the links back to the repository, and it INHERITs this. So there is no
 # nav here, and paths below are inside the docs/ folder that script
 # writes, not this one: assets/ is this folder's assets/ copied in, plus
-# the app's brand mark from static/icons/.
+# the app's brand mark from static/icons/. overrides/ (the front page's
+# banner) is this folder's own, named in the generated file because
+# MkDocs resolves it against that file's folder.
 #
 # Preview locally:
 #
@@ -83,6 +85,11 @@ markdown_extensions:
   - tables
   - attr_list
   - sane_lists
+  # The front page's section cards: a grid written in Markdown inside a
+  # <div>. Their icons are filled in by hooks.py, not pymdownx.emoji,
+  # which would read every :word: on every page as an emoji (the wiki has
+  # hh:mm:ss) and fetch it from a CDN.
+  - md_in_html
   - pymdownx.superfences
   - pymdownx.highlight:
       use_pygments: true

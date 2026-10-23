@@ -1,0 +1,52 @@
+{#-
+  The Pages site's front page: a banner above Home.md's own content.
+
+  Only the site has this. index.md (Home.md) asks for it in the front
+  matter scripts/build_wiki.py --site writes, which also drops Home.md's
+  "# Winnow wiki" title, since the banner is the title here. Everything
+  below the banner is still Home.md, so the words a reader gets are the
+  ones the wiki and the repository show.
+
+  Links are written relative to the site's root and go through `url`, so
+  they hold at any base path. tests/test_build_wiki.py checks each one
+  names a page or a file the build stages.
+-#}
+{% extends "main.html" %}
+
+{% block hero %}
+<section class="wn-hero">
+  <div class="md-grid wn-hero__inner">
+    <div class="wn-hero__text">
+      <img class="wn-hero__mark" src="{{ 'assets/winnow-mark.svg' | url }}" alt="" width="56" height="56">
+      <h1 class="wn-hero__title">Winnow</h1>
+      <p class="wn-hero__lede">Filter it down. Tag what matters. Read it back.</p>
+      <p class="wn-hero__sub">
+        The manual: getting it running, working a case from first import to
+        hand-off, and every setting and key.
+      </p>
+      <div class="wn-hero__actions">
+        <a class="md-button md-button--primary" href="{{ 'Installation/' | url }}">Get started</a>
+        <a class="md-button" href="#your-first-triage">Your first triage</a>
+      </div>
+      <p class="wn-hero__facts">
+        <span>Runs on your machine</span>
+        <span>No network once installed</span>
+        <span>Never modifies the evidence</span>
+      </p>
+    </div>
+    <figure class="wn-hero__shot">
+      <img src="{{ 'screenshots/grid.png' | url }}" width="3360" height="2000"
+           alt="Winnow's grid: an EvtxECmd table under a saved filter, with the histogram above it">
+    </figure>
+  </div>
+</section>
+{% endblock %}
+
+{#- Material titles a page that has no H1 of its own ("Home"); the banner
+    is this page's title. Otherwise as partials/content.html. -#}
+{% block content %}
+  {% include "partials/actions.html" %}
+  <div class="wn-home">
+    {{ page.content }}
+  </div>
+{% endblock %}

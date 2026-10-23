@@ -31,14 +31,16 @@ instead. The site is the manual for the released version, so
 .github/workflows/pages.yml builds it from main, at each release, with
 --ref main; "Edit this page" still opens the page on develop
 (--edit-ref), where changes to it land. OUT_DIR gets the same pages under
-docs/, with
-Home.md as index.md and docs/writing-plugins.md as a page of its own, the
-images they show copied in beside them, and a generated mkdocs.yml whose
-nav is Home.md's page list, so Home.md stays the one place a page is
-listed. Page links keep their `.md` (MkDocs resolves them), titles stay,
-and links to the rest of the repository go to GitHub as in the wiki. The
-site's look, which doesn't change from build to build, is
-docs/site/mkdocs.yml, which the generated file INHERITs.
+docs/, with docs/writing-plugins.md as a page of its own, the images they
+show copied in beside them, and a generated mkdocs.yml whose nav is
+Home.md's page list, so Home.md stays the one place a page is listed.
+Page links keep their `.md` (MkDocs resolves them), titles stay, and
+links to the rest of the repository go to GitHub as in the wiki. Home.md
+becomes index.md, the front page, which is the one page that changes
+shape: a banner (docs/site/overrides/home.html) stands in for its title,
+and its page list is shown as a card per group. The site's look, which
+doesn't change from build to build, is docs/site/mkdocs.yml, which the
+generated file INHERITs.
 
     python scripts/build_wiki.py OUT_DIR [--repo OWNER/NAME] [--ref BRANCH]
     python scripts/build_wiki.py --site OUT_DIR --ref main [--edit-ref BRANCH]
@@ -68,11 +70,24 @@ DEFAULT_REF = "develop"
 # page link on the site; in the wiki it is a link to GitHub, as before.
 SITE_EXTRA_PAGES = {"docs/writing-plugins.md": "writing-plugins.md"}
 
-# The app's own brand mark, as the site's logo and favicon, copied in at
-# build time rather than kept twice. docs/site/mkdocs.yml names the
-# destinations.
-SITE_ICONS = {"static/icons/winnow-mark.svg": "assets/winnow-mark.svg",
-              "static/icons/winnow-icon.svg": "assets/favicon.svg"}
+# Files the theme uses rather than a page, copied in at build time rather
+# than kept twice: the app's brand mark as logo and favicon (named in
+# docs/site/mkdocs.yml) and the grid screenshot the front page's banner
+# shows (docs/site/overrides/home.html).
+SITE_ASSETS = {"static/icons/winnow-mark.svg": "assets/winnow-mark.svg",
+               "static/icons/winnow-icon.svg": "assets/favicon.svg",
+               "docs/screenshots/grid.png": "screenshots/grid.png"}
+
+# The icon on each of the front page's section cards, by the group's name
+# in Home.md: a name in Material's icon set, which docs/site/hooks.py
+# inlines. A group not named here gets the last one.
+SITE_GROUP_ICONS = {
+    "Getting set up": "material/rocket-launch-outline",
+    "Working a case": "material/filter-variant",
+    "Going further": "material/chart-box-outline",
+    "Reference": "material/book-open-variant",
+    None: "material/file-document-outline",
+}
 
 # A code span (left alone) or a link/image. Only the target is rewritten.
 _TOKEN = re.compile(r"(`+)(?:[\s\S]+?)\1|(!?)\[([^\]]*)\]\(([^)\s]+)\)")
@@ -162,20 +177,24 @@ def _relink(lines, *, where, errors, **target_kw):
     return "\n".join(out) + "\n"
 
 
-def _wiki_pages(page_names):
-    return {f"{SOURCE}/{name}.md": name for name in page_names}
-
-
-def convert(text, *, name, page_names, root, repo, ref, errors):
-    """One page's markdown as the wiki should have it."""
-    lines = text.splitlines()
-    # The wiki already titles the page from its name.
+def _drop_title(lines):
     while lines and not lines[0].strip():
         lines.pop(0)
     if lines and lines[0].startswith("# "):
         lines.pop(0)
         while lines and not lines[0].strip():
             lines.pop(0)
+    return lines
+
+
+def _wiki_pages(page_names):
+    return {f"{SOURCE}/{name}.md": name for name in page_names}
+
+
+def convert(text, *, name, page_names, root, repo, ref, errors):
+    """One page's markdown as the wiki should have it."""
+    # The wiki already titles the page from its name.
+    lines = _drop_title(text.splitlines())
     return _relink(lines, pages=_wiki_pages(page_names), root=root, repo=repo,
                    ref=ref, where=f"{name}.md", errors=errors)
 
@@ -301,6 +320,41 @@ def _table_pipes(text):
     return "\n".join(out)
 
 
+def _front_page(text):
+    """Home.md as the site's front page. Its title goes, because the
+    banner in docs/site/overrides/home.html is the title there, and its
+    "## Pages" list becomes a grid of cards, one per group, each listing
+    its pages with their descriptions. The rest is Home.md as written."""
+    lines = _drop_title(text.splitlines())
+    try:
+        start = lines.index("## Pages") + 1
+    except ValueError:
+        return "\n".join(lines)
+    end = next((i for i in range(start, len(lines)) if lines[i].startswith("## ")),
+               len(lines))
+    def card(name):
+        icon = SITE_GROUP_ICONS.get(name, SITE_GROUP_ICONS[None])
+        title = f" **{name}**" if name else ""
+        return ["", f'-   <span class="twemoji lg middle" data-icon="{icon}"></span>{title}',
+                "", "    ---"]
+
+    out, in_card = ['', '<div class="grid cards" markdown>', ''], False
+    for line in lines[start:end]:
+        if line.startswith("**"):
+            out += card(line.strip().strip("*"))
+            in_card = True
+        elif line.strip():
+            if not in_card:
+                out += card(None)
+                in_card = True
+            out.append("    " + line)
+        else:
+            out.append("")
+    out += ["", "</div>", ""]
+    block = re.sub(r"\n{3,}", "\n\n", "\n".join(out)).split("\n")
+    return "\n".join(lines[:start] + block + lines[end:])
+
+
 def _q(text):
     """A YAML double-quoted scalar. JSON's escapes are a subset of YAML's."""
     return json.dumps(text)
@@ -324,6 +378,8 @@ def _site_config(nav, *, root, repo, ref, edit_ref):
         'edit_uri: ""',
         "hooks:",
         f"  - {_q(str(config_dir / 'hooks.py'))}",
+        "theme:",
+        f"  custom_dir: {_q(str(config_dir / 'overrides'))}",
         "copyright: " + _q(
             f"Built from <code>{SOURCE}/</code> on <code>{ref}</code>. "
             f'Edit the pages on <a href="https://github.com/{repo}/tree/{edit_ref}/{SOURCE}">'
@@ -361,11 +417,16 @@ def build_site(out_dir, *, root=ROOT, repo=DEFAULT_REPO, ref=DEFAULT_REF,
     errors, images = [], {}
     built = {}
     for path, text in sources.items():
+        meta = [f"edit_url: {_q(f'https://github.com/{repo}/edit/{edit_ref}/{path}')}"]
+        if site_pages[path] == "index.md":
+            text = _front_page(text)
+            # The banner, and room for the cards: the cards are the nav
+            # here, and Home has three headings to list.
+            meta += ["template: home.html", "hide:", "  - navigation", "  - toc"]
         body = _relink(text.splitlines(), pages=site_pages, root=root, repo=repo,
                        ref=ref, where=posixpath.basename(path), errors=errors,
                        base=posixpath.dirname(path), images=images)
-        edit_url = f"https://github.com/{repo}/edit/{edit_ref}/{path}"
-        built[site_pages[path]] = (f"---\nedit_url: {_q(edit_url)}\n---\n\n"
+        built[site_pages[path]] = ("---\n" + "\n".join(meta) + "\n---\n\n"
                                    + _table_pipes(body))
 
     nav, listed = [(None, [("Home", "index.md")])], set()
@@ -398,7 +459,7 @@ def build_site(out_dir, *, root=ROOT, repo=DEFAULT_REPO, ref=DEFAULT_REF,
     assets = root / SITE_CONFIG / "assets"
     if assets.is_dir():
         shutil.copytree(assets, docs / "assets", dirs_exist_ok=True)
-    for src, dest in SITE_ICONS.items():
+    for src, dest in SITE_ASSETS.items():
         if (root / src).exists():
             (docs / dest).parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(root / src, docs / dest)
