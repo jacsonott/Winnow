@@ -9409,7 +9409,7 @@ class Store:
         ts_expr = "NULL"
         if ts_col:
             ref = self._col_ref(src, ts_col, "s")
-            ts_expr = ref if self._is_derived(src, ts_col) else f"TS_NORMALIZE({ref})"
+            ts_expr = ref if self._is_derived(src, ts_col) else ts_normalize_sql(ref)
 
         chosen_body = [c for c in (cfg.get("body_columns") or []) if c in col_names]
         body_cols = chosen_body or [c["name"] for c in src["columns"]]
@@ -9672,8 +9672,10 @@ class Store:
         (DAY_BUCKET'd or not) — otherwise a group's day-bucket value like
         "2026-01-01" would get compared against the raw full-timestamp
         column and never match any row, breaking expand/tag/export for
-        every datetime group."""
-        expr = f"DAY_BUCKET({col_ident})" if is_datetime else col_ident
+        every datetime group. The bucket is day_bucket_sql's, which only
+        calls DAY_BUCKET for a value not in the ISO shape, so `col_ident`
+        must be a column reference: it appears several times."""
+        expr = day_bucket_sql(col_ident) if is_datetime else col_ident
         if value is None:
             return f"{expr} IS ?", [None]
         return f"{expr} = ?", [value]
@@ -9707,8 +9709,8 @@ class Store:
         fragments. `alias` (e.g. "s"), when given, is baked into the
         identifier _eq_condition builds on — NOT prefixed onto the
         returned fragment by the caller afterward, since a datetime
-        column's fragment starts with DAY_BUCKET(...) and "s.DAY_BUCKET(...)"
-        isn't valid SQL the way "s.\"col\"" is.
+        column's fragment is a CASE over the column (day_bucket_sql), and
+        "s.CASE ..." isn't valid SQL the way "s.\"col\"" is.
 
         `src` routes each column through _col_ref, so a level grouped on a
         derived column resolves against the sidecar rather than taking the
@@ -9857,7 +9859,7 @@ class Store:
         # the value expression and the path conditions are built per branch.
         def _val_expr(m: dict, derived_alias: str | None) -> str:
             ref = self._col_ref(self._ref_src_for(src, m), column, "s", derived_alias)
-            return f"DAY_BUCKET({ref})" if is_datetime else ref
+            return day_bucket_sql(ref) if is_datetime else ref
 
         def _path_for(m: dict, derived_alias: str | None) -> tuple[str, list]:
             clauses, p = self._path_where(path, colnames, "s", self._ref_src_for(src, m),
@@ -10542,11 +10544,20 @@ class Store:
 
         members = self._resolve_members(root["source_id"])
         is_root_virtual = root.get("kind") == "root_virtual"
+        covers_source = self._grouping_covers_whole_source(root, src)
+        # A parent holding every row (root_virtual, or a root view that is
+        # only sorted) is the member tables themselves as far as which rows
+        # are in the group goes, so they are read directly, in their own
+        # order. Through the view it was one rid lookup per row in the
+        # view's order — random access over the whole table on any sort
+        # but rid's: 30 s to expand a day on a 4.3M-row MFTECmd table
+        # sorted by a timestamp, 2 s directly.
+        direct = is_root_virtual or covers_source
         # Same split group_summary makes: the direct-against-the-table shape
         # picks the derived sidecar up through _from_clause's USING(rid)
         # (bare refs), the view-join shape chains a second ON join and
         # refers to it by alias.
-        d_alias = None if is_root_virtual else "d"
+        d_alias = None if direct else "d"
         uses = [column, *(p.get("column") for p in path or [] if isinstance(p, dict))]
 
         def _conds(m: dict) -> tuple[str, list]:
@@ -10568,10 +10579,14 @@ class Store:
         # either window. Same contract as every other view read: expired, so
         # a 409 the frontend rebuilds on, not a 500.
         with self.lock, self._dropped_view_is_expired():
+            if direct and not is_root_virtual:
+                # Counted without reading the parent, which still has to
+                # exist for the group to mean anything.
+                self.db.execute(f"SELECT 1 FROM v.{q(view_id)} LIMIT 0")
             total = 0
             for m in members:
                 where_sql, where_params = _conds(m)
-                if is_root_virtual:
+                if direct:
                     n = self.db.execute(
                         f"SELECT count(*) FROM {self._member_from(src, m, 's', uses)} WHERE {where_sql}",
                         where_params,
@@ -10596,7 +10611,6 @@ class Store:
         # rows the filter excluded, rendered under a correct count. Tag and
         # export on the group read the same way, which makes it an
         # over-tagging bug too, not just a display one.
-        covers_source = self._grouping_covers_whole_source(root, src)
         is_merge = bool(src.get("is_merge"))
         # A tag level is the other thing the fast path can't hold still.
         # Its predicate is re-run against row_tags on every page fetch,
@@ -10621,6 +10635,17 @@ class Store:
                         f"FROM {self._member_from(src, m, 's', uses)} WHERE {where_sql}"
                     )
                     params.extend(where_params)
+                elif direct:
+                    # The parent's order still comes from the view, which
+                    # is read in that order once, against the group's rids
+                    # gathered from the member (an uncorrelated IN, so one
+                    # pass over each).
+                    branches.append(
+                        f"SELECT vv.pos AS root_pos, vv.source_id, vv.rid FROM v.{q(view_id)} vv "
+                        f"WHERE vv.source_id = ? AND vv.rid IN "
+                        f"(SELECT s.rid FROM {self._member_from(src, m, 's', uses)} WHERE {where_sql})"
+                    )
+                    params.extend([m["source_id"], *where_params])
                 else:
                     branches.append(
                         f"SELECT vv.pos AS root_pos, vv.source_id, vv.rid FROM v.{q(view_id)} vv "
@@ -11726,12 +11751,15 @@ class Store:
 
         Closeness is |julianday(a) - julianday(b)| over TS_NORMALIZE'd
         values — string comparison can order timestamps but can't measure
-        between them. That makes this a scan of the view (TS_NORMALIZE is a
-        registered Python function), which is the same cost shape as
-        group_summary's whole-source aggregate: fine for a user-initiated,
-        occasional action, and it runs on a pooled reader so it never
-        blocks anything. Rows whose timestamp doesn't parse simply can't
-        win. Returns None when no row has a usable timestamp."""
+        between them. That makes this a scan of the view, the same cost
+        shape as group_summary's whole-source aggregate: fine for a
+        user-initiated, occasional action, and it runs on a pooled reader
+        so it never blocks anything. The ISO shape is read by SQLite
+        (ts_normalize_sql) and a view holding every row reads its table in
+        the table's own order (_nearest_in_covering_view), which between
+        them took a 4.3M-row MFTECmd table sorted by a timestamp from 41 s
+        to 5 s. Rows whose timestamp doesn't parse simply can't win.
+        Returns None when no row has a usable timestamp."""
         handle = self._views.get(view_id)
         if not handle:
             raise ViewExpired("View expired — rebuild it")
@@ -11751,6 +11779,7 @@ class Store:
             if not ts_cols:
                 raise ValueError("This table has no datetime columns")
             kind = handle.get("kind")
+            covers = kind == "root" and self._grouping_covers_whole_source(handle, src)
             members = self._resolve_members_on(ro, handle["source_id"])
             for m in members:
                 msrc = self._source_lite_on(ro, m["source_id"])
@@ -11761,36 +11790,45 @@ class Store:
                               if _col_key(cc["name"]) == _col_key(want)), None)
                     if c is None:
                         continue  # merge member without this column
+                    # The timestamp is worked out once a row, inside
+                    # (LIMIT -1 keeps that SELECT from being flattened into
+                    # this one, which would repeat it for the filter, the
+                    # distance and the answer), and by SQLite itself for
+                    # the ISO shape (ts_normalize_sql). A row whose
+                    # distance is NULL (a timestamp julianday can't read,
+                    # like 0000-00-00) can't win: ORDER BY puts NULL first.
+                    # A tie goes to the row first in the view's order, said
+                    # outright (pos, or rid for the kinds that page in rid
+                    # order): the scan's own order is the planner's choice,
+                    # and an index on the column makes it the column's.
+                    if covers:
+                        row = self._nearest_in_covering_view(ro, view_id, msrc, m["source_id"], c, norm)
+                        if row is not False:
+                            if row and (best is None or row["d"] < best[0]):
+                                best = (row["d"], m["source_id"], row["rid"], row["pos"], row["ts"])
+                            continue
                     if kind == "root_virtual":
-                        ts_expr = f"TS_NORMALIZE({q(c)})"
-                        row = ro.execute(
-                            f"SELECT rid, NULL AS pos, {ts_expr} AS ts, "
-                            f"ABS(julianday({ts_expr}) - julianday(?)) AS d "
-                            f"FROM {self._from_clause(msrc)} "
-                            f"WHERE {ts_expr} IS NOT NULL ORDER BY d LIMIT 1",
-                            (norm,),
-                        ).fetchone()
+                        inner = (f"SELECT rid, NULL AS pos, {ts_normalize_sql(q(c))} AS ts "
+                                 f"FROM {self._from_clause(msrc)}")
+                        params = (norm,)
                     elif kind == "group_virtual":
                         where_sql, where_params = self._virtual_group_where(handle, ro)
-                        ts_expr = f"TS_NORMALIZE({q(c)})"
-                        row = ro.execute(
-                            f"SELECT rid, NULL AS pos, {ts_expr} AS ts, "
-                            f"ABS(julianday({ts_expr}) - julianday(?)) AS d "
-                            f"FROM {self._member_from(msrc, m)} WHERE ({where_sql}) "
-                            f"AND {ts_expr} IS NOT NULL ORDER BY d LIMIT 1",
-                            (norm, *where_params),
-                        ).fetchone()
+                        inner = (f"SELECT rid, NULL AS pos, {ts_normalize_sql(q(c))} AS ts "
+                                 f"FROM {self._member_from(msrc, m)} WHERE ({where_sql})")
+                        params = (norm, *where_params)
                     else:
-                        ts_expr = f"TS_NORMALIZE({self._col_ref(msrc, c, 's', 'd')})"
-                        row = ro.execute(
-                            f"SELECT vv.rid AS rid, vv.pos AS pos, {ts_expr} AS ts, "
-                            f"ABS(julianday({ts_expr}) - julianday(?)) AS d "
-                            f"FROM v.{q(view_id)} vv "
-                            f"JOIN {q(m['table_name'])} s ON s.rid = vv.rid AND vv.source_id = ?"
-                            f"{self._derived_join(msrc, 's')} "
-                            f"WHERE {ts_expr} IS NOT NULL ORDER BY d LIMIT 1",
-                            (norm, m["source_id"]),
-                        ).fetchone()
+                        inner = (f"SELECT vv.rid AS rid, vv.pos AS pos, "
+                                 f"{ts_normalize_sql(self._col_ref(msrc, c, 's', 'd'))} AS ts "
+                                 f"FROM v.{q(view_id)} vv "
+                                 f"JOIN {q(m['table_name'])} s ON s.rid = vv.rid AND vv.source_id = ?"
+                                 f"{self._derived_join(msrc, 's')}")
+                        params = (norm, m["source_id"])
+                    row = ro.execute(
+                        f"SELECT rid, pos, ts, d FROM (SELECT rid, pos, ts, "
+                        f"ABS(julianday(ts) - julianday(?)) AS d FROM ({inner} LIMIT -1)) "
+                        f"WHERE d IS NOT NULL ORDER BY d, pos, rid LIMIT 1",
+                        params,
+                    ).fetchone()
                     if row and row["d"] is not None and (best is None or row["d"] < best[0]):
                         best = (row["d"], m["source_id"], row["rid"], row["pos"], row["ts"])
             if best is None:
@@ -11813,6 +11851,47 @@ class Store:
             else:
                 pos = pos - 1  # v.view_N pos is 1-based
         return {"pos": pos, "source_id": sid, "rid": rid, "ts": ts}
+
+    # How many rows find_nearest_timestamp's covering-view shortcut takes
+    # as tied for closest before it reads the view instead.
+    NEAREST_TIES = 500
+
+    def _nearest_in_covering_view(self, ro: sqlite3.Connection, view_id: str, msrc: dict,
+                                  source_id: int, column: str, norm: str) -> dict | None | bool:
+        """find_nearest_timestamp for a root view holding every row of its
+        source (_grouping_covers_whole_source), one member: the closest
+        row, None when no row has a usable timestamp, or False when more
+        than NEAREST_TIES rows tie for closest and the caller should read
+        through the view after all.
+
+        Reading through the view visits the member's rows in the view's
+        order, one rid lookup each: on any sort but rid's that is random
+        access over the whole table (30 s on a 4.3M-row MFTECmd table
+        sorted by a timestamp, against 5 s in rid order). Since the view
+        holds every row, the member table is read in its own order
+        instead, and the view is only asked where the closest rows sit. Of
+        rows tied for closest, the one first in the view's order wins,
+        which is the row reading the view in order would have kept."""
+        cand = ro.execute(
+            f"SELECT rid, ts, d FROM (SELECT rid, ts, ABS(julianday(ts) - julianday(?)) AS d "
+            f"FROM (SELECT rid, {ts_normalize_sql(q(column))} AS ts FROM {self._from_clause(msrc)} LIMIT -1)) "
+            f"WHERE d IS NOT NULL ORDER BY d LIMIT ?",
+            (norm, self.NEAREST_TIES + 1),
+        ).fetchall()
+        if not cand:
+            return None
+        tied = {r["rid"]: r for r in cand if r["d"] == cand[0]["d"]}
+        if len(tied) > self.NEAREST_TIES:
+            return False
+        hit = ro.execute(
+            f"SELECT pos, rid FROM v.{q(view_id)} WHERE source_id = ? "
+            f"AND rid IN ({','.join('?' * len(tied))}) ORDER BY pos LIMIT 1",
+            (source_id, *tied),
+        ).fetchone()
+        if hit is None:
+            return None
+        r = tied[hit["rid"]]
+        return {"rid": r["rid"], "pos": hit["pos"], "ts": r["ts"], "d": r["d"]}
 
     def column_values(self, source_id: int, column: str, limit: int = 200) -> list[dict]:
         """Distinct values + counts for one column — the filter box's
@@ -11926,10 +12005,13 @@ class Store:
                     c = member_names.get(_col_key(want))  # the member's own spelling
                     if c is None:
                         continue
+                    # LIMIT -1 keeps the inner SELECT from being
+                    # flattened into the aggregate, which would work the
+                    # timestamp out once for MIN and again for MAX.
                     row = ro.execute(
-                        f"SELECT MIN(TS_NORMALIZE({q(c)})), MAX(TS_NORMALIZE({q(c)})) "
+                        f"SELECT MIN(ts), MAX(ts) FROM (SELECT {ts_normalize_sql(q(c))} AS ts "
                         f"FROM {self._from_clause(msrc)} "
-                        f"WHERE rid IN (SELECT rid FROM row_tags WHERE source_id=?{tag_clause})",
+                        f"WHERE rid IN (SELECT rid FROM row_tags WHERE source_id=?{tag_clause}) LIMIT -1)",
                         [m["source_id"], *ids],
                     ).fetchone()
                     if row[0] is not None and (lo is None or row[0] < lo):
@@ -13688,7 +13770,7 @@ class Store:
             ts_expr = "NULL"
             if ts_col:
                 ref = self._col_ref(src, ts_col, "s")
-                ts_expr = ref if self._is_derived(src, ts_col) else f"TS_NORMALIZE({ref})"
+                ts_expr = ref if self._is_derived(src, ts_col) else ts_normalize_sql(ref)
             body_cols = [c for c in (cfg.get("body_columns") or []) if c in col_names]
             if not body_cols:
                 # Every column EXCEPT the one already shown as "when" —
