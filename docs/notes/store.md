@@ -954,9 +954,10 @@ see [docs/notes/README.md](README.md) for the whole set.
   index — frees to SQLite's freelist, which is the right default but can
   park tens of GB. Explicit and confirmed because it rewrites the whole file
   (minutes of held lock on a big case) and needs a full second copy free on
-  disk, checked up front. It forces `temp_store=FILE` for the duration:
-  `_tune` sets MEMORY, and VACUUM's scratch copy of the entire database
-  obeys that pragma. WAL is checkpoint-truncated on **both** sides — after,
+  disk, checked up front. VACUUM's scratch copy of the entire database
+  obeys `temp_store`, which is one reason `_tune` leaves it at FILE (it
+  used to set MEMORY, and compact forced FILE for the duration; see the
+  2026-10 sorter entry). WAL is checkpoint-truncated on **both** sides — after,
   so the reclaimed bytes don't just move into a `-wal`; before, so VACUUM
   starts from a folded-in file.
 - **`wal_checkpoint(TRUNCATE)` reports failure in its RESULT ROW (busy=1),
@@ -1495,6 +1496,8 @@ see [docs/notes/README.md](README.md) for the whole set.
     that helps a multi-million-row view-build sort), mmap_size at 1 GB
     (file-backed, shared with the OS page cache; costs address space,
     not RAM; SQLite clamps it to its compile-time max on old builds).
+    The threads did nothing until the 2026-10 sorter entry below:
+    `temp_store=MEMORY` switches them off.
 - **The 2026-08 reader-pool split** (invariants #3/#4 carry the rules;
   this entry carries the numbers and the traps that were checked):
   - Headline, via `bench/probe_concurrency.py` (a standalone before/after
@@ -1528,6 +1531,40 @@ see [docs/notes/README.md](README.md) for the whole set.
     why the pool returns connections on the happy path but *closes* them
     on any exception (a connection whose last statement died mid-view-drop
     is cheaper to replace than to prove clean).
+- **The 2026-10 sorter settings: less memory, faster.** Measured on a
+  2.08M-row, 3 GB EVTX case (`gen_large.py evtx 3.0`), in-process
+  `Store` calls, two interleaved rounds; scripts and logs in the project's
+  `benchmarks/2026-10-23-sqlite-memory/`.
+  - Two SQLite rules, both in `vdbesort.c`: a connection with
+    `temp_store=MEMORY` starts **no** sorter worker threads (so `_tune`'s
+    `threads=4` was a no-op) and keeps the whole sort as one list in RAM;
+    and the sorter's chunk size is the main schema's `cache_size` (at
+    least 250 pages, 16 MB at 64 KB pages), so the writer's old 256 MB
+    cache left a 2M-row sort one chunk with nothing to hand a thread.
+  - Writer now `temp_store=FILE` + `cache_size=-16384`; readers and the
+    SQL pane add `threads=4` (they already had FILE and the default 2 MB
+    cache, so 16 MB chunks). Unindexed sort view 5.56 s -> 1.75 s,
+    column index build 3.58 s -> 1.67 s, `group_summary` on an
+    unindexed column 1.98 s -> 1.33 s, `column_values` 1.66 s -> 1.17 s,
+    peak private memory 653 -> 235 MB. Paging, filters, histograms,
+    export: unchanged. Import (3 GB CSV) and `build_fts` (208k rows):
+    unchanged, peak import RSS 1.59 -> 1.27 GB.
+  - Readers with the writer's old settings (256 MB cache,
+    `temp_store=MEMORY`) were measured too: GROUP BY 1.8x **slower**.
+    More page cache does not help a reader anyway: in WAL mode SQLite
+    drops a connection's whole cache whenever another connection has
+    committed since its last read, and mmap'd pages bypass it.
+  - The memory side matters most on big cases: a sort by Payload (1.29 GB
+    of text) held +1.1-1.6 GB of RAM under the old writer settings and
+    ~0.1 GB now, the rest going to temp files that SQLite only creates
+    once a chunk overflows.
+  - Also measured and rejected, for the record: a copy of the whole case
+    on /dev/shm and `mmap_size` at SQLite's 2 GB max were no faster than
+    a warm OS cache; a `:memory:` copy (DB Browser's in-memory mode) cost
+    RAM equal to the case and 9-15 s to load 3 GB, for 6-21% on plain
+    scans and sorts and nothing on LIKE, against 1.5-3x from the sorter
+    settings. It also can't serve the reader pool: a private `:memory:`
+    database has one connection.
 
 - **`copy_sources_to` runs through the TARGET, with the source attached.**
   The target opens as a full Store — which is what migrates an older

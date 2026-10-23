@@ -3630,11 +3630,10 @@ class Store:
         disk while it runs — checked up front here, because running out
         of space mid-VACUUM is a far worse outcome than declining.
 
-        temp_store is forced back to FILE for the duration. _tune sets it
-        to MEMORY, which is right for the sorts and temp b-trees ordinary
-        queries build — but VACUUM's scratch copy of the whole database
-        obeys the same pragma, and materialising a 42 GB case in RAM is
-        not a thing to find out about the hard way.
+        VACUUM's scratch copy of the whole database obeys temp_store, which
+        _tune leaves at FILE: materialising a 42 GB case in RAM is not a
+        thing to find out about the hard way. (It used to be MEMORY, and
+        this forced FILE for the duration.)
 
         Sizes are measured as **main + -wal on both sides**, which is what
         makes the reclaim number honest without depending on a checkpoint
@@ -3682,15 +3681,11 @@ class Store:
                     f"so it needs about {needed // (1024 * 1024)} MB free and "
                     f"{free // (1024 * 1024)} MB is available"
                 )
-            self.db.execute("PRAGMA temp_store=FILE")
-            try:
-                self.db.execute("VACUUM")
-                # VACUUM commits through the WAL, so without this the
-                # rewritten (smaller) file is still sitting in the -wal and
-                # nothing has been given back to the OS yet.
-                checkpointed = self._checkpoint_truncate()
-            finally:
-                self.db.execute("PRAGMA temp_store=MEMORY")
+            self.db.execute("VACUUM")
+            # VACUUM commits through the WAL, so without this the
+            # rewritten (smaller) file is still sitting in the -wal and
+            # nothing has been given back to the OS yet.
+            checkpointed = self._checkpoint_truncate()
             after = os.path.getsize(self.path)
             wal_after = self._wal_size()
         return {"before_bytes": before + wal_before, "after_bytes": after + wal_after,
@@ -3771,8 +3766,23 @@ class Store:
         conn.execute("PRAGMA page_size=65536")
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA temp_store=MEMORY")
-        conn.execute("PRAGMA cache_size=-262144")  # ~256 MB page cache
+        # temp_store=FILE and a small page cache are both for the sorter
+        # (view-build sorts, CREATE INDEX, GROUP BY), and both used to be
+        # the other way. SQLite runs no sorter worker threads at all on a
+        # connection with temp_store=MEMORY, so threads=4 below did
+        # nothing; and it sorts in chunks of cache_size bytes, so a 256 MB
+        # cache left a 2M-row sort one chunk with nothing to hand a thread.
+        # Measured on a 2.08M-row, 3 GB EVTX case: an unindexed sort 5.6 s
+        # -> 1.8 s, a column index build 3.6 s -> 1.8 s, peak private
+        # memory 653 -> 235 MB. FILE doesn't mean every sort hits the disk:
+        # SQLite only opens a temp file once a chunk overflows, and the OS
+        # caches what it writes. What it does change is the huge sort — by
+        # Payload on a 25 GB case — which spills to the tempdir instead of
+        # holding gigabytes in RAM. 16 MB is the smallest chunk SQLite uses
+        # at a 64 KB page size anyway (250 pages), so going lower buys
+        # nothing.
+        conn.execute("PRAGMA temp_store=FILE")
+        conn.execute("PRAGMA cache_size=-16384")  # 16 MB page cache and sort chunk
         # 1 GB. mmap is file-backed and shared with the OS page cache, so
         # this costs address space (fine on 64-bit), not RAM — and it lets
         # the big sequential scans (view materialisation, LIKE fallback,
@@ -3784,6 +3794,7 @@ class Store:
         # Let the sorter use worker threads: a filtered/sorted view build
         # over millions of rows is one big external sort, and this is the
         # one knob that parallelises it (default is 0 = single-threaded).
+        # Only with temp_store=FILE — see above.
         conn.execute("PRAGMA threads=4")
 
     # The tables whose ids must never come round again (see the comment at
@@ -4139,6 +4150,14 @@ class Store:
         # even a reader can see SQLITE_BUSY briefly.
         ro.execute("PRAGMA mmap_size=1073741824")
         ro.execute("PRAGMA busy_timeout=5000")
+        # The aggregates on this pool (group_summary, column_values, a
+        # dashboard widget) sort on an unindexed column; sorter threads
+        # took column_values on 2M rows from 1.7 s to 1.1 s. temp_store
+        # FILE (SQLite's usual default, said outright so a build compiled
+        # otherwise can't switch the threads off) and the default 2 MB
+        # cache, for the reasons _tune gives.
+        ro.execute("PRAGMA temp_store=FILE")
+        ro.execute("PRAGMA threads=4")
         ro.execute("ATTACH DATABASE ? AS v", (sqlite_ro_uri(self._views_path),))
         return ro
 
@@ -17684,6 +17703,10 @@ class Store:
         ro.create_function("REGEXP", 2, _regexp, deterministic=True)
         ro.create_function("DAY_BUCKET", 1, _day_bucket, deterministic=True)
         ro.create_function("TS_NORMALIZE", 1, _ts_normalize, deterministic=True)
+        # Sorter threads for the pane's GROUP BY and ORDER BY, as on the
+        # _reader() pool (see _open_reader and _tune).
+        ro.execute("PRAGMA temp_store=FILE")
+        ro.execute("PRAGMA threads=4")
         try:
             for row in ro.execute("SELECT id FROM merges ORDER BY id"):
                 try:
