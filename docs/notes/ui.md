@@ -1507,6 +1507,14 @@ see [docs/notes/README.md](README.md) for the whole set.
     `AUTO_PREVIEW_UPLOAD_BYTES` waits for Load preview. `previewRunner`
     keeps the last answer dimmed behind a sequence number, like the
     folder import's preview.
+  - **A SQLite file's tables and a workbook's sheets are read once per
+    queued file** (`unitListing`, the request's promise kept as
+    `item.listing`). The pane is rebuilt every time the file is chosen,
+    and each rebuild used to ask again: a large upload showed Load
+    preview again, went up whole again, the answer still in flight was
+    dropped, and the server read the workbook once more for each — the
+    sheets never showed and the reads starved every other import of the
+    GIL. A failed read isn't kept, so choosing the file again retries.
   - **Import goes to the file that still needs a choice** instead of only
     saying so: it selects that file and toasts what to pick.
   - **Not `sectionPanes`.** The left side is a list of like things to

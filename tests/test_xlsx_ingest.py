@@ -253,3 +253,75 @@ def test_a_stale_declared_dimension_does_not_cut_the_sheet(store, write_xlsx, tm
     assert [c["name"] for c in rec["columns"]] == ["Time", "User", "Action"]
     v = store.build_view(rec["id"], {"source_id": rec["id"]})
     assert store.fetch_rows(v["view_id"], 99, 1)["rows"][0]["cells"] == ["t100", "u100", "a100"]
+
+
+def _without_declared_size(tmp_path, rows):
+    """A workbook whose one sheet declares no <dimension> — openpyxl's
+    write-only mode leaves it out, as many tools' writers do."""
+    wb = Workbook(write_only=True)
+    ws = wb.create_sheet("Log")
+    for r in rows:
+        ws.append(r)
+    path = tmp_path / "undeclared.xlsx"
+    wb.save(path)
+    return str(path)
+
+
+def _rows_iter_rows_counts(path):
+    import openpyxl
+    wb = openpyxl.load_workbook(path, read_only=True)
+    try:
+        ws = wb.worksheets[0]
+        ws.reset_dimensions()
+        return sum(1 for _ in ws.iter_rows(values_only=True))
+    finally:
+        wb.close()
+
+
+def test_a_sheet_with_no_declared_size_is_counted_without_reading_its_cells(tmp_path, monkeypatch):
+    """With no <dimension> to estimate from, the picker counted a sheet's
+    rows by reading every cell through openpyxl: 20 s for a 33 MB
+    workbook, holding the GIL so a CSV import beside it ran 15x slower,
+    and the new import pane asked again each time the file was chosen.
+    The count comes off the sheet's row tags now — the same number, across
+    several of the 1 MB reads it scans in, with openpyxl's row parser
+    reading only the header."""
+    from openpyxl.worksheet._reader import WorkSheetParser
+
+    n = 30_000
+    path = _without_declared_size(tmp_path, [["When", "Host", "Note"]]
+                                  + [[f"2024-05-01 08:{i % 60:02d}:00", f"srv{i % 7}", "x" * 60] for i in range(n)])
+    parsed = []
+    real = WorkSheetParser.parse_row
+    monkeypatch.setattr(WorkSheetParser, "parse_row", lambda self, el: parsed.append(1) or real(self, el))
+    sheets = xlsxread.workbook_sheets(path)
+    assert sheets == [{"name": "Log", "row_count": n, "columns": ["When", "Host", "Note"]}]
+    assert len(parsed) < 5
+    monkeypatch.undo()
+    assert _rows_iter_rows_counts(path) == n + 1
+
+
+def test_the_row_count_reads_rows_the_way_openpyxl_does(tmp_path):
+    """Prefixed tags (the OpenXML SDK writes <x:row>), rows with no r=""
+    (the one before plus one), single quotes, a gap (counted, as iter_rows
+    pads it), a cell whose TEXT spells a row tag, and <rowBreaks>: the
+    count is iter_rows's, row for row."""
+    import zipfile
+
+    path = _without_declared_size(tmp_path, [["placeholder"]])
+    cell = '<x:c t="inlineStr"><x:is><x:t>{}</x:t></x:is></x:c>'
+    xml = ('<x:worksheet xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><x:sheetData>'
+           f'<x:row r="1">{cell.format("Head")}</x:row>'
+           f'<x:row>{cell.format("&lt;row r=&quot;900&quot;&gt;")}</x:row>'
+           f"<x:row r='5' spans=\"1:1\">{cell.format('five')}</x:row>"
+           f'<x:row>{cell.format("six")}</x:row>'
+           '</x:sheetData><x:rowBreaks count="1"><x:brk id="40"/></x:rowBreaks></x:worksheet>')
+    out = tmp_path / "shaped.xlsx"
+    with zipfile.ZipFile(path) as zin, zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zout:
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            zout.writestr(item, xml.encode() if item.filename == "xl/worksheets/sheet1.xml" else data)
+
+    assert _rows_iter_rows_counts(str(out)) == 6
+    sheet, = xlsxread.workbook_sheets(str(out))
+    assert sheet["row_count"] == 5 and sheet["columns"] == ["Head"]

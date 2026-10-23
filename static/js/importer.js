@@ -507,8 +507,9 @@ export function buildQueueItemPane(pane, item, changed) {
 
 /* Fetch a preview for what is set now; the last answer stays on screen,
    dimmed, while the next is on its way (the derive preview's rule), and
-   an answer that arrives after a newer question is dropped. */
-export function previewRunner(ctx, fetcher, render, { wholeFile = false } = {}) {
+   an answer that arrives after a newer question is dropped. `requested`:
+   a whole-file preview already asked for once, so not asked about again. */
+export function previewRunner(ctx, fetcher, render, { wholeFile = false, requested = false } = {}) {
   let seq = 0;
   const run = async () => {
     const mine = ++seq;
@@ -530,7 +531,7 @@ export function previewRunner(ctx, fetcher, render, { wholeFile = false } = {}) 
     render(res);
   };
   const size = itemSize(ctx.item);
-  if (wholeFile && !ctx.item.path && size > AUTO_PREVIEW_UPLOAD_BYTES) {
+  if (wholeFile && !requested && !ctx.item.path && size > AUTO_PREVIEW_UPLOAD_BYTES) {
     // Asked, not started: reading it means sending it up.
     const go = el('button', 'btn ghost', `Load preview (uploads ${fmtBytes(size)})`);
     go.onclick = () => { go.remove(); run(); };
@@ -772,7 +773,7 @@ export function buildUnitSettings(ctx) {
   }
   all.onclick = () => { if (!units) return; for (const t of units) if (!t.error) chosen.add(t.name); commit(); paint(); };
   none.onclick = () => { if (!units) return; chosen.clear(); commit(); paint(); };
-  previewRunner(ctx, () => fetchPreview(item, { kind: item.kind }), (res) => {
+  previewRunner(ctx, () => unitListing(item), (res) => {
     units = res.tables;
     for (const t of units) {
       // Back on a file already picked: its choices; fresh: every detected
@@ -781,7 +782,27 @@ export function buildUnitSettings(ctx) {
       convert.set(t.name, prior ? new Set(prior.timestamp_columns || []) : new Set(t.likely_timestamp_columns));
     }
     paint();
-  }, { wholeFile: true });
+  }, { wholeFile: true, requested: !!item.listing });
+}
+
+/* A SQLite file's tables or a workbook's sheets, read once per queued file
+   and kept on it (item.listing, the request's promise), so the pane shows
+   it again without asking — and past 32 MB without the Load preview
+   button, once that has been pressed. The pane is built afresh each time
+   the file is chosen, and each build used to ask afresh too: an upload
+   went up whole again, the server read the workbook again, and an answer
+   still on its way when another file was chosen was thrown away. A large
+   workbook chosen twice was two full reads on the server and a list that
+   never arrived. Nothing listed can change while the file is queued (these
+   kinds have no Read as); a failed read isn't kept, so choosing the file
+   again tries again. */
+export function unitListing(item) {
+  if (!item.listing) {
+    const listing = fetchPreview(item, { kind: item.kind });
+    item.listing = listing;
+    listing.catch(() => { if (item.listing === listing) item.listing = null; });
+  }
+  return item.listing;
 }
 
 export function buildPluginSettings(ctx) {

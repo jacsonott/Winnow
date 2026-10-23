@@ -87,7 +87,17 @@ see [docs/notes/README.md](README.md) for the whole set.
   data, and a stale A1:B10 over 3 columns and 101 rows imported 2
   columns and 9 rows with ragged 0. The declared size is still the
   picker's row estimate and a floor on the width — so the picker can
-  under-count a sheet whose declaration is stale, but the import can't. Rows shorter than the header are
+  under-count a sheet whose declaration is stale, but the import can't.
+  A sheet that declares no size at all (openpyxl's write-only mode and
+  many tools' writers leave it out) is counted off its `<row>` tags in
+  the raw XML (`_count_rows`), not through `iter_rows`: openpyxl builds
+  every cell to be counted and thrown away, 16 of the 20 s a 33 MB
+  workbook took to list, holding the GIL so a 1 s CSV import beside it
+  took 18. Note openpyxl's own `load_workbook` still parses the whole of
+  such a sheet once looking for the `<dimension>` (its
+  `parse_dimensions` waits for `</sheetData>`), and a workbook's shared
+  strings are read in full on open — the rest of the listing's time,
+  out of reach without bypassing openpyxl. Rows shorter than the header are
   normal Excel storage (trailing empties aren't stored) and pad silently;
   only wider rows count as ragged. `.xlsm` imports (same container,
   macros never executed); legacy binary `.xls` is deliberately out of
