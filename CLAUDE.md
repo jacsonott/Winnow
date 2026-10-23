@@ -281,6 +281,20 @@ docs/              Long-form documentation. writing-plugins.md — the plugin
                     in the wiki. Every page must be listed under Home.md's
                     "## Pages" (it becomes the sidebar) and every link must
                     resolve; tests/test_build_wiki.py fails otherwise.
+                    The same pages are the GitHub Pages site too, but from
+                    main, not develop: it is the manual for the released
+                    version, so .github/workflows/pages.yml rebuilds it when
+                    a release lands (build_wiki.py --site, then MkDocs;
+                    nav from the same "## Pages" list, theme and the
+                    front page's banner and feature rows in docs/site/; Home.md's list
+                    also becomes the front page's cards, and its
+                    "# Title" gives way to the banner). PRs that touch the
+                    docs run its build with --strict, which also catches a
+                    link to a missing #anchor — the wiki test checks
+                    files, not headings.
+                    Pages are written for GitHub's Markdown; the site's
+                    Python-Markdown needs 4-space indents for a second
+                    paragraph inside a list item.
 plugins/           Analyst-installed plugins (gitignored except its README).
                     Managed from Settings → Plugins → Manage plugins…,
                     a two-pane manager (static/js/pluginmanager.js):

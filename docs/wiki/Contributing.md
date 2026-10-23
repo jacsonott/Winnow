@@ -145,10 +145,19 @@ once, so two runs of identical code report nothing.
   goes in the list under **Pages** on [Home](Home.md), which is also the
   wiki's sidebar, and `tests/test_build_wiki.py` fails if one is missing or
   a link doesn't resolve.
+- The same pages are the project's GitHub Pages website, rebuilt from
+  `main` at each release, with Home's page list as its navigation. A pull
+  request that changes them also builds the site, and that check fails on
+  a link to a heading that doesn't exist. To preview it,
+  `pip install -r docs/site/requirements.txt`, then
+  `python scripts/build_wiki.py --site /tmp/winnow-site` and
+  `mkdocs serve -f /tmp/winnow-site/mkdocs.yml`.
 - Anything a plugin author can call or receive is documented in the same
   commit, both in the `winnow/plugin_api.py` module docstring and in
   [`docs/writing-plugins.md`](../writing-plugins.md).
   `tests/test_plugin_docs_current.py` fails the build if a public
   `register_*` hook is missing from either.
 - `python3 scripts/screenshots.py` regenerates the README's screenshots
-  from a seeded demo case, so a changed image means the UI moved.
+  and the website's animated banner and feature pictures from a seeded
+  demo case, so a changed image means the UI moved. The animation also
+  needs Pillow (`pip install pillow`).

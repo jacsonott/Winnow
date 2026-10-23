@@ -211,8 +211,11 @@ format is about twenty lines.
 
 ## Documentation
 
-The [wiki](docs/wiki/Home.md) is the manual, and is also published as the
-project's [GitHub wiki](https://github.com/jacsonott/Winnow/wiki):
+The [wiki](docs/wiki/Home.md) is the manual. The manual for the latest
+release is published as a website, with search, at
+[jacsonott.github.io/Winnow](https://jacsonott.github.io/Winnow/), and
+the project's [GitHub wiki](https://github.com/jacsonott/Winnow/wiki)
+follows development:
 
 - [Installation](docs/wiki/Installation.md) — requirements, launching,
   command-line options, updating and rollback

@@ -30,6 +30,7 @@ tests/test_release_script.py export-ignore
 /screenshots/        export-ignore
 /design/             export-ignore
 
-# Brand icons are binary — never line-ending-convert or diff them as text.
+# Images are binary — never line-ending-convert or diff them as text.
 *.png binary
+*.gif binary
 *.ico binary
