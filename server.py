@@ -4246,9 +4246,9 @@ def api_rows(view_id: str, start: int = 0, count: int = 200):
 
 
 @app.get("/api/tag_positions")
-def api_tag_positions(view_id: str):
+def api_tag_positions(view_id: str, height: int | None = Query(None, ge=1, le=100_000)):
     try:
-        return JSONResponse(store().tag_positions(view_id))
+        return JSONResponse(store().tag_positions(view_id, height=height))
     except KeyError as e:
         raise HTTPException(409, str(e))
 

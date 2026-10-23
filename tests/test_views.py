@@ -692,3 +692,44 @@ def test_root_virtual_pages_in_source_order_ignoring_saved_layout(store, write_c
     rows = store.fetch_rows(view["view_id"], 0, 10)["rows"]
     # source order, hidden column included — NOT the layout's ["C","A"]
     assert [r["cells"] for r in rows] == [["A0", "B0", "C0"], ["A1", "B1", "C1"]]
+
+
+def _rail(flat, n, height):
+    """What the rail drew from the flat list: round(pos / n * height) per
+    tagged row, [first, last] per pixel and tag."""
+    out: dict = {}
+    for p, tid in flat:
+        y = int(p / n * height + 0.5)
+        lo, hi = out.get((y, tid), (p, p))
+        out[(y, tid)] = (min(lo, p), max(hi, p))
+    return out
+
+
+@pytest.mark.parametrize("spec", [{}, {"filters": [{"column": "n", "op": "not_contains", "value": "x"}]},
+                                  {"sort": [{"column": "n", "dir": "desc"}]}],
+                         ids=["root", "filtered", "sorted"])
+def test_the_rail_is_bucketed_by_pixel_and_counts_every_tagged_row(store, write_csv, spec):
+    """The flat list stopped at `limit` tagged rows (20,000 in the app),
+    so the rail of a view with more had nothing below the last one sent."""
+    rows = [["n"]] + [[f"r{i:04d}"] for i in range(1000)]
+    sid = store.ingest_csv(write_csv(rows), name="t.csv", build_fts=False)["id"]
+    a = store.upsert_tag(None, "a", "#ff0000", None)["id"]
+    b = store.upsert_tag(None, "b", "#00ff00", None)["id"]
+    store.set_tags(sid, list(range(1, 1001, 3)), a, True)
+    store.set_tags(sid, list(range(500, 1001, 7)), b, True)
+    view = store.build_view(sid, {"source_id": sid, "filters": [], "sort": [], **spec})
+    vid, n = view["view_id"], view["row_count"]
+
+    flat = store.tag_positions(vid, limit=10_000)
+    assert len(store.tag_positions(vid, limit=100)) == 100
+    for height in (37, 400, 5000):
+        marks = store.tag_positions(vid, limit=100, height=height)
+        assert {(y, t): (lo, hi) for y, t, lo, hi in marks} == _rail(flat, n, height)
+        assert [m[3] for m in marks] == sorted(m[3] for m in marks)   # drawn in the order rows were
+
+
+def test_the_rail_of_an_untagged_view_is_empty(store, write_csv):
+    sid = store.ingest_csv(write_csv([["n"], ["a"], ["b"]]), name="t.csv", build_fts=False)["id"]
+    view = store.build_view(sid, {"source_id": sid, "filters": [{"column": "n", "op": "equals", "value": "a"}],
+                                  "sort": []})
+    assert store.tag_positions(view["view_id"], height=300) == []
