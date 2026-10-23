@@ -88,34 +88,20 @@
    setting: mono, widely tracked, uppercase (.splash-tagline in
    static/style.css). */
 .wn-hero__tagline {
-  margin: .7rem 0 0;
+  margin: .8rem 0 0;
   color: #c3c8be;
   font-family: var(--md-code-font-family);
-  font-size: .62rem;
+  font-size: .7rem;
   letter-spacing: .32em;
   text-transform: uppercase;
   text-wrap: balance;
   opacity: .85;
 }
-.wn-hero__lede {
-  margin: 1.1rem 0 0;
-  color: #cfa057;
-  font-size: 1.1rem;
-  font-weight: 600;
-  line-height: 1.35;
-  text-wrap: balance;
-}
-.wn-hero__sub {
-  margin: .8rem 0 0;
-  font-size: .85rem;
-  line-height: 1.6;
-  max-width: 26rem;
-}
 .wn-hero__actions {
   display: flex;
   flex-wrap: wrap;
   gap: .6rem;
-  margin-top: 1.4rem;
+  margin-top: 2rem;
 }
 /* Material styles .md-button only inside .md-typeset, which the banner
    is not, so the whole button is spelled out here. */
@@ -140,23 +126,6 @@
   color: #0f1211;
   background-color: #cfa057;
   border-color: #cfa057;
-}
-.wn-hero__facts {
-  display: flex;
-  flex-wrap: wrap;
-  gap: .3rem 1.2rem;
-  margin: 1.4rem 0 0;
-  color: #848d80;            /* dark --dim */
-  font-size: .65rem;
-}
-.wn-hero__facts span::before {
-  content: "";
-  display: inline-block;
-  width: .35rem;
-  height: .35rem;
-  margin-right: .45rem;
-  vertical-align: .1em;
-  background: #8a6c33;       /* the brand mark's middle bar */
 }
 .wn-hero__shot {
   margin: 0;
