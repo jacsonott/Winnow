@@ -667,6 +667,11 @@ the same results, slower. The index is what makes **Contains** and
 ([Filtering and searching](Filtering-and-searching.md)), and it takes space
 in the case file. **Case ▾ → Tables…** shows which tables have one.
 
+The build works in short steps, so tagging, undo and grouping stay quick
+while it runs; on a large event log it can take a while. Closing the case
+before it finishes keeps what is done: the next build, on the first search
+or from **Build** in the Tables manager, carries on from where it stopped.
+
 `--no-fts` skips the index for files imported with `--open`; the first
 Contains or Advanced search, or Search all, on such a table builds it anyway.
 If the SQLite library in your Python is older than 3.45, no index is built
