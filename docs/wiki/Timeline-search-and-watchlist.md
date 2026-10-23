@@ -4,17 +4,20 @@ Three pages work across the whole case rather than one table. The **Timeline** r
 
 ## The Timeline
 
-![The Timeline: tagged rows from two tables in one stream](../screenshots/timeline.png)
+![The Timeline: tagged rows from six tables in one stream, one line selected](../screenshots/timeline.png)
 
 Open the **Timeline** tab (top right, beside SQL and Notes). It lists every tagged row in the case, from every table, oldest first; tag a row anywhere and it is here. The header says how many tagged rows there are. It is rebuilt each time you open the tab, so it always reflects the tags as they are now.
 
-Each line has three columns:
+Each line has four columns:
 
-- **Timestamp** — the row's time, always written `YYYY-MM-DD HH:MM:SS` whatever display format Settings uses, so tables with different date formats sort together. A derived datetime column is used as it is, keeping any fractions of a second. Rows with no usable timestamp come last and show `—`.
-- **Type** — a dot per tag on the row (hover for the tag's name) and a badge naming the kind of table: the file name unless you set a type (see [Choosing the timestamp, type and body](#choosing-the-timestamp-type-and-body)). Hover the badge for the file name.
+- **The gutter**, as on the grid — a stripe per tag on the row in the tag's colour (hover for the tag's name), `✎` when the row has a note (hover to read it), and `⤢` on the line under the mouse to open the row in its table.
+- **Timestamp** — the row's time, always written `YYYY-MM-DD HH:MM:SS` whatever display format Settings uses, so tables with different date formats sort together. A derived datetime column is used as it is, keeping any fractions of a second. Rows with no usable timestamp come last and show `—`. The column's heading names the day of the line at the top of the list (**Timestamp · Fri 13 Mar**).
+- **Type** — a pill naming the kind of table, in a colour of its own for each table: the type you set (see [Choosing the timestamp, type and body](#choosing-the-timestamp-type-and-body)), else the header set's nickname without the tool's name (**Event logs** for EvtxECmd output), else the table's name. When two tables are of the same kind, what tells their names apart follows the pill — `WKSTN-014` and `SRV-DC01` for `WKSTN-014_EvtxECmd_Output.csv` and `SRV-DC01_EvtxECmd_Output.csv`. Hover the pill for the file name.
 - **Body** — a one-line summary of the row when Winnow knows the artefact, otherwise the whole row with its columns joined by ` | `. Hover it for the whole row. A table with more than 495 columns shows only its first 495 in the Body, and the Timeline header says which table; pick body columns under **Configure tables…** to choose which ones.
 
-**Click a line** to open its table at that row on the grid page. A closed table is opened for you and gets its tab back.
+**Click a line** to select it. The grid's keys move the selection — `↓`/`j` and `↑`/`k` a line, `Page Down`/`Page Up` a screen, `g` and `G` the first and last line — and a key you rebind in Settings moves the Timeline too. `Esc` lets go of it.
+
+**Double-click a line**, press `Enter` on the selected one, or click its `⤢` to open its table at that row on the grid page. A closed table is opened for you and gets its tab back. When you come back to the Timeline it opens on the line you had selected, even though it is rebuilt; if that line has left the Timeline (its tag was taken off, say), it opens where the line was in time.
 
 ### Narrowing by tag
 
@@ -30,7 +33,7 @@ For the artefact shapes Winnow knows, the Body reads as a lead saying what happe
 Failed logon  svc_backup · 10.0.0.5 · WKSTN-4471 · id 4625
 ```
 
-The lead is the first of the shape's lead columns that has something in it on that row. The details drop blanks, anything that repeats the lead, and the column already shown as the timestamp; some carry a word in front (`id 4625`, `size 1024`). Leads are cut at 100 characters and each detail at 120. Press **raw** at the end of a line to see the whole row instead, and **summary** to go back.
+The lead is the first of the shape's lead columns that has something in it on that row. The details drop blanks, anything that repeats the lead, and the column already shown as the timestamp; some carry a word in front (`id 4625`, `size 1024`). Leads are cut at 100 characters and each detail at 120. Point at a line (or select it) and press **raw** at its right end to see the whole row instead, and **summary** to go back; a line showing its whole row keeps its **summary** button in view.
 
 A table gets a summary when it contains every column of one of the shapes below (in any order, ignoring case; derived columns don't count). When several shapes fit, the one with the most columns wins.
 
@@ -76,11 +79,11 @@ The right side sets the selected header set:
 
 | Field | What it sets |
 | --- | --- |
-| Type | The badge text on each line. Blank means each table's own file name |
+| Type | The pill on each line. Blank means the header set's nickname without the tool's name, else each table's own name |
 | Timestamp column | The default, which names the column it falls back to — **First datetime column (TimeCreated)**, say, or **Each table's first datetime column** when the tables differ — or any datetime column of the tables, derived ones included. A column only some of the tables have says so (`only on …`); the others keep their first datetime column |
 | Body columns | Click columns to put them in the Body, in the order you click them; each picked column shows its place. Click one again to take it out, or **Clear** to pick none. None picked means the default: the summary Winnow ships for that kind of table, or for one it doesn't know, every column joined with ` \| `. The line under the columns says which applies. Picking columns replaces the summary with exactly the columns you picked |
 
-**Preview** shows how rows of one of these tables will read on the Timeline — timestamp, type and body, exactly as the Timeline draws them — and changes as you edit the fields. It shows the table's tagged rows first, and its first rows when it has fewer than three tagged (untagged rows have no tag dot; they are not on the Timeline until tagged). When the header set covers several tables, **Rows from** picks which one to preview.
+**Preview** shows how rows of one of these tables will read on the Timeline — timestamp, type and body, exactly as the Timeline draws them — and changes as you edit the fields. It shows the table's tagged rows first, and its first rows when it has fewer than three tagged (untagged rows have no tag stripe; they are not on the Timeline until tagged). When the header set covers several tables, **Rows from** picks which one to preview.
 
 **Save** saves the header set shown; it is greyed out until something has changed. Your changes to other header sets are kept while the dialog is open — switching between entries doesn't lose them — and the line beside **Save** names any that are not saved yet (*Not saved yet: …*). Closing the dialog drops changes that were not saved. **Back to default** (shown when the header set has a saved setting) removes it, after asking, for every table with these columns, in this case and others.
 

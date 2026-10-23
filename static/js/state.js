@@ -115,6 +115,7 @@ export const S = {
     view: null, pages: new Map(), pending: new Set(), reqId: 0,
     tagsOff: new Set(), // tag ids the analyst switched OFF the timeline; every other tag is on (timelineTagIds), including one created after the case opened
     raw: new Set(),  // "<source_id>:<rid>" for rows showing the raw source row instead of their summary — see fillTimelineBody
+    sel: null,       // the selected line {pos, source_id, rid, ts}, kept across rebuilds — see keepTimelinePlace
   },
   savedFilterCursor: -1,   // index into filtersForCurrentSource(), for [ and ] cycling
   cases: [],               // home screen's case registry, from workspace/cases.json

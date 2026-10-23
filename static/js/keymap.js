@@ -22,6 +22,7 @@ import { S, clearCellSelection, selClear, selCount, selSetAll, selSnapshot } fro
 import { openTablesManager } from './tables.js';
 import { applyTag, applyTagToView, undoLastTagChange } from './tags.js';
 import { doJumpTs, openJumpTsModal, openTableMenu, openTimeRangeModal, toggleTimeRange } from './timeframe.js';
+import { clearTimelineSelection, timelineKey } from './timeline.js';
 
 /* ------------------------------------------------------ keyboard shortcuts */
 
@@ -456,6 +457,12 @@ export const FIXED_KEYS = [
     ['Ctrl/⌘-click a row', 'Add it to the result selection, or take it out'],
     ['Shift-click a row', 'Select every result row from the last one clicked to it'],
   ]],
+  ['Timeline', [
+    ['↓ / ↑, j / k, PgDn / PgUp, g / G', 'Move the selected line — the grid’s movement keys, so a rebinding above moves it too'],
+    ['Enter', 'Open the selected line’s row in its table'],
+    ['Double-click a line', 'Open its row in its table (a single click selects it)'],
+    ['Esc', 'Let go of the selected line'],
+  ]],
   ['Menus and dialogs', [
     ['↑ / ↓', 'Move through a menu’s items (from outside it, step in at the first or last)'],
     ['→ / ←', 'Open a submenu / close it again'],
@@ -588,6 +595,7 @@ document.addEventListener('keydown', (e) => {
     if (!$('modal').hidden) { closeModal(); return; }
     if (typing) { e.target.blur(); $('body').focus(); return; }
     if (S.activeTab === 'sql' && sqlClearSelection()) return;
+    if (S.activeTab === 'timeline' && clearTimelineSelection()) return;
     // Escape lets go of everything picked — rows and the cell range — and
     // the chip's Undo brings it back if it was a slip.
     if (selCount() || S.cellRange) selSnapshot();
@@ -732,6 +740,12 @@ document.addEventListener('keydown', (e) => {
 
   const pageRows = Math.floor(($('body').clientHeight - headH()) / ROW_H) - 1;
   const action = matchAction(e);
+  // The Timeline's list takes the grid's movement keys (and Enter) for
+  // its selected line, from the same keymap.
+  if (S.activeTab === 'timeline' && timelineKey(e, action)) {
+    e.preventDefault();
+    return;
+  }
   if (action && ACTION_HANDLERS[action] && (S.activeTab === 'grid' || TAB_AGNOSTIC_ACTIONS.has(action))) {
     e.preventDefault();
     ACTION_HANDLERS[action](e, pageRows);
