@@ -89,7 +89,7 @@ def test_an_iis_log_previews_configures_and_imports(page, ui_csv):
     p = Path(ui_csv).parent / "u_ex240501.log"
     p.write_text(LOG, newline="")
     try:
-        page.evaluate("(p) => { __winnow.S.importQueue = []; __winnow.queuePaths([{ path: p, name: 'u_ex240501.log' }]); __winnow.openImportModal(); }", str(p))
+        page.evaluate("async (p) => { __winnow.S.importQueue = []; await __winnow.queuePaths([{ path: p, name: 'u_ex240501.log' }]); __winnow.openImportModal(); }", str(p))
         page.wait_for_selector("#modal:not([hidden]) .import-pane .preview-tbl")
         assert _hint(page, "u_ex240501.log") == "IIS log · W3C"
         # Read as an IIS log, in the format the name says; the delimited
@@ -151,7 +151,7 @@ def test_an_iis_named_file_reads_as_text_and_back(page, ui_csv):
     p = Path(ui_csv).parent / "u_ex240502.log"
     p.write_text(LOG, newline="")
     try:
-        page.evaluate("(p) => { __winnow.S.importQueue = []; __winnow.queuePaths([{ path: p, name: 'u_ex240502.log' }]); __winnow.openImportModal(); }", str(p))
+        page.evaluate("async (p) => { __winnow.S.importQueue = []; await __winnow.queuePaths([{ path: p, name: 'u_ex240502.log' }]); __winnow.openImportModal(); }", str(p))
         page.wait_for_selector("#modal:not([hidden]) .import-pane .preview-tbl")
         page.locator("#modalBody .import-readas button[data-key=text]").click()
         _heads_are(page, ["Message"])

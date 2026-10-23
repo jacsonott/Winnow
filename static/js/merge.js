@@ -622,3 +622,27 @@ export function importKindFor(filename) {
   // Plugin formats are consulted before this by queueItem.
   return RECOGNIZED_IMPORT_EXTENSIONS.includes(extOf(filename)) ? 'csv' : 'text';
 }
+
+/* Key=value logs (FortiGate's, and the other Fortinet products') have no
+   name of their own, so they are recognised by their first line — the
+   twin of winnow/kvread.py's looks_like, regex and all: the pairs start
+   date=YYYY-MM-DD, then time=HH:MM:SS, then another pair, after an
+   optional syslog <priority> and any words before them. Only a file no
+   reader claims by name is asked (kvCandidate): one that would be raw
+   text, or a .txt, which would be sniffed as delimited. */
+const KV_LOG_LINE = /^(?:<\d{1,3}>)?(?:[^\s=]+\s+)*?date="?\d{4}-\d{2}-\d{2}"?[\s,]+time="?\d{2}:\d{2}:\d{2}(?:\.\d+)?"?[\s,]+[^\s=",]+=/;
+/* How much of an upload the queue reads to ask (store.KV_PROBE_BYTES). */
+export const KV_PROBE_BYTES = 8192;
+
+export function kvCandidate(filename) {
+  const kind = importKindFor(filename);
+  return kind === 'text' || (kind === 'csv' && extOf(filename) === '.txt');
+}
+
+export function looksLikeKvLog(text) {
+  for (const raw of text.split('\n', 64)) {
+    const line = raw.trim();
+    if (line) return KV_LOG_LINE.test(line);
+  }
+  return false;
+}

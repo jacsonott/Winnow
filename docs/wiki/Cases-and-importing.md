@@ -224,8 +224,8 @@ line per row* and so on. **Filter queued files…** narrows a long queue, and
 | Part | What it holds |
 | --- | --- |
 | **File** | Its name, the folder it is in, its size, and *read in place* (added from this machine) or *uploaded when it imports*. |
-| **Read as** | Only for a file that can be read more than one way: **Delimited** or **One line per row** for delimited and other text; **JSON** or **One line per row**; **IIS log**, **Delimited** or **One line per row**; a plugin's format or **One line per row** for an uploaded file a plugin claims. |
-| Settings | The reader's own: **Delimiter** and **Header**, JSON's **Nested objects**, an IIS log's **Format**, a plugin format's options. Plaso files and archives have none. |
+| **Read as** | Only for a file that can be read more than one way: **Delimited**, **One line per row** or **Key=value** for delimited and other text; **JSON** or **One line per row**; **IIS log**, **Delimited** or **One line per row**; **Key=value**, **Delimited** or **One line per row** for a [key=value log](#fortigate-and-other-fortinet-logs); a plugin's format or **One line per row** for an uploaded file a plugin claims. |
+| Settings | The reader's own: **Delimiter** and **Header**, JSON's **Nested objects**, an IIS log's **Format**, a plugin format's options. Plaso files, key=value logs and archives have none. |
 | **Preview** | The first 50 rows as they will import, a type picker in each column's heading where the type can be set, and a line under it saying what was detected. A SQLite file or workbook lists its **Tables** or **Sheets** here instead, to tick. |
 
 A setting is kept as you change it, and choosing another file keeps it, so
@@ -268,6 +268,7 @@ SQLite, Excel, Plaso and the rest. Other options are in
 | [Excel](#excel-workbooks) | `.xlsx` `.xlsm` | One table per sheet you pick. |
 | [Plaso](#plaso-storage-files) | `.plaso` | One timeline table. |
 | [IIS web server logs](#iis-web-server-logs) | named `u_ex…`, `ex…`, `nc…`, `in….log` | One table, columns from the log's own `#Fields:` lines. |
+| [FortiGate and other key=value logs](#fortigate-and-other-fortinet-logs) | `.log`, `.txt`, no extension…, recognised by the first line | One table, a column per key. |
 | [Archives](#archives) | `.zip` `.tar` `.tgz` `.gz` `.tbz2` `.txz` `.bz2` `.xz` | A folder, then folder import. |
 | [Any other text](#plain-text-and-log-files) | `.log`, `.1`, no extension… | One row per line. |
 | [Plugin formats](#plugin-formats) | raw `$MFT` and `$J`, ESXi and UAC logs | Whatever the plugin parses. |
@@ -294,7 +295,9 @@ pipe. The line under the file's preview says what was found
 **Semicolon**, **Pipe**). **Read as** → **One line per row** reads the file as
 [raw text](#plain-text-and-log-files) instead. KAPE writes some delimited
 output as `.txt`, so `.txt` comes here by default; a `.txt` log wants
-**One line per row**.
+**One line per row**, unless it is a
+[key=value log](#fortigate-and-other-fortinet-logs), which is recognised by
+its first line.
 
 **Header.** **First row is headers** is on by default, and the first
 non-blank line is the header. Off, columns are named `col_1`, `col_2`… and
@@ -479,6 +482,57 @@ Default-configured W3C tables, and NCSA and native ones, get a one-line
 summary on the [Timeline](Timeline-search-and-watchlist.md): the URL, method,
 status and client address.
 
+### FortiGate and other Fortinet logs
+
+A FortiGate writes its logs as `key=value` pairs, one event to a line:
+
+```
+date=2026-10-23 time=05:39:00 devname=Main-Firewall type=traffic srcip=192.168.1.50 srcintf="internal" dstip=8.8.8.8 dstport=53 action=accept
+```
+
+Downloaded from the GUI or collected by a syslog server, these files have no
+name of their own, so Winnow recognises them by their **first line**: it
+starts with `date=`, then `time=`, then another pair. A syslog `<189>` and a
+syslog header before the pairs are fine, as are quoted dates and FortiOS's
+comma-separated form (`set format csv`). Other Fortinet products' logs that
+start the same way, such as FortiMail's, are read the same way. Only a file no
+other reader claims by its name is looked at: a `.log`, a `.txt`, an
+extensionless file. A `.csv` is always delimited and an IIS log is always an
+IIS log. The queue says *Key=value log · a column per key* under its name.
+
+**Every key is a column**, in the order keys first appear in the file. A
+traffic line and an event line carry different keys, so the table has every
+key any line has, and a key a line doesn't have is blank on that line. Keys
+are matched whatever their case, and a key that appears twice in one line
+gets a second column, `key_1`. Quotes come off a value: `msg="Admin login
+successful"` is one value, and so is a quoted value holding spaces, commas or
+`=`.
+
+**`date` and `time` are joined into a timestamp**, the first column, so the
+Timeframe filter, Histogram and Timeline work straight away; `date` and
+`time` stay too. If every line carries a `tz` offset (FortiOS 6.2 and later
+write `tz="+0100"`), the times are converted and the column is
+`Timestamp (UTC)`. If any line doesn't, the column is `Timestamp (local)`:
+the firewall's own clock, as logged, not converted. `eventtime`, an epoch
+count, is kept as logged; a **Unix epoch** [derived column](Derived-columns.md)
+turns it into a datetime.
+
+Text before the first pair (a syslog header) is kept in a `Line prefix`
+column, and words in a line that aren't pairs, or a line with no pairs at
+all, in `Unparsed text`. Either appears only when a file needs it, and a line
+that needed it counts as a ragged row in the import toast. A file with more
+than 1,000 different keys keeps the rest of each line's pairs in an
+`Other fields (JSON)` column.
+
+The pane previews the first rows as they will import; the line under it
+says when a key further into the file can still add columns. Each column's
+type can be changed, and sticks to that column by name. **Read as** →
+**Delimited** or **One line per row** reads the file as any other text file,
+and **Read as** → **Key=value** reads any delimited or text file this way, for
+a key=value log whose first line didn't say so. As with an IIS log, a run of
+zero bytes from a power cut is a gap between rows, and a log still being
+written imports in place.
+
 ### Plain text and log files
 
 A file no other reader claims — `hostd.log`, `auth.log.1`, an extensionless
@@ -540,7 +594,10 @@ right. It stays the same size whatever you pick or the scan finds.
    `.ndjson`, `.plaso`, **IIS logs** and any extension an enabled plugin claims
    are on; **other text files** (off) adds every other non-binary file as raw
    text. **IIS logs** picks up [IIS web server logs](#iis-web-server-logs) by
-   name, and a file named like one is read as one however it got in.
+   name, and a file named like one is read as one however it got in. A
+   [FortiGate log](#fortigate-and-other-fortinet-logs) the file types let in
+   is read as one: a `.txt`, or a `.log` once **other text files**, or a
+   plugin that claims `.log`, is on.
    **Include subfolders** (on) walks the tree.
 4. Narrow with **Patterns**: **Include** and **Exclude**, one glob per line,
    case-insensitive. A pattern containing `/` matches the path from the
@@ -593,7 +650,8 @@ ESXi support-bundle and UAC Linux host logs. A claimed file shows the
 format's name in the queue, and its options, if it has any, in the file's
 pane. Built-in extensions always win, so no plugin can take over `.csv` or
 `.json`, and neither do built-in names: **esxi_logs** claims `.log`, but an
-[IIS log](#iis-web-server-logs) is still read as one. Plugin
+[IIS log](#iis-web-server-logs) is still read as one, and so is a
+[FortiGate log](#fortigate-and-other-fortinet-logs). Plugin
 imports don't run as background jobs: they show an *Importing …* notice, not
 a progress row, and can't be cancelled. See [Plugins](Plugins.md).
 

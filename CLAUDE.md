@@ -230,6 +230,15 @@ iisread.py         IIS web server logs (W3C extended, NCSA, IIS native) for
                     against the header in effect where it sits (two passes,
                     as JSON). Stdlib only; imports timeparse. See
                     docs/notes/ingest.md.
+kvread.py          Key=value logs (FortiGate and the other Fortinet
+                    products) for import — no name of their own, so
+                    recognised by the FIRST LINE (looks_like: date=, time=,
+                    another pair), and only on a file no reader claims by
+                    name; then ahead of plugin formats, as an IIS name is.
+                    A column per key, the union across every line (two
+                    passes, IIS's shared body), quotes off, date+time joined
+                    into a timestamp. Stdlib only; imports iisread and
+                    timeparse. See docs/notes/ingest.md.
 defaults/          The defaults Winnow ships, as JSON rather than Python:
                     headers.json names the header sets common tools emit
                     (EvtxECmd, MFTECmd, Amcache, ...) and, per set, how to

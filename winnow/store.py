@@ -56,6 +56,7 @@ from . import decode  # noqa: F401 — registers the decode ops (URL decode) the
 from . import structparse  # noqa: F401 — registers the JSON/XML extraction ops into timeparse.OPERATIONS
 from . import timeparse
 from . import iisread
+from . import kvread
 from . import plasoread
 from . import rxguard
 from . import xlsxread
@@ -1051,6 +1052,28 @@ def looks_binary(path: str) -> bool:
     return b"\x00" in head
 
 
+# How much of a file looks_like_kv_log reads: the first line is all it
+# asks about, and a Fortinet line is a kilobyte or two.
+KV_PROBE_BYTES = 8192
+
+
+def looks_like_kv_log(path: str) -> bool:
+    """Whether a text file's first line reads as a key=value log
+    (kvread.looks_like) — how a FortiGate log, which has no name of its
+    own, is told from other text. Asked only about a file no reader claims
+    by its name (it would be raw text, or a .txt sniffed as delimited) —
+    the server's router, the folder scan, the import queue's
+    /api/ingest/recognise — and before plugin formats, as an IIS name is.
+    Decoded as the import would decode it."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(KV_PROBE_BYTES)
+    except OSError:
+        return False
+    text, _ = decode_text_sample(head, complete=len(head) < KV_PROBE_BYTES)
+    return kvread.looks_like(text)
+
+
 def _text_line(line: str) -> str:
     r"""One raw-text row from one line read with newline="\n": the \n
     and ONE \r before it (a CRLF file's) come off, nothing else does.
@@ -1330,10 +1353,18 @@ def _ingest_record(kind: str, **options) -> str:
     a session names rows by rid, so the re-import has to produce the same
     rows in the same order, and the defaults do not (a headerless CSV
     gains a header and every rid slides by one). `kind` names a Store
-    reader: csv, text, json, sqlite, xlsx, plaso, iis — or rows, for a table
+    reader: csv, text, json, sqlite, xlsx, plaso, iis, kv — or rows, for a table
     produced in-process (a plugin's parser, a SQL save), which nothing
     here can re-run."""
     return json.dumps({"kind": kind, **{k: v for k, v in options.items() if v is not None}})
+
+
+def _valid_column_type_map(column_types) -> bool:
+    """A {column name: type} map, as the IIS and key=value previews set
+    types: by name, since a later line can add columns ahead of the ones
+    the preview saw."""
+    return isinstance(column_types, dict) and all(
+        t in ("text", "number", "datetime") for t in column_types.values())
 
 
 def _is_network_path(path: str) -> bool:
@@ -4623,30 +4654,70 @@ class Store:
         session re-import, which recorded it).
 
         `column_types` maps a column's name to the type the preview set
-        for it. By name, not position, as ingest_csv's list is: the
-        preview reads the start of the file, and a #Fields: line further
-        in can add columns ahead of ones it saw (Timestamp, Unnamed
-        values). A column it does not name keeps the inferred type.
-
-        Two passes, as ingest_json: the first finds the columns (the union
-        of every #Fields: line), the second inserts. The first runs before
-        the source exists, so a cancel there leaves nothing to drop; the
-        second reads exactly as many lines as the first did, so a log the
-        server is still appending to can't hand it a field it never
-        planned for. Otherwise ingest_text's contract: batched commits,
-        byte progress, cancel drops the partial source, a mid-file error
-        keeps what committed. No binary refusal — a log IIS was writing
-        when the power went holds NUL runs, which are read as gaps."""
+        for it (_ingest_planned_lines has why by name). Read in the two
+        passes _ingest_planned_lines makes."""
         name = name or os.path.basename(path)
         fmt = log_format or iisread.log_format(path)
         if log_format and fmt not in iisread.FORMATS:
             raise ValueError(f"Unknown IIS log format {log_format!r}")
         if fmt not in iisread.FORMATS:
             raise ValueError(f"{name} is not named like an IIS log (u_ex…, nc…, in….log)")
-        if column_types is not None and (
-                not isinstance(column_types, dict)
-                or any(t not in ("text", "number", "datetime") for t in column_types.values())):
+        if column_types is not None and not _valid_column_type_map(column_types):
             raise ValueError("An IIS log's column types name their columns: {column: text|number|datetime}")
+        rec = self._ingest_planned_lines(
+            path, name, lambda lines: iisread.plan(fmt, lines), iisread.rows,
+            nothing=f"{name} has no {iisread.FORMATS[fmt]} log lines in it",
+            ingest=_ingest_record("iis", format=fmt, column_types=column_types or None),
+            column_types=column_types, build_fts=build_fts, progress=progress, cancel=cancel)
+        rec["log_format"] = fmt
+        return rec
+
+    def ingest_kv(self, path: str, name: str | None = None, build_fts: bool = True,
+                  progress=None, cancel=None, column_types: dict[str, str] | None = None) -> dict:
+        """Import a key=value log — FortiGate's and the other Fortinet
+        products' format — as one table, a column per key; kvread.py has
+        the format, the quoting and the timestamp. Nothing about the file
+        is checked first: a file recognised as one (looks_like_kv_log) and
+        a file the analyst chose to read this way import alike, and a file
+        with no pairs in it at all is refused.
+
+        `column_types` maps a column's name to the type the preview set,
+        as ingest_iis's does: the preview reads the start of the file,
+        and a key first seen further in adds a column ahead of the ones
+        after it (Line prefix, Unparsed text)."""
+        name = name or os.path.basename(path)
+        if column_types is not None and not _valid_column_type_map(column_types):
+            raise ValueError("A key=value log's column types name their columns: {column: text|number|datetime}")
+        return self._ingest_planned_lines(
+            path, name, kvread.plan, kvread.rows,
+            nothing=f"{name} has no key=value pairs in it",
+            ingest=_ingest_record("kv", column_types=column_types or None),
+            column_types=column_types, build_fts=build_fts, progress=progress, cancel=cancel)
+
+    def _ingest_planned_lines(self, path: str, name: str, plan_of, rows_of, *, nothing: str,
+                              ingest: str, column_types: dict[str, str] | None,
+                              build_fts: bool, progress, cancel) -> dict:
+        """The two-pass import of a line-shaped log whose columns aren't
+        known until the whole file has been read (an IIS W3C log's #Fields:
+        lines, a key=value log's keys): `plan_of(lines)` is pass one, and
+        returns {"columns", "types"}; `rows_of(lines, plan, stats)` is pass
+        two, one row per line aligned to them. Lines are iisread's logical
+        lines — no line ending, blank ones dropped, NUL runs split out.
+
+        Two passes, as ingest_json: the first runs before the source
+        exists, so a cancel there leaves nothing to drop; the second reads
+        exactly as many lines as the first did, so a log still being
+        appended to can't hand it a line it never planned for. Otherwise
+        ingest_text's contract: batched commits, byte progress, cancel
+        drops the partial source, a mid-file error keeps what committed.
+        No binary refusal — a log a server was writing when the power went
+        holds NUL runs, which are read as gaps. `nothing` is the error for
+        a file whose plan has no columns.
+
+        `column_types` ({column: type}) is applied by name, not position as
+        ingest_csv's list is: the preview reads the start of the file, and
+        a line further in can add columns ahead of ones it saw. A column
+        it does not name keeps the inferred type."""
         size = os.path.getsize(path)
         file_hash = self._quick_hash(path)
         encoding = sniff_text_encoding(path)
@@ -4669,15 +4740,13 @@ class Store:
             if fh.read(1) == "":
                 raise ValueError("File is empty")
             fh.seek(0)
-            plan = iisread.plan(fmt, first_pass(iisread.logical_lines(fh, {})))
+            plan = plan_of(first_pass(iisread.logical_lines(fh, {})))
         if not plan["columns"]:
-            raise ValueError(f"{name} has no {iisread.FORMATS[fmt]} log lines in it")
+            raise ValueError(nothing)
 
         cols = sanitize_columns(plan["columns"])
         ncols = len(cols)
-        source_id, table = self._create_source_shell(
-            name, cols, path=path, file_hash=file_hash,
-            ingest=_ingest_record("iis", format=fmt, column_types=column_types or None))
+        source_id, table = self._create_source_shell(name, cols, path=path, file_hash=file_hash, ingest=ingest)
         insert = f"INSERT INTO {q(table)} ({','.join(q(c) for c in cols)}) VALUES ({','.join('?' * ncols)})"
 
         stats: dict = {}
@@ -4691,7 +4760,7 @@ class Store:
         with self._ingest_synchronous_off():
             try:
                 lines = itertools.islice(iisread.logical_lines(fh, stats), counted[0])
-                for row in iisread.rows(lines, plan, stats):
+                for row in rows_of(lines, plan, stats):
                     batch.append(tuple(row))
                     if len(sample) < SAMPLE_ROWS:
                         sample.append(row)
@@ -4748,7 +4817,6 @@ class Store:
         rec["rows_per_sec"] = int(total / elapsed) if elapsed > 0 else 0
         rec["ragged_rows"] = stats.get("ragged", 0)
         rec["suspect_quote_rows"] = 0
-        rec["log_format"] = fmt
         rec["encoding"], rec["cp1252_bytes"] = decoded["encoding"], decoded["cp1252_bytes"]
         return rec
 
@@ -4773,6 +4841,27 @@ class Store:
         return {"delimiter": None, "columns": sanitize_columns(plan["columns"]),
                 "sample_rows": sample, "inferred_types": types, "log_format": log_format,
                 "complete": complete}
+
+    @staticmethod
+    def preview_kv_text(text: str, complete: bool = True, max_rows: int = 50) -> dict:
+        """The first rows of a key=value log as ingest_kv would make them,
+        in preview_csv_text's shape. The columns are the keys the sample
+        holds — a key first seen further into the file adds its own on
+        import. `complete` as preview_iis_text's."""
+        if not text:
+            raise ValueError("File is empty")
+        physical = text.split("\n")
+        if not complete and len(physical) > 1:
+            physical.pop()
+        lines = list(iisread.logical_lines(physical, {}))
+        plan = kvread.plan(lines)
+        if not plan["columns"]:
+            raise ValueError("No key=value pairs in the start of this file")
+        sample = list(itertools.islice(kvread.rows(lines, plan, {}), max_rows))
+        types = [t or (infer_type([r[i] for r in sample]) if sample else "text")
+                 for i, t in enumerate(plan["types"])]
+        return {"delimiter": None, "columns": sanitize_columns(plan["columns"]),
+                "sample_rows": sample, "inferred_types": types, "complete": complete}
 
     def _finish_source_columns(self, source_id: int, colmeta: list[dict], decoded: dict,
                                name: str) -> None:
@@ -5717,6 +5806,12 @@ class Store:
                     kind = "plugin"
                 else:
                     kind = "text"
+                # A key=value log has no name of its own, so the file's
+                # first line is read — only for a file going in as text, a
+                # .txt or a plugin's, never on the name gates' account. It
+                # wins over the plugin's claim, as an IIS name does.
+                if (kind in ("text", "plugin") or (kind == "csv" and ext == ".txt")) and looks_like_kv_log(fpath):
+                    kind = "kv"
                 matched.append({
                     **entry,
                     "kind": kind,
@@ -5744,7 +5839,7 @@ class Store:
         sat behind with no progress, no way to tell "working" from
         "crashed", and a browser tab they couldn't use meanwhile.
 
-        `kind` is 'csv' | 'text' | 'json' | 'sqlite' | 'xlsx' | 'plaso' | 'iis'. For 'sqlite',
+        `kind` is 'csv' | 'text' | 'json' | 'sqlite' | 'xlsx' | 'plaso' | 'iis' | 'kv'. For 'sqlite',
         options['tables'] is [{table, name?, timestamp_columns?}, ...] —
         one uploaded file, one job, N sources, so the file is spooled and
         read once rather than re-uploaded per table. `delete_after` removes
@@ -5786,7 +5881,7 @@ class Store:
         (add_derived_column, add_derived_columns, rederive_column) undo
         that definition on the refusal — a column whose only job was never
         started would otherwise be 'building' for good."""
-        if kind not in ("csv", "text", "json", "sqlite", "xlsx", "plaso", "iis", "derive"):
+        if kind not in ("csv", "text", "json", "sqlite", "xlsx", "plaso", "iis", "kv", "derive"):
             raise ValueError(f"Unknown ingest kind: {kind}")
         try:
             size = os.path.getsize(path)
@@ -5925,6 +6020,11 @@ class Store:
                     job["path"], name=job["name"], build_fts=opts.get("build_fts", True),
                     progress=progress, cancel=cancel, log_format=opts.get("log_format"),
                     column_types=opts.get("column_types"),
+                )]
+            elif job["kind"] == "kv":
+                results = [self.ingest_kv(
+                    job["path"], name=job["name"], build_fts=opts.get("build_fts", True),
+                    progress=progress, cancel=cancel, column_types=opts.get("column_types"),
                 )]
             elif job["kind"] == "json":
                 results = [self.ingest_json(
@@ -15327,7 +15427,7 @@ class Store:
                 "so there is no file to re-import it from, and this case does not have it or a "
                 "copy of it")
 
-    _SESSION_READERS = ("csv", "text", "json", "sqlite", "xlsx", "plaso", "iis")
+    _SESSION_READERS = ("csv", "text", "json", "sqlite", "xlsx", "plaso", "iis", "kv")
 
     def _reimport_session_source(self, s_meta: dict) -> tuple[int | None, str | None]:
         """(source_id, None) after re-importing a session source from its
@@ -15394,6 +15494,8 @@ class Store:
             elif kind == "iis":
                 rec = self.ingest_iis(path, name=name, log_format=how.get("format"),
                                       column_types=how.get("column_types"))
+            elif kind == "kv":
+                rec = self.ingest_kv(path, name=name, column_types=how.get("column_types"))
             else:
                 rec = self.ingest_plaso(path, name=name)
         except Exception as e:

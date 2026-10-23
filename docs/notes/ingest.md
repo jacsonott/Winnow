@@ -1,4 +1,4 @@
-# Ingest: CSV, raw text, JSON, SQLite, Excel, Plaso, IIS logs, archives, folders, drops, jobs
+# Ingest: CSV, raw text, JSON, SQLite, Excel, Plaso, IIS logs, key=value logs, archives, folders, drops, jobs
 
 Every path that turns a file on disk into a `src_<id>` table, and the
 background-job machinery all of them run through. Invariant #1 (source
@@ -252,6 +252,55 @@ see [docs/notes/README.md](README.md) for the whole set.
   rides through the jobs routes and the ingest record (`column_types`,
   with the picked `log_format`), so a session re-import types the same.
   tests/test_iis_logs.py.
+- **Key=value logs (FortiGate, the other Fortinet products) are
+  recognised by their first line** (`kvread.looks_like`,
+  `store.looks_like_kv_log`, `Store.ingest_kv`, kind `kv`). They have no
+  name of their own — `fortigate.log`, `export.txt`, `syslog-10.0.0.1` —
+  so the rule is content: the first non-blank line starts, after an
+  optional syslog `<PRI>` and any words without `=` (a syslog header),
+  `date=YYYY-MM-DD`, then `time=HH:MM:SS`, then another pair; spaces or
+  FortiOS's `set format csv` commas between them. Requiring the third
+  pair keeps a CSV header and an auth.log out. Content means opening the
+  file, so only a file no reader claims by NAME is asked: one that would
+  be raw text, or a `.txt` (which would be sniffed as delimited) —
+  `_ingest_kind_for_path`, the folder scan (only among files the chips
+  already let in: `.txt`, other text, a plugin's extension; it never opens
+  a file just to see), `kvCandidate` + `looksLikeKvLog` in merge.js (a
+  twin of the regex) over an upload's first `KV_PROBE_BYTES`, and
+  `POST /api/ingest/recognise` for path items, so the queue shows the
+  kind before the import rather than routing invisibly. Recognised, it
+  wins over a plugin's claim on the extension, as an IIS name does
+  (`_assoc_ingest`, queueFiles/queuePaths pass `fmt=null`): esxi_logs
+  claims `.log`. **Columns are the union of every line's keys**, never
+  the first line's: a traffic line and an event line carry different
+  keys, and a reader that took the first line as a header put the event
+  line's values under the traffic line's names. Two passes through
+  `_ingest_planned_lines`, the body `ingest_iis` and `ingest_kv` share:
+  `plan` collects keys case-insensitively in first-seen order (first
+  spelling kept; a key repeated within a line takes `_1`), `rows` places
+  each line's values by key. **Quoting** is the load-bearing part: FortiOS
+  quotes string values that may hold spaces (`msg="Administrator admin
+  logged in"`), so the split is pair-by-pair, never on spaces; `\"`
+  inside a quoted value is an escaped quote only when that reading closes
+  the value at a pair boundary, and an unterminated quote takes the rest
+  of the line. Clean lines take a fast path (one fullmatch + findall,
+  and `_Splitter` caching a compiled regex per line shape), anything
+  else the careful scanner. Text before the first pair goes to `Line
+  prefix`, words that aren't pairs (or a line with no pairs) to
+  `Unparsed text`, both only when a file needs them and counted as
+  `ragged_rows`; past `MAX_COLUMNS` keys the rest go to `Other fields
+  (JSON)`. A file with no pair anywhere is refused, not imported as one
+  Unparsed text column. **Timestamp**: `date` + `time` become the first
+  column, `Timestamp (UTC)` only when every dated line also has a valid
+  `tz` (FortiOS 6.2+ writes `tz="+0100"`; 6.0 writes none) and
+  `Timestamp (local)` — the device clock, unconverted — when any line
+  lacks one, because a column that is UTC on some rows and local on
+  others can't be ordered. `tz` is pinned to text (it infers as a
+  number). NUL runs, the live-file second pass (`FileChanged`) and the
+  `{column: type}` map are IIS's, for the same reasons. Folder imports
+  and session re-import (`_SESSION_READERS`, the ingest record's
+  `column_types`) carry kind `kv`. tests/test_kv_logs.py,
+  tests/ui/test_kv_queue.py.
 
 - Ragged rows are padded/trimmed to the header width, never dropped, and
   counted — `ingest_csv`'s return dict has a `ragged_rows` count surfaced to

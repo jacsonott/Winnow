@@ -18,7 +18,7 @@ def log_file(ui_csv) -> Path:
 
 def test_log_queues_as_text_and_imports_one_line_per_row(page, log_file):
     try:
-        page.evaluate("(p) => { __winnow.S.importQueue = []; __winnow.queuePaths([{ path: p, name: 'hostd.log.1' }]); __winnow.openImportModal(); }", str(log_file))
+        page.evaluate("async (p) => { __winnow.S.importQueue = []; await __winnow.queuePaths([{ path: p, name: 'hostd.log.1' }]); __winnow.openImportModal(); }", str(log_file))
         page.wait_for_selector("#modal:not([hidden]) .import-pane .preview-tbl")
         item = page.locator("#modalBody .side-rail-item", has_text="hostd.log.1")
         assert item.locator(".side-rail-hint").inner_text() == "Text · one line per row"

@@ -68,7 +68,7 @@ Generate fixtures rather than committing them; `*.csv`, case files and
 | `server.py` | HTTP routes and the command-line entry point. Kept thin; the logic is in `winnow/`. |
 | `update.py` | The command-line updater. One of only two `.py` files in the root, because they're the only ones an analyst runs. |
 | `winnow/store.py` | All SQLite: ingest, view building, tags, sessions, export. |
-| `winnow/` | Everything else the app is made of: timestamp and JSON/XML parsing for derived columns, archive, Excel, Plaso and IIS log readers, the plugin host, the updater, file associations. |
+| `winnow/` | Everything else the app is made of: timestamp and JSON/XML parsing for derived columns, archive, Excel, Plaso, IIS log and key=value log readers, the plugin host, the updater, file associations. |
 | `winnow/defaults/` | The shipped header sets, triage filters and profiles, as JSON. |
 | `static/` | The frontend. `index.html`, `style.css`, and one ES module per subsystem in `static/js/` (`main.js` is the entry). |
 | `examples/plugins/` | The bundled plugins, which double as the reference for writing new ones. |

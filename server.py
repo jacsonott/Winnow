@@ -54,7 +54,7 @@ from winnow import workspace as WS
 from winnow.sqlresults import ResultExpired, TooBig
 from winnow.store import (CASE_SUFFIX, DEFAULT_IMPORT_EXTENSIONS, PLASO_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, MissingTable, OpCancelled, RecordGone, Store, ViewExpired,
                    case_lock_path, decode_text_sample, describe_case_lock, fold_leftover_wal, is_winnow_case_file,
-                   probe_case_lock, q, sniff_text_encoding, sweep_orphan_views)
+                   looks_like_kv_log, probe_case_lock, q, sniff_text_encoding, sweep_orphan_views)
 from winnow.store import case_session_document_problem, pane_cell_json, session_document_problem
 
 HERE = paths.INSTALL_ROOT  # static/, plugins/, examples/plugins/ all hang off the install root
@@ -1666,8 +1666,10 @@ def _assoc_ingest(path: str) -> dict:
     # this path, which must then actually use the plugin's parser.
     # An IIS log is the exception: recognised by its name, it is a built-in
     # reader's even when a plugin claims .log (esxi_logs does) — the import
-    # queue's own rule (pluginFormatFor).
-    fmt = None if iisread.log_format(path) else PLUGINS.format_for_filename(os.path.basename(path))
+    # queue's own rule (pluginFormatFor). So is a key=value log, recognised
+    # by its first line (the queue asks /api/ingest/recognise first too).
+    kind = _ingest_kind_for_path(path)
+    fmt = None if kind in ("iis", "kv") else PLUGINS.format_for_filename(os.path.basename(path))
     if fmt is not None:
         # Synchronous, like every plugin ingest (no background job): the
         # source exists by the time this returns, so there is no job_id
@@ -1675,7 +1677,6 @@ def _assoc_ingest(path: str) -> dict:
         rec = _ingest_via_plugin(path, fmt.id, None, {}, True)
         return {"file": os.path.basename(path), "kind": f"plugin:{fmt.id}",
                 "source_id": rec["id"], "rows": rec.get("row_count", 0)}
-    kind = _ingest_kind_for_path(path)
     opts = {"build_fts": True}
     if kind == "sqlite":
         # A table this SQLite can't read (preview marks it `error`) is not
@@ -2572,7 +2573,7 @@ async def api_ingest_preview(
     file: UploadFile = File(...),
     delimiter: str | None = Form(None),
     has_header: bool = Form(True),
-    kind: str = Form("csv"),   # "text": the raw-text importer's line-per-row preview
+    kind: str = Form("csv"),   # "text": the raw-text importer's line-per-row preview; "iis", "kv"
     log_format: str | None = Form(None),   # iis: w3c, ncsa or native; None reads the file's name
 ):
     raw = await file.read(PREVIEW_SAMPLE_BYTES)  # bounded sample — full parse happens at real ingest time
@@ -2584,6 +2585,10 @@ async def api_ingest_preview(
             fmt = _iis_preview_format(log_format, file.filename or "")
             return {**await run_in_threadpool(
                 store().preview_iis_text, text, fmt, complete=len(raw) < PREVIEW_SAMPLE_BYTES),
+                "encoding": encoding}
+        if kind == "kv":
+            return {**await run_in_threadpool(
+                store().preview_kv_text, text, complete=len(raw) < PREVIEW_SAMPLE_BYTES),
                 "encoding": encoding}
         # The uploaded file's own name goes through: the delimiter is read
         # from the extension first (Store._sniff), and a preview that
@@ -2719,7 +2724,10 @@ def _ingest_kind_for_path(path: str) -> str:
     import queue); it used to fall through to csv, which is how a
     hostd.log got a sniffed delimiter and its first line as a header.
     An IIS log is recognised by its whole name (iisread.log_format) —
-    its .log says nothing."""
+    its .log says nothing. A key=value log (FortiGate's) has no name of
+    its own, so a file that would be raw text, or a .txt, is asked what
+    its first line is (looks_like_kv_log) — never one an extension or a
+    name gives to another reader."""
     if iisread.log_format(path):
         return "iis"
     suffix = Path(path).suffix.lower()
@@ -2731,7 +2739,10 @@ def _ingest_kind_for_path(path: str) -> str:
         return "plaso"
     if suffix in _JSON_INGEST_EXTS:
         return "json"
-    return "csv" if suffix in DEFAULT_IMPORT_EXTENSIONS else "text"
+    kind = "csv" if suffix in DEFAULT_IMPORT_EXTENSIONS else "text"
+    if (kind == "text" or suffix == ".txt") and looks_like_kv_log(path):
+        return "kv"
+    return kind
 
 
 class ArchiveExpandBody(BaseModel):
@@ -2838,7 +2849,7 @@ def api_ingest_preview_path(body: PreviewPath):
         raise HTTPException(400, f"No file at {body.path}")
     kind = body.kind or _ingest_kind_for_path(body.path)
     try:
-        if kind in ("csv", "text", "iis"):
+        if kind in ("csv", "text", "iis", "kv"):
             # Same bounded sample the upload preview reads — never the file.
             with open(body.path, "rb") as f:
                 raw = f.read(PREVIEW_SAMPLE_BYTES)
@@ -2848,6 +2859,9 @@ def api_ingest_preview_path(body: PreviewPath):
             if kind == "iis":
                 fmt = _iis_preview_format(body.log_format, body.path)
                 return {**store().preview_iis_text(text, fmt, complete=len(raw) < PREVIEW_SAMPLE_BYTES),
+                        "encoding": encoding}
+            if kind == "kv":
+                return {**store().preview_kv_text(text, complete=len(raw) < PREVIEW_SAMPLE_BYTES),
                         "encoding": encoding}
             return {**store().preview_csv_text(text, delimiter=body.delimiter or None,
                                                has_header=body.has_header, name=body.path),
@@ -2860,6 +2874,24 @@ def api_ingest_preview_path(body: PreviewPath):
         return store().preview_sqlite_tables(body.path)
     except Exception as e:
         raise HTTPException(400, str(e))
+
+
+class RecognisePaths(BaseModel):
+    paths: list[str]
+
+
+@app.post("/api/ingest/recognise")
+def api_ingest_recognise(body: RecognisePaths):
+    """What each file's content says it is, for the one reader recognised
+    by content rather than name: "kv" for a key=value log
+    (looks_like_kv_log), else null. The import queue asks this as it
+    queues files added by path, the ones a name would leave as raw text,
+    so the queue says how a FortiGate log will be read before it imports
+    — the browser reads an upload's first line itself. Reads the first
+    KV_PROBE_BYTES of each; a path that isn't a regular file is null."""
+    if len(body.paths) > BROWSE_LIST_CAP:
+        raise HTTPException(400, f"At most {BROWSE_LIST_CAP} files at once")
+    return {"kinds": ["kv" if os.path.isfile(p) and looks_like_kv_log(p) else None for p in body.paths]}
 
 
 class IngestJobPath(BaseModel):
@@ -2877,8 +2909,9 @@ class IngestJobPath(BaseModel):
     # csv options
     delimiter: str | None = None
     has_header: bool = True
-    # csv: one type per column, in order. iis: {column name: type}, since
-    # the preview sees only the start of a log a later #Fields: line adds to
+    # csv: one type per column, in order. iis, kv: {column name: type},
+    # since the preview sees only the start of a log a later #Fields: line
+    # (or key) adds to
     column_types: list[str] | dict[str, str] | None = None
     # iis: w3c, ncsa or native; None reads the file's name
     log_format: str | None = None
@@ -2907,6 +2940,8 @@ def _ingest_job_options(kind: str, *, build_fts: bool, delimiter=None, has_heade
     if kind == "iis":
         return {**base, "build_fts": build_fts, "log_format": log_format,
                 "column_types": column_types}
+    if kind == "kv":
+        return {**base, "build_fts": build_fts, "column_types": column_types}
     if kind in ("plaso", "text"):
         return {**base, "build_fts": build_fts}   # one file, one table, no options
     return {**base, "build_fts": build_fts, "tables": tables or []}
@@ -2944,7 +2979,7 @@ async def api_ingest_job_upload(
     build_fts: bool = Form(True),
     delimiter: str | None = Form(None),
     has_header: bool = Form(True),
-    column_types: str | None = Form(None),   # JSON — a list (csv) or {column: type} (iis); forms are flat
+    column_types: str | None = Form(None),   # JSON — a list (csv) or {column: type} (iis, kv); forms are flat
     log_format: str | None = Form(None),     # iis: w3c, ncsa or native; None reads the file's name
     flatten_mode: str = Form("none"),
     flatten_depth: int = Form(0),
