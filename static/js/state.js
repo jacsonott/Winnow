@@ -118,8 +118,9 @@ export const S = {
   },
   savedFilterCursor: -1,   // index into filtersForCurrentSource(), for [ and ] cycling
   cases: [],               // home screen's case registry, from workspace/cases.json
-  homeSearch: '',          // home screen's case/group name filter, persisted across re-renders
-  homeShowOlder: false,    // reveals cases not opened in >30 days once toggled
+  homeSearch: '',          // home screen's filter over case names, groups and notes, persisted across re-renders
+  homeSection: 'recent',   // the home screen's side-list section: 'recent' | 'all' | 'group:<name>' | 'nogroup'
+  homeSort: 'opened',      // the home screen's sort column: 'opened' | 'name' | 'source_count' | 'row_count' | 'tagged_row_count'
   activeTab: 'grid',       // 'grid' or a page tab's key ('sql' | 'timeline' | 'plugin:<id>') — which of #grid/#sqlview/#timelineview/.pluginview is up
   gridRepaintPending: false, // a background job (the watchlist scan's auto-tags) dropped the row caches while the grid was off screen (a page tab, or the home screen) — showGridTab consumes it on the way back and pays it (render, rail, regroup-by-tag) unless the caller is painting for itself
   tabOrder: [],            // source/merge ids, drag-reordered — ids not listed here sort after, in loadSources() order

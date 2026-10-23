@@ -27,7 +27,8 @@ import { fmtBytes } from './tables.js';
 import { loadCaseTags } from './tags.js';
 import { updateTimeRangeButton } from './timeframe.js';
 import { loadTimelineTemplates } from './timeline.js';
-import { confirmDialog, modal, oneAtATime, promptDialog } from './ui.js';
+import { confirmDialog, contextMenu, dropdownMenu, modal, oneAtATime, promptDialog, sectionPanes } from './ui.js';
+import { writeClipboardText } from './grouping.js';
 
 /* -------------------------------------------------------------- home screen */
 
@@ -874,76 +875,18 @@ async function importDroppedFiles(files, casePath) {
   } catch (e) { toast('Could not start the import: ' + e.message, 6000); }
 }
 
-export function renderCaseRow(c) {
-  const row = el('div', 'home-case-row' + (c.exists === false ? ' missing' : ''));
-  if (c.exists !== false) {
-    row.addEventListener('dragover', (e) => {
-      if (!isFileDrag(e)) return;
-      e.preventDefault(); e.stopPropagation();
-      row.classList.add('home-case-drop');
-    });
-    row.addEventListener('dragleave', () => row.classList.remove('home-case-drop'));
-    row.addEventListener('drop', (e) => {
-      if (!isFileDrag(e)) return;
-      e.preventDefault(); e.stopPropagation();   // don't let the home-area handler also fire
-      row.classList.remove('home-case-drop');
-      const files = [...e.dataTransfer.files];
-      if (files.length) importDroppedFiles(files, c.path);
-    });
-  }
-  const main = el('div', 'home-case-main');
-  const nameRow = el('div', 'home-case-name');
-  nameRow.append(el('span', null, (c.exists === false ? '⚠ ' : '') + c.name));
-  if (c.group) nameRow.append(el('span', 'home-case-group-badge', c.group));
-  main.append(nameRow);
-  const stats = c.exists === false
-    ? `${c.path} — file not found`
-    : c.error
-      ? `${c.path} — ${c.error}`
-      : `${c.path} · ${(c.source_count || 0).toLocaleString()} table${c.source_count === 1 ? '' : 's'} `
-        + `· ${(c.row_count || 0).toLocaleString()} rows` + (c.last_opened ? ` · opened ${c.last_opened}` : '');
-  main.append(el('div', 'home-case-meta', stats));
-  if (c.notes) main.append(el('div', 'home-case-notes', c.notes));
-  if (c.exists !== false) main.onclick = () => openCase(c.path);
-  row.append(main);
-
-  // Always four button slots, in the same order, even when an action
-  // doesn't apply to this row (a missing case can't be Opened or have its
-  // file Deleted) — .home-case-actions is a plain flex row with no fixed
-  // column widths, so a row with fewer buttons used to pack them flush
-  // right instead of leaving Edit/Remove from list in their usual columns,
-  // visibly zig-zagging as soon as a missing case sat next to a real one.
-  // visibility:hidden (not omitting the element) keeps the slot's width
-  // reserved without making it paintable or clickable; disabled backs
-  // that up and drops it from tab order.
-  const actions = el('div', 'home-case-actions');
-  const openBtn = el('button', 'btn ghost', 'Open');
-  if (c.exists !== false) {
-    openBtn.onclick = () => openCase(c.path);
-  } else {
-    openBtn.disabled = true;
-    openBtn.style.visibility = 'hidden';
-  }
-  const edit = el('button', 'btn ghost', 'Edit');
-  edit.onclick = () => openEditCaseModal(c);
-  const remove = el('button', 'btn ghost', 'Remove from list');
-  remove.onclick = () => removeCaseFromList(c);
-  const del = el('button', 'btn ghost', 'Delete file…');
-  if (c.exists !== false) {
-    del.title = 'Permanently delete the case file from disk';
-    del.onclick = () => deleteCaseFile(c);
-  } else {
-    del.disabled = true;
-    del.style.visibility = 'hidden';
-  }
-  actions.append(openBtn, edit, remove, del);
-  row.append(actions);
-  return row;
+/* Quick look at files…: the drop-on-the-home-screen gesture as a button,
+   since nothing on screen said that gesture existed. A quick look with an
+   empty queue, so the import dialog's own Add buttons pick the files. */
+export async function startQuickLook() {
+  let path;
+  try { path = (await post('/api/case/quicklook/new', {})).path; }
+  catch (e) { toast('Could not start a quick look: ' + e.message, 6000); return; }
+  await openCase(path);
+  openImportModal();
 }
 
-export const HOME_STALE_MS = 30 * 24 * 60 * 60 * 1000;
-
- // 30 days
+export const HOME_STALE_MS = 30 * 24 * 60 * 60 * 1000;   // 30 days
 
 export function isStaleCase(c) {
   // Never-opened cases (just created, or from before last_opened existed)
@@ -953,6 +896,261 @@ export function isStaleCase(c) {
   return !Number.isNaN(t) && (Date.now() - t) > HOME_STALE_MS;
 }
 
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const dayStart = (t) => { const d = new Date(t); return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime(); };
+
+/* When a case was last opened, the way an analyst says it: "37 min ago",
+   "yesterday", "3 days ago", then the date. The registry keeps local
+   wall-clock time without a zone (workspace._now), which Date.parse reads
+   as local too, so the two agree. Days are counted between calendar days,
+   not in 24-hour steps: a case opened at 23:50 was opened "yesterday" at
+   00:10. `now` is a parameter for the tests. */
+export function openedAgo(iso, now = Date.now()) {
+  if (!iso) return 'never';
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return '';
+  const ms = Math.max(0, now - t);
+  if (ms < 60e3) return 'just now';
+  const days = Math.round((dayStart(now) - dayStart(t)) / 86400e3);
+  if (days === 0) return ms < 3600e3 ? `${Math.floor(ms / 60e3)} min ago` : `${Math.floor(ms / 3600e3)} h ago`;
+  if (days === 1) return 'yesterday';
+  if (days < 7) return `${days} days ago`;
+  if (days < 28) { const w = Math.round(days / 7); return `${w} week${w === 1 ? '' : 's'} ago`; }
+  const d = new Date(t);
+  if (d.getFullYear() === new Date(now).getFullYear()) return `${MONTHS[d.getMonth()]} ${d.getDate()}`;
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+}
+
+const plural = (n, one, many = `${one}s`) => `${(n || 0).toLocaleString()} ${n === 1 ? one : many}`;
+const latestOpened = (cases) => cases.map((c) => c.last_opened).filter(Boolean).sort().pop() || null;
+
+/* A case's ⋯ menu, and its right-click menu: the four buttons every row
+   used to carry, plus the path the row no longer shows. Open and Delete
+   are greyed out for a case whose file is gone; Edit and Remove from list
+   are how that one gets fixed or forgotten. */
+export function caseMenuItems(c) {
+  const gone = c.exists === false;
+  return [
+    { label: 'Open', onclick: () => openCase(c.path), disabled: gone },
+    { label: 'Edit name, group and notes…', onclick: () => openEditCaseModal(c) },
+    { label: 'Copy case file path', title: c.path,
+      onclick: () => writeClipboardText(Promise.resolve(c.path), 'Copied the case file’s path') },
+    '-',
+    { label: 'Remove from list…', title: 'Forget this case on this machine — the file is left on disk',
+      onclick: () => removeCaseFromList(c) },
+    { label: 'Delete case file…', title: gone ? 'The file is already gone' : 'Permanently delete the case file from disk',
+      onclick: () => deleteCaseFile(c), disabled: gone },
+  ];
+}
+
+/* One case in the list: its name with its group and notes beside it, the
+   Tables manager's number columns (a dim dash for none, tagged rows in the
+   accent), when it was last opened, and the ⋯. The whole row opens the
+   case, as the old card did; the name is a button so the keyboard can
+   reach it, and its click is the row's. The path is in the name's
+   tooltip and the ⋯ menu: shown in the row it was most of the line, and
+   pushed the counts and the "opened" time out of sight. */
+export function renderCaseRow(c, { showGroup = true } = {}) {
+  const gone = c.exists === false;
+  const r = el('div', 'home-row' + (gone ? ' missing' : ''));
+  r.dataset.id = String(c.id);
+  const cell = el('span', 'home-name-cell');
+  const name = el('button', 'home-name', (gone ? '⚠ ' : '') + c.name);
+  name.type = 'button';
+  name.title = gone ? `${c.path}\nThe case file isn’t at this path any more` : `${c.path}\nClick to open`;
+  name.disabled = gone;
+  cell.append(name);
+  if (showGroup && c.group) cell.append(el('span', 'home-group-chip', c.group));
+  if (gone) cell.append(el('span', 'home-sub warn', 'file not found'));
+  else if (c.error) cell.append(el('span', 'home-sub warn', c.error));
+  else if (c.notes) {
+    const notes = el('span', 'home-sub', c.notes);
+    notes.title = c.notes;
+    cell.append(notes);
+  }
+  r.append(cell);
+  const num = (n, cls) => el('span', 'tables-num ' + cls + (n ? ' some' : ''), gone || c.error ? '' : (n ? n.toLocaleString() : '—'));
+  r.append(num(c.source_count, 'home-tables'), num(c.row_count, 'tables-rows'), num(c.tagged_row_count, 'tables-tagged'));
+  const opened = el('span', 'home-opened' + (c.last_opened ? '' : ' never'), openedAgo(c.last_opened));
+  if (c.last_opened) opened.title = c.last_opened.replace('T', ' ');
+  r.append(opened);
+  const more = el('button', 'btn ghost row-more tables-more', '⋯');
+  more.type = 'button';
+  more.title = 'Open, edit, copy the path, remove';
+  more.setAttribute('aria-label', `Actions for ${c.name}`);
+  more.setAttribute('aria-haspopup', 'menu');
+  more.onclick = () => dropdownMenu(more, caseMenuItems(c));
+  r.append(more);
+  if (!gone) {
+    r.onclick = (e) => { if (!more.contains(e.target)) openCase(c.path); };
+    r.addEventListener('dragover', (e) => {
+      if (!isFileDrag(e)) return;
+      e.preventDefault(); e.stopPropagation();
+      r.classList.add('home-case-drop');
+    });
+    r.addEventListener('dragleave', () => r.classList.remove('home-case-drop'));
+    r.addEventListener('drop', (e) => {
+      if (!isFileDrag(e)) return;
+      e.preventDefault(); e.stopPropagation();   // don't let the home-area handler also fire
+      r.classList.remove('home-case-drop');
+      const files = [...e.dataTransfer.files];
+      if (files.length) importDroppedFiles(files, c.path);
+    });
+  }
+  r.addEventListener('contextmenu', (e) => { e.preventDefault(); contextMenu(e, caseMenuItems(c)); });
+  return r;
+}
+
+/* The side list: Recent and All cases, then one entry per group, newest
+   work first, and the cases in none. Rebuilt on every renderHome, so a
+   group that was renamed away is simply not there next time. */
+export function homeSections(cases) {
+  const recent = cases.filter((c) => !isStaleCase(c));
+  const missing = cases.filter((c) => c.exists === false).length;
+  const groups = new Map();
+  for (const c of cases) if (c.group) (groups.get(c.group) || groups.set(c.group, []).get(c.group)).push(c);
+  const loose = cases.filter((c) => !c.group);
+  const byLatest = [...groups].sort((a, b) => (latestOpened(b[1]) || '').localeCompare(latestOpened(a[1]) || '')
+    || a[0].localeCompare(b[0]));
+  return [
+    { id: 'recent', group: 'Cases', title: 'Recent', cases: recent,
+      hint: () => (recent.length ? `${recent.length.toLocaleString()} opened in the last 30 days` : 'None in the last 30 days') },
+    { id: 'all', group: 'Cases', title: 'All cases', cases, byGroup: true,
+      hint: () => cases.length.toLocaleString() + (missing ? ` · ${plural(missing, 'file')} missing` : '') },
+    ...byLatest.map(([g, cs]) => ({
+      id: 'group:' + g, group: 'Groups', title: g, cases: cs, labelCls: 'mono',
+      hint: () => plural(cs.length, 'case') + (latestOpened(cs) ? ` · ${openedAgo(latestOpened(cs))}` : ''),
+    })),
+    ...(loose.length && groups.size ? [{ id: 'nogroup', group: 'Groups', title: 'No group', cases: loose, hint: () => plural(loose.length, 'case') }] : []),
+  ];
+}
+
+export function sortCases(list, by) {
+  if (by === 'name') return list.slice().sort((a, b) => a.name.localeCompare(b.name));
+  // Most recently opened first; a case that's never been opened (no
+  // last_opened) sorts after every case that has been.
+  if (by === 'opened') return list.slice().sort((a, b) => (b.last_opened || '').localeCompare(a.last_opened || '') || a.name.localeCompare(b.name));
+  return list.slice().sort((a, b) => ((b[by] || 0) - (a[by] || 0)) || a.name.localeCompare(b.name));
+}
+
+const caseMatches = (q) => (c) => !q || `${c.name}\n${c.group || ''}\n${c.notes || ''}`.toLowerCase().includes(q);
+
+function caseGroupHead(label, cases, { code }) {
+  const h = el('div', 'tables-group home-group' + (code ? ' code' : ''));
+  h.append(el('span', 'tables-group-name', label));
+  const rows = cases.reduce((n, c) => n + (c.row_count || 0), 0);
+  const latest = latestOpened(cases);
+  h.append(el('span', 'tables-group-meta',
+    `${plural(cases.length, 'case')} · ${rows.toLocaleString()} rows` + (latest ? ` · opened ${openedAgo(latest)}` : '')));
+  return h;
+}
+
+/* A section's pane: the Tables manager's Every table, for cases. A filter
+   over names, groups and notes on top; then the box that takes the room
+   that is left and is the one thing that scrolls, with sortable column
+   heads; then a line on what a row does. All cases lists each group under
+   its own heading; the others are one list, where a row carries its group
+   as a chip (a group's own section leaves it off: every row would say the
+   same thing). */
+function buildCasesPane(section, sections, frame) {
+  return (pane) => {
+    const top = el('div', 'tm-cols-top');
+    const search = el('input', 'side-search home-filter');
+    search.type = 'search';
+    search.placeholder = 'Filter cases, groups and notes…';
+    search.setAttribute('aria-label', 'Filter cases');
+    search.value = S.homeSearch;
+    const count = el('span', 'tm-cols-count');
+    top.append(search, count);
+
+    const box = el('div', 'side-preview tm-cols-box tables-box home-box');
+    const head = el('div', 'tables-head home-list-head');
+    const sortBtn = (key, label, cls, title) => {
+      const b = el('button', 'tables-sort ' + cls, label);
+      b.type = 'button';
+      b.dataset.sort = key;
+      b.title = title;
+      b.onclick = () => { S.homeSort = key; paint(); };
+      return b;
+    };
+    head.append(sortBtn('name', 'Case', 'tables-name-h', 'Sort by name'),
+      sortBtn('source_count', 'Tables', 'tables-num', 'Most tables first'),
+      sortBtn('row_count', 'Rows', 'tables-num', 'Most rows first'),
+      sortBtn('tagged_row_count', 'Tagged', 'tables-num', 'Most tagged rows first'),
+      sortBtn('opened', 'Opened', 'home-opened-h', 'Most recently opened first'), el('span'));
+    const scroller = el('div', 'side-preview-rows');
+    const list = el('div', 'tables-list home-list');
+    scroller.append(list);
+    const foot = el('div', 'side-preview-foot');
+    foot.append(el('p', 'fb-help', 'Click a case to open it. Drop files on a case to import them into it, or anywhere else for a quick look.'));
+    box.append(head, scroller, foot);
+    pane.append(top, box);
+
+    function paint() {
+      const q = S.homeSearch.trim().toLowerCase();
+      const shown = section.cases.filter(caseMatches(q));
+      count.textContent = q ? `${shown.length} of ${plural(section.cases.length, 'case')}` : plural(section.cases.length, 'case');
+      for (const b of head.querySelectorAll('.tables-sort')) b.setAttribute('aria-pressed', String(b.dataset.sort === S.homeSort));
+      const nodes = [];
+      if (section.byGroup) {
+        for (const s of sections) {
+          if (!s.id.startsWith('group:') && s.id !== 'nogroup') continue;
+          const mine = sortCases(s.cases.filter(caseMatches(q)), S.homeSort);
+          if (!mine.length) continue;
+          nodes.push(caseGroupHead(s.title, mine, { code: s.id !== 'nogroup' }));
+          nodes.push(...mine.map((c) => renderCaseRow(c, { showGroup: false })));
+        }
+        // No groups at all: one plain list, no heading over it.
+        if (!nodes.length) nodes.push(...sortCases(shown, S.homeSort).map((c) => renderCaseRow(c)));
+      } else {
+        nodes.push(...sortCases(shown, S.homeSort).map((c) => renderCaseRow(c, { showGroup: !section.id.startsWith('group:') })));
+      }
+      // A filter only looks inside the section it was typed in; when the
+      // case it was typed for is in another one (an older case, from
+      // Recent), say where, rather than "no match" over a case that exists.
+      const elsewhere = q && section.id !== 'all' ? S.cases.filter(caseMatches(q)).length - shown.length : 0;
+      if (!shown.length) {
+        nodes.push(el('p', 'fb-help tables-empty', q ? `No case here matches “${S.homeSearch.trim()}”.`
+          : section.id === 'recent' ? 'No case has been opened in the last 30 days — All cases has the rest.' : 'No cases here.'));
+      }
+      if (elsewhere > 0) {
+        const more = el('button', 'btn ghost mb-small home-elsewhere', `${plural(elsewhere, 'more match', 'more matches')} in All cases`);
+        more.type = 'button';
+        more.onclick = () => { S.homeSection = 'all'; frame.show('all', { focus: false }); };
+        nodes.push(more);
+      }
+      list.replaceChildren(...nodes);
+    }
+    search.oninput = () => { S.homeSearch = search.value; paint(); };
+    search.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && search.value) { e.preventDefault(); e.stopPropagation(); search.value = ''; S.homeSearch = ''; paint(); }
+      else if (e.key === 'ArrowDown') { const first = list.querySelector('.home-name:not(:disabled)'); if (first) { e.preventDefault(); first.focus(); } }
+    });
+    // Up/Down walk the case names, and Up from the first goes back to the
+    // filter — the keyboard's way down a list it can't otherwise tab
+    // through quickly. Enter on a name is its click, which opens the case.
+    list.addEventListener('keydown', (e) => {
+      if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+      const names = [...list.querySelectorAll('.home-name:not(:disabled)')];
+      const at = names.indexOf(document.activeElement);
+      if (at < 0) return;
+      e.preventDefault();
+      if (e.key === 'ArrowDown') { if (at < names.length - 1) names[at + 1].focus(); }
+      else if (at > 0) names[at - 1].focus();
+      else search.focus();
+    });
+    paint();
+    return { update: paint };
+  };
+}
+
+/* The home screen: the wordmark, then one card in the Tables manager's
+   frame — the case list's sections down a side list, the chosen section
+   on the right, and along the foot the ways a case starts, with + New
+   case as the main action. Settings and Shut down sit by the wordmark:
+   they are about this Winnow, not about any case. The card takes the
+   window's height and the list inside it scrolls, so the page itself
+   never does (until the window is too short for the card's floor). */
 export function renderHome() {
   const home = $('home');
   home.replaceChildren();
@@ -971,10 +1169,6 @@ export function renderHome() {
     color: getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#cfa057',
   });
   head.append(el('div', 'home-head-spacer'));
-  const newBtn = el('button', 'btn', '+ New case');
-  newBtn.onclick = openNewCaseModal;
-  const openBtn = el('button', 'btn ghost', 'Open existing case file…');
-  openBtn.onclick = openExistingCasePrompt;
   // Settings is reachable from here, not only from inside a case. Theme,
   // keybindings, default tags for new cases and the update check are all
   // things you might want to change BEFORE opening anything — and the gear
@@ -986,52 +1180,44 @@ export function renderHome() {
   const offBtn = el('button', 'btn ghost', '⏻ Shut down');
   offBtn.title = 'Stop the Winnow server — cases stay saved on disk';
   offBtn.onclick = shutdownWinnow;
-  head.append(newBtn, openBtn, setBtn, offBtn);
+  head.append(setBtn, offBtn);
   inner.append(head);
 
-  if (!S.cases.length) {
-    inner.append(el('div', 'home-empty', 'No cases yet — create one to get started.'));
-    home.append(inner);
-    return;
-  }
-
-  const searchRow = el('div', 'home-search-row');
-  const search = el('input', 'home-search');
-  search.type = 'search';
-  search.placeholder = 'Search cases or groups…';
-  search.value = S.homeSearch;
-  searchRow.append(search);
-  inner.append(searchRow);
-
-  const listWrap = el('div', 'home-case-list');
-  inner.append(listWrap);
-
-  function renderList() {
-    listWrap.replaceChildren();
-    const q = S.homeSearch.trim().toLowerCase();
-    const matches = (c) => !q || c.name.toLowerCase().includes(q) || (c.group || '').toLowerCase().includes(q);
-    // Most-recently-opened first; a case that's never been opened (no
-    // last_opened) sorts after every case that has been, newest first.
-    const sorted = [...S.cases].sort((a, b) => (b.last_opened || '').localeCompare(a.last_opened || ''));
-    const filtered = sorted.filter(matches);
-    const visible = S.homeShowOlder ? filtered : filtered.filter((c) => !isStaleCase(c));
-    const hiddenCount = filtered.length - visible.length;
-    if (!visible.length) {
-      listWrap.append(el('div', 'home-empty', q ? 'No cases match that search.' : 'No cases to show.'));
-    } else {
-      for (const c of visible) listWrap.append(renderCaseRow(c));
-    }
-    if (hiddenCount > 0) {
-      const toggle = el('button', 'btn ghost home-show-older',
-        `Show ${hiddenCount.toLocaleString()} case${hiddenCount === 1 ? '' : 's'} not opened in over 30 days…`);
-      toggle.onclick = () => { S.homeShowOlder = true; renderList(); };
-      listWrap.append(toggle);
-    }
-  }
-  search.oninput = () => { S.homeSearch = search.value; renderList(); };
-  renderList();
-
+  const card = el('div', 'home-card');
+  inner.append(card);
   home.append(inner);
+
+  if (!S.cases.length) {
+    const empty = el('div', 'home-empty');
+    empty.append(el('div', 'home-empty-title', 'No cases yet'),
+      el('p', 'fb-help', '+ New case starts one. Open existing case file… adds one someone gave you. '
+        + 'Files dropped here open in a quick look, which is kept only if you save it.'));
+    card.append(empty);
+  } else {
+    const sections = homeSections(S.cases);
+    const frame = sectionPanes({ sections, label: 'Case list sections', cls: 'home-panes', paneCls: 'home-pane' });
+    for (const s of sections) s.build = buildCasesPane(s, sections, frame);
+    card.append(frame.panes);
+    // The section an analyst was on comes back with the list (a refresh
+    // after Remove from list, or coming back from a case). Recent with
+    // nothing in it opens on All cases instead of on an empty pane.
+    let start = sections.find((s) => s.id === S.homeSection) || sections[0];
+    if (start.id === 'recent' && !start.cases.length) start = sections[1];
+    frame.show(start.id);
+    frame.panes.querySelector('.side-rail-list').addEventListener('click', () => { S.homeSection = frame.current(); });
+    frame.panes.querySelector('.side-rail-list').addEventListener('keydown', () => { S.homeSection = frame.current(); });
+  }
+
+  const foot = el('div', 'home-foot');
+  const openBtn = el('button', 'btn ghost', 'Open existing case file…');
+  openBtn.onclick = () => openExistingCasePrompt();
+  const quick = el('button', 'btn ghost', 'Quick look at files…');
+  quick.title = 'A scratch case that isn’t listed or kept until you save it — import, look, then keep it or discard it';
+  quick.onclick = startQuickLook;
+  const newBtn = el('button', 'btn primary', '+ New case');
+  newBtn.onclick = () => openNewCaseModal();
+  foot.append(openBtn, quick, el('span', 'home-foot-spacer'), newBtn);
+  card.append(foot);
 }
 
 export async function refreshCases() {

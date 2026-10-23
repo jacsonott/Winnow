@@ -2313,9 +2313,18 @@ def api_cases_list():
                 # case on the home screen, and a plain mode=ro look left a
                 # -wal/-shm pair beside each one that nothing removed.
                 ro = sqlite3.connect(paths.sqlite_peek_uri(c["path"]), uri=True)
-                row = ro.execute("SELECT count(*), COALESCE(sum(row_count),0) FROM sources").fetchone()
-                ro.close()
-                rec["source_count"], rec["row_count"] = row[0], row[1]
+                try:
+                    row = ro.execute("SELECT count(*), COALESCE(sum(row_count),0) FROM sources").fetchone()
+                    rec["source_count"], rec["row_count"] = row[0], row[1]
+                    # The list's Tagged column: rows with any tag, not tag
+                    # assignments (a row tagged twice is one finding), the
+                    # Tables manager's count summed over the case. Walks
+                    # row_tags' primary key in order — ~0.1 s per million
+                    # tagged rows, and most cases tag thousands.
+                    rec["tagged_row_count"] = ro.execute(
+                        "SELECT count(*) FROM (SELECT DISTINCT source_id, rid FROM row_tags)").fetchone()[0]
+                finally:
+                    ro.close()
             except sqlite3.Error as e:
                 rec["error"] = str(e)
         else:

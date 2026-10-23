@@ -323,7 +323,8 @@ covered in [Tagging and notes](Tagging-and-notes.md).
 - While a dialog is open, keys go to the dialog, except that the key that
   opened it closes it again (`?` for Settings, `C` for the table menu, `e`
   for the Filter builder).
-- On the home screen only `Esc` does anything.
+- On the home screen only `Esc` does anything, apart from ↑/↓ and Enter in
+  the case list.
 - Letter keys follow Caps Lock: with it on, `g` arrives as `G`.
 
 ## Filter & search syntax

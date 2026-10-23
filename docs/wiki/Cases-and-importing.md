@@ -8,27 +8,45 @@ reads it and copies the rows into the case.
 
 ## The home screen
 
-The home screen is what Winnow shows when no case is open: **+ New case**,
-**Open existing case file…**, **⚙ Settings** and **⏻ Shut down** along the
-top, and this machine's list of cases below, most recently opened first.
-Each row shows the name, group, file path, table and row counts and when it
-was last opened. Click a row to open the case.
+The home screen is what Winnow shows when no case is open. **⚙ Settings**
+and **⏻ Shut down** sit beside the Winnow wordmark at the top. Below them
+is this machine's list of cases, in the same frame as the Tables manager:
+sections down the left, the chosen one on the right. Along the bottom are
+**Open existing case file…**, **Quick look at files…** and **+ New case**.
 
-**Search cases or groups…** filters the list. Cases not opened in over 30
-days are tucked behind **Show N cases not opened in over 30 days…**. A case
-whose file has gone missing shows ⚠ and *file not found*.
+| Section | What it lists |
+| --- | --- |
+| **Recent** | Cases opened in the last 30 days, and cases never opened yet, most recently opened first. Each row shows its group as a badge. |
+| **All cases** | Every case, under a heading for each group with its case count, total rows and when it was last opened. Its side entry says how many case files are missing. |
+| *each group* | That group's cases. Groups are listed by when one of their cases was last opened. |
+| **No group** | Cases with no group (shown once there is at least one group). |
+
+Each row is one case: its name, with its notes (or *file not found*)
+beside it, then **Tables**, **Rows**, **Tagged** (rows with at least one
+tag) and **Opened** (*37 min ago*, *yesterday*, *3 days ago*, *Sep 5*).
+Hover over the name for the case file's path, and over the opened time
+for the exact time. Click a column heading to sort by it. Click a row to
+open the case; with the keyboard, ↓ from the filter box walks the names
+and Enter opens one.
+
+**Filter cases, groups and notes…** filters the section you are in. When
+the case you are after is in another section (an older case, while you
+are in Recent), a button under the list says how many more match and
+takes you to **All cases**. Escape clears the filter. A case whose file
+has gone missing shows ⚠ and *file not found*, and can't be opened until
+you fix or forget it.
 
 Inside a case, the brand button at the top left shows the case's name and
-takes you back here. The case stays open in the server until you open
-another one.
+takes you back here, to the section you were on. The case stays open in
+the server until you open another one.
 
 ### Creating and opening cases
 
 **+ New case** asks for a **Name**, an optional **Group** (an engagement
-name, say; shown as a badge and offered again as you type), the
-**Case file path** and a **Profile**. The path is filled in from the name —
-`ACME Breach` becomes `<cases folder>/acme-breach.db-winnow` — until you
-edit it; **Browse…** picks another folder and **New folder…** makes one. A
+name, say; it gets its own section on the home screen and is offered again
+as you type), the **Case file path** and a **Profile**. The path is filled
+in from the name — `ACME Breach` becomes
+`<cases folder>/acme-breach.db-winnow` — until you edit it; **Browse…** picks another folder and **New folder…** makes one. A
 profile turns on its plugins and dashboards as the case opens, and asks for
 any case variables it needs (required ones are marked `*`); see
 [Dashboards](Dashboards.md). **Create case** writes the file and opens it.
@@ -41,12 +59,15 @@ database, is refused; open a case and import it instead. A path with no
 file at it is refused too (*No case file at …*) rather than creating an
 empty case there; **+ New case** makes new cases.
 
-| Row button | What it does |
+Each row's **⋯** button, or right-clicking the row, opens its menu:
+
+| Menu item | What it does |
 | --- | --- |
 | **Open** | Opens the case. |
-| **Edit** | Changes the name, group and notes on this machine's list. The file keeps its name on disk. |
-| **Remove from list** | Forgets the case on this machine; the file is left untouched. |
-| **Delete file…** | Permanently deletes the case file and everything in it. Refused for the case Winnow has open, or one open in another Winnow. |
+| **Edit name, group and notes…** | Changes the name, group and notes on this machine's list. The file keeps its name on disk. |
+| **Copy case file path** | Copies the full path of the case file. |
+| **Remove from list…** | Forgets the case on this machine; the file is left untouched. |
+| **Delete case file…** | Permanently deletes the case file and everything in it. Refused for the case Winnow has open, or one open in another Winnow. |
 
 ### The cases folder
 
@@ -131,8 +152,11 @@ misplaced ones out for you. What can:
 ## Quick-look cases
 
 A quick look is a temporary case for looking at a file without filing it.
-Dropping files anywhere on the home screen except a case row makes one, and
-so does opening a file through an OS file association (Windows and Linux;
+**Quick look at files…** on the home screen makes one and opens the Import
+window to add files to it. Dropping files anywhere on the home screen
+except a case row makes one too (dropping them on a case's row imports them
+into that case), and so does opening a file through an OS file association
+(Windows and Linux;
 **Settings → File associations**, see
 [Settings and shortcuts](Settings-and-shortcuts.md)).
 
