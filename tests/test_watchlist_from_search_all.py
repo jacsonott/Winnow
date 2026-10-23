@@ -1,8 +1,8 @@
 """Adding IOCs to the watchlist off a Search-all sweep does not re-read
 every table.
 
-The sweep and the scan ask a table the same question — the same two
-WHERE shapes, indexed `doc LIKE` or the escaped blob LIKE
+The sweep and the scan ask a table the same question — the same WHERE,
+`_contains_clause`, through the trigram index or as a scan
 (`_watchlist_match_sql` names the sharing) — so a sweep that READ a table
 and found no row holding a term has established the whole of what a scan
 of that (indicator, table) pair would. "Add to watchlist" used to start a

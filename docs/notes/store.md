@@ -214,32 +214,74 @@ see [docs/notes/README.md](README.md) for the whole set.
   `_build_fts_worker` logs a build failure once per source and message.
 - The substring-search index (`fts_<id>`) is FTS5 `tokenize='trigram'` over a
   **single `doc` column** — every column concatenated via the `src_<id>_doc`
-  view (same `_blob_expr` the LIKE fallback scans, so indexed and fallback
-  results are identical by construction) — with `detail=none, columnsize=0`,
-  and it is queried with a bare `doc LIKE ?`, **never MATCH**. Each piece of
-  that shape is measured, not stylistic (332K-row/285MB EvtxECmd source):
-  `detail=none` drops per-occurrence position lists nothing here uses,
-  cutting the index 892MB→143MB (–84%; case files were ~4.2x their source
-  CSVs, now ~1.6x) at the cost of verifying candidates against the real
-  text — so query time scales with *result count*: unchanged for the
-  rare-IOC case, ~0.8s worst-case for a term matching ~all rows. Under
-  `detail=none` a multi-trigram MATCH is a *phrase* query and errors
-  outright ("phrase queries are not supported"); SQLite ≥3.45's trigram
-  LIKE pushdown is the query form instead. Three traps around that
-  pushdown, all verified: it's per-column — a table-level `fts LIKE ?`
-  runs against the hidden table-name column (NULL outside MATCH) and
-  silently returns **0 rows** (why the index is one `doc` column); it only
-  fires for a *bare* `LIKE ?` — adding `ESCAPE` reverts to a full scan —
-  so the pushdown pattern is deliberately unescaped and
-  `_fts_like_pattern()` refuses any term containing `%`/`_` (would match
-  as wildcards = silently-wrong superset), routing it to the escaped
-  blob-LIKE fallback (backslash needs no escape in bare LIKE — Windows
-  paths search fine); and pre-3.45 SQLite has no pushdown at all, so
-  `_ensure_fts_building` no-ops there (LIKE still returns correct rows by
-  scanning — an index would be pure wasted disk). A term under
-  `TRIGRAM_MIN_LEN` (3 chars) or a source whose index isn't built yet
-  falls back the same way, in `_compile_where`/`_advanced_fts_clause`/
-  `search_all_sources`. Building isn't free — `build_fts` is
+  view (`_blob_expr`, which is what "the row contains the term" means) —
+  with `detail=none, columnsize=0`. The size is why: `detail=none` drops
+  per-occurrence position lists nothing here uses, cutting the index
+  892MB→143MB (–84%; case files were ~4.2x their source CSVs, now ~1.6x;
+  332K-row/285MB EvtxECmd source), at the cost that the index knows which
+  trigrams a row holds but not where, so every candidate has to be
+  checked against the real text and query time scales with *result
+  count*.
+- **Every substring match is `_contains_clause`** — the search box,
+  Advanced (one atom per term, `_advanced_clause`), the Search-all counts
+  and the watchlist scan — so they cannot disagree. Two parts:
+  candidates from the index, `rid IN (SELECT rowid FROM fts_N WHERE fts_N
+  MATCH ?)` with the term's distinct trigrams quoted one per string and
+  ANDed (`_trigram_match_query`), when the source's index is built and
+  the term is 3+ characters; and the check, `_contains_scan`, which is
+  the whole answer when there are no candidates to narrow to (index not
+  built, pre-3.45 SQLite, a 1–2 character term). The check is an escaped
+  LIKE asked **of each column on its own**, as `CASE WHEN c1 LIKE p OR c2
+  LIKE p … THEN 1 ELSE 0 END`, unless the term has a space in it. Each
+  piece measured on a 693k-row / 1 GB EvtxECmd table (27 columns, ~1.4 KB
+  a row joined):
+  - **Per column, not the joined text.** Joining every column was the
+    cost of a search, on every row a scan read and every candidate the
+    index returned. Columns are joined by one space, so a term without
+    one cannot straddle two columns and "some column holds it" is the
+    same rows. A scan that misses: 4.0 s → 1.7 s. A term on every row
+    (found in an early column, where the OR stops): 4.1 s → 0.35 s.
+  - **A term with a space asks the joined text, only where it could be.**
+    Every space-free piece of it sits inside one column wherever the term
+    is found, so the longest three pieces of 3+ characters are asked per
+    column first, longest first, in nested `CASE WHEN`s, and only a row
+    holding all of them builds the joined text. A scan for "Error
+    Microsoft-Windows-…": 4.8 s → 2.0 s. Pieces of one or two
+    characters are on nearly every row and are left out ("a b" paid
+    0.6 s for asking them).
+  - **`CASE WHEN`, not `COALESCE(… OR …, 0)`.** The check has to be 0/1,
+    never NULL (a NULL cell's LIKE is NULL, and Advanced's NOT of a NULL
+    drops the row from both sides), and SQLite 3.45 evaluates the OR
+    inside COALESCE as a value — every LIKE, no short-circuit (0.35 s →
+    1.7 s on the every-row term). CASE WHEN jumps.
+  - **The pattern is a literal in the SQL, not a parameter per column**:
+    a merge compiles this per member, and the parameter count would scale
+    with columns × members ("Nothing binds one parameter…" below).
+    `_sql_text_literal` quotes it; a term holding a NUL (which statement
+    text can't carry) takes the joined form, which binds.
+  - **MATCH, not the `doc LIKE ?` pushdown** the index was built for
+    (SQLite ≥3.45's trigram LIKE support). With that form FTS5 checks each
+    candidate itself, by fetching its `doc` through the content view —
+    joining every column of every candidate again. On the 1 GB table a
+    term on every row took 4.6 s that way, of which the index lookup is
+    0.13 s; MATCH + the per-column check is 0.59 s, and a 35k-row term
+    292 ms → 56 ms. MATCH has to be one string per trigram: a longer
+    string is a phrase, which `detail=none` refuses ("phrase queries are
+    not supported"). Since the trigrams are plain tokens, `%`/`_` in a
+    term are ordinary characters and those terms use the index now — the
+    pushdown pattern had to be unescaped (an `ESCAPE` clause turned it
+    back into a full scan), so it sent them to a scan. The pushdown's
+    other trap is why the index is one `doc` column: it is per-column,
+    and a table-level `fts LIKE ?` runs against the hidden table-name
+    column and silently returns **0 rows**.
+  - The tokenizer folds case for every script and LIKE for ASCII only, so
+    candidates can include non-matches ("администратор" for
+    "Администратор") — never miss one. The check removes them.
+  `_ensure_fts_building` still only builds on SQLite ≥3.45
+  (`TRIGRAM_LIKE_MIN_SQLITE`): MATCH needs only the trigram tokenizer
+  (3.34), but nothing has been measured below 3.45. Searches there scan,
+  with the same results.
+- Building the index isn't free — `build_fts` is
   `_ensure_fts_building`'d on a background daemon thread (in chunks
   sized to hold `self.lock` for about `FTS_COMMIT_SECONDS`, 0.5 s, not
   `ingest_csv`'s BATCH: tokenizing is 2-3 MB/s, so a BATCH of wide
@@ -248,8 +290,8 @@ see [docs/notes/README.md](README.md) for the whole set.
   closed under resumes there instead of starting over) rather than
   inline, both right after ingest and lazily on a source's first
   Contains/Advanced search — so
-  browsing and searching both work immediately via the LIKE fallback, and
-  get fast once the build catches up. A third way in is on request:
+  browsing and searching both work immediately by scanning, and get fast
+  once the build catches up. A third way in is on request:
   `start_search_index` (the Tables manager's Build) is the same
   `_ensure_fts_building`, with a KeyError for no such table and a
   ValueError for a merge (it searches through its members' indexes), and
@@ -257,7 +299,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   offering it (tests/test_search_index_build.py). A case file from an earlier build
   may have `has_fts=1` pointing at a stale-shape table — the original
   word-tokenized one, or the first-generation trigram (multi-column,
-  `detail=full`; the doc-LIKE query form would be a SQL error against it);
+  `detail=full`; not the one-`doc`-column shape the query is written for);
   `Store.__init__` detects both from `sqlite_master`'s own CREATE VIRTUAL
   TABLE text (`'detail=none'` only appears in current-shape DDL), resets
   `has_fts=0` for the lazy re-upgrade, and drops the stale tables on a
@@ -1043,11 +1085,10 @@ see [docs/notes/README.md](README.md) for the whole set.
   watchlist list itself (N+1 locked queries) — stalled for the whole
   scan while paging kept working — the lock-up where scrolling still
   answered. Now each unit's match is a rid
-  SELECT on a `_reader()` connection in the two WHERE shapes
-  `_search_all_count_sql` uses — the trigram index's bare `doc LIKE ?`
-  when the source has one and `_fts_like_pattern` accepts the value,
-  the escaped blob LIKE otherwise (both ASCII case folds, like the
-  `lower()` they replaced, so the hits are the same rows) — **without
+  SELECT on a `_reader()` connection with the WHERE
+  `_search_all_count_sql` uses — `_contains_clause`, through the
+  trigram index when the source has one (an ASCII case fold, like the
+  `lower()` it replaced, so the hits are the same rows) — **without
   the LIMIT**: a scan writes every hit and auto-tags them, and a capped
   scan would tag part of the matches and say nothing (invariant #7's
   silent-partial-triage failure). `_ensure_fts_building` fires for an
@@ -1130,9 +1171,8 @@ see [docs/notes/README.md](README.md) for the whole set.
   LIKE scans per indicator on a twenty-table case, to reach the numbers
   already on screen. The two ask the same question: a per-term count goes
   through `_search_all_count_sql`'s single-term path, and
-  `_watchlist_match_sql` compiles the same two shapes (indexed `doc LIKE`
-  when the source has a usable trigram index, the escaped blob LIKE
-  otherwise) without the cap. So a sweep that READ a table and found no
+  `_watchlist_match_sql` compiles the same `_contains_clause` without
+  the cap. So a sweep that READ a table and found no
   row holding a term has established the whole of what a scan of that
   (indicator, table) pair would, and what the seeder writes is
   byte-for-byte the write `_scan_unit` makes for a clean pair — the

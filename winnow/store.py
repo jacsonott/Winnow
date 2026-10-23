@@ -106,14 +106,15 @@ SAMPLE_ROWS = 500
 # cap no longer errors at all — suspect_quote_rows is what flags it now.
 CSV_FIELD_LIMIT = 64 * 1024 * 1024
 csv.field_size_limit(CSV_FIELD_LIMIT)
-TRIGRAM_MIN_LEN = 3  # the trigram FTS5 tokenizer can't index anything shorter — see _fts_like_pattern
+TRIGRAM_MIN_LEN = 3  # the trigram FTS5 tokenizer can't index anything shorter — see _trigram_match_query
 SARGABLE_OPS = {"equals", "in"}  # ops a plain single-column B-tree index actually accelerates (see _ensure_column_index_building)
 # SQLite gained LIKE/GLOB pushdown onto fts5 trigram tables in 3.45.0 —
-# the query form build_fts's detail=none index depends on. On an older
-# runtime the same LIKE still returns correct rows (SQLite just evaluates
-# it by scanning the fts table's docs — fallback speed), so nothing breaks;
-# building an index that can't accelerate anything is just wasted disk,
-# hence _ensure_fts_building gates on this.
+# the query form build_fts's detail=none index was designed around, and
+# the version every index in a case file was built on. Searches now ask the
+# index with MATCH (_trigram_match_query), which needs only the trigram
+# tokenizer (3.34); the gate stays here because nothing has been measured
+# below it, not because the query needs it. On an older runtime nothing
+# breaks: no index is built and searches scan (_contains_scan).
 TRIGRAM_LIKE_MIN_SQLITE = (3, 45, 0)
 # search_all_sources stops counting a source's matches here and reports
 # `capped` instead of an exact number. The modal it feeds only ranks
@@ -604,39 +605,119 @@ def _sql_chain(parts: list[str], op: str) -> str:
 
 
 def _blob_expr(cols: list[str]) -> str:
-    """Every column concatenated into one search target — the same
-    expression backs both sides of substring search: the src_<id>_doc view
-    the trigram index is built over (build_fts), and every LIKE-scan
-    fallback (Contains mode when no index is ready yet or never got one,
-    Advanced mode's whole-query LIKE fallback, and a single Advanced-mode
-    term _fts_like_pattern can't route through the index). Keeping them
-    the same expression is what makes the indexed and fallback paths
-    return identical results. Built by _sql_chain, so a wide table's
-    search is not refused for depth."""
+    """Every column concatenated into one search target. This is what
+    substring search means — a row matches when this text holds the term —
+    and it is the doc the trigram index is built over (build_fts's
+    src_<id>_doc view). _contains_clause is what queries it, and it only
+    builds this text when the term could straddle two columns: building it
+    for every row is most of what a search costs (see _contains_scan).
+    Built by _sql_chain, so a wide table's search is not refused for
+    depth."""
     return _sql_chain([f"COALESCE({q(c)},'')" for c in cols], " || ' ' || ")
 
 
-def _fts_like_pattern(term: str) -> str | None:
-    """The bare-LIKE pattern that routes a Contains/Advanced term through
-    the trigram index (`doc LIKE ?` on the fts table), or None when this
-    term has to take the blob-LIKE fallback scan instead. Two reasons a
-    term can't use the index, both verified empirically:
+def _contains_scan(cols: list[str], term: str) -> tuple[str, list]:
+    """Whether a row's search text (_blob_expr) holds `term`, as an escaped
+    LIKE — ASCII case folded, `%`/`_`/`\\` literal. A 0/1 expression, never
+    NULL, so NOT in front of it means "doesn't contain" (Advanced's
+    exclude).
 
-    - Under TRIGRAM_MIN_LEN (3 chars) the trigram tokenizer has nothing to
-      look up, so the "index-assisted" form degrades to scanning anyway.
-    - SQLite only pushes a *bare* `LIKE ?` down onto a trigram table —
-      adding an ESCAPE clause turns the plan back into a full scan. So the
-      pattern here is deliberately unescaped, which is only safe when the
-      term contains no LIKE wildcards: a `%`/`_` in the term would match
-      as a wildcard instead of literally (a superset of right answers —
-      silently wrong). Those terms go to the fallback, which escapes them.
-      A backslash is fine unescaped — LIKE has no escape character at all
-      unless an ESCAPE clause says so — which matters here because
-      Windows paths make `\\` the single most-searched special character
-      in this tool."""
-    if len(term) < TRIGRAM_MIN_LEN or "%" in term or "_" in term:
+    A term with no space in it is asked of each column on its own instead
+    of the concatenation. The columns are joined by a single space, so a
+    term without one cannot straddle two of them: "the joined text holds
+    it" and "one of the columns holds it" are the same rows. And it is
+    much cheaper, because concatenating every column is what a search
+    spent its time on — the 27 columns of a 693k-row EvtxECmd table
+    joined into ~1.4 KB per row, on every row of a scan and on every
+    candidate the index returned. Measured on that table: a scan that
+    misses 4.0 s -> 1.7 s, a term matching every row (it is usually found
+    in an early column, where the OR stops) 4.1 s -> 0.35 s.
+
+    `CASE WHEN … THEN 1 ELSE 0 END` is what keeps it never-NULL (a NULL
+    column's LIKE is NULL, and NOT NULL excludes the row) without giving
+    that back: SQLite 3.45 evaluates COALESCE(a OR b …, 0) as a value and
+    runs every LIKE in it (1.7 s for the every-row term), where CASE WHEN
+    jumps out at the first column that holds it.
+
+    The pattern is written into the SQL as a quoted literal rather than
+    bound once per column: a merge compiles this once per member, and a
+    parameter per column per member is the "nothing binds one parameter
+    per item" trap (docs/notes/store.md) on a wide table. A NUL can't be
+    written into statement text, so a term holding one takes the joined
+    form, which binds.
+
+    A term with a space does need the joined text, but only for rows that
+    could hold it: each space-free piece of the term sits inside one
+    column wherever the term is found (the separators are spaces, and a
+    piece has none), so a row with a piece in none of its columns is
+    answered without building the text. The pieces are asked longest
+    first, the likeliest to be rare, in a nested CASE so the first missing
+    one ends it. Pieces under TRIGRAM_MIN_LEN are left out: one or two
+    characters are in nearly every row, and asking cost "a b" 0.6 s for
+    nothing. So is everything past the longest three: any subset narrows
+    the rows correctly, and a pasted sentence would otherwise nest a CASE,
+    and repeat every column, per word. Same table, "Error
+    Microsoft-Windows-…" (1,739 rows): a scan 4.8 s -> 2.0 s."""
+    def per_column(piece: str) -> str:
+        lit = _sql_text_literal(f"%{_esc_like(piece)}%")
+        return _sql_chain([f"{q(c)} LIKE {lit} ESCAPE '\\'" for c in cols], " OR ")
+    if "\x00" in term:
+        return f"(({_blob_expr(cols)}) LIKE ? ESCAPE '\\')", [f"%{_esc_like(term)}%"]
+    if " " not in term:
+        return f"(CASE WHEN {per_column(term)} THEN 1 ELSE 0 END)", []
+    expr = f"(({_blob_expr(cols)}) LIKE {_sql_text_literal(f'%{_esc_like(term)}%')} ESCAPE '\\')"
+    pieces = sorted(dict.fromkeys(p for p in term.split(" ") if len(p) >= TRIGRAM_MIN_LEN), key=len, reverse=True)
+    for piece in reversed(pieces[:3]):
+        expr = f"(CASE WHEN {per_column(piece)} THEN {expr} ELSE 0 END)"
+    return expr, []
+
+
+def _trigram_match_query(term: str) -> str | None:
+    """The FTS5 query that finds the rows the trigram index says may hold
+    `term`: every distinct trigram of it, each a quoted string, ANDed. None
+    when the index can't help — under TRIGRAM_MIN_LEN (3) there is no
+    trigram to look up — or the term holds a NUL.
+
+    Candidates, not answers. The tokenizer folds case for every script
+    where LIKE folds ASCII only, so a candidate can still be a non-match
+    ("администратор" is a candidate for "Администратор"); _contains_clause
+    checks each against _contains_scan. Never fewer than the answers:
+    a row whose text holds the term holds every trigram of it.
+
+    Why MATCH and not the `doc LIKE ?` pushdown this used to be: with
+    `detail=none` the index can't tell where a trigram sits, so a LIKE
+    against it is answered by fetching each candidate's doc through the
+    src_<id>_doc view — concatenating every column of every candidate — to
+    test the pattern. That was nearly all of an indexed search's time on a
+    common term (693k-row EvtxECmd table, a term on every row: 4.6 s, of
+    which the index lookup is 0.13 s). MATCH reads the index alone, and
+    the check runs on the source row, per column. One string per trigram
+    is what makes MATCH legal here at all: a longer string is a phrase,
+    which detail=none refuses. And since the trigrams are matched as plain
+    tokens, a `%` or `_` in the term is just a character — such a term now
+    uses the index, where the unescaped LIKE pattern had to send it to a
+    full scan."""
+    if len(term) < TRIGRAM_MIN_LEN or "\x00" in term:
         return None
-    return f"%{term}%"
+    grams = dict.fromkeys(term[i:i + TRIGRAM_MIN_LEN] for i in range(len(term) - TRIGRAM_MIN_LEN + 1))
+    return " AND ".join('"' + g.replace('"', '""') + '"' for g in grams)
+
+
+def _contains_clause(cols: list[str], term: str, fts_ident: str | None = None) -> tuple[str, list]:
+    """The WHERE fragment for "this row contains `term`" (Contains search,
+    each Advanced term, a Search-all count, a watchlist scan), and its
+    params. `fts_ident` is the source's trigram table when its index is
+    built: the index narrows the rows to candidates and _contains_scan
+    checks each one; without it (not built yet, never built on SQLite <
+    3.45, or a term too short for it) _contains_scan is the whole answer,
+    as a scan. The same check decides either way, which is what makes the
+    indexed and scanning paths return the same rows. Never NULL."""
+    scan, params = _contains_scan(cols, term)
+    query = _trigram_match_query(term) if fts_ident else None
+    if query is None:
+        return scan, params
+    return (f"(rid IN (SELECT rowid FROM {fts_ident} WHERE {fts_ident} MATCH ?) AND {scan})",
+            [query, *params])
 
 
 def _numeric_expr(sql_expr: str) -> str:
@@ -3022,8 +3103,8 @@ class Store:
         have has_fts=1 pointing at a table the query code can't use — the
         original word-tokenized table (can't do substring search at all),
         or the first-generation trigram table (multi-column, detail=full:
-        the new `doc LIKE ?` query form would be a SQL error against it,
-        and it's ~6x the size the index needs to be — the reason the shape
+        not the one-`doc`-column shape the search query is written for,
+        and ~6x the size the index needs to be — the reason the shape
         changed). Either way: treat it as not-ready (the lazy background
         rebuild in _ensure_fts_building kicks in on next use) rather than
         erroring or serving wrong results under a stale flag. No schema
@@ -6240,8 +6321,9 @@ class Store:
         """(Re)builds the trigram substring index for a source: a single
         `doc` column (every column concatenated, via a `src_<id>_doc` view
         over `_blob_expr`) indexed with `tokenize='trigram', detail=none,
-        columnsize=0`, queried with a bare `doc LIKE ?` (never MATCH — see
-        below). Trigram indexing 3-character sequences is what makes
+        columnsize=0`, queried for candidates with a MATCH of the term's
+        trigrams, one token each (_trigram_match_query — see below).
+        Trigram indexing 3-character sequences is what makes
         Contains-mode search both correct *and* fast for a fragment buried
         mid-token (e.g. "jacso" inside `C:\\users\\jacso\\desktop\\file.txt`)
         — a real index lookup instead of a full-table LIKE scan.
@@ -6252,20 +6334,24 @@ class Store:
         - `detail=none, columnsize=0` drops the per-occurrence position
           lists (which nothing here uses — no ranking, no highlighting),
           cutting the index from 892MB to 143MB (–84%). The cost is that
-          FTS5 must verify each candidate against the real text, so query
-          time scales with *result count*: identical for rare/medium terms
-          (the IOC-hunting case), ~0.8s worst-case for a term matching 94%
-          of all rows — a degenerate result set anyway.
-        - Under detail=none a multi-trigram MATCH is a *phrase* query and
-          errors outright ("phrase queries are not supported"); the query
-          form is SQLite 3.45+'s LIKE pushdown instead. That pushdown is
-          per-column — a table-level `fts LIKE ?` runs against the hidden
-          table-name column (NULL outside MATCH) and silently returns 0
-          rows — which is why the index is one concatenated `doc` column
-          rather than mirroring the source's columns.
-        - content= points at the src_<id>_doc *view*, so candidate
-          verification recomputes the concat on demand — no second stored
-          copy of the data.
+          the index only knows which trigrams a row holds, not where, so
+          every candidate has to be checked against the real text and
+          query time scales with *result count*. That check is
+          _contains_scan on the source row, per column; it used to be
+          FTS5's own, through the doc view below, which concatenated every
+          column of every candidate and was most of a common term's time
+          (see _trigram_match_query).
+        - Under detail=none a multi-trigram MATCH *string* is a phrase
+          query and errors outright ("phrase queries are not supported"),
+          which is why the query quotes each trigram on its own and ANDs
+          them. The index was designed around SQLite 3.45's trigram LIKE
+          pushdown instead, which is per-column — a table-level `fts LIKE ?`
+          runs against the hidden table-name column (NULL outside MATCH)
+          and silently returns 0 rows — hence the one concatenated `doc`
+          column rather than one per source column.
+        - content= points at the src_<id>_doc *view*, so there is no second
+          stored copy of the data; the index is only ever asked for rowids,
+          so nothing reads that view at query time.
 
         Batches its own commits (DROP/CREATE once, then INSERT chunks keyed
         by rid range) instead of one multi-second transaction, so a build
@@ -11108,33 +11194,22 @@ class Store:
                 cols = [c["name"] for c in self._base_cols(src)]
                 if not src["has_fts"]:
                     self._ensure_fts_building(source_id)
-                if src["has_fts"]:
-                    clause, p = _advanced_fts_clause(q("fts_" + str(source_id)), _blob_expr(cols), terms)
-                else:
-                    clause, p = _advanced_like_clause(cols, terms)
+                fts_ident = q("fts_" + str(source_id)) if src["has_fts"] else None
+                clause, p = _advanced_clause(cols, terms, fts_ident)
                 if clause:
                     clauses.append(clause)
                     params.extend(p)
         elif search:
-            # A true substring match either way — the trigram index (a bare
-            # `doc LIKE ?` against the fts table, pushed down onto the
-            # trigram tokenizer; see build_fts/_fts_like_pattern for why
-            # not MATCH) makes it fast once built. Falls back to a blob
-            # LIKE scan — same results, just slower — when the index isn't
-            # ready yet (kicked off here in the background) or the term
-            # can't route through it (under 3 chars, or contains a LIKE
-            # wildcard the unescaped pushdown form would misinterpret).
+            # A true substring match either way — narrowed by the trigram
+            # index once it is built, a scan until then (the build is kicked
+            # off here in the background) or for a term too short for it.
+            # Same rows from both: see _contains_clause.
             if not src["has_fts"]:
                 self._ensure_fts_building(source_id)
-            pattern = _fts_like_pattern(search)
-            if src["has_fts"] and pattern is not None:
-                fts_ident = q("fts_" + str(source_id))
-                clauses.append(f"rid IN (SELECT rowid FROM {fts_ident} WHERE doc LIKE ?)")
-                params.append(pattern)
-            else:
-                blob = _blob_expr([c["name"] for c in self._base_cols(src)])
-                clauses.append(f"({blob}) LIKE ? ESCAPE '\\'")
-                params.append(f"%{_esc_like(search)}%")
+            fts_ident = q("fts_" + str(source_id)) if src["has_fts"] else None
+            clause, p = _contains_clause([c["name"] for c in self._base_cols(src)], search, fts_ident)
+            clauses.append(clause)
+            params.extend(p)
 
         # The tag filter is a UNION of whatever it names: any of these tags,
         # or untagged, or both. OR rather than AND because that is what the
@@ -13043,25 +13118,19 @@ class Store:
             self._bump_state_generation()
 
     def _watchlist_match_sql(self, src: dict, cols: list[str], value: str) -> tuple[str, tuple]:
-        """The rid SELECT for one indicator against one source: the two
-        WHERE shapes _search_all_count_sql uses — the trigram index's bare
-        `doc LIKE ?` when the source has one built and _fts_like_pattern
-        accepts the value, the escaped blob LIKE otherwise — without its
-        LIMIT. A scan is not a count: every matching rid is written to
-        watchlist_hits and, for an auto-tag indicator, tagged, so it has to
-        be complete — a capped scan would tag part of the matches and say
-        nothing, the silent-partial-triage failure invariant #7 exists to
-        prevent. Both shapes fold case for ASCII only, exactly as the
-        `instr(lower(blob), lower(?))` scan this replaced did, so the hits
-        are the same rows by construction."""
-        table = q(src["table_name"])
-        pattern = _fts_like_pattern(value)
-        if src.get("has_fts") and pattern is not None:
-            fts_ident = q("fts_" + str(src["id"]))
-            return (f"SELECT rid FROM {table} WHERE rid IN "
-                    f"(SELECT rowid FROM {fts_ident} WHERE doc LIKE ?) ORDER BY rid", (pattern,))
-        return (f"SELECT rid FROM {table} WHERE ({_blob_expr(cols)}) LIKE ? ESCAPE '\\' ORDER BY rid",
-                (f"%{_esc_like(value)}%",))
+        """The rid SELECT for one indicator against one source: the WHERE
+        _search_all_count_sql uses (_contains_clause, through the trigram
+        index when the source has one built) without its LIMIT. A scan is
+        not a count: every matching rid is written to watchlist_hits and,
+        for an auto-tag indicator, tagged, so it has to be complete — a
+        capped scan would tag part of the matches and say nothing, the
+        silent-partial-triage failure invariant #7 exists to prevent. It
+        folds case for ASCII only, exactly as the `instr(lower(blob),
+        lower(?))` scan this replaced did, so the hits are the same rows by
+        construction."""
+        fts_ident = q("fts_" + str(src["id"])) if src.get("has_fts") else None
+        clause, params = _contains_clause(cols, value, fts_ident)
+        return f"SELECT rid FROM {q(src['table_name'])} WHERE {clause} ORDER BY rid", tuple(params)
 
     def _scan_unit(self, src: dict, cols: list[str], ind: dict) -> tuple[int, bool] | None:
         """One (indicator, source) unit of a scan: the match on a reader
@@ -13291,16 +13360,15 @@ class Store:
         second time.
 
         The sweep and the scan ask a table the same question. A sweep
-        counts `(blob) LIKE '%term%'` — or the trigram index's `doc LIKE`
-        — per source and stops at a cap; a scan runs those same two shapes
-        uncapped and writes the rids (_watchlist_match_sql's docstring
-        names the shapes it shares with _search_all_count_sql, and
-        _search_all_term_counts reaches that function through its
-        single-term path, so a per-term count and a scan compile the same
-        WHERE). A sweep that READ a table and found no row holding a term
-        has therefore established the whole of what a scan of that
-        (indicator, table) pair would: nothing matches, and the pair has
-        been looked at. What this writes is the write _scan_unit makes for
+        counts the rows _contains_clause matches per source and stops at a
+        cap; a scan runs that same clause uncapped and writes the rids
+        (_watchlist_match_sql's docstring names the clause it shares with
+        _search_all_count_sql, and _search_all_term_counts reaches that
+        function through its single-term path, so a per-term count and a
+        scan compile the same WHERE). A sweep that READ a table and found
+        no row holding a term has therefore established the whole of what
+        a scan of that (indicator, table) pair would: nothing matches, and
+        the pair has been looked at. What this writes is the write _scan_unit makes for
         a clean pair — the pair's hits replaced by none, a watchlist_scans
         upsert in the same transaction — which is what makes this a
         shortcut rather than a second kind of answer.
@@ -16978,11 +17046,10 @@ class Store:
         per-term breakdown — "something here matched, which of them is
         unknown", the one shape that proves nothing per term.
 
-        Same indexed-when-ready-else-LIKE reasoning as _compile_where's
-        Contains/Advanced branches for both `query` and `terms` — including
-        triggering a background index build for any source that doesn't
-        have one yet, and falling back to a blob LIKE for a term
-        _fts_like_pattern can't route through the trigram index.
+        Same indexed-when-ready-else-scan reasoning as _compile_where's
+        Contains/Advanced branches for both `query` and `terms`, through the
+        same _contains_clause — including triggering a background index
+        build for any source that doesn't have one yet.
 
         Two things keep this from monopolising the case for its duration:
 
@@ -17120,38 +17187,21 @@ class Store:
         substring query. Returns (None, ()) when there's nothing to match on.
 
         Extracted so the per-term breakdown counts a term through exactly
-        the same shapes the whole-query count uses — indexed doc-LIKE when
-        the source has a usable trigram index, escaped blob LIKE otherwise
-        (see _fts_like_pattern). A single positive term is the same question
-        as a bare Contains query, which is why the breakdown reaches this
-        with `terms=None` and one string rather than a one-element chip
-        list."""
-        source_id = src["id"]
+        the same shapes the whole-query count uses — _contains_clause, with
+        the source's trigram index when it has one built. A single positive
+        term is the same question as a bare Contains query, which is why
+        the breakdown reaches this with `terms=None` and one string rather
+        than a one-element chip list."""
+        fts_ident = q("fts_" + str(src["id"])) if src.get("has_fts") else None
         if terms:
-            if src.get("has_fts"):
-                clause, params = _advanced_fts_clause(q("fts_" + str(source_id)), _blob_expr(cols), terms)
-            else:
-                clause, params = _advanced_like_clause(cols, terms)
-            if not clause:
-                return None, ()
-            return f"SELECT 1 FROM {q(table)} WHERE {clause} LIMIT {SEARCH_ALL_COUNT_CAP + 1}", tuple(params)
-        if not query:
+            clause, params = _advanced_clause(cols, terms, fts_ident)
+        elif query:
+            clause, params = _contains_clause(cols, query, fts_ident)
+        else:
             return None, ()
-        pattern = _fts_like_pattern(query)
-        if src.get("has_fts") and pattern is not None:
-            fts_ident = q("fts_" + str(source_id))
-            return (
-                f"SELECT 1 FROM {q(table)} WHERE rid IN "
-                f"(SELECT rowid FROM {fts_ident} WHERE doc LIKE ?) "
-                f"LIMIT {SEARCH_ALL_COUNT_CAP + 1}",
-                (pattern,),
-            )
-        blob = _blob_expr(cols)
-        return (
-            f"SELECT 1 FROM {q(table)} WHERE ({blob}) LIKE ? ESCAPE '\\' "
-            f"LIMIT {SEARCH_ALL_COUNT_CAP + 1}",
-            (f"%{_esc_like(query)}%",),
-        )
+        if not clause:
+            return None, ()
+        return f"SELECT 1 FROM {q(table)} WHERE {clause} LIMIT {SEARCH_ALL_COUNT_CAP + 1}", tuple(params)
 
     def _search_all_term_counts(
         self, ro: sqlite3.Connection, src: dict, table: str, cols: list[str], terms: list[str]
@@ -18531,42 +18581,29 @@ def _blank_string_literals(frag: str) -> str:
     return "".join(out)
 
 
-def _advanced_fts_clause(fts_ident: str, blob_expr: str, terms: list[dict]) -> tuple[str, list]:
-    """Compile Advanced-mode term chips into a WHERE fragment against the
-    trigram FTS5 index — one `rid IN/NOT IN (SELECT rowid FROM fts WHERE
-    doc LIKE ?)` per term, combined with AND/OR at the SQL level.
+def _advanced_clause(cols: list[str], terms: list[dict], fts_ident: str | None = None) -> tuple[str, list]:
+    """Compile Advanced-mode term chips into one WHERE fragment: each term
+    is its own _contains_clause atom (through the trigram index when
+    `fts_ident` names a built one, a scan otherwise — decided per term, so
+    a term too short for the index never drops out of the query or changes
+    its meaning), NOT-prefixed when excluded, joined by AND/OR per its
+    stated connector. Standard SQL boolean precedence applies (NOT > AND >
+    OR), same as a hand-typed AND/OR/NOT query would behave.
 
-    The doc-LIKE form (not MATCH) is required by the index's detail=none
-    shape — a multi-trigram MATCH is a phrase query, which detail=none
-    refuses outright; see build_fts. Applying NOT as SQL-level `NOT IN`
-    (rather than any in-query negation) keeps NOT working in any position,
-    including as the first term — an earlier MATCH-string version silently
-    dropped a leading term's exclude flag because FTS5's NOT is a binary
-    "and not" with no unary form.
-
-    Per-term, not just per-query: a term _fts_like_pattern can't route
-    through the index (under 3 characters, or containing a LIKE wildcard
-    the unescaped pushdown form would misinterpret) gets its own escaped
-    `(blob_expr) LIKE ?` atom instead, joined into the exact same AND/OR
-    chain as every indexed term — such a term never silently drops out of
-    the query, and never changes meaning."""
-    fts_in = f"rid IN (SELECT rowid FROM {fts_ident} WHERE doc LIKE ?)"
-    fts_not_in = f"rid NOT IN (SELECT rowid FROM {fts_ident} WHERE doc LIKE ?)"
-    like_atom = f"({blob_expr}) LIKE ? ESCAPE '\\'"
+    NOT is applied at the SQL level, to an atom that is never NULL, which is
+    what keeps it working in any position — including as the first term,
+    which an earlier MATCH-string version silently dropped because FTS5's
+    NOT is a binary "and not" with no unary form."""
     parts: list[str] = []
     params: list[Any] = []
     for t in terms:
         term = (t.get("term") or "").strip()
         if not term:
             continue
-        exclude = t.get("exclude")
-        pattern = _fts_like_pattern(term)
-        if pattern is not None:
-            atom = fts_not_in if exclude else fts_in
-            params.append(pattern)
-        else:
-            atom = f"NOT {like_atom}" if exclude else like_atom
-            params.append(f"%{_esc_like(term)}%")
+        atom, p = _contains_clause(cols, term, fts_ident)
+        if t.get("exclude"):
+            atom = f"NOT {atom}"
+        params.extend(p)
         if not parts:
             parts.append(atom)
         else:
@@ -18630,29 +18667,3 @@ def _swept_or_terms(query: str, terms: list[dict] | None) -> list[str] | None:
         return strings
     query = (query or "").strip()
     return [query] if query else None
-
-
-def _advanced_like_clause(cols: list[str], terms: list[dict]) -> tuple[str, list]:
-    """LIKE-chain fallback for sources without an FTS index. Each term is its
-    own '(blob) LIKE ?' atom, optionally NOT-prefixed, joined by AND/OR per
-    its stated connector — standard SQL boolean precedence applies (NOT >
-    AND > OR), same as a hand-typed FTS AND/OR/NOT query would behave."""
-    blob = _blob_expr(cols)
-    parts: list[str] = []
-    params: list[str] = []
-    for t in terms:
-        term = (t.get("term") or "").strip()
-        if not term:
-            continue
-        atom = f"({blob}) LIKE ? ESCAPE '\\'"
-        if t.get("exclude"):
-            atom = f"NOT {atom}"
-        params.append(f"%{_esc_like(term)}%")
-        if not parts:
-            parts.append(atom)
-        else:
-            connector = "OR" if str(t.get("connector", "AND")).upper() == "OR" else "AND"
-            parts.append(f"{connector} {atom}")
-    if not parts:
-        return "", []
-    return "(" + " ".join(parts) + ")", params
