@@ -5480,18 +5480,36 @@ def _resolve_timeline_configs() -> dict[int, dict]:
 class TimelineBuild(BaseModel):
     tag_ids: list[int] = []
     op_token: str | None = None
+    ts_range: list[str] | None = None        # [start, end), the overview strip's drag
+    exclude_sources: list[int] = []          # tables switched off on the strip
 
 
 @app.post("/api/timeline")
 def api_timeline_build(body: TimelineBuild):
-    return store().build_timeline(_resolve_timeline_configs(), body.tag_ids or None,
-                                  op_token=body.op_token)
+    try:
+        return store().build_timeline(_resolve_timeline_configs(), body.tag_ids or None,
+                                      op_token=body.op_token, ts_range=body.ts_range,
+                                      exclude_sources=body.exclude_sources or None)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 @app.get("/api/timeline_rows")
 def api_timeline_rows(view_id: str, start: int = 0, count: int = 200):
     try:
         return JSONResponse(store().fetch_timeline_rows(view_id, start, count))
+    except KeyError as e:
+        raise HTTPException(409, str(e))
+
+
+@app.get("/api/timeline_overview")
+def api_timeline_overview(view_id: str, by: str = "tags", buckets: int = Store.TIMELINE_OVERVIEW_BARS):
+    """The Timeline's lines over time, split by first tag or by table, for
+    the overview strip above the list (Store.timeline_overview)."""
+    try:
+        return store().timeline_overview(view_id, by, max(1, min(buckets, 2000)))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     except KeyError as e:
         raise HTTPException(409, str(e))
 

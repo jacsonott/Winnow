@@ -1865,6 +1865,52 @@ textarea:focus { border-color: var(--accent); outline: none; }
    is needed here — the chip carries its own padding, border, pressed
    state and per-skin treatment. */
 .timeline-tagfilter { display: flex; gap: 5px; flex-wrap: wrap; align-items: center; }
+/* The overview strip (timelineoverview.js): the histogram strip's look
+   (.histogram-head and the .th-* rules above), under class names of its
+   own so nothing that finds that strip's parts by class finds these. */
+.tl-overview { background: var(--panel); border-bottom: 1px solid var(--line-2); flex: 0 0 auto; }
+.tl-overview[hidden] { display: none; }
+#btnTimelineOverview[aria-pressed="true"] { color: var(--accent); border-color: var(--accent-dim); }
+.tl-ov-head {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; padding: 4px 10px 0;
+  font-size: 11px; color: var(--dim);
+}
+.tl-ov-title { letter-spacing: .08em; text-transform: uppercase; font-size: 10px; }
+.tl-ov-head .btn { font-size: 11px; padding: 1px 7px; }
+.tl-ov-views { display: flex; align-items: center; flex: 0 0 auto; }
+.tl-ov-views .btn { border-radius: 0; margin-left: -1px; }
+.tl-ov-views .btn:first-child { border-radius: var(--radius-sm) 0 0 var(--radius-sm); margin-left: 0; }
+.tl-ov-views .btn:last-child { border-radius: 0 var(--radius-sm) var(--radius-sm) 0; }
+.tl-ov-views .btn[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--text);
+  border-color: var(--accent); position: relative; z-index: 1;
+}
+.tl-ov-legend { display: flex; align-items: center; flex-wrap: wrap; gap: 5px 10px; min-width: 0; }
+.tl-ov-legend .tag-chip { font-size: 11px; }
+.tl-ov-item { display: flex; align-items: center; gap: 4px; flex: 0 0 auto; white-space: nowrap; }
+.tl-ov-item .swatch { width: 8px; height: 8px; border-radius: 1px; flex: 0 0 auto; }
+.tl-chip-n { font-family: var(--mono); font-size: 10px; margin-left: 2px; }
+.tl-ov-info { margin-left: auto; font-family: var(--mono); }
+/* The histogram's two cues: the count line breathes while an answer is
+   out, and a chart about a view since rebuilt is faded and takes no
+   clicks (fresh() in the module). */
+.tl-overview[aria-busy="true"] .tl-ov-info { animation: th-busy 1s var(--ease) infinite; }
+.tl-overview.is-outdated .tl-ov-canvas {
+  opacity: .3; filter: grayscale(1); cursor: progress;
+  transition: opacity .2s var(--ease) .12s, filter .2s var(--ease) .12s;
+}
+.tl-ov-canvas { display: block; width: 100%; cursor: crosshair; user-select: none; }
+.tl-ov-hint { padding: 0 10px 4px; font-size: 10px; }
+.tl-ov-empty { padding: 2px 10px 6px; font-size: 11px; white-space: normal; }
+.tl-ov-range:empty { display: none; }
+.tl-range-chip {
+  display: inline-flex; align-items: center; gap: 6px; padding: 1px 4px 1px 8px;
+  border: 1px solid var(--accent); border-radius: var(--radius-sm);
+  font-family: var(--mono); font-size: 11px; color: var(--text); white-space: nowrap;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.tl-range-x { border: 0; background: none; color: var(--dim); cursor: pointer; padding: 0 3px; font-size: 11px; }
+.tl-range-x:hover, .tl-range-x:focus-visible { color: var(--text); }
 .timeline-cols {
   display: flex; background: var(--panel); border-bottom: 1px solid var(--line-2);
   font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--dim);

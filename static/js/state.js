@@ -116,6 +116,9 @@ export const S = {
     tagsOff: new Set(), // tag ids the analyst switched OFF the timeline; every other tag is on (timelineTagIds), including one created after the case opened
     raw: new Set(),  // "<source_id>:<rid>" for rows showing the raw source row instead of their summary — see fillTimelineBody
     sel: null,       // the selected line {pos, source_id, rid, ts}, kept across rebuilds — see keepTimelinePlace
+    sourcesOff: new Set(), // table ids switched OFF in the overview's Tables view, as tagsOff is for tags
+    range: null,     // ['YYYY-MM-DD HH:MM:SS', …) the overview's drag narrowed the Timeline to, or null for all of it
+    overview: null,  // the overview strip's bars for the current view — see loadTimelineOverview
   },
   savedFilterCursor: -1,   // index into filtersForCurrentSource(), for [ and ] cycling
   cases: [],               // home screen's case registry, from workspace/cases.json

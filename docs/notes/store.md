@@ -46,7 +46,10 @@ see [docs/notes/README.md](README.md) for the whole set.
   (invariant #2) — only one timeline view is ever alive at a time, rebuilt
   (and the old one evicted) on every tag-filter change and on every visit
   to the tab (`showTimelineTab`).
-  **The view holds `(pos, source_id, rid, ts)` and nothing else.** The
+  **The view holds `(pos, source_id, rid, ts, tag1)` and nothing else.**
+  `tag1` is the first of the tags asked for that the row carries (lowest
+  id: tag order), which the overview strip splits its bars by; it is the
+  build's snapshot, where the page's stripes are read live. The
   body, the summary, the tags and the note are read by
   `fetch_timeline_rows`, for the rows of the page asked for: one query
   per source on the page, reading that source's slice of the page off the
@@ -69,6 +72,18 @@ see [docs/notes/README.md](README.md) for the whole set.
   in a rebuilt view — by `(source_id, rid)`, else the first line at or
   after its `ts` — which is how the tab keeps the analyst's place across
   the rebuild every visit is (`keepTimelinePlace` in timeline.js).
+  `timeline_overview` (`GET /api/timeline_overview`) is the overview
+  strip's bars: the view's lines per `HISTOGRAM_BUCKETS` width, split by
+  `tag1` or `source_id`, each with `first` = its `MIN(pos)`, which is
+  the bar's first line because the view is in time order. Its `start` is
+  floored in Python so `(epoch - start) / width` is never negative —
+  SQLite's integer division truncates toward zero, the pre-1970 trap
+  `time_histogram` documents, and FILETIME zero (1601) does reach the
+  Timeline. The strip narrows the build two ways: `exclude_sources` (the
+  tables switched OFF, as the tag chips keep theirs) and `ts_range`, a
+  half-open `[start, end)` compared with the line's normalised timestamp,
+  which leaves lines with no time out while it is set.
+  `tests/test_timeline_overview.py`.
   **The body join is capped at what SQLite's expression depth allows**
   (`_fit_body_cols`, 495 columns at the default limit of 1000). The flat
   `a || ' | ' || b || ...` chain is two tree levels per column, so a

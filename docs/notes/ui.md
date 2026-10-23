@@ -2226,6 +2226,35 @@ see [docs/notes/README.md](README.md) for the whole set.
     still click it), and stays shown on a line showing its raw row.
   `tests/ui/test_timeline_lines.py`.
 
+- **The Timeline's overview strip** (timelineoverview.js) is the
+  histogram strip's look over the Timeline's own view, with three things
+  worth knowing before touching it:
+  - **Its classes are its own** (`.tl-ov-*`, `.tl-overview`), not the
+    histogram's `.th-*`. The histogram's tests find that strip's parts by
+    bare class (`.th-info`, `.th-legend-item`, `canvas.th-canvas`), and a
+    second strip under the same names put them in strict-mode violations
+    the moment the Timeline had been opened. The rules in style.css copy
+    the histogram's rather than sharing them.
+  - **What it narrows is kept as what is OFF or what was dragged**:
+    `S.timeline.sourcesOff` (the tag chips' rule, so a table tagged later
+    is on) and `S.timeline.range`, a half-open `[start, end)` that
+    `build_timeline` compares with each line's normalised timestamp. The
+    drag is snapped with the histogram's rule (a unit picked from the
+    drag's width, never coarser than a bar), not to the bars: snapping to
+    bars made a stretch inside one bar impossible to pick. Both reset on
+    a case switch (home.js), as `tagsOff` does.
+  - **The bars come from the server, the marks from the client.**
+    `GET /api/timeline_overview` after each build (and on Tags/Tables);
+    the band, the thumb and the selected line's mark are worked out from
+    lines the list already holds, on `renderTimelineRows`' and
+    `selectTimelineLine`'s call, coalesced to a frame and repainted only
+    when they would land on other pixels. A chart whose `view_id` is not
+    the current view's is drawn faded and takes no clicks (`fresh`).
+  Bars are square-root scaled (single findings beside a burst of
+  hundreds were a pixel tall on a linear scale); the hover gives each
+  bar's real count. `timelineOverviewX` is what the strip paints with and
+  what `tests/ui/test_timeline_overview_strip.py` clicks by.
+
 - **The Timeline's tag filter is the grid's tag chips** (`.tag-chip`,
   renderTimelineTagFilter). It asks what the ribbon asks, from the same
   strip across the top, and was the one tag control in the app answering
