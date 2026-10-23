@@ -232,7 +232,7 @@ def test_every_link_in_the_front_pages_banner_lands(site):
     """MkDocs checks the links in pages, not in templates."""
     home = (ROOT / "docs" / "site" / "overrides" / "home.html").read_text(encoding="utf-8")
     named = re.findall(r"\{\{ '([^']+)' \| url \}\}", home)
-    assert "Installation/" in named and "screenshots/grid.png" in named
+    assert {"Installation/", "screenshots/triage.gif", "screenshots/grid.png"} <= set(named)
     docs = site / "docs"
     for rel in named:
         if rel.endswith("/"):

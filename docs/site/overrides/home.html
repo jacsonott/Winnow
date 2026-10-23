@@ -26,9 +26,14 @@
         <a class="md-button" href="#your-first-triage">Your first triage</a>
       </div>
     </div>
+    {#- The recording is scripts/screenshots.py --only triage. A reader who
+        asked for less motion gets the README's still of the same table. -#}
     <figure class="wn-hero__shot">
-      <img src="{{ 'screenshots/grid.png' | url }}" width="3360" height="2000"
-           alt="Winnow's grid: an EvtxECmd table under a saved filter, with the histogram above it">
+      <picture>
+        <source media="(prefers-reduced-motion: reduce)" srcset="{{ 'screenshots/grid.png' | url }}">
+        <img src="{{ 'screenshots/triage.gif' | url }}" width="1200" height="740"
+             alt="Winnow filtering an EvtxECmd table with a shipped filter, narrowing it to one user, tagging four rows and opening the Timeline">
+      </picture>
     </figure>
   </div>
 </section>

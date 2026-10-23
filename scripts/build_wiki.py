@@ -76,7 +76,8 @@ SITE_EXTRA_PAGES = {"docs/writing-plugins.md": "writing-plugins.md"}
 # shows (docs/site/overrides/home.html).
 SITE_ASSETS = {"static/icons/winnow-mark.svg": "assets/winnow-mark.svg",
                "static/icons/winnow-icon.svg": "assets/favicon.svg",
-               "docs/screenshots/grid.png": "screenshots/grid.png"}
+               "docs/screenshots/grid.png": "screenshots/grid.png",
+               "docs/screenshots/triage.gif": "screenshots/triage.gif"}
 
 # The icon on each of the front page's section cards, by the group's name
 # in Home.md: a name in Material's icon set, which docs/site/hooks.py

@@ -131,6 +131,7 @@
   margin: 0;
   perspective: 80rem;
 }
+.wn-hero__shot picture,
 .wn-hero__shot img {
   display: block;
   width: 100%;
