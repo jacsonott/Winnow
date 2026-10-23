@@ -1,7 +1,9 @@
-"""Indexes an import builds up front because its shape asks for them
-(defaults/headers.json `indexes`): EventId on an EvtxECmd export, so the
-shipped dashboards' `WHERE EventId = ... GROUP BY <col>` is an index
-search even after the grid has indexed the grouped column."""
+"""Indexes an import builds up front (Store._build_import_indexes): the
+ones its shape asks for (defaults/headers.json `indexes`) — EventId on an
+EvtxECmd export, so the shipped dashboards' `WHERE EventId = ... GROUP BY
+<col>` is an index search even after the grid has indexed the grouped
+column — and a sort index on its first datetime column, so the first sort
+by time does not sort every row while that index builds."""
 
 from __future__ import annotations
 
@@ -80,3 +82,44 @@ def test_a_header_set_can_only_index_its_own_columns():
         _indexes("s", cols, {"indexes": ["C"]})
     with pytest.raises(DefaultsError, match="list"):
         _indexes("s", cols, {"indexes": "A"})
+
+
+TIMES = [["When", "Seen", "Host"]] + [
+    [f"2026-03-14 {i % 24:02d}:00:00", f"2026-03-15 {i % 24:02d}:00:00", f"H{i % 5}"] for i in range(40)
+]
+
+
+def test_the_first_datetime_column_gets_its_sort_index_at_import(store, write_csv):
+    sid = store.ingest_csv(write_csv(TIMES, "t.csv"), name="t", build_fts=False)["id"]
+    table = store.get_source(sid)["table_name"]
+    assert [c["type"] for c in store.get_source(sid)["columns"]] == ["datetime", "datetime", "text"]
+    assert store._column_index_exists(table, "When", "sort")
+    # Only the first: the others build on first use, as before.
+    assert not store._column_index_exists(table, "Seen", "sort")
+    assert not store._column_index_exists(table, "When", "filter")
+
+
+def test_the_first_sort_by_time_is_served_by_it(store, write_csv):
+    """The plan the index is there for: the view's ORDER BY walks it, with
+    no temp b-tree to sort every row in."""
+    sid = store.ingest_csv(write_csv(TIMES, "t.csv"), name="t", build_fts=False)["id"]
+    table = store.get_source(sid)["table_name"]
+    plan = " ".join(r[3] for r in store.db.execute(
+        f"EXPLAIN QUERY PLAN SELECT rid FROM {table} ORDER BY \"When\" COLLATE NOCASE ASC, rid ASC"))
+    assert store._column_index_name(table, "When", "sort") in plan and "TEMP B-TREE" not in plan, plan
+    view = store.build_view(sid, {"source_id": sid, "sort": [{"column": "When", "dir": "asc"}]})
+    rows = store.fetch_rows(view["view_id"], 0, 3)["rows"]
+    assert [r["cells"][0] for r in rows] == ["2026-03-14 00:00:00"] * 2 + ["2026-03-14 01:00:00"]
+
+
+def test_a_table_with_no_datetime_column_gets_no_sort_index(store, write_csv):
+    rows = [["Host", "User"]] + [[f"H{i}", f"u{i}"] for i in range(10)]
+    sid = store.ingest_csv(write_csv(rows, "t.csv"), name="t", build_fts=False)["id"]
+    assert _indexed(store, sid) == []
+
+
+def test_a_table_saved_from_a_view_gets_its_sort_index_too(store, write_csv):
+    sid = store.ingest_csv(write_csv(TIMES, "t.csv"), name="t", build_fts=False)["id"]
+    view = store.build_view(sid, {"filters": [{"column": "Host", "op": "equals", "value": "H1"}]})
+    new = store.save_view_as_source(view["view_id"], "h1", build_fts=False)["source"]["id"]
+    assert store._column_index_exists(store.get_source(new)["table_name"], "When", "sort")

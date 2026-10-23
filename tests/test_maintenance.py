@@ -17,9 +17,15 @@ from winnow import store as store_module
 from winnow.store import VIEWS_PREFIX, VIEWS_SUFFIX, Store, sweep_orphan_views
 
 
+def _columns(store, source_id):
+    return [ix["column"] for ix in store.list_column_indexes(source_id)]
+
+
 def test_column_index_listed_after_a_sargable_filter(ingested):
     store, source_id = ingested
-    assert store.list_column_indexes(source_id) == []
+    # The import's own (Store._build_import_indexes): a sort index on the
+    # first datetime column. Everything else waits for first use.
+    assert _columns(store, source_id) == ["Timestamp"]
     spec = {
         "source_id": source_id,
         "filters": [{"column": "EventId", "op": "equals", "value": "4624"}],
@@ -28,8 +34,8 @@ def test_column_index_listed_after_a_sargable_filter(ingested):
     store.build_view(source_id, spec)
     assert store.wait_for_column_index(source_id, "EventId", timeout=5)
     listed = store.list_column_indexes(source_id)
-    assert [ix["column"] for ix in listed] == ["EventId"]
-    assert listed[0]["building"] is False
+    assert [ix["column"] for ix in listed] == ["Timestamp", "EventId"]
+    assert listed[1]["building"] is False
 
 
 def test_column_values_triggers_an_index(ingested):
@@ -39,7 +45,7 @@ def test_column_values_triggers_an_index(ingested):
     store, source_id = ingested
     store.column_values(source_id, "Process")
     assert store.wait_for_column_index(source_id, "Process", timeout=5)
-    assert [ix["column"] for ix in store.list_column_indexes(source_id)] == ["Process"]
+    assert _columns(store, source_id) == ["Timestamp", "Process"]
 
 
 def test_group_summary_triggers_an_index_only_on_a_whole_source_view(ingested):
@@ -90,7 +96,7 @@ def test_drop_column_index_and_rebuild(ingested):
     store.column_values(source_id, "Process")
     assert store.wait_for_column_index(source_id, "Process", timeout=5)
     store.drop_column_index(source_id, "Process")
-    assert store.list_column_indexes(source_id) == []
+    assert _columns(store, source_id) == ["Timestamp"]
     # Nothing broke: the same query still answers correctly, and rebuilds it.
     assert store.column_values(source_id, "Process")
     assert store.wait_for_column_index(source_id, "Process", timeout=5)
