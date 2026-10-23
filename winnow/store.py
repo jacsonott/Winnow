@@ -11449,41 +11449,52 @@ class Store:
             ).fetchall()
         return [{"value": r["val"], "count": r["n"]} for r in rows]
 
-    def column_max_lengths(self, source_id: int) -> dict[str, int]:
+    def column_max_lengths(self, source_id: int, columns: list[str] | None = None) -> dict[str, int]:
         """MAX(LENGTH(col)) per column, across all member tables — backs the
         UI's autofit-column-width shortcut. One sequential scan per member
-        table, every column computed in a single pass.
+        table, every asked column computed in a single pass.
 
-        Cached per source — a full scan over every column of a 10M-row
-        source isn't cheap, and autofit is a button a user can click
-        repeatedly (once per column double-click, plus a "fit all" action)
-        without the underlying data changing at all between clicks. Keyed
-        on the row count AND the column list, derived columns' id and
-        status included: base columns never change after ingest
-        (invariant #1), but a derived column comes and goes, and fills in
-        behind a backfill, without the row count moving — keyed on rows
-        alone, the answer after one was added simply lacked it."""
+        `columns` narrows it to the ones being fitted: double-clicking one
+        column's edge used to measure every column of the table to answer
+        for one — 4.7 s on a 2.1M-row EvtxECmd export where the column
+        alone takes 0.1 to 1.4 s, and much less when it is indexed, since
+        then the scan reads the index instead of the table. None is every
+        column, as before; names the source does not have are left out.
+
+        Cached per source and per column — a full scan over every column
+        of a 10M-row source isn't cheap, and autofit is a button a user can
+        click repeatedly (once per column double-click, plus a "fit all"
+        action) without the underlying data changing at all between
+        clicks. Keyed on the row count AND the column list, derived
+        columns' id and status included: base columns never change after
+        ingest (invariant #1), but a derived column comes and goes, and
+        fills in behind a backfill, without the row count moving — keyed
+        on rows alone, the answer after one was added simply lacked it."""
         with self._reader() as ro, self._dropped_view_is_expired():
             src = self._source_lite_on(ro, source_id)
             key = (src["row_count"],
                    tuple((c["name"], c.get("derived_id"), c.get("derived_status"))
                          for c in src["columns"]))
-            cached = self._maxlen_cache.get(source_id)
-            if cached and cached[0] == key:
-                return cached[1]
             self._require_columns(src)
+            cached = self._maxlen_cache.get(source_id)
+            known = dict(cached[1]) if cached and cached[0] == key else {}
             cols = [c["name"] for c in src["columns"]]
-            members = self._resolve_members_on(ro, source_id)
-            sel = ", ".join(f"MAX(LENGTH({q(c)}))" for c in cols)
-            maxes = [0] * len(cols)
-            for m in members:
-                row = ro.execute(f"SELECT {sel} FROM {self._member_from(src, m)}").fetchone()
-                for i, v in enumerate(row):
-                    if v and v > maxes[i]:
-                        maxes[i] = v
-        result = {c: maxes[i] for i, c in enumerate(cols)}
-        self._maxlen_cache[source_id] = (key, result)
-        return result
+            if columns is not None:
+                asked = set(columns)
+                cols = [c for c in cols if c in asked]
+            missing = [c for c in cols if c not in known]
+            if missing:
+                members = self._resolve_members_on(ro, source_id)
+                sel = ", ".join(f"MAX(LENGTH({q(c)}))" for c in missing)
+                maxes = [0] * len(missing)
+                for m in members:
+                    row = ro.execute(f"SELECT {sel} FROM {self._member_from(src, m)}").fetchone()
+                    for i, v in enumerate(row):
+                        if v and v > maxes[i]:
+                            maxes[i] = v
+                known.update(zip(missing, maxes))
+                self._maxlen_cache[source_id] = (key, known)
+        return {c: known[c] for c in cols}
 
     # -------------------------------------------------------------------- tags
 

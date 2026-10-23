@@ -1417,6 +1417,16 @@ see [docs/notes/README.md](README.md) for the whole set.
   header can't defeat the cap either. Stored with the other per-browser
   look-and-feel prefs rather than in the layout — it's a statement about
   this screen, not about this table's columns.
+- **Autofit measures only the columns it fits.** `fetchColumnMaxLens(names)`
+  sends them as repeated `columns=` to `/api/column_maxlen`, and
+  `column_max_lengths` reads `max(length(...))` for those alone, caching
+  each column's answer per source (the cache key still carries the
+  column list, so an add or remove starts it again). Double-clicking one
+  divider used to measure every column of the table, 4.4 to 4.7 s on a
+  2.1M-row EvtxECmd table before the one width changed; it is 0.1 to
+  1.4 s now, and nothing on a second fit. Fit-all asks for the visible
+  columns only, so hidden ones cost nothing. No `columns` at all still
+  measures every column.
 - **The table menu replaced the tab strip's `▦` column-chooser button**
   (`TABLE_MENU_SECTIONS`/`openTableMenu`: press `C`, or Columns… on a
   table's right-click menu or its ⋯ in the Tables manager). Same registry
