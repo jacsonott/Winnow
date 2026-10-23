@@ -6,7 +6,7 @@ import { $, api, debounce, dragHas, el, post, toast } from './core.js';
 import { maybeOfferAssociation } from './assoc.js';
 import { openFolderBrowser } from './home.js';
 import { startJobsPoll, uploadWithProgress } from './jobs.js';
-import { ARCHIVE_IMPORT_EXTENSIONS, IIS_FORMAT_LABELS, IIS_IMPORT_TYPE, PLASO_IMPORT_EXTENSIONS, RECOGNIZED_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, extOf, iisLogFormat, importKindFor } from './merge.js';
+import { ARCHIVE_IMPORT_EXTENSIONS, IIS_FORMAT_LABELS, IIS_IMPORT_TYPE, KV_PROBE_BYTES, PLASO_IMPORT_EXTENSIONS, RECOGNIZED_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, extOf, iisLogFormat, importKindFor, kvCandidate, looksLikeKvLog } from './merge.js';
 import { renderPluginTabs, renderPluginPanelButtons } from './plugins.js';
 import { fmtBytes } from './tables.js';
 import { loadSources } from './sources.js';
@@ -107,10 +107,12 @@ export const UPLOAD_ADVISORY_BYTES = 1 << 30; // 1 GB
    the per-kind defaults live here so the entry points can't drift — a
    default that differs between a dropped file and a path-picked one is the
    kind of bug nothing surfaces until the imports disagree. `fmt` overrides
-   name routing for the Plugins panel's explicit per-format picker. */
+   name routing for the Plugins panel's explicit per-format picker, and
+   `kind` for a file recognised by its content (a key=value log, which
+   queueFiles and queuePaths ask about before they get here). */
 export let queueSeq = 0;
 
-export function queueItem(transport, name, fmt = pluginFormatFor(name)) {
+export function queueItem(transport, name, fmt = pluginFormatFor(name), kind = importKindFor(name)) {
   // qid: which item the Import dialog has chosen, kept across a reorder,
   // a removal and the dialog reopening.
   const qid = ++queueSeq;
@@ -119,7 +121,6 @@ export function queueItem(transport, name, fmt = pluginFormatFor(name)) {
              options: defaultPluginOptions(fmt), configured: false };
   }
   transport = { ...transport, qid };
-  const kind = importKindFor(name);
   return kind === 'json' ? { ...transport, name, kind, flatten_mode: 'none', flatten_depth: 1, configured: false }
     : kind === 'sqlite' || kind === 'xlsx' ? { ...transport, name, kind, tables: null, configured: false }
     // A .plaso is one file → one timeline table with nothing to configure.
@@ -127,6 +128,9 @@ export function queueItem(transport, name, fmt = pluginFormatFor(name)) {
     // An IIS log names its own columns; the preview can still pick another
     // of the three formats (log_format, null = the name's) and set types.
     : kind === 'iis' ? { ...transport, name, kind, log_format: null, column_types: null, configured: false }
+    // A key=value log names its own columns too, one per key; the preview
+    // can set their types, by name as an IIS log's.
+    : kind === 'kv' ? { ...transport, name, kind, column_types: null, configured: false }
     // An archive expands on import, then you pick files from its contents.
     : kind === 'archive' ? { ...transport, name, kind, configured: true }
     // Raw text (a log with an extension nothing else claims) is the delimited
@@ -140,20 +144,35 @@ export function queueItem(transport, name, fmt = pluginFormatFor(name)) {
    .evtx picked by mistake is refused here rather than copied up in full
    and refused on arrival. Unreadable here means "let the server say". */
 const BINARY_PROBE_BYTES = 8192;
-async function looksBinaryFile(f) {
-  try {
-    const head = new Uint8Array(await f.slice(0, BINARY_PROBE_BYTES).arrayBuffer());
-    if (head.length >= 2 && ((head[0] === 0xFF && head[1] === 0xFE) || (head[0] === 0xFE && head[1] === 0xFF))) return false;
-    return head.includes(0);
-  } catch { return false; }
+const PROBE_BYTES = Math.max(BINARY_PROBE_BYTES, KV_PROBE_BYTES);
+async function fileHead(f) {
+  try { return new Uint8Array(await f.slice(0, PROBE_BYTES).arrayBuffer()); } catch { return null; }
+}
+const utf16Bom = (head) => head.length >= 2 && ((head[0] === 0xFF && head[1] === 0xFE) || (head[0] === 0xFE && head[1] === 0xFF));
+function headLooksBinary(head) {
+  if (!head || utf16Bom(head)) return false;
+  return head.subarray(0, BINARY_PROBE_BYTES).includes(0);
+}
+/* A file's first bytes as text, for looksLikeKvLog: UTF-16 by its BOM,
+   else UTF-8 (a Windows-1252 byte the decoder can't read is not in the
+   ASCII the first line is recognised by). */
+function headText(head) {
+  if (!head) return '';
+  const bytes = head.subarray(0, KV_PROBE_BYTES);
+  const enc = utf16Bom(bytes) ? (bytes[0] === 0xFF ? 'utf-16le' : 'utf-16be') : 'utf-8';
+  return new TextDecoder(enc).decode(bytes);
 }
 
 export async function queueFiles(files) {
   let bigNamed = null, bigCount = 0;
   const skipped = [];
   for (const f of [...files]) {
-    const item = queueItem({ file: f }, f.name);
-    if (item.kind === 'text' && await looksBinaryFile(f)) { skipped.push(f.name); continue; }
+    // A name nothing claims could be a key=value log, which only its first
+    // line says (looks_like_kv_log server-side reads the same bytes).
+    const head = kvCandidate(f.name) ? await fileHead(f) : null;
+    const item = head && looksLikeKvLog(headText(head))
+      ? queueItem({ file: f }, f.name, null, 'kv') : queueItem({ file: f }, f.name);
+    if (item.kind === 'text' && headLooksBinary(head || await fileHead(f))) { skipped.push(f.name); continue; }
     if (f.size >= UPLOAD_ADVISORY_BYTES) { bigCount++; bigNamed = bigNamed || f; }
     S.importQueue.push(item);
   }
@@ -176,11 +195,25 @@ export async function queueFiles(files) {
    rules as queueFiles (plugin format by name first, then extension), same
    queue, same configure/preview steps — the transport is the only
    difference, carried as {path} instead of {file}. */
-export function queuePaths(entries) {
+export async function queuePaths(entries) {
   // No extension gate any more: a name nothing else claims queues as raw
   // text (importKindFor). A binary file is refused by the importer itself,
-  // as a job error — the server has the bytes, the browser doesn't.
-  for (const e of entries) S.importQueue.push(queueItem({ path: e.path, size: e.size }, e.name));
+  // as a job error — the server has the bytes, the browser doesn't. Which
+  // is also why the server is asked which of those are key=value logs:
+  // only the first line says. Asked once for the lot, and only when one
+  // could be; a failed ask leaves them as their names say.
+  const ask = entries.filter((e) => kvCandidate(e.name));
+  const kv = new Set();
+  if (ask.length) {
+    try {
+      const r = await post('/api/ingest/recognise', { paths: ask.map((e) => e.path) });
+      ask.forEach((e, i) => { if (r.kinds[i] === 'kv') kv.add(e); });
+    } catch { /* read as their names say */ }
+  }
+  for (const e of entries) {
+    const transport = { path: e.path, size: e.size };
+    S.importQueue.push(kv.has(e) ? queueItem(transport, e.name, null, 'kv') : queueItem(transport, e.name));
+  }
 }
 
 /* Queue files against one plugin format explicitly — bypasses filename
@@ -260,6 +293,7 @@ export function queueHint(item) {
     case 'plugin': return (pluginFormatById(item.format_id)?.label || item.format_id) + (item.configured ? ' · options set' : '');
     case 'text': return 'Text · one line per row';
     case 'iis': return `IIS log · ${IIS_FORMAT_LABELS[item.log_format || iisLogFormat(item.name)] || 'W3C'}`;
+    case 'kv': return 'Key=value log · a column per key';
     case 'json': return 'JSON · ' + (item.flatten_mode === 'full' ? 'flattened'
       : item.flatten_mode === 'depth' ? `flattened ${item.flatten_depth} deep` : 'nested kept as JSON');
     case 'sqlite': return 'SQLite · ' + (item.configured ? units(item.tables.length, 'table') : 'pick tables');
@@ -339,10 +373,10 @@ export function openImportModal() {
     const pathBtn = el('button', 'btn ghost', 'Add from this machine…');
     pathBtn.title = 'Browse the server\'s own disk and import in place — no upload copy, fastest for big files';
     pathBtn.onclick = () => {
-      openFolderBrowser(S.lastBrowsePath || undefined, (sel) => {
+      openFolderBrowser(S.lastBrowsePath || undefined, async (sel) => {
         S.lastBrowsePath = sel.dir;
         const before = queue().length;
-        queuePaths(sel.files);
+        await queuePaths(sel.files);
         if (queue()[before]) importSel = String(queue()[before].qid);
         openImportModal();
       }, () => openImportModal(), { mode: 'files', title: 'Add files from this machine' });
@@ -412,7 +446,7 @@ export function buildEmptyQueuePane(pane) {
   box.append(
     el('div', 'import-empty-title', 'Drop files here'),
     el('p', 'fb-help', 'or anywhere on the window — or add them with the buttons below. “Add from this machine…” reads a file where it is, which is the fast way for anything large.'),
-    el('p', 'fb-help', 'CSV and other delimited text, JSON and JSON Lines, SQLite, Excel, Plaso, IIS logs, and zip or tar archives each import their own way; any other text file imports one line per row.'));
+    el('p', 'fb-help', 'CSV and other delimited text, JSON and JSON Lines, SQLite, Excel, Plaso, IIS logs, key=value logs such as FortiGate’s, and zip or tar archives each import their own way; any other text file imports one line per row.'));
   pane.append(box);
 }
 
@@ -420,14 +454,19 @@ export function buildEmptyQueuePane(pane) {
    named like an IIS log can be read as delimited text too, for the log
    that was renamed or isn't what its name says; anything text-shaped can
    be read one line per row, the way out for a file that some reader
-   claims and gets wrong. Kinds with no other reading (SQLite, Excel,
-   Plaso, archives) have no switch. */
+   claims and gets wrong. Delimited and other text can be read as
+   key=value pairs, for a key=value log whose first line didn't say so
+   (only Fortinet's is recognised), and one that did can be read the other
+   two ways. Kinds with no other reading (SQLite, Excel, Plaso, archives)
+   have no switch. */
 export function readAsOptions(item) {
   const base = item.queuedAs || item;
   const delimited = ['csv', 'Delimited', 'Split into columns on a delimiter'];
   const lines = ['text', 'One line per row', 'Every line becomes one row in one column, nothing split'];
+  const kv = ['kv', 'Key=value', 'A column per key, each line’s values under its own keys (FortiGate and other Fortinet logs)'];
   switch (base.kind) {
-    case 'csv': case 'text': return [delimited, lines];
+    case 'csv': case 'text': return [delimited, lines, kv];
+    case 'kv': return [kv, delimited, lines];
     case 'json': return [['json', 'JSON', 'One row per record, its keys as columns'], lines];
     case 'iis': return [['iis', 'IIS log', 'Columns named by the log itself'], delimited, lines];
     // A plugin-claimed upload only, as the queue row's "As text" was.
@@ -448,6 +487,7 @@ export function switchKind(item, to) {
   if (to === 'text') Object.assign(item, reset, { kind: 'text', has_header: false, configured: true });
   else if (to === 'csv') Object.assign(item, reset, { kind: 'csv', configured: true });
   else if (to === 'iis') Object.assign(item, reset, { kind: 'iis', configured: false });
+  else if (to === 'kv') Object.assign(item, reset, { kind: 'kv', configured: false });
   else if (to === 'json') Object.assign(item, reset, { kind: 'json', flatten_mode: 'none', flatten_depth: 1, configured: false });
   else if (to === 'plugin') {
     Object.assign(item, reset, { kind: 'plugin', format_id: item.queuedAs.format_id, options: item.queuedAs.options, configured: false });
@@ -500,6 +540,7 @@ export function buildQueueItemPane(pane, item, changed) {
   else if (item.kind === 'text') buildLinesSettings(ctx);
   else if (item.kind === 'json') buildJsonSettings(ctx);
   else if (item.kind === 'iis') buildIisSettings(ctx);
+  else if (item.kind === 'kv') buildKvSettings(ctx);
   else if (UNIT_KINDS.includes(item.kind)) buildUnitSettings(ctx);
   else if (item.kind === 'plugin') buildPluginSettings(ctx);
   else buildFixedSettings(ctx);
@@ -648,6 +689,29 @@ export function buildIisSettings(ctx) {
     ctx.footLine(`IIS log, ${IIS_FORMAT_LABELS[format()]} · ${res.columns.length} columns · first ${n} row${n === 1 ? '' : 's'}`
       // Only W3C's columns can grow: NCSA's and native's are fixed.
       + (format() === 'w3c' && !res.complete ? ' · a #Fields: line further in can add columns' : '')
+      + encodingNote(res));
+  });
+}
+
+/* A key=value log: nothing to choose but the column types, which are kept
+   by name as an IIS log's are — a key first seen further into the file
+   adds a column ahead of Line prefix and Unparsed text (store.ingest_kv). */
+export function buildKvSettings(ctx) {
+  const { item } = ctx;
+  ctx.note('Each key becomes a column, in the order keys first appear; a value’s quotes come off. date and time are joined into a Timestamp column: UTC when every line carries a tz offset, the device’s own clock when not. Text before the first pair is kept in Line prefix, and anything else that isn’t a pair in Unparsed text.');
+  ctx.previewHead.append(el('span', 'import-preview-aside', 'Set a column’s type in its heading'));
+  previewRunner(ctx, () => fetchPreview(item, { kind: 'kv' }), (res) => {
+    const given = item.column_types && !Array.isArray(item.column_types) ? item.column_types : {};
+    const types = res.columns.map((c, i) => given[c] || res.inferred_types[i]);
+    ctx.rows.replaceChildren(previewTable(res.columns, res.sample_rows, (i) => typeSelect(types[i], (ty) => {
+      types[i] = ty;
+      item.column_types = { ...given, ...Object.fromEntries(res.columns.map((c, j) => [c, types[j]])) };
+      item.configured = true;
+      ctx.changed();
+    })));
+    const n = res.sample_rows.length;
+    ctx.footLine(`Key=value log · ${res.columns.length} columns · first ${n} row${n === 1 ? '' : 's'}`
+      + (res.complete ? '' : ' · a key further in can add columns')
       + encodingNote(res));
   });
 }
@@ -1536,7 +1600,7 @@ export async function openDirectoryImportModal(state = {}) {
             });
             pluginOk++;
           } else {
-            await post('/api/ingest/jobs/path', { path: m.path, name: base, folder_path, kind: ['json', 'plaso', 'text', 'iis'].includes(m.kind) ? m.kind : 'csv' });
+            await post('/api/ingest/jobs/path', { path: m.path, name: base, folder_path, kind: ['json', 'plaso', 'text', 'iis', 'kv'].includes(m.kind) ? m.kind : 'csv' });
           }
           ok++;
         } catch (e) {

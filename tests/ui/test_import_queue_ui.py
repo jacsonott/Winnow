@@ -30,9 +30,9 @@ def files(tmp_path):
 
 
 def _queue(page, base, *names):
-    page.evaluate("""([base, names]) => {
+    page.evaluate("""async ([base, names]) => {
       __winnow.S.importQueue = [];
-      __winnow.queuePaths(names.map((n) => ({ path: base + '/' + n, name: n })));
+      await __winnow.queuePaths(names.map((n) => ({ path: base + '/' + n, name: n })));
       __winnow.openImportModal();
     }""", [str(base), list(names)])
     page.wait_for_selector("#modal:not([hidden]) .import-pane")

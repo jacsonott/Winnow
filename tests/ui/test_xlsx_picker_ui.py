@@ -28,7 +28,7 @@ def test_sheet_picker_flow(page, tmp_path):
     path = tmp_path / "mini.xlsx"
     wb.save(path)
 
-    page.evaluate("(p) => { __winnow.S.importQueue = []; __winnow.queuePaths([{ path: p, name: 'mini.xlsx' }]); }", str(path))
+    page.evaluate("async (p) => { __winnow.S.importQueue = []; await __winnow.queuePaths([{ path: p, name: 'mini.xlsx' }]); }", str(path))
     page.evaluate("() => __winnow.openImportModal()")
     page.wait_for_selector("#modal:not([hidden])")
 
