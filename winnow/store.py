@@ -676,6 +676,47 @@ def _sqlite_has_json_each() -> bool:
 _HAS_JSON_EACH = _sqlite_has_json_each()
 
 
+# json_array takes at most SQLITE_MAX_FUNCTION_ARG arguments — 127 unless
+# the build raised it — so a page's cells go to it this many at a time
+# (Store.fetch_rows_json; a 420-column JSON import is four calls a row).
+JSON_CELLS_PER_CALL = 100
+
+
+def _cells_json_sql(cols: list[str]) -> str:
+    """The SELECT list that writes a row's cells as JSON, one json_array
+    per JSON_CELLS_PER_CALL columns; _cells_json joins what it returns.
+
+    A cell is TEXT, NULL or a BLOB, never a number: every column a page
+    reads is declared TEXT (every import path's CREATE TABLE, and each
+    derived column's ADD COLUMN), and TEXT affinity stores a number as
+    its text. That matters, because a REAL is the one value SQLite's JSON
+    writes differently from json.dumps (15 significant digits, where
+    Python writes the shortest that reads back exactly). Text it escapes
+    exactly as json.dumps(ensure_ascii=False) does, which
+    Store._sql_json_pages checks before trusting it; a BLOB it refuses,
+    and the page falls back to json.dumps, which refuses it too."""
+    return ", ".join(
+        "json_array(" + ", ".join(q(c) for c in cols[i:i + JSON_CELLS_PER_CALL]) + ")"
+        for i in range(0, len(cols), JSON_CELLS_PER_CALL))
+
+
+def _cells_json(parts: Sequence[str]) -> str:
+    """_cells_json_sql's arrays as one. Each holds at least one cell."""
+    return parts[0] if len(parts) == 1 else "[" + ",".join(p[1:-1] for p in parts) + "]"
+
+
+def _page_row_json(pos: int, source_id: int, rid: int, cells: str, tags: list[int], note: Any) -> str:
+    """One row of a page as json.dumps writes fetch_rows' dict for it, key
+    order included."""
+    return (f'{{"pos":{pos},"source_id":{source_id},"rid":{rid},"cells":{cells},'
+            f'"tags":[{",".join(map(str, tags))}],'
+            f'"note":{json.dumps(note, ensure_ascii=False, allow_nan=False)}}}')
+
+
+def _page_json(start: int, rows: Iterable[str]) -> bytes:
+    return f'{{"start":{start},"rows":[{",".join(rows)}]}}'.encode("utf-8")
+
+
 def _regexp(pattern: str, value: Any) -> bool:
     """SQLite's REGEXP. An unusable pattern RAISES (SQLite reports it as a
     failed statement): it used to swallow re.error per row, so `C:\\Users`
@@ -2827,6 +2868,8 @@ class Store:
         # unlike the width hint: see _histogram_rows_key for what may key
         # one. Under _histogram_widths_lock, newest last.
         self._histogram_results: dict[tuple, dict] = {}
+        # fetch_rows_json's one question about this SQLite (_sql_json_pages).
+        self._sql_json_ok: bool | None = None
         self._undo_seq = 0
         # Tag-change undo history. Entries are newest-last; each owns a
         # v.undo_<n> delta table listing the rows the op *actually*
@@ -11300,13 +11343,64 @@ class Store:
         cost as before); for a merged view rows are grouped by their real
         distinct member source_id (bounded by window size × member count)
         and resolved per member. Either way this stays O(window)."""
+        return self._fetch_page(view_id, start, count, as_json=False)
+
+    def fetch_rows_json(self, view_id: str, start: int, count: int) -> bytes:
+        """fetch_rows' answer as the bytes JSONResponse would send for it,
+        with the cells written by SQLite (`json_array`) rather than read
+        into Python one value at a time and written again by json.dumps.
+        GET /api/rows serves this, on every scroll.
+
+        The cells were most of a page's cost: a 5,000-row page took
+        500 ms on a 420-column JSON import and 110 ms this way, 80 ms and
+        40 ms on a 27-column EvtxECmd table (8 MB). Same bytes, which tests/test_rows_json.py holds over every
+        kind of view and of text (_cells_json_sql says why that holds).
+        Anything SQLite's JSON refuses — a BLOB, a build without JSON
+        functions or with a lower argument cap (_sql_json_pages) — is
+        answered by the fetch_rows path instead, so it fails, or not, as
+        it always did."""
+        if self._sql_json_pages():
+            try:
+                return self._fetch_page(view_id, start, count, as_json=True)
+            except sqlite3.OperationalError:
+                pass
+        return json.dumps(self.fetch_rows(view_id, start, count), ensure_ascii=False,
+                          allow_nan=False, separators=(",", ":")).encode("utf-8")
+
+    # What _sql_json_pages has SQLite write: NULL, empty, every control
+    # character, the characters json.dumps escapes, the ones it leaves
+    # alone that a JSON writer might not (DEL, the line and paragraph
+    # separators, an astral character), and enough more to fill one
+    # json_array call.
+    _SQL_JSON_PROBE = ([None, "", "".join(map(chr, range(1, 32))), '"\\/', "\x7f\u2028\u2029\U0001F600"]
+                       + [str(i) for i in range(JSON_CELLS_PER_CALL - 5)])
+
+    def _sql_json_pages(self) -> bool:
+        """Whether this SQLite writes a page's cells as json.dumps would:
+        JSON functions present (a build option before 3.38), _SQL_JSON_PROBE
+        written alike, and room for JSON_CELLS_PER_CALL arguments. Asked
+        once per Store."""
+        if self._sql_json_ok is None:
+            probe = self._SQL_JSON_PROBE
+            try:
+                with self._reader() as ro:
+                    got = ro.execute(
+                        "SELECT json_array(" + ", ".join(f"v{i}" for i in range(len(probe)))
+                        + ") FROM (SELECT " + ", ".join(f"? AS v{i}" for i in range(len(probe))) + ")",
+                        probe).fetchone()[0]
+                self._sql_json_ok = got == json.dumps(probe, ensure_ascii=False, separators=(",", ":"))
+            except sqlite3.Error:
+                self._sql_json_ok = False
+        return self._sql_json_ok
+
+    def _fetch_page(self, view_id: str, start: int, count: int, *, as_json: bool) -> dict | bytes:
         handle = self._views.get(view_id)
         if not handle:
             raise ViewExpired("View expired — rebuild it")
         if handle.get("kind") == "group_virtual":
-            return self._fetch_virtual_group_rows(handle, start, count)
+            return self._fetch_virtual_group_rows(handle, start, count, as_json)
         if handle.get("kind") == "root_virtual":
-            return self._fetch_virtual_root_rows(handle, start, count)
+            return self._fetch_virtual_root_rows(handle, start, count, as_json)
 
         with self._reader() as ro, self._dropped_view_is_expired():
             src = self._source_lite_on(ro, handle["source_id"])
@@ -11323,10 +11417,10 @@ class Store:
             for r in vrows:
                 by_source.setdefault(r["source_id"], []).append(r["rid"])
 
-            cellmap: dict[tuple[int, int], tuple] = {}
+            cellmap: dict[tuple[int, int], Any] = {}
             tags: dict[tuple[int, int], list[int]] = {}
             notes: dict[tuple[int, int], str] = {}
-            sel = ", ".join(q(c) for c in cols)
+            sel = _cells_json_sql(cols) if as_json else ", ".join(q(c) for c in cols)
             for sid, rids in by_source.items():
                 member_src = self._source_lite_on(ro, sid)
                 ph = ",".join("?" * len(rids))
@@ -11337,7 +11431,7 @@ class Store:
                     # order — tuple(row) is one C-level copy, vs a
                     # per-cell name lookup for row[c]
                     t = tuple(row)
-                    cellmap[(sid, t[0])] = t[1:]
+                    cellmap[(sid, t[0])] = _cells_json(t[1:]) if as_json else t[1:]
                 for rid, tid in ro.execute(
                     f"SELECT rid, tag_id FROM row_tags WHERE source_id=? AND rid IN ({ph})",
                     [sid, *rids],
@@ -11349,6 +11443,13 @@ class Store:
                 ):
                     notes[(sid, rid)] = note
 
+        if as_json:
+            missing = "[" + ",".join(['""'] * len(cols)) + "]"
+            return _page_json(start, (
+                _page_row_json(r["pos"] - 1, r["source_id"], r["rid"],
+                               cellmap.get((r["source_id"], r["rid"]), missing),
+                               tags.get((r["source_id"], r["rid"]), []), notes.get((r["source_id"], r["rid"])))
+                for r in vrows))
         out = []
         for r in vrows:
             key = (r["source_id"], r["rid"])
@@ -11362,7 +11463,8 @@ class Store:
             })
         return {"start": start, "rows": out}
 
-    def _fetch_virtual_group_rows(self, handle: dict, start: int, count: int) -> dict:
+    def _fetch_virtual_group_rows(self, handle: dict, start: int, count: int,
+                                  as_json: bool = False) -> dict | bytes:
         """Pages a small, ungathered group directly with LIMIT/OFFSET —
         expand_group only chooses this path for a single-source (non-merge)
         group under GROUP_MATERIALIZE_THRESHOLD, so `handle['members']`
@@ -11378,7 +11480,7 @@ class Store:
             self._require_columns(src)
             cols = [c["name"] for c in src["columns"]]
             where_sql, where_params = self._virtual_group_where(handle, ro)
-            sel = ", ".join(q(c) for c in cols)
+            sel = _cells_json_sql(cols) if as_json else ", ".join(q(c) for c in cols)
 
             rows = ro.execute(
                 f"SELECT rid, {sel} FROM {self._from_clause(src)} WHERE {where_sql} "
@@ -11399,6 +11501,10 @@ class Store:
                 ):
                     notes[rid] = note
 
+        if as_json:
+            return _page_json(start, (
+                _page_row_json(start + i, sid, r[0], _cells_json(tuple(r)[1:]), tags.get(r[0], []), notes.get(r[0]))
+                for i, r in enumerate(rows)))
         out = []
         for i, r in enumerate(rows):
             t = tuple(r)
@@ -11412,7 +11518,8 @@ class Store:
             })
         return {"start": start, "rows": out}
 
-    def _fetch_virtual_root_rows(self, handle: dict, start: int, count: int) -> dict:
+    def _fetch_virtual_root_rows(self, handle: dict, start: int, count: int,
+                                 as_json: bool = False) -> dict | bytes:
         """Pages the source table directly by rid *range* — no v.view_N to
         build, since an unfiltered/unsorted root_virtual view is, by
         construction, every row of the source in its natural (already
@@ -11435,7 +11542,7 @@ class Store:
             # arrangement on purpose; the grid does its own ordering client-side.
             self._require_columns(src)
             cols = [c["name"] for c in src["columns"]]
-            sel = ", ".join(q(c) for c in cols)
+            sel = _cells_json_sql(cols) if as_json else ", ".join(q(c) for c in cols)
 
             # _from_clause adds the derived-value sidecar join only when the
             # source has derived columns, and that join is on drv's INTEGER
@@ -11460,6 +11567,11 @@ class Store:
                 ):
                     notes[rid] = note
 
+        if as_json:
+            # rid - 1: contiguous rids make this exact
+            return _page_json(start, (
+                _page_row_json(r[0] - 1, sid, r[0], _cells_json(tuple(r)[1:]), tags.get(r[0], []), notes.get(r[0]))
+                for r in rows))
         out = []
         for i, r in enumerate(rows):
             t = tuple(r)

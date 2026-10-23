@@ -1413,6 +1413,27 @@ see [docs/notes/README.md](README.md) for the whole set.
     overhead on payloads that are already plain str/int/None) and go
     straight to json.dumps. `/api/rows` dropped ~62–77%. Anything these
     endpoints return must stay JSON-native types.
+  - **`/api/rows` goes one step further: SQLite writes the cells.**
+    `Store.fetch_rows_json` selects `json_array(col, ...)` per row and
+    splices the arrays into the page as text, so a cell is never read
+    into Python at all — a 5,000-row page of a 420-column JSON import
+    went from ~500ms to ~110ms, a 27-column EvtxECmd one from 80ms to
+    40ms, same bytes. Three things make that safe, and each is a test in
+    tests/test_rows_json.py: (1) SQLite escapes text exactly as
+    `json.dumps(ensure_ascii=False)` does, which `_sql_json_pages` checks
+    once per Store against a probe of the awkward characters before
+    trusting it; (2) it writes a REAL with 15 significant digits where
+    Python writes the shortest round-trip, and that cannot reach a page
+    because every column a page reads is declared TEXT (TEXT affinity
+    stores a number as its text) — **a non-TEXT grid column would
+    change the bytes**, so keep the coldefs TEXT or give such a column a
+    guard; (3) `json_array` takes at most 127 arguments
+    (SQLITE_MAX_FUNCTION_ARG), so cells go 100 to a call
+    (`JSON_CELLS_PER_CALL`) and the arrays are joined. A BLOB (which
+    SQLite's JSON refuses), a build without JSON functions, or a lower
+    argument cap all fall back to `fetch_rows` + `json.dumps`, so they
+    fail, or not, exactly as before. `fetch_rows` itself still returns
+    dicts for every other caller.
   - `tag_positions` fast-exits via one indexed `row_tags` probe per
     member before the join — the join's only plan is a full scan of the
     view probing row_tags per row (~115ms per 2M view rows even with
