@@ -165,18 +165,29 @@ def test_the_grids_keys_move_the_line_open_it_and_let_it_go(page, two_hosts):
 
 def test_opening_a_line_and_coming_back_lands_on_that_line(page, two_hosts):
     _open_timeline(page)
-    _line(page, DC_PRIV).locator(".tl-col-body").dblclick()
+    # Until the grid asks where the row is, the open is still under way:
+    # S.activeTab is 'grid' while the table loads, and the grid tab is
+    # shown only after, so a Timeline clicked open in between was hidden
+    # again under the asserts below (#timelineBody with no box).
+    with page.expect_response(lambda r: "/api/row_position?" in r.url
+                              and f"&source_id={two_hosts['dc']}&" in r.url):
+        _line(page, DC_PRIV).locator(".tl-col-body").dblclick()
     page.wait_for_function(
         "(id) => __winnow.S.activeTab === 'grid' && __winnow.S.sourceId === id", arg=two_hosts["dc"])
     page.locator("#tabTimeline").click()
-    # The tab rebuilds on the way in; the line is found again in the new view.
+    # The tab rebuilds on the way in; the line is found again in the new
+    # view, picked, and in sight. Measured in the page in one go, not by
+    # two bounding_box calls: the list repaints its rows whenever a page
+    # or the details pane's answer lands, and a repaint between the two
+    # calls left the first measuring a detached line (None).
     page.wait_for_function("""(ts) => {
-        const n = document.querySelector('#timelineRows .timeline-row.selected .tl-col-ts');
-        return n && n.textContent === ts; }""", arg=DC_PRIV, timeout=10_000)
+        const n = document.querySelector('#timelineRows .timeline-row.selected');
+        if (!n || n.querySelector('.tl-col-ts').textContent !== ts) return false;
+        const body = document.getElementById('timelineBody').getBoundingClientRect();
+        const line = n.getBoundingClientRect();
+        return body.height > 0 && body.top <= line.top && line.bottom <= body.bottom; }""",
+                           arg=DC_PRIV, timeout=10_000)
     assert _selected_ts(page) == DC_PRIV
-    box = _line(page, DC_PRIV).bounding_box()
-    body = page.locator("#timelineBody").bounding_box()
-    assert body["y"] <= box["y"] and box["y"] + box["height"] <= body["y"] + body["height"]
 
 
 def test_the_open_mark_opens_the_row_in_its_table(page, two_hosts):

@@ -2193,8 +2193,9 @@ see [docs/notes/README.md](README.md) for the whole set.
     the edge jumps) to `timelineKey` while the Timeline is the page
     showing, plus Enter from the list itself, and Escape to
     `clearTimelineSelection`. A rebinding in Settings moves this list
-    too. The digits do NOT tag the selected line (yet) — the tag chips
-    still carry no hotkey, as the next entry says.
+    too. The digits tag the selected line (`tagTimelineLine`, see the
+    details pane entry below); the header's tag chips still carry no
+    hotkey, since they filter rather than tag.
   - **Clicks are delegated on `#timelineRows`** (invariant #6), and a
     click that picks a line on screen moves the `.selected` class rather
     than repainting: a repaint replaces the node under the pointer, and a
@@ -2254,6 +2255,42 @@ see [docs/notes/README.md](README.md) for the whole set.
   hundreds were a pixel tall on a linear scale); the hover gives each
   bar's real count. `timelineOverviewX` is what the strip paints with and
   what `tests/ui/test_timeline_overview_strip.py` clicks by.
+
+- **The Timeline's details pane** (timelinepane.js) shows the selected
+  line in full and is where "What else happened then" lives:
+  - **It does not open on a click.** It is always there (until Details
+    or its ✕ puts it away, remembered in `winnow.timelinePane`), empty
+    with nothing selected. A first version opened on the first click and
+    closed on Esc; opening narrowed the list under the pointer, so the
+    second click of a double-click landed on whatever had moved there
+    and the row never opened. `tests/ui/test_timeline_pane.py` asserts
+    `#timelineBody`'s box is the same before and after a pick, and
+    test_timeline_lines.py's double-click is the one that caught it.
+  - **It follows `S.timeline.sel`, cheaply.** `syncTimelinePane` runs on
+    every `renderTimelineRows` (so every scroll frame) and only redraws
+    when the selected row changes or its page object does; the row is
+    asked for (`GET /api/timeline_row`) debounced, so holding j does not
+    fetch every line it passes. After a rebuild `refreshTimelinePane`
+    asks again but keeps the old row on screen until the answer lands,
+    so a tag key does not blink the pane to "Loading…".
+  - **A redraw keeps the note being typed**: the textarea is rebuilt
+    with the pending text and the caret put back. A pending note is
+    saved before the pane takes another row (`flushTimelineNote`), so
+    moving on with j never drops one.
+  - **Tagging is one pair through `/api/row_tags`**, which journals it
+    (invariant #7), then the usual clearRowCaches / regroup / undo-state
+    refresh and a Timeline rebuild. The digits route here only on the
+    Timeline tab with a line selected; `undoLastTagChange` rebuilds the
+    Timeline when it is the tab showing.
+  - **Values are shown as stored.** The grid's detail pane formats a
+    datetime column with the open table's display format (`displayCell`
+    reads `S.columns`); this pane's row is from any table, usually not
+    the open one, so it does not.
+  - **The rows around a finding** are `S.timeline.context` (`{minutes,
+    around, start, end}`, reset on a case switch), posted as
+    `build_timeline`'s `context`. They come back with `ctx` set and get
+    `.ctx` (hatched, faded, ○ in the gutter). The header's count is the
+    findings (`row_count - context_rows`); the chip carries the rest.
 
 - **The Timeline's tag filter is the grid's tag chips** (`.tag-chip`,
   renderTimelineTagFilter). It asks what the ribbon asks, from the same

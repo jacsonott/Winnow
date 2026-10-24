@@ -285,6 +285,12 @@ function renderLegend(by) {
     item.title = `${n.toLocaleString()} line${n === 1 ? '' : 's'} whose first tag is ${t.name}`;
     ui.legend.append(item);
   }
+  if (per.ctx) {
+    const item = el('span', 'tl-ov-item tl-ov-ctx');
+    item.append(el('span', 'swatch'), el('span', null, 'Untagged'), el('span', 'tl-chip-n', per.ctx.toLocaleString()));
+    item.title = `${per.ctx.toLocaleString()} untagged line${per.ctx === 1 ? '' : 's'} around a finding`;
+    ui.legend.append(item);
+  }
 }
 
 /* The stretch of time the Timeline is narrowed to, as a chip whose ✕
@@ -367,7 +373,8 @@ function layers(by, t) {
     return S.sources.filter((s) => kinds.has(s.id)).map((s) => [String(s.id),
       t.cs.getPropertyValue(`--series-${kinds.get(s.id).slot}`).trim() || t.dim]);
   }
-  return S.tags.map((tg) => [String(tg.id), tg.color]);
+  // The untagged rows around a finding (timelinepane.js) on top, grey.
+  return [...S.tags.map((tg) => [String(tg.id), tg.color]), ['ctx', t.dim]];
 }
 
 export function paintTimelineOverview() {
@@ -595,7 +602,8 @@ function barTitle(bar) {
   const t0 = o.start + bar.b * o.width;
   const name = o.by === 'tables'
     ? (k) => { const kk = timelineKinds().get(Number(k)); return kk ? (kk.host ? `${kk.kind} · ${kk.host}` : kk.kind) : k; }
-    : (k) => (S.tags.find((tg) => String(tg.id) === k) || {}).name || 'a tag since deleted';
+    : (k) => (k === 'ctx' ? 'Untagged'
+      : (S.tags.find((tg) => String(tg.id) === k) || {}).name || 'a tag since deleted');
   return `${dayOf(t0)} ${clock(t0)} – ${clock(t0 + o.width)} · ${bar.n.toLocaleString()} line${bar.n === 1 ? '' : 's'}\n`
     + Object.entries(bar.split).map(([k, n]) => `${name(k)}: ${n.toLocaleString()}`).join('\n');
 }

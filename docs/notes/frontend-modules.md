@@ -67,7 +67,7 @@ split, found by loading the app:
 | `filters` `filterbuilder` `savedfilters` `timeframe` `filterundo` | quick filters and the value picker; the guided tree; saved filters and nicknames; timeframe and jump-to-timestamp; undoing a filter change (`z`) |
 | `grouping` `tags` `rowmenu` `detail` | group-by; tagging and undo; the row right-click menu; the detail pane |
 | `sources` `importer` `merge` `tables` | sources/tabs/sidebar; every import path; the merge builder; the Tables manager |
-| `search` `sql` `timeline` `timelineoverview` `session` `plugins` | toolbar + search-all; the SQL pane; the timeline tab and its overview strip; session files; the plugin host frontend |
+| `search` `sql` `timeline` `timelineoverview` `timelinepane` `session` `plugins` | toolbar + search-all; the SQL pane; the timeline tab, its overview strip and its details pane; session files; the plugin host frontend |
 | `pluginmanager` `bundles` `profilebuilder` | the two-pane plugins manager (and the one-line Settings section that opens it); the profiles manager; the profile builder |
 | `histogram` | the built-in histogram strip between the toolbar and the grid — the time-proportional canvas, the brush that writes the timeframe filter, the `winnow.histogram` prefs; shares `#pluginPanels` with plugin toolbar panels (see [ui.md](ui.md)) |
 | `ui` `keymap` `settings` `home` | modal/dialog/menu primitives; keybindings; the Settings modal; the home screen and `boot()` |

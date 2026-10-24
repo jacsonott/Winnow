@@ -5482,6 +5482,7 @@ class TimelineBuild(BaseModel):
     op_token: str | None = None
     ts_range: list[str] | None = None        # [start, end), the overview strip's drag
     exclude_sources: list[int] = []          # tables switched off on the strip
+    context: list[str] | None = None         # [start, end) of the rows around a finding
 
 
 @app.post("/api/timeline")
@@ -5489,7 +5490,8 @@ def api_timeline_build(body: TimelineBuild):
     try:
         return store().build_timeline(_resolve_timeline_configs(), body.tag_ids or None,
                                       op_token=body.op_token, ts_range=body.ts_range,
-                                      exclude_sources=body.exclude_sources or None)
+                                      exclude_sources=body.exclude_sources or None,
+                                      context=body.context)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -5500,6 +5502,15 @@ def api_timeline_rows(view_id: str, start: int = 0, count: int = 200):
         return JSONResponse(store().fetch_timeline_rows(view_id, start, count))
     except KeyError as e:
         raise HTTPException(409, str(e))
+
+
+@app.get("/api/timeline_row")
+def api_timeline_row(source_id: int, rid: int):
+    """A Timeline line's row in full, tags and note included, for the
+    Timeline's detail pane (Store.timeline_row). A table that has gone
+    answers 404 through the KeyError handler; so does a rid it never had
+    (RecordGone)."""
+    return store().timeline_row(source_id, rid)
 
 
 @app.get("/api/timeline_overview")

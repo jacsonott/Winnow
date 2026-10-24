@@ -52,7 +52,7 @@ What a digit key acts on depends on what is selected (selection is covered in [W
 
 The key is a toggle, and the first row of the selection decides the direction: if that row already has the tag, the key removes it from every selected row; otherwise it adds it to every selected row. Anything of 10,000 rows or more asks first (*Tag 12,000 selected rows as "TA"?*). A toast confirms what happened, for example *Tagged 4 rows · Suspicious*.
 
-The keys work on the grid page. In the [SQL pane](SQL-pane.md) they tag the selected result rows when the query returns rows of a real table.
+The keys work on the grid page. In the [SQL pane](SQL-pane.md) they tag the selected result rows when the query returns rows of a real table. On the [Timeline](Timeline-search-and-watchlist.md#the-details-pane) they tag the selected line, and a second press takes the tag off again.
 
 **From the right-click menu.** Right-click a row and open **Tag this row**: each tag is listed with its key, and a ✓ against the tags the clicked row carries. Clicking a tag toggles it, and the menu stays open so you can apply several in a row. Right-clicking inside a selection acts on the whole selection; right-clicking a row outside it acts on that row alone and leaves the selection as it was. Drag a tag (or click its ☆) to pin it to the top level of the menu, where it stays in this browser.
 
@@ -113,7 +113,7 @@ Undo restores exactly the rows a change moved, not the rows you aimed it at. Tag
 
 What it covers and what it does not:
 
-- **Covered**: the digit keys, `Shift`+digit, the right-click menu, tagging a group and tagging rows in the SQL pane.
+- **Covered**: the digit keys, `Shift`+digit, the right-click menu, tagging a group, tagging rows in the SQL pane and tagging a line on the Timeline.
 - **Not covered**: row notes, renaming or recolouring tags, and tags a [watchlist](Timeline-search-and-watchlist.md#auto-tagging) scan applies.
 - **Cleared**: deleting a tag drops its entries from the history; removing a table drops the entries that touched it; loading a session or **Start a fresh pass…** clears the whole history (see [Sessions and export](Sessions-and-export.md#loading-a-session)).
 

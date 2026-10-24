@@ -184,6 +184,9 @@ def test_the_strip_can_be_put_away_and_stays_away(page, two_hosts):
     assert page.locator("#timelineOverview").is_hidden()
     page.reload()
     page.wait_for_selector("#tabTimeline", state="visible")
+    # Boot reopens the case's table after #tabTimeline shows; the Timeline
+    # opened before it lands would be hidden again under the test.
+    page.wait_for_function("() => window.__winnow && __winnow.S.view", timeout=30_000)
     page.locator("#tabTimeline").click()
     page.wait_for_function("() => (__winnow.S.timeline.view || {}).row_count === 63", timeout=10_000)
     assert page.locator("#timelineOverview").is_hidden()
