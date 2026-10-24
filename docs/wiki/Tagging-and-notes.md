@@ -126,7 +126,7 @@ A row note is a sentence or two on one row: why it matters, what it led to.
 1. Open the row in the detail pane — double-click it, or press `d`.
 2. Type in the **Note** box at the bottom of the pane (*Why does this row matter?*). `n` puts the cursor there while the pane is open.
 
-The note saves itself shortly after you stop typing, and **Saved** appears under the box. Moving to another row before then still saves it on the row you typed it on. Clearing the box deletes the note. A row with a note shows ✎ in its gutter, on the grid and on the Timeline (hover it there to read the note). Each row has one note; on a merged table it is written on the member table's row.
+The note saves itself shortly after you stop typing, and **Saved** appears under the box. Moving to another row before then still saves it on the row you typed it on. Clearing the box deletes the note. A row with a note shows ✎ in its gutter, on the grid and on the Timeline (hover it there to read the note). On the Timeline the note is also written into the row's line, after what happened. Each row has one note; on a merged table it is written on the member table's row.
 
 Row notes travel with tags in session files. `Ctrl+Z` does not undo them.
 

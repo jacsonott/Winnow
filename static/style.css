@@ -1870,7 +1870,14 @@ textarea:focus { border-color: var(--accent); outline: none; }
    own so nothing that finds that strip's parts by class finds these. */
 .tl-overview { background: var(--panel); border-bottom: 1px solid var(--line-2); flex: 0 0 auto; }
 .tl-overview[hidden] { display: none; }
-#btnTimelineOverview[aria-pressed="true"], #btnTimelinePane[aria-pressed="true"] { color: var(--accent); border-color: var(--accent-dim); }
+/* The header's switches (Fold repeats, Overview, Details) when on. A tint,
+   not .btn[aria-pressed]'s fill: that rule's --accent-dim background kept
+   under this rule's --accent text, which on the light themes was gold on
+   gold, unreadable. */
+#btnTimelineOverview[aria-pressed="true"], #btnTimelinePane[aria-pressed="true"],
+#btnTimelineFold[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--text); border-color: var(--accent-dim);
+}
 .tl-ov-head {
   display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; padding: 4px 10px 0;
   font-size: 11px; color: var(--dim);
@@ -1922,6 +1929,7 @@ textarea:focus { border-color: var(--accent); outline: none; }
    the row in its table. */
 .tl-col-gutter { flex: 0 0 46px; }
 .tl-col-ts { flex: 0 0 190px; }
+.tl-col-gap { flex: 0 0 74px; }
 .tl-col-type { flex: 0 0 214px; }
 .tl-col-body { flex: 1 1 auto; }
 .timeline-body { position: relative; flex: 1 1 auto; min-height: 0; overflow: auto; outline: none; }
@@ -1978,11 +1986,15 @@ textarea:focus { border-color: var(--accent); outline: none; }
    where. Each clips itself — text-overflow on the flex container above
    only ever applied to the bare text node the cell used to hold. */
 .timeline-row .tl-col-body > span { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-.timeline-row .tl-lead { flex: 0 1 auto; color: var(--text); }
-/* Shrinks ~20x faster than the lead, so a narrow Timeline eats into the
-   identifying fields rather than truncating the event itself. The extra
-   margin is on top of the cell's 6px gap: at this size one gap reads as a
-   word space and runs the lead into the first detail. */
+/* What happened keeps its own width, up to just over half the cell, and
+   the rest of the line (the note, then who and where) gets what is left:
+   with the details pane open the Body column is narrow, and a lead that
+   shrank with the others came out as "PowerShell script…". */
+.timeline-row .tl-lead { flex: 0 0 auto; max-width: 55%; color: var(--text); }
+/* Shrinks ~5x faster than the note, so a narrow Timeline eats into the
+   identifying fields first. The extra margin is on top of the cell's 6px
+   gap: at this size one gap reads as a word space and runs the lead into
+   the first detail. */
 .timeline-row .tl-detail { flex: 0 20 auto; color: var(--dim); margin-left: 6px; }
 .timeline-row .tl-raw { flex: 0 1 auto; }
 /* At the line's right edge, and only on the line under the mouse or the
@@ -1997,6 +2009,36 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .timeline-row:hover .tl-raw-toggle, .timeline-row.selected .tl-raw-toggle,
 .timeline-row .tl-raw-toggle:focus-visible, .timeline-row .tl-raw-toggle[aria-pressed="true"] { opacity: 1; }
 .timeline-row .tl-raw-toggle:hover { color: var(--text); border-color: var(--accent); }
+/* The Timeline read as a story (timelineRowNode's `story`): the day once,
+   at its first line, over a solid rule; then each line's time of day; the
+   gap since the line above, bold over a dashed rule from half an hour.
+   The rules are borders, inside the row's fixed height (border-box), so
+   they cost the virtual list nothing. */
+.timeline-row .tl-col-ts .tl-day {
+  font-family: var(--ui); font-size: 11px; font-weight: 600; color: var(--accent); white-space: nowrap;
+  margin-right: 8px; flex: 0 0 auto;
+}
+.timeline-row .tl-col-ts .tl-time { margin-left: auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.timeline-row.day-start .tl-time { color: var(--text); }
+.timeline-row .tl-col-gap { justify-content: flex-end; font-family: var(--mono); font-size: 11px; color: var(--text-faint); }
+.timeline-row .tl-col-gap.long { color: var(--num); font-weight: 600; }
+.timeline-row.gap { border-top: 1px dashed var(--line-2); }
+.timeline-row.day-start { border-top: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line-2)); }
+/* A folded run (Fold repeats): ×N before what happened, its first and
+   last times after; "fold" on the first line of a run opened again. */
+.timeline-row .tl-col-body > .tl-fold {
+  flex: 0 0 auto; font: 600 10.5px var(--mono); line-height: 16px; padding: 0 6px; border-radius: 9px;
+  cursor: pointer; color: var(--accent-fg); background: var(--accent); border: 0; overflow: visible;
+}
+.timeline-row .tl-col-body > .tl-fold:hover { filter: brightness(1.1); }
+.timeline-row .tl-col-body > .tl-fold.open {
+  color: var(--accent); background: transparent; border: 1px solid var(--accent-dim); font-weight: 500;
+}
+.timeline-row .tl-span { flex: 0 30 auto; color: var(--dim); font-size: 11px; white-space: nowrap; }
+/* The row's note, said in the line it belongs to. */
+.timeline-row .tl-note {
+  flex: 0 4 auto; color: var(--kw); font-family: var(--ui); font-style: italic; font-size: 12px; white-space: nowrap;
+}
 .timeline-empty { padding: 40px 20px; text-align: center; color: var(--dim); font-size: 13px; }
 /* A row around a finding (timelinepane.js): on the Timeline because of
    when it happened, not because anyone tagged it, so it reads as

@@ -124,6 +124,8 @@ export async function buildTimeline() {
         tag_ids: tagIds, op_token: token, ts_range: S.timeline.range,
         exclude_sources: [...S.timeline.sourcesOff],
         context: ctx ? [ctx.start, ctx.end] : null,
+        // Runs of repeats on one line, less the runs opened (fillTimelineBody).
+        fold: timelineFoldOn(), unfold: S.timeline.unfold,
       });
     } finally {
       disarmCancel();
@@ -139,9 +141,12 @@ export async function buildTimeline() {
   S.timeline.view = v;
   $('timelineSpacerY').style.height = spacerPx(v.row_count) + 'px';
   // The untagged rows around a finding are said by their own chip
-  // (renderTimelineContextChip), so the count here stays the findings.
-  const findings = v.row_count - (v.context_rows || 0);
-  $('timelineStats').innerHTML = `<b>${findings.toLocaleString()}</b> tagged row${findings === 1 ? '' : 's'}`;
+  // (renderTimelineContextChip), so the count here stays the findings —
+  // rows, and the lines they take when runs of repeats are folded.
+  const findings = (v.rows ?? v.row_count) - (v.context_rows || 0);
+  const lines = v.row_count - (v.context_rows || 0);
+  $('timelineStats').innerHTML = `<b>${findings.toLocaleString()}</b> tagged row${findings === 1 ? '' : 's'}`
+    + (lines < findings ? ` in <b>${lines.toLocaleString()}</b> line${lines === 1 ? '' : 's'}` : '');
   // Tables switched off on the overview strip hide in its Tables view, so
   // the count says it is short of them wherever the strip is.
   const tagged = S.sources.filter((s) => s.tagged_row_count && !s.is_merge);
@@ -198,7 +203,9 @@ async function keepTimelinePlace(v, reqId) {
   }
   if (reqId !== S.timeline.reqId) return;
   if (!at) { S.timeline.sel = null; body.scrollTop = 0; return; }
-  S.timeline.sel = at.exact ? { ...sel, pos: at.pos } : null;
+  // A row folded into a run (Fold repeats) picks the run's line, which
+  // learns its row when its page is painted (renderTimelineRows).
+  S.timeline.sel = at.exact ? { ...sel, pos: at.pos } : at.folded ? { pos: at.pos, rid: null } : null;
   body.scrollTop = rScroll(body, v.row_count, at.pos * ROW_H - body.clientHeight / 3);
 }
 
@@ -268,7 +275,7 @@ export function renderTimelineRows() {
     // A line picked by key before its page arrived (End on a long
     // Timeline) learns which row it is once the page is here.
     if (r && sel && sel.pos === pos && sel.rid == null) Object.assign(sel, lineOf(pos, r));
-    const row = timelineRowNode(r, tagColor, fillTimelineBody, { open: true });
+    const row = timelineRowNode(r, tagColor, fillTimelineBody, { open: true, story: true });
     row.dataset.pos = pos;
     if (sel && sel.pos === pos) row.classList.add('selected');
     frag.append(row);
@@ -292,11 +299,39 @@ export function renderTimelineRows() {
 
    A row around a finding (r.ctx: untagged, on the Timeline because of
    the window timelinepane.js asked for) is hatched, with ○ where its tag
-   stripes would be. */
-export function timelineRowNode(r, tagColor, fillBody, { open = false } = {}) {
+   stripes would be.
+
+   `story` is the Timeline's own list, read as a story rather than a
+   table: the day said once, at the first line of each day, over a solid
+   rule, and each line's time of day after it; a Gap column, the time
+   since the line above, with a dashed rule over a gap of half an hour or
+   more (TIMELINE_LONG_GAP) and the gap itself bold. The server works out
+   both (gap, new_day), since the line above the first line of a page is
+   on another page. The full timestamp stays the cell's title and the
+   row's data-ts. Configure tables…' preview leaves `story` out and keeps
+   the plain timestamp, since its lines are samples, not neighbours. */
+export function timelineRowNode(r, tagColor, fillBody, { open = false, story = false } = {}) {
   const row = el('div', 'timeline-row' + (r ? (r.ctx ? ' ctx' : '') : ' pending'));
   const gutter = el('div', 'tl-col-gutter');
-  const tsCell = el('div', 'tl-col-ts', r ? (r.ts || '—') : '');
+  const tsCell = el('div', 'tl-col-ts', r && !story ? (r.ts || '—') : '');
+  const gapCell = story ? el('div', 'tl-col-gap') : null;
+  if (r && story) {
+    row.dataset.ts = r.ts || '';
+    if (r.new_day) {
+      row.classList.add('day-start');
+      tsCell.append(el('span', 'tl-day', timelineDayLabel(r.ts)));
+    }
+    tsCell.append(el('span', 'tl-time', r.ts ? r.ts.slice(11) : '—'));
+    tsCell.title = r.ts || 'No timestamp';
+    if (r.gap != null) {
+      gapCell.textContent = timelineGap(r.gap);
+      gapCell.title = `${timelineGap(r.gap).slice(1)} after the line above`;
+      if (r.gap >= TIMELINE_LONG_GAP) {
+        gapCell.classList.add('long');
+        if (!r.new_day) row.classList.add('gap');
+      }
+    }
+  }
   const typeCell = el('div', 'tl-col-type');
   if (r) {
     if (r.ctx) {
@@ -327,8 +362,53 @@ export function timelineRowNode(r, tagColor, fillBody, { open = false } = {}) {
   }
   const bodyCell = el('div', 'tl-col-body');
   if (r) fillBody(bodyCell, r);
-  row.append(gutter, tsCell, typeCell, bodyCell);
+  row.append(...(story ? [gutter, tsCell, gapCell, typeCell, bodyCell] : [gutter, tsCell, typeCell, bodyCell]));
   return row;
+}
+
+// A gap of at least this many seconds is drawn as a break in the story.
+export const TIMELINE_LONG_GAP = 30 * 60;
+
+/* "+40s", "+2m 17s", "+2h 31m", "+3d 4h": the Gap column. */
+export function timelineGap(sec) {
+  const parts = (big, bigUnit, small, smallUnit) => `+${big}${bigUnit}${small ? ` ${small}${smallUnit}` : ''}`;
+  if (sec < 60) return `+${Math.max(0, sec)}s`;
+  if (sec < 3600) return parts(Math.floor(sec / 60), 'm', sec % 60, 's');
+  if (sec < 86400) return parts(Math.floor(sec / 3600), 'h', Math.floor((sec % 3600) / 60), 'm');
+  return parts(Math.floor(sec / 86400), 'd', Math.floor((sec % 86400) / 3600), 'h');
+}
+
+/* ------------------------------------------------------- folded repeats
+
+   Fold repeats (in the header, remembered per browser like Overview)
+   asks build_timeline for a run of three or more lines in a row from one
+   table, with one summary and one first tag, on one line. The line says
+   ×N, and a click on that opens the run (S.timeline.unfold, by the run's
+   first row; the click is the list's, delegated like ⤢); its first line
+   then says "fold" to put it back. Off by
+   default: every line on the Timeline is a row somebody tagged, and a
+   fold the analyst did not ask for is findings they cannot see. */
+export const TIMELINE_FOLD_KEY = 'winnow.timelineFold';
+
+export function timelineFoldOn() {
+  try { return !!(JSON.parse(localStorage.getItem(TIMELINE_FOLD_KEY) || '{}') || {}).on; } catch { return false; }
+}
+
+export function toggleTimelineFold(on = !timelineFoldOn()) {
+  try { localStorage.setItem(TIMELINE_FOLD_KEY, JSON.stringify({ on })); } catch { /* private window */ }
+  S.timeline.unfold = [];
+  renderTimelineFoldButton();
+  buildTimeline();
+}
+
+export function renderTimelineFoldButton() {
+  $('btnTimelineFold').setAttribute('aria-pressed', String(timelineFoldOn()));
+}
+
+function setRunOpen(r, open) {
+  const others = S.timeline.unfold.filter(([a, b]) => !(a === r.source_id && b === r.rid));
+  S.timeline.unfold = open ? [...others, [r.source_id, r.rid]] : others;
+  buildTimeline();
 }
 
 /* What kind of table a line came from, and which one: the Type column.
@@ -526,7 +606,23 @@ export function fillTimelineBody(cell, r) {
   const summarised = !!(r.lead || r.detail);
   const key = `${r.source_id}:${r.rid}`;
   const showRaw = !summarised || S.timeline.raw.has(key);
+  if (r.n > 1) {
+    const fold = el('button', 'tl-fold', `×${r.n}`);
+    fold.type = 'button';
+    fold.title = `${r.n} rows in a row from this table with this summary and first tag, `
+      + `${r.ts ? r.ts.slice(11, 19) : ''} to ${r.ts_last ? r.ts_last.slice(11, 19) : ''}. Click to show each one.`;
+    cell.append(fold);
+  } else if (r.run_n && timelineFoldOn()) {
+    const fold = el('button', 'tl-fold open', 'fold');
+    fold.type = 'button';
+    fold.title = `Fold these ${r.run_n} rows back into one line`;
+    cell.append(fold);
+  }
   paintTimelineBody(cell, r, showRaw);
+  if (r.n > 1 && r.ts && r.ts_last) {
+    const secs = (timelineEpochOf(r.ts_last) ?? 0) - (timelineEpochOf(r.ts) ?? 0);
+    cell.append(el('span', 'tl-span', `${r.ts.slice(11, 19)} → ${r.ts_last.slice(11, 19)} · over ${timelineGap(secs).slice(1)}`));
+  }
   if (!summarised) return; // nothing to swap to — the body already IS the raw row
   const btn = el('button', 'tl-raw-toggle', showRaw ? 'summary' : 'raw');
   btn.title = showRaw ? 'Show the summary' : 'Show the raw row';
@@ -544,13 +640,24 @@ export function fillTimelineBody(cell, r) {
    painted by the same code as a row on the Timeline. */
 export function paintTimelineBody(cell, r, showRaw) {
   cell.title = r.body;
+  // The row's note, in the line, where the story is read: after what
+  // happened, before who and where.
+  const note = r.note ? el('span', 'tl-note', `✎ ${r.note}`) : null;
+  if (note) note.title = r.note;
   if (showRaw) {
+    if (note) cell.append(note);
     cell.append(el('span', 'tl-raw', r.body));
   } else {
     if (r.lead) cell.append(el('span', 'tl-lead', r.lead));
+    if (note) cell.append(note);
     if (r.detail) cell.append(el('span', 'tl-detail', r.detail));
   }
 }
+
+const timelineEpochOf = (ts) => {
+  const m = /^(\d{4})-(\d\d)-(\d\d)[ T](\d\d):(\d\d):(\d\d)/.exec(ts || '');
+  return m ? Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]) / 1000 : null;
+};
 
 /* Open the row's own table at the row — from a timeline line, and from
    every hit in the watchlist's two panes.
@@ -1127,6 +1234,13 @@ $('timelineBody').addEventListener('scroll', () => {
 $('timelineRows').addEventListener('click', (e) => {
   const row = e.target.closest('.timeline-row');
   if (!row || row.classList.contains('pending')) return;
+  // ×N opens a folded run, "fold" puts it back (fillTimelineBody).
+  const fold = e.target.closest('.tl-fold');
+  if (fold) {
+    const r = timelineRowAt(+row.dataset.pos);
+    if (r) setRunOpen(r, !fold.classList.contains('open'));
+    return;
+  }
   selectTimelineLine(+row.dataset.pos);
   if (e.target.closest('.tl-row-open')) openTimelineSelection();
 });
@@ -1138,4 +1252,6 @@ $('timelineRows').addEventListener('dblclick', (e) => {
 });
 
 $('btnTimelineConfig').onclick = openTimelineSourceConfig;
+$('btnTimelineFold').onclick = () => toggleTimelineFold();
+renderTimelineFoldButton();
 }

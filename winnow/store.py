@@ -1047,6 +1047,20 @@ def _tl_cap(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "\u2026"
 
 
+_TIMELINE_EPOCH = datetime.datetime(1970, 1, 1)
+
+
+def _timeline_seconds(ts: str) -> int | None:
+    """A Timeline timestamp ('YYYY-MM-DD HH:MM:SS', maybe with a
+    fraction) as whole seconds since 1970, or None. Naive and UTC by
+    construction — every Timeline timestamp is — so a gap never crosses a
+    daylight-saving change that isn't there."""
+    try:
+        return int((datetime.datetime.fromisoformat(ts[:19]) - _TIMELINE_EPOCH).total_seconds())
+    except (TypeError, ValueError):
+        return None
+
+
 def _tl_lead(*values: Any) -> str:
     """Registered as the SQL function TL_LEAD(v1, v2, ...) — the first of
     the summary template's lead columns that this row actually filled in.
@@ -9568,6 +9582,9 @@ class Store:
             return
         if handle.get("kind") not in ("group_virtual", "root_virtual"):
             self.db.execute(f"DROP TABLE IF EXISTS v.{q(vid)}")
+        # Tables a view keeps beside its own (a folded Timeline's rows).
+        for extra in handle.get("tables", ()):
+            self.db.execute(f"DROP TABLE IF EXISTS v.{q(extra)}")
         for child_vid, child in list(self._views.items()):
             if child.get("parent_view_id") == vid:
                 self._evict_view_and_children(child_vid)
@@ -9799,7 +9816,8 @@ class Store:
     def build_timeline(self, configs: dict[int, dict] | None = None, tag_ids: list[int] | None = None,
                        op_token: str | None = None, ts_range: list[str] | None = None,
                        exclude_sources: list[int] | None = None,
-                       context: list[str] | None = None) -> dict:
+                       context: list[str] | None = None, fold: bool = False,
+                       unfold: list[list[int]] | None = None) -> dict:
         """Materialises one row per *tagged* row across every real source in
         the case (open or closed — this is "every finding in the case", not
         "every finding in a currently-open tab"), in time order. `configs`
@@ -9844,6 +9862,14 @@ class Store:
         Tables switched off stay off; a table with no timestamp has no
         rows "around" anything. How each table is read for it is
         _timeline_context_branch's docstring.
+
+        `fold` puts a run of TIMELINE_FOLD_MIN or more lines in a row from
+        one table, with one summary lead and one first tag, on one line
+        (`n` rows from `ts` to `ts_last`); `unfold` lists the runs, by
+        their first row's [source_id, rid], to leave open. How a run is
+        told is _timeline_fold's docstring. Folded, the view is the lines
+        and the rows are kept beside it, for the overview's bars and for
+        finding a row that is inside a run (timeline_position).
 
         Beside its timestamp each line keeps `tag1`, the first of the tags
         asked for that it carries (lowest id — tag order, the order the
@@ -9897,9 +9923,13 @@ class Store:
             # looked up by its rid. `uses` keeps the derived sidecar out of
             # the join unless the timestamp is a derived column.
             uses = [p["ts_col"]] if p["ts_col"] else []
+            fkey = "NULL"
+            if fold:
+                fkey, lead_cols = self._timeline_fold_key(src, p)
+                uses += lead_cols
             branches.append(
                 f"SELECT {int(source_id)} AS source_id, t.trid AS rid, {p['ts_expr']} AS ts, t.tag1 AS tag1, "
-                f"0 AS ctx "
+                f"0 AS ctx, {fkey} AS fkey "
                 f"FROM (SELECT rid AS trid, MIN(tag_id) AS tag1 FROM row_tags "
                 f"WHERE source_id = ?{tag_clause} GROUP BY rid) t "
                 f"CROSS JOIN {self._from_clause(src, 's', uses)} WHERE s.rid = t.trid"
@@ -9916,29 +9946,44 @@ class Store:
             params.extend(ts_range)
 
         vid = self._next_view_id()
+        rows_table = f"{vid}_rows" if fold else None
         per_source: dict[int, int] = {}
         with self.lock, self._interruptible(op_token, self.db), self.db:
+            # `n` rows on the line from `ts` to `ts_last` when it is a folded
+            # run; `run_n` the length of the run the line heads, folded or
+            # left open (None when it heads none).
             self.db.execute(
                 f"CREATE TABLE v.{q(vid)} (pos INTEGER PRIMARY KEY, source_id INTEGER, rid INTEGER, "
-                f"ts TEXT, tag1 INTEGER, ctx INTEGER)"
+                f"ts TEXT, tag1 INTEGER, ctx INTEGER, n INTEGER NOT NULL DEFAULT 1, run_n INTEGER, ts_last TEXT)"
             )
             n = 0
+            rows = 0
             context_rows = 0
             if branches:
                 union_sql = union_all(branches)
                 # ORDER BY-fed insert, same as build_view: pos auto-assigns
                 # in sorted order ((source_id, rid) makes the order fully
                 # determined), rowcount replaces a count(*) re-scan.
+                into = f"{vid}_all" if fold else vid
+                if fold:
+                    self.db.execute(
+                        f"CREATE TABLE v.{q(into)} (pos INTEGER PRIMARY KEY, source_id INTEGER, "
+                        f"rid INTEGER, ts TEXT, tag1 INTEGER, ctx INTEGER, fkey TEXT)")
                 n = self.db.execute(
-                    f"INSERT INTO v.{q(vid)}(source_id, rid, ts, tag1, ctx) "
-                    f"SELECT source_id, rid, ts, tag1, ctx FROM ({union_sql}) {where}"
+                    f"INSERT INTO v.{q(into)}(source_id, rid, ts, tag1, ctx{', fkey' if fold else ''}) "
+                    f"SELECT source_id, rid, ts, tag1, ctx{', fkey' if fold else ''} "
+                    f"FROM ({union_sql}) {where}"
                     f"ORDER BY (ts IS NULL) ASC, ts ASC, source_id, rid",
                     params,
                 ).rowcount
+                rows = n
+                if fold:
+                    n = self._timeline_fold(vid, into, rows_table, unfold or [])
                 # The table chips count findings; a table's rows around one
                 # are on top of that, and counted on their own.
                 for sid, found, near in self.db.execute(
-                        f"SELECT source_id, SUM(ctx = 0), SUM(ctx) FROM v.{q(vid)} GROUP BY source_id"):
+                        f"SELECT source_id, SUM(CASE WHEN ctx = 0 THEN n ELSE 0 END), SUM(ctx) "
+                        f"FROM v.{q(vid)} GROUP BY source_id"):
                     if found:
                         per_source[sid] = found
                     context_rows += near
@@ -9948,9 +9993,127 @@ class Store:
                 if h and h.get("kind") == "timeline":
                     self._evict_view_and_children(old)
 
-        self._views[vid] = {"view_id": vid, "kind": "timeline", "row_count": n, "configs": configs}
-        return {"view_id": vid, "row_count": n, "body_trimmed": body_trimmed, "per_source": per_source,
-                "context_rows": context_rows}
+        self._views[vid] = {"view_id": vid, "kind": "timeline", "row_count": n, "rows": rows,
+                            "configs": configs, "rows_table": rows_table,
+                            "tables": [rows_table] if rows_table else []}
+        return {"view_id": vid, "row_count": n, "rows": rows, "body_trimmed": body_trimmed,
+                "per_source": per_source, "context_rows": context_rows}
+
+    # The fewest lines in a row that fold into one.
+    TIMELINE_FOLD_MIN = 3
+
+    def _timeline_fold_key(self, src: dict, p: dict) -> tuple[str, list[str]]:
+        """What tells one line of a run from the next when the Timeline
+        folds repeats — the summary's lead, in plain SQL — and the columns
+        it reads. ("NULL", []) for a table read without a summary (body
+        columns picked, or a shape nothing describes): its lines never fold.
+
+        Not TL_LEAD itself, which is a Python call per row and the build
+        runs none (tests/test_timeline_summary.py counts). The first lead
+        column with something in it, trimmed of the whitespace _tl_squash
+        drops at either end: two rows with the same key show the same lead,
+        which is the property folding needs. Two rows that differ only
+        inside their whitespace, or past TL_LEAD_MAX, are told apart here
+        and shown alike — a run left unfolded, never one folded wrongly."""
+        if p["body_columns"] or not self._timeline_summary_exprs(src, p["ts_col"]):
+            return "NULL", []
+        spec = self._timeline_summary_template(src)
+        have = {c["name"].strip().lower(): c["name"] for c in self._base_cols(src)}
+        skip = (p["ts_col"] or "").strip().lower()
+        cols = [have[k] for k in (n.strip().lower() for n in spec["lead"]) if k in have and k != skip]
+        if not cols:
+            return "NULL", []
+        ws = "char(32, 9, 10, 13)"
+        return ("COALESCE(" + ", ".join(f"NULLIF(TRIM({self._col_ref(src, c, 's')}, {ws}), '')" for c in cols)
+                + ", NULL)"), cols
+
+    def _timeline_fold(self, vid: str, all_table: str, rows_table: str, unfold: list[list[int]]) -> int:
+        """Fills the view `vid` with the lines of `all_table` (every row, in
+        Timeline order, with its fold key), a run of repeats on one line,
+        and keeps the rows as `rows_table`, each with the line it is on.
+        Returns the number of lines. Caller holds the writer lock, in a
+        transaction; `all_table` is dropped.
+
+        A row continues the run above it when it is a finding (not a row
+        around one), has a fold key, and the line before it is a finding
+        from the same table with the same key and the same first tag. A
+        row with a note starts a run of its own, so a note is never inside
+        a fold; it can head one, and the folded line shows it. Runs
+        shorter than TIMELINE_FOLD_MIN, and those listed in `unfold` by
+        their first row, stay a line per row.
+
+        In steps, each a table with a key the next one reads by, and the
+        row before compared by a join on `pos - 1` rather than LAG(): at
+        250k rows the window functions took 0.84 s for what the join does
+        in 0.34 s. A run's rows are consecutive lines, so a row's line is
+        its run's first line (`hl`), plus how far into the run it is when
+        the run is left open."""
+        runs_t, opened, each = f"{vid}_runs", f"{vid}_open", f"{vid}_each"
+        pairs = set()
+        for pair in unfold:
+            if len(pair) != 2:
+                raise ValueError("unfold must be a list of [source_id, rid]")
+            pairs.add((int(pair[0]), int(pair[1])))
+        fold_min = int(self.TIMELINE_FOLD_MIN)
+        a_t = f"v.{q(all_table)}"
+        try:
+            # Which run each row is in: a running total of the rows that
+            # start one.
+            self.db.execute(f"CREATE TABLE v.{q(each)} (pos INTEGER PRIMARY KEY, run INTEGER, brk INTEGER)")
+            self.db.execute(f"""
+                INSERT INTO v.{q(each)}(pos, run, brk)
+                SELECT pos, SUM(brk) OVER (ORDER BY pos ROWS UNBOUNDED PRECEDING), brk FROM (
+                  SELECT a.pos,
+                         CASE WHEN a.fkey IS NOT NULL AND a.ctx = 0 AND b.ctx = 0 AND a.fkey = b.fkey
+                                   AND a.source_id = b.source_id AND a.tag1 IS b.tag1
+                                   AND NOT EXISTS (SELECT 1 FROM row_notes nt
+                                                   WHERE nt.source_id = a.source_id AND nt.rid = a.rid
+                                                     AND nt.note != '')
+                              THEN 0 ELSE 1 END AS brk
+                  FROM {a_t} a LEFT JOIN {a_t} b ON b.pos = a.pos - 1)""")
+            self.db.execute(f"CREATE TABLE v.{q(opened)} (source_id INTEGER, rid INTEGER, "
+                            f"PRIMARY KEY (source_id, rid)) WITHOUT ROWID")
+            self.db.executemany(f"INSERT INTO v.{q(opened)} VALUES (?, ?)", sorted(pairs))
+            # Each run: its first row, its length (up to the next run's first
+            # row), whether it is folded, and the line it starts on (hl) — a
+            # running total of the lines the runs before it take, one for a
+            # folded run, cnt for an open one.
+            self.db.execute(f"CREATE TABLE v.{q(runs_t)} (run INTEGER PRIMARY KEY, p0 INTEGER, cnt INTEGER, "
+                            f"folded INTEGER, hl INTEGER)")
+            self.db.execute(f"""
+                INSERT INTO v.{q(runs_t)}(run, p0, cnt, folded, hl)
+                SELECT run, p0, cnt, folded,
+                       SUM(CASE WHEN folded THEN 1 ELSE cnt END) OVER (ORDER BY run ROWS UNBOUNDED PRECEDING)
+                         - CASE WHEN folded THEN 1 ELSE cnt END + 1
+                FROM (SELECT g.run, g.p0, g.cnt,
+                             CASE WHEN g.cnt < {fold_min} THEN 0 ELSE NOT EXISTS (
+                                SELECT 1 FROM {a_t} a JOIN v.{q(opened)} o
+                                ON o.source_id = a.source_id AND o.rid = a.rid WHERE a.pos = g.p0) END AS folded
+                      FROM (SELECT run, pos AS p0,
+                                   LEAD(pos, 1, (SELECT MAX(pos) + 1 FROM v.{q(each)})) OVER (ORDER BY pos) - pos AS cnt
+                            FROM v.{q(each)} WHERE brk) g)""")
+            self.db.execute(
+                f"CREATE TABLE v.{q(rows_table)} (pos INTEGER PRIMARY KEY, source_id INTEGER, rid INTEGER, "
+                f"ts TEXT, tag1 INTEGER, ctx INTEGER, line INTEGER)")
+            self.db.execute(f"""
+                INSERT INTO v.{q(rows_table)}
+                SELECT a.pos, a.source_id, a.rid, a.ts, a.tag1, a.ctx,
+                       r.hl + CASE WHEN r.folded THEN 0 ELSE a.pos - r.p0 END
+                FROM {a_t} a JOIN v.{q(each)} e ON e.pos = a.pos JOIN v.{q(runs_t)} r ON r.run = e.run
+                ORDER BY a.pos""")
+            n = self.db.execute(f"""
+                INSERT INTO v.{q(vid)}(source_id, rid, ts, tag1, ctx, n, run_n, ts_last)
+                SELECT a.source_id, a.rid, a.ts, a.tag1, a.ctx,
+                       CASE WHEN r.folded THEN r.cnt ELSE 1 END,
+                       CASE WHEN a.pos = r.p0 AND r.cnt >= {fold_min} THEN r.cnt END,
+                       CASE WHEN r.folded THEN (SELECT z.ts FROM {a_t} z WHERE z.pos = r.p0 + r.cnt - 1) END
+                FROM {a_t} a JOIN v.{q(each)} e ON e.pos = a.pos JOIN v.{q(runs_t)} r ON r.run = e.run
+                WHERE NOT r.folded OR a.pos = r.p0
+                ORDER BY a.pos""").rowcount
+        finally:
+            for t in (all_table, each, runs_t, opened):
+                self.db.execute(f"DROP TABLE IF EXISTS v.{q(t)}")
+        return n
 
     # (source_id, column) -> whether every value the column holds starts
     # with a YYYY-MM-DD date. Source tables are never written after ingest
@@ -10009,7 +10172,7 @@ class Store:
             except (ValueError, OverflowError):
                 pass   # not a date this side of year 9999: the exact test alone
         sid = int(src["id"])
-        sql = (f"SELECT {sid} AS source_id, s.rid AS rid, {p['ts_expr']} AS ts, NULL AS tag1, 1 AS ctx "
+        sql = (f"SELECT {sid} AS source_id, s.rid AS rid, {p['ts_expr']} AS ts, NULL AS tag1, 1 AS ctx, NULL AS fkey "
                f"FROM {self._from_clause(src, 's', uses)} WHERE {' AND '.join(conds)} "
                f"AND s.rid NOT IN (SELECT rid FROM row_tags WHERE source_id = ?{tag_clause})")
         params.append(sid)
@@ -10049,7 +10212,14 @@ class Store:
         removed since the build makes the view stale: ViewExpired, the
         client's cue to rebuild. `ctx` marks a row that is on the Timeline
         because it falls around a finding (build_timeline's `context`),
-        not because it is tagged."""
+        not because it is tagged.
+
+        Each line also says how it sits against the line above it, which
+        the page alone cannot know for its first line: `gap`, the seconds
+        since that line ended (its `ts_last` when it is a folded run), and
+        `new_day`, whether this line is on another day — the first line of
+        the Timeline is. Both are None/False for a line with no time.
+        `n`, `run_n` and `ts_last` are build_timeline's fold."""
         handle = self._views.get(view_id)
         if not handle or handle.get("kind") != "timeline":
             raise ViewExpired("View expired — rebuild it")
@@ -10057,9 +10227,13 @@ class Store:
         lo, hi = start + 1, start + 1 + count
         with self._reader() as ro, self._dropped_view_is_expired():
             rows = ro.execute(
-                f"SELECT pos, source_id, rid, ts, ctx FROM v.{q(view_id)} WHERE pos >= ? AND pos < ? ORDER BY pos",
-                (lo, hi),
+                f"SELECT pos, source_id, rid, ts, ctx, n, run_n, ts_last FROM v.{q(view_id)} "
+                f"WHERE pos >= ? AND pos < ? ORDER BY pos",
+                (lo - 1, hi),
             ).fetchall()
+            above = rows[0] if rows and rows[0]["pos"] < lo else None
+            if above is not None:
+                rows = rows[1:]
             got: dict[tuple[int, int], Any] = {}
             labels: dict[int, tuple[str, str]] = {}
             for source_id in sorted({r["source_id"] for r in rows}):
@@ -10083,7 +10257,19 @@ class Store:
                 ):
                     got[(source_id, r["rid"])] = r
         out = []
+        prev_end = (above["ts_last"] or above["ts"]) if above is not None else None
         for r in rows:
+            gap, new_day = None, False
+            if r["ts"]:
+                here = _timeline_seconds(r["ts"])
+                if prev_end is None:
+                    new_day = r["pos"] == 1
+                else:
+                    new_day = prev_end[:10] != r["ts"][:10]
+                    before = _timeline_seconds(prev_end)
+                    if here is not None and before is not None:
+                        gap = here - before
+            prev_end = r["ts_last"] or r["ts"]
             g = got.get((r["source_id"], r["rid"]))
             type_label, source_name = labels[r["source_id"]]
             out.append({
@@ -10099,6 +10285,11 @@ class Store:
                 "tags": sorted(int(x) for x in g["tag_ids"].split(",")) if g and g["tag_ids"] else [],
                 "note": (g["note"] if g else "") or "",
                 "ctx": bool(r["ctx"]),
+                "n": r["n"],
+                "run_n": r["run_n"],
+                "ts_last": r["ts_last"],
+                "gap": gap,
+                "new_day": new_day,
             })
         return {"start": start, "rows": out}
 
@@ -10110,7 +10301,8 @@ class Store:
         every visit to the tab is one (showTimelineTab), so opening a line
         in its table and coming back used to land at the top. A scan of
         the view, which holds four narrow columns: milliseconds at 250k
-        lines. `exact` says which answer it is."""
+        lines. `exact` says which answer it is; `folded`, that the row is
+        on the Timeline but inside a folded run, whose line `pos` is."""
         handle = self._views.get(view_id)
         if not handle or handle.get("kind") != "timeline":
             raise ViewExpired("View expired — rebuild it")
@@ -10120,6 +10312,13 @@ class Store:
             ).fetchone()
             if row:
                 return {"pos": row[0] - 1, "exact": True}
+            # Folded into a run: the run's line.
+            if handle.get("rows_table"):
+                row = ro.execute(
+                    f"SELECT line FROM v.{q(handle['rows_table'])} WHERE source_id = ? AND rid = ?",
+                    (source_id, rid)).fetchone()
+                if row:
+                    return {"pos": row[0] - 1, "exact": False, "folded": True}
             row = ro.execute(
                 f"SELECT MIN(pos) FROM v.{q(view_id)} WHERE ts >= ?", (ts,)
             ).fetchone() if ts else None
@@ -10185,12 +10384,16 @@ class Store:
         if not handle or handle.get("kind") != "timeline":
             raise ViewExpired("View expired — rebuild it")
         key = "tag1" if by == "tags" else "source_id"
-        lines = f"SELECT {epoch_sql('ts')} AS e, {key} AS k, pos FROM v.{q(view_id)} WHERE ts IS NOT NULL"
+        # Folded, the bars count the rows, each at its own time, and a bar's
+        # first line is the line its first row is on.
+        table, line = (handle["rows_table"], "line") if handle.get("rows_table") else (view_id, "pos")
+        total = handle.get("rows", handle["row_count"])
+        lines = f"SELECT {epoch_sql('ts')} AS e, {key} AS k, {line} AS pos FROM v.{q(table)} WHERE ts IS NOT NULL"
         with self._reader() as ro, self._dropped_view_is_expired():
             lo, hi, dated = ro.execute(f"SELECT MIN(e), MAX(e), COUNT(e) FROM ({lines})").fetchone()
             if lo is None:
                 return {"start": None, "end": None, "width": 0,
-                        "undated": handle["row_count"], "buckets": []}
+                        "undated": total, "buckets": []}
             width = self._histogram_width(max(1, hi - lo), max_buckets)
             start = lo // width * width
             rows = ro.execute(
@@ -10205,7 +10408,7 @@ class Store:
             bar["first"] = min(bar["first"], first - 1)
             # A row around a finding has no tag: "ctx" in the split by tag.
             bar["split"]["ctx" if k is None else str(k)] = n
-        return {"start": start, "end": hi, "width": width, "undated": handle["row_count"] - dated,
+        return {"start": start, "end": hi, "width": width, "undated": total - dated,
                 "buckets": [buckets[b] for b in sorted(buckets)]}
 
     # ---------------------------------------------------------------- group-by

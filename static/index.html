@@ -236,6 +236,8 @@ try {
         <div class="spacer"></div>
         <span class="stats" id="timelineStats"></span>
         <span class="tl-context" id="timelineContext"></span>
+        <button class="btn ghost" id="btnTimelineFold" aria-pressed="false"
+                title="Put three or more rows in a row from one table, with one summary and one first tag, on one line">Fold repeats</button>
         <button class="btn ghost" id="btnTimelineOverview" aria-pressed="true"
                 title="Show or hide the overview: the Timeline's lines over time">Overview</button>
         <button class="btn ghost" id="btnTimelinePane" aria-pressed="true"
@@ -248,6 +250,7 @@ try {
           <div class="timeline-cols">
             <div class="tl-col-gutter"></div>
             <div class="tl-col-ts" id="timelineColTs">Timestamp</div>
+            <div class="tl-col-gap" title="The time since the line above">Gap</div>
             <div class="tl-col-type">Type</div>
             <div class="tl-col-body">Body</div>
           </div>

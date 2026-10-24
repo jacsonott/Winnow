@@ -119,6 +119,7 @@ export const S = {
     sourcesOff: new Set(), // table ids switched OFF in the overview's Tables view, as tagsOff is for tags
     range: null,     // ['YYYY-MM-DD HH:MM:SS', …) the overview's drag narrowed the Timeline to, or null for all of it
     overview: null,  // the overview strip's bars for the current view — see loadTimelineOverview
+    unfold: [],      // [[source_id, rid]]: the first rows of the folded runs opened to a line per row — see toggleTimelineFold
     context: null,   // {minutes, around, start, end}: the untagged rows around a finding that are on the Timeline too, or null — see setTimelineContext
   },
   savedFilterCursor: -1,   // index into filtersForCurrentSource(), for [ and ] cycling

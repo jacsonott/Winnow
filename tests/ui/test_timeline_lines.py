@@ -94,7 +94,9 @@ def _open_timeline(page):
 
 
 def _line(page, ts):
-    return page.locator("#timelineRows .timeline-row", has=page.locator(".tl-col-ts", has_text=ts))
+    # By the row's own timestamp: the cell says only the time of day, and
+    # the day once, at the first line of each.
+    return page.locator(f"#timelineRows .timeline-row[data-ts^='{ts}']")
 
 
 def _selected_ts(page):
@@ -182,7 +184,7 @@ def test_opening_a_line_and_coming_back_lands_on_that_line(page, two_hosts):
     # calls left the first measuring a detached line (None).
     page.wait_for_function("""(ts) => {
         const n = document.querySelector('#timelineRows .timeline-row.selected');
-        if (!n || n.querySelector('.tl-col-ts').textContent !== ts) return false;
+        if (!n || n.dataset.ts !== ts) return false;
         const body = document.getElementById('timelineBody').getBoundingClientRect();
         const line = n.getBoundingClientRect();
         return body.height > 0 && body.top <= line.top && line.bottom <= body.bottom; }""",
@@ -201,7 +203,7 @@ def test_the_open_mark_opens_the_row_in_its_table(page, two_hosts):
 
 def test_the_header_names_the_day_of_the_top_line(page, two_hosts):
     _open_timeline(page)
-    top = page.locator("#timelineRows .timeline-row:not(.pending) .tl-col-ts").first.inner_text()
+    top = page.locator("#timelineRows .timeline-row:not(.pending)").first.get_attribute("data-ts")
     day = dt.date.fromisoformat(top[:10])
     want = f"Timestamp · {day.strftime('%a')} {day.day} {day.strftime('%b')}"
     assert page.locator("#timelineColTs").text_content() == want

@@ -103,6 +103,40 @@ see [docs/notes/README.md](README.md) for the whole set.
   extra day). A column that is not date-led (US dates, epochs, a derived
   column) gets the exact test alone. `tests/test_timeline_context.py`
   holds both paths to the same rows and the plan to the SEARCH.
+  **Folding repeats** (`fold`; `unfold` names the runs to leave open by
+  their first row) puts a run of `TIMELINE_FOLD_MIN` (3) or more
+  consecutive findings from one table, with the same fold key and the
+  same `tag1`, on one line. The fold key (`_timeline_fold_key`) is the
+  summary's lead, the first non-blank of the shape's lead columns,
+  trimmed, written as SQL in the tagged branch rather than read through
+  `TL_LEAD`, so the build still runs no summary function (the test
+  counts calls). A table with no summary, or with body columns picked
+  in Configure tables…, has no key and never folds: "the same lead"
+  would be nothing the analyst can see. A row around a finding never
+  folds and ends a run; a row with a note starts one, so a note is never
+  inside a fold. `_timeline_fold` works in steps: every row with its key
+  into `{vid}_all`; whether each row starts a run, compared with the row
+  above by a join on `pos - 1` (0.34 s at 250k rows where LAG() took
+  0.84 s), and a running sum of that for its run; the runs, each with its
+  first row, length and first line; then the view, which gains `n` (rows
+  on the line), `run_n` (a run's length on its first line, folded or
+  open, which the "fold" badge reads) and `ts_last`. **The rows are
+  kept** as `{vid}_rows`, each with its `line` (`handle["rows_table"]`,
+  also in `handle["tables"]`, which eviction drops with the view),
+  because two readers need rows rather than lines: `timeline_overview`
+  buckets each row at its own time and points `first` at its line, so a
+  fold never moves a bar; and `timeline_position` finds a folded-away row
+  on its run's line (`exact: False`). `per_source` sums `n` and the
+  answer carries `rows`, so every count stays a count of rows. The cost,
+  on the 416k-row EvtxECmd table with 250k tagged rows: 0.8 s → 1.9 s a
+  build, most of it reading the lead columns of every tagged row (the
+  plain build reads the timestamp alone). It is off by default, so only
+  whoever switches it on pays it.
+  `fetch_timeline_rows` also gives each line its `gap` (seconds since
+  the line above ended: that line's `ts_last` when folded, else its
+  `ts`; `None` when either has no time) and `new_day`. Both need the line
+  above, which for the first line of a page is on another page, so the
+  read starts one line early. `tests/test_timeline_story.py`.
   `timeline_row` (`GET /api/timeline_row`) is a line's row in full for
   the details pane: every column (derived included), its tags (all of
   them, not just those switched on) and note; a merge id or a gone
