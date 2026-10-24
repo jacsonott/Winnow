@@ -24,7 +24,7 @@ import json
 import os
 
 from winnow import defaults
-from winnow.store import q
+from winnow.store import q, union_all
 
 PLUGIN = {
     "name": "lateral-movement",
@@ -157,7 +157,7 @@ def _scope(req, src):
         m = req.store.get_source(mid)
         sel = req.store.merge_select_list(src, m)  # NULL-pads columns a member lacks
         branches.append(f"SELECT s.rid AS rid, {sel} FROM {_from_clause(m)}")
-    return "(" + " UNION ALL ".join(branches) + ") s"
+    return "(" + union_all(branches) + ") s"
 
 
 def _lit(value):

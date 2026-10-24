@@ -608,6 +608,32 @@ def _sql_chain(parts: list[str], op: str) -> str:
     return f"({_sql_chain(parts[:mid], op)}){op}({_sql_chain(parts[mid:], op)})"
 
 
+# Most terms one compound SELECT may have. SQLite refuses more than
+# SQLITE_MAX_COMPOUND_SELECT ("too many terms in compound SELECT"), which
+# is 500 in every stock build, and sqlite3_limit can only lower it.
+MAX_COMPOUND_TERMS = 500
+
+
+def union_all(branches: Iterable[str], sep: str = " UNION ALL ") -> str:
+    """`branches` joined by UNION ALL, at any count. A merge reads through
+    one branch per member, and a merge of 1000 IIS logs is twice what one
+    compound may hold — its view would not even build. Past the cap each
+    run of MAX_COMPOUND_TERMS branches is wrapped as `SELECT * FROM (...)`
+    and those are unioned in turn (again, if even they are too many), so
+    no single compound is over it. At or under the cap the text is the
+    plain join it always was. Branch order, and with it the order of any
+    `?` parameters, is unchanged, and the columns are still named by the
+    first branch. SQLite flattens the nesting back out when it plans the
+    query: a merge's compound ORDER BY still merges each member's sorted
+    index (MERGE (UNION ALL), no temp B-tree), as the flat one did.
+    Public: the bundled plugins build their merge scopes with it."""
+    out = list(branches)
+    while len(out) > MAX_COMPOUND_TERMS:
+        out = [f"SELECT * FROM ({sep.join(out[i:i + MAX_COMPOUND_TERMS])})"
+               for i in range(0, len(out), MAX_COMPOUND_TERMS)]
+    return sep.join(out)
+
+
 def _blob_expr(cols: list[str]) -> str:
     """Every column concatenated into one search target. This is what
     substring search means — a row matches when this text holds the term —
@@ -7025,13 +7051,17 @@ class Store:
         row = self._merge_row(merge_id)
         member_ids = json.loads(row["source_ids"])
         members = [self.get_source(sid) for sid in member_ids]
+        # Once, not once per member as well: it reads every member's
+        # columns, so per member it made opening a merge quadratic — ~3 s
+        # for 510 members, and four times that at 1000.
+        columns = self._merge_columns(row, members)
         return {
             "id": -merge_id,
             "name": row["name"],
             "path": None,
             "table_name": None,
             "row_count": sum(m["row_count"] for m in members),
-            "columns": self._merge_columns(row, members),
+            "columns": columns,
             "col_mode": row["col_mode"],
             "source_column": bool(row["source_column"]),
             # Per member, which merge columns it lacks — what the builder's
@@ -7039,7 +7069,7 @@ class Store:
             "members": [
                 {"id": m["id"], "label": m.get("nickname") or m["name"], "name": m["name"],
                  "row_count": m["row_count"],
-                 "missing": self._member_missing_columns(row, members, m)}
+                 "missing": self._member_missing_columns(columns, m)}
                 for m in members
             ],
             "file_hash": None,
@@ -7131,8 +7161,9 @@ class Store:
             cols.insert(0, {"name": name, "type": "text", "source_column": True})
         return cols
 
-    def _member_missing_columns(self, row: sqlite3.Row, members: list[dict], member: dict) -> list[str]:
-        return [c["name"] for c in self._merge_columns(row, members)
+    @staticmethod
+    def _member_missing_columns(columns: list[dict], member: dict) -> list[str]:
+        return [c["name"] for c in columns
                 if not c.get("source_column") and _member_column(member, c) is None]
 
     @staticmethod
@@ -9015,7 +9046,7 @@ class Store:
                     f"WHERE {ref} IS NOT NULL AND {ref} <> '' "
                     f"ORDER BY {order} LIMIT {int(per)})")
 
-        union = " UNION ALL ".join(branch(m) for m in members)
+        union = union_all(branch(m) for m in members)
         with self._reader() as ro, self._dropped_view_is_expired():
             return [r[0] for r in ro.execute(f"SELECT v FROM ({union}) LIMIT ?", (want,))]
 
@@ -9322,7 +9353,7 @@ class Store:
                 params.extend(p)
 
             def union(cols: str) -> str:
-                return " UNION ALL ".join(f"SELECT {mid} AS {sid_col}, rid{cols}{rest}" for mid, rest in parts)
+                return union_all(f"SELECT {mid} AS {sid_col}, rid{cols}{rest}" for mid, rest in parts)
 
             vid = self._next_view_id()
             # Each member SELECTs its id, rid and what the sort needs, and
@@ -9846,7 +9877,7 @@ class Store:
             )
             n = 0
             if branches:
-                union_sql = " UNION ALL ".join(branches)
+                union_sql = union_all(branches)
                 # ORDER BY-fed insert, same as build_view: pos auto-assigns
                 # in sorted order ((source_id, rid) makes the order fully
                 # determined), rowcount replaces a count(*) re-scan.
@@ -10159,7 +10190,7 @@ class Store:
                     )
                 branches.append(f"SELECT {_val_expr(m, derived_alias)} AS val, count(*) AS n {scope} GROUP BY 1")
                 params.extend(path_params)
-        union_sql = " UNION ALL ".join(branches)
+        union_sql = union_all(branches)
         if direction is None:
             direction = "asc" if order == "value" else "desc"
         dir_sql = "DESC" if direction == "desc" else "ASC"
@@ -10396,7 +10427,7 @@ class Store:
             else:
                 tag_of = self._histogram_tag_exprs(ro, members) if split_in_pass else {}
                 params = []
-            union = " UNION ALL ".join(
+            union = union_all(
                 branch(m, "EPOCH AS e" + (f", {tag_of[m['source_id']]} AS {'sv' if split_day else 'tag'}"
                                           if split_in_pass else ""))
                 for m in members)
@@ -10449,7 +10480,7 @@ class Store:
                 # The span first, then the bars: two scans of SQL arithmetic
                 # and a few hundred rows back, where one pass by second
                 # sends Python every distinct second to fold.
-                spans = " UNION ALL ".join(branch(m, "EPOCH AS e") for m in members)
+                spans = union_all(branch(m, "EPOCH AS e") for m in members)
                 lo, hi = ro.execute(f"SELECT MIN(e), MAX(e) FROM ({spans} LIMIT -1)").fetchone()
                 if lo is not None:
                     take(by_bar(self._histogram_width(hi - lo, max_buckets)), -1)
@@ -10464,7 +10495,7 @@ class Store:
             bucket = self._histogram_width(hi - lo, max_buckets)
             apart = []
             if tags_apart and tagged_n:
-                tagged = " UNION ALL ".join(branch(m, "EPOCH AS e, t.tag AS tag", tagged=True) for m in members)
+                tagged = union_all(branch(m, "EPOCH AS e, t.tag AS tag", tagged=True) for m in members)
                 apart = by_bar(bucket, split=", tag", keys="1, 2",
                                rows_from=f"FROM ({tagged} LIMIT -1) WHERE e IS NOT NULL")
             # The labels come from SQLite too, not time.gmtime: on Windows
@@ -10903,7 +10934,7 @@ class Store:
                         f"WHERE {where_sql}"
                     )
                     params.extend([m["source_id"], *where_params])
-            union_sql = " UNION ALL ".join(branches)
+            union_sql = union_all(branches)
             with self.lock:
                 with self._dropped_view_is_expired(), self.db:
                     # The parent can have been rebuilt away since its
@@ -11546,7 +11577,7 @@ class Store:
                     + (f"\nWHERE {where}" if where else "")
                 )
                 params.extend(p)
-            sql = "\nUNION ALL\n".join(branches) + f"\n{order}"
+            sql = union_all(branches, "\nUNION ALL\n") + f"\n{order}"
         else:
             where, params = self._compile_where(source_id, src, spec, colnames)
             collist = ", ".join(q(c) for c in colnames)
@@ -12157,7 +12188,7 @@ class Store:
                 self._ensure_column_index_building(
                     m["source_id"], column, self._index_table_for(src, column, m["table_name"], m["source_id"])
                 )
-            union_sql = " UNION ALL ".join(
+            union_sql = union_all(
                 f"SELECT {q(column)} AS val FROM {self._member_from(src, m, uses=(column,))}" for m in members
             )
             rows = ro.execute(
@@ -14033,7 +14064,7 @@ class Store:
             params.append(limit)
         if not branches:
             return {"rows": [], "limit": limit}
-        sql = " UNION ALL ".join(branches) + " ORDER BY 4 DESC, 2, 3 DESC LIMIT ?"
+        sql = union_all(branches) + " ORDER BY 4 DESC, 2, 3 DESC LIMIT ?"
         params.append(limit)
         with self._reader() as ro:
             rows = ro.execute(sql, params).fetchall()
@@ -14973,7 +15004,7 @@ class Store:
                 from . import defaults
                 want = dict(defaults.headers()["nicknames"]).get(hs) or []
                 cols = ", ".join(q(c) for c in want)
-                union = " UNION ALL ".join(
+                union = union_all(
                     f"SELECT {cols} FROM {q(s['table_name'])}" for s in srcs)
                 return f"({union})"
             hs = _hs_of(key)
@@ -17644,7 +17675,7 @@ class Store:
             branches.append(
                 f"SELECT {int(mid)} AS source_id, s.rid AS rid, {sel}, "
                 f"{self._annotation_cols(mid, taken)} FROM {frm}")
-        return " UNION ALL ".join(branches)
+        return union_all(branches)
 
     @staticmethod
     def _annotation_cols(source_id: int, taken: set[str], alias: str = "s",

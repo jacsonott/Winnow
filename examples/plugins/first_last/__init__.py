@@ -97,7 +97,7 @@ import threading
 import time
 import traceback
 
-from winnow.store import OpCancelled, q
+from winnow.store import OpCancelled, q, union_all
 
 PLUGIN = {
     "name": "first-last",
@@ -221,7 +221,7 @@ def _scope(req, src):
         m = req.store.get_source(mid)
         sel = req.store.merge_select_list(src, m)  # NULL-pads columns a member lacks
         branches.append(f"SELECT {int(m['id'])} AS source_id, s.rid AS rid, {sel} FROM {_from_clause(m)}")
-    return "(" + " UNION ALL ".join(branches) + ") s"
+    return "(" + union_all(branches) + ") s"
 
 
 def _col(src, name):
@@ -693,7 +693,7 @@ def _bookend_rows(req, src, group_cols, sort_col, carry, where, params, limit,
                       f" {req.store.merge_select_list(src, m)} FROM {_from_clause(m)}) s")
             arms.append(f"SELECT {cols} FROM fl_top e CROSS JOIN {member}"
                         f" ON s.rid = e.rid WHERE e.sid = {int(m['id'])}")
-        fetch = " UNION ALL ".join(arms)
+        fetch = union_all(arms)
     else:
         target = f"{q(src['table_name'])} s ON s.rid = e.rid"
         if _derived_names(src):
