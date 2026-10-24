@@ -415,7 +415,7 @@ Prefer it to reaching into the app's globals — this is what's supported.
 
 | Field | What it is |
 | --- | --- |
-| `apiVersion` | Contract version of this object (currently `7`) |
+| `apiVersion` | Contract version of this object (currently `8`) |
 | `plugin` | Your plugin's display name |
 | `base` | `/api/plugin/<fs_name>` — prefix for your own routes |
 | `assets` | `/plugin_assets/<fs_name>` — prefix for your own files |
@@ -429,6 +429,7 @@ Prefer it to reaching into the app's globals — this is what's supported.
 | `modal(title, build, opts)` / `closeModal()` | Winnow's modal singleton and its close |
 | `alertDialog(msg, opts)` / `confirmDialog(msg, opts)` / `promptDialog(msg, initial, opts)` | Themed replacements for `window.alert` / `confirm` / `prompt` — all async |
 | `dropdownMenu(anchor, items)` | The app's own small menu, opened under `anchor` — for a choice among a few things; see [Menus](#menus) |
+| `sectionPanes({sections, label, cls, paneCls})` | The app's two-pane dialog frame, the Tables manager's: sections down a side list by group, the chosen one's pane on the right; see [Dialogs with sections](#dialogs-with-sections) |
 | `showTab(localId?)` | Bring the analyst to one of **your** tabs (reopens it if closed); no argument when you register exactly one |
 | `showPage(name)` | Switch to a built-in page: `'grid'`, `'sql'`, `'notes'`, `'timeline'`, `'watchlist'` (reopens it if closed) |
 | `sqlPage` | The SQL pane: `show()`, `text()`, `setText(sql, {newTab})`, `run()`, `result()`, `selectedRows()`, `onRun(cb)` — see [Driving the page](#driving-the-page) |
@@ -627,6 +628,48 @@ the element that opened it, a keyboard user's focus lands on `<body>`:
 focus the new node yourself when the menu was opened from the keyboard,
 as the bundled [`pivot/`](../examples/plugins/pivot/) and
 [`first_last/`](../examples/plugins/first_last/) field lists do.
+
+### Dialogs with sections
+
+A dialog that manages a few lists of things (yours and the shipped ones,
+or one list per kind) is two panes, the way Winnow's own Tables manager,
+Sessions and Export dialogs are. `winnow.sectionPanes(spec)` (API 14)
+builds that frame: the sections go down a side list by group, each with a
+line under its name saying what is set there now, and the chosen one is
+built fresh into the pane on the right. The frame has a fixed height, so
+moving to a short section moves nothing. The side list is one tab stop,
+and Up, Down, Home and End walk it.
+
+```js
+winnow.modal('Movement events', (b) => {
+  const frame = winnow.sectionPanes({
+    label: 'Movement event lists',
+    sections: [
+      { id: 'saved', group: 'Events', title: 'Yours', hint: () => `${mine.length} events`,
+        build: (pane) => pane.append(listOf(mine)) },
+      { id: 'shipped', group: 'Events', title: 'Shipped', hint: () => `${shipped.length} events`,
+        build: (pane) => pane.append(listOf(shipped)) },
+    ],
+  });
+  b.append(frame.panes);       // into the dialog first:
+  frame.show('saved');         // a pane is built where it will be seen
+}, { wide: true, tall: true });
+```
+
+| Spec | What it does |
+| --- | --- |
+| `sections` | `[{ id, group, title, hint, build }]`. Consecutive sections with the same `group` sit under one heading. `hint()` returns the line under the title. `build(pane, refresh)` fills the pane; it may return `{ update }` to repaint in place instead of being rebuilt |
+| `label` | The side list's accessible name |
+| `cls`, `paneCls` | Extra classes on the frame and on the pane, for your own CSS |
+| `changedEvent` | The event name (default `sections:changed`) a pane dispatches, bubbling, when it changes something the hints describe; the hints repaint |
+
+It returns `{ panes, pane, show(id), update(), refresh(), paintHints(), current() }`.
+Append `panes` inside the modal, then `show()` one section: a pane is
+built into the dialog, never into a detached node. `update()` repaints the
+open pane (its `update`, or a rebuild), and `current()` is the open
+section's id. The bundled
+[`lateral_movement/`](../examples/plugins/lateral_movement/) Events…
+dialog is one.
 
 ### Theming
 
@@ -1400,9 +1443,10 @@ python server.py --plugins-dir ~/src/my-winnow-plugins
 
 Installs from the UI always land in the first directory (`plugins/`).
 
-**Versioning:** the current plugin API version is **13** (the tab
-context's `dropdownMenu` arrived in 13, which took the context's own
-`apiVersion` to 7; in 12 the SQL
+**Versioning:** the current plugin API version is **14** (the tab
+context's `sectionPanes` arrived in 14, which took the context's own
+`apiVersion` to 8; its `dropdownMenu` arrived in 13, which took it to 7;
+in 12 the SQL
 pane started holding results on the server: `sqlPage` results gained
 `total` and `stopped`, their `rows` became the first 5,000, and
 `sqlPage.selectedRows()` became async, which took the context's own
@@ -1543,7 +1587,8 @@ Module: `export default function mount(container, winnow)`, plus optional
 `onShow(container)` / `onHide(container)`. Everything `winnow` carries is
 tabled under [The `winnow` context](#the-winnow-context);
 `winnow.dropdownMenu(anchor, items)` (API 13) takes the item shape in
-[Menus](#menus).
+[Menus](#menus), and `winnow.sectionPanes(spec)` (API 14) the section
+shape in [Dialogs with sections](#dialogs-with-sections).
 
 ### `register_api(route, handler, methods=("GET", "POST"))`
 

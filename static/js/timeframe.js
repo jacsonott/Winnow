@@ -14,10 +14,10 @@ import { applyPreset, filtersForCurrentSource, headerSig, loadSavedFilters, matc
 import { saveAppearance } from './settings.js';
 import { clearAllFilters, closeTab, loadSources, openSource, sourceLabel, wireDragReorder } from './sources.js';
 import { normalizeTree, S } from './state.js';
-import { mergesUsing, openTablesManager } from './tables.js';
+import { countCell, keepingFocus, mergesUsing, openTablesManager, plural } from './tables.js';
 import { clearRowCaches, loadTags, newTagDefaults, tagEditRow } from './tags.js';
 import { baseColumns, columnMeta, parseTimestamp } from './tsformat.js';
-import { closeModal, datePickerButton, dropdownMenu, markModalAction, confirmDialog, modal, oneAtATime, promptDialog, sectionPanes } from './ui.js';
+import { closeModal, contextMenu, datePickerButton, dropdownMenu, markModalAction, confirmDialog, modal, oneAtATime, promptDialog, sectionPanes } from './ui.js';
 import { rebuildView } from './view.js';
 
 /* ------------------------------------------------------ jump to timestamp */
@@ -438,71 +438,57 @@ export async function moveSavedFilter(f, dir) {
    here (which hides the modal without the event) or a builder opened
    from here (which replaces the title) doesn't bounce back to Settings
    at the wrong moment. */
-export function openSavedFiltersModal({ returnTo = null } = {}) {
-  if (returnTo) {
+export function openSavedFiltersModal({ returnTo = null, section = null, rearm = true } = {}) {
+  if (returnTo && rearm) {
     const back = () => {
       document.removeEventListener('winnow:modalclose', back);
       if ($('modalTitle').textContent === 'Saved filters' && $('modalBody').dataset.sfReturn === '1') returnTo();
     };
     document.addEventListener('winnow:modalclose', back);
   }
-  const backBtn = () => {
-    if (!returnTo) return null;
-    const btn = el('button', 'btn ghost sf-back', '‹ Settings');
-    btn.style.marginLeft = 'auto';
-    btn.onclick = () => returnTo();
-    return btn;
+  // Redrawn whole when its sections change (a set's last filter deleted,
+  // an import bringing a new one); the listener above stays armed for it.
+  const reopen = (at) => openSavedFiltersModal({ returnTo, section: at, rearm: false });
+  const curCols = new Set(baseColumns().map((c) => c.name.trim().toLowerCase()));
+  const groupMatchesCur = (colNames) => {
+    const cols = new Set((colNames || []).map((c) => c.trim().toLowerCase()));
+    return cols.size === curCols.size && [...cols].every((c) => curCols.has(c));
   };
+  /* One section per header set — the filters under a set cycle together,
+     so they read together. The open table's set leads, and is where the
+     dialog opens; All lists every set under its own heading. */
+  const setsNow = () => {
+    const groups = new Map();
+    for (const f of S.savedFilters) {
+      const sig = headerSig(f.col_names);
+      if (!groups.has(sig)) groups.set(sig, { sig, colNames: f.col_names, filters: [] });
+      groups.get(sig).filters.push(f);
+    }
+    return [...groups.values()].sort((a, z) => Number(groupMatchesCur(z.colNames)) - Number(groupMatchesCur(a.colNames)));
+  };
+  const sets = setsNow();
+  const setLabel = (g) => nicknameFor(g.colNames) || (g.colNames || []).slice(0, 3).join(', ') + ((g.colNames || []).length > 3 ? ` +${g.colNames.length - 3}` : '');
+  let query = '';
+
   modal('Saved filters', (b) => {
     // Marks THIS opening as the one with a way back, so a listener left
     // armed by a close that bypassed the event can't fire for a later
     // Saved filters opened from Filters ▾.
     b.dataset.sfReturn = returnTo ? '1' : '';
-    if (!S.savedFilters.length) {
-      b.append(el('div', 'note-status', 'No saved filters yet. Build one in the Filter builder, then "Save filter…".'));
-      const back = backBtn();
-      if (back) { const row = el('div', 'row-actions'); row.append(back); b.append(row); }
-      return;
-    }
-    // One line on what the list is for; the rest (Edit's round trip
-    // through the builder, cycling past the ends) is on the wiki.
-    b.append(el('p', 'fb-help',
-      `Click a name to apply it. Drag to set the ${S.keymap.cyclePrevFilter[0] || '['} / `
-      + `${S.keymap.cycleNextFilter[0] || ']'} cycle order.`));
-    const search = el('input');
-    search.type = 'search';
-    search.placeholder = 'Search by name, nickname, or column…';
-    search.autocomplete = 'off';
-    search.style.cssText = 'width:100%;background:var(--ink);color:var(--text);border:1px solid var(--line-2);'
-      + 'border-radius:var(--radius-sm);padding:6px 9px;font:inherit;font-size:12px;margin-bottom:10px';
-    b.append(search);
-
-    const list = el('div', 'sf-list');
-    b.append(list);
-
-    const curCols = new Set(baseColumns().map((c) => c.name.trim().toLowerCase()));
     const active = activeSavedFilterRecord();
 
-    const groupMatchesCur = (colNames) => {
-      const cols = new Set((colNames || []).map((c) => c.trim().toLowerCase()));
-      return cols.size === curCols.size && [...cols].every((c) => curCols.has(c));
-    };
-
-    // A name is text that applies the filter on click (Enter or Space
-    // from the keyboard); everything else about the filter is in its ⋯.
-    async function applyFilter(f, matches, colText) {
-      if (!matches && !(await confirmDialog(`"${f.name}" was built for a different column set (${colText}). Apply anyway?`))) return;
+    async function applyFilter(f, matches) {
+      if (!matches && !(await confirmDialog(`"${f.name}" was built for a different column set (${f.col_names.join(', ')}). Apply anyway?`))) return;
       $('modal').hidden = true;
       applyPreset(f);
     }
 
     // Editing routes through the real grid: apply the filter, then open
     // the builder pre-loaded with its payload, so the match count behind
-    // the modal is live feedback on the change being made. Needs a table
-    // open to apply against — without one there's nothing to preview.
-    async function editFilter(f, matches, colText) {
+    // the modal is live feedback on the change being made.
+    async function editFilter(f, matches) {
       if (!matches && !(await confirmDialog(
-        `"${f.name}" was built for a different column set (${colText}). Edit it against the open table anyway? `
+        `"${f.name}" was built for a different column set (${f.col_names.join(', ')}). Edit it against the open table anyway? `
         + `It stays saved for its original columns.`))) return;
       $('modal').hidden = true;
       applyPreset(f);
@@ -518,14 +504,14 @@ export function openSavedFiltersModal({ returnTo = null } = {}) {
         });
       } catch (e) { toast(`Could not rename "${f.name}": ${e.message}`, 6000); return; }
       f.name = name.trim();
-      render();
+      frame.update();
       focusMore(f.id);
       updateFiltersButton();
     }
 
     async function moveFilter(f, dir) {
       try { await moveSavedFilter(f, dir); } catch (e) { toast(`Could not move "${f.name}": ${e.message}`, 6000); return; }
-      render();
+      frame.update();
       // Back on the same filter's ⋯, so a second Move up is Enter and
       // an arrow away — reordering without a mouse is a row of keys.
       focusMore(f.id);
@@ -536,21 +522,24 @@ export function openSavedFiltersModal({ returnTo = null } = {}) {
       try { await api(`/api/saved_filters/${f.id}`, { method: 'DELETE' }); }
       catch (e) { toast(`Could not delete "${f.name}": ${e.message}`, 6000); return; }
       S.savedFilters = S.savedFilters.filter((x) => x.id !== f.id);
-      render();
       updateFiltersButton();
+      // The last filter of a set takes its section with it.
+      if (setsNow().length !== sets.length) { reopen(frame.current() === 'all' ? 'all' : null); return; }
+      frame.update();
     }
 
     function focusMore(id) {
-      const btn = list.querySelector(`.sf-row[data-id="${id}"] .sf-more`);
+      const btn = frame.pane.querySelector(`.sf-row[data-id="${id}"] .sf-more`);
       if (btn) btn.focus();
     }
 
     // Built from live state each time it opens: the move entries read the
     // filter's place in its header set as it is now, not as it was drawn.
-    function rowMenu(f, matches, colText) {
+    function rowMenu(f, matches) {
       const ids = sameGroupFilterIds(f.col_names);
       const at = ids.indexOf(f.id);
       return [
+        { label: 'Apply', onclick: () => applyFilter(f, matches) },
         {
           label: 'Edit…',
           disabled: !S.sourceId,
@@ -558,56 +547,65 @@ export function openSavedFiltersModal({ returnTo = null } = {}) {
           title: S.sourceId
             ? `Apply "${f.name}" to the open table and edit its conditions`
             : 'Editing applies the filter so you can see what it matches, which needs a table open',
-          onclick: () => editFilter(f, matches, colText),
+          onclick: () => editFilter(f, matches),
         },
         { label: 'Rename…', onclick: () => renameFilter(f) },
         '-',
-        {
-          label: 'Move up', disabled: at <= 0,
-          title: 'Earlier in the cycle order for this header set',
-          onclick: () => moveFilter(f, -1),
-        },
-        {
-          label: 'Move down', disabled: at < 0 || at >= ids.length - 1,
-          title: 'Later in the cycle order for this header set',
-          onclick: () => moveFilter(f, 1),
-        },
+        { label: 'Move up', disabled: at <= 0, title: 'Earlier in the cycle order for this header set', onclick: () => moveFilter(f, -1) },
+        { label: 'Move down', disabled: at < 0 || at >= ids.length - 1, title: 'Later in the cycle order for this header set', onclick: () => moveFilter(f, 1) },
         '-',
         { label: 'Delete…', onclick: () => deleteFilter(f) },
       ];
     }
 
-    function filterRow(f, matches, colText) {
-      const row = el('div', 'sf-row' + (matches ? '' : ' sf-other'));
-      row.dataset.id = String(f.id);
+    /* What a filter does, in a few words: the columns its conditions are
+       on, and how many conditions — the old list showed the name alone,
+       and twenty "EVTX — …" names tell each other apart by their ends. */
+    function conditionsOf(tree) {
+      const cols = [];
+      let n = 0;
+      const walk = (node) => {
+        if (!node) return;
+        if (node.type === 'cond') { n += 1; if (!cols.includes(node.column)) cols.push(node.column); }
+        else if (node.type === 'raw') { n += 1; if (!cols.includes('SQL')) cols.push('SQL'); }
+        else for (const c of node.children || []) walk(c);
+      };
+      walk(tree);
+      return { n, cols };
+    }
+
+    function filterRow(f, matches) {
+      const r = el('div', 'tables-row sf-row' + (matches ? ' open' : ' sf-other'));
+      r.dataset.id = String(f.id);
       const grip = el('span', 'sf-grip', '⠿');
       grip.title = 'Drag to change the cycle order';
       grip.setAttribute('aria-hidden', 'true');
-      const name = el('span', 'sf-name', f.name);
-      name.setAttribute('role', 'button');
-      name.tabIndex = 0;
+      const cell = el('span', 'tables-name-cell');
+      const name = el('button', 'tables-name sf-name', f.name);
+      name.type = 'button';
+      name.dataset.role = 'name';
       if (active && active.id === f.id) name.setAttribute('aria-current', 'true');
-      name.title = matches
-        ? `Apply "${f.name}"`
-        : `Built for different columns (${colText}) — click to apply anyway`;
-      name.onclick = () => applyFilter(f, matches, colText);
-      name.onkeydown = (e) => {
-        if (e.key !== 'Enter' && e.key !== ' ') return;
-        e.preventDefault();
-        applyFilter(f, matches, colText);
-      };
-      const more = el('button', 'btn ghost row-more sf-more', '⋯');
-      more.title = 'Edit, rename, move or delete';
+      name.title = matches ? `Apply "${f.name}"` : `Built for different columns — click to apply anyway`;
+      name.onclick = () => applyFilter(f, matches);
+      cell.append(name);
+      if (active && active.id === f.id) cell.append(el('span', 'tables-sub sf-on', 'applied'));
+      const p = f.payload || {};
+      const { n, cols } = conditionsOf(p.filter_tree);
+      const extra = [p.search && 'search', (p.group_by || []).length && `grouped by ${p.group_by.join(', ')}`].filter(Boolean);
+      const on = el('span', 'sf-on-cols', cols.join(', ') + (extra.length ? (cols.length ? ' · ' : '') + extra.join(' · ') : ''));
+      on.title = on.textContent;
+      const more = el('button', 'btn ghost row-more tables-more sf-more', '⋯');
+      more.dataset.role = 'more';
+      more.title = 'Apply, edit, rename, move or delete';
       more.setAttribute('aria-label', `Actions for "${f.name}"`);
       more.setAttribute('aria-haspopup', 'menu');
       more.setAttribute('aria-expanded', 'false');
-      more.onclick = () => dropdownMenu(more, () => rowMenu(f, matches, colText));
-      row.append(grip, name, more);
-      // Drag to reorder — same one DnD implementation the tab strip and
-      // SQL sub-tabs use. currentIds scopes the drop to this filter's own
-      // header set, so dragging across sets is a no-op (wireDragReorder's
-      // own from === -1 guard).
-      wireDragReorder(row, f.id, {
+      more.onclick = () => dropdownMenu(more, () => rowMenu(f, matches));
+      r.append(grip, cell, on, countCell(n, 'tables-notes'), more);
+      r.addEventListener('contextmenu', (e) => { e.preventDefault(); contextMenu(e, rowMenu(f, matches)); });
+      // Drag to reorder — the one DnD implementation the tab strip and SQL
+      // sub-tabs use, scoped to this filter's own header set.
+      wireDragReorder(r, f.id, {
         containerSelector: '.sf-list',
         rowSelector: '.sf-row',
         horizontal: false,
@@ -615,56 +613,108 @@ export function openSavedFiltersModal({ returnTo = null } = {}) {
         onReorder: async (ids) => {
           try { S.savedFilters = await post('/api/saved_filters/reorder', { ids }); }
           catch (e) { toast(`Could not reorder: ${e.message}`, 6000); return; }
-          render();
+          frame.update();
         },
       });
-      return row;
+      return r;
     }
 
-    function render() {
-      const q = search.value.trim().toLowerCase();
-      list.replaceChildren();
-      // One section per header set — the filters under a set cycle
-      // together, so they read together. The open table's set leads.
-      const groups = new Map();
-      for (const f of S.savedFilters) {
-        const sig = headerSig(f.col_names);
-        if (!groups.has(sig)) groups.set(sig, { colNames: f.col_names, filters: [] });
-        groups.get(sig).filters.push(f);
-      }
-      const entries = [...groups.values()];
-      entries.sort((a, z) => Number(groupMatchesCur(z.colNames)) - Number(groupMatchesCur(a.colNames)));
-      let shown = 0;
-      for (const g of entries) {
-        const nickname = nicknameFor(g.colNames);
-        const colText = (g.colNames || []).join(', ');
-        const hits = g.filters.filter((f) => !q || f.name.toLowerCase().includes(q)
-          || (nickname || '').toLowerCase().includes(q) || colText.toLowerCase().includes(q));
-        if (!hits.length) continue;
-        shown += hits.length;
-        const matches = groupMatchesCur(g.colNames);
-        const head = el('div', 'sf-group-head');
-        const title = el('span', 'sf-group-name', nickname || colText);
-        title.title = colText;
-        const nickBtn = el('button', 'btn ghost sf-mini', nickname ? '🏷' : '🏷 name…');
-        nickBtn.title = nickname
-          ? `Rename this header set's nickname (used by every filter in this section: ${colText})`
-          : `Give this header set a nickname instead of showing its raw columns (${colText})`;
-        nickBtn.onclick = async () => { await setNicknameFor(g.colNames, nickname); render(); };
-        head.append(title, nickBtn);
-        if (matches) head.append(el('span', 'count', 'open table'));
-        list.append(head);
-        for (const f of hits) list.append(filterRow(f, matches, colText));
-      }
-      if (!shown) list.append(el('div', 'note-status', 'No saved filters match that search.'));
+    function groupHead(g, filters) {
+      const h = el('div', 'tables-group');
+      const name = el('span', 'tables-group-name', setLabel(g));
+      name.title = (g.colNames || []).join(', ');
+      h.append(name, el('span', 'tables-group-meta', plural(filters.length, 'filter') + (groupMatchesCur(g.colNames) ? ' · open table' : '')));
+      return h;
     }
-    search.oninput = render;
-    render();
-    setTimeout(() => search.focus(), 0);
 
-    const acts = el('div', 'row-actions');
-    const exp = el('button', 'btn ghost', 'Export filters…');
-    exp.onclick = () => { window.location = '/api/saved_filters/export'; };
+    /* A set's pane, or All's: a filter over names, nicknames and columns on
+       top, the set's columns under it, then the box that scrolls. */
+    const buildPane = (sig) => (pane) => {
+      const top = el('div', 'tm-cols-top');
+      const search = el('input', 'side-search');
+      search.type = 'search';
+      search.placeholder = 'Filter by name, nickname or column…';
+      search.setAttribute('aria-label', 'Filter saved filters');
+      search.autocomplete = 'off';
+      search.value = query;
+      const count = el('span', 'tm-cols-count');
+      top.append(search, count);
+      pane.append(top);
+      const g0 = sig ? sets.find((g) => g.sig === sig) : null;
+      if (g0) {
+        const about = el('div', 'sf-set');
+        const cols = el('span', 'sf-set-cols', `${plural(g0.colNames.length, 'column')}: ${g0.colNames.join(', ')}`);
+        cols.title = g0.colNames.join(', ');
+        const nick = el('button', 'btn ghost mb-small', nicknameFor(g0.colNames) ? 'Rename nickname…' : 'Nickname…');
+        nick.title = 'What this header set is called here, in the Filters ▾ menu and in the Tables manager';
+        nick.onclick = async () => { await setNicknameFor(g0.colNames, nicknameFor(g0.colNames)); reopen(sig); };
+        about.append(cols, nick);
+        pane.append(about);
+      }
+      const box = el('div', 'side-preview tm-cols-box tables-box sf-box');
+      const head = el('div', 'tables-head sf-head');
+      head.append(el('span'), el('span', 'tables-name-h', 'Filter'), el('span', null, 'Filters on'), el('span', 'tables-num', 'Conds'), el('span'));
+      const scroller = el('div', 'side-preview-rows');
+      const list = el('div', 'tables-list sf-list');
+      scroller.append(list);
+      const foot = el('div', 'side-preview-foot');
+      foot.append(el('p', 'fb-help',
+        `Click a name to apply it. Drag a row to set the ${S.keymap.cyclePrevFilter[0] || '['} / `
+        + `${S.keymap.cycleNextFilter[0] || ']'} cycle order.`));
+      box.append(head, scroller, foot);
+      pane.append(box);
+
+      function paint() {
+        const q = query.trim().toLowerCase();
+        const groups = setsNow().filter((g) => !sig || g.sig === sig);
+        let all = 0, shown = 0;
+        const nodes = [];
+        for (const g of groups) {
+          const nickname = nicknameFor(g.colNames) || '';
+          const colText = (g.colNames || []).join(', ').toLowerCase();
+          all += g.filters.length;
+          const hits = g.filters.filter((f) => !q || f.name.toLowerCase().includes(q) || nickname.toLowerCase().includes(q) || colText.includes(q));
+          if (!hits.length) continue;
+          shown += hits.length;
+          if (!sig) nodes.push(groupHead(g, hits));
+          const matches = groupMatchesCur(g.colNames);
+          nodes.push(...hits.map((f) => filterRow(f, matches)));
+        }
+        if (!all) nodes.push(el('p', 'fb-help tables-empty', 'No saved filters yet. Build one in the Filter builder, then Save filter….'));
+        else if (!shown) nodes.push(el('p', 'fb-help tables-empty', `No saved filter matches “${query.trim()}”.`));
+        count.textContent = q ? `${shown} of ${plural(all, 'filter')}` : plural(all, 'filter');
+        keepingFocus(list, () => list.replaceChildren(...nodes));
+      }
+      search.oninput = () => { query = search.value; paint(); };
+      search.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && search.value) { e.preventDefault(); e.stopPropagation(); search.value = ''; query = ''; paint(); }
+      });
+      paint();
+      return { update: paint };
+    };
+
+    const frame = sectionPanes({
+      sections: [
+        { id: 'all', group: 'Saved filters', title: 'Every saved filter', build: buildPane(null),
+          hint: () => `${plural(S.savedFilters.length, 'filter')} · ${plural(setsNow().length, 'header set')}` },
+        ...sets.map((g) => ({
+          id: 'set:' + g.sig, group: 'Header sets', title: setLabel(g), build: buildPane(g.sig),
+          hint: () => {
+            const n = S.savedFilters.filter((f) => headerSig(f.col_names) === g.sig).length;
+            return plural(n, 'filter') + (groupMatchesCur(g.colNames) ? ' · open table' : '');
+          },
+        })),
+      ],
+      label: 'Saved filter sections', cls: 'list-panes sf-manager', paneCls: 'list-pane sf-pane', changedEvent: 'savedfilters:changed',
+    });
+    b.append(frame.panes);
+
+    const foot = el('div', 'table-menu-foot table-menu-strip');
+    if (returnTo) {
+      const back = el('button', 'btn ghost sf-back', '‹ Settings');
+      back.onclick = () => returnTo();
+      foot.append(back);
+    }
     const impLabel = el('label', 'btn ghost', 'Import filters…');
     const impInput = el('input');
     impInput.type = 'file';
@@ -676,16 +726,25 @@ export function openSavedFiltersModal({ returnTo = null } = {}) {
       fd.append('merge', 'true');
       const res = await api('/api/saved_filters/import', { method: 'POST', body: fd });
       await loadSavedFilters();
-      render();
       updateFiltersButton();
       toast(`Imported ${res.added} filter${res.added === 1 ? '' : 's'}`);
+      reopen(frame.current());   // an import can bring header sets of its own
     };
     impLabel.append(impInput);
-    acts.append(exp, impLabel);
-    const back = backBtn();
-    if (back) acts.append(back);
-    b.append(acts);
-  });
+    const exp = el('button', 'btn ghost', 'Export filters…');
+    exp.onclick = () => { window.location = '/api/saved_filters/export'; };
+    const builder = el('button', 'btn ghost table-menu-close', 'Filter builder…');
+    builder.disabled = !S.sourceId;
+    builder.title = S.sourceId ? 'Build a filter on the open table, then Save filter…' : 'Open a table first';
+    builder.onclick = () => openFilterBuilder();
+    foot.append(impLabel, exp, builder);
+    b.append(foot);
+
+    const mine = sets.find((g) => groupMatchesCur(g.colNames));
+    const want = section && (section === 'all' || sets.some((g) => 'set:' + g.sig === section)) ? section
+      : mine ? 'set:' + mine.sig : 'all';
+    frame.show(want);
+  }, { wide: true, tall: true, focus: (b) => b.querySelector('.sf-pane .side-search') });
 }
 
 /* The Columns pane of the table menu. `refresh` repaints the pane after a

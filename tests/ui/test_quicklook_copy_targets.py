@@ -25,8 +25,9 @@ def test_a_case_whose_file_is_gone_is_not_offered_as_a_copy_target(page, api, tm
         assert next(c for c in api("/api/cases") if c["id"] == gone["id"])["exists"] is False
 
         page.evaluate("() => __winnow.tempCopyModal()")
-        page.locator("#modalBody .session-row", has_text="UI copy target here").wait_for()
-        names = page.locator("#modalBody .session-row .session-name").all_inner_texts()
+        page.locator("#modalBody .side-rail-item[data-section=all]").click()
+        page.locator("#modalBody .copyto-row", has_text="UI copy target here").wait_for()
+        names = page.locator("#modalBody .copyto-row .home-name").all_inner_texts()
         assert "UI copy target gone" not in names
         page.keyboard.press("Escape")
     finally:

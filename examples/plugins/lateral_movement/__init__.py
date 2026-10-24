@@ -32,7 +32,7 @@ PLUGIN = {
     "description": "Visualize lateral movement over time: multiple movement events across multiple tables on one graph, with defaults for KAPE/EvtxECmd output.",
 }
 
-WINNOW_API_VERSION = 1
+WINNOW_API_VERSION = 14   # winnow.sectionPanes: the Events… dialog's two panes
 
 MAX_ROWS = 8000          # (src, dst, bucket) rows across every selection
 MAX_SELECTIONS = 20

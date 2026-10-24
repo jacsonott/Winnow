@@ -123,6 +123,12 @@ delivered as infrastructure: once a chart module eats `{rows, x, y,
 kind}`, the stack view, the timeline scrubber, and every dashboard widget
 draw through it.
 
+*As built:* the stack view no longer draws through the chart module. Its
+bars are DOM elements in a chart-first dialog (stack.js), so each can
+take focus, a full-value title and the value menu, and a long tail
+scrolls; the dashboard widgets and the timeline still use charts.js. See
+docs/notes/ui.md, "Stack view".
+
 ---
 
 ## 3. Case notes  (Markdown, own tab, travels in the .db)

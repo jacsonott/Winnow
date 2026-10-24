@@ -2,9 +2,10 @@
 buttons.
 
 Each row had Edit, Rename, ▲, ▼ and ✕, and the name was a button styled
-like a text box. The name is text now — clicking it still applies the
-filter — the row drags to reorder within its header set, and Edit,
-Rename, Move up, Move down and Delete are in the row's ⋯ menu. Move up and
+like a text box. The name reads as text now, as a table's does in the
+Tables manager — clicking it still applies the filter — the row drags to
+reorder within its header set, and Edit, Rename, Move up, Move down and
+Delete are in the row's ⋯ menu. Move up and
 Move down are there so the order can still be changed without a mouse,
 which is why the focus goes back to the row's ⋯ after a move.
 
@@ -63,13 +64,15 @@ def test_a_row_is_a_plain_name_and_one_button(page, two_filters):
     a, _ = two_filters
     _open(page)
     row = _row(page, a)
-    assert row.locator("button").count() == 1, row.inner_html()
+    # The name (what applies it) and the ⋯; nothing else to press.
+    assert row.locator("button").count() == 2, row.inner_html()
+    assert row.locator("button.sf-more").count() == 1, row.inner_html()
     looks = row.locator(".sf-name").evaluate("""(n) => {
       const cs = getComputedStyle(n);
       return { tag: n.tagName, border: cs.borderTopStyle, bg: cs.backgroundColor };
     }""")
     # Not a box: no border and nothing filled behind the text.
-    assert looks["tag"] not in ("BUTTON", "INPUT"), looks
+    assert looks["tag"] != "INPUT", looks
     assert looks["border"] == "none", looks
     assert looks["bg"] == "rgba(0, 0, 0, 0)", looks
     page.keyboard.press("Escape")

@@ -27,10 +27,10 @@ import { dashDrag, loadDashboards, renderDashboardsInto, showDashboard } from '.
 import { openCaseSettings } from './settings.js';
 import { openLog } from './errlog.js';
 import { S, clearCellSelection, selClear, selCount, selFirst, specKey } from './state.js';
-import { compactCaseFile, mergesUsing, openTablesManager, removeRefusal, removeSource } from './tables.js';
+import { compactCaseFile, countCell, mergesUsing, openTablesManager, plural, removeRefusal, removeSource } from './tables.js';
 import { loadTags, refreshTagCounts, renderTagRibbon } from './tags.js';
-import { openTableMenu, timeframeAcrossTables, updateFiltersButton, updateTimeRangeButton } from './timeframe.js';
-import { confirmDialog, contextMenu, dropdownMenu, modal, promptDialog } from './ui.js';
+import { openTableMenu, tableMenuSeg, tableMenuStat, timeframeAcrossTables, updateFiltersButton, updateTimeRangeButton } from './timeframe.js';
+import { confirmDialog, contextMenu, dropdownMenu, modal, promptDialog, sectionPanes } from './ui.js';
 import { dropPendingSelection, pendingViewStatsText, rebuildView, syncNoRows, writeStatsLine } from './view.js';
 
 /* --------------------------------------------------------------- sources */
@@ -1879,50 +1879,163 @@ async function landOnFilters(filters, tree, { clearTimeframe = false } = {}) {
   await recenterOnRow(anchor);
 }
 
-export function openExportModal() {
+/* Export, in the table menu's frame: what can be exported down a side
+   list — the view on screen, then the whole case as a workbook, tagged
+   rows or every row — each with its size under its name; the chosen one
+   on the right says what goes in the file, and the one main button on
+   the foot exports it, saying how much. It was two paragraphs, each over
+   a row of two buttons. */
+export function openExportModal(section = null) {
+  const real = () => (S.sources || []).filter((s) => !s.is_merge && !s.error);
+  const sum = (k) => real().reduce((n, s) => n + (s[k] || 0), 0);
+  const src = S.sources.find((s) => s.id === S.sourceId);
+  let viewTagged = false;
+  let plan = null;   // /api/export/all_xlsx/plan, for the every-row pane
   modal('Export', (b) => {
-    if (S.view) {
-      b.append(el('p', null, 'Exports what you are looking at now — current filters, sort and search — with Line, Tags and Note columns added in front.'));
-      const acts = el('div', 'row-actions');
-      const all = el('button', 'btn', 'Export current view');
-      all.onclick = () => { window.location = caseUrl(`/api/export?view_id=${S.view.view_id}`); $('modal').hidden = true; };
-      const tagged = el('button', 'btn', 'Export tagged rows only');
-      tagged.onclick = () => { window.location = caseUrl(`/api/export?view_id=${S.view.view_id}&tagged_only=true`); $('modal').hidden = true; };
-      acts.append(all, tagged);
-      b.append(acts);
-    }
-    b.append(el('p', null, 'Exports every table in this case — not just the one open now — one worksheet per table. '
-      + 'Tagged rows only, or everything. A merge has no sheet of its own: its rows are on its members’ sheets.'));
-    const xlsxActs = el('div', 'row-actions');
-    const xlsx = el('button', 'btn', 'Export tagged rows from all tables (.xlsx)');
-    xlsx.onclick = () => { window.location = caseUrl('/api/export/tagged_xlsx'); $('modal').hidden = true; };
-    const every = el('button', 'btn', 'Export all tables (.xlsx)');
-    every.title = 'Every row of every table, each on its own worksheet. Big cases take a while.';
-    every.onclick = async () => {
-      // Ask the server what this would write before writing it: Excel
-      // stops a worksheet at 1,048,576 rows, and a timeline is often past
-      // that. The rows still all land — on continuation sheets — but the
-      // analyst gets to hear that, and the size of what's coming, first.
-      let plan;
-      try { plan = await api('/api/export/all_xlsx/plan'); } catch (e) { toast('Could not plan the export: ' + e.message, 6000); return; }
-      if (!plan.tables.length) { toast('Nothing to export — the case has no tables.'); return; }
-      const total = plan.tables.reduce((n, t) => n + t.rows, 0);
-      if (plan.over_cap.length) {
-        const names = plan.over_cap.map((n) => `“${n}”`).join(', ');
-        const ok = await confirmDialog(
-          `${names} ${plan.over_cap.length === 1 ? 'has' : 'have'} more rows than Excel allows on one worksheet `
-          + `(${plan.rows_per_sheet.toLocaleString()}). Every row will still be exported, continued on `
-          + `“Name (2)”, “Name (3)”… sheets. ${total.toLocaleString()} rows across `
-          + `${plan.tables.length} table${plan.tables.length === 1 ? '' : 's'} — this can take a while. Export anyway?`,
-          { okLabel: 'Export anyway' });
-        if (!ok) return;
+    const go = (url) => { window.location = caseUrl(url); $('modal').hidden = true; };
+    const main = el('button', 'btn primary table-menu-close');
+    let run = null;
+    const setMain = (label, fn, disabled = false) => { main.textContent = label; main.disabled = disabled; run = fn; };
+    main.onclick = () => run && run();
+
+    /* The view: what narrows it said in a line, then the file's columns
+       as a list, in the grid's order — the three Winnow adds first, and
+       a hidden column left out, as the export leaves it. */
+    function buildViewPane(pane) {
+      const stats = el('div', 'mb-stats');
+      const summary = el('div', 'mb-summary');
+      const seg = tableMenuSeg([['all', 'Every row', 'Every row the view shows'], ['tagged', 'Tagged rows only', 'Only the rows of the view that carry a tag']],
+        () => (viewTagged ? 'tagged' : 'all'), (key) => { viewTagged = key === 'tagged'; seg.paint(); paint(); });
+      summary.append(stats, seg.seg);
+      const notes = el('ul', 'mb-notes');
+      const box = el('div', 'side-preview tm-cols-box tables-box export-box');
+      const head = el('div', 'tables-head export-cols-head');
+      head.append(el('span', 'tables-name-h', 'Column in the file'), el('span', null, 'Holds'));
+      const scroller = el('div', 'side-preview-rows');
+      const list = el('div', 'tables-list');
+      scroller.append(list);
+      const foot = el('div', 'side-preview-foot');
+      box.append(head, scroller, foot);
+      pane.append(summary, notes, box);
+
+      function applied() {
+        const out = [];
+        const tree = S.filterTree || {};
+        const conds = (n) => (!n ? 0 : n.type === 'cond' || n.type === 'raw' ? 1 : (n.children || []).reduce((k, c) => k + conds(c), 0));
+        for (const [col, raw] of Object.entries(S.filters || {})) if (raw) out.push(`${col} ${raw}`);
+        if (conds(tree)) out.push(plural(conds(tree), 'built condition'));
+        if (S.search) out.push(`search “${S.search}”`);
+        if (S.timeRange && S.timeRange.enabled) out.push(`${S.timeRange.column} ${S.timeRange.start || '…'} → ${S.timeRange.end || '…'}`);
+        if ((S.tagFilter || []).length) out.push(plural(S.tagFilter.length, 'tag') + ' filtered');
+        return out;
       }
-      window.location = caseUrl('/api/export/all_xlsx');
-      $('modal').hidden = true;
+      const colRow = (name, holds, added) => {
+        const r = el('div', 'tables-row export-col-row' + (added ? ' added' : ''));
+        r.append(el('span', 'tables-name static', name), el('span', 'tables-sub', holds));
+        return r;
+      };
+      function paint() {
+        const rows = S.view ? S.view.row_count : 0;
+        const shown = S.columns.filter((c) => !(S.layout[c.name] || {}).hidden);
+        const hidden = S.columns.length - shown.length;
+        stats.replaceChildren(tableMenuStat(rows, 'rows in the view'), tableMenuStat(src ? src.row_count : 0, 'in the table'),
+          tableMenuStat(shown.length + 3, 'columns'));
+        const narrowed = applied();
+        const sort = (S.sort || []).map((x) => `${x.column} ${x.dir === 'desc' ? '↓' : '↑'}`).join(', ');
+        notes.replaceChildren(el('li', 'mb-note', 'What you are looking at now, as CSV: '
+          + (narrowed.length ? `narrowed by ${narrowed.join(' · ')}` : 'nothing narrows it, so every row of the table')
+          + (sort ? `, sorted by ${sort}.` : ', in its stored order.')));
+        list.replaceChildren(colRow('Line', 'the row’s line in the source', true), colRow('Tags', 'its tags, comma-separated', true),
+          colRow('Note', 'its note', true), ...shown.map((c) => colRow(c.name, c.derived ? `derived from ${c.derived_from}` : (c.type || 'text'))));
+        foot.replaceChildren(el('p', 'fb-help', hidden
+          ? `${plural(hidden, 'hidden column')} left out. Show ${hidden === 1 ? 'it' : 'them'} in the grid to export ${hidden === 1 ? 'it' : 'them'}.`
+          : 'The grid’s order, as you arranged it.'));
+        if (!S.view) setMain('Export the view (.csv)', null, true);
+        else if (viewTagged) setMain('Export tagged rows (.csv)', () => go(`/api/export?view_id=${S.view.view_id}&tagged_only=true`));
+        else setMain(`Export ${rows.toLocaleString()} rows (.csv)`, () => go(`/api/export?view_id=${S.view.view_id}`));
+      }
+      paint();
+      return { update: paint };
+    }
+
+    /* The whole case as a workbook: one worksheet per table, listed with
+       what each sheet gets. Tagged rows skips the tables with none. */
+    const buildCasePane = (taggedOnly) => (pane) => {
+      const summary = el('div', 'mb-summary');
+      const stats = el('div', 'mb-stats');
+      summary.append(stats);
+      const notes = el('ul', 'mb-notes');
+      notes.append(el('li', 'mb-note', 'Every table in the case, not just the open one, each on its own worksheet. '
+        + 'A merge has no sheet of its own: its rows are on its tables’ sheets.'));
+      const box = el('div', 'side-preview tm-cols-box tables-box export-box');
+      const head = el('div', 'tables-head export-head');
+      head.append(el('span', 'tables-name-h', 'Worksheet'), el('span', 'tables-num', taggedOnly ? 'Tagged' : 'Rows'), el('span', 'tables-num', 'Sheets'));
+      const scroller = el('div', 'side-preview-rows');
+      const list = el('div', 'tables-list');
+      scroller.append(list);
+      const foot = el('div', 'side-preview-foot');
+      box.append(head, scroller, foot);
+      pane.append(summary, notes, box);
+      function paint() {
+        const tables = real();
+        const n = (s) => (taggedOnly ? s.tagged_row_count || 0 : s.row_count || 0);
+        const withRows = tables.filter((s) => n(s) > 0);
+        const sheetsOf = (s) => (taggedOnly ? (n(s) ? 1 : 0) : ((plan && plan.tables.find((t) => t.id === s.id)) || { sheets: 1 }).sheets);
+        stats.replaceChildren(tableMenuStat(taggedOnly ? sum('tagged_row_count') : sum('row_count'), taggedOnly ? 'tagged rows' : 'rows'),
+          tableMenuStat(withRows.length, withRows.length === 1 ? 'worksheet' : 'worksheets'));
+        list.replaceChildren(...tables.map((s) => {
+          const r = el('div', 'tables-row export-row' + (n(s) ? ' open' : ''));
+          const cell = el('span', 'tables-name-cell');
+          cell.append(el('span', 'tables-name static', sourceLabel(s)));
+          if (!n(s) && taggedOnly) cell.append(el('span', 'tables-sub', 'nothing tagged, no sheet'));
+          const sheets = sheetsOf(s);
+          r.append(cell, countCell(n(s), taggedOnly ? 'tables-tagged' : 'tables-rows'), countCell(sheets, 'tables-notes'));
+          return r;
+        }));
+        const over = plan ? plan.over_cap : [];
+        foot.replaceChildren(el('p', 'fb-help', over.length && !taggedOnly
+          ? `${over.length} table${over.length === 1 ? ' is' : 's are'} past Excel’s ${plan.rows_per_sheet.toLocaleString()} rows a sheet, continued on “Name (2)” sheets.`
+          : 'Excel holds 1,048,575 rows a sheet; a bigger table continues on “Name (2)”, “Name (3)”…'));
+        if (taggedOnly) {
+          setMain(`Export ${sum('tagged_row_count').toLocaleString()} tagged rows (.xlsx)`, () => go('/api/export/tagged_xlsx'), !sum('tagged_row_count'));
+        } else {
+          setMain(`Export ${plural(tables.length, 'table')} (.xlsx)`, async () => {
+            // Big cases take a while: past Excel's cap, say so first.
+            if (plan && plan.over_cap.length) {
+              const names = plan.over_cap.map((x) => `“${x}”`).join(', ');
+              const total = plan.tables.reduce((k, t) => k + t.rows, 0);
+              if (!(await confirmDialog(`${names} ${plan.over_cap.length === 1 ? 'has' : 'have'} more rows than Excel allows on one worksheet. `
+                + `Every row will still be exported, continued on “Name (2)” sheets. ${total.toLocaleString()} rows — this can take a while. Export anyway?`,
+              { okLabel: 'Export anyway' }))) return;
+            }
+            go('/api/export/all_xlsx');
+          }, !tables.length);
+        }
+      }
+      paint();
+      if (!taggedOnly && !plan) {
+        api('/api/export/all_xlsx/plan').then((p) => { plan = p; if (pane.isConnected) paint(); }).catch(() => {});
+      }
+      return { update: paint };
     };
-    xlsxActs.append(xlsx, every);
-    b.append(xlsxActs);
-  });
+
+    const frame = sectionPanes({
+      sections: [
+        { id: 'view', group: 'This table', title: 'Current view', build: buildViewPane,
+          hint: () => (S.view ? `${S.view.row_count.toLocaleString()} rows · .csv` : 'No table open') },
+        { id: 'tagged', group: 'Whole case', title: 'Tagged rows', build: buildCasePane(true),
+          hint: () => `${sum('tagged_row_count').toLocaleString()} rows · .xlsx` },
+        { id: 'all', group: 'Whole case', title: 'Every row', build: buildCasePane(false),
+          hint: () => `${sum('row_count').toLocaleString()} rows · ${plural(real().length, 'sheet')}` },
+      ],
+      label: 'What to export', cls: 'list-panes export-panes', paneCls: 'list-pane export-pane',
+    });
+    b.append(frame.panes);
+    const foot = el('div', 'table-menu-foot table-menu-strip');
+    foot.append(main);
+    b.append(foot);
+    frame.show(section || (S.view ? 'view' : 'tagged'));
+  }, { wide: true, tall: true, focus: (b) => b.querySelector('.side-rail-item[aria-selected="true"]') });
 }
 
 /* DOM wiring for this module, called once by main.js. Handlers can't

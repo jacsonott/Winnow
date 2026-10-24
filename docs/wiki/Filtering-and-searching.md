@@ -89,7 +89,15 @@ The ▾ buttons appear automatically on tables under 250,000 rows, because readi
 
 ### Stacking a column
 
-Right-click a column header and choose **Stack values (rarest first)…** to see the column's values as a bar chart of counts for the current view. **Rarest first** is where one-off command lines and odd hosts show up; **Most common** reverses it. It shows up to 60 bars. Click a bar to filter the grid to that value.
+Right-click a column header and choose **Stack values (rarest first)…** to see the column's values for the current view as a bar chart: one bar per value, every bar to one scale, with round numbers along the top and the **Share** of the rows counted at the end of each bar. Over the chart are how many **distinct values** the column has, the **rows counted** and how many values are **seen once**.
+
+- **Rarest first** is where one-off command lines and odd hosts show up; **Most common** turns it round.
+- Click a bar to filter the grid to that value. Right-click a bar, or click its **⋯**, for **Filter to this value**, **Exclude this value** and **Copy value**.
+- Point at a bar, or move to it with the arrow keys, and the line under the chart gives its value, its rows and its share. `Enter` filters to it.
+- **Filter values…** narrows the chart to the values that contain what you type. Each bar keeps its length.
+- The table's other columns are down the left, with their type or the filter on them: click one to stack it instead. **Find a column…** searches them, and ☆ pins a column you stack often.
+
+A few values get broad bars; a long tail gets thinner ones and scrolls. Stack counts up to 1,000 values and draws 500 at a time. When there are more, the line under the chart says so: filter the grid, or the values, to reach the rest.
 
 To take every value away as a list instead, **Copy unique values** in the same menu puts the column's distinct values for the current view on the clipboard, one per line (see [Copying](Working-with-tables.md#copying)).
 
@@ -110,9 +118,9 @@ A filter is a group of conditions. In the **Match … of:** line at the top of e
 
 A datetime column gets a 📅 date picker next to the value. When you open the builder, any filters in the column boxes move into it as conditions, so the builder always shows the whole filter.
 
-Under the conditions, **Equivalent SQL (editable):** shows the same filter as a SQL expression. You can edit either side and they stay in step. If you type SQL that the guided editor can't show, the builder switches to raw SQL mode and says so. A `LIKE` becomes a guided condition only when it means exactly the same thing: `'%text%'` is contains and `'text%'` is starts with, as long as the text has no other `%` or `_` in it. Any other `LIKE`, such as `'%.exe'`, `'p_.exe'` or `'P1.EXE'` (which ignores case, unlike equals), stays as raw SQL and filters exactly as typed. A contains or starts with whose value holds a `%` or `_` is shown with an `ESCAPE '\'` clause, so the SQL matches those characters literally, as the condition does. **Start over with the guided editor** leaves raw mode. Raw SQL is checked when you click **Apply**, and an error is shown under the box. Only plain conditions are accepted: no `SELECT`, no `;` and no comments.
+The conditions are on the left, under **Conditions**. The right side says what they come to: how many **rows match** in the whole table, counted again as you change anything, beside the **rows in the table** and the number of **conditions**. The search box, the tag filter and the timeframe narrow the grid further, so the grid can show fewer (a merge isn't counted here: apply the filter and read the grid's count). Under the counts, **SQL** shows the same filter as a SQL expression. You can edit either side and they stay in step. If you type SQL that the guided editor can't show, the builder switches to raw SQL mode and says so. A `LIKE` becomes a guided condition only when it means exactly the same thing: `'%text%'` is contains and `'text%'` is starts with, as long as the text has no other `%` or `_` in it. Any other `LIKE`, such as `'%.exe'`, `'p_.exe'` or `'P1.EXE'` (which ignores case, unlike equals), stays as raw SQL and filters exactly as typed. A contains or starts with whose value holds a `%` or `_` is shown with an `ESCAPE '\'` clause, so the SQL matches those characters literally, as the condition does. **Start over with the guided editor** leaves raw mode. Raw SQL is checked when you click **Apply**, and an error is shown under the box. Only plain conditions are accepted: no `SELECT`, no `;` and no comments.
 
-The **Group by** section lets a filter carry a grouping too (see [Grouping rows](Working-with-tables.md#grouping-rows)). **Apply** runs the filter; **Clear** empties the conditions.
+The **Group by** section under the SQL lets a filter carry a grouping too (see [Grouping rows](Working-with-tables.md#grouping-rows)). Along the bottom, **Apply** runs the filter, **Clear** empties the conditions, **Save filter…** keeps it (see [Saved filters](#saved-filters)) and **Saved filters…** opens the list.
 
 To see the current filter as a full query, press `Q`. It opens in a new tab of the [SQL pane](SQL-pane.md).
 
@@ -126,14 +134,14 @@ To step through the saved filters made for exactly this table's columns, press `
 
 Applying a saved filter replaces the builder's conditions, the search and the grouping. It leaves the column boxes, the tag filter and the timeframe as they were, so a host filter in a column box keeps narrowing each saved filter you step through.
 
-**Filters ▾ → Saved filters…** opens the full list, grouped by column set, with the open table's set first. Click a filter's name to apply it. Drag a filter up or down within its column set to change the order `[` and `]` step through. Each filter's **⋯** menu has:
+**Filters ▾ → Saved filters…** opens the full list. Down its left are **Every saved filter** and, under **Header sets**, each set of columns that has filters saved for it, with the open table's set first and marked *open table*. It opens on the open table's set. A set's own list says which columns it is, and **Nickname…** (**Rename nickname…** once it has one) gives it a shorter name, used here, in **Filters ▾** and in the Tables manager. **Every saved filter** lists every filter, under a heading for its set. **Filter by name, nickname or column…** narrows the list. Click a filter's name to apply it. Drag a filter up or down within its column set to change the order `[` and `]` step through. Each filter's **⋯** menu has:
 
 - **Edit…**: applies the filter to the open table and opens it in the builder, where `Update "name"` saves over it and **Save as new…** keeps both. It needs a table open.
 - **Rename…**
 - **Move up** and **Move down**: the same reordering as dragging, from the keyboard.
 - **Delete…**, which asks first.
 
-**Export filters…** and **Import filters…** move them between machines as a JSON file. The same buttons are in **Settings → Saved filters**.
+**Export filters…** and **Import filters…**, along the bottom, move them between machines as a JSON file. The same buttons are in **Settings → Saved filters**. **Filter builder…** beside them opens the builder on the open table.
 
 ### Shipped triage filters
 

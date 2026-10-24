@@ -105,6 +105,10 @@ A tab plus its backend route, the full custom-UI shape:
     # {header} for a section label; one menu is open at a time and Escape,
     # an outside click and the arrow keys work as in every Winnow menu (a
     # choice among a few things is a menu, not a modal over the work),
+    # winnow.sectionPanes({sections, label, cls, paneCls}) for the app's
+    # two-pane dialog frame — sections down a side list by group, each with
+    # a line saying what is set there, the chosen one built into the pane
+    # on the right; append its `panes` inside winnow.modal and show() one,
     # winnow.notify() for a row in the jobs panel with progress and
     # buttons, winnow.showTab()/showPage() to bring the analyst to one of
     # the plugin's tabs or a built-in page, winnow.base
@@ -233,7 +237,7 @@ PAGE_PANEL_PAGES = ("sql", "notes")
 # provides, with a message that says to update Winnow — the failure mode
 # is otherwise an AttributeError deep inside register() that reads like a
 # plugin bug.
-PLUGIN_API_VERSION = 13
+PLUGIN_API_VERSION = 14
 
 FORMAT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 # API routes may nest ("chat/stream") but each segment keeps the same shape.
