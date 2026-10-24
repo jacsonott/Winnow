@@ -7,7 +7,7 @@ import { $, AUTOFIT_MAX_W_DEFAULT, ROW_H, ROW_H_COMFORTABLE, ROW_H_COMPACT, api,
 import { labeledRow } from './derived.js';
 import { VALUE_FILTER_AUTO_MAX, syncSearchKeyCopy } from './filters.js';
 import { headH, rScroll, render, syncSpacer, vScroll } from './grid.js';
-import { drawRail, rebuildGroupPrefix, renderGrouped } from './grouping.js';
+import { drawRail, rebuildGroupPrefix, renderGrouped, writeClipboardText } from './grouping.js';
 import { syncHistogramPanel } from './histogram.js';
 import { shutdownWinnow } from './home.js';
 import { ACTION_LABELS, FIXED_KEYS, defaultKeymap, findKeyConflict, keyLabel, keySpecFromEvent, saveKeymap } from './keymap.js';
@@ -19,10 +19,11 @@ import { loadCaseVariables, loadSavedFilters } from './savedfilters.js';
 import { applyPageTabsSize, renderPageTabs, syncTabOverflow } from './sources.js';
 import { lastSplash, osSkipsSplash, reducedMotion, remoteSkipsSplash } from './splash.js';
 import { S, gridRowCount, dashboardCreatorMode } from './state.js';
+import { keepingFocus } from './tables.js';
 import { buildDefaultTagsEditor } from './tags.js';
 import { openSavedFiltersModal, setTimeframeAcrossTables, timeframeAcrossTables, updateFiltersButton, updateTimeRangeButton } from './timeframe.js';
-import { TS_FORMATS } from './tsformat.js';
-import { markModalAction, confirmDialog, modal, promptDialog } from './ui.js';
+import { TS_FORMATS, formatTimestamp } from './tsformat.js';
+import { markModalAction, confirmDialog, dropdownMenu, modal, promptDialog, sectionPanes } from './ui.js';
 
 /* ------------------------------------------------------------ appearance */
 
@@ -589,129 +590,201 @@ export function openSkinPicker(onPicked) {
    they live in the case file and travel with it when it is handed to
    another analyst. Kept out of the main Settings modal because that one
    is reachable from the home screen, where there is no case for a "this
-   case" control to describe. */
-export function openCaseSettings() {
+   case" control to describe.
+
+   In the table menu's frame: the three settings down a side list, each
+   with what it is set to under its name, so the dialog answers "what has
+   this case got set?" before anything is opened. */
+export function openCaseSettings(section = 'timestamps') {
   markModalAction('openCaseSettings');
   modal('Case settings', (b) => {
-    // One line each; the longer account of both is the wiki's Case
-    // settings section (Settings and shortcuts).
-    b.append(el('p', null, 'Saved in the case file, so they travel with it — Settings is for this machine.'));
-
-    b.append(el('div', 'settings-sub-label', 'Timestamps'));
-    b.append(el('p', 'fb-help', 'Display only — a format set on a column (right-click its header) beats this.'));
-
-    const sel = el('select');
-    const inherit = el('option', null, 'Use the machine-wide default');
-    inherit.value = '';
-    sel.append(inherit);
-    for (const [key, label] of Object.entries(TS_FORMATS)) {
-      const o = el('option', null, label);
-      o.value = key;
-      sel.append(o);
-    }
-    sel.value = S.caseSettings.ts_format || '';
-    sel.onchange = async () => {
-      try {
-        S.caseSettings = await post('/api/case_settings', { ts_format: sel.value });
-        render();
-        toast('Case timestamp format saved');
-      } catch (e) {
-        toast('Could not save: ' + e.message, 5000);
-      }
-    };
-    b.append(labeledRow('Timestamp format', sel));
-
-    b.append(el('div', 'settings-sub-label', 'Dashboards'));
-    const dcRow = el('label', 'check-row');
-    const dcBox = el('input');
-    dcBox.type = 'checkbox';
-    dcBox.id = 'caseDashboardCreator';
-    dcBox.checked = dashboardCreatorMode();
-    dcBox.onchange = async () => {
-      try {
-        S.caseSettings = await post('/api/case_settings', { dashboard_creator: dcBox.checked });
-        toast(dcBox.checked ? 'Dashboard creator mode on — "Add to dashboard" is back in the menus'
-          : 'Dashboard creator mode off');
-      } catch (e) {
-        dcBox.checked = !dcBox.checked;
-        toast('Could not save: ' + e.message, 5000);
-      }
-    };
-    dcRow.append(dcBox, el('span', null, ' Dashboard creator mode'));
-    b.append(dcRow);
-    b.append(el('p', 'fb-help',
-      'Shows "Add to dashboard" in column-header menus, row menus and the Filters ▾ button. '
-      + 'Off, those menus stay short; boards themselves are always there under Dashboards.'));
-
-    b.append(el('div', 'settings-sub-label', 'Variables'));
-    b.append(el('p', 'fb-help',
-      'Named values this case carries for the plugins and people working it — the engagement '
-      + 'name, an API base URL, a link to the scoping document. Plugins read them as '
-      + 'req.variables / winnow.state.variables. Case data, so they travel with the file: '
-      + 'never put a token or password here (Settings → Environment is for those).'));
-    const varsBox = el('div', 'case-vars');
-    b.append(varsBox);
-    renderCaseVariables(varsBox);
+    const frame = sectionPanes({
+      sections: [
+        { id: 'timestamps', group: 'Saved in the case file', title: 'Timestamps', build: buildCaseTsPane,
+          hint: () => (S.caseSettings.ts_format ? TS_FORMATS[S.caseSettings.ts_format] : 'Machine default') },
+        { id: 'dashboards', group: 'Saved in the case file', title: 'Dashboards', build: buildCaseDashPane,
+          hint: () => (dashboardCreatorMode() ? 'Creator mode on' : 'Creator mode off') },
+        { id: 'variables', group: 'Saved in the case file', title: 'Variables', build: buildCaseVarsPane,
+          hint: () => {
+            const list = S.caseVariables || [];
+            const missing = list.filter((v) => v.required && !v.value).length;
+            return list.length ? `${list.length} set` + (missing ? ` · ${missing} missing` : '') : 'None yet';
+          } },
+      ],
+      label: 'Case settings sections', cls: 'list-panes case-settings', paneCls: 'list-pane case-settings-pane', changedEvent: 'casesettings:changed',
+    });
+    b.append(frame.panes);
+    const foot = el('div', 'table-menu-foot table-menu-strip');
+    const machine = el('button', 'btn ghost table-menu-close', 'Settings for this machine…');
+    machine.title = 'Skins, keys, the default timestamp format: kept on this machine, not in the case';
+    machine.onclick = () => openSettings();
+    foot.append(machine);
+    b.append(foot);
+    frame.show(section);
     // Plugins can set variables behind the UI's back; re-fetch on open.
-    loadCaseVariables().then(() => renderCaseVariables(varsBox)).catch(() => {});
-  });
+    loadCaseVariables().then(() => frame.update()).catch(() => {});
+  }, { wide: true, tall: true, focus: (b) => b.querySelector('.side-rail-item[aria-selected="true"]') });
 }
 
-/* Case settings → Variables: one row per variable (name · value · what
-   it's for), required ones flagged while empty, plus an add row. Saves
-   on change through the same route plugins use. */
-export function renderCaseVariables(box) {
-  // The add row is built once per box and never detached — a repaint
-  // landing mid-typing (the re-fetch on open) must not steal focus or
-  // text from it. Only the listed rows are replaced.
-  if (!box._addRow) box._addRow = buildCaseVariableAddRow(box);
-  if (!box._addRow.isConnected) box.append(box._addRow);
-  for (const c of [...box.children]) if (c !== box._addRow) c.remove();
-  const list = S.caseVariables || [];
-  const rows = [];
-  if (!list.length) rows.push(el('div', 'note-status', 'No variables yet.'));
-  for (const v of list) {
-    const row = el('div', 'case-var-row' + (v.required && !v.value ? ' missing' : ''));
-    const name = el('span', 'case-var-name', v.name);
-    name.title = v.name;
-    const val = el('input', 'case-var-value');
-    val.value = v.value || '';
-    val.placeholder = v.required ? 'required' : 'value';
-    val.onchange = async () => {
-      try { await post('/api/case/variables', { name: v.name, value: val.value }); await loadCaseVariables(); renderCaseVariables(box); }
-      catch (e) { toast('Could not save: ' + e.message, 5000); }
-    };
-    const desc = el('span', 'case-var-desc', (v.required ? 'required · ' : '') + (v.description || ''));
-    const del = el('button', 'btn ghost case-var-del', '✕');
-    del.title = 'Remove this variable';
-    del.onclick = async () => {
-      try { await api(`/api/case/variables/${encodeURIComponent(v.name)}`, { method: 'DELETE' }); await loadCaseVariables(); renderCaseVariables(box); }
-      catch (e) { toast('Could not remove: ' + e.message, 5000); }
-    };
-    row.append(name, val, desc, del);
-    rows.push(row);
+const caseChanged = (pane) => pane.dispatchEvent(new CustomEvent('casesettings:changed', { bubbles: true }));
+
+/* Timestamps: every format as a row with what a timestamp looks like in
+   it, ticked where the case is — rather than a dropdown whose options say
+   only a pattern. */
+function buildCaseTsPane(pane) {
+  const sample = '2026-03-14 00:16:17.482391';
+  const notes = el('ul', 'mb-notes');
+  notes.append(el('li', 'mb-note', 'Display only. A format set on a column (right-click its header) beats this.'));
+  const box = el('div', 'side-preview tm-cols-box tables-box cs-ts-box');
+  const head = el('div', 'tables-head cs-ts-head');
+  head.append(el('span'), el('span', 'tables-name-h', 'Format'), el('span', null, 'Shows as'));
+  const scroller = el('div', 'side-preview-rows');
+  const list = el('div', 'tables-list');
+  list.setAttribute('role', 'radiogroup');
+  list.setAttribute('aria-label', 'Timestamp format');
+  scroller.append(list);
+  box.append(head, scroller);
+  pane.append(notes, box);
+
+  async function pick(value) {
+    try {
+      S.caseSettings = await post('/api/case_settings', { ts_format: value });
+      render();
+      toast('Case timestamp format saved');
+    } catch (e) { toast('Could not save: ' + e.message, 5000); }
+    paint();
+    caseChanged(pane);
   }
-  for (const r of rows) box.insertBefore(r, box._addRow);
+  function row(value, label, sub) {
+    const on = (S.caseSettings.ts_format || '') === value;
+    const r = el('label', 'tables-row cs-ts-row' + (on ? ' open' : ''));
+    r.dataset.id = value || 'default';
+    const radio = el('input');
+    radio.type = 'radio';
+    radio.name = 'caseTsFormat';
+    radio.dataset.role = 'pick';
+    radio.checked = on;
+    radio.onchange = () => pick(value);
+    const cell = el('span', 'tables-name-cell');
+    cell.append(el('span', 'tables-name static', label));
+    if (sub) cell.append(el('span', 'tables-sub', sub));
+    const machineFmt = S.appSettings.default_ts_format || 'iso';
+    r.append(radio, cell, el('span', 'cs-ts-sample', formatTimestamp(sample, value || machineFmt)));
+    return r;
+  }
+  function paint() {
+    const machineFmt = S.appSettings.default_ts_format || 'iso';
+    keepingFocus(list, () => list.replaceChildren(
+      row('', 'Machine default', `from Settings · ${TS_FORMATS[machineFmt]}`),
+      ...Object.entries(TS_FORMATS).map(([key, label]) => row(key, label))));
+  }
+  paint();
+  return { update: paint };
 }
 
-function buildCaseVariableAddRow(box) {
-  const add = el('div', 'case-var-row case-var-add');
-  const nameIn = el('input', 'case-var-name-in');
-  nameIn.placeholder = 'name (e.g. engagement)';
-  const valIn = el('input', 'case-var-value');
+/* Dashboards: the one switch, with what it changes said beside it. */
+function buildCaseDashPane(pane) {
+  const field = el('label', 'cs-check');
+  const box = el('input');
+  box.type = 'checkbox';
+  box.id = 'caseDashboardCreator';
+  box.checked = dashboardCreatorMode();
+  box.onchange = async () => {
+    try {
+      S.caseSettings = await post('/api/case_settings', { dashboard_creator: box.checked });
+      toast(box.checked ? 'Dashboard creator mode on — "Add to dashboard" is back in the menus'
+        : 'Dashboard creator mode off');
+    } catch (e) {
+      box.checked = !box.checked;
+      toast('Could not save: ' + e.message, 5000);
+    }
+    caseChanged(pane);
+  };
+  const text = el('span', 'cs-check-text');
+  text.append(el('b', null, 'Dashboard creator mode'),
+    el('small', null, 'Shows "Add to dashboard" in column-header menus, row menus and the Filters ▾ button.'));
+  field.append(box, text);
+  const notes = el('ul', 'mb-notes');
+  notes.append(el('li', 'mb-note', 'Off, those menus stay short. Boards themselves are always there, under Dashboards.'));
+  pane.append(field, notes);
+}
+
+/* Variables: the case's named values as a list, each value edited in
+   place and saved on change; the add row is the list's last line. */
+function buildCaseVarsPane(pane) {
+  const notes = el('ul', 'mb-notes');
+  notes.append(el('li', 'mb-note', 'Named values plugins and people working this case read: the engagement name, an API base URL. '
+    + 'Plugins see them as req.variables and winnow.state.variables.'),
+  el('li', 'mb-note warn', 'They travel with the case file: never put a token or password here. Settings → Environment is for those.'));
+  const box = el('div', 'side-preview tm-cols-box tables-box cs-vars-box');
+  const head = el('div', 'tables-head cs-vars-head');
+  head.append(el('span', 'tables-name-h', 'Name'), el('span', null, 'Value'), el('span', null, 'For'), el('span'));
+  const scroller = el('div', 'side-preview-rows');
+  const list = el('div', 'tables-list');
+  scroller.append(list);
+  // Built once and never repainted: a re-fetch landing mid-typing must
+  // not steal focus or text from it.
+  const add = el('div', 'side-preview-foot cs-vars-add');
+  const nameIn = el('input', 'cs-var-in');
+  nameIn.placeholder = 'New variable name';
+  nameIn.setAttribute('aria-label', 'New variable name');
+  const valIn = el('input', 'cs-var-in');
   valIn.placeholder = 'value';
-  const addBtn = el('button', 'btn ghost', 'Add');
+  valIn.setAttribute('aria-label', 'New variable value');
+  const addBtn = el('button', 'btn ghost mb-small', 'Add');
   addBtn.onclick = async () => {
-    if (!nameIn.value.trim()) { toast('Name the variable'); return; }
+    if (!nameIn.value.trim()) { toast('Name the variable'); nameIn.focus(); return; }
     try {
       await post('/api/case/variables', { name: nameIn.value.trim(), value: valIn.value });
       nameIn.value = ''; valIn.value = '';
       await loadCaseVariables();
-      renderCaseVariables(box);
+      paint();
+      caseChanged(pane);
     } catch (e) { toast('Could not add: ' + e.message, 5000); }
   };
-  add.append(nameIn, valIn, el('span', 'case-var-desc', ''), addBtn);
-  return add;
+  for (const inp of [nameIn, valIn]) inp.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); addBtn.click(); } };
+  add.append(nameIn, valIn, addBtn);
+  box.append(head, scroller, add);
+  pane.append(notes, box);
+
+  function row(v) {
+    const r = el('div', 'tables-row cs-var-row' + (v.required && !v.value ? ' missing' : ''));
+    r.dataset.id = v.name;
+    const name = el('span', 'tables-name static', v.name);
+    name.title = v.name;
+    const val = el('input', 'cs-var-in');
+    val.dataset.role = 'value';
+    val.value = v.value || '';
+    val.placeholder = v.required ? 'required' : 'value';
+    val.setAttribute('aria-label', `Value of ${v.name}`);
+    val.onchange = async () => {
+      try { await post('/api/case/variables', { name: v.name, value: val.value }); await loadCaseVariables(); paint(); caseChanged(pane); }
+      catch (e) { toast('Could not save: ' + e.message, 5000); }
+    };
+    const desc = el('span', 'tables-sub', (v.required ? 'required · ' : '') + (v.description || ''));
+    desc.title = desc.textContent;
+    const more = el('button', 'btn ghost row-more tables-more', '⋯');
+    more.dataset.role = 'more';
+    more.setAttribute('aria-label', `Actions for ${v.name}`);
+    more.setAttribute('aria-haspopup', 'menu');
+    more.onclick = () => dropdownMenu(more, [
+      { label: 'Copy value', disabled: !v.value, onclick: () => writeClipboardText(Promise.resolve(v.value || ''), `Copied ${v.name}`) },
+      '-',
+      { label: 'Remove', onclick: async () => {
+        try { await api(`/api/case/variables/${encodeURIComponent(v.name)}`, { method: 'DELETE' }); await loadCaseVariables(); paint(); caseChanged(pane); }
+        catch (e) { toast('Could not remove: ' + e.message, 5000); }
+      } },
+    ]);
+    r.append(name, val, desc, more);
+    return r;
+  }
+  function paint() {
+    const vars = S.caseVariables || [];
+    keepingFocus(list, () => list.replaceChildren(...(vars.length ? vars.map(row)
+      : [el('p', 'fb-help tables-empty', 'No variables yet. Add one on the line below, or apply a profile that asks for some.')])));
+  }
+  paint();
+  return { update: paint };
 }
 
 /* The values prompt's fields, one per variable definition: its label

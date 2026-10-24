@@ -12,8 +12,8 @@ pytestmark = pytest.mark.ui
 H = "{ 'X-Timeline-Lite-Client': '1', 'Content-Type': 'application/json' }"
 
 
-def _open(page):
-    page.evaluate("() => __winnow.openSessionManager()")
+def _open(page, section=None):
+    page.evaluate("(s) => __winnow.openSessionManager(s)", section)
     page.wait_for_selector("#modal:not([hidden])")
     page.locator(".btn", has_text="Save current work").wait_for(state="visible")
 
@@ -43,11 +43,12 @@ def _save(page, name):
 
 
 def _compare(page, left, right):
-    _open(page)
-    page.locator(".session-compare select").first.select_option(left)
-    page.locator(".session-compare select").nth(1).select_option(right)
-    page.locator(".btn", has_text="Compare").click()
-    page.wait_for_selector(".diff-stats")
+    """Compare compares as its sides change: there is no button to press."""
+    _open(page, "compare")
+    sels = page.locator(".sessions-compare-top select")
+    sels.first.select_option(left)
+    sels.nth(1).select_option(right)
+    page.wait_for_selector(".sessions-diff-row")
 
 
 def test_the_panel_says_a_comparison_is_applied_and_can_clear_it(page):
@@ -58,8 +59,8 @@ def test_the_panel_says_a_comparison_is_applied_and_can_clear_it(page):
         _tag_rows(page, [1, 2])           # the reviewer drops two of the three
         _tag_rows(page, [5], "2")         # and adds one, with a different tag
         _compare(page, "analyst", "__live__")
-        assert page.locator("#modalBody .diff-applied").is_hidden(), "nothing pivoted yet"
-        page.locator(".diff-stats tr").nth(1).locator(".diff-n-removed .btn").click()
+        assert page.locator("#modalBody .sessions-applied").is_hidden(), "nothing pivoted yet"
+        page.locator(".sessions-diff-row").first.locator("button.diff-n-removed").click()
         page.wait_for_selector("#modal", state="hidden")
         page.wait_for_function("() => __winnow.S.view && __winnow.S.view.row_count === 2")
 
@@ -73,22 +74,23 @@ def test_the_panel_says_a_comparison_is_applied_and_can_clear_it(page):
         b_col = page.evaluate("() => getComputedStyle(document.documentElement).getPropertyValue('--diff-b').trim()")
         assert a_col and b_col and b_col.startswith("#")
 
-        # Back in the panel: the status line, and the dropdowns agreeing with it.
+        # Back in the panel — on Compare, since a comparison is applied: the
+        # status line, and the dropdowns agreeing with it.
         _open(page)
-        line = page.locator("#modalBody .diff-applied")
-        assert line.is_visible()
+        line = page.locator("#modalBody .sessions-applied")
+        line.wait_for(state="visible")
         text = line.inner_text()
         assert "Comparison applied" in text and "analyst" in text and "Current work" in text
-        assert "only in analyst" in text.lower() and "(2 rows)" in text
+        assert "only in analyst" in text.lower() and "2 rows" in text
         # Waited for: the dropdowns are filled once the panel's session list
         # has loaded, after the status line is already up. Read once, they
         # still said Current work on a loaded runner.
         page.wait_for_function(
-            "() => [...document.querySelectorAll('.session-compare select')].map((s) => s.value).join()"
+            "() => [...document.querySelectorAll('.sessions-compare-top select')].map((s) => s.value).join()"
             " === 'analyst,__live__'")
 
         # Show all differences: the added row joins, wearing B.
-        line.locator(".btn", has_text="Show all differences").click()
+        line.locator(".btn", has_text="All differences").click()
         page.wait_for_selector("#modal", state="hidden")
         page.wait_for_function("() => __winnow.S.view && __winnow.S.view.row_count === 3")
         page.wait_for_function("() => document.querySelectorAll('#body .row.diff-b').length === 1")
@@ -100,10 +102,10 @@ def test_the_panel_says_a_comparison_is_applied_and_can_clear_it(page):
 
         # Clear from the panel: marks gone, filter back to none, line gone.
         _open(page)
-        page.locator("#modalBody .diff-applied .btn", has_text="Clear").click()
+        page.locator("#modalBody .sessions-applied .btn", has_text="Clear").click()
         page.wait_for_function("() => __winnow.S.diffMarks === null")
         page.wait_for_function("() => __winnow.S.view && __winnow.S.view.row_count === 200")
-        page.wait_for_selector("#modalBody .diff-applied", state="hidden")
+        page.wait_for_selector("#modalBody .sessions-applied", state="hidden")
         assert page.locator("#diffBanner").is_hidden()
         assert page.locator("#body .row.diff-a, #body .row.diff-b").count() == 0
         page.keyboard.press("Escape")
@@ -123,7 +125,7 @@ def test_clear_from_another_table_lands_on_the_compared_one(page):
         _save(page, "analyst")
         _tag_rows(page, [1])
         _compare(page, "analyst", "__live__")
-        page.locator(".diff-stats tr").nth(1).locator(".diff-n-removed .btn").click()
+        page.locator(".sessions-diff-row").first.locator("button.diff-n-removed").click()
         page.wait_for_selector("#modal", state="hidden")
         page.wait_for_function("() => __winnow.S.view && __winnow.S.view.row_count === 1")
         compared = page.evaluate("() => __winnow.S.sourceId")
@@ -131,7 +133,7 @@ def test_clear_from_another_table_lands_on_the_compared_one(page):
         page.click("#tabSql")
         page.wait_for_selector("#sqlview:not([hidden])")
         _open(page)
-        page.locator("#modalBody .diff-applied .btn", has_text="Clear").click()
+        page.locator("#modalBody .sessions-applied .btn", has_text="Clear").click()
         page.wait_for_function("() => __winnow.S.diffMarks === null")
         page.wait_for_function("(id) => __winnow.S.activeTab === 'grid' && __winnow.S.sourceId === id", arg=compared)
         page.wait_for_function("() => __winnow.S.view && __winnow.S.view.row_count === 200")

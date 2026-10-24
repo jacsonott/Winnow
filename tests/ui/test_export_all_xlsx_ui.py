@@ -1,7 +1,9 @@
-"""The Export modal's fourth button: every table to one workbook. On a
-small case there's nothing to warn about, so the click is the download."""
+"""Export's Every row: every table to one workbook. On a small case there's
+nothing to warn about, so the main button is the download."""
 
 from __future__ import annotations
+
+import re
 
 import pytest
 
@@ -9,10 +11,12 @@ pytestmark = pytest.mark.ui
 
 
 def test_the_button_downloads_a_workbook(page):
-    page.evaluate("() => __winnow.openExportModal()")
-    page.wait_for_selector("#modal:not([hidden])")
-    btn = page.locator("#modalBody .btn", has_text="Export all tables (.xlsx)")
-    assert btn.count() == 1
+    page.evaluate("() => __winnow.openExportModal('all')")
+    page.wait_for_selector("#modal:not([hidden]) .export-pane[data-section=all]")
+    hint = page.locator("#modalBody .side-rail-item[data-section=all] .side-rail-hint").inner_text()
+    assert re.fullmatch(r"[\d,]+ rows · \d+ sheets?", hint), hint
+    btn = page.locator("#modal .table-menu-foot .btn.primary")
+    assert re.fullmatch(r"Export \d+ tables? \(\.xlsx\)", btn.inner_text()), btn.inner_text()
     with page.expect_download(timeout=15_000) as dl:
         btn.click()
     download = dl.value

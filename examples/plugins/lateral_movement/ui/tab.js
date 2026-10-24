@@ -470,58 +470,81 @@ async function saveDefs(winnow) {
   catch (e) { winnow.toast('Could not save: ' + e.message, 6000); }
 }
 
-/* The Events… modal: every definition with the hop it draws and where it
-   binds. Shipped ones can be copied into the builder as a starting
-   point; saved ones edited or deleted. */
-function openEventManager(winnow) {
-  const { el, modal, confirmDialog } = winnow;
-  const reopen = () => openEventManager(winnow);
+/* The Events… modal, in the app's two-pane frame (winnow.sectionPanes):
+   yours and the shipped ones down a side list, each list on the right
+   with the hop it draws, where it binds and how many of this case's
+   tables it binds to. What a row offers is in its ⋯ (it was a Copy to
+   edit button on every shipped row); its name opens it in the builder. */
+function openEventManager(winnow, section = null) {
+  const { el, modal, confirmDialog, dropdownMenu, sectionPanes } = winnow;
+  const reopen = (at) => openEventManager(winnow, at);
+  const sources = () => winnow.state.sources.filter((s) => !s.error);
+  const bound = (d) => sources().filter((s) => bindsTo(d, s)).length;
+  const plural = (n, one) => `${n} ${n === 1 ? one : one + 's'}`;
   modal('Movement events', (b) => {
-    b.append(el('p', 'note-status',
-      'Shipped events come with the plugin. Yours are kept on this machine and offered in every case. '
-      + 'Copy a shipped event to start a new one from it.'));
-    const list = el('div', 'lm-mgr');
-    const row = (d, kind) => {
-      const r = el('div', 'lm-mgr-row');
-      const text = el('div', 'lm-mgr-text');
-      text.append(el('span', 'lm-mgr-name', d.name),
-                  el('span', 'lm-mgr-sub', `${d.src_col} → ${d.dst_col} · ${bindingText(d)}`));
-      r.append(text);
-      const acts = el('div', 'lm-mgr-acts');
-      if (kind === 'shipped') {
-        const copy = el('button', 'btn ghost', 'Copy to edit');
-        copy.onclick = () => openEventBuilder(winnow, { template: d, onSave: addEvent, onDone: reopen });
-        acts.append(copy);
-      } else {
-        const edit = el('button', 'btn ghost', 'Edit');
-        edit.onclick = () => openEventBuilder(winnow, {
-          edit: d, onSave: (def) => replaceEvent(d.name, def), onDone: reopen });
-        const del = el('button', 'btn ghost', 'Delete');
-        del.onclick = async () => {
-          if (!(await confirmDialog(`Delete the movement event "${d.name}"?`, { okLabel: 'Delete', danger: true }))) return;
-          S.defs.saved = S.defs.saved.filter((x) => x !== d);
-          await saveDefs(winnow);
-          repaint();
-          reopen();
-        };
-        acts.append(edit, del);
-      }
-      r.append(acts);
-      return r;
+    const edit = (d) => openEventBuilder(winnow, { edit: d, onSave: (def) => replaceEvent(d.name, def), onDone: () => reopen('saved') });
+    const copy = (d) => openEventBuilder(winnow, { template: d, onSave: addEvent, onDone: () => reopen('saved') });
+    const del = async (d) => {
+      if (!(await confirmDialog(`Delete the movement event "${d.name}"?`, { okLabel: 'Delete', danger: true }))) return;
+      S.defs.saved = S.defs.saved.filter((x) => x !== d);
+      await saveDefs(winnow);
+      repaint();
+      reopen('saved');
     };
-    if (S.defs.saved.length) {
-      list.append(el('div', 'lm-mgr-head', 'Yours'));
-      for (const d of S.defs.saved) list.append(row(d, 'saved'));
-    }
-    list.append(el('div', 'lm-mgr-head', 'Shipped'));
-    for (const d of S.defs.shipped) list.append(row(d, 'shipped'));
-    b.append(list);
-    const add = el('button', 'btn', '+ New event type');
-    add.onclick = () => openEventBuilder(winnow, { onSave: addEvent, onDone: reopen });
-    const acts = el('div', 'row-actions');
-    acts.append(add);
-    b.append(acts);
-  }, { wide: true });
+    const menu = (d, kind) => (kind === 'shipped'
+      ? [{ label: 'Copy to a new event…', onclick: () => copy(d) }]
+      : [{ label: 'Edit…', onclick: () => edit(d) }, { label: 'Copy to a new event…', onclick: () => copy(d) }, '-',
+        { label: 'Delete…', onclick: () => del(d) }]);
+
+    const buildList = (kind) => (pane) => {
+      const defs = kind === 'shipped' ? S.defs.shipped : S.defs.saved;
+      pane.append(el('p', 'lm-mgr-note', kind === 'shipped'
+        ? 'These come with the plugin. Copy one to start an event of your own from it.'
+        : 'Kept on this machine and offered in every case.'));
+      const box = el('div', 'lm-mgr-box');
+      const head = el('div', 'lm-mgr-row lm-mgr-headrow');
+      head.append(el('span', null, 'Event'), el('span', null, 'Hop'), el('span', null, 'Binds to'), el('span', 'lm-mgr-num', 'Tables'), el('span'));
+      const list = el('div', 'lm-mgr-list');
+      for (const d of defs) {
+        const r = el('div', 'lm-mgr-row');
+        const name = el('button', 'lm-mgr-name', d.name);
+        name.type = 'button';
+        name.title = kind === 'shipped' ? 'Copy to a new event' : 'Edit this event';
+        name.onclick = () => (kind === 'shipped' ? copy(d) : edit(d));
+        const n = bound(d);
+        const more = el('button', 'btn ghost lm-mgr-more', '⋯');
+        more.type = 'button';
+        more.setAttribute('aria-label', `Actions for ${d.name}`);
+        more.setAttribute('aria-haspopup', 'menu');
+        more.onclick = () => dropdownMenu(more, menu(d, kind));
+        r.append(name, el('span', 'lm-mgr-sub', `${d.src_col} → ${d.dst_col}`), el('span', 'lm-mgr-sub', bindingText(d)),
+          el('span', 'lm-mgr-num' + (n ? ' some' : ''), n ? String(n) : '—'), more);
+        list.append(r);
+      }
+      if (!defs.length) {
+        list.append(el('p', 'lm-mgr-empty', kind === 'shipped' ? 'The plugin ships no events.'
+          : 'None yet. + New event… below starts one, or copy a shipped event from its ⋯.'));
+      }
+      box.append(head, list);
+      pane.append(box);
+    };
+    const frame = sectionPanes({
+      sections: [
+        { id: 'saved', group: 'Events', title: 'Yours', build: buildList('saved'),
+          hint: () => (S.defs.saved.length ? plural(S.defs.saved.length, 'event') : 'None yet') },
+        { id: 'shipped', group: 'Events', title: 'Shipped', build: buildList('shipped'),
+          hint: () => `${plural(S.defs.shipped.length, 'event')} · ${S.defs.shipped.filter((d) => bound(d)).length} bind here` },
+      ],
+      label: 'Movement event lists', cls: 'lm-mgr-panes', paneCls: 'lm-mgr-pane',
+    });
+    b.append(frame.panes);
+    const foot = el('div', 'lm-mgr-foot');
+    const add = el('button', 'btn primary', '+ New event…');
+    add.onclick = () => openEventBuilder(winnow, { onSave: addEvent, onDone: () => reopen('saved') });
+    foot.append(add);
+    b.append(foot);
+    frame.show(section || (S.defs.saved.length ? 'saved' : 'shipped'));
+  }, { wide: true, tall: true });
 }
 
 function bindingText(d) {

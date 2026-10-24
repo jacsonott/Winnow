@@ -55,8 +55,10 @@ def test_case_settings_is_on_the_case_menu_and_saves(page):
     page.wait_for_selector("#modal:not([hidden])")
     assert page.locator("#modalTitle").inner_text().lower() == "case settings"
 
-    sel = page.locator("#modalBody select").first
-    sel.select_option("us")
+    # Timestamps is the section it opens on: a row per format, picked
+    # like a radio button.
+    us = page.locator("#modalBody .cs-ts-row[data-id=us] input[type=radio]")
+    us.check()
     page.wait_for_function("() => __winnow.S.caseSettings.ts_format === 'us'")
 
     # Stored in the CASE, not the browser — so it survives to another
@@ -65,6 +67,6 @@ def test_case_settings_is_on_the_case_menu_and_saves(page):
       { headers: { 'X-Timeline-Lite-Client': '1' } }).then((r) => r.json())""")
     assert saved["ts_format"] == "us"
 
-    sel.select_option("")   # back to inheriting
+    page.locator("#modalBody .cs-ts-row[data-id=default] input[type=radio]").check()   # back to inheriting
     page.wait_for_function("() => !__winnow.S.caseSettings.ts_format")
     page.keyboard.press("Escape")
