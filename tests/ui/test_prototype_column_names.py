@@ -44,7 +44,7 @@ def proto(page, server, server_post, ui_csv):
     # Queued from outside the page, so nothing in it polls the job.
     for _ in range(150):
         page.evaluate("() => __winnow.loadSources(undefined, { navigate: false })")
-        if page.evaluate("() => __winnow.S.sources.some((s) => s.name === 'proto.csv' && s.row_count === 3)"):
+        if page.evaluate("() => __winnow.S.sources.some((s) => s.name === 'proto.csv' && s.row_count === 3 && s.columns.length)"):
             break
         page.wait_for_timeout(200)
     sid = page.evaluate("() => __winnow.S.sources.find((s) => s.name === 'proto.csv').id")
