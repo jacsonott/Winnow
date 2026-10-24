@@ -171,6 +171,15 @@ export async function followFtsBuild(sourceId) {
   startJobsPoll();
 }
 
+/* The Tables manager changed what a table's index is doing (Build or
+   Remove): forget the "no index, no build" answer followFtsBuild
+   remembered for it, which Build has just made wrong, and follow it the
+   same way — the open table's hint, the poll, the toast when it lands. */
+export function refollowFtsBuild(sourceId) {
+  ftsAsked.delete(sourceId);
+  return followFtsBuild(sourceId);
+}
+
 /* Jobs that finished before this page existed are history, not news.
    "Before this page existed" used to be approximated as "before this
    client ever saw a job" (seenJobStatus empty), which misfired on a

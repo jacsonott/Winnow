@@ -4,7 +4,7 @@
 
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { tableMenuSeg, tableMenuStat } from './timeframe.js';
-import { $, api, el, post, setBusy, toast } from './core.js';
+import { $, api, el, post, setBusy, toast, toastAction } from './core.js';
 import { writeClipboardText } from './grouping.js';
 import { openImportModal } from './importer.js';
 import { columnGroupKey, openMergeBuilder } from './merge.js';
@@ -13,6 +13,7 @@ import { nicknameFor } from './savedfilters.js';
 import { closeAllTabs, closeTab, dropViewStateFor, foldersFlattened, loadSources, openSource, openTables, sourceGlyph, sourceLabel, sourceTitle, subsetParentLabel, tableMenuItems, taggedTablesToOpen } from './sources.js';
 import { S } from './state.js';
 import { alertDialog, closeModal, confirmDialog, dropdownMenu, markModalAction, modal, openMenuAnchor, sectionPanes } from './ui.js';
+import { refollowFtsBuild } from './jobs.js';
 import { cancelPendingView } from './view.js';
 
 /* The manager's background poll (openTablesManager, at the bottom), kept
@@ -27,11 +28,22 @@ export async function refreshSourcesQuietly() {
 /* The search index's state, as the chip beside a table's counts says it.
    Worded to stand alone: the chip has no column heading over it, and the
    old bare "Not started" in a bordered box read as a button that would
-   start something. */
+   start something. A table whose index waits for Build says why
+   (Store._fts_on_request): the analyst removed it, or the table is big
+   enough that the index's disk is worth asking about. */
 export function indexStatusFor(s) {
   if (s.has_fts) return { text: 'index ready', cls: 'ready' };
   if (s.fts_building) return { text: 'indexing…', cls: 'building' };
+  if (s.fts_on_request === 'removed') return { text: 'removed', cls: 'idle' };
+  if (s.fts_on_request === 'large') return { text: 'on request', cls: 'idle' };
   return { text: 'not indexed yet', cls: 'idle' };
+}
+
+/* The size past which a table's search index waits for Build, as the
+   Tables manager says it ("1 GB", not "1.0 GB"). */
+export function autoIndexLimit() {
+  const n = searchIndexSupport && searchIndexSupport.auto_max_bytes;
+  return n ? fmtBytes(n).replace('.0 ', ' ') : '1 GB';
 }
 
 export function fmtBytes(n) {
@@ -541,11 +553,37 @@ export function buildIndexesPane(pane) {
     setBusy(true);
     try {
       for (const s of targets) await post(`/api/source/${s.id}/search_index`, {});
-      await refreshSourcesQuietly();
+      for (const s of targets) await refollowFtsBuild(s.id);
     } catch (e) { toast('Could not start the search index: ' + e.message, 6000); }
     finally { setBusy(false); }
     paint();
     changed();
+  }
+  /* Remove: the index goes, a build of one stops, and nothing builds it
+     again until Build (Store.remove_search_index). Its pages stay in the
+     case file for the next import or index to reuse, so the toast offers
+     Compact rather than claiming the disk is back. */
+  async function removeIndex(s) {
+    const ok = await confirmDialog(
+      `Remove the search index on ${sourceLabel(s)}?\n\n`
+      + 'Contains and Advanced searches of this table will scan every row instead: the same results, more slowly. '
+      + 'Winnow won’t build it again on its own; Build brings it back.\n\n'
+      + 'Its space stays in the case file for reuse until you compact it.',
+      { okLabel: 'Remove' },
+    );
+    if (!ok) return;
+    setBusy(true);
+    let res;
+    try {
+      res = await api(`/api/source/${s.id}/search_index`, { method: 'DELETE' });
+      await refollowFtsBuild(s.id);
+    } catch (e) { toast('Could not remove the search index: ' + e.message, 6000); return; }
+    finally { setBusy(false); }
+    paint();
+    changed();
+    const msg = `Removed the search index on ${sourceLabel(s)}`;
+    if (res.freed_bytes) toastAction(`${msg}: ${fmtBytes(res.freed_bytes)} is free inside the case file.`, 'Compact…', () => compactCaseFile());
+    else toast(msg);
   }
   async function drop(s, columns) {
     setBusy(true);
@@ -559,7 +597,10 @@ export function buildIndexesPane(pane) {
     paint();
     changed();
   }
-  buildAll.onclick = () => build(realTables().filter((s) => !s.has_fts && !s.fts_building));
+  /* "Missing" leaves out the tables waiting for Build: a big one, or one
+     whose index was removed, is a choice per table, not a gap. */
+  const missingOf = (real) => real.filter((s) => !s.has_fts && !s.fts_building && !s.fts_on_request);
+  buildAll.onclick = () => build(missingOf(realTables()));
   dropAll.onclick = async () => {
     const withIdx = realTables().filter((s) => (indexesBySource.get(s.id) || []).some((ix) => !ix.building));
     const n = withIdx.reduce((k, s) => k + (indexesBySource.get(s.id) || []).filter((ix) => !ix.building).length, 0);
@@ -577,12 +618,25 @@ export function buildIndexesPane(pane) {
     name.append(label);
     const si = el('span', 'tables-si');
     const status = indexStatusFor(s);
-    si.append(el('span', 'index-status index-status-' + status.cls, status.text.replace(' yet', '')));
+    const chipEl = el('span', 'index-status index-status-' + status.cls, status.text.replace(' yet', ''));
+    if (s.fts_on_request === 'removed') chipEl.title = 'You removed this index. Searches scan the table until you build it again.';
+    else if (s.fts_on_request === 'large') chipEl.title = `More than ${autoIndexLimit()} of text, so its index is built only when you ask: it would take about as much disk again. Searches scan the table until then.`;
+    si.append(chipEl);
     if (status.cls === 'idle' && searchIndexSupport && searchIndexSupport.supported) {
       const b = el('button', 'btn ghost mb-small tables-build', 'Build');
       b.dataset.role = 'build';
-      b.title = 'Build it now in the background, rather than on the first search that needs it';
+      b.title = s.fts_on_request
+        ? 'Build it now in the background; searches use it once it is ready'
+        : 'Build it now in the background, rather than on the first search that needs it';
       b.onclick = () => build([s]);
+      si.append(b);
+    } else if (status.cls !== 'idle') {
+      const b = el('button', 'btn ghost mb-small tables-remove', 'Remove');
+      b.dataset.role = 'remove';
+      b.title = status.cls === 'ready'
+        ? 'Remove this index to free its space; searches scan the table instead'
+        : 'Stop building this index and remove what is built';
+      b.onclick = () => removeIndex(s);
       si.append(b);
     }
     const fi = el('span', 'tables-fi');
@@ -618,7 +672,7 @@ export function buildIndexesPane(pane) {
     notes.replaceChildren(
       el('li', 'mb-note', unsupported
         ? `This Winnow runs on SQLite ${searchIndexSupport.sqlite}, which can't use a search index (it needs 3.45 or later, which Python 3.12 and later ship). Contains and Advanced searches scan every row instead: the same results, more slowly.`
-        : 'Contains and Advanced searches use a table’s search index once it is ready. Until then they scan the table: the same results, more slowly. The first search that needs one starts it.'),
+        : `Contains and Advanced searches use a table’s search index once it is ready, and scan the table until then: the same results, more slowly. The first search that needs one starts it, except on a table with more than ${autoIndexLimit()} of text, where it waits for Build: an index takes about as much disk as its table. A removed index stays removed until you build it again.`),
       el('li', 'mb-note', 'Filtering, grouping or opening the value picker on a column builds a small filter index for it. Drop them if they add up; the next filter on that column builds it again.'));
     keepingFocus(list, () => {
       list.replaceChildren(...(real.length ? real.slice().sort((a, b) => sourceLabel(a).localeCompare(sourceLabel(b))).map(row)
@@ -626,7 +680,7 @@ export function buildIndexesPane(pane) {
     });
     footText.textContent = idxCount ? `${plural(idxCount, 'filter index', 'filter indexes')} on ${plural(idxTables, 'table')}.` : 'No filter indexes.';
     dropAll.disabled = !real.some((s) => (indexesBySource.get(s.id) || []).some((ix) => !ix.building));
-    const missing = real.filter((s) => !s.has_fts && !s.fts_building).length;
+    const missing = missingOf(real).length;
     buildAll.hidden = !missing || unsupported;
     buildAll.textContent = `Build ${missing === 1 ? 'the missing search index' : `${missing} missing search indexes`}`;
   }
@@ -705,6 +759,12 @@ export function openTablesManager(section = 'tables') {
     // that changed nothing from one that did.
     const paintedSig = () => JSON.stringify([S.sources, S.folders, [...indexesBySource]]);
     let lastSig = paintedSig();
+    // A pane that repaints itself after acting (Build, Remove, a drop) has
+    // painted what S.sources says now, so that is what is on screen.
+    // Without this, a tick that comes back to the state the last tick
+    // painted (Remove, then Build, inside one tick) compared equal and
+    // left "indexing…" up after the index was ready.
+    frame.panes.addEventListener('tables:changed', () => { lastSig = paintedSig(); });
     refreshColumnIndexes().then(() => { lastSig = paintedSig(); frame.update(); }).catch(() => {});
 
     if (tablesModalPoll) clearInterval(tablesModalPoll);

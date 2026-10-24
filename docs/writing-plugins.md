@@ -1089,6 +1089,8 @@ A source dict:
                                      # table made inside Winnow — an identity, not a digest
   "imported_at": "2026-08-16T09:12:44",
   "has_fts": 1, "fts_building": False,
+  "fts_on_request": None,             # "large" / "removed": no search index until the
+                                      # analyst's Build — searches of it scan
   "is_open": True,                    # has a visible tab
   "tagged_row_count": 118, "note_count": 4,
 }

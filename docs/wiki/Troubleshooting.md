@@ -207,6 +207,12 @@ every row, and the hint in the search box reads `substring · index
 building`. **Case ▾ → Tables…** shows each table's index as **indexing…**
 or **index ready**. Regex search always scans.
 
+If **Tables…** says **on request**, the table has more than 1 GB of text
+and Winnow waits for you to press **Build**, because the index would take
+about as much disk as the table. **removed** means someone removed its index;
+**Build** brings it back. Either way the search box reads `substring · no
+index`.
+
 If an index never builds and **Tables…** keeps saying **not indexed yet**, the
 Python running Winnow has a SQLite older than 3.45, which can't use the
 index. Search still works at scanning speed. Check the version with:

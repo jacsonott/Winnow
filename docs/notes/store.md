@@ -370,6 +370,40 @@ see [docs/notes/README.md](README.md) for the whole set.
   background janitor thread (`wait_for_fts_maintenance` in tests) — freed
   pages go to the freelist for reuse; the file only shrinks under a VACUUM
   nothing runs automatically.
+- **No automatic search index past `FTS_AUTO_MAX_BYTES` (1 GiB of text),
+  and none at all once the analyst removes one.** The index is about a
+  byte of case file per byte of text, which is most of why a case is
+  twice its CSVs (measured 2026-10-23: 0.91x-0.96x on generated
+  EvtxECmd/MFTECmd data; see the benchmarks folder of that date). The
+  decision lives in ONE place, `_ensure_fts_building`, via
+  `_fts_on_request`, and every automatic caller (ingest, the search
+  compile, search-all, the watchlist scan, save-as-table) goes through
+  it, so gate there rather than at a call site. `sources.fts_mode`
+  carries the analyst's word: NULL decides by size, `'on'` is Build
+  (`start_search_index`, which passes `requested=True`), `'off'` is Remove
+  (`remove_search_index`). Three things keep `'off'` honest: `build_fts`
+  refuses to start on it and reads `_fts_build_state` under the writer
+  lock before every chunk (so Remove stops a running build at its next
+  chunk, and a dropped table ends a build without an error); a Remove
+  then Build between two chunks finds the old thread still alive, so
+  that thread starts over ("restart") rather than stopping or writing
+  into the dropped table; and `build_view` compiles once more when the
+  fts_N it compiled against is gone by the time it has the lock
+  (`_DROPPED_FTS_RE`). The size is a sample (`_fts_doc_bytes`: 8 runs of
+  32 consecutive rows, which share pages — 3 ms from a cold cache on a
+  1 GB table against 27 ms for 256 scattered rows, both within 1%),
+  cached per source for the Store's life since tables never change after
+  ingest; `list_sources` reports it as `fts_on_request` ('large' /
+  'removed') for the Tables manager and the search hint.
+  tests/test_search_index_on_request.py.
+- **Debian's and Ubuntu's SQLite has `secure_delete` on by default**
+  (`PRAGMA compile_options` lists SECURE_DELETE), so every page a DROP
+  frees is overwritten with zeros, through the WAL, under the writer
+  lock. Removing a 915 MB search index took 8.3 s that way and 0.14 s
+  with `secure_delete=FAST` (zero only pages being written anyway), which
+  `remove_search_index` sets for its one transaction and then puts back
+  (a build without the flag was already fast). Nothing else sets it yet: `drop_source` and the column-index drops pay the same cost on
+  Linux, in proportion to what they free.
 - **Contains folds case for A–Z only; Regex folds every script.** Every
   contains path — the search box, the `contains`/`starts`/`not_contains`
   filters, Advanced, search-all — ends in SQLite's built-in `LIKE`, which
