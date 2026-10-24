@@ -607,6 +607,20 @@ see [docs/notes/README.md](README.md) for the whole set.
   in the table list reads as a real empty import. Pinned by
   tests/test_ingest_broken.py.
 
+- **A source's row count is final before its columns are.** Each batch
+  commits `sources.row_count` with its rows, so the count a source list
+  reads grows while the file is read. The typed column list is the import's last write
+  (`_finish_source_columns`), in a transaction of its own that waits for
+  the writer lock again, and until it lands the row holds the
+  `columns = '[]'` placeholder. So for a moment `list_sources` reports
+  every row and no columns, and a table opened then has an empty header.
+  The job reaching `done` is what says the table is complete. A UI test
+  that queues an import from outside the page and polls the source list
+  waits for `columns.length` as well as the count:
+  test_value_picker_fills_the_box.py waited on the count alone, and
+  opened `picks.csv` in that gap once the browser shards were dealt
+  differently.
+
 - **The file's extension names the delimiter, and it is read before the
   content is sniffed** (`EXTENSION_DELIMITERS`, `Store._sniff`). `.tsv`,
   `.tab`, `.csv` and `.psv` each say what they are; `.txt` and an

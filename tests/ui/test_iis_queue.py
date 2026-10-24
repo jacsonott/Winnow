@@ -112,7 +112,7 @@ def test_an_iis_log_previews_configures_and_imports(page, ui_csv):
         assert _type_select(page, "sc-status").input_value() == "text"
 
         page.locator("#modalBody .import-foot .btn.primary").click()
-        page.wait_for_function("() => __winnow.S.sources.some((s) => s.name === 'u_ex240501.log' && s.row_count === 2)", timeout=20_000)
+        page.wait_for_function("() => __winnow.S.sources.some((s) => s.name === 'u_ex240501.log' && s.row_count === 2 && s.columns.length)", timeout=20_000)
         cols = page.evaluate("() => __winnow.S.sources.find((s) => s.name === 'u_ex240501.log').columns")
         assert [c["name"] for c in cols] == W3C_COLUMNS
         assert {c["name"]: c["type"] for c in cols}["sc-status"] == "text"
@@ -138,7 +138,7 @@ def test_an_uploaded_iis_log_previews_in_the_format_picked(page):
         _heads_are(page, W3C_COLUMNS)
         assert _hint(page, "nc240501.log") == "IIS log · W3C"
         page.locator("#modalBody .import-foot .btn.primary").click()
-        page.wait_for_function("() => __winnow.S.sources.some((s) => s.name === 'nc240501.log' && s.row_count === 2)", timeout=20_000)
+        page.wait_for_function("() => __winnow.S.sources.some((s) => s.name === 'nc240501.log' && s.row_count === 2 && s.columns.length)", timeout=20_000)
         cols = page.evaluate("() => __winnow.S.sources.find((s) => s.name === 'nc240501.log').columns.map((c) => c.name)")
         assert cols == W3C_COLUMNS
     finally:

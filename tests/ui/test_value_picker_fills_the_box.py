@@ -42,8 +42,11 @@ def picks(page, server_post, ui_csv, until):
     p = Path(ui_csv).parent / "picks.csv"
     p.write_text("Proc,Pad,Path,User\n" + "".join(",".join(r) + "\n" for r in ROWS))
     server_post("/api/ingest/jobs/path", {"path": str(p), "build_fts": False})
+    # The columns as well as the count: the count is final a moment before
+    # the columns are written (docs/notes/ingest.md), and a table opened in
+    # between has none, so its filter row never appears.
     until(page, lambda: page.evaluate("""() => __winnow.loadSources(undefined, { navigate: false }).then(() =>
-            __winnow.S.sources.some((s) => s.name === 'picks.csv' && s.row_count === 14))"""),
+            __winnow.S.sources.some((s) => s.name === 'picks.csv' && s.row_count === 14 && s.columns.length))"""),
           "picks.csv to finish importing", timeout=20)
     sid = page.evaluate("() => __winnow.S.sources.find((s) => s.name === 'picks.csv').id")
     page.evaluate("(id) => __winnow.openSource(id)", sid)
