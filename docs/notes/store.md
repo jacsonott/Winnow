@@ -332,6 +332,14 @@ see [docs/notes/README.md](README.md) for the whole set.
   ingest; `list_sources` reports it as `fts_on_request` ('large' /
   'removed') for the Tables manager and the search hint.
   tests/test_search_index_on_request.py.
+- **Debian's and Ubuntu's SQLite has `secure_delete` on by default**
+  (`PRAGMA compile_options` lists SECURE_DELETE), so every page a DROP
+  frees is overwritten with zeros, through the WAL, under the writer
+  lock. Removing a 915 MB search index took 8.3 s that way and 0.14 s
+  with `secure_delete=FAST` (zero only pages being written anyway), which
+  `remove_search_index` sets for its one transaction and then puts back
+  (a build without the flag was already fast). Nothing else sets it yet: `drop_source` and the column-index drops pay the same cost on
+  Linux, in proportion to what they free.
 - **Contains folds case for A–Z only; Regex folds every script.** Every
   contains path — the search box, the `contains`/`starts`/`not_contains`
   filters, Advanced, search-all — ends in SQLite's built-in `LIKE`, which

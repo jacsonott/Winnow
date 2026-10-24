@@ -3429,17 +3429,31 @@ class Store:
         table is a KeyError."""
         if source_id < 0:
             raise ValueError("A merge has no search index of its own — remove its tables' instead")
-        with self.lock, self.db:
-            row = self.db.execute("SELECT table_name FROM sources WHERE id=?", (source_id,)).fetchone()
-            if not row:
-                raise KeyError(f"No table {source_id}")
-            free_before = self.db.execute("PRAGMA freelist_count").fetchone()[0]
-            self.db.execute(f"DROP TABLE IF EXISTS {q(f'fts_{source_id}')}")
-            self.db.execute(f"DROP VIEW IF EXISTS {q(row[0] + '_doc')}")
-            self.db.execute("DELETE FROM fts_progress WHERE source_id=?", (source_id,))
-            self.db.execute("UPDATE sources SET has_fts=0, fts_mode='off' WHERE id=?", (source_id,))
-            freed = self.db.execute("PRAGMA freelist_count").fetchone()[0] - free_before
-            page = self.db.execute("PRAGMA page_size").fetchone()[0]
+        with self.lock:
+            # Debian's and Ubuntu's SQLite is built with secure_delete on,
+            # which zeroes every freed page: the DROP below wrote the whole
+            # index again into the WAL, 8.3 s under the writer lock for a
+            # 915 MB index on a 1 GB EvtxECmd table, against 0.14 s with it
+            # FAST (zero only what is written anyway). Nothing here needs
+            # wiping: the index is trigrams of rows the table still holds.
+            secure = self.db.execute("PRAGMA secure_delete").fetchone()[0]
+            if secure == 1:
+                self.db.execute("PRAGMA secure_delete=FAST")
+            try:
+                with self.db:
+                    row = self.db.execute("SELECT table_name FROM sources WHERE id=?", (source_id,)).fetchone()
+                    if not row:
+                        raise KeyError(f"No table {source_id}")
+                    free_before = self.db.execute("PRAGMA freelist_count").fetchone()[0]
+                    self.db.execute(f"DROP TABLE IF EXISTS {q(f'fts_{source_id}')}")
+                    self.db.execute(f"DROP VIEW IF EXISTS {q(row[0] + '_doc')}")
+                    self.db.execute("DELETE FROM fts_progress WHERE source_id=?", (source_id,))
+                    self.db.execute("UPDATE sources SET has_fts=0, fts_mode='off' WHERE id=?", (source_id,))
+                    freed = self.db.execute("PRAGMA freelist_count").fetchone()[0] - free_before
+                    page = self.db.execute("PRAGMA page_size").fetchone()[0]
+            finally:
+                if secure == 1:
+                    self.db.execute("PRAGMA secure_delete=1")
         # The build stops at its next look at fts_mode, which waited on the
         # lock just released; a moment, so "building" below is the truth.
         # Bounded: one still queued for a build slot (_fts_build_sem) only
@@ -7005,7 +7019,10 @@ class Store:
             ro = None
             for d in sources:
                 if ro is None and not (d.get("has_fts") or d.get("fts_mode")):
-                    ro = stack.enter_context(self._reader())
+                    with self._threads_lock:
+                        known = self._fts_size_cache.get(d["id"], (None,))[0] == d.get("row_count")
+                    if not known:
+                        ro = stack.enter_context(self._reader())
                 d["fts_on_request"] = self._fts_on_request(ro, d)
 
     def _tab_meta(self, source_id: int) -> dict:

@@ -91,8 +91,11 @@ def test_remove_drops_the_index_and_keeps_it_off(store, write_csv, case_path):
     sid = store.ingest_csv(write_csv(ROWS), name="a.csv")["id"]
     assert store.wait_for_fts(sid, timeout=10)
     with_index = _searched(store, sid, "jacso\\file01")
+    secure = store.db.execute("PRAGMA secure_delete").fetchone()[0]
 
     out = store.remove_search_index(sid)
+    # FAST only for the drop (see remove_search_index), then as it was.
+    assert store.db.execute("PRAGMA secure_delete").fetchone()[0] == secure
     assert out["ready"] is False and out["building"] is False
     assert out["freed_bytes"] > 0
     assert _fts_objects(store, sid) == []
