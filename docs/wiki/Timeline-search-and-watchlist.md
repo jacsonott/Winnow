@@ -4,7 +4,7 @@ Three pages work across the whole case rather than one table. The **Timeline** r
 
 ## The Timeline
 
-![The Timeline: tagged rows from six tables in one stream, one line selected](../screenshots/timeline.png)
+![The Timeline: the overview strip over tagged rows from six tables in one stream, one line selected](../screenshots/timeline.png)
 
 Open the **Timeline** tab (top right, beside SQL and Notes). It lists every tagged row in the case, from every table, oldest first; tag a row anywhere and it is here. The header says how many tagged rows there are. It is rebuilt each time you open the tab, so it always reflects the tags as they are now.
 
@@ -18,6 +18,19 @@ Each line has four columns:
 **Click a line** to select it. The grid's keys move the selection — `↓`/`j` and `↑`/`k` a line, `Page Down`/`Page Up` a screen, `g` and `G` the first and last line — and a key you rebind in Settings moves the Timeline too. `Esc` lets go of it.
 
 **Double-click a line**, press `Enter` on the selected one, or click its `⤢` to open its table at that row on the grid page. A closed table is opened for you and gets its tab back. When you come back to the Timeline it opens on the line you had selected, even though it is rebuilt; if that line has left the Timeline (its tag was taken off, say), it opens where the line was in time.
+
+### The overview
+
+The **Overview** strip above the list shows the Timeline's lines over time: how they are spread across the case, and where the lines on screen sit in it. **Overview** in the header hides or shows it, and Winnow remembers which.
+
+- **Bars.** Each bar is a stretch of time, as wide as fits the whole Timeline across the strip; the width is on the right (**15 min bars**). Dashed lines mark midnight when the bars are shorter than a day. A bar's height grows with the square root of its lines, so a burst of a few hundred failed logons does not flatten single findings to nothing. Hover a bar for its time, its count and what it is made of.
+- **Tags** colours each bar by the first tag on each line (the first in the tag order, as the grid's histogram does), and the legend counts the lines under each tag. A line with two tags is counted once.
+- **Tables** colours each bar by table, in the colour of its **Type** pill, and gives each table a chip with its count. Click a chip to take that table off the Timeline and again to put it back; while one is off, the header says so (**5 of 6 tables**).
+- **Where you are.** The shaded band, and the bar along the top of the strip, cover the lines on screen. The selected line is marked by a line through the bars.
+- **Click a bar** to go to its first line and select it. A click where there are no bars goes on to the next one.
+- **Drag across bars** to show only that stretch of time. The Timeline is rebuilt for it, the strip redraws with finer bars, and a chip names the stretch (**Fri 13 Mar 01:30 → 06:15**); click its **✕** for the whole Timeline again. Lines with no timestamp are left out while a stretch is set. Otherwise they are on no bar, and the strip counts them on the right (**3 with no time**).
+
+Tables you switch off and the stretch you drag stay while the case is open; opening another case starts with the whole Timeline again.
 
 ### Narrowing by tag
 

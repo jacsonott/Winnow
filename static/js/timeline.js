@@ -8,6 +8,7 @@ import { headerSig, nicknameFor } from './savedfilters.js';
 import { loadSources, openSource, recenterOnRow, sourceLabel } from './sources.js';
 import { showGridTab } from './sql.js';
 import { S } from './state.js';
+import { loadTimelineOverview, renderTimelineOverview, timelineOverviewFollow } from './timelineoverview.js';
 import { confirmDialog, modal, oneAtATime } from './ui.js';
 
 /* ---------------------------------------------------------- unified timeline */
@@ -104,6 +105,7 @@ export async function buildTimeline() {
     // "no tag filter," which would mean the opposite (every tagged row).
     S.timeline.view = { view_id: null, row_count: 0 };
     renderTimelineRows();
+    loadTimelineOverview();
     return;
   }
   setBusy(true);
@@ -112,7 +114,12 @@ export async function buildTimeline() {
     const token = opToken();
     const disarmCancel = armOpCancel(token);
     try {
-      v = await post('/api/timeline', { tag_ids: tagIds, op_token: token });
+      // The overview strip's two narrowings: a stretch of time, and the
+      // tables switched off (timelineoverview.js).
+      v = await post('/api/timeline', {
+        tag_ids: tagIds, op_token: token, ts_range: S.timeline.range,
+        exclude_sources: [...S.timeline.sourcesOff],
+      });
     } finally {
       disarmCancel();
     }
@@ -127,6 +134,15 @@ export async function buildTimeline() {
   S.timeline.view = v;
   $('timelineSpacerY').style.height = spacerPx(v.row_count) + 'px';
   $('timelineStats').innerHTML = `<b>${v.row_count.toLocaleString()}</b> tagged row${v.row_count === 1 ? '' : 's'}`;
+  // Tables switched off on the overview strip hide in its Tables view, so
+  // the count says it is short of them wherever the strip is.
+  const tagged = S.sources.filter((s) => s.tagged_row_count && !s.is_merge);
+  const off = tagged.filter((s) => S.timeline.sourcesOff.has(s.id)).length;
+  if (off) {
+    const note = el('span', null, ` · ${tagged.length - off} of ${tagged.length} tables`);
+    note.title = `${off} table${off === 1 ? ' is' : 's are'} switched off in the overview's Tables view`;
+    $('timelineStats').append(note);
+  }
   // A table too wide to join into one body keeps its first N columns
   // (Store._fit_body_cols). Said here, so the columns past N aren't taken
   // for columns that were empty.
@@ -143,6 +159,7 @@ export async function buildTimeline() {
   await keepTimelinePlace(v, reqId);
   if (reqId !== S.timeline.reqId) return;
   renderTimelineRows();
+  loadTimelineOverview();
 }
 
 /* Where a rebuilt Timeline opens: on the line that was selected, when
@@ -203,6 +220,13 @@ export function timelineRowAt(pos) {
 function emptyReason() {
   const on = timelineTagIds().length;
   if (S.tags.length && !on) return 'Every tag is switched off — turn one back on above to see its rows.';
+  if (S.timeline.range) return 'No tagged rows in this stretch of time — ✕ on the overview shows the whole Timeline again.';
+  if (S.timeline.sourcesOff.size) {
+    const tagged = S.sources.filter((s) => s.tagged_row_count && !s.is_merge);
+    if (tagged.length && tagged.every((s) => S.timeline.sourcesOff.has(s.id))) {
+      return 'Every table is switched off — turn one back on in the overview\'s Tables view.';
+    }
+  }
   if (on && on < S.tags.length) return 'No rows carry the tags switched on above.';
   return 'No tagged rows yet — tag some rows in any table, then come back here.';
 }
@@ -241,6 +265,7 @@ export function renderTimelineRows() {
   }
   rowsEl.replaceChildren(frag);
   syncTimelineDay(timelineRowAt(Math.min(total - 1, Math.floor(virt / ROW_H))));
+  timelineOverviewFollow();
 }
 
 /* One Timeline line — gutter, timestamp, type, body — or the empty
@@ -421,6 +446,7 @@ export function selectTimelineLine(pos) {
   // a double-click whose second click lands on a node the first one threw
   // away never reaches the list's dblclick listener.
   for (const n of $('timelineRows').children) n.classList.toggle('selected', +n.dataset.pos === pos);
+  timelineOverviewFollow();
 }
 
 export function openTimelineSelection() {

@@ -9795,7 +9795,8 @@ class Store:
         }
 
     def build_timeline(self, configs: dict[int, dict] | None = None, tag_ids: list[int] | None = None,
-                       op_token: str | None = None) -> dict:
+                       op_token: str | None = None, ts_range: list[str] | None = None,
+                       exclude_sources: list[int] | None = None) -> dict:
         """Materialises one row per *tagged* row across every real source in
         the case (open or closed — this is "every finding in the case", not
         "every finding in a currently-open tab"), in time order. `configs`
@@ -9823,6 +9824,20 @@ class Store:
 
         `tag_ids` narrows to rows carrying at least one of those tags;
         None/empty means every tagged row regardless of which tag(s).
+        `exclude_sources` leaves those tables out (the overview strip's
+        table chips): the tables switched OFF rather than the ones on, for
+        the reason the tag chips remember theirs that way — a table tagged
+        after the list was read is on the Timeline, not missing from it.
+        `ts_range` is [start, end), normalised 'YYYY-MM-DD HH:MM:SS' text
+        compared with the line's own timestamp (the strip's drag); a line
+        with no timestamp has no place in a stretch of time and is left out
+        while one is set.
+
+        Beside its timestamp each line keeps `tag1`, the first of the tags
+        asked for that it carries (lowest id — tag order, the order the
+        histogram's Tags view colours by), which is what the overview strip
+        splits its bars by (timeline_overview). `per_source` in the result
+        counts the lines from each table, for the strip's table chips.
 
         A source whose body would join more columns than SQLite's expression
         depth allows (_fit_body_cols — 495 at the default limit) keeps only
@@ -9844,8 +9859,9 @@ class Store:
         branches = []
         params: list[Any] = []
         body_trimmed: list[dict] = []
+        skip = {int(x) for x in exclude_sources or ()}
         for src in self.list_sources():
-            if not src["tagged_row_count"]:
+            if not src["tagged_row_count"] or src["id"] in skip:
                 continue
             source_id = src["id"]
             p = self._timeline_parts(src, configs.get(source_id, {}))
@@ -9858,18 +9874,28 @@ class Store:
             # the join unless the timestamp is a derived column.
             uses = [p["ts_col"]] if p["ts_col"] else []
             branches.append(
-                f"SELECT {int(source_id)} AS source_id, t.trid AS rid, {p['ts_expr']} AS ts "
-                f"FROM (SELECT rid AS trid FROM row_tags WHERE source_id = ?{tag_clause} GROUP BY rid) t "
+                f"SELECT {int(source_id)} AS source_id, t.trid AS rid, {p['ts_expr']} AS ts, t.tag1 AS tag1 "
+                f"FROM (SELECT rid AS trid, MIN(tag_id) AS tag1 FROM row_tags "
+                f"WHERE source_id = ?{tag_clause} GROUP BY rid) t "
                 f"CROSS JOIN {self._from_clause(src, 's', uses)} WHERE s.rid = t.trid"
             )
             params.append(source_id)
             if tag_ids:
                 params.extend(tag_ids)
 
+        where = ""
+        if ts_range is not None:
+            if len(ts_range) != 2 or not all(isinstance(x, str) and x for x in ts_range):
+                raise ValueError("ts_range must be [start, end]")
+            where = "WHERE ts >= ? AND ts < ? "
+            params.extend(ts_range)
+
         vid = self._next_view_id()
+        per_source: dict[int, int] = {}
         with self.lock, self._interruptible(op_token, self.db), self.db:
             self.db.execute(
-                f"CREATE TABLE v.{q(vid)} (pos INTEGER PRIMARY KEY, source_id INTEGER, rid INTEGER, ts TEXT)"
+                f"CREATE TABLE v.{q(vid)} (pos INTEGER PRIMARY KEY, source_id INTEGER, rid INTEGER, "
+                f"ts TEXT, tag1 INTEGER)"
             )
             n = 0
             if branches:
@@ -9878,11 +9904,13 @@ class Store:
                 # in sorted order ((source_id, rid) makes the order fully
                 # determined), rowcount replaces a count(*) re-scan.
                 n = self.db.execute(
-                    f"INSERT INTO v.{q(vid)}(source_id, rid, ts) "
-                    f"SELECT source_id, rid, ts FROM ({union_sql}) "
+                    f"INSERT INTO v.{q(vid)}(source_id, rid, ts, tag1) "
+                    f"SELECT source_id, rid, ts, tag1 FROM ({union_sql}) {where}"
                     f"ORDER BY (ts IS NULL) ASC, ts ASC, source_id, rid",
                     params,
                 ).rowcount
+                per_source = dict(self.db.execute(
+                    f"SELECT source_id, COUNT(*) FROM v.{q(vid)} GROUP BY source_id").fetchall())
             # Same evict-after-build ordering (and reasoning) as build_view.
             for old in list(self._views):
                 h = self._views.get(old)
@@ -9890,7 +9918,7 @@ class Store:
                     self._evict_view_and_children(old)
 
         self._views[vid] = {"view_id": vid, "kind": "timeline", "row_count": n, "configs": configs}
-        return {"view_id": vid, "row_count": n, "body_trimmed": body_trimmed}
+        return {"view_id": vid, "row_count": n, "body_trimmed": body_trimmed, "per_source": per_source}
 
     def _fit_body_cols(self, cols: list[str]) -> list[str]:
         """The first of `cols` that one ' | '-joined body can hold before
@@ -9998,6 +10026,55 @@ class Store:
         if row and row[0] is not None:
             return {"pos": row[0] - 1, "exact": False}
         return {"pos": max(0, handle["row_count"] - 1), "exact": False}
+
+    # Bars the Timeline's overview strip is drawn with at most: about one
+    # per 5px across a full-width strip.
+    TIMELINE_OVERVIEW_BARS = 240
+
+    def timeline_overview(self, view_id: str, by: str = "tags",
+                          max_buckets: int = TIMELINE_OVERVIEW_BARS) -> dict:
+        """The Timeline's lines over time, for the strip above the list:
+        one bar per HISTOGRAM_BUCKETS width (the narrowest that fits the
+        span in `max_buckets`), each split by the line's first tag
+        (`by="tags"`, the view's tag1) or by its table (`by="sources"`),
+        and each with `first`, the position of its first line, which is
+        where a click on it takes the list. The view is in time order, so
+        that is the bar's MIN(pos).
+
+        Two aggregates over the view on the reader pool: the span, then
+        the bars. Bar b covers [start + b*width, start + (b+1)*width), and
+        `start` is floored here in Python, so every epoch less `start` is
+        positive and SQLite's truncating division is a floor — the trap
+        time_histogram documents for a pre-1970 epoch (FILETIME zero is a
+        value real artefacts carry). Lines with no time, or one SQLite
+        cannot read, are `undated`: at the end of the list, and on no bar."""
+        if by not in ("tags", "sources"):
+            raise ValueError(f"by must be 'tags' or 'sources', not {by!r}")
+        handle = self._views.get(view_id)
+        if not handle or handle.get("kind") != "timeline":
+            raise ViewExpired("View expired — rebuild it")
+        key = "tag1" if by == "tags" else "source_id"
+        lines = f"SELECT {epoch_sql('ts')} AS e, {key} AS k, pos FROM v.{q(view_id)} WHERE ts IS NOT NULL"
+        with self._reader() as ro, self._dropped_view_is_expired():
+            lo, hi, dated = ro.execute(f"SELECT MIN(e), MAX(e), COUNT(e) FROM ({lines})").fetchone()
+            if lo is None:
+                return {"start": None, "end": None, "width": 0,
+                        "undated": handle["row_count"], "buckets": []}
+            width = self._histogram_width(max(1, hi - lo), max_buckets)
+            start = lo // width * width
+            rows = ro.execute(
+                f"SELECT (e - ?) / ? AS b, k, COUNT(*), MIN(pos) FROM ({lines}) "
+                f"WHERE e IS NOT NULL GROUP BY b, k ORDER BY b, k",
+                (start, width),
+            ).fetchall()
+        buckets: dict[int, dict] = {}
+        for b, k, n, first in rows:
+            bar = buckets.setdefault(b, {"b": b, "n": 0, "first": first - 1, "split": {}})
+            bar["n"] += n
+            bar["first"] = min(bar["first"], first - 1)
+            bar["split"][str(k)] = n
+        return {"start": start, "end": hi, "width": width, "undated": handle["row_count"] - dated,
+                "buckets": [buckets[b] for b in sorted(buckets)]}
 
     # ---------------------------------------------------------------- group-by
 

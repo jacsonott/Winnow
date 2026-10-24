@@ -235,8 +235,11 @@ try {
         <div id="timelineTagFilter" class="timeline-tagfilter"></div>
         <div class="spacer"></div>
         <span class="stats" id="timelineStats"></span>
+        <button class="btn ghost" id="btnTimelineOverview" aria-pressed="true"
+                title="Show or hide the overview: the Timeline's lines over time">Overview</button>
         <button class="btn ghost" id="btnTimelineConfig">Configure tables…</button>
       </div>
+      <section class="tl-overview" id="timelineOverview" hidden></section>
       <div class="timeline-cols">
         <div class="tl-col-gutter"></div>
         <div class="tl-col-ts" id="timelineColTs">Timestamp</div>
