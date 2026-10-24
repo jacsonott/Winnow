@@ -52,7 +52,7 @@ def test_a_wide_table_is_on_the_timeline_and_the_header_says_it_was_trimmed(page
     page.locator("#tabTimeline").click()
     page.wait_for_selector("#timelineview:not([hidden])")
     # The symptom: this never appeared ("Could not build timeline" instead).
-    row = page.locator(".timeline-row", has=page.locator(".tl-col-ts", has_text=TS))
+    row = page.locator(f"#timelineRows .timeline-row[data-ts^='{TS}']")
     row.wait_for(timeout=10_000)
 
     body = row.locator(".tl-col-body").get_attribute("title") or ""

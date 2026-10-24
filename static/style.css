@@ -1865,53 +1865,239 @@ textarea:focus { border-color: var(--accent); outline: none; }
    is needed here — the chip carries its own padding, border, pressed
    state and per-skin treatment. */
 .timeline-tagfilter { display: flex; gap: 5px; flex-wrap: wrap; align-items: center; }
+/* The overview strip (timelineoverview.js): the histogram strip's look
+   (.histogram-head and the .th-* rules above), under class names of its
+   own so nothing that finds that strip's parts by class finds these. */
+.tl-overview { background: var(--panel); border-bottom: 1px solid var(--line-2); flex: 0 0 auto; }
+.tl-overview[hidden] { display: none; }
+/* The header's switches (Fold repeats, Overview, Details) when on. A tint,
+   not .btn[aria-pressed]'s fill: that rule's --accent-dim background kept
+   under this rule's --accent text, which on the light themes was gold on
+   gold, unreadable. */
+#btnTimelineOverview[aria-pressed="true"], #btnTimelinePane[aria-pressed="true"],
+#btnTimelineFold[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--text); border-color: var(--accent-dim);
+}
+.tl-ov-head {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; padding: 4px 10px 0;
+  font-size: 11px; color: var(--dim);
+}
+.tl-ov-title { letter-spacing: .08em; text-transform: uppercase; font-size: 10px; }
+.tl-ov-head .btn { font-size: 11px; padding: 1px 7px; }
+.tl-ov-views, .tl-pane-seg { display: flex; align-items: center; flex: 0 0 auto; }
+.tl-ov-views .btn, .tl-pane-seg .btn { border-radius: 0; margin-left: -1px; }
+.tl-ov-views .btn:first-child, .tl-pane-seg .btn:first-child { border-radius: var(--radius-sm) 0 0 var(--radius-sm); margin-left: 0; }
+.tl-ov-views .btn:last-child, .tl-pane-seg .btn:last-child { border-radius: 0 var(--radius-sm) var(--radius-sm) 0; }
+.tl-ov-views .btn[aria-pressed="true"], .tl-pane-seg .btn[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--text);
+  border-color: var(--accent); position: relative; z-index: 1;
+}
+.tl-ov-legend { display: flex; align-items: center; flex-wrap: wrap; gap: 5px 10px; min-width: 0; }
+.tl-ov-legend .tag-chip { font-size: 11px; }
+.tl-ov-item { display: flex; align-items: center; gap: 4px; flex: 0 0 auto; white-space: nowrap; }
+.tl-ov-item .swatch { width: 8px; height: 8px; border-radius: 1px; flex: 0 0 auto; }
+.tl-ov-ctx .swatch { background: var(--dim); }
+.tl-chip-n { font-family: var(--mono); font-size: 10px; margin-left: 2px; }
+.tl-ov-info { margin-left: auto; font-family: var(--mono); }
+/* The histogram's two cues: the count line breathes while an answer is
+   out, and a chart about a view since rebuilt is faded and takes no
+   clicks (fresh() in the module). */
+.tl-overview[aria-busy="true"] .tl-ov-info { animation: th-busy 1s var(--ease) infinite; }
+.tl-overview.is-outdated .tl-ov-canvas {
+  opacity: .3; filter: grayscale(1); cursor: progress;
+  transition: opacity .2s var(--ease) .12s, filter .2s var(--ease) .12s;
+}
+.tl-ov-canvas { display: block; width: 100%; cursor: crosshair; user-select: none; }
+.tl-ov-hint { padding: 0 10px 4px; font-size: 10px; }
+.tl-ov-empty { padding: 2px 10px 6px; font-size: 11px; white-space: normal; }
+.tl-ov-range:empty { display: none; }
+.tl-range-chip {
+  display: inline-flex; align-items: center; gap: 6px; padding: 1px 4px 1px 8px;
+  border: 1px solid var(--accent); border-radius: var(--radius-sm);
+  font-family: var(--mono); font-size: 11px; color: var(--text); white-space: nowrap;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.tl-range-x { border: 0; background: none; color: var(--dim); cursor: pointer; padding: 0 3px; font-size: 11px; }
+.tl-range-x:hover, .tl-range-x:focus-visible { color: var(--text); }
 .timeline-cols {
   display: flex; background: var(--panel); border-bottom: 1px solid var(--line-2);
   font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--dim);
 }
 .timeline-cols > div { padding: 5px 10px; border-right: 1px solid var(--line); }
-.tl-col-ts { flex: 0 0 170px; }
-.tl-col-type { flex: 0 0 180px; }
+.timeline-cols #timelineColTs { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* The grid's gutter (.gutter): a stripe per tag, ✎ for a note, ⤢ to open
+   the row in its table. */
+.tl-col-gutter { flex: 0 0 46px; }
+.tl-col-ts { flex: 0 0 190px; }
+.tl-col-gap { flex: 0 0 74px; }
+.tl-col-type { flex: 0 0 214px; }
 .tl-col-body { flex: 1 1 auto; }
 .timeline-body { position: relative; flex: 1 1 auto; min-height: 0; overflow: auto; outline: none; }
 .timeline-spacer-y { width: 1px; }
 /* No will-change: transform here either -- see the note on .rows. */
 .timeline-rows { position: absolute; top: 0; left: 0; right: 0; }
 .timeline-row {
-  display: flex; height: var(--row-h); align-items: stretch; cursor: pointer;
+  display: flex; height: var(--row-h); align-items: stretch;
   border-bottom: 1px solid var(--border-hairline);
 }
 .timeline-row:nth-child(even) { background: var(--row-even); }
 .timeline-row:hover { background: var(--row-hover); }
+/* The picked line (selectTimelineLine): the grid's selected-row colour,
+   with an accent edge so it still reads on a striped or hovered row. */
+.timeline-row.selected { background: var(--row-selected); box-shadow: inset 2px 0 0 var(--accent); }
 .timeline-row > div { padding: 0 10px; display: flex; align-items: center; overflow: hidden; }
+.timeline-row > .tl-col-gutter {
+  gap: 2px; padding: 0 0 0 8px; border-right: 1px solid var(--line);
+  color: var(--dim); font-family: var(--mono); font-size: 11px;
+}
+.tl-col-gutter .stripe { width: 4px; height: 12px; border-radius: 1px; flex: 0 0 auto; }
+.tl-col-gutter .tl-note-mark { color: var(--accent); margin-left: 2px; cursor: default; }
+.tl-col-gutter .tl-ctx-mark { font-size: 10px; cursor: default; }
+.tl-col-gutter .tl-row-open {
+  margin-left: auto; padding: 0 5px; font: inherit; line-height: 1; color: var(--dim);
+  background: none; border: 0; cursor: pointer; opacity: 0;
+}
+.timeline-row:hover .tl-row-open, .timeline-row.selected .tl-row-open, .tl-row-open:focus-visible { opacity: 1; }
+.tl-col-gutter .tl-row-open:hover { color: var(--accent); }
 .timeline-row .tl-col-ts { font-family: var(--mono); font-size: 11px; color: var(--dim); }
-.timeline-row .tl-col-type { font-size: 11px; }
-.timeline-row .tl-col-type .type-badge {
-  border: 1px solid var(--line-2); border-radius: var(--radius-sm); padding: 1px 6px;
-  background: var(--panel-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+.timeline-row .tl-col-type { font-size: 11px; gap: 6px; }
+/* The kind of table as a pill in the table's colour (timelineKinds: one
+   --series-N per table), then the host that tells two of a kind apart. */
+.timeline-row .tl-col-type .type-badge, .tl-pane-kind .type-badge {
+  --k: var(--dim);
+  display: inline-flex; align-items: center; gap: 5px; flex: 0 1 auto; min-width: 0;
+  line-height: 16px; padding: 0 7px 0 6px; border-radius: 9px; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; color: var(--text);
+  background: color-mix(in srgb, var(--k) 18%, transparent);
+  border: 1px solid color-mix(in srgb, var(--k) 55%, transparent);
+}
+.timeline-row .tl-col-type .type-badge::before, .tl-pane-kind .type-badge::before {
+  content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--k); flex: 0 0 auto;
+}
+.timeline-row .tl-host, .tl-pane-kind .tl-host {
+  font-family: var(--mono); color: var(--dim); white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; min-width: 0;
 }
 .timeline-row .tl-col-body {
   font-family: var(--mono); font-size: 12px; white-space: nowrap; text-overflow: ellipsis; gap: 6px;
+  padding-right: 8px;
 }
 /* The summary's two halves (fillTimelineBody): what happened, then who and
    where. Each clips itself — text-overflow on the flex container above
    only ever applied to the bare text node the cell used to hold. */
 .timeline-row .tl-col-body > span { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-.timeline-row .tl-lead { flex: 0 1 auto; color: var(--text); }
-/* Shrinks ~20x faster than the lead, so a narrow Timeline eats into the
-   identifying fields rather than truncating the event itself. The extra
-   margin is on top of the cell's 6px gap: at this size one gap reads as a
-   word space and runs the lead into the first detail. */
+/* What happened keeps its own width, up to just over half the cell, and
+   the rest of the line (the note, then who and where) gets what is left:
+   with the details pane open the Body column is narrow, and a lead that
+   shrank with the others came out as "PowerShell script…". */
+.timeline-row .tl-lead { flex: 0 0 auto; max-width: 55%; color: var(--text); }
+/* Shrinks ~5x faster than the note, so a narrow Timeline eats into the
+   identifying fields first. The extra margin is on top of the cell's 6px
+   gap: at this size one gap reads as a word space and runs the lead into
+   the first detail. */
 .timeline-row .tl-detail { flex: 0 20 auto; color: var(--dim); margin-left: 6px; }
 .timeline-row .tl-raw { flex: 0 1 auto; }
+/* At the line's right edge, and only on the line under the mouse or the
+   one picked: a badge on every line was a column of "raw" down the page.
+   Opacity rather than visibility, so it keeps its place and stays
+   reachable by Tab. */
 .timeline-row .tl-raw-toggle {
-  flex: 0 0 auto; font: inherit; font-size: 10px; line-height: 1.6;
+  flex: 0 0 auto; margin-left: auto; font: inherit; font-size: 10px; line-height: 1.6;
   background: var(--panel-2); color: var(--dim); border: 1px solid var(--line-2);
-  border-radius: var(--radius-sm); padding: 0 5px; cursor: pointer;
+  border-radius: var(--radius-sm); padding: 0 5px; cursor: pointer; opacity: 0;
 }
+.timeline-row:hover .tl-raw-toggle, .timeline-row.selected .tl-raw-toggle,
+.timeline-row .tl-raw-toggle:focus-visible, .timeline-row .tl-raw-toggle[aria-pressed="true"] { opacity: 1; }
 .timeline-row .tl-raw-toggle:hover { color: var(--text); border-color: var(--accent); }
-.timeline-row .tl-tag-dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; }
+/* The Timeline read as a story (timelineRowNode's `story`): the day once,
+   at its first line, over a solid rule; then each line's time of day; the
+   gap since the line above, bold over a dashed rule from half an hour.
+   The rules are borders, inside the row's fixed height (border-box), so
+   they cost the virtual list nothing. */
+.timeline-row .tl-col-ts .tl-day {
+  font-family: var(--ui); font-size: 11px; font-weight: 600; color: var(--accent); white-space: nowrap;
+  margin-right: 8px; flex: 0 0 auto;
+}
+.timeline-row .tl-col-ts .tl-time { margin-left: auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.timeline-row.day-start .tl-time { color: var(--text); }
+.timeline-row .tl-col-gap { justify-content: flex-end; font-family: var(--mono); font-size: 11px; color: var(--text-faint); }
+.timeline-row .tl-col-gap.long { color: var(--num); font-weight: 600; }
+.timeline-row.gap { border-top: 1px dashed var(--line-2); }
+.timeline-row.day-start { border-top: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line-2)); }
+/* A folded run (Fold repeats): ×N before what happened, its first and
+   last times after; "fold" on the first line of a run opened again. */
+.timeline-row .tl-col-body > .tl-fold {
+  flex: 0 0 auto; font: 600 10.5px var(--mono); line-height: 16px; padding: 0 6px; border-radius: 9px;
+  cursor: pointer; color: var(--accent-fg); background: var(--accent); border: 0; overflow: visible;
+}
+.timeline-row .tl-col-body > .tl-fold:hover { filter: brightness(1.1); }
+.timeline-row .tl-col-body > .tl-fold.open {
+  color: var(--accent); background: transparent; border: 1px solid var(--accent-dim); font-weight: 500;
+}
+.timeline-row .tl-span { flex: 0 30 auto; color: var(--dim); font-size: 11px; white-space: nowrap; }
+/* The row's note, said in the line it belongs to. */
+.timeline-row .tl-note {
+  flex: 0 4 auto; color: var(--kw); font-family: var(--ui); font-style: italic; font-size: 12px; white-space: nowrap;
+}
 .timeline-empty { padding: 40px 20px; text-align: center; color: var(--dim); font-size: 13px; }
+/* A row around a finding (timelinepane.js): on the Timeline because of
+   when it happened, not because anyone tagged it, so it reads as
+   background — hatched, faded, its time in italics — until it is the
+   line picked. */
+.timeline-row.ctx {
+  background: repeating-linear-gradient(135deg, transparent 0 6px,
+    color-mix(in srgb, var(--line) 35%, transparent) 6px 7px);
+}
+.timeline-row.ctx > div:not(.tl-col-gutter) { opacity: .62; }
+.timeline-row.ctx .tl-lead { color: var(--dim); }
+.timeline-row.ctx .tl-col-ts { font-style: italic; }
+.timeline-row.ctx .type-badge { filter: saturate(.25); }
+.timeline-row.ctx.selected { background: var(--row-selected); }
+.timeline-row.ctx.selected > div:not(.tl-col-gutter) { opacity: 1; }
+.timeline-row.ctx.selected .tl-lead { color: var(--text); }
+.tl-context:empty { display: none; }
+.tl-context-n { color: var(--dim); }
+
+/* The list, and beside it the selected line's pane (timelinepane.js).
+   Under a narrow window the pane goes below the list: 380px beside it
+   would leave the Body column a few characters wide. */
+.tl-split { flex: 1 1 auto; min-height: 0; display: flex; }
+.tl-main { flex: 1 1 auto; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.tl-pane {
+  flex: 0 0 380px; min-width: 0; min-height: 0; display: flex; flex-direction: column;
+  background: var(--panel); border-left: 1px solid var(--line-2);
+}
+.tl-pane[hidden] { display: none; }
+@media (max-width: 1100px) {
+  .tl-split { flex-direction: column; }
+  .tl-pane { flex: 0 0 42%; border-left: 0; border-top: 1px solid var(--line-2); }
+}
+.tl-pane-head .btn { padding: 0 7px; font-size: 11px; letter-spacing: normal; }
+.tl-pane-body {
+  flex: 1 1 auto; min-height: 0; overflow: auto; padding: 12px 14px;
+  display: flex; flex-direction: column; gap: 10px;
+}
+.tl-pane-kind { display: flex; align-items: center; gap: 6px; font-size: 11px; min-width: 0; }
+.tl-pane-when { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.tl-pane-when b { font: 600 20px var(--mono); color: var(--text); }
+.tl-pane-when span { color: var(--dim); font-size: 12px; }
+.tl-pane-lead { font-size: 14px; font-weight: 600; color: var(--text); overflow-wrap: anywhere; }
+.tl-pane-detail { font: 12px var(--mono); color: var(--dim); overflow-wrap: anywhere; margin-top: -6px; }
+.tl-pane-tags { display: flex; flex-wrap: wrap; gap: 4px; }
+.tl-pane-tags .tag-chip { font-size: 11px; }
+.tl-pane-hint, .tl-pane-empty { margin: 0; font-size: 12px; color: var(--dim); line-height: 1.4; }
+.tl-pane-acts { display: flex; gap: 6px; }
+.tl-pane-sub { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--dim); }
+.tl-pane-around, .tl-pane-cols { display: grid; gap: 6px; padding-top: 10px; border-top: 1px solid var(--line); }
+.tl-pane-around small { color: var(--dim); font-size: 11.5px; line-height: 1.4; }
+.tl-pane-seg .btn { font-size: 11px; padding: 2px 9px; }
+/* The fields as the grid's detail pane sets them out (.detail-body dl),
+   in a column narrow enough that the names go dim to let the values
+   lead. */
+.tl-pane-cols dl { margin: 0; display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; align-content: start; }
+.tl-pane-cols dt { font-size: 12px; color: var(--dim); white-space: nowrap; padding-top: 2px; }
+.tl-pane-cols dd { margin: 0; min-width: 0; font: 12px var(--mono); color: var(--text); word-break: break-all; }
+.tl-pane-cols dd:hover .dfield-copy { visibility: visible; }
 
 /* Configure tables… (openTimelineSourceConfig): the merge builder's shape
    in classes of its own — the case's header sets on the left, the one
@@ -1982,7 +2168,7 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .tlc-prev-from { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--dim); min-width: 0; }
 .tlc-prev-from select { font-size: 12px; padding: 2px 6px; max-width: 260px; }
 .tlc-preview { border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--ink); overflow: hidden; }
-.tlc-preview .timeline-row { cursor: default; }
+.tlc-preview .tl-col-gutter { flex-basis: 30px; }
 .tlc-preview .tl-col-ts { flex-basis: 150px; }
 .tlc-preview .tl-col-type { flex-basis: 150px; }
 .tlc-caption { font-size: 11.5px; color: var(--dim); line-height: 1.4; }

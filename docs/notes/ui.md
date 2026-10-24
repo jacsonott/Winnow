@@ -2183,6 +2183,148 @@ see [docs/notes/README.md](README.md) for the whole set.
   A failed POST still jumps: the grid can show the row, which is what was
   asked for. `tests/ui/test_watchlist_opens_the_table.py`.
 
+- **A Timeline line is picked by a click, not opened by it**
+  (timeline.js, `selectTimelineLine`). A click used to call
+  `jumpToTimelineRow`, so reading the Timeline meant not touching it.
+  Now: click picks (`S.timeline.sel`), double-click, Enter or the
+  gutter's ⤢ open. Things worth knowing before touching it:
+  - **The keys are the keymap's**, not a second set: keymap.js hands
+    `moveDown`/`moveUp`/`pageDown`/`pageUp`/`jumpFirst`/`jumpLast` (and
+    the edge jumps) to `timelineKey` while the Timeline is the page
+    showing, plus Enter from the list itself, and Escape to
+    `clearTimelineSelection`. A rebinding in Settings moves this list
+    too. The digits tag the selected line (`tagTimelineLine`, see the
+    details pane entry below); the header's tag chips still carry no
+    hotkey, since they filter rather than tag.
+  - **Clicks are delegated on `#timelineRows`** (invariant #6), and a
+    click that picks a line on screen moves the `.selected` class rather
+    than repainting: a repaint replaces the node under the pointer, and a
+    double-click whose second click landed on a node the first one threw
+    away never reached the listener (`tests/ui/test_timeline_lines.py`
+    has the double-click).
+  - **The place survives the rebuild every visit is**
+    (`keepTimelinePlace`): `showTimelineTab` rebuilds, so opening a line
+    and coming back used to land at the top. The selection is found
+    again by `(source_id, rid)` through `GET /api/timeline_position`
+    and scrolled a third of the way down; a line that left the Timeline
+    puts the list where it was in time, with nothing selected. Scrolling
+    goes through `rScroll`/`vScroll`, since a long Timeline's spacer is
+    capped like the grid's (MAX_SPACER_PX).
+  - **The Type column is the kind of table plus the host**
+    (`timelineKinds`): the configured Type, else the header set's
+    nickname less the tool in brackets, else the table's name; tables of
+    one kind are told apart by their names less the common prefix and
+    suffix. One `--series-N` colour per table, tables with tagged rows
+    first. The pill keeps `.type-badge` and the file name as its title,
+    and its text is the kind alone (the host is a sibling `.tl-host`),
+    which `tests/ui/test_timeline_config_builder.py` reads. The memo is
+    keyed on `S.sources`, `S.timelineTemplates` and `S.headerNicknames`
+    by identity — each is replaced, never mutated, when it changes.
+  - **The gutter is the grid's**: a stripe per tag, ✎ for a note (the
+    page now carries `note`), ⤢ to open. The tag dots it replaces sat in
+    the Type column. The raw toggle shows on the line under the mouse or
+    the one picked (opacity, so it keeps its place and Playwright can
+    still click it), and stays shown on a line showing its raw row.
+  `tests/ui/test_timeline_lines.py`.
+
+- **The Timeline's overview strip** (timelineoverview.js) is the
+  histogram strip's look over the Timeline's own view, with three things
+  worth knowing before touching it:
+  - **Its classes are its own** (`.tl-ov-*`, `.tl-overview`), not the
+    histogram's `.th-*`. The histogram's tests find that strip's parts by
+    bare class (`.th-info`, `.th-legend-item`, `canvas.th-canvas`), and a
+    second strip under the same names put them in strict-mode violations
+    the moment the Timeline had been opened. The rules in style.css copy
+    the histogram's rather than sharing them.
+  - **What it narrows is kept as what is OFF or what was dragged**:
+    `S.timeline.sourcesOff` (the tag chips' rule, so a table tagged later
+    is on) and `S.timeline.range`, a half-open `[start, end)` that
+    `build_timeline` compares with each line's normalised timestamp. The
+    drag is snapped with the histogram's rule (a unit picked from the
+    drag's width, never coarser than a bar), not to the bars: snapping to
+    bars made a stretch inside one bar impossible to pick. Both reset on
+    a case switch (home.js), as `tagsOff` does.
+  - **The bars come from the server, the marks from the client.**
+    `GET /api/timeline_overview` after each build (and on Tags/Tables);
+    the band, the thumb and the selected line's mark are worked out from
+    lines the list already holds, on `renderTimelineRows`' and
+    `selectTimelineLine`'s call, coalesced to a frame and repainted only
+    when they would land on other pixels. A chart whose `view_id` is not
+    the current view's is drawn faded and takes no clicks (`fresh`).
+  Bars are square-root scaled (single findings beside a burst of
+  hundreds were a pixel tall on a linear scale); the hover gives each
+  bar's real count. `timelineOverviewX` is what the strip paints with and
+  what `tests/ui/test_timeline_overview_strip.py` clicks by.
+
+- **The Timeline's details pane** (timelinepane.js) shows the selected
+  line in full and is where "What else happened then" lives:
+  - **It does not open on a click.** It is always there (until Details
+    or its ✕ puts it away, remembered in `winnow.timelinePane`), empty
+    with nothing selected. A first version opened on the first click and
+    closed on Esc; opening narrowed the list under the pointer, so the
+    second click of a double-click landed on whatever had moved there
+    and the row never opened. `tests/ui/test_timeline_pane.py` asserts
+    `#timelineBody`'s box is the same before and after a pick, and
+    test_timeline_lines.py's double-click is the one that caught it.
+  - **It follows `S.timeline.sel`, cheaply.** `syncTimelinePane` runs on
+    every `renderTimelineRows` (so every scroll frame) and only redraws
+    when the selected row changes or its page object does; the row is
+    asked for (`GET /api/timeline_row`) debounced, so holding j does not
+    fetch every line it passes. After a rebuild `refreshTimelinePane`
+    asks again but keeps the old row on screen until the answer lands,
+    so a tag key does not blink the pane to "Loading…".
+  - **A redraw keeps the note being typed**: the textarea is rebuilt
+    with the pending text and the caret put back. A pending note is
+    saved before the pane takes another row (`flushTimelineNote`), so
+    moving on with j never drops one.
+  - **Tagging is one pair through `/api/row_tags`**, which journals it
+    (invariant #7), then the usual clearRowCaches / regroup / undo-state
+    refresh and a Timeline rebuild. The digits route here only on the
+    Timeline tab with a line selected; `undoLastTagChange` rebuilds the
+    Timeline when it is the tab showing.
+  - **Values are shown as stored.** The grid's detail pane formats a
+    datetime column with the open table's display format (`displayCell`
+    reads `S.columns`); this pane's row is from any table, usually not
+    the open one, so it does not.
+  - **The rows around a finding** are `S.timeline.context` (`{minutes,
+    around, start, end}`, reset on a case switch), posted as
+    `build_timeline`'s `context`. They come back with `ctx` set and get
+    `.ctx` (hatched, faded, ○ in the gutter). The header's count is the
+    findings (`row_count - context_rows`); the chip carries the rest.
+
+- **The Timeline reads as a story** (`timelineRowNode`'s `story`, which
+  only `renderTimelineRows` passes; Configure tables…' preview keeps the
+  plain timestamp, since its lines are samples rather than neighbours):
+  - **The Timestamp cell holds the time of day**, plus the day on the
+    first line of each, so **a line is found by its `data-ts`**, not by
+    the cell's text. The UI tests' `_line` helpers match
+    `.timeline-row[data-ts^='…']`; matching the cell's text stopped
+    working when it lost the date.
+  - **The rules are borders inside the row** (`day-start`, `gap`), and
+    rows are border-box, so a rule costs no height: the virtual list
+    places every row at `pos * ROW_H`, and a row one pixel taller would
+    drift every line under it. `tests/ui/test_timeline_story_lines.py`
+    holds every row to one height.
+  - **`gap` and `new_day` come from the server** (store.md), since the
+    line above the first line on a page is on another page.
+  - **The lead does not shrink** (`flex: 0 0 auto`, up to 55% of the
+    cell); the note and then the details give way. With the details
+    pane open the Body column is narrow, and a lead that shrank with the
+    rest came out as "PowerShell script…".
+  - **Fold repeats is off by default** (`winnow.timelineFold`): a line on
+    the Timeline is a finding, and a fold nobody asked for hides
+    findings. `S.timeline.unfold` holds the runs opened, by first row,
+    reset on a case switch and on the toggle. A tag on a folded line
+    goes on its first row only, which the pane says. A selected row that
+    folds away (`timeline_position`'s `folded`) leaves its run's line
+    selected, as `{pos, rid: null}`, which the line's row fills in when
+    its page paints, the way a line picked by key before its page
+    arrived does.
+  - **The header's switches are tinted when on, not filled.**
+    `.btn[aria-pressed]` fills with `--accent-dim`; Overview's and
+    Details' rule set the text to `--accent` and kept that fill, which on
+    the light themes was gold on gold.
+
 - **The Timeline's tag filter is the grid's tag chips** (`.tag-chip`,
   renderTimelineTagFilter). It asks what the ribbon asks, from the same
   strip across the top, and was the one tag control in the app answering
@@ -2227,8 +2369,8 @@ see [docs/notes/README.md](README.md) for the whole set.
     the Timeline still applied the old template.
   - **A blank Type saves as blank**, not as the first table's file name
     (what the per-table dialog sent). The template is shared, so that
-    name went on every other table's badges; blank lets `build_timeline`
-    fall back to each table's own name.
+    name went on every other table's badges; blank lets each table read
+    as its kind (the nickname-derived pill, `timelineKinds`).
   - **Edits are kept per header set until saved** (`state.drafts`):
     switching sets keeps them, the list marks each `unsaved`, and the
     footer names the others, because Save writes only the set shown.
@@ -2241,7 +2383,7 @@ see [docs/notes/README.md](README.md) for the whole set.
     clickable.
   - **The preview is the server's, not a re-implementation**:
     `POST /api/timeline/preview` runs `_timeline_parts` (the code
-    `build_timeline` uses) over a few rows under the UNSAVED settings, and
+    `fetch_timeline_rows` uses) over a few rows under the UNSAVED settings, and
     the rows are painted by `timelineRowNode`/`paintTimelineBody`, the
     Timeline's own row code, minus the raw/summary toggle (that state is
     the Timeline's, `S.timeline.raw`). Debounced, with a sequence number

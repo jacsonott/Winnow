@@ -55,6 +55,8 @@ import * as search from './search.js';
 import * as session from './session.js';
 import * as sql from './sql.js';
 import * as timeline from './timeline.js';
+import * as timelineoverview from './timelineoverview.js';
+import * as timelinepane from './timelinepane.js';
 import * as rowmenu from './rowmenu.js';
 import * as subset from './subset.js';
 import * as keymap from './keymap.js';
@@ -83,6 +85,8 @@ import { wireSql } from './sql.js';
 import { S } from './state.js';
 import { updateTimeRangeButton } from './timeframe.js';
 import { wireTimeline } from './timeline.js';
+import { wireTimelineOverview } from './timelineoverview.js';
+import { wireTimelinePane } from './timelinepane.js';
 import { wireUi } from './ui.js';
 
 
@@ -92,7 +96,7 @@ import { wireUi } from './ui.js';
    spread would freeze the value of a rebindable export like ROW_H at boot.
    Collision-free by construction — these names all shared one scope until
    the file was split. Not an API; nothing in the app reads it. */
-const NAMESPACES = { splash, core, connection, state, jobs, tabhistory, charts, stack, notes, watchlist, dashboard, dashwidgets, filters, filterundo, sources, view, columns, tsformat, derived, grid, grouping, tags, detail, ui, filterbuilder, savedfilters, timeframe, histogram, merge, multicase, importer, tables, plugins, search, session, sql, timeline, rowmenu, subset, keymap, settings, bundles, profilebuilder, pluginmanager, userenv, home, errlog };
+const NAMESPACES = { splash, core, connection, state, jobs, tabhistory, charts, stack, notes, watchlist, dashboard, dashwidgets, filters, filterundo, sources, view, columns, tsformat, derived, grid, grouping, tags, detail, ui, filterbuilder, savedfilters, timeframe, histogram, merge, multicase, importer, tables, plugins, search, session, sql, timeline, timelineoverview, timelinepane, rowmenu, subset, keymap, settings, bundles, profilebuilder, pluginmanager, userenv, home, errlog };
 window.__winnow = {};
 for (const ns of Object.values(NAMESPACES)) {
   for (const key of Object.keys(ns)) {
@@ -118,6 +122,8 @@ wireSql();
 wirePlugins();
 wireHistogram();
 wireTimeline();
+wireTimelineOverview();
+wireTimelinePane();
 wireGrid();
 wireColumnDividers();
 wireFilters();
