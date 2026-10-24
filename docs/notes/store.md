@@ -525,6 +525,42 @@ see [docs/notes/README.md](README.md) for the whole set.
   *source* (the Timeline, latest hits, `{{all:…}}`): a case can hold 500
   tables without a merge in sight. tests/test_merge_compound_limit.py
   drives each one over a merge of 510 W3C logs.
+- **A `_reader()` block is one read transaction, and so is a SQL pane
+  query.** A statement whose schema changed between its prepare and its
+  step is re-prepared, up to 50 times, and in autocommit each try reads
+  the latest schema afresh, so a writer that commits schema changes
+  faster than a reader can load the schema wins every round and the read
+  fails with "database schema has changed". The first filter on a merge
+  of 1000 IIS logs did exactly that: an index build per member, each
+  committing a CREATE INDEX, against a schema of thousands of tables;
+  `get_source`, `column_values` and the next build failed for the minute
+  the builds took, and the pane, whose TEMP views are made the same way,
+  silently skipped the ones that hit it ("no such table: merge_1"). Inside
+  a transaction the retry reads the snapshot's schema and succeeds the
+  first time. A block never sees a commit made after its first read,
+  which no reader wanted anyway, but a WAL checkpoint cannot pass a page
+  its snapshot might read: a block that streams (the CSV exports, paced by
+  the download) or copies (Save as table, committing its own batches)
+  calls `_renew_snapshot` between batches, or the -wal grows by everything
+  written while it runs. That also keeps Save as table's refusal of a view
+  evicted mid-copy, which a snapshot held throughout would have copied
+  regardless. tests/test_schema_churn.py
+  commits a schema change from the reader's own authorizer, inside every
+  prepare, which fails every time without the transaction.
+- **A merge's background index builds are one batch.** `_build_batch()`
+  collects what the block's `_ensure_*` calls ask for; at its end one
+  reader checks them all and one worker builds them, as many to a commit
+  as fit in `INDEX_BATCH_HOLD_S` (search indexes go to
+  `FTS_BUILD_CONCURRENCY` workers, one build at a time each). Each
+  `_ensure_*` used to check on two readers of its own and start a thread:
+  with the snapshot above, a 1000-member merge's filter made 2000 checks,
+  each reloading a schema that another build had just changed, and took
+  up to 160 s. Merge loops that compile per member (`build_view`,
+  `spec_sql`, `group_summary`, `column_values`) are wrapped in it; a
+  single table's call is a batch of one. The registries hold a
+  `_QueuedBuild` per build, alive until the worker has done that one, so
+  `wait_for_column_index`, `list_column_indexes`' "building" and the
+  dedup read them as they read the thread they replace.
 - **A regex is checked before it runs, and some are refused**
   (`_compiled_regex`, called by the regex filter op, regex search mode,
   any `REGEXP '…'` literal in a raw fragment or the SQL pane

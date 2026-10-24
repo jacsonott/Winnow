@@ -402,9 +402,20 @@ see [docs/notes/README.md](README.md) for the whole set.
     name, the helper columns (total, ord, sid, rid) are sliced off by
     position, and the ORDER BY names its columns by position too, since
     an included column may share their names.
-  - **On a merge, fetch per member.** Each `UNION ALL` arm joins one
-    member's rows by rid with `e.sid = <member>`; rids collide across
-    members, the same trap as the tag lookup above.
+  - **On a merge, fetch per member, in a second query.** The bookends'
+    places (member, rid, the per-group values) come back first, in
+    order; then each member's rows are read from its own table by
+    `rid IN (…)`, since rids collide across members (the same trap as
+    the tag lookup above). It was one query, a `UNION ALL` arm per
+    member joining `fl_top` by rid, and SQLite expands a CTE once per
+    reference: every arm carried the whole union of members beneath
+    `fl_top` again, members squared references to each table, and past
+    65,535 ("too many references to row_tags", from 120 to 250 members
+    depending on the options) the preview failed, and took 5 s at 120
+    where it now takes 0.2 s. The second query selects NULLs under the
+    per-group names and reads them through `SELECT *`, so a column named
+    `group_n` still comes back as `group_n:1`, as the single-table query
+    names it (`_merge_bookend_rows`).
   The proof that nothing changed is a harness that runs the old and new
   plugin on random specs (filters, tags, merges, derived columns, Total
   up, List values, placeholders, the JSON cell, truncation) and compares

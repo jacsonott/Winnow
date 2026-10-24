@@ -6,7 +6,8 @@ SELECT"). A case that merged 1000 IIS logs could not even open its merged
 view: POST /api/view answered 500. store.union_all nests the branches once
 there are more than MAX_COMPOUND_TERMS of them; these tests drive every
 path that unions a merge's members, over a merge of real W3C logs just
-past the limit."""
+past the limit, and First/Last past the reference limit a merge that size
+used to hit as well."""
 
 from __future__ import annotations
 
@@ -268,3 +269,53 @@ def test_plugins_past_the_limit(big, monkeypatch):
     edges = post("/api/plugin/lateral_movement/edges", {"selections": [
         {"source_id": mid, "src_col": "c-ip", "dst_col": "s-ip"}]})["edges"]
     assert sum(e["n"] for e in edges) == 2 * N_MEMBERS
+
+
+def test_first_last_bookends_past_the_reference_limit(big, monkeypatch):
+    """first_last looked each bookend up with an arm per member that joined
+    its CTE of bookends, and SQLite expands a CTE once per reference: every
+    arm carried the whole union of members again, members squared
+    references to each table. Past 65,535 of them ("too many references
+    to row_tags", from about 200 members) the preview and Copy result
+    answered 500."""
+    import server
+    from fastapi.testclient import TestClient
+
+    s, _, mid = big
+    reg = PluginRegistry()
+    reg.load([EXAMPLES])
+    monkeypatch.setattr(server, "STORE", s)
+    monkeypatch.setattr(server, "PLUGINS", reg)
+    client = TestClient(server.app, headers={"X-Timeline-Lite-Client": "1"})
+    body = {"source_id": mid, "group_by": ["c-ip"], "sort_column": TS,
+            "columns": ["c-ip", "cs-uri-stem"], "sum_columns": ["time-taken"]}
+
+    def post(route):
+        r = client.post(f"/api/plugin/first_last/{route}", json=body)
+        assert r.status_code == 200, r.text
+        out = r.json()
+        return [dict(zip(out["columns"], row)) for row in out["rows"]], out
+
+    def day(i, hour):
+        return f"{datetime.date(2024, 1, 1) + datetime.timedelta(days=i)} {hour}:00:00"
+
+    # 203.0.113.k requested on days k, k+250 (and k+500 for k < 10);
+    # 198.51.100.7 uploaded every day.
+    expected = {"198.51.100.7": (day(0, "09"), "/upload0.aspx", day(N_MEMBERS - 1, "09"),
+                                 f"/upload{N_MEMBERS - 1}.aspx", N_MEMBERS, sum(range(N_MEMBERS)))}
+    for k in range(250):
+        days = list(range(k, N_MEMBERS, 250))
+        expected[f"203.0.113.{k}"] = (day(days[0], "08"), "/login.aspx", day(days[-1], "08"),
+                                      "/login.aspx", len(days), sum(days))
+    rows, _ = post("rows")
+    assert len(rows) == 2 * len(expected)
+    got = {}
+    for r in rows:
+        which, n = r["Description"].split(" of ")
+        got.setdefault(r["c-ip"], {})[which] = (r[TS], r["cs-uri-stem"], int(n), int(r["Sum of time-taken"]))
+    assert got == {ip: {"First": (f_ts, f_uri, n, total), "Last": (l_ts, l_uri, n, total)}
+                   for ip, (f_ts, f_uri, l_ts, l_uri, n, total) in expected.items()}
+
+    preview, out = post("preview")
+    assert out["total_groups"] == len(expected)
+    assert [r["c-ip"] for r in preview[:4]] == ["203.0.113.0", "198.51.100.7", "203.0.113.1", "203.0.113.2"]
