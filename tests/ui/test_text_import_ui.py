@@ -34,7 +34,7 @@ def test_log_queues_as_text_and_imports_one_line_per_row(page, log_file):
         page.locator("#modalBody .import-readas button[data-key=text]").click()
         page.wait_for_function("() => document.querySelector('#modalBody .import-preview .side-preview-foot').textContent.includes('One line per row')")
         page.locator("#modalBody .import-foot .btn.primary").click()
-        page.wait_for_function("() => __winnow.S.sources.some((s) => s.name === 'hostd.log.1' && s.row_count === 4)", timeout=20_000)
+        page.wait_for_function("() => __winnow.S.sources.some((s) => s.name === 'hostd.log.1' && s.row_count === 4 && s.columns.length)", timeout=20_000)
         sid = page.evaluate("() => __winnow.S.sources.find((s) => s.name === 'hostd.log.1').id")
         page.evaluate("(id) => __winnow.openSource(id)", sid)
         page.wait_for_function("(id) => __winnow.S.sourceId === id && __winnow.S.view && __winnow.S.view.row_count === 4", arg=sid)

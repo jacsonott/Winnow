@@ -17,7 +17,7 @@ def gappy(page, server_post, ui_csv, until):
     # Queued from outside the page, so nothing in it polls the job: refresh
     # the source list ourselves until the table is there.
     until(page, lambda: page.evaluate("""() => __winnow.loadSources(undefined, { navigate: false }).then(() =>
-            __winnow.S.sources.some((s) => s.name === 'gappy.csv' && s.row_count === 5))"""),
+            __winnow.S.sources.some((s) => s.name === 'gappy.csv' && s.row_count === 5 && s.columns.length))"""),
           "gappy.csv to finish importing", timeout=20)
     sid = page.evaluate("() => __winnow.S.sources.find((s) => s.name === 'gappy.csv').id")
     yield sid
