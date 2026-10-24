@@ -111,7 +111,7 @@ def test_a_fortigate_log_by_path_previews_configures_and_imports(page, ui_csv):
         assert item["kind"] == "kv" and item["column_types"]["srcport"] == "text"
 
         page.locator("#modalBody .import-foot .btn.primary").click()
-        page.wait_for_function("() => __winnow.S.sources.some((s) => s.name === 'fortigate.log' && s.row_count === 2)", timeout=20_000)
+        page.wait_for_function("() => __winnow.S.sources.some((s) => s.name === 'fortigate.log' && s.row_count === 2 && s.columns.length)", timeout=20_000)
         cols = page.evaluate("() => __winnow.S.sources.find((s) => s.name === 'fortigate.log').columns")
         assert [c["name"] for c in cols] == heads
         types = {c["name"]: c["type"] for c in cols}
@@ -139,7 +139,7 @@ def test_an_uploaded_fortigate_log_is_recognised_from_its_head(page):
         page.locator("#modalBody .import-readas button[data-key=kv]").click()
         page.wait_for_function("() => document.querySelector('#modalBody .preview-colname')?.textContent === 'Timestamp (local)'", timeout=10_000)
         page.locator("#modalBody .import-foot .btn.primary").click()
-        page.wait_for_function("() => __winnow.S.sources.some((s) => s.name === 'fw-export.txt' && s.row_count === 2)", timeout=20_000)
+        page.wait_for_function("() => __winnow.S.sources.some((s) => s.name === 'fw-export.txt' && s.row_count === 2 && s.columns.length)", timeout=20_000)
     finally:
         page.evaluate(DROP, "fw-export.txt")
 
