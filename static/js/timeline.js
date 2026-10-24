@@ -2,7 +2,7 @@
 
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { $, OVERSCAN, PAGE, ROW_H, api, debounce, el, post, setBusy, toast } from './core.js';
-import { rowsPaintY, spacerPx, vScroll } from './grid.js';
+import { rScroll, rowsPaintY, spacerPx, vScroll } from './grid.js';
 import { armOpCancel, opToken } from './jobs.js';
 import { headerSig, nicknameFor } from './savedfilters.js';
 import { loadSources, openSource, recenterOnRow, sourceLabel } from './sources.js';
@@ -23,8 +23,8 @@ import { confirmDialog, modal, oneAtATime } from './ui.js';
    defaults/headers.json to summarise the row for its artefact shape);
    this is just the tab UI plus a small virtualized list, same
    translateY-window technique as the main grid's render(), simplified
-   since a row here is always exactly three fixed fields (ts/type/body),
-   never per-column. */
+   since a row here is always exactly four fixed fields (gutter/ts/type/
+   body), never per-column. */
 
 export async function loadTimelineTemplates() {
   try { S.timelineTemplates = await api('/api/timeline_templates'); } catch { S.timelineTemplates = []; }
@@ -140,8 +140,39 @@ export async function buildTimeline() {
       + '\nPick body columns in Configure tables… to choose which ones.';
     $('timelineStats').append(note);
   }
-  $('timelineBody').scrollTop = 0;
+  await keepTimelinePlace(v, reqId);
+  if (reqId !== S.timeline.reqId) return;
   renderTimelineRows();
+}
+
+/* Where a rebuilt Timeline opens: on the line that was selected, when
+   there was one, else at the top. Every visit to the tab is a rebuild
+   (showTimelineTab — tags change while it isn't showing), so before this
+   opening a line in its table and coming back always landed at the top,
+   to scroll for it again. The line is found by its identity
+   (/api/timeline_position); one that is no longer on the Timeline (its
+   tag was taken off, or switched off above) puts the list where it was in
+   time, with nothing selected. Scrolled a third of the way down, so what
+   came before it is on screen too. */
+async function keepTimelinePlace(v, reqId) {
+  const body = $('timelineBody');
+  const sel = S.timeline.sel;
+  if (!sel || sel.rid == null || !v.row_count) {
+    S.timeline.sel = null;
+    body.scrollTop = 0;
+    return;
+  }
+  let at;
+  try {
+    at = await api(`/api/timeline_position?view_id=${encodeURIComponent(v.view_id)}`
+      + `&source_id=${sel.source_id}&rid=${sel.rid}${sel.ts ? `&ts=${encodeURIComponent(sel.ts)}` : ''}`);
+  } catch {
+    at = null;
+  }
+  if (reqId !== S.timeline.reqId) return;
+  if (!at) { S.timeline.sel = null; body.scrollTop = 0; return; }
+  S.timeline.sel = at.exact ? { ...sel, pos: at.pos } : null;
+  body.scrollTop = rScroll(body, v.row_count, at.pos * ROW_H - body.clientHeight / 3);
 }
 
 export async function ensureTimelinePage(idx) {
@@ -196,39 +227,239 @@ export function renderTimelineRows() {
 
   const tagColor = Object.fromEntries(S.tags.map((t) => [t.id, t.color]));
   rowsEl.style.transform = `translateY(${rowsPaintY(body, virt, first)}px)`;
+  const sel = S.timeline.sel;
   const frag = document.createDocumentFragment();
   for (let pos = first; pos < last; pos++) {
     const r = timelineRowAt(pos);
-    const row = timelineRowNode(r, tagColor, fillTimelineBody);
-    if (r) row.onclick = () => jumpToTimelineRow(r.source_id, r.rid);
+    // A line picked by key before its page arrived (End on a long
+    // Timeline) learns which row it is once the page is here.
+    if (r && sel && sel.pos === pos && sel.rid == null) Object.assign(sel, lineOf(pos, r));
+    const row = timelineRowNode(r, tagColor, fillTimelineBody, { open: true });
+    row.dataset.pos = pos;
+    if (sel && sel.pos === pos) row.classList.add('selected');
     frag.append(row);
   }
   rowsEl.replaceChildren(frag);
+  syncTimelineDay(timelineRowAt(Math.min(total - 1, Math.floor(virt / ROW_H))));
 }
 
-/* One Timeline line — timestamp, tag dots and type badge, body — or the
-   empty placeholder for a row whose page hasn't arrived. `fillBody`
-   paints the Body cell: fillTimelineBody on the Timeline, with its raw /
-   summary toggle; Configure tables…' preview passes one without it. */
-export function timelineRowNode(r, tagColor, fillBody) {
+/* One Timeline line — gutter, timestamp, type, body — or the empty
+   placeholder for a row whose page hasn't arrived. `fillBody` paints the
+   Body cell: fillTimelineBody on the Timeline, with its raw / summary
+   toggle; Configure tables…' preview passes one without it, and leaves
+   out `open`, since its lines are a sample rather than lines to go to.
+
+   The gutter is the grid's (.gutter in grid.js): a stripe per tag the
+   row carries, in the tag's colour, then ✎ when it has a note, then ⤢ to
+   open it in its table. It was one dot per tag beside the type badge,
+   which put the tags in the column that says where a row came from. */
+export function timelineRowNode(r, tagColor, fillBody, { open = false } = {}) {
   const row = el('div', 'timeline-row' + (r ? '' : ' pending'));
+  const gutter = el('div', 'tl-col-gutter');
   const tsCell = el('div', 'tl-col-ts', r ? (r.ts || '—') : '');
   const typeCell = el('div', 'tl-col-type');
   if (r) {
     for (const tid of r.tags) {
-      const dot = el('span', 'tl-tag-dot');
-      dot.style.background = tagColor[tid] || '#888';
-      dot.title = (S.tags.find((t) => t.id === tid) || {}).name || '';
-      typeCell.append(dot);
+      const stripe = el('span', 'stripe');
+      stripe.style.background = tagColor[tid] || '#888';
+      stripe.title = (S.tags.find((t) => t.id === tid) || {}).name || '';
+      gutter.append(stripe);
     }
-    const badge = el('span', 'type-badge', r.type_label);
-    badge.title = r.source_name;
-    typeCell.append(badge);
+    if (r.note) {
+      const mark = el('span', 'tl-note-mark', '✎');
+      mark.title = r.note;
+      gutter.append(mark);
+    }
+    if (open) {
+      const go = el('button', 'tl-row-open', '⤢');
+      go.type = 'button';
+      go.tabIndex = -1;
+      go.title = 'Open this row in its table (or double-click the line, or Enter)';
+      go.setAttribute('aria-label', 'Open this row in its table');
+      gutter.append(go);
+    }
+    typeCell.append(...typeParts(r));
   }
   const bodyCell = el('div', 'tl-col-body');
   if (r) fillBody(bodyCell, r);
-  row.append(tsCell, typeCell, bodyCell);
+  row.append(gutter, tsCell, typeCell, bodyCell);
   return row;
+}
+
+/* What kind of table a line came from, and which one: the Type column.
+   The kind is said the way the app already names a header set — the Type
+   set for it in Configure tables… (the row's type_label), else its header
+   set's nickname less the tool in brackets ("Event logs (EvtxECmd)" →
+   "Event logs"), else the table's own name. Two tables of one kind are
+   told apart by what is left of their names once what they share is
+   taken off: "WKSTN-014_EvtxECmd_Output.csv" and "SRV-DC01_EvtxECmd_
+   Output.csv" read Event logs · WKSTN-014 and Event logs · SRV-DC01.
+   The column used to be the file name, cut by its own width to
+   "WKSTN-014_EvtxECmd_…", so both hosts' event logs read the same.
+
+   One colour per table, from the histogram's categorical palette
+   (--series-1…8), tables with tagged rows first so the ones on the
+   Timeline get the eight distinct ones before any repeats. */
+let kindsKey = null;
+let kindsMap = new Map();
+
+function trimSeparators(x) { return x.replace(/^[\s_.\-–—]+|[\s_.\-–—]+$/g, ''); }
+
+/* Each label less what every label shares at its start and its end. */
+function distinguish(labels) {
+  if (labels.length < 2) return labels.map(() => '');
+  let pre = labels[0].length;
+  let suf = labels[0].length;
+  for (const l of labels.slice(1)) {
+    let i = 0;
+    while (i < pre && i < l.length && l[i] === labels[0][i]) i++;
+    pre = i;
+    let j = 0;
+    while (j < suf && j < l.length && l[l.length - 1 - j] === labels[0][labels[0].length - 1 - j]) j++;
+    suf = j;
+  }
+  return labels.map((l) => trimSeparators(l.slice(pre, Math.max(pre, l.length - suf))) || l);
+}
+
+/* source id → { kind, host, slot }. Worked out again only when one of the
+   three lists it reads is replaced, which is how each of them changes. */
+export function timelineKinds() {
+  const key = [S.sources, S.timelineTemplates, S.headerNicknames];
+  if (kindsKey && key.every((x, i) => x === kindsKey[i])) return kindsMap;
+  kindsKey = key;
+  kindsMap = new Map();
+  const groups = new Map();
+  for (const s of S.sources) {
+    if (s.is_merge || !s.columns) continue;
+    const base = s.columns.filter((c) => !c.derived).map((c) => c.name);
+    const tmpl = timelineTemplateFor(base);
+    const nick = nicknameFor(base);
+    const kind = (tmpl && tmpl.type_label) || (nick ? nick.replace(/\s*\([^)]*\)\s*$/, '') : '') || sourceLabel(s);
+    if (!groups.has(kind)) groups.set(kind, []);
+    groups.get(kind).push(s);
+  }
+  for (const [kind, srcs] of groups) {
+    const labels = srcs.map(sourceLabel);
+    const hosts = distinguish(labels);
+    srcs.forEach((s, i) => kindsMap.set(s.id, { kind, host: kind === labels[i] ? '' : hosts[i], slot: 0 }));
+  }
+  let slot = 0;
+  for (const tagged of [true, false]) {
+    for (const s of S.sources) {
+      const k = kindsMap.get(s.id);
+      if (k && !!s.tagged_row_count === tagged) k.slot = (slot++ % 8) + 1;
+    }
+  }
+  return kindsMap;
+}
+
+/* The Type cell's contents: the kind as a pill in the table's colour,
+   then the host when it takes one to tell the table apart. The pill
+   keeps .type-badge and the table's name as its title, as the badge it
+   replaces did. */
+function typeParts(r) {
+  const k = timelineKinds().get(r.source_id);
+  // With no Type set, the server's type_label is the table's own name,
+  // which the kind says better.
+  const configured = r.type_label && r.type_label !== r.source_name;
+  const badge = el('span', 'type-badge', configured ? r.type_label : (k ? k.kind : r.type_label));
+  badge.title = r.source_name;
+  if (k && k.slot) badge.style.setProperty('--k', `var(--series-${k.slot})`);
+  return k && k.host ? [badge, el('span', 'tl-host', k.host)] : [badge];
+}
+
+/* "Timestamp · Fri 13 Mar" over the column: the day of the line at the
+   top of the list, since every line below says only its own time of
+   day once the day has been read off it once. */
+const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+export function timelineDayLabel(ts) {
+  const m = /^(\d{4})-(\d\d)-(\d\d)/.exec(ts || '');
+  if (!m) return '';
+  const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
+  return Number.isNaN(d.getTime()) ? '' : `${DOW[d.getUTCDay()]} ${d.getUTCDate()} ${MON[d.getUTCMonth()]}`;
+}
+
+function syncTimelineDay(r) {
+  const cell = $('timelineColTs');
+  const day = r ? timelineDayLabel(r.ts) : '';
+  const text = day ? `Timestamp · ${day}` : 'Timestamp';
+  if (cell.textContent !== text) cell.textContent = text;
+}
+
+/* ------------------------------------------------- the selected line
+
+   Click picks a line; double-click, Enter or the gutter's ⤢ opens it in
+   its table — the grid's own gestures. A single click used to leave the
+   page, so reading the Timeline meant not touching it. The keys are the
+   grid's, read from the keymap (moveDown, pageDown, jumpLast…), so a
+   rebinding in Settings moves this list too. */
+function lineOf(pos, r) {
+  return { pos, source_id: r.source_id, rid: r.rid, ts: r.ts };
+}
+
+export function selectTimelineLine(pos) {
+  const total = S.timeline.view ? S.timeline.view.row_count : 0;
+  if (!total) return;
+  pos = Math.max(0, Math.min(total - 1, pos));
+  const r = timelineRowAt(pos);
+  S.timeline.sel = r ? lineOf(pos, r) : { pos, source_id: null, rid: null, ts: null };
+  const body = $('timelineBody');
+  const cur = vScroll(body, total);
+  const top = pos * ROW_H;
+  let to = null;
+  if (top < cur) to = rScroll(body, total, top);
+  else if (top + ROW_H > cur + body.clientHeight) to = rScroll(body, total, top + ROW_H - body.clientHeight);
+  if (to !== null) {
+    body.scrollTop = to;
+    renderTimelineRows();
+    return;
+  }
+  // On screen already (a click's line always is): the mark moves and the
+  // lines stay. Repainting would replace the node under the pointer, and
+  // a double-click whose second click lands on a node the first one threw
+  // away never reaches the list's dblclick listener.
+  for (const n of $('timelineRows').children) n.classList.toggle('selected', +n.dataset.pos === pos);
+}
+
+export function openTimelineSelection() {
+  const sel = S.timeline.sel;
+  if (!sel || sel.rid == null) return false;
+  jumpToTimelineRow(sel.source_id, sel.rid);
+  return true;
+}
+
+/* Escape: let go of the selected line. False when there was none, so the
+   key goes on to whatever else it means. */
+export function clearTimelineSelection() {
+  if (!S.timeline.sel) return false;
+  S.timeline.sel = null;
+  renderTimelineRows();
+  return true;
+}
+
+/* The keymap's movement actions, on this list rather than the grid's
+   (keymap.js routes them here while the Timeline is the page showing).
+   True when the key was this list's. */
+export function timelineKey(e, action) {
+  const total = S.timeline.view ? S.timeline.view.row_count : 0;
+  if (!total) return false;
+  const body = $('timelineBody');
+  const page = Math.max(1, Math.floor(body.clientHeight / ROW_H) - 1);
+  const sel = S.timeline.sel;
+  const by = { moveDown: 1, moveUp: -1, pageDown: page, pageUp: -page }[action];
+  if (by !== undefined) {
+    // With nothing selected, the first move picks the top line on screen.
+    selectTimelineLine(sel ? sel.pos + by : Math.floor(vScroll(body, total) / ROW_H));
+    return true;
+  }
+  if (action === 'jumpFirst' || action === 'jumpEdgeUp') { selectTimelineLine(0); return true; }
+  if (action === 'jumpLast' || action === 'jumpEdgeDown') { selectTimelineLine(total - 1); return true; }
+  // Enter only from the list itself: on a focused button it is that
+  // button's press.
+  if (!action && e.key === 'Enter' && (e.target === body || e.target === document.body)) return openTimelineSelection();
+  return false;
 }
 
 /* The Body cell. The server sends both halves of the row (see
@@ -238,8 +469,8 @@ export function timelineRowNode(r, tagColor, fillBody) {
    there is for a CSV no shipped shape describes.
 
    The raw row is never more than a gesture away: it's the cell's title
-   on every row, "raw" swaps the cell's text for it, and clicking the row
-   still opens that row in its own table. What "raw" deliberately does
+   on every row, "raw" swaps the cell's text for it, and double-clicking
+   the line opens that row in its own table. What "raw" deliberately does
    NOT do is expand the row — every row in this list is exactly ROW_H
    tall and the virtualized window's arithmetic (first, visible,
    translateY) is built on that, so a row that grew would paint over its
@@ -254,7 +485,7 @@ export function fillTimelineBody(cell, r) {
   btn.title = showRaw ? 'Show the summary' : 'Show the raw row';
   btn.setAttribute('aria-pressed', String(showRaw));
   btn.onclick = (e) => {
-    e.stopPropagation(); // clicking the row itself jumps to it in its table
+    e.stopPropagation(); // the list's click handler would take it as picking the line
     if (showRaw) S.timeline.raw.delete(key); else S.timeline.raw.add(key);
     renderTimelineRows();
   };
@@ -737,7 +968,8 @@ export function openTimelineSourceConfig() {
     const pv = state.preview;
     if (!pv) { previewEl.append(el('p', 'tlc-empty', 'Loading…')); return; }
     const head = el('div', 'timeline-cols');
-    head.append(el('div', 'tl-col-ts', 'Timestamp'), el('div', 'tl-col-type', 'Type'), el('div', 'tl-col-body', 'Body'));
+    head.append(el('div', 'tl-col-gutter'), el('div', 'tl-col-ts', 'Timestamp'),
+      el('div', 'tl-col-type', 'Type'), el('div', 'tl-col-body', 'Body'));
     previewEl.append(head);
     if (!pv.rows.length) { previewEl.append(el('p', 'tlc-empty', 'This table has no rows.')); return; }
     const tagColor = Object.fromEntries(S.tags.map((t) => [t.id, t.color]));
@@ -754,7 +986,7 @@ export function openTimelineSourceConfig() {
     let caption;
     if (!tagged) caption = `${label} has no tagged rows yet, so these are its first rows. A row is on the Timeline once it is tagged.`;
     else if (!rest) caption = `${plural(tagged, 'tagged row')} from ${label}.`;
-    else caption = `${plural(tagged, 'tagged row')} from ${label}, plus ${rest} untagged (no tag dot) to fill the preview.`;
+    else caption = `${plural(tagged, 'tagged row')} from ${label}, plus ${rest} untagged (no tag stripe) to fill the preview.`;
     if (pv.body_shown < pv.body_total) caption += ` The Body shows its first ${pv.body_shown} of ${pv.body_total} columns.`;
     captionEl.textContent = caption;
   }
@@ -842,6 +1074,21 @@ export function wireTimeline() {
 $('timelineBody').addEventListener('scroll', () => {
   if (!timelineScrollRaf) timelineScrollRaf = requestAnimationFrame(() => { timelineScrollRaf = null; renderTimelineRows(); });
 }, { passive: true });
+
+/* On the list, not on each line: invariant #6's delegation, as #body has
+   it. */
+$('timelineRows').addEventListener('click', (e) => {
+  const row = e.target.closest('.timeline-row');
+  if (!row || row.classList.contains('pending')) return;
+  selectTimelineLine(+row.dataset.pos);
+  if (e.target.closest('.tl-row-open')) openTimelineSelection();
+});
+$('timelineRows').addEventListener('dblclick', (e) => {
+  const row = e.target.closest('.timeline-row');
+  if (!row || row.classList.contains('pending') || e.target.closest('button')) return;
+  selectTimelineLine(+row.dataset.pos);
+  openTimelineSelection();
+});
 
 $('btnTimelineConfig').onclick = openTimelineSourceConfig;
 }

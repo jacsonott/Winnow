@@ -303,3 +303,72 @@ def test_watchlist_latest_hits_survive_a_table_too_wide_for_the_body(store, writ
     store.scan_source(wide_id)
     [hit] = store.latest_hits()["rows"]
     assert hit["source_id"] == wide_id and hit["body"].startswith("v1 | v2 | ")
+
+
+# --------------------------------------------- what a page reads, and when
+#
+# The view holds (source_id, rid, ts) and nothing else; each page reads
+# its rows' body, summary, tags and note (Store.fetch_timeline_rows).
+
+def test_a_page_reads_tags_and_the_note_as_they_are_now(store, write_csv):
+    """A line whose tags changed since the build shows the tags it has,
+    not the ones it had — and its note rides along for the ✎ mark."""
+    rec1_id, rec2_id, tag_a, tag_b, configs = _two_tagged_sources(store, write_csv)
+    res = store.build_timeline(configs=configs)
+    store.set_tags(rec1_id, [1], tag_b, True)
+    store.set_note(rec1_id, 1, "first logon from the jump box")
+    rows = store.fetch_timeline_rows(res["view_id"], 0, 10)["rows"]
+    first = next(r for r in rows if (r["source_id"], r["rid"]) == (rec1_id, 1))
+    assert first["tags"] == sorted([tag_a, tag_b])
+    assert first["note"] == "first logon from the jump box"
+    assert all(r["note"] == "" for r in rows if r is not first)
+
+
+def test_pages_cut_anywhere_read_the_same_lines(store, write_csv):
+    """Each page reads its own rows source by source, so a page that
+    starts or ends part way through a table must still line up."""
+    _, _, _, _, configs = _two_tagged_sources(store, write_csv)
+    res = store.build_timeline(configs=configs)
+    whole = store.fetch_timeline_rows(res["view_id"], 0, 10)["rows"]
+    pieced = [r for start, count in [(0, 1), (1, 1), (2, 5)]
+              for r in store.fetch_timeline_rows(res["view_id"], start, count)["rows"]]
+    assert pieced == whole
+    assert [r["pos"] for r in whole] == [0, 1, 2]
+
+
+def test_a_page_after_its_table_is_dropped_asks_for_a_rebuild(store, write_csv):
+    import pytest
+
+    from winnow.store import ViewExpired
+
+    _, rec2_id, _, _, configs = _two_tagged_sources(store, write_csv)
+    res = store.build_timeline(configs=configs)
+    store.drop_source(rec2_id)
+    with pytest.raises(ViewExpired):
+        store.fetch_timeline_rows(res["view_id"], 0, 10)
+
+
+def test_timeline_position_finds_the_line_again_after_a_rebuild(store, write_csv):
+    """What keeps the analyst's place: every visit to the tab rebuilds."""
+    rec1_id, rec2_id, tag_a, tag_b, configs = _two_tagged_sources(store, write_csv)
+    rows = store.fetch_timeline_rows(store.build_timeline(configs=configs)["view_id"], 0, 10)["rows"]
+    evil = rows[2]          # history row 2, the last line
+    bob = rows[1]           # evtx row 2, tagged tag_b only
+    narrowed = store.build_timeline(configs=configs, tag_ids=[tag_a])["view_id"]
+    # Still on it, one line further up now that bob's line is gone.
+    assert store.timeline_position(narrowed, rec2_id, 2, evil["ts"]) == {"pos": 1, "exact": True}
+    # No longer on it: the first line at or after its time.
+    assert store.timeline_position(narrowed, rec1_id, 2, bob["ts"]) == {"pos": 1, "exact": False}
+    # Later than everything left: the last line.
+    assert store.timeline_position(narrowed, rec1_id, 2, "2027-01-01 00:00:00") == {"pos": 1, "exact": False}
+
+
+def test_timeline_position_route(client, write_csv):
+    import server
+
+    rec1_id, _, _, _, _ = _two_tagged_sources(server.STORE, write_csv)
+    view = client.post("/api/timeline", json={"tag_ids": []}).json()
+    r = client.get(f"/api/timeline_position?view_id={view['view_id']}&source_id={rec1_id}&rid=2")
+    assert r.status_code == 200 and r.json() == {"pos": 1, "exact": True}
+    gone = client.get(f"/api/timeline_position?view_id=nope&source_id={rec1_id}&rid=2")
+    assert gone.status_code == 409

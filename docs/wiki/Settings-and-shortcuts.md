@@ -276,6 +276,17 @@ keys**, below **Reset to defaults**, in the same groups as here.
 
 More on selecting and tagging results is in [SQL pane](SQL-pane.md).
 
+**Timeline**
+
+| Key | What it does |
+| --- | --- |
+| `↓` / `↑`, `j` / `k`, `PgDn` / `PgUp`, `g` / `G` | Move the selected line. These are the grid's movement keys, so a key you rebind moves the Timeline too. |
+| `Enter` | Open the selected line's row in its table. |
+| Double-click a line | Open its row in its table. A single click selects it. |
+| `Esc` | Let go of the selected line. |
+
+More on reading the Timeline is in [Timeline, Search all and the Watchlist](Timeline-search-and-watchlist.md#the-timeline).
+
 **Menus and dialogs**
 
 | Key | What it does |
@@ -316,8 +327,9 @@ covered in [Tagging and notes](Tagging-and-notes.md).
 
 - Most keys act on the grid and work only while a table is showing. `?`,
   `t`, `s`, `p` and `` ` `` also work from the SQL, Timeline, Notes,
-  Watchlist and plugin tabs. `Alt+1`–`Alt+0` and `Ctrl+F` work anywhere in
-  a case; `Ctrl+F` switches to the table first.
+  Watchlist and plugin tabs, and the movement keys move the selected line
+  on the Timeline. `Alt+1`–`Alt+0` and `Ctrl+F` work anywhere in a case;
+  `Ctrl+F` switches to the table first.
 - While you are typing in a box, keys type. `Esc`, `Alt+1`–`Alt+0` and
   `Ctrl+F` still work.
 - While a dialog is open, keys go to the dialog, except that the key that

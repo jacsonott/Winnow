@@ -5496,6 +5496,16 @@ def api_timeline_rows(view_id: str, start: int = 0, count: int = 200):
         raise HTTPException(409, str(e))
 
 
+@app.get("/api/timeline_position")
+def api_timeline_position(view_id: str, source_id: int, rid: int, ts: str | None = None):
+    """Where a Timeline line is after a rebuild (Store.timeline_position),
+    so the tab can put the analyst back on the line they had selected."""
+    try:
+        return store().timeline_position(view_id, source_id, rid, ts)
+    except KeyError as e:
+        raise HTTPException(409, str(e))
+
+
 class TimelinePreview(BaseModel):
     """What Configure tables… has on screen for a header set, not yet
     saved — the same three fields a timeline template holds."""

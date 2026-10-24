@@ -2183,6 +2183,49 @@ see [docs/notes/README.md](README.md) for the whole set.
   A failed POST still jumps: the grid can show the row, which is what was
   asked for. `tests/ui/test_watchlist_opens_the_table.py`.
 
+- **A Timeline line is picked by a click, not opened by it**
+  (timeline.js, `selectTimelineLine`). A click used to call
+  `jumpToTimelineRow`, so reading the Timeline meant not touching it.
+  Now: click picks (`S.timeline.sel`), double-click, Enter or the
+  gutter's ⤢ open. Things worth knowing before touching it:
+  - **The keys are the keymap's**, not a second set: keymap.js hands
+    `moveDown`/`moveUp`/`pageDown`/`pageUp`/`jumpFirst`/`jumpLast` (and
+    the edge jumps) to `timelineKey` while the Timeline is the page
+    showing, plus Enter from the list itself, and Escape to
+    `clearTimelineSelection`. A rebinding in Settings moves this list
+    too. The digits do NOT tag the selected line (yet) — the tag chips
+    still carry no hotkey, as the next entry says.
+  - **Clicks are delegated on `#timelineRows`** (invariant #6), and a
+    click that picks a line on screen moves the `.selected` class rather
+    than repainting: a repaint replaces the node under the pointer, and a
+    double-click whose second click landed on a node the first one threw
+    away never reached the listener (`tests/ui/test_timeline_lines.py`
+    has the double-click).
+  - **The place survives the rebuild every visit is**
+    (`keepTimelinePlace`): `showTimelineTab` rebuilds, so opening a line
+    and coming back used to land at the top. The selection is found
+    again by `(source_id, rid)` through `GET /api/timeline_position`
+    and scrolled a third of the way down; a line that left the Timeline
+    puts the list where it was in time, with nothing selected. Scrolling
+    goes through `rScroll`/`vScroll`, since a long Timeline's spacer is
+    capped like the grid's (MAX_SPACER_PX).
+  - **The Type column is the kind of table plus the host**
+    (`timelineKinds`): the configured Type, else the header set's
+    nickname less the tool in brackets, else the table's name; tables of
+    one kind are told apart by their names less the common prefix and
+    suffix. One `--series-N` colour per table, tables with tagged rows
+    first. The pill keeps `.type-badge` and the file name as its title,
+    and its text is the kind alone (the host is a sibling `.tl-host`),
+    which `tests/ui/test_timeline_config_builder.py` reads. The memo is
+    keyed on `S.sources`, `S.timelineTemplates` and `S.headerNicknames`
+    by identity — each is replaced, never mutated, when it changes.
+  - **The gutter is the grid's**: a stripe per tag, ✎ for a note (the
+    page now carries `note`), ⤢ to open. The tag dots it replaces sat in
+    the Type column. The raw toggle shows on the line under the mouse or
+    the one picked (opacity, so it keeps its place and Playwright can
+    still click it), and stays shown on a line showing its raw row.
+  `tests/ui/test_timeline_lines.py`.
+
 - **The Timeline's tag filter is the grid's tag chips** (`.tag-chip`,
   renderTimelineTagFilter). It asks what the ribbon asks, from the same
   strip across the top, and was the one tag control in the app answering
@@ -2227,8 +2270,8 @@ see [docs/notes/README.md](README.md) for the whole set.
     the Timeline still applied the old template.
   - **A blank Type saves as blank**, not as the first table's file name
     (what the per-table dialog sent). The template is shared, so that
-    name went on every other table's badges; blank lets `build_timeline`
-    fall back to each table's own name.
+    name went on every other table's badges; blank lets each table read
+    as its kind (the nickname-derived pill, `timelineKinds`).
   - **Edits are kept per header set until saved** (`state.drafts`):
     switching sets keeps them, the list marks each `unsaved`, and the
     footer names the others, because Save writes only the set shown.
@@ -2241,7 +2284,7 @@ see [docs/notes/README.md](README.md) for the whole set.
     clickable.
   - **The preview is the server's, not a re-implementation**:
     `POST /api/timeline/preview` runs `_timeline_parts` (the code
-    `build_timeline` uses) over a few rows under the UNSAVED settings, and
+    `fetch_timeline_rows` uses) over a few rows under the UNSAVED settings, and
     the rows are painted by `timelineRowNode`/`paintTimelineBody`, the
     Timeline's own row code, minus the raw/summary toggle (that state is
     the Timeline's, `S.timeline.raw`). Debounced, with a sequence number

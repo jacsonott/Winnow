@@ -213,7 +213,7 @@ export async function openCaseNow(path, opts = {}) {
   // instance that just closed, and its switched-off tag ids belong to the
   // previous case's tag_defs — neither means anything here.
   S.timeline = { view: null, pages: new Map(), pending: new Set(), reqId: S.timeline.reqId + 1,
-                 tagsOff: new Set(), raw: new Set() };
+                 tagsOff: new Set(), raw: new Set(), sel: null };
   // sql_tabs is a per-case table, so the previous case's tabs (and the
   // results and runs keyed by their ids) don't describe this one.
   resetSqlPane();

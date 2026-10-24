@@ -44,7 +44,31 @@ see [docs/notes/README.md](README.md) for the whole set.
   artefact shape (next entry) or every column joined.
   Same materialize-into-`v.`-then-page-by-pos pattern as `build_view`
   (invariant #2) — only one timeline view is ever alive at a time, rebuilt
-  (and the old one evicted) on every tag-filter change.
+  (and the old one evicted) on every tag-filter change and on every visit
+  to the tab (`showTimelineTab`).
+  **The view holds `(pos, source_id, rid, ts)` and nothing else.** The
+  body, the summary, the tags and the note are read by
+  `fetch_timeline_rows`, for the rows of the page asked for: one query
+  per source on the page, reading that source's slice of the page off the
+  view by pos range and its own rows by rid (a `CROSS JOIN`, so the order
+  is fixed). The view used to hold all of it, and the build joined every
+  column of every tagged row into a string and ran `TL_LEAD`/`TL_DETAILS`
+  over each before the first line showed: 13.7 s warm (28.8 s cold) for
+  250k tagged rows, paid on every visit to the tab and every tag chip
+  clicked. Ordering needs the timestamp alone: 0.6 s (2.7 s cold), with a
+  page of 5,000 lines costing ~140 ms to read instead of nothing. The
+  handle keeps the `configs` the build was given, so every page reads its
+  rows the way the build placed them. Two consequences worth knowing:
+  tags and notes are read as they are NOW (a line untagged since the
+  build shows no stripe rather than a stale one), and a source dropped
+  since the build makes the page raise `ViewExpired` (409) rather than
+  answer with lines it can no longer describe. `tests/test_timeline_summary.py`
+  holds the build to running no summary function at all, by counting
+  calls on the writer.
+  `timeline_position` (`GET /api/timeline_position`) finds a line again
+  in a rebuilt view — by `(source_id, rid)`, else the first line at or
+  after its `ts` — which is how the tab keeps the analyst's place across
+  the rebuild every visit is (`keepTimelinePlace` in timeline.js).
   **The body join is capped at what SQLite's expression depth allows**
   (`_fit_body_cols`, 495 columns at the default limit of 1000). The flat
   `a || ' | ' || b || ...` chain is two tree levels per column, so a
@@ -151,9 +175,9 @@ see [docs/notes/README.md](README.md) for the whole set.
 
 - **A Timeline row leads with what happened, not with the source row.**
   Beside `body` (still the pipe-joined columns, unchanged) each row
-  carries `summary_lead`/`summary_detail` — "Special privileges assigned"
-  plus "svc_backup · WKSTN-4471 · id 4672" — built in the same INSERT by
-  the `TL_LEAD`/`TL_DETAILS` SQL functions from the artefact shape's
+  carries `lead`/`detail` — "Special privileges assigned" plus
+  "svc_backup · WKSTN-4471 · id 4672" — read with the page by the
+  `TL_LEAD`/`TL_DETAILS` SQL functions from the artefact shape's
   `summary` block in `defaults/headers.json`. Things worth knowing before
   touching it:
   - The shape is matched by `_timeline_summary_match` the way every
@@ -171,15 +195,17 @@ see [docs/notes/README.md](README.md) for the whole set.
     source whose body columns the analyst picked by hand in Configure
     tables… — an explicit choice outranks a shipped default.
   - `TL_LEAD`/`TL_DETAILS` are registered on the writer AND the reader
-    pool. The build's INSERT runs them on the writer; Configure tables…'
-    preview (`timeline_preview`) runs the same SELECT on a reader, so a
-    long build or import holding the writer lock can't freeze the dialog
+    pool. A Timeline page (`fetch_timeline_rows`) and Configure tables…'
+    preview (`timeline_preview`) both run them on a reader, so a long
+    build or import holding the writer lock can't freeze either
     (`tests/test_timeline_preview.py` holds the lock for the whole read).
+    The build no longer calls them at all (previous entry).
   - **How a source reads on the Timeline is decided in one place,
     `_timeline_parts`** — the timestamp fallback, the derived-timestamp
     split, the body join and its 495-column cap, the summary-or-picks
-    rule, the empty-type fallback. `build_timeline` unions a branch of it
-    per source and `timeline_preview` (`POST /api/timeline/preview`) runs
+    rule, the empty-type fallback. `build_timeline` orders each source's
+    tagged rows by its timestamp, `fetch_timeline_rows` reads a page's
+    rows with the rest, and `timeline_preview` (`POST /api/timeline/preview`) runs
     it over a few rows of one table under the dialog's UNSAVED settings,
     so the preview cannot drift from the Timeline. A new rule about how a
     row reads goes in there, not in either caller — and not in
