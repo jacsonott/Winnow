@@ -306,6 +306,46 @@ see [docs/notes/README.md](README.md) for the whole set.
   background janitor thread (`wait_for_fts_maintenance` in tests) — freed
   pages go to the freelist for reuse; the file only shrinks under a VACUUM
   nothing runs automatically.
+- **A search-box Contains search the index can't narrow scans in
+  parallel** (`_parallel_contains`; only build_view asks for it, by
+  passing `_compile_where` the `scan_from` its rows are read through).
+  Before the writer lock, the table is split into `PARALLEL_SCAN_THREADS`
+  rid ranges, each scanned with `_contains_scan` on its own reader, and the
+  view is built from `rid IN (SELECT value FROM json_each(?))`. On a
+  6.9M-row, 10 GB EvtxECmd table: 17.9 s on one thread, 9.6 s on two,
+  4.8 s on four. What matters about it:
+  - Threads work because Python's sqlite3 lets go of the GIL inside a
+    statement and LIKE takes none of SQLite's locks. Not everything
+    scales that way: four threads each building an FTS5 index into its
+    own file reached 1,874 rows/s against 1,660 for one, because SQLite's
+    allocator serializes them (four processes: 6,946).
+  - Each range's rids come back as one `json_group_array`, gathered by
+    SQLite, not fetched a row at a time: every fetch takes the GIL, and
+    four threads taking it per row ran a term on 870k rows of a 2M-row
+    table at 25 s, where the single scan takes 5. The build then looks
+    each rid up again, about 1 µs apiece, against the 2-3 s per million
+    rows four threads save, so it hands back to the single scan only past
+    `PARALLEL_SCAN_MAX_RIDS` (split evenly between the ranges, a LIMIT on
+    each). Not on a share of the rows read so far, which it did at first:
+    matches are not spread evenly (EvtxECmd writes each .evtx file's
+    events together, so a Channel's rows are one run), and "Security", on
+    4% of that table, tripped it in the first rows of a range and paid
+    for both scans (6.1 s against 5.7 s).
+  - Before the writer lock, so a tag, an undo or another table's build no
+    longer waits for the scan, only for the build of the view from the
+    rids found.
+  - Cancel: the threads register under the build's `op_token` as one
+    `_ScanGroup`, which each polls from a progress handler. Not
+    `interrupt()` on each: an interrupt that lands before a connection's
+    statement has started is forgotten when it starts.
+  - While an index build is in progress, rids below its
+    `fts_progress.next_rid` are asked of the index (MATCH, then the same
+    check, as `_contains_clause` does) and only the rest are scanned —
+    at 15 GB the build takes hours. The point is read again inside the
+    MATCH's own read transaction: one that went back (a fresh build drops
+    the table) hands the search back to the single scan.
+  - `spec_sql` doesn't pass `scan_from`, so "open in the SQL pane" still
+    renders the search as the scan, SQL that runs on its own.
 - **Contains folds case for A–Z only; Regex folds every script.** Every
   contains path — the search box, the `contains`/`starts`/`not_contains`
   filters, Advanced, search-all — ends in SQLite's built-in `LIKE`, which
