@@ -2650,6 +2650,27 @@ def describe_case_lock(holder: dict) -> str:
     return bits
 
 
+class _QueuedBuild:
+    """One background build a batch worker has taken on, standing in a
+    build registry (Store._index_threads, Store._fts_threads) where a
+    thread per build used to: alive until the worker has done this one,
+    and joined as that thread was."""
+
+    __slots__ = ("_done",)
+
+    def __init__(self) -> None:
+        self._done = threading.Event()
+
+    def is_alive(self) -> bool:
+        return not self._done.is_set()
+
+    def join(self, timeout: float | None = None) -> None:
+        self._done.wait(timeout)
+
+    def finish(self) -> None:
+        self._done.set()
+
+
 class _CaseLock:
     """The marker one Store holds for its case file, for its whole life.
 
@@ -3019,9 +3040,11 @@ class Store:
         # (invariant #3) and dies with the process, same as a view.
         self._undo: list[dict] = []
         self._maxlen_cache: dict[int, tuple[tuple, dict[str, int]]] = {}
-        self._fts_threads: dict[int, threading.Thread] = {}
+        self._fts_threads: dict[int, _QueuedBuild] = {}
         self._fts_failures: set[tuple[int, str]] = set()   # logged once each (_build_fts_worker)
-        self._index_threads: dict[tuple[int, str], threading.Thread] = {}
+        self._index_threads: dict[tuple[int, str, str], _QueuedBuild] = {}
+        # Where _build_batch collects the builds its block asks for.
+        self._batch = threading.local()
         # Caps how many trigram builds run at once. A broad action — a
         # search-all sweep over a case with many unindexed sources — calls
         # _ensure_fts_building for every one of them, and each build holds
@@ -3275,24 +3298,75 @@ class Store:
         every search still ran at fallback speed."""
         if sqlite3.sqlite_version_info < TRIGRAM_LIKE_MIN_SQLITE:
             return
+        batch = getattr(self._batch, "builds", None)
+        if batch is not None:
+            batch["fts"].append(source_id)
+            return
+        self._start_fts_builds([source_id])
+
+    @contextlib.contextmanager
+    def _build_batch(self) -> Iterator[None]:
+        """Collects the background builds the block's _ensure_* calls ask
+        for, index and search index alike, and starts them when the block
+        ends: one reader checks them all, and the builds run in turn on one
+        worker (search indexes on FTS_BUILD_CONCURRENCY). A block inside
+        another adds to the outer one's.
+
+        For a merge, whose operations ask once per member. Asked one at a
+        time, a 1000-member merge's first filter made 2000 checks on as
+        many readers and started 1000 threads, each committing its own
+        CREATE INDEX: every commit changed the schema, every check after
+        one reloaded a schema of thousands of tables, and the filter's own
+        compile took minutes. Nothing starts when the block raises."""
+        if getattr(self._batch, "builds", None) is not None:
+            yield
+            return
+        builds: dict[str, list] = {"index": [], "fts": []}
+        self._batch.builds = builds
+        try:
+            yield
+        finally:
+            self._batch.builds = None
+        self._start_index_builds(builds["index"])
+        self._start_fts_builds(builds["fts"])
+
+    def _start_fts_builds(self, source_ids: list[int]) -> None:
+        """_ensure_fts_building for each of `source_ids`, built in turn by as
+        many workers as may build at once (FTS_BUILD_CONCURRENCY)."""
         with self._threads_lock:
-            existing = self._fts_threads.get(source_id)
-            if existing and existing.is_alive():
-                return
+            todo = [sid for sid in dict.fromkeys(source_ids)
+                    if not (sid in self._fts_threads and self._fts_threads[sid].is_alive())]
+        if not todo:
+            return
         # A _reader() for the has_fts check, not _source_lite/self.lock:
         # this helper is called from read paths mid-scan, and every call
         # site runs outside any writer transaction (ingest fires it after
         # its final commit), so committed state is exactly what to check.
         with self._reader() as ro:
-            if self._source_lite_on(ro, source_id).get("has_fts"):
-                return
+            ready = {sid for (sid,) in ro.execute("SELECT id FROM sources WHERE has_fts=1")}
+        todo = [sid for sid in todo if sid not in ready]
         with self._threads_lock:
-            existing = self._fts_threads.get(source_id)
-            if existing and existing.is_alive():
-                return
-            t = threading.Thread(target=self._build_fts_worker, args=(source_id,), daemon=True)
-            self._fts_threads[source_id] = t
-        t.start()
+            jobs = []
+            for sid in todo:
+                existing = self._fts_threads.get(sid)
+                if existing and existing.is_alive():
+                    continue
+                self._fts_threads[sid] = _QueuedBuild()
+                jobs.append((sid, self._fts_threads[sid]))
+        workers = min(len(jobs), self.FTS_BUILD_CONCURRENCY)
+        for k in range(workers):
+            threading.Thread(target=self._build_fts_batch_worker, args=(jobs[k::workers],), daemon=True).start()
+
+    def _build_fts_batch_worker(self, jobs: list[tuple[int, _QueuedBuild]]) -> None:
+        try:
+            for source_id, handle in jobs:
+                if self._closing:
+                    break
+                self._build_fts_worker(source_id)
+                handle.finish()
+        finally:
+            for _, handle in jobs:
+                handle.finish()
 
     @staticmethod
     def search_index_supported() -> bool:
@@ -3319,7 +3393,7 @@ class Store:
                 "supported": self.search_index_supported()}
 
     def _build_fts_worker(self, source_id: int) -> None:
-        # The thread is registered (so _is_fts_building sees it and the
+        # The build is registered (so _is_fts_building sees it and the
         # per-source dedup holds) before it waits here for a build slot —
         # bounding writer contention when many builds are requested at once
         # (the search-all sweep). The heavy, lock-holding build_fts runs
@@ -3376,14 +3450,16 @@ class Store:
         return f"idx_{table_name}_{h}"
 
     def _column_index_exists(self, table_name: str, column: str, purpose: str = "filter") -> bool:
-        name = self._column_index_name(table_name, column, purpose)
         # A _reader(), same reasoning as _ensure_fts_building's has_fts
         # check: called from read paths, always outside a writer
         # transaction, and an index only "exists" once its CREATE commits.
         with self._reader() as ro:
-            row = ro.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='index' AND name=?", (name,)
-            ).fetchone()
+            return self._column_index_exists_on(ro, table_name, column, purpose)
+
+    def _column_index_exists_on(self, conn: sqlite3.Connection, table_name: str, column: str,
+                                purpose: str = "filter") -> bool:
+        name = self._column_index_name(table_name, column, purpose)
+        row = conn.execute("SELECT 1 FROM sqlite_master WHERE type='index' AND name=?", (name,)).fetchone()
         return row is not None
 
     def _ensure_column_index_building(self, source_id: int, column: str, table_name: str | None = None) -> None:
@@ -3514,48 +3590,110 @@ class Store:
         a member of a merge whose tables have different columns lacks some
         of the merge's. Matched as _col_key does, so a member's " Host" is
         the merge's "Host" too."""
-        key = _col_key(column)
         with self._reader() as ro:
-            names = [name for (name,) in ro.execute("SELECT name FROM pragma_table_info(?)", (table_name,))]
+            return self._own_spelling(self._table_columns_on(ro, table_name), column)
+
+    @staticmethod
+    def _table_columns_on(conn: sqlite3.Connection, table_name: str) -> list[str]:
+        return [name for (name,) in conn.execute("SELECT name FROM pragma_table_info(?)", (table_name,))]
+
+    @staticmethod
+    def _own_spelling(names: list[str], column: str) -> str | None:
+        """_table_own_spelling against a table's column `names`."""
         if column in names:
             return column
+        key = _col_key(column)
         return next((name for name in names if _col_key(name) == key), None)
 
     def _ensure_purpose_index_building(self, source_id: int, column: str, purpose: str,
                                         table_name: str | None = None) -> None:
         table_name = table_name or self._source_lite(source_id)["table_name"]
-        # Callers pass a merge's spelling of the column, once per member.
-        # Index the member's own spelling (the name list_column_indexes
-        # hashes), and nothing at all on a member that lacks the column:
-        # a merge of tables with different columns asks every member for
-        # every one of its columns.
-        column = self._table_own_spelling(table_name, column)
-        if column is None:
+        batch = getattr(self._batch, "builds", None)
+        if batch is not None:
+            batch["index"].append((source_id, column, purpose, table_name))
             return
-        key = (source_id, column, purpose)
-        with self._threads_lock:
-            existing = self._index_threads.get(key)
-            if existing and existing.is_alive():
-                return
-        if self._column_index_exists(table_name, column, purpose):
-            return
-        with self._threads_lock:
-            existing = self._index_threads.get(key)
-            if existing and existing.is_alive():
-                return
-            t = threading.Thread(target=self._build_column_index_worker,
-                                 args=(column, table_name, purpose), daemon=True)
-            self._index_threads[key] = t
-        t.start()
+        self._start_index_builds([(source_id, column, purpose, table_name)])
 
-    def _build_column_index_worker(self, column: str, table_name: str, purpose: str = "filter") -> None:
+    def _start_index_builds(self, wanted: list[tuple[int, str, str, str]]) -> None:
+        """_ensure_purpose_index_building for each (source_id, column,
+        purpose, table_name) in `wanted`: checked on one reader, built by
+        one worker."""
+        if not wanted:
+            return
+        todo = []
+        with self._reader() as ro:
+            columns: dict[str, list[str]] = {}
+            for source_id, column, purpose, table_name in wanted:
+                if table_name not in columns:
+                    columns[table_name] = self._table_columns_on(ro, table_name)
+                # Callers pass a merge's spelling of the column, once per
+                # member. Index the member's own spelling (the name
+                # list_column_indexes hashes), and nothing at all on a member
+                # that lacks the column: a merge of tables with different
+                # columns asks every member for every one of its columns.
+                own = self._own_spelling(columns[table_name], column)
+                if own is None:
+                    continue
+                key = (source_id, own, purpose)
+                with self._threads_lock:
+                    existing = self._index_threads.get(key)
+                    if existing and existing.is_alive():
+                        continue
+                if not self._column_index_exists_on(ro, table_name, own, purpose):
+                    todo.append((key, table_name, own, purpose))
+        jobs = []
+        with self._threads_lock:
+            for key, table_name, column, purpose in todo:
+                existing = self._index_threads.get(key)
+                if existing and existing.is_alive():
+                    continue
+                self._index_threads[key] = _QueuedBuild()
+                jobs.append((self._index_threads[key], table_name, column, purpose))
+        if jobs:
+            threading.Thread(target=self._build_column_indexes_worker, args=(jobs,), daemon=True).start()
+
+    # How long the index worker holds the writer lock for one transaction of
+    # index builds. A merge of small tables builds dozens in one commit, and
+    # each commit is one schema change for every reader to reload, not one
+    # per table; a table big enough to take longer is built alone.
+    INDEX_BATCH_HOLD_S = 0.25
+
+    def _build_column_indexes_worker(self, jobs: list[tuple[_QueuedBuild, str, str, str]]) -> None:
         try:
-            name = self._column_index_name(table_name, column, purpose)
-            collate = " COLLATE NOCASE" if purpose == "sort" else ""
-            with self.lock, self.db:
-                self.db.execute(f"CREATE INDEX IF NOT EXISTS {q(name)} ON {q(table_name)}({q(column)}{collate})")
+            i = 0
+            while i < len(jobs) and not self._closing:
+                done = []
+                with self.lock:
+                    t0 = time.perf_counter()
+                    # Never someone else's transaction to commit or roll back.
+                    own = not self.db.in_transaction
+                    if own:
+                        self.db.execute("BEGIN")
+                    try:
+                        while i < len(jobs) and (not done or time.perf_counter() - t0 < self.INDEX_BATCH_HOLD_S):
+                            handle, table_name, column, purpose = jobs[i]
+                            i += 1
+                            done.append(handle)
+                            name = self._column_index_name(table_name, column, purpose)
+                            collate = " COLLATE NOCASE" if purpose == "sort" else ""
+                            with contextlib.suppress(sqlite3.Error):   # its table dropped since: skip it
+                                self.db.execute(f"CREATE INDEX IF NOT EXISTS {q(name)} "
+                                                f"ON {q(table_name)}({q(column)}{collate})")
+                        if own:
+                            self.db.commit()
+                    except BaseException:
+                        if own:
+                            self.db.rollback()
+                        raise
+                for handle in done:
+                    handle.finish()
+                if i < len(jobs):
+                    time.sleep(0.02)  # same anti-starvation yield build_fts uses
         except Exception:
             pass  # best-effort background upgrade — the next filter/sort application retries
+        finally:
+            for handle, *_ in jobs:
+                handle.finish()
 
     def wait_for_column_index(self, source_id: int, column: str, timeout: float | None = None,
                                purpose: str = "filter") -> bool:
@@ -4213,6 +4351,16 @@ class Store:
         the store closing, and a connection whose last statement died is
         cheaper to replace than to prove clean. The pool refills lazily.
 
+        The block is one read transaction, so everything in it reads one
+        snapshot of the case. That is what keeps a read from failing with
+        "database schema has changed" while the writer commits schema
+        changes back to back, as the per-member index builds of a big
+        merge do: a statement that finds the schema changed under it is
+        re-prepared, and in autocommit SQLite reads the schema afresh for
+        each of its 50 tries, which a writer committing faster than a
+        schema of thousands of tables loads can outrun every time. Inside
+        a transaction the retry reads the snapshot's schema and succeeds.
+
         Checked-out connections are counted, so that close() can wait for
         them to come back: one still open when the writer closes keeps
         SQLite from tidying the -wal and -shm away (see close())."""
@@ -4233,7 +4381,9 @@ class Store:
         try:
             if conn is None:
                 conn = self._open_reader()
+            conn.execute("BEGIN")
             yield conn
+            conn.rollback()
             with self._reader_lock:
                 if not self._readers_closed and len(self._reader_pool) < self.READER_POOL_CAP:
                     self._reader_pool.append(conn)
@@ -4250,6 +4400,17 @@ class Store:
                 with self._reader_lock:
                     self._readers_out -= 1
                     self._readers_back.notify_all()
+
+    @staticmethod
+    def _renew_snapshot(ro: sqlite3.Connection) -> None:
+        """Ends a _reader() block's snapshot; the next read starts another.
+        For a block that streams or copies batch by batch, called between
+        batches, with none of its statements open: a WAL checkpoint cannot
+        pass a page that a reader's snapshot might still read, so a snapshot
+        held across a slow download, or across a copy's own commits, would
+        grow the -wal by everything written in the meantime."""
+        ro.rollback()
+        ro.execute("BEGIN")
 
     @staticmethod
     @contextlib.contextmanager
@@ -9340,17 +9501,18 @@ class Store:
             parts = []
             filtered = False
             params: list[Any] = []
-            for m in self._resolve_members(source_id):
-                msrc = m["src"]
-                where, p = self._compile_where(m["source_id"], self._member_read_src(src, msrc), spec, colnames)
-                for col in sort_cols:
-                    self._ensure_sort_index_building(
-                        m["source_id"], col,
-                        self._index_table_for(src, col, msrc["table_name"], m["source_id"]))
-                parts.append((int(m["source_id"]),
-                              f" FROM {self._member_from(src, m)}" + (f" WHERE {where}" if where else "")))
-                filtered = filtered or bool(where)
-                params.extend(p)
+            with self._build_batch():   # one batch for every member's index builds
+                for m in self._resolve_members(source_id):
+                    msrc = m["src"]
+                    where, p = self._compile_where(m["source_id"], self._member_read_src(src, msrc), spec, colnames)
+                    for col in sort_cols:
+                        self._ensure_sort_index_building(
+                            m["source_id"], col,
+                            self._index_table_for(src, col, msrc["table_name"], m["source_id"]))
+                    parts.append((int(m["source_id"]),
+                                  f" FROM {self._member_from(src, m)}" + (f" WHERE {where}" if where else "")))
+                    filtered = filtered or bool(where)
+                    params.extend(p)
 
             def union(cols: str) -> str:
                 return union_all(f"SELECT {mid} AS {sid_col}, rid{cols}{rest}" for mid, rest in parts)
@@ -10165,10 +10327,11 @@ class Store:
             # true whole_source (unfiltered, no path) case, same scope as
             # before this had to also cover root_virtual.
             if whole_source and not is_datetime:
-                for m in members:
-                    self._ensure_column_index_building(
-                        m["source_id"], column, self._index_table_for(src, column, m["table_name"], m["source_id"])
-                    )
+                with self._build_batch():
+                    for m in members:
+                        self._ensure_column_index_building(
+                            m["source_id"], column, self._index_table_for(src, column, m["table_name"], m["source_id"])
+                        )
 
         branches: list[str] = []
         params: list[Any] = []
@@ -11562,21 +11725,22 @@ class Store:
             sid_col = q(self._member_id_alias(colnames))
             branches = []
             params: list[Any] = []
-            for m in self._resolve_members(source_id):
-                msrc = m["src"]
-                where, p = self._compile_where(m["source_id"], self._member_read_src(src, msrc), spec, colnames)
-                # The pane's own src_<id> name, projected when the member
-                # doesn't carry the merge's columns as-is — run_sql's shadow
-                # view supplies any derived columns the projection names.
-                exprs = self._member_projection(src, msrc)
-                from_sql = (q(m["table_name"]) if exprs is None
-                            else f"(SELECT rid, {', '.join(exprs)} FROM {q(m['table_name'])})")
-                branches.append(
-                    f"SELECT {int(m['source_id'])} AS {sid_col}, rid, {collist}\n"
-                    f"FROM {from_sql}"
-                    + (f"\nWHERE {where}" if where else "")
-                )
-                params.extend(p)
+            with self._build_batch():
+                for m in self._resolve_members(source_id):
+                    msrc = m["src"]
+                    where, p = self._compile_where(m["source_id"], self._member_read_src(src, msrc), spec, colnames)
+                    # The pane's own src_<id> name, projected when the member
+                    # doesn't carry the merge's columns as-is — run_sql's shadow
+                    # view supplies any derived columns the projection names.
+                    exprs = self._member_projection(src, msrc)
+                    from_sql = (q(m["table_name"]) if exprs is None
+                                else f"(SELECT rid, {', '.join(exprs)} FROM {q(m['table_name'])})")
+                    branches.append(
+                        f"SELECT {int(m['source_id'])} AS {sid_col}, rid, {collist}\n"
+                        f"FROM {from_sql}"
+                        + (f"\nWHERE {where}" if where else "")
+                    )
+                    params.extend(p)
             sql = union_all(branches, "\nUNION ALL\n") + f"\n{order}"
         else:
             where, params = self._compile_where(source_id, src, spec, colnames)
@@ -12184,10 +12348,11 @@ class Store:
             if column not in names:
                 raise KeyError(column)
             members = self._resolve_members_on(ro, source_id)
-            for m in members:
-                self._ensure_column_index_building(
-                    m["source_id"], column, self._index_table_for(src, column, m["table_name"], m["source_id"])
-                )
+            with self._build_batch():
+                for m in members:
+                    self._ensure_column_index_building(
+                        m["source_id"], column, self._index_table_for(src, column, m["table_name"], m["source_id"])
+                    )
             union_sql = union_all(
                 f"SELECT {q(column)} AS val FROM {self._member_from(src, m, uses=(column,))}" for m in members
             )
@@ -16679,6 +16844,7 @@ class Store:
             buf = io.StringIO()
             w = csv.writer(buf, lineterminator="\n")
             w.writerow(_export_header(cols, _csv_safe))
+            self._renew_snapshot(ro)
             yield buf.getvalue()
             buf.seek(0), buf.truncate(0)
 
@@ -16728,6 +16894,7 @@ class Store:
             buf = io.StringIO()
             w = csv.writer(buf, lineterminator="\n")
             w.writerow(_export_header(cols, _csv_safe))
+            self._renew_snapshot(ro)
             yield buf.getvalue()
             buf.seek(0), buf.truncate(0)
 
@@ -16766,6 +16933,7 @@ class Store:
                         continue
                     w.writerow([r["rid"], _csv_safe("; ".join(tmap.get(r["rid"], []))), _csv_safe(nmap.get(r["rid"], "")),
                                *[_csv_safe(r[c]) for c in cols]])
+                self._renew_snapshot(ro)
                 yield buf.getvalue()
                 buf.seek(0), buf.truncate(0)
 
@@ -16807,6 +16975,7 @@ class Store:
             if member_names is not None:
                 head.insert(1, "Table")
             w.writerow(head)
+            self._renew_snapshot(ro)
             yield buf.getvalue()
             buf.seek(0), buf.truncate(0)
 
@@ -16866,6 +17035,7 @@ class Store:
                         _csv_safe(nmap.get(key, "")),
                         *[_csv_safe(v) for v in cellmap[key]],
                     ])
+                self._renew_snapshot(ro)
                 yield buf.getvalue()
                 buf.seek(0), buf.truncate(0)
 
@@ -17738,6 +17908,10 @@ class Store:
         # _reader() pool (see _open_reader and _tune).
         ro.execute("PRAGMA temp_store=FILE")
         ro.execute("PRAGMA threads=4")
+        # One snapshot for the views and the query, as on _reader(): a view
+        # whose CREATE hit "database schema has changed" was skipped below,
+        # and the query then failed with "no such table: merge_1".
+        ro.execute("BEGIN")
         try:
             for row in ro.execute("SELECT id FROM merges ORDER BY id"):
                 try:
@@ -18073,6 +18247,7 @@ class Store:
                         if rows:
                             total = self._commit_ingest_batch(insert, rows, new_id, total,
                                                               also=(map_sql, mapping), op_token=op_token)
+                        self._renew_snapshot(ro)
 
                 # The metadata write is what makes the table openable
                 # (_require_columns reads columns='[]' as "still importing"),
