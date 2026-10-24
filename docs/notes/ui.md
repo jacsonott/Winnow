@@ -880,7 +880,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   the grid, never rows in the panel. The first cut listed the differing
   rows inside the modal, three columns of tag names per row: it read as
   cramped at twenty rows and useless at two thousand, and the rows were
-  a copy of what the grid already shows. So `renderDiff` draws one line
+  a copy of what the grid already shows. So `diffRows` draws one line
   per table with a count per kind (only-left, only-right, tagged
   differently, notes) from the server's uncapped per-table tally
   (`sources`), and each count calls `pivotDiff`, which sets
@@ -1570,6 +1570,40 @@ see [docs/notes/README.md](README.md) for the whole set.
     two-pane dialogs, and Tables, Tagged, notes and the group chip drop
     out of the row.
   tests/ui/test_home_screen.py, test_home_fixes.py.
+- **The rest of the older dialogs are the frame too**: Sessions
+  (session.js), Saved filters (timeframe.js `openSavedFiltersModal`), the
+  folder and file picker (home.js `openFolderBrowser`), the quick look's
+  Add these tables to a case (home.js `tempCopyModal`), Case settings and
+  Export (settings.js, sources.js, on `sectionPanes`), the filter builder
+  (filterbuilder.js, the merge builder's `.mb-*` panes), lateral_movement's
+  Movement events, and Stack (below). Each was paragraphs over rows of
+  buttons. Decisions:
+  - **`.list-panes`/`.list-pane` are the Tables manager's pane rules,
+    shared**: the frame's sizes, the box that scrolls, the 640px narrow
+    layout. The rules that draw the manager's own columns stay scoped to
+    `.tables-manager`, since the other dialogs' `.tables-row` lists have
+    columns of their own.
+  - **A row's actions are in its ⋯ and its right-click**, and a click on
+    its name is the one gesture that changes nothing, or the one it is
+    opened for: compare a session with the current work, apply a saved
+    filter, go into a folder, pick a case to copy into. Load, Delete and
+    the like are a menu away, behind their own confirm as before.
+  - **One main button on the foot, naming what it does** ("Copy 3 tables
+    into ACME", "Export 1,204 rows (.csv)", "Add 2 files"). The copy is
+    guarded by `oneAtATime`, as the old per-row button was
+    (test_double_click_submits_once.py).
+  - **Comparing runs as the sides change**; `runCompare` clears the last
+    answer before asking, so a pane never shows one comparison's counts
+    under the other's names. The heads are A/B, as the gutter marks are,
+    and the figures above them spell the names out.
+  - **No intro paragraphs.** What each takes is said in its panes' notes
+    and feet (test_dialog_intros.py keeps the Timeframe filter's one line).
+  - **`sectionPanes` is in the plugin API** (14; tab context `apiVersion`
+    8) so a plugin's dialog can be the same frame; lateral_movement's
+    Events… is the example.
+  tests/ui/test_sessions_panel.py, test_saved_filters_rows.py,
+  test_case_variables_ui.py, test_import_ux.py, test_export_all_xlsx_ui.py,
+  test_quicklook_copy_targets.py, test_stack.py.
 - **A header set's default layout seeds a table once, so it needs its
   own way onto the rest** (the table menu's Layout section with the
   default chosen; columns.js `applyDefaultLayout` is the same as a
@@ -2154,7 +2188,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   would change along with it and see no difference at the next build.
   `tests/ui/test_undo_filter_change.py`.
 
-- **Stack view** (stack.js) — the column-header menu's "Stack values (rarest first)…" opens a modal of the current view's distinct values by count (via group_summary, order=count direction=asc), drawn with charts.js. Click a bar to filter the grid to that value. Least-frequency-of-occurrence triage. **The box is sized to its bars** — `max-height: min(60vh,520px)` over a canvas whose height is `rows × 22`, not a fixed height: a column that stacks to nine distinct values used to open a screen-high modal with nine bars in the top corner and four fifths of nothing under them. See docs/design/analysis-suite.md.
+- **Stack view** (stack.js) — the column-header menu's "Stack values (rarest first)…" opens a chart of the current view's distinct values by count (via group_summary, order=count, up to 1,000 values), one bar per value, click-to-filter. Least-frequency-of-occurrence triage. **The chart is the dialog**: the table's columns down a side list (`sideRail`, pinnable) and the bars taking the rest of an `xwide`, tall modal. It used to be a canvas drawn with charts.js in a box sized to its bars, which read as too small. Decisions: **the bars are DOM elements, not canvas bars**, so each is focusable (ArrowUp/Down walk them, Enter filters), carries its full value in its title, takes the row menu (Filter to / Exclude / Copy value) and scrolls; **one scale for the column**, ending at the largest count with gridlines on the nearest 1-2-5 step (`scaleStep`, so 412 gets 0…400 by 100 and the longest bar spans the track — rounding the axis up to 600 wasted a third of it), kept when Filter values… narrows the bars; **the row height shares the chart's height out** (`size`: between 26 and 44px), so five values are five broad bars and a long tail scrolls; the value gutter is measured in the chart's face, at most two fifths of it. The foot says when the count or the drawing (500 bars) was cut short. tests/ui/test_stack.py. See docs/design/analysis-suite.md.
 
 - **Case notes tab** (notes.js) — a free-form Markdown scratchpad for the investigation narrative, stored in the case file (Store.case_notes) so it travels with the .db — distinct from the per-row notes, which the page now LISTS below the split (see below). The editor and a live preview sit side by side (`#notesSplit`, a flex row inside `.page-main`) split by a draggable divider; Edit / Split / Preview collapse one pane or the other through `data-mode` on the row, and the stylesheet does the hiding. Debounced autosave, a tiny dependency-free Markdown renderer (airgap). Page tabs now route visibility through sql.js's showMainView(id)/MAIN_VIEWS registry so adding a tab is a one-place edit. See docs/design/analysis-suite.md. Things that bite here:
   - **The mode never persists, the layout does** (`winnow.notes = { split, rows }` — the divider ratio as a ratio of the row, and whether the row-note strip is open; per browser, like `winnow.sidebar`, and written only when the analyst drags or toggles, never on a visit that touched nothing): Notes always opens in Split, and `showNotesTab` re-applies both *synchronously before* `await ensureNotesLoaded()` — the page is already showing by then, so applying them after the fetch paints the markup's 50/50 default and then jumps. A remembered preview-only mode would also hide the editor from Playwright's `fill()` in tests/ui/test_case_notes.py after its reload.

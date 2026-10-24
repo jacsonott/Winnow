@@ -2880,6 +2880,31 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .fb-groupby-sort { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
 .fb-groupby-sublabel { font-size: 11px; color: var(--dim); }
 .fb-raw-banner { font-size: 12px; color: var(--dim); margin-bottom: 8px; }
+/* The filter builder in the builders' shape (openFilterBuilder): the
+   conditions in the left pane, what they match and their SQL in the right. */
+.fb-left .fb-tree { border: 0; padding: 0; margin: 0; flex: 1 1 auto; min-height: 0; overflow: auto; }
+.fb-builder .fb-group-head { text-transform: none; letter-spacing: 0; font-size: 12px; gap: 8px; }
+.fb-builder .fb-group-op.mb-seg { background: none; padding: 0; border: var(--border-w) solid var(--line-2); }
+.fb-builder .fb-group-op.mb-seg button { font-size: 11px; padding: 2px 10px; }
+.mb-panes.fb-panes { grid-template-columns: minmax(0, 7fr) minmax(0, 5fr); }
+.fb-builder .fb-cond, .fb-builder .fb-row > .fb-group { min-width: 0; }
+.fb-builder .fb-cond select, .fb-builder .fb-cond input, .fb-builder .fb-cond textarea { font-size: 12px; padding: 4px 7px; min-width: 0; }
+.fb-builder .fb-cond select { flex: 0 1 auto; max-width: 34%; }
+.fb-builder .fb-cond input, .fb-builder .fb-cond textarea { flex: 1 1 0; min-width: 80px; }
+.fb-builder .fb-cond textarea {
+  background: var(--ink); color: var(--text); border: 1px solid var(--line-2); border-radius: var(--radius-sm);
+  font-family: var(--mono); resize: none;
+}
+.fb-builder .fb-rm { opacity: .45; }
+.fb-builder .fb-row:hover .fb-rm, .fb-builder .fb-rm:focus-visible { opacity: 1; }
+.fb-builder .fb-actions { margin-top: 4px; }
+.fb-sql-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.fb-sql-head .fb-status { margin: 0; }
+.fb-right .fb-sql { resize: none; flex: 0 0 auto; }
+.fb-right .fb-groupby { margin-top: 2px; }
+.fb-right .fb-groupby .mb-head { margin-bottom: 6px; }
+.fb-groupby-sort .mb-seg button { font-size: 11px; padding: 2px 9px; }
+.fb-foot { margin-top: 12px; }
 
 /* ----------------------------------------------------------- settings */
 
@@ -3463,22 +3488,26 @@ textarea:focus { border-color: var(--accent); outline: none; }
   .table-menu .side-rail-group, .table-menu .side-rail-hint { display: none; }
 }
 
-/* The Tables manager in two panes (openTablesManager, in tables.js): the
-   table menu's frame, with its sections down a side list and the chosen
-   one on the right. Every table and Indexes are the Columns pane's shape:
-   what to narrow by on top, then a box that takes the room that is left
-   and is the one thing that scrolls. */
-.tables-manager .side-rail { padding-right: 12px; }
-.tables-manager-pane { overflow: hidden; }
-.tables-manager-pane .tm-cols-top { display: flex; align-items: center; gap: 10px; }
-.tables-manager-pane .tm-cols-top .side-search { flex: 1 1 auto; min-width: 0; }
-.tables-manager-pane .tm-cols-top .mb-seg { flex: 0 0 auto; }
-.tables-manager-pane .tm-cols-top .mb-seg button { font-size: 11px; padding: 3px 10px; }
-.tables-manager-pane .tm-cols-top .tm-cols-count { white-space: nowrap; }
-.tables-manager-pane .tm-cols-box { flex: 1 1 0; min-height: 0; margin-top: 8px; }
-.tables-manager-pane .row-actions { flex-wrap: wrap; margin-top: 10px; }
-.tables-manager-pane .mb-summary { margin-bottom: 10px; }
-.tables-manager-pane .mb-notes { list-style: none; margin: 0 0 10px; padding: 0; display: grid; gap: 5px; }
+/* A list in two panes: the Tables manager (openTablesManager, in
+   tables.js) and the dialogs on its frame — Sessions, Saved filters, the
+   folder browser, Case settings, Export, Stack — take .list-panes on the
+   frame and .list-pane on the pane (sectionPanes cls / paneCls). A list
+   pane is the Every table pane's shape: what to narrow by on top, then a
+   box that takes the room that is left and is the one thing that
+   scrolls. Each dialog adds only its own column grid. */
+.list-panes .side-rail { padding-right: 12px; }
+.list-pane { overflow: hidden; }
+.list-pane .tm-cols-top { display: flex; align-items: center; gap: 10px; }
+.list-pane .tm-cols-top .side-search { flex: 1 1 auto; min-width: 0; }
+.list-pane .tm-cols-top .mb-seg { flex: 0 0 auto; }
+.list-pane .tm-cols-top .mb-seg button { font-size: 11px; padding: 3px 10px; }
+.list-pane .tm-cols-top .tm-cols-count { white-space: nowrap; }
+.list-pane .tm-cols-box { flex: 1 1 0; min-height: 0; margin-top: 8px; }
+.list-pane .row-actions { flex-wrap: wrap; margin-top: 10px; }
+.list-pane .mb-summary { margin-bottom: 10px; }
+.list-pane .mb-notes { list-style: none; margin: 0 0 10px; padding: 0; display: grid; gap: 5px; }
+.list-pane .mb-notes[hidden] { display: none; }
+.list-pane .tables-head > span { overflow: hidden; text-overflow: ellipsis; }
 /* One grid for the column heads and every row, so the counts line up
    down fifty tables. The name cell takes what is left and ellipsizes. */
 .tables-head, .tables-row {
@@ -3552,18 +3581,203 @@ button.tables-name:not(:disabled):hover { text-decoration: underline; color: var
 .tables-member-rows { flex: 0 0 auto; font-size: 11px; color: var(--dim); }
 .tables-made-sql { display: block; font-family: var(--mono); font-size: 11.5px; color: color-mix(in srgb, var(--text) 62%, var(--dim)); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 @media (max-width: 640px) {
-  .tables-manager.side-panes { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
-  .tables-manager .side-rail { border-right: 0; padding: 0 0 6px; border-bottom: 1px solid var(--line); }
-  .tables-manager .side-rail-list { flex: 0 0 auto; flex-direction: row; flex-wrap: wrap; gap: 2px; overflow: visible; }
-  .tables-manager .side-rail-group, .tables-manager .side-rail-hint { display: none; }
-  .tables-manager-pane .tm-cols-top { flex-wrap: wrap; }
-  .tables-manager-pane .tm-cols-top .side-search { flex-basis: 100%; }
-  .tables-head, .tables-row { grid-template-columns: 16px minmax(0, 1fr) 62px 26px; }
-  .tables-head .tables-sort[data-sort="tagged_row_count"], .tables-head .tables-sort[data-sort="note_count"],
-  .tables-row .tables-tagged, .tables-row .tables-notes { display: none; }
-  .tables-indexes .tables-head, .tables-ix-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  /* Scoped to the manager: other dialogs draw .tables-row lists with
+     columns of their own. The frame's own narrow rules are .list-panes'. */
+  .tables-manager .tables-head, .tables-manager .tables-row { grid-template-columns: 16px minmax(0, 1fr) 62px 26px; }
+  .tables-manager .tables-head .tables-sort[data-sort="tagged_row_count"], .tables-manager .tables-head .tables-sort[data-sort="note_count"],
+  .tables-manager .tables-row .tables-tagged, .tables-manager .tables-row .tables-notes { display: none; }
+  .tables-indexes .tables-head, .tables-manager .tables-ix-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
   .tables-indexes .tables-head .tables-fi-h { display: none; }
   .tables-ix-row .tables-fi { grid-column: 1 / -1; }
+}
+
+/* A count that opens something: the number, in its column, underlined
+   on hover — not a bordered button in every cell. */
+button.tables-num { background: none; border: 0; padding: 0; font: inherit; font-family: var(--mono); font-size: 11.5px; cursor: pointer; }
+button.tables-num:hover { text-decoration: underline; color: var(--text); }
+
+/* Sessions (openSessionManager, session.js). */
+.sessions-head, .sessions-row { grid-template-columns: minmax(0, 1fr) 64px 56px 52px 118px 26px; }
+.sessions-head .tables-name-h { grid-column: auto; }
+.sessions-saved, .sessions-saved-h { text-align: right; }
+.sessions-saved { font-family: var(--mono); font-size: 11.5px; color: var(--dim); white-space: nowrap; }
+.sessions-row .tables-name { color: var(--text); }
+.sessions-compare-top { display: flex; align-items: flex-end; gap: 10px; margin-bottom: 12px; }
+.sessions-compare-top .tm-field { flex: 1 1 0; min-width: 0; }
+.sessions-swap { flex: 0 0 auto; padding: 5px 9px; margin-bottom: 1px; }
+.sessions-applied-line { display: flex; align-items: center; gap: 8px; }
+.sessions-applied-text { flex: 1 1 auto; min-width: 0; }
+.sessions-diff-head, .sessions-diff-row { grid-template-columns: minmax(0, 1fr) repeat(4, 82px) 50px; }
+.sessions-diff-head .tables-name-h { grid-column: auto; }
+.sessions-diff-row .tables-name { color: var(--text); }
+.sessions-n.diff-n-removed { color: var(--diff-a); }
+.sessions-n.diff-n-added, .sessions-n.diff-n-changed { color: var(--diff-b); }
+.sessions-legend { margin: 0; flex-wrap: nowrap; overflow: hidden; white-space: nowrap; }
+/* Saved filters (openSavedFiltersModal, timeframe.js): a header set per
+   section, its columns on one line over the list. */
+.sf-head, .sf-row { grid-template-columns: 14px minmax(0, 1.5fr) minmax(0, 1fr) 44px 26px; }
+.sf-head .tables-name-h { grid-column: auto; }
+.sf-row .sf-name { color: var(--text); }
+.sf-row.sf-other .sf-name { color: var(--dim); }
+.sf-row .sf-name[aria-current="true"] { color: var(--accent); }
+.sf-on { color: var(--accent); }
+.sf-on-cols { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 11px; color: var(--dim); }
+.sf-set { display: flex; align-items: center; gap: 10px; margin-top: 8px; font-size: 11.5px; color: var(--dim); }
+.sf-set-cols { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); }
+.sf-manager .side-rail-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The folder browser (openFolderBrowser, home.js): places down the left,
+   the folder on the right, its column heads the sort. */
+.browse-panes .side-rail-hint { direction: rtl; text-align: left; font-family: var(--mono); font-size: 10.5px; }
+.browse-top { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.browse-top .browse-path { flex: 1 1 auto; min-width: 0; width: auto; font-family: var(--mono); font-size: 12px; }
+.browse-up { flex: 0 0 auto; padding: 4px 10px; }
+.browse-head, .browse-box .tables-row { grid-template-columns: 16px minmax(0, 1fr) 128px 72px; }
+.browse-head .tables-name-h { grid-column: auto; }
+.browse-box.folders-only .tables-head, .browse-box.folders-only .tables-row { grid-template-columns: 16px minmax(0, 1fr); }
+.browse-box.folders-only .browse-mtime-h, .browse-box.folders-only .tables-num,
+.browse-box.folders-only .browse-mtime { display: none; }
+.browse-head input { margin: 0; accent-color: var(--accent); }
+.browse-head input[hidden] { display: block; visibility: hidden; }
+.browse-head .tables-sort:disabled { cursor: default; }
+.browse-head .tables-sort[aria-pressed="true"]::after { content: none; }
+.browse-head .tables-sort[data-dir="asc"]::after { content: ' \2191'; }
+.browse-head .tables-sort[data-dir="desc"]::after { content: ' \2193'; }
+.browse-mtime-h, .browse-mtime { text-align: right; }
+.browse-mtime { font-family: var(--mono); font-size: 11.5px; color: var(--dim); white-space: nowrap; }
+.browse-glyph { color: var(--dim); font-size: 10px; text-align: center; }
+.browse-row-file { cursor: pointer; }
+.browse-row-file .tables-name { color: color-mix(in srgb, var(--text) 62%, var(--dim)); }
+.browse-row-file.open .tables-name { color: var(--text); }
+.browse-dir { color: var(--text); }
+/* Add these tables to a case (tempCopyModal, home.js): the home list's
+   rows, a click picks one. */
+.copyto-row.picked { background: color-mix(in srgb, var(--accent) 10%, transparent); box-shadow: inset 2px 0 0 var(--accent); }
+.copyto-row.picked .home-name { font-weight: 600; }
+.copyto-tick { color: var(--accent); text-align: center; }
+/* Case settings (openCaseSettings, settings.js). */
+.cs-ts-head, .cs-ts-row { grid-template-columns: 16px minmax(0, 1fr) minmax(0, 1fr); }
+.cs-ts-head .tables-name-h { grid-column: auto; }
+.cs-ts-row { cursor: pointer; min-height: 30px; }
+.cs-ts-row input { accent-color: var(--accent); }
+.cs-ts-row .tables-name { font-family: var(--mono); color: color-mix(in srgb, var(--text) 62%, var(--dim)); }
+.cs-ts-row.open .tables-name { color: var(--text); }
+.cs-ts-sample { font-family: var(--mono); font-size: 12px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cs-ts-row.open .cs-ts-sample { color: var(--accent); }
+.cs-check { display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; margin-bottom: 10px; cursor: pointer;
+  border: 1px solid var(--line); border-radius: var(--radius-sm); }
+.cs-check input { margin: 3px 0 0; accent-color: var(--accent); }
+.cs-check-text { display: grid; gap: 3px; }
+.cs-check-text b { font-weight: 500; color: var(--text); font-size: 13px; }
+.cs-check-text small { font-size: 12px; color: var(--dim); line-height: 1.4; }
+.cs-vars-head, .cs-var-row { grid-template-columns: 170px minmax(0, 1.6fr) minmax(0, 1fr) 26px; }
+.cs-vars-head .tables-name-h { grid-column: auto; }
+.cs-var-row.missing { box-shadow: inset 2px 0 0 var(--danger); }
+.cs-var-in {
+  min-width: 0; background: var(--ink); color: var(--text); border: 1px solid var(--line-2); border-radius: var(--radius-sm);
+  padding: 3px 7px; font-family: var(--mono); font-size: 12px;
+}
+.cs-var-in:focus { border-color: var(--accent); outline: none; }
+.cs-var-row .cs-var-in { border-color: transparent; background: transparent; }
+.cs-var-row:hover .cs-var-in, .cs-var-row .cs-var-in:focus { border-color: var(--line-2); background: var(--ink); }
+.cs-vars-add { flex-direction: row !important; align-items: center; gap: 8px; height: 40px; }
+.cs-vars-add .cs-var-in { flex: 1 1 0; }
+.cs-vars-add .cs-var-in:first-child { flex: 0 0 170px; }
+/* Export (openExportModal, sources.js). */
+.export-pane .mb-summary .mb-seg button { font-size: 11.5px; padding: 3px 10px; }
+.export-head, .export-row { grid-template-columns: minmax(0, 1fr) 80px 56px; }
+.export-head .tables-name-h, .export-cols-head .tables-name-h { grid-column: auto; }
+.export-cols-head, .export-col-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.export-col-row .tables-name { font-family: var(--mono); font-size: 11.5px; color: var(--text); }
+.export-col-row.added .tables-name { color: var(--accent); }
+.export-row:not(.open) .tables-name { color: var(--dim); }
+/* Stack (openStack, stack.js): the chart is the dialog. One grid for the
+   head and every bar — the value gutter (measured to the longest value,
+   --stack-label), the bar's track against the shared scale, the share and
+   the ⋯ — with the bar's button spanning the first three on a subgrid, so
+   the whole bar is one click and the numbers line up down the column. */
+.stack-chart {
+  --stack-label: 200px; --stack-row: 30px; --stack-grid: 25%; --stack-face: 12px var(--mono);
+  flex: 1 1 0; min-height: 0; margin-top: 8px;
+}
+.stack-head, .stack-row {
+  display: grid; grid-template-columns: var(--stack-label) minmax(0, 1fr) 44px 26px;
+  column-gap: 12px; align-items: center;
+}
+.stack-head { padding: 6px 10px 5px; border-bottom: 1px solid var(--line); }
+.stack-head > span {
+  font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--dim); white-space: nowrap;
+}
+.stack-head-share { text-align: right; }
+.stack-axis { position: relative; height: 14px; margin-right: 52px; }
+.stack-axis .stack-tick {
+  position: absolute; top: 0; transform: translateX(-50%);
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: 0; text-transform: none;
+}
+.stack-axis .stack-tick:first-child { transform: none; }
+.stack-scroll { flex: 1 1 0; min-height: 0; overflow: auto; padding: 4px; }
+.stack-row { padding: 0 6px; border-radius: var(--radius-sm); }
+.stack-row:hover { background: var(--panel-2); }
+.stack-bar-btn {
+  grid-column: 1 / 4; display: grid; grid-template-columns: subgrid; align-items: center;
+  height: var(--stack-row); padding: 0; border: 0; background: none; color: inherit; font: inherit;
+  text-align: left; cursor: pointer; border-radius: var(--radius-sm);
+}
+.stack-bar-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.stack-label { font: var(--stack-face); color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stack-label.empty { font-family: inherit; font-style: italic; color: var(--dim); }
+/* The gridlines are the track's background, one every --stack-grid of its
+   content box; the padding is the room the count takes past a full bar. */
+.stack-track {
+  position: relative; height: 100%; display: flex; align-items: center; padding-right: 52px;
+  background-image: linear-gradient(to right, var(--line) 1px, transparent 1px);
+  background-size: var(--stack-grid) 100%; background-origin: content-box; background-clip: content-box;
+}
+.stack-fill {
+  flex: 0 0 auto; height: min(64%, 26px); min-width: 2px;
+  background: var(--accent); opacity: .78; border-radius: 0 2px 2px 0;
+}
+.stack-row:hover .stack-fill, .stack-bar-btn:focus-visible .stack-fill { opacity: 1; }
+.stack-count { flex: 0 0 auto; margin-left: 7px; font-family: var(--mono); font-size: 11px; color: var(--text); white-space: nowrap; }
+.stack-share { font-family: var(--mono); font-size: 11px; color: var(--dim); text-align: right; white-space: nowrap; }
+.stack-more { padding: 0 7px; font-size: 14px; line-height: 18px; opacity: .35; }
+.stack-row:hover .stack-more, .stack-more:focus-visible, .stack-more[aria-expanded="true"] { opacity: 1; }
+.stack-empty { margin: 0; padding: 10px 6px; }
+.stack-chart.stale .stack-bars { opacity: .45; transition: opacity 120ms ease; }
+@media (max-width: 640px) {
+  .list-panes.side-panes { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  .list-panes .side-rail { border-right: 0; padding: 0 0 6px; border-bottom: 1px solid var(--line); }
+  .list-panes .side-rail-list { flex: 0 0 auto; flex-direction: row; flex-wrap: wrap; gap: 2px; overflow: visible; }
+  .list-panes .side-rail-group, .list-panes .side-rail-hint { display: none; }
+  .list-pane .tm-cols-top { flex-wrap: wrap; }
+  .list-pane .tm-cols-top .side-search { flex-basis: 100%; }
+  .sessions-head, .sessions-row { grid-template-columns: minmax(0, 1fr) 56px 26px; }
+  .sessions-head > :nth-child(3), .sessions-head > :nth-child(4), .sessions-head > :nth-child(5),
+  .sessions-row > :nth-child(3), .sessions-row > :nth-child(4), .sessions-row > :nth-child(5) { display: none; }
+  .sessions-diff-head, .sessions-diff-row { grid-template-columns: minmax(0, 1fr) repeat(2, 64px) 44px; }
+  .sessions-diff-head > :nth-child(4), .sessions-diff-head > :nth-child(5),
+  .sessions-diff-row > :nth-child(4), .sessions-diff-row > :nth-child(5) { display: none; }
+  .sessions-compare-top { flex-wrap: wrap; }
+  .sf-head, .sf-row { grid-template-columns: 14px minmax(0, 1fr) 26px; }
+  .sf-head > :nth-child(3), .sf-head > :nth-child(4), .sf-row > :nth-child(3), .sf-row > :nth-child(4) { display: none; }
+  .sf-set-cols { display: none; }
+  .browse-panes.side-panes { grid-template-rows: 132px minmax(0, 1fr); }
+  .browse-panes .side-rail-list { flex-direction: column; flex-wrap: nowrap; overflow: auto; flex: 1 1 0; }
+  .browse-panes .side-rail-group { display: block; }
+  .browse-head, .browse-box .tables-row { grid-template-columns: 16px minmax(0, 1fr) 64px; }
+  .browse-mtime-h, .browse-mtime { display: none; }
+  .copyto-pane .home-list-head, .copyto-row { grid-template-columns: minmax(0, 1fr) 76px 84px 26px; }
+  .copyto-pane .home-list-head > :nth-child(2), .copyto-pane .home-list-head > :nth-child(4),
+  .copyto-row > .home-tables, .copyto-row > .tables-tagged, .copyto-row .home-sub { display: none; }
+  .stack-panes .side-rail-list { max-height: 78px; overflow: auto; }
+  .stack-head, .stack-row { grid-template-columns: var(--stack-label) minmax(0, 1fr) 26px; column-gap: 8px; }
+  .stack-bar-btn { grid-column: 1 / 3; }
+  .stack-share, .stack-head-share { display: none; }
+  .stack-axis { margin-right: 44px; }
+  .stack-track { padding-right: 44px; }
+  /* The foot's two lines' room is used here: the hint is a sentence. */
+  .stack-foot .stack-readout {
+    white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.35;
+  }
 }
 
 /* Shown while dragging OS files over the window (wireFileDrop in app.js) —
@@ -4673,6 +4887,7 @@ html.remote .row.selected:hover { background: var(--row-selected); }
 .mb-check input { accent-color: var(--accent); margin: 0; }
 @media (max-width: 860px) {
   .mb-panes { grid-template-columns: minmax(0, 1fr); height: auto; }
+  .mb-panes.fb-panes { grid-template-columns: minmax(0, 1fr); }
   .mb-pane > .mb-list { max-height: 40vh; }
   .mb-pane > .mb-scroll { max-height: 50vh; }
   .mb-pane + .mb-pane { border-left: 0; border-top: var(--border-w) solid var(--line); }

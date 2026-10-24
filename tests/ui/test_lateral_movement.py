@@ -130,15 +130,16 @@ def test_lateral_movement_tab_mounts_binds_defaults_and_builds(own_page, tmp_pat
             assert mine.locator("input").is_checked(), "a new event is ticked where it binds"
 
             # Events… edits it in the same builder, name and all, and the
-            # tick follows the rename.
+            # tick follows the rename. It opens on Yours, where a name is
+            # the way into the builder.
             pg.locator("button", has_text="Events…").click()
-            pg.locator("#modal .lm-mgr-row", has_text="My custom hop").locator("button", has_text="Edit").click()
+            pg.locator("#modal .lm-mgr-row", has_text="My custom hop").locator(".lm-mgr-name").click()
             pg.wait_for_selector("#modal:not([hidden]) .lm-eb")
             assert name.input_value() == "My custom hop"
             assert pg.locator("#modal .lm-eb-cond input").input_value() == "alice"
             name.fill("My renamed hop")
             pg.locator("#modal .lm-eb-save").click()
-            pg.wait_for_selector("#modal:not([hidden]) .lm-mgr")
+            pg.wait_for_selector("#modal:not([hidden]) .lm-mgr-panes")
             assert "My renamed hop" in pg.locator("#modal .lm-mgr-name").all_inner_texts()
             pg.locator("#modal button", has_text="Close").click()
             assert pg.locator(".lm-events .lm-event", has_text="My renamed hop").locator("input").is_checked()

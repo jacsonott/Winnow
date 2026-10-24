@@ -35,10 +35,17 @@ evidence imported the same way. It also leaves out the Notes page, merges,
 dashboards, the watchlist and SQL tabs; those stay in the case file and are
 untouched by saving or loading.
 
-The Sessions panel lists each session with how many rows it has tagged (a
-row with two tags counts once) and how many notes, the number of tables it
-covers and when it was saved, newest first. A session you
-received from someone else is marked **received**.
+**Case ▾ → Sessions…** has two sections down its left: **Saved sessions**
+and **Compare**. **Saved sessions** lists each session with how many rows
+it has tagged (a row with two tags counts once), how many notes, the
+number of tables it covers and when it was saved, newest first. A session
+you received from someone else is listed under **Received from another
+analyst**, below your own. **Filter sessions…** narrows the list by name.
+Click a session's name to compare it with your current work (see
+[Comparing two sessions](#comparing-two-sessions)). Everything else you can
+do with a session is in its **⋯** menu, or in the menu you get by
+right-clicking its row: **Compare with current work**, **Load…**,
+**Download**, **Rename…** and **Delete…**.
 
 ### Saving a session
 
@@ -51,7 +58,7 @@ asking. Use a new name if you want to keep the old one.
 
 ### Loading a session
 
-Click **Load** on a session's row. Winnow asks first, because loading
+Choose **Load…** from a session's **⋯** menu. Winnow asks first, because loading
 **replaces** the tags and notes currently in the case: every table's, not
 only the tables the session mentions. Save your current work first if you
 want to keep it.
@@ -93,9 +100,9 @@ session, it asks before replacing it.
 
 ### Renaming and deleting
 
-**Rename** refuses a name another session already has. **✕** deletes the
-session from the case after asking; it doesn't touch the live tags and
-notes.
+**Rename…**, in a session's **⋯** menu, refuses a name another session
+already has. **Delete…** deletes the session from the case after asking; it
+doesn't touch the live tags and notes.
 
 ## Handing work to another analyst
 
@@ -106,7 +113,7 @@ file and goes wherever the case goes.
 
 ### Sending a session file
 
-Save a session, then click **Download** on its row. You get a
+Save a session, then choose **Download** from its **⋯** menu. You get a
 `.winnow_case.json` file named after the session. It holds the session
 described above: tags, notes, layouts and derived-column definitions, and
 the original path of each evidence file on your machine (for a file you
@@ -116,10 +123,11 @@ evidence rows.
 ### Receiving a session file
 
 **Case ▾ → Sessions… → Receive a session file…**, pick the `.json` file
-and name it. This only stores the session in your case, marked
-**received**; nothing in your work changes yet. From there you can
-**Compare** it against your current work (below), or **Load** it. As with
-saving, a name that is already taken replaces that session without asking.
+and name it. This only stores the session in your case, under **Received
+from another analyst**; nothing in your work changes yet. From there you
+can click its name to compare it with your current work (below), or
+**Load…** it from its **⋯** menu. As with saving, a name that is already
+taken replaces that session without asking.
 
 Before loading someone else's session, import the same evidence files they
 worked from, the same way: the same file, with the same delimiter, header
@@ -173,7 +181,7 @@ session again.
 ### Replace, not merge
 
 **Load** always replaces the case's tags and notes with the session's.
-The Sessions panel has no option to add a session on top of your own work.
+The Sessions dialog has no option to add a session on top of your own work.
 To fold a colleague's findings into yours, compare the two first and carry
 over the rows you agree with, or load their session into a copy of your
 case.
@@ -183,64 +191,76 @@ case.
 Comparing is how a review gets checked: what one side tagged that the
 other didn't, and where both tagged a row differently.
 
-1. Open **Case ▾ → Sessions…** and go to **Compare two sessions**.
-2. Pick **From** and **to**. Either side can be **Current work (live)**,
-   your case as it is now. Once a session is saved, **From** starts on the
-   newest one and **to** on **Current work (live)**: what has changed since
-   you last saved. The usual review is the session that was handed over on the left and
-   your current work on the right.
-3. Click **Compare**.
+1. Open **Case ▾ → Sessions…** and choose **Compare** on the left.
+   Clicking a session's name under **Saved sessions** does the same, with
+   that session against your current work.
+2. Pick **From · A** and **To · B**. Either side can be **Current work
+   (live)**, your case as it is now. Once a session is saved, **From · A**
+   starts on the newest one and **To · B** on **Current work (live)**: what
+   has changed since you last saved. The usual review is the session that
+   was handed over as A and your current work as B. **⇄** swaps the two.
 
-The result is one line per table, with a count in each column:
+The comparison runs as soon as either side changes. The totals over the
+list spell the two names out (**Only in** *A*, **Only in** *B*, **Tagged
+differently**, **Notes changed**), and under them is one line per table,
+with a count in each column:
 
 | Column | Meaning |
 | --- | --- |
-| **Only in** *left* | Rows tagged on the left and untagged on the right. |
-| **Only in** *right* | Rows tagged on the right and untagged on the left. |
-| **Tagged differently** | Rows tagged on both sides, with different tags. |
-| **Notes changed** | Rows whose note differs. |
+| **A only** | Rows tagged on the A side and untagged on the B side. |
+| **B only** | Rows tagged on the B side and untagged on the A side. |
+| **Differ** | Rows tagged on both sides, with different tags. |
+| **Notes** | Rows whose note differs. |
 | **All** | Every differing row in the table. |
+
+A count of nothing shows as **—**.
 
 Tags are compared by name and tables by their evidence file, so two
 analysts' sessions from different cases compare correctly. Two tags that
 share a name are told apart when both sides come from this case (a session
 you saved here, or your current work), and named after their tag number
 in the marks, such as `New tag #4`. Between a received session and your
-work they can't be, so the panel names them above the counts: a row moved
+work they can't be, so the section names them above the counts: a row moved
 from one of them to the other is not counted as a difference. If the two
-sessions cover different tables, the panel says so above the counts. A
+sessions cover different tables, the section says so above the counts. A
 table that only one side has still gets a line, with every tagged row in
 it counted as a difference. A table that isn't in your case is listed as
 "not in this case" and its counts can't be opened, and so is a table made
 inside Winnow that an older session recorded, since it can't be matched.
 
 Click a count to open those rows in the table. The grid is filtered to
-exactly those rows, and each carries a mark in the gutter: **A** for left
-only, **B** for right only, **A→B** for both sides, differently. Hover over
+exactly those rows, and each carries a mark in the gutter: **A** for A
+only, **B** for B only, **A→B** for both sides, differently. Hover over
 a mark to see each side's tags and notes. A banner above the grid names the
 two sessions and offers **All differences** and **Done**; **Done** removes
-the marks and puts back the filter the table had before. Opening a
-comparison turns the timeframe filter off, since the counts were worked out
-over the whole table.
+the marks and puts back the filter the table had before. While the rows are
+open, **Case ▾ → Sessions…** opens on **Compare**, which says
+**Comparison applied** at the top with the same **All differences** and a
+**Clear** that does what **Done** does. Opening a comparison turns the
+timeframe filter off, since the counts were worked out over the whole
+table.
 
 The counts are exact, but the rows you can open are capped at 2,000 per
 kind of difference. A count past the cap opens its first 2,000 rows, and
-the panel says the comparison hit its cap.
+the section says the comparison hit its row cap.
 
 ## Exporting
 
-**Case ▾ → Export…** offers four exports.
+**Case ▾ → Export…** lists what you can export down its left, each with
+its size under its name. The one you choose says on the right what goes
+into the file, and the button at the bottom exports it, saying how much.
 
-| Button | Format | What it contains | File name |
+| Section | Format | What it contains | File name |
 | --- | --- | --- | --- |
-| **Export current view** | CSV | Every row of the open table's view, with its filters, sort, search and timeframe applied, in that order | `timeline-export.csv` |
-| **Export tagged rows only** | CSV | The same, limited to rows with at least one tag | `timeline-export.csv` |
-| **Export tagged rows from all tables (.xlsx)** | Excel | Every tagged row in the case, one worksheet per table that has any | `tagged-export.xlsx` |
-| **Export all tables (.xlsx)** | Excel | Every row of every table, one worksheet per table | `all-tables.xlsx` |
+| **Current view** | CSV | Every row of the open table's view, with its filters, sort, search and timeframe applied, in that order. **Tagged rows only** limits it to the rows with at least one tag | `timeline-export.csv` |
+| **Tagged rows** | Excel | Every tagged row in the case, one worksheet per table that has any | `tagged-export.xlsx` |
+| **Every row** | Excel | Every row of every table, one worksheet per table | `all-tables.xlsx` |
 
-The two CSV buttons appear only while a table is open. The two workbook
-exports ignore filters entirely and list rows in Line order. With nothing
-tagged, the tagged workbook holds a single sheet saying so.
+**Current view** says what narrows the view and how it is sorted, and lists
+the file's columns in order. It exports only while a table is open. The two
+workbook exports ignore filters entirely and list rows in Line order; each
+lists its worksheets with the rows each gets. With nothing tagged in the
+case, **Tagged rows** has nothing to export and its button is off.
 
 ### What an export contains
 
@@ -277,7 +297,7 @@ The workbook exports keep inside what Excel can open:
 - **Rows per sheet.** A worksheet holds 1,048,576 rows including the
   header, so 1,048,575 rows of data. A table with more continues on sheets
   named `Name (2)`, `Name (3)` and so on, with the header repeated, and
-  every row is exported. **Export all tables (.xlsx)** checks first and asks
+  every row is exported. **Every row** checks first and asks
   before starting when a table is over the limit; the tagged export
   continues the same way without asking.
 - **Sheet names.** A sheet is named after its table, cut to 31 characters,
@@ -298,7 +318,7 @@ The CSV exports have no row limit and keep values whole.
 ### Large exports
 
 The CSV exports stream: the download starts at once and grows as rows are
-written. **Export all tables (.xlsx)** writes the whole workbook first and
+written. **Every row** writes the whole workbook first and
 then downloads it, so on a big case nothing seems to happen for a while.
 **Case ▾ → Log…** records when each export started and finished, its size
 and how long it took, and notes a CSV download that was cut off.

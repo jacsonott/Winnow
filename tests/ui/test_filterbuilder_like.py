@@ -1,4 +1,4 @@
-"""The filter builder's "Equivalent SQL (editable):" box and LIKE.
+"""The filter builder's SQL box (once "Equivalent SQL (editable):") and LIKE.
 
 Typed SQL with a LIKE used to become a guided condition that meant
 something else: parseWhereFragment never looked at `%` and `_`, so
@@ -49,7 +49,7 @@ def _open_builder(page):
 
 def _apply(page, view_rebuilt):
     with view_rebuilt(page):
-        page.locator("#modal .row-actions .btn.primary").click()
+        page.locator("#modal .fb-foot .btn.primary").click()
     page.wait_for_selector("#modal[hidden]", state="attached")
 
 

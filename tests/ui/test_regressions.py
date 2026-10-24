@@ -301,10 +301,15 @@ def test_saved_filters_modal_groups_by_header_set_and_stays_dense(page):
     ~52px pitch) drowned once the 28 shipped filters landed. Filters now
     sit under one header per column set — which is also the unit they
     cycle in — with the nickname control on the section, and rows dense
-    enough to scan."""
+    enough to scan. The sets are the dialog's side list now, under their
+    own heading, and Every saved filter heads each set in its list."""
     page.evaluate("() => __winnow.openSavedFiltersModal()")
-    page.wait_for_selector(".sf-group-head")
-    assert page.locator(".sf-group-head").count() >= 1
+    page.wait_for_selector(".sf-row")
+    rail = page.locator("#modalBody .side-rail")
+    assert rail.locator(".side-rail-group", has_text="Header sets").count() == 1
+    assert rail.locator(".side-rail-item[data-section^='set:']").count() >= 1
+    page.locator("#modalBody .side-rail-item[data-section=all]").click()
+    page.wait_for_selector("#modalBody .tables-group")
     rows = page.locator(".sf-row")
     assert rows.count() >= 2
     b1, b2 = rows.nth(0).bounding_box(), rows.nth(1).bounding_box()
@@ -322,7 +327,7 @@ def test_settings_no_longer_duplicates_the_saved_filters_list(page):
     sec = page.locator("#modalBody .settings-pane[data-section='filters']")
     assert sec.locator(".session-row, .sf-row").count() == 0
     sec.locator(".btn", has_text="Open saved filters").click()
-    page.wait_for_selector(".sf-group-head")
+    page.wait_for_selector(".sf-row")
     assert page.locator("#modalTitle").inner_text().lower() == "saved filters"
     page.keyboard.press("Escape")
 

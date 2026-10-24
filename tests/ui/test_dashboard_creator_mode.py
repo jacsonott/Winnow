@@ -50,19 +50,22 @@ def test_off_by_default_the_menus_do_not_mention_dashboards(page, server_post):
 
 def test_the_case_settings_checkbox_turns_the_entries_on(page, server_post):
     try:
-        page.evaluate("() => __winnow.openCaseSettings()")
+        page.evaluate("() => __winnow.openCaseSettings('dashboards')")
         page.wait_for_selector("#caseDashboardCreator")
+        assert page.locator("#modalBody .side-rail-item[data-section=dashboards]").inner_text().endswith("Creator mode off")
         box = page.locator("#caseDashboardCreator")
         assert not box.is_checked()
         box.check()
         page.wait_for_function("() => __winnow.S.caseSettings.dashboard_creator === '1'")
+        page.wait_for_function("() => document.querySelector('#modalBody .side-rail-item[data-section=dashboards]')"
+                               ".textContent.endsWith('Creator mode on')")
         page.keyboard.press("Escape")
         page.wait_for_selector("#modal", state="hidden")
         assert "Top values of Host" in _header_menu(page)
         assert "Add to dashboard" in _row_menu(page)
         assert "count of this view" in _filters_menu(page)
         # Reopening shows it checked; unchecking takes them away again.
-        page.evaluate("() => __winnow.openCaseSettings()")
+        page.evaluate("() => __winnow.openCaseSettings('dashboards')")
         page.wait_for_selector("#caseDashboardCreator")
         assert page.locator("#caseDashboardCreator").is_checked()
         page.locator("#caseDashboardCreator").uncheck()

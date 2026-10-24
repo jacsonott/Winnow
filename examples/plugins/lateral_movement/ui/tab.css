@@ -45,17 +45,41 @@
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .lm-events[hidden] { display: none; }
 
-/* Events… manager: each definition with the hop it draws and where it
-   binds, then its actions. */
-.lm-mgr { display: grid; gap: 2px; margin: 10px 0 12px; max-height: 56vh; overflow: auto; }
-.lm-mgr-head { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--dim);
-  padding: 8px 2px 4px; border-bottom: 1px solid var(--line); }
-.lm-mgr-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center;
-  padding: 6px 4px; border-bottom: 1px solid var(--line); }
-.lm-mgr-text { display: grid; min-width: 0; }
-.lm-mgr-name { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.lm-mgr-sub { color: var(--dim); font: 11px var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.lm-mgr-acts { display: flex; gap: 6px; }
+/* Events… manager, in the app's two-pane frame (winnow.sectionPanes):
+   the lists are the plugin's own rows, in the Tables manager's look — one
+   grid for the heads and every row, a ⋯ that is faint until its row is
+   under the pointer. */
+.lm-mgr-panes .side-rail { padding-right: 12px; }
+.lm-mgr-pane { overflow: hidden; }
+.lm-mgr-note { margin: 0 0 8px; font-size: 12px; color: var(--dim); }
+.lm-mgr-box { flex: 1 1 0 !important; min-height: 0; display: flex; flex-direction: column;
+  border: 1px solid var(--line); border-radius: var(--radius-sm); overflow: hidden; }
+.lm-mgr-list { flex: 1 1 0; min-height: 0; overflow: auto; padding: 4px; }
+.lm-mgr-row { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr) minmax(0, 1fr) 50px 26px;
+  column-gap: 10px; align-items: center; min-height: 26px; padding: 1px 6px; border-radius: var(--radius-sm); font-size: 12px; }
+.lm-mgr-row:hover { background: var(--panel-2); }
+.lm-mgr-headrow { padding: 6px 10px 5px; border-bottom: 1px solid var(--line); border-radius: 0;
+  font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--dim); }
+.lm-mgr-headrow:hover { background: none; }
+.lm-mgr-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left;
+  background: none; border: 0; padding: 0; cursor: pointer; font-family: var(--mono); font-size: 12px; color: var(--text); }
+.lm-mgr-name:hover { text-decoration: underline; }
+.lm-mgr-sub { min-width: 0; color: var(--dim); font: 11px var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lm-mgr-num { text-align: right; font-family: var(--mono); font-size: 11.5px; color: var(--dim); }
+.lm-mgr-num.some { color: var(--text); }
+.lm-mgr-headrow .lm-mgr-num { font-family: inherit; font-size: inherit; }
+.lm-mgr-more { padding: 0 7px; font-size: 14px; line-height: 18px; border-color: transparent; opacity: .35; }
+.lm-mgr-row:hover .lm-mgr-more, .lm-mgr-more:focus-visible, .lm-mgr-more[aria-expanded="true"] { opacity: 1; }
+.lm-mgr-empty { margin: 6px; font-size: 12px; color: var(--dim); }
+.lm-mgr-foot { display: flex; justify-content: flex-end; gap: 6px; margin-top: 12px; }
+@media (max-width: 640px) {
+  .lm-mgr-panes.side-panes { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  .lm-mgr-panes .side-rail { border-right: 0; padding: 0 0 6px; border-bottom: 1px solid var(--line); }
+  .lm-mgr-panes .side-rail-list { flex: 0 0 auto; flex-direction: row; flex-wrap: wrap; gap: 2px; overflow: visible; }
+  .lm-mgr-panes .side-rail-group, .lm-mgr-panes .side-rail-hint { display: none; }
+  .lm-mgr-row { grid-template-columns: minmax(0, 1fr) 44px 26px; }
+  .lm-mgr-row > :nth-child(2), .lm-mgr-row > :nth-child(3) { display: none; }
+}
 
 /* Event builder: the merge builder's shape (the definition on the left,
    what it finds on the right), in the plugin's own classes so a change

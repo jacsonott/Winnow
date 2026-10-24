@@ -515,10 +515,13 @@ this server stops working until you start Winnow again. See
 
 **Case ▾ → Case settings…** holds the settings stored in the open case file,
 which go with it when you hand it to another analyst. Settings, by contrast,
-is about this machine.
+is about this machine; **Settings for this machine…** at the bottom opens
+it. The three sections are down the left, each with what it is set to under
+its name.
 
-- **Timestamps**: this case's display format, or **Use the machine-wide
-  default**. It is display only: the stored and exported value is always
+- **Timestamps**: every format as a row, with a timestamp shown in it, and
+  **Machine default** (the format Settings sets) at the top. Pick one for
+  this case. It is display only: the stored and exported value is always
   the text the file came with. A format picked on one column (right-click
   its header) beats this one, and this one beats the machine-wide default
   (see [Timestamps](#timestamps)).
@@ -527,5 +530,9 @@ is about this machine.
   menus stay short; boards are always available under Dashboards. See
   [Dashboards](Dashboards.md).
 - **Variables**: named values the case carries for plugins and the people
-  working it (an engagement name, a link to the scoping document). Never put
+  working it (an engagement name, a link to the scoping document). Each is a
+  row whose value you edit in place; it is saved when you leave the box. A
+  required one with no value is flagged, and the side list counts it as
+  missing. Add one on the list's last line (**New variable name**, a value,
+  **Add**). A variable's **⋯** has **Copy value** and **Remove**. Never put
   a token or password here; use [Environment](#environment).

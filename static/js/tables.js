@@ -683,7 +683,7 @@ export function openTablesManager(section = 'tables') {
     b.dataset.kind = 'tables';
     const frame = sectionPanes({
       sections: TABLES_MANAGER_SECTIONS, label: 'Tables manager sections',
-      cls: 'tables-manager', paneCls: 'tables-manager-pane', changedEvent: 'tables:changed',
+      cls: 'list-panes tables-manager', paneCls: 'list-pane tables-manager-pane', changedEvent: 'tables:changed',
     });
     b.append(frame.panes);
 

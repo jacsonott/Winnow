@@ -384,8 +384,13 @@ between every table of the same kind (Event logs (EvtxECmd) tables, say)
 and any table that has the columns the event reads. Names must be unique.
 
 Your definitions are saved on this machine and offered in every case.
-**Events…** lists every event: **Edit** and **Delete** change yours, and
-**Copy to edit** opens a shipped one in the builder as a new event. A graph
+**Events…** lists them in two sections, **Yours** and **Shipped**, each
+with the hop it draws, the tables it is offered on and how many of this
+case's tables it fits. Click an event's name to open it in the builder:
+yours to edit, a shipped one as a new event of your own. An event's **⋯**
+has **Edit…**, **Copy to a new event…** and **Delete…** for yours, and
+**Copy to a new event…** for a shipped one. **+ New event…** at the bottom
+starts one from nothing. A graph
 takes up to 20 selections and 8,000 edge rows.
 
 The shipped **KAPE triage** profile turns this plugin on.
