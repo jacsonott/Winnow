@@ -211,6 +211,67 @@ def test_build_a_search_index_and_drop_filter_indexes(page, api, server_call, se
     page.keyboard.press("Escape")
 
 
+def _status_is(page, name, text, timeout=20_000):
+    page.wait_for_function("""([n, t]) => {
+      const r = [...document.querySelectorAll('.tables-ix-row')]
+        .find((x) => x.querySelector('.tables-name').textContent === n);
+      return r && r.querySelector('.index-status').textContent === t;
+    }""", arg=[name, text], timeout=timeout)
+
+
+def test_remove_a_search_index_then_build_it_again(page, server_call, server_post, second):
+    # Ready first: the Build test above leaves it so, and this builds it
+    # when run on its own.
+    server_post(f"/api/source/{second}/search_index", {})
+    page.evaluate("() => __winnow.loadSources()")
+    _open(page, "indexes")
+    _status_is(page, NAME, "index ready")
+    row = _row(page, NAME, "tables-ix-row")
+    row.locator(".tables-remove").click()
+    page.locator(".confirm-card .btn", has_text="Remove").click()
+    _status_is(page, NAME, "removed", timeout=10_000)
+    # What the analyst gets back: where the space went, and the way to the disk.
+    page.wait_for_function("() => document.getElementById('toast').textContent.includes('free inside the case file')")
+    assert page.locator("#toast .toast-action").inner_text() == "Compact…"
+    row = _row(page, NAME, "tables-ix-row")
+    assert row.locator(".tables-remove").count() == 0
+    src = next(s for s in server_call("/api/sources") if s["id"] == second)
+    assert (src["has_fts"], src["fts_on_request"]) == (0, "removed")
+
+    row.locator(".tables-build").click()
+    _status_is(page, NAME, "index ready")
+    assert next(s for s in server_call("/api/sources") if s["id"] == second)["fts_on_request"] is None
+    page.keyboard.press("Escape")
+
+
+def test_a_table_waiting_for_build_says_why_and_so_does_its_search_box(page, second):
+    """A table over the size limit (faked here: the server says so for
+    this one) has no index until Build, and both places an analyst would
+    wonder why its search is slow say so."""
+    def mark(route):
+        resp = route.fetch()
+        data = resp.json()
+        for s in data:
+            if s["name"] == NAME:
+                s.update(has_fts=0, fts_building=False, fts_on_request="large")
+        route.fulfill(response=resp, json=data)
+    shown = page.evaluate("() => __winnow.S.sourceId")
+    page.route("**/api/sources", mark)
+    try:
+        page.evaluate("() => __winnow.loadSources()")
+        _open(page, "indexes")
+        _status_is(page, NAME, "on request", timeout=10_000)
+        chip = _row(page, NAME, "tables-ix-row").locator(".index-status")
+        assert "More than 1 GB of text" in chip.get_attribute("title")
+        assert _row(page, NAME, "tables-ix-row").locator(".tables-build").count() == 1
+        page.keyboard.press("Escape")
+        page.evaluate("(id) => __winnow.openSource(id)", second)
+        page.wait_for_function("() => document.getElementById('searchMode').textContent === 'substring · no index'")
+    finally:
+        page.unroute("**/api/sources", mark)
+        page.evaluate("(id) => __winnow.loadSources().then(() => __winnow.openSource(id))", shown)
+
+
 def test_drop_all_asks_then_drops_every_filter_index(page, server_call, second):
     server_call(f"/api/column_values?source_id={second}&column=Host")
     deadline = time.monotonic() + 15

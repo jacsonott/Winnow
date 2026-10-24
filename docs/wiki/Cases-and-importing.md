@@ -752,8 +752,14 @@ background: an *indexing* row in the panel, then *Search index ready for …*.
 The table is usable at once; until the index lands, search scans the table —
 the same results, slower. The index is what makes **Contains** and
 **Advanced** search and **Search all** fast
-([Filtering and searching](Filtering-and-searching.md)), and it takes space
-in the case file. **Case ▾ → Tables…** shows which tables have one.
+([Filtering and searching](Filtering-and-searching.md)), and it takes about
+as much space in the case file as the table. **Case ▾ → Tables…** shows
+which tables have one.
+
+A table with more than 1 GB of text is the exception: its index is built
+only when you press **Build** for it in **Case ▾ → Tables…**, and until then
+its searches scan. **Remove** there takes a table's index away again
+([Working with tables](Working-with-tables.md#the-tables-manager)).
 
 The build works in short steps, so tagging, undo and grouping stay quick
 while it runs; on a large event log it can take a while. Closing the case

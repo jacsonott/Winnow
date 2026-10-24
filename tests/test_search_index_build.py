@@ -57,7 +57,8 @@ def test_start_does_nothing_on_an_old_sqlite(store, write_csv, monkeypatch):
 
 def test_search_index_routes(client, store, write_csv, monkeypatch):
     info = client.get("/api/search_index").json()
-    assert info == {"supported": Store.search_index_supported(), "sqlite": sqlite3.sqlite_version}
+    assert info == {"supported": Store.search_index_supported(), "sqlite": sqlite3.sqlite_version,
+                    "auto_max_bytes": store_mod.FTS_AUTO_MAX_BYTES}
 
     rec = store.ingest_csv(write_csv(ROWS), name="a.csv", build_fts=False)
     r = client.post(f"/api/source/{rec['id']}/search_index")

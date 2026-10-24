@@ -211,7 +211,9 @@ In Advanced mode, each term is a separate box. Use **+ term** to add one, the AN
 
 ### The search index and slow searches
 
-Winnow builds a search index for each table in the background, and the **Indexes** section of the Tables manager (`t`) shows whether it is ready. **Build** there starts one now rather than on the first search that needs it. Contains and Advanced searches use it once it is ready, for terms of three characters or more. Shorter terms, and every search before the index exists, scan the whole table instead. The results are the same either way; only the speed differs. The hint at the right of the search box says which is happening: `substring`, `substring · index building`, `advanced · full-text`, or `regex · full scan`. Regex never uses the index.
+Winnow builds a search index for each table in the background, and the **Indexes** section of the Tables manager (`t`) shows whether it is ready. **Build** there starts one now rather than on the first search that needs it. Contains and Advanced searches use it once it is ready, for terms of three characters or more. Shorter terms, and every search before the index exists, scan the whole table instead. The results are the same either way; only the speed differs. The hint at the right of the search box says which is happening: `substring`, `substring · index building`, `substring · no index`, `advanced · full-text`, or `regex · full scan`. Regex never uses the index.
+
+A table with more than 1 GB of text gets no search index until you press **Build** for it, because the index takes about as much disk as the table. Neither does a table whose index you removed. Searches of those tables scan every time, and the hint says `substring · no index`. See [Working with tables](Working-with-tables.md#the-tables-manager) for **Build** and **Remove**.
 
 If a search takes longer than five seconds, it carries on in the background and the rows you had stay on screen. When it finishes, a "Search finished" message offers **Apply**. Typing a new search, or `Escape` in the box, cancels it.
 

@@ -89,6 +89,23 @@ def _next_fts_commit_rows(rows: int, held: float) -> int:
     return int(max(FTS_COMMIT_MIN_ROWS, min(BATCH, rows * 2, want)))
 
 
+# A table with more text than this gets no search index unless the analyst
+# asks for one (the Tables manager's Build): import, the first search,
+# search-all and a watchlist scan all pass it by. The index costs about a
+# byte of case file per byte of text (1.1-1.2 bytes per row per distinct
+# trigram, and rows hold 0.8-0.9 distinct trigrams a byte), which is most
+# of why a case is twice its CSVs, and on a big table it takes the longest
+# to build. Measured in "Why case files are twice the CSV" (2026-10-23):
+# 0.91x-0.96x of the CSV on generated EvtxECmd/MFTECmd data. Estimated from
+# a sample of the table's rows (_fts_doc_bytes).
+FTS_AUTO_MAX_BYTES = 1 << 30
+FTS_SIZE_SAMPLE_RUNS = 8
+FTS_SIZE_SAMPLE_RUN_ROWS = 32
+# What a query compiled against a search index raises once Remove has
+# dropped it (build_view retries on it).
+_DROPPED_FTS_RE = re.compile(r"no such table: (?:main\.)?fts_\d+")
+
+
 SAMPLE_ROWS = 500
 # The csv module's own field limit is 131072 characters, and one field
 # past it stopped the import at that line — an EvtxECmd payload carrying a
@@ -246,7 +263,8 @@ CREATE TABLE IF NOT EXISTS sources (
     nickname    TEXT,                   -- analyst display name; `name` stays the imported file's identity
     origin      TEXT,                   -- NULL = an imported file; 'sql' = saved from the SQL pane; 'subset' = saved from a view/selection
     origin_meta TEXT,                   -- json, per origin: {sql} / {parent_source_id, parent_name, spec, ...} — see save_view_as_source; an imported file not read as plain UTF-8: {encoding, cp1252_bytes?} — see _encoding_report
-    ingest      TEXT                    -- json: how the file was read, {kind, ...options} — what a session re-imports with
+    ingest      TEXT,                   -- json: how the file was read, {kind, ...options} — what a session re-imports with
+    fts_mode    TEXT                    -- search index: NULL = automatic while under FTS_AUTO_MAX_BYTES, 'on' = the analyst built it, 'off' = the analyst removed it
 );
 CREATE TABLE IF NOT EXISTS tag_defs (
     id     INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2932,8 +2950,11 @@ class Store:
             # ...and sources.ingest (how the file was parsed; NULL on a
             # table from before it was recorded, which session re-import
             # treats as "guess, then check the shape").
+            # ...and sources.fts_mode (whether the analyst built or removed
+            # the search index; NULL, every table from before it, is "decide
+            # by size" — see FTS_AUTO_MAX_BYTES).
             have = {r[1] for r in self.db.execute("PRAGMA table_info(sources)")}
-            for col in ("origin", "origin_meta", "ingest"):
+            for col in ("origin", "origin_meta", "ingest", "fts_mode"):
                 if col not in have:
                     self.db.execute(f"ALTER TABLE sources ADD COLUMN {col} TEXT")
             # A table made inside Winnow before such tables were given an
@@ -3021,6 +3042,10 @@ class Store:
         self._maxlen_cache: dict[int, tuple[tuple, dict[str, int]]] = {}
         self._fts_threads: dict[int, threading.Thread] = {}
         self._fts_failures: set[tuple[int, str]] = set()   # logged once each (_build_fts_worker)
+        # _fts_doc_bytes' estimates: source_id -> (row_count, bytes). A
+        # source table never changes after ingest (invariant #1) and ids
+        # are never reused, so an answer holds for the life of the Store.
+        self._fts_size_cache: dict[int, tuple[int, int]] = {}
         self._index_threads: dict[tuple[int, str], threading.Thread] = {}
         # Caps how many trigram builds run at once. A broad action — a
         # search-all sweep over a case with many unindexed sources — calls
@@ -3261,13 +3286,21 @@ class Store:
         if t:
             t.join(timeout)
 
-    def _ensure_fts_building(self, source_id: int) -> None:
+    def _ensure_fts_building(self, source_id: int, *, requested: bool = False) -> None:
         """Fire-and-forget: kicks off a background trigram-index build for
         this source if it doesn't already have one ready and isn't already
         building one. Callers (Contains/Advanced-mode search) call this and
         then immediately fall back to the LIKE-based path for the query
         they're already compiling — the next search against this source,
         once the build finishes, gets the fast indexed path instead.
+
+        Only when the analyst wants one (_fts_on_request): a table whose
+        index they removed, or one with more than FTS_AUTO_MAX_BYTES of
+        text they never asked for one on, is passed by — every automatic
+        caller (import, search, search-all, a watchlist scan) goes through
+        here, so this is the one place that decides. `requested` is the
+        Tables manager's Build (start_search_index), which has already
+        recorded the ask in fts_mode.
 
         No-ops entirely on a pre-3.45 SQLite: the index is only ever
         queried through the trigram LIKE pushdown that version introduced,
@@ -3284,7 +3317,10 @@ class Store:
         # site runs outside any writer transaction (ingest fires it after
         # its final commit), so committed state is exactly what to check.
         with self._reader() as ro:
-            if self._source_lite_on(ro, source_id).get("has_fts"):
+            src = self._source_lite_on(ro, source_id)
+            if src.get("has_fts"):
+                return
+            if not requested and self._fts_on_request(ro, src):
                 return
         with self._threads_lock:
             existing = self._fts_threads.get(source_id)
@@ -3301,18 +3337,120 @@ class Store:
         builds nothing on anything older."""
         return sqlite3.sqlite_version_info >= TRIGRAM_LIKE_MIN_SQLITE
 
+    @staticmethod
+    def search_index_auto_max_bytes() -> int:
+        """FTS_AUTO_MAX_BYTES, for the Tables manager to say."""
+        return FTS_AUTO_MAX_BYTES
+
+    def _fts_on_request(self, conn: sqlite3.Connection, src: dict) -> str | None:
+        """Why this table's search index waits for the analyst to ask for
+        it, or None when an automatic caller may build it: 'removed' (they
+        removed it in the Tables manager, and only Build brings it back) or
+        'large' (more than FTS_AUTO_MAX_BYTES of text, and never asked
+        for). A table that has one, or that they built one on, has nothing
+        to wait for; nor does a merge, which searches through its tables'.
+        `conn` is the caller's connection, for the size estimate."""
+        if src.get("is_merge") or src.get("has_fts"):
+            return None
+        mode = src.get("fts_mode")
+        if mode == "off":
+            return "removed"
+        if mode == "on":
+            return None
+        return "large" if self._fts_doc_bytes(conn, src) > FTS_AUTO_MAX_BYTES else None
+
+    def _fts_doc_bytes(self, conn: sqlite3.Connection, src: dict) -> int:
+        """About how many bytes of text a search index on this table would
+        be built over: build_fts's doc (every base column, joined by
+        spaces), measured on FTS_SIZE_SAMPLE_RUNS runs of consecutive rows
+        spread evenly over the table and scaled to its row count. Every
+        source's rids run 1..row_count (invariant #2's carve-out), so that
+        is a handful of seeks, not a scan; runs rather than single rows
+        because a run shares its pages. Measured from a cold page cache on
+        a 1 GB EvtxECmd table: 3 ms, against 27 ms for as many rows spread
+        one by one, and within 1% of the exact figure either way. Cached
+        per source; see _fts_size_cache."""
+        sid, n = src["id"], int(src.get("row_count") or 0)
+        with self._threads_lock:
+            hit = self._fts_size_cache.get(sid)
+        if hit and hit[0] == n:
+            return hit[1]
+        cols = [c["name"] for c in self._base_cols(src)]
+        if n <= 0 or not cols:
+            return 0   # still importing: the columns land last
+        rids = sorted({min(n, 1 + i * n // FTS_SIZE_SAMPLE_RUNS + j)
+                       for i in range(FTS_SIZE_SAMPLE_RUNS) for j in range(FTS_SIZE_SAMPLE_RUN_ROWS)})
+        try:
+            got, total = conn.execute(
+                f"SELECT COUNT(*), COALESCE(SUM(length(CAST({_blob_expr(cols)} AS BLOB))), 0)"
+                f" FROM {q(src['table_name'])} WHERE rid IN ({','.join('?' * len(rids))})",
+                rids).fetchone()
+        except sqlite3.Error:
+            return 0   # dropped under us; nothing to build either way
+        est = total * n // got if got else 0
+        with self._threads_lock:
+            self._fts_size_cache[sid] = (n, est)
+        return est
+
     def start_search_index(self, source_id: int) -> dict:
         """Start this table's search index now, in the background, rather
         than on the first Contains or Advanced search that wants it: the
-        Tables manager's Build. Nothing happens to a table that has one or
-        is building one (_ensure_fts_building's dedup). A merge has no index
-        of its own (it searches through its tables'), so it is refused; no
-        such table is a KeyError."""
+        Tables manager's Build. Records the ask (fts_mode 'on'), which is
+        what lets a table over FTS_AUTO_MAX_BYTES, or one whose index was
+        removed, have one again — and keeps it automatic from then on: a
+        case closed mid-build carries on with the next search. Nothing
+        happens to a table that has one or is building one
+        (_ensure_fts_building's dedup). A merge has no index of its own (it
+        searches through its tables'), so it is refused; no such table is a
+        KeyError."""
         if source_id < 0:
             raise ValueError("A merge has no search index of its own — it uses its tables'")
-        with self._reader() as ro:
-            self._source_lite_on(ro, source_id)
-        self._ensure_fts_building(source_id)
+        with self.lock, self.db:
+            if not self.db.execute("SELECT 1 FROM sources WHERE id=?", (source_id,)).fetchone():
+                raise KeyError(f"No table {source_id}")
+            self.db.execute("UPDATE sources SET fts_mode='on' WHERE id=?", (source_id,))
+        self._ensure_fts_building(source_id, requested=True)
+        return self._search_index_state(source_id)
+
+    def remove_search_index(self, source_id: int) -> dict:
+        """The Tables manager's Remove: drop this table's search index, or
+        stop the build making one, and keep it off. Nothing automatic
+        builds it again (fts_mode 'off' — see _fts_on_request); only Build
+        does. Searches keep working, by scanning the table: the same rows,
+        more slowly. The index's pages go to the case file's freelist,
+        where the next import or index reuses them and Compact hands them
+        back to the disk; `freed_bytes` is how much that came to.
+
+        One writer transaction, so a search either sees the index whole or
+        not at all (the scans that read fts_N absorb a "no such table" by
+        falling back — see _scan_unit). A build running for this table
+        reads fts_mode under the lock before each chunk and stops there
+        (build_fts). A merge has none of its own (ValueError); no such
+        table is a KeyError."""
+        if source_id < 0:
+            raise ValueError("A merge has no search index of its own — remove its tables' instead")
+        with self.lock, self.db:
+            row = self.db.execute("SELECT table_name FROM sources WHERE id=?", (source_id,)).fetchone()
+            if not row:
+                raise KeyError(f"No table {source_id}")
+            free_before = self.db.execute("PRAGMA freelist_count").fetchone()[0]
+            self.db.execute(f"DROP TABLE IF EXISTS {q(f'fts_{source_id}')}")
+            self.db.execute(f"DROP VIEW IF EXISTS {q(row[0] + '_doc')}")
+            self.db.execute("DELETE FROM fts_progress WHERE source_id=?", (source_id,))
+            self.db.execute("UPDATE sources SET has_fts=0, fts_mode='off' WHERE id=?", (source_id,))
+            freed = self.db.execute("PRAGMA freelist_count").fetchone()[0] - free_before
+            page = self.db.execute("PRAGMA page_size").fetchone()[0]
+        # The build stops at its next look at fts_mode, which waited on the
+        # lock just released; a moment, so "building" below is the truth.
+        # Bounded: one still queued for a build slot (_fts_build_sem) only
+        # looks once it has one, and it will find 'off' then.
+        with self._threads_lock:
+            t = self._fts_threads.get(source_id)
+        if t and t.is_alive():
+            t.join(2.0)
+        return dict(self._search_index_state(source_id), freed_bytes=max(0, freed) * page)
+
+    def _search_index_state(self, source_id: int) -> dict:
         with self._reader() as ro:
             ready = bool(self._source_lite_on(ro, source_id).get("has_fts"))
         return {"ready": ready, "building": self._is_fts_building(source_id),
@@ -6425,6 +6563,13 @@ class Store:
         synchronously here; _ensure_fts_building is what runs this on a
         background thread so ingest/search never block waiting for it.
 
+        Stoppable: before each chunk, under the lock, it reads whether the
+        table still wants an index (_fts_build_state), so Remove in the
+        Tables manager (remove_search_index) ends a build at its next chunk
+        and a dropped table ends it without an error. A table whose index
+        was removed is never built here at all until start_search_index
+        records that the analyst wants one again.
+
         Each chunk also yields the thread briefly (time.sleep) right after
         releasing the lock, not just released-and-immediately-reacquired:
         measured directly, a tight release/reacquire loop with no yield
@@ -6458,6 +6603,8 @@ class Store:
         doc_view = f"{table}_doc"
         doc_sql = f"CREATE VIEW {q(doc_view)} AS SELECT rid, {_blob_expr(cols)} AS doc FROM {q(table)}"
         with self.lock, self.db:
+            if self._fts_build_state(source_id) == "stop":
+                return
             start = self._fts_resume_point(source_id, fts, doc_view, doc_sql)
             if start is None:
                 self.db.execute(f"DROP TABLE IF EXISTS {q(fts)}")
@@ -6475,12 +6622,16 @@ class Store:
                     " doc_sql=excluded.doc_sql", (source_id, start, doc_sql))
             max_rid = self.db.execute(f"SELECT COALESCE(MAX(rid), 0) FROM {q(table)}").fetchone()[0]
         rows = FTS_COMMIT_FIRST_ROWS
+        state = "go"
         while start <= max_rid:
             if self._closing:
                 return   # fts_progress already says where the next build starts
             with self.lock:
                 t0 = time.perf_counter()
                 with self.db:
+                    state = self._fts_build_state(source_id)
+                    if state != "go":
+                        break
                     self.db.execute(
                         f"INSERT INTO {q(fts)}(rowid, doc) "
                         f"SELECT rid, doc FROM {q(doc_view)} WHERE rid >= ? AND rid < ?",
@@ -6492,9 +6643,32 @@ class Store:
             start += rows
             rows = _next_fts_commit_rows(rows, held)
             time.sleep(0.02)
-        with self.lock, self.db:
-            self.db.execute("UPDATE sources SET has_fts=1 WHERE id=?", (source_id,))
-            self.db.execute("DELETE FROM fts_progress WHERE source_id=?", (source_id,))
+        if state == "go":
+            with self.lock, self.db:
+                state = self._fts_build_state(source_id)
+                if state == "go":
+                    self.db.execute("UPDATE sources SET has_fts=1 WHERE id=?", (source_id,))
+                    self.db.execute("DELETE FROM fts_progress WHERE source_id=?", (source_id,))
+        if state == "restart":
+            # The index this build was filling was removed and asked for
+            # again (Remove, then Build) between two of its chunks. That
+            # Build found this thread alive and started none of its own, so
+            # this one starts over in its place.
+            self.build_fts(source_id)
+
+    def _fts_build_state(self, source_id: int) -> str:
+        """Whether build_fts goes on, read under its writer lock before each
+        chunk: 'stop' when the table is gone or its index was removed
+        (fts_mode 'off'), 'restart' when its fts_progress row is gone with
+        the table still wanting an index (removed and asked for again since
+        the last chunk), else 'go'. Before the first chunk only 'stop'
+        counts — a fresh build writes the progress row itself."""
+        row = self.db.execute(
+            "SELECT s.fts_mode, p.source_id FROM sources s"
+            " LEFT JOIN fts_progress p ON p.source_id = s.id WHERE s.id=?", (source_id,)).fetchone()
+        if row is None or row[0] == "off":
+            return "stop"
+        return "go" if row[1] is not None else "restart"
 
     def _fts_resume_point(self, source_id: int, fts: str, doc_view: str, doc_sql: str) -> int | None:
         """The rid an interrupted build_fts should carry on from, or None
@@ -6818,7 +6992,21 @@ class Store:
             d["note_count"] = notes.get(d["id"], 0)
             d["fts_building"] = self._is_fts_building(d["id"])
             out.append(d)
+        self._add_fts_on_request(out)
         return out
+
+    def _add_fts_on_request(self, sources: list[dict]) -> None:
+        """`fts_on_request` on each source dict (_fts_on_request), which the
+        Tables manager and the search box's hint read. A reader only when a
+        size has to be estimated: once per table per Store, and never for a
+        table that has an index or whose index the analyst built or
+        removed."""
+        with contextlib.ExitStack() as stack:
+            ro = None
+            for d in sources:
+                if ro is None and not (d.get("has_fts") or d.get("fts_mode")):
+                    ro = stack.enter_context(self._reader())
+                d["fts_on_request"] = self._fts_on_request(ro, d)
 
     def _tab_meta(self, source_id: int) -> dict:
         """is_open for a single signed source_id (real or merge). Not
@@ -6931,6 +7119,7 @@ class Store:
         d["tagged_row_count"] = tagged
         d["note_count"] = note_count
         d["fts_building"] = self._is_fts_building(source_id)
+        self._add_fts_on_request([d])
         return d
 
     @staticmethod
@@ -7076,6 +7265,7 @@ class Store:
             "imported_at": row["created_at"],
             "has_fts": 1 if all(m["has_fts"] for m in members) else 0,
             "fts_building": any(m["fts_building"] for m in members),
+            "fts_on_request": next((m["fts_on_request"] for m in members if m.get("fts_on_request")), None),
             "is_merge": True,
             "member_source_ids": member_ids,
             "is_open": self._tab_meta(-merge_id)["is_open"],
@@ -9310,6 +9500,19 @@ class Store:
         through both the materialised block and the virtual-root path: a
         cleared search box lands in the latter, which evicts under the
         lock before it has a handle to mint."""
+        try:
+            return self._build_view_once(source_id, spec, hold=hold, yield_others=yield_others)
+        except sqlite3.OperationalError as e:
+            # The search was compiled against a table's search index, and
+            # Remove (remove_search_index) dropped it before this build got
+            # the writer lock. The build rolled back; compiled again, the
+            # table reads has_fts=0 and the search scans it.
+            if not _DROPPED_FTS_RE.search(str(e)):
+                raise
+            return self._build_view_once(source_id, spec, hold=hold, yield_others=yield_others)
+
+    def _build_view_once(self, source_id: int, spec: dict, *, hold: bool,
+                         yield_others: bool) -> dict:
         src = self._source_lite(source_id)
         colnames = {c["name"]: c["type"] for c in src["columns"]}
         order = self._compile_order(spec, colnames)
@@ -15930,7 +16133,7 @@ class Store:
                 tag_map = t._map_tags_by_name(tag_defs)
                 shared_cols = [c for c in ("name", "path", "table_name", "row_count",
                                            "columns", "file_hash", "imported_at", "nickname",
-                                           "origin", "origin_meta", "ingest")]
+                                           "origin", "origin_meta", "ingest", "fts_mode")]
                 for sid in source_ids:
                     src = src_rows[sid]
                     cur = t.db.execute(

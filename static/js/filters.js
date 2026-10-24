@@ -701,11 +701,15 @@ export function updateSearchHint() {
   // that doesn't is a hang. Regex never uses the index, so it stays a
   // full scan whatever the index is doing.
   const building = !!(src && src.fts_building && !hasFts);
+  // A table whose index waits for Build (a big one, or one whose index
+  // the analyst removed) scans on every search, not just the first: say
+  // so, for the same reason.
+  const onRequest = !!(src && src.fts_on_request && !hasFts && !building);
   const hint = $('searchMode');
   if (S.searchMode === 'regex') hint.textContent = 'regex · full scan';
   else if (S.searchMode === 'advanced') {
     hint.textContent = hasFts ? 'advanced · full-text' : (building ? 'advanced · index building' : 'advanced · substring chain');
-  } else hint.textContent = building ? 'substring · index building' : 'substring';
+  } else hint.textContent = building ? 'substring · index building' : (onRequest ? 'substring · no index' : 'substring');
   // The hint sits inside the box's right padding, which was a fixed 74px —
   // the longer hints painted straight over the typed text. Size the padding
   // to the hint; while the box is hidden (no layout yet) estimate from the

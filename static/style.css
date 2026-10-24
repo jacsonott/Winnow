@@ -3344,7 +3344,7 @@ button.tables-name:not(:disabled):hover { text-decoration: underline; color: var
 .tables-empty { margin: 6px; }
 /* Indexes: the search index's state in a column of its own, then the
    filter indexes, which wrap to as many as the analyst has filtered on. */
-.tables-indexes .tables-head, .tables-ix-row { grid-template-columns: minmax(0, 1fr) 150px minmax(0, 1.25fr); }
+.tables-indexes .tables-head, .tables-ix-row { grid-template-columns: minmax(0, 1fr) 172px minmax(0, 1.25fr); }
 .tables-indexes .tables-head .tables-name-h { grid-column: auto; }
 .tables-ix-row { padding-top: 2px; padding-bottom: 2px; }
 .tables-si { display: flex; align-items: center; gap: 6px; }
