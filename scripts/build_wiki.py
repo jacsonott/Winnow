@@ -265,7 +265,18 @@ def footer(repo, ref):
     )
 
 
+# Where the Pages site is served. The project's own is on a custom domain,
+# which is set in the repository's Settings → Pages: a site deployed by
+# Actions ignores a CNAME file, so that setting is what serves it there, and
+# this is only the address the pages say they are at (site_url: canonical
+# links, the sitemap, the 404 page's assets). A fork's build gets the
+# address GitHub gives any project's Pages site.
+SITE_DOMAINS = {DEFAULT_REPO: "winnow.jacson.tech"}
+
+
 def site_url(repo):
+    if repo in SITE_DOMAINS:
+        return f"https://{SITE_DOMAINS[repo]}/"
     owner, name = repo.split("/")
     return f"https://{owner.lower()}.github.io/{name}/"
 
