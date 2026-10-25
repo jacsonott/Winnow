@@ -34,10 +34,18 @@ from winnow.store import DEFAULT_TAGS, Store
 
 from test_plaso_import import make_old_plaso
 
+
+def _odd(*names):
+    """A `?` name is POSIX-only: Windows file names cannot hold one, so
+    nothing an analyst has there can trip over it either."""
+    no_qmark = pytest.mark.skipif(os.name == "nt", reason="a Windows file name cannot hold `?`")
+    return [pytest.param(n, marks=no_qmark) if "?" in n else n for n in names]
+
+
 # Each one misparses differently: `#` truncates, `?` truncates and turns
 # the rest into query parameters, `%41` silently names a different file
 # ("A"), and a bare `%` followed by non-hex is an outright parse error.
-ODD = ["Case #5", "what?x=1", "a%41b", "100% done"]
+ODD = _odd("Case #5", "what?x=1", "a%41b", "100% done")
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -78,7 +86,7 @@ def test_a_case_in_an_odd_folder_reads_back_what_was_imported(tmp_path, write_cs
                                         "case.db-winnow-shm", "case.db-winnow.winnow-lock"}
 
 
-@pytest.mark.parametrize("name", ["History#1.db", "what?.db", "a%41.db", "100% x.db"])
+@pytest.mark.parametrize("name", _odd("History#1.db", "what?.db", "a%41.db", "100% x.db"))
 def test_an_odd_sqlite_evidence_name_lists_and_imports_its_own_tables(store, tmp_path, name):
     ev = tmp_path / "evidence"
     ev.mkdir()
@@ -104,7 +112,7 @@ def test_an_odd_sqlite_evidence_name_lists_and_imports_its_own_tables(store, tmp
     assert p.read_bytes() == evidence_bytes  # and the evidence never written
 
 
-@pytest.mark.parametrize("folder", ["plaso #2", "p?x", "p%41"])
+@pytest.mark.parametrize("folder", _odd("plaso #2", "p?x", "p%41"))
 def test_an_odd_plaso_path_is_detected_and_imported(store, tmp_path, folder):
     ev = tmp_path / "evidence"
     d = ev / folder

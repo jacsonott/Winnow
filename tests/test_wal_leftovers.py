@@ -22,6 +22,7 @@ rows reach the case file itself, not just that the files went away.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -156,7 +157,9 @@ def test_the_peek_uri_reads_the_file_as_it_stands_only_when_there_is_no_wal(tmp_
 def test_the_peek_uri_finds_the_wal_of_a_case_reached_through_a_link(tmp_path):
     """SQLite names the -wal after the file a link points at, so looking
     beside the link alone read a live case without its newest rows (and
-    refused to open a fresh case through a link as "not a case file")."""
+    refused to open a fresh case through a link as "not a case file").
+    The look opens the target too: Windows SQLite names the -wal after the
+    path it is given, so opening the link there missed it all the same."""
     wal_db = tmp_path / "w.db"
     link = tmp_path / "link.db"
     os.symlink(wal_db, link)
@@ -166,7 +169,11 @@ def test_the_peek_uri_finds_the_wal_of_a_case_reached_through_a_link(tmp_path):
     c.commit()
     try:
         assert not os.path.exists(f"{link}-wal")
-        assert "immutable=1" not in paths.sqlite_peek_uri(link)
+        uri = paths.sqlite_peek_uri(link)
+        assert uri == paths.sqlite_ro_uri(os.path.realpath(wal_db))
+        # The table is in the -wal alone (nothing has checkpointed it).
+        with contextlib.closing(sqlite3.connect(uri, uri=True)) as look:
+            assert look.execute("SELECT name FROM sqlite_master").fetchall() == [("t",)]
     finally:
         c.close()
 

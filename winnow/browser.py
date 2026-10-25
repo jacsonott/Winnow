@@ -34,6 +34,7 @@ import http.client
 import json
 import ntpath
 import os
+import posixpath
 import platform
 import shutil
 import socket
@@ -92,7 +93,9 @@ def find_chromium(*, system=None, which=None, isfile=None, environ=None) -> str 
     if system == "Darwin":
         for suffix in _MACOS_CANDIDATES:
             for base in ("/Applications", os.path.expanduser("~/Applications")):
-                path = os.path.join(base, suffix)
+                # posixpath, for the Windows branch's reason the other way
+                # round: a real macOS path even when the tests run on Windows.
+                path = posixpath.join(base, suffix)
                 if isfile(path):
                     return path
         return None

@@ -173,7 +173,8 @@ def test_a_stream_that_cannot_spell_it_gets_escapes_and_the_writer_lives_on(writ
     out.write("Settings → Plugins, café\n")
     out.write("still writing\n")
     assert writer.drain(5)
-    assert buf.getvalue() == b"Settings \\u2192 Plugins, caf\\xe9\nstill writing\n"
+    nl = os.linesep.encode()   # a text stream writes \r\n on Windows
+    assert buf.getvalue() == b"Settings \\u2192 Plugins, caf\\xe9" + nl + b"still writing" + nl
 
 
 def test_a_broken_console_does_not_stop_the_other_stream(writer):
@@ -228,7 +229,7 @@ def test_install_wraps_a_pipe_and_leaves_in_process_streams_alone(monkeypatch, w
         assert sys.stdout is wrapped
         print("through the queue")
         assert writer.drain(5)
-        assert os.read(r, 100) == b"through the queue\n"
+        assert os.read(r, 100) == b"through the queue" + os.linesep.encode()
     finally:
         piped.close()
         os.close(r)
