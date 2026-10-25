@@ -7,7 +7,12 @@ legible, and nothing has to be executed to read it.
 
 **headers.json** names the header sets common forensic tools emit
 (EvtxECmd, MFTECmd, Amcache, ...), so an analyst's Nth case opens with the
-same tables already labelled. **filters.json** is a working analyst's
+same tables already labelled. Each set may also carry a `summary` block
+saying how to render one of its rows in a line — the Timeline's Body reads
+"Special privileges assigned  svc_backup · WKSTN-4471 · id 4672" rather
+than the whole source row pipe-joined. See `_summary` for the shape and
+why a wrong column name in one is a load-time error. A set may also name
+`indexes`, columns an import of that shape indexes up front (`_indexes`). **filters.json** is a working analyst's
 Timeline Explorer triage set, converted to filter trees.
 
 The one thing the Python version got for free was the binding between
@@ -19,8 +24,11 @@ version would only have failed if someone happened to mistype a Python
 identifier.
 
 Both files carry a `version`. Bump it when you add entries: workspace's
-`ensure_seeded` re-seeds only sets not already present, so an analyst's
-renamed or deleted copy is never re-added beside itself. Never edit an
+`ensure_seeded` records every entry it has handed a workspace (`seeded`
+in the workspace file) and on a bump adds only the ones it never has, so
+an analyst's deleted default stays deleted and a renamed one is never
+re-added beside itself. Renaming an entry HERE therefore reads as a new
+default to every workspace — which is what it is. Never edit an
 existing header set in place — files produced by an older release of the
 tool are still out there and still have to match.
 """
@@ -52,20 +60,103 @@ def _load(path: Path) -> dict:
         raise DefaultsError(f"{path.name} is not valid JSON ({e})") from e
 
 
+def _summary(name: str, cols: list[str], rec: dict) -> dict | None:
+    """One header set's `summary` block, validated and normalised to
+    {"lead": [column, ...], "details": [(column, label), ...]}.
+
+    This is how a Timeline row says what happened instead of printing the
+    whole source row: `lead` is the columns that carry the event itself,
+    best first (the first non-blank one wins on a given row — EvtxECmd
+    leaves MapDescription empty for an event it has no map for, and the
+    row still has to read as something), `details` the handful of fields
+    that identify the subject and the peer, and `labels` a word in front
+    of the ones whose bare value would be a mystery ("id 4624", not
+    "4624").
+
+    Every column named here has to be one of this set's own columns, and
+    every label has to name one of its own details: a typo would simply
+    render nothing on every row of that shape forever, and nobody would
+    know to look here. Same reasoning as the filters/header_set binding
+    below — fail at load, loudly, rather than silently produce a worse
+    Timeline."""
+    spec = rec.get("summary")
+    if spec is None:
+        return None
+    if not isinstance(spec, dict):
+        raise DefaultsError(f"headers.json entry {name!r}: summary must be an object")
+    lead = spec.get("lead") or []
+    details = spec.get("details") or []
+    labels = spec.get("labels") or {}
+    if not isinstance(lead, list) or not isinstance(details, list) or not isinstance(labels, dict):
+        raise DefaultsError(
+            f"headers.json entry {name!r}: summary needs lead/details lists and a labels object")
+    known = set(cols)
+    for c in [*lead, *details, *labels]:
+        if c not in known:
+            raise DefaultsError(
+                f"headers.json entry {name!r}: summary names column {c!r}, which that "
+                f"header set does not define — it would render nothing on every row")
+    for c in labels:
+        if c not in details:
+            raise DefaultsError(
+                f"headers.json entry {name!r}: summary labels {c!r}, which is not one of its details")
+    if not lead and not details:
+        raise DefaultsError(f"headers.json entry {name!r}: summary says nothing")
+    return {"lead": list(lead), "details": [(c, labels.get(c, "")) for c in details]}
+
+
+def _indexes(name: str, cols: list[str], rec: dict) -> list[str]:
+    """One header set's `indexes`: the columns an import of that shape
+    indexes before the analyst asks (Store._build_import_indexes), because
+    the shipped dashboards and lateral movement filter on them in nearly
+    every query. Without one, a query that filters on EventId and groups
+    by a column the grid has indexed walks the grouped column's index
+    with a table lookup per row: the KAPE board took 45 s on 2.1M rows
+    instead of 10 s. Same rule as a summary's columns: each has to be
+    one of the set's own, or it would index nothing on every import."""
+    want = rec.get("indexes")
+    if want is None:
+        return []
+    if not isinstance(want, list) or not all(isinstance(c, str) for c in want):
+        raise DefaultsError(f"headers.json entry {name!r}: indexes must be a list of column names")
+    for c in want:
+        if c not in cols:
+            raise DefaultsError(
+                f"headers.json entry {name!r}: indexes names column {c!r}, which that "
+                f"header set does not define — it would index nothing")
+    return list(want)
+
+
 @lru_cache(maxsize=1)
 def headers() -> dict:
-    """{"version": int, "nicknames": [(name, [columns]), ...]} — tuples so
-    callers read the same shape the Python module handed them."""
+    """{"version": int, "nicknames": [(name, [columns]), ...],
+    "summaries": {name: {"lead": [...], "details": [(column, label), ...]}},
+    "indexes": {name: [column, ...]}}
+    — tuples so callers read the same shape the Python module handed them.
+
+    `summaries` and `indexes` are separate keys rather than more elements
+    of each nickname tuple because half the callers do `dict(headers()
+    ["nicknames"])`; a shape with no summary or no indexes is simply
+    absent from that dict."""
     data = _load(HEADERS_FILE)
     out = []
+    summaries = {}
+    indexes = {}
     for i, rec in enumerate(data.get("nicknames") or []):
         name, cols = rec.get("name"), rec.get("columns")
         if not name or not isinstance(cols, list) or not cols:
             raise DefaultsError(f"headers.json entry {i} needs a name and a non-empty columns list")
         out.append((name, list(cols)))
+        spec = _summary(name, cols, rec)
+        if spec:
+            summaries[name] = spec
+        want = _indexes(name, cols, rec)
+        if want:
+            indexes[name] = want
     if not out:
         raise DefaultsError("headers.json lists no header sets")
-    return {"version": int(data.get("version") or 0), "nicknames": out}
+    return {"version": int(data.get("version") or 0), "nicknames": out, "summaries": summaries,
+            "indexes": indexes}
 
 
 @lru_cache(maxsize=1)

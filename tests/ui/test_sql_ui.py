@@ -8,17 +8,8 @@ import pytest
 pytestmark = pytest.mark.ui
 
 
-def _open_sql(page):
-    page.click("#tabSql")
-    page.wait_for_selector("#sqlview:not([hidden])")
-    # The tab list (and the starter query it seeds into the editor) loads
-    # async — filling the editor before that lands gets overwritten.
-    page.wait_for_function(
-        "() => __winnow.S.sqlTabs.length > 0 && !document.getElementById('sqlText').disabled")
-
-
-def test_autocomplete_keywords_tables_and_columns(page):
-    _open_sql(page)
+def test_autocomplete_keywords_tables_and_columns(page, open_sql):
+    open_sql(page)
     ta = page.locator("#sqlText")
     ta.click()
     ta.fill("")
@@ -41,8 +32,35 @@ def test_autocomplete_keywords_tables_and_columns(page):
     page.keyboard.press("Escape")
 
 
-def test_tables_menu_inserts_the_src_name(page):
-    _open_sql(page)
+def test_the_dropdown_survives_leaving_the_editor_and_coming_straight_back(page, open_sql):
+    """Leaving the editor hides its dropdown 150 ms later. That timer used to
+    hide whatever was showing by then, so back in the editor and typing
+    inside those 150 ms, the dropdown for the new word was painted and then
+    torn down by the old blur, with nothing to bring it back until the next
+    keystroke. test_sql_pane_welcome.py's comment test does exactly that
+    (Run, then straight back to type) and failed on CI with no dropdown.
+
+    Leaving, coming back and typing all happen in one call, so they land
+    inside the 150 ms however loaded the machine is. The promise it returns
+    is a timer of the same length set after the blur's, so it resolves
+    after the blur's has run."""
+    open_sql(page)
+    page.locator("#sqlText").click()
+    page.evaluate("""() => {
+      const ta = document.getElementById('sqlText');
+      ta.blur();
+      ta.focus();
+      ta.value = 'SELECT * FROM src_1 WHERE Even';
+      ta.setSelectionRange(ta.value.length, ta.value.length);
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
+      return new Promise((done) => setTimeout(done, 150));
+    }""")
+    labels = page.locator(".sql-ac .menu-item span:first-child").all_text_contents()
+    assert "EventId" in labels, labels
+    page.keyboard.press("Escape")
+
+def test_tables_menu_inserts_the_src_name(page, open_sql):
+    open_sql(page)
     page.locator("#sqlText").fill("")
     page.click("#btnSqlTables")
     page.wait_for_selector(".menu .menu-item")
@@ -52,14 +70,14 @@ def test_tables_menu_inserts_the_src_name(page):
     assert page.locator("#sqlText").input_value() == "src_1"
 
 
-def test_results_sort_by_clicking_headers_and_show_tags(page):
+def test_results_sort_by_clicking_headers_and_show_tags(page, open_sql):
     # Tag the cursor row so the Tags column has something to prove.
     page.locator(".row").nth(0).click()
     page.keyboard.press("1")
     page.wait_for_function("() => __winnow.rowAt(0).tags.length === 1")
     rid = page.evaluate("() => __winnow.rowAt(0).rid")
 
-    _open_sql(page)
+    open_sql(page)
     page.locator("#sqlText").fill(f"SELECT rid, EventId FROM src_1 WHERE rid = {rid}")
     page.click("#btnRunSql")
     page.wait_for_selector("#sqlResult table")
@@ -75,12 +93,13 @@ def test_results_sort_by_clicking_headers_and_show_tags(page):
     page.click("#btnRunSql")
     page.wait_for_function("() => document.querySelectorAll('#sqlResult tr').length === 21")
 
-    cell = lambda: page.locator("#sqlResult tr").nth(1).locator("td").nth(1).inner_text()  # noqa: E731
+    # The sort is the server's (the result is held there), so the sorted
+    # rows land a fetch after the click: wait for the first one.
+    first = "() => document.querySelectorAll('#sqlResult tr')[1]?.querySelectorAll('td')[1]?.textContent"
     page.locator("#sqlResult th", has_text="EventId").click()
-    asc = cell()
+    page.wait_for_function(f"({first})() === '1'")   # EventId cycles 4624/4625/4688/1
     page.locator("#sqlResult th", has_text="EventId").click()
-    desc = cell()
-    assert asc == "1" and desc == "4688"  # EventId cycles 4624/4625/4688/1
+    page.wait_for_function(f"({first})() === '4688'")
 
     # cleanup: untag
     page.evaluate("() => __winnow.showGridTab()")
@@ -89,8 +108,8 @@ def test_results_sort_by_clicking_headers_and_show_tags(page):
     page.wait_for_function("() => __winnow.rowAt(0).tags.length === 0")
 
 
-def test_query_box_resizes_from_the_bar(page):
-    _open_sql(page)
+def test_query_box_resizes_from_the_bar(page, open_sql):
+    open_sql(page)
     h0 = page.evaluate("() => document.getElementById('sqlText').offsetHeight")
     bar = page.locator("#sqlResize").bounding_box()
     page.mouse.move(bar["x"] + 200, bar["y"] + 3)
@@ -101,7 +120,7 @@ def test_query_box_resizes_from_the_bar(page):
     assert h1 > h0 + 80
 
 
-def test_autocomplete_marks_and_completes_derived_columns(page):
+def test_autocomplete_marks_and_completes_derived_columns(page, open_sql):
     """Derived columns were always suggested — before the shadow views
     that was a trap (the query returned the literal column name). Now the
     suggestion is real and tagged 'derived'."""
@@ -129,7 +148,7 @@ def test_autocomplete_marks_and_completes_derived_columns(page):
         else:
             raise AssertionError("AcBinary never finished building")
 
-        _open_sql(page)
+        open_sql(page)
         ta = page.locator("#sqlText")
         ta.click()
         ta.fill("SELECT * FROM src_1 WHERE AcBin")
@@ -150,3 +169,63 @@ def test_autocomplete_marks_and_completes_derived_columns(page):
         page.evaluate("""(id) => fetch('/api/derived/' + id, { method: 'DELETE',
           headers: { 'X-Timeline-Lite-Client': '1' } })""", rec["definition"]["id"])
         page.evaluate("() => __winnow.loadSources()")
+
+
+def _hold_first_sql_run(page):
+    """Intercept /api/sql/run: the first run is held (its route returned for
+    the test to answer whenever it likes), later ones go straight through.
+    That makes "a slow run is still in flight" a state the test controls
+    rather than a query it hopes is slow enough (test_search_supersede.py's
+    idiom)."""
+    import re
+
+    held = []
+
+    def handler(route):
+        if not held:
+            held.append(route)
+        else:
+            route.continue_()
+
+    pattern = re.compile(r".*/api/sql/run$")
+    page.route(pattern, handler)
+    return held, pattern
+
+
+def _answer_late(route, column):
+    """Answer a held run with a one-cell result naming `column` — or
+    nothing, if the page already gave up on it (which is the fix)."""
+    import json
+
+    try:
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(
+            {"id": "late", "columns": [column], "rows": [[1]], "total": 1, "widths": [1],
+             "stopped": None, "elapsed_ms": 1}))
+    except Exception:
+        pass
+
+
+def test_a_slow_run_does_not_paint_over_the_run_after_it(page, open_sql):
+    """runSql painted by the tab id it started from and nothing else, so a
+    slow run that came back after a quicker re-run in the same tab put
+    its rows over the newer result — and Copy/CSV/tagging then took the
+    old query's rows."""
+    open_sql(page)
+    held, pattern = _hold_first_sql_run(page)
+    try:
+        page.locator("#sqlText").fill("SELECT 1 AS slow_one")
+        page.click("#btnRunSql")
+        page.wait_for_function("() => document.getElementById('sqlResult').textContent.startsWith('Running')")
+        assert held, "the first run was not intercepted"
+        page.locator("#sqlText").fill("SELECT 2 AS quick_one")
+        page.click("#btnRunSql")
+        page.wait_for_function("() => /quick_one/.test(document.getElementById('sqlResult').textContent)")
+
+        _answer_late(held[0], "slow_one")
+        page.wait_for_timeout(500)   # long enough for the late answer to land if it is going to
+        assert "quick_one" in page.locator("#sqlResult").inner_text()
+        assert "slow_one" not in page.locator("#sqlResult").inner_text()
+        assert page.evaluate("() => __winnow.S.sqlResults.get(__winnow.S.sqlTabId).columns") == ["quick_one"]
+        assert page.evaluate("() => __winnow.busyCount") == 0
+    finally:
+        page.unroute(pattern)

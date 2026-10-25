@@ -1,25 +1,29 @@
 /* Keybindings: the default map, its migrations, and the action handlers.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
-import { autofitAllColumnWidths, resetAllColumnWidths, saveDefaultLayout, visibleCols } from './columns.js';
+import { applyDefaultLayout, autofitAllColumnWidths, openColumnFilter, resetAllColumnWidths, saveDefaultLayout, visibleCols } from './columns.js';
 import { openFilterBuilder } from './filterbuilder.js';
+import { undoFilterChange } from './filterundo.js';
 import { $, ROW_H } from './core.js';
-import { currentModalAction, repaintOpenMenus } from './ui.js';
+import { currentModalAction, repaintOpenMenus, closeMenu, closeModal } from './ui.js';
 import { toggleDetailPane } from './detail.js';
+import { toggleHistogram } from './histogram.js';
 import { filterBySelectedCell, openValuePickerForColumn, selectedCellTarget } from './filters.js';
-import { headH, moveCursor, render } from './grid.js';
-import { dropGrouping, handleCopyShortcut, toggleGrouping } from './grouping.js';
+import { headH, moveCell, render, selectCellRangeRows, toggleCellRangeRows, toggleCursorRow } from './grid.js';
+import { copyUniqueValuesShortcut, dropGrouping, handleCopyShortcut, toggleGrouping } from './grouping.js';
 import { openPluginBundlesModal } from './bundles.js';
 import { cycleSavedFilter, openFilterSqlTab } from './savedfilters.js';
 import { expandSearch, openSearchAllModal } from './search.js';
-import { applySqlTabToEditor } from './sql.js';
+import { applySqlTabToEditor, showGridTab } from './sql.js';
 import { sqlClearSelection, sqlCopySelection, sqlSelectionCount, sqlTagHotkey } from './sqlassist.js';
 import { openSettings } from './settings.js';
 import { activateTabSlot, clearAllFilters, setSidebarVisible } from './sources.js';
-import { S, gridRowCount, selClear, selCount, selSetAll } from './state.js';
+import { S, clearCellSelection, selClear, selCount, selSetAll, selSnapshot } from './state.js';
 import { openTablesManager } from './tables.js';
 import { applyTag, applyTagToView, undoLastTagChange } from './tags.js';
 import { doJumpTs, openJumpTsModal, openTableMenu, openTimeRangeModal, toggleTimeRange } from './timeframe.js';
+import { clearTimelineSelection, timelineKey } from './timeline.js';
+import { tagTimelineLine } from './timelinepane.js';
 
 /* ------------------------------------------------------ keyboard shortcuts */
 
@@ -31,11 +35,38 @@ import { doJumpTs, openJumpTsModal, openTableMenu, openTimeRangeModal, toggleTim
 export const DEFAULT_KEYMAP = {
   moveDown: ['ArrowDown', 'j'],
   moveUp: ['ArrowUp', 'k'],
+  // Left/right and the Ctrl jumps are NEW action names on purpose, not
+  // extra keys on the two above. loadKeymap lets a stored array replace a
+  // default one wholesale, so adding a chord to an action an analyst has
+  // already used reaches nobody without a migration — while an action
+  // name their keymap has never seen takes its default for free. Same
+  // reasoning the v2 entry records for openFilterBuilder/openValuePicker.
+  moveLeft: ['ArrowLeft'],
+  moveRight: ['ArrowRight'],
+  // Ctrl+Shift+Arrow needs no binding of its own: matchAction strips
+  // Shift from a chord that did not match and tries again, so it lands
+  // here and the handler reads e.shiftKey — the same route Shift+ArrowDown
+  // takes to moveDown.
+  // ⌘ alongside Ctrl, the way focusSearch carries Ctrl+F: on macOS
+  // Ctrl+Arrow belongs to Mission Control and never reaches the page,
+  // and ⌘+Arrow is what Excel uses there anyway. Harmless elsewhere —
+  // Windows takes Meta+Arrow for window snapping before the browser sees
+  // it, and on Linux it is free.
+  jumpEdgeUp: ['Ctrl+ArrowUp', 'Meta+ArrowUp'],
+  jumpEdgeDown: ['Ctrl+ArrowDown', 'Meta+ArrowDown'],
+  jumpEdgeLeft: ['Ctrl+ArrowLeft', 'Meta+ArrowLeft'],
+  jumpEdgeRight: ['Ctrl+ArrowRight', 'Meta+ArrowRight'],
   pageDown: ['PageDown'],
   pageUp: ['PageUp'],
   jumpFirst: ['g'],
   jumpLast: ['G'],
-  focusSearch: ['/'],
+  // '/' and the chord every analyst's hands already do. Ctrl+F is worth
+  // taking rather than leaving to the browser: find-in-page can only
+  // see the rows the virtualised grid has in the DOM (invariant #6), so
+  // it answers "not found" on data that is right there. ⌘+F comes with
+  // it, spelled in the dispatcher's pre-gate rather than as a second
+  // binding here — see wireKeymap.
+  focusSearch: ['/', 'Ctrl+f'],
   // No default: `f` is worth more as "filter to the value I'm looking at"
   // (below) than as "focus the first column's filter box", which is a click
   // away and was the less-used of the two. Still bindable in Settings.
@@ -54,10 +85,19 @@ export const DEFAULT_KEYMAP = {
   filterBySelectedCell: ['f'],
   filterBySelectedCellOnly: ['F'],
   clearFilters: ['c'],
+  // A bare z, next to c, and not Ctrl+Z: that one undoes TAGS (the
+  // dispatcher's fixed chord), and tags are evidence while filters are
+  // only where the analyst is looking — two undo stacks, two keys.
+  undoFilterChange: ['z'],
   // Ctrl+A, like everywhere else. The typing guard above the dispatcher
   // keeps it native inside inputs; grouped mode no-ops (the header
   // checkbox is disabled there for the same reason).
   selectAllRows: ['Ctrl+a'],
+  // Ctrl+Shift+U — U for unique. Ctrl+Shift+C was the obvious chord and is
+  // taken: the copy handler reads Shift there as "with headers". Spelled
+  // 'Ctrl+U' because Shift lives in the capital (keySpecFromEvent), and
+  // ⌘ alongside it for the reason focusSearch carries it.
+  copyUniqueValues: ['Ctrl+U', 'Meta+U'],
   openTables: ['t'],
   toggleSidebar: ['`'],
   openTableMenu: ['C'],
@@ -65,20 +105,31 @@ export const DEFAULT_KEYMAP = {
   toggleDetail: ['d'],
   dropGrouping: ['x'],
   saveDefaultLayout: ['L'],
+  // No default key: it replaces a layout, so it should take a choice to
+  // put it on a key. The table menu has it as a button.
+  applyDefaultLayout: [],
   toggleTimeRange: ['r'],
   openTimeRange: ['R'],
+  toggleHistogram: ['h'],
   toggleGrouping: ['X'],
   openFilterSql: ['Q'],
   openJumpTs: ['J', 'a'],
   repeatJumpTs: ['.'],
-  openPluginBundles: ['M'],
+  // Lowercase, and the letter the word starts with. M was chosen when
+  // these were "plugin bundles"; nothing about the surface says M now,
+  // and the profiles manager is a place analysts go often enough for the
+  // key to be worth a home key rather than a shifted one.
+  openPluginBundles: ['p'],
 };
 
 export const ACTION_LABELS = {
-  moveDown: 'Move down', moveUp: 'Move up',
+  moveDown: 'Move the cell cursor down', moveUp: 'Move the cell cursor up',
+  moveLeft: 'Move the cell cursor left', moveRight: 'Move the cell cursor right',
+  jumpEdgeUp: 'Jump to the first row', jumpEdgeDown: 'Jump to the last row',
+  jumpEdgeLeft: 'Jump to the first column', jumpEdgeRight: 'Jump to the last column',
   pageDown: 'Page down', pageUp: 'Page up',
   jumpFirst: 'Jump to first row', jumpLast: 'Jump to last row',
-  focusSearch: 'Focus search box', focusFilter: 'Focus first column filter',
+  focusSearch: 'Focus search box', focusFilter: 'Filter the column under the cursor',
   focusNote: 'Focus note field', openSettings: 'Open settings (keyboard shortcuts, filter syntax)',
   resetColumnWidths: 'Reset all column widths to default',
   autofitColumnWidths: 'Autofit all column widths to content',
@@ -88,21 +139,25 @@ export const ACTION_LABELS = {
   filterBySelectedCell: "Filter by selected cell's value",
   filterBySelectedCellOnly: "Filter by selected cell's value, dropping every other filter",
   clearFilters: 'Clear all filters, search and tag filter',
+  undoFilterChange: 'Undo the last filter change (press again to keep stepping back)',
   selectAllRows: 'Select every row in the current view (same as the header checkbox)',
+  copyUniqueValues: "Copy the unique values of the cursor's column — from the selected rows, else the whole view",
   openTables: 'Open Tables manager',
   toggleSidebar: 'Show/hide the table sidebar',
-  openTableMenu: 'Open the table menu (columns, value dropdowns) — also right-click a tab',
+  openTableMenu: 'Open the table menu (columns, value dropdowns, layout, name & merge) — also right-click a tab → Columns…',
   openSearchAll: 'Search all tables',
   toggleDetail: 'Open/close the detail pane',
   dropGrouping: 'Drop all grouping, restore column order',
   saveDefaultLayout: "Save this column order/visibility as the default for this header set",
+  applyDefaultLayout: "Apply the default saved for this header set to this table's column order/visibility",
   toggleTimeRange: 'Toggle the timeframe filter on/off',
   openTimeRange: 'Open the timeframe filter (set column/range)',
+  toggleHistogram: 'Show/hide the histogram of when the rows in this view happened',
   toggleGrouping: 'Toggle grouping off/on (remembers the last grouping)',
   openFilterSql: 'Open the current filter as a query in the SQL pane',
   openJumpTs: 'Jump to timestamp… (set the moment and column)',
   repeatJumpTs: 'Jump again to the saved timestamp (works across tables)',
-  openPluginBundles: 'Plugin bundles — named plugin sets ("case types") to apply per case',
+  openPluginBundles: 'Profiles — the plugins, boards, watchlist and variables a kind of case carries',
 };
 
 /* Stored keymaps are a merge over the defaults, which means a returning
@@ -117,7 +172,16 @@ export const ACTION_LABELS = {
    over it on every load. */
 export const KEYMAP_VERSION_KEY = 'winnow.keymap.v';
 
-export const KEYMAP_VERSION = 4;
+export const KEYMAP_VERSION = 7;
+
+/* The four spec strings one Ctrl/⌘+F press can produce. keySpecFromEvent
+   spells the plain chord 'Ctrl+f'; ⌘ makes it 'Meta+f', and Shift — or Caps
+   Lock, which is the one that bites — makes e.key 'F'. It is the same chord
+   under the analyst's fingers in all four cases, so the dispatcher matches
+   the set rather than the one spelling the keymap stores, the way the copy
+   handler matches 'c' or 'C'. Declared up here because the v5 migration
+   below has to know the whole set too. */
+const SEARCH_CHORD_SPECS = ['Ctrl+f', 'Ctrl+F', 'Meta+f', 'Meta+F'];
 
 export const KEYMAP_MIGRATIONS = [
   // v1 (2026-08): the column chooser grew into the table menu, and `f`
@@ -165,6 +229,57 @@ export const KEYMAP_MIGRATIONS = [
     if (wasDefault('toggleTimeRange', ['r', 'a'])) map.toggleTimeRange = ['r'];
     if (wasDefault('openTimeRange', ['R', 'A'])) map.openTimeRange = ['R'];
     if (wasDefault('openJumpTs', ['J'])) map.openJumpTs = ['J', 'a'];
+  },
+  // v5 (2026-09): Ctrl+F joins '/' on the search box. Additive, and only
+  // where '/' is still the whole binding — an analyst who moved search
+  // somewhere else keeps what they chose, and loses nothing, since the
+  // pre-gate only claims the chord while focusSearch still holds it.
+  // The second condition is the one this chord needs and the others
+  // didn't: Ctrl+F matched nothing in Winnow until now, so Settings
+  // accepted it for any action, and handing focusSearch the chord would
+  // put the pre-gate in front of a binding someone chose — shadowed with
+  // the chip still sitting in Settings. Where that has happened the
+  // migration does nothing and their binding keeps working, since the
+  // gate is off while focusSearch does not hold the chord.
+  (map) => {
+    const wasDefault = (action, keys) =>
+      JSON.stringify((map[action] || []).slice().sort()) === JSON.stringify(keys.slice().sort());
+    const chordTaken = Object.entries(map).some(([action, keys]) => action !== 'focusSearch'
+      && Array.isArray(keys) && keys.some((k) => SEARCH_CHORD_SPECS.includes(k)));
+    if (!chordTaken && wasDefault('focusSearch', ['/'])) map.focusSearch = ['/', 'Ctrl+f'];
+  },
+  // v6 (2026-09): the profiles manager moves M → p. A REPLACEMENT, not an
+  // alias, so unlike the additive migrations above it has to be sure it
+  // is not stepping on something: `p` was unbound by default, which means
+  // Settings would have accepted it for any action, and handing it to
+  // this one would shadow a binding somebody chose.
+  //
+  // The `else` is not belt-and-braces. A migration edits the STORED map,
+  // and loadKeymap then merges it over the defaults — so declining to
+  // move an action the stored map has no entry for leaves the new
+  // default (`p`) to arrive anyway, beside the `p` the analyst bound to
+  // something else. Writing M back makes the refusal stick. A stored map
+  // always carries every action after one real run (loadKeymap persists
+  // the whole thing), so this only reaches a hand-edited or very old
+  // one — which is exactly the shape that would otherwise collide.
+  (map) => {
+    const wasDefault = (action, keys) =>
+      JSON.stringify((map[action] || []).slice().sort()) === JSON.stringify(keys.slice().sort());
+    const taken = Object.entries(map).some(([action, keys]) => action !== 'openPluginBundles'
+      && Array.isArray(keys) && keys.includes('p'));
+    if (!taken && wasDefault('openPluginBundles', ['M'])) map.openPluginBundles = ['p'];
+    else if (taken && !map.openPluginBundles) map.openPluginBundles = ['M'];
+  },
+  // v7 (2026-10): undoFilterChange arrives on `z`. A new action needs no
+  // migration to get its default — but `z` was unbound until now, so
+  // Settings would have accepted it for anything, and the default landing
+  // beside that would put two actions on one key (the earlier one in the
+  // list wins, with both chips showing). Where it is taken, the new action
+  // starts with no key; the analyst's binding is left as it was.
+  (map) => {
+    const taken = Object.entries(map).some(([action, keys]) => action !== 'undoFilterChange'
+      && Array.isArray(keys) && keys.includes('z'));
+    if (taken && !map.undoFilterChange) map.undoFilterChange = [];
   },
 ];
 
@@ -230,6 +345,16 @@ export function keySpecFromEvent(e) {
   return mods + e.key;
 }
 
+/* A stored binding as an analyst reads it. 'Ctrl+U' is how
+   keySpecFromEvent spells Ctrl+Shift+U — the Shift lives in the capital,
+   the way 'G' is Shift+g — and beside a modifier that reads as plain
+   Ctrl+U, which is a different chord. So a capital letter after a
+   modifier gets its Shift spelled out; everything else is shown as is. */
+export function keyLabel(spec) {
+  const m = /^((?:Ctrl\+|Alt\+|Meta\+)+)([A-Z])$/.exec(spec || '');
+  return m ? `${m[1]}Shift+${m[2]}` : (spec || '');
+}
+
 export function matchAction(e) {
   const spec = keySpecFromEvent(e);
   if (spec == null) return null;
@@ -250,6 +375,13 @@ export function matchAction(e) {
   return null;
 }
 
+/* Whether the search box still owns the chord. It is dispatched by hand,
+   above the typing guard where matchAction never looks — but not
+   unconditionally: take the binding off focusSearch in Settings and the
+   browser's find-in-page comes back, which is what keeps the chip in
+   Settings a statement about the app rather than decoration. */
+const searchChordBound = () => (S.keymap.focusSearch || []).some((k) => SEARCH_CHORD_SPECS.includes(k));
+
 /* Returns a human-readable description of what already owns `key`, or null
    if it's free. Checked against other keymap actions, tag hotkeys (which
    can change independently at any time via the tag editor), Escape, and
@@ -264,11 +396,94 @@ export function findKeyConflict(key, currentAction) {
   if (/^(Ctrl|Meta)\+(c|C)$/.test(key)) return 'the copy shortcut';
   if (/^(Ctrl|Meta)\+z$/.test(key)) return 'the tag-undo shortcut';
   if (/^Alt\+[0-9]$/.test(key)) return 'tab switching (Alt+1–0)';
+  // The search chord is dispatched before matchAction and in every
+  // spelling of itself, so binding any of the four to another action
+  // would silently do nothing — including the two the keymap has no way
+  // to store on focusSearch ('Meta+f' and 'Meta+F'). Answered here rather
+  // than left to the loop below, which only knows the one spelling
+  // focusSearch actually holds.
+  if (currentAction !== 'focusSearch' && SEARCH_CHORD_SPECS.includes(key) && searchChordBound()) {
+    return ACTION_LABELS.focusSearch;
+  }
   for (const [action, keys] of Object.entries(S.keymap)) {
     if (action !== currentAction && keys.includes(key)) return ACTION_LABELS[action] || action;
   }
   return null;
 }
+
+/* Every key the map above does not hold, as Settings → Keyboard shortcuts
+   lists them under the rebindable ones, grouped by where they work. Each
+   is dispatched by hand — in wireKeymap ahead of matchAction, or by the
+   module that owns the box, pane or menu it acts in (filters.js,
+   columns.js, search.js, sqlassist.js, plugins.js, ui.js, grid.js,
+   settings.js, splash.js) — and nothing ties a hand-written handler to
+   Settings but this list, which is how Ctrl+Enter, Ctrl+Space, the menu
+   arrows and the modified clicks all went unlisted there. A new one gets
+   its line here in the same change, and in the "Fixed keys" table of
+   docs/wiki/Settings-and-shortcuts.md. Keys are spelled for reading
+   (`Ctrl/⌘ + C`), not as keymap specs. */
+export const FIXED_KEYS = [
+  ['In the grid', [
+    ['Shift + arrow, PgUp, PgDn', 'Grow the cell selection, the way dragging does'],
+    ['Ctrl/⌘ + Shift + arrow', 'Grow it all the way to the first/last row or column'],
+    ['Space', 'Pick every row the cell selection covers — or let them all go, if they are already picked'],
+    ['Shift + Space', 'Turn the cell selection into picked rows, for tagging'],
+    ['1 – 9', 'Toggle the tag with that hotkey on the selection'],
+    ['Shift + 1 – 9', 'Apply that tag to every row in the current view — or, when every row already has it, remove it from them all (asks first)'],
+    ['Ctrl/⌘ + C', 'Copy the selected cells, or the picked rows (the cursor row if none are picked), as tab-separated text'],
+    ['Ctrl/⌘ + Shift + C', 'The same, with a header row'],
+    ['Ctrl/⌘ + Z', 'Undo the last tag applied or removed (repeat to keep stepping back)'],
+    ['Esc', 'Let go of the picked rows and the cell selection'],
+  ]],
+  ['Anywhere in a case', [
+    ['Alt + 1 – 0', 'Switch tabs — 1 is the table you were last in, 2 – 0 the page tabs in strip order'],
+    ['Esc', 'Close a dialog or menu, or leave the box you are typing in'],
+    ['The key that opened it', 'Close a dialog again — ? Settings, t Tables, s Search tables, C the table menu, e the Filter builder, R the timeframe, J jump to timestamp, p Profiles'],
+    ['Any key or click', 'Skip the launch animation'],
+  ]],
+  ['Search and filter boxes', [
+    ['Enter', 'In the search box or a column’s filter box: apply it now and go back to the grid'],
+    ['Esc', 'In the search box or a column’s filter box: clear it (the search box also stops a search still running)'],
+    ['Enter', 'In the value picker’s Find a value… box: apply the ticked values'],
+    ['Enter', 'In + filter a column…: open the first column that matches'],
+    ['Ctrl/⌘ + Enter', 'In Search tables: run the search (Enter in a term box does too)'],
+  ]],
+  ['SQL pane', [
+    ['Ctrl/⌘ + Enter', 'Run the query'],
+    ['Ctrl + Space', 'Open autocomplete — it also opens by itself after two characters of a word'],
+    ['↑ / ↓, Tab or Enter, Esc', 'In autocomplete: move, accept the suggestion, close it'],
+    ['1 – 9', 'Toggle that tag on the selected result rows, when the result names real rows'],
+    ['Ctrl/⌘ + C', 'Copy the selected result rows as tab-separated text, with a header row'],
+    ['Esc', 'Clear the result selection'],
+    ['Ctrl/⌘-click a row', 'Add it to the result selection, or take it out'],
+    ['Shift-click a row', 'Select every result row from the last one clicked to it'],
+  ]],
+  ['Timeline', [
+    ['↓ / ↑, j / k, PgDn / PgUp, g / G', 'Move the selected line — the grid’s movement keys, so a rebinding above moves it too'],
+    ['Enter', 'Open the selected line’s row in its table'],
+    ['Double-click a line', 'Open its row in its table (a single click selects it)'],
+    ['Esc', 'Let go of the selected line'],
+  ]],
+  ['Menus and dialogs', [
+    ['↑ / ↓', 'Move through a menu’s items (from outside it, step in at the first or last)'],
+    ['→ / ←', 'Open a submenu / close it again'],
+    ['Esc', 'Close the menu, keeping whatever was selected underneath it'],
+    ['Menu key, Shift + F10', 'On a focused tab or sidebar table: open its menu'],
+    ['Enter', 'In a dialog’s name or value box: its main button (OK, Create, Save…)'],
+    ['↑ / ↓, Home / End', 'In Settings’ section list: show the next or previous section, or the first or last'],
+  ]],
+  ['With the mouse', [
+    ['Shift-click a cell', 'Grow the cell selection to it'],
+    ['Ctrl/⌘-click a cell', 'Pick that row, or drop it'],
+    ['Shift-click a row number', 'Pick every row from the last row clicked to this one — Ctrl/⌘ + Shift-click drops them instead'],
+    ['Shift-click a header', 'Add that column to the sort, or flip its direction if it is in the sort already'],
+    ['Alt-click a header', 'Pin or unpin that column'],
+    ['Right-click a row', 'Tag it, filter to or exclude that cell’s value, copy'],
+    ['Right-click a header', 'Column options — stack or copy its values, derive a column'],
+    ['Right-click a tab', 'Close, rename, merge or remove it, or Columns… for the table menu'],
+    ['Right-click a tag chip', 'Filter to that tag, or exclude the rows carrying it'],
+  ]],
+];
 
 /* The shortcuts that still mean something when the grid isn't the active
    tab — everything else moves a cursor, edits the grid's view spec or
@@ -280,23 +495,53 @@ export function findKeyConflict(key, currentAction) {
 export const TAB_AGNOSTIC_ACTIONS = new Set(['openSettings', 'openTables', 'openSearchAll', 'openPluginBundles', 'toggleSidebar']);
 
 export const ACTION_HANDLERS = {
-  moveDown: (e, pageRows) => moveCursor(S.cursor + 1, e.shiftKey),
-  moveUp: (e, pageRows) => moveCursor(S.cursor - 1, e.shiftKey),
-  pageDown: (e, pageRows) => moveCursor(S.cursor + pageRows, e.shiftKey),
-  pageUp: (e, pageRows) => moveCursor(S.cursor - pageRows, e.shiftKey),
-  jumpFirst: () => moveCursor(0, false),
-  jumpLast: () => moveCursor(Math.max(0, gridRowCount() - 1), false),
+  /* Every movement goes through moveCell, so the active cell and the row
+     cursor can never drift apart. Shift extends the rectangle from the
+     anchor (what a mouse drag does); Ctrl jumps to the far end. Shift and
+     Ctrl together do both, which is how Ctrl+Shift+Arrow gets to be "grab
+     everything from here to the edge" without a binding of its own. */
+  moveDown: (e) => moveCell({ dr: 1, extend: e.shiftKey }),
+  moveUp: (e) => moveCell({ dr: -1, extend: e.shiftKey }),
+  moveLeft: (e) => moveCell({ dc: -1, extend: e.shiftKey }),
+  moveRight: (e) => moveCell({ dc: 1, extend: e.shiftKey }),
+  jumpEdgeUp: (e) => moveCell({ dr: -1, edge: true, extend: e.shiftKey }),
+  jumpEdgeDown: (e) => moveCell({ dr: 1, edge: true, extend: e.shiftKey }),
+  jumpEdgeLeft: (e) => moveCell({ dc: -1, edge: true, extend: e.shiftKey }),
+  jumpEdgeRight: (e) => moveCell({ dc: 1, edge: true, extend: e.shiftKey }),
+  pageDown: (e, pageRows) => moveCell({ dr: 1, rows: pageRows, extend: e.shiftKey }),
+  pageUp: (e, pageRows) => moveCell({ dr: -1, rows: pageRows, extend: e.shiftKey }),
+  /* No e.shiftKey here, unlike every handler above: these two are bound
+     to PRINTABLE keys, and keySpecFromEvent never prefixes Shift for one
+     — 'G' IS Shift+g. Reading e.shiftKey therefore made jumpLast extend
+     ALWAYS and never jump, selecting from the cursor to the last row of
+     the view; a tag hotkey pressed after it would have hit every row in
+     between. Ctrl+Shift+ArrowDown is the extending form, and it can read
+     the modifier because its binding is a non-printable key. */
+  jumpFirst: () => moveCell({ dr: -1, edge: true }),
+  jumpLast: () => moveCell({ dr: 1, edge: true }),
   focusSearch: () => expandSearch(),
-  focusFilter: () => { const i = document.querySelector('.fcell input'); if (i) { i.focus(); i.select(); } },
+  // "Let me type a filter" — which under the filter bar means revealing a
+  // box before there is one to focus. It goes through openColumnFilter, the
+  // one place that knows how to reveal, scroll to and focus a column's box,
+  // so the key means the same thing on both surfaces. It aims at the column
+  // the cell cursor is in rather than the first on screen: pressing it with
+  // a cell selected in the seventh column and landing in the first one's
+  // box is how it used to behave and it was never what anyone wanted.
+  focusFilter: () => {
+    const cols = visibleCols();
+    const name = cols[(S.cellRange && S.cellRange.c0) || 0] || cols[0];
+    if (name) openColumnFilter(name);
+  },
   focusNote: () => { if (!$('detail').hidden) $('noteInput').focus(); },
   openSettings: () => openSettings(),
   resetColumnWidths: () => resetAllColumnWidths(),
   autofitColumnWidths: () => autofitAllColumnWidths(),
+  copyUniqueValues: () => copyUniqueValuesShortcut(),
   selectAllRows: () => {
     if (S.groupByCols.length || !S.view || !S.view.row_count) return;
+    selSnapshot();
     selSetAll();
-    S.cellRange = null; // same mutual exclusion the header checkbox applies
-    S.cellAnchor = null;
+    clearCellSelection();
     render();
   },
   cyclePrevFilter: () => cycleSavedFilter(-1),
@@ -312,6 +557,7 @@ export const ACTION_HANDLERS = {
   filterBySelectedCell: () => filterBySelectedCell(),
   filterBySelectedCellOnly: () => filterBySelectedCell({ only: true }),
   clearFilters: () => clearAllFilters(),
+  undoFilterChange: () => undoFilterChange(),
   openTables: () => openTablesManager(),
   toggleSidebar: () => setSidebarVisible($('sidebar').hidden),
   openTableMenu: () => openTableMenu(),
@@ -319,8 +565,10 @@ export const ACTION_HANDLERS = {
   openSearchAll: () => openSearchAllModal(),
   dropGrouping: () => { if (S.groupByCols.length) dropGrouping(); },
   saveDefaultLayout: () => saveDefaultLayout(),
+  applyDefaultLayout: () => applyDefaultLayout(),
   toggleTimeRange: () => toggleTimeRange(),
   openTimeRange: () => openTimeRangeModal(),
+  toggleHistogram: () => toggleHistogram(),
   toggleGrouping: () => toggleGrouping(),
   openFilterSql: () => openFilterSqlTab(),
   openJumpTs: () => openJumpTsModal(),
@@ -336,10 +584,45 @@ export function wireKeymap() {
 document.addEventListener('keydown', (e) => {
   const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName);
   if (e.key === 'Escape') {
-    if (!$('modal').hidden) { $('modal').hidden = true; return; }
-    if (typing) { e.target.blur(); $('body').focus(); return; }
+    // A confirm/prompt overlay owns this Escape: its capture-phase
+    // listener has already closed it (so the overlay is gone from the DOM
+    // by the time this bubble listener runs) and called preventDefault,
+    // which is the trace it leaves. The modal underneath must not close
+    // too, or a declined confirm inside Saved filters would also fire the
+    // return-to-Settings hook.
+    if (e.defaultPrevented) return;
+    // closeModal, not a bare hide: whatever armed itself for the close
+    // (a return-to-Settings hook, the keybinding capture) has to hear it.
+    if (!$('modal').hidden) { closeModal(); return; }
+    if (typing) { e.target.blur(); (S.activeTab === 'timeline' ? $('timelineBody') : $('body')).focus(); return; }
     if (S.activeTab === 'sql' && sqlClearSelection()) return;
-    selClear(); render(); return;
+    if (S.activeTab === 'timeline' && clearTimelineSelection()) return;
+    // Escape lets go of everything picked — rows and the cell range — and
+    // the chip's Undo brings it back if it was a slip.
+    if (selCount() || S.cellRange) selSnapshot();
+    selClear(); clearCellSelection(); S.selHidden = 0; render(); return;
+  }
+  // Space toggles the rows the cell selection covers: every row of a
+  // multi-row rectangle, or the cursor row when there is no rectangle to
+  // speak of. Shift+Space picks those rows without toggling and spends
+  // the rectangle. Neither is in the rebindable map: a bare space is what
+  // the map can't spell, and the grid is the only place it means anything.
+  // Only when the grid itself has focus: a focused button, menu item or a
+  // confirm dialog's OK gets its native Space, not a row toggle.
+  const gridFocused = e.target === document.body || e.target === $('body') || $('body').contains(e.target);
+  if (e.key === ' ' && S.activeTab === 'grid' && !typing && gridFocused && $('modal').hidden && !document.querySelector('.confirm-overlay')) {
+    e.preventDefault();
+    /* Auto-repeat is never what a toggle means. Hold the key and the OS
+       sends a press every ~30ms, flipping the same rows on and off until
+       it comes up and leaving the result to whichever repeat landed
+       last. That was merely pointless while Space was one row; it is
+       worth refusing now that Space can mean a rectangle reaching to the
+       end of the view, where every repeat walks every position in it.
+       preventDefault stays above this, or a held Space scrolls the page. */
+    if (e.repeat) return;
+    if (e.shiftKey) { if (!selectCellRangeRows()) toggleCursorRow(); }
+    else if (!toggleCellRangeRows()) toggleCursorRow();
+    return;
   }
   /* Everything below acts on the case UI — the grid's cursor, its tabs, its
      modals (Tables, Search all, the timeframe dialog). On the home screen
@@ -360,12 +643,54 @@ document.addEventListener('keydown', (e) => {
      that's waiting on an answer isn't what anyone means. Ahead of
      matchAction and the tag hotkeys below because neither of those looks
      at modifiers — '0' is bound to resetColumnWidths and 1–9 are tag
-     hotkeys, and Alt+digit is meant for neither. (Shift+digit was the obvious row and is taken: it applies a
-     tag to the whole view.) */
+     hotkeys, and Alt+digit is meant for neither. (Shift+digit was the obvious row and is taken: it
+     tags the whole view, or untags it when the whole view already
+     carries that tag.) */
   if (e.altKey && !e.ctrlKey && !e.metaKey && /^[0-9]$/.test(digit)) {
     if (!$('modal').hidden || document.querySelector('.confirm-overlay')) return;
     e.preventDefault();
     activateTabSlot(digit);
+    return;
+  }
+
+  /* Ctrl/⌘+F — the find chord, taken rather than left to the browser.
+     Chromium's find-in-page searches the DOM, and invariant #6 keeps only
+     the visible window of rows in it, so on a two-million-row table it
+     reports "not found" for a value that is certainly there. A wrong
+     answer is worse than no answer in a tool people write reports from,
+     so Winnow answers instead and preventDefault stops the native bar.
+
+     Above the `typing` guard for the same reason Alt+digit is: the search
+     box is exactly what you want from a filter cell or the SQL editor,
+     and a chord that gave up there would hand back the bar that lies.
+     Below the $('app').hidden gate, though — the home screen has no
+     search box, and it is small enough to be entirely in the DOM, which
+     is the one place find-in-page tells the truth.
+
+     The match is the copy handler's shape — (ctrl || meta) on 'f' or 'F',
+     so ⌘ arrives here rather than as a second binding, and Caps Lock
+     (which makes e.key 'F') still opens the box — plus one term neither
+     the copy nor the undo handler has: `!e.altKey`. Ctrl+Alt is AltGr on
+     a European layout, and AltGr+F there is a character somebody is
+     trying to type, not a chord.
+
+     A dialog keeps its own find. #modal and a spawned confirm overlay own
+     the keyboard (the gate below says so for every other key, and Ctrl+C
+     already falls through to the native copy there), and a dialog's text
+     really is all in the DOM. A dropdown menu is neither of those and is
+     not a dialog — it is transient chrome that any other interaction
+     dismisses — so it is dismissed and the chord taken, rather than left
+     floating over a search box that just opened behind it.
+
+     Off the grid, switch first: syncTabChrome hides the whole toolbar on
+     a page tab, so focusing #search there would put the caret in a
+     display:none input and read as a keystroke that did nothing. */
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === 'f' || e.key === 'F') && searchChordBound()) {
+    if (!$('modal').hidden || document.querySelector('.confirm-overlay')) return;
+    e.preventDefault();
+    closeMenu();
+    if (S.activeTab !== 'grid') showGridTab();
+    expandSearch();
     return;
   }
 
@@ -416,6 +741,12 @@ document.addEventListener('keydown', (e) => {
 
   const pageRows = Math.floor(($('body').clientHeight - headH()) / ROW_H) - 1;
   const action = matchAction(e);
+  // The Timeline's list takes the grid's movement keys (and Enter) for
+  // its selected line, from the same keymap.
+  if (S.activeTab === 'timeline' && timelineKey(e, action)) {
+    e.preventDefault();
+    return;
+  }
   if (action && ACTION_HANDLERS[action] && (S.activeTab === 'grid' || TAB_AGNOSTIC_ACTIONS.has(action))) {
     e.preventDefault();
     ACTION_HANDLERS[action](e, pageRows);
@@ -433,6 +764,12 @@ document.addEventListener('keydown', (e) => {
   if (/^[1-9]$/.test(digit) && S.activeTab === 'sql' && sqlSelectionCount()) {
     const t = S.tags.find((x) => x.hotkey === digit);
     if (t) { e.preventDefault(); sqlTagHotkey(t, () => applySqlTabToEditor()); }
+  }
+  // And the Timeline's selected line, the row its detail pane shows. One
+  // line, so a key toggles it, as the per-row key does in the grid.
+  if (/^[1-9]$/.test(digit) && S.activeTab === 'timeline' && S.timeline.sel && !e.shiftKey) {
+    const t = S.tags.find((x) => x.hotkey === digit);
+    if (t) { e.preventDefault(); tagTimelineLine(t); }
   }
 });
 }

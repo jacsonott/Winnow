@@ -14,6 +14,14 @@ from winnow import defaults
 from winnow.defaults import DefaultsError
 
 
+def _shipped():
+    """The shipped filters, refusing an empty list: the checks below loop
+    over it, and a loop over no filters passes whatever is in the file."""
+    filters = defaults.filters()["filters"]
+    assert filters, "defaults/filters.json shipped no filters, so there was nothing to check"
+    return filters
+
+
 def _table_for(store, write_csv, cols, rows, name):
     all_rows = [list(cols)] + [[r.get(c, "") for c in cols] for r in rows]
     return store.ingest_csv(write_csv(all_rows, name), name=name, build_fts=False)["id"]
@@ -32,12 +40,12 @@ def _apply(store, source_id, payload):
 
 def test_every_shipped_filter_compiles_against_its_header_set(store, write_csv):
     tables = {}
-    for name, cols, payload in defaults.filters()["filters"]:
+    for name, cols, payload in _shipped():
         key = tuple(cols)
         if key not in tables:
             tables[key] = _table_for(store, write_csv, cols, [{}], f"t{len(tables)}.csv")
         view = _apply(store, tables[key], payload)   # raises on a bad tree
-        assert view["row_count"] >= 0
+        assert view["row_count"] in (0, 1), name     # the table has one row
 
 
 def test_seeded_filters_bind_to_the_shipped_header_sets():
@@ -50,7 +58,7 @@ def test_seeded_filters_bind_to_the_shipped_header_sets():
     wrong, which is why it is checked here as well as in the loader."""
     known = {tuple(sorted(c.strip().lower() for c in cols))
              for _, cols in defaults.headers()["nicknames"]}
-    for name, cols, _ in defaults.filters()["filters"]:
+    for name, cols, _ in _shipped():
         assert tuple(sorted(c.strip().lower() for c in cols)) in known, name
 
 
@@ -164,10 +172,11 @@ def test_every_shipped_tree_root_is_a_group():
     gate reads it as "no filter" — the v1 seeds shipped eight of those, so
     'Sysmon present?' et al showed as applied while filtering nothing.
     Roots must be groups, forever."""
-    for name, _, payload in defaults.filters()["filters"]:
-        tree = payload.get("filter_tree")
-        if tree:
-            assert tree["type"] == "group", name
+    trees = [(name, payload["filter_tree"]) for name, _, payload in _shipped()
+             if payload.get("filter_tree")]
+    assert trees, "no shipped filter has a tree, so there was nothing to check"
+    for name, tree in trees:
+        assert tree["type"] == "group", name
 
 
 def test_network_share_access_actually_filters(store, write_csv):

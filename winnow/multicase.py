@@ -21,18 +21,27 @@ actively writing (WAL) reads fine through `mode=ro`, and SQLite attaches
 at most 10 databases at once (`MAX_ATTACHED=10`) — which is why the
 cross-case query path attaches in batches and everything else uses one
 connection per case.
+
+Opened through `sqlite_peek_uri`, not plain `mode=ro`: on a case nothing
+has open, `mode=ro` creates a -wal/-shm pair beside it that a read-only
+connection can never remove, so every cross-case search left one beside
+every case it read. A case another Winnow has open has its -wal, and still
+reads through plain `mode=ro`, as above.
 """
 
 from __future__ import annotations
 
 import contextlib
+import heapq
+import itertools
 import json
 import os
 import re
 import sqlite3
-from typing import Any, Iterator
+from typing import Iterator
 
-from winnow.store import q, read_only_authorizer
+from winnow.paths import sqlite_peek_uri
+from winnow.store import _esc_like, _ts_normalize, q, read_only_authorizer
 
 # `v` is already attached to the writable Store's connection; leave room.
 MAX_ATTACHED = 10
@@ -62,8 +71,11 @@ class CaseReader:
         self.name = name or os.path.splitext(os.path.basename(self.path))[0]
         if not os.path.isfile(self.path):
             raise NotACaseFile(f"No case file at {self.path}")
-        self.db = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, check_same_thread=False)
+        self.db = sqlite3.connect(sqlite_peek_uri(self.path), uri=True, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
+        # The timeline orders and windows by this, as the case's own
+        # timeframe filter and Timeline do. A function, not a write.
+        self.db.create_function("TS_NORMALIZE", 1, _ts_normalize, deterministic=True)
         try:
             names = {r[0] for r in self.db.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'")}
@@ -140,6 +152,10 @@ class CaseReader:
 
         LIKE, not the FTS index: a visiting reader must not depend on
         whether the other case ever built one, and must never build it.
+        Escaped, because these are literal values: an IOC is very often an
+        account or a file name with `_` in it, and unescaped `_` is LIKE's
+        any-character — `svc_backup` reported a host whose only account
+        was `svcXbackup`.
         """
         wanted = [v for v in (values or []) if str(v).strip()]
         if not wanted:
@@ -152,8 +168,8 @@ class CaseReader:
             if not cols:
                 continue
             blob = " || '\\u0001' || ".join(f"COALESCE({q(c)}, '')" for c in cols)
-            where = " OR ".join(f"{blob} LIKE ?" for _ in wanted)
-            params = [f"%{v}%" for v in wanted]
+            where = " OR ".join(f"{blob} LIKE ? ESCAPE '\\'" for _ in wanted)
+            params = [f"%{_esc_like(str(v))}%" for v in wanted]
             sel = "rid"
             if columns_per_row:
                 sel += ", " + ", ".join(q(c) for c in cols[:columns_per_row])
@@ -176,40 +192,81 @@ class CaseReader:
 
     # ------------------------------------------------------------- timeline
 
-    def timeline_rows(self, *, ts_column: dict[int, str] | None = None,
-                      start: str = "", end: str = "", limit: int = 5000) -> list[dict]:
-        """Rows from this case as timeline entries: (when, case, source,
-        rid, summary). `ts_column` picks the timestamp column per source id;
-        without one, the first datetime column is used and a source with
-        none is skipped."""
-        out: list[dict] = []
+    def timeline_batches(self, *, ts_column: dict[int, str] | None = None,
+                         start: str = "", end: str = "", limit: int = 5000) -> Iterator[list[dict]]:
+        """Per source, its first `limit + 1` rows in time order (see
+        `_timeline_key`) — the most any one source can contribute to a
+        timeline of `limit` rows, plus one to tell whether it ran out.
+        `ts_column` picks the timestamp column per source id; without one,
+        the first datetime column is used and a source with none is
+        skipped.
+
+        Every source gets the full allowance. Each used to be read with
+        `LIMIT limit - rows so far` in table order, so the first table
+        could spend the whole limit — on its LATEST rows, if another
+        table's were earlier — and the rest were never read.
+
+        Times are compared and ordered as TS_NORMALIZE sees them, which is
+        what the case's own timeframe filter and Timeline do: as raw text,
+        `1/5/2024` sorted before `12/31/2023` and an ISO window compared
+        against `M/D/YYYY` kept and dropped the wrong rows. A value that
+        doesn't normalise can't be placed in time, so it isn't."""
+        start_norm = _ts_normalize(start) if start else None
+        end_norm = _ts_normalize(end) if end else None
         for src in self.sources():
-            if len(out) >= limit:
-                break
             col = (ts_column or {}).get(src["id"]) or next(iter(self.datetime_columns(src)), None)
             if not col or col not in src["columns"]:
                 continue
             others = [c for c in src["columns"] if c != col][:4]
             sel = ", ".join(q(c) for c in [col] + others)
-            where, params = [f"{q(col)} <> ''"], []
-            if start:
-                where.append(f"{q(col)} >= ?"); params.append(start)
-            if end:
-                where.append(f"{q(col)} <= ?"); params.append(end)
+            norm = f"TS_NORMALIZE({q(col)})"
+            where, params = [f"{norm} IS NOT NULL"], []
+            if start_norm is not None:
+                where.append(f"{norm} >= ?"); params.append(start_norm)
+            if end_norm is not None:
+                where.append(f"{norm} <= ?"); params.append(end_norm)
             try:
                 rows = self.db.execute(
-                    f"SELECT rid, {sel} FROM {q(src['table_name'])} WHERE {' AND '.join(where)} "
-                    f"ORDER BY {q(col)} LIMIT {int(limit - len(out))}", params).fetchall()
+                    f"SELECT rid, {norm} AS _ts, {sel} FROM {q(src['table_name'])} "
+                    f"WHERE {' AND '.join(where)} "
+                    f"ORDER BY _ts, {q(col)}, rid LIMIT {int(limit) + 1}", params).fetchall()
             except sqlite3.Error:
                 continue
-            for r in rows:
-                out.append({
-                    "when": r[col], "case": self.name, "path": self.path,
-                    "source_id": src["id"], "source": src["name"], "rid": r["rid"],
-                    "column": col,
-                    "summary": " · ".join(str(r[c]) for c in others if r[c] not in (None, "")),
-                })
-        return out
+            batch = [{
+                "when": r[col], "case": self.name, "path": self.path,
+                "source_id": src["id"], "source": src["name"], "rid": r["rid"],
+                "column": col,
+                "summary": " · ".join(str(r[c]) for c in others if r[c] not in (None, "")),
+                "_ts": r["_ts"],
+            } for r in rows]
+            batch.sort(key=_timeline_key)     # already is; the merge below relies on it
+            yield batch
+
+    def timeline_rows(self, *, ts_column: dict[int, str] | None = None,
+                      start: str = "", end: str = "", limit: int = 5000) -> list[dict]:
+        """This case's first `limit` rows in time order, across every
+        source: (when, case, source, rid, summary)."""
+        top: list[dict] = []
+        for batch in self.timeline_batches(ts_column=ts_column, start=start, end=end, limit=limit):
+            top = _first_in_time(top, batch, limit)
+        return [_public(r) for r in top]
+
+
+def _timeline_key(row: dict) -> tuple:
+    """Time order: the normalised instant, then the raw text — which keeps
+    two events inside one second in their sub-second order, since
+    TS_NORMALIZE drops the fraction — then a fixed tie-break."""
+    return (row["_ts"], row["when"] or "", row["case"], row["source_id"], row["rid"])
+
+
+def _first_in_time(top: list[dict], batch: list[dict], n: int) -> list[dict]:
+    """The first `n` of two time-ordered lists. Merged as they arrive so a
+    timeline over many sources holds about `n` rows, not every source's."""
+    return list(itertools.islice(heapq.merge(top, batch, key=_timeline_key), n))
+
+
+def _public(row: dict) -> dict:
+    return {k: v for k, v in row.items() if k != "_ts"}
 
 
 @contextlib.contextmanager
@@ -282,11 +339,12 @@ def query_across(paths: list[str], sql: str, *, limit: int = 5000,
     """Run ONE read-only SELECT across several cases, each attached under
     `c1`, `c2`, … in the order given.
 
-    A fresh in-memory connection with the cases attached `mode=ro`, so the
-    query cannot reach the open case's writer connection, cannot write
-    anywhere, and disappears with the request. ATTACH/DETACH/PRAGMA/VACUUM
-    are refused for the same reason Store.run_sql refuses them: the caller
-    picks which cases are visible, not the SQL.
+    A fresh in-memory connection with the cases attached read-only
+    (sqlite_peek_uri), so the query cannot reach the open case's writer
+    connection, cannot write anywhere, and disappears with the request.
+    ATTACH/DETACH/PRAGMA/VACUUM are refused for the same reason
+    Store.run_sql refuses them: the caller picks which cases are visible,
+    not the SQL.
     """
     if not paths:
         raise ValueError("Pick at least one case")
@@ -302,11 +360,17 @@ def query_across(paths: list[str], sql: str, *, limit: int = 5000,
 
     with open_cases(paths, names) as readers:      # validates each is a case first
         aliases = [f"c{i + 1}" for i in range(len(readers))]
-        conn = sqlite3.connect(":memory:")
+        # uri=True although the main database is no file at all: it is
+        # the connection's flag that makes SQLite read an ATTACHed name as
+        # a URI. Whether that is also on by default is a compile option
+        # (SQLITE_USE_URI) — the Linux SQLite CI runs on has it, the one a
+        # Windows Python bundles need not — and without it the ATTACH
+        # below looks for a file literally named "file:...?mode=ro".
+        conn = sqlite3.connect(":memory:", uri=True)
         try:
             conn.row_factory = sqlite3.Row
             for alias, r in zip(aliases, readers):
-                conn.execute(f"ATTACH DATABASE ? AS {alias}", (f"file:{r.path}?mode=ro",))
+                conn.execute(f"ATTACH DATABASE ? AS {alias}", (sqlite_peek_uri(r.path),))
             # After the attaches, so they are still allowed: from here the
             # connection can only read. The main database here is :memory:
             # and therefore writable, so the keyword scan above was the only
@@ -363,26 +427,32 @@ def sweep_values(paths: list[str], values: list[str], *, limit_per_case: int = 2
 def timeline_across(paths: list[str], *, start: str = "", end: str = "",
                     limit: int = 5000, ts_columns: dict[str, dict[int, str]] | None = None,
                     names: dict[str, str] | None = None) -> dict:
-    """One timeline over several cases, sorted by the timestamp text.
+    """One timeline over several cases, in time order.
 
-    Sorted in Python over each case's already-ordered rows rather than in
-    SQL: the values are the canonical "YYYY-MM-DD HH:MM:SS[.ffffff]" shape
-    (timeparse's whole point), so lexicographic order IS chronological, and
-    this way the case count is not capped by SQLite's attach limit.
+    Merged in Python over each source's already-ordered rows rather than
+    in SQL, so the case count is not capped by SQLite's attach limit and
+    one reader is open at a time. Every source offers its own first
+    `limit + 1` rows and the merge keeps the first `limit + 1` of all of
+    them, so the rows are the true first `limit` and `truncated` is true
+    exactly when there were more. `total_seen` counts the rows read to get
+    there: a lower bound on the total, which is how the pane shows it
+    ("N of M+").
 
     Read-only by construction, and that is the design: tags and notes live
     in the case that owns the row, so the way to act on a hit is to open it
     in its own case.
     """
-    rows: list[dict] = []
+    top: list[dict] = []
+    seen = 0
     errors = []
     for p in paths:
         try:
             with CaseReader(p, (names or {}).get(p)) as r:
-                rows.extend(r.timeline_rows(
-                    ts_column=(ts_columns or {}).get(p), start=start, end=end, limit=limit))
+                for batch in r.timeline_batches(ts_column=(ts_columns or {}).get(p),
+                                                start=start, end=end, limit=limit):
+                    seen += len(batch)
+                    top = _first_in_time(top, batch, limit + 1)
         except (NotACaseFile, sqlite3.Error) as e:
             errors.append({"path": p, "error": str(e)})
-    rows.sort(key=lambda x: (x["when"] or "", x["case"], x["source_id"], x["rid"]))
-    return {"rows": rows[:limit], "truncated": len(rows) > limit,
-            "total_seen": len(rows), "errors": errors}
+    return {"rows": [_public(r) for r in top[:limit]], "truncated": len(top) > limit,
+            "total_seen": seen, "errors": errors}

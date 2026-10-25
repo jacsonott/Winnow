@@ -6,12 +6,13 @@ import { $, api, debounce, dragHas, el, post, toast } from './core.js';
 import { maybeOfferAssociation } from './assoc.js';
 import { openFolderBrowser } from './home.js';
 import { startJobsPoll, uploadWithProgress } from './jobs.js';
-import { ARCHIVE_IMPORT_EXTENSIONS, PLASO_IMPORT_EXTENSIONS, RECOGNIZED_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, extOf, importKindFor, openImportPreview, openJsonImportPreview } from './merge.js';
+import { ARCHIVE_IMPORT_EXTENSIONS, IIS_FORMAT_LABELS, IIS_IMPORT_TYPE, KV_PROBE_BYTES, PLASO_IMPORT_EXTENSIONS, RECOGNIZED_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, extOf, iisLogFormat, importKindFor, kvCandidate, looksLikeKvLog } from './merge.js';
 import { renderPluginTabs, renderPluginPanelButtons } from './plugins.js';
 import { fmtBytes } from './tables.js';
 import { loadSources } from './sources.js';
 import { S } from './state.js';
-import { confirmDialog, modal, promptDialog } from './ui.js';
+import { tableMenuSeg } from './timeframe.js';
+import { confirmDialog, modal, oneAtATime, promptDialog, sideRail, sideRailMatch } from './ui.js';
 
 /* ------------------------------------------------------------- plugins */
 
@@ -25,10 +26,13 @@ export async function loadPlugins() {
     S.pluginFormats = r.formats || [];
     S.pluginTabs = r.tabs || [];
     S.pluginRowActions = r.row_actions || [];
+    S.pluginDashboards = r.dashboards || [];
     S.pluginPanels = r.panels || [];
+    S.pluginPagePanels = r.page_panels || [];
     S.pluginDirs = r.dirs || [];
     S.pluginsCaseOpen = !!r.case_open;
-  } catch { S.plugins = []; S.pluginFormats = []; S.pluginTabs = []; S.pluginRowActions = []; S.pluginPanels = []; S.pluginDirs = []; S.pluginsCaseOpen = false; }
+    S.pluginApiVersion = r.api_version ?? null;
+  } catch { S.plugins = []; S.pluginFormats = []; S.pluginTabs = []; S.pluginRowActions = []; S.pluginDashboards = []; S.pluginPanels = []; S.pluginPagePanels = []; S.pluginDirs = []; S.pluginsCaseOpen = false; S.pluginApiVersion = null; }
   renderPluginTabs();
   renderPluginPanelButtons();
 }
@@ -44,11 +48,13 @@ export function globMatches(pattern, name) {
 
 /* The plugin format claiming this filename, or null. Built-in extensions
    win outright — a plugin claiming .csv doesn't hijack default routing; it
-   stays reachable through the Plugins modal's explicit per-format picker. */
+   stays reachable through the Plugins modal's explicit per-format picker.
+   So do built-in names: an IIS log is .log, which esxi_logs claims. */
 export function pluginFormatFor(filename) {
   const base = filename.split(/[\\/]/).pop();
   const ext = extOf(base);
   if (RECOGNIZED_IMPORT_EXTENSIONS.includes(ext) || SQLITE_IMPORT_EXTENSIONS.includes(ext) || XLSX_IMPORT_EXTENSIONS.includes(ext) || PLASO_IMPORT_EXTENSIONS.includes(ext) || ARCHIVE_IMPORT_EXTENSIONS.includes(ext)) return null;
+  if (iisLogFormat(base)) return null;
   return S.pluginFormats.find((f) =>
     (ext && (f.extensions || []).includes(ext))
     || (f.filename_patterns || []).some((p) => globMatches(p, base))) || null;
@@ -101,27 +107,78 @@ export const UPLOAD_ADVISORY_BYTES = 1 << 30; // 1 GB
    the per-kind defaults live here so the entry points can't drift — a
    default that differs between a dropped file and a path-picked one is the
    kind of bug nothing surfaces until the imports disagree. `fmt` overrides
-   name routing for the Plugins panel's explicit per-format picker. */
-export function queueItem(transport, name, fmt = pluginFormatFor(name)) {
+   name routing for the Plugins panel's explicit per-format picker, and
+   `kind` for a file recognised by its content (a key=value log, which
+   queueFiles and queuePaths ask about before they get here). */
+export let queueSeq = 0;
+
+export function queueItem(transport, name, fmt = pluginFormatFor(name), kind = importKindFor(name)) {
+  // qid: which item the Import dialog has chosen, kept across a reorder,
+  // a removal and the dialog reopening.
+  const qid = ++queueSeq;
   if (fmt) {
-    return { ...transport, name, kind: 'plugin', format_id: fmt.id,
+    return { ...transport, qid, name, kind: 'plugin', format_id: fmt.id,
              options: defaultPluginOptions(fmt), configured: false };
   }
-  const kind = importKindFor(name);
+  transport = { ...transport, qid };
   return kind === 'json' ? { ...transport, name, kind, flatten_mode: 'none', flatten_depth: 1, configured: false }
     : kind === 'sqlite' || kind === 'xlsx' ? { ...transport, name, kind, tables: null, configured: false }
     // A .plaso is one file → one timeline table with nothing to configure.
     : kind === 'plaso' ? { ...transport, name, kind, configured: true }
+    // An IIS log names its own columns; the preview can still pick another
+    // of the three formats (log_format, null = the name's) and set types.
+    : kind === 'iis' ? { ...transport, name, kind, log_format: null, column_types: null, configured: false }
+    // A key=value log names its own columns too, one per key; the preview
+    // can set their types, by name as an IIS log's.
+    : kind === 'kv' ? { ...transport, name, kind, column_types: null, configured: false }
     // An archive expands on import, then you pick files from its contents.
     : kind === 'archive' ? { ...transport, name, kind, configured: true }
-    : { ...transport, name, kind, delimiter: null, has_header: true, column_types: null, configured: false };
+    // Raw text (a log with an extension nothing else claims) is the delimited
+    // shape with no header — one line per row, nothing to configure; the
+    // preview can still switch it to csv.
+    : { ...transport, name, kind, delimiter: null, has_header: kind !== 'text', column_types: null, configured: false };
 }
 
-export function queueFiles(files) {
+/* The server's looks_binary, on the client: a NUL in the first 8 KB, a
+   UTF-16 BOM exempt. Checked BEFORE a raw-text upload, so an .exe or an
+   .evtx picked by mistake is refused here rather than copied up in full
+   and refused on arrival. Unreadable here means "let the server say". */
+const BINARY_PROBE_BYTES = 8192;
+const PROBE_BYTES = Math.max(BINARY_PROBE_BYTES, KV_PROBE_BYTES);
+async function fileHead(f) {
+  try { return new Uint8Array(await f.slice(0, PROBE_BYTES).arrayBuffer()); } catch { return null; }
+}
+const utf16Bom = (head) => head.length >= 2 && ((head[0] === 0xFF && head[1] === 0xFE) || (head[0] === 0xFE && head[1] === 0xFF));
+function headLooksBinary(head) {
+  if (!head || utf16Bom(head)) return false;
+  return head.subarray(0, BINARY_PROBE_BYTES).includes(0);
+}
+/* A file's first bytes as text, for looksLikeKvLog: UTF-16 by its BOM,
+   else UTF-8 (a Windows-1252 byte the decoder can't read is not in the
+   ASCII the first line is recognised by). */
+function headText(head) {
+  if (!head) return '';
+  const bytes = head.subarray(0, KV_PROBE_BYTES);
+  const enc = utf16Bom(bytes) ? (bytes[0] === 0xFF ? 'utf-16le' : 'utf-16be') : 'utf-8';
+  return new TextDecoder(enc).decode(bytes);
+}
+
+export async function queueFiles(files) {
   let bigNamed = null, bigCount = 0;
-  for (const f of files) {
+  const skipped = [];
+  for (const f of [...files]) {
+    // A name nothing claims could be a key=value log, which only its first
+    // line says (looks_like_kv_log server-side reads the same bytes).
+    const head = kvCandidate(f.name) ? await fileHead(f) : null;
+    const item = head && looksLikeKvLog(headText(head))
+      ? queueItem({ file: f }, f.name, null, 'kv') : queueItem({ file: f }, f.name);
+    if (item.kind === 'text' && headLooksBinary(head || await fileHead(f))) { skipped.push(f.name); continue; }
     if (f.size >= UPLOAD_ADVISORY_BYTES) { bigCount++; bigNamed = bigNamed || f; }
-    S.importQueue.push(queueItem({ file: f }, f.name));
+    S.importQueue.push(item);
+  }
+  if (skipped.length) {
+    const names = skipped.slice(0, 3).join(', ') + (skipped.length > 3 ? ', …' : '');
+    toast(`Skipped ${skipped.length} binary file${skipped.length === 1 ? '' : 's'} (not text): ${names}`, 6000);
   }
   if (bigCount) {
     // Advisory, never a gate — the upload still works, it's just the slow
@@ -138,16 +195,24 @@ export function queueFiles(files) {
    rules as queueFiles (plugin format by name first, then extension), same
    queue, same configure/preview steps — the transport is the only
    difference, carried as {path} instead of {file}. */
-export function queuePaths(entries) {
-  // Same gate the drop handler applies (recognizedImportFile) — the server
-  // lists every file on purpose, so the filter has to live here: an
-  // unrecognized extension would otherwise fall through importKindFor's
-  // default and ingest a .zip as a CSV.
-  const known = entries.filter((e) => recognizedImportFile(e.name));
-  const skipped = entries.filter((e) => !recognizedImportFile(e.name));
-  for (const e of known) S.importQueue.push(queueItem({ path: e.path }, e.name));
-  if (skipped.length) {
-    toast(`Skipped ${skipped.length} file${skipped.length === 1 ? '' : 's'} no importer recognizes: ${skipped.map((e) => e.name).join(', ')}`, 6000);
+export async function queuePaths(entries) {
+  // No extension gate any more: a name nothing else claims queues as raw
+  // text (importKindFor). A binary file is refused by the importer itself,
+  // as a job error — the server has the bytes, the browser doesn't. Which
+  // is also why the server is asked which of those are key=value logs:
+  // only the first line says. Asked once for the lot, and only when one
+  // could be; a failed ask leaves them as their names say.
+  const ask = entries.filter((e) => kvCandidate(e.name));
+  const kv = new Set();
+  if (ask.length) {
+    try {
+      const r = await post('/api/ingest/recognise', { paths: ask.map((e) => e.path) });
+      ask.forEach((e, i) => { if (r.kinds[i] === 'kv') kv.add(e); });
+    } catch { /* read as their names say */ }
+  }
+  for (const e of entries) {
+    const transport = { path: e.path, size: e.size };
+    S.importQueue.push(kv.has(e) ? queueItem(transport, e.name, null, 'kv') : queueItem(transport, e.name));
   }
 }
 
@@ -161,103 +226,158 @@ export function queueFilesForFormat(fmt, files) {
   }
 }
 
-/* The one way to bring files into a case — queue any number of CSV/TSV or
-   JSON/JSONL files (kind picked per file from its extension), optionally
-   preview/configure each (delimiter+header+column-types for CSV,
-   flatten mode+depth for JSON — openImportPreview/openJsonImportPreview
-   both take the same {initial, onConfirm, onCancel} shape so either can
-   sit behind this one "Preview & configure" button), then import them all
-   at once. One queue for both kinds rather than a separate "Import
-   JSON…" entry point, since from the analyst's side it's the same
-   workflow — pick some files, maybe tweak settings, import — regardless
-   of which parser ends up handling a given one. */
+/* The one way to bring files into a case, in the two panes of the
+   Tables manager and Import a folder: the queued files down the left,
+   what each holds and how it will be read on the right, and the ways to
+   add more along the foot beside the one import. Any number of files of
+   any kind queue together (kind picked per file by importKindFor, or a
+   plugin's format by name), because from the analyst's side it is one
+   workflow whichever parser ends up reading a given file.
+
+   A file's settings are set in its pane and kept as they change — there
+   is no "Use these settings" step, so moving to the next file never loses
+   the last one's. The preview under them answers for what is set now:
+   the first rows split as they will be, or a SQLite file's tables. The
+   frame is .side-panes', a fixed height; only the preview box scrolls,
+   so going from a two-column CSV to a forty-table SQLite file moves
+   nothing on screen. It used to be a column of rows, one per file, with a
+   button on each that swapped the whole dialog out for that file's
+   preview and back. */
+export const IMPORT_QUEUE_GROUPS = ['Queued'];
+
+/* Which queued file the dialog shows, by qid — kept across its reopening
+   (a drop while it is open, the server-disk picker coming back). */
+export let importSel = null;
+
+export const UNIT_KINDS = ['sqlite', 'xlsx'];
+export const needsChoice = (item) => UNIT_KINDS.includes(item.kind) && !item.configured;
+export const itemSize = (item) => (item.file ? item.file.size : item.size);
+
+/* A JSON, SQLite or Excel upload's preview sends the whole file up to read
+   it (a JSON document can't be cut short, and sqlite3 wants a real file);
+   past this a pane asks before doing that, rather than starting a large
+   copy because a row in the list was clicked. A path item previews in
+   place, at any size. */
+export const AUTO_PREVIEW_UPLOAD_BYTES = 32 << 20;
+
+/* A delimited, text or IIS preview reads a bounded head of the file
+   (server.py's PREVIEW_SAMPLE_BYTES, 512 KB), so only a head is sent:
+   more than the server reads, so what it sees is the same. */
+export const PREVIEW_HEAD_BYTES = 1 << 20;
+export const headOf = (file) => (file.size > PREVIEW_HEAD_BYTES
+  ? new File([file.slice(0, PREVIEW_HEAD_BYTES)], file.name) : file);
+
+/* A queued file's preview, by the transport it arrived by — a path item
+   previews in place, an upload sends the file (or its head) — and by
+   kind, which picks the upload route. Never a guess about the disk. */
+export function fetchPreview(item, fields) {
+  if (item.path) return post('/api/ingest/preview/path', { path: item.path, ...fields });
+  const url = { json: '/api/ingest/json/preview', sqlite: '/api/ingest/sqlite/preview',
+                xlsx: '/api/ingest/xlsx/preview' }[fields.kind] || '/api/ingest/preview';
+  const fd = new FormData();
+  fd.append('file', url === '/api/ingest/preview' ? headOf(item.file) : item.file);
+  for (const [k, v] of Object.entries(fields)) if (v != null) fd.append(k, String(v));
+  return api(url, { method: 'POST', body: fd });
+}
+
+export const DELIMITERS = [['auto', 'Auto-detect', null], ['comma', 'Comma', ','], ['tab', 'Tab', '\t'],
+                    ['semicolon', 'Semicolon', ';'], ['pipe', 'Pipe', '|']];
+export const delimKey = (d) => (DELIMITERS.find((x) => x[2] === d) || DELIMITERS[0])[0];
+export const delimName = (d) => (DELIMITERS.find((x) => x[2] === d) || ['', JSON.stringify(d)])[1];
+
+/* What the side list says under a file's name: how it will be read, as
+   the section lists say what is set in a section. */
+export function queueHint(item) {
+  const units = (n, noun) => `${n} ${noun}${n === 1 ? '' : 's'}`;
+  switch (item.kind) {
+    case 'plugin': return (pluginFormatById(item.format_id)?.label || item.format_id) + (item.configured ? ' · options set' : '');
+    case 'text': return 'Text · one line per row';
+    case 'iis': return `IIS log · ${IIS_FORMAT_LABELS[item.log_format || iisLogFormat(item.name)] || 'W3C'}`;
+    case 'kv': return 'Key=value log · a column per key';
+    case 'json': return 'JSON · ' + (item.flatten_mode === 'full' ? 'flattened'
+      : item.flatten_mode === 'depth' ? `flattened ${item.flatten_depth} deep` : 'nested kept as JSON');
+    case 'sqlite': return 'SQLite · ' + (item.configured ? units(item.tables.length, 'table') : 'pick tables');
+    case 'xlsx': return 'Excel · ' + (item.configured ? units(item.tables.length, 'sheet') : 'pick sheets');
+    case 'plaso': return 'Plaso · one timeline table';
+    case 'archive': return 'Archive · expands on import';
+    default: return 'Delimited · ' + (item.delimiter ? delimName(item.delimiter).toLowerCase() : 'auto-detect')
+      + (item.has_header === false ? ' · no header' : '');
+  }
+}
+
 export function openImportModal() {
   modal('Import', (b) => {
-    b.append(el('p', null,
-      'Queue CSV/TSV, JSON/JSONL, Excel, or SQLite files (a SQLite file needs its tables picked '
-      + 'first, an Excel workbook its sheets), '
-      + 'then import them all — imports run in the background, so you can keep working while the '
-      + 'corner panel tracks progress.'));
-
-    const queueList = el('div', 'session-queue');
-
-    function renderQueue() {
-      queueList.replaceChildren();
-      if (!S.importQueue.length) { queueList.append(el('div', 'note-status', 'No files queued.')); return; }
-      S.importQueue.forEach((item, i) => {
-        const row = el('div', 'row-actions session-row');
-        const kindLabel = item.kind === 'plugin'
-          ? (pluginFormatById(item.format_id)?.label || item.format_id)
-          : item.kind;
-        const unitNoun = item.kind === 'xlsx' ? 'sheet' : 'table';
-        const stateLabel = item.kind === 'sqlite' || item.kind === 'xlsx'
-          ? (item.configured ? `${item.tables.length} ${unitNoun}${item.tables.length === 1 ? '' : 's'}` : `pick ${unitNoun}s`) + ` · ${kindLabel}`
-          : (item.configured ? 'configured' : 'default settings') + ` · ${kindLabel}`;
-        row.append(
-          el('span', 'session-name', item.name),
-          el('span', 'count', (item.path ? 'by path · ' : '') + stateLabel),
-        );
-        const cfg = el('button', 'btn ghost',
-          item.kind === 'sqlite' ? 'Pick tables…' : item.kind === 'xlsx' ? 'Pick sheets…'
-            : item.kind === 'plugin' ? 'Options' : 'Preview & configure');
-        if (item.kind === 'plugin' && !(pluginFormatById(item.format_id)?.options || []).length) {
-          // Nothing to configure — the format declared no options.
-          cfg.disabled = true;
-          cfg.title = 'This plugin format has no options';
-        }
-        if (item.kind === 'plaso') {
-          cfg.disabled = true;
-          cfg.title = 'A Plaso storage file imports as one flat timeline table — nothing to configure';
-        }
-        if (item.kind === 'archive') {
-          cfg.disabled = true;
-          cfg.title = 'Expands on import (nested archives included) — you pick the files from its contents next';
-        }
-        cfg.onclick = () => {
-          if (item.kind === 'plugin') {
-            openPluginOptionsForm(item, {
-              onConfirm: (options) => {
-                Object.assign(item, { options, configured: true });
-                openImportModal();
-              },
-              onCancel: () => openImportModal(),
-            });
-            return;
-          }
-          const openPreview = item.kind === 'json' ? openJsonImportPreview
-            : item.kind === 'sqlite' ? openSqliteTablePicker
-            : item.kind === 'xlsx' ? openXlsxSheetPicker
-            : openImportPreview;
-          openPreview(item, {
-            initial: item,
-            onConfirm: (settings) => {
-              Object.assign(item, settings, { configured: true });
-              openImportModal();
-            },
-            onCancel: () => openImportModal(),
-          });
-        };
-        const rm = el('button', 'btn ghost', '✕');
-        rm.onclick = () => { S.importQueue.splice(i, 1); renderQueue(); };
-        row.append(cfg, rm);
-        queueList.append(row);
-      });
+    b.dataset.kind = 'import';
+    const queue = () => S.importQueue;
+    const byKey = (key) => queue().find((i) => String(i.qid) === key) || null;
+    if (!byKey(importSel)) {
+      const first = queue().find(needsChoice) || queue()[0];
+      importSel = first ? String(first.qid) : null;
     }
-    renderQueue();
-    b.append(queueList);
 
-    const queueActs = el('div', 'row-actions');
-    // Path first, upload second — deliberate order. Browser and server are
-    // the same machine here, so "Add from this machine…" reads the file in
-    // place (no upload copy, no spool), which is the transport you want for
-    // anything large; the browser picker stays for convenience and for the
-    // odd tunneled/remote client where it's the only one that works.
-    const pathBtn = el('button', 'btn', 'Add from this machine…');
+    const side = sideRail({
+      entries: () => queue().map((item) => ({
+        key: String(item.qid), label: item.name, group: 'Queued', item,
+        title: item.path || item.name, hint: queueHint(item), warn: needsChoice(item),
+      })),
+      groups: IMPORT_QUEUE_GROUPS,
+      selected: () => importSel,
+      onPick: (entry) => { if (importSel !== entry.key) { importSel = entry.key; side.sync(); showItem(); } },
+      label: 'Queued files',
+      notes: { Queued: 'Nothing queued yet. Drop files on the window, or add them with the buttons below.' },
+      action: {
+        glyph: '✕', title: 'Take this file out of the queue',
+        label: (entry) => `Take ${entry.label} out of the queue`,
+        run: (entry) => removeItem(entry.item),
+      },
+    });
+    side.search.placeholder = 'Filter queued files…';
+
+    const pane = el('div', 'side-pane import-pane');
+    const panes = el('div', 'side-panes import-queue');
+    panes.append(side.rail, pane);
+    b.append(panes);
+
+    // A setting changed in the pane: the side list's line for the file
+    // and the import button say so.
+    const changed = () => { side.paint(); syncImport(); };
+
+    function removeItem(item) {
+      const i = queue().indexOf(item);
+      if (i < 0) return;
+      queue().splice(i, 1);
+      if (importSel === String(item.qid)) {
+        const next = queue()[Math.min(i, queue().length - 1)];
+        importSel = next ? String(next.qid) : null;
+        showItem();
+      }
+      side.paint();
+      syncImport();
+    }
+
+    function showItem() {
+      pane.replaceChildren();
+      const item = byKey(importSel);
+      if (!item) buildEmptyQueuePane(pane);
+      else buildQueueItemPane(pane, item, changed);
+    }
+
+    /* ---------------------------------------------- the foot */
+    // The ways in first, the import last and on the far side. Path before
+    // upload, deliberately: browser and server are the same machine here,
+    // so "Add from this machine…" reads the file in place (no upload copy,
+    // no spool), which is the transport you want for anything large; the
+    // browser picker stays for convenience and for the odd tunneled or
+    // remote client where it's the only one that works.
+    const foot = el('div', 'table-menu-foot table-menu-strip import-foot');
+    const pathBtn = el('button', 'btn ghost', 'Add from this machine…');
     pathBtn.title = 'Browse the server\'s own disk and import in place — no upload copy, fastest for big files';
     pathBtn.onclick = () => {
-      openFolderBrowser(S.lastBrowsePath || undefined, (sel) => {
+      openFolderBrowser(S.lastBrowsePath || undefined, async (sel) => {
         S.lastBrowsePath = sel.dir;
-        queuePaths(sel.files);
+        const before = queue().length;
+        await queuePaths(sel.files);
+        if (queue()[before]) importSel = String(queue()[before].qid);
         openImportModal();
       }, () => openImportModal(), { mode: 'files', title: 'Add files from this machine' });
     };
@@ -265,308 +385,668 @@ export function openImportModal() {
     addLabel.title = 'A regular browser file picker — the file is copied up to the server before importing';
     const addInput = el('input');
     addInput.type = 'file';
-    addInput.accept = [...RECOGNIZED_IMPORT_EXTENSIONS, ...SQLITE_IMPORT_EXTENSIONS, ...XLSX_IMPORT_EXTENSIONS, ...PLASO_IMPORT_EXTENSIONS, ...ARCHIVE_IMPORT_EXTENSIONS, ...pluginExtensions()].join(',');
+    // No `accept`: every file is importable now (raw text is the
+    // catch-all), and the other two entry points — a drop, the server-disk
+    // picker — never filtered by extension. An accept list here would make
+    // the browser picker the one place a .log.1 could not be chosen.
     addInput.multiple = true;
     addInput.hidden = true;
-    addInput.onchange = () => {
-      queueFiles(addInput.files);
+    addInput.onchange = async () => {
+      const files = [...addInput.files];
       addInput.value = '';
-      renderQueue();
+      const before = queue().length;
+      await queueFiles(files);
+      if (queue()[before]) importSel = String(queue()[before].qid);
+      side.paint();
+      showItem();
+      syncImport();
     };
     addLabel.append(addInput);
     const folderBtn = el('button', 'btn ghost', 'Import a whole folder…');
     folderBtn.title = 'Scan a directory (e.g. KAPE output) against extension + glob patterns';
     folderBtn.onclick = () => openDirectoryImportModal();
-    const importAll = el('button', 'btn', 'Import all queued');
+    const importAll = el('button', 'btn primary table-menu-close');
+    function syncImport() {
+      const n = queue().length;
+      importAll.textContent = n ? `Import ${n} file${n === 1 ? '' : 's'}` : 'Import';
+      importAll.disabled = !n;
+      const waiting = queue().filter(needsChoice).length;
+      importAll.title = waiting ? `${waiting} file${waiting === 1 ? '' : 's'} still need${waiting === 1 ? 's' : ''} tables or sheets picked` : '';
+    }
     importAll.onclick = () => {
-      if (!S.importQueue.length) return;
-      const unpicked = S.importQueue.find((i) => (i.kind === 'sqlite' || i.kind === 'xlsx') && !i.configured);
+      if (!queue().length) return;
+      const unpicked = queue().find(needsChoice);
       if (unpicked) {
+        // Take the analyst to it: the pane is where the choice is made.
+        importSel = String(unpicked.qid);
+        side.paint();
+        showItem();
         toast(`Pick which ${unpicked.kind === 'xlsx' ? 'sheets' : 'tables'} to import from ${unpicked.name} first`, 4500);
         return;
       }
-      const queue = S.importQueue.slice();
+      const items = queue().slice();
       S.importQueue = [];
-      renderQueue();
+      importSel = null;
       $('modal').hidden = true;
-      // Deliberately not awaited: uploads run sequentially (one disk, one
-      // spool at a time) behind this detached chain while the analyst
-      // keeps working; each upload resolves into a background ingest job
-      // the corner panel is already tracking.
-      (async () => {
-        // Plugin ingests are synchronous routes that create no background
-        // job, so nothing announces the finished source — the jobs poll
-        // only refreshes on a job transition. Counted here, refreshed after
-        // the loop; the directory-import loop does the same, for the same
-        // reason.
-        let pluginOk = 0;
-        const expanded = [];   // archive expansion reports, handed to directory import below
-        for (const item of queue) {
-          if (item.kind === 'archive') {
-            toast(`Expanding ${item.name}\u2026`, 60000);
-            try {
-              const rep = item.path
-                ? await post('/api/ingest/archive/expand', { path: item.path })
-                : await (() => {
-                  const fd = new FormData();
-                  fd.append('file', item.file);
-                  return uploadWithProgress('/api/ingest/archive/upload', fd, item.name);
-                })();
-              expanded.push({ name: item.name, ...rep });
-              toast(`Expanded ${item.name}: ${rep.files.toLocaleString()} file${rep.files === 1 ? '' : 's'}`
-                + (rep.archives > 1 ? ` from ${rep.archives} nested archives` : '')
-                + (rep.truncated ? ' (stopped at a safety cap — partial)' : ''), 6000);
-            } catch (e) {
-              if (!e.cancelled) toast(`Could not expand ${item.name}: ` + e.message, 8000);
-            }
-            continue;
-          }
-          // Two transports, chosen by how the item arrived — a path item
-          // (the "Add from this machine…" picker, directory import) reads
-          // in place with no upload leg; a browser-picked File uploads.
-          // Never a guess: the old content-fingerprint resolver that tried
-          // to recover a picked file's path is deliberately gone.
-          if (item.path) {
-            try {
-              if (item.kind === 'plugin') {
-                // 60s, not the default: this awaits the whole parse (see
-                // the directory-import loop's identical choice).
-                toast(`Importing ${item.name}…`, 60000);
-                await post('/api/ingest/plugin/path', {
-                  path: item.path, name: item.name, format_id: item.format_id,
-                  options: item.options || {},
-                });
-                pluginOk++;
-              } else {
-                await post('/api/ingest/jobs/path', {
-                  path: item.path, name: item.name, kind: item.kind,
-                  delimiter: item.delimiter || null,
-                  has_header: item.has_header !== false,
-                  column_types: item.column_types || null,
-                  flatten_mode: item.flatten_mode || 'none',
-                  flatten_depth: item.flatten_depth || 0,
-                  tables: item.tables || null,
-                });
-                startJobsPoll();
-              }
-            } catch (e) {
-              toast(`Import failed for ${item.name}: ` + e.message, 6000);
-            }
-            continue;
-          }
-          const fd = new FormData();
-          fd.append('file', item.file);
-          if (item.kind === 'plugin') {
-            // jobs/upload's start_ingest_job knows csv/json/sqlite only —
-            // plugin uploads have their own route, which parses via the
-            // registered format and ingests synchronously (no job).
-            fd.append('format_id', item.format_id);
-            fd.append('options', JSON.stringify(item.options || {}));
-            try {
-              await uploadWithProgress('/api/ingest/plugin/upload', fd, item.name);
-              pluginOk++;
-            } catch (e) {
-              if (!e.cancelled) toast(`Upload failed for ${item.name}: ` + e.message, 6000);
-            }
-            continue;
-          }
-          fd.append('kind', item.kind);
-          if (item.kind === 'json') {
-            fd.append('flatten_mode', item.flatten_mode || 'none');
-            fd.append('flatten_depth', String(item.flatten_depth || 1));
-          } else if (item.kind === 'sqlite' || item.kind === 'xlsx') {
-            fd.append('tables', JSON.stringify(item.tables));
-          } else {
-            if (item.delimiter) fd.append('delimiter', item.delimiter);
-            fd.append('has_header', item.has_header ? 'true' : 'false');
-            if (item.column_types) fd.append('column_types', JSON.stringify(item.column_types));
-          }
-          try {
-            await uploadWithProgress('/api/ingest/jobs/upload', fd, item.name);
-          } catch (e) {
-            if (!e.cancelled) toast(`Upload failed for ${item.name}: ` + e.message, 6000);
-          }
-        }
-        // Same reason as the directory-import loop's identical line: a
-        // sync plugin ingest creates no job for the poll to notice.
-        if (pluginOk) await loadSources();
-        // The analyst just opened these types with Winnow — the moment
-        // the one-time Open With offer is actually justified.
-        maybeOfferAssociation(queue.map((i) => i.name));
-        // Expanded archives hand off to directory import — the flow that
-        // already owns extension gates, include/exclude and the sidebar
-        // folder mirror. One modal, rooted at the first expansion; other
-        // roots are announced for a follow-up pass.
-        if (expanded.length) {
-          for (const r of expanded.slice(1)) toast(`Also expanded to ${r.root} — import it via Case \u2192 Import \u2192 folder`, 10000);
-          openDirectoryImportModal({ root: expanded[0].root });
-        }
-      })();
+      importQueued(items);
     };
-    queueActs.append(pathBtn, addLabel, folderBtn, importAll);
-    b.append(queueActs);
-  }, { wide: true });
+    foot.append(pathBtn, addLabel, folderBtn, importAll);
+    b.append(foot);
+
+    side.paint();
+    showItem();
+    syncImport();
+  }, { wide: 'x', tall: true, focus: (b) => b.querySelector('.side-rail-item[aria-selected="true"]') || b.querySelector('.side-search') });
 }
 
-/* Configure which tables come out of a queued SQLite file — Chromium's
-   History/Cookies/Web Data/... or any other .db. Same {initial, onConfirm,
-   onCancel} shape as openImportPreview/openJsonImportPreview, so the
-   unified import queue can sit one "Pick tables…" button in front of any
-   of the three. Shows every table with a row count and (for any column
-   that looks like a WebKit/Chrome timestamp — microseconds since
-   1601-01-01, Chromium's own convention) a pre-checked option to convert
-   it to a readable datetime on import rather than leaving it as an opaque
-   integer. Confirm hands back {tables: [{table, timestamp_columns}]} for
-   the queue item; the actual import happens later as one background job
-   reading every picked table out of one uploaded spool. */
-export function openSqliteTablePicker(src, hooks = {}) {
-  openUnitPicker(src, hooks, {
-    title: 'Pick SQLite tables',
-    intro: 'Choose which tables to import from this file — each becomes its own source.',
-    empty: 'No tables in this file.',
-    confirm: 'Use selected tables',
-    checkFirst: 'Check at least one table to import',
-    previewKind: 'sqlite',
-    uploadUrl: '/api/ingest/sqlite/preview',
-  });
+/* Nothing queued: the pane says what the dialog takes and how to give it
+   some, where a file's settings would be. */
+export function buildEmptyQueuePane(pane) {
+  const box = el('div', 'import-empty');
+  box.append(
+    el('div', 'import-empty-title', 'Drop files here'),
+    el('p', 'fb-help', 'or anywhere on the window — or add them with the buttons below. “Add from this machine…” reads a file where it is, which is the fast way for anything large.'),
+    el('p', 'fb-help', 'CSV and other delimited text, JSON and JSON Lines, SQLite, Excel, Plaso, IIS logs, key=value logs such as FortiGate’s, and zip or tar archives each import their own way; any other text file imports one line per row.'));
+  pane.append(box);
 }
 
-/* The same picker over an Excel workbook's sheets — a sheet is to a
-   workbook what a table is to a SQLite file, so the two share one
-   implementation (openUnitPicker) and one queue-item shape ({tables}).
-   No timestamp chips here: date-styled cells convert to ISO text
-   unconditionally (the day-serial Excel stores means nothing in a filter
-   or an export — see xlsxread.py), which the intro line states instead
-   of asking. */
-export function openXlsxSheetPicker(src, hooks = {}) {
-  openUnitPicker(src, hooks, {
-    title: 'Pick Excel sheets',
-    intro: 'Choose which sheets to import from this workbook — each becomes its own source. '
-      + 'Date-formatted cells are converted to readable timestamps on import.',
-    empty: 'No data sheets in this workbook.',
-    confirm: 'Use selected sheets',
-    checkFirst: 'Check at least one sheet to import',
-    previewKind: 'xlsx',
-    uploadUrl: '/api/ingest/xlsx/preview',
-  });
+/* What a queued file can be read as, by what it was queued as. A file
+   named like an IIS log can be read as delimited text too, for the log
+   that was renamed or isn't what its name says; anything text-shaped can
+   be read one line per row, the way out for a file that some reader
+   claims and gets wrong. Delimited and other text can be read as
+   key=value pairs, for a key=value log whose first line didn't say so
+   (only Fortinet's is recognised), and one that did can be read the other
+   two ways. Kinds with no other reading (SQLite, Excel, Plaso, archives)
+   have no switch. */
+export function readAsOptions(item) {
+  const base = item.queuedAs || item;
+  const delimited = ['csv', 'Delimited', 'Split into columns on a delimiter'];
+  const lines = ['text', 'One line per row', 'Every line becomes one row in one column, nothing split'];
+  const kv = ['kv', 'Key=value', 'A column per key, each line’s values under its own keys (FortiGate and other Fortinet logs)'];
+  switch (base.kind) {
+    case 'csv': case 'text': return [delimited, lines, kv];
+    case 'kv': return [kv, delimited, lines];
+    case 'json': return [['json', 'JSON', 'One row per record, its keys as columns'], lines];
+    case 'iis': return [['iis', 'IIS log', 'Columns named by the log itself'], delimited, lines];
+    // A plugin-claimed upload only, as the queue row's "As text" was.
+    case 'plugin': return item.path ? null
+      : [['plugin', pluginFormatById(base.format_id)?.label || base.format_id, 'Read by the plugin that claims this file'], lines];
+    default: return null;
+  }
 }
 
-function openUnitPicker(src, { initial, onConfirm, onCancel } = {}, cfg) {
-  // src is a queue item's transport ({file} or {path, name}) — same contract
-  // as openImportPreview/openJsonImportPreview.
-  let tables = null; // [{name, row_count, columns, likely_timestamp_columns}]
-  const selected = new Map(); // table name -> Set of timestamp columns to convert
-  const included = new Set(); // table names checked for import
+/* Read a queued file as another kind: the Read as switch. What it was
+   queued as is kept (queuedAs) so the switch keeps offering its way back,
+   and a plugin's format and options come back with it. Each kind starts
+   from its own defaults, as a freshly queued file of that kind would. */
+export function switchKind(item, to) {
+  if (item.kind === to) return;
+  if (!item.queuedAs) item.queuedAs = { kind: item.kind, format_id: item.format_id, options: item.options };
+  const reset = { delimiter: null, has_header: true, column_types: null, log_format: null, format_id: null, options: null };
+  if (to === 'text') Object.assign(item, reset, { kind: 'text', has_header: false, configured: true });
+  else if (to === 'csv') Object.assign(item, reset, { kind: 'csv', configured: true });
+  else if (to === 'iis') Object.assign(item, reset, { kind: 'iis', configured: false });
+  else if (to === 'kv') Object.assign(item, reset, { kind: 'kv', configured: false });
+  else if (to === 'json') Object.assign(item, reset, { kind: 'json', flatten_mode: 'none', flatten_depth: 1, configured: false });
+  else if (to === 'plugin') {
+    Object.assign(item, reset, { kind: 'plugin', format_id: item.queuedAs.format_id, options: item.queuedAs.options, configured: false });
+  }
+}
 
-  modal(cfg.title, (b) => {
-    b.append(el('p', null, cfg.intro));
+export function buildQueueItemPane(pane, item, changed) {
+  // The name, then the folder it is in, cut short from its start: the
+  // end of a path is the part that tells two triage folders apart.
+  const cut = item.path ? Math.max(item.path.lastIndexOf('/'), item.path.lastIndexOf('\\')) : -1;
+  const where = el('span', 'import-file-where');
+  where.append(el('span', 'import-file-name', item.name));
+  if (cut > 0) where.append(el('span', 'import-file-dir', '\u200E' + item.path.slice(0, cut) + '\u200E'));
+  where.title = item.path || item.name;
+  const size = itemSize(item);
+  const how = el('span', 'import-file-how',
+    (size != null ? fmtBytes(size) + ' · ' : '') + (item.path ? 'read in place' : 'uploaded when it imports'));
+  const fileRow = paneRow('File', where, how);
+  fileRow.classList.add('import-folder-row');
+  pane.append(fileRow);
 
-    const pickRow = el('div', 'row-actions');
-    const pickStatus = el('span', 'count', '');
-    pickRow.append(pickStatus);
-    b.append(pickRow);
+  const opts = readAsOptions(item);
+  if (opts) {
+    const seg = tableMenuSeg(opts, () => item.kind, (key) => {
+      if (key === item.kind) return;
+      switchKind(item, key);
+      changed();
+      pane.replaceChildren();
+      buildQueueItemPane(pane, item, changed);
+    }, 'import-readas');
+    pane.append(paneRow('Read as', seg.seg));
+  }
 
-    const tableList = el('div', 'session-list');
-    b.append(tableList);
+  const settings = el('div', 'side-settings import-settings');
+  const previewHead = el('div', 'side-preview-title', 'Preview');
+  const preview = el('div', 'side-preview import-preview');
+  const rows = el('div', 'side-preview-rows');
+  const foot = el('div', 'side-preview-foot');
+  preview.append(rows, foot);
+  pane.append(settings, previewHead, preview);
+  const footLine = (text, bad) => {
+    const line = el('div', 'fb-help' + (bad ? ' bad' : ''), text);
+    line.title = text;
+    foot.replaceChildren(line);
+  };
+  const note = (text) => settings.append(el('p', 'fb-help import-note', text));
+  const ctx = { item, settings, previewHead, preview, rows, foot, footLine, note, changed };
 
-    const actions = el('div', 'row-actions');
-    const importBtn = el('button', 'btn', cfg.confirm);
-    const cancel = el('button', 'btn ghost', 'Cancel');
-    cancel.onclick = () => { if (onCancel) onCancel(); else $('modal').hidden = true; };
-    actions.append(importBtn, cancel);
-    b.append(actions);
+  if (item.kind === 'csv') buildDelimitedSettings(ctx);
+  else if (item.kind === 'text') buildLinesSettings(ctx);
+  else if (item.kind === 'json') buildJsonSettings(ctx);
+  else if (item.kind === 'iis') buildIisSettings(ctx);
+  else if (item.kind === 'kv') buildKvSettings(ctx);
+  else if (UNIT_KINDS.includes(item.kind)) buildUnitSettings(ctx);
+  else if (item.kind === 'plugin') buildPluginSettings(ctx);
+  else buildFixedSettings(ctx);
+}
 
-    function renderTables() {
-      tableList.replaceChildren();
-      if (!tables) return;
-      if (!tables.length) { tableList.append(el('div', 'note-status', cfg.empty)); return; }
-      for (const t of tables) {
-        const row = el('div', 'session-row');
-        row.style.flexDirection = 'column';
-        row.style.alignItems = 'stretch';
-        const head = el('div', 'row-actions');
-        const cb = el('input');
-        cb.type = 'checkbox';
-        cb.checked = included.has(t.name);
-        cb.onchange = () => { cb.checked ? included.add(t.name) : included.delete(t.name); };
-        const lab = el('label');
-        lab.style.cssText = 'display:flex;align-items:center;gap:8px;flex:1';
-        lab.append(cb, el('span', 'session-name', t.name), el('span', 'count', `${t.row_count.toLocaleString()} rows`));
-        head.append(lab);
-        row.append(head);
-        if (t.likely_timestamp_columns.length) {
-          const tsRow = el('div', 'row-actions');
-          tsRow.style.cssText = 'flex-wrap:wrap;margin-top:4px';
-          tsRow.append(el('span', 'fb-help', 'Convert to readable datetime:'));
-          for (const colName of t.likely_timestamp_columns) {
-            const chip = el('button', 'btn ghost', colName);
-            chip.setAttribute('aria-pressed', String(selected.get(t.name).has(colName)));
-            chip.title = 'Toggle converting this WebKit/Chrome-epoch column to an ISO datetime on import';
-            chip.onclick = () => {
-              const set = selected.get(t.name);
-              if (set.has(colName)) set.delete(colName); else set.add(colName);
-              chip.setAttribute('aria-pressed', String(set.has(colName)));
-            };
-            tsRow.append(chip);
-          }
-          row.append(tsRow);
-        }
-        tableList.append(row);
-      }
+/* Fetch a preview for what is set now; the last answer stays on screen,
+   dimmed, while the next is on its way (the derive preview's rule), and
+   an answer that arrives after a newer question is dropped. `requested`:
+   a whole-file preview already asked for once, so not asked about again. */
+export function previewRunner(ctx, fetcher, render, { wholeFile = false, requested = false } = {}) {
+  let seq = 0;
+  const run = async () => {
+    const mine = ++seq;
+    ctx.preview.classList.add('stale');
+    ctx.preview.setAttribute('aria-busy', 'true');
+    if (!ctx.rows.childElementCount) ctx.footLine('Loading preview…');
+    let res;
+    try { res = await fetcher(); } catch (e) {
+      if (mine !== seq || !ctx.preview.isConnected) return;
+      ctx.preview.classList.remove('stale');
+      ctx.preview.setAttribute('aria-busy', 'false');
+      ctx.rows.replaceChildren();
+      ctx.footLine('Preview failed: ' + e.message, true);
+      return;
     }
+    if (mine !== seq || !ctx.preview.isConnected) return;
+    ctx.preview.classList.remove('stale');
+    ctx.preview.setAttribute('aria-busy', 'false');
+    render(res);
+  };
+  const size = itemSize(ctx.item);
+  if (wholeFile && !requested && !ctx.item.path && size > AUTO_PREVIEW_UPLOAD_BYTES) {
+    // Asked, not started: reading it means sending it up.
+    const go = el('button', 'btn ghost', `Load preview (uploads ${fmtBytes(size)})`);
+    go.onclick = () => { go.remove(); run(); };
+    ctx.rows.append(go);
+    ctx.footLine('A browser-picked file is sent to the server to be read.');
+    return () => { if (!go.isConnected) run(); };
+  }
+  run();
+  return run;
+}
 
-    // Factored out of pickInput's own onchange so a file handed in from
-    // outside (wireFileDrop) previews identically to one picked by hand —
-    // same request, same defaults, same failure handling.
-    async function loadFile(f) {
-      pickStatus.textContent = 'Reading…';
+export function previewTable(columns, sampleRows, headExtra) {
+  const t = el('table', 'preview-tbl');
+  const hr = el('tr');
+  columns.forEach((c, i) => {
+    const th = el('th');
+    th.append(el('div', 'preview-colname', c));
+    const extra = headExtra && headExtra(i);
+    if (extra) th.append(extra);
+    hr.append(th);
+  });
+  t.append(hr);
+  for (const row of sampleRows.slice(0, 50)) {
+    const tr = el('tr');
+    for (const v of row) tr.append(el('td', null, v));
+    t.append(tr);
+  }
+  return t;
+}
+
+export const encodingNote = (res) => (res.encoding === 'cp1252' ? ' · not UTF-8, read as Windows-1252' : '');
+
+export function buildDelimitedSettings(ctx) {
+  const { item, settings } = ctx;
+  const delim = tableMenuSeg(DELIMITERS.map(([k, l]) => [k, l]), () => delimKey(item.delimiter), (key) => {
+    item.delimiter = (DELIMITERS.find((x) => x[0] === key) || DELIMITERS[0])[2];
+    item.column_types = null;
+    item.configured = true;
+    delim.paint();
+    ctx.changed();
+    reload();
+  }, 'import-delims');
+  const headerLabel = el('label', 'import-check');
+  const headerCb = el('input');
+  headerCb.type = 'checkbox';
+  headerCb.checked = item.has_header !== false;
+  headerCb.onchange = () => { item.has_header = headerCb.checked; item.column_types = null; item.configured = true; ctx.changed(); reload(); };
+  headerLabel.append(headerCb, document.createTextNode(' First row is headers'));
+  settings.append(paneRow('Delimiter', delim.seg), paneRow('Header', headerLabel));
+  ctx.previewHead.append(el('span', 'import-preview-aside', 'Set a column’s type in its heading'));
+
+  const reload = previewRunner(ctx, () => fetchPreview(item, { kind: 'csv', delimiter: item.delimiter || null, has_header: item.has_header !== false }), (res) => {
+    if (!item.column_types || item.column_types.length !== res.columns.length) item.column_types = null;
+    const types = item.column_types || res.inferred_types.slice();
+    ctx.rows.replaceChildren(previewTable(res.columns, res.sample_rows, (i) => typeSelect(types[i], (ty) => {
+      types[i] = ty;
+      item.column_types = types.slice();
+      item.configured = true;
+      ctx.changed();
+    })));
+    const n = res.sample_rows.length;
+    ctx.footLine(`${delimName(res.delimiter)}-delimited${item.delimiter ? '' : ' (detected)'} · ${res.columns.length} columns · first ${n} row${n === 1 ? '' : 's'}${encodingNote(res)}`);
+  });
+}
+
+export function buildLinesSettings(ctx) {
+  const { item } = ctx;
+  ctx.note('Every line becomes one row, in a single column. Nothing is split, and there is no header row.');
+  previewRunner(ctx, () => fetchPreview(item, { kind: 'text', has_header: false }), (res) => {
+    ctx.rows.replaceChildren(previewTable(res.columns, res.sample_rows));
+    const n = res.sample_rows.length;
+    ctx.footLine(`One line per row · first ${n} line${n === 1 ? '' : 's'}${encodingNote(res)}`);
+  });
+}
+
+/* An IIS log in one of its three formats: the name picks one, and the
+   others are here for the log that was renamed or isn't what its name
+   says. Types are kept by column NAME ({column: type}, not the delimited
+   list): the preview reads the start of a W3C log, and a #Fields: line
+   further in can put columns ahead of the ones it saw (store.ingest_iis). */
+export const IIS_FORMATS = [
+  ['w3c', 'W3C extended', 'Columns named by the log’s own #Fields: lines'],
+  ['ncsa', 'NCSA common', 'The fixed NCSA common log layout'],
+  ['native', 'IIS native', 'IIS’s own fixed, comma-separated layout, in the server’s local time'],
+];
+
+export function buildIisSettings(ctx) {
+  const { item, settings } = ctx;
+  const named = iisLogFormat(item.name) || 'w3c';
+  const format = () => item.log_format || named;
+  const seg = tableMenuSeg(IIS_FORMATS, format, (key) => {
+    if (key === format()) return;
+    item.log_format = key;
+    item.column_types = null;
+    item.configured = true;
+    seg.paint();
+    ctx.changed();
+    reload();
+  }, 'import-iis-format');
+  settings.append(paneRow('Format', seg.seg));
+  ctx.note(`The name says ${IIS_FORMAT_LABELS[named]}. A Timestamp (UTC) column is added, and a line that isn’t in the format is kept whole.`);
+  ctx.previewHead.append(el('span', 'import-preview-aside', 'Set a column’s type in its heading'));
+
+  const reload = previewRunner(ctx, () => fetchPreview(item, { kind: 'iis', log_format: format() }), (res) => {
+    const given = item.column_types && !Array.isArray(item.column_types) ? item.column_types : {};
+    const types = res.columns.map((c, i) => given[c] || res.inferred_types[i]);
+    ctx.rows.replaceChildren(previewTable(res.columns, res.sample_rows, (i) => typeSelect(types[i], (ty) => {
+      types[i] = ty;
+      item.column_types = { ...given, ...Object.fromEntries(res.columns.map((c, j) => [c, types[j]])) };
+      item.configured = true;
+      ctx.changed();
+    })));
+    const n = res.sample_rows.length;
+    ctx.footLine(`IIS log, ${IIS_FORMAT_LABELS[format()]} · ${res.columns.length} columns · first ${n} row${n === 1 ? '' : 's'}`
+      // Only W3C's columns can grow: NCSA's and native's are fixed.
+      + (format() === 'w3c' && !res.complete ? ' · a #Fields: line further in can add columns' : '')
+      + encodingNote(res));
+  });
+}
+
+/* A key=value log: nothing to choose but the column types, which are kept
+   by name as an IIS log's are — a key first seen further into the file
+   adds a column ahead of Line prefix and Unparsed text (store.ingest_kv). */
+export function buildKvSettings(ctx) {
+  const { item } = ctx;
+  ctx.note('Each key becomes a column, in the order keys first appear; a value’s quotes come off. date and time are joined into a Timestamp column: UTC when every line carries a tz offset, the device’s own clock when not. Text before the first pair is kept in Line prefix, and anything else that isn’t a pair in Unparsed text.');
+  ctx.previewHead.append(el('span', 'import-preview-aside', 'Set a column’s type in its heading'));
+  previewRunner(ctx, () => fetchPreview(item, { kind: 'kv' }), (res) => {
+    const given = item.column_types && !Array.isArray(item.column_types) ? item.column_types : {};
+    const types = res.columns.map((c, i) => given[c] || res.inferred_types[i]);
+    ctx.rows.replaceChildren(previewTable(res.columns, res.sample_rows, (i) => typeSelect(types[i], (ty) => {
+      types[i] = ty;
+      item.column_types = { ...given, ...Object.fromEntries(res.columns.map((c, j) => [c, types[j]])) };
+      item.configured = true;
+      ctx.changed();
+    })));
+    const n = res.sample_rows.length;
+    ctx.footLine(`Key=value log · ${res.columns.length} columns · first ${n} row${n === 1 ? '' : 's'}`
+      + (res.complete ? '' : ' · a key further in can add columns')
+      + encodingNote(res));
+  });
+}
+
+/* The type picker in a preview column's heading. */
+export function typeSelect(value, onPick) {
+  const sel = el('select');
+  for (const ty of ['text', 'number', 'datetime']) {
+    const o = document.createElement('option');
+    o.value = ty; o.textContent = ty;
+    sel.append(o);
+  }
+  sel.value = value;
+  sel.onchange = () => onPick(sel.value);
+  return sel;
+}
+
+export function buildJsonSettings(ctx) {
+  const { item, settings } = ctx;
+  const depthInput = el('input', 'import-depth');
+  depthInput.type = 'number';
+  depthInput.min = '1';
+  depthInput.value = String(item.flatten_depth || 1);
+  depthInput.setAttribute('aria-label', 'Levels to flatten');
+  const mode = tableMenuSeg([
+    ['none', 'Keep as JSON', 'A nested object stays as its JSON text in one column'],
+    ['full', 'Flatten', 'Every nested object becomes dotted columns (user.name)'],
+    ['depth', 'Flatten to depth', 'Flatten only this many levels; deeper objects stay as JSON'],
+  ], () => item.flatten_mode || 'none', (key) => {
+    item.flatten_mode = key;
+    item.configured = true;
+    mode.paint();
+    depthInput.hidden = key !== 'depth';
+    ctx.changed();
+    reload();
+  }, 'import-flatten');
+  depthInput.hidden = (item.flatten_mode || 'none') !== 'depth';
+  depthInput.oninput = debounce(() => {
+    item.flatten_depth = Math.max(1, parseInt(depthInput.value, 10) || 1);
+    item.configured = true;
+    ctx.changed();
+    reload();
+  }, 300);
+  settings.append(paneRow('Nested objects', mode.seg, depthInput));
+  ctx.note('An array always stays as its JSON text in one column, at any depth, since its length varies record to record.');
+
+  const reload = previewRunner(ctx, () => fetchPreview(item, { kind: 'json', flatten_mode: item.flatten_mode || 'none', flatten_depth: item.flatten_depth || 1 }), (res) => {
+    ctx.rows.replaceChildren(previewTable(res.columns, res.sample_rows, (i) => el('div', 'count', res.inferred_types[i])));
+    const clashes = res.key_collisions || 0;
+    ctx.footLine(`${res.record_count.toLocaleString()} record${res.record_count === 1 ? '' : 's'} · ${res.columns.length} columns · first ${res.sample_rows.length}`
+      + (clashes ? ` · ${clashes.toLocaleString()} with two values for one key, the later kept as <key>_1` : '')
+      + encodingNote(res));
+  }, { wholeFile: true });
+}
+
+/* A SQLite file's tables or a workbook's sheets, ticked to import; the
+   preview box is the list. Chromium-epoch columns in a table get a chip
+   each, on to convert (microseconds since 1601 — Chrome's own
+   convention) to a readable datetime as it imports. */
+export function buildUnitSettings(ctx) {
+  const { item } = ctx;
+  const sheets = item.kind === 'xlsx';
+  const unit = sheets ? 'sheet' : 'table';
+  ctx.note(sheets
+    ? 'Each sheet you tick becomes a table of its own. Date-formatted cells become readable timestamps.'
+    : 'Each table you tick becomes a table of its own. Chrome-style timestamp columns are converted to readable dates; untick a chip to keep the number.');
+  ctx.previewHead.firstChild.textContent = sheets ? 'Sheets' : 'Tables';
+  const pick = el('div', 'vp-seg');
+  const all = el('button', 'btn ghost', 'All');
+  const none = el('button', 'btn ghost', 'None');
+  pick.append(all, none);
+  ctx.previewHead.append(pick);
+
+  let units = null;
+  const chosen = new Set((item.tables || []).map((t) => t.table));
+  const convert = new Map();
+  function commit() {
+    item.tables = units.filter((t) => chosen.has(t.name)).map((t) => ({ table: t.name, timestamp_columns: [...convert.get(t.name)] }));
+    item.configured = item.tables.length > 0;
+    ctx.changed();
+    sum();
+  }
+  function sum() {
+    const picked = units.filter((t) => chosen.has(t.name));
+    const rowsPicked = picked.reduce((n, t) => n + (t.row_count || 0), 0);
+    ctx.footLine(picked.length
+      ? `${picked.length} of ${units.length} ${unit}s ticked · ${rowsPicked.toLocaleString()} rows`
+      : `Tick the ${unit}s to import · ${units.length} in this file`);
+  }
+  function paint() {
+    const list = el('div', 'import-units');
+    if (!units.length) list.append(el('p', 'fb-help', sheets ? 'No data sheets in this workbook.' : 'No tables in this file.'));
+    for (const t of units) {
+      const row = el('div', 'import-unit' + (t.error ? ' error' : ''));
+      const lab = el('label', 'import-unit-pick');
+      const cb = el('input');
+      cb.type = 'checkbox';
+      cb.checked = chosen.has(t.name);
+      cb.disabled = !!t.error;
+      cb.onchange = () => { if (cb.checked) chosen.add(t.name); else chosen.delete(t.name); commit(); };
+      lab.append(cb, el('span', 'import-unit-name', t.name));
+      row.append(lab, el('span', 'import-unit-count', t.error ? `can’t be read: ${t.error}` : `${t.row_count.toLocaleString()} rows`));
+      if (t.likely_timestamp_columns.length) {
+        const chips = el('div', 'import-unit-chips');
+        for (const col of t.likely_timestamp_columns) {
+          const chip = el('button', 'btn ghost', col);
+          chip.setAttribute('aria-pressed', String(convert.get(t.name).has(col)));
+          chip.title = 'Convert this Chrome-epoch column to a readable datetime as it imports';
+          chip.onclick = () => {
+            const set = convert.get(t.name);
+            if (set.has(col)) set.delete(col); else set.add(col);
+            chip.setAttribute('aria-pressed', String(set.has(col)));
+            if (chosen.has(t.name)) commit();
+          };
+          chips.append(chip);
+        }
+        row.append(chips);
+      }
+      list.append(row);
+    }
+    ctx.rows.replaceChildren(list);
+    sum();
+  }
+  all.onclick = () => { if (!units) return; for (const t of units) if (!t.error) chosen.add(t.name); commit(); paint(); };
+  none.onclick = () => { if (!units) return; chosen.clear(); commit(); paint(); };
+  previewRunner(ctx, () => unitListing(item), (res) => {
+    units = res.tables;
+    for (const t of units) {
+      // Back on a file already picked: its choices; fresh: every detected
+      // timestamp column converts.
+      const prior = (item.tables || []).find((x) => x.table === t.name);
+      convert.set(t.name, prior ? new Set(prior.timestamp_columns || []) : new Set(t.likely_timestamp_columns));
+    }
+    paint();
+  }, { wholeFile: true, requested: !!item.listing });
+}
+
+/* A SQLite file's tables or a workbook's sheets, read once per queued file
+   and kept on it (item.listing, the request's promise), so the pane shows
+   it again without asking — and past 32 MB without the Load preview
+   button, once that has been pressed. The pane is built afresh each time
+   the file is chosen, and each build used to ask afresh too: an upload
+   went up whole again, the server read the workbook again, and an answer
+   still on its way when another file was chosen was thrown away. A large
+   workbook chosen twice was two full reads on the server and a list that
+   never arrived. Nothing listed can change while the file is queued (these
+   kinds have no Read as); a failed read isn't kept, so choosing the file
+   again tries again. */
+export function unitListing(item) {
+  if (!item.listing) {
+    const listing = fetchPreview(item, { kind: item.kind });
+    item.listing = listing;
+    listing.catch(() => { if (item.listing === listing) item.listing = null; });
+  }
+  return item.listing;
+}
+
+export function buildPluginSettings(ctx) {
+  const { item, settings } = ctx;
+  const fmt = pluginFormatById(item.format_id);
+  if (!fmt) { ctx.note('The plugin that claimed this file is no longer loaded.'); return; }
+  if (fmt.description) ctx.note(fmt.description);
+  item.options = { ...defaultPluginOptions(fmt), ...(item.options || {}) };
+  const set = (name, v) => { item.options[name] = v; item.configured = true; ctx.changed(); };
+  for (const o of fmt.options || []) {
+    if (o.type === 'bool') {
+      const lab = el('label', 'import-check');
+      const cb = el('input');
+      cb.type = 'checkbox';
+      cb.checked = !!item.options[o.name];
+      cb.onchange = () => set(o.name, cb.checked);
+      lab.append(cb, document.createTextNode(' ' + (o.label || o.name)));
+      settings.append(paneRow('', lab));
+    } else if (o.type === 'choice') {
+      const sel = el('select');
+      for (const c of o.choices || []) {
+        const opt = document.createElement('option');
+        opt.value = c; opt.textContent = c;
+        sel.append(opt);
+      }
+      sel.value = item.options[o.name] ?? o.default ?? '';
+      sel.onchange = () => set(o.name, sel.value);
+      settings.append(paneRow(o.label || o.name, sel));
+    } else {
+      const inp = el('input');
+      inp.type = 'text';
+      inp.value = item.options[o.name] ?? '';
+      inp.oninput = () => set(o.name, inp.value);
+      settings.append(paneRow(o.label || o.name, inp));
+    }
+  }
+  if (!(fmt.options || []).length) ctx.note('This format has no options.');
+  ctx.rows.append(el('p', 'fb-help', 'The plugin reads the file when it imports; there is no preview before then.'));
+  ctx.footLine(`Read by ${fmt.label}`);
+}
+
+/* Kinds with nothing to set: what they become, said where the settings
+   would be. */
+export function buildFixedSettings(ctx) {
+  const { item } = ctx;
+  if (item.kind === 'plaso') {
+    ctx.note('A Plaso storage file imports as one timeline table: a fixed set of columns, plus an Attributes column holding each event’s other fields as JSON.');
+    ctx.rows.append(el('p', 'fb-help', 'Plaso files are read in full when they import; there is no preview before then.'));
+    ctx.footLine('One timeline table');
+  } else if (item.kind === 'archive') {
+    ctx.note('Expands on import, nested archives included. Import a folder then opens on what it held, so you choose the files from there.');
+    ctx.rows.append(el('p', 'fb-help', 'The archive is opened when it imports; its files are listed then.'));
+    ctx.footLine('Expands on import');
+  }
+}
+
+/* Every queued file, in order, through the transport it arrived by.
+   Deliberately not awaited by the dialog: uploads run sequentially (one
+   disk, one spool at a time) behind this detached chain while the analyst
+   keeps working; each upload resolves into a background ingest job the
+   corner panel is already tracking. */
+export async function importQueued(queue) {
+  // Plugin ingests are synchronous routes that create no background
+  // job, so nothing announces the finished source — the jobs poll
+  // only refreshes on a job transition. Counted here, refreshed after
+  // the loop; the directory-import loop does the same, for the same
+  // reason.
+  let pluginOk = 0;
+  const expanded = [];   // archive expansion reports, handed to directory import below
+  for (const item of queue) {
+    if (item.kind === 'archive') {
+      toast(`Expanding ${item.name}…`, 60000);
       try {
-        // A path item previews the tables in place; a File uploads the .db
-        // once to enumerate them. Which is a fact, not a fingerprint guess.
-        const res = f.path
-          ? await post('/api/ingest/preview/path', { path: f.path, kind: cfg.previewKind })
-          : await (async () => {
-              const fd = new FormData();
-              fd.append('file', f.file);
-              return api(cfg.uploadUrl, { method: 'POST', body: fd });
-            })();
-        tables = res.tables;
+        const rep = item.path
+          ? await post('/api/ingest/archive/expand', { path: item.path })
+          : await (() => {
+            const fd = new FormData();
+            fd.append('file', item.file);
+            return uploadWithProgress('/api/ingest/archive/upload', fd, item.name);
+          })();
+        expanded.push({ name: item.name, ...rep });
+        // Skipped members (damaged, unwritable, refused as unsafe) and
+        // renamed ones (two wanted one name) are things the analyst
+        // needs to know before trusting the tree; the first of each is
+        // named, the full list is in the log.
+        const skipped = rep.skipped || [];
+        const renamed = rep.renamed || [];
+        toast(`Expanded ${item.name}: ${rep.files.toLocaleString()} file${rep.files === 1 ? '' : 's'}`
+          + (rep.archives > 1 ? ` from ${rep.archives} nested archives` : '')
+          + (renamed.length ? ` · ${renamed.length} renamed, the name was taken (${renamed[0].path} → ${renamed[0].as})` : '')
+          + (skipped.length ? ` · ${skipped.length} skipped (${skipped[0].path}: ${skipped[0].reason})` : '')
+          + (rep.truncated ? ' (stopped at a safety cap — partial)' : ''),
+        skipped.length || renamed.length ? 12000 : 6000);
       } catch (e) {
-        pickStatus.textContent = '';
-        toast('Could not read that file: ' + e.message, 6000);
-        return;
+        if (!e.cancelled) toast(`Could not expand ${item.name}: ` + e.message, 8000);
       }
-      pickStatus.textContent = f.name;
-      included.clear();
-      selected.clear();
-      const prior = initial && initial.tables
-        ? new Map(initial.tables.map((t) => [t.table, new Set(t.timestamp_columns || [])]))
-        : null;
-      for (const t of tables) {
-        // Re-opening the picker restores the previous choices; a fresh file
-        // defaults to converting every detected timestamp column.
-        if (prior) {
-          if (prior.has(t.name)) included.add(t.name);
-          selected.set(t.name, prior.get(t.name) || new Set(t.likely_timestamp_columns));
-        } else {
-          selected.set(t.name, new Set(t.likely_timestamp_columns));
-        }
-      }
-      renderTables();
+      continue;
     }
-    loadFile(src);
-
-    importBtn.onclick = () => {
-      const targets = [...included];
-      if (!targets.length) { toast(cfg.checkFirst); return; }
-      onConfirm({
-        tables: targets.map((tableName) => ({
-          table: tableName,
-          timestamp_columns: [...selected.get(tableName)],
-        })),
-      });
-    };
-  }, { wide: true });
+    // Two transports, chosen by how the item arrived — a path item
+    // (the "Add from this machine…" picker, directory import) reads
+    // in place with no upload leg; a browser-picked File uploads.
+    // Never a guess: the old content-fingerprint resolver that tried
+    // to recover a picked file's path is deliberately gone.
+    if (item.path) {
+      try {
+        if (item.kind === 'plugin') {
+          // 60s, not the default: this awaits the whole parse (see
+          // the directory-import loop's identical choice).
+          toast(`Importing ${item.name}…`, 60000);
+          await post('/api/ingest/plugin/path', {
+            path: item.path, name: item.name, format_id: item.format_id,
+            options: item.options || {},
+          });
+          pluginOk++;
+        } else {
+          await post('/api/ingest/jobs/path', {
+            path: item.path, name: item.name, kind: item.kind,
+            delimiter: item.delimiter || null,
+            has_header: item.has_header !== false,
+            column_types: item.column_types || null,
+            log_format: item.log_format || null,
+            flatten_mode: item.flatten_mode || 'none',
+            flatten_depth: item.flatten_depth || 0,
+            tables: item.tables || null,
+          });
+          startJobsPoll();
+        }
+      } catch (e) {
+        toast(`Import failed for ${item.name}: ` + e.message, 6000);
+      }
+      continue;
+    }
+    const fd = new FormData();
+    fd.append('file', item.file);
+    if (item.kind === 'plugin') {
+      // jobs/upload's start_ingest_job knows csv/json/sqlite only —
+      // plugin uploads have their own route, which parses via the
+      // registered format and ingests synchronously (no job).
+      fd.append('format_id', item.format_id);
+      fd.append('options', JSON.stringify(item.options || {}));
+      try {
+        await uploadWithProgress('/api/ingest/plugin/upload', fd, item.name);
+        pluginOk++;
+      } catch (e) {
+        if (!e.cancelled) toast(`Upload failed for ${item.name}: ` + e.message, 6000);
+      }
+      continue;
+    }
+    fd.append('kind', item.kind);
+    if (item.kind === 'json') {
+      fd.append('flatten_mode', item.flatten_mode || 'none');
+      fd.append('flatten_depth', String(item.flatten_depth || 1));
+    } else if (item.kind === 'sqlite' || item.kind === 'xlsx') {
+      fd.append('tables', JSON.stringify(item.tables));
+    } else {
+      if (item.delimiter) fd.append('delimiter', item.delimiter);
+      if (item.log_format) fd.append('log_format', item.log_format);
+      fd.append('has_header', item.has_header ? 'true' : 'false');
+      if (item.column_types) fd.append('column_types', JSON.stringify(item.column_types));
+    }
+    try {
+      await uploadWithProgress('/api/ingest/jobs/upload', fd, item.name);
+    } catch (e) {
+      if (!e.cancelled) toast(`Upload failed for ${item.name}: ` + e.message, 6000);
+    }
+  }
+  // Same reason as the directory-import loop's identical line: a
+  // sync plugin ingest creates no job for the poll to notice.
+  if (pluginOk) await loadSources();
+  // The analyst just opened these types with Winnow — the moment
+  // the one-time Open With offer is actually justified.
+  maybeOfferAssociation(queue.map((i) => i.name));
+  // Expanded archives hand off to directory import — the flow that
+  // already owns extension gates, include/exclude and the sidebar
+  // folder mirror. One modal, rooted at the first expansion; other
+  // roots are announced for a follow-up pass.
+  if (expanded.length) {
+    for (const r of expanded.slice(1)) toast(`Also expanded to ${r.root} — import it via Case → Import → folder`, 10000);
+    openDirectoryImportModal({ root: expanded[0].root });
+  }
 }
 
 /* Drag a file (or several) from the OS straight onto the window to import
@@ -618,6 +1098,26 @@ export function wireFileDrop() {
   });
 }
 
+/* Windows refuses a drag from File Explorer into a window running as
+   administrator before the page sees any event at all, so nothing above
+   can tell the analyst why the drop won't land: they just get a no-entry
+   cursor. The server can tell (winnow/elevation.py), so the window says so
+   as it loads, and keeps saying so until it's dismissed. "May", because a
+   browser that was already open runs the window with its own rights. */
+export async function maybeWarnElevated() {
+  let res;
+  try { res = await api('/api/elevation'); } catch { return; }
+  if (!res.drops_blocked) return;
+  const box = $('elevNotice');
+  const ok = el('button', 'btn ghost', 'Got it');
+  ok.onclick = () => { box.hidden = true; };
+  box.replaceChildren(el('span', 'elev-msg',
+    'Winnow is running as administrator, so Windows may refuse files dragged onto this '
+    + 'window from File Explorer. To drag files in, close Winnow and start it from a normal '
+    + 'window, not an administrator one. Case ▾ → Import… works either way.'), ok);
+  box.hidden = false;
+}
+
 /* A single dropped file recognized as SQLite opens the table-picker flow
    (it can't just queue-and-import like CSV/JSON — which table(s) to pull
    out is a real choice the analyst has to make, same as picking one by
@@ -627,38 +1127,79 @@ export function wireFileDrop() {
    modal "Choose files…" already uses. Unrecognized files are dropped
    silently from the queue but named in a toast — better than a mysterious
    partial import with no explanation. */
-/* Whether ANY importer will take this filename — built-in extensions or a
-   loaded plugin format. The shared gate for the two entry points that see
-   unfiltered listings: OS drops and the server-disk picker. */
-export function recognizedImportFile(name) {
-  return RECOGNIZED_IMPORT_EXTENSIONS.includes(extOf(name))
-    || SQLITE_IMPORT_EXTENSIONS.includes(extOf(name))
-    || XLSX_IMPORT_EXTENSIONS.includes(extOf(name))
-    || PLASO_IMPORT_EXTENSIONS.includes(extOf(name))
-    || ARCHIVE_IMPORT_EXTENSIONS.includes(extOf(name))
-    || !!pluginFormatFor(name);
-}
-
-export function handleDroppedFiles(files) {
+/* Every filename is importable now — a name nothing else claims imports
+   one line per row — so the only refusal left is the binary check in
+   queueFiles (and the importer's own, at ingest). */
+export async function handleDroppedFiles(files) {
   if (!files.length) return;
-  const known = (f) => recognizedImportFile(f.name);
-  const recognized = files.filter(known);
-  const skipped = files.filter((f) => !known(f));
-  if (!recognized.length) {
-    toast(`No recognized files in the drop (${skipped.map((f) => f.name).join(', ')})`, 5000);
-    return;
-  }
-  queueFiles(recognized);
+  await queueFiles(files);
   openImportModal();
-  if (skipped.length) {
-    toast(`Skipped ${skipped.length} unrecognized file${skipped.length === 1 ? '' : 's'}: ${skipped.map((f) => f.name).join(', ')}`, 5000);
-  }
 }
 
 export const patternLines = (text) => text.split('\n').map((l) => l.trim()).filter(Boolean);
 
 export async function loadImportProfiles() {
   try { S.importProfiles = await api('/api/import_profiles'); } catch { S.importProfiles = []; }
+}
+
+/* What the Import a folder dialog's side list offers: no profile at all
+   (patterns built here and not saved), then the saved profiles by name.
+   Pins are menuPins(IMPORT_PINS), keyed by profile id. */
+export const IMPORT_PINS = 'import';
+export const CUSTOM_IMPORT = 'custom';
+export const IMPORT_GROUPS = ['Ad hoc', 'Profiles'];
+
+export const defaultImportExtensions = () =>
+  RECOGNIZED_IMPORT_EXTENSIONS.concat(PLASO_IMPORT_EXTENSIONS, [IIS_IMPORT_TYPE], pluginExtensions());
+
+/* How a folder-import file type reads on its chip and in a profile's
+   search hint: the two that aren't extensions get words. */
+export const importTypeLabel = (x) => (x === '*' ? 'other text files' : x === IIS_IMPORT_TYPE ? 'IIS logs' : x);
+
+export function importProfileEntries(profiles) {
+  const entries = [{
+    key: CUSTOM_IMPORT, label: 'Custom (not saved)', group: 'Ad hoc',
+    title: 'Every file type Winnow reads and no patterns, to build your own here',
+  }];
+  const byName = [...profiles].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+  for (const p of byName) {
+    const inc = p.include_patterns || [];
+    const exc = p.exclude_patterns || [];
+    const title = [inc.length ? `Includes ${inc.join(', ')}` : 'Every file its types let in',
+                   exc.length ? `excludes ${exc.join(', ')}` : ''].filter(Boolean).join('; ');
+    entries.push({ key: String(p.id), label: p.name, group: 'Profiles', profile: p, title });
+  }
+  return entries;
+}
+
+/* Does the search box's text find this entry? By its name, or — for a
+   profile — by one of its patterns or file types, which the hit then
+   names: "amcache" finds a KAPE profile through the pattern that leaves
+   out Amcache's unassociated entries, the way "filetime" finds Parse a
+   timestamp in the derive dialog. */
+export function matchesImportSearch(entry, query) {
+  if (sideRailMatch(entry, query)) return {};
+  const p = entry.profile;
+  if (!p) return null;
+  const terms = String(query || '').toLowerCase().split(/\s+/).filter(Boolean);
+  for (const [verb, list] of [['includes', p.include_patterns], ['excludes', p.exclude_patterns], ['reads', p.extensions]]) {
+    for (const x of list || []) {
+      const shown = importTypeLabel(x);
+      const text = `${entry.label} ${entry.group} ${shown}`.toLowerCase();
+      if (terms.every((t) => text.includes(t))) return { hint: `${verb} ${shown}` };
+    }
+  }
+  return null;
+}
+
+/* A label and its controls on one line, the derive dialog's row — a div
+   rather than labeledRow's <label>, because a label passes its clicks to
+   the first control inside it, and here that would be Browse… or the
+   .csv chip. */
+function paneRow(label, ...controls) {
+  const row = el('div', 'derived-row');
+  row.append(el('span', 'derived-row-label', label), ...controls);
+  return row;
 }
 
 /* Point at a folder — a KAPE triage output or any other bulk-collection
@@ -669,12 +1210,23 @@ export async function loadImportProfiles() {
    profile, so a profile built once for "KAPE" keeps working on every future
    triage without re-typing its exclusions.
 
+   The derive dialog's shape (sideRail, the .side-* rules): the profiles
+   down the left, searchable, with pinned ones on top; on the right, the
+   folder, the settings a profile holds, and a preview of what the scan
+   found; the buttons under both. The frame is a fixed height and so is
+   every part of the right pane but the preview's file list, which takes
+   what is left and scrolls — so picking a profile, a rescan finding three
+   files or three thousand, or a profile's buttons coming and going moves
+   nothing. It used to be a centred column sized to the scan: the card
+   grew with the list until the buttons left the screen, and re-centred
+   on every rescan.
+
    Async at the top level (unlike every other open* modal function here,
    which stay synchronous and do async work via inner handlers) because
    S.importProfiles — unlike S.savedFilters/S.tags/etc. — has no earlier,
    source-open-triggered load point to piggyback on; this is the one place
    that ever needs it, so it's simplest to just await a fresh copy before
-   building the profile <select> at all, rather than rendering once with a
+   building the side list at all, rather than rendering once with a
    possibly-stale/empty list and re-rendering again once a background fetch
    resolves.
 
@@ -689,30 +1241,170 @@ export async function openDirectoryImportModal(state = {}) {
     root: state.root || null,
     profileId: state.profileId || null,
     recursive: state.recursive ?? true,
-    extensions: state.extensions || RECOGNIZED_IMPORT_EXTENSIONS.concat(PLASO_IMPORT_EXTENSIONS, pluginExtensions()),
+    extensions: state.extensions || defaultImportExtensions(),
     includeText: state.includeText || '',
     excludeText: state.excludeText || '',
   };
+  // Deleted from another window since the state was taken: the list has
+  // no row for it, so start from Custom with what was set.
+  if (st.profileId && !S.importProfiles.some((p) => p.id === st.profileId)) st.profileId = null;
   let scanResult = null; // {root, matched, excluded, truncated}
+  let scanError = null;
   let checked = new Set(); // indices into scanResult.matched
-  let showExcluded = false;
+  let showing = 'matched'; // which of the scan's two lists the preview shows
   let scanSeq = 0; // guards a slow scan response from overwriting a newer one
+  let pending = false; // a scan has been asked for and its answer isn't in
 
   modal('Import a folder', (b) => {
-    b.append(el('p', null,
-      'Point at a folder and import every file inside that matches — built for a KAPE triage or '
-      + 'similar bulk-collection output. Pick a saved profile or build patterns ad hoc; the preview '
-      + 'below updates as you edit them.'));
+    const profileOf = (id) => S.importProfiles.find((p) => p.id === id) || null;
 
-    const resultsBox = el('div', 'search-all-results');
+    /* ---------------------------------------------- the side list */
+    const side = sideRail({
+      entries: () => importProfileEntries(S.importProfiles),
+      groups: IMPORT_GROUPS,
+      selected: () => (st.profileId ? String(st.profileId) : CUSTOM_IMPORT),
+      onPick: (entry) => pickProfile(entry.profile || null),
+      match: matchesImportSearch,
+      pinsKey: IMPORT_PINS,
+      label: 'Profiles',
+      notes: { Profiles: 'None saved yet. Save as profile… keeps the file types and patterns for every case on this machine.' },
+    });
+
+    // Custom starts from every file type and no patterns, as it always
+    // has; a profile brings its own.
+    function pickProfile(p) {
+      if ((p ? p.id : null) === st.profileId) return;
+      st.profileId = p ? p.id : null;
+      st.recursive = p ? (p.recursive ?? true) : true;
+      st.extensions = (p && p.extensions) || defaultImportExtensions();
+      st.includeText = p ? (p.include_patterns || []).join('\n') : '';
+      st.excludeText = p ? (p.exclude_patterns || []).join('\n') : '';
+      side.sync();
+      syncSettings();
+      syncProfileButtons();
+      scheduleScan();
+    }
+
+    /* ---------------------------------------------- the right pane */
+    const folderPath = el('span', 'import-folder-path');
+    const browseBtn = el('button', 'btn ghost', 'Browse…');
+    browseBtn.onclick = () => {
+      openFolderBrowser(st.root || undefined, (path) => {
+        openDirectoryImportModal({ ...st, root: path });
+      }, () => openDirectoryImportModal(st));
+    };
+    const folderRow = paneRow('Folder', folderPath, browseBtn);
+    folderRow.classList.add('import-folder-row');
+
+    const recLabel = el('label', 'import-subfolders');
+    const recCb = el('input');
+    recCb.type = 'checkbox';
+    recCb.onchange = () => { st.recursive = recCb.checked; scheduleScan(); };
+    recLabel.append(recCb, document.createTextNode(' Include subfolders'));
+
+    // '*' is the raw-text catch-all: any other file that isn't binary,
+    // one line per row. Off by default — a triage tree is full of text
+    // nobody wants as a table — and remembered by profiles like an
+    // extension (it rides in the same list).
+    const extRow = el('div', 'import-types');
+    for (const ext of defaultImportExtensions().concat(['*'])) {
+      const chip = el('button', 'btn ghost', importTypeLabel(ext));
+      chip.dataset.ext = ext;
+      if (ext === '*') chip.title = 'Any other file that is not binary, imported as raw text — one line per row';
+      if (ext === IIS_IMPORT_TYPE) chip.title = 'IIS web server logs, recognised by name: u_ex…, ex…, nc…, in….log';
+      chip.onclick = () => {
+        st.extensions = st.extensions.includes(ext)
+          ? st.extensions.filter((e) => e !== ext)
+          : [...st.extensions, ext];
+        chip.setAttribute('aria-pressed', String(st.extensions.includes(ext)));
+        scheduleScan();
+      };
+      extRow.append(chip);
+    }
+
+    const patternBox = (caption, placeholder, onText) => {
+      const col = el('label', 'import-pattern');
+      const area = el('textarea');
+      area.rows = 3;
+      area.spellcheck = false;
+      area.wrap = 'off'; // a glob per line; one broken across two reads as two
+      area.placeholder = placeholder;
+      area.oninput = () => { onText(area.value); scheduleScan(); };
+      col.append(el('span', 'import-pattern-caption', caption), area);
+      return [col, area];
+    };
+    const [includeCol, includeArea] = patternBox('Include (blank = every file the types let in)',
+      'One glob per line,\ne.g. *EvtxECmd*', (v) => { st.includeText = v; });
+    const [excludeCol, excludeArea] = patternBox('Exclude',
+      'One glob per line,\ne.g. *_Amcache_Unassociated*', (v) => { st.excludeText = v; });
+    const patterns = el('div', 'import-patterns');
+    patterns.append(includeCol, excludeCol);
+
+    const settingsBox = el('div', 'side-settings');
+    const typesRow = paneRow('File types', extRow);
+    const patternRow = paneRow('Patterns', patterns);
+    // Labels on the first line of what they label, which is two lines.
+    typesRow.classList.add('import-top');
+    patternRow.classList.add('import-top');
+    settingsBox.append(typesRow, recLabel, patternRow);
+
+    // What a profile holds, put on screen — after a pick, and once to start.
+    function syncSettings() {
+      recCb.checked = st.recursive;
+      for (const chip of extRow.children) chip.setAttribute('aria-pressed', String(st.extensions.includes(chip.dataset.ext)));
+      includeArea.value = st.includeText;
+      excludeArea.value = st.excludeText;
+    }
+
+    /* The preview: the scan's two lists, one at a time, chosen beside the
+       word Preview the way the derive dialog chooses its sample, and a
+       verdict line under them that stays put. */
+    const previewBox = el('div', 'side-preview import-preview');
+    const previewRows = el('div', 'side-preview-rows');
+    const previewFoot = el('div', 'side-preview-foot');
+    previewBox.append(previewRows, previewFoot);
+    const previewHead = el('div', 'side-preview-title', 'Preview');
+    const listSeg = el('div', 'vp-seg import-lists');
+    const listBtns = {};
+    for (const [key, title] of [
+      ['matched', 'The files the scan matched; untick any you want left out'],
+      ['excluded', 'The files the scan passed over, and why'],
+    ]) {
+      const btn = el('button', 'btn ghost');
+      btn.dataset.list = key;
+      btn.title = title;
+      btn.onclick = () => { if (showing !== key) { showing = key; renderResults(); } };
+      listBtns[key] = btn;
+      listSeg.append(btn);
+    }
+    previewHead.append(listSeg);
+
+    const pane = el('div', 'side-pane');
+    pane.append(folderRow, settingsBox, previewHead, previewBox);
+    const panes = el('div', 'side-panes');
+    panes.append(side.rail, pane);
+    b.append(panes);
+
     const actions = el('div', 'row-actions');
-    const importBtn = el('button', 'btn', 'Import checked (0)');
+    const importBtn = el('button', 'btn primary', 'Import checked (0)');
     importBtn.disabled = true;
+
+    /* While a new scan is on its way, the last answer stays on screen,
+       dimmed — the derive preview's rule, for the same reason: a list
+       that empties to "Scanning…" and refills on every keystroke in a
+       pattern is a flicker. aria-busy says the rows are the old answer's. */
+    function previewBusy(on) {
+      previewBox.classList.toggle('stale', on);
+      previewBox.setAttribute('aria-busy', String(on));
+      syncCount();
+    }
 
     async function runScan() {
       const seq = ++scanSeq;
-      if (!st.root) { scanResult = null; checked = new Set(); renderResults(); return; }
-      resultsBox.replaceChildren(el('div', 'note-status', 'Scanning…'));
+      if (!st.root) { pending = false; scanResult = null; scanError = null; checked = new Set(); renderResults(); return; }
+      pending = true;
+      previewBusy(true);
+      if (!scanResult && !scanError) renderResults(); // the first scan says so; later ones dim the last
       let r;
       try {
         r = await post('/api/ingest/dir/scan', {
@@ -724,11 +1416,17 @@ export async function openDirectoryImportModal(state = {}) {
         });
       } catch (e) {
         if (seq !== scanSeq) return; // a newer scan already started; don't clobber it with a stale error
-        resultsBox.replaceChildren(el('div', 'note-status', 'Scan failed: ' + e.message));
+        pending = false;
+        scanResult = null;
+        scanError = e.message;
+        checked = new Set();
+        renderResults();
         return;
       }
       if (seq !== scanSeq) return; // a newer scan resolved first
+      pending = false;
       scanResult = r;
+      scanError = null;
       // Pre-check everything except what's already in the case — the
       // common case is "import the new stuff", and already_imported exists
       // precisely so a second pass over the same folder doesn't default to
@@ -737,160 +1435,105 @@ export async function openDirectoryImportModal(state = {}) {
       r.matched.forEach((m, i) => { if (!m.already_imported) checked.add(i); });
       renderResults();
     }
-    const scheduleScan = debounce(runScan, 300);
+    // Dimmed at once rather than after the debounce, so a keystroke
+    // never leaves an answer on screen looking current.
+    const scheduleScan = () => {
+      if (st.root) { pending = true; previewBusy(true); }
+      debouncedScan();
+    };
+    const debouncedScan = debounce(runScan, 300);
+
+    const foot = (text, bad) => {
+      const line = el('div', 'fb-help' + (bad ? ' bad' : ''), text);
+      line.title = text;
+      return line;
+    };
 
     function renderResults() {
-      resultsBox.replaceChildren();
-      const n = checked.size;
-      importBtn.disabled = n === 0;
-      importBtn.textContent = `Import checked (${n})`;
-      if (!st.root) { resultsBox.append(el('div', 'note-status', 'Choose a folder to preview matches.')); return; }
-      if (!scanResult) return; // "Scanning…" is already showing
-      if (scanResult.truncated) {
-        resultsBox.append(el('div', 'note-status', `Showing the first ${scanResult.matched.length + scanResult.excluded.length} files — narrow the folder or patterns to see the rest.`));
+      const r = scanResult;
+      listBtns.matched.textContent = r ? `Will import (${r.matched.length})` : 'Will import';
+      listBtns.excluded.textContent = r ? `Excluded (${r.excluded.length})` : 'Excluded';
+      for (const [key, btn] of Object.entries(listBtns)) btn.setAttribute('aria-pressed', String(key === showing));
+      const rows = el('div', 'import-files');
+      previewRows.replaceChildren(rows);
+      previewFoot.replaceChildren();
+      previewRows.scrollTop = 0;
+      previewBusy(pending);
+      if (!st.root) {
+        previewFoot.append(foot('Choose a folder to see what it would import.'));
+        return;
       }
-      if (!scanResult.matched.length) {
-        resultsBox.append(el('div', 'note-status', 'No files match.'));
-      } else {
-        resultsBox.append(el('div', 'fb-help', `Will import (${scanResult.matched.length})`));
-        scanResult.matched.forEach((m, i) => {
-          const row = el('div', 'search-all-row');
+      if (scanError) {
+        previewFoot.append(foot('Scan failed: ' + scanError, true));
+        return;
+      }
+      if (!r) { previewFoot.append(foot('Scanning…')); return; }
+      if (showing === 'matched') {
+        if (!r.matched.length) rows.append(el('div', 'fb-help', 'No files match.'));
+        r.matched.forEach((m, i) => {
+          const row = el('label', 'import-file');
           const cb = el('input');
           cb.type = 'checkbox';
           cb.checked = checked.has(i);
-          cb.onchange = () => { cb.checked ? checked.add(i) : checked.delete(i); renderResults(); };
-          row.append(cb, el('span', 'search-all-name', m.rel_path + (m.already_imported ? '  (already in case)' : '')));
-          resultsBox.append(row);
+          cb.onchange = () => { cb.checked ? checked.add(i) : checked.delete(i); syncCount(); };
+          const name = el('span', 'import-file-path', m.rel_path);
+          name.title = m.rel_path;
+          row.append(cb, name);
+          if (m.already_imported) row.append(el('span', 'import-file-note', 'already in case'));
+          rows.append(row);
         });
-      }
-      if (scanResult.excluded.length) {
-        const toggle = el('button', 'btn ghost', (showExcluded ? '▾ ' : '▸ ') + `Excluded (${scanResult.excluded.length})`);
-        toggle.onclick = () => { showExcluded = !showExcluded; renderResults(); };
-        resultsBox.append(toggle);
-        if (showExcluded) {
-          for (const e of scanResult.excluded) {
-            const row = el('div', 'search-all-row');
-            row.append(el('span', 'search-all-name', e.rel_path), el('span', 'search-all-count', e.reason));
-            resultsBox.append(row);
-          }
+      } else {
+        if (!r.excluded.length) rows.append(el('div', 'fb-help', 'Nothing was passed over.'));
+        for (const e of r.excluded) {
+          const row = el('div', 'import-file excluded');
+          const name = el('span', 'import-file-path', e.rel_path);
+          name.title = e.rel_path;
+          const why = el('span', 'import-file-note', e.reason);
+          why.title = e.reason;
+          row.append(name, why);
+          rows.append(row);
         }
       }
+      const total = r.matched.length + r.excluded.length;
+      previewFoot.append(foot(total
+        ? `${r.matched.length.toLocaleString()} of ${total.toLocaleString()} file${total === 1 ? '' : 's'} ${r.matched.length === 1 ? 'matches' : 'match'}.`
+        : 'There are no files in this folder.'));
+      const already = r.matched.filter((m) => m.already_imported).length;
+      const more = [];
+      if (already) more.push(`${already.toLocaleString()} already in the case ${already === 1 ? 'starts' : 'start'} unticked.`);
+      if (r.truncated) more.push(`The scan stopped at the first ${total.toLocaleString()} files: narrow the folder or patterns to see the rest.`);
+      if (more.length) previewFoot.append(foot(more.join(' ')));
+      previewBusy(pending);
     }
 
-    // --- folder row
-    const folderRow = el('div', 'row-actions');
-    const folderLabel = el('span', 'note-status', st.root || 'No folder chosen');
-    folderLabel.style.cssText = 'font-family:var(--mono);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
-    const browseBtn = el('button', 'btn ghost', 'Browse…');
-    browseBtn.onclick = () => {
-      openFolderBrowser(st.root || undefined, (path) => {
-        openDirectoryImportModal({ ...st, root: path });
-      }, () => openDirectoryImportModal(st));
-    };
-    folderRow.append(folderLabel, browseBtn);
-    b.append(folderRow);
-
-    // --- profile row
-    const profileRow = el('div', 'row-actions');
-    const profileSel = el('select');
-    profileSel.style.cssText = 'flex:1;background:var(--ink);color:var(--text);border:1px solid var(--line-2);padding:6px 8px;font:inherit';
-    const customOpt = document.createElement('option');
-    customOpt.value = '';
-    customOpt.textContent = 'Custom (not saved)';
-    profileSel.append(customOpt);
-    for (const p of S.importProfiles) {
-      const opt = document.createElement('option');
-      opt.value = String(p.id);
-      opt.textContent = p.name;
-      profileSel.append(opt);
+    // A tick changes the count, not the list. Nothing imports while the
+    // list on screen is the last answer, dimmed: what it would import is
+    // about to change.
+    function syncCount() {
+      importBtn.disabled = checked.size === 0 || pending;
+      importBtn.textContent = `Import checked (${checked.size})`;
     }
-    profileSel.value = st.profileId ? String(st.profileId) : '';
-    profileSel.onchange = () => {
-      const id = profileSel.value ? Number(profileSel.value) : null;
-      const p = id ? S.importProfiles.find((x) => x.id === id) : null;
-      openDirectoryImportModal({
-        ...st,
-        profileId: id,
-        recursive: p ? p.recursive : true,
-        extensions: (p && p.extensions) || RECOGNIZED_IMPORT_EXTENSIONS.concat(PLASO_IMPORT_EXTENSIONS, pluginExtensions()),
-        includeText: p ? (p.include_patterns || []).join('\n') : '',
-        excludeText: p ? (p.exclude_patterns || []).join('\n') : '',
-      });
-    };
-    profileRow.append(profileSel);
-    if (st.profileId) {
-      const delBtn = el('button', 'btn ghost', 'Delete profile');
-      delBtn.onclick = async () => {
-        const name = S.importProfiles.find((p) => p.id === st.profileId)?.name || 'this profile';
-        if (!(await confirmDialog(`Delete the "${name}" profile?`, { danger: true, okLabel: 'Delete' }))) return;
-        await api(`/api/import_profiles/${st.profileId}`, { method: 'DELETE' });
-        openDirectoryImportModal({ ...st, profileId: null });
-      };
-      profileRow.append(delBtn);
+
+    function syncFolder() {
+      folderPath.textContent = st.root || 'No folder chosen';
+      folderPath.title = st.root || '';
+      folderPath.classList.toggle('unset', !st.root);
     }
-    b.append(profileRow);
 
-    // --- recursive checkbox
-    const recLabel = el('label');
-    recLabel.style.cssText = 'display:block;margin-bottom:10px';
-    const recCb = el('input');
-    recCb.type = 'checkbox';
-    recCb.checked = st.recursive;
-    recCb.onchange = () => { st.recursive = recCb.checked; scheduleScan(); };
-    recLabel.append(recCb, document.createTextNode(' Include subfolders'));
-    b.append(recLabel);
-
-    // --- extension chips
-    b.append(el('label', null, 'File types'));
-    const extRow = el('div', 'row-actions');
-    extRow.style.flexWrap = 'wrap';
-    for (const ext of RECOGNIZED_IMPORT_EXTENSIONS.concat(PLASO_IMPORT_EXTENSIONS, pluginExtensions())) {
-      const chip = el('button', 'btn ghost', ext);
-      chip.setAttribute('aria-pressed', String(st.extensions.includes(ext)));
-      chip.onclick = () => {
-        st.extensions = st.extensions.includes(ext)
-          ? st.extensions.filter((e) => e !== ext)
-          : [...st.extensions, ext];
-        chip.setAttribute('aria-pressed', String(st.extensions.includes(ext)));
-        scheduleScan();
-      };
-      extRow.append(chip);
+    /* ---------------------------------------------- the profile's buttons */
+    // On the bottom row, left of the import: the profile is the last thing
+    // done with a set of choices, the import the first.
+    const saveBtn = el('button', 'btn ghost');
+    const deleteBtn = el('button', 'btn ghost', 'Delete profile');
+    // Delete is in the row only while a profile is chosen — taken out,
+    // not hidden, so the row reads the same to a test as on screen.
+    function syncProfileButtons() {
+      saveBtn.textContent = st.profileId ? 'Update profile' : 'Save as profile…';
+      if (!st.profileId) deleteBtn.remove();
+      else if (!deleteBtn.isConnected) saveBtn.after(deleteBtn);
     }
-    b.append(extRow);
-
-    // --- include/exclude patterns
-    const patRow = el('div', 'row-actions');
-    patRow.style.alignItems = 'stretch';
-    const includeCol = el('div');
-    includeCol.style.cssText = 'flex:1;display:flex;flex-direction:column;gap:4px;min-width:0';
-    includeCol.append(el('label', null, 'Include patterns (blank = every recognized file)'));
-    const includeArea = el('textarea');
-    includeArea.rows = 3;
-    includeArea.spellcheck = false;
-    includeArea.placeholder = 'One glob per line, e.g. *EvtxECmd*';
-    includeArea.value = st.includeText;
-    includeArea.oninput = () => { st.includeText = includeArea.value; scheduleScan(); };
-    includeCol.append(includeArea);
-
-    const excludeCol = el('div');
-    excludeCol.style.cssText = 'flex:1;display:flex;flex-direction:column;gap:4px;min-width:0';
-    excludeCol.append(el('label', null, 'Exclude patterns'));
-    const excludeArea = el('textarea');
-    excludeArea.rows = 3;
-    excludeArea.spellcheck = false;
-    excludeArea.placeholder = 'One glob per line, e.g. *_Amcache_UnassociatedFileEntries.csv';
-    excludeArea.value = st.excludeText;
-    excludeArea.oninput = () => { st.excludeText = excludeArea.value; scheduleScan(); };
-    excludeCol.append(excludeArea);
-
-    patRow.append(includeCol, excludeCol);
-    b.append(patRow);
-
-    // --- save-as-profile
-    const saveRow = el('div', 'row-actions');
-    const saveBtn = el('button', 'btn ghost', st.profileId ? 'Update profile' : 'Save as profile…');
     saveBtn.onclick = async () => {
-      let name = S.importProfiles.find((p) => p.id === st.profileId)?.name;
+      let name = profileOf(st.profileId)?.name;
       if (!name) {
         name = await promptDialog('Name this profile:', 'KAPE');
         if (!name || !name.trim()) return;
@@ -904,16 +1547,29 @@ export async function openDirectoryImportModal(state = {}) {
         });
       } catch (e) { toast('Could not save profile: ' + e.message, 4000); return; }
       toast(`Saved profile "${rec.name}"`);
-      openDirectoryImportModal({ ...st, profileId: rec.id });
+      await loadImportProfiles();
+      st.profileId = rec.id;
+      side.paint();
+      syncProfileButtons();
     };
-    saveRow.append(saveBtn);
-    b.append(saveRow);
-
-    b.append(resultsBox);
+    deleteBtn.onclick = async () => {
+      const id = st.profileId;
+      const name = profileOf(id)?.name || 'this profile';
+      if (!(await confirmDialog(`Delete the "${name}" profile?`, { danger: true, okLabel: 'Delete' }))) return;
+      try {
+        await api(`/api/import_profiles/${id}`, { method: 'DELETE' });
+      } catch (e) { toast(`Could not delete the "${name}" profile: ${e.message}`, 6000); return; }
+      await loadImportProfiles();
+      side.pins.remove(String(id));
+      // What it held stays on screen, as Custom, to tweak or save again.
+      st.profileId = null;
+      side.paint();
+      syncProfileButtons();
+    };
 
     const cancelBtn = el('button', 'btn ghost', 'Cancel');
     cancelBtn.onclick = () => { $('modal').hidden = true; };
-    importBtn.onclick = async () => {
+    importBtn.onclick = oneAtATime(importBtn, async () => {
       const toImport = scanResult.matched.filter((_, i) => checked.has(i));
       if (!toImport.length) return;
       // The files are already on the server's disk, so there's no upload
@@ -944,7 +1600,7 @@ export async function openDirectoryImportModal(state = {}) {
             });
             pluginOk++;
           } else {
-            await post('/api/ingest/jobs/path', { path: m.path, name: base, folder_path, kind: ['json', 'plaso'].includes(m.kind) ? m.kind : 'csv' });
+            await post('/api/ingest/jobs/path', { path: m.path, name: base, folder_path, kind: ['json', 'plaso', 'text', 'iis', 'kv'].includes(m.kind) ? m.kind : 'csv' });
           }
           ok++;
         } catch (e) {
@@ -956,63 +1612,16 @@ export async function openDirectoryImportModal(state = {}) {
       startJobsPoll();
       $('modal').hidden = true;
       toast(`Queued ${ok} import${ok === 1 ? '' : 's'}${failed ? ` — ${failed} failed to queue` : ''} — progress in the corner panel`, 4000);
-    };
-    actions.append(importBtn, cancelBtn);
+    });
+    importBtn.style.marginLeft = 'auto';
+    actions.append(saveBtn, deleteBtn, importBtn, cancelBtn);
     b.append(actions);
 
+    syncFolder();
+    syncSettings();
+    syncProfileButtons();
+    side.paint();
     renderResults();
     if (st.root) runScan();
-  }, { wide: true });
-}
-
-/* Options form for one queued plugin-format file, rendered generically
-   from the format's declared option specs (bool/text/choice — see
-   plugin_api.PluginAPI.register_ingest_format). Same {onConfirm, onCancel}
-   shape as openImportPreview/openJsonImportPreview so openImportModal's
-   one "configure" button can sit in front of any of the three. */
-export function openPluginOptionsForm(item, { onConfirm, onCancel }) {
-  const fmt = pluginFormatById(item.format_id);
-  const values = { ...defaultPluginOptions(fmt), ...(item.options || {}) };
-  modal(fmt.label, (b) => {
-    if (fmt.description) b.append(el('p', null, fmt.description));
-    for (const o of fmt.options || []) {
-      if (o.type === 'bool') {
-        const label = el('label');
-        label.style.cssText = 'display:block;margin-bottom:10px';
-        const cb = el('input');
-        cb.type = 'checkbox';
-        cb.checked = !!values[o.name];
-        cb.onchange = () => { values[o.name] = cb.checked; };
-        label.append(cb, document.createTextNode(' ' + (o.label || o.name)));
-        b.append(label);
-      } else if (o.type === 'choice') {
-        b.append(el('label', null, o.label || o.name));
-        const sel = el('select');
-        sel.style.cssText = 'display:block;margin-bottom:10px;background:var(--ink);color:var(--text);border:1px solid var(--line-2);padding:6px 8px;font:inherit';
-        for (const c of o.choices || []) {
-          const opt = document.createElement('option');
-          opt.value = c;
-          opt.textContent = c;
-          sel.append(opt);
-        }
-        sel.value = values[o.name] ?? o.default ?? '';
-        sel.onchange = () => { values[o.name] = sel.value; };
-        b.append(sel);
-      } else {
-        b.append(el('label', null, o.label || o.name));
-        const inp = el('input');
-        inp.type = 'text';
-        inp.value = values[o.name] ?? '';
-        inp.oninput = () => { values[o.name] = inp.value; };
-        b.append(inp);
-      }
-    }
-    const acts = el('div', 'row-actions');
-    const ok = el('button', 'btn', 'Use these options');
-    ok.onclick = () => onConfirm(values);
-    const cancel = el('button', 'btn ghost', 'Cancel');
-    cancel.onclick = onCancel;
-    acts.append(ok, cancel);
-    b.append(acts);
-  });
+  }, { wide: true, tall: true, focus: '.side-search' });
 }

@@ -17,28 +17,34 @@ def _run(page, sql):
     page.wait_for_selector("#sqlResult table")
 
 
-def test_select_tag_and_untag_result_rows(page):
+def test_select_tag_and_untag_result_rows(page, api):
     _run(page, "SELECT rid, EventId FROM src_1 ORDER BY rid LIMIT 10")
     rows = page.locator("#sqlResult tr")
     rows.nth(1).click()
     rows.nth(3).click(modifiers=["Control"])  # grid parity: plain click replaces, Ctrl adds
-    page.wait_for_timeout(150)
     assert page.locator(".sql-row-sel").count() == 2
+    rids = page.evaluate("() => [...document.querySelectorAll('#sqlResult tr.sql-row-sel')].map((tr) => +tr.cells[0].textContent)")
+    tag_id = page.evaluate("() => __winnow.S.tags.find((t) => String(t.hotkey) === '1').id")
 
-    page.keyboard.press("1")
-    page.wait_for_function("() => document.querySelectorAll('.sql-tag-chip').length === 2")
-    assert page.locator(".sql-row-sel").count() == 2, "selection must survive the repaint"
+    try:
+        page.keyboard.press("1")
+        page.wait_for_function("() => document.querySelectorAll('.sql-tag-chip').length === 2")
+        assert page.locator(".sql-row-sel").count() == 2, "selection must survive the repaint"
 
-    page.keyboard.press("1")  # toggles off — leaves the shared case clean
-    page.wait_for_function("() => document.querySelectorAll('.sql-tag-chip').length === 0")
+        page.keyboard.press("1")  # toggles off
+        page.wait_for_function("() => document.querySelectorAll('.sql-tag-chip').length === 0")
+    finally:
+        # The toggle is what is under test, so it can't be the cleanup too:
+        # a failure between the presses left both rows tagged in the case
+        # the rest of the shard shares (#227).
+        api("/api/row_tags", "POST", {"source_id": 1, "rids": rids, "tag_id": tag_id, "on": False})
 
 
 def test_shift_click_selects_a_display_order_range(page):
     _run(page, "SELECT rid, EventId FROM src_1 ORDER BY rid LIMIT 10")
     rows = page.locator("#sqlResult tr")
     rows.nth(2).click()
-    rows.nth(6).click(modifiers=["Shift"])
-    page.wait_for_timeout(150)
+    rows.nth(6).click(modifiers=["Shift"])   # every row of the range is cached: marked at once
     assert page.locator(".sql-row-sel").count() == 5
 
 
@@ -56,27 +62,24 @@ def test_double_click_opens_the_row_in_its_table(page):
     page.wait_for_function("() => __winnow.S.cursor >= 0 && __winnow.rowAt(__winnow.S.cursor) && __winnow.rowAt(__winnow.S.cursor).rid === 7")
 
 
-def test_selection_parity_click_ctrl_shift_escape_copy(page):
+def test_selection_parity_click_ctrl_shift_escape_copy(page, copied):
+    # The clicks and keys are handled synchronously, and every row here is
+    # cached, so each check reads the outcome of the gesture before it.
     _run(page, "SELECT rid, EventId FROM src_1 ORDER BY rid LIMIT 10")
     rows = page.locator("#sqlResult tr")
     rows.nth(1).click()
     rows.nth(4).click()  # plain click REPLACES the selection
-    page.wait_for_timeout(100)
     assert page.locator(".sql-row-sel").count() == 1
     rows.nth(2).click(modifiers=["Control"])  # Ctrl toggles in place
-    page.wait_for_timeout(100)
     assert page.locator(".sql-row-sel").count() == 2
     rows.nth(6).click(modifiers=["Shift"])  # Shift replaces with anchor→here
-    page.wait_for_timeout(100)
     assert page.locator(".sql-row-sel").count() == 5
 
-    page.keyboard.press("Control+c")  # copies the selection as TSV
-    page.wait_for_timeout(150)
-    clip = page.evaluate("() => navigator.clipboard.readText()")
-    assert clip.startswith("rid\tEventId") and len(clip.strip().splitlines()) == 6
+    with copied(page) as clip:
+        page.keyboard.press("Control+c")  # copies the selection as TSV
+    assert clip.text.startswith("rid\tEventId") and len(clip.text.strip().splitlines()) == 6, clip.text
 
     page.keyboard.press("Escape")
-    page.wait_for_timeout(100)
     assert page.locator(".sql-row-sel").count() == 0
 
 
@@ -137,12 +140,11 @@ def test_result_toolbar_and_save_as_table(page):
     page.evaluate("() => __winnow.loadSources()")
 
 
-def test_copy_schema_and_rightclick_rename(page):
+def test_copy_schema_and_rightclick_rename(page, copied):
     _run(page, "SELECT 1")
-    page.click("#btnSqlSchema")
-    page.wait_for_timeout(150)
-    clip = page.evaluate("() => navigator.clipboard.readText()")
-    assert "src_1" in clip and "ui.csv" in clip
+    with copied(page) as clip:
+        page.click("#btnSqlSchema")
+    assert "src_1" in clip.text and "ui.csv" in clip.text
 
     tab = page.locator("#sqlTabs .sql-tab").first
     tab.click(button="right")

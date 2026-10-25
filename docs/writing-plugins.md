@@ -7,37 +7,40 @@ backend endpoints — without touching Winnow's source. Drop it in
 
 This guide is the long form, and it stands alone — every hook, data
 shape and example you need to write a plugin is in this file, and every
-code sample in it was extracted verbatim and run before shipping. The
-enforcing contract lives in [`plugin_api.py`](../winnow/plugin_api.py)'s module
-docstring, and three fuller plugins live in
-[`examples/plugins/`](../examples/plugins/), but neither is required
-reading. Start with the Quickstart.
+code sample in it is written to be pasted out and run as it stands —
+kept true by hand, since `tests/test_plugin_docs_current.py` guards the
+hook names, the contents anchors and the §-references but never opens a
+code block. The enforcing contract lives in
+[`plugin_api.py`](../winnow/plugin_api.py)'s module docstring, and seven
+fuller plugins live in [`examples/plugins/`](../examples/plugins/), but
+neither is required reading. Start with the Quickstart.
 
 **Contents**
 
-1. [The five extension points](#1-the-five-extension-points)
+1. [The seven extension points](#1-the-seven-extension-points)
 2. [Quickstart: a parser in 20 lines](#2-quickstart-a-parser-in-20-lines)
 3. [Plugin anatomy](#3-plugin-anatomy)
 4. [Hook: ingest formats](#4-hook-ingest-formats)
 5. [Hook: tabs](#5-hook-tabs)
 6. [Hook: toolbar panels](#6-hook-toolbar-panels)
-7. [Hook: API routes](#7-hook-api-routes)
-8. [Hook: row actions](#8-hook-row-actions)
-9. [Talking to the case](#9-talking-to-the-case)
-10. [Testing a plugin](#10-testing-a-plugin)
-11. [Installing and sharing](#11-installing-and-sharing)
-12. [Security model](#12-security-model)
-13. [Troubleshooting](#13-troubleshooting)
-14. [Reference](#14-reference)
-15. [Writing a plugin with an LLM](#15-writing-a-plugin-with-an-llm)
+7. [Hook: page panels](#7-hook-page-panels)
+8. [Hook: API routes](#8-hook-api-routes)
+9. [Hook: row actions](#9-hook-row-actions)
+10. [Talking to the case](#10-talking-to-the-case)
+11. [Testing a plugin](#11-testing-a-plugin)
+12. [Installing and sharing](#12-installing-and-sharing)
+13. [Security model](#13-security-model)
+14. [Troubleshooting](#14-troubleshooting)
+15. [Reference](#15-reference)
+16. [Writing a plugin with an LLM](#16-writing-a-plugin-with-an-llm)
 
 > **This file is self-contained.** You do not need to read Winnow's
 > source to write a plugin against it, and neither does an LLM you're
-> working with — see [§15](#15-writing-a-plugin-with-an-llm).
+> working with — see [§16](#16-writing-a-plugin-with-an-llm).
 
 ---
 
-## 1. The five extension points
+## 1. The seven extension points
 
 Everything a plugin does, it does by calling methods on the `api` object
 handed to its `register()` function:
@@ -48,13 +51,15 @@ handed to its `register()` function:
 | `api.register_tab(...)` | A pinned tab with your own UI | A whole feature surface: a graph, a dashboard, an assistant, a report builder |
 | `api.register_api(route, handler)` | A backend endpoint | Whatever your tab (or a script) needs the server to do |
 | `api.register_row_action(...)` | An entry under the row right-click menu's **Plugins ▸** submenu — analysts can pin it to the top of the menu | Anything that operates on the selected rows: a VirusTotal lookup on the highlighted hashes, an enrichment, a hand-off to another tool |
-| `api.register_toolbar_panel(...)` | A toggle in the table toolbar + a strip above the grid | Something that follows the current view: a histogram of when its rows happened, a sparkline, a legend |
+| `api.register_toolbar_panel(...)` | A toggle in the table toolbar + a strip above the grid | Something that follows the current view: the top values of a column, a sparkline, a legend — the built-in histogram strip (`static/js/histogram.js`) is this shape |
+| `api.register_page_panel(...)` | A toggle in the SQL or Notes page's toolbar + a side column beside it | Something that works *with* the page: an assistant that writes and runs queries, a query library, a note template picker |
+| `api.register_dashboard(...)` | A board under **Dashboards ▸ Library**, added to a case with ＋ | The overview you would build by hand every time you open this kind of case: counts, top values, a timeline of what matters for the format your plugin reads |
 
 They compose: a tab usually pairs with one or more routes; a row action
 often pairs with a tab that shows its results; a toolbar panel usually
 pairs with a route that reads through the current view. Ingest formats
-and row actions work in a single-file plugin; tabs and panels need a
-folder plugin (there has to be somewhere to serve the JS from).
+and row actions work in a single-file plugin; tabs and panels (both
+kinds) need a folder plugin (there has to be somewhere to serve the JS from).
 
 The shipped examples map onto these:
 
@@ -62,11 +67,11 @@ The shipped examples map onto these:
 | --- | --- |
 | [`mft_usn/`](../examples/plugins/mft_usn/) | Ingest formats — two of them, with options, streaming parsers, extension *and* bare-filename matching |
 | [`lateral_movement/`](../examples/plugins/lateral_movement/) | A tab + a route — canvas UI, case queries, theming |
-| [`claude_assistant/`](../examples/plugins/claude_assistant/) | A tab + a route that calls an external service, with credentials and dependencies |
-| [`table_histogram/`](../examples/plugins/table_histogram/) | A toolbar panel + a route — following the grid with `onViewChange`, driving the timeframe filter with `setTimeRange` |
+| [`claude_assistant/`](../examples/plugins/claude_assistant/) | A tab + a route that calls an external service, with credentials and dependencies — and a **page panel**, the SQL Copilot, that inserts and runs the queries it writes |
+| [`top_values/`](../examples/plugins/top_values/) | A toolbar panel with no backend — following the grid with `onViewChange`, reading the current view through the app's own `/api/group_summary` |
 | [`first_last/`](../examples/plugins/first_last/) | A tab that writes a TABLE back — `ingest_rows` output an analyst browses, tags and exports like any other source |
 | [`pivot/`](../examples/plugins/pivot/) | A tab that aggregates the current view — drag-and-drop rows/columns/values over the case's own data |
-| [`esxi_logs/`](../examples/plugins/esxi_logs/) | Ingest formats for a support bundle's ESXi/Linux logs, and the profile that pairs them with a dashboard |
+| [`esxi_logs/`](../examples/plugins/esxi_logs/) | Ingest formats for a support bundle's ESXi/Linux logs, the profile that pairs them with a dashboard, and the reference `register_dashboard` board |
 
 ---
 
@@ -115,8 +120,10 @@ def register(api):
     )
 ```
 
-Restart the server (or just open **Settings → Plugins** — installs and
-toggles reload without a restart). You now have a `hosts file` format:
+Restart the server, or make the registry reload without one: open or
+switch a case, or flip any plugin's scope in **Settings → Plugins**
+(installs and toggles reload; opening the panel by itself only re-reads
+the set that is already loaded). You now have a `hosts file` format:
 drag a `hosts` file onto the window, or use Settings → Plugins → the
 format's own **Import files…** picker. Rows land in a normal `src_N`
 table, so tagging, filtering, search, sessions and the SQL pane all work
@@ -135,7 +142,7 @@ A plugin is **either** a single `.py` file **or** a folder with an
 
 ```
 plugins/
-  hostsfile.py              ← single-file plugin (ingest formats only)
+  hostsfile.py              ← single-file plugin (everything but tabs and panels)
   my_plugin/                ← folder plugin (everything)
     __init__.py             ← must define register(api)
     parser.py               ← helper modules; import with `from . import parser`
@@ -154,7 +161,7 @@ is the better off switch since it keeps the plugin visible.
 PLUGIN = {                      # optional — all three keys optional
     "name": "my-plugin",        # display name; defaults to the file/folder name
     "version": "1.0.0",
-    "description": "One line, shown in Settings → Plugins.",
+    "description": "One line, shown in the plugins manager.",
 }
 
 WINNOW_API_VERSION = 1          # optional; refuse to load on an older Winnow
@@ -165,7 +172,41 @@ def register(api):              # REQUIRED
 
 `register(api)` is called once at load. Raise anything inside it and the
 plugin is recorded as failed (with your exception's message) and skipped
-— it never takes the server or other plugins down.
+— it never takes the server or other plugins down. Skipped means all of
+it: whatever your `register()` had already registered before it raised
+(formats, routes, tabs, row actions, panels, dashboards) is taken back
+out, so a half-registered plugin can't keep working while the manager
+lists it as failed. The same is true of
+your module-level code, and of `SystemExit`: `sys.exit("needs Winnow
+2.0")` at import is recorded as a load error rather than exiting Winnow,
+so it is a safe way to refuse to run. It is not a *good* one — the
+analyst sees `SystemExit: needs Winnow 2.0` where they could have seen a
+sentence — so prefer `raise RuntimeError("…")`, or `WINNOW_API_VERSION`,
+which Winnow checks for you and reports in the plugins manager.
+
+**Write the description. It is read even when your plugin is off.** A
+disabled plugin is never imported, so for a long time the manager had
+nothing to show for one but its folder name, and an analyst had to switch
+a plugin on to find out what it was. Winnow now reads `PLUGIN` and
+`WINNOW_API_VERSION` straight out of your **source** — `ast.literal_eval`
+on the module-level assignment, no import, not a line of your code run —
+so the name, version and description are what the manager shows *before*
+anyone decides to run you. That makes the description the single most
+load-bearing string in your plugin: it is the case for switching it on.
+
+Two consequences worth knowing:
+
+- Both must be **literals assigned at module level**. `PLUGIN = {...}`
+  with a plain dict is read; `PLUGIN = build_meta()`, a name, or an
+  f-string is not, and your plugin falls back to its folder name until it
+  is enabled. Same for `WINNOW_API_VERSION = 11` versus a computed value.
+- The manager also lists what your plugin *would* add, from the
+  `api.register_*(…)` calls its entry file names — kinds only ("import
+  formats", "a pinned tab"), never counts, since a call inside a loop or
+  in a helper module makes a source-read count wrong. Once the plugin is
+  running the manager uses the real registry instead. A `register_*` call
+  reached only through a helper module will not show up in the
+  not-yet-enabled list; that costs you nothing but a line in the preview.
 
 ### Two names, and which one to use where
 
@@ -241,8 +282,12 @@ imports to pick them up.
 
 **Built-in extensions always win.** If you register `.csv`, files still
 route to Winnow's CSV parser by default — your format stays reachable
-through its own picker in Settings → Plugins, but it won't hijack
-existing behavior.
+through its own picker in the plugins manager (beside the format, under
+"What it adds"), but it won't hijack
+existing behavior. Everything else goes to your format *before* the
+raw-text catch-all: a name nothing claims imports as plain text, one
+line per row, so a plugin that registers `hostd*` gets `hostd.log` and
+an unregistered `vpxa.log` still imports — as lines.
 
 ### The `parse` contract
 
@@ -259,6 +304,14 @@ def parse(path, options) -> dict:
 - **`rows` should be a generator.** It's consumed lazily and committed in
   batches, so memory stays flat on a multi-GB input. Returning a list
   works, and materializes the whole file first.
+- **`path`'s file name is the file's real name — for an upload too.** A
+  file dropped into the browser is spooled under its own name in a
+  private temp directory, so `os.path.basename(path)` is `hostd.log` or
+  `$MFT` whichever way the analyst brought it in, and reading meaning
+  from it (a log type, a `$J`) works the same. The spool is deleted the
+  moment the import returns: read the file inside `parse` and the rows
+  it yields, never keep `path` for later. The table records the uploaded
+  file's name as its path, not the spool's.
 - **Cells may be `str`, `int`, `float`, or `None`.** Everything is
   stringified (`None` → `""`) because source columns are TEXT — the same
   evidence-fidelity rule the CSV path follows. Don't pre-format numbers
@@ -316,7 +369,7 @@ api.register_tab(
 ```
 
 Folder plugins only, and `entry` must exist **at registration time** — a
-typo is a visible load error in Settings → Plugins, not a 404 the first
+typo is a visible load error in the plugins manager, not a 404 the first
 time someone clicks the tab.
 
 ### The module contract
@@ -343,6 +396,13 @@ down and rebuilt when:
   carries a `?v=<gen>` cache-buster tied to the reload, so **toggling
   your plugin off and on is the reload button while you iterate on JS.**
 
+There is no `onDestroy`: a teardown removes the container without telling
+the module, so there is no moment at which you could flush what the
+analyst built. If your tab holds something worth keeping — which fields
+are in which well, which sub-tab was open — write it as it changes with
+[`winnow.tabState`](#keeping-a-tabs-state-across-a-case-close), not at
+the end.
+
 `onShow`/`onHide` fire on *every* switch, including the first. Use
 `onShow` to refresh anything that may have changed while you were hidden
 (new sources imported, theme changed) and `onHide` to pause timers or
@@ -355,20 +415,28 @@ Prefer it to reaching into the app's globals — this is what's supported.
 
 | Field | What it is |
 | --- | --- |
-| `apiVersion` | Contract version of this object (currently `2`) |
+| `apiVersion` | Contract version of this object (currently `8`) |
 | `plugin` | Your plugin's display name |
 | `base` | `/api/plugin/<fs_name>` — prefix for your own routes |
 | `assets` | `/plugin_assets/<fs_name>` — prefix for your own files |
 | `api(path, opts)` | `fetch` wrapper: JSON in/out, throws with `err.status`, sets the CSRF header |
 | `post(path, body)` | JSON POST shorthand |
-| `sql(sql, limit)` | Read-only query against the case file |
+| `sql(sql, limit)` | Read-only query against the case file. Cells JSON can't carry exactly come back as text: a BLOB as its UTF-8 text or SQLite's `X'00FF'`, `Inf`/`-Inf`/`NaN`, and an integer past ±2^53 as its decimal digits (server-side, `req.store.run_sql` still returns the raw values) |
 | `schemaText()` | The case's schema as CREATE TABLE-ish SQL (LLM-ready) |
-| `toast(msg, ms)` | Transient status message |
+| `toast(msg, ms)` | Transient status message — one slot, no button; see [Feedback](#feedback-toasts-notifications-and-dialogs) |
+| `notify(opts)` | A row in the bottom-right jobs panel, the card an import gets — progress, detail, buttons; returns a handle (`update` / `done` / `fail` / `close`) |
 | `el(tag, cls, text)` | Winnow's element helper |
-| `modal(title, build, opts)` | Winnow's modal |
-| `confirmDialog(msg, opts)` / `promptDialog(msg, initial)` | Async dialogs |
+| `modal(title, build, opts)` / `closeModal()` | Winnow's modal singleton and its close |
+| `alertDialog(msg, opts)` / `confirmDialog(msg, opts)` / `promptDialog(msg, initial, opts)` | Themed replacements for `window.alert` / `confirm` / `prompt` — all async |
+| `dropdownMenu(anchor, items)` | The app's own small menu, opened under `anchor` — for a choice among a few things; see [Menus](#menus) |
+| `sectionPanes({sections, label, cls, paneCls})` | The app's two-pane dialog frame, the Tables manager's: sections down a side list by group, the chosen one's pane on the right; see [Dialogs with sections](#dialogs-with-sections) |
+| `showTab(localId?)` | Bring the analyst to one of **your** tabs (reopens it if closed); no argument when you register exactly one |
+| `showPage(name)` | Switch to a built-in page: `'grid'`, `'sql'`, `'notes'`, `'timeline'`, `'watchlist'` (reopens it if closed) |
+| `sqlPage` | The SQL pane: `show()`, `text()`, `setText(sql, {newTab})`, `run()`, `result()`, `selectedRows()`, `onRun(cb)` — see [Driving the page](#driving-the-page) |
+| `notesPage` | The case notes: `show()`, `text()`, `setText(md)`, `insert(text)`, `onChange(cb)` |
+| `tabState` | This mount's own state in the case file: `get()`, `set(obj)`, `clear()` — see [Keeping a tab's state](#keeping-a-tabs-state-across-a-case-close) |
 | `openSource(id)` | Switch the app to a source's grid tab |
-| `refreshSources()` | Re-fetch the app's source list — call after your backend creates a table via `ingest_rows` (a sync ingest announces itself through no job), then `openSource(new_id)` |
+| `refreshSources()` | Re-fetch the app's source list — call after your backend creates a table via `ingest_rows` (a sync ingest announces itself through no job), then `openSource(new_id)` if the analyst should see it. It moves nobody: the page and table on screen, and that table's filters, stay as they are, so it is safe after work that finished while the analyst was elsewhere |
 | `state.sources` | Live source list (`{id, name, columns, row_count, is_merge, error}`) |
 | `state.sourceId` | Currently selected source id |
 | `state.tags` | Tag definitions |
@@ -376,7 +444,7 @@ Prefer it to reaching into the app's globals — this is what's supported.
 | `state.timeRange` | The case timeframe filter verbatim — `{enabled, column, start, end}`. Honouring it is what makes "the timeframe applies everywhere" true for your tab too |
 | `state.view` | What the grid is showing right now — `{view_id, row_count}`, filters/search/timeframe applied, or `null` before a table is open. Hand `view_id` to a route that reads THROUGH the view |
 | `setVariable(name, value)` | Set one case variable (creates it if new) |
-| `onViewChange(cb)` | Fires after every grid rebuild — filter, sort, search, timeframe, table switch — with `{sourceId, viewId, rowCount}`. Returns an unsubscribe |
+| `onViewChange(cb)` | Fires after every grid rebuild that installs a view — filter, sort, search, timeframe, table switch — with `{sourceId, viewId, rowCount}`. A search left running in the background fires when it is applied, not when it finishes. Returns an unsubscribe |
 | `onAppearanceChange(cb)` | Fires after every skin / theme / accent change with `{style, themeMode, accent}`. A canvas doesn't inherit CSS, so redraw here. Returns an unsubscribe |
 | `setTimeRange({column, start, end, enabled})` / `clearTimeRange()` | Drive the case timeframe filter (the toolbar's ⏱) — the same object the Timeframe dialog writes, so every other consumer sees it as if typed there |
 | `openFiltered(sourceId, pairs)` | Jump from your visualization to the EVIDENCE: opens the source and exact-filters it to `[{column, value}, …]`. Clears existing filters — it is a navigation, not a refinement |
@@ -384,6 +452,224 @@ Prefer it to reaching into the app's globals — this is what's supported.
 **Always call your backend through `winnow.api` / `winnow.post`.** A raw
 `fetch()` won't carry the `X-Timeline-Lite-Client` header that Winnow's
 CSRF middleware requires on non-GET `/api/*` calls, and will 403.
+
+### Keeping a tab's state across a case close
+
+A mount dies with the case — and with a plugin toggle, a profile apply and
+F5 — and takes everything in its closure with it. `winnow.tabState` is one
+row in the **case file**, scoped to this mount, for the state that should
+come back:
+
+```js
+const saved = await winnow.tabState.get();      // {payload, savedAt} | null | {error:true}
+if (saved && saved.error) return;               // read failed: restore nothing, save nothing
+if (saved) restore(saved.payload);              // validate it — see below
+
+function onEdit() {
+  winnow.tabState.set({ v: 1, fields: [...] }); // debounced ~500ms, coalesced
+}
+
+await winnow.tabState.clear();                  // the "start fresh" path
+```
+
+| Call | What it does |
+| --- | --- |
+| `get()` | `{payload, savedAt}`; `null` if this mount has never saved; `{error: true}` if the read itself failed — not the same thing, see below. Never rejects |
+| `set(obj)` | Replaces the row after a short debounce. Resolves `true` when the write lands, `false` if it was refused or superseded; never rejects |
+| `clear()` | Deletes the row and cancels anything pending |
+
+Five rules, and none of them is politeness:
+
+- **Save the definition, not the result.** Which fields sit in which well,
+  which sub-tab was open, a column width — never rows. Rows belong to the
+  case and are re-run on restore; a preview kept from three weeks ago is a
+  picture of evidence rather than the evidence. The payload is capped at
+  **64 KiB**, which is where a plugin saving results finds out.
+- **Validate on restore.** A payload says what somebody wanted, not what
+  the case still holds. A source id is handed to the next import after a
+  drop, so store the table's **name** beside its id and believe the id only
+  while the name matches — except for a **merge**, whose name is the
+  display name the analyst renames it by, so keep its `member_source_ids`
+  and match on those instead. Check every column against
+  `winnow.state.sources` before it goes into a query, and say what you
+  dropped rather than opening on an error.
+- **Know what an empty case looks like, and what a failed read looks
+  like.** A `panel:`/`page:` mount is built during boot, *before* the app
+  has loaded its sources, so an empty `winnow.state.sources` there means
+  "not known yet" and not "your table is gone" — `await
+  winnow.refreshSources()` first, or hold the restore until the list is
+  non-empty. And never `set()` until a restore has resolved: a save that
+  goes out before the first `get()` comes back, or after one that answered
+  `{error: true}`, replaces the row you were about to read with whatever
+  your mount happened to start as. Both bundled examples keep a
+  `saveOn` flag off until then, and say so on screen when a read failed.
+- **Say that you restored.** Sub-tabs that quietly reappear, built against
+  a case that has moved on, are worse than an empty tab. Both bundled
+  examples show a line with the saved-at time and a "Start fresh" button
+  ([`first_last/`](../examples/plugins/first_last/), [`pivot/`](../examples/plugins/pivot/)).
+- **Last write wins.** Two Winnows on one case file do not merge, and
+  nothing here is a transaction.
+
+The state is keyed by MOUNT, so your tab and your panel each get their own
+row, and it travels with the `.db` — someone handed the case file gets the
+grouping you were working on (and simply will not see the tab if they do
+not have the plugin). Nothing collects these rows: a plugin toggled off
+keeps its state for when it comes back.
+
+Not the right home for: a machine preference (a rail width, a checkbox
+about how *you* like to work — use `localStorage`, as First/Last does for
+Auto-update) or anything cross-case (`req.storage`).
+
+### Feedback: toasts, notifications and dialogs
+
+**Never call `window.alert()`, `window.confirm()` or `window.prompt()`.**
+They cannot be themed, they look like a different program next to the
+rest of the app, and they block the page while open. Winnow ships a
+replacement for each, and a test (`tests/test_no_native_dialogs.py`)
+fails the build if one of the natives appears in the app or in a
+bundled example. The replacements all return a Promise and stack above
+an open modal, so they work from inside a click handler in one:
+
+```js
+await winnow.alertDialog('The lookup service is unreachable.\nCheck WINNOW_VT_API_KEY under Settings → Environment.');
+                                                          // { okLabel } — resolves when read (OK, Enter, Escape, backdrop)
+const ok = await winnow.confirmDialog('Forget this case\'s conversation?', { danger: true, okLabel: 'Clear' });
+                                                          // → true / false; { okLabel, cancelLabel, danger }
+const name = await winnow.promptDialog('New table name:', 'results', { okLabel: 'Create' });
+                                                          // → the text, or null on Cancel / Escape (not '')
+```
+
+`winnow.modal(title, build, opts)` is the app's one modal: `build(body)`
+fills it, `opts` is `{ wide: true | 'x', tall: true, focus: <selector or
+fn> }`, and `winnow.closeModal()` closes it. Closing dispatches a
+`winnow:modalclose` event on `document` — listen for it if you armed a
+document-level handler inside the modal.
+
+`winnow.toast(msg, ms = 2600)` is for the small stuff — "Copied", "Saved".
+It has one slot: the next toast, yours or the app's, replaces it. For
+anything the analyst should still find when they look up, or that runs
+for a while, use a **notification**:
+
+```js
+const n = winnow.notify({ title: 'VirusTotal lookups', detail: '0 / 40 hashes', progress: 0 });
+for (const [i, hash] of hashes.entries()) {
+  await lookUp(hash);
+  n.update({ detail: `${i + 1} / 40 hashes`, progress: (i + 1) / 40 });
+}
+n.done({
+  detail: '40 hashes checked · 3 flagged',
+  actions: [{ label: 'Open VirusTotal', onClick: () => winnow.showTab() }],
+});
+```
+
+That is a row in the bottom-right jobs panel — the same card an upload or
+import gets, in the same stack. Options, all optional and all accepted by
+`update` too:
+
+| Option | What it does |
+| --- | --- |
+| `title` | The row's name (defaults to your plugin's id) |
+| `detail` | The line under the bar |
+| `progress` | `0..1` draws a bar; `null` an indeterminate one; `false` removes it; omitted leaves it alone |
+| `phase` | Free text for the badge instead of RUNNING / DONE / ERROR (the colour still follows the status) |
+| `actions` | `[{ label, onClick }]` — buttons under the detail; clicking one closes the row, then calls `onClick` |
+| `sticky` | A done row waits for the ✕ instead of fading after 8 s |
+
+The handle: `update(opts)` keeps the row running; `done(opts)` and
+`fail(opts)` finish it — a done row fades after eight seconds like a
+finished import, unless it carries a button or is sticky; an error row
+waits for the ✕. `close()` removes it. **Notices die with your mount**:
+when the case switches or your plugin reloads, the rows go and every
+handle becomes inert (each call a no-op), so a fetch that resolves late
+cannot bring one back. A notification is also the answer to "my tab was
+hidden when the answer arrived" — `container.hidden` says whether you
+are on screen, and `showTab()` from an action brings the analyst back
+(the bundled `claude_assistant` tab does exactly this).
+
+### Menus
+
+A choice among a few things — where a field goes, which of three
+exports — is a menu, not a modal over the work the analyst is arranging.
+`winnow.dropdownMenu(anchor, items)` opens the app's own menu under
+`anchor` (above it when there is no room below) — the one the Filters ▾
+and Case ▾ buttons open — so it behaves the way every menu in Winnow
+does: one is open at a time, Escape and a click outside close it, Down
+and Up step into it (from anywhere but a text field, which keeps its
+arrows) and walk it, and Enter picks the focused entry.
+
+```js
+field.tabIndex = 0;                              // reachable from the keyboard
+const open = () => winnow.dropdownMenu(field, [
+  { header: 'Place in' },
+  { label: 'Rows', onclick: () => place('rows') },
+  { label: 'Columns', onclick: () => place('cols'), desc: 'Moves it out of Rows' },
+  '-',
+  { label: 'Values', disabled: true, desc: 'Already there' },
+]);
+field.onclick = open;
+field.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } };
+```
+
+| Item | What it does |
+| --- | --- |
+| `label`, `onclick` | The entry, and what picking it runs; the menu closes first |
+| `disabled` | Greyed and not pickable. Say why in `desc` — a greyed entry with no reason reads as a bug |
+| `desc` | A dim second line under the label: what picking it will do, or why it can't be picked |
+| `note` | Dim text on the right that is not a key — a count, a name |
+| `title` | Hover text |
+| `checked` | `true` / `false` draws a ✓ column; leave it out for a plain entry |
+| `'-'` | A rule between groups of entries |
+| `{ header }` | A small section label, uppercased; `literal: true` keeps it as typed, in mono, for a value such as a column name or a path |
+
+Other keys the app's own menus use are not part of this contract. The
+menu does not move the focus when it opens, and does not put it back when
+it closes — true of every menu in the app. If picking an entry re-renders
+the element that opened it, a keyboard user's focus lands on `<body>`:
+focus the new node yourself when the menu was opened from the keyboard,
+as the bundled [`pivot/`](../examples/plugins/pivot/) and
+[`first_last/`](../examples/plugins/first_last/) field lists do.
+
+### Dialogs with sections
+
+A dialog that manages a few lists of things (yours and the shipped ones,
+or one list per kind) is two panes, the way Winnow's own Tables manager,
+Sessions and Export dialogs are. `winnow.sectionPanes(spec)` (API 14)
+builds that frame: the sections go down a side list by group, each with a
+line under its name saying what is set there now, and the chosen one is
+built fresh into the pane on the right. The frame has a fixed height, so
+moving to a short section moves nothing. The side list is one tab stop,
+and Up, Down, Home and End walk it.
+
+```js
+winnow.modal('Movement events', (b) => {
+  const frame = winnow.sectionPanes({
+    label: 'Movement event lists',
+    sections: [
+      { id: 'saved', group: 'Events', title: 'Yours', hint: () => `${mine.length} events`,
+        build: (pane) => pane.append(listOf(mine)) },
+      { id: 'shipped', group: 'Events', title: 'Shipped', hint: () => `${shipped.length} events`,
+        build: (pane) => pane.append(listOf(shipped)) },
+    ],
+  });
+  b.append(frame.panes);       // into the dialog first:
+  frame.show('saved');         // a pane is built where it will be seen
+}, { wide: true, tall: true });
+```
+
+| Spec | What it does |
+| --- | --- |
+| `sections` | `[{ id, group, title, hint, build }]`. Consecutive sections with the same `group` sit under one heading. `hint()` returns the line under the title. `build(pane, refresh)` fills the pane; it may return `{ update }` to repaint in place instead of being rebuilt |
+| `label` | The side list's accessible name |
+| `cls`, `paneCls` | Extra classes on the frame and on the pane, for your own CSS |
+| `changedEvent` | The event name (default `sections:changed`) a pane dispatches, bubbling, when it changes something the hints describe; the hints repaint |
+
+It returns `{ panes, pane, show(id), update(), refresh(), paintHints(), current() }`.
+Append `panes` inside the modal, then `show()` one section: a pane is
+built into the dialog, never into a detached node. `update()` repaints the
+open pane (its `update`, or a rebuild), and `current()` is the open
+section's id. The bundled
+[`lateral_movement/`](../examples/plugins/lateral_movement/) Events…
+dialog is one.
 
 ### Theming
 
@@ -512,7 +798,8 @@ api.register_toolbar_panel(
 )
 ```
 
-A toggle button appears in the table toolbar beside the search icon.
+A toggle button appears in the table toolbar after the row count, left
+of the built-in **Histogram** and **⏱ Timeframe** buttons.
 While it's on (the state persists per browser) and a table is showing,
 your module's UI occupies a strip **between the toolbar and the grid**;
 it hides with the toolbar on page tabs. Folder plugins only.
@@ -527,8 +814,8 @@ evidence.
 
 ### Following the grid
 
-The `winnow` context is a tab's (see above) with three additions that
-exist for exactly this hook:
+The `winnow` context here is the same object a tab gets — one builder
+makes both — but four of its members are the ones a panel lives on:
 
 ```js
 export default function mount(container, winnow) {
@@ -544,8 +831,13 @@ export default function mount(container, winnow) {
 }
 ```
 
-- `winnow.onViewChange(cb)` fires after **every** grid rebuild — filter,
-  search, sort, timeframe, table switch. Returns an unsubscribe.
+- `winnow.onViewChange(cb)` fires after **every** grid rebuild that
+  installs a view — filter, search, sort, timeframe, table switch.
+  Returns an unsubscribe. One timing detail: a search the analyst leaves
+  to finish in the background (past five seconds the grid keeps its rows
+  and a jobs-panel row offers Apply) has not changed the grid yet, so
+  nothing fires until they apply it — and nothing fires if they discard
+  it. `winnow.state.view` is the view on screen throughout.
 - `winnow.state.view` is what the table is showing right now. Hand its
   `view_id` to a route of yours that reads *through the view* (see
   `Store.time_histogram` for the shape: reader pool, both view kinds,
@@ -560,13 +852,100 @@ export default function mount(container, winnow) {
   and friends) at draw time and redraw here, and your panel follows the
   analyst's look — including a custom accent — like the rest of the app.
 
-`table_histogram/` is the worked example: bars per time bucket of a
-datetime column, a drag on them becomes the timeframe filter, and the
-whole thing re-queries on every view change.
+`top_values/` is the worked example: the ten most common values of a
+column for the current view, listed from the app's own
+`/api/group_summary` and re-asked on every view change — no route of its
+own. For the canvas-and-route shape (bars painted with the accent, a drag
+that becomes the timeframe filter, a route that reads through the view),
+read the built-in histogram strip, `static/js/histogram.js`: it was this
+hook's example until it was built in, and `GET /api/histogram` over
+`Store.time_histogram` is the route half.
 
 ---
 
-## 7. Hook: API routes
+## 7. Hook: page panels
+
+```python
+api.register_page_panel(
+    page="sql",              # "sql" or "notes" — which built-in page
+    id="copilot",            # unique within this plugin (shared with tabs/panels)
+    label="Copilot",         # the toggle's caption in the page's toolbar
+    entry="ui/copilot.js",   # ES module, relative to the plugin folder
+    description="…",         # the toggle's tooltip
+)
+```
+
+The same idea as a toolbar panel, on the **SQL** or **Notes** page: a
+toggle button in that page's toolbar (left of *Run* on SQL, after
+*Link ▾* on Notes), and while it's on — the state persists per browser —
+your module's UI occupies a **resizable side column** beside the page.
+The column hides with the page and takes no room until a panel is
+toggled on. Folder plugins only.
+
+### The module contract
+
+Identical to a tab's and a toolbar panel's: `export default function
+mount(container, winnow)`, plus optional `onShow(container)` /
+`onHide(container)`. `container` is an empty `<section>` filling the
+column's height (a flex column — give your scrolling area `flex: 1 1
+auto; min-height: 0`). The analyst drags the column's edge to size it,
+and the width is remembered.
+
+### Driving the page
+
+What makes this hook worth having: `winnow.sqlPage` and
+`winnow.notesPage` read and write the page the panel sits on. They are
+on every context (a tab can use them too); everything that may need a
+lazy load is async.
+
+```js
+// SQL
+await winnow.sqlPage.show();                          // switch to the page; resolves once the query tabs are loaded
+const current = await winnow.sqlPage.text();          // the editor's text
+await winnow.sqlPage.setText(sql);                    // replace the active query tab's text (autosaves like typing)
+await winnow.sqlPage.setText(sql, { newTab: 'From copilot' });   // …or a new named tab, leaving the analyst's alone
+const r = await winnow.sqlPage.run();                 // the page's own Run: {columns, rows, total, elapsed_ms, truncated, stopped}; rejects on a SQL error
+winnow.sqlPage.result();                              // the active tab's last result, or null
+const sel = await winnow.sqlPage.selectedRows();      // {columns, rows} the analyst selected — rows is [] when the result has no rid
+const off = winnow.sqlPage.onRun(({ tabId, sql, result }) => …);   // after every run; result may be {error}
+
+// Notes
+await winnow.notesPage.show();
+const md = await winnow.notesPage.text();
+await winnow.notesPage.insert('- 08:07 H2: powershell -Enc from wmiprvse\n');   // at the cursor
+await winnow.notesPage.setText(md);                   // replace the whole body
+const off2 = winnow.notesPage.onChange(({ text }) => …);
+```
+
+`setText` without `newTab` overwrites the active query tab — that is
+what "put this query in the editor" means, and the tab autosaves it as
+if typed. Use `newTab` when the analyst's own query should survive.
+`run()` paints the result in the pane whether or not the page is
+showing; call `show()` first if they should see it. The pane has no row
+cap, but the rows are not all in the browser: the server holds the
+result and the pane pages it in as the analyst scrolls. So a result's
+`rows` is its first 5,000 rows, `total` is how many it has in all, and
+`truncated` is `total > rows.length`. `stopped` is `null`, or
+`'cancelled'` when the analyst pressed Stop (or `'disk'` when the disk
+results are kept on ran low): the result is the rows that had come back
+by then, and still counts as a result. For more than the first page,
+query with `winnow.sql(sql, limit)` yourself. `selectedRows()` returns a
+promise (since API 12): a shift-click can select rows the pane never
+loaded, so they come from the server. A run that is overtaken before it
+returns — Run again in the same tab, the tab closed, another case
+opened — rejects with a "Superseded" error, and its result is neither
+painted nor announced to `onRun`: it describes a query (or a case) the
+page has moved on from. Both `onRun` and
+`onChange` return an unsubscribe and are cut with your mount.
+
+The `claude_assistant/` example's **Copilot** is the worked example: a
+chat beside the SQL editor whose answers carry *Insert* and *Run*
+buttons wired to `setText` and `run`, with the editor's current text
+sent along as context.
+
+---
+
+## 8. Hook: API routes
 
 ```python
 api.register_api("edges", edges_handler, methods=["POST"])
@@ -626,6 +1005,21 @@ req.storage.update(lambda d: d.__setitem__("calls", d.get("calls", 0) + 1))
 A plugin table is not affected by any of this — SQLite serialises the
 writes.
 
+**Blocking the server is fine; holding the browser is not.** A browser
+opens six connections to Winnow, Winnow's own live updates keep one, and
+every request your tab is waiting on keeps another until it answers. A
+tab that awaits a few long requests at once — one per edit, say — takes
+the rest, and then the grid in another tab cannot fetch its rows: the
+whole app looks frozen while the server sits idle. If a handler can run
+for more than a second or so on a big table, don't make the tab wait on
+it. Start the work on a thread of your own and answer at once, let the
+tab poll for the result, and stop the old work when a newer request
+replaces it. The bundled `first_last` example does exactly this (its
+`job/start`, `job` and `job/cancel` routes, and `startJob` in its
+`ui/tab.js`), and tells the analyst through `winnow.notify` when a
+result lands while they are on another tab — copy it rather than
+starting from scratch.
+
 ### Errors
 
 - **`raise ValueError("…")` → HTTP 400** with your message shown to the
@@ -642,7 +1036,7 @@ below).
 
 ---
 
-## 8. Hook: row actions
+## 9. Hook: row actions
 
 ```python
 api.register_row_action(
@@ -692,7 +1086,7 @@ from a plugin*).
 
 ---
 
-## 9. Talking to the case
+## 10. Talking to the case
 
 `req.store` is Winnow's `Store`. The safe, supported way to read from it:
 
@@ -700,6 +1094,10 @@ from a plugin*).
 res = req.store.run_sql("SELECT a, b FROM src_1 LIMIT 100", limit=5000)
 # -> {"columns": [...], "rows": [[...], ...], "truncated": bool, "elapsed_ms": int}
 ```
+
+`rows` holds at most `limit` rows; `truncated` is true only when the
+query had more than that (a result of exactly `limit` rows is not
+truncated).
 
 **Use `run_sql` for reads.** It opens its own read-only connection and
 never takes Winnow's writer lock, so a slow aggregation can't block
@@ -730,7 +1128,9 @@ A source dict:
   "columns": [{"name": "Timestamp", "type": "datetime"}, ...],
   "row_count": 331_642,
   "path": "/evidence/…",             # absolute source path, may be None
-  "file_hash": "…", "imported_at": "2026-08-16T09:12:44",
+  "file_hash": "…",                  # the file's fingerprint; "made:…" / "subset:…" for a
+                                     # table made inside Winnow — an identity, not a digest
+  "imported_at": "2026-08-16T09:12:44",
   "has_fts": 1, "fts_building": False,
   "is_open": True,                    # has a visible tab
   "tagged_row_count": 118, "note_count": 4,
@@ -740,7 +1140,15 @@ A source dict:
 Two things to know about ids: a **negative** `source_id` is a *merge*
 (a virtual union of several sources) with no single backing table — if
 your feature needs `table_name`, reject negatives with a `ValueError`
-rather than building broken SQL. And the sidecar tables are queryable
+rather than building broken SQL, or read every member yourself. A
+merge's members **don't all have its columns** (a column only some
+tables have is empty for the rest), so never write a merge's column
+names straight into a member's SELECT: an unknown double-quoted name is
+a string literal in SQLite, and every cell would read as the column's
+name. `req.store.merge_select_list(merge_src, member_src)` gives one
+member's SELECT list over `src_<id> s LEFT JOIN drv_<id> d ON d.rid =
+s.rid`, padding what it lacks with NULL — the bundled pivot, first/last
+and lateral movement plugins build their merge unions with it. And the sidecar tables are queryable
 too: `row_tags(source_id, rid, tag_id)`, `row_notes(source_id, rid,
 note)`, `tag_defs(id, name, color, hotkey)` — that's how you join
 analyst findings to evidence rows.
@@ -814,7 +1222,7 @@ digits or `_` is refused.
 that is the guarantee. It is not isolation: a plugin is arbitrary Python
 holding `req.store`, so SQL naming another plugin's table runs, exactly as
 anything else it chooses to do to the case file would ([Security
-model](#12-security-model)).
+model](#13-security-model)).
 
 **The evidence is the one exception.** `t.execute` refuses to write to
 `src_<id>`, `drv_<id>`, `row_tags`, `row_notes`, `sources` or `tag_defs`
@@ -850,7 +1258,11 @@ req.store.ingest_rows(
 
 It follows every ingest convention automatically (TEXT columns,
 contiguous row ids, batched commits, background search index), so the
-result is a completely normal source.
+result is a completely normal source. With no `path` there is no file to
+fingerprint, so the table gets an identity of its own (`file_hash`
+`"made:…"`): a saved session puts its tags and notes back, and a copy of
+it in another case matches, but a table another case made the same way —
+same name, same rows — does not.
 
 **Never write to a `src_` table.** Source tables are immutable by
 contract — that's what makes re-import non-destructive and sessions
@@ -880,7 +1292,7 @@ def report_handler(req):
 - Tabs and toolbar panels get the same through `winnow.state.variables`
   and `winnow.setVariable(name, value)`.
 
-A **profile** (case type) can declare the variables its plugins expect,
+A **profile** can declare the variables its plugins expect,
 so the analyst is asked once, at case creation, rather than discovering
 a missing setting mid-investigation:
 
@@ -905,7 +1317,7 @@ never in a variable.
 
 ---
 
-## 10. Testing a plugin
+## 11. Testing a plugin
 
 Plugins are ordinary Python, so ordinary tests work. Two levels:
 
@@ -922,7 +1334,9 @@ assert rows[0]["FullPath"] == ".\\Users\\bob\\secret.txt"
 **Test through the registry** to cover `register()` itself:
 
 ```python
-from plugin_api import PluginRegistry
+from pathlib import Path
+
+from winnow.plugin_api import PluginRegistry
 
 reg = PluginRegistry()
 reg.load([Path("examples/plugins")])
@@ -974,28 +1388,44 @@ SDK with `monkeypatch.setitem(sys.modules, "anthropic", fake_module)` so
 a network-dependent plugin is still testable offline, and build binary
 fixtures in the test file rather than committing evidence.
 
-For a tab's JS there's no browser test runner, but you can at least
-syntax-check it the way the repo checks its own frontend modules — see the Testing
-section of [`CLAUDE.md`](../CLAUDE.md).
+A tab's JS can be driven in a real browser. `tests/ui/` runs pytest
+against a live uvicorn and a real Chromium under Playwright, and the
+bundled examples are tested exactly that way: `test_lateral_movement.py`
+turns the plugin on through `/api/plugins/toggle`, calls
+`__winnow.loadPlugins()`, opens the tab and drives the graph that
+`lateral_movement/ui/tab.js` draws, and the pivot and first_last tabs get
+the same treatment. Copy one of those modules — mark it `pytest.mark.ui`,
+enable your plugin, reload the plugin set, then talk to your own DOM. The
+suite skips itself where playwright or a browser is missing, so a machine
+with neither still runs everything else. Separately, the esprima
+parse-and-scope check in `tests/test_static_syntax.py` covers `static/js/`
+rather than plugin JS, but it's a cheap technique to point at your own
+`ui/*.js` — see the Testing section of `CLAUDE.md` on develop.
 
 ---
 
-## 11. Installing and sharing
+## 12. Installing and sharing
 
 **Install:** Settings → Plugins → *Install a plugin…* — pick the `.py`
 file for a single-file plugin, or the folder that directly contains
 `__init__.py` for a folder plugin (the dialog states the rule and checks
 your pick before any bytes move). It copies into `plugins/` and loads
-immediately, no restart. Copying in by hand works identically; the panel
-picks it up next time it opens. The bundled examples in
-`examples/plugins/` never need installing — they're always listed, with
+immediately, no restart. Copying in by hand works too, but nothing
+notices the new file until the registry next reloads: a server restart,
+opening or switching a case, changing any plugin's scope, applying a
+profile, or installing through the dialog. Opening the panel is not
+enough on its own — it re-reads the set already loaded. The bundled
+examples in `examples/plugins/` never need installing — they're always listed, with
 a scope dropdown like any other plugin, just defaulting to off.
 
 **Scopes:** each plugin is on/off *for all cases* (machine default,
 `workspace/plugins.json`) or *for this case only* (an override stored in
 the case file's `case_settings`, so it travels with the evidence). The
 registry reloads on every case switch — per-case disablement really
-unloads the code, same guarantee as the machine-level switch.
+unloads the code, same guarantee as the machine-level switch. A reload
+is built beside the running set and switched in whole, one reload at a
+time: while yours imports, your routes keep answering from the previous
+load, and there is no moment in between when they 404.
 
 **Distribute** a folder plugin as a zip or a git repo containing the
 plugin folder. Include a README saying what it does, what it needs
@@ -1013,7 +1443,20 @@ python server.py --plugins-dir ~/src/my-winnow-plugins
 
 Installs from the UI always land in the first directory (`plugins/`).
 
-**Versioning:** the current plugin API version is **7** (`req.set_env` /
+**Versioning:** the current plugin API version is **14** (the tab
+context's `sectionPanes` arrived in 14, which took the context's own
+`apiVersion` to 8; its `dropdownMenu` arrived in 13, which took it to 7;
+in 12 the SQL
+pane started holding results on the server: `sqlPage` results gained
+`total` and `stopped`, their `rows` became the first 5,000, and
+`sqlPage.selectedRows()` became async, which took the context's own
+`apiVersion` to 6; the `signals`
+render kind and its `cells` source arrived in 11; two things arrived in
+10: a dashboard widget's `live` flag, and the tab context's `tabState`,
+which took the context's own `apiVersion` to 5;
+`api.register_page_panel`
+and the tab context's `sqlPage` / `notesPage` / `notify` arrived in 9; `api.register_dashboard`
+arrived in 8; `req.set_env` /
 `req.unset_env` / `req.is_loopback` arrived in 7; `req.table` in 6; `req.env`,
 `req.variables` / `req.set_variable` and the tab context's
 `state.variables` / `setVariable` arrived in 5; toolbar panels
@@ -1025,7 +1468,7 @@ failing mysteriously somewhere inside `register()`.
 
 ---
 
-## 12. Security model
+## 13. Security model
 
 **A plugin is arbitrary Python running with Winnow's privileges.** It can
 read any file the analyst can, open sockets, and touch the case. There is
@@ -1075,7 +1518,7 @@ def lookup_handler(req):
   limit on what Settings → Environment and `/api/env` can touch, and a
   convention that keeps a well-behaved plugin on the names the analyst
   manages — it is not a sandbox. A plugin is ordinary Python and can
-  read `os.environ` directly, which is why section 12 says what it says.
+  read `os.environ` directly, which is why §13 says what it says.
 - **Saving one:** `req.set_env("WINNOW_VT_API_KEY", token)` persists it the
   same way Settings → Environment does — immediately, and across restarts —
   so a plugin that obtained a key itself (an OAuth exchange, a field in its
@@ -1084,29 +1527,30 @@ def lookup_handler(req):
   cannot do what the analyst cannot: `WINNOW_*` names only, never one of
   Winnow's own settings, and never over a value exported outside Winnow.
 
-  This is not a new privilege — a plugin is arbitrary Python and could
-  always write that file itself. It is the way that lands in the right
-  place with the right permissions, and that the analyst can see and undo.
-  Two things to weigh: saving a secret they didn't ask you to save is a
-  surprise, so say so in your UI; and your route is reachable by whoever
-  can reach Winnow, so check `req.is_loopback` if a remote viewer shouldn't
-  be able to trigger it.
+    This is not a new privilege — a plugin is arbitrary Python and could
+    always write that file itself. It is the way that lands in the right
+    place with the right permissions, and that the analyst can see and undo.
+    Two things to weigh: saving a secret they didn't ask you to save is a
+    surprise, so say so in your UI; and your route is reachable by whoever
+    can reach Winnow, so check `req.is_loopback` if a remote viewer shouldn't
+    be able to trigger it.
 
 - Read it server-side, in the handler that uses it. **Never send the
   value to the browser** — not in a response, not in a tab's HTML. A tab
   that needs a network call makes it through its own `register_api`
   route.
 - Tell the analyst the name in your README: "set `WINNOW_VT_API_KEY`
-  under Settings → Environment". (The bundled `claude_assistant` predates
-  this and reads the Anthropic SDK's own `ANTHROPIC_API_KEY` from the
-  shell — the pattern to copy is the README sentence, not the name.)
+  under Settings → Environment". The bundled `claude_assistant` does
+  exactly this with `WINNOW_ANTHROPIC_API_KEY`, falling back to the
+  Anthropic SDK's own `ANTHROPIC_API_KEY` from the shell when it isn't
+  set.
 - For everything that is *not* secret — the engagement, a base URL, a
   document link — use a [case variable](#case-variables) instead, so it
   travels with the case.
 
 ---
 
-## 13. Troubleshooting
+## 14. Troubleshooting
 
 | Symptom | Cause |
 | --- | --- |
@@ -1126,18 +1570,25 @@ def lookup_handler(req):
 
 ---
 
-## 14. Reference
+## 15. Reference
 
 ### `register_ingest_format(*, id, label, parse, extensions=(), filename_patterns=(), description="", options=())`
 
 `parse(path: str, options: dict) -> {"columns": list[str], "rows": Iterable[Sequence], "column_types"?: list[str], "name"?: str}`
+
+`path` ends in the file's own name, uploads included, and an upload's
+spool is gone once the import returns (see *The `parse` contract*).
 
 Option spec: `{"name": str, "label"?: str, "type": "bool"|"text"|"choice", "default"?: Any, "choices"?: list[str]}`
 
 ### `register_tab(*, id, label, entry, description="")`
 
 Module: `export default function mount(container, winnow)`, plus optional
-`onShow(container)` / `onHide(container)`.
+`onShow(container)` / `onHide(container)`. Everything `winnow` carries is
+tabled under [The `winnow` context](#the-winnow-context);
+`winnow.dropdownMenu(anchor, items)` (API 13) takes the item shape in
+[Menus](#menus), and `winnow.sectionPanes(spec)` (API 14) the section
+shape in [Dialogs with sections](#dialogs-with-sections).
 
 ### `register_api(route, handler, methods=("GET", "POST"))`
 
@@ -1154,6 +1605,170 @@ context a tab does (one object builds both), so `onViewChange`,
 are available to tabs as well — they are listed under
 [The `winnow` context](#the-winnow-context), not additions here. They
 matter most to a panel, which sits beside the grid and has to follow it.
+
+### `register_page_panel(*, page, id, label, entry, description="")`
+
+`page` is `"sql"` or `"notes"`. Module: `export default function
+mount(container, winnow)`, plus optional `onShow(container)` /
+`onHide(container)` — the toolbar-panel contract, in a side column on
+that page. Ids are shared with tabs and toolbar panels within a plugin.
+Drive the page through `winnow.sqlPage` / `winnow.notesPage` ([Driving
+the page](#driving-the-page)).
+
+### `register_dashboard(*, id, label, widgets, description="")`
+
+A board your plugin offers. It appears under **Dashboards ▸ Library** in
+the sidebar, named `label`, and the analyst adds it to a case with ＋ (or
+by clicking its name) — which copies the widgets in, create-or-replace by
+name, so adding it twice refreshes rather than duplicates. Ship a new
+version of the board and re-adding it is how the analyst picks that up.
+
+That refresh is for **your** copy specifically. If the case already has a
+board of that name that your plugin did not write — one the analyst built
+by hand, or another plugin's — Winnow asks before replacing it, because
+`label` is yours to choose and the collision may be pure coincidence.
+Their widgets do not go without them saying so.
+
+**Offered, never applied.** Loading your plugin does not put a board in
+anyone's case. A plugin that dropped one into every case it could see
+would be deciding what the analyst opened Winnow to look at.
+
+`source` and `render` are checked against what actually runs and draws,
+at registration — a typo, or a render nobody implemented, is your
+plugin's load error rather than a card reading `Unknown render "table"`
+in somebody's case weeks later.
+
+`widgets` is a list of widget definitions — the same shape the dashboard
+editor writes and profiles carry:
+
+```python
+api.register_dashboard(
+    id="triage",
+    label="ESXi triage",
+    widgets=[
+        {"title": "Log lines", "source": "sql", "render": "stat",
+         "query": {"sql": "SELECT COUNT(*) FROM {{all:header_set:ESXi / Linux host logs}}"}},
+        {"title": "Log types", "source": "sql", "render": "bar",
+         "query": {"sql": "SELECT Log AS label, COUNT(*) c FROM {{evtx}} GROUP BY Log ORDER BY c DESC"},
+         "drill": {"table": "{{evtx}}", "column": "Log"}},
+    ],
+)
+```
+
+| key | |
+| --- | --- |
+| `title` | the card's heading (required) |
+| `source` | `"sql"`, `"tags"`, `"watchlist"` or `"cells"` (required) |
+| `render` | `"stat"`, `"kv"`, `"chips"`, `"list"`, `"bar"`, `"histogram"` or `"signals"` (required) |
+| `query.sql` | required for `source: "sql"`; runs on the read-only pane connection, so a board is data, not code |
+| `cells` | required for `source: "cells"` — see **A card of many numbers** below |
+| `span` | `1`–`4` — how many of the grid's four columns the card sits across |
+| `live` | `true` — re-run this widget every time the board opens, instead of showing its last result |
+| `id` | assigned by Winnow when the board lands in a case — don't set it, but preserve it if you read a board and write it back |
+| `drill` | makes the card clickable; see below |
+
+**A card of many numbers.** `render: "signals"` with `source: "cells"` is
+one card holding a grid of labelled numbers — and **every cell keeps its
+own drill**:
+
+```python
+{"title": "Triage signals", "source": "cells", "render": "signals", "span": 3,
+ "cells": [
+     {"label": "Failed logons (4625)", "tone": "warn", "source": "sql",
+      "query": {"sql": "SELECT COUNT(*) FROM {{evtx}} WHERE Channel='Security' AND EventId='4625'"},
+      "drill": {"table": "{{evtx}}", "where": [
+          {"column": "Channel", "op": "equals", "value": "Security"},
+          {"column": "EventId", "op": "equals", "value": "4625"}]}},
+     {"label": "Sysmon service", "chip": True, "source": "sql",
+      "query": {"sql": "SELECT COUNT(*) > 0 FROM {{registry}} WHERE KeyPath LIKE '%\\Services\\Sysmon%'"},
+      "drill": {"table": "{{registry}}", "where": [
+          {"column": "KeyPath", "op": "contains", "value": "\\Services\\Sysmon"}]}},
+ ]}
+```
+
+| cell key | |
+| --- | --- |
+| `label` | the caption under the number; unique within the card, because it is how the card finds the cell's drill (required) |
+| `source` | `"sql"`, `"tags"` or `"watchlist"` — anything a widget can be, except another grid of signals |
+| `query.sql` | required for a `sql` cell; the cell's value is the first number it returns |
+| `drill` | the rows behind THIS number — same shape and same rule as a widget's |
+| `tone` | `"warn"` draws the number in the danger colour |
+| `chip` | `True` draws a yes/no pill instead of a number, above the numeric cells |
+
+A signals card shows the widget's own `sub` under the grid, the way a
+`stat` card shows one under its number — a card of ten numbers is the one
+that most needs a line saying what they are numbers of.
+
+Reach for it when a row of single-number cards is really one subject. The
+shipped KAPE board folded eleven stats into one of these: a `kv` card
+would have folded eleven working drill-throughs into one
+OR-of-everything, and a click that opens a superset of the rows you were
+reading is worse than one that opens nothing.
+
+Two properties worth knowing. **One card is one request**, whatever the
+cell count — which is the other half of why that board got shorter.
+And **a cell fails alone**: a cell whose table is not in this case says
+so in its own place while its neighbours show their numbers, instead of
+taking the card down with it. That is strictly better than the cards it
+replaced, where a case with no registry meant five identical error cards.
+
+**A board is not re-run from scratch every time it is opened.** Each
+widget's last result is kept in the case file, painted the instant the
+board appears, and labelled with its age; the board carries an "as of"
+stamp and a ↻ Refresh that re-runs everything. This matters to you
+because a board of twenty-six widgets used to mean twenty-six queries per
+open, and "open" includes reopening the case tomorrow — so you can write
+the expensive card you actually wanted.
+
+`"live": true` opts a single widget out and runs it on every open. Reach
+for it where a stale number would be *wrong* rather than merely old and
+the query is cheap: a tag count, a watchlist count, a row count on a small
+table. Not a `GROUP BY` over the whole log — that is the card the cache
+exists for, and the analyst can ↻ it. The shipped KAPE profile marks one
+of its ten cards live — the two-cell Findings card, which reads the
+watchlist and the tag table and nothing else. Everything else on that
+board scans a log, so one is the honest number, not a stingy one.
+
+An imported table or a tag write does not silently replace a cached
+number; it marks it stale, and the card and the board bar say so. Numbers
+an analyst is going to draw conclusions from are dated, always.
+
+A run that did not fully answer is not kept: a widget that errored, and a
+signals card *any* of whose cells errored, are re-run the next time the
+board is opened rather than painted from the cache. The usual reason a
+cell cannot answer is that the table it reads has not been imported yet,
+and a cached "—" would outlive the import.
+
+The cached result is filed under the widget's `id`, which Winnow assigns
+when the board is written into a case. The list you register here is left
+unstamped, so there is nothing to set — but a board you READ back
+(`req.store.get_dashboard()`, `GET /api/dashboards/{id}`) carries one per
+widget, and a plugin that edits a board and writes it back with
+`req.store.set_dashboard_widgets()` has to carry the `id` through. Drop it
+and every card on that board is a new widget: the cached results are
+pruned and the whole board re-runs on its next open.
+
+**Write the SQL against a placeholder, not a table id**, which is
+different in every case: `{{evtx}}`-style shorthands and
+`{{header_set:Some Set}}` bind to the first table carrying that header
+set, and `{{all:header_set:Some Set}}` unions every table that does. A
+placeholder no table matches is a friendly message on the card, not a
+broken board.
+
+A `drill` opens the rows behind a number:
+`{"table": "{{evtx}}", "where": [{"column", "op", "value"}], "column": …,
+"bucket": "hour"}` — `where` conditions are ANDed, `tree` takes a whole
+filter tree for the OR-shaped ones, `column` is what a clicked bar or row
+pivots on, `bucket` is for a time histogram. **It has to select exactly
+the rows the widget counted.** A number whose click contradicts it is
+worse than one that does not respond at all, and it is the mistake that
+is easiest to ship: test it against a real case before you do.
+
+Registering needs no case open, so a board can be offered the moment the
+plugin loads. For a board built from the data of the case that IS open —
+counts you cannot know in advance — call `req.store.create_dashboard(name,
+widgets)` from a [`register_api`](#register_apiroute-handler-methodsget-post)
+handler instead. This hook is for the boards your plugin always ships.
 
 ### `register_row_action(*, id, label, handler, description="", max_rows=1000)`
 
@@ -1201,6 +1816,8 @@ What every API-route and row-action handler receives:
 | `GET /plugin_assets/<fs_name>/<path>` | A plugin's own files |
 | `* /api/plugin/<fs_name>/<route>` | A plugin's registered routes |
 | `POST /api/plugins/row_action/<fs_name>/<id>` | Runs a row action on `{source_id, pairs: [[source_id, rid]…], column?, value?}` |
+| `GET /api/plugin_state?key=<mount key>` | What a mount saved in this case — `{mount_key, payload, saved_at}`, nulls if nothing. Driven by `winnow.tabState` |
+| `POST /api/plugin_state` | `{key, payload}` — replace a mount's state; a null payload clears it. Over 64 KiB is a 400 |
 | `GET /api/case/variables` | `[{name, value, description, required}]` for the open case |
 | `POST /api/case/variables` | `{name, value?, description?, required?}` — create or update one |
 | `DELETE /api/case/variables/<name>` | Remove one |
@@ -1213,27 +1830,28 @@ can drive a plugin parser from `curl` without touching the UI.
 
 ---
 
-## 15. Writing a plugin with an LLM
+## 16. Writing a plugin with an LLM
 
 **Paste this one file. That's the whole context budget.**
 
-Everything an author needs is here: the contract for all three hooks,
+Everything an author needs is here: the contract for every hook,
 the data shapes you'll consume, complete runnable examples of an ingest
 format and a tab, and a standalone test recipe. It deliberately does not
-assume you can read Winnow's source — every example in it was extracted
-verbatim from this document and run against a live server before it
-shipped.
+assume you can read Winnow's source — every example in it is written to
+be pasted straight out of this document and run against a live server,
+with no step that says "and now read the code".
 
-Rough context cost (character estimate, not a tokenizer run):
+Rough context cost (characters counted and divided by four, not a
+tokenizer run):
 
 | What you paste | Size | Use it when |
 | --- | ---: | --- |
-| **This guide alone** | **~8k tokens** | Anything described here — which is every hook |
-| \+ `plugin_api.py` | ~14k tokens | You want the enforcing code beside the prose (validation rules, exact error text) |
-| \+ one `examples/plugins/*` | ~12–23k tokens | You're building something close to that example and want a full working precedent |
-| The whole codebase | ~190k tokens | You're changing Winnow itself, not writing a plugin |
+| **This guide alone** | **~20k tokens** | Anything described here — which is every hook |
+| \+ `plugin_api.py` | ~34k tokens | You want the enforcing code beside the prose (validation rules, exact error text) |
+| \+ one `examples/plugins/*` | ~22–54k tokens | You're building something close to that example and want a full working precedent |
+| The whole codebase | ~830k tokens | You're changing Winnow itself, not writing a plugin |
 
-So the guide is roughly **1/24th** the cost of loading the tool, and the
+So the guide is roughly **1/40th** the cost of loading the tool, and the
 step up to guide + contract is still under a tenth.
 
 ### A prompt that works
@@ -1241,7 +1859,7 @@ step up to guide + contract is still under a tenth.
 > Here is the plugin development guide for Winnow, a local DFIR triage
 > tool. Write a plugin that <what you want>. Follow the contract in the
 > guide exactly — do not invent API surface that isn't documented in it.
-> Include a test file using the standalone recipe in §10.
+> Include a test file using the standalone recipe in §11.
 >
 > <paste this file>
 
@@ -1249,10 +1867,10 @@ step up to guide + contract is still under a tenth.
 
 - **Don't paste `tests/test_plugins.py`.** It mostly tests Winnow's
   plugin *host* — the loader, installs, traversal rejection — none of
-  which a plugin author implements. §10's recipe is the part that's
+  which a plugin author implements. §11's recipe is the part that's
   actually about testing your own plugin.
 - **Don't paste `store.py`.** The supported surface is the short list in
-  §9; the rest is internals a plugin must not reach into anyway. If you
+  §10; the rest is internals a plugin must not reach into anyway. If you
   paste it, an LLM will happily use a private method and you'll find out
   when Winnow refactors.
 - **Do paste an example plugin** if you're building something in the
@@ -1263,8 +1881,8 @@ step up to guide + contract is still under a tenth.
 Three things this guide can't do for you:
 
 - **New hook types.** If you need an extension point that doesn't exist
-  (a new export format, a right-click action), no amount of guide helps
-  — that's a change to `plugin_api.py`, i.e. a Winnow PR.
+  (a new export format, say), no amount of guide helps — that's a
+  change to `plugin_api.py`, i.e. a Winnow PR.
 - **Matching internal behavior exactly.** If your parser has to reproduce
   a Winnow-specific detail not spelled out here (say, precisely how the
   timeframe filter normalizes an odd timestamp shape), read the source
@@ -1272,6 +1890,6 @@ Three things this guide can't do for you:
 - **Anything an LLM asserts that isn't in here.** The failure mode to
   watch for is a confidently invented method — `store.query()`,
   `api.register_command()`, `winnow.refresh()`. None of those exist.
-  Cross-check any API call against §14; if it isn't listed, it's a
+  Cross-check any API call against §15; if it isn't listed, it's a
   hallucination, and the plugin will fail at load or at first click with
   a message that says so.

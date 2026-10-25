@@ -9,7 +9,8 @@
      fire during load, so these are order-independent; they're grouped only
      because that's easier to read than interleaving them below.
    - the startup sequence, which is not. loadKeymap() must precede
-     updateTimeRangeButton() (it reads S.keymap for the tooltip);
+     updateTimeRangeButton(), syncHistogramPanel() and syncSearchKeyCopy()
+     (they read S.keymap for their tooltips and placeholders);
      loadPageTabPrefs() must precede renderPageTabs(); loadDetailPrefs()
      must precede applyDetailPrefs(). Keep them in this order.
 
@@ -29,6 +30,7 @@ import * as watchlist from './watchlist.js';
 import * as dashboard from './dashboard.js';
 import * as dashwidgets from './dashwidgets.js';
 import * as filters from './filters.js';
+import * as filterundo from './filterundo.js';
 import * as splash from './splash.js';
 import * as sources from './sources.js';
 import * as view from './view.js';
@@ -43,6 +45,7 @@ import * as ui from './ui.js';
 import * as filterbuilder from './filterbuilder.js';
 import * as savedfilters from './savedfilters.js';
 import * as timeframe from './timeframe.js';
+import * as histogram from './histogram.js';
 import * as merge from './merge.js';
 import * as multicase from './multicase.js';
 import * as importer from './importer.js';
@@ -52,20 +55,27 @@ import * as search from './search.js';
 import * as session from './session.js';
 import * as sql from './sql.js';
 import * as timeline from './timeline.js';
+import * as timelineoverview from './timelineoverview.js';
+import * as timelinepane from './timelinepane.js';
 import * as rowmenu from './rowmenu.js';
+import * as subset from './subset.js';
 import * as keymap from './keymap.js';
+import * as bundles from './bundles.js';
+import * as pluginmanager from './pluginmanager.js';
 import * as profilebuilder from './profilebuilder.js';
 import * as settings from './settings.js';
 import * as userenv from './userenv.js';
 import * as home from './home.js';
 import * as errlog from './errlog.js';
 import { toast } from './core.js';
+import { wireColumnDividers } from './columns.js';
 import { applyDetailPrefs, loadDetailPrefs, wireDetail } from './detail.js';
-import { wireFilters } from './filters.js';
+import { syncSearchKeyCopy, wireFilters } from './filters.js';
 import { wireGrid } from './grid.js';
 import { wireGrouping } from './grouping.js';
+import { syncHistogramPanel, wireHistogram } from './histogram.js';
 import { maybeOfferStorageDir, boot, wireHome } from './home.js';
-import { wireFileDrop } from './importer.js';
+import { maybeWarnElevated, wireFileDrop } from './importer.js';
 import { loadKeymap, wireKeymap } from './keymap.js';
 import { wirePlugins } from './plugins.js';
 import { wireSearch } from './search.js';
@@ -75,6 +85,8 @@ import { wireSql } from './sql.js';
 import { S } from './state.js';
 import { updateTimeRangeButton } from './timeframe.js';
 import { wireTimeline } from './timeline.js';
+import { wireTimelineOverview } from './timelineoverview.js';
+import { wireTimelinePane } from './timelinepane.js';
 import { wireUi } from './ui.js';
 
 
@@ -84,7 +96,7 @@ import { wireUi } from './ui.js';
    spread would freeze the value of a rebindable export like ROW_H at boot.
    Collision-free by construction — these names all shared one scope until
    the file was split. Not an API; nothing in the app reads it. */
-const NAMESPACES = { splash, core, connection, state, jobs, tabhistory, charts, stack, notes, watchlist, dashboard, dashwidgets, filters, sources, view, columns, tsformat, derived, grid, grouping, tags, detail, ui, filterbuilder, savedfilters, timeframe, merge, multicase, importer, tables, plugins, search, session, sql, timeline, rowmenu, keymap, settings, profilebuilder, userenv, home, errlog };
+const NAMESPACES = { splash, core, connection, state, jobs, tabhistory, charts, stack, notes, watchlist, dashboard, dashwidgets, filters, filterundo, sources, view, columns, tsformat, derived, grid, grouping, tags, detail, ui, filterbuilder, savedfilters, timeframe, histogram, merge, multicase, importer, tables, plugins, search, session, sql, timeline, timelineoverview, timelinepane, rowmenu, subset, keymap, settings, bundles, profilebuilder, pluginmanager, userenv, home, errlog };
 window.__winnow = {};
 for (const ns of Object.values(NAMESPACES)) {
   for (const key of Object.keys(ns)) {
@@ -96,7 +108,8 @@ for (const ns of Object.values(NAMESPACES)) {
 // mouseup, where browsers fire their own history navigation from.
 window.addEventListener('mouseup', tabhistory.onMouseNav);
 
-core.$('btnAcrossCases').onclick = () => multicase.openMultiCase();
+// Across cases has no button for now: the modal is reachable as
+// __winnow.openMultiCase() (multicase.js says why), not from the header.
 notes.wireNotes();
 session.wireSession();
 watchlist.wireWatchlist();
@@ -107,8 +120,12 @@ wireDetail();
 wireUi();
 wireSql();
 wirePlugins();
+wireHistogram();
 wireTimeline();
+wireTimelineOverview();
+wireTimelinePane();
 wireGrid();
+wireColumnDividers();
 wireFilters();
 wireSearch();
 wireKeymap();
@@ -128,6 +145,8 @@ applyDetailPrefs();
 S.keymap = loadKeymap();
 
 updateTimeRangeButton();
+syncHistogramPanel();
+syncSearchKeyCopy();
 
 initAppearance();
 
@@ -149,9 +168,13 @@ connection.wireConnection();
 
 boot().catch((e) => toast('Could not start: ' + e.message, 8000));
 
-// Surface server-side errors in the app (Case menu → Error log) with a dot
+// Surface server-side errors in the app (Case menu → Log) with a dot
 // on the Case button when new ones land — they used to go only to the
 // terminal.
 errlog.startLogBadgePoll();
 
 maybeOfferRemoteMode().then(() => maybeOfferStorageDir()).then(() => maybeOfferDefaultPrompt());
+
+// Not in that chain: it asks nothing and blocks nothing, so it needn't
+// wait behind a dialog the analyst hasn't answered yet.
+maybeWarnElevated();

@@ -10,9 +10,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import errno
 import functools
 import anyio
+import hashlib
 import heapq
+import html
 import ipaddress
 import json
 import os
@@ -22,18 +25,22 @@ import socket
 import sqlite3
 import sys
 import tempfile
+import threading
 import time
-from pathlib import Path
+import urllib.parse
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form, Query
 from starlette.concurrency import run_in_threadpool
-from fastapi.responses import StreamingResponse, FileResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import StreamingResponse, FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from winnow import assoc as file_assoc
 from winnow import browser
+from winnow import console
+from winnow import elevation
 from winnow import instances
 from winnow import multicase
 from winnow import paths
@@ -42,9 +49,13 @@ from winnow import updater
 from winnow import userenv
 from winnow import version
 from winnow import archive
+from winnow import iisread
 from winnow import workspace as WS
-from winnow.store import (CASE_SUFFIX, PLASO_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, OpCancelled, Store,
-                   describe_case_lock, probe_case_lock, q, sweep_orphan_views)
+from winnow.sqlresults import ResultExpired, TooBig
+from winnow.store import (CASE_SUFFIX, DEFAULT_IMPORT_EXTENSIONS, PLASO_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, MissingTable, OpCancelled, RecordGone, Store, ViewExpired,
+                   case_lock_path, decode_text_sample, describe_case_lock, fold_leftover_wal, is_winnow_case_file,
+                   looks_like_kv_log, probe_case_lock, q, sniff_text_encoding, sweep_orphan_views)
+from winnow.store import case_session_document_problem, pane_cell_json, session_document_problem
 
 HERE = paths.INSTALL_ROOT  # static/, plugins/, examples/plugins/ all hang off the install root
 
@@ -97,23 +108,64 @@ class _Presence:
         self.streams = 0            # open /api/presence connections
         self.inflight = 0           # other HTTP requests mid-flight
         self.ever_connected = False
-        self.said_goodbye = False   # a page reported itself closing, so the
-                                    # stream ending means gone, not asleep
+        self.said_goodbye = False   # the LAST window reported itself closing,
+                                    # so its stream ending means gone, not asleep
         self.started = time.monotonic()
         self.last_zero = time.monotonic()
         self.enabled = True         # main() clears this for --no-idle-shutdown
+        # Per page (connection.js names each page load): open streams, the
+        # pages that said goodbye while their stream was still open, and
+        # the page whose stream took the count to zero. Only open pages are
+        # kept, so these are bounded by the windows actually there. See
+        # _presence_close for why a goodbye has to be matched to its page.
+        self.pages: dict[str, int] = {}
+        self.farewells: set[str] = set()
+        self.last_gone: str | None = None
+        # The server is going down: every stream ends (_end_presence_streams).
+        # One event per open stream, made on the loop that waits on it.
+        self.closing = False
+        self.wakers: set[asyncio.Event] = set()
+        # The loop the streams wait on, so a case switch — a sync route, on
+        # a worker thread — can wake them to say so (_announce_case).
+        self.loop: asyncio.AbstractEventLoop | None = None
 
 
 PRESENCE = _Presence()
 
 
-def _jobs_running() -> bool:
+def _busy_reason() -> str | None:
+    """What background work the case has running right now, named the way
+    an analyst would name it, or None if it has none.
+
+    Four kinds qualify, and all four block the same two things. An import
+    (queued or running) is the original one: a source mid-ingest has an
+    accurate-but-growing row_count. A view-as-table copy is the same
+    situation under another name — the source it fills has a growing
+    row_count and columns='[]' until it finishes. A watchlist scan is a
+    writer too: it replaces hits per table and writes auto-tags. A
+    background view build is the analyst's pending search, whose result is
+    what they will come back for.
+
+    The idle monitor only wants "is anything running" and reads this as a
+    boolean. The two routes that refuse while it is (copy_sources,
+    save_as) put the answer in their 409 — the predicate stopped being
+    "an import is running" when the other three joined it, and a scan
+    reported as "Still importing" sends the analyst to look at a jobs
+    panel with no import in it."""
     if STORE is None or STORE.closed:
-        return False
+        return None
     try:
-        return any(j["status"] in ("running", "queued") for j in STORE.list_ingest_jobs())
+        if any(j["status"] in ("running", "queued") for j in STORE.list_ingest_jobs()):
+            return "Still importing"
+        if STORE.copies_in_flight() > 0:
+            return "A table is still being saved"
+        if STORE.running_watchlist_scan_jobs() > 0:
+            return "A watchlist scan is still running"
+        if STORE.running_view_jobs() > 0:
+            return "A search is still running"
     except Exception:  # noqa: BLE001 — a store mid-close must read as "not busy"
-        return False
+        return None
+    return None
 
 
 def _idle_exit_reason(now: float, p: _Presence, busy: bool) -> str | None:
@@ -144,7 +196,7 @@ async def _idle_monitor():
     while True:
         await asyncio.sleep(IDLE_TICK_S)
         reason = _idle_exit_reason(time.monotonic(), PRESENCE,
-                                   PRESENCE.inflight > 0 or _jobs_running())
+                                   PRESENCE.inflight > 0 or _busy_reason() is not None)
         if reason:
             print(reason, flush=True)
             _trigger_shutdown()
@@ -184,6 +236,11 @@ async def _lifespan(_app: FastAPI):
         a = file_assoc.adapter(background=_assoc_background())
         if a and a.refresh_icons(_assoc_catalogue()):
             print("File-association icon refreshed after an icon update")
+        # Same idea for the Open With entry's name and icon: an install
+        # registered before the verb carried them gets them on the next
+        # start rather than on the next re-registration.
+        if a and a.refresh_verb():
+            print("File-association Open With entry renamed to Winnow")
     if swept["removed"]:
         print(f"Cleaned up {swept['removed']} orphaned temp file(s) from previous runs "
               f"({swept['bytes_freed'] / (1 << 20):.1f} MB)")
@@ -208,11 +265,28 @@ async def _lifespan(_app: FastAPI):
 app = FastAPI(title="Winnow", lifespan=_lifespan)
 STORE: Store | None = None
 
+# Held by every route that replaces STORE (case open, the quick-look
+# save-as and discard, the association open, deleting the open case's
+# file) for the whole of the swap — the routes are thin wrappers that take
+# it around the real work. Each swap is a read of STORE, a Store opened
+# or closed, and a write of STORE, and
+# two of them interleaving is ordinary: a double-click on a case card is two
+# POSTs to /api/case/open, and sync routes run on parallel worker threads.
+# Unserialised, both read the same `old` and both open; the Store whose
+# assignment lost was never closed, its flock and heartbeat held for the
+# life of the process, so that case then read as "open in another Winnow" —
+# naming this one. On one path it was worse: both requests passed the
+# already-open check, and the case got two writer Stores. Serialised, the
+# second request sees what the first left, which for the same path is the
+# already-open no-op.
+_CASE_SWITCH = threading.Lock()
+
 # ---------------------------------------------------------------- plugins
 
-# Loaded once at import (so `uvicorn server:app` gets them too, not just
-# `python server.py`) from plugins/ next to server.py plus an optional
-# WINNOW_PLUGINS_DIR env var; main() adds any --plugins-dir flags on top.
+# Loaded from plugins/ next to server.py plus an optional WINNOW_PLUGINS_DIR
+# env var (main() adds any --plugins-dir flags on top): at import for
+# `uvicorn server:app`, and by main() for `python server.py`, once it knows
+# which case it is opening — see the load at the bottom of this section.
 # A plugin that fails to load is recorded with its error and skipped — it
 # shows up in GET /api/plugins with the reason, and never takes the server
 # down. See plugin_api.py for the whole model (and its security note: a
@@ -260,6 +334,18 @@ def _case_plugin_overrides() -> dict[str, bool]:
         return {}
 
 
+# Bundled examples that became part of the app, each with the one line the
+# analyst sees in its Settings → Plugins row. The updater removes the folder
+# (examples/ is not in updater.PROTECTED), but a zip install that has never
+# run an update carries no manifest and keeps every folder it shipped with —
+# so a copy can outlive the feature it demonstrated, and loading it would
+# put a second Histogram button and route beside the built-in one.
+RETIRED_BUNDLED_EXAMPLES = {
+    "table_histogram": "Retired — the histogram is built into Winnow (the Histogram button in the toolbar); "
+                       "delete examples/plugins/table_histogram",
+}
+
+
 def _reload_plugins() -> None:
     """Rescan PLUGIN_DIRS under the effective enablement policy: the open
     case's override wins where set, else the machine default (installed
@@ -267,19 +353,52 @@ def _reload_plugins() -> None:
     via the enabled list). Cheap enough (a directory listing plus importing
     whatever's enabled) that toggles, installs and case switches just call
     it — no server restart involved. Case switches MUST call it: "a
-    disabled plugin's code never runs" is a per-case statement now."""
+    disabled plugin's code never runs" is a per-case statement now.
+
+    Serialised as a whole, not just the load inside it: the policy is
+    read from whatever case is open NOW, so a toggle's reload that read
+    case A, then lost the race to a case switch's reload that read case
+    B, would finish last and leave B running A's plugin set."""
+    with _PLUGIN_RELOAD_LOCK:
+        _reload_plugins_locked()
+
+
+_PLUGIN_RELOAD_LOCK = threading.Lock()
+
+
+def _reload_plugins_locked() -> None:
     overrides = _case_plugin_overrides()
 
     def enabled_for(fs_name: str, directory: str) -> bool:
+        # A retired example is never loaded from examples/, whatever the
+        # prefs or the case file say. This is the one place both layers
+        # pass through — a case-level override is consulted right below,
+        # so a tombstone in PluginPrefs would be one a case could undo.
+        # An analyst's own copy in plugins/ is theirs and still loads.
+        if fs_name in RETIRED_BUNDLED_EXAMPLES and Path(directory) == BUNDLED_PLUGIN_DIR:
+            return False
         if fs_name in overrides:
             return overrides[fs_name]
         default_on = Path(directory) != BUNDLED_PLUGIN_DIR
         return WS.plugin_prefs.machine_enabled(fs_name, default_on)
 
     PLUGINS.load(PLUGIN_DIRS, enabled_for=enabled_for, bundled_dirs=[BUNDLED_PLUGIN_DIR])
+    # The tombstoned folder is still listed (load has no discovery filter,
+    # and the folder is the thing to delete), so say why it is off where the
+    # panel will show it; api_plugins_toggle refuses the name outright.
+    for p in PLUGINS.plugins:
+        if p["bundled"] and p["fs_name"] in RETIRED_BUNDLED_EXAMPLES:
+            p["error"] = RETIRED_BUNDLED_EXAMPLES[p["fs_name"]]
 
 
-_reload_plugins()
+# Not under `python server.py`: main() loads them itself once the case
+# named by --case (or a double-clicked case file) is open. The effective set
+# is that case's call, and loading the machine set here first would import —
+# run — a plugin the case has switched off, which unloading it a moment later
+# cannot take back. `uvicorn server:app` opens no case at startup, so the
+# machine set is the right one there.
+if __name__ != "__main__":
+    _reload_plugins()
 
 # ---------------------------------------------------------------------- csrf
 
@@ -336,38 +455,63 @@ def _host_is_allowed(raw: str) -> bool:
         return False
 
 
-# ------------------------------------------------------------ error log
+def _attachment(filename: str) -> dict:
+    """The Content-Disposition header for a download named `filename`, as
+    a headers dict. Every download goes through here.
+
+    Starlette encodes header values as Latin-1, so an f-string
+    `filename="{name}"` was a 500 — and no file — for one en dash or one
+    Cyrillic letter, and download names are exactly the text that carries
+    them: a SQL tab's name, an evidence file's own name, whatever the
+    analyst typed. RFC 6266: the real name goes in `filename*` (UTF-8,
+    percent-encoded), which every current browser prefers, beside a plain
+    ASCII `filename` for anything that does not read it. Control
+    characters become `_` in both — a CR/LF would end the header line —
+    and the fallback also loses `"` and `\\`, which would end or escape
+    its quoted string."""
+    name = re.sub(r"[\x00-\x1f\x7f]", "_", filename or "") or "download"
+    fallback = re.sub(r'[^\x20-\x7e]|["\\]', "_", name)
+    encoded = urllib.parse.quote(name, safe="")
+    return {"Content-Disposition": f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{encoded}"}
+
+
+# ------------------------------------------------------------ log
 #
-# Errors used to go only to the terminal Winnow was started from, which an
-# analyst rarely has in front of them. Capture them into a bounded ring the
-# UI can show (Case menu -> Error log). record_log ALSO prints, so the
-# terminal behaviour is unchanged for anyone watching it.
-import collections as _collections
-import datetime as _datetime
-import threading as _threading
+# The ring itself lives in winnow/log.py so the store's job threads can
+# write to it too (an import failing inside a job used to be a toast and
+# nothing else). Case menu -> Log shows it; only "error" entries light the
+# badge. record_log stays as the name the routes here use.
+from winnow import log as wlog
 
-_ERRLOG: "_collections.deque" = _collections.deque(maxlen=500)
-_ERRLOG_LOCK = _threading.Lock()
-_errlog_seq = 0
-
-
-def record_log(level: str, message) -> None:
-    global _errlog_seq
-    with _ERRLOG_LOCK:
-        _errlog_seq += 1
-        _ERRLOG.append({
-            "seq": _errlog_seq,
-            "ts": _datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "level": level,
-            "message": str(message),
-        })
-    print(f"[{level}] {message}", file=sys.stderr, flush=True)
+record_log = wlog.record
 
 
 @app.get("/api/log")
 def api_log():
-    with _ERRLOG_LOCK:
-        return {"entries": list(_ERRLOG), "seq": _errlog_seq}
+    return wlog.snapshot()
+
+
+@app.get("/api/log/marks")
+def api_log_marks():
+    return wlog.marks()
+
+
+class ClientLogBody(BaseModel):
+    level: str = "warn"
+    message: str = ""
+
+
+@app.post("/api/log/client")
+def api_log_client(body: ClientLogBody):
+    """The browser's side of the story — a job poll whose fetch rejected, a
+    response that wouldn't parse. Those never reach a route, so the
+    catch-all below can't see them, and they are exactly what a "the
+    progress bar stopped updating" report is made of. Never "error": the
+    badge means the SERVER hit something, and a client can't vouch for
+    that."""
+    level = "info" if body.level.strip().lower() == "info" else "warn"
+    wlog.record(level, "[client] " + body.message.strip()[:500])
+    return {"seq": wlog.seq()}
 
 
 @app.exception_handler(Exception)
@@ -404,12 +548,146 @@ async def closed_database_handler(request: Request, exc: sqlite3.ProgrammingErro
     return JSONResponse({"detail": f"Internal error: {exc}"}, status_code=500)
 
 
+# A write that names a table, tag or row this case no longer has — a
+# second window acting on something the first deleted. The Store raises it
+# before writing anything, so this is a clean refusal, not an error after
+# the fact; 404 rather than 409 because no rebuild brings the thing back,
+# and worded without "expired" for the reason the handler above gives.
+@app.exception_handler(RecordGone)
+async def record_gone_handler(request: Request, exc: RecordGone):
+    return JSONResponse({"detail": str(exc)}, status_code=404)
+
+
+# The read side of the same race: a request still in flight for a table
+# another window (or this one, a moment earlier) just deleted. The Store's
+# lookups say so as KeyError("No table N") / ("No merge N"), and a route
+# that never expected its table to vanish mid-request let that out into
+# the catch-all — a 500 "Internal error" and an error badge for something
+# nobody did wrong. Only those two messages are matched: any other
+# KeyError is still a bug, and is raised on to the catch-all — re-raised
+# rather than handed to it, because only the propagated exception keeps
+# its traceback in the terminal (and in the test client).
+_GONE_TABLE_RE = re.compile(r"No (?:table|merge) -?\d+")
+
+
+@app.exception_handler(KeyError)
+async def gone_table_handler(request: Request, exc: KeyError):
+    msg = exc.args[0] if exc.args and isinstance(exc.args[0], str) else ""
+    if _GONE_TABLE_RE.fullmatch(msg):
+        return JSONResponse({"detail": "That table is no longer in this case"}, status_code=404)
+    raise exc
+
+
+# An id, count or rid past SQLite's 64-bit INTEGER can't be bound as a
+# parameter, and sqlite3 raises OverflowError for it — from any of the
+# forty-odd routes that take an int straight from the path, query or body
+# and hand it to a query. That is a request this server can't answer, not
+# a defect in it, so it is the client's 400 rather than a 500 that blames
+# the server; one handler instead of a bound on every int parameter, and
+# keyed on sqlite3's own message so an OverflowError from anywhere else
+# (date arithmetic, say) still surfaces as the bug it would be — raised on
+# to the catch-all, as the KeyError handler above does and for its reason.
+@app.exception_handler(OverflowError)
+async def int_out_of_range_handler(request: Request, exc: OverflowError):
+    if "too large to convert to SQLite" in str(exc):
+        return JSONResponse({"detail": "A number in this request is out of range."},
+                            status_code=400)
+    raise exc
+
+
 @app.exception_handler(OpCancelled)
 async def op_cancelled_handler(request: Request, exc: OpCancelled):
     # 499 ("client closed request"): not an error and not the analyst's
     # fault — the frontend treats it as "keep what you had". Deliberately
     # not 4xx-per-endpoint: any cancellable operation can raise this.
     return JSONResponse({"detail": "Cancelled"}, status_code=499)
+
+
+# ------------------------------------------------------------------ case guard
+#
+# A server has one case open, and any number of windows can be pointed at
+# it. When one of them opens another case, the others are still showing the
+# old one, and nothing on the wire said which case a request was about: a
+# source id, a rid and a tag id are small numbers that every case reuses. So
+# a window left on case A, after another window opened B on the same server,
+# read B's rows under A's tabs and wrote its tags onto B's rows, on whatever
+# line had the same rid. Reported as tags from one case "showing up in the
+# other", applied to the wrong lines.
+#
+# Every request from a page carries the case its state belongs to
+# (CASE_HEADER, from core.js's api(); `case_token` in the query for the
+# downloads that are plain navigations), and a request naming any other
+# case is refused, touching nothing, with a 409 the page turns into "this
+# window is out of date". A request that names no case is let through: a
+# script, the launcher, an older page.
+#
+# The token names the case FILE (realpath + normcase, the same canonical
+# form as _same_case_path), not the Store: a window that outlives a restart
+# of its server on the same case carries on as it always has; one that
+# finds another case there is stopped.
+CASE_HEADER = "X-Winnow-Case"
+
+# What a window may still ask while its case isn't the one open here: the
+# switch itself, the home screen's list, and the plumbing that has no case.
+_CASE_FREE_PATHS = ("/api/case/open", "/api/case/current", "/api/case/quicklook/new",
+                    "/api/cases", "/api/presence", "/api/goodbye", "/api/version",
+                    "/api/shutdown", "/api/log")
+
+
+@functools.lru_cache(maxsize=64)
+def _case_token_for(path: str) -> str:
+    canon = os.path.normcase(os.path.realpath(path))
+    return hashlib.sha256(canon.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+
+
+def _case_token() -> str | None:
+    """The open case's token, or None when no case is open."""
+    s = STORE
+    if s is None or s.closed:
+        return None
+    return _case_token_for(s.path)
+
+
+def _open_case_brief() -> dict | None:
+    """The open case as a page is told about it: what to call it, and its
+    token. None when no case is open."""
+    token = _case_token()
+    if token is None:
+        return None
+    s = STORE
+    return {"token": token, "name": "Quick look" if _is_temp_case(s.path) else _case_display_name(s.path)}
+
+
+def _case_is_free(path: str) -> bool:
+    return any(path == p or path.startswith(p + "/") for p in _CASE_FREE_PATHS)
+
+
+# Added before the Host and client-header checks, so it runs after both
+# (the last middleware added is the outermost): a page that may not talk
+# to this server at all is refused before this says what case is open.
+@app.middleware("http")
+async def require_same_case(request: Request, call_next):
+    claimed = request.headers.get(CASE_HEADER)
+    navigation = False
+    if not claimed:
+        claimed = request.query_params.get("case_token")
+        navigation = bool(claimed)
+    path = request.url.path
+    if claimed and path.startswith("/api/") and not _case_is_free(path) and claimed != _case_token():
+        now = await run_in_threadpool(_open_case_brief)   # reads the case registry
+        theirs = f"“{now['name']}”" if now else "no case"
+        message = (f"This window is out of date: Winnow now has {theirs} open, opened from another "
+                   "window. Nothing was changed. Reload this window to carry on.")
+        if navigation:
+            # A download is a plain navigation, so this page replaces the
+            # app; it has to say what happened and how to get back.
+            return HTMLResponse(
+                "<!doctype html><meta charset='utf-8'><title>Winnow</title>"
+                f"<p style='font:14px system-ui;margin:2em'>{html.escape(message)} "
+                "<a href='/'>Back to Winnow</a></p>", status_code=409)
+        return JSONResponse({"detail": {"error": "case_changed", "message": message, "open": now}},
+                            status_code=409)
+    return await call_next(request)
 
 
 @app.middleware("http")
@@ -439,24 +717,6 @@ async def require_client_header(request: Request, call_next):
 
 @app.middleware("http")
 async def no_cache_static(request: Request, call_next):
-    # Piggybacked in-flight counting for idle shutdown — this middleware
-    # already wraps every request, so the marginal cost is two increments.
-    # /api/presence is excluded: its response streams for the LIFETIME of a
-    # page, so counting it would read as "busy" forever; it has its own
-    # stream counter. A download that outlives its tab (a multi-minute CSV
-    # export) counts here until the body finishes, which is the hold that
-    # keeps auto-exit from killing it.
-    counted = request.url.path != "/api/presence"
-    if counted:
-        PRESENCE.inflight += 1
-    try:
-        return await _no_cache_static_inner(request, call_next)
-    finally:
-        if counted:
-            PRESENCE.inflight -= 1
-
-
-async def _no_cache_static_inner(request: Request, call_next):
     """StaticFiles sends Last-Modified/ETag but no Cache-Control, which
     leaves the browser free to serve a stale index.html/app.js/style.css
     from its own disk cache for an unbounded time — even across a normal
@@ -478,9 +738,45 @@ async def _no_cache_static_inner(request: Request, call_next):
     return response
 
 
+class _InflightCounter:
+    """In-flight request counting for idle shutdown, as plain ASGI.
+
+    It used to ride the no-cache middleware above, which is a
+    BaseHTTPMiddleware — and there `call_next` returns as soon as the
+    response HEADERS exist; the body streams after the middleware has
+    already returned. So a multi-minute CSV export, the very download this
+    hold exists to protect, stopped counting the moment it started, and
+    idle shutdown could begin under it. A raw ASGI wrapper's `await` only
+    returns once the app has sent its last body chunk, which is the
+    meaning the count needs.
+
+    /api/presence is excluded: its response streams for the LIFETIME of a
+    page, so counting it would read as "busy" forever; it has its own
+    stream counter. Added after every @app.middleware above, which makes
+    it the outermost layer — it sees the whole response, whatever the
+    others do to it."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or scope.get("path") == "/api/presence":
+            return await self.app(scope, receive, send)
+        PRESENCE.inflight += 1
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            PRESENCE.inflight -= 1
+
+
+app.add_middleware(_InflightCounter)
+
+
 def store() -> Store:
+    # 400, not 500: nothing is broken — the request needs a case and there
+    # isn't one open yet (the home screen, or a stale tab after a close).
     if STORE is None:
-        raise HTTPException(500, "No case file open")
+        raise HTTPException(400, "No case file open")
     return STORE
 
 
@@ -489,6 +785,12 @@ def _default_tags_tuples() -> list[tuple]:
 
 
 def _open_store(path: str) -> Store:
+    # Every Store this server opens comes through here, so this is the
+    # backstop for any door that forgets: an EXISTING file must already
+    # be a case (is_winnow_case_file says why). A path that does not
+    # exist yet is a new case, which is the only thing Store may create.
+    if os.path.exists(path) and not is_winnow_case_file(path):
+        raise ValueError(f"{path} is not a Winnow case file — opening it would write into it")
     return Store(path, default_tags=_default_tags_tuples())
 
 
@@ -504,6 +806,7 @@ class ViewSpec(BaseModel):
     filter_tree: dict | None = None  # guided filter-builder tree; group/cond/raw nodes
     tags: list = []
     time_range: dict | None = None  # {enabled, column, start, end} — see _compile_where; survives filter/preset changes
+    hide_empty_rows: bool = False   # the table menu's toggle — rows with every column NULL/'' are dropped; see _compile_where
     op_token: str | None = None  # client-generated cancel handle — see Store.cancel_op
 
 
@@ -533,15 +836,23 @@ class LayoutWrite(BaseModel):
     payload: dict
 
 
-class SavedViewWrite(BaseModel):
-    source_id: int
-    name: str
-    payload: dict
-
-
 class SqlQuery(BaseModel):
+    """Rows inline, capped — winnow.api.sql and dashboards. The SQL pane
+    has no cap and goes through /api/sql/run instead, which holds its
+    rows server-side; this default is what keeps an uncapped answer from
+    ever being one JSON response here by omission."""
     sql: str
     limit: int = 5000
+    # The run's one-shot id (jobs.js opToken), so the busy chip's Cancel
+    # reaches it through /api/cancel_op. Optional: a run without one is
+    # still stopped by its client leaving, or by shutdown.
+    op_token: str | None = None
+
+
+class SqlRun(BaseModel):
+    sql: str
+    op_token: str | None = None   # the pane's Stop and the busy chip's Cancel, through /api/cancel_op
+    release: list[str] = []       # the result(s) this run replaces — see Store.run_sql_result
 
 
 class IngestPath(BaseModel):
@@ -598,6 +909,10 @@ class CaseCreate(BaseModel):
     name: str
     group: str = ""
     notes: str = ""
+    # Register a case file that is already there, and nothing else — the
+    # home screen's "Open existing case file…". Without it a missing path
+    # is a new case, created (+ New case).
+    must_exist: bool = False
 
 
 class CaseUpdate(BaseModel):
@@ -620,9 +935,11 @@ def _case_display_name(path: str) -> str:
 @app.get("/api/case/current")
 def api_case_current():
     if STORE is None:
-        return {"open": False}
+        return {"open": False, "case_token": None}
+    # case_token is what the page sends back on every request from here on
+    # (see the case guard): the case its state belongs to.
     return {"open": True, "path": STORE.path, "name": _case_display_name(STORE.path),
-            "temp": _is_temp_case(STORE.path)}
+            "temp": _is_temp_case(STORE.path), "case_token": _case_token()}
 
 
 # ------------------------------------------------------------ quick-look cases
@@ -637,9 +954,16 @@ def api_case_current():
 # quicklook/ and registers), push its tables into an existing case
 # (copy_sources_to), or discard it.
 
+def _default_cases_dir() -> str:
+    """Where case files go until the analyst picks a folder: cases/ in the
+    install root, beside server.py — wherever the server was started
+    from. The first-run prompt shows and stores this exact path."""
+    return str(paths.INSTALL_ROOT / "cases")
+
+
 def _cases_dir() -> str:
     configured = os.environ.get("WINNOW_CASES_DIR") or WS.machine_prefs.get("cases_dir")
-    base = configured or str(paths.INSTALL_ROOT / "cases")
+    base = configured or _default_cases_dir()
     return os.path.abspath(os.path.expanduser(base))
 
 
@@ -650,10 +974,34 @@ def _is_temp_case(path: str) -> bool:
     return os.path.basename(os.path.dirname(os.path.abspath(path))) == QUICKLOOK_DIRNAME
 
 
+def _same_case_path(a: str, b: str) -> bool:
+    """Whether two spellings name the same case file. realpath + normcase,
+    the same canonical form case_lock_path uses: a case reached through a
+    symlink (or, on Windows, in other letter case) is the case it points
+    at, and comparing abspaths called it a different one."""
+    return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
+
+
+def _remove_case_file(path: str) -> None:
+    """Delete a case file and what lives beside it: SQLite's -wal/-shm
+    (left behind whenever the last connection to it didn't close cleanly)
+    and a stale .winnow-lock marker. Deleting only the .db-winnow left
+    those three in the cases folder for good, the lock marker under a name
+    no case would ever own again."""
+    for p in (path, path + "-wal", path + "-shm", case_lock_path(path)):
+        with contextlib.suppress(OSError):
+            os.remove(p)
+
+
 def _new_temp_case_path() -> str:
     d = os.path.join(_cases_dir(), QUICKLOOK_DIRNAME)
     os.makedirs(d, exist_ok=True)
+    # The pid as well as the time: "doesn't exist yet" is checked here and
+    # the file only made when the case opens, so two Winnows started by
+    # double-clicks in the same second picked the same name and opened ONE
+    # quick look between them, each importing its file into the other's.
     stamp = __import__("datetime").datetime.now().strftime("%Y%m%d-%H%M%S")
+    stamp = f"{stamp}-{os.getpid()}"
     path = os.path.join(d, f"quicklook-{stamp}{CASE_SUFFIX}")
     n = 1
     while os.path.exists(path):
@@ -662,38 +1010,26 @@ def _new_temp_case_path() -> str:
     return path
 
 
-def is_winnow_case_file(path: str) -> bool:
-    """Distinguish a Winnow case from a generic SQLite file — double-
-    clicking a case should OPEN it, not ingest it as data. Read-only,
-    tolerant of anything unreadable."""
-    try:
-        with open(path, "rb") as f:
-            if f.read(16) != b"SQLite format 3\x00":
-                return False
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-        try:
-            names = {r[0] for r in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'")}
-        finally:
-            conn.close()
-        return {"sources", "tag_defs", "row_tags"} <= names
-    except Exception:  # noqa: BLE001 — unreadable means "not a case"
-        return False
-
-
 # Every table whose contents can only exist because someone did something.
 # The sweep keeps a quick-look case forever if ANY of them has a row.
 #
 # Deliberately not here: `open_tabs` and `tag_defs`, which a fresh case is
 # born with (1 and 3 rows), `sources`, which every quick-look has by
-# definition, and `layouts`/`case_settings`, which are incidental UI state
-# rather than findings. Everything else in the case file got there because
-# an analyst — or a plugin acting for them — put it there.
+# definition, `subset_rids`, which only ever accompanies a `sources` row (a
+# subset table with nothing tagged or noted on it is a derived copy of rows
+# the case already had, not work — see docs/notes/server.md), and
+# `layouts`/`case_settings`/`plugin_ui_state`, which are incidental UI state
+# rather than findings (a plugin tab's saved sheet definitions are the shape
+# of a question, and the rows they would produce are still in the case
+# whether or not the sweep keeps it).
+# Everything else in the case file got there because an analyst
+# — or a plugin acting for them — put it there.
 _WORK_TABLES = (
     "row_tags", "row_notes", "sessions",        # the original three
     "case_notes", "case_variables",
     "dashboards", "dashboard",                  # `dashboard` is the pre-rename single-row table
-    "derived_columns", "filter_presets", "merges", "saved_views",
+    "derived_columns", "filter_presets", "merges",
+    "saved_views",                              # gone from new case files; an old one may still have rows
     "source_folders", "watchlist", "sql_tabs",
 )
 
@@ -731,7 +1067,13 @@ def _sweep_quicklook(max_age_days: int = 7) -> int:
         try:
             if os.path.getmtime(path) > cutoff or probe_case_lock(path):
                 continue
-            conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+            # Only ever a CASE file. _case_holds_work reads "none of the
+            # work tables" as empty, which is also what a browser History
+            # database or any other SQLite file dropped here looks like —
+            # and the janitor has no business deleting those at all.
+            if not is_winnow_case_file(path):
+                continue
+            conn = sqlite3.connect(paths.sqlite_peek_uri(path), uri=True)
             try:
                 busy = _case_holds_work(conn)
             finally:
@@ -744,9 +1086,15 @@ def _sweep_quicklook(max_age_days: int = 7) -> int:
             with contextlib.suppress(OSError):
                 os.remove(path + ".winnow-lock")
             removed += 1
-        except OSError:
+        except (OSError, sqlite3.Error):
+            # One file the sweep can't read is not proven empty, so it is
+            # kept — and it is that file's problem, not the end of the
+            # sweep (a corrupt one used to stop it for every file after).
             continue
     return removed
+
+
+_SHUTDOWN_ONCE = threading.Lock()
 
 
 def _trigger_shutdown() -> None:
@@ -757,57 +1105,193 @@ def _trigger_shutdown() -> None:
     works on Windows (where SIGINT can't be delivered via kill); uvicorn
     treats it exactly like Ctrl+C — graceful shutdown, so _lifespan's
     Store.close() still runs and the views scratch files are deleted. The
-    short delay is what lets the HTTP response reach the browser first."""
+    short delay is what lets the HTTP response reach the browser first.
+
+    Once only: uvicorn reads a SECOND SIGINT as the impatient Ctrl+C and
+    force-quits, skipping the lifespan — Store.close() never runs, the
+    case lock and views file are left behind. Two windows pressing Shut
+    down together, or the idle monitor firing during one, must not be
+    that."""
     import signal
-    import threading
+    if not _SHUTDOWN_ONCE.acquire(blocking=False):
+        return
     threading.Timer(0.3, lambda: signal.raise_signal(signal.SIGINT)).start()
+
+
+class UpdateCheck(BaseModel):
+    """`dev` asks for the tip of the develop branch rather than the latest
+    release — `update.py --dev --check`, reached from Settings → Updates
+    only by an Alt+right-click nothing on screen mentions (buildUpdatesPanel
+    in settings.js says why). No body is the release check."""
+    dev: bool = False
 
 
 class UpdateApply(BaseModel):
     """Applying is a separate, explicit POST from checking — a check must
-    never be able to install anything as a side effect."""
+    never be able to install anything as a side effect. `dev` syncs to
+    the develop tip instead, as UpdateCheck's does."""
     confirm: bool = False
+    dev: bool = False
 
 
-def _presence_open() -> None:
+def _presence_open(page: str = "") -> None:
     """A window is here. Clearing said_goodbye matters when several are
     open: one closing must not put the survivors on the closed-window
     fuse."""
     PRESENCE.streams += 1
     PRESENCE.ever_connected = True
     PRESENCE.said_goodbye = False
+    if page:
+        PRESENCE.pages[page] = PRESENCE.pages.get(page, 0) + 1
 
 
-def _presence_close() -> None:
+def _presence_close(page: str = "") -> None:
+    """A stream ended. Whether that reads as a closed window (the short
+    fuse) or a suspended one (the long one) is decided HERE, at the moment
+    the count reaches zero, by whether the page that just went is one that
+    said goodbye.
+
+    It used to be one flag that only a NEW stream cleared, so with two
+    windows open, closing one left its goodbye standing; when the survivor
+    later went quiet — a suspended tab, a sleeping laptop — the server took
+    the two-minute fuse and exited under a window that was still there.
+    Clearing the flag whenever a stream ends with others still open fixes
+    the order in which the goodbye arrives first, but not the other one,
+    and the other one is likelier: this close runs on the event loop the
+    moment the socket drops, while the goodbye is a separate request. A
+    goodbye landing after its own stream has gone looks exactly like one
+    from the survivor — unless both name their page, which is what the
+    page id connection.js sends on each is for."""
     PRESENCE.streams -= 1
+    if page:
+        left = PRESENCE.pages.get(page, 0) - 1
+        if left > 0:
+            PRESENCE.pages[page] = left
+        else:
+            PRESENCE.pages.pop(page, None)
     if PRESENCE.streams == 0:
         PRESENCE.last_zero = time.monotonic()
+        if page:
+            PRESENCE.said_goodbye = page in PRESENCE.farewells
+            PRESENCE.last_gone = page
+    else:
+        # A window remains, so no goodbye heard so far was the last one's.
+        PRESENCE.said_goodbye = False
+    if page and page not in PRESENCE.pages:
+        PRESENCE.farewells.discard(page)
+
+
+def _presence_page(page: str) -> str:
+    # A label the client makes up per page load; only ever compared, so a
+    # long one is cut rather than refused.
+    return (page or "")[:64]
 
 
 @app.get("/api/presence")
-async def api_presence():
+async def api_presence(page: str = ""):
     """The connection every page holds open so the server knows a browser
     is attached. EventSource on the client, a comment-ping stream here —
     no data ever flows, the CONNECTION is the message. Disconnect is
-    noticed at the next ping (≤15s), which is well inside the idle grace."""
+    noticed at the next ping (≤15s), which is well inside the idle grace.
+    `page` names the page load, so its goodbye can be matched to it.
+
+    One thing does flow: a `case` event naming the case open here, when the
+    stream opens and whenever it changes. That is how a window learns that
+    another window switched this server to a different case, before it
+    asks for anything (the case guard refuses it then, too); and how one
+    that reconnects to a server restarted on another case finds out."""
+    page = _presence_page(page)
+
     async def stream():
-        _presence_open()
+        _presence_open(page)
+        wake = asyncio.Event()
+        PRESENCE.wakers.add(wake)
+        PRESENCE.loop = asyncio.get_running_loop()
+        said = object()   # nothing said about the case yet
         try:
-            while True:
-                yield ": ping\n\n"
-                await asyncio.sleep(15)
+            while not PRESENCE.closing:
+                wake.clear()
+                if _case_token() != said:
+                    now = await run_in_threadpool(_open_case_brief)   # reads the case registry
+                    said = now["token"] if now else None
+                    yield f"event: case\ndata: {json.dumps(now)}\n\n"
+                else:
+                    yield ": ping\n\n"
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(wake.wait(), 15)
+            # Said, not just dropped: a page that only sees its stream end
+            # tells the analyst the connection was lost. Non-empty data, or
+            # EventSource never dispatches the event.
+            yield "event: shutdown\ndata: shutdown\n\n"
         finally:
-            _presence_close()
+            PRESENCE.wakers.discard(wake)
+            _presence_close(page)
     return StreamingResponse(stream(), media_type="text/event-stream")
 
 
+def _announce_case() -> None:
+    """Wake every presence stream to say which case is open now. Called by
+    each route that swaps STORE, from a worker thread, so the waking is
+    handed to the loop the streams wait on."""
+    loop = PRESENCE.loop
+    if loop is not None:
+        with contextlib.suppress(RuntimeError):   # that loop has closed
+            loop.call_soon_threadsafe(_wake_presence_streams)
+
+
+def _wake_presence_streams() -> None:
+    for wake in PRESENCE.wakers:
+        wake.set()
+
+
+def _end_presence_streams() -> None:
+    """End every presence stream, because the server is going down.
+
+    uvicorn's graceful shutdown waits for every open connection to finish
+    its response BEFORE it runs the lifespan's shutdown half, and a
+    presence stream's response never finishes — that is its whole job. So
+    Shut down answered {"ok": true}, the page said "Winnow is off", and the
+    process ran on, case lock held, until the analyst closed the last
+    window: the very window that pressed the button holds a stream. Ctrl+C
+    and SIGTERM waited the same way. Runs on the event loop, from
+    _Server.shutdown in main(), before uvicorn starts waiting."""
+    PRESENCE.closing = True
+    for wake in list(PRESENCE.wakers):
+        wake.set()
+
+
+@app.get("/api/presence/others")
+async def api_presence_others(page: str = ""):
+    """How many OTHER windows are using this server — what Shut down
+    names before it asks, since stopping the server stops those too.
+    `page` is the asking window's id (connection.js); a stream that came
+    with no id (an older client) counts as a window of its own. `async`
+    for the same reason as the goodbye: presence is read on the loop."""
+    page = _presence_page(page)
+    unnamed = max(PRESENCE.streams - sum(PRESENCE.pages.values()), 0)
+    return {"others": sum(1 for p in PRESENCE.pages if p != page) + unnamed}
+
+
 @app.post("/api/goodbye")
-def api_goodbye():
+async def api_goodbye(page: str = ""):
     """A page reporting that it is closing (connection.js sends this on
     pagehide with keepalive, so it survives the unload). Without it the
     server cannot tell a closed window from a suspended one and has to
-    assume the analyst may come back — see SUSPENDED_EXIT_S."""
-    PRESENCE.said_goodbye = True
+    assume the analyst may come back — see SUSPENDED_EXIT_S.
+
+    `async` so it runs on the event loop with the stream hooks above: the
+    presence record is only ever touched from one thread. A goodbye whose
+    page is still streaming is remembered until that stream closes (which
+    decides); one whose page already went counts only if that page was the
+    last to go. One naming no page — a client that predates the page id —
+    is taken as the last window's, which is what this always assumed."""
+    page = _presence_page(page)
+    if not page:
+        PRESENCE.said_goodbye = True
+    elif page in PRESENCE.pages:
+        PRESENCE.farewells.add(page)
+    elif PRESENCE.streams == 0 and PRESENCE.last_gone == page:
+        PRESENCE.said_goodbye = True
     return {"ok": True}
 
 
@@ -924,18 +1408,25 @@ def api_version():
     tester who reported only "0.1.0" would be describing a build nobody
     can reproduce."""
     src = updater.installed_source()
+    # `pid` says WHICH Winnow answered: main() opens its window only once
+    # the server on its port is itself (browser.open_when_ready).
     return {"version": version.VERSION, "source": src,
-            "is_release": src == "release"}
+            "is_release": src == "release", "pid": os.getpid()}
 
 
 @app.post("/api/updates/check")
-def api_updates_check():
+def api_updates_check(body: UpdateCheck | None = None):
     """Ask GitHub whether there's a newer release. ONLY ever runs because
     the analyst clicked Check — Winnow has no background poll and nothing
     at startup. The box may be airgapped, and a forensic tool that phones
     home unasked is its own problem; the error path says how to update
-    offline instead."""
+    offline instead.
+
+    With `dev`, the develop tip instead (updater.check_branch): a branch
+    has no version to compare, so that answer has no `available`."""
     try:
+        if body and body.dev:
+            return updater.check_branch(updater.DEV_BRANCH)
         return updater.check_for_update(current=version.VERSION)
     except updater.UpdateError as e:
         raise HTTPException(400, str(e))
@@ -951,6 +1442,15 @@ def api_updates_apply(body: UpdateApply):
     if not body.confirm:
         raise HTTPException(400, "Refusing to update without confirm=true")
     try:
+        if body.dev:
+            # `update.py --dev -y`: whatever develop's tip is now, recorded
+            # in the manifest as develop@<sha> so /api/version can say
+            # which build this is — version.py on develop doesn't.
+            tip = updater.check_branch(updater.DEV_BRANCH)
+            archive = updater.download(
+                tip["url"], Path(tempfile.gettempdir()) / f"winnow-{tip['branch']}-{tip['short']}.zip")
+            res = updater.apply_update(archive, updater.HERE, source=f"{tip['branch']}@{tip['sha']}")
+            return {**res, "branch": tip["branch"], "short": tip["short"], "restart_required": True}
         info = updater.check_for_update(current=version.VERSION)
         if not info["available"]:
             raise HTTPException(400, f"Already on the latest release ({info['latest']})")
@@ -975,13 +1475,22 @@ def api_shutdown():
     server usually lives in a forgotten terminal (or was started by a
     shortcut with no terminal at all) — "close the browser tab" leaving the
     process running forever is how a case file stays locked all weekend.
-    Nothing to save: every write already went to the case file."""
+    Nothing to save: every write already went to the case file. A SQL
+    pane query in flight is stopped by the signal this sends (see
+    _stop_pane_queries) — uvicorn would otherwise wait on it for ever —
+    and so is every open window's presence stream (_end_presence_streams),
+    which otherwise kept the server up until the last window closed."""
     _trigger_shutdown()
     return {"ok": True}
 
 
 @app.post("/api/case/open")
 def api_case_open(body: CaseOpen):
+    with _CASE_SWITCH:
+        return _case_open(body)
+
+
+def _case_open(body: CaseOpen):
     global STORE
     if not os.path.isfile(body.path):
         raise HTTPException(400, f"No case file at {body.path}")
@@ -1003,12 +1512,20 @@ def api_case_open(body: CaseOpen):
     # `not STORE.closed` matters: STORE outlives close() on both the case-
     # switch path and the legacy-preset migration, and reopening a case
     # whose Store has already been closed is a real reopen, not a no-op.
-    if STORE is not None and not STORE.closed and os.path.abspath(STORE.path) == os.path.abspath(body.path):
+    if STORE is not None and not STORE.closed and _same_case_path(STORE.path, body.path):
         rec = WS.cases.find_by_path(body.path) or WS.cases.create(
             body.path, name=os.path.splitext(os.path.basename(body.path))[0]
         )
         WS.cases.touch_opened(rec["id"])
-        return {"sources": STORE.list_sources(), "name": rec["name"], "temp": _is_temp_case(STORE.path)}
+        # The store swap is what this skips, not the plugin reload: the
+        # client tears its plugin tabs down on this request and refetches
+        # the list on the understanding that the server reloaded for the
+        # case it just opened (openCase in home.js). Skipping it here left
+        # a registry that disagreed with the case disagreeing however often
+        # the analyst re-opened it.
+        _reload_plugins()
+        return {"sources": STORE.list_sources(), "name": rec["name"], "temp": _is_temp_case(STORE.path),
+                "case_token": _case_token()}
     if not body.force:
         holder = probe_case_lock(body.path)
         if holder:
@@ -1056,7 +1573,9 @@ def api_case_open(body: CaseOpen):
     # exists the moment the case does, and an "off in this case" plugin's
     # code is unloaded rather than merely unlisted.
     _reload_plugins()
-    return {"sources": STORE.list_sources(), "name": rec["name"], "temp": _is_temp_case(STORE.path)}
+    _announce_case()
+    return {"sources": STORE.list_sources(), "name": rec["name"], "temp": _is_temp_case(STORE.path),
+            "case_token": _case_token()}
 
 
 class CopySourcesBody(BaseModel):
@@ -1070,17 +1589,22 @@ def api_case_copy_sources(body: CopySourcesBody):
     these quick-look tables into my real case" flow. A target open in
     another Winnow is refused with the holder named (409, same contract as
     opening a locked case)."""
-    if _jobs_running():
-        # A source mid-ingest has an accurate-but-growing row_count; the
-        # ATTACH copy would snapshot whatever happened to be committed
-        # and file it in the target as a complete table.
-        raise HTTPException(409, "Still importing — copy again when the import finishes")
+    busy = _busy_reason()
+    if busy:
+        # A source mid-ingest (or mid-copy) has an accurate-but-growing
+        # row_count; the ATTACH copy would snapshot whatever happened to
+        # be committed and file it in the target as a complete table. A
+        # scan's hits and auto-tags land in the same rows. The message
+        # names whichever it is — see _busy_reason.
+        raise HTTPException(409, f"{busy} — copy again when it finishes")
     try:
         return store().copy_sources_to(body.target_path, body.source_ids)
     except KeyError as e:
         raise HTTPException(404, str(e))
     except ValueError as e:
-        code = 409 if "another Winnow" in str(e) else 400
+        # Both refusals that clear up on their own (the other Winnow closes
+        # it, the running copy lands) are 409s; the rest are the request.
+        code = 409 if ("another Winnow" in str(e) or "Already copying" in str(e)) else 400
         raise HTTPException(code, str(e))
 
 
@@ -1104,6 +1628,11 @@ class AssocOpenBody(BaseModel):
 
 @app.post("/api/assoc/open")
 def api_assoc_open(request: Request, body: AssocOpenBody):
+    with _CASE_SWITCH:
+        return _assoc_open(request, body)
+
+
+def _assoc_open(request: Request, body: AssocOpenBody):
     """A file-association launch landing on an already-running server.
 
     Loopback-only: it creates cases and ingests files by path, both
@@ -1130,6 +1659,7 @@ def api_assoc_open(request: Request, body: AssocOpenBody):
         with contextlib.suppress(Exception):
             instances.set_case(temp)
         _reload_plugins()
+        _announce_case()
 
     started, skipped = [], []
     for f in files:
@@ -1159,7 +1689,12 @@ def _assoc_ingest(path: str) -> dict:
     # is also what makes plugin file ASSOCIATIONS real: registering a
     # plugin's extension (Settings → File associations) hands the file to
     # this path, which must then actually use the plugin's parser.
-    fmt = PLUGINS.format_for_filename(os.path.basename(path))
+    # An IIS log is the exception: recognised by its name, it is a built-in
+    # reader's even when a plugin claims .log (esxi_logs does) — the import
+    # queue's own rule (pluginFormatFor). So is a key=value log, recognised
+    # by its first line (the queue asks /api/ingest/recognise first too).
+    kind = _ingest_kind_for_path(path)
+    fmt = None if kind in ("iis", "kv") else PLUGINS.format_for_filename(os.path.basename(path))
     if fmt is not None:
         # Synchronous, like every plugin ingest (no background job): the
         # source exists by the time this returns, so there is no job_id
@@ -1167,12 +1702,13 @@ def _assoc_ingest(path: str) -> dict:
         rec = _ingest_via_plugin(path, fmt.id, None, {}, True)
         return {"file": os.path.basename(path), "kind": f"plugin:{fmt.id}",
                 "source_id": rec["id"], "rows": rec.get("row_count", 0)}
-    kind = _ingest_kind_for_path(path)
     opts = {"build_fts": True}
     if kind == "sqlite":
-        tables = store().preview_sqlite_tables(path)["tables"]
+        # A table this SQLite can't read (preview marks it `error`) is not
+        # one to queue — the rest of the file still imports.
+        tables = [t for t in store().preview_sqlite_tables(path)["tables"] if not t.get("error")]
         if not tables:
-            raise ValueError("no tables in this SQLite file")
+            raise ValueError("no readable tables in this SQLite file")
         opts["tables"] = [{"table": t["name"],
                            "timestamp_columns": t["likely_timestamp_columns"]} for t in tables]
     elif kind == "xlsx":
@@ -1210,9 +1746,10 @@ def _mark_prompted(exts: list[str]) -> None:
     WS.machine_prefs.set(_ASSOC_PROMPTED_KEY, sorted(done))
 # Start the association-launched server with the console-less interpreter
 # (pythonw.exe) so double-clicking a file doesn't also open a terminal
-# window. Off by default: the hidden flavour hides the server log too,
-# which matters the day an association won't open. Windows-only in effect;
-# Linux .desktop entries already run with Terminal=false.
+# window. On by default (see _assoc_background); the hidden flavour hides
+# the server log too, which matters the day an association won't open,
+# so the Appearance toggle turns it off. Windows-only in effect; Linux
+# .desktop entries already run with Terminal=false.
 _ASSOC_BACKGROUND_KEY = "assoc_background"
 
 
@@ -1368,10 +1905,40 @@ def api_assoc_asked(request: Request, body: AssocExtsBody):
 
 class CaseSaveAsBody(BaseModel):
     name: str
+    # What + New case asks for, so saving a quick look is the same dialog.
+    # No path keeps the old shape: the name, slugged, in the cases folder.
+    path: str | None = None
+    group: str = ""
+    notes: str = ""
 
 
 @app.post("/api/case/save_as")
-def api_case_save_as(body: CaseSaveAsBody):
+def api_case_save_as(request: Request, body: CaseSaveAsBody):
+    with _CASE_SWITCH:
+        return _case_save_as(request, body)
+
+
+def _move_case_file(src: str, dest: str) -> None:
+    """Rename, or copy-then-delete when `dest` is on another drive or mount
+    (a case saved to D:\\Cases from a Winnow on C:), which a rename can't
+    cross. A copy that fails leaves no half-written file at `dest`."""
+    try:
+        os.replace(src, dest)
+        return
+    except OSError as e:
+        if e.errno != errno.EXDEV:
+            raise
+    try:
+        shutil.copy2(src, dest)
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.remove(dest)
+        raise
+    with contextlib.suppress(OSError):
+        os.remove(src)
+
+
+def _case_save_as(request: Request, body: CaseSaveAsBody):
     """Promote the open quick-look case to a real one: move the file out of
     quicklook/, register it on the home screen under the given name.
 
@@ -1385,59 +1952,113 @@ def api_case_save_as(body: CaseSaveAsBody):
     if not _is_temp_case(STORE.path):
         raise HTTPException(400, "Only a quick-look case can be saved this way — "
                                  "this one already has a home")
-    if _jobs_running():
-        # Closing the store cancels running ingest jobs, and a cancelled
-        # ingest DROPS its partial source (the cancel contract) — so
-        # "save while the file is still importing" would quietly produce
-        # an empty saved case. Natural timing, too: double-click a big
-        # file, banner appears, analyst clicks Save immediately.
-        raise HTTPException(409, "Still importing — save again when the import finishes")
+    busy = _busy_reason()
+    if busy:
+        # This route closes the store, and closing cancels every kind of
+        # background work: a cancelled ingest DROPS its partial source
+        # (the cancel contract) and so does a cancelled copy, so "save
+        # while the file is still importing" would quietly produce an
+        # empty saved case. Natural timing, too: double-click a big file,
+        # banner appears, analyst clicks Save immediately. The message
+        # names what is actually running — see _busy_reason.
+        raise HTTPException(409, f"{busy} — save again when it finishes")
     name = (body.name or "").strip()
     if not name:
         raise HTTPException(400, "Give the case a name")
-    slug = re.sub(r"[^A-Za-z0-9._ -]+", "_", name).strip() or "case"
-    dest = os.path.join(_cases_dir(), f"{slug}{CASE_SUFFIX}")
-    if os.path.exists(dest):
-        raise HTTPException(400, f"A case file named {os.path.basename(dest)} already exists")
+    if body.path and body.path.strip():
+        dest = os.path.abspath(os.path.expanduser(body.path.strip()))
+        if _is_temp_case(dest):
+            # Saved into quicklook/, it would still be a quick look: off
+            # the home screen, and the startup sweep's to delete.
+            raise HTTPException(400, "That folder holds quick looks — pick another one for the case")
+        if os.path.exists(dest):
+            raise HTTPException(400, f"Something is already at {dest} — pick another path")
+        parent = os.path.dirname(dest)
+        _refuse_remote_mkdir(request, parent)
+        try:
+            os.makedirs(parent, exist_ok=True)
+        except OSError as e:
+            raise HTTPException(400, f"Could not create the folder: {e}")
+    else:
+        slug = re.sub(r"[^A-Za-z0-9._ -]+", "_", name).strip() or "case"
+        dest = os.path.join(_cases_dir(), f"{slug}{CASE_SUFFIX}")
+        if os.path.exists(dest):
+            raise HTTPException(400, f"A case file named {os.path.basename(dest)} already exists")
 
     old_path = STORE.path
-    STORE.close()
+    still_reading = ("Something is still reading this case (a download or a search) "
+                     "— save again when it finishes")
+    # Only the case file moves, and its -wal is deleted below, so every
+    # write must be in the file itself first. A download or a search-all
+    # still reading an older snapshot can stop that; then nothing moves.
+    if not STORE.close(fold_wal=True):
+        STORE = _open_store(old_path)
+        raise HTTPException(409, still_reading)
     try:
-        os.replace(old_path, dest)
+        _move_case_file(old_path, dest)
     except OSError as e:
-        STORE = _open_store(old_path)   # failed rename leaves everything as it was
+        STORE = _open_store(old_path)   # failed move leaves everything as it was
+        if getattr(e, "winerror", None) == 32:
+            # ERROR_SHARING_VIOLATION. Windows won't rename a file that any
+            # handle still has open, and the reader a streaming download
+            # holds outlives the store's close.
+            raise HTTPException(409, still_reading)
         raise HTTPException(400, f"Could not move the case file: {e}")
     for suffix in ("-wal", "-shm", ".winnow-lock"):
         with contextlib.suppress(OSError):
             os.remove(old_path + suffix)
     STORE = _open_store(dest)
-    rec = WS.cases.create(dest, name=name)
+    group = (body.group or "").strip()
+    rec = WS.cases.create(dest, name=name, group=group, notes=body.notes or "")
+    if (rec.get("name"), rec.get("group") or "") != (name, group):
+        # create() hands back a record already listed under this path (one
+        # whose file was deleted outside Winnow) as it was; the dialog's
+        # name and group are what the analyst just typed.
+        rec = WS.cases.update(rec["id"], name=name, group=group)
     WS.cases.touch_opened(rec["id"])
     with contextlib.suppress(Exception):
         instances.set_case(dest)
-    return {"path": dest, "name": name, "temp": False}
+    _announce_case()
+    # The case moved, so its token did too: this page carries on in it.
+    return {"path": dest, "name": name, "temp": False, "case_token": _case_token()}
 
 
 @app.post("/api/case/discard")
 def api_case_discard():
+    with _CASE_SWITCH:
+        return _case_discard()
+
+
+def _case_discard():
     """Throw a quick-look case away. Refused for real cases — deleting
     those goes through the home screen, where it says what it is doing."""
-    global STORE
     if STORE is None or STORE.closed:
         raise HTTPException(400, "No case is open")
     if not _is_temp_case(STORE.path):
         raise HTTPException(400, "Only a quick-look case can be discarded — "
                                  "delete a real case from the home screen")
     path = STORE.path
+    _close_case()
+    _remove_case_file(path)
+    return {"ok": True, "case_token": None}
+
+
+def _close_case() -> None:
+    """Close the open case and leave none open: what discarding a quick
+    look and deleting the open case's file both do before the file goes.
+    The caller holds _CASE_SWITCH."""
+    global STORE
     old, STORE = STORE, None
     with contextlib.suppress(Exception):
         old.close()
-    for suffix in ("", "-wal", "-shm", ".winnow-lock"):
-        with contextlib.suppress(OSError):
-            os.remove(path + suffix)
     with contextlib.suppress(Exception):
         instances.set_case(None)
-    return {"ok": True}
+    # No case is open now, so the machine defaults decide again: a plugin
+    # switched on only for that case must not stay imported and routed on
+    # the home screen (the case switch in api_case_open, for the same
+    # reason).
+    _reload_plugins()
+    _announce_case()
 
 
 @app.post("/api/case/compact")
@@ -1465,6 +2086,19 @@ def _is_loopback(request: Request) -> bool:
     peer."""
     host = request.client.host if request.client else ""
     return host in ("127.0.0.1", "::1", "testclient")
+
+
+def _refuse_remote_mkdir(request: Request, path: str) -> None:
+    """403 when a peer that isn't this machine would make `path` exist.
+
+    browse_dir/new's rule, applied to the two routes that create folders
+    as a side effect: a new case's parent (POST /api/cases) and the cases
+    folder setting (POST /api/prefs). Refusing only the route NAMED "new
+    folder" left a LAN peer free to makedirs anywhere the server user can
+    through either of the others. A folder that already exists is not a
+    write, so a peer can still file a case into one."""
+    if not os.path.isdir(path) and not _is_loopback(request):
+        raise HTTPException(403, "Creating folders is only allowed from this machine")
 
 
 # ---------------------------------------------------------------- user env
@@ -1556,13 +2190,14 @@ def api_browse_dir_new(request: Request, body: MakeDirBody):
         raise HTTPException(400, f"{name!r} already exists here")
     try:
         os.mkdir(target)
-    except OSError as e:
+    except (OSError, ValueError) as e:   # ValueError: an embedded NUL in the name
         raise HTTPException(400, f"Could not create it: {e}")
     return {"path": target, "name": name}
 
 
 @app.get("/api/browse_dir")
-def api_browse_dir(request: Request, path: str = "", files: bool = False):
+def api_browse_dir(request: Request, path: str = "", files: bool = False,
+                   sort: str = "name", dir: str = "asc"):
     """One directory level — backs the "Browse..." folder picker in the
     new-case modal and, with files=true, the import modal's "Add from this
     machine…" file picker (the fast path: a picked path imports in place
@@ -1623,11 +2258,24 @@ def api_browse_dir(request: Request, path: str = "", files: bool = False):
         if files:
             truncated = len(all_dirs) > BROWSE_LIST_CAP or len(all_files) > BROWSE_LIST_CAP
             dirs = heapq.nsmallest(BROWSE_LIST_CAP, all_dirs, key=str.lower)
-            for e in heapq.nsmallest(BROWSE_LIST_CAP, all_files, key=lambda e: e.name.lower()):
+            # The cap is taken in the order the picker is showing. Sorting
+            # a name-capped 2000 by size or mtime client-side would show
+            # "the newest of the alphabetically-first 2000", which is not
+            # what "Modified ↓" promises on a 5000-file folder.
+            stats = []
+            for e in all_files:
                 try:
-                    file_entries.append({"name": e.name, "size": e.stat().st_size})
+                    st = e.stat()
                 except OSError:
                     continue
+                stats.append((e.name, st.st_size, int(st.st_mtime)))
+            key = {"size": lambda t: (t[1], t[0].lower()), "mtime": lambda t: (t[2], t[0].lower())}.get(
+                sort, lambda t: t[0].lower())
+            pick = heapq.nlargest if dir == "desc" else heapq.nsmallest
+            for name, size, mtime in pick(BROWSE_LIST_CAP, stats, key=key):
+                # mtime so the picker can sort by it — collections are
+                # often "the newest files from the tool run".
+                file_entries.append({"name": name, "size": size, "mtime": mtime})
         else:
             dirs = sorted(all_dirs, key=str.lower)
     except PermissionError:
@@ -1645,6 +2293,15 @@ class PrefsBody(BaseModel):
     cases_dir: str | None = None
 
 
+@app.get("/api/elevation")
+def api_elevation(request: Request):
+    """Whether this window will refuse files dragged in from File Explorer
+    because Winnow is running as administrator (winnow/elevation.py). Only
+    a browser on this machine is affected: one on another computer runs
+    with its own rights, whatever the server's."""
+    return {"drops_blocked": _is_loopback(request) and elevation.this_process()}
+
+
 @app.get("/api/prefs")
 def api_prefs():
     # A quick-look opened on a brand-new install would otherwise get the
@@ -1654,15 +2311,22 @@ def api_prefs():
     # until Save-as-a-case, or until they launch Winnow itself.
     quicklook = STORE is not None and _is_temp_case(STORE.path)
     return {"cases_dir": WS.machine_prefs.get("cases_dir"),
+            "default_cases_dir": _default_cases_dir(),
             # first run of this INSTANCE: nothing configured and no cases yet
             "first_run": (WS.machine_prefs.get("cases_dir") is None
                           and not WS.cases.list() and not quicklook)}
 
 
 @app.post("/api/prefs")
-def api_prefs_set(body: PrefsBody):
+def api_prefs_set(request: Request, body: PrefsBody):
     if body.cases_dir is not None:
-        path = os.path.abspath(os.path.expanduser(body.cases_dir.strip()))
+        # A relative folder is relative to the install, not to the
+        # directory the server happened to be started from: "Use the
+        # default" sent 'cases', and `python /opt/winnow/server.py` run
+        # from a home directory filed every case under ~/cases.
+        path = os.path.abspath(os.path.join(paths.INSTALL_ROOT,
+                                            os.path.expanduser(body.cases_dir.strip())))
+        _refuse_remote_mkdir(request, path)
         try:
             os.makedirs(path, exist_ok=True)
         except OSError as e:
@@ -1674,15 +2338,37 @@ def api_prefs_set(body: PrefsBody):
 @app.get("/api/cases")
 def api_cases_list():
     out = []
+    here = STORE.path if STORE is not None and not STORE.closed else None
     for c in WS.cases.list():
         rec = dict(c)
+        # The case this server has open — still open on the home screen,
+        # which only changes what the window shows. Deleting it closes it
+        # first, and the dialog says so.
+        rec["open"] = here is not None and _same_case_path(here, c["path"])
         if os.path.isfile(c["path"]):
             rec["exists"] = True
+            # A -wal/-shm pair left beside a case nobody has open (a killed
+            # Winnow, or an older build's look at it) is folded in and
+            # removed here, by SQLite itself — see fold_leftover_wal.
+            with contextlib.suppress(Exception):
+                fold_leftover_wal(c["path"])
             try:
-                ro = sqlite3.connect(f"file:{c['path']}?mode=ro", uri=True)
-                row = ro.execute("SELECT count(*), COALESCE(sum(row_count),0) FROM sources").fetchone()
-                ro.close()
-                rec["source_count"], rec["row_count"] = row[0], row[1]
+                # sqlite_peek_uri, not sqlite_ro_uri: this runs for every
+                # case on the home screen, and a plain mode=ro look left a
+                # -wal/-shm pair beside each one that nothing removed.
+                ro = sqlite3.connect(paths.sqlite_peek_uri(c["path"]), uri=True)
+                try:
+                    row = ro.execute("SELECT count(*), COALESCE(sum(row_count),0) FROM sources").fetchone()
+                    rec["source_count"], rec["row_count"] = row[0], row[1]
+                    # The list's Tagged column: rows with any tag, not tag
+                    # assignments (a row tagged twice is one finding), the
+                    # Tables manager's count summed over the case. Walks
+                    # row_tags' primary key in order — ~0.1 s per million
+                    # tagged rows, and most cases tag thousands.
+                    rec["tagged_row_count"] = ro.execute(
+                        "SELECT count(*) FROM (SELECT DISTINCT source_id, rid FROM row_tags)").fetchone()[0]
+                finally:
+                    ro.close()
             except sqlite3.Error as e:
                 rec["error"] = str(e)
         else:
@@ -1692,12 +2378,33 @@ def api_cases_list():
 
 
 @app.post("/api/cases")
-def api_cases_create(body: CaseCreate):
+def api_cases_create(request: Request, body: CaseCreate):
+    # Registering a path puts it in every case picker — the home screen,
+    # "Copy into this case", multi-case — and each of those opens it.
+    # An existing file has to be a case already; same check /api/case/open
+    # makes, for the same reason.
+    if os.path.exists(body.path) and not is_winnow_case_file(body.path):
+        raise HTTPException(
+            400, f"{body.path} is not a Winnow case file — to import it as evidence, "
+                 "open a case and import it there")
     if not os.path.isfile(body.path):
+        if body.must_exist:
+            # Opening a path that names nothing used to create an empty
+            # case there and open that, so a typo or a case on a share
+            # that wasn't mounted looked like a case with no tables.
+            raise HTTPException(400, f"No case file at {body.path} — to start a new case, "
+                                     "use + New case")
         parent = os.path.dirname(os.path.abspath(body.path))
         if parent:
-            os.makedirs(parent, exist_ok=True)
+            # Outside the try below: its refusal is already the 403 it
+            # means, not a "could not create" 400.
+            _refuse_remote_mkdir(request, parent)
         try:
+            # Inside the try with the open: a parent that is a FILE, or one
+            # this account can't create, is the path's problem (a 400 that
+            # says so), not a 500.
+            if parent:
+                os.makedirs(parent, exist_ok=True)
             _open_store(body.path).close()
         except Exception as e:
             raise HTTPException(400, f"Could not create case file: {e}")
@@ -1713,24 +2420,79 @@ def api_cases_update(case_id: int, body: CaseUpdate):
 
 
 @app.delete("/api/cases/{case_id}")
-def api_cases_delete(case_id: int, delete_file: bool = False):
+def api_cases_delete(case_id: int, delete_file: bool = False, path: str | None = None):
+    # _CASE_SWITCH: deleting the open case's file closes it (a swap to no
+    # case), and between the close and the unlink no other window may open
+    # it again.
+    with _CASE_SWITCH:
+        return _cases_delete(case_id, delete_file, path)
+
+
+def _cases_delete(case_id: int, delete_file: bool, path: str | None):
+    """`path` is the file the client means — the one its list showed under
+    this id. An id is only a pointer into the registry as it was when that
+    list was painted; registry ids are never reused now, but a home screen
+    painted before this server started can still hold one that meant
+    something else. Deleting a FILE on the strength of a bare id is the one
+    step here that cannot be taken back, so when the client says which file
+    it means and the id now names another, nothing is touched at all."""
+    rec = WS.cases.get(case_id)
+    if path is not None and rec is not None and not _same_case_path(path, rec["path"]):
+        raise HTTPException(409, "That case list is out of date — it has changed since this window "
+                                 "showed it. Nothing was removed; reload the case list and try again.")
+    closed = False
     if delete_file:
-        rec = WS.cases.get(case_id)
         if rec and os.path.isfile(rec["path"]):
-            if STORE is not None and os.path.abspath(STORE.path) == os.path.abspath(rec["path"]):
-                raise HTTPException(400, "Close this case before deleting its file")
+            # The case this server has open is closed first. Going back to
+            # the case list leaves the case open (the home screen only
+            # changes what the window shows), and nothing there closes one,
+            # so refusing it — as this used to, "Close this case before
+            # deleting its file" — meant the case an analyst had just come
+            # from could not be deleted until they opened another case and
+            # came back. Everything in it is already committed, and it is
+            # about to be deleted; every other window on it is told the
+            # case has gone (_announce_case).
+            if STORE is not None and not STORE.closed and _same_case_path(STORE.path, rec["path"]):
+                _close_case()
+                closed = True
+            # Open in ANOTHER Winnow is a refusal, and stays one after the
+            # close above — which has to come first: this server's own flock
+            # reads as a holder to the probe until its Store lets go.
+            # Unlinking a case a live Winnow has open leaves it writing into
+            # an inode nobody can find again (or, on Windows, fails half way
+            # through), and the other analyst learns about it when their
+            # work is gone.
+            holder = probe_case_lock(rec["path"])
+            if holder:
+                raise HTTPException(409, {
+                    "error": "case_in_use",
+                    "message": (f"It is open in another Winnow ({describe_case_lock(holder)}) "
+                                "— close it there first"),
+                    "holder": holder,
+                })
             # Registering a case is just recording a path, and nothing
             # checked what was at the end of it — so "forget this case, and
             # delete the file" was an unlink of anything the analyst's
             # account could reach. Deleting a case file requires it to be
-            # one; the registry entry goes either way.
+            # one; the registry entry goes either way — before the refusal,
+            # which says so.
             if not is_winnow_case_file(rec["path"]):
+                WS.cases.delete(case_id)
                 raise HTTPException(
                     400, f"{rec['path']} is not a Winnow case file — removed from the "
                          "list, but not deleted from disk")
-            os.remove(rec["path"])
+            _remove_case_file(rec["path"])
+            # Removal is best-effort file by file, and on Windows a file
+            # anything still holds open can't be removed at all — now a
+            # likelier thing to meet, with the case closed a moment ago.
+            # Taking it off the list anyway hid a case whose file was
+            # still on disk behind a "deleted".
+            if os.path.exists(rec["path"]):
+                raise HTTPException(409, f"Could not delete {rec['path']} — something still has it "
+                                         "open. It is still on the case list; try again in a moment.")
     WS.cases.delete(case_id)
-    return {"ok": True}
+    # The window that asked carries on with no case, as after a discard.
+    return {"ok": True, "case_token": None} if closed else {"ok": True}
 
 
 @app.get("/api/sources")
@@ -1805,6 +2567,22 @@ def api_import_profiles_delete(profile_id: int):
     return {"ok": True}
 
 
+def _ingest_spooled(ingest, tmp: str, *args, **kwargs) -> dict:
+    """One synchronous upload's import, for the threadpool: `ingest` (a
+    Store ingest_* reader) on the spool _upload_spool made, then the
+    uploaded file's name recorded as where the table came from instead of
+    the spool, which the route deletes on return — the rule the job
+    route's tables follow too (Store.record_upload_path). In `finally`, so
+    rows an import kept before an error say so as well."""
+    try:
+        rec = ingest(tmp, *args, **kwargs)
+    finally:
+        with contextlib.suppress(sqlite3.Error):
+            store().record_upload_path(tmp, os.path.basename(tmp))
+    rec["path"] = os.path.basename(tmp)
+    return rec
+
+
 @app.post("/api/ingest/upload")
 async def api_ingest_upload(
     file: UploadFile = File(...),
@@ -1813,10 +2591,9 @@ async def api_ingest_upload(
     has_header: bool = Form(True),
     column_types: str | None = Form(None),  # JSON-encoded list[str], since multipart forms are flat
 ):
-    suffix = Path(file.filename or "upload.csv").suffix or ".csv"
-    fd, tmp = tempfile.mkstemp(suffix=suffix)
+    spool_dir, tmp = _upload_spool(file.filename, "upload.csv")
     try:
-        with os.fdopen(fd, "wb") as out:
+        with open(tmp, "wb") as out:
             while chunk := await file.read(4 << 20):
                 out.write(chunk)
         types = json.loads(column_types) if column_types else None
@@ -1826,8 +2603,8 @@ async def api_ingest_upload(
         # get this from FastAPI for free; an `async def` route — which this
         # has to be, for `await file.read()` — must ask for it.
         return await run_in_threadpool(
-            store().ingest_csv,
-            tmp, name=file.filename, build_fts=build_fts, delimiter=delimiter or None,
+            _ingest_spooled, store().ingest_csv,
+            tmp, name=os.path.basename(tmp), build_fts=build_fts, delimiter=delimiter or None,
             has_header=has_header, column_types=types,
         )
     except Exception as e:
@@ -1835,17 +2612,33 @@ async def api_ingest_upload(
     finally:
         # The rows are in the case file the moment ingest returns; the spool
         # was leaking its full size in the OS tempdir on every upload.
-        with contextlib.suppress(OSError):
-            os.remove(tmp)
+        _remove_spool(spool_dir, tmp)
 
 
-def _decode_preview_bytes(raw: bytes) -> str:
-    # Same UTF-16 BOM handling as the real ingest (store.sniff_text_encoding)
-    # so the preview an analyst approves is the table they actually get —
-    # PowerShell's UTF-16LE exports were previewing as NUL-riddled noise.
-    if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
-        return raw.decode("utf-16", errors="replace")
-    return raw.decode("utf-8-sig", errors="replace")
+PREVIEW_SAMPLE_BYTES = 512 * 1024
+
+
+def _decode_preview_bytes(raw: bytes, path: str | None = None) -> tuple[str, str]:
+    # Decided and decoded exactly as the real ingest will (store.
+    # decode_text_sample — UTF-16 by BOM, Windows-1252 when it isn't UTF-8)
+    # so the preview an analyst approves is the table they actually get:
+    # PowerShell's UTF-16LE exports previewed as NUL-riddled noise, and
+    # Excel's cp1252 CSVs as "Jos\ufffd". A sample shorter than the cap is
+    # the whole file. Returns (text, encoding label). `path`, when the file
+    # is on this disk, lets the decision see as much as the import will.
+    return decode_text_sample(raw, complete=len(raw) < PREVIEW_SAMPLE_BYTES,
+                              encoding=sniff_text_encoding(path) if path else None)
+
+
+def _iis_preview_format(log_format: str | None, name: str) -> str:
+    """The IIS format a preview reads with: the one the analyst picked in
+    the preview, else the one the file's name says."""
+    fmt = log_format or iisread.log_format(name)
+    if fmt is None:
+        raise ValueError("Not named like an IIS log (u_ex…, nc…, in….log)")
+    if fmt not in iisread.FORMATS:
+        raise ValueError(f"Unknown IIS log format {fmt!r}")
+    return fmt
 
 
 @app.post("/api/ingest/preview")
@@ -1853,12 +2646,30 @@ async def api_ingest_preview(
     file: UploadFile = File(...),
     delimiter: str | None = Form(None),
     has_header: bool = Form(True),
+    kind: str = Form("csv"),   # "text": the raw-text importer's line-per-row preview; "iis", "kv"
+    log_format: str | None = Form(None),   # iis: w3c, ncsa or native; None reads the file's name
 ):
-    raw = await file.read(512 * 1024)  # bounded sample — full parse happens at real ingest time
-    text = _decode_preview_bytes(raw)
+    raw = await file.read(PREVIEW_SAMPLE_BYTES)  # bounded sample — full parse happens at real ingest time
+    text, encoding = _decode_preview_bytes(raw)
     try:
-        return await run_in_threadpool(
-            store().preview_csv_text, text, delimiter=delimiter or None, has_header=has_header)
+        if kind == "text":
+            return {**await run_in_threadpool(store().preview_text_lines, text), "encoding": encoding}
+        if kind == "iis":
+            fmt = _iis_preview_format(log_format, file.filename or "")
+            return {**await run_in_threadpool(
+                store().preview_iis_text, text, fmt, complete=len(raw) < PREVIEW_SAMPLE_BYTES),
+                "encoding": encoding}
+        if kind == "kv":
+            return {**await run_in_threadpool(
+                store().preview_kv_text, text, complete=len(raw) < PREVIEW_SAMPLE_BYTES),
+                "encoding": encoding}
+        # The uploaded file's own name goes through: the delimiter is read
+        # from the extension first (Store._sniff), and a preview that
+        # sniffed without it would show a different table from the one the
+        # import then builds.
+        return {**await run_in_threadpool(
+            store().preview_csv_text, text, delimiter=delimiter or None,
+            has_header=has_header, name=file.filename), "encoding": encoding}
     except Exception as e:
         raise HTTPException(400, str(e))
 
@@ -1892,23 +2703,20 @@ async def api_ingest_sqlite_upload(
     build_fts: bool = Form(True),
     timestamp_columns: str | None = Form(None),  # JSON-encoded list[str]
 ):
-    suffix = Path(file.filename or "upload.sqlite").suffix or ".sqlite"
-    fd, tmp = tempfile.mkstemp(suffix=suffix)
+    spool_dir, tmp = _upload_spool(file.filename, "upload.sqlite")
     try:
-        with os.fdopen(fd, "wb") as out:
+        with open(tmp, "wb") as out:
             while chunk := await file.read(4 << 20):
                 out.write(chunk)
         ts_cols = json.loads(timestamp_columns) if timestamp_columns else None
         return await run_in_threadpool(
-            store().ingest_sqlite_table,  # threadpool: see api_ingest_upload
-            tmp, table, name=name or f"{Path(file.filename or 'upload').stem}.{table}",
-            build_fts=build_fts, timestamp_columns=ts_cols,
+            _ingest_spooled, store().ingest_sqlite_table,  # threadpool: see api_ingest_upload
+            tmp, table, name=name, build_fts=build_fts, timestamp_columns=ts_cols,
         )
     except Exception as e:
         raise HTTPException(400, str(e))
     finally:
-        with contextlib.suppress(OSError):
-            os.remove(tmp)
+        _remove_spool(spool_dir, tmp)
 
 
 @app.post("/api/ingest/xlsx/preview")
@@ -1962,28 +2770,39 @@ async def api_ingest_json_upload(
     flatten_depth: int = Form(0),
     build_fts: bool = Form(True),
 ):
-    suffix = Path(file.filename or "upload.json").suffix or ".json"
-    fd, tmp = tempfile.mkstemp(suffix=suffix)
+    spool_dir, tmp = _upload_spool(file.filename, "upload.json")
     try:
-        with os.fdopen(fd, "wb") as out:
+        with open(tmp, "wb") as out:
             while chunk := await file.read(4 << 20):
                 out.write(chunk)
         return await run_in_threadpool(
-            store().ingest_json,  # threadpool: see api_ingest_upload
-            tmp, name=name or file.filename, flatten_mode=flatten_mode, flatten_depth=flatten_depth,
-            build_fts=build_fts,
+            _ingest_spooled, store().ingest_json,  # threadpool: see api_ingest_upload
+            tmp, name=name or os.path.basename(tmp), flatten_mode=flatten_mode,
+            flatten_depth=flatten_depth, build_fts=build_fts,
         )
     except Exception as e:
         raise HTTPException(400, str(e))
     finally:
-        with contextlib.suppress(OSError):
-            os.remove(tmp)
+        _remove_spool(spool_dir, tmp)
 
 
 _JSON_INGEST_EXTS = {".json", ".jsonl", ".ndjson"}
 
 
 def _ingest_kind_for_path(path: str) -> str:
+    """The built-in importer for a filename. Anything no built-in claims
+    is raw text (Store.ingest_text) — a log with a rotated, vendor-specific
+    or missing extension is still a log. Plugin formats are consulted
+    before this by the callers that honour them (_assoc_ingest, the
+    import queue); it used to fall through to csv, which is how a
+    hostd.log got a sniffed delimiter and its first line as a header.
+    An IIS log is recognised by its whole name (iisread.log_format) —
+    its .log says nothing. A key=value log (FortiGate's) has no name of
+    its own, so a file that would be raw text, or a .txt, is asked what
+    its first line is (looks_like_kv_log) — never one an extension or a
+    name gives to another reader."""
+    if iisread.log_format(path):
+        return "iis"
     suffix = Path(path).suffix.lower()
     if suffix in SQLITE_IMPORT_EXTENSIONS:
         return "sqlite"
@@ -1991,7 +2810,12 @@ def _ingest_kind_for_path(path: str) -> str:
         return "xlsx"
     if suffix in PLASO_IMPORT_EXTENSIONS:
         return "plaso"
-    return "json" if suffix in _JSON_INGEST_EXTS else "csv"
+    if suffix in _JSON_INGEST_EXTS:
+        return "json"
+    kind = "csv" if suffix in DEFAULT_IMPORT_EXTENSIONS else "text"
+    if (kind == "text" or suffix == ".txt") and looks_like_kv_log(path):
+        return "kv"
+    return kind
 
 
 class ArchiveExpandBody(BaseModel):
@@ -2007,34 +2831,72 @@ def api_ingest_archive_expand(body: ArchiveExpandBody):
     if not os.path.isfile(body.path):
         raise HTTPException(400, f"No file at {body.path}")
     try:
-        return archive.expand_archive(body.path)
+        return _log_archive_report(os.path.basename(body.path), archive.expand_archive(body.path))
     except archive.ArchiveError as e:
         raise HTTPException(400, str(e))
 
 
+def _log_archive_report(name: str, rep: dict) -> dict:
+    # The toast that shows these is gone in seconds; members that were
+    # skipped (damaged, unwritable, refused) or renamed (their name was
+    # taken) are a fact about the evidence, so the log keeps them.
+    for sk in rep.get("skipped", []):
+        wlog.record("warn", f"Archive {name}: skipped {sk['path']} — {sk['reason']}")
+    for rn in rep.get("renamed", []):
+        wlog.record("warn", f"Archive {name}: {rn['path']} extracted as {rn['as']} (that name was taken)")
+    return rep
+
+
+def _upload_spool(filename: str | None, fallback: str) -> tuple[str, str]:
+    """(directory, path) to spool one upload to: a private directory
+    (mkdtemp — 0700, unique) holding the file under the name the browser
+    sent. Two things depend on the name being the real one — the archive
+    extraction is named after it, and a plugin parser can read meaning
+    from it (esxi_logs takes the log type from the file name; $MFT and $J
+    are recognised by name) — and the private directory is what makes
+    using it safe: the archive route used to rename its spool to
+    <tempdir>/<that name>, overwriting and then deleting whatever file of
+    that name was already in the shared temp folder. Undo it with
+    _remove_spool."""
+    base = os.path.basename((filename or "").replace("\\", "/")).strip()
+    if base in ("", ".", ".."):
+        base = fallback
+    spool_dir = tempfile.mkdtemp(prefix="winnow-upload-")
+    return spool_dir, os.path.join(spool_dir, base)
+
+
+def _remove_spool(spool_dir: str, path: str) -> None:
+    """Undo _upload_spool: the one file, then its private directory. Not
+    rmtree: the upload routes are async, and a tree walk is blocking work
+    the event loop must not do (tests/test_event_loop_blocking.py). Nothing
+    else is ever written into the directory, so an unlink, the same one the
+    routes always did, and an rmdir are the whole job."""
+    for remove, target in ((os.remove, path), (os.rmdir, spool_dir)):
+        try:
+            remove(target)
+        except OSError:
+            pass
+
+
 @app.post("/api/ingest/archive/upload")
 async def api_ingest_archive_upload(file: UploadFile = File(...)):
-    """Upload-then-expand: the archive spools to a tempfile, expands into a
-    directory beside the CASE file (the one durable, analyst-visible place
-    an upload has), and the spool is removed either way."""
-    suffix = Path(file.filename or "upload.zip").suffix or ".zip"
-    fd, tmp = tempfile.mkstemp(suffix=suffix)
+    """Upload-then-expand: the archive spools to a private tempdir,
+    expands into a directory beside the CASE file (the one durable,
+    analyst-visible place an upload has), and the spool is removed either
+    way."""
+    spool_dir, tmp = _upload_spool(file.filename, "archive.zip")
     try:
-        with os.fdopen(fd, "wb") as out:
+        with open(tmp, "wb") as out:
             while chunk := await file.read(4 << 20):
                 out.write(chunk)
         dest_root = os.path.dirname(os.path.abspath(store().path))
-        # Name the extraction after the UPLOADED file, not the tempfile.
-        named = os.path.join(os.path.dirname(tmp), os.path.basename(file.filename or "archive.zip"))
-        os.replace(tmp, named)
-        tmp = named
         try:
-            return await run_in_threadpool(archive.expand_archive, tmp, dest_root=dest_root)
+            return _log_archive_report(os.path.basename(tmp), await run_in_threadpool(
+                archive.expand_archive, tmp, dest_root=dest_root))
         except archive.ArchiveError as e:
             raise HTTPException(400, str(e))
     finally:
-        with contextlib.suppress(OSError):
-            os.remove(tmp)
+        _remove_spool(spool_dir, tmp)
 
 
 class PreviewPath(BaseModel):
@@ -2047,6 +2909,8 @@ class PreviewPath(BaseModel):
     # csv
     delimiter: str | None = None
     has_header: bool = True
+    # iis: w3c, ncsa or native; None reads the file's name
+    log_format: str | None = None
     # json
     flatten_mode: str = "none"
     flatten_depth: int = 0
@@ -2058,13 +2922,23 @@ def api_ingest_preview_path(body: PreviewPath):
         raise HTTPException(400, f"No file at {body.path}")
     kind = body.kind or _ingest_kind_for_path(body.path)
     try:
-        if kind == "csv":
+        if kind in ("csv", "text", "iis", "kv"):
             # Same bounded sample the upload preview reads — never the file.
             with open(body.path, "rb") as f:
-                raw = f.read(512 * 1024)
-            text = _decode_preview_bytes(raw)
-            return store().preview_csv_text(text, delimiter=body.delimiter or None,
-                                            has_header=body.has_header)
+                raw = f.read(PREVIEW_SAMPLE_BYTES)
+            text, encoding = _decode_preview_bytes(raw, body.path)
+            if kind == "text":
+                return {**store().preview_text_lines(text), "encoding": encoding}
+            if kind == "iis":
+                fmt = _iis_preview_format(body.log_format, body.path)
+                return {**store().preview_iis_text(text, fmt, complete=len(raw) < PREVIEW_SAMPLE_BYTES),
+                        "encoding": encoding}
+            if kind == "kv":
+                return {**store().preview_kv_text(text, complete=len(raw) < PREVIEW_SAMPLE_BYTES),
+                        "encoding": encoding}
+            return {**store().preview_csv_text(text, delimiter=body.delimiter or None,
+                                               has_header=body.has_header, name=body.path),
+                    "encoding": encoding}
         if kind == "json":
             return store().preview_json_file(body.path, flatten_mode=body.flatten_mode,
                                              flatten_depth=body.flatten_depth)
@@ -2073,6 +2947,24 @@ def api_ingest_preview_path(body: PreviewPath):
         return store().preview_sqlite_tables(body.path)
     except Exception as e:
         raise HTTPException(400, str(e))
+
+
+class RecognisePaths(BaseModel):
+    paths: list[str]
+
+
+@app.post("/api/ingest/recognise")
+def api_ingest_recognise(body: RecognisePaths):
+    """What each file's content says it is, for the one reader recognised
+    by content rather than name: "kv" for a key=value log
+    (looks_like_kv_log), else null. The import queue asks this as it
+    queues files added by path, the ones a name would leave as raw text,
+    so the queue says how a FortiGate log will be read before it imports
+    — the browser reads an upload's first line itself. Reads the first
+    KV_PROBE_BYTES of each; a path that isn't a regular file is null."""
+    if len(body.paths) > BROWSE_LIST_CAP:
+        raise HTTPException(400, f"At most {BROWSE_LIST_CAP} files at once")
+    return {"kinds": ["kv" if os.path.isfile(p) and looks_like_kv_log(p) else None for p in body.paths]}
 
 
 class IngestJobPath(BaseModel):
@@ -2090,7 +2982,12 @@ class IngestJobPath(BaseModel):
     # csv options
     delimiter: str | None = None
     has_header: bool = True
-    column_types: list[str] | None = None
+    # csv: one type per column, in order. iis, kv: {column name: type},
+    # since the preview sees only the start of a log a later #Fields: line
+    # (or key) adds to
+    column_types: list[str] | dict[str, str] | None = None
+    # iis: w3c, ncsa or native; None reads the file's name
+    log_format: str | None = None
     # json options
     flatten_mode: str = "none"
     flatten_depth: int = 0
@@ -2102,8 +2999,8 @@ class IngestJobPath(BaseModel):
 
 
 def _ingest_job_options(kind: str, *, build_fts: bool, delimiter=None, has_header=True,
-                        column_types=None, flatten_mode="none", flatten_depth=0,
-                        tables=None, folder_path=None) -> dict:
+                        column_types=None, log_format=None, flatten_mode="none",
+                        flatten_depth=0, tables=None, folder_path=None) -> dict:
     # folder_path rides along on every kind — the job worker files each new
     # source under it when the ingest completes (directory import).
     base = {"folder_path": folder_path} if folder_path else {}
@@ -2113,7 +3010,12 @@ def _ingest_job_options(kind: str, *, build_fts: bool, delimiter=None, has_heade
     if kind == "json":
         return {**base, "build_fts": build_fts, "flatten_mode": flatten_mode,
                 "flatten_depth": flatten_depth}
-    if kind == "plaso":
+    if kind == "iis":
+        return {**base, "build_fts": build_fts, "log_format": log_format,
+                "column_types": column_types}
+    if kind == "kv":
+        return {**base, "build_fts": build_fts, "column_types": column_types}
+    if kind in ("plaso", "text"):
         return {**base, "build_fts": build_fts}   # one file, one table, no options
     return {**base, "build_fts": build_fts, "tables": tables or []}
 
@@ -2133,6 +3035,7 @@ def api_ingest_job_path(body: IngestJobPath):
             options=_ingest_job_options(
                 kind, build_fts=body.build_fts, delimiter=body.delimiter,
                 has_header=body.has_header, column_types=body.column_types,
+                log_format=body.log_format,
                 flatten_mode=body.flatten_mode, flatten_depth=body.flatten_depth,
                 tables=body.tables, folder_path=body.folder_path,
             ),
@@ -2149,7 +3052,8 @@ async def api_ingest_job_upload(
     build_fts: bool = Form(True),
     delimiter: str | None = Form(None),
     has_header: bool = Form(True),
-    column_types: str | None = Form(None),   # JSON-encoded list[str] — multipart forms are flat
+    column_types: str | None = Form(None),   # JSON — a list (csv) or {column: type} (iis, kv); forms are flat
+    log_format: str | None = Form(None),     # iis: w3c, ncsa or native; None reads the file's name
     flatten_mode: str = Form("none"),
     flatten_depth: int = Form(0),
     tables: str | None = Form(None),         # sqlite: JSON [{table, name?, timestamp_columns?}]
@@ -2158,28 +3062,34 @@ async def api_ingest_job_upload(
     gets transfer progress from its own XHR events), and the moment the
     spool completes a background ingest job takes over — the response
     carries the job record, not the finished source. delete_after cleans
-    the spooled tempfile whichever way the job ends."""
-    suffix = Path(file.filename or "upload").suffix or ".dat"
-    fd, tmp = tempfile.mkstemp(suffix=suffix)
+    the spool whichever way the job ends.
+
+    Spooled under the uploaded file's own name (_upload_spool), because
+    the name a SQLite table or a workbook sheet gets is built from it —
+    `History.urls`, `Book1.Sheet1`, as a path import names them; a
+    mkstemp spool made those `tmp3z2vauq7.urls`. And every table records
+    that name, not the spool's path, as where it came from
+    (recorded_path): the spool is deleted when the job ends."""
+    spool_dir, tmp = _upload_spool(file.filename, f"upload.{kind}")
     try:
-        with os.fdopen(fd, "wb") as out:
+        with open(tmp, "wb") as out:
             while chunk := await file.read(4 << 20):
                 out.write(chunk)
         table_list = json.loads(tables) if tables else None
         types = json.loads(column_types) if column_types else None
         return await run_in_threadpool(
             store().start_ingest_job,  # threadpool: see api_ingest_upload
-            kind, tmp, name=name or file.filename, delete_after=True,
+            kind, tmp, name=name or os.path.basename(tmp), delete_after=True,
+            spool_dir=spool_dir, recorded_path=os.path.basename(tmp),
             options=_ingest_job_options(
                 kind, build_fts=build_fts, delimiter=delimiter or None,
-                has_header=has_header, column_types=types,
+                has_header=has_header, column_types=types, log_format=log_format or None,
                 flatten_mode=flatten_mode, flatten_depth=flatten_depth,
                 tables=table_list,
             ),
         )
     except Exception as e:
-        with contextlib.suppress(OSError):
-            os.remove(tmp)
+        _remove_spool(spool_dir, tmp)
         raise HTTPException(400, str(e))
 
 
@@ -2219,7 +3129,9 @@ def api_plugins():
         "formats": PLUGINS.list_formats(),
         "tabs": PLUGINS.list_tabs(),
         "row_actions": PLUGINS.list_row_actions(),
+        "dashboards": PLUGINS.list_dashboards(),
         "panels": PLUGINS.list_panels(),
+        "page_panels": PLUGINS.list_page_panels(),
     }
 
 
@@ -2321,7 +3233,7 @@ def _resolve_row_action_rows(pairs: list[tuple[int, int]]) -> list[dict]:
         try:
             src = st.get_source(sid)
         except KeyError:
-            raise HTTPException(400, f"No source {sid}")
+            raise HTTPException(400, f"No table {sid}")
         cols = [c["name"] for c in src["columns"] if not c.get("derived")]
         sel = ", ".join(q(c) for c in cols)
         marks = ",".join(str(int(r)) for r in rids)
@@ -2365,7 +3277,7 @@ async def api_plugin_row_action(fs_name: str, action_id: str, body: RowActionBod
 class PluginToggle(BaseModel):
     fs_name: str   # the plugins/ entry's file/folder name — the identity that exists without importing
     enabled: bool | None = None          # legacy body: on/off everywhere
-    scope: str | None = None             # on_all | off_all | on_case | off_case
+    scope: str | None = None             # on_all | off_all | on_case | off_case | follow_case
 
 
 @app.post("/api/plugins/toggle")
@@ -2378,12 +3290,16 @@ def api_plugins_toggle(body: PluginToggle):
     rec = next((p for p in PLUGINS.describe() if p["fs_name"] == body.fs_name), None)
     if rec is None:
         raise HTTPException(404, f"No installed plugin named {body.fs_name}")
+    if rec.get("bundled") and body.fs_name in RETIRED_BUNDLED_EXAMPLES:
+        # Nothing to persist: _reload_plugins would ignore the pref or the
+        # override, and the dropdown would then show a state that is not.
+        raise HTTPException(400, RETIRED_BUNDLED_EXAMPLES[body.fs_name])
     scope = body.scope
     if scope is None:
         if body.enabled is None:
             raise HTTPException(400, "Send scope (on_all/off_all/on_case/off_case) or the legacy enabled flag")
         scope = "on_all" if body.enabled else "off_all"
-    if scope not in ("on_all", "off_all", "on_case", "off_case"):
+    if scope not in ("on_all", "off_all", "on_case", "off_case", "follow_case"):
         raise HTTPException(400, f"Unknown scope {scope!r}")
     default_on = not rec.get("bundled")
     if scope in ("on_all", "off_all"):
@@ -2400,8 +3316,18 @@ def api_plugins_toggle(body: PluginToggle):
         if STORE is None or STORE.closed:
             raise HTTPException(400, "Open a case first — per-case scopes live in the case file")
         overrides = _case_plugin_overrides()
-        overrides[body.fs_name] = scope == "on_case"
-        STORE.set_case_setting("plugin_overrides", json.dumps(overrides))
+        if scope == "follow_case":
+            # Drop this case's override and go back to following the
+            # machine setting, whatever it is. The only other way to
+            # reach that state was to re-pick an "everywhere" scope,
+            # which clears the override as a side effect — fine when the
+            # machine setting you want is the one already set, and a
+            # silent rewrite of every other case's behaviour when it
+            # isn't. Removing an override should not be able to do that.
+            overrides.pop(body.fs_name, None)
+        else:
+            overrides[body.fs_name] = scope == "on_case"
+        STORE.set_case_setting("plugin_overrides", json.dumps(overrides) if overrides else None)
     _reload_plugins()
     return api_plugins()
 
@@ -2413,6 +3339,14 @@ class PluginBundleBody(BaseModel):
     dashboards: list | None = None  # profile: extra named boards [{name, widgets}]
     variables: list | None = None   # profile: variable DEFINITIONS the case should carry
     description: str | None = None  # profile: what this profile is for, shown in the list
+    watchlist: list | None = None   # profile: the starter indicators it seeds
+    # Lineage: which shipped profile this is a copy of, and the version it
+    # was copied at. Written by "Copy to edit" and carried through every
+    # later edit, so the manager can offer the diff when the shipped one
+    # moves on. Named from_profile rather than the plain `from` the plan
+    # asked for — `from` is a Python keyword and cannot be a field name.
+    from_profile: str | None = None
+    from_version: int | None = None
 
 
 @app.get("/api/plugin_bundles")
@@ -2423,8 +3357,10 @@ def api_plugin_bundles():
 @app.post("/api/plugin_bundles")
 def api_plugin_bundles_save(body: PluginBundleBody):
     try:
-        return WS.plugin_bundles.save(body.name, body.plugins, body.dashboard, body.variables,
-                                      body.dashboards, body.description)
+        return WS.plugin_bundles.save(
+            body.name, body.plugins, dashboard=body.dashboard, variables=body.variables,
+            dashboards=body.dashboards, description=body.description, watchlist=body.watchlist,
+            from_profile=body.from_profile, from_version=body.from_version)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -2435,48 +3371,247 @@ def api_plugin_bundles_delete(bundle_id: int):
     return {"ok": True}
 
 
+@app.get("/api/plugin_bundles/{bundle_id}/export")
+def api_plugin_bundles_export(bundle_id: int):
+    """One profile as a file, the way saved filters already export — same
+    {"format": ..., <payload>} envelope, one profile instead of every
+    filter, because a profile is the unit an analyst hands to a
+    colleague."""
+    try:
+        data = WS.plugin_bundles.export_one(bundle_id)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", data["profile"]["name"]).strip("-") or "profile"
+    return JSONResponse(
+        data,
+        headers=_attachment(f"winnow-profile-{slug}.json"),
+    )
+
+
+@app.post("/api/plugin_bundles/import")
+async def api_plugin_bundles_import(file: UploadFile = File(...)):
+    """The other half. A malformed file, an unreadable one and one
+    carrying a key this version does not understand are all 400s with the
+    reason in them — an import that half-worked would leave a profile
+    that looks complete and is not."""
+    try:
+        data = json.loads(await file.read())
+    except Exception as e:
+        raise HTTPException(400, f"Not a valid profile file: {e}")
+    try:
+        return WS.plugin_bundles.import_one(data)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/plugin_bundles/{bundle_id}/diff")
+def api_plugin_bundles_diff(bundle_id: int):
+    """What the shipped profile a copy came from has that the copy does
+    not. 404 for a profile with no lineage — there is no question to
+    answer, rather than an empty one."""
+    try:
+        diff = WS.plugin_bundles.upstream_diff(bundle_id)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    if diff is None:
+        raise HTTPException(404, "That profile is not a copy of a shipped one")
+    return diff
+
+
+@app.post("/api/plugin_bundles/{bundle_id}/take_update")
+def api_plugin_bundles_take_update(bundle_id: int):
+    """Replace a copy's contents with the shipped profile's. Always a
+    button (see PluginBundles.take_upstream) — nothing here runs on its
+    own, and applying a profile never takes an update either."""
+    try:
+        return WS.plugin_bundles.take_upstream(bundle_id)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+# The four independently skippable parts of an apply, in the order the
+# sheet lists them. A profile apply used to be all four, silently: every
+# installed plugin got an explicit override, boards were replaced BY
+# NAME, indicators were seeded and a scan started. Each is now something
+# an analyst can decline — take the board, leave my plugins alone — and
+# the names below are the contract between the sheet and this route.
+APPLY_PARTS = ("plugins", "boards", "watchlist", "variables")
+
+
+def _profile_board_origin(name: str) -> str:
+    """What `origin` a board applied by this profile carries.
+
+    It is what makes "you have edited this board" answerable: any hand
+    edit clears origin (Store.set_dashboard_widgets), so a board still
+    stamped with this profile is the profile's own untouched copy and
+    replacing it discards nothing. A board applied before this stamp
+    existed reads as edited, which errs toward warning — the direction
+    the plugin-board add already errs in."""
+    return f"profile:{name}"
+
+
+@app.get("/api/plugin_bundles/{bundle_id}/plan")
+def api_plugin_bundles_plan(bundle_id: int):
+    """What applying this profile to the OPEN CASE would actually change,
+    counted against the case rather than described in general.
+
+    Read-only, and the numbers the apply sheet prints: which plugins go
+    on and which go off, which board is replaced and whether it has been
+    edited since, which indicators are new and how many tables seeding
+    them would scan, which variables will be asked for. Nothing here
+    writes — that is the whole point of the sheet."""
+    if STORE is None or STORE.closed:
+        raise HTTPException(400, "Open a case first — a profile applies per case")
+    try:
+        bundle = WS.plugin_bundles.get(bundle_id)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+
+    wanted = set(bundle["plugins"])
+    installed = PLUGINS.describe()
+    known = {p["fs_name"] for p in installed}
+    on_now = {p["fs_name"] for p in installed if p.get("enabled")}
+    plugins = {
+        "turn_on": sorted((wanted & known) - on_now),
+        "already_on": sorted(wanted & on_now),
+        "turn_off": sorted(on_now - wanted),
+        "stay_off": len(known - wanted - on_now),
+        "missing": sorted(wanted - known),   # named by the profile, not installed here
+        # How many explicit case overrides the write lands. Applying does
+        # not only move the plugins that differ: it writes an override for
+        # EVERY installed plugin, which is what makes the case's set the
+        # profile's regardless of what the machine's defaults later become.
+        # So the sheet has something to show — and something to leave
+        # tickable — on a case that already matches the profile exactly.
+        "pins": len(known),
+    }
+
+    def _board(name, widgets):
+        existing = STORE.find_dashboard_by_name(name)
+        live = sum(1 for w in widgets if isinstance(w, dict) and w.get("live"))
+        out = {"name": name, "widgets": len(widgets), "live": live, "replaces": None}
+        if existing:
+            out["replaces"] = {"widget_count": existing["widget_count"],
+                               "edited": existing.get("origin") != _profile_board_origin(bundle["name"])}
+        return out
+
+    boards = []
+    if bundle.get("dashboard"):
+        boards.append(_board(bundle["name"], bundle["dashboard"]))
+    for board in bundle.get("dashboards") or []:
+        bname = str(board.get("name") or "").strip()
+        if bname and board.get("widgets"):
+            boards.append(_board(bname, board["widgets"]))
+
+    have = {i["value"] for i in STORE.list_indicators()}
+    wl_new, wl_have = [], []
+    for ind in bundle.get("watchlist") or []:
+        val = str(ind.get("value") or "").strip()
+        if not val:
+            continue
+        (wl_have if val in have else wl_new).append(val)
+
+    values = {v["name"]: v["value"] for v in STORE.list_variables()}
+    variables = []
+    for d in bundle.get("variables") or []:
+        vname = str(d.get("name") or "").strip()
+        # Exactly what the apply will accept. Store.seed_variables skips a
+        # name outside VARIABLE_NAME_RE, and a profile that arrived as a
+        # file has had no name checked anywhere (the builder's guard is
+        # client-side), so listing one here would promise a variable that
+        # is never created and never asked for.
+        if not Store.VARIABLE_NAME_RE.match(vname):
+            continue
+        # A declared DEFAULT is not a value this case holds, but apply
+        # creates the row with it, so a required variable carrying one is
+        # never prompted for. The sheet needs both facts to say which of
+        # the two happens rather than promising a prompt that never comes.
+        variables.append({"name": vname, "label": d.get("label") or "",
+                          "required": bool(d.get("required")),
+                          "set": bool(values.get(vname)),
+                          "default": str(d.get("default") or "")})
+
+    return {"name": bundle["name"], "shipped": bool(bundle.get("shipped")),
+            "plugins": plugins, "boards": boards,
+            "watchlist": {"new": wl_new, "existing": wl_have,
+                          "scan_tables": len(STORE.watchlist_scan_sources()) if wl_new else 0},
+            "variables": variables}
+
+
+class BundleApplyBody(BaseModel):
+    """Which parts of the profile to apply, from APPLY_PARTS.
+
+    None means all four — what apply meant before the sheet existed, and
+    what the new-case dialog's Profile select and any script calling
+    this route still send."""
+    parts: list[str] | None = None
+
+
 @app.post("/api/plugin_bundles/{bundle_id}/apply")
-def api_plugin_bundles_apply(bundle_id: int):
-    """Set the open case's per-plugin overrides to exactly this bundle —
-    every installed plugin gets an explicit on/off override, so the case's
-    plugin set is the bundle regardless of machine defaults. One registry
-    reload, not one per plugin."""
+def api_plugin_bundles_apply(bundle_id: int, body: BundleApplyBody | None = None):
+    """Apply a profile to the open case, part by part.
+
+    With every part on (the default): the case's per-plugin overrides
+    become exactly this bundle — every installed plugin gets an explicit
+    on/off override, so the case's plugin set is the bundle regardless of
+    machine defaults, in one registry reload — its boards are upserted by
+    name, its indicators seeded and scanned, and its variable definitions
+    seeded. Each of those is skippable independently, because they are
+    four different decisions that only ever arrived as one."""
     if STORE is None or STORE.closed:
         raise HTTPException(400, "Open a case first — per-case scopes live in the case file")
     try:
         bundle = WS.plugin_bundles.get(bundle_id)
     except KeyError as e:
         raise HTTPException(404, str(e))
+    parts = list(APPLY_PARTS) if (body is None or body.parts is None) else list(body.parts)
+    unknown = [p for p in parts if p not in APPLY_PARTS]
+    if unknown:
+        raise HTTPException(400, f"Not a part of a profile: {', '.join(unknown)}")
     wanted = set(bundle["plugins"])
     known = {p["fs_name"] for p in PLUGINS.describe()}
-    overrides = _case_plugin_overrides()
-    for fs_name in known:
-        overrides[fs_name] = fs_name in wanted
-    STORE.set_case_setting("plugin_overrides", json.dumps(overrides))
-    _reload_plugins()
+    if "plugins" in parts:
+        overrides = _case_plugin_overrides()
+        for fs_name in known:
+            overrides[fs_name] = fs_name in wanted
+        STORE.set_case_setting("plugin_overrides", json.dumps(overrides))
+        _reload_plugins()
     # A profile's dashboard becomes a NAMED dashboard on apply, keyed by the
     # profile name (a second apply refreshes it rather than duplicating).
     # Applying a plain plugin bundle (no dashboard) leaves the case's own
     # dashboards untouched.
-    if bundle.get("dashboard"):
-        STORE.upsert_dashboard_by_name(bundle["name"], bundle["dashboard"])
-    # Extra named boards a profile carries (the KAPE host overview) land
-    # under their own names, same upsert-by-name rule.
     boards_applied = []
-    for board in bundle.get("dashboards") or []:
-        bname = str(board.get("name") or "").strip()
-        if bname and board.get("widgets"):
-            STORE.upsert_dashboard_by_name(bname, board["widgets"])
-            boards_applied.append(bname)
+    dashboard_applied = False
+    if "boards" in parts:
+        origin = _profile_board_origin(bundle["name"])
+        if bundle.get("dashboard"):
+            STORE.upsert_dashboard_by_name(bundle["name"], bundle["dashboard"], origin=origin)
+            dashboard_applied = True
+        # Extra named boards a profile carries land under their own names,
+        # same upsert-by-name rule and the same stamp. No SHIPPED profile
+        # has one — the KAPE host overview, which is what this was written
+        # for, is part of the triage board now — but Save-as-profile writes
+        # whatever boards it was given.
+        for board in bundle.get("dashboards") or []:
+            bname = str(board.get("name") or "").strip()
+            if bname and board.get("widgets"):
+                STORE.upsert_dashboard_by_name(bname, board["widgets"], origin=origin)
+                boards_applied.append(bname)
     # A profile can seed a starter watchlist: add its indicators (dedup by
     # value) and scan the case, so the IOC rollups have data immediately.
     seeded = 0
-    if bundle.get("watchlist"):
+    if "watchlist" in parts and bundle.get("watchlist"):
         have = {i["value"] for i in STORE.list_indicators()}
         for ind in bundle["watchlist"]:
             val = (ind.get("value") or "").strip()
             if val and val not in have:
-                STORE.add_indicator(val, ind.get("kind", "other"), ind.get("note"), ind.get("auto_tag_id"))
+                # No auto-tag, whatever the profile says: a profile is a
+                # cross-case template, and a tag id means something only
+                # in the case that numbered it — the rule
+                # import_watchlist_from_case follows for the same reason.
+                STORE.add_indicator(val, ind.get("kind", "other"), ind.get("note"))
                 have.add(val)
                 seeded += 1
         if seeded:
@@ -2484,12 +3619,28 @@ def api_plugin_bundles_apply(bundle_id: int):
                 STORE.scan_all()
     # A profile's variable definitions seed rows (values never overwritten);
     # the required ones still empty come back so the UI can ask for them.
-    variables_missing = STORE.seed_variables(bundle.get("variables") or [])
+    variables_missing = STORE.seed_variables(bundle.get("variables") or []) if "variables" in parts else []
+    # Which profiles this case has had applied, and when. In the case file
+    # because it is a fact about the investigation, not about the machine:
+    # the analyst who receives the .db should be able to see that it was
+    # opened as a KAPE triage. It is also the only honest way for the
+    # manager to badge a profile "applied" — a board of the same name
+    # could have been built by hand.
+    if parts:
+        try:
+            seen = json.loads(STORE.get_case_settings().get("profiles_applied") or "{}")
+            if not isinstance(seen, dict):
+                seen = {}
+        except (TypeError, ValueError):
+            seen = {}
+        seen[bundle["name"]] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        STORE.set_case_setting("profiles_applied", json.dumps(seen))
     return {"applied": bundle["name"],
+            "parts": parts,
             "variables_missing": variables_missing,
             "enabled": sorted(wanted & known),
             "missing": sorted(wanted - known),  # in the bundle, not installed here
-            "dashboard_applied": bool(bundle.get("dashboard")),
+            "dashboard_applied": dashboard_applied,
             "dashboards_applied": boards_applied,
             "watchlist_seeded": seeded,
             "plugins": api_plugins()}
@@ -2533,10 +3684,15 @@ async def api_plugins_install(
         raise HTTPException(400, "paths and files must align")
 
     keep: list[tuple[Path, UploadFile]] = []  # (relative path, upload)
+    root = PLUGIN_DIRS[0].resolve()
     for rel, f in zip(rel_paths, files):
-        p = Path(str(rel).replace("\\", "/"))
-        if not rel or p.is_absolute() or ".." in p.parts or not p.parts:
+        parts = _plugin_upload_parts(rel)
+        # Belt and braces over the segment check, the way browse_dir/new
+        # does it: whatever the string did, the file has to land inside
+        # plugins/ (a symlink already in there pointing out included).
+        if parts is None or root not in (root / Path(*parts)).resolve().parents:
             raise HTTPException(400, f"Unsafe path in upload: {rel!r}")
+        p = Path(*parts)
         if "__pycache__" in p.parts or p.suffix == ".pyc":
             continue
         keep.append((p, f))
@@ -2556,13 +3712,27 @@ async def api_plugins_install(
         if not any(p.parts == (fs_name, "__init__.py") for p, _ in keep):
             raise HTTPException(400, f"Not a plugin package: no {fs_name}/__init__.py in the folder")
         dest = PLUGIN_DIRS[0] / fs_name
+    # What an overwrite would delete must itself be an entry directly in
+    # plugins/ — never the folder, never something a link points at.
+    if dest.resolve().parent != root:
+        raise HTTPException(400, f"Unsafe plugin name: {fs_name!r}")
 
-    if dest.exists() and not overwrite:
+    # Taken means the NAME, not the path: foo.py and foo/ are the same
+    # plugin to the loader, which loads whichever sorts first (the folder)
+    # and ignores the other. Checking only `dest` installed foo.py beside an
+    # existing foo/, reported "Installed foo", and the new file never ran.
+    other = (PLUGIN_DIRS[0] / fs_name) if dest.suffix == ".py" else (PLUGIN_DIRS[0] / f"{fs_name}.py")
+    other_is_plugin = (other.is_file() if other.suffix == ".py"
+                       else (other / "__init__.py").is_file())
+    taken = [d for d in (dest, other)
+             if (d.exists() and (d is dest or other_is_plugin))
+             and d.resolve().parent == root]
+    if taken and not overwrite:
         # 409, not 400: the request is fine, the name is simply taken —
         # the frontend confirms and retries with overwrite=true.
         raise HTTPException(409, f"A plugin named {fs_name} is already installed")
-    if overwrite and dest.exists():
-        await run_in_threadpool(_remove_plugin_dest, dest)
+    for d in taken if overwrite else ():
+        await run_in_threadpool(_remove_plugin_dest, d)
 
     PLUGIN_DIRS[0].mkdir(parents=True, exist_ok=True)
     for p, f in keep:
@@ -2584,6 +3754,32 @@ async def api_plugins_install(
     return {"installed": fs_name, "error": rec["error"] if rec else None, **api_plugins()}
 
 
+def _plugin_upload_parts(rel) -> tuple[str, ...] | None:
+    """The path segments of one uploaded plugin file, or None if it is not
+    a plain relative path on EVERY platform Winnow runs on.
+
+    The check used to be `Path(...).is_absolute()` plus "no '..'", which is
+    POSIX's idea of safe. On Windows a rooted-but-driveless path
+    (`\\Windows\\Tasks\\x.py`) and a drive-relative one (`C:__init__.py`) are
+    neither absolute nor dotted, so both passed, and `plugins / p` then
+    pointed outside plugins/ — with overwrite on, the destination was
+    rmtree'd first, and a drive-relative fs_name could make that a drive.
+    So every Windows form is refused wherever this runs: a drive, a root,
+    and a colon in any segment (drive-relative paths and NTFS alternate
+    streams — never part of a real plugin's file name)."""
+    if not isinstance(rel, str) or not rel:
+        return None
+    win = PureWindowsPath(rel)
+    if win.drive or win.root:
+        return None
+    parts = tuple(x for x in rel.replace("\\", "/").split("/") if x not in ("", "."))
+    if not parts or rel.replace("\\", "/").startswith("/"):
+        return None
+    if any(x == ".." or ":" in x for x in parts):
+        return None
+    return parts
+
+
 def _remove_plugin_dest(dest: Path) -> None:
     """Delete an installed plugin before overwriting it. A named function
     rather than a lambda at the call site so it is clear — to a reader and
@@ -2593,24 +3789,33 @@ def _remove_plugin_dest(dest: Path) -> None:
 
 
 def _ingest_via_plugin(path: str, format_id: str, name: str | None,
-                       options: dict, build_fts: bool) -> dict:
+                       options: dict, build_fts: bool, recorded_path: str | None = None) -> dict:
     """Shared by the path and upload plugin-ingest routes: resolve the
     format, run its parse, feed the result through Store.ingest_rows. The
     parse call itself runs outside Store.lock (it's pure file reading —
     only the row batches inside ingest_rows ever hold the lock), so a slow
     multi-GB parse doesn't freeze other requests any more than a big CSV
-    import does."""
+    import does.
+
+    `recorded_path` is what the table says it came from, when that is not
+    `path`: an upload is parsed (and hashed) from a spool that is deleted
+    the moment this returns, and the name the browser sent is the only
+    honest answer to "which file was this"."""
     fmt = PLUGINS.get_format(format_id)  # KeyError -> 400 at the route
     opts = fmt.resolve_options(options)
     result = fmt.parse(path, opts)
     if not isinstance(result, dict) or "columns" not in result or "rows" not in result:
         raise ValueError(f"Plugin format {format_id} returned no columns/rows")
-    return store().ingest_rows(
+    rec = store().ingest_rows(
         result["columns"], result["rows"],
         name=name or result.get("name") or os.path.basename(path),
         path=path, build_fts=build_fts,
         column_types=result.get("column_types"),
     )
+    if recorded_path is not None:
+        store().set_source_path(rec["id"], recorded_path)
+        rec["path"] = recorded_path
+    return rec
 
 
 @app.post("/api/ingest/plugin/path")
@@ -2643,10 +3848,13 @@ async def api_ingest_plugin_upload(
     options: str | None = Form(None),  # JSON-encoded dict, since multipart forms are flat
     build_fts: bool = Form(True),
 ):
-    suffix = Path(file.filename or "upload.bin").suffix or ".bin"
-    fd, tmp = tempfile.mkstemp(suffix=suffix)
+    # Spooled under the upload's own name (see _upload_spool — a parser
+    # may read meaning from it) and removed whichever way the import ends:
+    # it used to stay, a full copy of every uploaded $MFT in the temp
+    # folder, with the table's path pointing at it.
+    spool_dir, tmp = _upload_spool(file.filename, "upload.bin")
     try:
-        with os.fdopen(fd, "wb") as out:
+        with open(tmp, "wb") as out:
             while chunk := await file.read(4 << 20):
                 out.write(chunk)
         opts = json.loads(options) if options else {}
@@ -2654,14 +3862,24 @@ async def api_ingest_plugin_upload(
         # walk — and ran on the loop until now, the same defect the plugin
         # ROUTE dispatcher had.
         return await run_in_threadpool(
-            _ingest_via_plugin, tmp, format_id, name or file.filename, opts, build_fts)
+            _ingest_via_plugin, tmp, format_id, name or file.filename, opts, build_fts,
+            os.path.basename(tmp))
     except Exception as e:
         raise HTTPException(400, str(e))
+    finally:
+        _remove_spool(spool_dir, tmp)
 
 
 @app.delete("/api/source/{source_id}")
 def api_drop_source(source_id: int):
-    store().drop_source(source_id)
+    try:
+        store().drop_source(source_id)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        # 409, not 400: the request is well-formed and will succeed once
+        # the merge above it is gone. The message names which one.
+        raise HTTPException(409, str(e))
     return {"ok": True}
 
 
@@ -2677,6 +3895,23 @@ def api_set_tab_open(source_id: int, body: TabOpenReq):
     (DELETE /api/source/{id} / DELETE /api/merges/{id})."""
     store().set_tab_open(source_id, body.open)
     return {"ok": True}
+
+
+class TabsOpenReq(BaseModel):
+    source_ids: list[int]
+
+
+@app.post("/api/tabs/open")
+def api_open_tabs(body: TabsOpenReq):
+    """Open tabs for several tables at once — the sidebar's "open all" and
+    "open all with tags", and the Tables manager's "Open all tagged",
+    which used to be a POST per table. Answers with how many tabs it
+    actually opened (ones already open don't count); an id that names no
+    table is a 400, not a tab for nothing."""
+    try:
+        return {"opened": store().open_tabs(body.source_ids)}
+    except KeyError as e:
+        raise HTTPException(400, str(e).strip("'"))
 
 
 @app.post("/api/tabs/close_all")
@@ -2799,6 +4034,17 @@ def api_set_source_folder(source_id: int, body: SourceFolderReq):
 class MergeCreate(BaseModel):
     name: str
     source_ids: list[int]
+    # 'all' keeps every member's columns (empty where a member lacks one),
+    # 'shared' only those every member has — see Store._merge_columns.
+    col_mode: str = "all"
+    source_column: bool = False
+
+
+class MergeUpdate(BaseModel):
+    name: str | None = None
+    source_ids: list[int] | None = None
+    col_mode: str | None = None
+    source_column: bool | None = None
 
 
 @app.get("/api/merges")
@@ -2809,7 +4055,35 @@ def api_merges_list():
 @app.post("/api/merges")
 def api_merges_create(body: MergeCreate):
     try:
-        return store().create_merge(body.name, body.source_ids)
+        return store().create_merge(body.name, body.source_ids, body.col_mode, body.source_column)
+    except (ValueError, KeyError) as e:
+        raise HTTPException(400, str(e))
+
+
+class MergePreview(BaseModel):
+    source_ids: list[int]
+    col_mode: str = "all"
+    source_column: bool = False
+
+
+@app.post("/api/merges/preview")
+def api_merges_preview(body: MergePreview):
+    """The merge builder's live preview: columns, who has them, a few rows."""
+    try:
+        return store().merge_preview(body.source_ids, body.col_mode, body.source_column)
+    except (ValueError, KeyError) as e:
+        raise HTTPException(400, str(e))
+
+
+@app.put("/api/merges/{merge_id}")
+def api_merges_update(merge_id: int, body: MergeUpdate):
+    st = store()
+    try:
+        st._merge_row(merge_id)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    try:
+        return st.update_merge(merge_id, body.name, body.source_ids, body.col_mode, body.source_column)
     except (ValueError, KeyError) as e:
         raise HTTPException(400, str(e))
 
@@ -2832,6 +4106,54 @@ def api_view(spec: ViewSpec):
         # blaming the analyst's filter for something they can't fix and
         # burying the traceback.
         raise HTTPException(400, str(e))
+
+
+@app.post("/api/view/start")
+def api_view_start(spec: ViewSpec, wait_ms: int | None = None):
+    """The same build as /api/view, run in the background as a *held*
+    view (Store.start_view_job): the grid keeps its rows until the client
+    adopts the result. Waits up to `wait_ms` (Store default 250, clamped
+    to Store.VIEW_JOB_INLINE_WAIT_MAX_MS — the wait parks one of the
+    shared threadpool workers, and the client never sends the parameter)
+    so a fast search answers with `status: "done"` and its view inline;
+    otherwise `running`, and the client polls /api/view/job. A build
+    error lands in the record (`error`, `error_status` 400 for the
+    analyst-fixable kind), never as this route's status."""
+    return store().start_view_job(spec.source_id, spec.model_dump(), wait_ms=wait_ms)
+
+
+@app.get("/api/view/job")
+def api_view_job(job_id: int):
+    """404 when the job is gone — superseded by a newer build for the same
+    source, or from a case since closed. The poller stops on it."""
+    job = store().get_view_job(job_id)
+    if job is None:
+        raise HTTPException(404, "No such view job")
+    return job
+
+
+@app.post("/api/view/job/cancel")
+def api_view_job_cancel(job_id: int):
+    """Cancel a running background build, or discard a finished one's
+    still-pending view. A miss is `cancelled: false`, not an error."""
+    return {"cancelled": store().cancel_view_job(job_id)}
+
+
+class ViewAdopt(BaseModel):
+    view_id: str
+
+
+@app.post("/api/view/adopt")
+def api_view_adopt(body: ViewAdopt):
+    """Install a held view as its source's live one (Store.adopt_view);
+    returns the same payload /api/view does. 409 with "expired" in the
+    detail when the view is gone — a newer build evicted it — which the
+    client answers by running the search again. (The closed-case 409 from
+    closed_database_handler deliberately does NOT say "expired".)"""
+    try:
+        return store().adopt_view(body.view_id)
+    except KeyError as e:
+        raise HTTPException(409, str(e))
 
 
 @app.post("/api/view/sql")
@@ -2890,9 +4212,9 @@ class CancelOp(BaseModel):
 @app.post("/api/cancel_op")
 def api_cancel_op(body: CancelOp):
     """Interrupts the in-flight cancellable operation (view/timeline build,
-    group summary) started with this client-generated token. A miss — the
-    operation already finished, or never started — is a no-op, reported as
-    cancelled: false."""
+    group summary, SQL pane query) started with this client-generated
+    token. A miss — the operation already finished, or never started — is
+    a no-op, reported as cancelled: false."""
     return {"cancelled": store().cancel_op(body.token)}
 
 
@@ -2900,17 +4222,88 @@ def api_cancel_op(body: CancelOp):
 def api_group_summary(view_id: str, column: str, order: str = "count", direction: str | None = None,
                        limit: int = 1000, path: str = "", op_token: str | None = None,
                        bucket_datetime: bool = True):
+    # `path` (the outer levels already fixed by nested grouping) is a
+    # JSON-encoded list — GET query params don't carry structured data,
+    # and this stays a GET (not POST) so it keeps the same cacheable,
+    # side-effect-free shape as every other view-summary read. Checked
+    # here, since a query string is anything anyone typed: one that isn't
+    # JSON, or isn't a list of levels, is the request's fault (it used to
+    # surface as a 500 from json.loads or from deep inside the store).
     try:
-        # `path` (the outer levels already fixed by nested grouping) is a
-        # JSON-encoded list — GET query params don't carry structured data,
-        # and this stays a GET (not POST) so it keeps the same cacheable,
-        # side-effect-free shape as every other view-summary read.
         path_list = json.loads(path) if path else None
+    except ValueError:
+        raise HTTPException(400, "path must be a JSON list of group levels")
+    if path_list is not None and not (
+            isinstance(path_list, list) and all(isinstance(p, dict) for p in path_list)):
+        raise HTTPException(400, "path must be a JSON list of group levels")
+    try:
         return JSONResponse(store().group_summary(view_id, column, order=order, direction=direction,
                                                   limit=min(limit, 5000), path=path_list,
                                                   op_token=op_token, bucket_datetime=bucket_datetime))
     except KeyError as e:
         raise HTTPException(409, str(e))
+
+
+@app.get("/api/distinct_values")
+def api_distinct_values(view_id: str, column: str, op_token: str | None = None):
+    """One column's distinct non-empty values over the current view, sorted
+    — "Copy unique values" when nothing narrower than the view is picked
+    (Store.distinct_values). Its own route rather than group_summary with a
+    bigger limit: that one's 5,000 cap is sized for a group strip, and this
+    list is meant to be complete or refused (`truncated`), with no counts
+    to carry along."""
+    try:
+        return JSONResponse(store().distinct_values(view_id, column, op_token=op_token))
+    except KeyError as e:
+        raise HTTPException(409, str(e))
+
+
+@app.get("/api/histogram")
+def api_histogram(view_id: str, column: str, max_buckets: int = 160, op_token: str | None = None,
+                  stack: str | None = None, split_column: str | None = None,
+                  split_values: str | None = None):
+    """Time buckets of a datetime column over the CURRENT view — what the
+    histogram strip between the toolbar and the grid draws
+    (static/js/histogram.js). A side-effect-free view-summary read like
+    group_summary, so a GET; max_buckets is clamped to what a canvas can
+    usefully show.
+
+    The errors split the way the strip keys on them. An expired view is
+    the 409 every view read returns — a rebuild is under way and its own
+    view change refetches. A column the table does not have (a derived
+    column just removed, say) or one that is not a datetime is a 400 the
+    strip shows as text. Both arrive as a KeyError, and they are told
+    apart by TYPE: time_histogram raises ViewExpired for the handle and a
+    plain KeyError carrying the column NAME for the column. Not by looking
+    for "expired" in the message, which is what this route used to do —
+    column names are user data (invariant #5), so a table with a column
+    called `expired_at` got the 409 and the strip sat waiting for a view
+    change that would fix nothing."""
+    try:
+        # `stack=tags` adds a per-bucket split by tag beside the plain
+        # counts; `stack=value` / `stack=groups` one by the values
+        # `split_values` (a JSON list) names in `split_column`. Anything
+        # else is ignored rather than refused, so an old client and a new
+        # server agree on the chart they already share.
+        values = None
+        if stack in ("value", "groups"):
+            try:
+                values = json.loads(split_values or "[]")
+            except ValueError:
+                values = None
+            if not isinstance(values, list):
+                raise HTTPException(400, "split_values must be a JSON list")
+        return JSONResponse(store().time_histogram(
+            view_id, column, max_buckets=max(20, min(max_buckets, 400)), op_token=op_token,
+            stack=stack if stack in ("tags", "value", "groups") else None,
+            split_column=split_column, split_values=values))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except ViewExpired as e:
+        raise HTTPException(409, str(e))
+    except KeyError as e:
+        name = e.args[0] if e.args else column
+        raise HTTPException(400, f"No column named {name!r} on this table")
 
 
 class GroupExpand(BaseModel):
@@ -2940,6 +4333,9 @@ def api_filter_validate(body: WhereValidate):
         return {"ok": True}
     except ValueError as e:
         return {"ok": False, "error": str(e)}
+    except KeyError as e:
+        # The table, not the fragment: there is nothing to validate against.
+        raise HTTPException(404, str(e))
 
 
 @app.get("/api/rows")
@@ -2955,16 +4351,24 @@ def api_rows(view_id: str, start: int = 0, count: int = 200):
         # jsonable_encoder's per-value walk over every cell of every row —
         # pure overhead for payloads that are already plain
         # str/int/None — and go straight to json.dumps. This endpoint is
-        # hit on every scroll, so the saving is felt continuously.
-        return JSONResponse(store().fetch_rows(view_id, start, min(count, 10000)))
+        # hit on every scroll, so the saving is felt continuously. Now a
+        # step further: the page arrives already encoded, its cells
+        # written by SQLite (Store.fetch_rows_json), the same bytes.
+        return Response(store().fetch_rows_json(view_id, start, min(count, 10000)),
+                        media_type="application/json")
+    except ValueError as e:
+        # Store._require_columns: the table is still importing (or an
+        # import was killed mid-way). The analyst's tab says so rather
+        # than reporting a server fault.
+        raise HTTPException(400, str(e))
     except KeyError as e:
         raise HTTPException(409, str(e))
 
 
 @app.get("/api/tag_positions")
-def api_tag_positions(view_id: str):
+def api_tag_positions(view_id: str, height: int | None = Query(None, ge=1, le=100_000)):
     try:
-        return JSONResponse(store().tag_positions(view_id))
+        return JSONResponse(store().tag_positions(view_id, height=height))
     except KeyError as e:
         raise HTTPException(409, str(e))
 
@@ -2973,6 +4377,34 @@ def api_tag_positions(view_id: str):
 def api_row_position(view_id: str, source_id: int, rid: int):
     try:
         return {"pos": store().find_position(view_id, source_id, rid)}
+    except KeyError as e:
+        raise HTTPException(409, str(e))
+
+
+class ViewKeysBody(BaseModel):
+    view_id: str
+    positions: list[int] = []
+
+
+class ViewPositionsBody(BaseModel):
+    view_id: str
+    keys: list = []   # [[source_id, rid], ...]
+
+
+@app.post("/api/view/keys")
+def api_view_keys(body: ViewKeysBody):
+    """A selection's row ids, asked for before the view is rebuilt (see
+    Store.view_keys / view.js rebuildView)."""
+    try:
+        return {"keys": store().view_keys(body.view_id, body.positions)}
+    except KeyError as e:
+        raise HTTPException(409, str(e))
+
+
+@app.post("/api/view/positions")
+def api_view_positions(body: ViewPositionsBody):
+    try:
+        return store().view_positions(body.view_id, body.keys)
     except KeyError as e:
         raise HTTPException(409, str(e))
 
@@ -3005,10 +4437,30 @@ def api_column_index_drop(source_id: int, column: str):
     return {"ok": True}
 
 
-@app.get("/api/column_maxlen")
-def api_column_maxlen(source_id: int):
+@app.get("/api/search_index")
+def api_search_index():
+    """Whether searches on this machine can use a search index at all, and
+    the SQLite that decides it — the Tables manager says so rather than
+    showing "not indexed" on every table forever."""
+    return {"supported": Store.search_index_supported(), "sqlite": sqlite3.sqlite_version}
+
+
+@app.post("/api/source/{source_id}/search_index")
+def api_search_index_start(source_id: int):
     try:
-        return store().column_max_lengths(source_id)
+        return store().start_search_index(source_id)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/column_maxlen")
+def api_column_maxlen(source_id: int, columns: list[str] | None = Query(None)):
+    try:
+        return store().column_max_lengths(source_id, columns)
+    except ValueError as e:   # still importing (Store._require_columns)
+        raise HTTPException(400, str(e))
     except KeyError as e:
         raise HTTPException(404, str(e))
 
@@ -3028,6 +4480,18 @@ def api_tag_counts(view_id: str):
     view-keyed read."""
     try:
         return store().tag_counts_in_view(view_id)
+    except KeyError as e:
+        raise HTTPException(409, str(e))
+
+
+@app.get("/api/tag_view_coverage")
+def api_tag_view_coverage(view_id: str, tag_id: int):
+    """How many rows this view has and how many of them already carry one
+    tag — what the whole-view tag hotkey asks before it decides whether it
+    is tagging or untagging, and what its confirm quotes. Same 409 on an
+    expired view as every other view-keyed read."""
+    try:
+        return store().tag_coverage_in_view(view_id, tag_id)
     except KeyError as e:
         raise HTTPException(409, str(e))
 
@@ -3078,6 +4542,10 @@ def api_app_settings_save(body: AppSettingsWrite):
 
 class CaseSettingWrite(BaseModel):
     ts_format: str | None = None
+    # Shows the "Add to dashboard" entries in the column-header menu, the
+    # row menu and the Filters ▾ dropdown. Off, those menus stay short —
+    # most analysts read boards someone else built and never author one.
+    dashboard_creator: bool | None = None
 
 
 @app.get("/api/case_settings")
@@ -3087,11 +4555,18 @@ def api_case_settings_get():
 
 @app.post("/api/case_settings")
 def api_case_settings_save(body: CaseSettingWrite):
-    """A blank/absent ts_format clears the case override, so the case falls
-    back to the system-wide default rather than pinning today's value."""
-    if body.ts_format is not None and body.ts_format not in WS.AppSettings.TS_FORMATS | {""}:
-        raise HTTPException(400, f"Unknown timestamp format: {body.ts_format}")
-    store().set_case_setting("ts_format", body.ts_format)
+    """Writes only the keys the body actually carried, so a client saving
+    one setting can't blank another. A blank ts_format clears the case
+    override (the case falls back to the system-wide default); a false
+    dashboard_creator clears that key rather than storing "0", since
+    absent already means off and set_case_setting deletes on None."""
+    sent = body.model_fields_set
+    if "ts_format" in sent:
+        if body.ts_format is not None and body.ts_format not in WS.AppSettings.TS_FORMATS | {""}:
+            raise HTTPException(400, f"Unknown timestamp format: {body.ts_format}")
+        store().set_case_setting("ts_format", body.ts_format)
+    if "dashboard_creator" in sent:
+        store().set_case_setting("dashboard_creator", "1" if body.dashboard_creator else None)
     return store().get_case_settings()
 
 
@@ -3166,22 +4641,28 @@ def api_watchlist_add(body: IndicatorBody):
 @app.post("/api/watchlist/import")
 def api_watchlist_import(body: WatchlistImportBody):
     """One indicator per line; blanks and #-comments dropped; optional
-    'value,kind' per line overrides the body default. Deduped against
+    'value,kind' per line overrides the body default. The Watchlist's own
+    Export… CSV is recognised by its header row and read back with each
+    row's kind and note (Store.parse_indicator_list). Deduped against
     what's already in the list."""
     have = {i["value"] for i in store().list_indicators()}
-    added = 0
-    for line in (body.text or "").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
+    added_ids: list[int] = []
+    try:
+        entries = Store.parse_indicator_list(body.text, body.kind)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    for ind in entries:
+        value = ind["value"]
+        if value in have:
             continue
-        value, _, kind = line.partition(",")
-        value = value.strip()
-        if not value or value in have:
-            continue
-        store().add_indicator(value, (kind.strip() or body.kind), None, body.auto_tag_id)
+        try:
+            added_ids.append(store().add_indicator(value, ind["kind"], ind["note"], body.auto_tag_id)["id"])
+        except ValueError as e:   # an auto-tag that isn't a tag here fails the first line, before any write
+            raise HTTPException(400, str(e))
         have.add(value)
-        added += 1
-    return {"added": added, "indicators": store().list_indicators()}
+    # `added_ids` is what the client scans for — the new entries only,
+    # not the whole list again.
+    return {"added": len(added_ids), "added_ids": added_ids, "indicators": store().list_indicators()}
 
 
 @app.delete("/api/watchlist/{wid}")
@@ -3191,13 +4672,101 @@ def api_watchlist_delete(wid: int):
 
 
 @app.post("/api/watchlist/scan")
-def api_watchlist_scan(source_id: int | None = None):
-    return store().scan_source(source_id) if source_id is not None else store().scan_all()
+def api_watchlist_scan(source_id: int | None = None, watchlist_id: int | None = None):
+    """Synchronous scan — one source or every one, every indicator or
+    one. Kept for profile apply (which scans inline while it seeds a
+    watchlist) and scripts; the UI runs the job routes below."""
+    wids = None if watchlist_id is None else [watchlist_id]
+    return store().scan_source(source_id, wids) if source_id is not None else store().scan_all(wids)
+
+
+class WatchlistScanStart(BaseModel):
+    source_ids: list[int] | None = None     # None = every table
+    watchlist_ids: list[int] | None = None  # None = every indicator
+    # A finished (or still running) search-all job whose answers this scan
+    # may reuse — see Store.seed_watchlist_from_search_all. An id naming no
+    # live job is not an error: the scan simply reads every table, which is
+    # what it did before there was a handoff at all.
+    from_search_all: int | None = None
+
+
+@app.post("/api/watchlist/scan/start")
+def api_watchlist_scan_start(body: WatchlistScanStart | None = None):
+    """The scan the UI runs: on a Store thread, answered at once with
+    the job's snapshot (Store.start_watchlist_scan_job) — progress and
+    per-indicator/per-table totals land in the record as each table
+    finishes. One live scan per case; starting another stops the
+    running one. Poll /api/watchlist/scan/job.
+
+    `from_search_all` hands the scan a search-all job id: the sweep asked
+    every table the same question, so the pairs it proved clean are
+    recorded and the tables it answered whole are left out of this scan's
+    scope. The job's `seeded` says how much."""
+    body = body or WatchlistScanStart()
+    return store().start_watchlist_scan_job(body.source_ids, body.watchlist_ids,
+                                            body.from_search_all)
+
+
+@app.get("/api/watchlist/scan/job")
+def api_watchlist_scan_job(job_id: int):
+    """404 when the job is gone — superseded by a newer scan, or from a
+    case since closed. The poller stops on it."""
+    job = store().get_watchlist_scan_job(job_id)
+    if job is None:
+        raise HTTPException(404, "No such scan job")
+    return job
+
+
+@app.post("/api/watchlist/scan/cancel")
+def api_watchlist_scan_cancel(job_id: int):
+    """Stop a running scan at its next (indicator, source) unit. A miss
+    is `cancelled: false`, not an error."""
+    return {"cancelled": store().cancel_watchlist_scan_job(job_id)}
 
 
 @app.get("/api/watchlist/hits")
 def api_watchlist_hits(watchlist_id: int):
     return store().indicator_hits(watchlist_id)
+
+
+@app.get("/api/watchlist/overview")
+def api_watchlist_overview():
+    """What the tab opens on: every indicator (with how much of the case it
+    has actually been scanned against), the table count that fraction is
+    out of, and the overlap picture — which indicators flag identical or
+    contained row sets, and how many DISTINCT rows the per-indicator counts
+    add up to. `/api/watchlist` still answers the plain list; this is the
+    one the page reads, because a summary built from counts alone
+    double-counts a row two indicators both match."""
+    return store().watchlist_overview()
+
+
+@app.get("/api/watchlist/latest")
+def api_watchlist_latest(limit: int | None = None):
+    """The newest flagged rows across every indicator, one entry per row
+    with the indicators that matched it. Uses the analyst's timeline
+    templates for "when" and "what the row is" (the same resolution
+    /api/timeline does), so the pane speaks the artefact's vocabulary
+    rather than column indexes."""
+    return store().latest_hits(_resolve_timeline_configs(), limit)
+
+
+class WatchlistMergeBody(BaseModel):
+    keep_id: int
+    drop_id: int
+
+
+@app.post("/api/watchlist/merge")
+def api_watchlist_merge(body: WatchlistMergeBody):
+    """Fold a redundant indicator into the one that already covers its
+    rows. 400 when it does not cover them all — the message names how many
+    would be lost."""
+    try:
+        return store().merge_indicators(body.keep_id, body.drop_id)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 @app.get("/api/watchlist/cases")
@@ -3212,7 +4781,7 @@ def api_watchlist_cases():
         if os.path.abspath(c["path"]) == current or not os.path.isfile(c["path"]):
             continue
         try:
-            ro = sqlite3.connect(f"file:{c['path']}?mode=ro", uri=True)
+            ro = sqlite3.connect(paths.sqlite_peek_uri(c["path"]), uri=True)
             row = ro.execute(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='watchlist'").fetchone()
             n = ro.execute("SELECT COUNT(*) FROM watchlist").fetchone()[0] if row[0] else 0
@@ -3233,11 +4802,15 @@ def api_watchlist_import_case(body: WatchlistImportCaseBody):
     rec = WS.cases.get(body.case_id)
     if rec is None or not os.path.isfile(rec["path"]):
         raise HTTPException(400, "No such case on this machine")
+    before = {i["id"] for i in store().list_indicators()}
     try:
         res = store().import_watchlist_from_case(rec["path"])
     except ValueError as e:
         raise HTTPException(400, str(e))
-    return {**res, "indicators": store().list_indicators()}
+    indicators = store().list_indicators()
+    # The new entries' ids, for the client to scan for just those.
+    return {**res, "added_ids": [i["id"] for i in indicators if i["id"] not in before],
+            "indicators": indicators}
 
 
 @app.get("/api/watchlist/badge")
@@ -3295,6 +4868,22 @@ class DashboardReorder(BaseModel):
 class WidgetPreviewBody(BaseModel):
     source: str
     query: dict = {}
+    # A `signals` widget (source "cells") asks several questions at once —
+    # one per cell, each with its own drill. They ride in the body rather
+    # than in `query` because each cell has its own source, and the
+    # editor's Preview runs an unsaved draft that is not on any board yet.
+    cells: list | None = None
+    # Which card on which board this run is for. Both present and the
+    # result is cached under that widget, so the next open of the board
+    # paints it instead of re-running the query. Absent — the editor
+    # previewing a draft, a plugin calling the route — and nothing is
+    # cached, which is what "Preview" has to mean to be worth pressing.
+    dashboard_id: int | None = None
+    widget_id: str | None = None
+
+
+class DashboardRefreshBody(BaseModel):
+    widget_id: str | None = None
 
 
 @app.get("/api/dashboards")
@@ -3318,26 +4907,56 @@ def api_dashboards_reorder(body: DashboardReorder):
 
 @app.get("/api/dashboards/{dashboard_id}")
 def api_dashboard_widgets_get(dashboard_id: int):
+    """A board's widget definitions AND what each one last returned.
+
+    One request, because the alternative is what this replaces: the client
+    painting an empty grid and then issuing one query per card on every
+    open. `cache` is keyed by widget id and carries `ran_at` so the board
+    can say how old each number is; a result whose widget has changed
+    since is simply absent, and that card runs."""
+    st = store()
     try:
-        return {"widgets": store().get_dashboard(dashboard_id)}
+        widgets = st.get_dashboard(dashboard_id)
     except KeyError as e:
         raise HTTPException(404, str(e))
+    return {"widgets": widgets, "cache": st.get_dashboard_cache(dashboard_id, widgets)}
 
 
 @app.post("/api/dashboards/{dashboard_id}")
 def api_dashboard_update(dashboard_id: int, body: DashboardUpdate):
+    """Returns the stored widgets when widgets were sent, because the
+    store mints an id for any widget that arrived without one — a card the
+    analyst just added has no cached result to find until the client knows
+    what that card is called."""
+    stored = None
     try:
         if body.name is not None:
             store().rename_dashboard(dashboard_id, body.name)
         if body.widgets is not None:
-            store().set_dashboard_widgets(dashboard_id, body.widgets)
+            stored = store().set_dashboard_widgets(dashboard_id, body.widgets)
         if body.pinned is not None:
             store().set_dashboard_pinned(dashboard_id, body.pinned)
     except ValueError as e:
         raise HTTPException(400, str(e))
     except KeyError as e:
         raise HTTPException(404, str(e))
-    return {"ok": True}
+    return {"ok": True} if stored is None else {"ok": True, "widgets": stored}
+
+
+@app.post("/api/dashboards/{dashboard_id}/refresh")
+def api_dashboard_refresh(dashboard_id: int, body: DashboardRefreshBody):
+    """Re-run a board's widgets now and cache what they return — the whole
+    board, or the one named by `widget_id`.
+
+    A plain `def` on the threadpool, like every other Store route: one
+    worker runs the board rather than the event loop
+    (tests/test_event_loop_blocking.py)."""
+    try:
+        return store().refresh_dashboard(dashboard_id, body.widget_id)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 @app.delete("/api/dashboards/{dashboard_id}")
@@ -3351,6 +4970,11 @@ def api_dashboard_delete(dashboard_id: int):
 class LibraryDashboardWrite(BaseModel):
     name: str
     widgets: list
+
+
+class PluginBoardAddBody(BaseModel):
+    name: str | None = None
+    replace: bool = False
 
 
 class LibraryAddBody(BaseModel):
@@ -3400,12 +5024,77 @@ def api_dashboard_library_add(board_id: int, body: LibraryAddBody):
     return store().upsert_dashboard_by_name((body.name or b["name"]).strip() or b["name"], b["widgets"])
 
 
+@app.post("/api/plugin_dashboards/{fs_name}/{local_id}/add")
+def api_plugin_dashboard_add(fs_name: str, local_id: str, body: PluginBoardAddBody):
+    """Copy an offered board into the open case. Offered, never applied: a
+    plugin does not get to put a board in a case by loading.
+
+    Nor by colliding. The library's add replaces by name, which is right
+    there — the analyst named that board and asked for it back. Here the
+    name comes from the PLUGIN, so a board the analyst built by hand can
+    share it by coincidence, and replacing it would discard their widgets
+    with no undo. A name already in use is a 409 carrying the existing
+    board, and the UI asks; `replace=true` is the answer to that question,
+    never the default.
+
+    Unless the board already there is this plugin board's own earlier copy,
+    which `origin` identifies. Then there is nothing of the analyst's to
+    discard and no question to ask: adding again refreshes it, which is
+    what the plugin guide promises adding again does."""
+    b = PLUGINS.get_dashboard(fs_name, local_id)
+    if not b:
+        raise HTTPException(404, f"No dashboard {local_id} from {fs_name}")
+    name = (body.name or b["label"]).strip() or b["label"]
+    origin = f"plugin:{fs_name}:{local_id}"
+    existing = store().find_dashboard_by_name(name)
+    if existing and not body.replace and existing.get("origin") != origin:
+        raise HTTPException(409, {"error": "name_taken", "name": name,
+                                  "dashboard_id": existing["id"],
+                                  "widget_count": existing["widget_count"]})
+    return store().upsert_dashboard_by_name(name, b["widgets"], origin=origin)
+
+
 @app.post("/api/dashboard/widget/preview")
 def api_dashboard_widget_preview(body: WidgetPreviewBody):
+    st = store()
+    t0 = time.time()
     try:
-        return store().dashboard_widget_preview(body.source, body.query)
+        out = st.dashboard_widget_preview(body.source, body.query, cells=body.cells)
+    except MissingTable as e:
+        # Structured, not just a sentence: the board folds a card whose
+        # artefact is not in the case into its empty-cards strip and offers
+        # to import one, and it cannot tell that apart from "the query ran
+        # and matched nothing" by reading the message. `message` is the
+        # same string every existing catch prints (core.js unwraps it).
+        raise HTTPException(400, {"message": str(e), "missing_table": e.table})
     except ValueError as e:
         raise HTTPException(400, str(e))
+    except sqlite3.Error as e:
+        # A widget's SQL is the analyst's (or a profile's) text — a typo or
+        # a column the table doesn't have is theirs to fix, which is the
+        # 400 /api/sql gives the same query. The closed-case error keeps
+        # its own 409 handler.
+        if isinstance(e, sqlite3.ProgrammingError) and "closed database" in str(e).lower():
+            raise
+        raise HTTPException(400, str(e))
+    elapsed = int((time.time() - t0) * 1000)
+    out["elapsed_ms"] = elapsed
+    if body.dashboard_id is not None and body.widget_id:
+        # Caching is best-effort on purpose: the analyst asked for a
+        # number, and they have it. A board that has been deleted or a
+        # widget that has moved on since the request went out is a reason
+        # not to store the result, not a reason to fail the request — and
+        # so is anything else, which is why this catches Exception rather
+        # than a list. A narrower list said "best-effort" and meant "unless
+        # I forgot one": a widget whose result would not encode turned a
+        # 200 into a 500 on the way to the filing cabinet.
+        try:
+            stamp = st.cache_widget_result(body.dashboard_id, body.widget_id, out, elapsed)
+        except Exception:
+            stamp = None
+        if stamp:
+            out["ran_at"] = stamp["ran_at"]
+    return out
 
 
 class ResolveBody(BaseModel):
@@ -3460,10 +5149,25 @@ class DerivedProbe(BaseModel):
     column: str
     op_id: str | None = None
     params: dict = {}
+    # Optional: sample the rows this view holds rather than the head of
+    # the file. Absent means the whole table, which is what every caller
+    # got before the preview could be scoped.
+    view_id: str | None = None
 
 
 class RederiveWrite(BaseModel):
     params: dict = {}
+    # The table the column was re-derived FROM. A merge's id here means
+    # every member's definition of the column (Store._derived_scope);
+    # absent is the definition alone, as before.
+    source_id: int | None = None
+
+
+class DerivedRename(BaseModel):
+    name: str
+    # The table it was renamed from, as on rederive: a merge's id renames
+    # every member's definition of the column.
+    source_id: int | None = None
 
 
 class DerivedBatchItem(BaseModel):
@@ -3506,9 +5210,11 @@ def api_derived_create(body: DerivedCreate):
 
 
 @app.delete("/api/derived/{def_id}")
-def api_derived_delete(def_id: int):
+def api_derived_delete(def_id: int, source_id: int | None = None):
+    """`source_id` is the table it was removed from, as on rederive: a
+    merge's id removes the column from every member that carries it."""
     try:
-        store().remove_derived_column(def_id)
+        store().remove_derived_column(def_id, source_id)
     except ValueError as e:
         raise HTTPException(400, str(e))
     except KeyError as e:
@@ -3519,7 +5225,17 @@ def api_derived_delete(def_id: int):
 @app.post("/api/derived/{def_id}/rederive")
 def api_derived_rederive(def_id: int, body: RederiveWrite):
     try:
-        return store().rederive_column(def_id, body.params)
+        return store().rederive_column(def_id, body.params, body.source_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.post("/api/derived/{def_id}/rename")
+def api_derived_rename(def_id: int, body: DerivedRename):
+    try:
+        return store().rename_derived_column(def_id, body.name, body.source_id)
     except ValueError as e:
         raise HTTPException(400, str(e))
     except KeyError as e:
@@ -3546,6 +5262,8 @@ def api_derived_paths(body: StructProbe):
     a sample — the picker behind "flatten this into columns"."""
     try:
         return store().detect_struct_paths(body.source_id, body.column)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     except KeyError as e:
         raise HTTPException(404, str(e))
 
@@ -3571,7 +5289,38 @@ def api_derived_preview(body: DerivedProbe):
     if not body.op_id:
         raise HTTPException(400, "op_id is required")
     try:
-        return store().preview_derived(body.source_id, body.column, body.op_id, body.params)
+        return store().preview_derived(body.source_id, body.column, body.op_id, body.params,
+                                       view_id=body.view_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except ViewExpired as e:
+        # An expired view is a 409 the client retries against the table; a
+        # 404 would read as "no such column" and send the analyst looking
+        # for the wrong thing. The split is on the exception TYPE, not on
+        # the message: the other KeyError this call raises carries a column
+        # NAME, which is user data (invariant #5), so a table with a column
+        # called `expired_at` used to answer "that view was rebuilt" to a
+        # request whose real problem was the column.
+        raise HTTPException(409, str(e))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+
+
+class RegexGroupsProbe(BaseModel):
+    source_id: int
+    column: str
+    pattern: str
+
+
+@app.post("/api/derived/regex_groups")
+def api_derived_regex_groups(body: RegexGroupsProbe):
+    """The (?P<name>…) groups a pattern declares, with sample values each
+    would pull out of this column — what the derive modal's "a column per
+    named group" offer is built from. A pattern that will not compile is a
+    400 with the compiler's own message, same as every other params error;
+    a column that is not there is a 404, same as the preview above."""
+    try:
+        return store().preview_regex_groups(body.source_id, body.column, body.pattern)
     except ValueError as e:
         raise HTTPException(400, str(e))
     except KeyError as e:
@@ -3606,7 +5355,12 @@ def api_row_tags_undo():
 @app.post("/api/row_tags")
 def api_row_tags(body: TagWrite):
     if body.pairs:
-        return store().set_tags_pairs(body.pairs, body.tag_id, body.on)
+        # source_id, when sent, is the merge the selection was made in: the
+        # counts that come back are that merge's, every member of it.
+        try:
+            return store().set_tags_pairs(body.pairs, body.tag_id, body.on, body.source_id or None)
+        except KeyError as e:
+            raise HTTPException(404, f"No such table: {e}")
     return store().set_tags(body.source_id, body.rids, body.tag_id, body.on)
 
 
@@ -3614,7 +5368,10 @@ class TagViewWrite(BaseModel):
     view_id: str
     tag_id: int
     on: bool = True
-    exclude: list[list[int]] = []  # [[source_id, rid], ...] — rows to leave alone (select-all minus a few)
+    # [[source_id, rid], ...] — rows to leave alone (select-all minus a
+    # few). Typed as PAIRS so a malformed entry is refused at the door with
+    # a 422, rather than unpacked deep in the store into a 500.
+    exclude: list[tuple[int, int]] = []
 
 
 @app.post("/api/row_tags/view")
@@ -3631,6 +5388,14 @@ def api_note(body: NoteWrite):
     return {"ok": True}
 
 
+# Read-only, and deliberately whole-case rather than per source: the Notes
+# page lists the rows annotated anywhere in the case, which is the one
+# question the detail pane can't answer.
+@app.get("/api/row_notes")
+def api_row_notes(limit: int = 500):
+    return store().list_row_notes(limit)
+
+
 @app.post("/api/layout")
 def api_layout_save(body: LayoutWrite):
     store().save_layout(body.source_id, body.payload)
@@ -3640,22 +5405,6 @@ def api_layout_save(body: LayoutWrite):
 @app.get("/api/layout")
 def api_layout_get(source_id: int):
     return store().get_layout(source_id) or {}
-
-
-@app.get("/api/saved_views")
-def api_saved_views(source_id: int):
-    return store().list_saved_views(source_id)
-
-
-@app.post("/api/saved_views")
-def api_saved_view_add(body: SavedViewWrite):
-    return store().save_view(body.source_id, body.name, body.payload)
-
-
-@app.delete("/api/saved_views/{view_id}")
-def api_saved_view_del(view_id: int):
-    store().delete_saved_view(view_id)
-    return {"ok": True}
 
 
 class NicknameWrite(BaseModel):
@@ -3707,13 +5456,24 @@ def _resolve_timeline_configs() -> dict[int, dict]:
     timeline_templates by header set (order/case-independent, same
     convention every header-set-keyed workspace store uses), returning
     only the sources that actually matched — build_timeline already
-    supplies its own per-source defaults for anything missing here."""
+    supplies its own per-source defaults for anything missing here.
+
+    The header set is the file's OWN columns, derived ones left out —
+    the key Configure tables… saves under (timeline.js). Matching on every
+    column meant the first derived column added to a table changed its
+    key, and the Timeline and the Watchlist's latest hits silently fell
+    back to the defaults. A derived column can still BE the configured
+    timestamp: build_timeline/latest_hits resolve that name against all
+    of the source's columns. A template keyed on the full column list is
+    still honoured when nothing matches the base set, so nothing that
+    matched before stops matching."""
     templates = WS.timeline_templates.list()
     by_key = {tuple(t["col_names"]): t for t in templates}
     configs: dict[int, dict] = {}
     for src in store().list_sources():
-        key = tuple(sorted(c["name"].strip().lower() for c in src["columns"]))
-        tmpl = by_key.get(key)
+        base = tuple(sorted(c["name"].strip().lower() for c in src["columns"] if not c.get("derived")))
+        tmpl = by_key.get(base) or by_key.get(
+            tuple(sorted(c["name"].strip().lower() for c in src["columns"])))
         if tmpl:
             configs[src["id"]] = {
                 "timestamp_column": tmpl.get("timestamp_column"),
@@ -3726,12 +5486,22 @@ def _resolve_timeline_configs() -> dict[int, dict]:
 class TimelineBuild(BaseModel):
     tag_ids: list[int] = []
     op_token: str | None = None
+    ts_range: list[str] | None = None        # [start, end), the overview strip's drag
+    exclude_sources: list[int] = []          # tables switched off on the strip
+    context: list[str] | None = None         # [start, end) of the rows around a finding
+    fold: bool = False                       # a run of repeats on one line
+    unfold: list[list[int]] = []             # runs left open, by their first [source_id, rid]
 
 
 @app.post("/api/timeline")
 def api_timeline_build(body: TimelineBuild):
-    return store().build_timeline(_resolve_timeline_configs(), body.tag_ids or None,
-                                  op_token=body.op_token)
+    try:
+        return store().build_timeline(_resolve_timeline_configs(), body.tag_ids or None,
+                                      op_token=body.op_token, ts_range=body.ts_range,
+                                      exclude_sources=body.exclude_sources or None,
+                                      context=body.context, fold=body.fold, unfold=body.unfold)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 @app.get("/api/timeline_rows")
@@ -3740,6 +5510,63 @@ def api_timeline_rows(view_id: str, start: int = 0, count: int = 200):
         return JSONResponse(store().fetch_timeline_rows(view_id, start, count))
     except KeyError as e:
         raise HTTPException(409, str(e))
+
+
+@app.get("/api/timeline_row")
+def api_timeline_row(source_id: int, rid: int):
+    """A Timeline line's row in full, tags and note included, for the
+    Timeline's detail pane (Store.timeline_row). A table that has gone
+    answers 404 through the KeyError handler; so does a rid it never had
+    (RecordGone)."""
+    return store().timeline_row(source_id, rid)
+
+
+@app.get("/api/timeline_overview")
+def api_timeline_overview(view_id: str, by: str = "tags", buckets: int = Store.TIMELINE_OVERVIEW_BARS):
+    """The Timeline's lines over time, split by first tag or by table, for
+    the overview strip above the list (Store.timeline_overview)."""
+    try:
+        return store().timeline_overview(view_id, by, max(1, min(buckets, 2000)))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except KeyError as e:
+        raise HTTPException(409, str(e))
+
+
+@app.get("/api/timeline_position")
+def api_timeline_position(view_id: str, source_id: int, rid: int, ts: str | None = None):
+    """Where a Timeline line is after a rebuild (Store.timeline_position),
+    so the tab can put the analyst back on the line they had selected."""
+    try:
+        return store().timeline_position(view_id, source_id, rid, ts)
+    except KeyError as e:
+        raise HTTPException(409, str(e))
+
+
+class TimelinePreview(BaseModel):
+    """What Configure tables… has on screen for a header set, not yet
+    saved — the same three fields a timeline template holds."""
+    source_id: int
+    timestamp_column: str | None = None
+    body_columns: list[str] = []
+    type_label: str | None = None
+    limit: int | None = None
+
+
+@app.post("/api/timeline/preview")
+def api_timeline_preview(body: TimelinePreview):
+    """A few rows of one table rendered the Timeline's way under unsaved
+    settings (Store.timeline_preview). Writes nothing; a POST because the
+    settings are a body, like /api/derived/preview. A merge or a table
+    still importing is the request's fault (400); a table that is gone is
+    gone_table_handler's 404, and any other KeyError stays the 500 it
+    would be."""
+    cfg = {"timestamp_column": body.timestamp_column, "body_columns": body.body_columns,
+           "type_label": body.type_label}
+    try:
+        return store().timeline_preview(body.source_id, cfg, limit=body.limit)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 class SavedFilterCreate(BaseModel):
@@ -3797,8 +5624,28 @@ def api_saved_filters_export():
     data = WS.filters.export_all()
     return JSONResponse(
         data,
-        headers={"Content-Disposition": 'attachment; filename="winnow-filters.json"'},
+        headers=_attachment("winnow-filters.json"),
     )
+
+
+def _filters_file_problem(data: Any) -> str | None:
+    """The shape import_all reads, checked first: a filters file is often
+    another analyst's, and valid JSON of the wrong shape used to die
+    inside the importer as a 500."""
+    if not isinstance(data, dict):
+        return "it should be a JSON object"
+    filters = data.get("filters", [])
+    if not isinstance(filters, list):
+        return "'filters' should be a list"
+    for i, f in enumerate(filters):
+        if not isinstance(f, dict):
+            return f"filters[{i}] should be an object"
+        cols = f.get("col_names", [])
+        if not isinstance(cols, list) or not all(isinstance(c, str) for c in cols):
+            return f"filters[{i}].col_names should be a list of column names"
+        if not isinstance(f.get("name", ""), str) or not isinstance(f.get("payload", {}), dict):
+            return f"filters[{i}] has a name or payload of the wrong type"
+    return None
 
 
 @app.post("/api/saved_filters/import")
@@ -3807,6 +5654,9 @@ async def api_saved_filters_import(file: UploadFile = File(...), merge: bool = F
         data = json.loads(await file.read())
     except Exception as e:
         raise HTTPException(400, f"Not a valid filters file: {e}")
+    problem = _filters_file_problem(data)
+    if problem:
+        raise HTTPException(400, f"Not a valid filters file: {problem}")
     added = WS.filters.import_all(data, merge=merge)
     return {"added": added}
 
@@ -3834,11 +5684,14 @@ def api_column_layout_save(body: ColumnLayoutSave):
 
 @app.get("/api/session/{source_id}")
 def api_session_export(source_id: int):
-    data = store().export_session(source_id)
+    try:
+        data = store().export_session(source_id)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
     name = os.path.splitext(data["source"]["name"])[0]
     return JSONResponse(
         data,
-        headers={"Content-Disposition": f'attachment; filename="{name}.tls.json"'},
+        headers=_attachment(f"{name}.tls.json"),
     )
 
 
@@ -3848,7 +5701,15 @@ async def api_session_import(source_id: int, file: UploadFile = File(...), merge
         session = json.loads(await file.read())
     except Exception as e:
         raise HTTPException(400, f"Not a valid session file: {e}")
-    return await run_in_threadpool(store().import_session, source_id, session, merge=merge)
+    problem = session_document_problem(session)
+    if problem:
+        raise HTTPException(400, f"Not a valid session file: {problem}")
+    try:
+        return await run_in_threadpool(store().import_session, source_id, session, merge=merge)
+    except KeyError as e:   # no such table to import onto
+        raise HTTPException(404, str(e))
+    except ValueError as e:   # refused before writing: tag names it can't match (_session_tag_doubts)
+        raise HTTPException(400, str(e))
 
 
 @app.get("/api/case_session")
@@ -3856,7 +5717,7 @@ def api_case_session_export():
     data = store().export_case_session()
     return JSONResponse(
         data,
-        headers={"Content-Disposition": 'attachment; filename="case-session.winnow_case.json"'},
+        headers=_attachment("case-session.winnow_case.json"),
     )
 
 
@@ -3866,7 +5727,13 @@ async def api_case_session_import(file: UploadFile = File(...), merge: bool = Fo
         session = json.loads(await file.read())
     except Exception as e:
         raise HTTPException(400, f"Not a valid session file: {e}")
-    return await run_in_threadpool(store().import_case_session, session, merge=merge)
+    problem = case_session_document_problem(session)
+    if problem:
+        raise HTTPException(400, f"Not a valid session file: {problem}")
+    try:
+        return await run_in_threadpool(store().import_case_session, session, merge=merge)
+    except ValueError as e:   # refused before writing: tag names it can't match (_session_tag_doubts)
+        raise HTTPException(400, str(e))
 
 
 class SessionSaveReq(BaseModel):
@@ -3904,23 +5771,39 @@ def api_case_sessions_save(body: CaseSessionSave):
         raise HTTPException(400, str(e))
 
 
-@app.post("/api/case_sessions/{name}/load")
+# {name:path} on every route that names a session in the URL: the client
+# sends encodeURIComponent(name), but the path is percent-DECODED before
+# routing, so a "/" in the name ("before 12/05", "host1/day2") arrives as
+# two segments and a plain {name} never matched — the session saved and
+# then could not be loaded, renamed, downloaded or deleted. The converter
+# is greedy, so a name that itself ends in "/load" still resolves.
+@app.post("/api/case_sessions/{name:path}/load")
 def api_case_sessions_load(name: str, merge: bool = True):
     try:
         return store().load_session(name, merge=merge)
     except KeyError as e:
         raise HTTPException(404, str(e))
+    except ValueError as e:
+        # Refused before anything was written — a tag name more than one
+        # tag carries, in a session from outside this case
+        # (Store._session_tag_doubts). The analyst's to fix, so not a 500.
+        raise HTTPException(400, str(e))
 
 
 @app.post("/api/case_sessions/adopt")
 def api_case_sessions_adopt(body: CaseSessionAdopt):
+    # Checked whole before it is recorded: a stored session that can never
+    # load is worse than one refused at the door.
+    problem = case_session_document_problem(body.session)
+    if problem:
+        raise HTTPException(400, f"Not a valid session file: {problem}")
     try:
         return store().adopt_session(body.name, body.session)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
 
-@app.post("/api/case_sessions/{name}/rename")
+@app.post("/api/case_sessions/{name:path}/rename")
 def api_case_sessions_rename(name: str, body: CaseSessionRename):
     try:
         return store().rename_session(name, body.name)
@@ -3930,13 +5813,13 @@ def api_case_sessions_rename(name: str, body: CaseSessionRename):
         raise HTTPException(400, str(e))
 
 
-@app.delete("/api/case_sessions/{name}")
+@app.delete("/api/case_sessions/{name:path}")
 def api_case_sessions_delete(name: str):
     store().delete_session(name)
     return {"ok": True}
 
 
-@app.get("/api/case_sessions/{name}/download")
+@app.get("/api/case_sessions/{name:path}/download")
 def api_case_sessions_download(name: str):
     """The hand-off: a stored session as a file, for sending to another
     analyst. The only reason a session file exists now."""
@@ -3945,8 +5828,7 @@ def api_case_sessions_download(name: str):
     except KeyError as e:
         raise HTTPException(404, str(e))
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", name).strip("_") or "session"
-    return JSONResponse(data, headers={
-        "Content-Disposition": f'attachment; filename="{safe}.winnow_case.json"'})
+    return JSONResponse(data, headers=_attachment(f"{safe}.winnow_case.json"))
 
 
 class NewSessionReq(BaseModel):
@@ -3991,6 +5873,8 @@ def api_sessions_load(name: str, merge: bool = True):
         return store().load_named_session(name, merge=merge)
     except KeyError as e:
         raise HTTPException(404, str(e))
+    except ValueError as e:   # refused before writing: tag names it can't match (_session_tag_doubts)
+        raise HTTPException(400, str(e))
 
 
 @app.delete("/api/sessions/{name}")
@@ -4005,18 +5889,90 @@ class SqlToTable(BaseModel):
     force: bool = False
 
 
+async def _client_gone(request: Request) -> None:
+    """Returns once the request's client has hung up. Only for a route that
+    has read its whole body (any route with a pydantic body has): from
+    then on the one message the ASGI receive channel can deliver is
+    http.disconnect — or, once the response is out, the same message."""
+    while (await request.receive())["type"] != "http.disconnect":
+        await asyncio.sleep(0.25)   # a server that says something else: don't spin
+
+
+async def _run_pane_query(request: Request, op_token: str | None, run, *args, **kwargs):
+    """Run a SQL pane query — `run` is a bound Store.run_sql,
+    run_sql_result or sql_to_table — on a worker thread, and interrupt it
+    if the client hangs up first.
+
+    The pane runs whatever the analyst typed, and some of it never ends. A
+    closed window, a reload or a curl --max-time left the query spinning
+    at 100% CPU for the life of the process — and, being an in-flight
+    request, holding the idle shutdown off too. A sync route never notices
+    its client leave (nothing it does reads the socket), so these routes
+    are async: they wait on the work and on the receive channel together,
+    and a hang-up becomes cancel_op on the run's token. A token is made up
+    when the client sent none, so a run nobody can cancel by hand can still
+    be stopped by its client going."""
+    token = op_token or f"pane-{os.urandom(8).hex()}"
+    work = asyncio.ensure_future(run_in_threadpool(run, *args, op_token=token, **kwargs))
+    gone = asyncio.ensure_future(_client_gone(request))
+    try:
+        await asyncio.wait({work, gone}, return_when=asyncio.FIRST_COMPLETED)
+        if not work.done():
+            # On the Store that is running it, not whatever store() is by now.
+            await run_in_threadpool(run.__self__.cancel_op, token)
+        return await work
+    finally:
+        gone.cancel()
+
+
 @app.post("/api/sql/to_table")
-def api_sql_to_table(body: SqlToTable):
+async def api_sql_to_table(body: SqlToTable, request: Request):
     """Land a pane query's result as a new source. Soft 500k cap: over it
     the response asks for confirmation ({needs_confirm, rows}); resend
-    with force=true to proceed."""
+    with force=true to proceed. Stopped if the client hangs up (see
+    _run_pane_query) — 499 rather than 400 when it is."""
     try:
-        res = store().sql_to_table(body.sql, body.name, force=body.force)
+        res = await _run_pane_query(request, None, store().sql_to_table,
+                                    body.sql, body.name, force=body.force)
     except ValueError as e:
         raise HTTPException(400, str(e))
     except sqlite3.Error as e:
         raise HTTPException(400, str(e))
     return res
+
+
+class SaveViewAsTable(BaseModel):
+    view_id: str
+    name: str
+    keys: list[list[int]] | None = None   # explicit [[source_id, rid], ...] picks; None = the whole view
+    exclude: list[list[int]] = []         # rows to leave out — a select-all with a few unchecked
+    spec: dict | None = None              # the filters/sort/search that produced the view; provenance only
+    # Off by default: the Timeline and the whole-case tagged export list
+    # every source's tagged rows, a subset's included, so a seeded copy
+    # would show each finding twice. Scripts that want a tagged copy send
+    # true; the UI never does.
+    copy_tags: bool = False
+    force: bool = False
+    op_token: str | None = None           # client-generated cancel handle — see Store.cancel_op
+
+
+@app.post("/api/view/save_as_table")
+def api_view_save_as_table(body: SaveViewAsTable):
+    """Copy a view — or a pick of its rows — into a new table of the case
+    (Store.save_view_as_source). Same soft cap as /api/sql/to_table:
+    over it the response asks for confirmation ({needs_confirm, rows});
+    resend with force=true. 400 while a derived column of the parent is
+    still building (its values would copy as blanks); 409 on an expired
+    view, the contract every view read has; a cancel via op_token — or
+    the case closing under the copy — is the 499 OpCancelled maps to."""
+    try:
+        return store().save_view_as_source(
+            body.view_id, body.name, keys=body.keys, exclude=body.exclude, spec=body.spec,
+            copy_tags=body.copy_tags, force=body.force, op_token=body.op_token)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except KeyError as e:
+        raise HTTPException(409, str(e))
 
 
 @app.get("/api/export")
@@ -4025,39 +5981,136 @@ def api_export(view_id: str, tagged_only: bool = False, filename: str = "timelin
         gen = store().export_view_csv(view_id, tagged_only)
     except KeyError as e:
         raise HTTPException(409, str(e))
+    what = f"CSV {'tagged rows of ' if tagged_only else ''}view {view_id}"
+
+    def logged():
+        # Counted as it streams: the row count isn't known up front, and
+        # an aborted download (browser closed) is worth a line too. A
+        # failure mid-stream can't reach the catch-all handler (headers
+        # are already out), so it is recorded here or nowhere.
+        rows, nbytes, t0 = 0, 0, time.time()
+        wlog.record("info", f"Export started: {what} → {filename}")
+        try:
+            for chunk in gen:
+                if isinstance(chunk, str):
+                    rows += chunk.count("\n")
+                    nbytes += len(chunk.encode("utf-8"))
+                else:
+                    rows += chunk.count(b"\n")
+                    nbytes += len(chunk)
+                yield chunk
+        except GeneratorExit:
+            wlog.record("warn", f"Export aborted: {what} after {rows:,} lines, {nbytes:,} bytes")
+            raise
+        except Exception as e:  # noqa: BLE001 — the download is already truncated; say why
+            wlog.record("error", f"Export failed: {what} after {rows:,} lines — {type(e).__name__}: {e}")
+            raise
+        wlog.record("info", f"Export finished: {what} — {max(rows - 1, 0):,} rows, {nbytes:,} bytes "
+                            f"in {time.time() - t0:.1f}s")
+
     return StreamingResponse(
-        gen,
+        logged(),
         media_type="text/csv",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers=_attachment(filename),
     )
 
 
 @app.get("/api/export/tagged_xlsx")
 def api_export_tagged_xlsx(filename: str = "tagged-export.xlsx"):
+    t0 = time.time()
+    wlog.record("info", f"Export started: tagged rows from all tables (.xlsx) → {filename}")
     buf = store().export_tagged_xlsx()
+    wlog.record("info", f"Export finished: tagged rows from all tables (.xlsx) — "
+                        f"{buf.getbuffer().nbytes:,} bytes in {time.time() - t0:.1f}s")
+    # In 1 MB reads, never the BytesIO itself: StreamingResponse iterates a
+    # file object by LINES, and a zip has a newline byte every couple of
+    # hundred bytes, so a 217 MB workbook went out as 856,000 chunks, each
+    # its own trip through the threadpool — 109 s to send what takes 0.2 s
+    # in megabyte reads.
     return StreamingResponse(
-        buf,
+        iter(lambda: buf.read(1 << 20), b""),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers=_attachment(filename),
+    )
+
+
+@app.get("/api/export/all_xlsx/plan")
+def api_export_all_xlsx_plan():
+    return store().export_all_xlsx_plan()
+
+
+@app.get("/api/export/all_xlsx")
+def api_export_all_xlsx(filename: str = "all-tables.xlsx"):
+    """Every table, every row, to a temp file the response streams and
+    then deletes. A temp FILE rather than BytesIO because the workbook is
+    the size of the case; mkstemp's descriptor is closed before openpyxl
+    opens the path, which Windows insists on. Runs in the threadpool (a
+    plain def), so a multi-minute export doesn't block the app — there is
+    no progress bar for it yet, and the plan route is how the UI warns
+    about a big one first."""
+    from starlette.background import BackgroundTask
+    t0 = time.time()
+    wlog.record("info", f"Export started: all tables (.xlsx) → {filename}")
+    fd, path = tempfile.mkstemp(suffix=".xlsx", prefix="winnow-export-")
+    os.close(fd)
+    try:
+        stats = store().export_all_xlsx(path)
+    except BaseException:
+        wlog.record("error", "Export failed: all tables (.xlsx)")
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+        raise
+    wlog.record("info", f"Export finished: all tables (.xlsx) — {stats['rows']:,} rows on "
+                        f"{stats['sheets']} sheet{'s' if stats['sheets'] != 1 else ''}, "
+                        f"{os.path.getsize(path):,} bytes in {time.time() - t0:.1f}s")
+    return FileResponse(
+        path,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers=_attachment(filename),
+        background=BackgroundTask(os.unlink, path),
     )
 
 
 class SearchAllReq(BaseModel):
     query: str = ""
     terms: list[dict] = []  # advanced mode: [{term, connector: "AND"|"OR", exclude: bool}]
+    # None = every real table in the case, which is what the sweep has
+    # always done. A list scopes it; a merge id in that list expands to the
+    # merge's members (Store.resolve_search_all_scope).
+    source_ids: list[int] | None = None
 
 
 @app.post("/api/search_all")
 def api_search_all(body: SearchAllReq):
     """Synchronous whole-sweep search. Kept for scripted/one-shot use; the
     UI goes through the job routes below so it can show partial results and
-    let the analyst close the modal mid-sweep."""
-    return store().search_all_sources(body.query, body.terms)
+    let the analyst close the modal mid-sweep.
+
+    The scope is resolved on its own line, and only that line is inside the
+    try: a KeyError is the caller naming a table this case doesn't have,
+    and an `except KeyError` wrapped around the whole sweep would turn any
+    dict-key defect inside the scan into a 400 blaming the request for
+    something the analyst can't fix (api_view's old bare `except
+    Exception`, which docs/notes/server.md records)."""
+    st = store()
+    try:
+        scope = st.resolve_search_all_scope(body.source_ids)["source_ids"]
+    except KeyError as e:
+        raise HTTPException(400, e.args[0])
+    return st.search_all_sources(body.query, body.terms, scope)
 
 
 @app.post("/api/search_all/start")
 def api_search_all_start(body: SearchAllReq):
-    return store().start_search_all_job(body.query, body.terms)
+    """400 (not a job that quietly scans nothing) when the scope names a
+    source this case doesn't have — an empty result set reads as "no
+    matches", which would be an answer rather than the error it is. The
+    scope resolve is the only thing here that can raise KeyError, and it
+    runs before the thread starts (Store.start_search_all_job)."""
+    try:
+        return store().start_search_all_job(body.query, body.terms, body.source_ids)
+    except KeyError as e:
+        raise HTTPException(400, e.args[0])
 
 
 @app.get("/api/search_all/job")
@@ -4077,11 +6130,177 @@ def api_search_all_cancel(job_id: int | None = None):
 
 
 @app.post("/api/sql")
-def api_sql(body: SqlQuery):
+async def api_sql(body: SqlQuery, request: Request):
+    """A query's rows inline, capped — winnow.api.sql and dashboards; the
+    SQL pane's own Run is /api/sql/run. Stoppable three ways, because the
+    SQL is whatever was typed: cancel_op on its op_token (→ 499), the
+    client hanging up (_run_pane_query), and shutdown
+    (Store.stop_pane_queries)."""
     try:
-        return store().run_sql(body.sql, body.limit)
+        res = await _run_pane_query(request, body.op_token, store().run_sql, body.sql, body.limit)
+    except OpCancelled:
+        raise
     except Exception as e:
         raise HTTPException(400, str(e))
+    # Encoded here, at the JSON boundary, not in Store.run_sql: plugins
+    # call run_sql server-side and are owed the values SQLite returned.
+    res["rows"] = [[pane_cell_json(v) for v in row] for row in res["rows"]]
+    # Straight to json.dumps, as api_rows does — FastAPI's per-cell
+    # jsonable_encoder walk is most of the time on a big answer.
+    return JSONResponse(res)
+
+
+@app.post("/api/sql/run")
+async def api_sql_run(body: SqlRun, request: Request):
+    """The SQL pane's Run: every row, held server-side (Store.run_sql_result,
+    winnow/sqlresults.py). Answers with the result's id, row count, column
+    widths and its first rows; the rest is paged through the routes
+    below. A Stop before the first row is the 499 OpCancelled maps to; a
+    Stop after it keeps the rows so far and says `stopped`. Async for the
+    same reason /api/sql is: a client that hangs up stops the query
+    (_run_pane_query)."""
+    try:
+        res = await _run_pane_query(request, body.op_token, store().run_sql_result,
+                                    body.sql, release=body.release)
+    except OpCancelled:
+        raise
+    except (ValueError, sqlite3.Error) as e:
+        raise HTTPException(400, str(e))
+    return JSONResponse(res)
+
+
+@app.get("/api/sql/run/progress")
+def api_sql_run_progress(token: str):
+    return store().sql_run_progress(token)
+
+
+def _sql_result_call(fn, *args, **kwargs):
+    """The held-result routes' one error contract: a result that is gone
+    is 404 (the pane says to run the query again), a bad column or row
+    reference is 400, a copy too big for a clipboard is 413."""
+    try:
+        return fn(*args, **kwargs)
+    except ResultExpired as e:
+        raise HTTPException(404, str(e))
+    except TooBig as e:
+        raise HTTPException(413, str(e))
+    except (ValueError, TypeError) as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/sql/result/{result_id}/rows")
+def api_sql_result_rows(result_id: str, start: int = 0, count: int = 500,
+                        sort: int | None = None, order: str = "asc"):
+    return JSONResponse(_sql_result_call(store().sql_results.page, result_id, start, count, sort, order))
+
+
+class SqlRowRef(BaseModel):
+    """Which result columns name a real row (the pane's sqlRowRef): the
+    rid column, plus the source_id column or the one source."""
+    rid_col: int
+    sid_col: int | None = None
+    sid: int | None = None
+
+
+@app.get("/api/sql/result/{result_id}/keys")
+def api_sql_result_keys(result_id: str, start: int, count: int, rid_col: int,
+                        sid_col: int | None = None, sid: int | None = None,
+                        sort: int | None = None, order: str = "asc"):
+    ref = {"rid_col": rid_col, "sid_col": sid_col, "sid": sid}
+    return {"keys": _sql_result_call(store().sql_results.keys, result_id, start, count, ref, sort, order)}
+
+
+@app.get("/api/sql/result/{result_id}/tags")
+def api_sql_result_tags(result_id: str, rid_col: int, sid_col: int | None = None, sid: int | None = None):
+    st = store()
+    ref = {"rid_col": rid_col, "sid_col": sid_col, "sid": sid}
+    return _sql_result_call(st.sql_results.tags, result_id, ref, st.path)
+
+
+class SqlResultPick(BaseModel):
+    sort: int | None = None
+    order: str = "asc"
+    keys: list[list[int]] | None = None   # the selection; None = every row
+    ref: SqlRowRef | None = None
+    format: str = "tsv"                   # "tsv" for the clipboard, "rows" for winnow.sqlPage.selectedRows
+
+
+@app.post("/api/sql/result/{result_id}/pick")
+def api_sql_result_pick(result_id: str, body: SqlResultPick):
+    return JSONResponse(_sql_result_call(
+        store().sql_results.pick, result_id, body.sort, body.order, body.keys,
+        body.ref.model_dump() if body.ref else None, as_text=body.format != "rows"))
+
+
+class SqlResultRelease(BaseModel):
+    ids: list[str]
+
+
+@app.post("/api/sql/result/release")
+def api_sql_result_release(body: SqlResultRelease):
+    return {"released": store().sql_results.release(body.ids)}
+
+
+@app.get("/api/sql/result/{result_id}/export.csv")
+def api_sql_result_csv(result_id: str, sort: int | None = None, order: str = "asc",
+                       filename: str = "query-results.csv"):
+    """Every row of a held result, in the order the pane shows it,
+    streamed off the scratch table — never assembled in memory, by the
+    server or the tab."""
+    st = store()
+    gen = _sql_result_call(st.sql_result_csv, result_id, sort, order)
+    what = f"SQL result {result_id} (.csv)"
+
+    def logged():
+        n, t0 = 0, time.time()
+        wlog.record("info", f"Export started: {what} \u2192 {filename}")
+        try:
+            for chunk in gen:
+                n += chunk.count("\n")
+                yield chunk
+        except GeneratorExit:
+            wlog.record("warn", f"Export aborted: {what} after {n:,} lines")
+            raise
+        except Exception as e:  # noqa: BLE001 — the download is already truncated; say why
+            wlog.record("error", f"Export failed: {what} after {n:,} lines — {type(e).__name__}: {e}")
+            raise
+        wlog.record("info", f"Export finished: {what} — {max(n - 1, 0):,} rows in {time.time() - t0:.1f}s")
+
+    return StreamingResponse(logged(), media_type="text/csv",
+                             headers=_attachment(filename or "query-results.csv"))
+
+
+@app.get("/api/sql/result/{result_id}/export.xlsx")
+def api_sql_result_xlsx(result_id: str, sort: int | None = None, order: str = "asc",
+                        filename: str = "query-results.xlsx", sheet: str = "Query"):
+    """A held result as a workbook, in displayed order, continuing onto
+    "Query (2)"… past one worksheet. Built into a temp file the response
+    streams and then deletes (export_all_xlsx's shape): the rows come off
+    the scratch table, so a million of them are never in memory at once —
+    it used to be the browser posting them all up, which crashed the tab."""
+    from starlette.background import BackgroundTask
+    st = store()
+    t0 = time.time()
+    what = f"SQL result {result_id} (.xlsx)"
+    wlog.record("info", f"Export started: {what} \u2192 {filename}")
+    fd, path = tempfile.mkstemp(suffix=".xlsx", prefix="winnow-export-")
+    os.close(fd)
+    try:
+        stats = _sql_result_call(st.sql_result_xlsx, result_id, path, sort, order, sheet)
+    except BaseException:
+        wlog.record("error", f"Export failed: {what}")
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+        raise
+    wlog.record("info", f"Export finished: {what} — {stats['rows']:,} rows on {stats['sheets']} "
+                        f"sheet{'s' if stats['sheets'] != 1 else ''}, {os.path.getsize(path):,} bytes "
+                        f"in {time.time() - t0:.1f}s")
+    return FileResponse(
+        path,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers=_attachment(filename or "query-results.xlsx"),
+        background=BackgroundTask(os.unlink, path),
+    )
 
 
 class SqlTabCreate(BaseModel):
@@ -4127,9 +6346,66 @@ def api_sql_tabs_reorder(body: SqlTabReorder):
     return store().reorder_sql_tabs(body.ids)
 
 
+# A mount key is 'tab:'/'panel:'/'page:' plus the mount id (plugins.js
+# mountKey), and the mount id carries the plugin's DISPLAY name, which can
+# hold anything an author typed — a slash included. That is why the key
+# travels as a parameter rather than a path segment: "First/Last" in a path
+# is two segments by the time uvicorn has unquoted it.
+# fullmatch, not match: `$` also matches just before a trailing newline, so
+# "tab:x.y\n" would pass and become a second row under a key no mount ever
+# reads back.
+_PLUGIN_STATE_KEY_RE = re.compile(r"(tab|panel|page):[^\x00-\x1f]{1,180}")
+
+
+def _plugin_state_key(key: str) -> str:
+    if not _PLUGIN_STATE_KEY_RE.fullmatch(key or ""):
+        raise HTTPException(400, "A plugin state key is 'tab:'/'panel:'/'page:' plus the mount id")
+    return key
+
+
+class PluginStateWrite(BaseModel):
+    key: str
+    payload: Any = None      # null clears the row — winnow.tabState.clear()
+
+
+@app.get("/api/plugin_state")
+def api_plugin_state_get(key: str):
+    """What a plugin mount saved in THIS case, or nulls if it never has.
+    Nothing here is trusted on the way back in: the payload describes what
+    the analyst had, and the plugin validates it against the case as it
+    stands now (a table may be gone, a column dropped, an id reused)."""
+    rec = store().get_plugin_ui_state(_plugin_state_key(key))
+    return rec or {"mount_key": key, "payload": None, "saved_at": None}
+
+
+@app.post("/api/plugin_state")
+def api_plugin_state_set(body: PluginStateWrite):
+    """Replace (or, with a null payload, clear) a mount's saved state.
+    Over the size cap is a 400 with the number in it — a plugin saving rows
+    instead of a spec should hear about it in the console, not silently
+    grow the case file."""
+    key = _plugin_state_key(body.key)
+    if body.payload is None:
+        store().clear_plugin_ui_state(key)
+        return {"mount_key": key, "payload": None, "saved_at": None}
+    try:
+        return store().set_plugin_ui_state(key, body.payload)
+    except (TypeError, ValueError) as e:
+        raise HTTPException(400, str(e))
+
+
 @app.get("/")
 def index():
-    return FileResponse(HERE / "static" / "index.html")
+    """The app shell, with Remote session mode already on <html> when this
+    machine has it on. The page otherwise learns the setting from a fetch
+    in boot(), which lands after the launch animation has started — so the
+    one thing that animates hardest ran on exactly the remote displays the
+    mode exists to spare, and the mode's CSS switch-off came in a beat
+    after the first paint."""
+    page = (HERE / "static" / "index.html").read_text(encoding="utf-8")
+    if WS.app_settings.get().get("remote_session"):
+        page = page.replace("<html ", '<html class="remote" ', 1)
+    return HTMLResponse(page)
 
 
 app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
@@ -4227,14 +6503,157 @@ def _run_assoc(files: list[str], no_browser: bool = False) -> int | None:
     return None   # become the server
 
 
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+DEFAULT_PORT = 8777
+# How many ports past DEFAULT_PORT a second Winnow tries before it takes
+# whatever the OS hands out. Nearby and in order, so a second copy started
+# the same way lands on the same port each time and keeps its browser
+# storage (which is per port) from one run to the next.
+PORT_FALLBACK_SPAN = 20
+
+
+def _listener(host: str, port: int) -> socket.socket:
+    """A socket bound to `host`:`port` (0: any free port) for uvicorn to
+    serve on. Bound, not listening: until uvicorn starts serving, a
+    connection is refused rather than left hanging.
+
+    Bound here rather than by uvicorn because the port has to be this
+    process's BEFORE a window is opened on it. uvicorn binds as it starts
+    serving, which is after main() has opened the case and started the
+    browser thread, and that thread only waited for the port to answer. A
+    second Winnow started while the first held 8777 opened its window on
+    8777 — the FIRST Winnow — and then failed to bind and exited, with no
+    console to say so: the analyst was working in the other case without
+    knowing it.
+
+    No SO_REUSEADDR on Windows, where it would let a second socket bind a
+    port that is in use; SO_EXCLUSIVEADDRUSE instead, so nothing else can
+    bind a more specific address under this one. Elsewhere SO_REUSEADDR is
+    what asyncio sets too: it only lets a restart past the old process's
+    TIME_WAIT, never two listeners."""
+    infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM, flags=socket.AI_PASSIVE)
+    infos.sort(key=lambda i: i[0] != socket.AF_INET)   # "localhost": 127.0.0.1, as before
+    family, kind, proto, _, addr = infos[0]
+    sock = socket.socket(family, kind, proto)
+    try:
+        if os.name == "nt":
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        else:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if family == socket.AF_INET6:
+            sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+        sock.bind(addr)
+    except BaseException:
+        sock.close()
+        raise
+    return sock
+
+
+def _claim_port(host: str, port: int | None) -> socket.socket:
+    """The listener main() serves on. An explicit `port` is that port or an
+    OSError: a script that asked for one port must not be answered on
+    another. With none, DEFAULT_PORT, else the next free one after it, else
+    any — the second Winnow on a machine is a normal thing to start."""
+    if port is not None:
+        return _listener(host, port)
+    tried: OSError | None = None
+    for p in (*range(DEFAULT_PORT, DEFAULT_PORT + PORT_FALLBACK_SPAN + 1), 0):
+        try:
+            return _listener(host, p)
+        except socket.gaierror:
+            raise                # the host, not the port: no other port will do better
+        except OSError as e:     # in use, or reserved (Windows' excluded port ranges)
+            tried = e
+    raise tried
+
+
+def _ensure_console_streams() -> None:
+    """Give sys.stdout/sys.stderr somewhere to go when the process has no
+    console.
+
+    Windows' pythonw.exe — which is what a file association registered in
+    background mode launches (assoc.launch_command) — starts a process
+    with no console at all, and CPython sets sys.stdout and sys.stderr to
+    None rather than to a stream that discards. `print()` tolerates that;
+    uvicorn does not. `uvicorn.run` configures logging before it binds,
+    and its default formatter asks `sys.stdout.isatty()`, so the server
+    died with an AttributeError on the line before it would have started
+    listening.
+
+    What the analyst saw was nothing: double-click a file, no window, no
+    error — the browser thread was waiting out its fifteen seconds on a
+    port that was never going to open, and there was no console for the
+    traceback to land in either. "Launching by association never opens
+    the browser" is that crash, seen from outside.
+
+    Rebinding both to os.devnull is deliberately the whole fix. The
+    alternative — handing uvicorn a log config that does not touch stdout
+    — would leave every other stdout consumer (this module's own prints,
+    any plugin's) one None-dereference away from the same silent death.
+
+    The second half is the same death by a different route: a stream
+    that cannot spell what startup prints. The null stream was opened in
+    the locale encoding — cp1252 on a typical Windows box — and startup
+    prints "Plugin disabled: … (toggle in Settings → Plugins)" for each
+    bundled example, all off by default; `→` is not in cp1252, so a
+    double-click died before binding again, just as silently. The null
+    stream is UTF-8 with errors="replace" now (it discards everything;
+    only "never raise" matters). A REAL stream in the locale encoding —
+    `python server.py > winnow.log`, or PYTHONIOENCODING=cp1252 — keeps
+    its encoding, since whatever reads it expects that, but stops being
+    strict: what it cannot spell comes out as a backslash escape, which
+    is what Python's own stderr already does. log.record writes to
+    stderr, so it is covered by both halves.
+    """
+    devnull = None
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        if stream is not None:
+            if getattr(stream, "errors", None) == "strict":
+                # Not every stream has reconfigure (a test's StringIO, a
+                # host's own wrapper); one that can't be told is left as
+                # it was rather than replaced.
+                with contextlib.suppress(AttributeError, ValueError, OSError):
+                    stream.reconfigure(errors="backslashreplace")
+            continue
+        if devnull is None:
+            # Line-buffered text, like a console would be. Never closed:
+            # it has to outlive main() — uvicorn logs through it until the
+            # process exits, and the OS reclaims it then.
+            devnull = open(os.devnull, "w", encoding="utf-8",  # noqa: SIM115
+                           errors="replace", buffering=1)
+        setattr(sys, name, devnull)
+
+
+def _load_startup_plugins() -> None:
+    """main()'s one plugin load (the import-time load is skipped under
+    `python server.py`), and the console summary of what it loaded — after
+    the startup case is open, so the summary describes what this server
+    will actually run rather than the machine defaults."""
+    _reload_plugins()
+    for p in PLUGINS.describe():
+        if p["bundled"] and p["fs_name"] in RETIRED_BUNDLED_EXAMPLES:
+            # Stamped with its reason by _reload_plugins; not a failure.
+            print(f"Plugin retired: {p['name']} ({p['path']}): {p['error']}")
+        elif p["error"]:
+            record_log("error", f"Plugin FAILED: {p['name']} ({p['path']}): {p['error']}")
+        elif not p["enabled"]:
+            print(f"Plugin disabled: {p['name']} (toggle in Settings → Plugins)")
+        else:
+            # Formats *and* tabs — a tab-only plugin reporting "no formats"
+            # reads like a failed load when it's a perfectly good plugin.
+            what = ", ".join(p["formats"] + p["tabs"]) or "registered nothing"
+            print(f"Plugin loaded: {p['name']}" + (f" v{p['version']}" if p["version"] else "") + f" ({what})")
 
 
 def main() -> None:
     global STORE
+    # Before anything that might log or print: with no console there is
+    # no stdout, and the crash that causes is invisible by construction.
+    _ensure_console_streams()
+    # And a console that is there but has stopped taking output (one click
+    # in a QuickEdit window does it) must stall only the thread that writes
+    # to it, never a request or the event loop: winnow/console.py.
+    console.install()
     # Stored WINNOW_* variables (tokens plugins read) join the process
     # environment here, not at import — `import server` in a test must
     # never read the developer's real store. A real export wins.
@@ -4249,7 +6668,9 @@ def main() -> None:
                          "names are always accepted; see ALLOWED_HOSTS.")
     ap.add_argument("--force", action="store_true",
                     help="Open --case even if another Winnow already has it open")
-    ap.add_argument("--port", type=int, default=8777)
+    ap.add_argument("--port", type=int, default=None,
+                    help=f"Port to listen on. Default {DEFAULT_PORT}, or the next free one "
+                         "when another Winnow has it; a port given here is used or refused")
     ap.add_argument("--no-fts", action="store_true", help="Skip full-text index (faster import)")
     ap.add_argument("--assoc", nargs="+", metavar="FILE",
                     help="opened via a file association: reuse a running Winnow when "
@@ -4276,17 +6697,6 @@ def main() -> None:
     if args.plugins_dir:
         global PLUGIN_DIRS
         PLUGIN_DIRS = _plugin_dirs(args.plugins_dir)
-        _reload_plugins()
-    for p in PLUGINS.describe():
-        if p["error"]:
-            record_log("error", f"Plugin FAILED: {p['name']} ({p['path']}): {p['error']}")
-        elif not p["enabled"]:
-            print(f"Plugin disabled: {p['name']} (toggle in Settings → Plugins)")
-        else:
-            # Formats *and* tabs — a tab-only plugin reporting "no formats"
-            # reads like a failed load when it's a perfectly good plugin.
-            what = ", ".join(p["formats"] + p["tabs"]) or "registered nothing"
-            print(f"Plugin loaded: {p['name']}" + (f" v{p['version']}" if p["version"] else "") + f" ({what})")
 
     # The bound address is by definition one this server answers to, as is
     # anything the operator named explicitly.
@@ -4301,6 +6711,15 @@ def main() -> None:
             file=sys.stderr,
         )
 
+    if elevation.this_process():
+        print(
+            "WARNING: Winnow is running as administrator. Windows doesn't let File "
+            "Explorer drag files into a program running as administrator, so dragging "
+            "files onto Winnow's window may not work. Start Winnow from a normal, "
+            "non-administrator window to drag files in; Case > Import... works either way.",
+            file=sys.stderr,
+        )
+
     if args.assoc:
         handed_off = _run_assoc(args.assoc, no_browser=args.no_browser)
         if handed_off is not None:
@@ -4308,7 +6727,7 @@ def main() -> None:
             sys.exit(handed_off)
         # Nobody could take it — this process becomes the server, on its own
         # port so it can never collide with a Winnow already listening.
-        args.port = _free_port()
+        args.port = 0
         if len(args.assoc) == 1 and is_winnow_case_file(args.assoc[0]):
             args.case = args.assoc[0]
         else:
@@ -4318,9 +6737,38 @@ def main() -> None:
             # through the kind-aware quick-look ingest after the store opens.
             args.assoc_ingest = list(args.assoc)
 
+    # The port before the case: a Winnow that can't serve must not open a
+    # case, import into it, or open a window — least of all on the port
+    # another Winnow already has (see _listener).
+    try:
+        listener = _claim_port(args.host, args.port)
+    except OSError as e:
+        print(f"ERROR: Winnow can't listen on {args.host}:{args.port or DEFAULT_PORT}: {e}\n"
+              "  Another program (often another Winnow) has that port. "
+              "Leave out --port and Winnow picks a free one.",
+              file=sys.stderr)
+        sys.exit(3)
+    asked = args.port
+    args.port = listener.getsockname()[1]
+    if asked is None and args.port != DEFAULT_PORT:
+        print(f"Port {DEFAULT_PORT} is in use (another Winnow?), so this one is on {args.port}.",
+              flush=True)
+
     case_path = args.case or (f"case{CASE_SUFFIX}" if args.open_files else None)
     url = f"http://{args.host}:{args.port}"
     if case_path:
+        # Same rule as /api/case/open, said here rather than as
+        # _open_store's traceback: an existing file that is not a case is
+        # not created over — the schema would land in it.
+        if os.path.exists(case_path) and not is_winnow_case_file(case_path):
+            print(
+                f"ERROR: {os.path.abspath(case_path)} is not a Winnow case file — opening it "
+                "as one would write Winnow's tables into it.\n"
+                "  To import it as evidence, open a case and import it; "
+                "for a new case, give a path that does not exist yet.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         # Refuse rather than warn: this entrypoint is scriptable, a warning
         # scrolls past, and opening a case twice is the failure the lock
         # exists to catch. --force is the deliberate way through, and a
@@ -4345,6 +6793,10 @@ def main() -> None:
             # saves them — an unregistered temp case is the whole point.
             WS.cases.create(case_path, name=os.path.splitext(os.path.basename(case_path))[0])
             WS.cases.touch_opened(WS.cases.find_by_path(case_path)["id"])
+        # After the open, so the case's own plugin settings apply from the
+        # first request; before the quick-look imports below, which route a
+        # file to a plugin's parser when one claims it.
+        _load_startup_plugins()
         for f in getattr(args, "assoc_ingest", []):
             try:
                 job = _assoc_ingest(f)
@@ -4362,8 +6814,13 @@ def main() -> None:
             if rec.get("suspect_quote_rows"):
                 print(f"  {rec['suspect_quote_rows']:,} row(s) contain very long multi-line fields — "
                       "check for a stray quote if the row count looks low")
+            if rec.get("encoding") == "cp1252":
+                print("  not UTF-8 — read as Windows-1252")
+            elif rec.get("cp1252_bytes"):
+                print(f"  {rec['cp1252_bytes']:,} byte(s) not valid UTF-8 — read as Windows-1252")
         print(f"Winnow on {url}  (case: {os.path.abspath(case_path)})")
     else:
+        _load_startup_plugins()
         print(f"Winnow on {url}  (home screen — no case open)")
     if not args.no_browser:
         # Opened from a thread that waits for the port, rather than before
@@ -4371,21 +6828,63 @@ def main() -> None:
         # landing on a connection error has no address bar to retry from.
         browser.open_when_ready(url, args.host, args.port,
                                 app_mode=not args.browser_tab,
-                                profile_dir=args.browser_profile)
+                                profile_dir=args.browser_profile,
+                                expect_pid=os.getpid())
 
     if args.no_idle_shutdown:
         PRESENCE.enabled = False
 
     # Registered before uvicorn blocks, not in the lifespan: the lifespan
     # doesn't know the port (uvicorn owns it by then), and a launcher that
-    # probes an entry a moment before bind completes just gets a failed
-    # probe and moves on — running() treats the file as a hint, the port as
-    # the truth.
+    # probes an entry a moment before bind completes gets a failed probe and
+    # moves on — running() treats the file as a hint, the port as the truth,
+    # and leaves an entry this young in place (instances.STARTUP_GRACE_S).
     with contextlib.suppress(Exception):
         instances.register(args.port, case_path if case_path else None)
 
     import uvicorn
-    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+
+    class _Server(uvicorn.Server):
+        def handle_exit(self, sig, frame):
+            _stop_pane_queries()
+            super().handle_exit(sig, frame)
+
+        async def shutdown(self, sockets=None):
+            # First, while nothing is waiting yet: an open window's presence
+            # stream would otherwise hold the wait below for as long as the
+            # window stays open (_end_presence_streams).
+            _end_presence_streams()
+            await super().shutdown(sockets=sockets)
+
+    # uvicorn.run, less the reload/workers branches Winnow never takes, so
+    # that the signal handler and shutdown above are the ones uvicorn runs.
+    server = _Server(uvicorn.Config(app, host=args.host, port=args.port, log_level="warning"))
+    with contextlib.suppress(KeyboardInterrupt):
+        server.run(sockets=[listener])
+    if not server.started:
+        sys.exit(3)   # uvicorn.run's STARTUP_FAILURE: startup raised (the port is already ours)
+
+
+def _stop_pane_queries() -> None:
+    """Interrupt the open case's running SQL pane queries — from uvicorn's
+    signal handler, which is where Shut down (_trigger_shutdown), Ctrl+C and
+    SIGTERM all arrive.
+
+    Here rather than in the lifespan's Store.close(), which does the same
+    but never got the chance: uvicorn's graceful shutdown waits for every
+    in-flight request BEFORE it runs the lifespan's shutdown half, a pane
+    query that never ends is an in-flight request that never ends, and
+    the process cannot exit while a worker thread is inside sqlite3_step.
+    So Shut down answered {"ok": true} and the server ran on at 100% CPU,
+    case lock held, until someone killed it.
+
+    On a thread of its own: a signal handler runs on the main thread
+    between two bytecodes — possibly inside Store.close() (a second
+    Ctrl+C during shutdown) holding the lock stop_pane_queries takes."""
+    s = STORE
+    if s is not None:
+        threading.Thread(target=s.stop_pane_queries, name="winnow-stop-queries",
+                         daemon=True).start()
 
 
 if __name__ == "__main__":

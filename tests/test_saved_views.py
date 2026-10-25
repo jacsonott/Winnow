@@ -1,79 +1,105 @@
-"""Saved views: the store CRUD and its three routes. This is currently a
-backend-only feature (CLAUDE.md backlog #5 — the UI doesn't call it yet),
-which is exactly why it needs pinning: nothing exercises it day-to-day,
-so a regression would sit invisible until the UI finally lands on top of
-a broken foundation."""
+"""Saved views are gone: the per-table view snapshots behind
+/api/saved_views had a working backend and no UI, and saved filters
+already cover what an analyst would save. What has to keep working is
+what they left behind — a case file made before the removal still has a
+saved_views table, and a session saved then still carries a
+`saved_views` list."""
 
 from __future__ import annotations
 
-import pytest
-from fastapi.testclient import TestClient
+import json
+import sqlite3
 
-HEADERS = {"X-Timeline-Lite-Client": "1"}
+import pytest
+
+from winnow.store import DEFAULT_TAGS, Store, case_session_document_problem
 
 ROWS = [["When", "Who"], ["2024-01-01 10:00", "alice"], ["2024-01-01 11:00", "bob"]]
 
-PAYLOAD = {"filters": [{"column": "Who", "op": "equals", "value": "alice"}],
-           "sort": [{"column": "When", "dir": "desc"}],
-           "search": "svc", "search_mode": "contains"}
+OLD_TABLE = """CREATE TABLE saved_views (
+    id        INTEGER PRIMARY KEY,
+    source_id INTEGER NOT NULL,
+    name      TEXT NOT NULL,
+    payload   TEXT NOT NULL,
+    saved_at  TEXT
+)"""
 
 
 @pytest.fixture
-def sid(store, write_csv):
-    return store.ingest_csv(write_csv(ROWS, "sv.csv"), build_fts=False)["id"]
+def old_case(case_path, write_csv):
+    """A case file as an older Winnow left it: one table, plus a saved
+    view for it in a saved_views table."""
+    s = Store(case_path, default_tags=DEFAULT_TAGS)
+    sid = s.ingest_csv(write_csv(ROWS, "sv.csv"), build_fts=False)["id"]
+    s.close()
+    con = sqlite3.connect(case_path)
+    con.execute(OLD_TABLE)
+    con.execute("INSERT INTO saved_views(source_id, name, payload) VALUES (?, ?, ?)",
+                (sid, "alice only", json.dumps({"filters": []})))
+    con.commit()
+    con.close()
+    return case_path, sid
 
 
-def test_save_list_delete_round_trip(store, sid):
-    saved = store.save_view(sid, "alice only", PAYLOAD)
-    assert saved["id"] > 0
-
-    views = store.list_saved_views(sid)
-    assert len(views) == 1
-    # Payload fidelity is the whole feature — a saved view that comes back
-    # subtly different silently changes what the analyst re-applies.
-    assert views[0]["payload"] == PAYLOAD
-    assert views[0]["name"] == "alice only"
-
-    store.delete_saved_view(saved["id"])
-    assert store.list_saved_views(sid) == []
+def test_a_new_case_has_no_saved_views_table(store):
+    names = {r[0] for r in store.db.execute("SELECT name FROM sqlite_master")}
+    assert "saved_views" not in names
 
 
-def test_saved_views_are_scoped_to_their_source(store, write_csv, sid):
-    other = store.ingest_csv(write_csv(ROWS, "sv2.csv"), build_fts=False)["id"]
-    store.save_view(sid, "mine", PAYLOAD)
-    store.save_view(other, "theirs", PAYLOAD)
-    assert [v["name"] for v in store.list_saved_views(sid)] == ["mine"]
-    assert [v["name"] for v in store.list_saved_views(other)] == ["theirs"]
+def test_the_routes_are_gone(client, store, write_csv):
+    sid = store.ingest_csv(write_csv(ROWS, "sv.csv"), build_fts=False)["id"]
+    assert client.get(f"/api/saved_views?source_id={sid}").status_code == 404
+    assert client.post("/api/saved_views",
+                       json={"source_id": sid, "name": "x", "payload": {}}).status_code in (404, 405)
 
 
-def test_newest_first_ordering(store, sid):
-    store.save_view(sid, "first", PAYLOAD)
-    store.save_view(sid, "second", PAYLOAD)
-    assert [v["name"] for v in store.list_saved_views(sid)] == ["second", "first"]
+def test_an_old_case_file_still_opens_and_its_tables_can_be_dropped(old_case, tmp_path):
+    path, sid = old_case
+    target = str(tmp_path / "copy.db")
+    Store(target, default_tags=DEFAULT_TAGS).close()
+    s = Store(path, default_tags=DEFAULT_TAGS)
+    try:
+        assert [src["id"] for src in s.list_sources()] == [sid]
+        # Copying out of an old case must not try to carry its saved views
+        # into a target that has no table for them.
+        s.copy_sources_to(target, [sid])
+        s.drop_source(sid)
+        assert s.list_sources() == []
+    finally:
+        s.close()
+    # Left alone, not dropped: nothing reads it, and deleting rows out of
+    # someone's case file to tidy up is not this change's call.
+    con = sqlite3.connect(path)
+    assert con.execute("SELECT COUNT(*) FROM saved_views").fetchone()[0] == 1
+    con.close()
 
 
-def test_drop_source_takes_its_saved_views_with_it(store, sid):
-    store.save_view(sid, "doomed", PAYLOAD)
-    store.drop_source(sid)
-    n = store.db.execute(
-        "SELECT COUNT(*) c FROM saved_views WHERE source_id=?", (sid,)).fetchone()["c"]
-    assert n == 0
-
-
-def test_routes_round_trip(store, monkeypatch, sid):
+def test_an_old_case_whose_only_work_is_a_saved_view_is_not_swept(old_case):
+    """The quick-look janitor deletes case files holding no work. An old
+    file's saved view still counts as work, so dropping the feature can't
+    make such a file look empty."""
     import server
-    monkeypatch.setattr(server, "STORE", store)
-    c = TestClient(server.app)
+    path, sid = old_case
+    con = sqlite3.connect(path)
+    try:
+        assert server._case_holds_work(con)
+        con.execute("DELETE FROM saved_views")
+        assert not server._case_holds_work(con)   # it was the saved view that counted
+    finally:
+        con.close()
 
-    res = c.post("/api/saved_views",
-                 json={"source_id": sid, "name": "via api", "payload": PAYLOAD},
-                 headers=HEADERS)
-    assert res.status_code == 200
-    vid = res.json()["id"]
 
-    listed = c.get(f"/api/saved_views?source_id={sid}", headers=HEADERS).json()
-    assert [v["name"] for v in listed] == ["via api"]
-    assert listed[0]["payload"] == PAYLOAD
+def test_a_session_that_still_carries_saved_views_loads(store, write_csv):
+    sid = store.ingest_csv(write_csv(ROWS, "sv.csv"), name="sv.csv", build_fts=False)["id"]
+    tag = store.list_tags()[0]["id"]
+    store.set_tags(sid, [1], tag, True)
+    data = store.export_case_session()
+    assert "saved_views" not in data["sources"][0]
+    data["sources"][0]["saved_views"] = [{"name": "alice only", "payload": {"filters": []}}]
 
-    assert c.delete(f"/api/saved_views/{vid}", headers=HEADERS).status_code == 200
-    assert c.get(f"/api/saved_views?source_id={sid}", headers=HEADERS).json() == []
+    assert case_session_document_problem(data) is None
+    store.set_tags(sid, [1], tag, False)
+    store.import_case_session(data, merge=True)
+
+    assert store.db.execute(
+        "SELECT COUNT(*) FROM row_tags WHERE source_id=? AND rid=1", (sid,)).fetchone()[0] == 1

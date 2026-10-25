@@ -30,12 +30,16 @@ ever reached through the fallback.
 
 from __future__ import annotations
 
+import http.client
+import json
 import ntpath
 import os
+import posixpath
 import platform
 import shutil
 import socket
 import subprocess
+import sys
 import threading
 import time
 import webbrowser
@@ -89,7 +93,9 @@ def find_chromium(*, system=None, which=None, isfile=None, environ=None) -> str 
     if system == "Darwin":
         for suffix in _MACOS_CANDIDATES:
             for base in ("/Applications", os.path.expanduser("~/Applications")):
-                path = os.path.join(base, suffix)
+                # posixpath, for the Windows branch's reason the other way
+                # round: a real macOS path even when the tests run on Windows.
+                path = posixpath.join(base, suffix)
                 if isfile(path):
                     return path
         return None
@@ -123,8 +129,34 @@ def _port_is_open(host: str, port: int, timeout: float = 0.2) -> bool:
         return False
 
 
+def _winnow_pid(host: str, port: int, timeout: float = 0.5) -> int | None:
+    """The pid of the Winnow answering on this port (/api/version says),
+    0 for something that answers 200 but doesn't say (another program, or a
+    Winnow from before /api/version did), None for no answer yet.
+    http.client, not urllib: urllib sends even a loopback request through a
+    configured HTTP proxy."""
+    conn = http.client.HTTPConnection(host, port, timeout=timeout)
+    try:
+        conn.request("GET", "/api/version")
+        resp = conn.getresponse()
+        if resp.status != 200:
+            return None
+        raw = resp.read()
+    except (OSError, http.client.HTTPException):
+        return None
+    finally:
+        conn.close()
+    try:
+        body = json.loads(raw.decode("utf-8"))
+    except ValueError:
+        return 0
+    pid = body.get("pid") if isinstance(body, dict) else None
+    return pid if isinstance(pid, int) and not isinstance(pid, bool) else 0
+
+
 def open_when_ready(url: str, host: str, port: int, *, app_mode: bool = True,
-                    profile_dir: str | None = None, wait_s: float = 15.0) -> threading.Thread:
+                    profile_dir: str | None = None, wait_s: float = 15.0,
+                    expect_pid: int | None = None) -> threading.Thread:
     """Open the UI once the server is actually accepting connections.
 
     The old code opened the browser immediately and then started uvicorn,
@@ -133,6 +165,16 @@ def open_when_ready(url: str, host: str, port: int, *, app_mode: bool = True,
     an app window is worse, since there is no address bar to retry from.
     So this waits for the port and runs on a daemon thread — uvicorn.run()
     blocks the main one.
+
+    `expect_pid` is for a server opening its OWN window: wait until the
+    Winnow on the port is that process, and open nothing if another one
+    answers. "Something answers on the port" was all this asked, and a
+    second Winnow started while the first had the port got its answer from
+    the first, opened its window there, failed to bind and exited, leaving
+    the analyst working in the first Winnow's case without knowing it.
+    main() binds its port before it gets here now, so this is the second
+    lock on that door, not the first. Without it (a launcher opening a
+    window on ANOTHER running Winnow), any answer will do.
     """
 
     def run():
@@ -141,8 +183,17 @@ def open_when_ready(url: str, host: str, port: int, *, app_mode: bool = True,
         # address, not somewhere you can connect to.
         probe = "127.0.0.1" if host in ("0.0.0.0", "::", "") else host
         while time.monotonic() < deadline:
-            if _port_is_open(probe, port):
-                break
+            if expect_pid is None:
+                if _port_is_open(probe, port):
+                    break
+            else:
+                pid = _winnow_pid(probe, port)
+                if pid == expect_pid:
+                    break
+                if pid is not None:
+                    print(f"Not opening a window: another program answers on port {port}. "
+                          f"Open {url} once this Winnow is up.", file=sys.stderr, flush=True)
+                    return
             time.sleep(0.1)
         argv = app_command(url, profile_dir=profile_dir) if app_mode else None
         if argv:

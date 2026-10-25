@@ -7,18 +7,10 @@ look instead of the default skin."""
 from __future__ import annotations
 
 import json
-import urllib.request
 
 import pytest
 
 pytestmark = pytest.mark.ui
-
-
-def _post(server, route, body):
-    req = urllib.request.Request(
-        server.rstrip("/") + route, data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json", "X-Timeline-Lite-Client": "1"})
-    return json.loads(urllib.request.urlopen(req, timeout=10).read())
 
 
 def test_join_path_uses_the_directory_s_own_separator(page):
@@ -59,24 +51,149 @@ def test_quicklook_banner_spans_the_bar_and_ignores_the_sidebar(page):
     page.evaluate("() => __winnow.paintTempBanner(false)")
 
 
-def test_fresh_origin_adopts_the_machine_s_saved_look(browser, server):
-    before = _post(server, "/api/settings/app", {})   # current, unchanged
-    _post(server, "/api/settings/app", {"appearance": {
+def test_fresh_origin_adopts_the_machine_s_saved_look(own_page, server_post):
+    before = server_post("/api/settings/app", {})   # current, unchanged
+    server_post("/api/settings/app", {"appearance": {
         "style": "phosphor", "themeMode": "dark", "accent": "#39e881",
         "accentCustomized": False, "splash": False}})
-    ctx = browser.new_context(viewport={"width": 1200, "height": 800})
-    # No stored appearance at all — a brand-new origin, like a quick-look.
-    ctx.add_init_script("localStorage.setItem('winnow.remotePrompt', 'seen')")
-    pg = ctx.new_page()
     try:
-        pg.goto(server, wait_until="networkidle")
-        pg.wait_for_function("() => document.documentElement.getAttribute('data-style') === 'phosphor'",
-                             timeout=10_000)
-        assert pg.evaluate("() => __winnow.S.appearance.style") == "phosphor"
+        # No stored appearance at all — a brand-new origin, like a quick-look.
+        with own_page(seed="localStorage.setItem('winnow.remotePrompt', 'seen')",
+                      viewport=(1200, 800), ready=None) as pg:
+            pg.wait_for_function("() => document.documentElement.getAttribute('data-style') === 'phosphor'",
+                                 timeout=10_000)
+            assert pg.evaluate("() => __winnow.S.appearance.style") == "phosphor"
     finally:
-        ctx.close()
         # An origin WITH its own stored look keeps it (the shared fixture
         # contexts store one) — and put the machine back as we found it.
         restore = before.get("appearance") or {"style": "harvest", "themeMode": "dark",
                                                 "accent": "#d9a441", "accentCustomized": False, "splash": False}
-        _post(server, "/api/settings/app", {"appearance": restore})
+        server_post("/api/settings/app", {"appearance": restore})
+
+
+def test_double_clicking_a_case_opens_it_once(page, until):
+    """A double-click on a case is two clicks, and each one used to
+    POST /api/case/open: two opens racing on the server (which left a
+    Store open behind the switch, and the case reading as "open in another
+    Winnow") and two state resets interleaving here. The open is held in
+    flight until the second click has landed, so the second click cannot
+    miss the first by being slower than the server."""
+    page.evaluate("() => { __winnow.showHome(); return __winnow.refreshCases(); }")
+    cid = page.evaluate("""() => Promise.all([fetch('/api/case/current'), fetch('/api/cases')].map((p) => p.then((r) => r.json())))
+      .then(([cur, cases]) => cases.find((c) => c.path === cur.path).id)""")
+    card = page.locator(f"#home .home-row[data-id='{cid}'] .home-name")
+    card.wait_for()
+    held = []
+    page.route("**/api/case/open", lambda route: held.append(route))
+    try:
+        card.dblclick()
+        until(page, lambda: held, "the open to be asked for")
+        # A second POST from the second click would arrive within moments;
+        # give it a generous window to show up rather than looking once.
+        page.wait_for_timeout(500)   # see above
+        assert len(held) == 1, f"{len(held)} opens for one double-click"
+    finally:
+        # Released before unrouting: unroute settles a still-held route
+        # itself, and continuing it afterwards is an error.
+        for r in held:
+            r.continue_()
+        page.unroute("**/api/case/open")
+    page.wait_for_selector("#app:not([hidden])")
+    page.wait_for_function("() => __winnow.S.view")
+    page.wait_for_selector(".row")
+
+
+def test_open_existing_refuses_a_path_with_no_case_there(page, tmp_path):
+    """Given a typo, or a case on a share that wasn't mounted, "Open
+    existing case file…" created an empty case at that path and opened it:
+    the analyst's case looked like one with no tables. It says there is no
+    case file there and creates nothing — that is + New case's job."""
+    missing = tmp_path / "Shares" / "acme.db-winnow"
+    page.evaluate("() => __winnow.openExistingCasePrompt()")
+    page.wait_for_selector("#modal:not([hidden])")
+    page.locator("#modalBody input").first.fill(str(missing))
+    page.locator("#modalBody .btn", has_text="Open").click()
+    page.wait_for_function("() => /No case file at/.test(document.getElementById('toast').textContent)")
+    assert not (tmp_path / "Shares").exists()
+    cases = page.evaluate("() => fetch('/api/cases').then((r) => r.json())")
+    assert str(missing) not in [c["path"] for c in cases]
+    # Still asking, path and all, so the typo can be fixed in place.
+    page.wait_for_selector("#modal:not([hidden])")
+    assert page.locator("#modalBody input").first.input_value() == str(missing)
+    page.keyboard.press("Escape")
+    page.wait_for_selector("#modal[hidden]", state="attached")
+
+
+DEFAULT_CASES = "/srv/winnow/cases"
+
+
+def test_first_run_names_the_default_cases_folder_and_stores_that_one(page):
+    """"Use the default" posted 'cases', which the server resolved against
+    the directory it was started from rather than the install — and the
+    prompt only said "next to the server". It names the folder now, and
+    what it names is what it stores. /api/prefs is answered here, so the
+    shared server's own setting is never touched."""
+    posted = []
+
+    def prefs(route):
+        if route.request.method == "POST":
+            body = json.loads(route.request.post_data)
+            posted.append(body)
+            route.fulfill(json={"cases_dir": body.get("cases_dir"),
+                                "default_cases_dir": DEFAULT_CASES, "first_run": False})
+        else:
+            route.fulfill(json={"cases_dir": None, "default_cases_dir": DEFAULT_CASES,
+                                "first_run": True})
+
+    page.route("**/api/prefs", prefs)
+    try:
+        page.evaluate("() => { __winnow.maybeOfferStorageDir(); }")
+        page.wait_for_selector(".confirm-overlay")
+        assert DEFAULT_CASES in page.locator(".confirm-card").inner_text()
+        page.locator(".confirm-card .btn", has_text="Use the default").click()
+        page.wait_for_function("(d) => __winnow.S.casesDir === d", arg=DEFAULT_CASES)
+        assert posted == [{"cases_dir": DEFAULT_CASES}]
+    finally:
+        page.unroute("**/api/prefs")
+
+
+def test_a_new_case_goes_in_the_default_folder_when_none_was_chosen(page):
+    """An install with cases but no cases folder set (one from before the
+    setting) never sees the first-run prompt, and New case offered the
+    relative cases/<name> — created wherever the server was started."""
+    page.route("**/api/prefs", lambda route: route.fulfill(json={
+        "cases_dir": None, "default_cases_dir": DEFAULT_CASES, "first_run": False}))
+    try:
+        page.evaluate("() => __winnow.maybeOfferStorageDir()")
+    finally:
+        page.unroute("**/api/prefs")
+    page.evaluate("() => __winnow.openNewCaseModal({ name: 'Acme' })")
+    page.wait_for_selector("#modal:not([hidden])")
+    values = page.evaluate("() => [...document.querySelectorAll('#modalBody input')].map((i) => i.value)")
+    assert DEFAULT_CASES + "/acme.db-winnow" in values, values
+    page.keyboard.press("Escape")
+    page.wait_for_selector("#modal[hidden]", state="attached")
+
+
+def test_new_case_captions_sit_with_the_box_below_them(page):
+    """Each caption sat flush under the previous field's box (the 12px gap
+    was on the row below the caption), so "Group" read as a caption of the
+    Name box. The dialog is also the quick look's Save as a case."""
+    page.evaluate("() => __winnow.openNewCaseModal()")
+    page.wait_for_selector("#modal:not([hidden])")
+    gaps = page.evaluate("""() => {
+      const out = {};
+      for (const lab of document.querySelectorAll('#modalBody > label')) {
+        const above = lab.previousElementSibling, below = lab.nextElementSibling;
+        if (!above || !below) continue;
+        const l = lab.getBoundingClientRect();
+        out[lab.textContent] = [l.top - above.getBoundingClientRect().bottom,
+                                below.getBoundingClientRect().top - l.bottom];
+      }
+      return out;
+    }""")
+    page.keyboard.press("Escape")
+    page.wait_for_selector("#modal[hidden]", state="attached")
+    assert set(gaps) >= {"Group", "Case file path", "Profile"}, gaps
+    for name, (above, below) in gaps.items():
+        assert above >= 10 and above > below, (name, gaps)

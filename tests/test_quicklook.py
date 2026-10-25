@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -121,6 +120,88 @@ def test_save_as_refuses_a_real_case(client, case_path):
         server.STORE.close()
 
 
+def _quicklook(server, c, tmp_path):
+    body = c.post("/api/assoc/open", json={"files": [_csv(tmp_path)]}, headers=HEADERS).json()
+    server.STORE.wait_for_ingest_job(body["started"][0]["job_id"], timeout=30)
+    return body["case"]
+
+
+def test_save_as_takes_the_new_case_dialogs_path_and_group(client, tmp_path):
+    """Save as a case… is + New case's dialog now, so the path and group
+    typed there are where the case lands and what it's listed under — not
+    the name slugged into the cases folder, which was all a name-only
+    prompt could do."""
+    server, c = client
+    old_path = _quicklook(server, c, tmp_path)
+    dest = tmp_path / "elsewhere" / "acme-breach.db-winnow"   # the folder doesn't exist yet
+
+    res = c.post("/api/case/save_as", headers=HEADERS,
+                 json={"name": "ACME breach", "group": "ACME IR", "path": str(dest)})
+    assert res.status_code == 200, res.text
+    assert res.json()["path"] == str(dest)
+    assert dest.is_file() and not os.path.exists(old_path)
+    rec = WS.cases.find_by_path(str(dest))
+    assert (rec["name"], rec["group"]) == ("ACME breach", "ACME IR")
+    assert server.STORE.path == str(dest)
+    assert server.STORE.list_sources()[0]["row_count"] == 2
+    server.STORE.close()
+
+
+def test_save_as_refuses_a_path_that_is_taken_or_still_a_quicklook(client, tmp_path):
+    server, c = client
+    old_path = _quicklook(server, c, tmp_path)
+    taken = tmp_path / "taken.db-winnow"
+    taken.write_text("not mine")
+    res = c.post("/api/case/save_as", json={"name": "x", "path": str(taken)}, headers=HEADERS)
+    assert res.status_code == 400
+    assert taken.read_text() == "not mine"
+    # Saved into quicklook/, it would still be temporary — off the home
+    # screen and the startup sweep's to delete.
+    inside = os.path.join(os.path.dirname(old_path), "kept.db-winnow")
+    res = c.post("/api/case/save_as", json={"name": "x", "path": inside}, headers=HEADERS)
+    assert res.status_code == 400
+    assert not os.path.exists(inside)
+    assert c.get("/api/case/current", headers=HEADERS).json()["temp"] is True
+    server.STORE.close()
+
+
+def test_save_as_to_another_drive_copies_then_deletes(client, tmp_path, monkeypatch):
+    """A rename can't cross drives or mounts (D:\\Cases from a Winnow on
+    C:), and the dialog's Browse… reaches any folder."""
+    import errno
+    server, c = client
+    old_path = _quicklook(server, c, tmp_path)
+    real_replace = os.replace
+
+    def cross_device(src, dst):
+        if src == old_path:
+            raise OSError(errno.EXDEV, "Invalid cross-device link")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(server.os, "replace", cross_device)
+    dest = tmp_path / "other-drive" / "case.db-winnow"
+    res = c.post("/api/case/save_as", json={"name": "Moved", "path": str(dest)}, headers=HEADERS)
+    assert res.status_code == 200, res.text
+    assert dest.is_file() and not os.path.exists(old_path)
+    assert server.STORE.list_sources()[0]["row_count"] == 2
+    server.STORE.close()
+
+
+def test_save_as_over_a_stale_listing_takes_the_new_name(client, tmp_path):
+    """A case deleted outside Winnow stays listed under its path; saving a
+    quick look to that path must list it under the name just typed, not
+    the old record's."""
+    server, c = client
+    _quicklook(server, c, tmp_path)
+    dest = tmp_path / "reused.db-winnow"
+    WS.cases.create(str(dest), name="Old case", group="Old group")
+    res = c.post("/api/case/save_as", json={"name": "New case", "path": str(dest)}, headers=HEADERS)
+    assert res.status_code == 200, res.text
+    rec = WS.cases.find_by_path(str(dest))
+    assert (rec["name"], rec["group"]) == ("New case", "")
+    server.STORE.close()
+
+
 def test_discard_deletes_the_quicklook_and_only_the_quicklook(client, tmp_path):
     server, c = client
     body = c.post("/api/assoc/open", json={"files": [_csv(tmp_path)]}, headers=HEADERS).json()
@@ -198,7 +279,6 @@ def test_the_sweep_keeps_any_kind_of_work(tmp_path, monkeypatch):
     one — was deleted as empty after 7 days. Deleting findings to save disk
     is the worst trade this app can make."""
     import os
-    import sqlite3
     import server
     from winnow.store import Store
 
@@ -256,12 +336,9 @@ def test_a_fresh_case_still_reads_as_empty(tmp_path):
 # ------------------------------------------------------- the real launcher
 
 import http.client
-import socket
-import subprocess
-import sys
 import time
 
-ROOT = Path(__file__).resolve().parent.parent
+from spawn import running_server
 
 
 def _get(port, route):
@@ -275,50 +352,17 @@ def _get(port, route):
 def test_a_real_assoc_launch_becomes_a_quicklook_server(tmp_path):
     """python server.py --assoc file.csv with no Winnow running: this
     process becomes the server, on its own port, with the file in a temp
-    case — proven by asking the real process over HTTP."""
+    case — proven by asking the real process over HTTP. The port is
+    self-chosen, so it is read from what the process prints. The child sees
+    the real INSTALL_ROOT; tests/spawn.py's isolation is what keeps it from
+    registering in the developer's workspace/ and leaving its quicklook
+    file in their cases/."""
     dropped = tmp_path / "evidence.csv"
     dropped.write_text("Host,User\nh1,alice\n", encoding="utf-8")
-    # The child is a real process with the real INSTALL_ROOT, so without
-    # these overrides it would register itself in the developer's actual
-    # workspace/ and drop its quicklook file in the actual cases/ — state
-    # that outlives the test and collides on the next run.
-    env = {**os.environ, "WINNOW_NEVER_CONNECTED_EXIT_S": "600",
-           "WINNOW_IDLE_EXIT_S": "600",
-           "WINNOW_WORKSPACE_DIR": str(tmp_path / "ws"),
-           "WINNOW_ENV_FILE": str(tmp_path / "userenv"),
-           "WINNOW_CASES_DIR": str(tmp_path / "cases")}
-    # -u: the child's stdout is block-buffered under a pipe, so without it
-    # the "Winnow on …" line sits in the child's buffer and readline()
-    # starves forever.
-    proc = subprocess.Popen(
-        [sys.executable, "-u", str(ROOT / "server.py"), "--assoc", str(dropped),
-         "--no-browser", "--no-fts"],
-        cwd=str(tmp_path), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    try:
-        # Its port is self-chosen; learn it from the process's own output.
-        port = None
-        deadline = time.monotonic() + 40
-        lines = []
-        while time.monotonic() < deadline and port is None:
-            line = proc.stdout.readline().decode(errors="replace")
-            lines.append(line)
-            if "Winnow on http://127.0.0.1:" in line:
-                port = int(line.split(":")[2].split("/")[0].split()[0])
-            if proc.poll() is not None:
-                pytest.fail("launcher-server exited early:\n" + "".join(lines))
-        assert port, "never announced a port:\n" + "".join(lines)
-
-        # The announcement prints before uvicorn binds; wait for the socket.
-        deadline = time.monotonic() + 30
-        while time.monotonic() < deadline:
-            try:
-                _get(port, "/api/version")
-                break
-            except OSError:
-                time.sleep(0.2)
-        else:
-            pytest.fail("announced port never started accepting")
-
+    with running_server(tmp_path, "--assoc", dropped, "--no-fts", launcher=True, cwd=tmp_path,
+                        env={"WINNOW_NEVER_CONNECTED_EXIT_S": "600",
+                             "WINNOW_IDLE_EXIT_S": "600"}) as srv:
+        port = srv.port
         cur = _get(port, "/api/case/current")
         assert cur["temp"] is True
         assert "quicklook" in cur["path"]
@@ -332,12 +376,80 @@ def test_a_real_assoc_launch_becomes_a_quicklook_server(tmp_path):
             time.sleep(0.3)
         else:
             pytest.fail(f"ingest never landed: {_get(port, '/api/sources')}")
-    finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=15)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+
+
+def _quicklook_with_work(server, c, tmp_path):
+    """A quick look holding an import, three tagged rows and a note — all of
+    it still in the -wal, which only checkpoints itself at ~64 MB."""
+    p = tmp_path / "big.csv"
+    p.write_text("Host,User\n" + "".join(f"h{i},u{i}\n" for i in range(200)), encoding="utf-8")
+    body = c.post("/api/assoc/open", json={"files": [str(p)]}, headers=HEADERS).json()
+    server.STORE.wait_for_ingest_job(body["started"][0]["job_id"], timeout=30)
+    src = server.STORE.list_sources()[0]["id"]
+    # The import starts a search-index build that writes on its own thread.
+    # Still running when a test opens its reader, it commits after that
+    # reader's snapshot, so the save is refused for a write the test never
+    # made (about one run in ten on a loaded CI runner).
+    server.STORE.wait_for_fts(src, timeout=30)
+    tag = server.STORE.upsert_tag(None, "Suspicious", "#c94f4f", None)["id"]
+    server.STORE.set_tags(src, [1, 2, 3], tag, True)
+    server.STORE.set_note(src, 2, "lateral movement from here")
+    return src, tag
+
+
+def test_save_as_keeps_what_an_open_download_would_have_stranded_in_the_wal(client, tmp_path):
+    """A reader checked out by a request still in flight (a CSV export
+    streaming, a search-all sweep) keeps the case file open past the
+    writer's close, so SQLite skips the checkpoint it does on the last
+    close — and save_as, which moves only the file and deletes the -wal,
+    used to take every write since the last checkpoint with it: the case
+    reopened empty, or failed to open at all."""
+    server, c = client
+    src, tag = _quicklook_with_work(server, c, tmp_path)
+    with server.STORE._reader() as conn:
+        rows = conn.execute(f"SELECT * FROM src_{src}")
+        rows.fetchone()   # mid-statement, the way a streaming export holds it
+        res = c.post("/api/case/save_as", json={"name": "Saved mid-download"}, headers=HEADERS)
+        rows.close()
+    if os.name == "nt":
+        # Windows won't rename a file the reader still has open, so there
+        # the save waits for the download (409, the case left as it was)
+        # and goes through whole once it is done.
+        assert res.status_code == 409, res.text
+        assert "still reading" in res.json()["detail"]
+        assert c.get("/api/case/current", headers=HEADERS).json()["temp"] is True
+        res = c.post("/api/case/save_as", json={"name": "Saved mid-download"}, headers=HEADERS)
+    assert res.status_code == 200, res.text
+    assert server.STORE.list_sources()[0]["row_count"] == 200
+    assert server.STORE.tag_counts(src)["counts"][str(tag)] == 3
+    note = server.STORE.db.execute("SELECT note FROM row_notes WHERE source_id=? AND rid=2", (src,)).fetchone()
+    assert note[0] == "lateral movement from here"
+    server.STORE.close()
+
+
+def test_save_as_refuses_while_a_reader_still_holds_writes_back(client, tmp_path, monkeypatch):
+    """A reader whose snapshot is older than the newest writes stops those
+    frames being copied into the file, so the move would lose them. The
+    save is refused and the quick look stays open with everything in it."""
+    from winnow.store import Store
+    monkeypatch.setattr(Store, "FOLD_TIMEOUT_S", 0)
+    server, c = client
+    src, tag = _quicklook_with_work(server, c, tmp_path)
+    with server.STORE._reader() as conn:
+        rows = conn.execute(f"SELECT * FROM src_{src}")
+        rows.fetchone()
+        server.STORE.set_tags(src, [4, 5], tag, True)   # newer than the reader's snapshot
+        res = c.post("/api/case/save_as", json={"name": "Too soon"}, headers=HEADERS)
+        rows.close()   # a statement left open would keep the connection (and its snapshot) alive
+    assert res.status_code == 409
+    assert "still reading" in res.json()["detail"]
+    assert c.get("/api/case/current", headers=HEADERS).json()["temp"] is True
+    assert server.STORE.tag_counts(src)["counts"][str(tag)] == 5
+    # And once the reader is done, the same save goes through whole.
+    res = c.post("/api/case/save_as", json={"name": "Now"}, headers=HEADERS)
+    assert res.status_code == 200, res.text
+    assert server.STORE.tag_counts(src)["counts"][str(tag)] == 5
+    server.STORE.close()
 
 
 def test_save_as_refuses_while_an_import_runs(client, tmp_path, monkeypatch):
@@ -348,10 +460,18 @@ def test_save_as_refuses_while_an_import_runs(client, tmp_path, monkeypatch):
     server, c = client
     res = c.post("/api/assoc/open", json={"files": [_csv(tmp_path)]}, headers=HEADERS)
     server.STORE.wait_for_ingest_job(res.json()["started"][0]["job_id"], timeout=30)
-    monkeypatch.setattr(server, "_jobs_running", lambda: True)
+    monkeypatch.setattr(server, "_busy_reason", lambda: "Still importing")
     r = c.post("/api/case/save_as", json={"name": "Too soon"}, headers=HEADERS)
     assert r.status_code == 409
     assert "importing" in r.json()["detail"].lower()
+    # The same gate holds for the other three kinds of background work a
+    # close would cancel, and the 409 names whichever one is running —
+    # an analyst sent to find an import that isn't there looks for a bug.
+    monkeypatch.setattr(server, "_busy_reason", lambda: "A watchlist scan is still running")
+    r = c.post("/api/case/save_as", json={"name": "Also too soon"}, headers=HEADERS)
+    assert r.status_code == 409
+    assert "watchlist scan" in r.json()["detail"]
+    assert "importing" not in r.json()["detail"].lower()
     # The quick-look is untouched — still open, still temp.
     assert c.get("/api/case/current", headers=HEADERS).json()["temp"] is True
     server.STORE.close()
@@ -454,3 +574,85 @@ def test_a_plugin_format_file_ingests_via_the_plugin(client, tmp_path, monkeypat
     assert [col["name"] for col in src["columns"]] == ["EventId", "Msg"]
     assert src["row_count"] == 2
     server.STORE.close()
+
+
+def test_one_corrupt_file_does_not_stop_the_sweep(tmp_path, monkeypatch):
+    """Only OSError was caught per file, so a quick-look whose content is
+    not a database (sqlite3.DatabaseError) ended the whole sweep — every
+    abandoned file listed after it stayed forever. It is skipped, not
+    deleted (the janitor only eats what it can prove is empty), and the
+    rest are swept."""
+    import server
+    from winnow.store import Store
+
+    qdir = tmp_path / "cases" / server.QUICKLOOK_DIRNAME
+    qdir.mkdir(parents=True)
+    monkeypatch.setattr(server, "_cases_dir", lambda: str(tmp_path / "cases"))
+    old = __import__("time").time() - 30 * 86400
+    bad = qdir / "quicklook-a-corrupt.db-winnow"
+    bad.write_bytes(b"SQLite format 3\x00" + b"\xff" * 4000)   # the header, then garbage
+    empties = []
+    for i in range(3):
+        p = qdir / f"quicklook-z{i}.db-winnow"
+        Store(str(p)).close()
+        empties.append(p)
+    for p in [bad, *empties]:
+        os.utime(p, (old, old))
+
+    assert server._sweep_quicklook() == 3
+    assert not any(p.exists() for p in empties)
+    assert bad.exists(), "a file the sweep can't read is not proven empty"
+
+
+def test_the_sweep_never_deletes_a_sqlite_file_that_is_not_a_case(tmp_path, monkeypatch):
+    """_case_holds_work reads "none of the work tables" as empty, and a
+    browser History database has none of them — so any non-Winnow SQLite
+    file left in quicklook/ for a week was deleted. The sweep only deletes
+    case files."""
+    import sqlite3
+    import server
+
+    qdir = tmp_path / "cases" / server.QUICKLOOK_DIRNAME
+    qdir.mkdir(parents=True)
+    monkeypatch.setattr(server, "_cases_dir", lambda: str(tmp_path / "cases"))
+    evidence = qdir / "History.db"
+    conn = sqlite3.connect(str(evidence))
+    conn.execute("CREATE TABLE urls (id INTEGER PRIMARY KEY, url TEXT)")
+    conn.execute("INSERT INTO urls(url) VALUES ('https://example.test')")
+    conn.commit()
+    conn.close()
+    old = __import__("time").time() - 30 * 86400
+    os.utime(evidence, (old, old))
+
+    assert server._sweep_quicklook() == 0
+    assert evidence.exists()
+
+
+def test_discarding_a_quicklook_unloads_a_plugin_only_it_turned_on(client, tmp_path, monkeypatch):
+    """The effective plugin set is per case, so every way a case goes away
+    has to reload it. Discard set STORE to None and stopped there: a plugin
+    switched on for just this quick-look stayed imported and kept answering
+    at the home screen, with the machine setting saying off."""
+    from winnow.plugin_api import PluginRegistry
+
+    server, c = client
+    plugs = tmp_path / "plugs"
+    plugs.mkdir()
+    (plugs / "caseonly.py").write_text(
+        'def register(api):\n    api.register_api("ping", lambda req: {"pong": True})\n')
+    monkeypatch.setattr(server, "PLUGIN_DIRS", [plugs])
+    monkeypatch.setattr(server, "PLUGINS", PluginRegistry())
+    WS.plugin_prefs.set_machine_enabled("caseonly", False, True)
+
+    body = c.post("/api/assoc/open", json={"files": [_csv(tmp_path)]}, headers=HEADERS).json()
+    server.STORE.wait_for_ingest_job(body["started"][0]["job_id"], timeout=30)
+    assert c.get("/api/plugin/caseonly/ping").status_code == 404      # off by machine
+    r = c.post("/api/plugins/toggle", json={"fs_name": "caseonly", "scope": "on_case"},
+               headers=HEADERS)
+    assert r.status_code == 200, r.text
+    assert c.get("/api/plugin/caseonly/ping").json() == {"pong": True}
+
+    assert c.post("/api/case/discard", json={}, headers=HEADERS).status_code == 200
+    assert c.get("/api/plugin/caseonly/ping").status_code == 404
+    rec = next(p for p in c.get("/api/plugins").json()["plugins"] if p["fs_name"] == "caseonly")
+    assert rec["enabled"] is False

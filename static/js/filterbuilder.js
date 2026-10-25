@@ -2,11 +2,11 @@
 
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { $, api, debounce, el, post, toast } from './core.js';
-import { parseFilter, setColumnFilter } from './filters.js';
+import { makePickerNode, parseFilter, setColumnFilter } from './filters.js';
 import { checkPresets } from './savedfilters.js';
 import { setGrouping } from './grouping.js';
 import { S, normalizeTree } from './state.js';
-import { currentFilterPayload, openSavedFiltersModal, updateFiltersButton } from './timeframe.js';
+import { currentFilterPayload, openSavedFiltersModal, tableMenuSeg, tableMenuStat, updateFiltersButton } from './timeframe.js';
 import { baseColumns } from './tsformat.js';
 import { datePickerButton, markModalAction, modal, promptDialog } from './ui.js';
 import { rebuildView } from './view.js';
@@ -34,22 +34,47 @@ export function sqlLit(v) { return "'" + String(v).replace(/'/g, "''") + "'"; }
 
 export function sqlIdent(c) { return '"' + String(c).replace(/"/g, '""') + '"'; }
 
+/* A LIKE pattern for contains/starts text, as the server compiles it
+   (Store._compile_condition: LIKE ... ESCAPE '\'). Text holding a `%` or
+   `_` has to escape them, or the SQL shown says something else — a contains
+   on `a%b` read as `LIKE '%a%b%'`, which also matches `axxb`. Text without
+   them is shown bare, the way it always was: there a backslash is already
+   literal, as it is to SQLite with no ESCAPE clause. */
+export function likeSql(c, text, { lead, not = false }) {
+  const kw = not ? 'NOT LIKE' : 'LIKE';
+  const s = String(text);
+  if (!/[%_]/.test(s)) return `${c} ${kw} ${sqlLit((lead ? '%' : '') + s + '%')}`;
+  const esc = s.replace(/[\\%_]/g, '\\$&');
+  return `${c} ${kw} ${sqlLit((lead ? '%' : '') + esc + '%')} ESCAPE '\\'`;
+}
+
 export function serializeCond(node) {
   const c = sqlIdent(node.column);
   const v = node.value;
+  // An empty contains/starts compiles to no clause at all server-side, so
+  // it says nothing here either: `LIKE '%%'` would claim it drops NULLs,
+  // and would not parse back as the blank condition it came from.
+  if (['contains', 'not_contains', 'starts'].includes(node.op) && (v == null || v === '')) return '';
   switch (node.op) {
-    case 'contains': return `${c} LIKE ${sqlLit('%' + v + '%')}`;
-    case 'not_contains': return `(${c} NOT LIKE ${sqlLit('%' + v + '%')} OR ${c} IS NULL)`;
+    case 'contains': return likeSql(c, v, { lead: true });
+    case 'not_contains': return `(${likeSql(c, v, { lead: true, not: true })} OR ${c} IS NULL)`;
     case 'equals': return `${c} = ${sqlLit(v)}`;
     case 'not_equals': return `(${c} <> ${sqlLit(v)} OR ${c} IS NULL)`;
-    case 'starts': return `${c} LIKE ${sqlLit(v + '%')}`;
+    case 'starts': return likeSql(c, v, { lead: false });
     case 'regex': return `${c} REGEXP ${sqlLit(v)}`;
     case '>': case '>=': case '<': case '<=': return `${c} ${node.op} ${sqlLit(v)}`;
     case 'empty': return `(${c} IS NULL OR ${c} = '')`;
     case 'not_empty': return `(${c} IS NOT NULL AND ${c} <> '')`;
     case 'in': {
       const items = Array.isArray(v) ? v : String(v || '').split('\n').map((x) => x.trim()).filter(Boolean);
-      return items.length ? `${c} IN (${items.map(sqlLit).join(', ')})` : '1';
+      // An empty string in a list is the empty cell, NULL included, as the
+      // server compiles it (Store._compile_condition) — the value picker
+      // and the box's `a|""` put one there.
+      const values = items.filter((x) => x !== '');
+      const empty = values.length !== items.length ? `${c} IS NULL OR ${c} = ''` : '';
+      const inList = values.length ? `${c} IN (${values.map(sqlLit).join(', ')})` : '';
+      if (inList && empty) return `(${inList} OR ${empty})`;
+      return inList || (empty ? `(${empty})` : '1');
     }
     default: return '1';
   }
@@ -87,12 +112,46 @@ export const unquoteStr = (t) => t.slice(1, -1).replace(/''/g, "'");
 
 export const isStrLit = (t) => !!t && t[0] === "'";
 
+/* What a LIKE pattern means as a guided condition, or null when no guided
+   condition means exactly that — the caller then keeps the SQL as raw,
+   which runs as typed. Two shapes qualify, because they are what the
+   server's own contains and starts-with compile to (Store._compile_condition:
+   LIKE with `%` around the escaped text, ESCAPE '\', so the same
+   ASCII-only case folding as any LIKE): `%text%` and `text%`, with text
+   holding no wildcard of its own. A `_`, a `%` anywhere else (`%.exe`,
+   `p%.exe`, `%p%exe%`) or no `%` at all — LIKE 'P1.EXE' is a
+   case-insensitive equality, and equals is case-sensitive — has no guided
+   twin. With an ESCAPE character, it and the character after it are that
+   character, literally, as SQLite reads them. */
+export function likePatternCond(column, pattern, escape = null) {
+  const segs = []; // literal runs as strings, each unescaped `%` as null
+  for (let i = 0; i < pattern.length; i++) {
+    let ch = pattern[i];
+    if (escape !== null && ch === escape) {
+      if (++i >= pattern.length) return null; // a dangling escape matches nothing
+      ch = pattern[i];
+    } else if (ch === '_') {
+      return null;
+    } else if (ch === '%') {
+      segs.push(null);
+      continue;
+    }
+    if (typeof segs[segs.length - 1] === 'string') segs[segs.length - 1] += ch;
+    else segs.push(ch);
+  }
+  const [a, b, c] = segs;
+  if (segs.length === 3 && a === null && typeof b === 'string' && c === null) return { type: 'cond', column, op: 'contains', value: b };
+  if (segs.length === 2 && typeof a === 'string' && b === null) return { type: 'cond', column, op: 'starts', value: a };
+  return null;
+}
+
 /* Round-trips only the narrow subset serializeTree/serializeCond emit: the
    simple atomic ops (contains/starts/equals/regex/comparisons/in) plus
    AND/OR/paren grouping. The compound shapes for not_contains/not_equals/
    empty/not_empty — and anything else outside this subset — fall back to
    raw mode, which still works as a filter, it just won't populate the
-   structured editor. */
+   structured editor. A LIKE is in the subset only in the shapes
+   likePatternCond accepts. */
 export function parseWhereFragment(text) {
   const toks = tokenizeWhere(text.trim());
   if (!toks) return null;
@@ -107,11 +166,18 @@ export function parseWhereFragment(text) {
     if (op === 'LIKE') {
       const lit = toks[pos + 2];
       if (!isStrLit(lit)) return null;
-      const val = unquoteStr(lit);
-      pos += 3;
-      if (val.startsWith('%') && val.endsWith('%') && val.length >= 2) return { type: 'cond', column, op: 'contains', value: val.slice(1, -1) };
-      if (!val.startsWith('%') && val.endsWith('%')) return { type: 'cond', column, op: 'starts', value: val.slice(0, -1) };
-      return { type: 'cond', column, op: 'equals', value: val };
+      let escape = null;
+      let next = pos + 3;
+      if (toks[next] === 'ESCAPE') {
+        const e = toks[next + 1];
+        if (!isStrLit(e) || unquoteStr(e).length !== 1) return null;
+        escape = unquoteStr(e);
+        next += 2;
+      }
+      const cond = likePatternCond(column, unquoteStr(lit), escape);
+      if (!cond) return null;
+      pos = next;
+      return cond;
     }
     if (op === 'REGEXP') {
       const lit = toks[pos + 2];
@@ -228,15 +294,12 @@ export function renderCondRow(node, onStructural, onPreview) {
 export function renderFilterGroup(node, onStructural, onPreview, isRoot) {
   const wrap = el('div', 'fb-group');
   const head = el('div', 'fb-group-head');
-  const opSel = el('select', 'fb-group-op');
-  for (const o of ['AND', 'OR']) {
-    const opt = document.createElement('option');
-    opt.value = o; opt.textContent = o;
-    if (node.op === o) opt.selected = true;
-    opSel.append(opt);
-  }
-  opSel.onchange = () => { node.op = opSel.value; onStructural(); };
-  head.append(el('span', 'fb-group-label', isRoot ? 'Match' : 'Group:'), opSel, el('span', 'fb-group-label', 'of:'));
+  // All / Any as the builders' segment, in words: "Match [AND] of:" read
+  // as a sentence only to someone who already knew it meant AND.
+  const op = tableMenuSeg([['AND', 'All', 'Every condition here has to hold (AND)'], ['OR', 'Any', 'One condition here is enough (OR)']],
+    () => node.op, (key) => { node.op = key; onStructural(); }, 'fb-group-op');
+  head.append(el('span', 'fb-group-label', isRoot ? 'Match' : 'A group matching'), op.seg,
+    el('span', 'fb-group-label', isRoot ? 'of these' : 'of'));
   wrap.append(head);
 
   const list = el('div', 'fb-children');
@@ -254,13 +317,13 @@ export function renderFilterGroup(node, onStructural, onPreview, isRoot) {
   wrap.append(list);
 
   const actions = el('div', 'fb-actions');
-  const addCond = el('button', 'btn ghost', '+ condition');
+  const addCond = el('button', 'btn ghost mb-small', '+ Condition');
   addCond.onclick = () => {
     node.children = node.children || [];
     node.children.push({ type: 'cond', column: S.columns[0] ? S.columns[0].name : '', op: 'contains', value: '' });
     onStructural();
   };
-  const addGroup = el('button', 'btn ghost', '+ group');
+  const addGroup = el('button', 'btn ghost mb-small', '+ Group');
   addGroup.onclick = () => {
     node.children = node.children || [];
     node.children.push({ type: 'group', op: 'AND', children: [] });
@@ -297,27 +360,71 @@ export function openFilterBuilder(editing = null) {
       const parsed = parseFilter(raw || '');
       if (!parsed) continue;
       S.filterTree.children = S.filterTree.children || [];
-      S.filterTree.children.push({
-        type: 'cond', column, op: parsed.op,
-        value: OP_NO_VALUE.has(parsed.op) ? '' : parsed.value,
-      });
+      // A list holding the empty value (`a|""`) arrives as the picker's
+      // OR of `in` and `is empty`: the builder's one-per-line box drops a
+      // blank line the moment it is edited.
+      S.filterTree.children.push(parsed.op === 'in' && parsed.value.includes('')
+        ? makePickerNode(column, parsed.value)
+        : { type: 'cond', column, op: parsed.op, value: OP_NO_VALUE.has(parsed.op) ? '' : parsed.value });
       setColumnFilter(column, '');
     }
   }
   modal(editing ? `Edit filter — ${editing.name}` : 'Filter builder', (b) => {
-    const help = el('p', 'fb-help',
-      'Build filters visually, or type/paste SQL directly below — edits sync both ways when the SQL is simple enough to parse back into the structured editor.');
+    /* The builders' shape (the merge builder's .mb-*): the conditions on
+       the left; on the right what they come to — the rows they match in
+       this table, counted as they change, and the same filter as SQL,
+       editable, with the grouping under it. */
+    const root = el('div', 'mb fb-builder');
+    const panes = el('div', 'mb-panes fb-panes');
+    const left = el('div', 'mb-pane fb-left');
+    const right = el('div', 'mb-pane mb-result fb-right');
     const treeContainer = el('div', 'fb-tree');
-    const sqlLabel = el('div', 'fb-sql-label', 'Equivalent SQL (editable):');
+    left.append(el('div', 'mb-head', 'Conditions'), treeContainer);
+
+    const summary = el('div', 'mb-summary');
+    const stats = el('div', 'mb-stats');
+    summary.append(stats);
+    const countNote = el('ul', 'mb-notes');
+    const sqlHead = el('div', 'fb-sql-head');
+    const status = el('span', 'fb-status');
+    sqlHead.append(el('span', 'mb-head', 'SQL'), status);
     const sqlBox = el('textarea', 'fb-sql');
-    sqlBox.rows = 3;
+    sqlBox.rows = 4;
     sqlBox.spellcheck = false;
-    const status = el('div', 'fb-status');
+    sqlBox.setAttribute('aria-label', 'The filter as SQL (editable)');
+    right.append(summary, countNote, sqlHead, sqlBox);
+    panes.append(left, right);
+    root.append(panes);
+
+    const src = S.sources.find((s) => s.id === S.sourceId);
+    // Counted with a plain COUNT over the table, which a merge has no
+    // table of its own for; its grid's count is the one to read there.
+    const countable = !!(src && src.table_name && !src.is_merge);
+    let countSeq = 0;
+    const paintStats = (n, note) => {
+      stats.replaceChildren(tableMenuStat(n == null ? '—' : n, 'rows match'),
+        tableMenuStat(src ? src.row_count : 0, 'rows in the table'),
+        tableMenuStat(conditionCount(S.filterTree), 'conditions'));
+      countNote.replaceChildren(el('li', 'mb-note' + (note && note.warn ? ' warn' : ''), note ? note.text
+        : 'Counted over the whole table. The search box, the tag filter and the timeframe narrow the grid further.'));
+    };
+    const recount = debounce(async () => {
+      if (!countable) { paintStats(null, { text: 'A merge isn’t counted here: apply the filter and read the grid’s count.' }); return; }
+      const where = S.filterTree.type === 'raw' ? (S.filterTree.sql || '').trim() : serializeTree(S.filterTree);
+      const seq = ++countSeq;
+      try {
+        const res = await post('/api/sql', { sql: `SELECT COUNT(*) AS n FROM ${src.table_name}` + (where ? ` WHERE ${where}` : ''), limit: 1 });
+        if (seq === countSeq) paintStats(res.rows[0][0]);
+      } catch (e) {
+        if (seq === countSeq) paintStats(null, { warn: true, text: 'Not counted: ' + e.message });
+      }
+    }, 300);
 
     function refreshPreview() {
       if (document.activeElement !== sqlBox) {
         sqlBox.value = S.filterTree.type === 'raw' ? (S.filterTree.sql || '') : serializeTree(S.filterTree);
       }
+      recount();
     }
 
     function rerenderTree() {
@@ -362,7 +469,7 @@ export function openFilterBuilder(editing = null) {
     const gbWrap = el('div', 'fb-groupby');
     function renderGroupBy() {
       gbWrap.replaceChildren();
-      gbWrap.append(el('div', 'fb-groupby-label', 'Group by'));
+      gbWrap.append(el('div', 'mb-head', 'Group by'));
       const chips = el('div', 'fb-groupby-chips');
       gbCols.forEach((name, i) => {
         const chip = el('span', 'fb-groupby-chip', name);
@@ -380,25 +487,20 @@ export function openFilterBuilder(editing = null) {
       gbWrap.append(chips);
       if (gbCols.length) {
         const sortRow = el('div', 'fb-groupby-sort');
-        sortRow.append(el('span', 'fb-groupby-sublabel', 'order groups'));
-        const by = el('select');
-        for (const [v, l] of [['count', 'by count'], ['value', 'by value']]) by.append(new Option(l, v));
-        by.value = gbSort;
-        by.onchange = () => { gbSort = by.value; };
-        const dir = el('select');
-        for (const [v, l] of [['desc', 'high → low'], ['asc', 'low → high']]) dir.append(new Option(l, v));
-        dir.value = gbDir;
-        dir.onchange = () => { gbDir = dir.value; };
-        sortRow.append(by, dir);
+        sortRow.append(el('span', 'fb-groupby-sublabel', 'Order groups'));
+        const by = tableMenuSeg([['count', 'By count'], ['value', 'By value']], () => gbSort, (k) => { gbSort = k; by.paint(); });
+        const dir = tableMenuSeg([['desc', 'High → low'], ['asc', 'Low → high']], () => gbDir, (k) => { gbDir = k; dir.paint(); });
+        sortRow.append(by.seg, dir.seg);
         gbWrap.append(sortRow);
       }
     }
     renderGroupBy();
+    right.append(gbWrap);
 
-    b.append(help, treeContainer, sqlLabel, sqlBox, status, gbWrap);
-
-    const actions = el('div', 'row-actions');
-    const apply = el('button', 'btn', 'Apply');
+    // Along the foot: where filters are kept on the left, then saving,
+    // and Apply — the main one — on the right.
+    const actions = el('div', 'table-menu-foot table-menu-strip fb-foot');
+    const apply = el('button', 'btn primary', 'Apply');
     apply.onclick = () => {
       const doApply = () => {
         // Grouping first — setGrouping only updates state; the rebuild below
@@ -416,11 +518,12 @@ export function openFilterBuilder(editing = null) {
       } else doApply();
     };
     const clear = el('button', 'btn ghost', 'Clear');
+    clear.title = 'Remove every condition (Apply to see the table unfiltered)';
     clear.onclick = () => { S.filterTree = { type: 'group', op: 'AND', children: [] }; rerenderTree(); };
     const browse = el('button', 'btn ghost', 'Saved filters…');
     browse.title = 'Browse, apply and manage saved filters (the builder\'s state stays as-is)';
     browse.onclick = () => openSavedFiltersModal();
-    const saveFilterAs = el('button', 'btn ghost', editing ? 'Save as new…' : 'Save filter…');
+    const saveFilterAs = el('button', 'btn ghost table-menu-close', editing ? 'Save as new…' : 'Save filter…');
     saveFilterAs.title = `Saves for these ${S.columns.length} columns — cyclable with `
       + `${S.keymap.cyclePrevFilter[0] || '['} / ${S.keymap.cycleNextFilter[0] || ']'}, and suggested `
       + `automatically next time you open a table with matching columns`;
@@ -434,14 +537,14 @@ export function openFilterBuilder(editing = null) {
       checkPresets(S.sourceId); // this filter may now match the open table's banner
       toast(`Saved filter "${name.trim()}"`);
     };
-    actions.append(apply, clear, saveFilterAs, browse);
+    actions.append(browse, clear, saveFilterAs);
 
     if (editing) {
       // Deliberately doesn't send col_names: the header set is the filter's
       // identity for [ / ] cycling and the suggested-filter banner, so an
       // edit keeps it bound to the set it was saved for even if the table
       // open right now has a different one. "Save as new…" is the rebind path.
-      const update = el('button', 'btn', `Update "${editing.name}"`);
+      const update = el('button', 'btn ghost', `Update "${editing.name}"`);
       update.title = 'Overwrite this saved filter with the conditions above';
       update.onclick = async () => {
         const payload = currentFilterPayload();
@@ -461,9 +564,19 @@ export function openFilterBuilder(editing = null) {
       };
       actions.append(update);
     }
+    actions.append(apply);
+    root.append(actions);
+    b.append(root);
 
-    b.append(actions);
-
+    paintStats(null);
     rerenderTree();
-  }, { wide: true });
+  }, { wide: 'x', tall: true });
+}
+
+/* Conditions in a tree, counted as the builder shows them: a raw SQL
+   expression is one. */
+function conditionCount(node) {
+  if (!node) return 0;
+  if (node.type === 'cond' || node.type === 'raw') return node.type === 'raw' && !(node.sql || '').trim() ? 0 : 1;
+  return (node.children || []).reduce((n, c) => n + conditionCount(c), 0);
 }

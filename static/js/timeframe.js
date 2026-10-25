@@ -2,23 +2,36 @@
 navigation that survive everything else being cleared.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
-import { isPinned, renderHead, saveDefaultLayout, saveLayout, togglePin } from './columns.js';
-import { $, api, el, post, toast } from './core.js';
+import { copiedColumns, copiedOrder, defaultLayoutResult, findDefaultLayout, isPinned, moveColumn, renderHead, replaceLayout, saveDefaultLayout, saveLayout, togglePin } from './columns.js';
+import { $, api, el, nameMap, post, toast } from './core.js';
 import { openDerivedColumnModal } from './derived.js';
 import { hasActiveFilterTree, openFilterBuilder } from './filterbuilder.js';
 import { VALUE_FILTER_AUTO_MAX, setColumnValueFilter, setValueFilterMode, valueFilterAutoOn, valueFilterEnabled } from './filters.js';
 import { moveCursor, render } from './grid.js';
-import { drawRail } from './grouping.js';
-import { applyPreset, filtersForCurrentSource, headerSig, loadSavedFilters, matchingSavedFilters, nicknameFor, setNicknameFor } from './savedfilters.js';
-import { clearAllFilters, closeTab, editSourceNickname, openSource, sourceLabel, wireDragReorder } from './sources.js';
+import { drawRail, regroupIfGroupedByTag } from './grouping.js';
+import { openMergeBuilder } from './merge.js';
+import { applyPreset, filtersForCurrentSource, headerSig, loadSavedFilters, matchingSavedFilters, nicknameFor, saveHeaderNickname, setNicknameFor } from './savedfilters.js';
+import { saveAppearance } from './settings.js';
+import { clearAllFilters, closeTab, loadSources, openSource, sourceLabel, wireDragReorder } from './sources.js';
 import { normalizeTree, S } from './state.js';
-import { openTablesManager } from './tables.js';
-import { loadTags } from './tags.js';
+import { countCell, keepingFocus, mergesUsing, openTablesManager, plural } from './tables.js';
+import { clearRowCaches, loadTags, newTagDefaults, tagEditRow } from './tags.js';
 import { baseColumns, columnMeta, parseTimestamp } from './tsformat.js';
-import { datePickerButton, markModalAction, confirmDialog, modal, promptDialog } from './ui.js';
+import { closeModal, contextMenu, datePickerButton, dropdownMenu, markModalAction, confirmDialog, modal, oneAtATime, promptDialog, sectionPanes } from './ui.js';
 import { rebuildView } from './view.js';
 
 /* ------------------------------------------------------ jump to timestamp */
+
+/* A timestamp box with its label above and the 📅 picker beside it — the
+   builders' field shape (.dlg-field), shared by Jump and Timeframe so the
+   two dialogs' boxes look and line up the same. */
+function timestampField(label, input) {
+  const field = el('div', 'dlg-field');
+  const row = el('div', 'dlg-input');
+  row.append(input, datePickerButton(input));
+  field.append(el('label', null, label), row);
+  return field;
+}
 
 /* Scroll to the row whose timestamp is closest to a given moment. The
    target is saved in S.jumpTs and deliberately survives switching tables —
@@ -34,10 +47,9 @@ export function openJumpTsModal() {
       'Scrolls to the row whose timestamp is closest to this moment. The value is remembered '
       + `across tables — press "${jumpKey}" in any table to jump straight to it again.`));
 
-    b.append(el('label', null, 'Column'));
+    const colField = el('div', 'dlg-field');
+    colField.append(el('label', null, 'Column'));
     const colSel = el('select');
-    colSel.style.cssText = 'display:block;width:100%;background:var(--ink);color:var(--text);'
-      + 'border:1px solid var(--line-2);padding:6px 8px;font:inherit;margin-bottom:10px';
     const allOpt = document.createElement('option');
     allOpt.value = '';
     allOpt.textContent = 'Nearest across all datetime columns';
@@ -49,18 +61,15 @@ export function openJumpTsModal() {
       colSel.append(opt);
     }
     colSel.value = dtCols.includes(S.jumpTs.column) ? S.jumpTs.column : '';
-    b.append(colSel);
+    colField.append(colSel);
+    b.append(colField);
     if (!dtCols.length) b.append(el('p', 'fb-help', 'This table has no datetime columns — the jump will have nothing to measure against here.'));
 
-    const row = el('div', 'row-actions');
-    const input = el('input');
+    const input = el('input', 'confirm-input mono');
     input.type = 'text';
     input.placeholder = 'YYYY-MM-DD HH:MM:SS';
-    input.style.cssText = 'flex:1;background:var(--ink);color:var(--text);border:1px solid var(--line-2);'
-      + 'padding:6px 8px;font:inherit;font-family:var(--mono)';
     input.value = S.jumpTs.value || '';
-    row.append(el('span', null, 'Moment'), input, datePickerButton(input));
-    b.append(row);
+    b.append(timestampField('Moment', input));
     b.append(el('p', 'fb-help', '24-hour time — the date alone, or date plus HH:MM, also work.'));
 
     const go = () => {
@@ -73,7 +82,7 @@ export function openJumpTsModal() {
     };
     input.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); go(); } };
     const actions = el('div', 'row-actions');
-    const jumpBtn = el('button', 'btn', 'Jump');
+    const jumpBtn = el('button', 'btn primary', 'Jump');
     jumpBtn.onclick = go;
     const cancel = el('button', 'btn ghost', 'Cancel');
     cancel.onclick = () => { $('modal').hidden = true; };
@@ -93,7 +102,7 @@ export async function doJumpTs() {
     ? S.jumpTs.column : null;
   try {
     const res = await post('/api/view/find_ts', { view_id: S.view.view_id, value: S.jumpTs.value, column: col });
-    moveCursor(res.pos, false);
+    moveCursor(res.pos);
     toast(`Jumped to ${res.ts} (row ${(res.pos + 1).toLocaleString()})`);
   } catch (e) {
     toast((e.status === 404 ? e.message : 'Could not jump: ' + e.message), 4000);
@@ -179,7 +188,9 @@ export function updateFiltersButton() {
    openSource() — deliberately not among the fields it resets). The MFT use
    case this exists for: pin a date range, then flip through per-column
    quick filters/presets/tables without having to re-set the range each
-   time. Column choice is per-invocation, not persisted structure — "all
+   time. Switching tables is the one carry-over the analyst can turn off
+   (timeframeAcrossTables, below): off, each table keeps its own timeframe
+   the way it keeps its own filters. Column choice is per-invocation, not persisted structure — "all
    datetime columns" (column: null) ORs every datetime column on whichever
    table is open, so a timestomped Created date doesn't hide a row whose
    Modified date is genuinely in range; _compile_where falls back to that
@@ -188,6 +199,25 @@ export function updateFiltersButton() {
 
 export function datetimeColumns() {
   return S.columns.filter((c) => c.type === 'datetime').map((c) => c.name);
+}
+
+/* Whether the timeframe follows the analyst from table to table. On (the
+   default, and what every install did before this was a choice) it is one
+   case-wide range; off, openSource stashes it with the table being left
+   and puts back the one the arriving table had — none, for a table it
+   has not been set on. A machine preference beside openNewTables, not
+   case data: it is about how this analyst works, not about the evidence.
+   `!== false` so an appearance blob from before the key existed reads as
+   the behaviour it was saved under. S.appearance itself is guarded:
+   updateTimeRangeButton asks this during boot, before initAppearance. */
+export function timeframeAcrossTables() {
+  return !(S.appearance && S.appearance.timeframeAcrossTables === false);
+}
+
+export function setTimeframeAcrossTables(on) {
+  S.appearance.timeframeAcrossTables = !!on;
+  saveAppearance();
+  updateTimeRangeButton();
 }
 
 export function updateTimeRangeButton() {
@@ -203,7 +233,8 @@ export function updateTimeRangeButton() {
       + `${S.timeRange.start || '…'} → ${S.timeRange.end || '…'} — "${toggleKey}" to toggle off, "${openKey}" to edit`
     : hasRange
       ? `Timeframe filter set but off — "${toggleKey}" to toggle on, "${openKey}" to edit`
-      : `Set up a timeframe filter that survives filter/preset/table changes — "${openKey}" to open, "${toggleKey}" to toggle`;
+      : `Set up a timeframe filter that survives ${timeframeAcrossTables() ? 'filter/preset/table changes' : 'filter/preset changes'}`
+        + ` — "${openKey}" to open, "${toggleKey}" to toggle`;
 }
 
 export function toggleTimeRange() {
@@ -221,23 +252,43 @@ export function toggleTimeRange() {
 export function openTimeRangeModal() {
   markModalAction('openTimeRange');
   modal('Timeframe filter', (b) => {
+    // No Enabled box. Apply always turns the filter on, and the two ways
+    // off are Clear (forget the range) and the toggle key (keep it): with
+    // a box as well, a range typed in with the box left unticked was
+    // saved but not applied, and Apply looked as if it had done nothing.
     const toggleKey = S.keymap.toggleTimeRange[0] || '(unbound)';
-    const openKey = S.keymap.openTimeRange[0] || '(unbound)';
-    b.append(el('p', null,
-      `Stays applied across filter/preset changes and table switches, unlike the regular filters — `
-      + `toggle it on/off quickly with "${toggleKey}", or jump straight back to this dialog with "${openKey}".`));
+    // One line, and it follows the across-tables switch below: with it
+    // off the range is per table, and the line must not say otherwise.
+    const intro = el('p');
+    const paintIntro = () => {
+      intro.textContent = (timeframeAcrossTables()
+        ? 'Survives filters and table switches'
+        : 'Survives filters; each table keeps its own')
+        + ` — "${toggleKey}" turns it off without clearing it.`;
+    };
+    paintIntro();
+    b.append(intro);
+    if (!S.timeRange.enabled && (S.timeRange.start || S.timeRange.end)) {
+      b.append(el('p', 'fb-help tf-off', 'Off right now — Apply turns it back on.'));
+    }
 
-    const enabledLabel = el('label', 'tf-enabled');
-    const enabledCb = el('input');
-    enabledCb.type = 'checkbox';
-    enabledCb.checked = S.timeRange.enabled;
-    enabledLabel.append(enabledCb, document.createTextNode(' Enabled'));
-    b.append(enabledLabel);
+    // A preference rather than part of the range, so it saves as it is
+    // clicked — Cancel below discards the range edits, not this. The same
+    // switch is in Settings → Filter & search syntax.
+    const acrossLabel = el('label', 'tf-check');
+    const acrossCb = el('input');
+    acrossCb.type = 'checkbox';
+    acrossCb.id = 'tfAcrossTables';
+    acrossCb.checked = timeframeAcrossTables();
+    acrossCb.onchange = () => { setTimeframeAcrossTables(acrossCb.checked); paintIntro(); };
+    acrossLabel.title = 'On: one timeframe for the whole case, applied to whichever table you open. '
+      + 'Off: each table keeps its own timeframe, and a table you have not set one on opens without one.';
+    acrossLabel.append(acrossCb, document.createTextNode(' Keep applied when switching tables'));
+    b.append(acrossLabel);
 
-    b.append(el('label', null, 'Column'));
+    const colField = el('div', 'dlg-field');
+    colField.append(el('label', null, 'Column'));
     const colSel = el('select');
-    colSel.style.cssText = 'display:block;width:100%;background:var(--ink);color:var(--text);'
-      + 'border:1px solid var(--line-2);padding:6px 8px;font:inherit;margin-bottom:10px';
     const allOpt = document.createElement('option');
     allOpt.value = '';
     allOpt.textContent = 'All datetime columns (catches a match on any of them)';
@@ -250,8 +301,9 @@ export function openTimeRangeModal() {
       colSel.append(opt);
     }
     colSel.value = cols.includes(S.timeRange.column) ? S.timeRange.column : '';
-    b.append(colSel);
-    if (!cols.length) b.append(el('p', 'fb-help', "This table has no datetime columns yet — the range below will simply match nothing here until it's opened on one that does."));
+    colField.append(colSel);
+    b.append(colField);
+    if (!cols.length) b.append(el('p', 'fb-help', "This table has no datetime columns yet, so the range below doesn't narrow it — the timeframe hides none of its rows, and applies on the tables that have one."));
 
     // Plain text, not <input type="datetime-local"> — that widget's native
     // picker renders in the browser's locale/12-hour format depending on
@@ -261,26 +313,19 @@ export function openTimeRangeModal() {
     // separator is TS_ISO_RE's own shape (it accepts 'T' too, for values
     // coming from elsewhere, but the field asks for the one the rest of the
     // app displays: formatTimestamp's 'iso' option, the timeline, exports).
-    const inputStyle = 'flex:1;background:var(--ink);color:var(--text);border:1px solid var(--line-2);'
-      + 'padding:6px 8px;font:inherit;font-family:var(--mono)';
-
-    const startRow = el('div', 'row-actions');
-    const startInput = el('input');
+    const startInput = el('input', 'confirm-input mono');
     startInput.type = 'text';
     startInput.placeholder = 'YYYY-MM-DD HH:MM:SS';
-    startInput.style.cssText = inputStyle;
     startInput.value = S.timeRange.start || '';
-    startRow.append(el('span', null, 'Start'), startInput, datePickerButton(startInput));
-    b.append(startRow);
-
-    const endRow = el('div', 'row-actions');
-    const endInput = el('input');
+    const endInput = el('input', 'confirm-input mono');
     endInput.type = 'text';
     endInput.placeholder = 'YYYY-MM-DD HH:MM:SS';
-    endInput.style.cssText = inputStyle;
     endInput.value = S.timeRange.end || '';
-    endRow.append(el('span', null, 'End'), endInput, datePickerButton(endInput));
-    b.append(endRow);
+    // Side by side, so the two boxes line up (a label beside each put them
+    // at different x positions, "Start" and "End" being different widths).
+    const range = el('div', 'dlg-pair');
+    range.append(timestampField('Start', startInput), timestampField('End', endInput));
+    b.append(range);
     b.append(el('p', 'fb-help', '24-hour time, e.g. 2024-01-05 13:22:01 — the date alone, or date plus HH:MM, also work.'));
 
     // Free-text, so it's validated the same way a value has to be
@@ -298,8 +343,9 @@ export function openTimeRangeModal() {
     // Fill the range from what's already been triaged: earliest/latest
     // timestamp among tagged rows — any tag, or just the ones toggled on.
     if (S.sourceId && S.tags.length) {
-      b.append(el('label', null, 'From tagged rows'));
-      const tagRow = el('div', 'row-actions tr-tag-row');
+      const tagField = el('div', 'dlg-field');
+      tagField.append(el('label', null, 'From tagged rows'));
+      const tagRow = el('div', 'dlg-chips tr-tag-row');
       const selectedTags = new Set();
       for (const t of S.tags) {
         const chip = el('button', 'tag-chip');
@@ -325,23 +371,23 @@ export function openTimeRangeModal() {
           if (!res.start && !res.end) { toast('No tagged rows with a usable timestamp'); return; }
           startInput.value = res.start || '';
           endInput.value = res.end || '';
-          enabledCb.checked = true;
           toast('Range set from tagged rows — Apply to use it');
         } catch (e) {
           toast('Could not read tagged range: ' + e.message, 4000);
         }
       };
       tagRow.append(fillBtn);
-      b.append(tagRow);
+      tagField.append(tagRow);
+      b.append(tagField);
     }
 
     const actions = el('div', 'row-actions');
-    const apply = el('button', 'btn', 'Apply');
+    const apply = el('button', 'btn primary', 'Apply');
     apply.onclick = () => {
       if (!startInput.value.trim() && !endInput.value.trim()) { toast('Set a start and/or end'); return; }
       if (!validateTimeInput(startInput, 'Start') || !validateTimeInput(endInput, 'End')) return;
       S.timeRange = {
-        enabled: enabledCb.checked,
+        enabled: true,
         column: colSel.value || null,
         start: startInput.value.trim(),
         end: endInput.value.trim(),
@@ -385,152 +431,290 @@ export async function moveSavedFilter(f, dir) {
   S.savedFilters = await post('/api/saved_filters/reorder', { ids });
 }
 
-export function openSavedFiltersModal() {
-  modal('Saved filters', (b) => {
-    if (!S.savedFilters.length) {
-      b.append(el('div', 'note-status', 'No saved filters yet. Build one in the Filter builder, then "Save filter…".'));
-      return;
+/* `returnTo`: where the × (and Escape) should land. Settings opens this
+   in the same shared modal, so closing it used to drop the analyst on the
+   grid — one level up, not back where they were. A one-shot listener on
+   the close event, guarded by the title so that a filter applied from
+   here (which hides the modal without the event) or a builder opened
+   from here (which replaces the title) doesn't bounce back to Settings
+   at the wrong moment. */
+export function openSavedFiltersModal({ returnTo = null, section = null, rearm = true } = {}) {
+  if (returnTo && rearm) {
+    const back = () => {
+      document.removeEventListener('winnow:modalclose', back);
+      if ($('modalTitle').textContent === 'Saved filters' && $('modalBody').dataset.sfReturn === '1') returnTo();
+    };
+    document.addEventListener('winnow:modalclose', back);
+  }
+  // Redrawn whole when its sections change (a set's last filter deleted,
+  // an import bringing a new one); the listener above stays armed for it.
+  const reopen = (at) => openSavedFiltersModal({ returnTo, section: at, rearm: false });
+  const curCols = new Set(baseColumns().map((c) => c.name.trim().toLowerCase()));
+  const groupMatchesCur = (colNames) => {
+    const cols = new Set((colNames || []).map((c) => c.trim().toLowerCase()));
+    return cols.size === curCols.size && [...cols].every((c) => curCols.has(c));
+  };
+  /* One section per header set — the filters under a set cycle together,
+     so they read together. The open table's set leads, and is where the
+     dialog opens; All lists every set under its own heading. */
+  const setsNow = () => {
+    const groups = new Map();
+    for (const f of S.savedFilters) {
+      const sig = headerSig(f.col_names);
+      if (!groups.has(sig)) groups.set(sig, { sig, colNames: f.col_names, filters: [] });
+      groups.get(sig).filters.push(f);
     }
-    const search = el('input');
-    search.type = 'search';
-    search.placeholder = 'Search by name, nickname, or column…';
-    search.autocomplete = 'off';
-    search.style.cssText = 'width:100%;background:var(--ink);color:var(--text);border:1px solid var(--line-2);'
-      + 'border-radius:var(--radius-sm);padding:6px 9px;font:inherit;font-size:12px;margin-bottom:10px';
-    b.append(search);
+    return [...groups.values()].sort((a, z) => Number(groupMatchesCur(z.colNames)) - Number(groupMatchesCur(a.colNames)));
+  };
+  const sets = setsNow();
+  const setLabel = (g) => nicknameFor(g.colNames) || (g.colNames || []).slice(0, 3).join(', ') + ((g.colNames || []).length > 3 ? ` +${g.colNames.length - 3}` : '');
+  let query = '';
 
-    const list = el('div', 'sf-list');
-    b.append(list);
-
-    const curCols = new Set(baseColumns().map((c) => c.name.trim().toLowerCase()));
+  modal('Saved filters', (b) => {
+    // Marks THIS opening as the one with a way back, so a listener left
+    // armed by a close that bypassed the event can't fire for a later
+    // Saved filters opened from Filters ▾.
+    b.dataset.sfReturn = returnTo ? '1' : '';
     const active = activeSavedFilterRecord();
 
-    const groupMatchesCur = (colNames) => {
-      const cols = new Set((colNames || []).map((c) => c.trim().toLowerCase()));
-      return cols.size === curCols.size && [...cols].every((c) => curCols.has(c));
-    };
+    async function applyFilter(f, matches) {
+      if (!matches && !(await confirmDialog(`"${f.name}" was built for a different column set (${f.col_names.join(', ')}). Apply anyway?`))) return;
+      $('modal').hidden = true;
+      applyPreset(f);
+    }
 
-    function filterRow(f, matches, colText) {
-      const row = el('div', 'sf-row');
-      const applyBtn = el('button', 'btn' + (matches ? '' : ' ghost') + ' sf-apply', f.name);
-      applyBtn.setAttribute('aria-pressed', String(!!(active && active.id === f.id)));
-      applyBtn.title = matches
-        ? `Apply "${f.name}"`
-        : `Built for different columns (${colText}) — click to apply anyway`;
-      applyBtn.onclick = async () => {
-        if (!matches && !(await confirmDialog(`"${f.name}" was built for a different column set (${colText}). Apply anyway?`))) return;
-        $('modal').hidden = true;
-        applyPreset(f);
-      };
-      // Editing routes through the real grid: apply the filter, then open
-      // the builder pre-loaded with its payload, so the match count behind
-      // the modal is live feedback on the change being made. Needs a table
-      // open to apply against — without one there's nothing to preview.
-      const editBtn = el('button', 'btn ghost sf-mini', 'Edit');
-      editBtn.title = S.sourceId
-        ? `Apply "${f.name}" to the open table and edit its conditions`
-        : 'Open a table first — editing applies the filter so you can see what it matches';
-      editBtn.disabled = !S.sourceId;
-      editBtn.onclick = async () => {
-        if (!matches && !(await confirmDialog(
-          `"${f.name}" was built for a different column set (${colText}). Edit it against the open table anyway? `
-          + `It stays saved for its original columns.`))) return;
-        $('modal').hidden = true;
-        applyPreset(f);
-        openFilterBuilder(f);
-      };
-      const renBtn = el('button', 'btn ghost sf-mini', 'Rename');
-      renBtn.onclick = async () => {
-        const name = await promptDialog('New name:', f.name);
-        if (!name || !name.trim()) return;
+    // Editing routes through the real grid: apply the filter, then open
+    // the builder pre-loaded with its payload, so the match count behind
+    // the modal is live feedback on the change being made.
+    async function editFilter(f, matches) {
+      if (!matches && !(await confirmDialog(
+        `"${f.name}" was built for a different column set (${f.col_names.join(', ')}). Edit it against the open table anyway? `
+        + `It stays saved for its original columns.`))) return;
+      $('modal').hidden = true;
+      applyPreset(f);
+      openFilterBuilder(f);
+    }
+
+    async function renameFilter(f) {
+      const name = await promptDialog('New name:', f.name);
+      if (!name || !name.trim()) return;
+      try {
         await api(`/api/saved_filters/${f.id}`, {
           method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name.trim() }),
         });
-        f.name = name.trim();
-        render();
-        updateFiltersButton();
+      } catch (e) { toast(`Could not rename "${f.name}": ${e.message}`, 6000); return; }
+      f.name = name.trim();
+      frame.update();
+      focusMore(f.id);
+      updateFiltersButton();
+    }
+
+    async function moveFilter(f, dir) {
+      try { await moveSavedFilter(f, dir); } catch (e) { toast(`Could not move "${f.name}": ${e.message}`, 6000); return; }
+      frame.update();
+      // Back on the same filter's ⋯, so a second Move up is Enter and
+      // an arrow away — reordering without a mouse is a row of keys.
+      focusMore(f.id);
+    }
+
+    async function deleteFilter(f) {
+      if (!(await confirmDialog(`Delete saved filter "${f.name}"?`, { danger: true, okLabel: 'Delete' }))) return;
+      try { await api(`/api/saved_filters/${f.id}`, { method: 'DELETE' }); }
+      catch (e) { toast(`Could not delete "${f.name}": ${e.message}`, 6000); return; }
+      S.savedFilters = S.savedFilters.filter((x) => x.id !== f.id);
+      updateFiltersButton();
+      // The last filter of a set takes its section with it.
+      if (setsNow().length !== sets.length) { reopen(frame.current() === 'all' ? 'all' : null); return; }
+      frame.update();
+    }
+
+    function focusMore(id) {
+      const btn = frame.pane.querySelector(`.sf-row[data-id="${id}"] .sf-more`);
+      if (btn) btn.focus();
+    }
+
+    // Built from live state each time it opens: the move entries read the
+    // filter's place in its header set as it is now, not as it was drawn.
+    function rowMenu(f, matches) {
+      const ids = sameGroupFilterIds(f.col_names);
+      const at = ids.indexOf(f.id);
+      return [
+        { label: 'Apply', onclick: () => applyFilter(f, matches) },
+        {
+          label: 'Edit…',
+          disabled: !S.sourceId,
+          desc: S.sourceId ? null : 'Open a table first',
+          title: S.sourceId
+            ? `Apply "${f.name}" to the open table and edit its conditions`
+            : 'Editing applies the filter so you can see what it matches, which needs a table open',
+          onclick: () => editFilter(f, matches),
+        },
+        { label: 'Rename…', onclick: () => renameFilter(f) },
+        '-',
+        { label: 'Move up', disabled: at <= 0, title: 'Earlier in the cycle order for this header set', onclick: () => moveFilter(f, -1) },
+        { label: 'Move down', disabled: at < 0 || at >= ids.length - 1, title: 'Later in the cycle order for this header set', onclick: () => moveFilter(f, 1) },
+        '-',
+        { label: 'Delete…', onclick: () => deleteFilter(f) },
+      ];
+    }
+
+    /* What a filter does, in a few words: the columns its conditions are
+       on, and how many conditions — the old list showed the name alone,
+       and twenty "EVTX — …" names tell each other apart by their ends. */
+    function conditionsOf(tree) {
+      const cols = [];
+      let n = 0;
+      const walk = (node) => {
+        if (!node) return;
+        if (node.type === 'cond') { n += 1; if (!cols.includes(node.column)) cols.push(node.column); }
+        else if (node.type === 'raw') { n += 1; if (!cols.includes('SQL')) cols.push('SQL'); }
+        else for (const c of node.children || []) walk(c);
       };
-      const groupIds = sameGroupFilterIds(f.col_names);
-      const gIdx = groupIds.indexOf(f.id);
-      const upBtn = el('button', 'btn ghost sf-mini', '▲');
-      upBtn.title = 'Move earlier in the cycle order for this header set';
-      upBtn.disabled = gIdx <= 0;
-      upBtn.onclick = async () => { await moveSavedFilter(f, -1); render(); };
-      const downBtn = el('button', 'btn ghost sf-mini', '▼');
-      downBtn.title = 'Move later in the cycle order for this header set';
-      downBtn.disabled = gIdx >= groupIds.length - 1;
-      downBtn.onclick = async () => { await moveSavedFilter(f, 1); render(); };
-      const del = el('button', 'btn ghost sf-mini', '✕');
-      del.title = 'Delete this saved filter';
-      del.onclick = async () => {
-        if (!(await confirmDialog(`Delete saved filter "${f.name}"?`, { danger: true, okLabel: 'Delete' }))) return;
-        await api(`/api/saved_filters/${f.id}`, { method: 'DELETE' });
-        S.savedFilters = S.savedFilters.filter((x) => x.id !== f.id);
-        render();
-        updateFiltersButton();
-      };
-      row.append(applyBtn, editBtn, renBtn, upBtn, downBtn, del);
-      // Drag to reorder as well — same one DnD implementation the tab
-      // strip and SQL sub-tabs use. currentIds scopes the drop to this
-      // filter's own header set, so dragging across sets is a no-op
-      // (wireDragReorder's own from === -1 guard).
-      wireDragReorder(row, f.id, {
+      walk(tree);
+      return { n, cols };
+    }
+
+    function filterRow(f, matches) {
+      const r = el('div', 'tables-row sf-row' + (matches ? ' open' : ' sf-other'));
+      r.dataset.id = String(f.id);
+      const grip = el('span', 'sf-grip', '⠿');
+      grip.title = 'Drag to change the cycle order';
+      grip.setAttribute('aria-hidden', 'true');
+      const cell = el('span', 'tables-name-cell');
+      const name = el('button', 'tables-name sf-name', f.name);
+      name.type = 'button';
+      name.dataset.role = 'name';
+      if (active && active.id === f.id) name.setAttribute('aria-current', 'true');
+      name.title = matches ? `Apply "${f.name}"` : `Built for different columns — click to apply anyway`;
+      name.onclick = () => applyFilter(f, matches);
+      cell.append(name);
+      if (active && active.id === f.id) cell.append(el('span', 'tables-sub sf-on', 'applied'));
+      const p = f.payload || {};
+      const { n, cols } = conditionsOf(p.filter_tree);
+      const extra = [p.search && 'search', (p.group_by || []).length && `grouped by ${p.group_by.join(', ')}`].filter(Boolean);
+      const on = el('span', 'sf-on-cols', cols.join(', ') + (extra.length ? (cols.length ? ' · ' : '') + extra.join(' · ') : ''));
+      on.title = on.textContent;
+      const more = el('button', 'btn ghost row-more tables-more sf-more', '⋯');
+      more.dataset.role = 'more';
+      more.title = 'Apply, edit, rename, move or delete';
+      more.setAttribute('aria-label', `Actions for "${f.name}"`);
+      more.setAttribute('aria-haspopup', 'menu');
+      more.setAttribute('aria-expanded', 'false');
+      more.onclick = () => dropdownMenu(more, () => rowMenu(f, matches));
+      r.append(grip, cell, on, countCell(n, 'tables-notes'), more);
+      r.addEventListener('contextmenu', (e) => { e.preventDefault(); contextMenu(e, rowMenu(f, matches)); });
+      // Drag to reorder — the one DnD implementation the tab strip and SQL
+      // sub-tabs use, scoped to this filter's own header set.
+      wireDragReorder(r, f.id, {
         containerSelector: '.sf-list',
         rowSelector: '.sf-row',
         horizontal: false,
         currentIds: () => sameGroupFilterIds(f.col_names),
         onReorder: async (ids) => {
-          S.savedFilters = await post('/api/saved_filters/reorder', { ids });
-          render();
+          try { S.savedFilters = await post('/api/saved_filters/reorder', { ids }); }
+          catch (e) { toast(`Could not reorder: ${e.message}`, 6000); return; }
+          frame.update();
         },
       });
-      return row;
+      return r;
     }
 
-    function render() {
-      const q = search.value.trim().toLowerCase();
-      list.replaceChildren();
-      // One section per header set — the filters under a set cycle
-      // together, so they read together. The open table's set leads.
-      const groups = new Map();
-      for (const f of S.savedFilters) {
-        const sig = headerSig(f.col_names);
-        if (!groups.has(sig)) groups.set(sig, { colNames: f.col_names, filters: [] });
-        groups.get(sig).filters.push(f);
-      }
-      const entries = [...groups.values()];
-      entries.sort((a, z) => Number(groupMatchesCur(z.colNames)) - Number(groupMatchesCur(a.colNames)));
-      let shown = 0;
-      for (const g of entries) {
-        const nickname = nicknameFor(g.colNames);
-        const colText = (g.colNames || []).join(', ');
-        const hits = g.filters.filter((f) => !q || f.name.toLowerCase().includes(q)
-          || (nickname || '').toLowerCase().includes(q) || colText.toLowerCase().includes(q));
-        if (!hits.length) continue;
-        shown += hits.length;
-        const matches = groupMatchesCur(g.colNames);
-        const head = el('div', 'sf-group-head');
-        const title = el('span', 'sf-group-name', nickname || colText);
-        title.title = colText;
-        const nickBtn = el('button', 'btn ghost sf-mini', nickname ? '🏷' : '🏷 name…');
-        nickBtn.title = nickname
-          ? `Rename this header set's nickname (used by every filter in this section: ${colText})`
-          : `Give this header set a nickname instead of showing its raw columns (${colText})`;
-        nickBtn.onclick = async () => { await setNicknameFor(g.colNames, nickname); render(); };
-        head.append(title, nickBtn);
-        if (matches) head.append(el('span', 'count', 'open table'));
-        list.append(head);
-        for (const f of hits) list.append(filterRow(f, matches, colText));
-      }
-      if (!shown) list.append(el('div', 'note-status', 'No saved filters match that search.'));
+    function groupHead(g, filters) {
+      const h = el('div', 'tables-group');
+      const name = el('span', 'tables-group-name', setLabel(g));
+      name.title = (g.colNames || []).join(', ');
+      h.append(name, el('span', 'tables-group-meta', plural(filters.length, 'filter') + (groupMatchesCur(g.colNames) ? ' · open table' : '')));
+      return h;
     }
-    search.oninput = render;
-    render();
-    setTimeout(() => search.focus(), 0);
 
-    const acts = el('div', 'row-actions');
-    const exp = el('button', 'btn ghost', 'Export filters…');
-    exp.onclick = () => { window.location = '/api/saved_filters/export'; };
+    /* A set's pane, or All's: a filter over names, nicknames and columns on
+       top, the set's columns under it, then the box that scrolls. */
+    const buildPane = (sig) => (pane) => {
+      const top = el('div', 'tm-cols-top');
+      const search = el('input', 'side-search');
+      search.type = 'search';
+      search.placeholder = 'Filter by name, nickname or column…';
+      search.setAttribute('aria-label', 'Filter saved filters');
+      search.autocomplete = 'off';
+      search.value = query;
+      const count = el('span', 'tm-cols-count');
+      top.append(search, count);
+      pane.append(top);
+      const g0 = sig ? sets.find((g) => g.sig === sig) : null;
+      if (g0) {
+        const about = el('div', 'sf-set');
+        const cols = el('span', 'sf-set-cols', `${plural(g0.colNames.length, 'column')}: ${g0.colNames.join(', ')}`);
+        cols.title = g0.colNames.join(', ');
+        const nick = el('button', 'btn ghost mb-small', nicknameFor(g0.colNames) ? 'Rename nickname…' : 'Nickname…');
+        nick.title = 'What this header set is called here, in the Filters ▾ menu and in the Tables manager';
+        nick.onclick = async () => { await setNicknameFor(g0.colNames, nicknameFor(g0.colNames)); reopen(sig); };
+        about.append(cols, nick);
+        pane.append(about);
+      }
+      const box = el('div', 'side-preview tm-cols-box tables-box sf-box');
+      const head = el('div', 'tables-head sf-head');
+      head.append(el('span'), el('span', 'tables-name-h', 'Filter'), el('span', null, 'Filters on'), el('span', 'tables-num', 'Conds'), el('span'));
+      const scroller = el('div', 'side-preview-rows');
+      const list = el('div', 'tables-list sf-list');
+      scroller.append(list);
+      const foot = el('div', 'side-preview-foot');
+      foot.append(el('p', 'fb-help',
+        `Click a name to apply it. Drag a row to set the ${S.keymap.cyclePrevFilter[0] || '['} / `
+        + `${S.keymap.cycleNextFilter[0] || ']'} cycle order.`));
+      box.append(head, scroller, foot);
+      pane.append(box);
+
+      function paint() {
+        const q = query.trim().toLowerCase();
+        const groups = setsNow().filter((g) => !sig || g.sig === sig);
+        let all = 0, shown = 0;
+        const nodes = [];
+        for (const g of groups) {
+          const nickname = nicknameFor(g.colNames) || '';
+          const colText = (g.colNames || []).join(', ').toLowerCase();
+          all += g.filters.length;
+          const hits = g.filters.filter((f) => !q || f.name.toLowerCase().includes(q) || nickname.toLowerCase().includes(q) || colText.includes(q));
+          if (!hits.length) continue;
+          shown += hits.length;
+          if (!sig) nodes.push(groupHead(g, hits));
+          const matches = groupMatchesCur(g.colNames);
+          nodes.push(...hits.map((f) => filterRow(f, matches)));
+        }
+        if (!all) nodes.push(el('p', 'fb-help tables-empty', 'No saved filters yet. Build one in the Filter builder, then Save filter….'));
+        else if (!shown) nodes.push(el('p', 'fb-help tables-empty', `No saved filter matches “${query.trim()}”.`));
+        count.textContent = q ? `${shown} of ${plural(all, 'filter')}` : plural(all, 'filter');
+        keepingFocus(list, () => list.replaceChildren(...nodes));
+      }
+      search.oninput = () => { query = search.value; paint(); };
+      search.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && search.value) { e.preventDefault(); e.stopPropagation(); search.value = ''; query = ''; paint(); }
+      });
+      paint();
+      return { update: paint };
+    };
+
+    const frame = sectionPanes({
+      sections: [
+        { id: 'all', group: 'Saved filters', title: 'Every saved filter', build: buildPane(null),
+          hint: () => `${plural(S.savedFilters.length, 'filter')} · ${plural(setsNow().length, 'header set')}` },
+        ...sets.map((g) => ({
+          id: 'set:' + g.sig, group: 'Header sets', title: setLabel(g), build: buildPane(g.sig),
+          hint: () => {
+            const n = S.savedFilters.filter((f) => headerSig(f.col_names) === g.sig).length;
+            return plural(n, 'filter') + (groupMatchesCur(g.colNames) ? ' · open table' : '');
+          },
+        })),
+      ],
+      label: 'Saved filter sections', cls: 'list-panes sf-manager', paneCls: 'list-pane sf-pane', changedEvent: 'savedfilters:changed',
+    });
+    b.append(frame.panes);
+
+    const foot = el('div', 'table-menu-foot table-menu-strip');
+    if (returnTo) {
+      const back = el('button', 'btn ghost sf-back', '‹ Settings');
+      back.onclick = () => returnTo();
+      foot.append(back);
+    }
     const impLabel = el('label', 'btn ghost', 'Import filters…');
     const impInput = el('input');
     impInput.type = 'file';
@@ -542,34 +726,79 @@ export function openSavedFiltersModal() {
       fd.append('merge', 'true');
       const res = await api('/api/saved_filters/import', { method: 'POST', body: fd });
       await loadSavedFilters();
-      render();
       updateFiltersButton();
       toast(`Imported ${res.added} filter${res.added === 1 ? '' : 's'}`);
+      reopen(frame.current());   // an import can bring header sets of its own
     };
     impLabel.append(impInput);
-    acts.append(exp, impLabel);
-    b.append(acts);
+    const exp = el('button', 'btn ghost', 'Export filters…');
+    exp.onclick = () => { window.location = '/api/saved_filters/export'; };
+    const builder = el('button', 'btn ghost table-menu-close', 'Filter builder…');
+    builder.disabled = !S.sourceId;
+    builder.title = S.sourceId ? 'Build a filter on the open table, then Save filter…' : 'Open a table first';
+    builder.onclick = () => openFilterBuilder();
+    foot.append(impLabel, exp, builder);
+    b.append(foot);
 
-    b.append(el('p', null,
-      `Cycle filters that match the open source's columns with `
-      + `${S.keymap.cyclePrevFilter[0] || '['} / ${S.keymap.cycleNextFilter[0] || ']'} — cycling past either `
-      + `end drops the filters entirely rather than wrapping. ▲/▼ (or drag) set the cycle order within a `
-      + `header set. "Edit" applies a filter to the open table and reopens it in the Filter builder, where `
-      + `"Update" saves your changes back over it.`));
-  });
+    const mine = sets.find((g) => groupMatchesCur(g.colNames));
+    const want = section && (section === 'all' || sets.some((g) => 'set:' + g.sig === section)) ? section
+      : mine ? 'set:' + mine.sig : 'all';
+    frame.show(want);
+  }, { wide: true, tall: true, focus: (b) => b.querySelector('.sf-pane .side-search') });
 }
 
-/* `refresh` re-renders whatever surface is hosting the panel after a bulk
-   action ("Show all"/"Hide empty") — the per-column checkboxes repaint the
-   grid directly and don't need it. */
-export function buildColumnsPanel(container, refresh = openTableMenu) {
+/* The Columns pane of the table menu. `refresh` repaints the pane after a
+   bulk action ("Show all"/"Hide empty") — the per-column checkboxes
+   repaint the grid directly and don't need it. Anything that changes what
+   the side list says about this pane (how many columns are shown) sends
+   `tablemenu:changed` up from the container instead. */
+export function buildColumnsPanel(container, refresh = () => openTableMenu()) {
   if (!S.sourceId) {
     container.append(el('p', null, 'Open a table to manage its columns.'));
     return;
   }
+  const changed = () => container.dispatchEvent(new CustomEvent('tablemenu:changed', { bubbles: true }));
+  // A filter box first: a KAPE table has a few hundred columns, and the
+  // one to hide or pin is somewhere in the middle. Rows not matching are
+  // hidden, not removed — the drag order still runs over all of S.order,
+  // so a drop between two visible rows lands where the list shows it.
+  const top = el('div', 'tm-cols-top');
+  const search = el('input', 'side-search collist-search');
+  search.type = 'search';
+  search.placeholder = 'Filter columns…';
+  search.autocomplete = 'off';
+  search.setAttribute('aria-label', 'Filter columns');
+  const count = el('span', 'tm-cols-count');
+  top.append(search, count);
+  container.append(top);
+  // The list is the one part of the pane that takes what is left and
+  // scrolls, the way the derive dialog's settings and the folder import's
+  // file list do, so the filter box and the buttons under it stay put.
+  const box = el('div', 'side-preview tm-cols-box');
+  const scroller = el('div', 'side-preview-rows');
   const list = el('div', 'collist');
-  S.order.forEach((name) => {
+  scroller.append(list);
+  const foot = el('div', 'side-preview-foot');
+  foot.append(el('p', 'fb-help', 'Drag a row, or a column header in the grid, to reorder. ⤒ ⤓ send one straight to an end.'));
+  box.append(scroller, foot);
+  const rows = new Map();
+  const applySearch = () => {
+    const q = search.value.trim().toLowerCase();
+    for (const [name, row] of rows) row.hidden = !!q && !name.toLowerCase().includes(q);
+  };
+  search.oninput = applySearch;
+  // A column grouped on is in the group strip, not the grid, so it is left
+  // out here as it is from the header (visibleCols). It is still in S.order
+  // — the drag order below runs over that — and is listed again on Ungroup.
+  const listed = S.order.filter((n) => !S.groupByCols.includes(n));
+  const paintCount = () => {
+    const shown = listed.filter((n) => !(S.layout[n] || {}).hidden).length;
+    count.textContent = `${shown} of ${listed.length} shown`;
+  };
+  paintCount();
+  listed.forEach((name) => {
     const row = el('div', 'collist-row');
+    rows.set(name, row);
     const lab = el('label');
     const cb = el('input');
     cb.type = 'checkbox';
@@ -577,8 +806,9 @@ export function buildColumnsPanel(container, refresh = openTableMenu) {
     cb.onchange = () => {
       S.layout[name] = { ...(S.layout[name] || {}), hidden: !cb.checked };
       renderHead(); render(); saveLayout();
+      paintCount(); changed();
     };
-    lab.append(cb, el('span', null, name));
+    lab.append(cb, el('span', 'collist-name', name));
     // Pinning sits beside visibility: both are decisions about where a
     // column is, rather than what it contains.
     // Its own class, not collist-pick: that one is the value-picker
@@ -587,40 +817,68 @@ export function buildColumnsPanel(container, refresh = openTableMenu) {
     const pin = el('button', 'btn ghost collist-pin');
     const paintPin = () => {
       const on = isPinned(name);
-      pin.textContent = on ? '📌 pinned' : 'pin';
+      pin.textContent = on ? 'pinned' : 'pin';
       pin.setAttribute('aria-pressed', String(on));
       pin.title = on
         ? `"${name}" stays put when you scroll sideways — click to unpin`
         : `Keep "${name}" visible while scrolling sideways`;
     };
     paintPin();
-    pin.onclick = () => { togglePin(name); paintPin(); };
+    pin.onclick = () => { togglePin(name); paintPin(); changed(); };
     const c = columnMeta(name);
-    lab.append(el('span', 'count', ' ' + (c ? c.type : '') + (c && c.derived ? ' · derived' : '')));
+    const type = (c ? c.type : '') + (c && c.derived ? ' · derived' : '');
+    lab.append(el('span', 'collist-type', ' ' + type));
+    // A narrow window cuts a long name short; hovering shows it whole.
+    lab.title = `${name} ${type}`;
     row.append(lab, pin);
     // Per-column value-picker override, in the same row as the visibility
     // box because they're the same kind of decision about the same column.
     // Three states, not two: following the table's setting is distinct from
     // being explicitly on or off, and only an explicit choice survives the
     // table default changing later.
-    const override = (S.layout[name] || {}).valuePicker;
-    const state = override === undefined ? 'auto' : (override ? 'on' : 'off');
-    // 'auto' alone lied when the table setting was "on for every column" —
-    // every row read auto while every dropdown was actually on. Show what
-    // auto currently RESOLVES to.
-    const label = state === 'auto' ? `auto·${valueFilterEnabled(name) ? 'on' : 'off'}` : state;
-    const pick = el('button', 'btn ghost collist-pick', '▾ ' + label);
-    pick.setAttribute('aria-pressed', String(valueFilterEnabled(name)));
-    pick.title = state === 'auto'
-      ? `Value dropdown follows this table's setting (currently ${valueFilterEnabled(name) ? 'on' : 'off'}) — click to pin it on`
-      : `Value dropdown pinned ${state} for this column — click to cycle`;
+    const pick = el('button', 'btn ghost collist-pick');
+    const pickState = () => {
+      const override = (S.layout[name] || {}).valuePicker;
+      return override === undefined ? 'auto' : (override ? 'on' : 'off');
+    };
+    const paintPick = () => {
+      const state = pickState();
+      // 'auto' alone lied when the table setting was "on for every column" —
+      // every row read auto while every dropdown was actually on. Show what
+      // auto currently RESOLVES to.
+      const on = valueFilterEnabled(name);
+      pick.textContent = '▾ ' + (state === 'auto' ? `auto·${on ? 'on' : 'off'}` : state);
+      // Only a choice made for this column is drawn at full strength; a row
+      // following the table's setting says the same as every other row, so
+      // it stays faint until the row is under the pointer, like ⤒ ⤓.
+      pick.classList.toggle('set', state !== 'auto');
+      pick.setAttribute('aria-pressed', String(on));
+      pick.title = state === 'auto'
+        ? `Value dropdown follows this table's setting (currently ${on ? 'on' : 'off'}) — click to pin it on`
+        : `Value dropdown pinned ${state} for this column — click to cycle`;
+    };
+    paintPick();
     pick.onclick = () => {
       // auto → on → off → auto: all three states reachable in one direction,
-      // including pinning a column on while the table default is off.
+      // including pinning a column on while the table default is off. The
+      // button repaints in place, so the filter and the scroll stay put.
+      const state = pickState();
       setColumnValueFilter(name, state === 'auto' ? true : (state === 'on' ? false : null));
-      refresh();
+      paintPick(); changed();
     };
     row.append(pick);
+    // To either end in one click. Drag handles the rest; these handle the
+    // case drag is worst at — the column that belongs first on a table
+    // with two hundred of them.
+    const topBtn = el('button', 'btn ghost collist-move', '⤒');
+    topBtn.title = `Move "${name}" to the top`;
+    // The row moves in place rather than the panel re-rendering, so a
+    // filter typed into the box above survives the click.
+    topBtn.onclick = () => { moveColumn(name, 'top'); list.prepend(row); };
+    const bottom = el('button', 'btn ghost collist-move', '⤓');
+    bottom.title = `Move "${name}" to the bottom`;
+    bottom.onclick = () => { moveColumn(name, 'bottom'); list.append(row); };
+    row.append(topBtn, bottom);
     // Reorder from here too — the grid's header drag is invisible to
     // anyone working from this panel, and hidden columns can ONLY be
     // repositioned here. Same DnD vocabulary as the tab strip.
@@ -632,13 +890,15 @@ export function buildColumnsPanel(container, refresh = openTableMenu) {
       onReorder: (order) => {
         S.order = order;
         renderHead(); render(); saveLayout();
-        refresh();
+        // Rows follow the new order in place — like ⤒ ⤓, so a filter
+        // typed above survives the drop instead of the panel re-rendering
+        // with an empty box and every column back.
+        for (const n of order) { const rw = rows.get(n); if (rw) list.append(rw); }
       },
     });
     list.append(row);
   });
-  container.append(list);
-  container.append(el('p', 'fb-help', 'Drag rows here — or the column headers in the grid — to reorder columns.'));
+  container.append(box);
   const acts = el('div', 'row-actions');
   const addDerived = el('button', 'btn ghost', 'Add derived column…');
   addDerived.title = 'Parse a timestamp, or extract part of a value — JSON/XML field or a regex capture — into its own sortable, filterable column';
@@ -656,63 +916,476 @@ export function buildColumnsPanel(container, refresh = openTableMenu) {
     });
     renderHead(); render(); saveLayout(); refresh();
   };
-  acts.append(all, none);
+  // Rows, not columns: a toggle, since it's a view predicate the server
+  // applies (currentSpec's hide_empty_rows) rather than a one-shot edit
+  // to S.layout — the row count in the toolbar follows it. Remembered per
+  // table in the layout, like the value-filter default.
+  const hideRows = el('button', 'btn ghost', 'Hide empty rows');
+  hideRows.title = 'Drop rows whose every column is empty — blank lines in a raw-text import, padding rows in an export';
+  const paintHideRows = () => hideRows.setAttribute('aria-pressed', String(!!S.hideEmptyRows));
+  paintHideRows();
+  hideRows.onclick = async () => {
+    S.hideEmptyRows = !S.hideEmptyRows;
+    paintHideRows();
+    saveLayout();
+    await rebuildView({ keepScroll: false });
+  };
+  acts.append(all, none, hideRows);
   container.append(acts);
 }
 
-/* The table menu's value-filter section: the table-wide default the
-   per-column overrides above fall back to. */
-export function buildValueFilterPanel(container, refresh) {
-  const src = S.sources.find((s) => s.id === S.sourceId);
-  const rows = src ? src.row_count : 0;
-  container.append(el('p', null,
-    'A ▾ button on each column filter box lists that column’s distinct values with counts, '
-    + 'so you can tick the ones to filter to. Reading those values is a scan, which is why big '
-    + 'tables start with it off.'));
-  const seg = el('div', 'vp-seg');
-  for (const [key, label, title] of [
-    ['auto', `Auto (on under ${VALUE_FILTER_AUTO_MAX.toLocaleString()} rows)`,
-      `This table has ${rows.toLocaleString()} rows — auto means ${valueFilterAutoOn() ? 'on' : 'off'} here`],
-    ['on', 'On for every column', 'Show the picker on every column regardless of size'],
-    ['off', 'Off', 'No picker buttons — the row menu’s "Filter by values…" still opens one'],
-  ]) {
-    const b = el('button', 'btn ghost', label);
-    b.setAttribute('aria-pressed', String(S.valueFilterMode === key));
-    b.title = title;
-    b.onclick = () => { setValueFilterMode(key); refresh(); };
-    seg.append(b);
-  }
-  container.append(seg);
-  const pinned = S.order.filter((n) => (S.layout[n] || {}).valuePicker !== undefined);
-  if (pinned.length) {
-    const clear = el('button', 'btn ghost', `Clear ${pinned.length} per-column override${pinned.length > 1 ? 's' : ''}`);
-    clear.style.marginTop = '10px';
-    clear.onclick = () => { for (const n of pinned) setColumnValueFilter(n, null); refresh(); };
-    container.append(clear);
-  }
+/* A figure over a dim caps label, the merge builder's (.mb-stat). */
+export function tableMenuStat(value, label) {
+  const s = el('div', 'mb-stat');
+  s.append(el('b', null, typeof value === 'number' ? value.toLocaleString() : value), el('span', null, label));
+  return s;
 }
 
-export function buildTableActionsPanel(container, refresh) {
+/* A segmented control in the builders' tint (.mb-seg): `options` is
+   [key, label, title], `current()` the pressed key, `pick(key)` what a
+   click does. Returns the node and a paint() for after a change. */
+export function tableMenuSeg(options, current, pick, cls = '') {
+  const seg = el('div', 'mb-seg ' + cls);
+  const buttons = options.map(([key, label, title]) => {
+    const b = el('button', null, label);
+    b.type = 'button';
+    b.dataset.key = key;
+    if (title) b.title = title;
+    b.onclick = () => pick(key);
+    seg.append(b);
+    return b;
+  });
+  const paint = () => { for (const b of buttons) b.setAttribute('aria-pressed', String(b.dataset.key === current())); };
+  paint();
+  return { seg, buttons, paint };
+}
+
+/* A field in the builders' shape (.mb-field): a dim caps label above
+   whatever the field holds. */
+export function tableMenuField(label, ...nodes) {
+  const f = el('div', 'mb-field tm-field');
+  f.append(el('label', null, label), ...nodes);
+  return f;
+}
+
+/* The table menu's value-dropdown section, in the merge builder's shape:
+   what the table's setting comes to on top with the setting itself
+   beside it, then every column with its own Auto / On / Off. The list is
+   the Columns pane's order, and a click changes the row in place rather
+   than re-sorting it, so the row under the pointer stays there. */
+export function buildValueFilterPanel(container) {
+  const changed = () => container.dispatchEvent(new CustomEvent('tablemenu:changed', { bubbles: true }));
   const src = S.sources.find((s) => s.id === S.sourceId);
-  const acts = el('div', 'row-actions');
-  const dflt = el('button', 'btn ghost', 'Save layout as default for these columns');
-  dflt.title = 'Reuse this column order/visibility for any table imported with the same headers';
-  dflt.onclick = () => saveDefaultLayout();
-  const nick = el('button', 'btn ghost', 'Name this header set…');
-  nick.onclick = () => setNicknameFor(baseColumns().map((c) => c.name), nicknameFor(baseColumns().map((c) => c.name)));
-  const nickTable = el('button', 'btn ghost', src && src.is_merge ? 'Rename this merge…' : 'Nickname this table…');
-  nickTable.title = src && src.is_merge
-    ? 'Rename this merge'
-    : 'A display name shown in place of the file name — clear it to go back';
-  nickTable.onclick = async () => {
-    if (!src) return;
-    if (await editSourceNickname(src)) refresh();
+  const rows = src ? src.row_count : 0;
+  const listed = S.order.filter((n) => !S.groupByCols.includes(n));
+  const setByHand = () => listed.filter((n) => (S.layout[n] || {}).valuePicker !== undefined);
+
+  const summary = el('div', 'mb-summary');
+  const stats = el('div', 'mb-stats');
+  const table = tableMenuSeg([
+    ['auto', `Auto · under ${VALUE_FILTER_AUTO_MAX.toLocaleString()} rows`, `This table has ${rows.toLocaleString()} rows`],
+    ['on', 'On', 'A ▾ on every column, whatever the table’s size'],
+    ['off', 'Off', 'No ▾ buttons — the row menu’s "Filter by values…" still opens one'],
+  ], () => S.valueFilterMode, (key) => { setValueFilterMode(key); paint(); changed(); });
+  summary.append(stats, table.seg);
+  const notes = el('ul', 'mb-notes');
+  container.append(summary, notes);
+
+  const top = el('div', 'tm-cols-top');
+  const search = el('input', 'side-search');
+  search.type = 'search';
+  search.placeholder = 'Filter columns…';
+  search.setAttribute('aria-label', 'Filter columns');
+  top.append(search);
+  container.append(top);
+  const box = el('div', 'side-preview tm-cols-box');
+  const scroller = el('div', 'side-preview-rows');
+  const list = el('div', 'tm-vf-list');
+  scroller.append(list);
+  const foot = el('div', 'side-preview-foot tm-vf-foot');
+  const footText = el('p', 'fb-help');
+  const clear = el('button', 'btn ghost');
+  clear.onclick = () => { for (const n of setByHand()) setColumnValueFilter(n, null); paint(); changed(); };
+  foot.append(footText, clear);
+  box.append(scroller, foot);
+  container.append(box);
+
+  const rowsByName = new Map();
+  for (const name of listed) {
+    const row = el('div', 'tm-vf-row');
+    row.dataset.col = name;
+    const c = columnMeta(name);
+    const label = el('span', 'tm-vf-name');
+    label.append(el('span', 'collist-name', name), el('span', 'collist-type', ' ' + (c ? c.type : '')));
+    label.title = name;
+    const state = () => {
+      const v = (S.layout[name] || {}).valuePicker;
+      return v === undefined ? 'auto' : (v ? 'on' : 'off');
+    };
+    const seg = tableMenuSeg([
+      ['auto', 'Auto', 'Follow this table’s setting'],
+      ['on', 'On', `Always a ▾ on "${name}"`],
+      ['off', 'Off', `Never a ▾ on "${name}"`],
+    ], state, (key) => {
+      setColumnValueFilter(name, key === 'auto' ? null : key === 'on');
+      paint(); changed();
+    }, 'tm-vf-seg');
+    row.append(label, seg.seg);
+    list.append(row);
+    rowsByName.set(name, { row, seg, state });
+  }
+  search.oninput = () => {
+    const q = search.value.trim().toLowerCase();
+    for (const [name, r] of rowsByName) r.row.hidden = !!q && !name.toLowerCase().includes(q);
   };
+
+  function paint() {
+    table.paint();
+    const withPicker = listed.filter((n) => valueFilterEnabled(n)).length;
+    const byHand = setByHand();
+    stats.replaceChildren(
+      tableMenuStat(withPicker, 'with a ▾'),
+      tableMenuStat(byHand.length, 'set by hand'),
+      tableMenuStat(rows, 'rows'));
+    const on = valueFilterAutoOn();
+    const line = S.valueFilterMode === 'auto'
+      ? `Auto is ${on ? 'on' : 'off'} here: ${rows.toLocaleString()} rows is ${on ? 'under' : 'over'} the ${VALUE_FILTER_AUTO_MAX.toLocaleString()} where listing a column’s values gets slow.`
+      : S.valueFilterMode === 'on'
+        ? 'Every column gets a ▾, whatever the table’s size. On a big table the first open of one can take a while.'
+        : 'No column gets a ▾ unless it is set On below. The row menu’s "Filter by values…" still opens one.';
+    const li = el('li', null, line);
+    notes.replaceChildren(li);
+    for (const [name, { row, seg, state }] of rowsByName) {
+      seg.paint();
+      const auto = state() === 'auto';
+      row.classList.toggle('set', !auto);
+      // Auto's own button says what auto comes to for this column.
+      seg.buttons[0].textContent = auto ? `Auto · ${valueFilterEnabled(name) ? 'on' : 'off'}` : 'Auto';
+    }
+    footText.textContent = `${withPicker} of ${listed.length} columns get a ▾${byHand.length ? `, ${byHand.length} of them set by hand` : ''}.`;
+    clear.textContent = byHand.length > 1 ? `Set all ${byHand.length} back to Auto` : 'Set back to Auto';
+    clear.hidden = !byHand.length;
+  }
+  paint();
+}
+
+/* The tables the Layout pane can take a layout from, after the default
+   saved for this header set: every other table sharing a column with this
+   one, the same header set first, then by how many columns they share. */
+const LAYOUT_SAME = 'Same columns';
+const LAYOUT_SOME = 'Some columns in common';
+function layoutSources() {
+  const id = S.sourceId;
+  const mine = new Set(S.columns.map((c) => c.name));
+  const headerSet = (cols) => cols.filter((c) => !c.derived).map((c) => c.name.toLowerCase()).sort().join('\n');
+  const myHeaders = headerSet(S.columns);
+  const base = baseColumns().length;
+  return S.sources.filter((s) => s.id !== id && !s.error).map((s) => {
+    const cols = s.columns || [];
+    const shared = cols.filter((c) => mine.has(c.name)).length;
+    return {
+      key: String(s.id), label: sourceLabel(s), src: s, shared,
+      group: headerSet(cols) === myHeaders ? LAYOUT_SAME : LAYOUT_SOME,
+      hint: shared >= base ? `all ${shared} columns` : `${shared} of ${base} columns`,
+    };
+  }).filter((e) => e.shared > 0)
+    .sort((a, b) => (a.group === b.group ? 0 : a.group === LAYOUT_SAME ? -1 : 1)
+      || b.shared - a.shared || a.label.localeCompare(b.label));
+}
+
+/* The columns a new order actually moves. Comparing positions marks
+   every column after one that moved to the top as "moved" too; what
+   moved is what falls outside the longest run of columns still in their
+   old relative order. */
+function movedColumns(before, after) {
+  const at = after.map((n) => before.indexOf(n));
+  const tails = [];   // tails[k]: index into `after` ending the best run of length k+1
+  const prev = new Array(after.length).fill(-1);
+  at.forEach((pos, i) => {
+    if (pos < 0) return;
+    let lo = 0, hi = tails.length;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (at[tails[mid]] < pos) lo = mid + 1; else hi = mid; }
+    if (lo > 0) prev[i] = tails[lo - 1];
+    tails[lo] = i;
+  });
+  const kept = new Set();
+  for (let i = tails.length ? tails[tails.length - 1] : -1; i >= 0; i = prev[i]) kept.add(after[i]);
+  return new Set(after.filter((n, i) => at[i] >= 0 && !kept.has(n)));
+}
+
+/* The table menu's layout section: where to take a layout from, the
+   columns as they would be after it with what changes marked, and one
+   button that applies it. The default for this header set and the other
+   tables are places in one list, so applying the default gets the same
+   preview copying another table's layout had in its own dialog (Copy
+   layout from another table…, which this replaced). Saving this table's
+   layout as that default sits on the left of the foot, the way Import a
+   folder keeps Save as profile… */
+export function buildLayoutPanel(container) {
+  const id = S.sourceId;
+  const changed = () => container.dispatchEvent(new CustomEvent('tablemenu:changed', { bubbles: true }));
+  const others = layoutSources();
+  const from = el('select', 'tm-layout-from');
+  from.setAttribute('aria-label', 'Take the layout from');
+  const dfltOpt = new Option('The default for these columns — looking…', 'default');
+  dfltOpt.disabled = true;
+  from.append(dfltOpt);
+  for (const group of [LAYOUT_SAME, LAYOUT_SOME]) {
+    const members = others.filter((e) => e.group === group);
+    if (!members.length) continue;
+    const og = el('optgroup');
+    og.label = group;
+    for (const e of members) og.append(new Option(`${e.label} — ${e.hint}`, e.key));
+    from.append(og);
+  }
+  container.append(tableMenuField('Take the layout from', from));
+  const notes = el('ul', 'mb-notes');
+  container.append(notes);
+
+  const head = el('div', 'side-preview-title', 'Columns after applying');
+  const box = el('div', 'side-preview tm-layout-preview');
+  const rows = el('div', 'side-preview-rows');
+  const foot = el('div', 'side-preview-foot');
+  box.append(rows, foot);
+  container.append(head, box);
+
+  const acts = el('div', 'row-actions tm-foot-actions');
+  const save = el('button', 'btn ghost', 'Save this layout as the default');
+  save.title = 'Reuse this table’s column order and visibility for any table imported with the same headers';
+  save.onclick = async () => { await saveDefaultLayout(); picked = false; loadDefault(); changed(); };
+  const apply = el('button', 'btn primary', 'Apply layout');
+  apply.disabled = true;
+  acts.append(save, apply);
+  container.append(acts);
+
+  let found;          // the saved default once asked: an object, or null for none
+  let result = null;  // { order, layout, message } for what is chosen
+  const layouts = new Map();   // source id -> its saved layout, asked once
+
+  function loadDefault() {
+    findDefaultLayout().then((f) => {
+      found = f;
+      if (!box.isConnected) return;
+      const name = nicknameFor(baseColumns().map((c) => c.name));
+      dfltOpt.disabled = !f;
+      dfltOpt.textContent = f
+        ? `The default saved for ${name || 'these columns'}`
+        : `The default for ${name || 'these columns'} — none saved yet`;
+      // The saved default is the first place to look, until the analyst
+      // has picked another.
+      if (f && !picked) from.value = 'default';
+      else if (!f && from.value === 'default' && others.length) from.value = others[0].key;
+      preview();
+    }).catch(() => { found = null; if (box.isConnected) preview(); });
+  }
+
+  async function preview() {
+    const key = from.value;
+    result = null;
+    apply.disabled = true;
+    box.classList.add('stale');
+    let order, layout, line, message;
+    if (key === 'default' && found) {
+      ({ order, layout } = defaultLayoutResult(found));
+      line = `Saved for every table imported with these ${baseColumns().length} headers. A table that already has a layout keeps it until one is applied here.`;
+      message = 'Applied the default layout for these columns';
+    } else if (key && key !== 'default') {
+      const entry = others.find((e) => e.key === key);
+      if (!layouts.has(entry.src.id)) {
+        layouts.set(entry.src.id, api(`/api/layout?source_id=${entry.src.id}`).catch(() => ({})));
+      }
+      const saved = await layouts.get(entry.src.id);
+      if (from.value !== key || !box.isConnected || S.sourceId !== id) return;
+      // A table never laid out shows its columns as the file had them.
+      const fromOrder = saved.order || (entry.src.columns || []).map((c) => c.name);
+      const copied = copiedOrder(fromOrder);
+      order = copied.order;
+      layout = copiedColumns(nameMap(saved.columns), copied.shared);
+      const own = order.length - copied.shared.size;
+      line = `The order, visibility and widths of ${entry.label}, for the ${copied.shared.size} columns the two share.`
+        + (own ? ` ${own} only this table has ${own === 1 ? 'stays beside the column it follows' : 'stay beside the columns they follow'}.` : '');
+      message = `Copied the layout of ${entry.label}`;
+    } else {
+      notes.replaceChildren(el('li', null, 'Nothing to take a layout from yet: no default is saved for these columns, and no other table shares any of them.'));
+      rows.replaceChildren();
+      foot.replaceChildren();
+      box.classList.remove('stale');
+      return;
+    }
+    notes.replaceChildren(el('li', null, line));
+    // What applying would change, row by row, against the table now.
+    const before = S.order.filter((n) => !S.groupByCols.includes(n));
+    const after = order.filter((n) => !S.groupByCols.includes(n));
+    const moved = movedColumns(before, after);
+    const list = el('div', 'copy-layout-cols');
+    let changes = 0;
+    after.forEach((n) => {
+      const now = S.layout[n] || {};
+      const then = layout[n] || {};
+      const what = [];
+      if (!!now.hidden !== !!then.hidden) what.push(then.hidden ? 'hidden' : 'shown');
+      if (!!now.pinned !== !!then.pinned) what.push(then.pinned ? 'pinned' : 'unpinned');
+      if (moved.has(n)) what.push('moved');
+      if ((now.w || null) !== (then.w || null)) what.push('width');
+      const r = el('div', 'copy-layout-col' + (then.hidden ? ' hidden-col' : '') + (what.length ? ' tm-changed' : ''));
+      r.dataset.col = n;
+      r.append(el('span', 'copy-layout-name', n));
+      const notesFor = [];
+      if (then.hidden && !what.includes('hidden')) notesFor.push('hidden');
+      if (then.pinned && !what.includes('pinned')) notesFor.push('pinned');
+      if (notesFor.length) r.append(el('span', 'copy-layout-note', notesFor.join(' · ')));
+      if (what.length) r.append(el('span', 'tm-change', what.join(' · ')));
+      if (what.length) changes++;
+      list.append(r);
+    });
+    rows.replaceChildren(list);
+    const verdict = changes
+      ? `${changes} of ${after.length} columns change.`
+      : 'Nothing changes: this table already has this layout.';
+    const p = el('p', 'fb-help', verdict);
+    foot.replaceChildren(p);
+    box.classList.remove('stale');
+    result = { order, layout, message };
+    apply.disabled = !changes;
+  }
+
+  let picked = false;
+  from.onchange = () => { picked = true; preview(); };
+  apply.onclick = () => {
+    if (!result || S.sourceId !== id) return;
+    closeModal();
+    replaceLayout(result.order, result.layout, result.message);
+  };
+  if (others.length) from.value = others[0].key;
+  loadDefault();
+}
+
+/* The table menu's name-and-merge section: the names saved as they are
+   typed, the way the tag editor saves, what the table holds, and the
+   merge builder with what it would find. */
+export function buildNamePanel(container, refresh) {
+  const src = S.sources.find((s) => s.id === S.sourceId);
+  if (!src) return;
+  const merge = !!src.is_merge;
+  const changed = () => container.dispatchEvent(new CustomEvent('tablemenu:changed', { bubbles: true }));
+
+  /* A text box that saves on Enter or on leaving it, and says so. */
+  function savingInput(value, placeholder, saveFn) {
+    const wrap = el('div', 'tm-input');
+    const input = el('input');
+    input.value = value;
+    input.placeholder = placeholder;
+    input.spellcheck = false;
+    const said = el('span', 'tm-saved');
+    let last = value;
+    const commit = async () => {
+      const v = input.value.trim();
+      if (v === last) return;
+      try {
+        await saveFn(v);
+        last = v;
+        said.textContent = 'Saved';
+        setTimeout(() => { said.textContent = ''; }, 1600);
+        changed();
+      } catch (e) {
+        toast('Could not save that: ' + e.message, 4000);
+      }
+    };
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); commit(); }
+      else if (e.key === 'Escape' && input.value !== last) { e.preventDefault(); e.stopPropagation(); input.value = last; }
+    });
+    input.addEventListener('blur', commit);
+    wrap.append(input, said);
+    return wrap;
+  }
+
+  const stats = el('div', 'mb-stats tm-about');
+  const cols = baseColumns();
+  const derived = S.columns.length - cols.length;
+  stats.append(
+    tableMenuStat(src.row_count, 'rows'),
+    tableMenuStat(cols.length, derived ? `columns + ${derived} derived` : 'columns'),
+    tableMenuStat(src.tagged_row_count || 0, 'tagged'),
+    tableMenuStat(src.note_count || 0, 'notes'));
+  const fileLine = el('div', 'tm-file');
+  if (!merge && src.path) fileLine.append(el('span', 'tm-path', src.path));
+  if (src.imported_at) fileLine.append(el('span', null, (merge ? 'Made ' : 'Imported ') + src.imported_at.replace('T', ' ')));
+  fileLine.title = src.path || '';
+  container.append(stats, fileLine);
+  const name = savingInput(merge ? src.name : (src.nickname || ''), merge ? 'Name this merge' : src.name, async (v) => {
+    if (merge && !v) throw new Error('a merge needs a name');
+    await post(`/api/source/${src.id}/nickname`, { nickname: v });
+    await loadSources();
+    const fresh = S.sources.find((s) => s.id === src.id);
+    if (fresh) $('modalTitle').textContent = `Table — ${sourceLabel(fresh)}`;
+  });
+  container.append(tableMenuField(merge ? 'Name' : 'Nickname', name,
+    el('small', null, merge ? 'On its tab and in the sidebar.' : 'Shown on its tab and in the sidebar in place of the file name. Blank goes back to the file name.')));
+
+
+  if (!merge) {
+    const names = cols.map((c) => c.name);
+    const sig = headerSig(names);
+    const alike = S.sources.filter((s) => !s.is_merge && !s.error
+      && headerSig((s.columns || []).filter((c) => !c.derived).map((c) => c.name)) === sig);
+    const setName = savingInput(nicknameFor(names) || '', `A name for these ${names.length} columns`, async (v) => {
+      await saveHeaderNickname(names, v);
+    });
+    container.append(tableMenuField(`These ${names.length} columns`, setName,
+      el('small', null, `${alike.length === 1 ? 'Only this table has' : `${alike.length} tables have`} them. The name groups them in the merge builder, Saved filters and the Timeline.`)));
+  }
+
+  const mergeBtn = el('button', 'btn ghost', merge ? 'Edit merge…' : 'Merge with other tables…');
+  mergeBtn.title = merge
+    ? 'Add or remove tables, or change which columns this merge keeps. Its layout stays.'
+    : 'One table across this and others, matched by column name';
+  mergeBtn.onclick = () => openMergeBuilder(merge ? { edit: src } : { preselect: [src.id] });
+  // What the merge builder would offer, best fit first: the tables
+  // sharing columns with this one, or a merge's own tables.
+  const mergeHead = el('div', 'tm-merge-head');
+  const mergeList = el('div', 'tm-merge-list');
+  const mergeRow = (s, chipText, chipKind) => {
+    const r = el('div', 'tm-merge-row');
+    r.append(el('span', 'tm-merge-name', sourceLabel(s)), el('span', 'tm-merge-rows', `${(s.row_count || 0).toLocaleString()} rows`));
+    if (chipText) r.append(el('span', 'mb-chip ' + chipKind, chipText));
+    mergeList.append(r);
+  };
+  if (merge) {
+    const members = (src.member_source_ids || []).map((mid) => S.sources.find((s) => s.id === mid)).filter(Boolean);
+    mergeHead.append(el('span', null, `A merge of ${members.length} tables.`));
+    for (const m of members) mergeRow(m, null);
+  } else {
+    const usedBy = mergesUsing(src);
+    const mine = new Set(cols.map((c) => c.name));
+    const fits = S.sources.filter((s) => s.id !== src.id && !s.is_merge && !s.error).map((s) => ({
+      s, shared: (s.columns || []).filter((c) => !c.derived && mine.has(c.name)).length,
+    })).filter((f) => f.shared > 0).sort((a, b) => b.shared - a.shared || sourceLabel(a.s).localeCompare(sourceLabel(b.s)));
+    mergeHead.append(el('span', null, usedBy.length
+      ? `In ${usedBy.map((m) => `“${sourceLabel(m)}”`).join(', ')}. Tables that share its columns:`
+      : fits.length ? 'Not in a merge. Tables that share its columns, best fit first:'
+        : 'Not in a merge, and no other table shares any of its columns.'));
+    for (const f of fits) {
+      const all = f.shared === mine.size;
+      mergeRow(f.s, `${f.shared} of ${mine.size} columns`, all ? 'ok' : 'info');
+    }
+  }
+  mergeHead.append(mergeBtn);
+  container.append(tableMenuField('Merge', mergeHead, mergeList));
+}
+
+/* Along the foot of the table menu: the three things this menu is opened
+   FOR most of the time, under whichever section is showing. They sat last,
+   under the column list, until a two-hundred-column table put closing a
+   tab a long scroll away. */
+export function buildTableStripPanel(container) {
+  const src = S.sources.find((s) => s.id === S.sourceId);
+  const strip = el('div', 'table-menu-strip');
   const tables = el('button', 'btn ghost', 'Tables manager…');
-  tables.title = 'Every table in the case — indexes, row counts, dropping a source';
+  tables.title = 'Every table in the case — indexes, row counts, dropping a table';
   tables.onclick = () => openTablesManager();
   const reset = el('button', 'btn ghost', 'Reset view');
-  reset.title = 'Back to the just-opened state: clear filters, search, tag filter and grouping, and restore the default sort. Column layout and the timeframe filter stay.';
+  reset.title = 'Back to the just-opened state: clear filters, search, tag filter and grouping, and restore the default sort. Column layout and the timeframe filter stay (Layout, taking the default for these columns, resets the layout).';
   reset.onclick = async () => {
     $('modal').hidden = true;
     const dt = S.columns.find((c) => c.type === 'datetime');
@@ -720,38 +1393,78 @@ export function buildTableActionsPanel(container, refresh) {
     saveLayout();
     await clearAllFilters();
   };
-  acts.append(dflt, nick, nickTable, tables, reset);
-  container.append(acts);
+  strip.append(tables, reset);
   if (src && src.is_open) {
-    const close = el('button', 'btn ghost', 'Close this tab');
+    const close = el('button', 'btn ghost table-menu-close', 'Close this tab');
     close.title = 'Stays in the case — reopen it from the sidebar';
-    close.style.marginTop = '10px';
     close.onclick = async () => { $('modal').hidden = true; await closeTab(src); };
-    container.append(close);
+    strip.append(close);
   }
+  container.append(strip);
+}
+
+/* What the side list says under each section's name: its state at a
+   glance, so the list answers "is anything set here?" without opening
+   each one. */
+function columnsHint() {
+  const listed = S.order.filter((n) => !S.groupByCols.includes(n));
+  const shown = listed.filter((n) => !(S.layout[n] || {}).hidden).length;
+  const pinned = listed.filter((n) => isPinned(n)).length;
+  return `${shown} of ${listed.length} shown` + (pinned ? ` · ${pinned} pinned` : '');
+}
+
+function valueFilterHint() {
+  const mode = S.valueFilterMode === 'auto' ? `Auto, ${valueFilterAutoOn() ? 'on' : 'off'} here`
+    : S.valueFilterMode === 'on' ? 'On for every column' : 'Off';
+  const set = S.order.filter((n) => !S.groupByCols.includes(n) && (S.layout[n] || {}).valuePicker !== undefined).length;
+  return mode + (set ? ` · ${set} set by hand` : '');
+}
+
+function nameHint() {
+  const src = S.sources.find((s) => s.id === S.sourceId);
+  if (!src) return '';
+  if (src.is_merge) return `${(src.member_source_ids || []).length} tables`;
+  const usedBy = mergesUsing(src);
+  return (src.nickname ? 'Nicknamed' : 'No nickname') + (usedBy.length ? ' · in a merge' : '');
 }
 
 /* The table menu — everything that's about *this table* rather than the
    case or the app. Sections are a registry for the same reason the row
    menu's are: this is where per-table features are expected to land, and
-   adding one should be adding an entry. `build` gets (container, refresh)
-   and may render nothing at all.
+   adding one should be adding an entry. `build` gets (container, refresh);
+   `hint` says what the side list shows under its name, and a section with
+   `asyncHint` fills that in once it has asked the server.
 
-   It lives behind a right-click on the tab or the sidebar row (and the
-   openTableMenu keybind) rather than a visible ▦ button, which is the icon
-   this replaced — a menu that's going to keep growing needs a home that
-   doesn't cost tab-strip width per entry. */
+   It lives behind the openTableMenu keybind, the Tables manager's
+   Settings… and Columns… on a table's right-click menu (tableMenuItems in
+   sources.js) rather than a visible ▦ button, which is the icon this
+   replaced — a menu that's going to keep growing needs a home that doesn't
+   cost tab-strip width per entry. The right-click opened this dialog
+   directly until it got a short menu of its own: a full-height modal was a
+   lot to put up for closing or renaming a tab. */
 export const TABLE_MENU_SECTIONS = [
-  { id: 'columns', title: 'Columns', build: buildColumnsPanel },
-  { id: 'valueFilters', title: 'Value filter dropdowns', build: buildValueFilterPanel },
-  { id: 'table', title: 'This table', build: buildTableActionsPanel },
+  { id: 'columns', group: 'Columns', title: 'Show, hide & order', hint: columnsHint, build: buildColumnsPanel },
+  { id: 'valueFilters', group: 'Columns', title: 'Value dropdowns', hint: valueFilterHint, build: buildValueFilterPanel },
+  { id: 'layout', group: 'This table', title: 'Layout', build: buildLayoutPanel,
+    asyncHint: async () => ((await findDefaultLayout()) ? 'Default saved' : 'No default saved') },
+  { id: 'name', group: 'This table', title: 'Name & merge', hint: nameHint, build: buildNamePanel },
 ];
 
-/* `sourceId` is optional — the tab/sidebar entry points pass the table that
-   was right-clicked, which may not be the one on screen. The panels all
+/* `sourceId` is optional — the right-click menu's Columns… and the Tables
+   manager pass the table they were opened on, which may not be the one on
+   screen. The panels all
    read S.layout/S.order/S.columns (this table's live state), so opening
-   that source first isn't a convenience, it's the precondition. */
-export async function openTableMenu(sourceId) {
+   that source first isn't a convenience, it's the precondition. `section`
+   picks the pane it opens on; Columns otherwise, since that is what `C`
+   and Columns… are pressed for.
+
+   Two panes, the shape of Settings and the side-list dialogs: the sections
+   down the left, the chosen one on the right, in a frame of a FIXED height
+   so going from the column list to a pane of three rows moves nothing.
+   Choosing a section builds its pane fresh (they read live state that
+   another dialog opened from here, like the merge builder, may change),
+   and the everyday actions sit along the foot under every one of them. */
+export async function openTableMenu(sourceId, section = 'columns') {
   markModalAction('openTableMenu');
   const id = sourceId === undefined ? S.sourceId : sourceId;
   if (id == null) { toast('Open a table first'); return; }
@@ -759,48 +1472,79 @@ export async function openTableMenu(sourceId) {
   if (S.sourceId !== id) return; // openSource no-ops on an id it can't find
   const src = S.sources.find((x) => x.id === id);
   modal(`Table — ${src ? sourceLabel(src) : ''}`, (b) => {
-    for (const section of TABLE_MENU_SECTIONS) {
-      const wrap = el('div', 'table-menu-section');
-      wrap.append(el('h4', null, section.title));
-      section.build(wrap, () => openTableMenu(id));
-      b.append(wrap);
-    }
-  });
+    const frame = sectionPanes({
+      sections: TABLE_MENU_SECTIONS, label: 'Table menu sections',
+      cls: 'table-menu', paneCls: 'table-menu-pane', changedEvent: 'tablemenu:changed',
+    });
+    b.append(frame.panes);
+    const foot = el('div', 'table-menu-foot');
+    buildTableStripPanel(foot);
+    b.append(foot);
+    frame.show(section);
+    // The side list, like Settings: arrow keys move between sections from
+    // the start, and C still closes the menu it opened (a caret in the
+    // filter box would take the C as typing).
+  }, { wide: true, tall: true, focus: (b) => b.querySelector('.side-rail-item[aria-selected="true"]') });
 }
 
-export function openTagEditor() {
+/* The case's tags, saved as they change (tagEditRow, in tags.js — the
+   template editor in Settings is the same row). `focusId` puts the caret
+   in that tag's name, selected: Add tag reopens the editor on the tag it
+   just made, so "New tag" is typed over rather than clicked into. */
+export function openTagEditor({ focusId = null } = {}) {
+  let focusRow = null;
   modal('Tags', (b) => {
+    b.append(el('p', 'fb-help', 'Changes save as you make them. Keys 1–9 tag the selection.'));
+    const list = el('div', 'tag-edit-list');
+    b.append(list);
+    const rows = [];
+    // Anything that redraws the dialog sends a name still waiting on its
+    // pause first, so the redraw shows it and a later edit builds on it.
+    const settle = () => Promise.all(rows.map((r) => r.flush()));
     for (const t of S.tags) {
-      const row = el('div', 'row-actions');
-      const color = el('input'); color.type = 'color'; color.value = t.color;
-      const name = el('input'); name.value = t.name;
-      name.style.cssText = 'flex:1;background:var(--ink);color:var(--text);border:1px solid var(--line-2);padding:4px 7px;font:inherit';
-      const key = el('input'); key.value = t.hotkey || ''; key.maxLength = 1;
-      key.style.cssText = 'width:34px;text-align:center;background:var(--ink);color:var(--text);border:1px solid var(--line-2);padding:4px;font-family:var(--mono)';
-      const save = el('button', 'btn', 'Save');
-      save.onclick = async () => {
-        await post('/api/tags', { id: t.id, name: name.value, color: color.value, hotkey: key.value || null });
-        await loadTags(); openTagEditor();
-      };
-      const del = el('button', 'btn ghost', 'Delete');
-      del.onclick = async () => {
-        if (!(await confirmDialog(`Delete "${t.name}" and remove it from every row?`, { danger: true, okLabel: 'Delete' }))) return;
-        await api(`/api/tags/${t.id}`, { method: 'DELETE' });
-        await loadTags(); render(); drawRail(); openTagEditor();
-      };
-      row.append(color, name, key, save, del);
-      b.append(row);
+      const r = tagEditRow(t, {
+        save: async (want) => {
+          await post('/api/tags', { id: t.id, ...want });
+          await loadTags();
+          // A recolour shows on the rows' stripes and the rail at once,
+          // not on the next scroll.
+          render(); drawRail();
+        },
+        removeLabel: 'Delete',
+        removeTitle: 'Delete this tag and take it off every row',
+        remove: async () => {
+          if (!(await confirmDialog(`Delete "${t.name}" and remove it from every row?`, { danger: true, okLabel: 'Delete' }))) return;
+          await settle();
+          try { await api(`/api/tags/${t.id}`, { method: 'DELETE' }); }
+          catch (e) { toast(`Could not delete "${t.name}": ${e.message}`, 6000); return; }
+          await loadTags();
+          // The server took the tag off every row, but the cached rows (flat
+          // and grouped) still carry its id, which buildDataRow paints as a
+          // grey stripe for a tag it can't name. Same rule as a bulk tag —
+          // drop both — and a grouping by tag has just lost a bucket.
+          clearRowCaches();
+          regroupIfGroupedByTag();
+          render(); drawRail(); openTagEditor();
+        },
+      });
+      rows.push(r);
+      list.append(r.row);
+      if (t.id === focusId) focusRow = r;
     }
+    const acts = el('div', 'row-actions');
     const add = el('button', 'btn', 'Add tag');
-    add.style.marginTop = '14px';
-    add.onclick = async () => {
-      await post('/api/tags', { name: 'New tag', color: '#7f9bb5', hotkey: null });
-      await loadTags(); openTagEditor();
-    };
+    add.onclick = oneAtATime(add, async () => {
+      await settle();
+      let made;
+      try { made = await post('/api/tags', newTagDefaults(S.tags)); }
+      catch (e) { toast(`Could not add a tag: ${e.message}`, 6000); return; }
+      await loadTags();
+      openTagEditor({ focusId: made.id });
+    });
     const applyTemplate = el('button', 'btn ghost', 'Apply default template');
-    applyTemplate.style.marginTop = '14px';
     applyTemplate.title = "Add any tags from the default template (Settings) that this case doesn't already have";
-    applyTemplate.onclick = async () => {
+    applyTemplate.onclick = oneAtATime(applyTemplate, async () => {
+      await settle();
       const template = await api('/api/settings/default_tags');
       const existing = new Set(S.tags.map((t) => t.name.toLowerCase()));
       const missing = template.filter((t) => !existing.has((t.name || '').toLowerCase()));
@@ -808,7 +1552,8 @@ export function openTagEditor() {
       for (const t of missing) await post('/api/tags', { name: t.name, color: t.color, hotkey: t.hotkey || null });
       await loadTags(); openTagEditor();
       toast(`Added ${missing.length} tag${missing.length > 1 ? 's' : ''} from the default template`);
-    };
-    b.append(add, applyTemplate);
-  });
+    });
+    acts.append(add, applyTemplate);
+    b.append(acts);
+  }, { focus: () => (focusRow ? focusRow.name : null) });
 }

@@ -1,7 +1,7 @@
-"""The Tables manager as a dense grid: rows are single-line with the name
-ellipsizing (buttons never leave the modal), the modal takes the extra
-width class, and Compact case file lives in the Case menu now rather than
-as a third button here."""
+"""The Tables manager as the table menu's two panes: its sections down a
+side list, Every table a dense list in a box that scrolls, one line a
+table with the counts in columns that line up, nothing leaving the
+modal — and Compact case file in the Case menu rather than here."""
 
 from __future__ import annotations
 
@@ -10,20 +10,26 @@ import pytest
 pytestmark = pytest.mark.ui
 
 
-def test_rows_are_grid_dense_and_buttons_stay_inside(page):
+def test_two_panes_and_dense_rows_that_stay_inside(page):
     page.evaluate("() => __winnow.openTablesManager()")
-    page.wait_for_selector("#modal:not([hidden])")
+    page.wait_for_selector("#modal:not([hidden]) .tables-list .tables-row")
     card = page.locator(".modal-card")
     assert "xwide" in card.get_attribute("class")
-    row = page.locator("#modal .tables-row").first
-    box_row = row.bounding_box()
+    rail = [t.inner_text().split("\n")[0] for t in page.locator(".tables-manager .side-rail-item").all()]
+    assert rail == ["Every table", "Merges & saved tables", "Indexes"], rail
+    assert page.locator('.side-rail-item[aria-selected="true"]').inner_text().startswith("Every table")
+
     box_card = card.bounding_box()
-    for btn in row.locator(".tables-acts .btn").all():
-        bb = btn.bounding_box()
-        assert bb["x"] + bb["width"] <= box_card["x"] + box_card["width"] + 1
-    # Single-line density: the row is one text line tall, not a wrapped stack.
-    assert box_row["height"] < 40
-    # No Compact button in the manager any more…
+    row = page.locator("#modal .tables-list .tables-row").first
+    # Single-line density: one text line tall, not a wrapped stack.
+    assert row.bounding_box()["height"] < 40
+    more = row.locator(".tables-more").bounding_box()
+    assert more["x"] + more["width"] <= box_card["x"] + box_card["width"] + 1
+    # The Rows column lines up under its head.
+    head = page.locator(".tables-head .tables-sort[data-sort='row_count']").bounding_box()
+    cell = row.locator(".tables-rows").bounding_box()
+    assert abs((head["x"] + head["width"]) - (cell["x"] + cell["width"])) <= 2, (head, cell)
+    # No Compact button in the manager…
     assert page.locator("#modal button", has_text="Compact case file").count() == 0
     page.keyboard.press("Escape")
     page.wait_for_selector("#modal[hidden]", state="attached")

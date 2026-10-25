@@ -21,6 +21,11 @@ the TEXT the grid stores, and the choices behind it are analyst-facing:
   reads back as 13:06:59.999999 otherwise); exact-midnight values and
   date-typed cells render as a bare "YYYY-MM-DD"; time-of-day cells as
   a bare "HH:MM:SS". All three shapes are ones TS_NORMALIZE accepts.
+  A date-styled serial no datetime can hold (year 10000 and on) keeps
+  its NUMBER: openpyxl's parser turns it into the string "#VALUE!" and
+  drops the value, so the reader takes date conversion over from it
+  (`_own_date_conversion`) wherever this openpyxl keeps the date styles
+  where 3.x does.
 - **Numbers render without float noise** — a cell holding 42 arrives as
   "42", not "42.0", since the string is what the analyst greps.
 - **Booleans render TRUE/FALSE**, matching what Excel shows.
@@ -29,6 +34,13 @@ the TEXT the grid stores, and the choices behind it are analyst-facing:
   (i.e. was written by a tool and never opened in Excel).
 - **Gaps are real**: skipped cells come back as "" in place rather than
   shifting values left under the wrong headers.
+- **The sheet's declared size is a hint, never a limit.** Read-only mode
+  takes a sheet's `<dimension ref>` as the edge of its data, and writers
+  get it wrong (stale after an edit, or a default like A1:A1): a sheet
+  declaring A1:B10 over 3 columns and 101 rows imported 2 columns and 9
+  rows, and said nothing. Every sheet is read with reset_dimensions(),
+  so rows and cells are read to wherever they really end; the declared
+  size survives only as the progress estimate and a floor on the width.
 
 The workbook is opened strictly read-only, so the evidence-file
 guarantee holds by construction.
@@ -37,9 +49,12 @@ guarantee holds by construction.
 from __future__ import annotations
 
 import datetime
+import re
 from typing import Iterator
 
 import openpyxl
+from openpyxl.styles.numbers import is_timedelta_format
+from openpyxl.utils.datetime import from_excel
 
 
 def cell_text(v) -> str:
@@ -70,6 +85,77 @@ def cell_text(v) -> str:
     return str(v)
 
 
+def _own_date_conversion(wb) -> bool:
+    """Take date conversion away from openpyxl's sheet parser, so a
+    date-styled number reaches the reader as the number it is.
+
+    The parser converts a date-styled serial itself and, when no datetime
+    can hold it, substitutes the string "#VALUE!" — the cell's value is
+    gone, and the import shows an error where the workbook stores a
+    number. With the workbook's date-style set emptied the parser leaves
+    the number alone, and `_cell_value` converts it with the same
+    `from_excel` (keeping the number when that fails). The set is a
+    private attribute, so where it isn't what openpyxl 3.x keeps there,
+    nothing changes and the parser's own conversion stands (False)."""
+    if not isinstance(getattr(wb, "_date_formats", None), (set, frozenset)):
+        return False
+    wb._date_formats = set()
+    return True
+
+
+def _cell_value(cell, epoch):
+    """A read-only cell's value, a date-styled number converted to its
+    datetime (timedelta for a duration format) unless the serial is past
+    what one can hold — then the number stays."""
+    v = cell.value
+    if cell.data_type == "n" and isinstance(v, (int, float)) and not isinstance(v, bool) \
+            and cell.is_date:
+        try:
+            return from_excel(v, epoch, timedelta=is_timedelta_format(cell.number_format))
+        except (OverflowError, ValueError):
+            return v
+    return v
+
+
+# A <row ...> start tag, under any namespace prefix (<x:row> from the
+# OpenXML SDK), and the r="" it may carry. Never <rowBreaks>: \b.
+_ROW_TAG = re.compile(rb"<(?:[A-Za-z_][\w.-]*:)?row\b([^>]*)>")
+_ROW_INDEX = re.compile(rb"""\sr\s*=\s*["'](\d+)["']""")
+
+
+def _count_rows(ws) -> int:
+    """How many rows a sheet with no <dimension> runs to, counted the way
+    iter_rows counts them — up to the last row's r="", the gaps before it
+    included — from the sheet's XML rather than through openpyxl's row
+    parser. That parser builds every cell of every row to be counted and
+    thrown away: 16 of the 20 seconds a 33 MB workbook took to list its
+    sheets, the whole time holding the GIL every other import needed
+    (a 1 s CSV import took 18 s beside it). The tags alone take one.
+
+    Text content can't fake a tag (a "<" in a cell is written &lt;). The
+    sheet's XML is reached through the read-only sheet's own private
+    _get_source; where that isn't what openpyxl 3.x keeps there, the rows
+    are counted the slow way, which gives the same number."""
+    source = getattr(ws, "_get_source", None)
+    if source is None:
+        return sum(1 for _ in ws.iter_rows(values_only=True))
+    last = top = 0
+    tail = b""
+    with source() as xml:
+        while chunk := xml.read(1 << 20):
+            buf = tail + chunk
+            done = 0
+            for m in _ROW_TAG.finditer(buf):
+                r = _ROW_INDEX.search(m.group(1))
+                last = int(r.group(1)) if r else last + 1
+                top = max(top, last)
+                done = m.end()
+            # A tag the chunk cut in two is matched whole in the next one.
+            cut = buf.rfind(b"<", done)
+            tail = buf[cut:] if cut >= 0 else b""
+    return top
+
+
 def workbook_sheets(path: str) -> list[dict]:
     """Every data sheet, for the import picker: [{name, row_count, columns}]
     in workbook order (chartsheets never appear). row_count is *data* rows
@@ -81,8 +167,11 @@ def workbook_sheets(path: str) -> list[dict]:
         out = []
         for ws in wb.worksheets:
             rows_hint = ws.max_row
+            # After the estimate is taken: the header row is read to its
+            # real end, not to a column the declaration stopped at.
+            ws.reset_dimensions()
             if rows_hint is None:  # no <dimension> — count the rows
-                rows_hint = sum(1 for _ in ws.iter_rows(values_only=True))
+                rows_hint = _count_rows(ws)
             header: list[str] = []
             for row in ws.iter_rows(values_only=True):
                 texts = [cell_text(v).strip() for v in row]
@@ -102,7 +191,8 @@ def workbook_sheets(path: str) -> list[dict]:
 def sheet_reader(path: str, sheet_name: str):
     """(row_count_hint, width_hint, rows) for one sheet — the ingest entry
     point. The hints come from the sheet's declared dimension (0 when
-    absent); `rows` is a generator of per-row string lists that holds the
+    absent) and bound nothing — `rows` reads past them (see the module
+    docstring); `rows` is a generator of per-row string lists that holds the
     workbook open until exhausted or closed, so callers that stop early
     must close() it."""
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
@@ -114,14 +204,23 @@ def sheet_reader(path: str, sheet_name: str):
             raise ValueError(f"{sheet_name!r} is a chart sheet, not a data sheet")
         rows_hint = ws.max_row or 0
         width_hint = ws.max_column or 0
+        own_dates = _own_date_conversion(wb)
+        ws.reset_dimensions()   # the hints above are all the declaration is good for
     except BaseException:
         wb.close()
         raise
 
     def rows() -> Iterator[list[str]]:
         try:
-            for row in ws.iter_rows(values_only=True):
-                yield [cell_text(v) for v in row]
+            if own_dates:
+                # Cells, not values_only: the reader needs each one's style
+                # to do the date conversion the parser no longer does.
+                epoch = wb.epoch
+                for row in ws.iter_rows():
+                    yield [cell_text(_cell_value(c, epoch)) for c in row]
+            else:
+                for row in ws.iter_rows(values_only=True):
+                    yield [cell_text(v) for v in row]
         finally:
             wb.close()
 

@@ -9,27 +9,20 @@ import pytest
 pytestmark = pytest.mark.ui
 
 
-def _fresh(browser, server):
-    ctx = browser.new_context(viewport={"width": 1500, "height": 900})
-    ctx.add_init_script("localStorage.setItem('winnow.remotePrompt', 'seen');"
-                        "localStorage.setItem('winnow.appearance', JSON.stringify({ splash: false }))")
-    pg = ctx.new_page()
-    pg.goto(server, wait_until="networkidle")
-    pg.wait_for_selector(".row")
-    return ctx, pg
+def _fresh(own_page):
+    """No sidebar key, unlike every other page here: what the sidebar does
+    unset is the question."""
+    return own_page(seed="localStorage.setItem('winnow.remotePrompt', 'seen');"
+                         "localStorage.setItem('winnow.appearance', JSON.stringify({ splash: false }))")
 
 
-def test_a_case_opens_with_the_sidebar_closed(browser, server):
-    ctx, pg = _fresh(browser, server)
-    try:
+def test_a_case_opens_with_the_sidebar_closed(own_page):
+    with _fresh(own_page) as pg:
         assert pg.evaluate("() => document.getElementById('sidebar').hidden")
-    finally:
-        ctx.close()
 
 
-def test_backtick_toggles_and_the_choice_persists(browser, server):
-    ctx, pg = _fresh(browser, server)
-    try:
+def test_backtick_toggles_and_the_choice_persists(own_page):
+    with _fresh(own_page) as pg:
         pg.keyboard.press("`")
         pg.wait_for_function("() => !document.getElementById('sidebar').hidden")
         pg.keyboard.press("`")
@@ -39,8 +32,6 @@ def test_backtick_toggles_and_the_choice_persists(browser, server):
         pg.reload(wait_until="networkidle")
         pg.wait_for_selector(".row")
         assert not pg.evaluate("() => document.getElementById('sidebar').hidden")
-    finally:
-        ctx.close()
 
 
 def test_backtick_in_an_input_types_a_backtick(page):

@@ -1,7 +1,7 @@
 # Plugins: the extension host and the example plugins
 
 `plugin_api.py`, `plugins/`, `examples/plugins/` (mft_usn, lateral_movement,
-pivot, claude_assistant). The authoring contract
+pivot, claude_assistant, top_values, …). The authoring contract
 lives in `plugin_api.py`'s module docstring and
 [docs/writing-plugins.md](../writing-plugins.md); this is what bites the
 *host*.
@@ -10,6 +10,33 @@ Part of the working notes split out of [CLAUDE.md](../../CLAUDE.md) —
 see [docs/notes/README.md](README.md) for the whole set.
 
 ---
+
+- **Plugin notices (`winnow.notify`) are keyed by MOUNT, and so are the
+  context's tracked listeners.** `mountKey(kind, id)` — `tab:x.y` or
+  `panel:x.y` — not the bare namespaced id, because a tab and a panel of
+  the same plugin can share `<plugin>.<id>` and one teardown must not
+  cut the other's rows and listeners. Anything new that a mount owns and
+  the host cleans up goes under the same key in `disposePluginMount`.
+  The notice handle goes inert (no-ops) the moment its row is gone —
+  `resetJobState` on a case switch clears the map *and* re-renders,
+  because the jobs poll stops when idle and would never redraw the
+  panel on its own.
+
+- **Page panels write pages that load lazily.** The SQL sub-tabs load
+  on the pane's first visit and `applySqlTabToEditor` then repaints the
+  editor from the server copy; the notes body loads on Notes' first
+  visit and the editor's `input` event autosaves. So `winnow.sqlPage.*`
+  loads the tabs first and `setText` flushes at once, and
+  `winnow.notesPage.*` goes through `ensureNotesLoaded()` before
+  touching the editor — a plugin insert before the analyst ever opened
+  Notes would otherwise autosave plugin text over a body that was never
+  fetched. Any new page API keeps that order.
+
+- **The three panel hosts are one code path** (`PANEL_HOSTS` in
+  plugins.js): the grid strip and the SQL/Notes side columns differ only
+  in their button host, container, and which `S.activeTab` shows them.
+  Adding a page to `PAGE_PANEL_PAGES` means a row there, two elements in
+  index.html, and nothing else.
 
 - **`_reload_plugins()` mutates the registry in place, so a shared
   `PluginRegistry` in a test is a landmine.** It calls
@@ -46,6 +73,31 @@ see [docs/notes/README.md](README.md) for the whole set.
   plain `def`, which FastAPI threadpools for you); if you add another
   plugin entry point from an `async def`, thread it the same way.
 
+- **A plugin route the tab holds open for seconds locks up the other
+  tabs, even though the server is fine.** The worker thread above keeps
+  the *server* answering; the *browser* is the bottleneck. It opens six
+  connections to Winnow, the presence EventSource keeps one, and every
+  `post()` a tab awaits keeps another until it answers. First/Last
+  awaited a 15-second preview POST per edit on a 1M-row table, and
+  Auto-update never stopped the previous one, so a few edits took all
+  six: a grid scroll in another tab queued in the browser behind them
+  and took 67 s to paint (`/api/rows` itself answered in milliseconds).
+  Create table did the same inside a modal that covers the app. The fix
+  is first_last's `job/start` / `job` / `job/cancel` routes: start runs
+  the work on a thread of its own and answers within 250 ms (inline
+  when a small table already had the result), the tab polls, and an
+  edit cancels the job it supersedes. Two parts of that are easy to
+  drop and both matter: the cancel has to reach the SQL (each job's
+  queries pass the job id as `run_sql(op_token=…)`, and `cancel_op`
+  interrupts them; a job that was only forgotten still owned a core
+  for its 15 s), and the id is made by the client, so a cancel can
+  land before its start does (`cancel_op` remembers a token it has
+  not seen yet). The job threads are not the plugin pool of 8: a job
+  ties up no request, so `PLUGIN_THREADS` would only cap how many
+  superseded previews could queue. Copy this shape for any plugin
+  route that can run long; tests/ui/test_firstlast_background.py fails
+  on a tab that holds requests open, by the browser's own timings.
+
 - **Plugin tables are namespaced against ACCIDENTS, not against a plugin
   that means harm.** A plugin's own tables live in the case file as
   `plugin:<fs_name>:<table>` (`req.table("chat")`). The separator is a
@@ -63,20 +115,56 @@ see [docs/notes/README.md](README.md) for the whole set.
   They carry no `sources` row, so the grid, the sidebar and merges never
   see them; use `ingest_rows` when an analyst should browse the result.
 
+- **A plugin write's authorizer comes off through `_clear_authorizer`,
+  never `set_authorizer(None)`.** `plugin_table_write` puts
+  `_refuse_evidence_writes` on the writer connection for its one
+  statement. `None` only means "no authorizer" from Python 3.11; on 3.10
+  it installs None as the callback, every statement is denied, and one
+  `execute()` (the Claude assistant's clear-history) left the whole case
+  refusing writes, view builds and imports until a restart. CI ran only
+  3.12 then, so it shipped; the backend now also runs on 3.10.
+
 - **Plugins** (plugin_api.py, `plugins/`, Settings → Plugins) are
   Notepad++-style drop-in extensions, first loaded at server *import* (so
   `uvicorn server:app` gets them, not just `python server.py`;
   `--plugins-dir` / `$WINNOW_PLUGINS_DIR` add directories) and reloaded
   live by `_reload_plugins()` whenever Settings → Plugins toggles or
-  installs one — `PluginRegistry.load` is written to be safely re-run on
+  installs one, and whenever the open case changes — a switch, and a
+  quick-look discard, which leaves NO case and so the machine defaults
+  (the per-case overrides make each of those a policy change; discard
+  once skipped it, and a plugin on only for that quick-look kept serving
+  routes at the home screen) — `PluginRegistry.load` is written to be safely re-run on
   a live server (registry rebuilt wholesale; superseded modules linger in
   sys.modules under unique per-load names because Python can't truly
-  unload code, but nothing references them again). Enabled/disabled state
+  unload code, but nothing references them again). **Rebuilt off to the
+  side, swapped in whole, one load at a time.** A load fills a fresh
+  `_Loaded` and assigns it to `self._state` at the end, under
+  `_load_lock`; every lookup reads `self._state` once. It used to clear
+  the live dicts first and refill them plugin by plugin, so every plugin
+  route 404'd for as long as the imports took, and two reloads at once
+  (a toggle in one window, a case opening in another — both threadpooled
+  routes) filled the same dicts, listing healthy plugins twice and
+  failing them with "Duplicate API route". server.py's `_reload_plugins`
+  holds `_PLUGIN_RELOAD_LOCK` around reading the policy AND loading, so
+  the reload that finishes last is also the one that read the open case
+  last. Anything new that `register()` writes into goes on `_Loaded`,
+  not on the registry, or it lands in the live set mid-load. Enabled/disabled state
   is `workspace/plugins.json` (`PluginPrefs`) — machine-level workflow
   state, stored as a *disabled* list so presence in plugins/ means on by
   default, keyed by filesystem name because that's the only identity that
   exists without importing (a disabled plugin is discovered for the
   listing but its code never runs — the point of the off switch).
+  That last clause is also why a plugin's own metadata has to be readable
+  *without* a load: `static_meta` parses `PLUGIN`, `WINNOW_API_VERSION`
+  and the `register_*` names out of the entry file with `ast.parse` +
+  `ast.literal_eval`, executing nothing, so the manager can show a
+  switched-off plugin's name, version and description — the three things
+  the decision to enable it is actually made on. It is also the fallback
+  when a load FAILS: an import that dies on its first line used to leave
+  the record holding a folder name and a traceback, at the moment being
+  identifiable matters most. `declares` is kinds, never counts — three
+  `register_ingest_format` calls across `mft_usn`'s folder register two
+  formats, because one is in a helper the entry file never reaches.
   `POST /api/plugins/install` copies an uploaded .py or folder (from the
   panel's webkitdirectory picker) into `PLUGIN_DIRS[0]`, rejecting
   absolute/`..` paths so an upload can't write outside the plugins dir; a
@@ -101,7 +189,38 @@ see [docs/notes/README.md](README.md) for the whole set.
   — `gen` is the registry load sequence, bumped on every reload, so a
   toggle-off/on picks up changed JS. One mount per tab, kept across tab
   switches, torn down on case switch (`resetPluginTabMounts`) and gen
-  change; the module's default export gets `(container, winnow)` where
+  change — and the plugin is told about none of it, since there is no
+  `onDestroy` in the contract. That is why `winnow.tabState` (get/set/
+  clear, one `plugin_ui_state` row per MOUNT key in the case file, via
+  `GET`/`POST /api/plugin_state`) writes as the analyst works instead of
+  flushing at teardown: a case switch has already swapped the server's
+  Store by the time `resetPluginTabMounts` runs, which is also why
+  `openCase` calls `dropPendingTabState()` *before* `/api/case/open`
+  rather than flushing after it — a save still inside its debounce would
+  land the old case's spec in the new case's file. Restoring is the
+  plugin's job and has three traps in it: a source id is handed to the
+  next import after a drop (so the saved table NAME is what makes the id
+  believable); a MERGE's name is its *editable* display name
+  (`set_source_nickname` rewrites `merges.name`), so a rename would read
+  as "table gone" and the saved member ids are the identity there
+  instead; and a column named by the payload may be gone (the
+  first_last/pivot backends answer that with a 400). Both bundled
+  examples therefore validate against the live source list, say what they
+  dropped, and offer "Start fresh" — and when the READ fails (`get()`
+  resolves `{error: true}`, not null) they stay read-only for that mount,
+  because "nothing saved" and "could not tell" are the same picture to a
+  plugin that does not distinguish them and the second one ends in a save
+  over unread state. The rows are never collected: a plugin toggled off
+  keeps its state for when it comes back. The read takes time, and
+  `showPluginTab` calls onShow straight after mounting, without waiting
+  for the read to return. So a mount that draws its fields on show
+  offers drags before saving has started. That drag is not saved, and a
+  restore would replace it anyway. Pivot's onShow therefore draws
+  nothing until the read is back; the read draws the fields itself.
+  First/Last still draws on show, and its tests drag straight after the
+  tab appears.
+
+  The module's default export gets `(container, winnow)` where
   `winnow` is `buildPluginTabContext`'s stable surface (api/post/el/
   modal helpers, `sql()` → run_sql's own RO connection, `schemaText()`,
   live state getters incl. state.timeRange, plus openFiltered(source_id, [{column, value}]) to jump to the evidence); optional onShow/onHide exports fire per switch.
@@ -135,6 +254,19 @@ see [docs/notes/README.md](README.md) for the whole set.
   strict all-stamped check silently produced 0 rows). `_apply_fixups`
   therefore distinguishes all-stamped (un-stamp), none-stamped (parse
   as-is), and mixed (genuinely torn → skip the record).
+  Its timestamps are `ft // 10` microseconds, never `ft / 10`: a 2024
+  FILETIME is past a float's exact range and `timedelta` rounds the
+  fraction, which turned `.9999999` into the next second's `.000000` —
+  the zeroed-subsecond timestomping tell, manufactured by the parser.
+  Its $J carver has two traps of its own. First, measuring a zero run
+  by slicing `data[pos:]` copies the rest of the 8 MiB chunk every time.
+  Garbage whose 8-byte slots start with a zero u32 without being zero
+  runs did that once per slot, which is minutes per chunk. `_NONZERO.search`
+  scans in place instead. Second, the length gate is not a header gate.
+  A V3 header is 76 bytes, so a "V3" slot claiming 64 bytes passed the
+  60-byte minimum and was unpacked past its own end; at end of file that
+  raised `struct.error` and failed the ingest. `HEADER_LEN` is per
+  version, and a slot shorter than its own header is carved past.
 
 - **The pivot example is the one that exercises `run_sql`'s edges**, and
   three of them bit during its build — worth knowing before writing
@@ -171,12 +303,180 @@ see [docs/notes/README.md](README.md) for the whole set.
     to the *case file*; `v.view_N` lives in the scratch database that only
     the reader pool attaches. Any plugin that wants "what the grid is
     showing" has to be handed the filter spec and recompile it, or do what
-    the pivot does and own its filtering outright.
+    the pivot does and own its filtering outright. Tags are the part it
+    *can* see: `row_tags` is in the case file, so the pivot's tag chips
+    compile straight into its query, from the grid's own `S.tagFilter`
+    spelling (`_tag_clauses`).
+  - **One statement for every grouping level, or the pivot is a table
+    scan per level.** It used to run one `GROUP BY` per level, each a full
+    scan of the source, and on a wide table the scan is most of the cost:
+    one row field and one column field (four levels) took three to four
+    times what the same `GROUP BY` takes in the SQL pane. `_rollup_sql`
+    reads the source once into a `pivot_base` CTE grouped by every key any
+    level uses, and each level is a `UNION ALL` arm grouped from it. What
+    that leans on: SQLite materialises a CTE that is referenced more than
+    once only from 3.35 (an older build inlines it into every arm, which
+    is right but costs the old scan per level); each arm's `LIMIT
+    MAX_GROUPS + 1` sits inside its own subquery, since a `LIMIT` on a
+    compound applies to the whole of it; the base's partials are
+    `_agg_expr`'s own SQL, so a rolled-up cell is the same expression over
+    the same rows; and Distinct count can't be rolled up, so its column
+    joins the base's keys instead.
+  - **On a merge, match tags per member, not with a row-value IN.**
+    `(s.source_id, s.rid) IN (SELECT source_id, rid FROM row_tags …)` is
+    correct over `_scope`'s union and fine when it keeps rows, but SQLite
+    builds no lookup table for a row-value IN, so under `NOT` (an
+    exclusion, or No tags) it rescans the subquery once per merged row:
+    minutes on two 600k-row members with 50k rows excluded. One
+    `s.source_id = N AND s.rid IN (SELECT rid … WHERE source_id = N)` arm
+    per member is about a second (`_tagged`). Matching on `rid` alone is
+    the other way to get it wrong — rids collide across members.
   - **Iterating on a plugin's Python needs a reload.** The module is
-    imported once at server import; editing the file and re-requesting a
+    imported once when the server loads plugins; editing the file and re-requesting a
     route runs the *old* code with the *new* line numbers, which makes
     tracebacks point at unrelated lines. Toggle the plugin off and on in
     Settings → Plugins (that's what `_reload_plugins` is for) or restart.
+
+- **First/Last's description takes a dropped field, and an `<input>`
+  fights that twice.** The field list's drag sets `text/plain` to the
+  field's name (Firefox will not start a drag without data), so a drop the
+  tab does not `preventDefault()` is one the browser finishes itself, by
+  typing the bare name in at its own caret. And an input reports no caret
+  for a drop point, so `dropIndex` measures the box's text with a canvas
+  in the box's computed font to turn `clientX` into an index, then moves a
+  drop that lands inside a `{…}` to just after it. The same handlers make
+  the function chips drop targets (`{sum:` + a dropped number column).
+  The completion a chip click opens needs the chip's `mousedown`
+  prevented: a blur would let the box's blur handler take it straight
+  back down.
+
+- **First/Last finds its bookends with one GROUP BY, not window
+  functions.** Window functions are the obvious spelling (ROW_NUMBER()
+  both ways and a COUNT(), partitioned by the group), and SQLite sorts
+  the whole filtered table once per window, carrying every column the
+  result names through each sort; a whole-row JSON cell carries the whole
+  row. On a 1M-row table that was 9.5 s for a preview the SQL pane groups
+  in 1.5 s, and nearly a minute with the JSON cell, plus a second scan to
+  count the groups. `_groups_sql` groups once and takes MIN and MAX of a
+  text key that sorts the way the ordering column does, with the rid (and
+  the source id on a merge) zero-padded on the end as the file-order
+  tiebreak; the two rows per group are then fetched by rid. What that
+  leans on:
+  - **The key keeps BINARY's order only as `hex()`.** The value goes
+    behind a storage-class letter (`A` NULL, `T` text, `U` blob, which is
+    SQLite's NULL < TEXT < BLOB) and is hexed: hex keeps the byte order
+    BINARY compares in, and the space before the tie sorts below every
+    hex digit, so `ab` sorts before `abc` as it should. Raw text would
+    not do, since a value can contain the separator or a NUL. Numbers
+    never reach the key, because a TEXT-affinity column never stores
+    one. A column with a non-BINARY collation would break it; source
+    columns are declared without one (only indexes say NOCASE).
+  - **A number-sorted column is two passes.** Hex of a REAL does not sort
+    numerically, so `fl_bounds` takes each group's MIN/MAX of the guarded
+    cast and `fl_ties` picks the earliest/latest row equal to them. Both
+    read `fl_rows`, which has to be `MATERIALIZED` (3.35 syntax, behind
+    `_ONCE`) or SQLite flattens it into each reader and scans the table
+    twice. A cell that isn't a number sorts after the numbers at both
+    ends, so it is a bookend only in a group with no number at all, and
+    the Last row's `{which:number}` is the count of numbers, not the
+    group size, whenever there is one.
+  - **Put the bookends in order and cut them to the limit before reading
+    any row.** Fetching every bookend by rid and sorting afterwards made
+    Host + User (486k groups on the 693k-row table) slower than the
+    window functions had been: nearly a million random lookups to keep
+    the 20,000 Copy result wants. `fl_top` orders the bookends by an
+    `ord` value (the key without its tie, or the negated number) and
+    takes the limit, and only those rows are fetched; the outer query
+    sorts them again by position, since the lookups shuffle them.
+  - **The key is built once only because of `LIMIT -1`.** Without it
+    SQLite flattens the inner select into the aggregate and evaluates the
+    CASE once for MIN and again for MAX.
+  - **The preview's group count is a second read of the grouped rows**,
+    `(SELECT COUNT(*) FROM fl_groups)`, with `fl_groups` marked
+    `MATERIALIZED` so the read does not rerun the grouping. The separate
+    `GROUP BY` it replaced was a second scan of the table. `COUNT(*) OVER
+    ()` on the grouped rows looks free and is not: it buffers every group
+    first, and took two of the five seconds on 486k groups.
+  - **The result keeps the old query's shape on purpose.** `SELECT *`
+    over the fetch keeps the `:1` suffix SQLite gives a repeated column
+    name, the helper columns (total, ord, sid, rid) are sliced off by
+    position, and the ORDER BY names its columns by position too, since
+    an included column may share their names.
+  - **On a merge, fetch per member, in a second query.** The bookends'
+    places (member, rid, the per-group values) come back first, in
+    order; then each member's rows are read from its own table by
+    `rid IN (…)`, since rids collide across members (the same trap as
+    the tag lookup above). It was one query, a `UNION ALL` arm per
+    member joining `fl_top` by rid, and SQLite expands a CTE once per
+    reference: every arm carried the whole union of members beneath
+    `fl_top` again, members squared references to each table, and past
+    65,535 ("too many references to row_tags", from 120 to 250 members
+    depending on the options) the preview failed, and took 5 s at 120
+    where it now takes 0.2 s. The second query selects NULLs under the
+    per-group names and reads them through `SELECT *`, so a column named
+    `group_n` still comes back as `group_n:1`, as the single-table query
+    names it (`_merge_bookend_rows`).
+  The proof that nothing changed is a harness that runs the old and new
+  plugin on random specs (filters, tags, merges, derived columns, Total
+  up, List values, placeholders, the JSON cell, truncation) and compares
+  row for row; the old one needs file order added to its ORDER BY first,
+  because its ties were in no particular order. It and the timings are in
+  the project's benchmarks folder (2026-10-22-firstlast).
+
+- **lateral_movement's event builder previews through the graph's own
+  SQL.** `preview` and `edges` both build on `_prepare`, so "273 rows
+  match, 12 links" in the builder is the row set Build turns into edges
+  (a test holds `hops` to the edges' summed `n`); a preview with its own
+  WHERE would drift the first time the noise list changed. Four more
+  things the builder depends on:
+  - **An event's NAME is its identity in the tab.** A tick is keyed
+    `source_id::name`, so a saved event named like a shipped one ticked
+    and unticked with it. The builder refuses a taken name
+    (case-insensitive, across shipped and saved); a rename moves the
+    ticks to the new key (`replaceEvent`), a delete drops them
+    (`syncSelections`).
+  - **`POST defs` returns `header_sets` too.** The tab replaces its whole
+    `S.defs` with the reply, and a reply without them left every
+    header-set binding resolving against nothing until the next GET.
+  - **Binding needs every column the event reads**, not just the header
+    set's: `requires` lists the label, time and condition columns as well
+    (`requiresOf`), and `bindsTo` checks both. A condition on a column the
+    table lacked used to bind and then fail at Build with "No column".
+  - **Guesses are per table, and only for roles nobody chose.** The old
+    editor guessed from every table's columns at once, so it could pair a
+    source from one table with a destination from another, and its
+    `/user/` matched the SID in `UserId` before `UserName`. `st.picked`
+    is what keeps a table switch from rewriting an edited event's columns
+    while it is only being previewed elsewhere.
+
+- **A plugin's menu is the app's menu** (`winnow.dropdownMenu`, plugin
+  API 13 / context `apiVersion` 7). Pivot's and First/Last's
+  click-to-place used to be a modal titled "Place <field>" — a whole
+  dialog for one click, over the board being arranged. Both open the
+  ui.js singleton under the field now, so they are one-at-a-time with
+  every app menu, Escape is swallowed in the capture phase (it can't
+  also clear the grid's selection underneath), and an outside mousedown
+  closes it. Three things bite:
+  - **The helper never moves focus.** It doesn't focus an item on open
+    (Down/Up step in) and doesn't put focus back on close. Both tabs
+    re-render their field list on a pick, so the field that opened the
+    menu is a new node and a keyboard user ends on `<body>`;
+    `refocusField` focuses the new one — only for a menu opened from the
+    keyboard, and never while `#modal` is up, because First/Last's
+    Filters pick opens the filter editor and its search box must keep
+    the focus it takes when the values arrive.
+  - **Greyed means a rule `addField` already applies, said before the
+    click** — already there; Total up needs a number column (addField's
+    toast); Group rows on stops at `meta.limits.group_cols` (the
+    backend's 400 on the next preview). The reason goes in `desc`, the
+    visible second line, not only in `title`. The group-column limit is
+    the one the menu applies and a drag does not: a drag past it still
+    lands and the preview reports the 400, as before.
+  - **A hand-built `.menu` div gets the look and none of the behaviour**
+    — not one-at-a-time with the app's menus, no shared Escape or
+    outside-click. Fine for a completion popup tied to an input
+    (First/Last's `fl-ac` owns its keys on purpose); not for a menu.
+  `tests/ui/test_field_place_menu.py` pins all of it against both tabs.
 
 - **Plugin enablement is two-layer, and the defaults point opposite ways.**
   Machine level (workspace/plugins.json): installed plugins are on unless
@@ -185,13 +485,49 @@ see [docs/notes/README.md](README.md) for the whole set.
   right for something the analyst placed and wrong for what we shipped.
   Case level (case_settings `plugin_overrides`, JSON {fs_name: bool}):
   wins where set, travels with the case file on purpose. Three rules keep
-  it honest: `_reload_plugins()` runs on every case open, because "a
-  disabled plugin's code never runs" is a per-case statement now; the
-  "everywhere" scopes clear the open case's override, so the dropdown
-  can't show a state a leftover override silently exempts; and
+  it honest: `_reload_plugins()` runs whenever which case is open changes,
+  because "a disabled plugin's code never runs" is a per-case statement
+  now — every case open including re-opening the open one (the client
+  resets its plugin tabs on that request either way), the quick-look
+  open, quick-look discard (no case: machine defaults again), and startup.
+  Startup is the one that went wrong: plugins loaded at import with no
+  case open and `main()` opened `--case` afterwards, so a double-clicked
+  case ran what it had switched off and lacked what it had switched on.
+  Under `python server.py` the import-time load is skipped and `main()`
+  loads once the case is open (`_load_startup_plugins`), since a load
+  under the machine set first would already have imported a plugin the
+  case turns off; `uvicorn server:app` opens no case and keeps the
+  import-time load. The "everywhere" scopes clear the open case's
+  override, so the dropdown can't show a state a leftover override
+  silently exempts; and
   `PluginRegistry.load` is first-directory-wins on fs_name, so an
   analyst's installed copy of an example shadows the bundled one instead
   of both loading and fighting over tab ids.
+
+- **The `table_histogram` example is retired; `top_values` holds the
+  `register_toolbar_panel` slot.** The histogram is built in
+  (static/js/histogram.js and `GET /api/histogram`; `Store.time_histogram`
+  was always core), so the example that showed it went, and a smaller one
+  with no backend took its place — one example per extension point stays
+  true. `server.RETIRED_BUNDLED_EXAMPLES` tombstones the old folder name
+  in `_reload_plugins.enabled_for`: the updater removes
+  `examples/plugins/table_histogram` on the next update (examples/ is not
+  in `updater.PROTECTED`), but a zip install that has never updated has no
+  manifest and keeps every folder it shipped with, and with
+  `table_histogram` still in `enabled_bundled` it would load a second
+  Histogram button and route beside the built-in. The tombstone lives in
+  `enabled_for` rather than `PluginPrefs` because case-level overrides are
+  consulted there first — a `plugin_overrides` entry in a case file would
+  undo a prefs-level one. It is scoped to the bundled directory: an
+  analyst's own copy in `plugins/` is theirs and still loads. The stale
+  folder is still *listed* in Settings → Plugins — `PluginRegistry.load`
+  has no discovery filter, and the folder is the thing to delete — so
+  `_reload_plugins` stamps its record's `error` with the one-line reason
+  from the map, and `/api/plugins/toggle` refuses the name with the same
+  text: a pref or case override for it would change nothing, and the
+  dropdown would then show a state that is not so. Retiring another
+  example means a name and its reason there, and another example
+  covering its hook.
 
 - **The `esxi_logs` example and the {{all:...}} widget placeholder.**
   The ESXi / UAC triage profile (winnow/defaults/profiles.json) needs to
@@ -204,12 +540,72 @@ see [docs/notes/README.md](README.md) for the whole set.
   `SELECT * FROM src_a UNION ALL SELECT * FROM src_b …` over every matching
   source (schemas identical by construction, so the union lines up by
   position), and the dashboard slices it back apart on the plugin's `Log`
-  column ('hostd'/'auth'/'shell'/…, set from the filename). A profile still
+  column ('hostd'/'auth'/'shell'/…, set from the filename's stem, with
+  the ` (N)` that archive expansion gives a clashing name taken off first,
+  so `messages (2)` is still syslog). A profile still
   can't create a merge, and this isn't one — it's a read-time union, so it
   needs no new object in the case file and picks up rotated logs imported
   later with no re-wiring. The plugin parses two line shapes per line, not
   per file (ESXi ISO and year-less Linux syslog both appear in one
   syslog.log), and folds timestamp-less continuation lines onto the
-  previous row rather than emitting orphans.
+  previous row rather than emitting orphans. Folding collects the lines
+  and joins once, and stops at `FOLD_MAX_CHARS` (64 Ki). The format
+  claims every .log, so a dated header over a 100k-line dump is a real
+  input, and repeated `message + " " + line` took minutes over it to build
+  one 9 MB cell. Past the cap, lines are rows of their own, as they are
+  in a file with no timestamps.
+  **A year-less syslog stamp is not a datetime**, and Timestamp is
+  declared one: TS_NORMALIZE reads "Jan  5 10:00:01" as NULL, so every
+  UAC/Linux line fell out of the timeframe filter and the board's own
+  "Activity over time" chart. `_SyslogYears` resolves the year the way
+  timeparse's `syslog_bsd` op does (a year added at each Dec→Jan wrap,
+  in file order), but anchors at the other end, because a parser can't
+  ask for the first line's year. The last stamp belongs to the year of
+  the file's mtime, or the year before if that day is still to come. That
+  costs one extra read, only for a file that has a year-less stamp. The
+  output is naive ISO, since syslog doesn't say its zone. An upload's
+  spool carries the upload time as its mtime (browsers don't send it),
+  so only an import by path gets the file's real one.
 
-- **Bundles are profiles.** A plugin bundle (PluginBundles, workspace/plugin_bundles.json) now carries an optional `dashboard` (a list of widget definitions) alongside its plugins. Applying a bundle whose profile has a dashboard also sets the open case's dashboard (Store.set_dashboard). So a profile is 'how I analyze this kind of case' — plugins + a dashboard — one saveable, shareable JSON thing. See docs/design/analysis-suite.md.
+- **A plugin's dashboard is offered, not applied** (`register_dashboard`,
+  API 8). It appears under Dashboards ▸ Library beside the machine-wide
+  boards and is copied into a case only when the analyst presses ＋
+  (`upsert_dashboard_by_name`, so twice refreshes rather than duplicates).
+  Loading a plugin must never put a board in a case: the analyst opened
+  Winnow to look at something, and a plugin does not get to decide what.
+  The registry holds the widgets and the listing omits them; the listing
+  rides `/api/plugins` alongside tabs and panels rather than getting a
+  route of its own to drift from. **A name already in use is a 409, not a
+  replace**: the library's add replaces by name and is right to, because
+  the analyst named that board — here the name is the PLUGIN's, so a
+  board they built by hand can collide with it by coincidence, and
+  `replace=true` is the answer to a question the UI asks rather than a
+  default. `source` and `render` are validated at registration against
+  what actually runs and draws, so a typo is the plugin's load error and
+  not a card reading "Unknown render" weeks later. Registering needs no case open, which is
+  what makes it a declaration; a board built FROM the open case's data is
+  `req.store.create_dashboard` from a route instead, and that path was
+  always there — this hook is the half that can be declared, documented
+  and tested. Widget SQL should use `{{all:header_set:…}}` rather than a
+  table id: ids differ per case, and a bundle arrives as many files.
+- **Bundles are profiles.** A plugin bundle (PluginBundles, workspace/plugin_bundles.json) carries, alongside its plugins, an optional `dashboard` (a list of widget definitions), extra named boards under `dashboards`, a starter `watchlist` and variable definitions. So a profile is 'how I analyze this kind of case' — one saveable, shareable JSON thing, and literally one file: `GET /api/plugin_bundles/{id}/export` writes a `winnow-profile/1` document and `POST /api/plugin_bundles/import` reads one back (a key this version does not understand is a 400 rather than a silent drop, and so is a known key holding the wrong kind of value — `"plugins": "lateral_movement"` would otherwise store one plugin per letter). **Applying is per part now** — `POST .../apply` takes `parts` from server.APPLY_PARTS (plugins/boards/watchlist/variables) and no body still means all four, which is what the new-case dialog and any script sends. The plugins part is still all-or-nothing WITHIN itself: every installed plugin gets an explicit case override, so anything not in the profile is turned off — and the sheet keeps that part ticked even on a case whose plugin set already matches, because the override write is what pins the case against a later machine-wide toggle, not a no-op (`plan.plugins.pins` is how many overrides it lands). Boards land by upsert-by-name stamped `origin='profile:<name>'`, which is how the apply sheet knows whether the board it is about to replace has been edited since — and which still is not a `plugin:<fs>:<id>` stamp, so a plugin offering a board of that name asks like any other collision. See docs/notes/ui.md's profile-manager entry and docs/design/analysis-suite.md.
+- **Importing a plugin catches `BaseException`, not `Exception`, and the
+  difference is not pedantry.** `PluginRegistry._load_one` runs arbitrary
+  module-level Python — that is what a plugin *is* — and
+  `sys.exit("needs Winnow 2.0")` is a completely ordinary way for one to
+  bail on a version check. `SystemExit` and `KeyboardInterrupt` are not
+  `Exception` subclasses, so they used to leave the registry entirely,
+  and the two places that call it both handle that badly. From the
+  install route (`run_in_threadpool(_reload_plugins)`) the exception
+  escapes a worker thread and **the request never returns** — Winnow
+  stops answering. From the module-level `_reload_plugins()` in
+  `server.py` it kills the import of `server.py` itself, so the server
+  **will not start at all** until the plugin is deleted by hand. Install
+  one plugin like that and Winnow hangs, then refuses to come back up;
+  reported as "importing a plugin folder crashes Winnow". A plugin that
+  cannot load is a load error like any other, and that is what it is
+  recorded as. The cost is a genuine Ctrl+C inside a plugin's import
+  being swallowed — one keystroke, on a server whose shutdown uvicorn
+  owns. `tests/test_plugins.py` pins all three: the registry records it,
+  one bad plugin does not take the others' formats with it, and the
+  install route answers instead of hanging.

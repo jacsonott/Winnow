@@ -1,9 +1,11 @@
-"""The row number selects its row.
+"""The row number selects its row — and so does the rest of the gutter.
 
 The checkbox was the only way to pick a row: a 12px target that has to be
 aimed at, sitting beside a number that looked just as clickable and did
 nothing. Clicking the number now does what ticking the box does, and
-dragging down the column paints that choice onto the rows it crosses.
+dragging down the column selects the span the drag covers. Since the
+whole gutter became the handle, picks also survive a cell click; the
+model's own tests are in test_row_selection_model.py.
 
 Asserted through the checkbox's own state, because "functions as the
 checkbox does" is the claim — not through a class the implementation
@@ -81,12 +83,15 @@ def test_dragging_down_the_column_paints_the_rows_it_crosses(page):
         assert _checked(page, r), r
 
 
-def test_a_cell_click_still_replaces_the_selection(page):
-    """The row number is the checkbox; the cells are unchanged."""
+def test_a_cell_click_keeps_the_selection(page):
+    """Picking is never clearing: a cell click moves the cursor and the
+    cell range, and leaves the picked rows alone (Escape lets go)."""
     _rid(page, 1).click()
     _rid(page, 2).click()
     page.wait_for_function("() => __winnow.selCount() === 2")
     page.locator("#body .row").nth(7).locator(".cell").first.click()
+    page.wait_for_function("() => __winnow.selCount() === 2 && __winnow.S.cursor === 7")
+    page.keyboard.press("Escape")
     page.wait_for_function("() => __winnow.selCount() === 0")
 
 

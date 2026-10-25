@@ -1,14 +1,14 @@
 /* Column layout: header rendering, drag-to-reorder, widths and autofit.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
-import { $, AUTOFIT_MAX_W_DEFAULT, GUTTER_W, api, debounce, el, post, toast } from './core.js';
+import { $, AUTOFIT_MAX_W_DEFAULT, GUTTER_W, api, debounce, el, nameMap, post, toast, toastAction } from './core.js';
 import { columnMenuItems, opLabel } from './derived.js';
-import { openValuePicker, pickerTreeNode, valueFilterEnabled } from './filters.js';
-import { render } from './grid.js';
+import { columnFilterChips, openValuePicker, pickerTreeNode, removeColumnFilter, valueFilterEnabled } from './filters.js';
+import { render, setCellRange } from './grid.js';
 import { renderGroupStrip } from './grouping.js';
-import { S, selClear, selSetAll } from './state.js';
+import { S, clearCellSelection, gridRowCount, selClear, selSetAll, selSnapshot } from './state.js';
 import { baseColumns, columnMeta } from './tsformat.js';
-import { contextMenu } from './ui.js';
+import { anchoredPanel, contextMenu } from './ui.js';
 import { rebuildSoon, rebuildView } from './view.js';
 
 /* ---------------------------------------------------------------- header */
@@ -20,10 +20,36 @@ export function colWidth(name) {
   if (!c) return 140;
   if (c.type === 'datetime') return 190;
   if (c.type === 'number') return 100;
+  if (fillsGrid(c)) return fillWidth();
   return Math.min(360, Math.max(90, name.length * 9 + 30));
 }
 
-export const visibleCols = () => S.order.filter((n) => !(S.layout[n] || {}).hidden);
+/* A one-column table IS its column: a log imported one line per row has
+   nothing but Message. Sized from that header it came out 93px wide with
+   every line cut to "2026-03-1…" and the rest of the grid empty, so the
+   lone base column takes the viewport instead (the gutter and a little
+   for the scrollbar excepted). A dragged width still wins (S.layout), and
+   columns the analyst derives from it keep their own defaults. */
+export function fillsGrid(c) {
+  if (!c || c.derived) return false;
+  // Counted with an early exit rather than baseColumns().length: colWidth
+  // asks this for every text column on every paint, and a filtered copy of
+  // a 400-column list per column was O(columns²) to learn "more than one".
+  let n = 0;
+  for (const x of S.columns) if (!x.derived && ++n > 1) return false;
+  return n === 1;
+}
+
+export function fillWidth() {
+  const body = $('body');
+  return Math.max(360, (body ? body.clientWidth : 0) - GUTTER_W - 20);
+}
+
+/* The grid's columns: S.order less the hidden ones and the ones grouped
+   on, which are in the group headers instead. S.order itself keeps every
+   column, grouped or not, so the layout saved while grouped and the place
+   a column comes back to on Ungroup are the analyst's (see addGroupLevel). */
+export const visibleCols = () => S.order.filter((n) => !(S.layout[n] || {}).hidden && !S.groupByCols.includes(n));
 
 export const isPinned = (name) => !!(S.layout[name] || {}).pinned;
 
@@ -38,7 +64,7 @@ export const isPinned = (name) => !!(S.layout[name] || {}).pinned;
    behaviour you want and costs nothing. Reordering would also have
    silently changed export column order, which follows the arrangement. */
 export function pinnedOffsets() {
-  const out = {};
+  const out = nameMap();   // keyed by column name — a `toString` column must not read as pinned
   let left = GUTTER_W;
   for (const name of visibleCols()) {
     if (!isPinned(name)) continue;
@@ -69,6 +95,19 @@ export function togglePin(name) {
   render();
   saveLayout();
   return now;
+}
+
+/* Send a column to either end of the order. Drag covers every other
+   position, but "put this first" on a 200-column table is a drag across
+   the whole list — and a hidden column can't be dragged in the grid at
+   all. Same save path as a drag, so the layout remembers it. */
+export function moveColumn(name, where) {
+  if (!S.order.includes(name)) return;
+  const rest = S.order.filter((n) => n !== name);
+  S.order = where === 'top' ? [name, ...rest] : [...rest, name];
+  renderHead();
+  render();
+  saveLayout();
 }
 
 /* ----------------------------------------------------------- column drag */
@@ -117,9 +156,222 @@ export function wireColumnDrag(h, name) {
   });
 }
 
+/* ------------------------------------------------------- filter surface */
+
+/* Two surfaces, one setting. The classic always-on filter ROW — a box
+   under every column, forever — is what ships: typing straight into a
+   column box without looking is the Timeline Explorer reflex, and the
+   analysts who have it are not wrong. Settings → Grid & layout switches to
+   the filter BAR: a strip above the grid carrying only the filters
+   actually set, as chips, plus the way to add one — and there a column's
+   box appears under its header only when the header's ⌕ (or a chip, or
+   "+ filter a column…") asks for it.
+
+   The bar exists because the row was measured on a real seven-table case:
+   27 boxes on screen, 0 in use, and they are the heaviest thing in the
+   viewport after the data. Which of the two a fresh install gets lives in
+   one place (FILTER_UI_DEFAULT in settings.js), not in a comparison
+   spelled out here — flipping it must be one edit, and the sentence above
+   naming the shipped side is the only thing in this file that has to
+   follow it. */
+export const classicFilterRow = () => S.appearance.filterUi === 'row';
+
+/* Whether this column's box is on screen. Under the classic row every
+   column's is; under the bar only the ones the analyst opened. */
+export const filterBoxOpen = (name) => classicFilterRow() || S.filterOpen.includes(name);
+
+/* renderHead() for the paths that change the head's HEIGHT rather than only
+   what is drawn in it — revealing or folding a box, and the Appearance
+   switch between the two surfaces, all add or remove the whole filter row.
+
+   #rows is positioned absolutely at headH(), and that top is written in one
+   place only: syncRowsTop(), inside a paint. Repaint the head without
+   repainting the rows and the two disagree by the row's ~29px — the first
+   data row is drawn underneath the sticky header, a blank strip is left at
+   the bottom, and rowAtClientY (which subtracts headH()) hands the gutter
+   drag and the autoscroll a row that isn't the one under the pointer.
+   Nothing repairs it by itself: a column already in view scrolls nowhere,
+   so no scroll event fires, and folding a box away rebuilds nothing at all.
+   Every other caller that resizes the head — a width drag, a pin, hiding a
+   column — has always paired the two; this is that pair, named, so the
+   filter surface cannot drift back out of it. */
+export function renderHeadResized() {
+  renderHead();
+  render();
+}
+
+/* Reveal a column's box under its header and put the cursor in it. The
+   header ⌕, a chip's label and the column picker all come through here, so
+   the three cannot disagree about what "open" means or forget the scroll.
+
+   Under the classic row there is nothing to reveal — the box is already
+   there — so this is only the focus half. */
+export function openColumnFilter(name, { focus = true } = {}) {
+  // A hidden or grouped-away column has no header to reveal a box under.
+  // Its filter is still real and its chip's ✕ still takes it off — this is
+  // only the edit-in-place half, and saying why beats a click that does
+  // nothing.
+  if (!visibleCols().includes(name)) {
+    toast(`"${name}" is not on screen — show it from the Columns panel to edit its filter here`);
+    return;
+  }
+  if (!classicFilterRow() && !S.filterOpen.includes(name)) {
+    S.filterOpen = [...S.filterOpen, name];
+    renderHeadResized();
+  }
+  if (!focus) return;
+  const inp = document.querySelector(`.fcell input[data-col="${CSS.escape(name)}"]`);
+  if (!inp) return;
+  // A column off the right edge has a box nobody can see, and focusing it
+  // would scroll the grid there with no warning. Bring it in deliberately,
+  // by the nearest amount, so the columns either side stay in frame.
+  inp.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  inp.focus();
+  inp.select();
+}
+
+/* Put a revealed box away again. Not a filter change: an open box with
+   text in it folds back into its chip, which is where a set filter lives
+   when it is not being edited. */
+export function closeColumnFilter(name) {
+  if (!S.filterOpen.includes(name)) return;
+  S.filterOpen = S.filterOpen.filter((n) => n !== name);
+  renderHeadResized();
+}
+
+export function toggleColumnFilter(name) {
+  if (S.filterOpen.includes(name)) closeColumnFilter(name); else openColumnFilter(name);
+}
+
+/* The bar, painted on its own. Separate from renderHead because
+   setColumnFilter (the row menu's Filter to…, the `f` keybind, the value
+   picker's single-value case) deliberately avoids a full head render —
+   that would drop the cell selection the caller is still acting on — and
+   the chip is the only place those writes show up once the boxes are gone.
+
+   Owns its own `hidden`, all three reasons for it: the classic row is on,
+   no table is open, or a page tab is up (syncTabChrome calls this for the
+   same reason it hides the toolbar — the bar describes the grid). */
+export function renderFilterBar() {
+  const bar = $('filterBar');
+  if (!bar) return;
+  bar.replaceChildren();
+  bar.hidden = classicFilterRow() || !S.sourceId || S.activeTab !== 'grid';
+  if (bar.hidden) return;
+
+  const label = el('span', 'filter-bar-label', 'Filters');
+  // The scope, said once here rather than guessed at: the guided tree, the
+  // tag filter and the timeframe narrow the table too and have their own
+  // controls, so "Filters — none" must not read as "nothing is hidden".
+  label.title = 'The per-column filters on this table. The filter builder, tags and the timeframe have their own controls in the toolbar.';
+  bar.append(label);
+
+  // A column being edited in place is not also a chip: the box IS that
+  // filter while it is open, and two copies of one filter a keystroke
+  // apart is exactly the confusion the bar exists to remove.
+  const chips = columnFilterChips().filter((c) => !S.filterOpen.includes(c.column));
+  for (const c of chips) bar.append(filterChip(c));
+  if (!chips.length && !S.filterOpen.length) bar.append(el('span', 'filter-bar-none', 'none'));
+
+  const add = el('button', 'btn ghost filter-add', '+ filter a column…');
+  add.id = 'filterAdd';
+  add.title = 'Open a column’s filter box — including one scrolled off the right edge';
+  add.onclick = (e) => { e.stopPropagation(); openFilterColumnPicker(add); };
+  bar.append(add);
+}
+
+/* One chip: the column, what it is filtered to, and the way off. The label
+   is a button rather than text because "click the filter to change it" is
+   the gesture people try first, and it lands on the same reveal the header
+   ⌕ does. */
+function filterChip(c) {
+  const chip = el('span', 'filter-chip');
+  chip.dataset.col = c.column;
+  const label = el('button', 'filter-chip-label');
+  label.append(el('span', 'filter-chip-col', c.column), el('span', 'filter-chip-val', c.text));
+  label.title = `${c.column}: ${c.full}\n\nClick to edit this filter under its column`;
+  label.onclick = () => openColumnFilter(c.column);
+  const rm = el('button', 'filter-chip-rm', '✕');
+  rm.title = `Remove the filter on ${c.column}`;
+  rm.setAttribute('aria-label', `Remove the filter on ${c.column}`);
+  rm.onclick = () => removeColumnFilter(c.column);
+  chip.append(label, rm);
+  return chip;
+}
+
+/* "+ filter a column…": the way to filter a column a long way off the right
+   edge, and the answer to "where did the boxes go" for anyone meeting the
+   bar for the first time. Searchable because a KAPE EVTX table carries
+   thirty-odd columns and reading the list is slower than typing three
+   letters. Visible columns only — the others have no header to open a box
+   under (see openColumnFilter). */
+export function openFilterColumnPicker(anchorEl) {
+  const cols = visibleCols();
+  return anchoredPanel(anchorEl, 'filter-col-picker', (p, close) => {
+    const search = el('input', 'vp-search');
+    search.type = 'search';
+    search.placeholder = 'Find a column…';
+    const list = el('div', 'vp-list');
+    const paint = () => {
+      const q = search.value.trim().toLowerCase();
+      list.replaceChildren();
+      const hits = cols.filter((n) => !q || n.toLowerCase().includes(q));
+      for (const n of hits) {
+        const b = el('button', 'menu-item', n);
+        if (S.filters[n]) b.classList.add('filtered');
+        b.onclick = () => { close(); openColumnFilter(n); };
+        list.append(b);
+      }
+      if (!hits.length) list.append(el('div', 'vp-note', 'No column matches that.'));
+    };
+    search.oninput = paint;
+    // Enter takes the first hit: typing three letters and pressing Enter is
+    // the whole gesture for someone who knows which column they want.
+    search.onkeydown = (e) => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      const first = list.querySelector('.menu-item');
+      if (first) first.click();
+    };
+    p.append(search, list);
+    paint();
+    setTimeout(() => search.focus(), 0);
+  });
+}
+
+/* For the merge on screen: each column only some of its tables have
+   (folded name -> labels of the tables that have it), and `total`, the
+   table count. Empty for a plain table. Read from the merge's `members`,
+   which the server fills with what each one lacks. */
+function partialMergeColumns() {
+  const out = new Map();
+  const src = S.sources.find((s) => s.id === S.sourceId);
+  if (!src || !src.is_merge || !src.members) return out;
+  out.total = src.members.length;
+  const missing = src.members.map((m) => new Set(m.missing.map((n) => n.trim().toLowerCase())));
+  for (const c of src.columns) {
+    const k = c.name.trim().toLowerCase();
+    const owners = src.members.filter((m, i) => !missing[i].has(k)).map((m) => m.label);
+    if (owners.length < src.members.length) out.set(k, owners);
+  }
+  return out;
+}
+
 export function renderHead() {
-  S.cellRange = null; // column order/visibility/width changes invalidate cell-range column indices
-  S.cellAnchor = null;
+  /* The RECTANGLE goes: c0/c1 are indices into visibleCols(), and this
+     runs precisely when that list changes — a hide, a reorder, a pin, a
+     resize, revealing a filter box. The ACTIVE CELL is carried across by
+     column NAME instead, so those repaints do not cost the analyst their
+     place. If its column is gone, so is it.
+
+     The boundary worth knowing: this rescues repaints only. A filter edit
+     or a sort REBUILDS, and rebuildView clears the cell selection
+     outright — correctly, because after a re-sort "row 4" is a different
+     row and a cursor left sitting on it would be pointing at evidence the
+     analyst never chose. Row picks survive a rebuild because they are
+     remapped by rid; a cell cursor has no such identity. */
+  const keep = S.cellFocus ? { pos: S.cellFocus.pos, name: S.cellFocus.name } : null;
+  clearCellSelection();
   renderGroupStrip();
   const head = $('headRow');
   const filt = $('filterRow');
@@ -140,9 +392,9 @@ export function renderHead() {
   selectAllCb.title = 'Select every row in the current view';
   selectAllCb.onchange = () => {
     if (S.groupByCols.length || !S.view) { selectAllCb.checked = false; return; }
+    selSnapshot();
     selectAllCb.checked ? selSetAll() : selClear();
-    S.cellRange = null;
-    S.cellAnchor = null;
+    clearCellSelection();
     render();
   };
   // The Line label is the way BACK from any sort: original file order,
@@ -163,11 +415,19 @@ export function renderHead() {
   gh.append(selectAllCb, el('span', 'gutter-mid'), lineLabel);
   head.append(gh);
 
+  // A box can only be open on a column that is still on screen: hiding a
+  // column from the columns panel, grouping by it, or removing a derived
+  // column would otherwise leave a name in S.filterOpen that nothing ever
+  // renders and nothing ever drops.
+  const shown = visibleCols();
+  S.filterOpen = S.filterOpen.filter((n) => shown.includes(n));
+
   const gf = el('div', 'fcell gutter-filter');
   gf.style.flexBasis = GUTTER_W + 'px';
   filt.append(gf);
 
   const pins = pinnedOffsets();
+  const partial = partialMergeColumns();
   for (const name of visibleCols()) {
     const w = colWidth(name);
     const h = el('div', 'hcell');
@@ -189,8 +449,51 @@ export function renderHead() {
       const dstatus = colMetaEntry.derived_status;
       mark.title = `Derived from "${colMetaEntry.derived_from}" — ${opLabel(colMetaEntry.derived_op)}`
         + (dstatus === 'building' ? ' (building…)' : '')
-        + (dstatus === 'partial' ? ' (incomplete — re-derive to finish)' : '');
+        + (dstatus === 'partial' ? ' (incomplete — re-derive to finish)' : '')
+        // A re-derive that stopped part-way clears what it wrote rather
+        // than leave two runs' values mixed (Store._fail_derive_backfill).
+        + (dstatus === 'error' ? ' (failed — values cleared; re-derive to retry)' : '');
       if (dstatus !== 'ready') mark.classList.add('pending');
+      h.append(mark);
+    }
+    if (!classicFilterRow()) {
+      // The one-click way in, in the place the box it opens will appear.
+      // Laid out at all times rather than appearing on hover, for the same
+      // reason .fcell-pick is: a header row that reflows as the pointer
+      // crosses it is worse than a quiet glyph. It does cost ~13px of every
+      // header — the charge that got the column-options ▾ removed — and the
+      // trade is different here: that one was a rarely-used menu, this one
+      // replaces a whole row of boxes with a row of nothing, and filtering
+      // a column is the everyday verb it pays for.
+      const fo = el('button', 'hcell-filter', '⌕');
+      fo.dataset.col = name;
+      fo.tabIndex = -1;
+      const open = S.filterOpen.includes(name);
+      const filtered = !!(S.filters[name] || pickerTreeNode(name));
+      if (open) fo.classList.add('open');
+      if (filtered) fo.classList.add('active');
+      fo.setAttribute('aria-pressed', String(open));
+      fo.title = filtered
+        ? `${name} is filtered — click to edit the filter here`
+        : `Filter ${name}`;
+      fo.onclick = (ev) => {
+        // A modified click belongs to the header, not to this button:
+        // Alt-click pins and Shift-click adds a sort, and landing one of
+        // those on the glyph of a narrow column must not mean something
+        // else. Falling through (no stopPropagation) is what delivers it.
+        if (ev.altKey || ev.shiftKey || ev.ctrlKey || ev.metaKey) return;
+        ev.stopPropagation();
+        toggleColumnFilter(name);
+      };
+      h.append(fo);
+    }
+    const owners = partial.get(name.trim().toLowerCase());
+    if (owners) {
+      // On a merge, a column not every table has: its empty cells there
+      // mean "that file has no such field", not missing data.
+      const mark = el('span', 'hcell-partial', `${owners.length}/${partial.total}`);
+      mark.title = `Only in ${owners.length === 1 ? owners[0] : `${owners.slice(0, -1).join(', ')} and ${owners[owners.length - 1]}`}. `
+        + 'Rows from the other tables are empty here.';
       h.append(mark);
     }
     if (colMetaEntry) {
@@ -225,18 +528,17 @@ export function renderHead() {
       renderHead();
       rebuildView();
     };
-    const grip = el('div', 'grip');
-    grip.draggable = false;
-    grip.onmousedown = (e) => startResize(e, name);
-    grip.onclick = (e) => e.stopPropagation();
-    grip.ondblclick = (e) => { e.stopPropagation(); autofitOneColumn(name); };
-    grip.title = 'Drag to resize, double-click to autofit this column';
-    h.append(grip);
+    // No resize grip in here: the divider is found by distance from the
+    // line, across the whole row — see wireColumnDividers.
     head.append(h);
 
+    // Under the bar the row is mostly empty cells: a column whose box is
+    // not open still needs one, at its own width, or the open box stops
+    // sitting under the header it belongs to.
     const f = el('div', 'fcell');
-  applyPin(f, name, pins);
+    applyPin(f, name, pins);
     f.style.flexBasis = w + 'px';
+    if (!filterBoxOpen(name)) { filt.append(f); continue; }
     const inp = el('input');
     inp.value = S.filters[name] || '';
     inp.placeholder = 'filter';
@@ -248,8 +550,22 @@ export function renderHead() {
       rebuildSoon();
     };
     inp.onkeydown = (e) => {
-      if (e.key === 'Escape') { inp.value = ''; S.filters[name] = ''; inp.classList.remove('active'); rebuildView(); }
-      if (e.key === 'Enter') { e.preventDefault(); rebuildView(); $('body').focus(); }
+      // Escape clears; Enter commits. Under the bar both also put the box
+      // away — it was revealed for one edit, and a box left open with its
+      // filter in it is the row this replaced, rebuilt one column at a
+      // time. What the filter says then is the chip's job. Under the
+      // classic row there is nothing to put away.
+      if (e.key === 'Escape') {
+        inp.value = ''; S.filters[name] = ''; inp.classList.remove('active');
+        closeColumnFilter(name);
+        rebuildView();
+      }
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        closeColumnFilter(name);
+        rebuildView();
+        $('body').focus();
+      }
     };
     f.append(inp);
     if (valueFilterEnabled(name)) {
@@ -271,6 +587,25 @@ export function renderHead() {
       f.append(pick);
     }
     filt.append(f);
+  }
+
+  // Nothing open means the row is a line of empty cells across the whole
+  // table — which is the thing the bar exists to stop drawing.
+  filt.hidden = !classicFilterRow() && !S.filterOpen.length;
+  renderFilterBar();
+
+  // The active cell, put back on the column it was on if that column
+  // survived this repaint. The rectangle is NOT restored: its far corner
+  // may have been in a column that just went away, and a rectangle with
+  // one real corner is worse than none.
+  if (keep) {
+    const ci = visibleCols().indexOf(keep.name);
+    const pos = Math.min(keep.pos, Math.max(0, gridRowCount() - 1));
+    if (ci >= 0 && S.view && gridRowCount()) {
+      S.cellFocus = { pos, col: ci, name: keep.name };
+      S.cellAnchor = { pos, col: ci };
+      setCellRange(S.cellAnchor, S.cellFocus);
+    }
   }
 }
 
@@ -294,13 +629,107 @@ export function startResize(e, name) {
   document.addEventListener('mouseup', up);
 }
 
-export const saveLayout = debounce(() => {
-  if (!S.sourceId) return;
-  post('/api/layout', {
+/* ------------------------------------------------------ column dividers */
+
+/* How far either side of a header's dividing line (the cell's 1px right
+   border) still counts as grabbing the line. The grab used to be a 7px
+   .grip inside each header, meant to straddle the line — but `.hcell`'s
+   `overflow: hidden` (load-bearing, see .fcell in style.css) clipped it to
+   the 4px left of it. The line itself and everything to its right were
+   the header, so a double-click aimed at the line sorted the column twice
+   instead of fitting it. 5px either side stays inside both cells' 8px of
+   padding, so the zone never covers a label, a sort arrow or a button. */
+const DIVIDER_REACH = 5;
+
+/* The main grid's header cell painted at (x, y), or null. What is on TOP
+   there, so a column that has scrolled under a pinned one or under the
+   gutter is never the answer for the part of it that is covered. */
+function headCellAt(x, y) {
+  const at = document.elementFromPoint(x, y);
+  const h = at && at.closest('.hcell');
+  return h && h.parentElement === $('headRow') ? h : null;
+}
+
+/* The column whose divider is within DIVIDER_REACH of (x, y), or null —
+   whichever line is nearer: the right edge of the cell under the pointer,
+   or the edge of whatever is painted to its left, found by reading
+   leftwards a pixel at a time. By what is painted rather than by the
+   cells' order or boxes, because pinning breaks both: the line beside a
+   pin belongs to the pin, whichever column's box happens to sit behind
+   it. The gutter has an edge but nothing to resize, so it never answers. */
+export function dividerAt(x, y) {
+  const here = headCellAt(x, y);
+  const toRight = here && here.dataset.col ? here.getBoundingClientRect().right - 1 - x : Infinity;
+  for (let d = 1; d <= DIVIDER_REACH && d < toRight; d++) {
+    const left = headCellAt(x - d, y);
+    if (left === here) continue;
+    if (left && left.dataset.col) return left.dataset.col;
+    break;
+  }
+  return toRight <= DIVIDER_REACH ? here.dataset.col : null;
+}
+
+/* Wired once, on the row, rather than as a grip inside each header: half
+   the zone lies over the NEXT column's cell, which nothing inside this one
+   can reach through the clip, and whose own handlers would take the press.
+   Capture phase, so a press that grabs a line never reaches the header
+   under it: no sort, no reorder drag. A right-click is left alone — it is
+   still the column menu of whichever header it lands on. */
+export function wireColumnDividers() {
+  const head = $('headRow');
+  let grabbed = null;   // the column whose divider the current press took
+  // The divider's tooltip, worn by whatever the pointer is over while it is
+  // on a line (an element of its own would be one more thing to keep
+  // positioned). Put back on the way off; a cell renderHead has replaced
+  // since is detached, and nothing reads it.
+  let tipped = null;
+  let tipWas = null;
+  const tip = (on) => {
+    if (on === tipped) return;
+    if (tipped) {
+      if (tipWas === null) tipped.removeAttribute('title'); else tipped.title = tipWas;
+    }
+    tipped = on;
+    tipWas = on && on.getAttribute('title');
+    if (on) on.title = 'Drag to resize, double-click to autofit this column';
+  };
+  head.addEventListener('mousemove', (e) => {
+    const col = dividerAt(e.clientX, e.clientY);
+    head.classList.toggle('at-divider', !!col);
+    tip(col ? headCellAt(e.clientX, e.clientY) || head : null);
+  });
+  head.addEventListener('mouseleave', () => {
+    head.classList.remove('at-divider');
+    tip(null);
+  });
+  head.addEventListener('mousedown', (e) => {
+    grabbed = e.button === 0 ? dividerAt(e.clientX, e.clientY) : null;
+    if (grabbed) startResize(e, grabbed);
+  }, true);
+  // startResize's preventDefault already stops the header's reorder drag
+  // from starting; this is the same promise, made where it can't be lost.
+  head.addEventListener('dragstart', (e) => { if (grabbed) e.preventDefault(); }, true);
+  head.addEventListener('click', (e) => { if (grabbed) e.stopPropagation(); }, true);
+  head.addEventListener('dblclick', (e) => {
+    if (!grabbed) return;
+    e.stopPropagation();
+    autofitOneColumn(grabbed);
+  }, true);
+}
+
+/* saveLayout's write without the wait, for a caller about to read the
+   layout back (a derived column's rename re-opens the table): a resize
+   or move made in the last 400ms would otherwise still be pending, and
+   lost under the copy the re-open fetches. */
+export function saveLayoutNow() {
+  if (!S.sourceId) return Promise.resolve();
+  return post('/api/layout', {
     source_id: S.sourceId,
-    payload: { columns: S.layout, order: S.order, sort: S.sort, value_filters: S.valueFilterMode },
+    payload: { columns: S.layout, order: S.order, sort: S.sort, value_filters: S.valueFilterMode, hide_empty_rows: S.hideEmptyRows },
   }).catch(() => {});
-}, 400);
+}
+
+export const saveLayout = debounce(saveLayoutNow, 400);
 
 /* Saves the current column order/visibility/timestamp-format as the
    cross-case default for this exact header set (workspace/column_layouts.json,
@@ -317,17 +746,151 @@ export async function saveDefaultLayout() {
       // matching this layout when it's opened somewhere else.
       col_names: baseColumns().map((c) => c.name), order: S.order, columns: S.layout,
     });
-    toast('Saved as the default layout for this set of columns');
+    // Said here because it is exactly what went wrong: a table that
+    // already has a layout keeps it, and nothing else said so.
+    toast('Saved as the default layout for these columns. A table that already has a layout keeps it until the default is applied from Layout in its table menu', 6000);
   } catch (e) {
     toast('Could not save default layout: ' + e.message, 4000);
   }
 }
 
+/* The saved default for this table's header set, or null when there is
+   none. Asked by the base columns, for the reason saveDefaultLayout gives. */
+export async function findDefaultLayout() {
+  const qp = new URLSearchParams();
+  for (const c of baseColumns()) qp.append('col_names', c.name);
+  const found = await api(`/api/column_layouts/find?${qp.toString()}`);
+  return found && found.order ? found : null;
+}
+
+/* Adds every column of the table that `order` doesn't name yet, in place.
+   A derived column goes right after the column it was derived from, after
+   any siblings already sitting there (a flatten adds several from one
+   input, in order), not at the far end where nobody scrolls. Anything
+   else (no derived_from, or an input the order doesn't name) appends.
+   Re-derive keeps its name, so it never moves. Returns whether any column
+   was placed beside its input. */
+export function placeUnorderedColumns(order) {
+  let placed = false;
+  for (const c of S.columns) {
+    if (order.includes(c.name)) continue;
+    let at = c.derived_from ? order.indexOf(c.derived_from) : -1;
+    if (at === -1) { order.push(c.name); continue; }
+    while (at + 1 < order.length) {
+      const next = S.columns.find((x) => x.name === order[at + 1]);
+      if (next && next.derived_from === c.derived_from) at++; else break;
+    }
+    order.splice(at + 1, 0, c.name);
+    placed = true;
+  }
+  return placed;
+}
+
+/* The other half of saveDefaultLayout, for a table that already has a
+   layout of its own. Opening a table seeds the default only into one that
+   has never saved a layout, and almost every table has (a resize, a sort
+   or Reset view saves one), so a default saved after a table's first open
+   never reached it, and Reset view keeps the layout on purpose. The
+   imported columns take the default's order, visibility, widths, pins and
+   formats outright; a derived column keeps its own settings and goes back
+   beside its input, as on open. Undo is offered because nothing else
+   brings back the layout this replaces. */
+export async function applyDefaultLayout() {
+  const id = S.sourceId;
+  if (!id || !S.columns.length) return;
+  let found;
+  try { found = await findDefaultLayout(); } catch (e) {
+    toast('Could not read the default layout: ' + e.message, 4000);
+    return;
+  }
+  if (S.sourceId !== id) return;
+  if (!found) {
+    toast('No default layout is saved for these columns yet — "Save this layout as the default" under Layout in the table menu of a table with them saves one', 5000);
+    return;
+  }
+  const { order, layout } = defaultLayoutResult(found);
+  replaceLayout(order, layout, 'Applied the default layout for these columns');
+}
+
+/* What applying a saved default leaves on the table on screen: the
+   default's order and per-column settings for the imported columns, each
+   derived column keeping its own entry and placed beside its input. One
+   computation for applying and for the table menu's preview of it. */
+export function defaultLayoutResult(found) {
+  const layout = nameMap(found.columns);
+  for (const c of S.columns) {
+    if (!c.derived) continue;
+    if (S.layout[c.name]) layout[c.name] = S.layout[c.name]; else delete layout[c.name];
+  }
+  const order = found.order.filter((n) => S.columns.some((c) => c.name === n));
+  placeUnorderedColumns(order);
+  return { order, layout };
+}
+
+/* Puts a whole new order and set of per-column settings on the table on
+   screen, saves it, and says so in a toast whose Undo puts the old ones
+   back. A grouped column stays in S.order (visibleCols() leaves it out),
+   so grouping needs nothing here. */
+export function replaceLayout(order, layout, message) {
+  const id = S.sourceId;
+  const before = { order: [...S.order], layout: S.layout };
+  S.layout = layout;
+  S.order = order;
+  renderHead(); render(); saveLayout();
+  toastAction(message, 'Undo', () => {
+    if (S.sourceId !== id) return;
+    S.order = before.order;
+    S.layout = before.layout;
+    renderHead(); render(); saveLayout();
+  });
+}
+
+/* --------------------------------------- copying another table's layout */
+
+/* The order the table on screen gets from another table's: the columns
+   both have, in the other table's order, and each column only this one
+   has right after the column it follows now, so a derived column stays
+   beside its input and an extra column beside its neighbour. One
+   computation for the preview and the copy, so they cannot disagree. */
+export function copiedOrder(fromOrder) {
+  const mine = new Set(S.columns.map((c) => c.name));
+  const shared = fromOrder.filter((n) => mine.has(n));
+  const isShared = new Set(shared);
+  const after = new Map();
+  let anchor = '';
+  for (const n of S.order) {
+    if (isShared.has(n)) { anchor = n; continue; }
+    if (!mine.has(n)) continue;
+    if (!after.has(anchor)) after.set(anchor, []);
+    after.get(anchor).push(n);
+  }
+  const order = [...(after.get('') || [])];
+  for (const n of shared) order.push(n, ...(after.get(n) || []));
+  placeUnorderedColumns(order);
+  return { order, shared: isShared };
+}
+
+/* The per-column settings that go with it: a shared column takes the
+   other table's entry outright (none there means none here, so a width
+   it never had set is not kept from this one), and a column only this
+   table has keeps its own. */
+export function copiedColumns(fromColumns, shared) {
+  const layout = nameMap(S.layout);
+  for (const n of shared) {
+    if (fromColumns[n]) layout[n] = { ...fromColumns[n] }; else delete layout[n];
+  }
+  return layout;
+}
+
 /* ------------------------------------------------------- column autosize */
 
-export async function fetchColumnMaxLens() {
+/* The longest value in each of `names`, which is all the server measures:
+   a table's every column cost seconds on a big table to fit one. */
+export async function fetchColumnMaxLens(names) {
   if (!S.sourceId) return null;
-  try { return await api(`/api/column_maxlen?source_id=${S.sourceId}`); }
+  const qs = new URLSearchParams({ source_id: S.sourceId });
+  for (const n of names) qs.append('columns', n);
+  try { return nameMap(await api(`/api/column_maxlen?${qs}`)); }
   catch (e) { toast('Could not measure column widths: ' + e.message); return null; }
 }
 
@@ -348,8 +911,7 @@ export function autofitMaxWidth() {
    That's how a fit-to-content pass could leave "EVEN…▾" sitting over a
    column of 1s. `scrollWidth` gives the label's full text width even while
    it's clipped; the difference between the cell's own clientWidth (which
-   includes its padding) and the label's is everything else in the row. The
-   grip is absolutely positioned, so it isn't in that difference.
+   includes its padding) and the label's is everything else in the row.
 
    Returns 0 for a column with no header on screen (hidden, or a caller
    running before the first renderHead) — callers fall back to the estimate. */
@@ -362,8 +924,7 @@ export function headerWidthFor(name) {
   // the chrome while the cell is exactly as wide as its contents. On a column
   // that's wider than it needs to be, that difference is mostly slack, so the
   // header reported needing roughly the current width and autofit could never
-  // shrink a column back to its content. (.grip is absolutely positioned and
-  // occupies no track, so it isn't counted; .label can shrink but not grow,
+  // shrink a column back to its content. (.label can shrink but not grow,
   // so its scrollWidth is the text width whether it's clipped or not.)
   const cs = getComputedStyle(h);
   const pad = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight);
@@ -371,7 +932,7 @@ export function headerWidthFor(name) {
   let extras = 0;
   let siblings = 0;
   for (const child of h.children) {
-    if (child === label || child.classList.contains('grip')) continue;
+    if (child === label) continue;
     extras += child.getBoundingClientRect().width;
     siblings += 1;
   }
@@ -403,9 +964,10 @@ export function resetAllColumnWidths() {
 export async function autofitAllColumnWidths() {
   if (!S.sourceId) return;
   toast('Measuring columns…', 8000);
-  const maxlens = await fetchColumnMaxLens();
+  const names = visibleCols();
+  const maxlens = await fetchColumnMaxLens(names);
   if (!maxlens) return;
-  for (const name of visibleCols()) {
+  for (const name of names) {
     S.layout[name] = { ...(S.layout[name] || {}), w: widthForLen(name, maxlens[name]) };
   }
   renderHead(); render(); saveLayout();
@@ -414,7 +976,7 @@ export async function autofitAllColumnWidths() {
 
 export async function autofitOneColumn(name) {
   if (!S.sourceId) return;
-  const maxlens = await fetchColumnMaxLens();
+  const maxlens = await fetchColumnMaxLens([name]);
   if (!maxlens) return;
   S.layout[name] = { ...(S.layout[name] || {}), w: widthForLen(name, maxlens[name]) };
   renderHead(); render(); saveLayout();

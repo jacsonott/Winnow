@@ -5,26 +5,25 @@ the case list carries the mark the launch just assembled."""
 
 from __future__ import annotations
 
+import contextlib
+
 import pytest
 
 pytestmark = pytest.mark.ui
 
 
-def _home(browser, server, appearance="{}"):
-    ctx = browser.new_context(viewport={"width": 950, "height": 500})
-    ctx.add_init_script("localStorage.setItem('winnow.remotePrompt', 'seen');"
-                        f"localStorage.setItem('winnow.appearance', JSON.stringify({appearance}))")
-    pg = ctx.new_page()
-    pg.goto(server)
-    pg.wait_for_selector(".row", timeout=20_000)
-    pg.evaluate("() => { __winnow.showHome(); return __winnow.refreshCases(); }")
-    pg.wait_for_selector("#home:not([hidden]) .home-head")
-    return ctx, pg
+@contextlib.contextmanager
+def _home(own_page, appearance="{}"):
+    with own_page(seed="localStorage.setItem('winnow.remotePrompt', 'seen');"
+                       f"localStorage.setItem('winnow.appearance', JSON.stringify({appearance}))",
+                  viewport=(950, 500), wait_until="load", ready_timeout=20_000) as pg:
+        pg.evaluate("() => { __winnow.showHome(); return __winnow.refreshCases(); }")
+        pg.wait_for_selector("#home:not([hidden]) .home-head")
+        yield pg
 
 
-def test_the_wordmark_is_drawn_in_the_accent(browser, server):
-    ctx, pg = _home(browser, server, '{ "splash": false }')
-    try:
+def test_the_wordmark_is_drawn_in_the_accent(own_page):
+    with _home(own_page, '{ "splash": false }') as pg:
         mark = pg.locator(".home-brand-mark")
         assert mark.count() == 1
         box = mark.bounding_box()
@@ -54,22 +53,17 @@ def test_the_wordmark_is_drawn_in_the_accent(browser, server):
         r, g, b = (int(accent.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4))
         # Within rounding of the accent — the dots are drawn in it, not near it.
         assert max(abs(a - c) for a, c in zip(painted["sample"], (r, g, b))) <= 4, (painted, accent)
-    finally:
-        ctx.close()
 
 
-def test_light_mode_gets_the_skin_s_own_accent_not_the_dark_one(browser, server):
+def test_light_mode_gets_the_skin_s_own_accent_not_the_dark_one(own_page):
     """Each skin defines a darker accent for light mode, because the colour
     that reads on near-black is washed out on parchment. Writing the saved
     accent inline made every one of those dead code."""
     seen = {}
     for mode in ("dark", "light"):
-        ctx, pg = _home(browser, server, f'{{ "themeMode": "{mode}", "splash": false }}')
-        try:
+        with _home(own_page, f'{{ "themeMode": "{mode}", "splash": false }}') as pg:
             seen[mode] = pg.evaluate(
                 "() => getComputedStyle(document.documentElement).getPropertyValue('--accent').trim()")
-        finally:
-            ctx.close()
     assert seen["dark"] != seen["light"], seen
 
     def lum(hexstr):
@@ -80,37 +74,29 @@ def test_light_mode_gets_the_skin_s_own_accent_not_the_dark_one(browser, server)
     assert lum(seen["light"]) < lum(seen["dark"]), seen
 
 
-def test_a_custom_accent_still_wins(browser, server):
+def test_a_custom_accent_still_wins(own_page):
     """Gating the inline value on accentCustomized must not take the
     analyst's own colour away from them."""
-    ctx, pg = _home(browser, server,
-                    '{ "accent": "#39e881", "accentCustomized": true, "splash": false }')
-    try:
+    with _home(own_page, '{ "accent": "#39e881", "accentCustomized": true, "splash": false }') as pg:
         accent = pg.evaluate(
             "() => getComputedStyle(document.documentElement).getPropertyValue('--accent').trim()")
         assert accent.lower() == "#39e881"
-    finally:
-        ctx.close()
 
 
-def test_harvest_is_the_default_look(browser, server):
-    ctx, pg = _home(browser, server, '{ "splash": false }')
-    try:
+def test_harvest_is_the_default_look(own_page):
+    with _home(own_page, '{ "splash": false }') as pg:
         assert pg.evaluate("() => document.documentElement.getAttribute('data-style')") == "harvest"
         # And it leads the picker, since the list is a menu and the one you
         # are on should be read first.
         assert pg.evaluate("() => Object.keys(__winnow.STYLES)[0]") == "harvest"
-    finally:
-        ctx.close()
 
 
-def test_the_brand_mark_leads_the_word_in_its_own_colors(browser, server):
+def test_the_brand_mark_leads_the_word_in_its_own_colors(own_page):
     """The three-bar icon (grain kept, chaff fading) now fronts the
     wordmark — brand colors from the icon itself, NOT theme tokens, so
     the logo and the OS file icon are visibly the same mark in every
     skin. Pinned by sampling the canvas for the bronze and the grey."""
-    ctx, pg = _home(browser, server, '{ "splash": false }')
-    try:
+    with _home(own_page, '{ "splash": false }') as pg:
         pg.wait_for_function(
             """() => {
               const c = document.querySelector('.home-brand-mark');
@@ -125,17 +111,14 @@ def test_the_brand_mark_leads_the_word_in_its_own_colors(browser, server):
               }
               return false;
             }""", timeout=10_000)
-    finally:
-        ctx.close()
 
 
-def test_the_mark_and_the_letters_share_their_ink_height(browser, server):
+def test_the_mark_and_the_letters_share_their_ink_height(own_page):
     """The reported misalignment: box-based sizing left the bars towering
     over the letters. Both are dot fields on one canvas, so alignment is
     checkable directly — the mark region's ink and the text region's ink
     must share top and bottom within a dot-stride."""
-    ctx, pg = _home(browser, server, '{ "splash": false }')
-    try:
+    with _home(own_page, '{ "splash": false }') as pg:
         spans = pg.evaluate(
             """() => {
               const c = document.querySelector('.home-brand-mark');
@@ -168,5 +151,3 @@ def test_the_mark_and_the_letters_share_their_ink_height(browser, server):
         tol = spans["h"] * 0.06   # about one dot-stride
         assert abs(spans["mark"][0] - spans["text"][0]) <= tol, spans
         assert abs(spans["mark"][1] - spans["text"][1]) <= tol, spans
-    finally:
-        ctx.close()

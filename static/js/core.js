@@ -20,6 +20,16 @@ export const ROW_H_COMFORTABLE = 24;
 
 export const ROW_H_COMPACT = 20;
 
+/* The Cmd/Ctrl+Enter shortcut, spelled for this machine. Both keys run
+   the query everywhere (plugins.js, search.js); the label used to say ⌘⏎
+   on every platform, which on the Windows boxes most analysts triage from
+   names a key that isn't there. */
+export const IS_MAC = /Mac|iPhone|iPad/.test((navigator.platform || '') + (navigator.userAgent || ''));
+export const MOD_ENTER = IS_MAC ? '⌘⏎' : 'Ctrl+⏎';
+/* Windows, where Chromium's prefers-reduced-motion is just the Animation
+   effects switch — see splash.osSkipsSplash for why that matters. */
+export const IS_WINDOWS = /^Win/.test(navigator.platform || '') || /Windows/.test(navigator.userAgent || '');
+
 export let ROW_H = ROW_H_COMFORTABLE;
 /* Rebinding has to happen in this module: an imported binding is readable
    (live — importers see the new value) but not assignable, and the old
@@ -52,7 +62,7 @@ export const GUTTER_W = 104;
 
  // keep in sync with `.gutter { width: ... }` in style.css
 /* Default ceiling for autofit-to-content column widths, overridable (and
-   removable) per browser under Settings → Appearance — see autofitMaxWidth.
+   removable) per browser under Settings → Grid & layout — see autofitMaxWidth.
    A cap exists because one pathological column can otherwise decide the
    width of the whole grid: a CommandLine full of base64 is tens of
    thousands of characters, and the rows are `width: max-content`, so an
@@ -90,15 +100,92 @@ const connListeners = [];
 export function onConnectionChange(fn) { connListeners.push(fn); }
 function announce(up) { for (const fn of connListeners) fn(up); }
 
+/* Which case this page's state belongs to: the token the server named it
+   by (case_token, on /api/case/current and on every route that switches
+   case). Every request carries it, and the server refuses (409
+   case_changed, nothing touched) one whose case isn't the one it has
+   open. That is the whole of what stops a window left on case A, after
+   ANOTHER window opened case B on the same server, from reading B's rows
+   under A's tabs and tagging them: source ids, rids and tag ids are small
+   numbers every case reuses, so nothing else on the wire tells them apart
+   (server.py's case guard). Null on a page with no case open: nothing to
+   check, and nothing is sent. */
+let caseToken = null;
+let caseSwitching = 0;
+const caseListeners = [];
+export function onCaseChanged(fn) { caseListeners.push(fn); }
+export function setCaseToken(token) { caseToken = token || null; }
+export function pageCaseToken() { return caseToken; }
+export function caseHeaders() { return caseToken ? { 'X-Winnow-Case': caseToken } : {}; }
+
+/* A download that is a plain navigation can't carry a header, so it
+   carries the token in its query instead. */
+export function caseUrl(path) {
+  if (!caseToken) return path;
+  return `${path}${path.includes('?') ? '&' : '?'}case_token=${caseToken}`;
+}
+
+/* `now` is the case the server has open ({token, name}), or null for none —
+   from the presence stream (connection.js) or a refused request. Not this
+   page's case means another window switched the server: say so. Ignored
+   mid-switch, when it is this page's own switch landing. */
+export function noticeServerCase(now) {
+  if (!caseToken || caseSwitching || (now && now.token === caseToken)) return;
+  for (const fn of caseListeners) fn(now);
+}
+
+/* Run a request that switches the server's case (open, save-as, discard)
+   and adopt the case_token its answer names. Until it lands, a refusal of
+   one of this page's own earlier requests is that switch, not another
+   window's, and a request that asked about the case being left is dropped
+   quietly rather than reported. */
+export async function switchCase(request) {
+  caseSwitching += 1;
+  try {
+    const res = await request();
+    if (res && 'case_token' in res) setCaseToken(res.case_token);
+    return res;
+  } finally {
+    caseSwitching -= 1;
+  }
+}
+
+/* Whether a failed request was the server refusing it for naming a case it
+   no longer has open. `sentCase` is the token the request went out with.
+   A refusal of a request this page sent before its own switch is marked
+   `aborted` (see api()): it asked about the case being left, and nobody
+   needs telling. Shared with jobs.js's upload XHR. */
+export function caseRefused(err, sentCase) {
+  const d = err.detail;
+  if (err.status !== 409 || !d || d.error !== 'case_changed') return false;
+  err.caseChanged = true;
+  if (caseSwitching || sentCase !== caseToken) err.aborted = true;
+  else noticeServerCase(d.open || null);
+  return true;
+}
+
+/* `opts.signal` (an AbortController's) rides through to fetch. A request
+   this client aborted itself — a view build a newer one superseded, see
+   view.js — rejects with `aborted: true` and no status, and says nothing
+   about the connection: the server never answered because it was never
+   allowed to, not because it is gone. */
 export async function api(path, opts) {
   const o = { ...opts };
   if (o.method && o.method !== 'GET') {
     o.headers = { ...(o.headers || {}), 'X-Timeline-Lite-Client': '1' };
   }
+  const sentCase = caseToken;
+  if (sentCase) o.headers = { ...(o.headers || {}), 'X-Winnow-Case': sentCase };
   let r;
   try {
     r = await fetch(path, o);
   } catch (e) {
+    if (e && e.name === 'AbortError') {
+      const err = new Error('Cancelled');
+      err.aborted = true;
+      err.cause = e;
+      throw err;
+    }
     const err = new Error(OFFLINE_MESSAGE);
     err.offline = true;      // callers that want to say more can branch on it
     err.cause = e;
@@ -125,13 +212,14 @@ export async function api(path, opts) {
     const err = new Error(msg);
     err.status = r.status;
     err.detail = detail;
+    caseRefused(err, sentCase);
     throw err;
   }
   return r.json();
 }
 
-export const post = (path, body) =>
-  api(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+export const post = (path, body, { signal } = {}) =>
+  api(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal });
 
 /* Thin top-of-viewport progress indicator for anything that can take a
    real amount of time on a large source (a view rebuild — filter/sort/
@@ -174,7 +262,27 @@ export function toastAction(msg, label, onclick, ms = 12000) {
 export const dragHas = (e, type) =>
   !!(e.dataTransfer && e.dataTransfer.types && Array.prototype.includes.call(e.dataTransfer.types, type));
 
+/* `.cancel()` drops a call still waiting — for a caller that is about
+   to do the same work at once (the search box's Enter). */
 export const debounce = (fn, ms) => {
   let t;
-  return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
+  const d = (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
+  d.cancel = () => clearTimeout(t);
+  return d;
 };
+
+/* A map keyed by column name — or by any other name an analyst or a file
+   supplies. Column names are user data, and a CSV can have a `toString`,
+   `constructor` or `__proto__` column: a plain `{}` answers those with
+   Object.prototype's members (a filter box prefilled with
+   `function toString() { [native code] }`, a value picker that throws on
+   `.trim()` of it), and `map['__proto__'] = x` replaces the map's
+   prototype instead of adding a key — so the column can't be filtered,
+   and hiding it hid every column with no layout entry of its own. A
+   null-prototype object inherits nothing and keeps `__proto__` as an
+   ordinary key; JSON.stringify, Object.keys/entries and `in` treat it like
+   any other object. A spread (`{ ...m }`) gives back a PLAIN object, so a
+   copy that is going to be looked up by name goes through here again.
+   `src`'s own keys are copied in, `__proto__` included when JSON.parse
+   made it one. */
+export const nameMap = (src) => Object.assign(Object.create(null), src || {});

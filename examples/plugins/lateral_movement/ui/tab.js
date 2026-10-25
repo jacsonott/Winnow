@@ -49,18 +49,7 @@ export default function mount(container, winnow) {
   const summary = el('span', 'lm-panel-summary');
   const newBtn = el('button', 'btn ghost', '+ New event type');
   newBtn.title = 'Define a movement event mapped to your own columns';
-  newBtn.onclick = () => openEventEditor(winnow, async (def) => {
-    S.defs.saved.push(def); await saveDefs(winnow); renderPanel();
-    // A freshly defined type is usually the one you want next — tick it
-    // wherever it binds, so Build is one click away.
-    for (const src of winnow.state.sources.filter((x) => !x.error)) {
-      if ((def.requires || [def.src_col, def.dst_col]).every((c) => src.columns.some((col) => col.name === c))
-          && !S.selections.some((sl) => sl.key === selKey(src.id, def.name))) {
-        S.selections.push({ key: selKey(src.id, def.name), source_id: src.id, def, color: null });
-      }
-    }
-    recolor();
-  });
+  newBtn.onclick = () => openEventBuilder(winnow, { onSave: addEvent });
   panelHead.append(caret, el('span', 'lm-panel-title', 'Movement events'), summary, newBtn);
   root.append(panelHead);
   const panel = el('div', 'lm-events');
@@ -93,19 +82,8 @@ export default function mount(container, winnow) {
 
   // ===== event definitions & selection ====================================
   function eventsForSource(src) {
-    const cols = new Set(src.columns.map((c) => c.name));
-    const all = [...S.defs.shipped, ...S.defs.saved];
-    return all.filter((d) => {
-      // Tied to a header set: only bind on a table that IS that artifact
-      // (has every column the set defines) — a filter default binds the
-      // same way. A set that isn't present (older defs) falls back to the
-      // explicit column list.
-      const hs = d.header_set && S.defs.header_sets && S.defs.header_sets[d.header_set];
-      if (hs) return hs.every((c) => cols.has(c));
-      return (d.requires || [d.src_col, d.dst_col]).every((c) => cols.has(c));
-    });
+    return [...S.defs.shipped, ...S.defs.saved].filter((d) => bindsTo(d, src));
   }
-  const selKey = (sourceId, name) => `${sourceId}::${name}`;
 
   function renderPanel() {
     panel.replaceChildren();
@@ -414,9 +392,72 @@ export default function mount(container, winnow) {
 
   new ResizeObserver(() => { kick(); drawHist(); }).observe(stage);
 
-  manage.onclick = () => openEventManager(winnow, () => { renderPanel(); paintPanelHead(); });
+  // A definition saved, edited or deleted from a dialog repaints the
+  // panel behind it, with the ticks carried over (syncSelections).
+  repaint = () => { syncSelections(); recolor(); };
+  manage.onclick = () => openEventManager(winnow);
   paintPanelHead();
   loadDefs().then(() => { renderPanel(); paintPanelHead(); });
+}
+
+let repaint = () => {};
+const selKey = (sourceId, name) => `${sourceId}::${name}`;
+
+/* Whether a definition is offered on a table. Tied to a header set, it
+   binds only on a table that IS that artifact (has every column the set
+   defines), the way a filter default binds; a set that isn't known
+   (older defs) falls back to the explicit column list. Either way the
+   table must also carry every column the event itself reads: a
+   condition on a column the table lacks used to bind anyway and fail
+   at Build with "No column". */
+function bindsTo(d, src) {
+  const cols = new Set(src.columns.map((c) => c.name));
+  const hs = d.header_set && S.defs.header_sets && S.defs.header_sets[d.header_set];
+  if (hs && !hs.every((c) => cols.has(c))) return false;
+  return [...(d.requires || []), ...requiresOf(d)].every((c) => cols.has(c));
+}
+
+// Every column an event reads, in the order the builder shows them.
+function requiresOf(d) {
+  return [...new Set([d.src_col, d.dst_col, d.label_col, d.time_col,
+    ...(d.conditions || []).map((c) => c.column)].filter(Boolean))];
+}
+
+/* Ticks follow the definitions they name: an edited event keeps its
+   ticks where it still binds, a deleted one loses them. Before this a
+   deleted event stayed ticked, and Build sent it anyway. */
+function syncSelections() {
+  const byName = new Map([...S.defs.shipped, ...S.defs.saved].map((d) => [d.name, d]));
+  S.selections = S.selections.flatMap((s) => {
+    const d = byName.get(s.def.name);
+    const src = ctx.state.sources.find((x) => x.id === s.source_id);
+    return d && src && bindsTo(d, src) ? [{ ...s, def: d }] : [];
+  });
+}
+
+// A freshly defined event is usually the one you want next: tick it
+// wherever it binds, so Build is one click away.
+async function addEvent(def) {
+  S.defs.saved.push(def);
+  await saveDefs(ctx);
+  for (const src of ctx.state.sources.filter((x) => !x.error)) {
+    if (bindsTo(def, src) && !S.selections.some((sl) => sl.key === selKey(src.id, def.name))) {
+      S.selections.push({ key: selKey(src.id, def.name), source_id: src.id, def, color: null });
+    }
+  }
+  repaint();
+}
+
+async function replaceEvent(oldName, def) {
+  const i = S.defs.saved.findIndex((d) => d.name === oldName);
+  if (i < 0) return addEvent(def);
+  S.defs.saved[i] = def;
+  // A rename carries its ticks across to the new name.
+  for (const s of S.selections) {
+    if (s.def.name === oldName) { s.def = def; s.key = selKey(s.source_id, def.name); }
+  }
+  await saveDefs(ctx);
+  repaint();
 }
 
 async function loadDefs() {
@@ -424,146 +465,617 @@ async function loadDefs() {
   catch { S.defs = { shipped: [], saved: [] }; }
 }
 
-/* The Events… modal: browse shipped defaults, add/edit/delete saved
-   ones. onPanelChange repaints the selection panel behind the modal so a
-   just-saved event is immediately tickable. */
-function openEventManager(winnow, onPanelChange) {
-  const { el, modal } = winnow;
-  modal('Movement events', (b) => {
-    b.append(el('p', null,
-      'Shipped events bind to any table with the right columns. Saved events are yours, '
-      + 'kept on this machine across cases. An event maps a source column to a destination '
-      + 'column, optionally within conditions (e.g. EventId = 4624).'));
-    const list = el('div', 'session-list');
-    const render = () => {
-      list.replaceChildren();
-      for (const d of S.defs.shipped) {
-        const row = el('div', 'row-actions session-row');
-        row.append(el('span', 'session-name', d.name), el('span', 'count', 'shipped'));
-        list.append(row);
-      }
-      S.defs.saved.forEach((d, i) => {
-        const row = el('div', 'row-actions session-row');
-        row.append(el('span', 'session-name', d.name), el('span', 'count', `${d.src_col} → ${d.dst_col}`));
-        const del = el('button', 'btn ghost', 'Delete');
-        del.onclick = async () => { S.defs.saved.splice(i, 1); await saveDefs(winnow); render(); onPanelChange(); };
-        row.append(del); list.append(row);
-      });
-    };
-    render();
-    b.append(list);
-    const add = el('button', 'btn', 'Add a saved event…');
-    add.onclick = () => openEventEditor(winnow, async (def) => {
-      S.defs.saved.push(def); await saveDefs(winnow); render(); onPanelChange();
-    });
-    b.append(add);
-  }, { wide: true });
-}
-
 async function saveDefs(winnow) {
   try { S.defs = await winnow.post(`${winnow.base}/defs`, { saved: S.defs.saved }); }
   catch (e) { winnow.toast('Could not save: ' + e.message, 6000); }
 }
 
-function openEventEditor(winnow, onSave) {
-  const { el, modal, toast } = winnow;
-  const allCols = [...new Set(winnow.state.sources.flatMap((s) => s.columns.map((c) => c.name)))].sort();
-  const headerSets = S.defs.header_sets || {};
-  // The column vocabulary the dropdowns offer: a chosen header set's
-  // columns (so you pick from the RIGHT names for that artifact), else
-  // every column across the open tables.
-  let pool = allCols;
-  const colSelects = [];
-  const mkColSel = (val) => {
-    const s = el('select');
-    s.style.cssText = 'background:var(--ink);color:var(--text);border:1px solid var(--line-2);padding:4px 6px;font:inherit';
-    const fill = (keep) => {
-      s.replaceChildren(new Option('(column)', ''));
-      for (const c of pool) s.append(new Option(c, c));
-      if (keep && pool.includes(keep)) s.value = keep;
+/* The Events… modal, in the app's two-pane frame (winnow.sectionPanes):
+   yours and the shipped ones down a side list, each list on the right
+   with the hop it draws, where it binds and how many of this case's
+   tables it binds to. What a row offers is in its ⋯ (it was a Copy to
+   edit button on every shipped row); its name opens it in the builder. */
+function openEventManager(winnow, section = null) {
+  const { el, modal, confirmDialog, dropdownMenu, sectionPanes } = winnow;
+  const reopen = (at) => openEventManager(winnow, at);
+  const sources = () => winnow.state.sources.filter((s) => !s.error);
+  const bound = (d) => sources().filter((s) => bindsTo(d, s)).length;
+  const plural = (n, one) => `${n} ${n === 1 ? one : one + 's'}`;
+  modal('Movement events', (b) => {
+    const edit = (d) => openEventBuilder(winnow, { edit: d, onSave: (def) => replaceEvent(d.name, def), onDone: () => reopen('saved') });
+    const copy = (d) => openEventBuilder(winnow, { template: d, onSave: addEvent, onDone: () => reopen('saved') });
+    const del = async (d) => {
+      if (!(await confirmDialog(`Delete the movement event "${d.name}"?`, { okLabel: 'Delete', danger: true }))) return;
+      S.defs.saved = S.defs.saved.filter((x) => x !== d);
+      await saveDefs(winnow);
+      repaint();
+      reopen('saved');
     };
-    fill(val);
-    s._fill = fill;
-    colSelects.push(s);
-    return s;
+    const menu = (d, kind) => (kind === 'shipped'
+      ? [{ label: 'Copy to a new event…', onclick: () => copy(d) }]
+      : [{ label: 'Edit…', onclick: () => edit(d) }, { label: 'Copy to a new event…', onclick: () => copy(d) }, '-',
+        { label: 'Delete…', onclick: () => del(d) }]);
+
+    const buildList = (kind) => (pane) => {
+      const defs = kind === 'shipped' ? S.defs.shipped : S.defs.saved;
+      pane.append(el('p', 'lm-mgr-note', kind === 'shipped'
+        ? 'These come with the plugin. Copy one to start an event of your own from it.'
+        : 'Kept on this machine and offered in every case.'));
+      const box = el('div', 'lm-mgr-box');
+      const head = el('div', 'lm-mgr-row lm-mgr-headrow');
+      head.append(el('span', null, 'Event'), el('span', null, 'Hop'), el('span', null, 'Binds to'), el('span', 'lm-mgr-num', 'Tables'), el('span'));
+      const list = el('div', 'lm-mgr-list');
+      for (const d of defs) {
+        const r = el('div', 'lm-mgr-row');
+        const name = el('button', 'lm-mgr-name', d.name);
+        name.type = 'button';
+        name.title = kind === 'shipped' ? 'Copy to a new event' : 'Edit this event';
+        name.onclick = () => (kind === 'shipped' ? copy(d) : edit(d));
+        const n = bound(d);
+        const more = el('button', 'btn ghost lm-mgr-more', '⋯');
+        more.type = 'button';
+        more.setAttribute('aria-label', `Actions for ${d.name}`);
+        more.setAttribute('aria-haspopup', 'menu');
+        more.onclick = () => dropdownMenu(more, menu(d, kind));
+        r.append(name, el('span', 'lm-mgr-sub', `${d.src_col} → ${d.dst_col}`), el('span', 'lm-mgr-sub', bindingText(d)),
+          el('span', 'lm-mgr-num' + (n ? ' some' : ''), n ? String(n) : '—'), more);
+        list.append(r);
+      }
+      if (!defs.length) {
+        list.append(el('p', 'lm-mgr-empty', kind === 'shipped' ? 'The plugin ships no events.'
+          : 'None yet. + New event… below starts one, or copy a shipped event from its ⋯.'));
+      }
+      box.append(head, list);
+      pane.append(box);
+    };
+    const frame = sectionPanes({
+      sections: [
+        { id: 'saved', group: 'Events', title: 'Yours', build: buildList('saved'),
+          hint: () => (S.defs.saved.length ? plural(S.defs.saved.length, 'event') : 'None yet') },
+        { id: 'shipped', group: 'Events', title: 'Shipped', build: buildList('shipped'),
+          hint: () => `${plural(S.defs.shipped.length, 'event')} · ${S.defs.shipped.filter((d) => bound(d)).length} bind here` },
+      ],
+      label: 'Movement event lists', cls: 'lm-mgr-panes', paneCls: 'lm-mgr-pane',
+    });
+    b.append(frame.panes);
+    const foot = el('div', 'lm-mgr-foot');
+    const add = el('button', 'btn primary', '+ New event…');
+    add.onclick = () => openEventBuilder(winnow, { onSave: addEvent, onDone: () => reopen('saved') });
+    foot.append(add);
+    b.append(foot);
+    frame.show(section || (S.defs.saved.length ? 'saved' : 'shipped'));
+  }, { wide: true, tall: true });
+}
+
+function bindingText(d) {
+  return d.header_set ? `${d.header_set} tables` : 'any table with its columns';
+}
+
+/* ============================================================ event builder
+
+   One dialog for a new event, a copy of a shipped one, or an edit of one
+   of yours. It has the merge builder's shape: the definition on the
+   left, read against one real table in the case, and on the right what
+   that definition finds there (rows matched, links, hosts, the busiest
+   links), refreshed as it changes. A wrong column or a condition value
+   spelled the way the export doesn't spell it shows up here, before the
+   event is saved, instead of as an empty graph afterwards. */
+
+const OP_LABELS = [
+  ['equals', 'is'], ['not_equals', 'is not'], ['in', 'is one of'],
+  ['not_in', 'is none of'], ['contains', 'contains'], ['not_contains', 'does not contain'],
+];
+const LIST_OPS = new Set(['in', 'not_in']);
+
+/* Column guesses, per role and per table: the first pattern that matches
+   any column wins, so an exact name (UserName) beats a loose one (the
+   SID in UserId, which the old union-of-every-table guess picked). */
+const GUESS = {
+  src: [/^(remote|source|src|client|calling)[ _-]?(host|hostname|ip|ip ?address|addr(ess)?|name|workstation|computer)?$/i,
+        /workstation|ip ?address|remote|source|src|client|caller/i],
+  dst: [/^(dest(ination)?|dst|target)[ _-]?(host|hostname|ip|ip ?address|addr(ess)?|name|computer|server)?$/i,
+        /^computer(name)?$/i, /dest|dst|target|server|computer|host/i],
+  label: [/^(target)?user[ _-]?name$/i, /^(user|account|subject|principal)$/i, /user|account|principal|subject/i],
+  time: [/^(time ?created|timestamp|time ?generated|event ?time|date ?time)$/i, /time|date|created|when|utc/i],
+};
+const ID_LIKE = /(Id|ID|Sid|SID|[_\s-]id)$/;
+
+function guessColumn(src, role, avoid) {
+  let cols = src.columns.filter((c) => !avoid.includes(c.name));
+  if (role === 'label') cols = cols.filter((c) => !ID_LIKE.test(c.name));
+  const tiers = role === 'time' ? [cols.filter((c) => c.type === 'datetime'), cols] : [cols];
+  for (const re of GUESS[role]) {
+    for (const tier of tiers) {
+      const hit = tier.find((c) => re.test(c.name));
+      if (hit) return hit.name;
+    }
+  }
+  if (role === 'time') { const dt = cols.find((c) => c.type === 'datetime'); if (dt) return dt.name; }
+  return '';
+}
+
+function headerSetsOf(src) {
+  const cols = new Set(src.columns.map((c) => c.name));
+  return Object.entries(S.defs.header_sets || {})
+    .filter(([, hs]) => hs.every((c) => cols.has(c)))
+    .sort((a, b) => b[1].length - a[1].length)
+    .map(([name]) => name);
+}
+
+function openEventBuilder(winnow, { edit = null, template = null, onSave, onDone = null } = {}) {
+  const { el, modal, post, closeModal } = winnow;
+  const sources = winnow.state.sources.filter((s) => !s.error);
+  const taken = new Map([...S.defs.shipped.map((d) => [d.name.toLowerCase(), 'a shipped event']),
+    ...S.defs.saved.filter((d) => d !== edit).map((d) => [d.name.toLowerCase(), 'one of your events'])]);
+  const st = {
+    sourceId: null, binding: '', bindingTouched: false,
+    name: '', nameTouched: false, base: null, description: '',
+    src_col: '', dst_col: '', label_col: '', time_col: '', strip_prefix: false, conditions: [],
+    // Roles the definition or the analyst chose, as opposed to guessed:
+    // a table switch re-guesses only the rest, so previewing an edited
+    // event against another table never quietly rewrites it.
+    picked: new Set(),
   };
-  // Guess the four columns from their names — the hard part for someone
-  // staring at a fresh export. Same spirit as the app's header
-  // nicknames; the analyst can override any of them.
-  const guess = (re) => allCols.find((c) => re.test(c)) || '';
-  const gSrc = guess(/source|src|remote(host)?|workstation|client|from|caller/i);
-  const gDst = guess(/dest|dst|target|computer|host\b|to\b|server/i);
-  const gLabel = guess(/user|account|subject|logon|principal/i);
-  const gTime = guess(/time|created|date|when|timestamp|utc/i);
-  modal('New movement event', (b) => {
-    b.append(el('p', 'note-status',
-      'Map the columns that describe a hop. The dropdowns are pre-guessed '
-      + 'from the names in your tables — change any that are wrong. Conditions '
-      + '(optional) narrow it to specific events, e.g. EventId equals 4624.'));
-    const name = el('input'); name.className = 'confirm-input'; name.placeholder = 'Name (e.g. WinRM logons)';
-    const hsSel = el('select');
-    hsSel.style.cssText = 'background:var(--ink);color:var(--text);border:1px solid var(--line-2);padding:4px 6px;font:inherit;max-width:100%';
-    hsSel.append(new Option('Any table with the chosen columns', ''));
-    for (const hn of Object.keys(headerSets).sort()) hsSel.append(new Option(hn, hn));
-    hsSel.onchange = () => {
-      // Re-scope every column dropdown to the header set (or back to all).
-      pool = hsSel.value && headerSets[hsSel.value] ? headerSets[hsSel.value].slice().sort() : allCols;
-      for (const cs of colSelects) { const keep = cs.value; cs._fill(keep); }
-    };
-    const src = mkColSel(gSrc), dst = mkColSel(gDst), label = mkColSel(gLabel), time = mkColSel(gTime);
-    b.append(el('label', null, 'Applies to (header set)'), hsSel);
-    b.append(el('label', null, 'Name'), name);
-    b.append(el('label', null, 'Source host column'), src);
-    b.append(el('label', null, 'Destination host column'), dst);
-    b.append(el('label', null, 'Label column (optional, e.g. user)'), label);
-    b.append(el('label', null, 'Time column (optional — enables the timeline)'), time);
-    b.append(el('div', 'lm-src-head', 'Conditions (all must hold)'));
-    const conds = el('div', 'lm-conditions');
-    const rows = [];
-    const addCond = (c = {}) => {
-      const row = el('div', 'lm-cond-row');
-      const col = mkColSel(c.column);
-      const op = el('select');
-      op.style.cssText = 'background:var(--ink);color:var(--text);border:1px solid var(--line-2);padding:4px 6px;font:inherit';
-      for (const o of ['equals', 'not_equals', 'contains', 'not_contains', 'in', 'not_in']) op.append(new Option(o, o));
-      if (c.op) op.value = c.op;
-      const val = el('input'); val.className = 'confirm-input'; val.value = c.value || '';
-      val.placeholder = 'value (comma list for in/not_in)';
-      const rm = el('button', 'btn ghost', '✕');
-      const entry = { col, op, val };
-      rm.onclick = () => { conds.removeChild(row); rows.splice(rows.indexOf(entry), 1); };
-      row.append(col, op, val, rm);
-      rows.push(entry); conds.append(row);
-    };
-    const addBtn = el('button', 'btn ghost', '+ Condition');
-    addBtn.onclick = () => addCond();
-    b.append(conds, addBtn);
-    const acts = el('div', 'row-actions');
-    const save = el('button', 'btn', 'Save event');
-    save.onclick = () => {
-      if (!name.value.trim() || !src.value || !dst.value) { toast('Name, source and destination are required'); return; }
-      const def = {
-        name: name.value.trim(), src_col: src.value, dst_col: dst.value,
-        label_col: label.value || null, time_col: time.value || null,
-        // Tied to the header set when one is chosen — it binds only on
-        // that artifact; requires stays as the fallback column list.
-        header_set: hsSel.value || null,
-        requires: [src.value, dst.value, ...(time.value ? [time.value] : [])],
-        conditions: rows.map((r) => ({ column: r.col.value, op: r.op.value, value: r.val.value })).filter((c) => c.column),
-        color: '#4ac7c7',
+  const srcOf = () => sources.find((s) => s.id === st.sourceId) || null;
+  const hasCol = (name) => !!srcOf() && srcOf().columns.some((c) => c.name === name);
+
+  // Copy a definition into the builder and read it against a table it
+  // binds to, when the case has one.
+  function load(def) {
+    for (const role of ['src', 'dst', 'label', 'time']) {
+      st[`${role}_col`] = def[`${role}_col`] || '';
+      if (st[`${role}_col`]) st.picked.add(role);
+    }
+    st.strip_prefix = !!def.strip_prefix;
+    st.conditions = (def.conditions || []).map((c) => ({ column: c.column, op: c.op, value: c.value ?? '' }));
+    st.description = def.description || '';
+    st.binding = def.header_set || '';
+    st.bindingTouched = true;
+    const home = sources.find((s) => bindsTo(def, s));
+    if (home) st.sourceId = home.id;
+  }
+  // Guess every role nobody chose from the table's own column names.
+  function guessMissing() {
+    const src = srcOf();
+    if (!src) return;
+    for (const role of ['src', 'dst', 'label', 'time']) {
+      if (st.picked.has(role)) continue;
+      const avoid = ['src', 'dst'].filter((r) => r !== role && st.picked.has(r)).map((r) => st[`${r}_col`]);
+      if (role === 'dst' && st.src_col) avoid.push(st.src_col);
+      st[`${role}_col`] = guessColumn(src, role, avoid);
+    }
+    if (!st.bindingTouched) st.binding = headerSetsOf(src)[0] || '';
+  }
+
+  if (edit) { load(edit); st.name = edit.name; st.nameTouched = true; }
+  else if (template) { load(template); st.base = template.name; }
+  if (st.sourceId == null) {
+    // The open table when it has something that reads as a hop, else
+    // the first table that does.
+    const hoppy = sources.filter((s) => guessColumn(s, 'src', []) && guessColumn(s, 'dst', [guessColumn(s, 'src', [])]));
+    const cur = (id) => id === winnow.state.sourceId;
+    st.sourceId = (hoppy.find((s) => cur(s.id)) || hoppy[0] || sources.find((s) => cur(s.id)) || sources[0] || {}).id ?? null;
+  }
+  if (!edit && !template) guessMissing();
+
+  // A name that follows the definition until the analyst types one —
+  // "EventId 5985: RemoteHost → Computer" — never one that's taken.
+  function suggestedName() {
+    let base = st.base ? `${st.base} (copy)` : '';
+    if (!base) {
+      const conds = st.conditions.filter((c) => c.column && String(c.value).trim()
+        && ['equals', 'in'].includes(c.op)).map((c) => `${c.column} ${String(c.value).trim()}`);
+      const hop = st.src_col && st.dst_col ? `${st.src_col} → ${st.dst_col}` : 'New movement event';
+      base = conds.length ? `${conds.join(', ')}: ${hop}` : hop;
+    }
+    let name = base;
+    for (let n = 2; taken.has(name.toLowerCase()); n++) name = `${base} (${n})`;
+    return name;
+  }
+  const currentName = () => (st.nameTouched ? st.name : suggestedName()).trim();
+
+  // A condition counts once it has a column and a value. A row just
+  // added has neither, and previewing "EventId is (blank)" would only
+  // ever report that nothing matches.
+  const hasValue = (c) => {
+    const v = String(c.value ?? '');
+    return (LIST_OPS.has(c.op) ? v.split(',') : [v]).some((x) => x.trim());
+  };
+  const usableConditions = () => st.conditions.filter((c) => c.column && hasValue(c));
+  const waitingConditions = () => st.conditions.filter((c) => c.column && !hasValue(c));
+  function problem() {
+    if (!st.src_col || !st.dst_col) return 'Pick a source and a destination column.';
+    if (st.src_col === st.dst_col) return 'Source and destination need to be different columns.';
+    const half = waitingConditions()[0];
+    if (half) return `The ${half.column} condition needs a value, or remove it.`;
+    if (st.conditions.some((c) => !c.column && hasValue(c))) return 'Pick a column for every condition, or remove it.';
+    const name = currentName();
+    if (!name) return 'Give the event a name.';
+    if (taken.has(name.toLowerCase())) return `"${name}" is already the name of ${taken.get(name.toLowerCase())}.`;
+    return '';
+  }
+
+  let tableSel, segBox, segNote, roleSels = {}, stripCb, condBox, nameInput, descInput, saveBtn, hint;
+  let statsBox, notesBox, linksBox, previewHead;
+  // Declared before modal() runs the builder, which already uses them.
+  let timer = 0, seq = 0;
+  const valueCache = new Map();
+
+  modal(edit ? `Edit movement event — ${edit.name}` : 'New movement event', (b) => {
+    if (!sources.length) {
+      b.append(el('p', null, 'Import a table first. The builder reads its columns from one, and shows what the event finds there.'));
+      return;
+    }
+    const root = el('div', 'lm-eb');
+    const panes = el('div', 'lm-eb-panes');
+    const left = el('div', 'lm-eb-pane');
+
+    // ---- start from (a new event only)
+    if (!edit) {
+      const startSel = el('select');
+      startSel.setAttribute('aria-label', 'Start from');
+      startSel.append(new Option('A blank event', ''));
+      for (const [label, defs] of [['Shipped', S.defs.shipped], ['Yours', S.defs.saved]]) {
+        if (!defs.length) continue;
+        const g = document.createElement('optgroup');
+        g.label = label;
+        defs.forEach((d, i) => g.append(new Option(d.name, `${label}:${i}`)));
+        startSel.append(g);
+      }
+      if (template) {
+        const i = S.defs.shipped.indexOf(template), j = S.defs.saved.indexOf(template);
+        startSel.value = i >= 0 ? `Shipped:${i}` : (j >= 0 ? `Yours:${j}` : '');
+      }
+      startSel.onchange = () => {
+        const [kind, i] = startSel.value.split(':');
+        const def = kind ? (kind === 'Shipped' ? S.defs.shipped : S.defs.saved)[+i] : null;
+        Object.assign(st, { src_col: '', dst_col: '', label_col: '', time_col: '', strip_prefix: false,
+          conditions: [], description: '', base: null, bindingTouched: false, picked: new Set() });
+        if (def) { load(def); st.base = def.name; tableSel.value = String(st.sourceId); }
+        guessMissing();
+        refresh();
       };
-      document.getElementById('modal').hidden = true;
-      onSave(def);
+      left.append(section('Start from', startSel));
+    }
+
+    // ---- which table the columns come from, and where the event is offered
+    tableSel = el('select');
+    tableSel.setAttribute('aria-label', 'Read columns from');
+    for (const s of sources) tableSel.append(new Option(`${s.name} · ${s.row_count.toLocaleString()} rows`, String(s.id)));
+    tableSel.value = String(st.sourceId);
+    tableSel.onchange = () => { st.sourceId = +tableSel.value; guessMissing(); refresh(); };
+    segBox = el('div', 'lm-eb-seg');
+    segBox.setAttribute('role', 'group');
+    segBox.setAttribute('aria-label', 'Offer it on');
+    segNote = el('div', 'lm-eb-sub');
+    const offer = el('div', 'lm-eb-offer');
+    offer.append(el('span', 'lm-eb-label', 'Offer it on'), segBox);
+    left.append(section('Read columns from', tableSel, offer, segNote));
+
+    // ---- the hop
+    const hop = el('div', 'lm-eb-pair');
+    roleSels.src = colSelect('src_col', 'Pick a column');
+    roleSels.dst = colSelect('dst_col', 'Pick a column');
+    hop.append(field('Source host', roleSels.src), el('span', 'lm-eb-arrow', '→'), field('Destination host', roleSels.dst));
+    const strip = el('label', 'lm-eb-check');
+    stripCb = el('input');
+    stripCb.type = 'checkbox';
+    stripCb.onchange = () => { st.strip_prefix = stripCb.checked; changed(); };
+    strip.title = 'EVTX payload fields carry their field name in the value: "TargetServerName: FILESRV" becomes FILESRV.';
+    strip.append(stripCb, el('span', null, 'Drop a leading "Name: " from both host values'));
+    left.append(section('The hop', hop, strip));
+
+    // ---- optional columns
+    const extra = el('div', 'lm-eb-pair two');
+    roleSels.label = colSelect('label_col', '(none)');
+    roleSels.time = colSelect('time_col', '(none)');
+    extra.append(field('User column', roleSels.label, 'Counted per link: how many users made each hop'),
+                 field('Time column', roleSels.time, 'Puts the hops on the timeline under the graph'));
+    left.append(section('Also read (optional)', extra));
+
+    // ---- conditions
+    condBox = el('div', 'lm-eb-conds');
+    const addCond = el('button', 'btn ghost lm-eb-small', '+ Add a condition');
+    addCond.type = 'button';
+    addCond.onclick = () => { st.conditions.push({ column: '', op: 'equals', value: '' }); renderConds(); changed(); };
+    left.append(section('Only rows where', condBox, addCond));
+
+    // ---- preview
+    const right = el('div', 'lm-eb-pane lm-eb-result');
+    previewHead = el('div', 'lm-eb-head');
+    statsBox = el('div', 'lm-eb-stats');
+    notesBox = el('ul', 'lm-eb-notes');
+    linksBox = el('div', 'lm-eb-links');
+    right.append(previewHead, statsBox, notesBox, el('div', 'lm-eb-head', 'Busiest links'), linksBox);
+    panes.append(left, right);
+
+    // ---- name and save
+    const foot = el('div', 'lm-eb-foot');
+    nameInput = el('input');
+    nameInput.type = 'text';
+    nameInput.autocomplete = 'off';
+    nameInput.id = 'lmEbName';
+    if (st.nameTouched) nameInput.value = st.name;
+    nameInput.oninput = () => { st.nameTouched = nameInput.value.trim() !== ''; st.name = nameInput.value; renderFoot(); };
+    nameInput.onkeydown = (e) => { if (e.key === 'Enter' && !saveBtn.disabled) saveBtn.click(); };
+    descInput = el('input');
+    descInput.type = 'text';
+    descInput.autocomplete = 'off';
+    descInput.id = 'lmEbDesc';
+    descInput.placeholder = 'What this hop means, shown beside it in the list';
+    descInput.value = st.description;
+    descInput.oninput = () => { st.description = descInput.value; };
+    saveBtn = el('button', 'btn lm-eb-save', edit ? 'Save changes' : 'Save event');
+    saveBtn.type = 'button';
+    saveBtn.onclick = save;
+    hint = el('div', 'lm-eb-hint');
+    foot.append(footField('Name', nameInput), footField('Description (optional)', descInput), saveBtn, hint);
+
+    root.append(panes, foot);
+    b.append(root);
+    refresh();
+  }, { wide: 'x', focus: '#lmEbName' });
+
+  function section(title, ...kids) {
+    const s = el('div', 'lm-eb-sec');
+    s.append(el('div', 'lm-eb-head', title), ...kids);
+    return s;
+  }
+  function field(label, control, sub) {
+    const f = el('label', 'lm-eb-field');
+    f.append(el('span', 'lm-eb-label', label), control);
+    if (sub) f.append(el('small', null, sub));
+    return f;
+  }
+  function footField(label, input) {
+    const f = el('div', 'lm-eb-field');
+    const l = el('label', 'lm-eb-head', label);
+    l.htmlFor = input.id;
+    f.append(l, input);
+    return f;
+  }
+  function colSelect(key, emptyLabel) {
+    const s = el('select');
+    s.dataset.role = key;
+    s.dataset.empty = emptyLabel;
+    s.onchange = () => { st[key] = s.value; st.picked.add(key.replace('_col', '')); fillColumns(); changed(); };
+    return s;
+  }
+  // Options are the chosen table's columns, in the table's own order. A
+  // value the table doesn't have (an event made for another case's
+  // tables) stays selected and says so, rather than silently becoming
+  // the first column.
+  function fillSelect(s, value, emptyLabel) {
+    const src = srcOf();
+    s.replaceChildren(new Option(emptyLabel, ''));
+    for (const c of src.columns) s.append(new Option(c.name, c.name));
+    if (value && !hasCol(value)) s.append(new Option(`${value} (not in this table)`, value));
+    s.value = value || '';
+    s.classList.toggle('missing', !!value && !hasCol(value));
+  }
+  function fillColumns() {
+    for (const s of Object.values(roleSels)) fillSelect(s, st[s.dataset.role], s.dataset.empty);
+    stripCb.checked = st.strip_prefix;
+  }
+  function paintBinding() {
+    const src = srcOf();
+    const sets = headerSetsOf(src);
+    if (st.binding && !sets.includes(st.binding)) sets.push(st.binding);
+    segBox.replaceChildren();
+    const opts = [...sets.map((n) => [n, `${n} tables`]), ['', 'Any table with these columns']];
+    for (const [value, label] of opts) {
+      const btn = el('button', null, label);
+      btn.type = 'button';
+      btn.setAttribute('aria-pressed', String(st.binding === value));
+      btn.onclick = () => { st.binding = value; st.bindingTouched = true; paintBinding(); changed(); };
+      segBox.append(btn);
+    }
+    const cols = requiresOf(st);
+    const here = sources.filter((s) => bindsTo(draftDef(), s));
+    const names = here.slice(0, 3).map((s) => s.name).join(', ') + (here.length > 3 ? ` and ${here.length - 3} more` : '');
+    segNote.textContent = (st.binding
+      ? `Offered on every table that has the ${st.binding} columns`
+      : `Offered on every table that has ${cols.length ? cols.join(', ') : 'the columns you pick'}`)
+      + (here.length ? `. In this case: ${names}.` : '. No table in this case has them all.');
+  }
+
+  function renderConds() {
+    condBox.replaceChildren();
+    if (!st.conditions.length) {
+      condBox.append(el('p', 'lm-eb-empty', 'Every row with both hosts counts. Add a condition to narrow it, for example EventId is 4624.'));
+      return;
+    }
+    st.conditions.forEach((c) => {
+      const row = el('div', 'lm-eb-cond');
+      const col = el('select');
+      col.setAttribute('aria-label', 'Condition column');
+      fillSelect(col, c.column, 'Pick a column');
+      const op = el('select');
+      op.setAttribute('aria-label', 'Condition operator');
+      for (const [o, label] of OP_LABELS) op.append(new Option(label, o));
+      op.value = c.op || 'equals';
+      const val = el('input');
+      val.type = 'text';
+      val.setAttribute('aria-label', 'Condition value');
+      val.value = c.value ?? '';
+      val.placeholder = LIST_OPS.has(op.value) ? 'value, value, …' : 'value';
+      const rm = el('button', 'btn ghost lm-eb-x', '✕');
+      rm.type = 'button';
+      rm.title = 'Remove this condition';
+      const chips = el('div', 'lm-eb-vals');
+      col.onchange = () => { c.column = col.value; col.classList.toggle('missing', false); loadValues(c, chips, val); changed(); };
+      op.onchange = () => {
+        c.op = op.value;
+        val.placeholder = LIST_OPS.has(op.value) ? 'value, value, …' : 'value';
+        paintChips(c, chips, val);
+        changed();
+      };
+      val.oninput = () => { c.value = val.value; paintChips(c, chips, val); changed(); };
+      rm.onclick = () => { st.conditions.splice(st.conditions.indexOf(c), 1); renderConds(); changed(); };
+      row.append(col, op, val, rm, chips);
+      condBox.append(row);
+      loadValues(c, chips, val);
+    });
+  }
+
+  // The commonest values of a condition's column, as chips: a click sets
+  // the value, or toggles it in and out of an "is one of" list.
+  function loadValues(c, chips, input) {
+    chips.replaceChildren();
+    if (!c.column || !hasCol(c.column)) return;
+    const key = `${st.sourceId}::${c.column}`;
+    if (!valueCache.has(key)) {
+      valueCache.set(key, post(`${winnow.base}/values`, { source_id: st.sourceId, column: c.column })
+        .then((r) => r.values).catch(() => []));
+    }
+    valueCache.get(key).then((vals) => { chips._vals = vals; paintChips(c, chips, input); });
+  }
+  function paintChips(c, chips, input) {
+    const vals = chips._vals || [];
+    chips.replaceChildren();
+    const list = LIST_OPS.has(c.op);
+    const picked = list ? String(c.value).split(',').map((v) => v.trim()).filter(Boolean) : [String(c.value).trim()];
+    for (const { value, n } of vals.slice(0, 8)) {
+      const chip = el('button', 'lm-eb-chip');
+      chip.type = 'button';
+      chip.title = `${value} — ${n.toLocaleString()} rows`;
+      chip.setAttribute('aria-pressed', String(picked.includes(value)));
+      chip.append(el('b', null, value), document.createTextNode(` ${n.toLocaleString()}`));
+      chip.onclick = () => {
+        if (list) {
+          const next = picked.includes(value) ? picked.filter((v) => v !== value) : [...picked, value];
+          c.value = next.join(', ');
+        } else c.value = value;
+        input.value = c.value;
+        paintChips(c, chips, input);
+        changed();
+      };
+      chips.append(chip);
+    }
+  }
+
+  // The definition as it would be saved right now.
+  function draftDef() {
+    const conditions = usableConditions().map((c) => ({ column: c.column, op: c.op, value: String(c.value) }));
+    const def = {
+      name: currentName(), src_col: st.src_col, dst_col: st.dst_col,
+      label_col: st.label_col || null, time_col: st.time_col || null,
+      strip_prefix: st.strip_prefix,
+      header_set: st.binding || null,
+      conditions,
+      color: (edit || template || {}).color || '#4ac7c7',
     };
-    acts.append(save); b.append(acts);
-  });
+    if (st.description.trim()) def.description = st.description.trim();
+    def.requires = requiresOf(def);
+    return def;
+  }
+
+  function changed() {
+    paintBinding();
+    renderFoot();
+    clearTimeout(timer);
+    timer = setTimeout(runPreview, 180);
+  }
+  function refresh() {
+    tableSel.value = String(st.sourceId);
+    fillColumns();
+    renderConds();
+    descInput.value = st.description;
+    changed();
+  }
+  function renderFoot() {
+    if (!st.nameTouched) nameInput.value = suggestedName();
+    const p = problem();
+    hint.textContent = p;
+    saveBtn.disabled = !!p;
+  }
+
+  async function runPreview() {
+    const my = ++seq;
+    const src = srcOf();
+    previewHead.textContent = `What it finds in ${src.name}`;
+    const missing = requiresOf(st).filter((c) => !hasCol(c));
+    if (!st.src_col || !st.dst_col) return paintPreview(null, ['Pick a source and a destination column to see the links this event finds.']);
+    if (st.src_col === st.dst_col) return paintPreview(null, ['Source and destination are the same column, so every row would be a host reaching itself.'], 'warn');
+    if (missing.length) return paintPreview(null, [`This table has no ${missing.join(', ')} column. Pick another table to preview against.`], 'warn');
+    statsBox.classList.add('busy');
+    try {
+      const r = await post(`${winnow.base}/preview`, { selection: { source_id: st.sourceId, ...draftDef() } });
+      if (my === seq) paintPreview(r);
+    } catch (e) {
+      if (my === seq) paintPreview(null, [e.message], 'warn');
+    }
+  }
+
+  function paintPreview(r, msgs = [], kind = 'info') {
+    statsBox.classList.remove('busy');
+    statsBox.replaceChildren();
+    const stat = (v, label) => {
+      const s = el('div', 'lm-eb-stat');
+      s.append(el('b', null, v == null ? '—' : v.toLocaleString()), el('span', null, label));
+      statsBox.append(s);
+    };
+    stat(r && r.matched, 'rows match');
+    stat(r && r.links, r && r.links_capped ? 'links (or more)' : 'links');
+    stat(r && r.hosts, 'hosts');
+    notesBox.replaceChildren();
+    const note = (text, k = 'info') => { const li = el('li', k, text); notesBox.append(li); };
+    for (const m of msgs) note(m, kind);
+    linksBox.replaceChildren();
+    if (!r) { linksBox.append(el('p', 'lm-eb-empty', 'Nothing to show yet.')); return; }
+    for (const c of waitingConditions()) note(`The ${c.column} condition has no value yet, so this leaves it out.`);
+
+    if (!r.matched) note(usableConditions().length
+      ? 'No rows in this table match the conditions. The value chips under each condition show how the column is actually spelled.'
+      : 'This table is empty.', 'warn');
+    else if (r.matched > r.hops) {
+      note(`${(r.matched - r.hops).toLocaleString()} of the ${r.matched.toLocaleString()} matching rows draw nothing: `
+        + 'the source or destination is empty, "-", loopback, or the same host on both ends.');
+    }
+    if (st.time_col) {
+      if (r.first) note(`Hops from ${r.first} to ${r.last}.`, 'ok');
+      else if (r.hops) note(`${st.time_col} holds nothing that reads as a time in these rows, so the timeline won't show this event.`, 'warn');
+    } else if (r.hops) {
+      note('No time column, so the timeline under the graph will not show this event.');
+    }
+
+    if (!r.top.length) { linksBox.append(el('p', 'lm-eb-empty', 'No links.')); return; }
+    const t = el('table', 'lm-eb-table');
+    const head = el('tr');
+    for (const h of ['Source', '', 'Destination', 'Rows', ...(st.label_col ? [st.label_col] : [])]) head.append(el('th', null, h));
+    const thead = el('thead');
+    thead.append(head);
+    const body = el('tbody');
+    const max = r.top[0].n;
+    for (const e of r.top) {
+      const tr = el('tr');
+      const bar = el('td', 'num');
+      const fill = el('span', 'lm-eb-bar');
+      fill.style.width = `${Math.max(4, (e.n / max) * 100)}%`;
+      bar.append(fill, el('span', null, e.n.toLocaleString()));
+      tr.append(el('td', 'host', e.src), el('td', 'arrow', '→'), el('td', 'host', e.dst), bar);
+      if (st.label_col) tr.append(el('td', 'num', e.labels == null ? '' : e.labels.toLocaleString()));
+      for (const td of tr.querySelectorAll('.host')) td.title = td.textContent;
+      body.append(tr);
+    }
+    t.append(thead, body);
+    linksBox.append(t);
+    if (r.links > r.top.length) {
+      linksBox.append(el('p', 'lm-eb-empty', `and ${(r.links - r.top.length).toLocaleString()} more link${r.links - r.top.length === 1 ? '' : 's'}`));
+    }
+  }
+
+  async function save() {
+    if (problem()) return;
+    const def = draftDef();
+    saveBtn.disabled = true;
+    closeModal();
+    await onSave(def);
+    if (onDone) onDone();
+  }
 }
 
 export function onShow() {
   // Sources/timeframe may have changed while another tab was active.
-  if (S && ctx) {
-    loadDefs().then(() => {
-      S.selections = S.selections.filter((s) => ctx.state.sources.some((src) => src.id === s.source_id));
-    });
-  }
+  if (S && ctx) loadDefs().then(() => repaint());
 }

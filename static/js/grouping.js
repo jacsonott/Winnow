@@ -1,14 +1,15 @@
 /* Group-by: the group strip, nested levels, and grouped-mode rendering.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
-import { draggedCol, renderHead, saveLayout, visibleCols } from './columns.js';
+import { draggedCol, renderHead, visibleCols } from './columns.js';
 import { $, OVERSCAN, PAGE, ROW_H, api, el, post, setBusy, toast } from './core.js';
 import { displayValue, ellipsize, filterByValue } from './filters.js';
-import { buildDataRow, ensurePage, headH, moveCursor, render, renderTagToolbar, rowAt, rowPaintContext, rowsPaintY, schedulePrefetch, setCellRange, spacerPx, syncRowsTop, syncRowsWidth, vScroll } from './grid.js';
+import { histogramGroupColor } from './histogram.js';
+import { buildDataRow, ensurePage, headH, isJumping, moveCursor, noteViewportMove, render, renderTagToolbar, rowAt, rowPaintContext, rowsPaintY, schedulePrefetch, setCellRange, syncRowsTop, syncRowsWidth, syncSpacer, syncVbar, titleClippedCells, vScroll } from './grid.js';
 import { armOpCancel, opToken } from './jobs.js';
 import { openRowContextMenu } from './rowmenu.js';
-import { S, selClear, selCount, selHas, selPositions, selRemap, selSetRange } from './state.js';
-import { BULK_TAG_CONFIRM_AT, refreshTagCounts, refreshUndoState, renderTagRibbon } from './tags.js';
+import { S, cellInRange, cellRangeRows, clearCellSelection, selClear, selCount, selHas, selPositions, selRemap, selSetRange, selSnapshot, selViewRows } from './state.js';
+import { BULK_TAG_CONFIRM_AT, clearRowCaches, refreshTagCounts, refreshUndoState, renderTagRibbon, tagFilterExclusions, toggleTagExclusion } from './tags.js';
 import { confirmDialog, contextMenu, dropdownMenu } from './ui.js';
 import { displayCell } from './tsformat.js';
 import { rebuildView } from './view.js';
@@ -90,17 +91,27 @@ export function ensureGroupPage(g, pageIdx, { prefetch } = {}) {
    changed rows this client never fetched, so every cached page's `tags`
    array is suspect. Bumping the generation is the half that's easy to miss
    — a fetch issued before the tag would otherwise land afterwards and put
-   the pre-tag rows straight back. */
+   the pre-tag rows straight back.
+
+   Rarely the right call on its own. The flat cache for the same view is
+   still alive underneath a grouping (regroupAll never touches it), so a
+   write that invalidates this one almost always has to invalidate that
+   one too — tags.js's clearRowCaches does both; this is its grouped
+   half. */
 export function clearGroupPageCache() {
   S.groupPages.clear();
   S.groupPending.clear();
   S.groupPageGen++;
 }
 
+/* Mid-jump it does not ask for the page: a drag through a big expanded
+   group would queue one per frame, as the flat grid did (grid.js's jumps
+   block). The paint the settle timer makes asks for it from wherever the
+   grid came to rest. */
 export function groupRowAt(g, localIdx) {
   const pageIdx = Math.floor(localIdx / PAGE);
   const page = S.groupPages.get(`${g.viewId}:${pageIdx}`);
-  if (!page) { ensureGroupPage(g, pageIdx); return null; }
+  if (!page) { if (!isJumping()) ensureGroupPage(g, pageIdx); return null; }
   return page[localIdx - pageIdx * PAGE] || null;
 }
 
@@ -186,9 +197,13 @@ export function renderGroupHeaderRow(g, gi) {
   // A tag level's swatch, so a grouped-by-tag list reads the same way the
   // tag ribbon and the row stripes do.
   const tag = isTagGroupCol(colName) ? S.tags.find((x) => x.id === g.value) : null;
-  if (tag) {
+  // And the histogram's color for this group while its Groups view is on,
+  // so a segment of the bars and the heading it counts read as one.
+  const series = tag ? null : histogramGroupColor(g);
+  if (tag || series) {
     const sw = el('span', 'swatch');
-    sw.style.background = tag.color;
+    sw.style.background = tag ? tag.color : series;
+    if (series) sw.title = 'This group\'s color in the histogram';
     label.append(sw);
   }
   label.append(el('span', 'group-header-value', groupValueLabel(colName, g.value)));
@@ -203,12 +218,13 @@ export function renderGrouped() {
   const rowsEl = $('rows');
   rebuildGroupPrefix();
   const total = S.groupTotalRows;
-  $('spacerY').style.height = spacerPx(total) + 'px';
+  syncSpacer(total);
 
   const virt = vScroll(body, total, headH());
   const first = Math.max(0, Math.floor(virt / ROW_H) - OVERSCAN);
   const visible = Math.ceil(body.clientHeight / ROW_H) + OVERSCAN * 2;
   const last = Math.min(total, first + visible);
+  noteViewportMove(first);
 
   rowsEl.style.transform = `translateY(${rowsPaintY(body, virt, first)}px)`;
   const frag = document.createDocumentFragment();
@@ -226,6 +242,11 @@ export function renderGrouped() {
   rowsEl.replaceChildren(frag);
   schedulePrefetch();
   renderTagToolbar();
+  syncVbar();
+  // Grouped rows are ordinary rows painted by the same buildDataRow, so
+  // they clip the same way and get the same tooltip — last, after the DOM
+  // this measures has settled (see titleClippedCells).
+  titleClippedCells();
 }
 
 export function makeGroupNode(gr, level, path) {
@@ -264,10 +285,11 @@ export async function fetchGroupLevel(path) {
    silently land on different rows. */
 export function clearGroupSelectionState() {
   selClear();
+  S.selUndo = [];      // its positions meant the old row set
+  S.selHidden = 0;
   S.cursor = -1;
   S.anchor = -1;
-  S.cellRange = null;
-  S.cellAnchor = null;
+  clearCellSelection();
 }
 
 /* Expanding or collapsing a group renumbers every flattened position below
@@ -298,7 +320,7 @@ export function shiftGroupPositions(headerPos, oldTotal) {
   // A cell range spanning the toggled group can't survive it intact —
   // its rows are no longer contiguous — so it goes rather than silently
   // covering different rows than it did a moment ago.
-  if (S.cellRange && (S.cellRange.r1 > headerPos)) { S.cellRange = null; S.cellAnchor = null; }
+  if (S.cellRange && (S.cellRange.r1 > headerPos)) clearCellSelection();
 }
 
 /* The (headerPos, oldTotal) pair shiftGroupPositions needs, read at the
@@ -407,8 +429,10 @@ export async function regroupAll() {
   } catch (e) {
     if (gen !== regroupGen) return;
     toast('Group-by failed: ' + e.message, 4000);
+    // The grouping is off, so the columns it held are data columns again:
+    // the head is repainted, not just the strip.
     S.groupByCols = [];
-    renderGroupStrip();
+    renderHead();
   }
   if (wasOpen.size && JSON.stringify(S.groupByCols) === prevCols) {
     // Walk forward so a reopened parent's freshly spliced children are
@@ -458,27 +482,44 @@ export function groupValueLabel(column, value) {
   return value === null || value === '' ? '(empty)' : String(value);
 }
 
-/* Adds a column as the innermost (last) grouping level — the drop target
-   for dragging a header into the group strip. Removes it from the normal
-   column list (S.order) so it doesn't also render as a data column while
-   grouped; S.preGroupOrder snapshots S.order the first time this happens,
-   so dropGrouping() can restore the original layout exactly. The tag
-   pseudo-column isn't in S.order to begin with, so that filter is a no-op
-   for it and it stays out of the way. */
-export function addGroupLevel(column) {
+/* Back to the left edge, because a grouped view is read from there. A
+   group header is an ordinary row with its label at the left (indented
+   per level — see .group-header-row), and nothing about it is sticky, so
+   grouping while scrolled right paints a screen of header rows whose
+   every label sits off past the edge. The column just grouped on has also
+   left the layout, which makes the horizontal position it was read at a
+   description of a column set that no longer exists. */
+function scrollGridLeft() {
+  const body = $('body');
+  if (body) body.scrollLeft = 0;
+}
+
+/* Adds a column as a grouping level: the innermost (last) one, unless `at`
+   says which — a header dropped into the group strip lands in the slot
+   its ghost showed (see the strip's drop zone below). The column stays where it
+   is in S.order: visibleCols() leaves out whatever is grouped on, so it
+   doesn't also render as a data column while grouped, and Ungroup has
+   nothing to put back.
+
+   It used to be cut out of S.order and restored from a snapshot taken
+   here (S.preGroupOrder), and every way the two drifted apart lost a
+   column. A Group-by that failed turned the grouping off without the
+   restore, so the column was gone from the grid and the Columns panel
+   until the table was opened again; a layout saved while grouped (a
+   resize, a sort) was saved without it, so it came back at the far end;
+   a level taken off its pill went to the far end too; and a column
+   moved while grouped jumped back on Ungroup. */
+export function addGroupLevel(column, at = S.groupByCols.length) {
   if (S.groupByCols.includes(column)) return;
-  if (!S.preGroupOrder) S.preGroupOrder = [...S.order];
-  S.groupByCols.push(column);
-  S.order = S.order.filter((n) => n !== column);
+  S.groupByCols.splice(at, 0, column);
   renderHead();
+  scrollGridLeft();
   regroupAll();
 }
 
 export function removeGroupLevel(i) {
-  const [removed] = S.groupByCols.splice(i, 1);
+  S.groupByCols.splice(i, 1);
   if (!S.groupByCols.length) { dropGrouping(); return; }
-  // The tag pseudo-column has no column to give back to the layout.
-  if (!isTagGroupCol(removed) && !S.order.includes(removed)) S.order.push(removed);
   renderHead();
   regroupAll();
 }
@@ -488,30 +529,19 @@ export async function dropGrouping() {
   S.groupByCols = [];
   S.groups = [];
   clearGroupSelectionState(); // grouped positions don't mean anything in the flat view
-
-  if (S.preGroupOrder) { S.order = S.preGroupOrder; S.preGroupOrder = null; }
   renderHead();
-  renderGroupStrip();
   render();
   drawRail();
-  saveLayout();
 }
 
-/* Replace the whole grouping set at once (preset apply, toggle restore) —
-   the incremental addGroupLevel/removeGroupLevel path exists for drag
-   interactions, but swapping one saved grouping for another needs the
-   pre-grouping column order restored first, or a formerly-grouped column
-   leaks out of the visible layout. Caller renders + regroups (or lets
+/* Replace the whole grouping set at once (preset apply, toggle restore,
+   coming back to a table) — the incremental addGroupLevel/removeGroupLevel
+   path exists for drag interactions. Only the grouping changes: the
+   columns stay in S.order (see addGroupLevel), so a formerly-grouped
+   column is back in the grid by itself. Caller renders + regroups (or lets
    rebuildView's own regroupAll do it). */
 export function setGrouping(cols, gsort, gdir) {
-  if (S.preGroupOrder) { S.order = S.preGroupOrder; S.preGroupOrder = null; }
-  const valid = (cols || []).filter((c) => isTagGroupCol(c) || S.columns.some((x) => x.name === c));
-  S.groupByCols = [];
-  if (valid.length) {
-    S.preGroupOrder = [...S.order];
-    S.groupByCols = valid;
-    S.order = S.order.filter((n) => !valid.includes(n));
-  }
+  S.groupByCols = (cols || []).filter((c) => isTagGroupCol(c) || S.columns.some((x) => x.name === c));
   if (gsort) S.groupSort = gsort;
   if (gdir) S.groupSortDir = gdir;
 }
@@ -527,6 +557,11 @@ export async function toggleGrouping() {
   } else if (S.lastGroupBy && S.lastGroupBy.cols.some((c) => S.columns.some((x) => x.name === c))) {
     setGrouping(S.lastGroupBy.cols, S.lastGroupBy.sort, S.lastGroupBy.dir);
     renderHead();
+    // Restoring a grouping is grouping — same headers at the same left
+    // edge. (setGrouping itself must NOT do this: a table switch restores
+    // its stashed grouping through it, and that path is deliberately
+    // putting the analyst back where they were.)
+    scrollGridLeft();
     await regroupAll();
   } else {
     toast('No grouping to restore — drag a column header into the Group by strip');
@@ -535,6 +570,8 @@ export async function toggleGrouping() {
 
 export let draggedPillIdx = null;
 
+/* A pill is only a drag SOURCE. Where it can be dropped is the strip's
+   business (wireGrouping), the same as for a header being dragged in. */
 export function wireGroupPillDrag(pill, idx) {
   pill.addEventListener('dragstart', (e) => {
     draggedPillIdx = idx;
@@ -542,24 +579,158 @@ export function wireGroupPillDrag(pill, idx) {
     e.dataTransfer.setData('text/plain', S.groupByCols[idx]);
     pill.classList.add('dragging');
   });
-  pill.addEventListener('dragend', () => {
-    draggedPillIdx = null;
-    document.querySelectorAll('.group-pill').forEach((p) => p.classList.remove('dragging'));
+  pill.addEventListener('dragend', endStripDrag);
+}
+
+/* ---------------------------------------------- the strip as a drop zone
+
+   Dropping into the strip used to count only on the exact element that
+   listened for it: a pill, for a reorder, and the strip's own background,
+   for a header. The strip is a 26px-tall box with pills filling most of
+   it, so a reorder released a few pixels under a pill, or on the › between
+   two, did nothing; and a header released ON a pill did nothing either,
+   worse than nothing, because the strip lit up as if it would take it
+   (the pill's drop handler stopped the event the strip needed). Nothing
+   showed where a drop would land until after it had.
+
+   Now one drop zone covers the whole strip and DROP_SLACK px round it,
+   kept inside the toolbar so it can't reach the grid header the drag
+   came from. Which slot a drop lands in is worked out from where the
+   pointer is against the pills as they are laid out at that moment, not
+   from which element is under it, and a dashed ghost pill stands in that
+   slot while the drag is over the zone, so what is on screen before the
+   release is what the release does. A dragged pill is taken out of the
+   strip while its ghost stands in for it, and comes back if the drag
+   leaves the zone.
+
+   Two things that look simplifiable and aren't. The listeners sit on the
+   document, not the strip, because the margin is outside the strip's box
+   and dragover only reaches an element the pointer is over. And the
+   slot is measured with the ghost already in place: putting the ghost in
+   pushes the pill beside it away from the pointer, so a pointer resting
+   on a pill's midpoint settles on one side rather than flicking the
+   ghost between two slots on every dragover. */
+const DROP_SLACK = 12;
+
+let dropSlot = null;   // the slot the ghost is showing; null while it isn't
+
+/* What a drag would add to or move within the strip, if it is one the
+   strip takes: a pill (`from` is its level) or a header not already
+   grouped on (`from` null). */
+function stripDrag() {
+  if (draggedPillIdx !== null && draggedPillIdx < S.groupByCols.length) {
+    return { from: draggedPillIdx, name: S.groupByCols[draggedPillIdx] };
+  }
+  if (draggedCol && !S.groupByCols.includes(draggedCol)) return { from: null, name: draggedCol };
+  return null;
+}
+
+function inDropZone(x, y) {
+  const strip = $('groupStrip');
+  if (!strip.offsetParent) return false;   // toolbar hidden: SQL, Timeline, a plugin page
+  const s = strip.getBoundingClientRect();
+  const bar = $('toolbar').getBoundingClientRect();
+  return x >= Math.max(bar.left, s.left - DROP_SLACK) && x <= Math.min(bar.right, s.right + DROP_SLACK)
+    && y >= Math.max(bar.top, s.top - DROP_SLACK) && y <= Math.min(bar.bottom, s.bottom + DROP_SLACK);
+}
+
+/* The levels' pills, in level order — the dragged one's included. */
+const levelPills = () => [...$('groupStrip').querySelectorAll('.group-pill[data-level]')];
+
+/* Which slot among the levels left once the dragged pill is out a drop
+   at (x, y) lands in. The pills wrap onto a second line in a narrow
+   strip, so the pointer is read against the line nearest it — which is
+   also what a pointer out in the margin, above or below every pill, is
+   measured against. */
+function dropSlotAt(x, y, drag) {
+  const boxes = levelPills().filter((p, i) => i !== drag.from).map((p) => p.getBoundingClientRect());
+  if (!boxes.length) return 0;
+  const off = (b) => (y < b.top ? b.top - y : y > b.bottom ? y - b.bottom : 0);
+  const line = Math.round(boxes.reduce((a, b) => (off(b) < off(a) ? b : a)).top);
+  return boxes.filter((b) => Math.round(b.top) < line
+    || (Math.round(b.top) === line && b.left + b.width / 2 < x)).length;
+}
+
+/* Lay the strip out as `slot` would leave it: the ghost there, the
+   dragged pill out, the › separators between whatever is showing. Done
+   with flex `order` rather than by moving nodes, because one of the pills
+   is the drag's source, and a source node taken out of the document
+   mid-drag is one dragend may never reach. slot null puts it all back
+   the way renderGroupStrip drew it. */
+function layoutStrip(slot, drag) {
+  const strip = $('groupStrip');
+  strip.querySelectorAll('.group-strip-arrow, .group-pill-ghost').forEach((n) => n.remove());
+  const pills = levelPills();
+  const lifted = drag && drag.from !== null ? pills[drag.from] : null;
+  const seq = pills.filter((p) => p !== lifted);
+  if (slot !== null) {
+    const ghost = el('div', 'group-pill group-pill-ghost');
+    // The ✕'s room too, unseen, so the ghost is the pill's own size.
+    ghost.append(el('span', null, groupColLabel(drag.name)), el('span', 'group-pill-rm'));
+    strip.append(ghost);
+    seq.splice(slot, 0, ghost);
+  } else if (lifted) {
+    seq.splice(drag.from, 0, lifted);
+  }
+  if (lifted) lifted.classList.toggle('lifted', slot !== null);
+  strip.classList.toggle('drag-over', slot !== null);
+  const hint = strip.querySelector('.group-strip-hint');
+  if (hint) hint.hidden = slot !== null;
+  let n = 1;
+  seq.forEach((p, i) => {
+    if (i) {
+      const arrow = el('span', 'group-strip-arrow', '›');
+      arrow.style.order = n++;
+      strip.append(arrow);
+    }
+    p.style.order = n++;
   });
-  pill.addEventListener('dragover', (e) => {
-    if (draggedPillIdx === null) return;
-    e.preventDefault();
-    e.dataTransfer.dropEffect = 'move';
-  });
-  pill.addEventListener('drop', (e) => {
-    e.preventDefault();
-    e.stopPropagation(); // don't also fall through to the strip's own "add new column" drop
-    if (draggedPillIdx === null || draggedPillIdx === idx) return;
-    const [moved] = S.groupByCols.splice(draggedPillIdx, 1);
-    S.groupByCols.splice(idx, 0, moved);
+  // Everything after the levels (hint, Sort, + Tag, Ungroup) stays after
+  // them; the label keeps order 0 and so stays first.
+  for (const c of strip.children) {
+    if (!seq.includes(c) && !c.classList.contains('group-strip-arrow') && !c.classList.contains('group-strip-label')) {
+      c.style.order = n;
+    }
+  }
+  dropSlot = slot;
+}
+
+function showDropSlot(slot, drag) {
+  if (slot === dropSlot && $('groupStrip').querySelector('.group-pill-ghost')) return;
+  layoutStrip(slot, drag);
+}
+
+function hideDropSlot() {
+  if (dropSlot === null) return;
+  layoutStrip(null, stripDrag());
+}
+
+/* Every way a strip drag ends — a drop anywhere, Esc, a release outside
+   the window — comes through here, from the pill's own dragend or the
+   document's. Both, because a pill that something redrew mid-drag
+   (renderHead redraws the strip) is no longer in the document, and a
+   dragend on it never bubbles up to the document's listener. A drop in
+   the strip has already cleared everything, so this is a no-op then. */
+function endStripDrag() {
+  const wasPill = draggedPillIdx !== null;
+  draggedPillIdx = null;
+  if (wasPill || dropSlot !== null) {
+    dropSlot = null;
     renderGroupStrip();
-    regroupAll();
-  });
+  }
+}
+
+function dropInStrip(drag, slot) {
+  draggedPillIdx = null;
+  dropSlot = null;
+  if (drag.from === null) {
+    addGroupLevel(drag.name, slot);   // renders the strip
+    return;
+  }
+  const moved = slot !== drag.from;
+  if (moved) S.groupByCols.splice(slot, 0, ...S.groupByCols.splice(drag.from, 1));
+  renderGroupStrip();
+  if (moved) regroupAll();
 }
 
 /* Both dimensions ('count' vs 'value' — the latter meaning alphabetical
@@ -608,6 +779,7 @@ export function renderGroupStrip() {
   const strip = $('groupStrip');
   strip.replaceChildren();
   strip.classList.toggle('has-groups', S.groupByCols.length > 0);
+  strip.classList.remove('drag-over');   // a drop preview's, and this draws none
   strip.append(el('span', 'group-strip-label', 'Group by'));
   if (!S.groupByCols.length) {
     strip.append(el('span', 'group-strip-hint', 'drag a column header here'));
@@ -616,6 +788,7 @@ export function renderGroupStrip() {
   }
   S.groupByCols.forEach((name, i) => {
     const pill = el('div', 'group-pill');
+    pill.dataset.level = i;
     pill.draggable = true;
     pill.title = 'Drag to reorder the grouping levels';
     pill.style.cursor = 'grab';
@@ -642,20 +815,81 @@ export function renderGroupStrip() {
   strip.append(dropAll);
 }
 
+/* What the rail is currently showing, keyed by the canvas row each mark
+   landed on: the tags on that pixel and the span of view positions it
+   stands for. The rail was the one surface in the app where a tag
+   appeared as a colour and nothing else; this is what lets a hover name
+   it (railTitleAt below).
+
+   Keyed by y rather than kept as the flat list of pairs because a view
+   can hold hundreds of thousands of tagged rows and the readout runs on
+   every mousemove — by y it is seven lookups whatever the count, and the
+   map is bounded by the height of the strip. */
+let railMarks = new Map();
+
+const RAIL_TITLE = 'Tagged rows in this view — hover a mark for its tag';
+
+// A mark is a 2px dash on a strip 14px wide; the readout answers for a
+// few pixels either side of the pointer rather than making it land on
+// one exactly.
+const RAIL_HIT = 3;
+
+/* What the mark under the pointer is called. A pixel several tags landed
+   on names all of them rather than picking whichever happened to be drawn
+   last, and the span it covers is stated as rows because at any real row
+   count one pixel of rail is many rows of view. */
+function railTitleAt(y) {
+  if (!S.view) return RAIL_TITLE;
+  const hit = [];
+  for (let d = -RAIL_HIT; d <= RAIL_HIT; d++) {
+    const m = railMarks.get(Math.round(y) + d);
+    if (m) hit.push(m);
+  }
+  if (!hit.length) return RAIL_TITLE;
+  const names = new Map(S.tags.map((t) => [t.id, t.name]));
+  const tags = [...new Set(hit.flatMap((m) => [...m.tids]).map((id) => names.get(id)).filter(Boolean))];
+  if (!tags.length) return RAIL_TITLE;   // every tag on this pixel has since been deleted
+  const lo = Math.min(...hit.map((m) => m.lo)) + 1;
+  const hi = Math.max(...hit.map((m) => m.hi)) + 1;
+  const where = lo === hi ? `row ${lo.toLocaleString()}`
+    : `rows ${lo.toLocaleString()}–${hi.toLocaleString()}`;
+  return `${tags.join(', ')} · ${where} of ${S.view.row_count.toLocaleString()}`;
+}
+
 export async function drawRail() {
   const cv = $('rail');
   const ctx = cv.getContext('2d');
+  /* The bitmap follows the box, so --rail-w in style.css is the only place
+     the strip's width is decided and a mark stays one device pixel per CSS
+     pixel. Nothing else about the placement is set from here: the rail
+     lives in the gutter .grid-body's margin-right reserves for it, which
+     is why it can take pointer events at all. Setting `right` per draw
+     from #body's measured scrollbar was tried and is the wrong shape —
+     it put the strip on the rows rather than beside them, and it went
+     stale on every repaint that changes #body's overflow without
+     redrawing the rail (toggleGroup calls render() and nothing else). */
+  cv.width = cv.clientWidth;
   cv.height = cv.clientHeight;
   ctx.clearRect(0, 0, cv.width, cv.height);
-  if (!S.view || !S.view.row_count) return;
-  let pts = [];
-  try { pts = await api(`/api/tag_positions?view_id=${S.view.view_id}`); } catch { return; }
+  railMarks = new Map();
+  if (!S.view || !S.view.row_count || !cv.height) return;
+  /* One [y, tag, first, last] per pixel row and tag, bucketed by the
+     server: every tagged row counts, where a list of rows stopped at the
+     20,000th and left the rest of the view's tags off the strip. */
+  let marksAt = [];
+  try { marksAt = await api(`/api/tag_positions?view_id=${S.view.view_id}&height=${cv.height}`); } catch { return; }
   const color = Object.fromEntries(S.tags.map((t) => [t.id, t.color]));
-  for (const [pos, tid] of pts) {
-    const y = Math.round((pos / S.view.row_count) * cv.height);
+  const marks = new Map();
+  for (const [y, tid, lo, hi] of marksAt) {
     ctx.fillStyle = color[tid] || '#888';
     ctx.fillRect(1, y, cv.width - 2, 2);
+    let m = marks.get(y);
+    if (!m) marks.set(y, (m = { tids: new Set(), lo, hi }));
+    m.tids.add(tid);
+    if (lo < m.lo) m.lo = lo;
+    if (hi > m.hi) m.hi = hi;
   }
+  railMarks = marks;
 }
 
 /* ------------------------------------------------- group header actions */
@@ -701,7 +935,10 @@ export async function tagWholeGroup(g, tag, on) {
   }
   S.tagCountsAll = res.counts || {};  // whole-table; refreshTagCounts re-reads the view-scoped half
   refreshTagCounts();
-  clearGroupPageCache(); // the server changed rows this client may never have fetched
+  // The server changed rows this client may never have fetched — and the
+  // flat cache under this grouping holds the ones it *has*, pre-tag, for
+  // dropGrouping to paint back. Both go.
+  clearRowCaches();
   renderTagRibbon();
   render();
   drawRail();
@@ -744,7 +981,7 @@ export function groupMenuItems(gi) {
   if (span) {
     items.push({
       label: `Select these ${scope}`,
-      onclick: () => { selSetRange(span.start, span.end); S.anchor = span.start; S.cursor = span.start; render(); },
+      onclick: () => { selSnapshot(); selSetRange(span.start, span.end); S.anchor = span.start; S.cursor = span.start; render(); },
     });
   }
   const on = !groupMenuUntagMode;
@@ -779,11 +1016,21 @@ export function groupMenuItems(gi) {
       label: `Filter to ${ellipsize(label)}`,
       title: 'Narrows the whole view to these rows — the same thing clicking the tag in the ribbon does',
       onclick: () => {
-        S.tagFilter = [g.value === null ? '__none__' : g.value];
+        // A tag filtered out stays out: this group's rows were counted
+        // without it, and "these rows" must not grow by the ones it hid.
+        S.tagFilter = [g.value === null ? '__none__' : g.value, ...tagFilterExclusions()];
         renderTagRibbon();
         rebuildView({ keepScroll: false });
       },
     });
+    // The untagged bucket has no tag to exclude; hiding it is "Any tag".
+    if (g.value !== null) {
+      items.push({
+        label: `Exclude ${ellipsize(label)}`,
+        title: 'Hides every row carrying this tag — the same thing Exclude on its chip in the ribbon does',
+        onclick: () => toggleTagExclusion(g.value),
+      });
+    }
   } else if (colType !== 'datetime') {
     items.push('-');
     items.push({ label: `Filter to ${ellipsize(displayValue(g.value))}`, onclick: () => filterByValue(colName, g.value) });
@@ -896,32 +1143,51 @@ export async function writeClipboardText(textPromise, successMsg) {
     } else {
       await navigator.clipboard.writeText(await textPromise);
     }
-    toast(successMsg);
+    // A function when the message depends on what the text turned out to
+    // be (how many unique values) — only known once textPromise settles.
+    toast(typeof successMsg === 'function' ? successMsg() : successMsg);
   } catch (e) {
-    toast('Copy failed: ' + e.message, 4000);
+    // When the text itself failed, say why: clipboard.write() rejects with
+    // its own error for a ClipboardItem whose promise rejected, and "Copy
+    // failed: NotAllowedError" hides a reason the analyst can act on.
+    const cause = await textPromise.then(() => null, (err) => err);
+    toast('Copy failed: ' + (cause || e).message, 5000);
   }
+}
+
+/* What a cell rectangle copied, in its own units. It used to report the
+   ROWS it spanned — so one cell read "Copied 1 row", which is the
+   complaint, and a 4x3 block read "Copied 4 rows", which claims every
+   column came across when three did. The row count alone cannot say
+   either thing correctly, because the rectangle has a width.
+
+   One cell is "1 cell"; a rectangle says its shape, because "12 cells"
+   leaves an analyst pasting into a spreadsheet with no idea what shape
+   to expect. */
+export function cellCount(rows, cols) {
+  if (rows === 1 && cols === 1) return '1 cell';
+  const r = `${rows.toLocaleString()} row${rows > 1 ? 's' : ''}`;
+  const c = `${cols.toLocaleString()} column${cols > 1 ? 's' : ''}`;
+  return `${r} \u00d7 ${c}`;
 }
 
 export async function copySelectedCells(withHeaders) {
   if (!S.cellRange) return;
-  const { r0, r1, c0, c1 } = S.cellRange;
-  const rowCount = r1 - r0 + 1;
+  const { c0, c1 } = S.cellRange;
+  const spanned = cellRangeRows();   // headings excluded, so the counts below are rows
+  const rowCount = spanned.length;
   if (rowCount > 20000) { toast('Selection too large to copy (max 20,000 rows)', 4000); return; }
   const cols = visibleCols().slice(c0, c1 + 1);
-  const spanned = [];
-  for (let pos = r0; pos <= r1; pos++) spanned.push(pos);
-  if (positionsNeedLoading(spanned)) toast(`Copying ${rowCount.toLocaleString()} row${rowCount > 1 ? 's' : ''}…`, 8000);
+  if (positionsNeedLoading(spanned)) toast(`Copying ${cellCount(rowCount, cols.length)}…`, 8000);
   const textPromise = (async () => {
     await loadRowsForPositions(spanned); // no-op fast path once everything's already cached
     const colIdx = Object.fromEntries(S.columns.map((c, i) => [c.name, i]));
     const lines = [];
     if (withHeaders) lines.push(cols.join('\t'));
     for (const pos of spanned) {
-      // A grouped range can span group headers, which aren't rows — skip
-      // those. Anything else missing here would be a bug, not a slow fetch
-      // (the load above threw if it couldn't get a page), so refuse rather
-      // than emit a blank line.
-      if (S.groupByCols.length && !groupCoordAt(pos)) continue;
+      // Anything missing here would be a bug, not a slow fetch (the load
+      // above threw if it couldn't get a page), so refuse rather than
+      // emit a blank line.
       const r = rowAt(pos);
       if (!r) throw new Error(`row ${pos + 1} could not be loaded`);
       // What's copied is what's shown: a column's chosen timestamp or
@@ -931,7 +1197,7 @@ export async function copySelectedCells(withHeaders) {
     }
     return lines.join('\n');
   })();
-  await writeClipboardText(textPromise, `Copied ${rowCount.toLocaleString()} row${rowCount > 1 ? 's' : ''}${withHeaders ? ' with headers' : ''}`);
+  await writeClipboardText(textPromise, `Copied ${cellCount(rowCount, cols.length)}${withHeaders ? ' with headers' : ''}`);
 }
 
 export async function copyRowsAsText(positions, withHeaders) {
@@ -948,6 +1214,7 @@ export async function copyRowsAsText(positions, withHeaders) {
     const lines = [];
     if (withHeaders) lines.push(cols.join('\t'));
     for (const pos of positions) {
+      if (S.groupByCols.length && !groupCoordAt(pos)) continue;   // a heading, never a row
       const r = rowAt(pos);
       if (!r) throw new Error(`row ${pos + 1} could not be loaded`);
       lines.push(cols.map((name) => displayCell(name, r.cells[colIdx[name]] ?? '')).join('\t'));
@@ -957,13 +1224,26 @@ export async function copyRowsAsText(positions, withHeaders) {
   await writeClipboardText(textPromise, `Copied ${positions.length.toLocaleString()} row${positions.length > 1 ? 's' : ''}${withHeaders ? ' with headers' : ''}`);
 }
 
-/* Ctrl+C prefers an explicit dragged/shift-clicked cell range; otherwise
-   falls back to whatever rows are actually selected — checked rows first,
-   then just the cursor row — so "select a row, then copy" (via checkbox or
-   a plain click) copies the whole row rather than nothing or a stray cell. */
+/* Ctrl+C prefers an explicit cell RECTANGLE — dragged, shift-clicked or
+   Shift+Arrowed; otherwise falls back to whatever rows are actually
+   selected — checked rows first, then just the cursor row — so "select a
+   row, then copy" (via checkbox or a plain click) copies the whole row
+   rather than nothing or a stray cell.
+
+   "Explicit" is the whole rule, and S.cellRangeExplicit is it written
+   down. Before the arrow keys moved the cell cursor, a cell range could
+   only come from a mouse gesture, so its mere existence WAS the analyst's
+   intent and `if (S.cellRange)` said so correctly. Now a plain arrow
+   leaves a one-cell range behind wherever the cursor stops, so without
+   this an analyst who picked forty rows in the gutter and then pressed
+   Down to read the next one would find Ctrl+C had quietly become "copy
+   one cell". A click, a drag and a Shift+Arrow all still win, including
+   on a single cell — clicking one cell to copy it is a real gesture and
+   asking for it is what makes it explicit, not how big it is. */
 export async function handleCopyShortcut(withHeaders) {
-  if (S.cellRange) { await copySelectedCells(withHeaders); return; }
-  const count = selCount();
+  const picked = selCount();
+  if (S.cellRange && (S.cellRangeExplicit || !picked)) { await copySelectedCells(withHeaders); return; }
+  const count = picked;
   // Checked before materializing: selPositions() on a select-all would
   // allocate an array of every position in the view just to have it
   // rejected by copyRowsAsText's own ceiling on the next line.
@@ -975,24 +1255,174 @@ export async function handleCopyShortcut(withHeaders) {
   await copyRowsAsText(positions, withHeaders);
 }
 
+/* "Copy unique values": one column's distinct values, one per line — the
+   hosts, users or hashes a set of rows touches, ready to paste into a
+   lookup, a filter or a report.
+
+   `positions` is the rows to read, or null for the whole view. Callers
+   pass null when nothing narrower than the view is picked: one row has
+   one value, which is not a question anyone needs this to answer.
+
+   - Rows: read through the page cache like every other copy, under the
+     same 20,000-row ceiling, and listed in the order they first appear —
+     the grid's own sort, so a timeline-sorted selection lists processes
+     in the order they first ran.
+   - The view: /api/distinct_values, in the column's sort order (numbers
+     as numbers, timestamps chronologically). Past its cap the server says
+     `truncated`, and this refuses rather than copy a list that stops
+     partway without saying so.
+
+   Either way the text is what the grid shows (displayCell, so a chosen
+   timestamp format applies), unique by that text, and empty values are
+   left out. */
+export async function copyUniqueValues(column, positions = null) {
+  if (positions && uniqueRowsTooMany(positions.length)) return;
+  const from = positions
+    ? `${positions.length.toLocaleString()} row${positions.length === 1 ? '' : 's'}`
+    : 'this view';
+  if (positions && positions.length && positionsNeedLoading(positions)) toast(`Reading ${from}…`, 8000);
+  const seen = new Set();
+  const add = (v) => {
+    const text = String(displayCell(column, v ?? ''));
+    if (text !== '') seen.add(text);
+  };
+  const textPromise = (async () => {
+    if (positions) {
+      await loadRowsForPositions(positions);
+      const idx = S.columns.findIndex((c) => c.name === column);
+      if (idx < 0) throw new Error(`no column named ${column}`);
+      for (const pos of positions) {
+        if (S.groupByCols.length && !groupCoordAt(pos)) continue;   // a heading, never a row
+        const r = rowAt(pos);
+        if (!r) throw new Error(`row ${pos + 1} could not be loaded`);
+        add(r.cells[idx]);
+      }
+    } else {
+      if (!S.view || !S.view.view_id) throw new Error('open a table first');
+      const token = opToken();
+      const disarmCancel = armOpCancel(token);
+      let res;
+      try {
+        res = await api(`/api/distinct_values?view_id=${encodeURIComponent(S.view.view_id)}`
+          + `&column=${encodeURIComponent(column)}&op_token=${encodeURIComponent(token)}`);
+      } catch (e) {
+        throw e.status === 499 ? new Error('cancelled') : e;
+      } finally {
+        disarmCancel();
+      }
+      if (res.truncated) {
+        throw new Error(`${column} has more than ${res.values.length.toLocaleString()} unique values in this view — filter it down first`);
+      }
+      for (const v of res.values) add(v);
+    }
+    if (!seen.size) throw new Error(`every ${column} value in ${from} is empty`);
+    return [...seen].join('\n');
+  })();
+  await writeClipboardText(textPromise,
+    () => `Copied ${seen.size.toLocaleString()} unique value${seen.size === 1 ? '' : 's'} of ${column} from ${from}`);
+}
+
+/* The keyboard's way in (Ctrl+Shift+U by default). The column is the one
+   the cell cursor is in; the rows are a cell range spanning several rows,
+   else the picked rows — Ctrl+C's precedence, minus its fall back to one
+   row — and the whole view when neither narrows anything, which is the
+   plain "click a cell in the column, press the key" case. A select-all
+   with nothing unchecked IS the whole view, and goes to the server as
+   that rather than as every position materialised. */
+export function copyUniqueValuesShortcut() {
+  const column = (S.cellFocus && S.cellFocus.name) || (S.cellRange ? visibleCols()[S.cellRange.c0] : null);
+  if (!column) { toast('Click a cell in the column first'); return; }
+  const picked = selCount();
+  const range = S.cellRange && (S.cellRangeExplicit || !picked) ? cellRangeRows() : [];
+  if (range.length > 1) return copyUniqueValues(column, range);
+  if (!picked || wholeViewPicked(picked)) return copyUniqueValues(column, null);
+  // Checked before materialising, as handleCopyShortcut does.
+  if (uniqueRowsTooMany(picked)) return;
+  return copyUniqueValues(column, selPositions());
+}
+
+/* A select-all with nothing unchecked: the picks ARE the view. */
+export const wholeViewPicked = (picked) => S.selectAll && picked === selViewRows();
+
+/* Copy's 20,000-row ceiling, said in this action's terms — with the way
+   round it, since the whole view has no such ceiling here. */
+export function uniqueRowsTooMany(n) {
+  if (n <= 20000) return false;
+  toast('Too many rows to copy unique values from (max 20,000) — clear the selection to copy them from the whole view', 5000);
+  return true;
+}
+
 /* DOM wiring for this module, called once by main.js. Handlers can't
    fire during load, so the order these run in doesn't matter — the
    startup steps that DO depend on order live in main.js instead. */
 export function wireGrouping() {
-$('groupStrip').addEventListener('dragover', (e) => {
-  if (!draggedCol || S.groupByCols.includes(draggedCol)) return;
+/* The group strip's drop zone — see "the strip as a drop zone" above for
+   why on the document. Outside the zone a strip drag takes the ghost
+   down and leaves the event alone, so a header still reorders among the
+   other headers exactly as before. */
+document.addEventListener('dragover', (e) => {
+  const drag = stripDrag();
+  if (!drag) return;
+  if (!inDropZone(e.clientX, e.clientY)) { hideDropSlot(); return; }
   e.preventDefault();
   e.dataTransfer.dropEffect = 'move';
-  $('groupStrip').classList.add('drag-over');
+  showDropSlot(dropSlotAt(e.clientX, e.clientY, drag), drag);
 });
 
-$('groupStrip').addEventListener('dragleave', () => $('groupStrip').classList.remove('drag-over'));
-
-$('groupStrip').addEventListener('drop', (e) => {
+document.addEventListener('drop', (e) => {
+  const drag = stripDrag();
+  if (!drag || !inDropZone(e.clientX, e.clientY)) return;
   e.preventDefault();
-  $('groupStrip').classList.remove('drag-over');
-  if (draggedCol && !S.groupByCols.includes(draggedCol)) addGroupLevel(draggedCol);
+  // Where the ghost was, which is what the analyst let go on.
+  dropInStrip(drag, dropSlot ?? dropSlotAt(e.clientX, e.clientY, drag));
 });
+
+document.addEventListener('dragend', endStripDrag);
+
+// A dragend can still go missing (Firefox sends none to a source node
+// that left the document), and a stale draggedPillIdx would make the next
+// header drag look like a reorder. A new drag starting is the one sure
+// sign the last one is over; capture, so it runs before the source's own.
+document.addEventListener('dragstart', () => { draggedPillIdx = null; dropSlot = null; }, true);
+
+/* The rail's readout. A `title` rather than a floating element: it is the
+   idiom every other hover hint here uses, it needs no z-order argument
+   with the menus and modals that open over the grid, and a mark is a 2px
+   dash — anything positioned against one would spend its life chasing it.
+   Assigned only when the text changes, because setting `title` while its
+   tooltip is up takes the tooltip away. */
+$('rail').addEventListener('mousemove', (e) => {
+  const cv = $('rail');
+  const r = cv.getBoundingClientRect();
+  if (!r.height) return;
+  /* Scaled into canvas rows rather than used as CSS pixels: the two are
+     the same only until the box changes height without a redraw, and one
+     path does that — dragging the detail pane's divider resizes the grid
+     and calls nothing (detail.js). The bitmap then stretches to the new
+     box, so the marks the analyst can see have moved; multiplying by the
+     same factor is what keeps the readout naming the mark under the
+     pointer instead of the row it used to stand for. */
+  const t = railTitleAt((e.clientY - r.top) * (cv.height / r.height));
+  if (cv.title !== t) cv.title = t;
+});
+
+/* The rail is a sibling of #body, not a child, so a wheel over it scrolls
+   nothing at all on its own — at the right edge of the grid that reads as
+   the grid having frozen under the pointer. deltaMode is honoured for the
+   same reason #body's own handler honours it: Firefox reports lines where
+   Chromium reports pixels, and three pixels per notch is the same dead
+   grid by another route. Ctrl is left alone, so browser zoom still works
+   over the strip. Remote-session quantization stays where it is (grid.js):
+   it exists to cut repaints during sustained scrolling of the rows, which
+   is not what a wheel on a 14px strip is. */
+$('rail').addEventListener('wheel', (e) => {
+  if (e.ctrlKey) return;
+  const body = $('body');
+  const unit = e.deltaMode === 1 ? ROW_H : e.deltaMode === 2 ? body.clientHeight : 1;
+  body.scrollTop += e.deltaY * unit;
+  body.scrollLeft += e.deltaX * unit;
+  e.preventDefault();
+}, { passive: false });
 
 $('body').addEventListener('contextmenu', (e) => {
   const groupHeader = e.target.closest('.group-header-row');
@@ -1013,14 +1443,18 @@ $('body').addEventListener('contextmenu', (e) => {
   // pointer); right-clicking outside it moves there first, which is what
   // every file manager does and what makes "this row" unambiguous.
   const inSelection = selCount() && selHas(pos);
-  if (colIndex != null) {
+  if (colIndex != null && !cellInRange(pos, colIndex)) {
     // Highlight the cell the menu is about — and make it the thing Ctrl+C
     // and the `f` keybind act on next, so the menu and the keyboard agree.
-    // Set before moveCursor so its render paints both changes at once.
+    // Set before moveCursor so its render paints both changes at once. A
+    // right-click INSIDE an existing range keeps the range: the menu's
+    // scope is the rows it spans (rowMenuTargets), same as a tag key's.
     S.cellAnchor = { pos, col: colIndex };
+    S.cellFocus = { pos, col: colIndex, name: colName };
     setCellRange(S.cellAnchor, S.cellAnchor);
+    S.cellRangeExplicit = true;   // a right-click on a cell is asking for that cell
   }
-  if (!inSelection) moveCursor(pos, false); // renders
+  if (!inSelection) moveCursor(pos); // renders
   else render();
   const r = rowAt(pos);
   const value = r && colName ? r.cells[S.columns.findIndex((c) => c.name === colName)] : null;

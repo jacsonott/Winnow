@@ -1,0 +1,147 @@
+{#-
+  The Pages site's front page: a banner above Home.md's own content.
+
+  Only the site has this. index.md (Home.md) asks for it in the front
+  matter scripts/build_wiki.py --site writes, which also drops Home.md's
+  "# Winnow wiki" title, since the banner is the title here. Everything
+  below the banner is still Home.md, so the words a reader gets are the
+  ones the wiki and the repository show.
+
+  Links are written relative to the site's root and go through `url`, so
+  they hold at any base path. tests/test_build_wiki.py checks each one
+  names a page or a file the build stages, and that each #anchor after a
+  page is one of its headings.
+-#}
+{% extends "main.html" %}
+
+{% block hero %}
+<section class="wn-hero">
+  <div class="md-grid wn-hero__inner">
+    <div class="wn-hero__text">
+      <img class="wn-hero__mark" src="{{ 'assets/winnow-mark.svg' | url }}" alt="" width="56" height="56">
+      <h1 class="wn-hero__title">Winnow</h1>
+      {#- The loading screen's line, set as it is there (static/index.html). -#}
+      <p class="wn-hero__tagline">separate the signal from the noise</p>
+      <div class="wn-hero__actions">
+        <a class="md-button md-button--primary" href="{{ 'Installation/' | url }}">Get started</a>
+        <a class="md-button" href="#your-first-triage">Your first triage</a>
+      </div>
+    </div>
+    {#- The recording is scripts/screenshots.py --only triage. A reader who
+        asked for less motion gets the README's still of the same table. -#}
+    <figure class="wn-hero__shot">
+      <picture>
+        <source media="(prefers-reduced-motion: reduce)" srcset="{{ 'screenshots/grid.png' | url }}">
+        <img src="{{ 'media/triage.gif' | url }}" width="1200" height="740"
+             alt="Winnow filtering an EvtxECmd table with a shipped filter, narrowing it to one user, tagging four rows and opening the Timeline">
+      </picture>
+    </figure>
+  </div>
+</section>
+{% endblock %}
+
+{#- Material titles a page that has no H1 of its own ("Home"); the banner
+    is this page's title. Otherwise as partials/content.html, with the
+    features between Home.md's opening paragraph and its first heading. -#}
+{% block content %}
+  {% include "partials/actions.html" %}
+  {%- set intro, h2, rest = page.content.partition("<h2") %}
+  <div class="wn-home">
+    {{ intro }}
+    {#- One picture and one line each, and a link to the feature's own page
+        (docs/site/features/), which shows it as a recording. The pictures
+        and recordings are scripts/screenshots.py --only feature-<name>. -#}
+    <h2 id="features">Features</h2>
+    <div class="wn-features">
+      <section class="wn-feature">
+        <div class="wn-feature__text">
+          <h3>Saved filters</h3>
+          <p>Saved once, offered on every table with the same columns.
+            28 ship for EvtxECmd, RECmd and MFTECmd output, and
+            <kbd>[</kbd> <kbd>]</kbd> step through them.</p>
+          <a class="wn-feature__more" href="{{ 'features/saved-filters/' | url }}">See it in action</a>
+        </div>
+        <a class="wn-feature__shot" href="{{ 'features/saved-filters/' | url }}">
+          <img src="{{ 'media/feature-saved-filters.png' | url }}" width="760" height="500" loading="lazy"
+               alt="The Filters menu on an EvtxECmd table, listing the shipped EVTX triage filters">
+        </a>
+      </section>
+      <section class="wn-feature">
+        <div class="wn-feature__text">
+          <h3>Timeframe filter</h3>
+          <p>Kept apart from the other filters: clearing them or stepping
+            through saved ones leaves it on. One range for the whole case,
+            or one per table.</p>
+          <a class="wn-feature__more" href="{{ 'features/timeframe/' | url }}">See it in action</a>
+        </div>
+        <a class="wn-feature__shot" href="{{ 'features/timeframe/' | url }}">
+          <img src="{{ 'media/feature-timeframe.png' | url }}" width="760" height="450" loading="lazy"
+               alt="The Timeframe filter dialog with a start and end time across all datetime columns">
+        </a>
+      </section>
+      <section class="wn-feature">
+        <div class="wn-feature__text">
+          <h3>Histogram</h3>
+          <p>When the rows in view happened, colored by tag, by one value or
+            by group. Drag across it to set the timeframe.</p>
+          <a class="wn-feature__more" href="{{ 'features/histogram/' | url }}">See it in action</a>
+        </div>
+        <a class="wn-feature__shot" href="{{ 'features/histogram/' | url }}">
+          <img src="{{ 'media/feature-histogram.png' | url }}" width="820" height="441" loading="lazy"
+               alt="The histogram above the grid, coloring one user's logons among all the logons">
+        </a>
+      </section>
+      <section class="wn-feature">
+        <div class="wn-feature__text">
+          <h3>Derived columns</h3>
+          <p>Sortable times from epochs and FILETIMEs, fields out of JSON and
+            XML, regex captures, decodes, and lookups into another table.
+            The original column is never changed.</p>
+          <a class="wn-feature__more" href="{{ 'features/derived-columns/' | url }}">See it in action</a>
+        </div>
+        <a class="wn-feature__shot" href="{{ 'features/derived-columns/' | url }}">
+          <img src="{{ 'media/feature-derived-columns.png' | url }}" width="960" height="747" loading="lazy"
+               alt="The Add derived column dialog lifting a field out of each row's JSON payload, with a preview">
+        </a>
+      </section>
+      <section class="wn-feature">
+        <div class="wn-feature__text">
+          <h3>SQL pane</h3>
+          <p>Read-only SQL over every table in the case, with its tags, notes
+            and derived columns. Tag the rows a query returns, export them,
+            or save them as a table.</p>
+          <a class="wn-feature__more" href="{{ 'features/sql-pane/' | url }}">See it in action</a>
+        </div>
+        <a class="wn-feature__shot" href="{{ 'features/sql-pane/' | url }}">
+          <img src="{{ 'media/feature-sql-pane.png' | url }}" width="760" height="440" loading="lazy"
+               alt="A query counting failed logons per user and host, with its results">
+        </a>
+      </section>
+      <section class="wn-feature">
+        <div class="wn-feature__text">
+          <h3>First and last <span class="wn-feature__badge">plugin</span></h3>
+          <p>Thousands of events down to the first and last of each group,
+            per host or per user, as a new table you can tag and export.</p>
+          <a class="wn-feature__more" href="{{ 'features/first-last/' | url }}">See it in action</a>
+        </div>
+        <a class="wn-feature__shot" href="{{ 'features/first-last/' | url }}">
+          <img src="{{ 'media/feature-first-last.png' | url }}" width="1060" height="540" loading="lazy"
+               alt="The first_last plugin grouping logons by host, listing the first and last event of each">
+        </a>
+      </section>
+      <section class="wn-feature">
+        <div class="wn-feature__text">
+          <h3>Pivot tables <span class="wn-feature__badge">plugin</span></h3>
+          <p>A cross-tab of any table, merged ones included: drag fields into
+            rows, columns and values, and filter by tag.</p>
+          <a class="wn-feature__more" href="{{ 'features/pivot/' | url }}">See it in action</a>
+        </div>
+        <a class="wn-feature__shot" href="{{ 'features/pivot/' | url }}">
+          <img src="{{ 'media/feature-pivot.png' | url }}" width="960" height="674" loading="lazy"
+               alt="The pivot plugin counting events per host and user against event IDs">
+        </a>
+      </section>
+    </div>
+    {{ h2 }}{{ rest }}
+  </div>
+{% endblock %}

@@ -8,7 +8,7 @@ Winnow's own source. Deleting the folder removes the plugin — there is no
 install step, no manifest database, nothing fetched from a network
 (CLAUDE.md: assume airgapped).
 
-Three extension points today, all on the PluginAPI object a plugin's
+Seven extension points today, all on the PluginAPI object a plugin's
 register() receives (deliberately an object rather than a bag of module
 functions — the seam future hooks get added to without any existing
 plugin needing to change):
@@ -46,6 +46,13 @@ A plugin module provides:
     PLUGIN = {"name": "...", "version": "...", "description": "..."}   # optional
     WINNOW_API_VERSION = 1                                             # optional
 
+Both are read from the SOURCE as well as from the loaded module — see
+static_meta. A plugin that is switched off is never imported, so without
+that the manager could show nothing about one but its folder name, and
+the only way to learn what a plugin did was to run it. Which means: they
+must be module-level literal assignments to be read before a load, and
+the description is what an analyst decides on.
+
     def register(api):                                                 # required
         api.register_ingest_format(
             id="mft",                        # unique within this plugin
@@ -67,6 +74,9 @@ A plugin module provides:
         # padded/trimmed and counted, same as a ragged CSV line. Cells may
         # be str/int/None — Store.ingest_rows stringifies (TEXT columns,
         # same evidence-fidelity convention as every other ingest path).
+        # basename(path) is the file's real name even for a browser
+        # upload (spooled under its own name in a private temp dir, and
+        # deleted once the import returns — don't keep `path`).
         return {
             "columns": ["Timestamp", "FileName"],
             "rows": iter_rows(path),
@@ -86,11 +96,35 @@ A tab plus its backend route, the full custom-UI shape:
 
     # ui/tab.js — mounted on first activation. `container` is an empty
     # <section> filling the main content area; `winnow` is the stable UI
-    # context (see buildPluginTabContext in app.js): winnow.api/post/toast/
-    # el/modal helpers, winnow.base ("/api/plugin/<fs_name>") for the
-    # plugin's own routes, winnow.assets for its other files, winnow.sql()
-    # for read-only case queries, winnow.schemaText() for an LLM-ready
-    # schema dump, and winnow.state (live sources/tags/selection getters).
+    # context (see buildPluginTabContext in static/js/plugins.js):
+    # winnow.api/post/toast/el/modal helpers, the themed dialogs
+    # (alertDialog/confirmDialog/promptDialog — never window.alert &co),
+    # winnow.dropdownMenu(anchor, items) for the app's own small menu
+    # anchored under an element — items are {label, onclick} plus
+    # optional disabled/desc/note/title/checked, '-' for a rule and
+    # {header} for a section label; one menu is open at a time and Escape,
+    # an outside click and the arrow keys work as in every Winnow menu (a
+    # choice among a few things is a menu, not a modal over the work),
+    # winnow.sectionPanes({sections, label, cls, paneCls}) for the app's
+    # two-pane dialog frame — sections down a side list by group, each with
+    # a line saying what is set there, the chosen one built into the pane
+    # on the right; append its `panes` inside winnow.modal and show() one,
+    # winnow.notify() for a row in the jobs panel with progress and
+    # buttons, winnow.showTab()/showPage() to bring the analyst to one of
+    # the plugin's tabs or a built-in page, winnow.base
+    # ("/api/plugin/<fs_name>") for the plugin's own routes, winnow.assets
+    # for its other files, winnow.sql() for read-only case queries,
+    # winnow.schemaText() for an LLM-ready schema dump, and winnow.state
+    # (live sources/tags/selection getters).
+    # winnow.tabState (get/set/clear) is this mount's own row in the CASE
+    # file, for state that should survive the case being closed — a mount
+    # is torn down with no callback, so it is written as the analyst works
+    # rather than flushed at the end. Definitions only (a cap of 64 KiB
+    # says so), validated against the case on the way back in: a source id
+    # is reused after a drop, a merge's name is editable, and a column can
+    # be gone. get() answers {error: true} rather than null when the read
+    # itself failed, so a mount can refuse to save over state it could not
+    # see.
     # Optional exports: onShow/onHide, called on every tab switch.
     #
     #   export default function mount(container, winnow) { ... }
@@ -108,6 +142,22 @@ A tab plus its backend route, the full custom-UI shape:
         label="Histogram",               # the toolbar toggle's caption
         entry="ui/panel.js",             # ES module: mount(container, winnow), onShow/onHide,
     )                                    #   and winnow.onViewChange(cb) to follow the grid
+
+    api.register_page_panel(             # the same thing on a built-in page
+        page="sql",                      # "sql" | "notes"
+        id="copilot",                    # unique within this plugin (shared with tabs/panels)
+        label="Copilot",                 # the toggle's caption in the page's toolbar
+        entry="ui/copilot.js",           # ES module: mount(container, winnow), onShow/onHide;
+    )                                    #   winnow.sqlPage / winnow.notesPage drive the page
+
+    api.register_dashboard(              # a board this plugin OFFERS
+        id="triage",                     # unique within this plugin
+        label="ESXi triage",             # its name in Dashboards ▸ Library
+        widgets=[                        # the shape the dashboard editor writes
+            {"title": "Log lines", "source": "sql", "render": "stat",
+             "query": {"sql": "SELECT COUNT(*) FROM {{all:header_set:ESXi / Linux host logs}}"}},
+        ],
+    )                                    # the analyst adds it with ＋; loading never applies it
 
     def vt_lookup(req):
         # req.body: {"source_id", "column", "value", "rows": [{"rid",
@@ -145,6 +195,11 @@ A tab plus its backend route, the full custom-UI shape:
             raise ValueError("Open a case first")
         return req.store.run_sql("SELECT ...", limit=5000)
 
+A register() that raises (or module code that does) is a load error: the
+plugin is listed as failed, with the exception's message, and it is all
+or nothing — whatever that register() had already registered before it
+raised is taken back out (_Loaded._rollback).
+
 SECURITY: a plugin is arbitrary Python running with Winnow's own
 privileges — the same trust model as a Notepad++ plugin or an autopsy/
 Ghidra script. Winnow only ever loads from local plugin directories the
@@ -154,11 +209,13 @@ analyst controls and never fetches code; the analyst placing a file there
 
 from __future__ import annotations
 
+import ast
 import fnmatch
 import importlib.util
 import os
 import re
 import sys
+import threading
 import traceback
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -169,13 +226,18 @@ from typing import Any, Callable, Iterable
 from .store import NUM_RE as _store_num_re, q as _store_q
 from . import userenv
 
+# Where a register_page_panel panel can sit. The grid's equivalent is
+# register_toolbar_panel; each page here has a button host and a
+# side-column host in static/index.html (plugins.js PANEL_HOSTS).
+PAGE_PANEL_PAGES = ("sql", "notes")
+
 # Bumped when PluginAPI's contract changes incompatibly. A plugin may
 # declare WINNOW_API_VERSION = N (the version it was written against);
 # loading refuses a plugin that asks for a newer API than this build
 # provides, with a message that says to update Winnow — the failure mode
 # is otherwise an AttributeError deep inside register() that reads like a
 # plugin bug.
-PLUGIN_API_VERSION = 7
+PLUGIN_API_VERSION = 14
 
 FORMAT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 # API routes may nest ("chat/stream") but each segment keeps the same shape.
@@ -458,7 +520,7 @@ class PluginAPI:
     #: with the rest of the app.
     NUM_RE = _store_num_re
 
-    def __init__(self, registry: "PluginRegistry", plugin_name: str,
+    def __init__(self, registry: "PluginRegistry | _Loaded", plugin_name: str,
                  fs_name: str, root: Path):
         self._registry = registry
         self._plugin = plugin_name
@@ -598,11 +660,7 @@ class PluginAPI:
             raise ValueError(f"Panel id {id!r} must be lowercase [a-z0-9_-]")
         if not label:
             raise ValueError("register_toolbar_panel needs a label")
-        if not self._root.is_dir():
-            raise ValueError("register_toolbar_panel is for folder plugins — a single .py file has no module to serve")
-        rel = Path(str(entry).replace("\\", "/"))
-        if rel.is_absolute() or ".." in rel.parts or not (self._root / rel).is_file():
-            raise ValueError(f"Panel entry {entry!r} must be a file inside the plugin folder")
+        rel = self._entry_path(entry, "register_toolbar_panel", "Panel")
         self._registry._add_panel({
             "id": f"{self._plugin}.{id}",
             "plugin": self._plugin,
@@ -611,6 +669,392 @@ class PluginAPI:
             "entry": rel.as_posix(),
             "description": description,
         })
+
+    def _entry_path(self, entry: str, hook: str, what: str) -> Path:
+        """A UI hook's `entry`, validated the way register_tab validates
+        its own: folder plugins only, a real file inside the folder, now."""
+        if not self._root.is_dir():
+            raise ValueError(f"{hook} is for folder plugins — a single .py file has no module to serve")
+        rel = Path(str(entry).replace("\\", "/"))
+        if rel.is_absolute() or ".." in rel.parts or not (self._root / rel).is_file():
+            raise ValueError(f"{what} entry {entry!r} must be a file inside the plugin folder")
+        return rel
+
+    def register_page_panel(self, *, page: str, id: str, label: str, entry: str,
+                            description: str = "") -> None:
+        """A toggle button in a built-in page's toolbar — the SQL pane's or
+        Notes' — that shows the plugin's own UI in a resizable column
+        beside that page. `page` names the page ("sql" or "notes"); the
+        rest is register_toolbar_panel's contract: `entry` is an ES module
+        exporting `mount(container, winnow)` and optional `onShow` /
+        `onHide`, the toggle persists per browser, and the column hides
+        with the page. The `winnow` context is a tab's; what makes this
+        hook useful is `winnow.sqlPage` (text/setText/run/result/
+        selectedRows/onRun/show) and `winnow.notesPage` (text/setText/
+        insert/onChange/show), which drive the page the panel sits on —
+        the copilot in the claude_assistant example inserts and runs the
+        queries it writes. A sqlPage result is {columns, rows, total,
+        elapsed_ms, truncated, stopped}: the server holds the rows and
+        `rows` is the first 5,000 of `total` (API 12), and selectedRows()
+        is a promise, since a selection can reach rows the browser never
+        loaded."""
+        if page not in PAGE_PANEL_PAGES:
+            raise ValueError(f"Page panel page {page!r} must be one of {', '.join(PAGE_PANEL_PAGES)}")
+        if not FORMAT_ID_RE.match(id or ""):
+            raise ValueError(f"Panel id {id!r} must be lowercase [a-z0-9_-]")
+        if not label:
+            raise ValueError("register_page_panel needs a label")
+        rel = self._entry_path(entry, "register_page_panel", "Panel")
+        self._registry._add_page_panel({
+            "id": f"{self._plugin}.{id}",
+            "local_id": id,
+            "plugin": self._plugin,
+            "plugin_fs": self._fs,
+            "page": page,
+            "label": label,
+            "entry": rel.as_posix(),
+            "description": description,
+        })
+
+
+    # What dashboard_widget_preview can run, and what the dashboard can
+    # draw (static/js/dashboard.js's runWidget). Checked at registration:
+    # a typo like "watchlst" or a render nobody implemented is a card
+    # reading "Unknown render" in somebody's case, weeks later, with the
+    # plugin looking innocent — and it is knowable right here.
+    WIDGET_SOURCES = ("sql", "tags", "watchlist", "cells")
+    WIDGET_RENDERS = ("stat", "kv", "chips", "list", "bar", "histogram", "signals")
+    # What a `signals` cell may ask — everything a widget can, except
+    # another grid of signals.
+    CELL_SOURCES = ("sql", "tags", "watchlist")
+
+    def register_dashboard(self, *, id: str, label: str, widgets: list,
+                           description: str = "") -> None:
+        """A dashboard this plugin offers, listed under Dashboards ▸ Library
+        in the sidebar. It is OFFERED, never applied: the analyst adds it to
+        a case with ＋, which copies the widgets in (create-or-replace by
+        name, so adding twice refreshes rather than duplicates). A board a
+        plugin dropped into every case it could see would be the wrong
+        default for the analyst who wanted one table on screen.
+
+        `widgets` is a list of widget definitions — the same shape the
+        dashboard editor writes and profiles carry:
+
+            {"title": str,                  # the card's heading
+             "source": "sql"|"tags"|"watchlist"|"cells",
+             "render": "stat"|"kv"|"chips"|"list"|"bar"|"histogram"|"signals",
+             "query": {"sql": "SELECT …"},  # source "sql" only
+             "cells": [...],                # source "cells" only — see below
+             "span": 1|2|3|4,               # optional; card width, in
+                                            #   grid columns (of four)
+             "live": True,                  # optional; re-run on every open
+             "id": str,                     # assigned by Winnow — see below
+             "drill": {...}}                # optional; see below
+
+        ``render: "signals"`` with ``source: "cells"`` is one card holding
+        a GRID of labelled numbers, each of which keeps its own drill:
+
+            {"title": "Triage signals", "source": "cells",
+             "render": "signals", "span": 3,
+             "cells": [
+                 {"label": "Failed logons (4625)", "tone": "warn",
+                  "source": "sql",
+                  "query": {"sql": "SELECT COUNT(*) FROM {{evtx}} WHERE …"},
+                  "drill": {"table": "{{evtx}}", "where": [...]}},
+                 {"label": "Sysmon service", "chip": True, ...},
+             ]}
+
+        A cell is a small widget: its own `source` (anything but "cells"),
+        its own `query`, its own `drill`, an optional `tone: "warn"` and
+        an optional ``"chip": True``, which draws it as a yes/no pill
+        rather than a number — a cell's value is one number, the first one
+        its query returns. Labels are unique within a card, because the
+        card finds a cell's drill by its label. One card is one request,
+        whatever the cell count, and a cell whose table is missing from
+        the case reports in its own place instead of taking the card's
+        other numbers down with it.
+
+        A widget's last result is kept in the case file and painted the
+        moment the board opens, with its age on the card — a board is not
+        re-run from scratch every time someone clicks it. ``"live": True``
+        opts one widget out of that and re-runs it on every open. Use it
+        only where the number would be wrong to show a minute old and the
+        query is cheap enough to pay for on every open: a tag or watchlist
+        count, not a GROUP BY over the whole log. Everything else is
+        re-run by the board's ↻ Refresh, or per widget from its editor.
+
+        A run that did not fully answer is not kept — a widget that
+        errored, and a signals card any of whose cells errored, are re-run
+        on the next open rather than painted from the cache, since the
+        usual reason a cell cannot answer is that its table has not been
+        imported yet.
+
+        ``id`` is what that cached result hangs off. You do not set it —
+        Winnow assigns one when the board is written into a case, and the
+        board you register here is never stamped. But you will SEE it on
+        any widget you read back (``req.store.get_dashboard()``, the
+        ``/api/dashboards/{id}`` response), and if you edit a board and
+        write it back with ``req.store.set_dashboard_widgets()`` you must
+        keep it: a widget that comes back without its id is a new widget
+        as far as the cache is concerned, and every card on that board
+        re-runs from scratch on the next open.
+
+        SQL rides the read-only pane connection, so a widget is data, not
+        code. Two placeholders save you from hardcoding a table id that is
+        different in every case: ``{{evtx}}``-style shorthands and
+        ``{{header_set:Some Set}}`` bind to the first table carrying that
+        header set, and ``{{all:header_set:Some Set}}`` unions every table
+        that does. A placeholder no table matches is a friendly error on
+        the card, not a broken board.
+
+        Adding a board whose name is already taken in that case is
+        refused rather than resolved — the analyst chose that name, and
+        your label collided with it. They are asked; you do not decide.
+
+        A `drill` makes the card clickable, opening the rows behind its
+        number — `{"table": "{{evtx}}", "where": [{"column", "op",
+        "value"}], "column": "…", "bucket": "hour"}`. It has to select
+        exactly the rows the widget counted: a number whose click
+        contradicts it is worse than one that does not respond.
+
+        Registering does not need a case open, so a board can be offered
+        the moment the plugin loads. To build one FROM the data of the case
+        that is open — counts only known at runtime — call
+        ``req.store.create_dashboard(name, widgets)`` from a
+        register_api handler instead; this hook is for the boards your
+        plugin always ships."""
+        if not FORMAT_ID_RE.match(id or ""):
+            raise ValueError(f"Dashboard id {id!r} must be lowercase [a-z0-9_-]")
+        if not label:
+            raise ValueError("register_dashboard needs a label")
+        if not isinstance(widgets, list) or not widgets:
+            raise ValueError("register_dashboard needs a non-empty list of widgets")
+        for i, w in enumerate(widgets):
+            if not isinstance(w, dict) or not w.get("title"):
+                raise ValueError(f"Widget {i} needs a title")
+            if w.get("source") not in self.WIDGET_SOURCES:
+                raise ValueError(
+                    f"Widget {w['title']!r} has source {w.get('source')!r} — "
+                    f"one of {', '.join(self.WIDGET_SOURCES)}")
+            if w.get("render") not in self.WIDGET_RENDERS:
+                raise ValueError(
+                    f"Widget {w['title']!r} has render {w.get('render')!r} — "
+                    f"one of {', '.join(self.WIDGET_RENDERS)}")
+            if w["source"] == "sql" and not (w.get("query") or {}).get("sql"):
+                raise ValueError(f"Widget {w['title']!r} is a sql widget with no query.sql")
+            if w["source"] == "cells":
+                self._check_cells(w)
+        self._registry._add_dashboard({
+            "id": f"{self._plugin}.{id}",
+            "local_id": id,
+            "plugin": self._plugin,
+            "plugin_fs": self._fs,
+            "label": label,
+            "description": description,
+            "widgets": widgets,
+        })
+
+    def _check_cells(self, w: dict) -> None:
+        """A `signals` widget's cells, checked the same way and for the
+        same reason its source and render are: a cell with no label draws
+        a number nobody can read, and two cells sharing one are a card
+        whose second drill is unreachable — both are silent in a case
+        weeks later and knowable right here."""
+        cells = w.get("cells")
+        title = w.get("title")
+        if not isinstance(cells, list) or not cells:
+            raise ValueError(f"Widget {title!r} has source 'cells' and no cells")
+        seen = set()
+        for i, c in enumerate(cells):
+            if not isinstance(c, dict) or not c.get("label"):
+                raise ValueError(f"Widget {title!r}: cell {i} needs a label")
+            if c["label"] in seen:
+                raise ValueError(f"Widget {title!r}: two cells labelled {c['label']!r} — "
+                                 "a cell's label is how its drill is found")
+            seen.add(c["label"])
+            src = c.get("source") or "sql"
+            if src not in self.CELL_SOURCES:
+                raise ValueError(f"Widget {title!r}: cell {c['label']!r} has source {src!r} — "
+                                 f"one of {', '.join(self.CELL_SOURCES)}")
+            if src == "sql" and not (c.get("query") or {}).get("sql"):
+                raise ValueError(f"Widget {title!r}: cell {c['label']!r} is a sql cell with no query.sql")
+
+
+# A folder plugin's README, if it ships one. Name only — the manager
+# offers to reveal the file rather than rendering it, because a plugin's
+# README is arbitrary Markdown from the same untrusted-ish source as its
+# code and the app has no renderer that would be safe to point at it.
+_README_NAMES = ("README.md", "README.rst", "README.txt", "README")
+
+
+def _readme_of(root: Path) -> str | None:
+    if not root.is_dir():
+        return None
+    for name in _README_NAMES:
+        if (root / name).is_file():
+            return name
+    return None
+
+
+# ---------------------------------------------------------- static metadata
+
+# What a plugin's source says about itself, read WITHOUT importing it.
+#
+# A disabled plugin is never imported — that is the whole point of the off
+# switch on something that runs with the app's privileges — so until this
+# existed the listing had nothing to show for one but its folder name.
+# Seven bundled examples all carrying a name, a version and a sentence of
+# description rendered as seven rows reading `mft_usn`, `first_last`,
+# `top_values`…, and the only way to find out what one did was to turn it
+# on: exactly backwards, since the description is what the decision needs.
+#
+# `ast.parse` + `ast.literal_eval` never executes a line of the file. A
+# literal_eval on a hand-written dict is the same trust boundary as reading
+# JSON; it is not `eval`, and it cannot call anything.
+_DECL_PREFIX = "register_"
+
+
+def _literal_assignment(tree: ast.Module, want: str):
+    """The value of a module-level `want = <literal>`, or None.
+
+    Last assignment wins, matching what the interpreter would end up with.
+    A non-literal value (a name, an f-string, a call) is skipped rather
+    than guessed at — the point of reading statically is to be certain."""
+    found = None
+    for node in tree.body:
+        targets = (node.targets if isinstance(node, ast.Assign)
+                   else [node.target] if isinstance(node, ast.AnnAssign) and node.value
+                   else [])
+        if not any(isinstance(t, ast.Name) and t.id == want for t in targets):
+            continue
+        try:
+            found = ast.literal_eval(node.value)
+        except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+            continue
+    return found
+
+
+def static_meta(entry: Path) -> dict:
+    """`PLUGIN`, `WINNOW_API_VERSION` and the `register_*` kinds a plugin's
+    source names, read from the file rather than from a live module.
+
+    `declares` is what the SOURCE calls, not what a load would produce:
+    a kind appears if `api.register_<kind>(…)` is written anywhere in the
+    file, so it is a list of what the plugin can add, never a count of
+    what it did add. A loaded plugin has a real registry behind it and the
+    caller should use that instead — this is the answer for the one that
+    was deliberately not run.
+
+    Every failure is the same answer: empty. A plugin whose source does
+    not parse is a plugin that would not import either, and the listing's
+    job here is to describe, not to diagnose (a failed *load* still
+    reports its error the usual way)."""
+    out = {"name": None, "version": None, "description": "",
+           "api_wants": None, "declares": []}
+    try:
+        tree = ast.parse(entry.read_text(encoding="utf-8", errors="replace"), str(entry))
+    except (OSError, SyntaxError, ValueError):
+        return out
+    meta = _literal_assignment(tree, "PLUGIN")
+    if isinstance(meta, dict):
+        if meta.get("name"):
+            out["name"] = str(meta["name"])
+        if meta.get("version"):
+            out["version"] = str(meta["version"])
+        if meta.get("description"):
+            out["description"] = str(meta["description"])
+    wants = _literal_assignment(tree, "WINNOW_API_VERSION")
+    if isinstance(wants, int) and not isinstance(wants, bool):
+        out["api_wants"] = wants
+    kinds = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        # `api.register_tab(…)` — the documented form. A bare
+        # `register_tab(…)` is not one of ours (the name only exists as a
+        # method on the PluginAPI the register() function is handed).
+        if isinstance(fn, ast.Attribute) and fn.attr.startswith(_DECL_PREFIX):
+            kinds.add(fn.attr[len(_DECL_PREFIX):])
+    out["declares"] = sorted(k for k in kinds if k)
+    return out
+
+
+class _Loaded:
+    """Everything one `PluginRegistry.load` registers: the listing and
+    each extension point's index. A load fills a fresh one and the
+    registry swaps it in whole (see load), so this is also what a reader
+    holds for the length of one lookup — never half of one load and half
+    of another."""
+
+    def __init__(self):
+        self.plugins: list[dict] = []       # [{name, fs_name, path, version, description, error|None, enabled, gen, formats:[ids], tabs:[ids]}]
+        self.formats: dict[str, IngestFormat] = {}
+        self.tabs: dict[str, dict] = {}                 # namespaced tab id -> tab dict (see PluginAPI.register_tab)
+        self.apis: dict[tuple[str, str], dict] = {}     # (fs_name, route) -> {handler, methods}
+        self.row_actions: dict[str, dict] = {}          # namespaced action id -> see register_row_action
+        self.panels: dict[str, dict] = {}               # namespaced panel id -> see register_toolbar_panel
+        self.page_panels: dict[str, dict] = {}          # namespaced panel id -> see register_page_panel
+        self.dashboards: dict[str, dict] = {}           # namespaced board id -> see register_dashboard
+
+    # Every table a register_* call writes into. _snapshot/_rollback copy
+    # these (shallowly: the entries themselves are never mutated after
+    # they're added), so a new extension point needs its table named here
+    # or a failed register() keeps that kind of registration.
+    _TABLES = ("formats", "tabs", "apis", "row_actions", "panels",
+               "page_panels", "dashboards")
+
+    def _snapshot(self) -> dict:
+        return {name: dict(getattr(self, name)) for name in self._TABLES}
+
+    def _rollback(self, snapshot: dict) -> None:
+        for name, table in snapshot.items():
+            live = getattr(self, name)
+            live.clear()
+            live.update(table)
+
+    # The PluginAPI a plugin's register() is handed writes through these.
+
+    def _add_format(self, fmt: IngestFormat) -> None:
+        if fmt.id in self.formats:
+            raise ValueError(f"Duplicate ingest format id: {fmt.id}")
+        self.formats[fmt.id] = fmt
+
+    # Tabs, toolbar panels and page panels share one `<plugin>.<id>`
+    # namespace: the frontend keys their mounts and everything a mount
+    # owns by that id, so a plugin naming a tab and a panel both
+    # "copilot" would have one teardown cut the other's state.
+    def _claim_ui_id(self, id: str, what: str) -> None:
+        for kind, table in (("tab", self.tabs), ("toolbar panel", self.panels), ("page panel", self.page_panels)):
+            if id in table:
+                raise ValueError(f"Duplicate {what} id: {id} (already a {kind} — tabs and panels share one id space)")
+
+    def _add_tab(self, tab: dict) -> None:
+        self._claim_ui_id(tab["id"], "tab")
+        self.tabs[tab["id"]] = tab
+
+    def _add_panel(self, panel: dict) -> None:
+        self._claim_ui_id(panel["id"], "toolbar panel")
+        self.panels[panel["id"]] = panel
+
+    def _add_page_panel(self, panel: dict) -> None:
+        self._claim_ui_id(panel["id"], "page panel")
+        self.page_panels[panel["id"]] = panel
+
+    def _add_dashboard(self, board: dict) -> None:
+        if board["id"] in self.dashboards:
+            raise ValueError(f"Duplicate dashboard id: {board['id']}")
+        self.dashboards[board["id"]] = board
+
+    def _add_row_action(self, action: dict) -> None:
+        if action["id"] in self.row_actions:
+            raise ValueError(f"Duplicate row action id: {action['id']}")
+        self.row_actions[action["id"]] = action
+
+    def _add_api(self, fs_name: str, route: str, handler: Callable, methods: set[str]) -> None:
+        if (fs_name, route) in self.apis:
+            raise ValueError(f"Duplicate API route: {route}")
+        self.apis[(fs_name, route)] = {"handler": handler, "methods": methods}
 
 
 class PluginRegistry:
@@ -624,13 +1068,44 @@ class PluginRegistry:
     plugin didn't load instead of it silently not existing."""
 
     def __init__(self):
-        self.plugins: list[dict] = []       # [{name, fs_name, path, version, description, error|None, enabled, gen, formats:[ids], tabs:[ids]}]
-        self._formats: dict[str, IngestFormat] = {}
-        self._tabs: dict[str, dict] = {}                 # namespaced tab id -> tab dict (see PluginAPI.register_tab)
-        self._apis: dict[tuple[str, str], dict] = {}     # (fs_name, route) -> {handler, methods}
-        self._row_actions: dict[str, dict] = {}          # namespaced action id -> see register_row_action
-        self._panels: dict[str, dict] = {}               # namespaced panel id -> see register_toolbar_panel
+        # The live set — replaced whole by load(), never edited in place.
+        # Every lookup below reads it ONCE into a local, so a reload
+        # landing mid-lookup can't hand it the listing of one load and
+        # the routes of the next.
+        self._state = _Loaded()
+        # One load at a time: two overlapping ones used to clear and fill
+        # the same dicts, so each plugin's register() collided with its own
+        # registration from the other load ("Duplicate API route") and the
+        # listing came out with every plugin twice, half of them failed.
+        self._load_lock = threading.Lock()
         self._seq = 0  # unique module names across load() calls / same-named plugins in two dirs
+
+    @property
+    def plugins(self) -> list[dict]:
+        return self._state.plugins
+
+    # A PluginAPI built straight on a registry (rather than by load) — a
+    # test's, say — registers into the live set, as it always did.
+    def _add_format(self, fmt: IngestFormat) -> None:
+        self._state._add_format(fmt)
+
+    def _add_tab(self, tab: dict) -> None:
+        self._state._add_tab(tab)
+
+    def _add_panel(self, panel: dict) -> None:
+        self._state._add_panel(panel)
+
+    def _add_page_panel(self, panel: dict) -> None:
+        self._state._add_page_panel(panel)
+
+    def _add_dashboard(self, board: dict) -> None:
+        self._state._add_dashboard(board)
+
+    def _add_row_action(self, action: dict) -> None:
+        self._state._add_row_action(action)
+
+    def _add_api(self, fs_name: str, route: str, handler: Callable, methods: set[str]) -> None:
+        self._state._add_api(fs_name, route, handler, methods)
 
     # ------------------------------------------------------------- loading
 
@@ -663,17 +1138,26 @@ class PluginRegistry:
 
         `bundled_dirs` entries mark their plugins `bundled: True` in the
         listing — presentation only ("ships with Winnow" in the panel);
-        enablement policy is entirely `enabled_for`'s business."""
+        enablement policy is entirely `enabled_for`'s business.
+
+        The new set is built off to the side and swapped in whole at the
+        end, and loads are serialised. Clearing the live dicts first (as
+        this did) meant every plugin route 404'd for as long as the
+        imports took — seconds, with an SDK to import — and two loads at
+        once (a toggle in one window while a case opens in another; both
+        routes run on worker threads) filled the same dicts and marked
+        healthy plugins failed. A load that raises leaves the previous
+        set in place."""
+        with self._load_lock:
+            staged = _Loaded()
+            self._load_into(staged, directories, disabled, enabled_for, bundled_dirs)
+            self._state = staged
+
+    def _load_into(self, staged: "_Loaded", directories, disabled, enabled_for, bundled_dirs) -> None:
         disabled = set(disabled)
         if enabled_for is None:
             enabled_for = lambda fs_name, directory: fs_name not in disabled  # noqa: E731
         bundled = {str(Path(b)) for b in bundled_dirs}
-        self.plugins = []
-        self._formats = {}
-        self._tabs = {}
-        self._apis = {}
-        self._row_actions = {}
-        self._panels = {}
         seen: set[str] = set()
         for directory in directories:
             d = Path(directory)
@@ -693,16 +1177,24 @@ class PluginRegistry:
                     continue
                 seen.add(fs_name)
                 if not enabled_for(fs_name, str(d)):
-                    self.plugins.append({
-                        "name": fs_name, "fs_name": fs_name, "path": str(candidate),
-                        "version": None, "description": "", "error": None,
+                    # Never imported — so everything below it knows about
+                    # itself comes from reading the file. See static_meta.
+                    meta = static_meta(entry)
+                    staged.plugins.append({
+                        "name": meta["name"] or fs_name, "fs_name": fs_name,
+                        "path": str(candidate),
+                        "version": meta["version"], "description": meta["description"],
+                        "error": None,
                         "enabled": False, "gen": 0, "formats": [], "tabs": [],
                         "bundled": is_bundled,
+                        "entry": entry.name, "readme": _readme_of(candidate),
+                        "api_wants": meta["api_wants"], "declares": meta["declares"],
                     })
                 else:
-                    self._load_one(fs_name, entry, candidate, bundled=is_bundled)
+                    self._load_one(staged, fs_name, entry, candidate, bundled=is_bundled)
 
-    def _load_one(self, default_name: str, entry: Path, root: Path, bundled: bool = False) -> None:
+    def _load_one(self, staged: "_Loaded", default_name: str, entry: Path, root: Path,
+                  bundled: bool = False) -> None:
         self._seq += 1
         # Unique, never-importable-by-accident module name; the seq keeps a
         # reload (or the same plugin name in two directories) from silently
@@ -711,6 +1203,12 @@ class PluginRegistry:
         record = {
             "name": default_name, "fs_name": default_name, "path": str(root),
             "version": None, "description": "", "error": None,
+            # Set from the module below once it imports. Pre-seeded so a
+            # plugin that fails to load still describes itself in the
+            # listing instead of going blank at the moment it most needs
+            # to be identifiable.
+            "entry": entry.name, "readme": _readme_of(root),
+            "api_wants": None, "declares": [],
             # gen = this load's sequence number — the frontend cache-busts
             # a tab entry's import() URL with it, so a toggle-off/on (or
             # any registry reload) picks up changed JS instead of the
@@ -718,7 +1216,7 @@ class PluginRegistry:
             "enabled": True, "gen": self._seq, "formats": [], "tabs": [],
             "bundled": bundled,
         }
-        self.plugins.append(record)
+        staged.plugins.append(record)
         try:
             spec = importlib.util.spec_from_file_location(
                 mod_name, entry,
@@ -736,6 +1234,8 @@ class PluginRegistry:
             record["description"] = str(meta.get("description") or "")
 
             wants = getattr(module, "WINNOW_API_VERSION", None)
+            if wants is not None:
+                record["api_wants"] = int(wants)
             if wants is not None and int(wants) > PLUGIN_API_VERSION:
                 raise RuntimeError(
                     f"needs Winnow plugin API v{wants}, this build provides v{PLUGIN_API_VERSION} — update Winnow"
@@ -744,54 +1244,78 @@ class PluginRegistry:
             if not callable(register):
                 raise RuntimeError("plugin has no register(api) function")
 
-            before_formats = set(self._formats)
-            before_tabs = set(self._tabs)
-            register(PluginAPI(self, record["name"], record["fs_name"], root))
-            record["formats"] = sorted(set(self._formats) - before_formats)
-            record["tabs"] = sorted(set(self._tabs) - before_tabs)
-        except Exception as e:
+            before_formats = set(staged.formats)
+            before_tabs = set(staged.tabs)
+            snapshot = staged._snapshot()
+            try:
+                register(PluginAPI(staged, record["name"], record["fs_name"], root))
+            except BaseException:
+                # A register() that raises partway has already put its
+                # first few formats, routes and row actions into the
+                # staged tables, and staged goes live. Left there they
+                # WORK — an ingest format offered, a route answering — for
+                # a plugin the panel lists as failed. All or nothing: roll
+                # back to before it ran.
+                staged._rollback(snapshot)
+                raise
+            record["formats"] = sorted(set(staged.formats) - before_formats)
+            record["tabs"] = sorted(set(staged.tabs) - before_tabs)
+        except BaseException as e:  # noqa: BLE001 — see below
+            # BaseException, not Exception, and the difference is the whole
+            # point. Importing a plugin runs arbitrary module-level Python,
+            # and `sys.exit("needs Winnow 2.0")` is a completely ordinary
+            # way for a plugin to bail on a version check. SystemExit and
+            # KeyboardInterrupt are not Exception subclasses, so they used
+            # to walk straight out of here:
+            #
+            #   - out of an install (run_in_threadpool(_reload_plugins)),
+            #     where it escapes the worker thread and the request never
+            #     returns — Winnow simply stops answering;
+            #   - and out of the module-level _reload_plugins() in
+            #     server.py, where it kills the import and the server will
+            #     not start AT ALL until the plugin is deleted by hand.
+            #
+            # Install such a plugin and Winnow hangs, then refuses to come
+            # back up. A plugin that cannot load is a load error like any
+            # other, and that is what it is recorded as here.
+            #
+            # The cost is a real Ctrl+C landing inside a plugin's import
+            # being swallowed. That is one keystroke, on a server whose
+            # shutdown uvicorn owns — against a plugin being able to make
+            # the app unstartable, it is not a close call.
             # Full traceback to the console for the plugin author; a
             # one-liner in the record for the UI.
             traceback.print_exc()
             record["error"] = f"{type(e).__name__}: {e}"
-
-    def _add_format(self, fmt: IngestFormat) -> None:
-        if fmt.id in self._formats:
-            raise ValueError(f"Duplicate ingest format id: {fmt.id}")
-        self._formats[fmt.id] = fmt
-
-    def _add_tab(self, tab: dict) -> None:
-        if tab["id"] in self._tabs:
-            raise ValueError(f"Duplicate tab id: {tab['id']}")
-        self._tabs[tab["id"]] = tab
-
-    def _add_panel(self, panel: dict) -> None:
-        if panel["id"] in self._panels:
-            raise ValueError(f"Duplicate toolbar panel id: {panel['id']}")
-        self._panels[panel["id"]] = panel
-
-    def _add_row_action(self, action: dict) -> None:
-        if action["id"] in self._row_actions:
-            raise ValueError(f"Duplicate row action id: {action['id']}")
-        self._row_actions[action["id"]] = action
-
-    def _add_api(self, fs_name: str, route: str, handler: Callable, methods: set[str]) -> None:
-        if (fs_name, route) in self._apis:
-            raise ValueError(f"Duplicate API route: {route}")
-        self._apis[(fs_name, route)] = {"handler": handler, "methods": methods}
+            # An import that died partway leaves the record holding
+            # whatever ran before the exception — for a plugin that blew
+            # up on its first line, that is the folder name and nothing
+            # else. Reading the file gives the failed plugin back its
+            # name and description, which is when they are most wanted.
+            meta = static_meta(entry)
+            record["name"] = record["name"] or meta["name"] or default_name
+            if record["name"] == default_name and meta["name"]:
+                record["name"] = meta["name"]
+            record["version"] = record["version"] or meta["version"]
+            record["description"] = record["description"] or meta["description"]
+            record["api_wants"] = record["api_wants"] or meta["api_wants"]
+            record["declares"] = meta["declares"]
 
     # -------------------------------------------------------------- lookup
+    #
+    # Each reads self._state once — see __init__.
 
     def get_format(self, format_id: str) -> IngestFormat:
-        if format_id not in self._formats:
+        formats = self._state.formats
+        if format_id not in formats:
             raise KeyError(f"No such ingest format: {format_id}")
-        return self._formats[format_id]
+        return formats[format_id]
 
     def format_for_filename(self, filename: str) -> IngestFormat | None:
         """First registered format claiming this filename, in plugin load
         order — used as the default routing for dropped/scanned files. The
         analyst can always pick a different format explicitly."""
-        for fmt in self._formats.values():
+        for fmt in self._state.formats.values():
             if fmt.matches(filename):
                 return fmt
         return None
@@ -799,30 +1323,50 @@ class PluginRegistry:
     # ------------------------------------------------------------ describe
 
     def list_formats(self) -> list[dict]:
-        return [f.describe() for f in self._formats.values()]
+        return [f.describe() for f in self._state.formats.values()]
 
     def list_tabs(self) -> list[dict]:
         """Every registered tab, each carrying its plugin's gen so the
         frontend can cache-bust the entry module URL per load."""
-        gen_by_fs = {p["fs_name"]: p["gen"] for p in self.plugins}
-        return [{**t, "gen": gen_by_fs.get(t["plugin_fs"], 0)} for t in self._tabs.values()]
+        st = self._state
+        gen_by_fs = {p["fs_name"]: p["gen"] for p in st.plugins}
+        return [{**t, "gen": gen_by_fs.get(t["plugin_fs"], 0)} for t in st.tabs.values()]
 
     def get_api(self, fs_name: str, route: str) -> dict | None:
-        return self._apis.get((fs_name, route))
+        return self._state.apis.get((fs_name, route))
 
     def list_panels(self) -> list[dict]:
         """Every registered toolbar panel, with its plugin's gen for the
         entry module's cache-buster (same as list_tabs)."""
-        gen_by_fs = {p["fs_name"]: p["gen"] for p in self.plugins}
-        return [{**t, "gen": gen_by_fs.get(t["plugin_fs"], 0)} for t in self._panels.values()]
+        st = self._state
+        gen_by_fs = {p["fs_name"]: p["gen"] for p in st.plugins}
+        return [{**t, "gen": gen_by_fs.get(t["plugin_fs"], 0)} for t in st.panels.values()]
+
+    def list_page_panels(self) -> list[dict]:
+        """Every registered page panel (SQL / Notes side columns), with its
+        plugin's gen for the entry module's cache-buster."""
+        st = self._state
+        gen_by_fs = {p["fs_name"]: p["gen"] for p in st.plugins}
+        return [{**t, "gen": gen_by_fs.get(t["plugin_fs"], 0)} for t in st.page_panels.values()]
+
+    def list_dashboards(self) -> list[dict]:
+        """Every registered dashboard, without its widgets — the sidebar
+        lists them by name and count, and fetches the widgets only when
+        the analyst adds one."""
+        return [{k: v for k, v in b.items() if k != "widgets"} | {"widget_count": len(b["widgets"])}
+                for b in self._state.dashboards.values()]
+
+    def get_dashboard(self, fs_name: str, local_id: str) -> dict | None:
+        return next((b for b in self._state.dashboards.values()
+                     if b["plugin_fs"] == fs_name and b["local_id"] == local_id), None)
 
     def list_row_actions(self) -> list[dict]:
         """Every registered row action, minus the handler (the UI only
         needs label/description/max_rows and where to POST)."""
-        return [{k: v for k, v in a.items() if k != "handler"} for a in self._row_actions.values()]
+        return [{k: v for k, v in a.items() if k != "handler"} for a in self._state.row_actions.values()]
 
     def get_row_action(self, fs_name: str, local_id: str) -> dict | None:
-        return next((a for a in self._row_actions.values()
+        return next((a for a in self._state.row_actions.values()
                      if a["plugin_fs"] == fs_name and a["local_id"] == local_id), None)
 
     def describe(self) -> list[dict]:

@@ -5,19 +5,9 @@ table… with the timeline tag)."""
 
 from __future__ import annotations
 
-import json
-import urllib.request
-
 import pytest
 
 pytestmark = pytest.mark.ui
-
-
-def _post(server, route, body):
-    req = urllib.request.Request(
-        server.rstrip("/") + route, data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json", "X-Timeline-Lite-Client": "1"})
-    return json.loads(urllib.request.urlopen(req, timeout=10).read())
 
 
 DRAG = """(args) => {
@@ -32,28 +22,6 @@ DRAG = """(args) => {
 }"""
 
 
-@pytest.fixture(scope="module")
-def fl_page(browser, server):
-    _post(server, "/api/plugins/toggle", {"fs_name": "first_last", "scope": "on_all"})
-    ctx = browser.new_context(viewport={"width": 1500, "height": 900},
-                              permissions=["clipboard-read", "clipboard-write"])
-    ctx.add_init_script("localStorage.setItem('winnow.remotePrompt', 'seen');"
-                        "localStorage.setItem('winnow.appearance', JSON.stringify({ splash: false }))")
-    pg = ctx.new_page()
-    errors: list[str] = []
-    pg.on("pageerror", lambda e: errors.append(str(e)))
-    pg.goto(server, wait_until="networkidle")
-    pg.wait_for_selector(".row")
-    pg.evaluate("() => __winnow.loadPlugins()")
-    pg.wait_for_function("() => __winnow.S.pluginTabs.some((t) => t.id.includes('firstlast'))",
-                         timeout=10_000)
-    pg.locator(".tab-plugin", has_text="First/Last").click()
-    pg.wait_for_selector("[data-zone='groupBy']", timeout=10_000)
-    yield pg
-    ctx.close()
-    assert not errors, "uncaught JS errors: " + " | ".join(errors)
-
-
 def _chip(field):
     return f"[data-field='{field}']"
 
@@ -65,20 +33,26 @@ def test_drag_drop_builds_a_grouping_with_preview(fl_page):
     # datetime column, so the preview runs.
     pg.wait_for_selector("tbody tr", timeout=10_000)
     assert "5 groups" in pg.locator("text=5 groups").first.inner_text()
-    # Include a column by dragging it into carry.
+    # And the grouped column is in the output without a second drag — see
+    # tests/ui/test_firstlast_group_includes.py for that rule on its own.
+    pg.wait_for_function(
+        "() => [...document.querySelectorAll('thead th')].map(h => h.textContent).join('|') === 'Timestamp|Host|Description'",
+        timeout=10_000)
+    # Include a further column by dragging it into carry.
     pg.evaluate(DRAG, [_chip("EventId"), "[data-zone='carry']"])
     pg.wait_for_function(
-        "() => [...document.querySelectorAll('thead th')].map(h => h.textContent).join('|') === 'Timestamp|EventId|Description'",
+        "() => [...document.querySelectorAll('thead th')].map(h => h.textContent).join('|') === 'Timestamp|Host|EventId|Description'",
         timeout=10_000)
 
 
 def test_header_drag_reorders_included_columns(fl_page):
+    """Carries on from the test above, which leaves Host then EventId in
+    the output (Host from the grouping, EventId dragged)."""
     pg = fl_page
-    pg.evaluate(DRAG, [_chip("Host"), "[data-zone='carry']"])
     pg.wait_for_function(
-        "() => [...document.querySelectorAll('thead th')].map(h => h.textContent).join('|') === 'Timestamp|EventId|Host|Description'",
+        "() => [...document.querySelectorAll('thead th')].map(h => h.textContent).join('|') === 'Timestamp|Host|EventId|Description'",
         timeout=10_000)
-    # Drag the Host header onto the EventId header — Host moves first.
+    # Drag the EventId header onto the Host header — EventId moves first.
     pg.evaluate("""() => {
       const ths = [...document.querySelectorAll('thead th')];
       const dt = new DataTransfer();
@@ -89,7 +63,7 @@ def test_header_drag_reorders_included_columns(fl_page):
       src.dispatchEvent(new DragEvent('dragend', { bubbles: true, dataTransfer: dt }));
     }""")
     pg.wait_for_function(
-        "() => [...document.querySelectorAll('thead th')].map(h => h.textContent).join('|') === 'Timestamp|Host|EventId|Description'",
+        "() => [...document.querySelectorAll('thead th')].map(h => h.textContent).join('|') === 'Timestamp|EventId|Host|Description'",
         timeout=10_000)
 
 

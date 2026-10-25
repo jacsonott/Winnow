@@ -14,7 +14,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
 
 from winnow import instances, workspace as WS
 
@@ -99,3 +98,26 @@ def test_concurrent_processes_do_not_lose_writes(tmp_path):
     items = json.loads((tmp_path / "ws" / "contended.json").read_text())["items"]
     assert len(items) == 100, f"lost {100 - len(items)} of 100 writes"
     assert len(set(items)) == 100
+
+
+def test_a_server_still_starting_is_not_pruned_for_good(tmp_path, monkeypatch):
+    """main() registers before uvicorn binds, so every server spends its
+    first seconds registered and silent. A launcher calling running() in
+    that window pruned the entry, and the server never registered again:
+    once it was up, find_idle() still never found it."""
+    monkeypatch.setattr(WS, "WORKSPACE_DIR", tmp_path / "ws")
+    instances.register(8777, None)
+
+    assert instances.running(_probe=lambda p: False) == []     # not up yet
+    assert instances.find_idle(_probe=lambda p: True)["port"] == 8777  # now it is
+
+
+def test_a_server_that_never_comes_up_is_pruned_after_the_grace(tmp_path, monkeypatch):
+    monkeypatch.setattr(WS, "WORKSPACE_DIR", tmp_path / "ws")
+    instances.register(8777, None)
+    later = instances.time.time() + instances.STARTUP_GRACE_S + 1
+    monkeypatch.setattr(instances.time, "time", lambda: later)
+
+    assert instances.running(_probe=lambda p: False) == []
+    on_disk = json.loads((tmp_path / "ws" / instances.FILE).read_text())
+    assert on_disk["instances"] == []

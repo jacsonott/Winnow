@@ -65,6 +65,29 @@ export const WIDGET_TEMPLATES = [
     drill: (t, p) => ({ table: t }) },
 ];
 
+/* What a widget reads FROM and how it is DRAWN, as the editor names
+   them: [stored value, label, what it answers with]. The values are what
+   boards, the Library and shipped profiles store, so they never change —
+   only the labels are free to. Each third field is the chip's or the
+   option's tooltip, written from what runWidget's sources return and
+   what paintWidget draws, because the raw names said neither. */
+export const WIDGET_SOURCES = [
+  ['sql', 'A query', 'A read-only query against the case — written for you by “What to show”, or by hand'],
+  ['watchlist', 'Watchlist hits', 'One row per watchlist indicator with its hit count; as a Number, the total of all hits'],
+  ['tags', 'Tag counts', 'One row per tag with how many rows carry it; as a Number, the total'],
+  ['cells', 'Signals card', 'Several small questions in one card, each with its own number and its own rows'],
+];
+
+export const WIDGET_RENDERS = [
+  ['stat', 'Number', 'One big number: the last column of the first row, or the watchlist / tag total'],
+  ['kv', 'Key / value', 'Label and value pairs, one per row: two columns, label then value'],
+  ['chips', 'Yes / no chips', 'A pill per row: ✓ when its value is above 0 or true, ✗ otherwise'],
+  ['list', 'List', 'The first 12 rows as a ranked list: label first, count last'],
+  ['bar', 'Bar chart', 'Horizontal bars: label first, count last'],
+  ['histogram', 'Histogram', 'Bars over time: bucket label first, count last'],
+  ['signals', 'Signals', 'A grid of labelled numbers, each opening its own rows (a Signals card)'],
+];
+
 export function templateById(id) {
   return WIDGET_TEMPLATES.find((t) => t.id === id) || WIDGET_TEMPLATES[0];
 }
@@ -107,10 +130,13 @@ export const tableOf = (sourceId) => `src_${sourceId}`;
    by dashboard.js into S.headerSets). Types are known only for case
    tables; placeholder columns get a name-based guess so the time
    templates can offer something. */
-/* A widget's SQL is `FROM src_<id>`, and a derived column's values are not
-   there — they live in the drv_<id> sidecar, which run_sql does not join.
-   Offering one produces a card whose body reads "no such column", so it is
-   filtered out at the source of every column list a widget is built from. */
+/* Derived columns are left out of every column list a widget is built
+   from (and the "Add to dashboard" menu entries skip them too). Not
+   because a widget's SQL can't see one: run_sql's pane connection shadows
+   `src_<id>` with a TEMP view that joins the drv_<id> sidecar
+   (Store._pane_connection), so a hand-written widget query can name a
+   derived column and gets its values. The guided editor just doesn't
+   offer them. */
 const widgetable = (c) => !c.derived;
 
 export function columnsForTable(table) {

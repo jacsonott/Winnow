@@ -10,20 +10,33 @@
 #
 # Deliberately NOT applied to docs/ or .github/: a downloaded tree that
 # can't tell you how it's meant to work is a worse artifact than a
-# slightly larger one.
-.claude/            export-ignore
+# slightly larger one. The one exception is docs/site/, below.
+#
+# Every directory rule is anchored with a leading "/". Unanchored, a
+# pattern matches that name at ANY depth: `screenshots/` also took
+# docs/screenshots/ (the images README.md shows) and `design/` took
+# docs/design/, so the docs this comment promises shipped with holes in.
+/.claude/            export-ignore
 scripts/release.py   export-ignore
 tests/test_release_script.py export-ignore
-tests/               export-ignore
-bench/               export-ignore
-CLAUDE.md            export-ignore
-requirements-dev.txt export-ignore
-# Neither is read at runtime: screenshots/ is README material kept at full
-# resolution, design/ is prototype HTML. Together they were over half the
-# bytes an analyst pulled over a slow link or carried in on a USB stick.
-screenshots/         export-ignore
-design/              export-ignore
+/tests/              export-ignore
+/bench/              export-ignore
+/CLAUDE.md           export-ignore
+/requirements-dev.txt export-ignore
+/ruff.toml           export-ignore
+# Neither is read at runtime: /screenshots/ is development screenshots kept
+# at full resolution, /design/ is prototype HTML. Together they were over
+# half the bytes an analyst pulled over a slow link or carried in on a USB
+# stick. README.md's own images are docs/screenshots/, which ships.
+/screenshots/        export-ignore
+/design/             export-ignore
+# The Pages site's own folder: its theme, the feature pages and their
+# recordings, which are megabytes of GIF. The site is built from the
+# repository (.github/workflows/pages.yml), not from the zip, and the
+# manual it is made of, docs/wiki/, ships.
+/docs/site/          export-ignore
 
-# Brand icons are binary — never line-ending-convert or diff them as text.
+# Images are binary — never line-ending-convert or diff them as text.
 *.png binary
+*.gif binary
 *.ico binary

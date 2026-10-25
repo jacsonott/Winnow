@@ -2,7 +2,7 @@
 picker behind each ▾, and filtering by a cell's value.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
-import { renderHead, saveLayout, visibleCols } from './columns.js';
+import { renderFilterBar, renderHead, renderHeadResized, saveLayout, visibleCols } from './columns.js';
 import { $, api, debounce, el, toast } from './core.js';
 import { rowAt } from './grid.js';
 import { collapseSearchIfEmpty, syncSearchExpansion } from './search.js';
@@ -10,16 +10,26 @@ import { clearAllFilters } from './sources.js';
 import { S, normalizeTree } from './state.js';
 import { updateFiltersButton } from './timeframe.js';
 import { anchoredPanel, closeMenu } from './ui.js';
-import { rebuildSoon, rebuildView } from './view.js';
+import { SEARCH_DETACH_MS, rebuildView, sameSearchInFlight } from './view.js';
 
 /* -------------------------------------------------------------- filters */
+
+/* The search box's rebuilds — the debounce below, Enter, Escape, the
+   mode switch, the advanced chips — are the ones that go to the
+   background after SEARCH_DETACH_MS (view.js): the old rows stay on
+   screen and the result waits for Apply. A header-box filter uses
+   view.js's rebuildSoon and blocks with the cancel chip like every
+   other rebuild — see SEARCH_DETACH_MS for why the two differ. */
+const searchSoon = debounce(() => rebuildView({ detachAfterMs: SEARCH_DETACH_MS }), 220);
 
 /* Compact filter syntax, typed straight into the column box:
      foo      contains          !foo    does not contain
      =foo     exact             ^foo    starts with
      >10 <10 >=10 <=10          /re/    regex
      ""       empty             *       not empty
-     a|b|c    any of            */
+     a|b|c    any of            a|""    any of, or empty
+   plus quoting, for exact values the bare text can't spell (see
+   unquoteValue): `=" padded "`, `"a|b"|c`. */
 export function parseFilter(raw) {
   const s = raw.trim();
   if (!s) return null;
@@ -29,10 +39,148 @@ export function parseFilter(raw) {
   const m = s.match(/^(!=|>=|<=|[!=^><])(.*)$/);
   if (m && m[2] !== '') {
     const map = { '!': 'not_contains', '=': 'equals', '^': 'starts', '!=': 'not_equals' };
-    return { op: map[m[1]] || m[1], value: m[2].trim() };
+    const op = map[m[1]] || m[1];
+    const value = m[2].trim();
+    if (op !== 'equals' && op !== 'not_equals') return { op, value };
+    // `=""` keeps the literal two quotes it has always meant: an exact
+    // match on nothing is no filter at all server-side, and `""` on its own
+    // is already how the box says empty.
+    return { op, value: unquoteValue(value) || value };
   }
-  if (s.includes('|')) return { op: 'in', value: s.split('|').map((x) => x.trim()).filter(Boolean) };
+  if (s.includes('|')) return { op: 'in', value: splitValueList(s) };
   return { op: 'contains', value: s };
+}
+
+/* Quoting, for the exact values (`=`, `!=` and lists) — what lets the value
+   picker write every selection into the box rather than some of them. A
+   value needs it when bare text would lose it or be read as something
+   else: it's empty, has spaces at an edge (the box trims), holds the list's
+   `|`, or starts with a character that means something at the front of
+   the box — an operator, the `/` that opens a regex, or a quote.
+
+   A quoted value is read as the text inside it ONLY when that text needed
+   the quotes. Any other quoted text is literal, quotes and all, which is
+   what it meant before quoting existed: `="C:\Program Files\x.exe"` is an
+   everyday value in a service or command-line column, `f` writes it bare,
+   and it must go on matching the quotes. Inside quotes `""` is one `"`,
+   the CSV rule. */
+const QUOTED_VALUE = /^"((?:[^"]|"")*)"$/;
+
+const needsQuotes = (v) => v === '' || v !== v.trim() || v.includes('|') || /^["!=^<>/]/.test(v);
+
+const quoteValue = (v) => '"' + v.replace(/"/g, '""') + '"';
+
+function unquoteValue(t) {
+  const m = t.match(QUOTED_VALUE);
+  if (!m) return t;
+  const inner = m[1].replace(/""/g, '"');
+  return needsQuotes(inner) ? inner : t;
+}
+
+/* `a|b|c`, split on the bars that aren't inside a quoted item. A bare item
+   is trimmed and a blank one dropped (`a||b`, or the `a|` of a list still
+   being typed), exactly as before; `""` is the empty value, kept. An item
+   that opens a quote but doesn't close it right before a bar is bare text,
+   so `"C:\x.exe" -k|y` still splits where it always did. */
+const QUOTED_ITEM = /\s*("(?:[^"]|"")*")\s*(?=\||$)/y; // sticky: a 999-value list is one pass, not a slice per item
+
+function splitValueList(s) {
+  const items = [];
+  let i = 0;
+  while (i <= s.length) {
+    QUOTED_ITEM.lastIndex = i;
+    const quoted = QUOTED_ITEM.exec(s);
+    if (quoted) {
+      items.push(unquoteValue(quoted[1]));
+      i = QUOTED_ITEM.lastIndex + 1;
+      continue;
+    }
+    const bar = s.indexOf('|', i);
+    const end = bar < 0 ? s.length : bar;
+    const item = s.slice(i, end).trim();
+    if (item) items.push(item);
+    i = end + 1;
+  }
+  return items;
+}
+
+/* How one column's filter reads on a chip in the filter bar. Short enough
+   for a strip, and honest about which of the box's operators is in play —
+   a chip that showed the bare text would make `!powershell` and
+   `powershell` look like the same filter, which is the opposite of what a
+   summary is for. `contains` is the one op with no marker, because it is
+   what typing a word into the box means and a `~` on nine chips out of ten
+   is noise. */
+export function describeFilter(raw) {
+  const p = parseFilter(raw);
+  if (!p) return '';
+  const v = (n = 30) => ellipsize(String(p.value), n);
+  switch (p.op) {
+    case 'contains': return v();
+    case 'not_contains': return 'not ' + v(26);
+    case 'equals': return '= ' + v(28);
+    case 'not_equals': return '\u2260 ' + v(28);
+    case 'starts': return 'starts ' + v(24);
+    case 'regex': return '/' + v(26) + '/';
+    case 'empty': return 'is empty';
+    case 'not_empty': return 'is not empty';
+    case 'in': return ellipsize(p.value.map(displayValue).join(' | '), 34);
+    default: return p.op + ' ' + v(26); // the numeric comparisons: > >= < <=
+  }
+}
+
+/* Every per-column filter currently narrowing the table, in display order,
+   as {column, text, full} — what the filter bar draws chips from.
+
+   Two kinds, because a column can be filtered two ways and a bar that
+   showed only one would leave the other invisible: the header box's own
+   text, and the value picker's node in the guided filter tree (the
+   selections the box can't spell — see setPickerTreeNode). The tree's OTHER
+   conditions are the filter builder's and stay under Filters ▾, which is
+   where they can be edited.
+
+   Hidden and grouped-away columns are included deliberately: a filter on a
+   column you cannot see is exactly the one worth naming. */
+export function columnFilterChips() {
+  const seen = new Set();
+  const names = [...S.order, ...S.columns.map((c) => c.name)].filter((n) => {
+    if (seen.has(n)) return false;
+    seen.add(n);
+    return true;
+  });
+  const out = [];
+  for (const column of names) {
+    const raw = S.filters[column];
+    if (raw && parseFilter(raw)) {
+      out.push({ column, text: describeFilter(raw), full: raw });
+      continue;
+    }
+    const node = pickerTreeNode(column);
+    if (node) {
+      const values = valuesFromPickerNode(node).map(displayValue);
+      out.push({ column, text: ellipsize(values.join(' | '), 34), full: values.join(' | ') });
+    }
+  }
+  return out;
+}
+
+/* Taking one filter off, from the chip's ✕. Both spellings go, because
+   the chip names the column rather than the mechanism and removing "the
+   filter on Provider" has to mean all of it.
+
+   Through renderHeadResized rather than renderHead because the line that
+   drops the column from S.filterOpen can shrink the head. Nothing reaches
+   here with that column's box open today — a chip and a revealed box are
+   never drawn for the same column — so the pairing costs one repaint and
+   buys not having to remember that, since the cost of forgetting is rows
+   painted under the sticky header until something else repaints them. */
+export async function removeColumnFilter(column) {
+  delete S.filters[column];
+  setPickerTreeNode(column, null);
+  S.filterOpen = S.filterOpen.filter((n) => n !== column);
+  updateFiltersButton();
+  renderHeadResized();
+  await rebuildView();
 }
 
 export function currentSpec() {
@@ -56,6 +204,7 @@ export function currentSpec() {
     })(),
     tags: S.tagFilter,
     time_range: S.timeRange,
+    hide_empty_rows: !!S.hideEmptyRows,
   };
 }
 
@@ -74,10 +223,10 @@ export function currentSpec() {
    lean on until the lazy per-column one exists. At a few hundred thousand
    rows that's tens of milliseconds; on a 2.4M-row $J it's the kind of
    pause a button you might click by accident shouldn't be able to cause.
-   The override lives per-table and per-column in the table menu (right-
-   click a tab), and the row menu's "Filter by values…" opens it regardless
-   — an explicit click is consent to pay for the scan in a way an
-   always-present button isn't. */
+   The override lives per-table and per-column in the table menu (C, or a
+   tab's right-click → Columns…), and the row menu's "Filter by values…"
+   opens it regardless — an explicit click is consent to pay for the scan
+   in a way an always-present button isn't. */
 export const VALUE_FILTER_AUTO_MAX = 250000;
 
 export const VALUE_PICKER_LIMIT = 1000;
@@ -130,10 +279,13 @@ export function currentValueSelection(column) {
   return node ? new Set(valuesFromPickerNode(node)) : null;
 }
 
-/* The picker's node in the guided filter tree, for the selections the
-   header box can't spell (a value containing `|`, one with whitespace at
-   its edges, or `(empty)` mixed with real values — `IN ()` drops empty
-   strings server-side, so that combination has to be an OR).
+/* The picker's node in the guided filter tree, for the one selection the
+   header box can't spell: a value with a line break in it, which an
+   <input> strips. It used to be every selection with a `|` in a value,
+   whitespace at a value's edge or `(empty)` beside real values, which is
+   how a picked filter could land in the box one time and not the next —
+   the box quotes those now (see unquoteValue). Older sessions and saved
+   state can still carry such a node, so it is still read everywhere.
 
    Recognised structurally rather than by a marker field: openFilterBuilder
    round-trips the tree through SQL text, which would drop any marker we
@@ -185,13 +337,27 @@ export function setPickerTreeNode(column, values) {
   if (node) S.filterTree = { type: 'group', op: 'AND', children: [root, node] };
 }
 
-/* The header box's two spellings, or null when neither fits — see
-   valueFilterText for why `=v` is safe with a `|` in it but a multi-value
-   `a|b|c` isn't, and why edge whitespace never survives either. */
+/* What the header box says for a set of picked values: `=v` for one, `a|b|c`
+   for several, each value quoted only where it has to be (see
+   unquoteValue), so the box reads as plainly as the selection allows.
+   Null only for a value with a line break in it — an <input> strips those,
+   so no spelling survives being put in one. Checked by parsing the text
+   back, so a value this gets wrong lands in the filter tree rather than
+   filtering on something nobody picked. */
 export function quickFilterTextForValues(values) {
-  if (values.length === 1) return valueFilterText(values[0] === '' ? '' : values[0]);
-  if (values.some((v) => v === '' || String(v).includes('|') || valueFilterText(v) === null)) return null;
-  return values.join('|');
+  if (values.length === 1) return valueFilterText(values[0]);
+  if (values.some((v) => /[\r\n]/.test(v))) return null;
+  // A leading quote is the one reason in needsQuotes that bare text can
+  // survive: `"C:\x.exe"` reads back as itself, quotes and all, and is
+  // far easier to read than `"""C:\x.exe"""`. Only when it is a whole
+  // quoted string on its own, though — `"abc` bare would pair its quote
+  // with one in a later value — and only when unquoteValue keeps it.
+  const bare = (v) => v !== '' && v === v.trim() && !v.includes('|') && !/^[!=^<>/]/.test(v)
+    && (v[0] !== '"' || (QUOTED_VALUE.test(v) && unquoteValue(v) === v));
+  const text = values.map((v) => (bare(v) ? v : quoteValue(v))).join('|');
+  const p = parseFilter(text);
+  const same = p && p.op === 'in' && p.value.length === values.length && p.value.every((v, i) => v === values[i]);
+  return same ? text : null;
 }
 
 export async function applyValueSelection(column, values, { clearInstead }) {
@@ -203,7 +369,7 @@ export async function applyValueSelection(column, values, { clearInstead }) {
     setColumnFilter(column, text === null ? '' : text);
     if (text === null) {
       setPickerTreeNode(column, values);
-      toast(`${column}: applied under Filters ▾ — these values can't be written in the filter box`, 5000);
+      toast(`${column}: applied under Filters ▾ — a value spans more than one line, which the filter box can't hold`, 5000);
     }
   }
   updateFiltersButton();
@@ -251,6 +417,8 @@ export function openValuePicker(column, anchorEl) {
     values: null,
     truncated: false,
     checked: new Set(),
+    // The ticks the list arrived with, so Apply can tell "nothing changed".
+    loadedChecked: new Set(),
     loading: true,
     error: null,
   };
@@ -276,6 +444,7 @@ export function openValuePicker(column, anchorEl) {
       state.checked = new Set(res.values
         .map((v) => (v.value == null ? '' : String(v.value)))
         .filter((v) => !selected || selected.has(v)));
+      state.loadedChecked = new Set(state.checked);
     } catch (e) {
       // 409 = the view was evicted (see invariant #3). Whole-table scope
       // needs no view at all, so the question is still answerable — re-ask
@@ -295,10 +464,22 @@ export function openValuePicker(column, anchorEl) {
   async function apply() {
     const listed = (state.values || []).map((v) => (v.value == null ? '' : String(v.value)));
     const values = listed.filter((v) => state.checked.has(v));
-    // Everything ticked out of a complete list is the same statement as no
-    // filter at all — and says so, rather than writing a 400-term `IN`.
-    const clearInstead = !state.truncated && values.length === listed.length;
     closeMenu();
+    // Apply with nothing changed leaves the filter as it is. "This view"
+    // after a contains, a regex, `>` or `!` on this column lists only the
+    // values that filter left, all of them ticked, and reading that as
+    // "everything ticked" cleared the box and widened the grid to rows the
+    // analyst had filtered out.
+    const unchanged = values.length === state.loadedChecked.size && values.every((v) => state.loadedChecked.has(v));
+    if (unchanged) return;
+    // Everything ticked out of a complete list is the same statement as no
+    // filter at all — and says so, rather than writing a 400-term `IN` —
+    // unless the list is this view's and this column's own filter is what
+    // narrowed it. Then everything ticked is "every value that filter
+    // leaves", so it is written out as those values rather than dropped.
+    const ownFilter = !!parseFilter(S.filters[column] || '') || !!pickerTreeNode(column);
+    const narrowed = state.scope === 'view' && ownFilter;
+    const clearInstead = !state.truncated && !narrowed && values.length === listed.length;
     await applyValueSelection(column, values, { clearInstead });
   }
 
@@ -363,7 +544,7 @@ export function renderValuePicker(panel, column, state, actions) {
   none.onclick = () => { for (const r of pickerRows(state)) state.checked.delete(r.value); paintList(); };
   const cancel = el('button', 'btn ghost', 'Cancel');
   cancel.onclick = () => actions.close();
-  const applyBtn = el('button', 'btn', 'Apply');
+  const applyBtn = el('button', 'btn primary', 'Apply');
   applyBtn.onclick = () => actions.apply();
   acts.append(all, none, el('span', 'spacer'), cancel, applyBtn);
   panel.append(acts);
@@ -399,7 +580,8 @@ export function renderValuePicker(panel, column, state, actions) {
     if (state.error) status.append(el('div', 'vp-warn', state.error));
     if (state.truncated) {
       status.append(el('div', 'vp-warn',
-        `Showing the ${VALUE_PICKER_LIMIT.toLocaleString()} most common values — type above to find others, or filter the column first.`));
+        `Showing the ${VALUE_PICKER_LIMIT.toLocaleString()} most common values — Find only searches these. `
+        + `To reach others, narrow the column with a text filter first.`));
     }
     status.append(el('div', null, `${checked.toLocaleString()} of ${rows.length.toLocaleString()} shown values ticked`));
     applyBtn.disabled = state.loading || !checked;
@@ -417,31 +599,47 @@ export function renderValuePicker(panel, column, state, actions) {
    the value picker's single-value case — so the three can't drift apart on
    what an empty cell means or how a value gets escaped.
 
-   `=value` is the spelling on purpose: it round-trips any value the box can
-   hold, including one containing a `|` (parseFilter matches the `=` prefix
-   before it ever looks for the any-of separator). What it can't hold is a
-   value whose own edges are whitespace — the box trims — which is why
-   valueFilterText() reports null rather than quietly filtering on the
-   trimmed text, and the picker routes those through the filter tree. */
+   `=value` is the spelling on purpose: it round-trips almost any value
+   bare, including one containing a `|` (parseFilter matches the `=` prefix
+   before it ever looks for the any-of separator). A value with whitespace
+   at an edge — which the box trims — is quoted, `=" padded "`, and so is
+   one whose bare text would read back as such a quoted value (see
+   unquoteValue). What no spelling holds is a line break, which an <input>
+   strips: valueFilterText() reports null for that rather than quietly
+   filtering on something else, and the picker routes it through the
+   filter tree. Both spellings are checked by parsing them back. */
 export function valueFilterText(v) {
   if (v == null || v === '') return '""';
-  const s = String(v);
-  return s === s.trim() && !/[\r\n]/.test(s) ? '=' + s : null;
+  return exactValueText('=', 'equals', String(v));
 }
 
 export function valueExcludeText(v) {
   if (v == null || v === '') return '*'; // "not empty" is the exclusion of empty
-  const s = String(v);
-  return s === s.trim() && !/[\r\n]/.test(s) ? '!=' + s : null;
+  return exactValueText('!=', 'not_equals', String(v));
+}
+
+function exactValueText(prefix, op, s) {
+  if (/[\r\n]/.test(s)) return null;
+  for (const text of [prefix + s, prefix + quoteValue(s)]) {
+    const p = parseFilter(text);
+    if (p && p.op === op && p.value === s) return text;
+  }
+  return null;
 }
 
 /* Writes a raw filter string into a column's header box and the state
    behind it, keeping the visible input in step without a full renderHead()
-   (which would drop the cell selection the caller may still be acting on). */
+   (which would drop the cell selection the caller may still be acting on).
+
+   The bar IS repainted, on its own: under it most columns have no box, so
+   the chip is the only place the filter this just wrote shows up, and one
+   that appeared a rebuild later would be a filter bar that lies about what
+   is narrowing the table. renderFilterBar touches nothing but the strip. */
 export function setColumnFilter(name, raw) {
   if (raw) S.filters[name] = raw; else delete S.filters[name];
   const inp = document.querySelector(`.fcell input[data-col="${CSS.escape(name)}"]`);
   if (inp) { inp.value = raw || ''; inp.classList.toggle('active', !!raw); }
+  renderFilterBar();
 }
 
 export const displayValue = (v) => (v == null || v === '' ? '(empty)' : String(v));
@@ -456,7 +654,7 @@ export const ellipsize = (s, n = 42) => (s.length > n ? s.slice(0, n - 1) + '…
 export async function filterByValue(column, value, { only = false, exclude = false } = {}) {
   const raw = exclude ? valueExcludeText(value) : valueFilterText(value);
   if (raw === null) {
-    toast(`"${ellipsize(String(value))}" starts or ends with whitespace — use Filter by values… to select it`, 5000);
+    toast(`"${ellipsize(String(value))}" spans more than one line, which the filter box can't hold — use Filter by values… to select it`, 5000);
     return;
   }
   const shown = ellipsize(displayValue(value));
@@ -495,17 +693,64 @@ export function currentSourceHasFts() {
 }
 
 export function updateSearchHint() {
+  const src = S.sources.find((s) => s.id === S.sourceId);
   const hasFts = currentSourceHasFts();
+  // The first search on an unindexed table starts the trigram build in
+  // the background (Store._ensure_fts_building) and scans the whole table
+  // until it lands. A slow first search that says why is a wait; one
+  // that doesn't is a hang. Regex never uses the index, so it stays a
+  // full scan whatever the index is doing.
+  const building = !!(src && src.fts_building && !hasFts);
   const hint = $('searchMode');
   if (S.searchMode === 'regex') hint.textContent = 'regex · full scan';
-  else if (S.searchMode === 'advanced') hint.textContent = hasFts ? 'advanced · full-text' : 'advanced · substring chain';
-  else hint.textContent = 'substring';
+  else if (S.searchMode === 'advanced') {
+    hint.textContent = hasFts ? 'advanced · full-text' : (building ? 'advanced · index building' : 'advanced · substring chain');
+  } else hint.textContent = building ? 'substring · index building' : 'substring';
   // The hint sits inside the box's right padding, which was a fixed 74px —
   // the longer hints painted straight over the typed text. Size the padding
   // to the hint; while the box is hidden (no layout yet) estimate from the
   // 10px uppercase face and let the next call correct it.
   const w = hint.offsetWidth || Math.ceil(hint.textContent.length * 6.7);
   $('search').style.paddingRight = (w + 16) + 'px';
+  // The padding it just claimed is how much room the placeholder has left.
+  syncSearchKeyCopy();
+}
+
+/* The key that opens the search box is advertised in two places — the
+   magnifier's tooltip and the box's own placeholder — and the chord is
+   dispatched only while `focusSearch` still holds it (keymap.js's
+   pre-gate). So both strings are built from the binding rather than
+   written into index.html: take Ctrl+F off search in Settings, or move
+   search to another key, and the copy stops naming a key that now does
+   something else. It is the same reason updateTimeRangeButton spells its
+   tooltip out of S.keymap. Keys are printed exactly as the Settings chips
+   spell them, so the tooltip and the chip agree character for character.
+
+   The placeholder is the string with a width limit: #search is a fixed
+   320px and the mode hint above just claimed the right padding, which in
+   regex and advanced mode leaves too little for the keys. Measure the
+   text against what is left and fall back to the bare "All columns"
+   rather than let it clip mid-chord — a hint that names half a key is
+   worse than one that names none. The tooltip has no width limit and
+   always names them. */
+let placeholderMetrics = null;
+
+export function syncSearchKeyCopy() {
+  const keys = (S.keymap.focusSearch || []).filter(Boolean);
+  const spelled = keys.join(' or ');
+  $('btnSearchToggle').title = spelled ? `Search  —  press ${spelled}` : 'Search';
+  const box = $('search');
+  const withKeys = `All columns  —  ${spelled}`;
+  const cs = getComputedStyle(box);
+  placeholderMetrics = placeholderMetrics || document.createElement('canvas').getContext('2d');
+  placeholderMetrics.font = `${cs.fontSize} ${cs.fontFamily}`;
+  // clientWidth is 0 while the wrap is hidden — the CSS width is what the
+  // box will be when it opens, and it is border-box, so the padding is
+  // already inside it.
+  const room = (box.clientWidth || parseFloat(cs.width) || 320)
+    - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+  box.placeholder = spelled && placeholderMetrics.measureText(withKeys).width <= room
+    ? withKeys : 'All columns';
 }
 
 /* Generic multi-term AND/OR/NOT chip editor — shared by the toolbar's
@@ -597,7 +842,7 @@ export function renderAdvancedChips() {
     bar.append(btn);
     return;
   }
-  renderTermChips(bar, S.searchTerms, () => rebuildView({ keepScroll: false }), {
+  renderTermChips(bar, S.searchTerms, () => rebuildView({ keepScroll: false, detachAfterMs: SEARCH_DETACH_MS }), {
     debounceMs: 220, blurTarget: $('body'), onInputBlur: collapseSearchIfEmpty,
     trailing: (container) => {
       if (S.searchTerms.length <= ADV_COLLAPSE_AT) return;
@@ -609,7 +854,20 @@ export function renderAdvancedChips() {
   });
 }
 
-export function setSearchMode(mode) {
+/* Switching the box between substring / regex / advanced, and rebuilding
+   under the new mode. The rebuild detaches like every other search-box
+   one — the analyst changed the mode to run a search, and a slow one
+   belongs in the background.
+
+   `detach: false` is for a caller that is not the search box: landing on
+   a set of filters (Reset, Shift+F, the row menu's "…only", a session
+   comparison's pivot) normalises the mode back to contains on its way,
+   and then goes on to act on the view that build produces — expanding
+   the search bar, recentring on the row it kept. A build left to finish
+   in the background resolves with the OLD view still installed, so that
+   work would land on the rows the analyst just cleared away
+   (docs/notes/ui.md: only search-box rebuilds detach). */
+export function setSearchMode(mode, { detach = true } = {}) {
   S.searchMode = mode;
   document.querySelectorAll('#searchModeToggle button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.mode === mode)));
   if (mode === 'advanced') {
@@ -618,7 +876,7 @@ export function setSearchMode(mode) {
   }
   syncSearchExpansion(true);
   updateSearchHint();
-  return rebuildView({ keepScroll: false });
+  return rebuildView({ keepScroll: false, detachAfterMs: detach ? SEARCH_DETACH_MS : null });
 }
 
 /* DOM wiring for this module, called once by main.js. Handlers can't
@@ -629,11 +887,25 @@ document.querySelectorAll('#searchModeToggle button').forEach((b) => {
   b.onclick = () => setSearchMode(b.dataset.mode);
 });
 
-$('search').oninput = (e) => { S.search = e.target.value; syncSearchExpansion(true); rebuildSoon(); };
+$('search').oninput = (e) => { S.search = e.target.value; syncSearchExpansion(true); searchSoon(); };
 
 $('search').onkeydown = (e) => {
-  if (e.key === 'Escape') { e.target.value = ''; S.search = ''; rebuildView({ keepScroll: false }); $('body').focus(); }
-  if (e.key === 'Enter') { rebuildView({ keepScroll: false }); $('body').focus(); }
+  // Escape is also how a search left running in the background is
+  // called off from the box: a search-box rebuild cancels this table's
+  // pending search before it starts its own (view.js runBuild).
+  //
+  // Both build now, so the debounced build from the last keystroke goes:
+  // left waiting, it fired up to 220 ms later and superseded this one —
+  // the scan cancelled and started over, landing where typing lands
+  // (keepScroll) instead of where Enter does. And when that build has
+  // already started, Enter lets it run if it is the one Enter would
+  // start (sameSearchInFlight).
+  if (e.key === 'Escape') { searchSoon.cancel(); e.target.value = ''; S.search = ''; rebuildView({ keepScroll: false, detachAfterMs: SEARCH_DETACH_MS }); $('body').focus(); }
+  if (e.key === 'Enter') {
+    searchSoon.cancel();
+    if (!sameSearchInFlight()) rebuildView({ keepScroll: false, detachAfterMs: SEARCH_DETACH_MS });
+    $('body').focus();
+  }
 };
 
 $('search').addEventListener('blur', collapseSearchIfEmpty);

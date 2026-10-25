@@ -1,4 +1,4 @@
-"""Appearance → "Pages as a dropdown" collapses the page strip into one
+"""Grid & layout → "Pages as a dropdown" collapses the page strip into one
 Pages ▾ button; the search toggle is a themed SVG rather than an emoji;
 group headers no longer paint their values in the accent."""
 
@@ -26,9 +26,10 @@ def test_pages_dropdown_setting(page):
     page.evaluate("() => { __winnow.S.appearance.pagesMenu = false; __winnow.saveAppearance(); __winnow.renderPageTabs(); }")
     page.wait_for_selector("#pagesMenuBtn", state="detached")
     assert page.locator('#pageTabs .tab[data-page-key="sql"]').is_visible()
-    # It's exposed in Settings → Appearance.
-    page.evaluate("() => __winnow.openSettings()")
+    # It's exposed in Settings → Grid & layout.
+    page.evaluate("() => __winnow.openSettings('grid')")
     page.wait_for_selector("#modal:not([hidden])")
+    assert page.locator("#modal .settings-pane[data-section='grid'] label", has_text="Pages as a dropdown").is_visible()
     assert page.locator("#modal label", has_text="Pages as a dropdown").count() == 1
     page.keyboard.press("Escape")
     page.wait_for_selector("#modal[hidden]", state="attached")

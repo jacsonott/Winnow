@@ -1,22 +1,28 @@
 /* The toolbar search box and the search-all-tables job.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
-import { $, api, el, post, toast } from './core.js';
+import { $, MOD_ENTER, api, el, post, toast } from './core.js';
 import { addViewCountWidget } from './dashboard.js';
 import { openFilterBuilder } from './filterbuilder.js';
 import { renderAdvancedChips, renderTermChips, updateSearchHint } from './filters.js';
 import { applyPreset, matchingSavedFilters } from './savedfilters.js';
 import { openSettings } from './settings.js';
-import { loadSources, sourceLabel } from './sources.js';
-import { S } from './state.js';
+import { clearViewNarrowing, loadSources, sourceGlyph, sourceLabel } from './sources.js';
+import { S, dashboardCreatorMode } from './state.js';
+import { saveCurrentViewAsTable } from './subset.js';
 import { openSavedFiltersModal, openTimeRangeModal } from './timeframe.js';
-import { markModalAction, confirmDialog, dropdownMenu, modal } from './ui.js';
+import { markModalAction, confirmDialog, currentModalAction, dropdownMenu, modal } from './ui.js';
 import { rebuildView } from './view.js';
+import { runScan } from './watchlist.js';
 
-/* Checked against every real table in the case (plain contains-mode only —
-   same as the grid's default search — not regex). Clicking a result opens
-   that table with the same terms already applied via Advanced search,
-   rather than inventing a separate cross-table results view.
+/* Checked against the tables the dialog's scope row names: the table in
+   the grid by default, every real table in the case when nothing is open
+   or "Every table" is asked for (searchAllScope here, resolved on the
+   server by resolve_search_all_scope — a merged table in scope means its
+   member tables). Plain contains-mode only — same as the grid's default
+   search — not regex. Clicking a result opens that table with the same
+   terms already applied via Advanced search, rather than inventing a
+   separate cross-table results view.
 
    Two ways to build the term list, sharing one results pane:
    "Paste a list" (default) — a multi-line textarea, one term per line,
@@ -25,9 +31,10 @@ import { rebuildView } from './view.js';
    the original AND/OR/NOT chip builder, for anything needing mixed
    connectors or an exclusion — still available, just not the default.
 
-   Explicit "Search" button rather than live-as-you-type: this hits every
-   real table in the case (COUNT(*) per table, potentially a background FTS
-   build kicked off per table too — see search_all_sources), not the cheap
+   Explicit "Search" button rather than live-as-you-type: this is a
+   COUNT(*) per table in scope, with a background FTS build potentially
+   kicked off per table too (see search_all_sources) — and the scope is
+   every table in the case whenever the analyst says so — not the cheap
    single-open-table filter the main grid's search bar is. Firing that on
    every keystroke while someone's still typing a hostname is real,
    avoidable backend load, not just a UX annoyance — so nothing here runs
@@ -54,8 +61,11 @@ export function searchAllState() {
       scanned: 0,
       total: 0,
       hits: [],
+      failed: [],      // tables the sweep could not count: {source_id, name, error}
       error: null,
       terms: [],       // the terms the current results were produced from
+      scope: null,     // {mode: 'all'|'current'|'pick', ids, names} — normalised by searchAllScope
+      ranScope: null,  // the scope the current results were produced from (see terms)
       seen: false,     // whether the analyst has looked at the finished results
     };
   }
@@ -69,6 +79,127 @@ export function searchAllTerms(st) {
     .map((term) => ({ term, connector: 'OR', exclude: false }));
 }
 
+/* ------------------------------------------------------------- scope */
+
+/* The sweep used to be one thing: every table in the case. It still
+   defaults to that on a case with nothing open, but "search this table for
+   forty hostnames" was only reachable by sweeping the whole case and then
+   reading one row of the results — minutes of scanning for an answer about
+   one file.
+
+   Three scopes, all of them the same job and the same results pane:
+   'all' (source_ids: null on the wire — the server's own default),
+   'current' (the table in the grid, re-read at every start so it follows
+   the tab rather than pinning whatever was open when the pane was built),
+   and 'pick' (an explicit list of real table ids).
+
+   The scope lives on S.searchAll beside the terms for the same reason they
+   do: the pane's state has to survive the modal being closed mid-sweep. */
+
+/* The table in the grid, if it is one this case still has. S.sourceId can
+   name a source from a previous case (loadSources documents why), and can
+   be null outright when a case has no open tab. */
+export function searchAllOpenSource() {
+  return S.sources.find((s) => s.id === S.sourceId && !s.error) || null;
+}
+
+/* A Choose… scope over `ids`, each id remembered by the name its table
+   has right now — see searchAllLivePickIds for why the name is kept. */
+export function searchAllPickScope(ids) {
+  const names = {};
+  for (const id of ids) {
+    const src = S.sources.find((s) => s.id === id);
+    if (src) names[id] = src.name;
+  }
+  return { mode: 'pick', ids: [...ids], names };
+}
+
+/* The picked ids that still name the table they were picked from. SQLite
+   reuses a source id once the table holding it is dropped, so a pick keeps
+   the name each id had when it was ticked and drops an id whose live table
+   is a different file — the same id-and-name rule subsetParentLabel
+   follows, for the same reason. Without it, dropping a table and importing
+   another that takes its id silently scopes the sweep to a file nobody
+   chose. */
+export function searchAllLivePickIds(sc) {
+  const names = (sc && sc.names) || {};
+  return ((sc && sc.ids) || []).filter((id) => S.sources.some(
+    (s) => s.id === id && !s.error && (names[id] === undefined || s.name === names[id])));
+}
+
+/* A pick gone stale wholesale: it named tables, and not one of them is
+   still in this case. It widens back to every table rather than pointing
+   at nothing — and the scope row says so, because a three-table check
+   quietly becoming a whole-case sweep is minutes an analyst didn't ask
+   for. */
+export function searchAllPickStale(st) {
+  const sc = st.scope;
+  return !!(sc && sc.mode === 'pick' && sc.ids.length && !searchAllLivePickIds(sc).length);
+}
+
+/* The chosen scope, normalised: a 'current' scope with no table open, or a
+   'pick' whose tables have since all been dropped, answers 'all' rather
+   than pointing at nothing. Assigns the default on first use — "this
+   table" when there is one, since someone who opens this from a table
+   nearly always means that table, and the whole-case sweep is one click
+   away.
+
+   A pick the analyst has emptied by hand is left alone: it is a scope
+   half-built, not a stale one, and turning it into "every table" behind
+   them is how a quick check becomes a four-minute sweep. Starting with it
+   empty is refused in startSearchAll instead. */
+export function searchAllScope(st) {
+  if (!st.scope) st.scope = { mode: searchAllOpenSource() ? 'current' : 'all', ids: [] };
+  const sc = st.scope;
+  if (sc.mode === 'current' && !searchAllOpenSource()) return { mode: 'all', ids: [] };
+  if (searchAllPickStale(st)) return { mode: 'all', ids: [] };
+  return sc;
+}
+
+/* What goes on the wire: null for the whole case, otherwise the ids to
+   scan. A merge id is sent AS the merge — the server expands it to the
+   member tables its rows actually live in (a merge has no table of its
+   own) and reports that expansion back, so the pane can say so rather
+   than quietly answering about different tables than the one named. */
+export function searchAllScopeIds(st) {
+  const sc = searchAllScope(st);
+  if (sc.mode === 'all') return null;
+  if (sc.mode === 'current') {
+    const src = searchAllOpenSource();
+    return src ? [src.id] : null;
+  }
+  return searchAllLivePickIds(sc);
+}
+
+/* The REAL tables the current scope covers, for painting the table chips —
+   null meaning "every one of them". A merge resolves to its members here
+   too, so picking a merged table lights up the tables it is made of. */
+export function searchAllScopeSelection(st) {
+  const ids = searchAllScopeIds(st);
+  if (!ids) return null;
+  const out = new Set();
+  for (const id of ids) {
+    const src = S.sources.find((s) => s.id === id);
+    if (src && src.is_merge) (src.member_source_ids || []).forEach((m) => out.add(m));
+    else out.add(id);
+  }
+  return out;
+}
+
+/* A run's scope in words — for the badge's tooltip, the finished toast and
+   the results pane. Reads the scope the RESULTS came from, never the one
+   the scope row has since been switched to. */
+export function searchAllRanScopeLabel(scope) {
+  const ids = scope && scope.source_ids;
+  if (!ids) return 'every table';
+  if (!ids.length) return 'no tables';
+  if (ids.length === 1) {
+    const src = S.sources.find((s) => s.id === ids[0]);
+    return src ? sourceLabel(src) : `table ${ids[0]}`;
+  }
+  return `${ids.length} tables`;
+}
+
 export let searchAllPollTimer = null;
 
 /* Polls the job to completion regardless of whether the modal is open —
@@ -79,16 +210,22 @@ export function pollSearchAll() {
   searchAllPollTimer = setTimeout(async () => {
     const st = S.searchAll;
     if (!st || !st.running || st.jobId == null) return;
+    const polled = st.jobId;
     let job;
     try {
-      job = await api(`/api/search_all/job?job_id=${st.jobId}`);
+      job = await api(`/api/search_all/job?job_id=${polled}`);
     } catch (e) {
-      // There is only ever one poll chain (the clearTimeout above cancels
-      // any previous one), so a 404 here is never a stale poller being
-      // superseded — it means the job genuinely no longer exists: the
-      // server restarted, or the case was closed/switched underneath us.
-      // This has to clear `running`, otherwise the badge sticks at
-      // "Search all… n/m" forever with nothing left to advance it.
+      // A 404 means the job asked for is not on the server — which is the
+      // ordinary end of a superseded poll now that starting a scoped run
+      // while a sweep is going is a thing the dialog invites: the start
+      // replaces the case's one job, so a GET already in flight for the
+      // old one comes back 404 while the new one is starting fine. Only
+      // the job we are still following gets to end the run here.
+      if (!S.searchAll || S.searchAll !== st || st.jobId !== polled) return;
+      // Otherwise the job genuinely no longer exists (the server restarted,
+      // or the case was closed/switched underneath us), and this has to
+      // clear `running`, or the badge sticks at "Search all… n/m" forever
+      // with nothing left to advance it.
       st.running = false;
       st.error = e.status === 404
         ? 'The search job is no longer on the server (it restarted, or the case was closed). Run the search again.'
@@ -101,15 +238,28 @@ export function pollSearchAll() {
     st.scanned = job.scanned;
     st.total = job.total;
     st.hits = job.hits;
+    st.failed = job.failed || [];
     st.error = job.error;
+    // The scope the server actually ran, merge expansion and all — it is
+    // what these hits describe, so it is kept with them.
+    if (job.scope) st.ranScope = job.scope;
     if (job.done || job.cancelled) {
       st.running = false;
-      const open = !$('modal').hidden && $('modalTitle').textContent === 'Search all tables';
+      // Asked of the modal's ACTION, not its title: the title names the
+      // scope now, and a dialog identified by a literal string stops being
+      // recognised the moment that string is allowed to vary.
+      const open = !$('modal').hidden && currentModalAction() === 'openSearchAll';
       st.seen = open;
       if (!open && !job.cancelled) {
+        const where = st.ranScope && st.ranScope.source_ids
+          ? `Search of ${searchAllRanScopeLabel(st.ranScope)}`
+          : 'Search all';
+        const nf = st.failed.length;
+        const unread = nf ? ` ${nf} table${nf === 1 ? '' : 's'} could not be searched.` : '';
         toast(job.hits.length
-          ? `Search all finished — ${job.hits.length} table${job.hits.length === 1 ? '' : 's'} matched. Reopen "Search all" to see them.`
-          : 'Search all finished — no matches.', 6000);
+          ? `${where} finished — ${job.hits.length} table${job.hits.length === 1 ? '' : 's'} matched.${unread} Reopen "Search all" to see them.`
+          : (nf ? `${where} finished — no matches, but${unread.toLowerCase()} Reopen "Search all" to see which.`
+                : `${where} finished — no matches.`), 6000);
       }
     }
     updateSearchAllButton();
@@ -124,19 +274,24 @@ export function updateSearchAllButton() {
   const btn = $('btnSearchAll');
   if (!btn) return;
   const st = S.searchAll;
+  // "Search all… 2/3" on a run that covered one table is a badge lying
+  // about what it counted, so the wording follows the run's own scope.
+  const scoped = !!(st && st.ranScope && st.ranScope.source_ids);
   if (st && st.running) {
     const pct = st.total ? ` ${st.scanned}/${st.total}` : '';
-    btn.textContent = `Search all…${pct}`;
+    btn.textContent = `${scoped ? 'Searching…' : 'Search all…'}${pct}`;
     btn.setAttribute('aria-busy', 'true');
-    btn.title = 'Search running in the background — click to watch or refine it';
+    btn.title = scoped
+      ? `Searching ${searchAllRanScopeLabel(st.ranScope)} in the background — click to watch or refine it`
+      : 'Search running in the background — click to watch or refine it';
   } else if (st && !st.seen && st.hits.length) {
-    btn.textContent = `Search all (${st.hits.length})`;
+    btn.textContent = `${scoped ? 'Search' : 'Search all'} (${st.hits.length})`;
     btn.removeAttribute('aria-busy');
     btn.title = `${st.hits.length} table(s) matched — click to see them`;
   } else {
     btn.textContent = 'Search all';
     btn.removeAttribute('aria-busy');
-    btn.title = 'Search every table in this case';
+    btn.title = 'Search this case — every table, or just the one you are on';
   }
 }
 
@@ -151,21 +306,51 @@ export async function startSearchAll() {
   const st = searchAllState();
   const terms = searchAllTerms(st);
   if (!terms.length) {
-    st.hits = []; st.terms = []; st.error = null; st.jobId = null; st.running = false;
+    // Emptying the box clears the pane — but not out from under a sweep
+    // that is still running: this branch used to drop the job id and the
+    // partial hits on the floor with the server still scanning, leaving
+    // nothing on screen that could stop it. Stopping a sweep is the Stop
+    // button's job, and it is deliberate there.
+    if (st.running) { toast('Enter a term, or use Stop to end the search that is running'); return; }
+    st.hits = []; st.failed = []; st.terms = []; st.error = null; st.jobId = null; st.ranScope = null;
     updateSearchAllButton();
     searchAllRepaint();
     return;
   }
+  const sourceIds = searchAllScopeIds(st);
+  if (sourceIds && !sourceIds.length) { toast('Tick at least one table to search'); return; }
+  // One search job per case: this one replaces whatever is still running,
+  // and a whole-case sweep can be four minutes in. Killing that silently
+  // to answer a quick one-table question is the kind of loss you only
+  // notice afterwards, so it is asked rather than assumed.
+  if (st.running) {
+    const where = st.ranScope && st.ranScope.source_ids
+      ? `The search of ${searchAllRanScopeLabel(st.ranScope)}`
+      : 'The sweep of every table';
+    const done = st.total ? ` (${st.scanned} of ${st.total} tables counted)` : '';
+    const ok = await confirmDialog(
+      `${where} is still running${done}. Only one search runs at a time, so starting this one stops it.`,
+      { okLabel: 'Stop it and search' });
+    if (!ok) return;
+  }
   st.terms = terms.map((t) => ({ ...t }));
+  // Provisional: the server answers with the scope it resolved (a merge
+  // expanded to its members), and the poll keeps it current.
+  st.ranScope = { requested: sourceIds, source_ids: sourceIds, merges: [] };
   st.hits = [];
+  st.failed = [];
   st.error = null;
   st.scanned = 0;
   st.total = 0;
   st.seen = true;
   try {
-    const job = await post('/api/search_all/start', { terms });
+    const job = await post('/api/search_all/start', { terms, source_ids: sourceIds });
     st.jobId = job.job_id;
     st.running = true;
+    // A poll of the job this start just superseded can have landed while
+    // the POST was in flight; this run has not failed, whatever it said.
+    st.error = null;
+    if (job.scope) st.ranScope = job.scope;
   } catch (e) {
     st.running = false;
     // A 404 on *this* endpoint means the route doesn't exist, not that
@@ -196,6 +381,13 @@ export function searchAllCountLabel(d) {
    table and opening it searches for just that term; without, it's the
    table's total and opening it carries the whole query across. Both share
    this so the open behaviour can't drift between the two. */
+/* ["a", "b", "c"] → "a, b and c". For a sentence that names what was
+   taken away; a bare comma list reads as a log line. */
+function listPhrase(items) {
+  if (items.length < 2) return items.join('');
+  return `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`;
+}
+
 export function searchAllHitRow(st, hit, term) {
   // The label goes through the live source record so a nickname shows here
   // too; the job's own hit.name (the file name) is the fallback for a
@@ -215,7 +407,17 @@ export function searchAllHitRow(st, hit, term) {
     const src = S.sources.find((s) => s.id === hit.source_id);
     if (src && !src.is_open) await post(`/api/source/${hit.source_id}/open`, { open: true });
     $('modal').hidden = true;
-    await loadSources(hit.source_id);
+    // skipBuild, then clear, then one build. Opening normally would build
+    // the table's STASHED spec first — the filters it was left with, which
+    // this row's count knows nothing about — and that build is what used
+    // to paint "No rows match" over the search that followed it.
+    await loadSources(hit.source_id, { openOpts: { skipBuild: true } });
+    if (S.sourceId !== hit.source_id) return;   // the table went away under the sweep
+    // A sweep counts rows in the table, ignoring every filter on it. So
+    // landing on this row's count means landing with none of them on:
+    // otherwise the grid shows fewer rows than the number just clicked,
+    // and nothing on screen says why.
+    const cleared = clearViewNarrowing();
     S.searchMode = 'advanced';
     // The terms the *results* came from, not whatever's since been typed
     // into the box — those are what this row's count describes.
@@ -227,7 +429,12 @@ export function searchAllHitRow(st, hit, term) {
     renderAdvancedChips();
     syncSearchExpansion(true);
     updateSearchHint();
-    await rebuildView({ keepScroll: false });
+    // keepRow:false — this is a navigation to a hit, not a filter change
+    // on rows already being read, so there is no row to come back to.
+    await rebuildView({ keepScroll: false, keepRow: false });
+    // Said out loud, because the analyst set those filters and would
+    // otherwise find them gone with no explanation.
+    if (cleared.length) toast(`Cleared ${listPhrase(cleared)} on ${hitName}`, 6000);
   };
   r.append(openBtn);
   return r;
@@ -239,9 +446,50 @@ export function openSearchAllModal() {
   st.seen = true;
   updateSearchAllButton();
 
-  modal('Search all tables', (b) => {
+  // "Search tables", not "Search all tables": the dialog decides how much
+  // of the case it covers now, so a title that claims all of it would be
+  // wrong two thirds of the time. Nothing identifies this dialog by its
+  // title any more — the poller asks currentModalAction() instead.
+  modal('Search tables', (b) => {
     b.append(el('p', 'fb-help',
-      'Matches every open and closed table in this case. Runs in the background — you can close this and keep working.'));
+      'Runs in the background — you can close this and keep working.'));
+
+    /* Scope row: Every table / This table / Choose…, with the tables it
+       covers as chips under it. Above the builder, because it changes what
+       the terms below it will be asked of. */
+    const scopeRow = el('div', 'search-all-scope');
+    scopeRow.append(el('span', 'search-all-scope-label', 'Search'));
+    const seg = el('div', 'vp-seg');   // the value picker's scope idiom
+    const scopeBtns = {};
+    for (const [mode, label, title] of [
+      ['all', 'Every table',
+       'Every open and closed table in this case. A merged table is covered through the tables its rows live in.'],
+      ['current', 'This table',
+       'Only the table open in the grid — all of its rows, not just the ones the current filters leave.'],
+      ['pick', 'Choose…', 'Tick the tables to search below.'],
+    ]) {
+      const btn = el('button', 'btn ghost', label);
+      btn.title = title;
+      btn.onclick = () => {
+        st.scope = mode === 'pick'
+          ? searchAllPickScope([...(searchAllScopeSelection(st) || allPickIds())])
+          : { mode, ids: [] };
+        paintScope();
+      };
+      scopeBtns[mode] = btn;
+      seg.append(btn);
+    }
+    scopeRow.append(seg);
+    const scopeNote = el('span', 'search-all-scope-note');
+    scopeRow.append(scopeNote);
+    b.append(scopeRow);
+
+    const picks = el('div', 'search-all-picks');
+    b.append(picks);
+    // A long case would push the builder off the bottom of the dialog, so
+    // the tail is folded behind a count until it is asked for.
+    let picksExpanded = false;
+    const PICK_CHIPS = 10;
 
     const modeToggle = el('div', 'search-mode-toggle');
     const pasteBtn = el('button', 'btn ghost', 'Paste a list');
@@ -293,22 +541,32 @@ export function openSearchAllModal() {
     impLabel.append(impInput);
     // The terms you're about to sweep for are usually exactly the IOCs
     // worth watching as new data lands — add them to the watchlist in one
-    // click (it dedupes against what's already there, then scans).
+    // click (it dedupes against what's already there, then scans for the
+    // new ones in the background — runScan's jobs-panel row stands for
+    // it, and on a finished sweep that scan is only the tables this one
+    // found something in).
     const wlBtn = el('button', 'btn ghost', 'Add to watchlist');
-    wlBtn.title = 'Add these terms to the case watchlist and scan every table for them';
+    wlBtn.title = 'Add these terms to the case watchlist — the tables this sweep has already '
+      + 'answered for are not read again';
     wlBtn.onclick = async () => {
       const terms = searchAllTerms(st).filter((t) => !t.exclude).map((t) => t.term.trim()).filter(Boolean);
       if (!terms.length) { toast('Enter a term or two first'); return; }
       try {
         const r = await post('/api/watchlist/import', { text: terms.join('\n'), kind: 'other' });
-        await post('/api/watchlist/scan', {});
+        // The sweep's own job id goes with the scan: it asked every table
+        // in its scope the question the scan is about to, so the tables it
+        // cleared are recorded rather than read again
+        // (Store.seed_watchlist_from_search_all). The server checks that
+        // the terms it swept are the values being added, so a box edited
+        // since the sweep ran simply gets the full scan.
+        if (r.added_ids && r.added_ids.length) runScan({ watchlistIds: r.added_ids, fromSearchAll: st.jobId });
         const dupes = terms.length - r.added;
         toast(r.added
           ? `${r.added} added to the watchlist${dupes > 0 ? ` · ${dupes} already there` : ''}`
           : 'All of those are already on the watchlist', 5000);
       } catch (e) { toast('Could not add to the watchlist: ' + e.message, 6000); }
     };
-    const searchBtn = el('button', 'btn', 'Search  ⌘⏎');
+    const searchBtn = el('button', 'btn primary', `Search  ${MOD_ENTER}`);
     const cancelBtn = el('button', 'btn ghost', 'Stop');
     cancelBtn.title = 'Stop the sweep — tables already counted keep their results';
     cancelBtn.onclick = async () => {
@@ -325,22 +583,143 @@ export function openSearchAllModal() {
     textarea.value = st.pasteText;
     textarea.oninput = () => { st.pasteText = textarea.value; };
 
+    /* Every real table the sweep can reach: chips are over REAL tables,
+       never merges, because that is what the server scans — a merge in
+       scope is shown as its members lit up. Open tables first: they are
+       the ones the analyst is working in. */
+    function pickSources() {
+      return S.sources.filter((x) => !x.is_merge && !x.error)
+        .slice().sort((a, x) => (x.is_open ? 1 : 0) - (a.is_open ? 1 : 0));
+    }
+    function allPickIds() { return pickSources().map((x) => x.id); }
+
+    function scopeNoteText(sc, sel) {
+      const n = pickSources().length;
+      if (sc.mode === 'all') {
+        // A pick whose tables have all left the case answers 'all' — which
+        // is a wider sweep than the one that was ticked, so it is named
+        // rather than left to be discovered by the clock.
+        const stale = searchAllPickStale(st)
+          ? ' — the tables you chose are no longer in this case' : '';
+        return `${n} table${n === 1 ? '' : 's'} in this case${stale}`;
+      }
+      if (sc.mode === 'current') {
+        const src = searchAllOpenSource();
+        if (!src) return '';
+        if (src.is_merge) {
+          const m = (src.member_source_ids || []).length;
+          return `${sourceGlyph(src)}${sourceLabel(src)} · merge of ${m} table${m === 1 ? '' : 's'}`;
+        }
+        return `${sourceLabel(src)} · ${(src.row_count || 0).toLocaleString()} rows`;
+      }
+      return `${sel ? sel.size : 0} of ${n} table${n === 1 ? '' : 's'}`;
+    }
+
+    function paintScope() {
+      const sc = searchAllScope(st);
+      for (const [mode, btn] of Object.entries(scopeBtns)) {
+        btn.setAttribute('aria-pressed', String(sc.mode === mode));
+      }
+      const sel = searchAllScopeSelection(st);
+      scopeNote.textContent = scopeNoteText(sc, sel);
+      picks.replaceChildren();
+      const all = pickSources();
+      const shown = picksExpanded ? all : all.slice(0, PICK_CHIPS);
+      for (const src of shown) {
+        const chip = el('button', 'search-all-pick', sourceGlyph(src) + sourceLabel(src));
+        chip.type = 'button';
+        chip.setAttribute('aria-pressed', String(!sel || sel.has(src.id)));
+        chip.title = src.is_open ? 'Open in a tab' : 'Closed — searched anyway';
+        // Clicking a chip from Every table / This table means "start from
+        // what is in scope now and take this one out (or put it in)",
+        // which is a Choose… scope with that edit already made.
+        chip.onclick = () => {
+          const ids = new Set(sel || allPickIds());
+          if (ids.has(src.id)) ids.delete(src.id); else ids.add(src.id);
+          st.scope = searchAllPickScope([...ids]);
+          paintScope();
+        };
+        picks.append(chip);
+      }
+      if (all.length > shown.length) {
+        const more = el('button', 'search-all-pick', `+ ${all.length - shown.length} more`);
+        more.type = 'button';
+        more.onclick = () => { picksExpanded = true; paintScope(); };
+        picks.append(more);
+      }
+    }
+
+    /* What the results on screen are an answer ABOUT — the scope the job
+       ran with, not the one the row above has since been switched to (the
+       same rule st.terms follows). Without it, a rescope between a sweep
+       and reading its results leaves the pane describing tables nobody
+       searched. */
+    function ranScopeLine() {
+      const rs = st.ranScope;
+      if (!rs) return null;
+      const line = rs.source_ids
+        ? `Searched ${searchAllRanScopeLabel(rs)}.`
+        : 'Searched every table in this case.';
+      const merges = (rs.merges || []).map((m) => {
+        const n = (m.member_source_ids || []).length;
+        return `${m.name} is a merged table: its ${n} member table${n === 1 ? '' : 's'} `
+             + `${n === 1 ? 'was' : 'were'} searched, and the results name ${n === 1 ? 'it' : 'them'}.`;
+      });
+      return [line, ...merges].join(' ');
+    }
+
+    /* The cap, said out loud. It is the right trade at any scope — an
+       exact count is a full scan of every matching row on a table whose
+       trigram index is not built yet, and scoping to one table does not
+       make that table smaller — but "1,000+" invites "show me", and the
+       answer to that is a button already on the row. */
+    function cappedNote() {
+      // A table's own count and a term's own count hit the cap separately
+      // — SEARCH_ALL_COUNT_CAP applies to each — so the note names
+      // whichever of them actually stopped, rather than telling someone
+      // whose table total is exact that it stopped at a thousand.
+      let table = 0;
+      let term = 0;
+      for (const h of st.hits) {
+        if (h.capped) table = Math.max(table, h.match_count);
+        for (const t of h.terms || []) if (t.capped) term = Math.max(term, t.match_count);
+      }
+      if (!table && !term) return null;
+      const what = table && term ? 'per table, and per term within it'
+        : (table ? 'per table' : 'per term, per table');
+      return `Counts stop at ${Math.max(table, term).toLocaleString()} ${what}`
+           + ' — "Open ↦" for the exact number, in the grid.';
+    }
+
     function paintResults() {
       // The poller holds this closure and fires whether or not the pane is
       // still on screen; once the modal body has been replaced these nodes
       // are detached and there's nothing to paint.
       if (!results.isConnected) return;
-      searchBtn.disabled = st.running;
+      // Startable while a sweep runs: scoping to one table is exactly what
+      // someone does mid-sweep, and startSearchAll asks before it takes
+      // the job slot rather than being blocked from asking at all.
       cancelBtn.hidden = !st.running;
       progress.textContent = st.running
-        ? (st.total ? `Scanning ${st.scanned} of ${st.total} tables…` : 'Starting…')
+        ? (st.total ? `Scanning ${st.scanned} of ${st.total} table${st.total === 1 ? '' : 's'}…` : 'Starting…')
         : '';
 
       results.replaceChildren();
       if (st.error) { results.append(el('div', 'note-status', 'Search failed: ' + st.error)); return; }
+      const scopeLine = st.terms.length ? ranScopeLine() : null;
+      if (scopeLine) results.append(el('div', 'search-all-scope-ran', scopeLine));
+      // A table the sweep could not count is said by name, ahead of the
+      // results: it used to be counted as zero, and "No matches." about a
+      // table nobody read is the one answer an analyst moves on from.
+      for (const f of st.failed || []) {
+        const fSrc = S.sources.find((s) => s.id === f.source_id);
+        results.append(el('div', 'note-status search-all-failed',
+          `Could not search ${fSrc ? sourceLabel(fSrc) : f.name}: ${f.error}`));
+      }
       if (!st.hits.length) {
+        const none = (st.failed || []).length ? 'No matches in the tables that could be searched.' : 'No matches.';
         results.append(el('div', 'note-status',
-          st.running ? 'No matches yet…' : (st.terms.length ? 'No matches.' : '')));
+          st.running ? 'No matches yet…' : (st.terms.length ? none : '')));
         return;
       }
       // Partial results while running are worth showing (a hit on the table
@@ -358,6 +737,8 @@ export function openSearchAllModal() {
           results.append(searchAllHitRow(st, h, t));
         }
       }
+      const cap = cappedNote();
+      if (cap) results.append(el('div', 'search-all-scope-ran', cap));
     }
     searchAllRepaint = paintResults;
 
@@ -374,11 +755,12 @@ export function openSearchAllModal() {
     advBtn.onclick = () => { st.mode = 'advanced'; syncMode(); };
     syncMode();
 
-    searchBtn.onclick = startSearchAll;
+    searchBtn.onclick = () => startSearchAll();
     textarea.onkeydown = (e) => {
       if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); startSearchAll(); }
     };
     renderTermChips(chips, st.chipTerms, startSearchAll, { liveInput: false });
+    paintScope();
     paintResults();
     setTimeout(() => textarea.focus(), 0);
   }, { wide: true });
@@ -438,8 +820,15 @@ $('btnFilters').onclick = () => dropdownMenu($('btnFilters'), () => {
   const items = [
     { label: 'Filter builder…', onclick: openFilterBuilder },
     { label: 'Saved filters…', onclick: openSavedFiltersModal },
+    // The WHOLE view as it stands — filters, search, timeframe; a
+    // select-all's unchecked rows included — copied into a new table
+    // (subset.js). The row menu's scope-worded item is where a selection
+    // is subtracted; this one never is, and the title says so.
+    { label: 'Save this view as a table…',
+      title: 'Every row this view shows — unchecked rows included — becomes a new table in the case, badged as a subset of this one; tags and notes stay here',
+      onclick: () => saveCurrentViewAsTable() },
   ];
-  if (S.sourceId != null && S.sourceId >= 0) {
+  if (dashboardCreatorMode() && S.sourceId != null && S.sourceId >= 0) {
     items.push({ label: 'Add to dashboard: count of this view',
       title: 'A number on a dashboard — the rows this view shows now — that reopens the view when clicked',
       onclick: () => addViewCountWidget() });

@@ -13,6 +13,21 @@ import pytest
 
 pytestmark = pytest.mark.ui
 
+
+# "Add to dashboard" only appears in the menus when the case has opted in
+# (Case settings → Dashboards); the whole module assumes it has.
+@pytest.fixture(autouse=True, scope="module")
+def _dashboard_creator_mode(server_post):
+    server_post("/api/case_settings", {"dashboard_creator": True})
+    yield
+    server_post("/api/case_settings", {"dashboard_creator": False})
+
+
+@pytest.fixture(autouse=True)
+def _fresh_case_settings(page, _dashboard_creator_mode):
+    """The page fixture is shared; make sure it has read the setting."""
+    page.evaluate("() => __winnow.loadCaseSettings()")
+
 H = "{ 'Content-Type': 'application/json', 'X-Timeline-Lite-Client': '1' }"
 
 
@@ -226,8 +241,8 @@ def test_clicking_a_bar_pivots_on_its_value(page):
         w = page.evaluate("(t) => __winnow.widgetFrom({ template: 'top', table: t, column: 'Host' })", f"src_{src}")
         _put_widgets(page, did, [w])
         _show(page, did)
-        page.wait_for_selector("#dashGrid canvas.drillable")
-        page.wait_for_timeout(300)   # the bars draw on the next frame
+        # The bars draw on the next frame, and leave where they are on the canvas.
+        page.wait_for_function("() => (document.querySelector('#dashGrid canvas.drillable') || {}).bars")
         page.locator("#dashGrid canvas.drillable").first.click(position={"x": 12, "y": 8})   # the first bar's row
         page.wait_for_selector("#dashboardview", state="hidden")
         page.wait_for_function("() => __winnow.S.view && __winnow.S.view.row_count === 40")
@@ -237,7 +252,7 @@ def test_clicking_a_bar_pivots_on_its_value(page):
         _delete_board(page, did)
 
 
-def test_clicking_a_histogram_bucket_sets_the_timeframe(page):
+def test_clicking_a_histogram_bucket_sets_the_timeframe(page, painted):
     did = _new_board(page, "Drill D")
     src = _src(page)
     try:
@@ -245,7 +260,7 @@ def test_clicking_a_histogram_bucket_sets_the_timeframe(page):
         _put_widgets(page, did, [w])
         _show(page, did)
         page.wait_for_selector("#dashGrid canvas.drillable")
-        page.wait_for_timeout(300)
+        painted(page)   # the histogram draws on the next frame
         page.locator("#dashGrid canvas.drillable").first.click(position={"x": 5, "y": 60})
         page.wait_for_selector("#dashboardview", state="hidden")
         page.wait_for_function("() => __winnow.S.timeRange.enabled === true")
@@ -290,9 +305,9 @@ def test_guided_editor_writes_the_sql_from_a_template_and_a_column(page):
         page.locator("#modal .dash-template").select_option("top")
         page.locator("#modal .dash-column").select_option("Host")
         assert 'GROUP BY "Host"' in page.locator("#modal .dash-sql").input_value()
-        assert page.locator("#modal .confirm-input").first.input_value() == "Top Host"
+        assert page.locator("#modal .dash-title-input").input_value() == "Top Host"
         assert not page.evaluate("() => document.querySelector('#modal .dash-advanced').open")
-        page.locator("#modal button", has_text="Preview").click()
+        # the preview draws the chart by itself, nothing pressed
         page.wait_for_selector("#modal .dash-preview canvas")
         page.locator("#modal button", has_text="Save widget").click()
         page.wait_for_selector("#modal[hidden]", state="attached")
@@ -426,27 +441,39 @@ def test_a_missing_pick_leaves_no_query_behind(page):
     did = _new_board(page, "Stale")
     try:
         _show(page, did)
+        # A portable table whose header set has no columns to offer.
+        #
+        # Stubbed at the ROUTE, not just in S.headerSets, because
+        # ensureHeaderSets() assigns whatever the fetch returns
+        # unconditionally — so a state stub written after any fetch was
+        # already in flight gets overwritten when that answer lands, and
+        # the regenerate() hanging off it puts real SQL back in the box.
+        # Locally the fetch always landed first and the stub survived; on
+        # a loaded runner it did not, which cost two unrelated PRs a red
+        # check. Stubbing the response makes the answer the same whoever
+        # wins, and the state stub below means the editor need not ask.
+        page.route("**/api/header_sets", lambda route: route.fulfill(
+            status=200, content_type="application/json",
+            body='{"shorthands": {}, "sets": []}'))
+        page.evaluate("() => { __winnow.S.headerSets = { shorthands: {}, sets: [] }; }")
         page.locator("#dashBar button", has_text="Add widget").click()
         page.wait_for_selector("#modal:not([hidden]) .dash-template")
         page.locator("#modal .dash-template").select_option("count")
         assert "COUNT(*)" in page.locator("#modal .dash-sql").input_value()
-        # a portable table whose header set has no columns to offer
-        page.evaluate("() => { __winnow.S.headerSets = { shorthands: {}, sets: [] }; }")
         page.locator("#modal .dash-table").select_option("{{evtx}}")
         page.locator("#modal .dash-template").select_option("top")
-        # regenerate() awaits ensureHeaderSets(), so the box settles a tick
-        # after the change — and the previous selection's regenerate can
-        # still be in flight. Asserting straight away read whichever won,
-        # which passed locally and failed on a slower runner.
+        # regenerate() awaits ensureHeaderSets(), so the box still settles
+        # a tick after the change — that part was always real.
         page.wait_for_function(
             "() => document.querySelector('#modal .dash-sql').value === ''")
-        page.locator("#modal .confirm-input").first.fill("Nothing")
+        page.locator("#modal .dash-title-input").fill("Nothing")
         page.locator("#modal button", has_text="Save widget").click()
         page.wait_for_selector("#toast:not([hidden])")
         assert "needs a query" in page.locator("#toast").inner_text()
         assert _widgets(page, did) == []
         page.keyboard.press("Escape")
     finally:
+        page.unroute("**/api/header_sets")
         page.evaluate("() => { __winnow.S.headerSets = null; }")
         _delete_board(page, did)
 
@@ -488,7 +515,7 @@ def test_editing_width_keeps_a_hand_written_drill_with_a_trailing_newline(page):
         page.wait_for_selector("#dashGrid .dash-edit")
         page.locator("#dashGrid .dash-edit").first.click()
         page.wait_for_selector("#modal:not([hidden]) .dash-template")
-        page.locator("#modal select").last.select_option("2")     # Width
+        page.locator("#modal .dash-width button[data-span='2']").click()     # Width
         page.locator("#modal button", has_text="Save widget").click()
         page.wait_for_selector("#modal[hidden]", state="attached")
         (w,) = _wait_widgets(page, did, 1)

@@ -28,7 +28,8 @@ WHERE m.InUse = 'false' ORDER BY u.Timestamp;
 
 ## Install
 
-**Settings → Plugins → "Install a plugin folder…"** and pick this folder
+**Settings → Plugins → Manage plugins… → "Install a plugin…"**, choose the
+folder picker, and pick this folder
 (takes effect immediately, no restart), or copy it in by hand:
 
 ```bash
@@ -36,7 +37,8 @@ cp -r examples/plugins/mft_usn plugins/
 ```
 
 Then import a raw `$MFT`/`$J` by drag-and-drop, through **Import files…**,
-a folder import, or the per-format picker in Settings → Plugins.
+a folder import, or the per-format picker in the plugins manager
+(beside the format, under "What it adds").
 
 ## As a reference for writing your own plugin
 

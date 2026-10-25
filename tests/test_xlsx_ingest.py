@@ -51,6 +51,10 @@ def test_cell_text_conversions():
     assert xlsxread.cell_text(datetime.date(2024, 5, 2)) == "2024-05-02"
     assert xlsxread.cell_text(datetime.time(9, 30, 5)) == "09:30:05"
     assert xlsxread.cell_text(datetime.timedelta(hours=26, minutes=3, seconds=4)) == "26:03:04"
+    # On the hour, and past a hundred: the hours are whole hours, however many.
+    assert xlsxread.cell_text(datetime.timedelta(hours=1)) == "1:00:00"
+    assert xlsxread.cell_text(datetime.timedelta(minutes=59, seconds=59)) == "0:59:59"
+    assert xlsxread.cell_text(datetime.timedelta(hours=100)) == "100:00:00"
 
 
 def test_reader_rows_dates_and_gaps(write_xlsx):
@@ -188,3 +192,136 @@ def test_http_routing(store, write_xlsx, monkeypatch):
     done = store.wait_for_ingest_job(res.json()["job_id"], timeout=30)
     assert done["status"] == "done"
     assert "uploaded" in [s["name"] for s in store.list_sources()]
+
+
+def test_an_out_of_range_date_cell_keeps_its_number(tmp_path):
+    """openpyxl turns a date-styled cell whose serial no datetime can hold
+    (year 10000 and on) into the string "#VALUE!", and the number
+    is gone — a value the workbook stores imported as an error. The reader
+    does the date conversion itself now and keeps the number when the
+    date can't be made; real dates and [h]:mm durations convert as before."""
+    import warnings
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["when", "elapsed", "n"])
+    ws.append([datetime.datetime(2024, 5, 1, 13, 7, 0), datetime.timedelta(hours=26, minutes=5), 1])
+    ws.cell(row=3, column=1, value=99999999).number_format = "yyyy-mm-dd"
+    ws.cell(row=4, column=1, value=2958466).number_format = "yyyy-mm-dd hh:mm"   # 10000-01-01
+    ws.cell(row=3, column=3, value=7)
+    path = tmp_path / "range.xlsx"
+    wb.save(path)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        rows = list(xlsxread.iter_sheet_rows(str(path), ws.title))
+    assert rows[1] == ["2024-05-01 13:07:00", "26:05:00", "1"]
+    assert rows[2][0] == "99999999" and rows[2][2] == "7"
+    assert rows[3][0] == "2958466"
+    assert "#VALUE!" not in [c for r in rows for c in r]
+
+
+def _with_declared_dimension(path, ref, out):
+    """A copy of the workbook at `path` whose first sheet declares
+    <dimension ref=`ref`> — stale or defaulted, as several writers emit."""
+    import re
+    import zipfile
+
+    with zipfile.ZipFile(path) as zin, zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zout:
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            if item.filename == "xl/worksheets/sheet1.xml":
+                data = re.sub(rb'<dimension ref="[^"]*"', b'<dimension ref="' + ref.encode() + b'"', data)
+            zout.writestr(item, data)
+    return str(out)
+
+
+def test_a_stale_declared_dimension_does_not_cut_the_sheet(store, write_xlsx, tmp_path):
+    """openpyxl's read-only mode trusts the sheet's own <dimension> as the
+    edge of the data: a workbook declaring A1:B10 but holding 3 columns
+    and 101 rows imported 2 columns and 9 rows, ragged 0 — no sign that
+    anything was left behind."""
+    good = write_xlsx({"Data": [["Time", "User", "Action"]]
+                               + [[f"t{i}", f"u{i}", f"a{i}"] for i in range(1, 101)]})
+    stale = _with_declared_dimension(good, "A1:B10", tmp_path / "stale.xlsx")
+
+    sheets = store.preview_xlsx_sheets(stale)["tables"]
+    assert [c["name"] for c in sheets[0]["columns"]] == ["Time", "User", "Action"]
+
+    rec = store.ingest_xlsx_sheet(stale, "Data", build_fts=False)
+    assert rec["row_count"] == 100
+    assert [c["name"] for c in rec["columns"]] == ["Time", "User", "Action"]
+    v = store.build_view(rec["id"], {"source_id": rec["id"]})
+    assert store.fetch_rows(v["view_id"], 99, 1)["rows"][0]["cells"] == ["t100", "u100", "a100"]
+
+
+def _without_declared_size(tmp_path, rows):
+    """A workbook whose one sheet declares no <dimension> — openpyxl's
+    write-only mode leaves it out, as many tools' writers do."""
+    wb = Workbook(write_only=True)
+    ws = wb.create_sheet("Log")
+    for r in rows:
+        ws.append(r)
+    path = tmp_path / "undeclared.xlsx"
+    wb.save(path)
+    return str(path)
+
+
+def _rows_iter_rows_counts(path):
+    import openpyxl
+    wb = openpyxl.load_workbook(path, read_only=True)
+    try:
+        ws = wb.worksheets[0]
+        ws.reset_dimensions()
+        return sum(1 for _ in ws.iter_rows(values_only=True))
+    finally:
+        wb.close()
+
+
+def test_a_sheet_with_no_declared_size_is_counted_without_reading_its_cells(tmp_path, monkeypatch):
+    """With no <dimension> to estimate from, the picker counted a sheet's
+    rows by reading every cell through openpyxl: 20 s for a 33 MB
+    workbook, holding the GIL so a CSV import beside it ran 15x slower,
+    and the new import pane asked again each time the file was chosen.
+    The count comes off the sheet's row tags now — the same number, across
+    several of the 1 MB reads it scans in, with openpyxl's row parser
+    reading only the header."""
+    from openpyxl.worksheet._reader import WorkSheetParser
+
+    n = 30_000
+    path = _without_declared_size(tmp_path, [["When", "Host", "Note"]]
+                                  + [[f"2024-05-01 08:{i % 60:02d}:00", f"srv{i % 7}", "x" * 60] for i in range(n)])
+    parsed = []
+    real = WorkSheetParser.parse_row
+    monkeypatch.setattr(WorkSheetParser, "parse_row", lambda self, el: parsed.append(1) or real(self, el))
+    sheets = xlsxread.workbook_sheets(path)
+    assert sheets == [{"name": "Log", "row_count": n, "columns": ["When", "Host", "Note"]}]
+    assert len(parsed) < 5
+    monkeypatch.undo()
+    assert _rows_iter_rows_counts(path) == n + 1
+
+
+def test_the_row_count_reads_rows_the_way_openpyxl_does(tmp_path):
+    """Prefixed tags (the OpenXML SDK writes <x:row>), rows with no r=""
+    (the one before plus one), single quotes, a gap (counted, as iter_rows
+    pads it), a cell whose TEXT spells a row tag, and <rowBreaks>: the
+    count is iter_rows's, row for row."""
+    import zipfile
+
+    path = _without_declared_size(tmp_path, [["placeholder"]])
+    cell = '<x:c t="inlineStr"><x:is><x:t>{}</x:t></x:is></x:c>'
+    xml = ('<x:worksheet xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><x:sheetData>'
+           f'<x:row r="1">{cell.format("Head")}</x:row>'
+           f'<x:row>{cell.format("&lt;row r=&quot;900&quot;&gt;")}</x:row>'
+           f"<x:row r='5' spans=\"1:1\">{cell.format('five')}</x:row>"
+           f'<x:row>{cell.format("six")}</x:row>'
+           '</x:sheetData><x:rowBreaks count="1"><x:brk id="40"/></x:rowBreaks></x:worksheet>')
+    out = tmp_path / "shaped.xlsx"
+    with zipfile.ZipFile(path) as zin, zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zout:
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            zout.writestr(item, xml.encode() if item.filename == "xl/worksheets/sheet1.xml" else data)
+
+    assert _rows_iter_rows_counts(str(out)) == 6
+    sheet, = xlsxread.workbook_sheets(str(out))
+    assert sheet["row_count"] == 5 and sheet["columns"] == ["Head"]

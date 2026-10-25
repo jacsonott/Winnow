@@ -12,7 +12,7 @@ pytestmark = pytest.mark.ui
 def test_manual_help_lists_platform_steps_and_the_real_command(page):
     page.evaluate("() => __winnow.openSettings()")
     page.wait_for_selector("#modal:not([hidden])")
-    page.locator(".settings-section-head", has_text="File associations").click()
+    page.locator("#modalBody .settings-nav-item", has_text="File associations").click()
     page.wait_for_selector(".assoc-manual")
     d = page.locator(".assoc-manual")
     # Collapsed by default; opens on click.

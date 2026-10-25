@@ -11,8 +11,10 @@ pytestmark = pytest.mark.ui
 
 
 def _press(page, button):
+    # The tab switches inside the handler; a step back onto a table also
+    # rebuilds its view, which is let finish before the next step.
     page.evaluate(f"() => window.dispatchEvent(new MouseEvent('mouseup', {{ button: {button} }}))")
-    page.wait_for_timeout(150)
+    page.wait_for_function("() => __winnow.busyCount === 0")
 
 
 def test_thumb_buttons_walk_the_recent_tabs(page):

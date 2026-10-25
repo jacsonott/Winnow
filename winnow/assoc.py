@@ -14,8 +14,11 @@ catalogue rather than left to the UI:
   the double-click can't cost the analyst anything (`default_ok`).
   .txt/.json/.db/.xlsx have real owners — Notepad, editors, DB Browser,
   Excel — and a forensic tool that steals .xlsx from Excel is the kind
-  of thing that gets it deleted. Plugin extensions are handler-only
-  too: they aren't vetted, and a plugin is free to claim .zip.
+  of thing that gets it deleted. Plugin extensions are default-ELIGIBLE
+  but never default silently: one becomes the double-click default only
+  through an explicit analyst choice (the new-extension launch prompt,
+  or the panel's "Make default"), and a builtin type always wins a
+  clash, so a plugin can't re-label .csv or .xlsx (supported_types).
 
 - On Windows, "make default" writes the classic HKCU\\Software\\Classes
   association and then tells the truth: since Windows 8 Explorer's
@@ -212,11 +215,47 @@ class LinuxAssoc:
                 cp.add_section(sec)
         return cp
 
+    _MIMEAPPS_SECTIONS = ("Default Applications", "Added Associations", "Removed Associations")
+
     def _write_mimeapps(self, cp: ConfigParser) -> None:
-        p = self._mimeapps_path()
+        """Write back only what changed, into the file as it is, atomically.
+
+        mimeapps.list is shared by every desktop application and often
+        hand-kept (or managed: "# managed by ansible" is a real header on
+        a SOC image). Writing `cp` out wholesale dropped every comment and
+        blank line and reflowed the rest; truncating the file in place
+        meant a kill mid-write left every app's associations empty, not
+        just ours. Now the edits made to `cp` are diffed against a fresh
+        parse of the file and applied line by line (_patch_mimeapps), the
+        result goes to a temp file beside it and is renamed over it, and a
+        symlinked mimeapps.list (a dotfiles repo) has its TARGET replaced
+        rather than the link turned into a regular file."""
+        p = Path(os.path.realpath(self._mimeapps_path()))
         p.parent.mkdir(parents=True, exist_ok=True)
-        with open(p, "w", encoding="utf-8") as f:
-            cp.write(f, space_around_delimiters=False)
+        text = p.read_text(encoding="utf-8") if p.exists() else ""
+        before = self._read_mimeapps()   # re-parse: what `text` says now
+        changes: dict[tuple[str, str], str | None] = {}
+        for sec in self._MIMEAPPS_SECTIONS:
+            old = dict(before.items(sec)) if before.has_section(sec) else {}
+            new = dict(cp.items(sec)) if cp.has_section(sec) else {}
+            for key in old.keys() | new.keys():
+                if old.get(key) != new.get(key):
+                    changes[(sec, key)] = new.get(key)
+        if not changes and p.exists():
+            return
+        out = _patch_mimeapps(text, changes)
+        tmp = p.with_name(p.name + ".winnow-tmp")
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(out)
+                f.flush()
+                os.fsync(f.fileno())
+            if p.exists():
+                shutil.copymode(p, tmp)
+            os.replace(tmp, p)
+        finally:
+            with contextlib.suppress(OSError):
+                tmp.unlink()
 
     @staticmethod
     def _add_entry(cp: ConfigParser, section: str, mime: str, desktop: str, *, front: bool) -> None:
@@ -247,7 +286,7 @@ class LinuxAssoc:
             f"Exec={exe} %F\n"
             "Terminal=false\n"
             "NoDisplay=true\n"          # a file handler, not a launcher-menu app
-            f"Icon={icon_file('png')}\n"  # absolute path: no install-into-theme step needed for the app icon
+            f"Icon={_desktop_string(icon_file('png'))}\n"  # absolute path: no install-into-theme step needed for the app icon
             f"MimeType={';'.join(sorted(mimes))};\n"
             "Categories=Utility;\n"
         )
@@ -389,6 +428,10 @@ class LinuxAssoc:
                                    capture_output=True, timeout=30)
         return refresh
 
+    def refresh_verb(self) -> bool:
+        """Windows-only concern (the .desktop entry's Name= is the name)."""
+        return False
+
     def refresh_icons(self, catalogue: list[dict]) -> bool:
         """Re-sync the theme copies against the committed icon — called at
         server startup so an update that changed the icon propagates
@@ -423,12 +466,94 @@ class LinuxAssoc:
         return out
 
 
+# The Desktop Entry spec's reserved characters for an Exec= argument: one
+# containing any of them must be double-quoted.
+_DESKTOP_RESERVED = frozenset(' \t\n"\'\\><~|&;$*?#()`')
+
+
+def _patch_mimeapps(text: str, changes: dict[tuple[str, str], str | None]) -> str:
+    """Apply {(section, key): value-or-None} to mimeapps.list text, touching
+    nothing else: a changed key is rewritten where it stands (a repeat of
+    it later in the same section dropped, since the parser read the last
+    one), a removed key's line goes, a new key is added at the end of its
+    section — or with a new section at the end of the file. Comments,
+    blank lines, order and every other application's lines stay exactly as
+    they were."""
+    lines = text.splitlines(keepends=True)
+    if lines and not lines[-1].endswith("\n"):
+        lines[-1] += "\n"
+    pending = dict(changes)
+    written: set[tuple[str, str]] = set()
+    out: list[str] = []
+    section = None
+
+    def flush(sec):
+        # Keys new to `sec`, placed after its last non-blank line.
+        adds = [(k, v) for (s_, k), v in pending.items() if s_ == sec and v is not None]
+        if not adds:
+            return
+        at = len(out)
+        while at > 0 and not out[at - 1].strip():
+            at -= 1
+        out[at:at] = [f"{k}={v}\n" for k, v in adds]
+        for k, _ in adds:
+            pending.pop((sec, k))
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            flush(section)
+            section = stripped[1:-1]
+            out.append(line)
+            continue
+        if section is not None and "=" in stripped and not stripped.startswith(("#", ";")):
+            key = (section, stripped.split("=", 1)[0].strip())
+            if key in written:
+                continue                       # a repeat of a key rewritten above
+            if key in pending:
+                value = pending.pop(key)
+                written.add(key)
+                if value is not None:
+                    out.append(f"{key[1]}={value}\n")
+                continue
+        out.append(line)
+    flush(section)
+    for sec in dict.fromkeys(s_ for (s_, _), v in pending.items() if v is not None):
+        if out and out[-1].strip():
+            out.append("\n")
+        out.append(f"[{sec}]\n")
+        flush(sec)
+    return "".join(out)
+
+
+def _desktop_string(value: str) -> str:
+    """A `string`-type .desktop value: backslash and the whitespace
+    controls escaped. The key-file reader undoes this BEFORE Exec's own
+    quoting rule runs, which is why a literal backslash in a quoted Exec
+    argument ends up as four of them."""
+    return (value.replace("\\", "\\\\").replace("\n", "\\n")
+            .replace("\t", "\\t").replace("\r", "\\r"))
+
+
 def _desktop_quote(arg: str) -> str:
-    # Desktop-entry Exec quoting: double quotes with backslash-escaping —
-    # NOT shell quoting. Paths with spaces are the norm on analyst boxes.
-    if not any(c in arg for c in ' "\\'):
-        return arg
-    return '"' + arg.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    """One Exec= argument, encoded the way the Desktop Entry spec says —
+    NOT shell quoting, and not just "quote it if it has a space", which
+    is what this used to be. Three layers, applied in this order and
+    undone by the launcher in the reverse one:
+
+    1. quoting: an argument with a reserved character is wrapped in
+       double quotes, with `"`, backtick, `$` and `\\` backslash-escaped
+       inside them. An install under /home/o'brien/ was left unquoted,
+       and GLib's argv parser read the apostrophe as an unterminated
+       quote — the entry did nothing on a double-click;
+    2. field codes: a literal `%` is `%%`, inside quotes too — the
+       launcher expands %-codes over the raw line first, so "100%done"
+       lost its `%d`;
+    3. the `string` escapes of the key-file format (_desktop_string),
+       which doubles every backslash the first layer wrote."""
+    if any(c in _DESKTOP_RESERVED for c in arg):
+        arg = '"' + "".join("\\" + c if c in '"`$\\' else c for c in arg) + '"'
+    return _desktop_string(arg.replace("%", "%%"))
 
 
 # ----------------------------------------------------------------- windows
@@ -532,11 +657,21 @@ class WindowsAssoc:
     def _ensure_progid(self) -> None:
         base = f"Software\\Classes\\{self.PROGID}"
         self._set(base, None, "Winnow")
-        # DefaultIcon is what puts the brand mark on the Open With → Winnow
-        # menu entry and on any file type Winnow is the default for (a
-        # .db-winnow case, above all). ",0" = the first icon in the .ico.
-        self._set(f"{base}\\DefaultIcon", None, f"{icon_file('ico')},0")
+        # DefaultIcon is what puts the brand mark on any file type Winnow is
+        # the default for (a .db-winnow case, above all). ",0" = the first
+        # icon in the .ico.
+        icon = f"{icon_file('ico')},0"
+        self._set(f"{base}\\DefaultIcon", None, icon)
         self._set(base, "IconHash", _icon_hash())
+        # The Open With menu names a handler by asking its open verb for a
+        # FriendlyAppName and, absent one, falls back to the executable
+        # in the command — which is python.exe, so the entry for a .txt
+        # read "Python" with the interpreter's icon. Name and icon on the
+        # verb (and the name on the ProgId, which some shells read
+        # instead) make it "Winnow" with the mark.
+        self._set(base, "FriendlyAppName", "Winnow")
+        self._set(f"{base}\\shell\\open", "FriendlyAppName", "Winnow")
+        self._set(f"{base}\\shell\\open", "Icon", icon)
         self._set(f"{base}\\shell\\open\\command", None,
                   subprocess.list2cmdline(launch_command(self.background)) + ' "%1"')
 
@@ -555,6 +690,23 @@ class WindowsAssoc:
             return False
         self._set(f"{base}\\DefaultIcon", None, f"{icon_file('ico')},0")
         self._set(base, "IconHash", current)
+        self._notify()
+        return True
+
+    def refresh_verb(self) -> bool:
+        """Stamp FriendlyAppName/Icon onto a registration made before the
+        open verb carried them. Startup-time: a registered install whose
+        verb already says Winnow is a no-op, and so is an unregistered
+        one — creating the ProgId here would be registration by
+        surprise. Without this, only a fresh register() or the
+        hidden-launch toggle would ever write the name, and the install
+        the fix is for keeps reading "Python" in Open With."""
+        base = f"Software\\Classes\\{self.PROGID}"
+        if self._get(base, None) is None:
+            return False
+        if self._get(f"{base}\\shell\\open", "FriendlyAppName") == "Winnow":
+            return False
+        self._ensure_progid()
         self._notify()
         return True
 

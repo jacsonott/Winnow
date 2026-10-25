@@ -3,17 +3,20 @@
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { $, PAGE, api, el, post, setBusy, toast } from './core.js';
 import { clearPageCache, render, rowAt } from './grid.js';
-import { drawRail, groupCoordAt, loadRowsForPositions, positionsNeedLoading, regroupIfGroupedByTag, waitForPages } from './grouping.js';
-import { S, selCount, selExcludedPairs, selExcludedPositions, selFirst, selPositions } from './state.js';
+import { clearGroupPageCache, drawRail, groupCoordAt, loadRowsForPositions, positionsNeedLoading, regroupIfGroupedByTag, waitForPages } from './grouping.js';
+import { S, cellRangeRows, selCount, selExcludedPairs, selExcludedPositions, selFirst, selPositions } from './state.js';
 import { openTagEditor } from './timeframe.js';
-import { renderTimelineTagFilter } from './timeline.js';
-import { confirmDialog } from './ui.js';
+import { buildTimeline, renderTimelineTagFilter } from './timeline.js';
+import { confirmDialog, contextMenu, oneAtATime } from './ui.js';
 import { rebuildView } from './view.js';
 
 /* ----------------------------------------------------------------- tags */
 
 export async function loadTags() {
-  const d = await api(`/api/tags?source_id=${S.sourceId}`);
+  // No table open (an empty case) is still a case with tags: ask for the
+  // definitions alone rather than send "source_id=null", which the route
+  // refuses (422) and which left the previous case's list in S.tags.
+  const d = await api(S.sourceId == null ? '/api/tags' : `/api/tags?source_id=${S.sourceId}`);
   S.tags = d.tags;
   // Whole-table counts. The ribbon shows the *view*-scoped ones the moment
   // there's a view to scope to (refreshTagCounts, below); until then these
@@ -25,6 +28,23 @@ export async function loadTags() {
   refreshTagCounts();
   // Deleting a tag takes its history with it server-side, and opening a
   // different case swaps the Store (and so the whole stack) underneath us.
+  refreshUndoState();
+}
+
+/* The tag definitions of the case just opened, before anything else reads
+   them. Tag ids are numbered per case file, so the previous case's list is
+   not this one's: the Watchlist's auto-tag picker and the Timeline's tag
+   chips both read S.tags, and an id picked from the old list was stored
+   here as an auto-tag naming nothing — or the wrong tag. loadSources only
+   reloads them by opening a table, which an empty case never does. Counts
+   are cleared rather than fetched: they are per table, and S.sourceId
+   still names the previous case's table at this point (see loadSources). */
+export async function loadCaseTags() {
+  S.tags = (await api('/api/tags')).tags;
+  S.tagCountsAll = {};
+  S.tagCounts = {};
+  renderTagRibbon();
+  renderTimelineTagFilter();
   refreshUndoState();
 }
 
@@ -56,16 +76,83 @@ export async function refreshTagCounts() {
   renderTagRibbon();
 }
 
+/* Puts the tag filter where `next` says and rebuilds. One place, because
+   the chips all mean the same kind of thing and the exclusions between
+   them are a rule, not five handlers: "Any tag" is every specific tag at
+   once, so it cannot usefully sit beside one. Everything else unions —
+   two tags means rows carrying either, and "No tags" beside a tag means
+   untagged rows plus that tag's (Store._compile_where OR's the parts). */
+function setTagFilter(next) {
+  S.tagFilter = next;
+  renderTagRibbon();
+  rebuildView({ keepScroll: false });
+}
+
+/* An excluded tag — one filtered OUT — rides in the same list as the
+   ones filtered to, spelled '!<id>' (the header box's own "not"). That is
+   what makes it an ordinary part of the tag filter: the table-switch
+   stash, a background search's snapshot, Clear filters and a dashboard's
+   count-of-this-view all copy S.tagFilter, so they carry an exclusion
+   without knowing it exists. Store._compile_where ANDs these where it ORs
+   the rest. */
+export const tagExcludeKey = (id) => `!${id}`;
+
+export const isTagExclusion = (key) => typeof key === 'string' && key.startsWith('!');
+
+export const tagFilterExclusions = () => S.tagFilter.filter(isTagExclusion);
+
+/* Click semantics shared by every chip: click adds, click again removes,
+   and picking anything specific drops "Any tag". What is excluded stays
+   excluded whatever is picked beside it, except the tag being picked: a
+   tag can't be both. */
+function toggleTagFilterKey(key) {
+  const has = S.tagFilter.includes(key);
+  const out = tagFilterExclusions().filter((k) => k !== tagExcludeKey(key));
+  let next = S.tagFilter.filter((k) => !isTagExclusion(k) && k !== key);
+  if (key === '__any__') next = has ? [] : ['__any__'];
+  else if (!has) next = [...next.filter((k) => k !== '__any__'), key];
+  setTagFilter([...next, ...out]);
+}
+
+/* Exclude a tag, or let its rows back in. Excluding a tag that was
+   filtered TO swaps it rather than leaving both, which would be no rows. */
+export function toggleTagExclusion(id) {
+  const key = tagExcludeKey(id);
+  const has = S.tagFilter.includes(key);
+  const next = S.tagFilter.filter((k) => k !== key && k !== id);
+  setTagFilter(has ? next : [...next, key]);
+}
+
+/* The chip's right-click menu. Both directions are here, rather than the
+   right-click simply excluding, because the menu is the one place that
+   says what each gesture on a chip does — and a ✓ on either line is how
+   to read which one is on. */
+function tagChipMenuItems(t) {
+  return [
+    { label: `Filter to ${t.name}`, checked: S.tagFilter.includes(t.id),
+      title: 'Show rows carrying this tag — the same as clicking the chip',
+      onclick: () => toggleTagFilterKey(t.id) },
+    { label: `Exclude ${t.name}`, checked: S.tagFilter.includes(tagExcludeKey(t.id)),
+      title: 'Hide every row carrying this tag. Combines with the rest of the tag filter: Suspicious with this one excluded means Suspicious rows that are not also this.',
+      onclick: () => toggleTagExclusion(t.id) },
+    '-',
+    { label: 'Clear the tag filter', disabled: !S.tagFilter.length, onclick: () => setTagFilter([]) },
+  ];
+}
+
 export function renderTagRibbon() {
   const rib = $('tagRibbon');
   rib.replaceChildren();
   for (const t of S.tags) {
     const chip = el('button', 'tag-chip');
-    chip.setAttribute('aria-pressed', String(S.tagFilter.includes(t.id)));
-    chip.style.color = S.tagFilter.includes(t.id) ? t.color : '';
+    const on = S.tagFilter.includes(t.id);
+    const out = S.tagFilter.includes(tagExcludeKey(t.id));
+    chip.setAttribute('aria-pressed', String(on));
+    chip.classList.toggle('excluded', out);
+    chip.style.color = on || out ? t.color : '';
     const sw = el('span', 'swatch');
     sw.style.background = t.color;
-    chip.append(sw, el('span', null, t.name));
+    chip.append(sw, el('span', 'name', t.name));
     if (t.hotkey) chip.append(el('span', 'key', t.hotkey));
     // Scoped to the current view, not the whole table: with a filter or a
     // search on, "how many of *these* are tagged" is the question the
@@ -78,32 +165,293 @@ export function renderTagRibbon() {
     const scope = n === all
       ? `${all.toLocaleString()} tagged`
       : `${n.toLocaleString()} tagged in this view · ${all.toLocaleString()} in the table`;
-    chip.title = `${scope}. Click to filter to ${t.name}. Press ${t.hotkey || '—'} to tag the selection.`;
-    chip.onclick = () => {
-      S.tagFilter = S.tagFilter.includes(t.id) ? [] : [t.id];
-      renderTagRibbon();
-      rebuildView({ keepScroll: false });
+    // Both halves of what a chip does: click to narrow (and chips add
+    // up), press to tag. The Shift form is named here because the ribbon
+    // is where an analyst looks to find out what the keys do.
+    const keys = ` Press ${t.hotkey || '—'} to tag the selection`
+      + (t.hotkey ? `, Shift+${t.hotkey} for every row in this view — or to take it off them, once they all have it` : '')
+      + '.';
+    chip.title = out
+      ? `Excluded: rows tagged ${t.name} are hidden (${all.toLocaleString()} in the table). Click to show them again.` + keys
+      : `${scope}. Click to filter to ${t.name} — chips add up, so two of them mean rows carrying either.`
+        + ` Right-click to exclude it instead.` + keys;
+    // A click on a chip that is excluded lets its rows back in, the
+    // way a click on one filtered to drops it: a click undoes what the
+    // chip is showing, whichever direction that is.
+    chip.onclick = () => (out ? toggleTagExclusion(t.id) : toggleTagFilterKey(t.id));
+    chip.oncontextmenu = (e) => {
+      e.preventDefault();
+      contextMenu(e, () => tagChipMenuItems(t));
     };
     rib.append(chip);
   }
   const any = el('button', 'tag-chip');
-  any.setAttribute('aria-pressed', String(S.tagFilter[0] === '__any__'));
+  any.setAttribute('aria-pressed', String(S.tagFilter.includes('__any__')));
+  any.title = 'Rows carrying any tag at all. Picking a specific tag replaces it — it already includes every tag.';
   any.append(el('span', null, 'Any tag'));
-  any.onclick = () => {
-    S.tagFilter = S.tagFilter[0] === '__any__' ? [] : ['__any__'];
-    renderTagRibbon();
-    rebuildView({ keepScroll: false });
-  };
+  any.onclick = () => toggleTagFilterKey('__any__');
   rib.append(any);
+  // The other end of the same question, and the one an analyst working
+  // through a table actually needs: what have I not looked at yet.
+  const none = el('button', 'tag-chip');
+  none.setAttribute('aria-pressed', String(S.tagFilter.includes('__none__')));
+  none.title = 'Rows with no tag on them — what is left to go through. Adds to any tags picked beside it.';
+  none.append(el('span', null, 'No tags'));
+  none.onclick = () => toggleTagFilterKey('__none__');
+  rib.append(none);
   const edit = el('button', 'tag-chip');
   edit.append(el('span', null, 'Edit tags'));
-  edit.onclick = openTagEditor;
+  edit.onclick = () => openTagEditor();
   rib.append(edit);
+}
+
+/* ------------------------------------------------------- tag list editors */
+
+/* The colours a new tag is handed, in order. The first three are the
+   shipped defaults (store.DEFAULT_TAGS: TA, Suspicious, Benign), so the
+   first tag an analyst adds to a fresh case is the first colour it doesn't
+   already have. Every tag used to arrive the same grey-blue, and a ribbon
+   of three of them is three tags nobody can tell apart at a glance. Nine,
+   one per tag key; blue sits late so the first few added don't read as
+   the old default. Mid-tones, like the three defaults, since each one is
+   both a row stripe and chip text on dark and light skins alike. */
+export const NEW_TAG_COLORS = [
+  '#c0392b', '#d68a2e', '#5d8a66', '#8e5cc2', '#2a9d8f',
+  '#c94f8a', '#b8962e', '#3b7dd8', '#8a6a4f',
+];
+
+/* What Add tag (Edit tags) and + tag (the template) create, given the
+   tags already in that list: the first palette colour none of them has
+   and the first of keys 1–9 none of them holds, so the new tag can be
+   pressed straight away. With all nine colours taken it reuses the one
+   the fewest tags carry; with all nine keys taken it has none, as every
+   new tag used to. And a name none of them has — "New tag", then "New
+   tag 2", "New tag 3"… — because sessions match tags by name: two
+   unrenamed "New tag"s became one when a session was loaded back.
+   Store.upsert_tag picks a free name too (any client, two windows); this
+   is what the template, which never reaches it, relies on. */
+export function newTagDefaults(existing) {
+  const colors = existing.map((t) => (t.color || '').toLowerCase());
+  const uses = (c) => colors.filter((x) => x === c).length;
+  const color = NEW_TAG_COLORS.reduce((best, c) => (uses(c) < uses(best) ? c : best));
+  const keys = new Set(existing.map((t) => t.hotkey));
+  const hotkey = ['1', '2', '3', '4', '5', '6', '7', '8', '9'].find((k) => !keys.has(k)) || null;
+  const names = new Set(existing.map((t) => t.name));
+  let name = 'New tag';
+  for (let n = 2; names.has(name); n += 1) name = `New tag ${n}`;
+  return { name, color, hotkey };
+}
+
+/* How long a paused name waits before it saves. The row note's figure
+   (saveNote), for the same reason: long enough not to write per keystroke,
+   short enough that closing the dialog straight after typing loses nothing
+   — the timer outlives the dialog, and leaving the box saves at once. */
+export const TAG_NAME_SAVE_MS = 500;
+
+/* One line of a tag list — Edit tags (the case's own) and Settings →
+   Default tags for new cases (the template) — that saves as it changes
+   instead of behind a Save button: the colour and the key at once, the
+   name once typing pauses or the box is left. Both editors had a Save the
+   analyst had to remember (one per row in Edit tags, one for the whole
+   template), and a rename typed and closed without it was silently lost.
+
+   `save({name, color, hotkey})` does the write and throws to refuse; the
+   row's own state slot says "Saving…" then "Saved", the way the row note
+   and the case notes do, and a refusal is toasted with the server's words
+   (ui.md, "A click handler reports its own refusal") and leaves "Not
+   saved" beside the row. An empty name is never sent: a pause while
+   retyping one would otherwise save a nameless tag in a case, and in the
+   template — whose server side drops nameless entries — delete the row
+   being edited. Leaving the box empty puts the last saved name back.
+
+   Saves run one at a time per row, so a slow write can't land after the
+   one that followed it. Returns {row, name, flush}: `name` is the name
+   box, `flush()` sends a pending name now and resolves once this row's
+   writes have settled — anything about to redraw the list calls it
+   first. */
+export function tagEditRow(t, { save, remove, removeLabel = '✕', removeTitle = '' }) {
+  const row = el('div', 'tag-edit-row');
+  const color = el('input', 'tag-edit-color');
+  color.type = 'color';
+  color.value = t.color || '#8899aa';
+  color.title = 'Colour';
+  const name = el('input', 'confirm-input tag-edit-name');
+  name.value = t.name || '';
+  name.placeholder = 'Tag name';
+  name.setAttribute('aria-label', 'Tag name');
+  const key = el('input', 'confirm-input tag-edit-key');
+  key.value = t.hotkey || '';
+  key.maxLength = 1;
+  key.title = 'Key — 1 to 9 tag the selection';
+  key.setAttribute('aria-label', 'Key');
+  const state = el('span', 'tag-edit-state');
+  state.setAttribute('aria-live', 'polite');
+  const rm = el('button', 'btn ghost tag-edit-remove', removeLabel);
+  if (removeTitle) rm.title = removeTitle;
+  rm.onclick = oneAtATime(rm, () => remove());
+  row.append(color, name, key, state, rm);
+
+  const fields = () => ({ name: name.value, color: color.value, hotkey: key.value || null });
+  const same = (a, b) => a.name === b.name && a.color === b.color && a.hotkey === b.hotkey;
+  // `saved` is what the server holds; `latest` what was last sent, so a
+  // blur straight after the pause that already sent the name sends nothing.
+  let saved = fields();
+  let latest = saved;
+  let timer = null;
+  let fade = null;
+  let inflight = 0;
+  let chain = Promise.resolve();
+  const show = (text, warn = false) => {
+    clearTimeout(fade);
+    state.textContent = text;
+    state.classList.toggle('warn', warn);
+    // "Saved" is a confirmation, not a state to live with: it goes once
+    // read, so the next one is visibly a new one.
+    if (text === 'Saved') fade = setTimeout(() => { if (state.textContent === 'Saved') show(''); }, 1500);
+  };
+  const needsName = (on) => {
+    name.classList.toggle('invalid', on);
+    if (on) show('Needs a name', true);
+  };
+  const commit = () => {
+    clearTimeout(timer);
+    timer = null;
+    const want = fields();
+    if (!want.name.trim()) { needsName(true); return chain; }
+    needsName(false);
+    if (same(want, latest)) {
+      if (!inflight && state.textContent === 'Saving…') show('');
+      return chain;
+    }
+    latest = want;
+    inflight++;
+    show('Saving…');
+    chain = chain.then(() => save(want)).then(() => {
+      saved = want;
+      inflight--;
+      if (!inflight) show('Saved');
+    }, (e) => {
+      inflight--;
+      latest = saved;
+      show('Not saved', true);
+      toast(`Could not save "${want.name}": ${e.message}`, 6000);
+    });
+    return chain;
+  };
+  color.addEventListener('change', commit);
+  key.addEventListener('focus', () => key.select());
+  key.addEventListener('input', commit);
+  name.addEventListener('input', () => {
+    clearTimeout(timer);
+    timer = null;
+    if (!name.value.trim()) { needsName(true); return; }
+    needsName(false);
+    show('Saving…');
+    timer = setTimeout(commit, TAG_NAME_SAVE_MS);
+  });
+  name.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); commit(); } });
+  name.addEventListener('blur', () => {
+    if (name.value.trim()) { commit(); return; }
+    clearTimeout(timer);
+    timer = null;
+    name.value = latest.name;
+    needsName(false);
+    show('');
+  });
+  return { row, name, flush: commit };
+}
+
+/* Settings → Default tags for new cases. The template is one file
+   (workspace/tags.json) written as a whole list, so every change — a
+   row's save, a row added, a row removed — sends the list, one write at a
+   time in the order they were made. `tags` only ever holds what each row
+   has committed: a name still being typed stays in its box, so another
+   row's save can't send it early. */
+export function buildDefaultTagsEditor(sec) {
+  const list = el('div', 'tag-edit-list');
+  const acts = el('div', 'row-actions');
+  const add = el('button', 'btn ghost', '+ tag');
+  // Not until the template has been read: every save writes the whole
+  // list, so a + tag on a list that failed to load would replace the
+  // template with one "New tag".
+  add.disabled = true;
+  acts.append(add);
+  sec.append(list, acts);
+  let tags = [];
+  let rows = [];
+  let chain = Promise.resolve();
+  const saveAll = () => {
+    const p = chain.then(() => post('/api/settings/default_tags', {
+      tags: tags.map((t) => ({ name: t.name, color: t.color, hotkey: t.hotkey || null })),
+    }));
+    chain = p.catch(() => {});
+    return p;
+  };
+  const settle = () => Promise.all(rows.map((r) => r.flush()));
+  const paint = () => {
+    list.replaceChildren();
+    rows = tags.map((t) => {
+      const r = tagEditRow(t, {
+        removeTitle: 'Remove this tag from the template',
+        save: async (want) => {
+          const was = { ...t };
+          Object.assign(t, want);
+          try { await saveAll(); } catch (e) { Object.assign(t, was); throw e; }
+        },
+        remove: async () => {
+          await settle();
+          const at = tags.indexOf(t);
+          if (at < 0) return;
+          tags.splice(at, 1);
+          try { await saveAll(); } catch (e) {
+            tags.splice(at, 0, t);
+            toast(`Could not remove "${t.name}": ${e.message}`, 6000);
+            return;
+          }
+          paint();
+        },
+      });
+      list.append(r.row);
+      return r;
+    });
+  };
+  add.onclick = oneAtATime(add, async () => {
+    await settle();
+    tags.push(newTagDefaults(tags));
+    try { await saveAll(); } catch (e) {
+      tags.pop();
+      toast(`Could not add a tag: ${e.message}`, 6000);
+      return;
+    }
+    paint();
+    const fresh = rows[rows.length - 1].name;
+    fresh.focus();
+    fresh.select();
+  });
+  api('/api/settings/default_tags')
+    .then((t) => { tags = t; paint(); add.disabled = false; })
+    .catch((e) => { list.append(el('p', 'fb-help', `Could not read the template: ${e.message}`)); });
 }
 
 /* Above this many rows, tagging asks first — and, on the per-row path,
    that many rows also means a lot of pages to fetch before it can start. */
 export const BULK_TAG_CONFIRM_AT = 10000;
+
+/* Two row caches share one view id and neither knows the other exists:
+   the flat `S.pages`/`S.rowsByPos` and the grouped `S.groupPages`.
+   Grouping doesn't empty the flat cache (regroupAll touches only the group
+   one, and S.view.view_id doesn't change), so while grouped the flat rows
+   sit off-screen, still holding the `tags` arrays they were fetched with —
+   and dropGrouping paints them straight back. A tag write the server did
+   on this client's behalf (a whole view, a whole group, an undo, a tag
+   deleted outright) therefore has to drop BOTH, whatever mode is showing;
+   the one that isn't on screen is exactly the one nobody would otherwise
+   remember. Each half bumps its own generation so a fetch already in
+   flight can't repopulate it. */
+export function clearRowCaches() {
+  clearPageCache();
+  clearGroupPageCache();
+}
 
 /* Tagging a selection.
 
@@ -129,12 +477,8 @@ export async function applyTag(tag, on) {
     // meant: highlighting cells across four rows and pressing a tag key
     // should tag those four rows, not just the anchor row the cursor
     // happens to sit on. Group headers inside the span are skipped.
-    if (S.cellRange) {
-      let positions = [];
-      for (let p = S.cellRange.r0; p <= S.cellRange.r1; p++) positions.push(p);
-      if (S.groupByCols.length) positions = positions.filter((p) => groupCoordAt(p));
-      if (positions.length) { await tagRowsAtPositions(tag, positions, on); return; }
-    }
+    const positions = cellRangeRows();
+    if (positions.length) { await tagRowsAtPositions(tag, positions, on); return; }
     if (S.cursor < 0) return;
     // In grouped mode the cursor can sit on a group header, which isn't a
     // row — tag the whole group from its right-click menu instead.
@@ -187,7 +531,7 @@ export async function tagWholeViewSelection(tag, on) {
   refreshTagCounts();
   // Every cached row's `tags` array is now stale — the server changed rows
   // this client never fetched, so there's nothing to patch up in place.
-  clearPageCache();
+  clearRowCaches();
   renderTagRibbon();
   render();
   drawRail();
@@ -215,9 +559,11 @@ export async function tagRowsAtPositions(tag, positions, on) {
   if (rows.some((r) => !r)) { toast('Could not tag: some selected rows could not be loaded', 5000); return; }
   // A merged view's selected rows can each belong to a different real
   // source — send their own (source_id, rid) pairs rather than the merge's
-  // synthetic negative id, so tags land on the row's actual origin.
+  // synthetic negative id, so tags land on the row's actual origin. The
+  // merge's id rides along so the counts that come back are the whole
+  // merge's, which is what tagCountsAll holds below.
   const body = S.sourceId < 0
-    ? { pairs: rows.map((r) => [r.source_id, r.rid]), tag_id: tag.id, on }
+    ? { pairs: rows.map((r) => [r.source_id, r.rid]), source_id: S.sourceId, tag_id: tag.id, on }
     : { source_id: S.sourceId, rids: rows.map((r) => r.rid), tag_id: tag.id, on };
   setBusy(true);
   let res;
@@ -227,6 +573,14 @@ export async function tagRowsAtPositions(tag, positions, on) {
   for (const r of rows) {
     r.tags = on ? [...new Set([...r.tags, tag.id])] : r.tags.filter((x) => x !== tag.id);
   }
+  // Under a grouping the objects just patched are group-page rows; the
+  // flat cache holds *other* objects for the same rids, off-screen and
+  // still pre-tag, and dropGrouping would paint them as they are. Drop it
+  // now, while it costs nothing — the group cache keeps the patch, which
+  // is the instant feedback, and no flat fetch can be in flight while
+  // grouped (schedulePrefetch and loadRowsForPositions both route to the
+  // group pages), so bumping S.pageGen here strands nothing.
+  if (S.groupByCols.length) clearPageCache();
   S.tagCountsAll = res.counts || {};  // whole-table; refreshTagCounts re-reads the view-scoped half
   refreshTagCounts();
   renderTagRibbon();
@@ -275,28 +629,64 @@ export async function undoLastTagChange() {
   setUndoState(res.next);
   // Same reasoning as the bulk tag path: the server changed rows this
   // client may never have fetched, so there is nothing to patch in place.
-  clearPageCache();
+  clearRowCaches();
   renderTagRibbon();
   render();
   drawRail();
   regroupIfGroupedByTag(); // undo moved rows between tag groups too
+  // A tag put on from the Timeline's pane is undone from there too, and
+  // the Timeline is built from the tags.
+  if (S.activeTab === 'timeline') buildTimeline();
   toast(`Undone: ${res.undone}`);
 }
 
 export async function applyTagToView(tag) {
   if (!S.view || !S.view.row_count) return;
-  if (!(await confirmDialog(`Tag all ${S.view.row_count.toLocaleString()} rows in this view as "${tag.name}"?`))) return;
+  // Which way this goes is asked before it is confirmed, because the two
+  // directions are different sentences to agree to. The rule: anything in
+  // the view still untagged means tag the lot; only when every row already
+  // carries the tag does the same keystroke mean take it off. So a repeat
+  // press is an undo of the press before it, and no press ever partially
+  // untags — the direction is decided by the whole view, never by one row
+  // (which is what the per-row hotkey does, on purpose).
+  //
+  // Asked fresh rather than read from S.tagCounts: those are refreshed
+  // fire-and-forget after every build and every tag write, which is right
+  // for a ribbon and not good enough to decide a write on.
+  let cov;
+  try {
+    cov = await api(`/api/tag_view_coverage?view_id=${encodeURIComponent(S.view.view_id)}&tag_id=${tag.id}`);
+  } catch (e) {
+    toast('Could not check what is tagged: ' + e.message, 5000);
+    return;
+  }
+  const rows = cov.rows;
+  if (!rows) return;
+  const on = cov.tagged < rows;
+  const ok = await confirmDialog(on
+    ? `Tag all ${rows.toLocaleString()} rows in this view as "${tag.name}"?`
+      + (cov.tagged ? ` ${cov.tagged.toLocaleString()} already ${cov.tagged === 1 ? 'is' : 'are'}.` : '')
+    : `Every row in this view is tagged "${tag.name}". Remove it from all ${rows.toLocaleString()}?`,
+  { okLabel: on ? 'Tag them' : 'Remove the tag' });
+  if (!ok) return;
   setBusy(true);
   let res;
-  try { res = await post('/api/row_tags/view', { view_id: S.view.view_id, tag_id: tag.id, on: true }); }
+  try { res = await post('/api/row_tags/view', { view_id: S.view.view_id, tag_id: tag.id, on }); }
   finally { setBusy(false); }
   S.tagCountsAll = res.counts || {};  // whole-table; refreshTagCounts re-reads the view-scoped half
   refreshTagCounts();
-  clearPageCache();
+  clearRowCaches();
   renderTagRibbon();
   render();
   drawRail();
   regroupIfGroupedByTag();
   await refreshUndoState();
-  toast(`Tagged ${res.affected.toLocaleString()} rows · ${tag.name}`);
+  // `changed` on the way out, `affected` on the way in: removing a tag
+  // from a view where every row had it changes all of them, and saying
+  // "removed from 1,204 rows" when 1,204 is also the count is the honest
+  // number either way. Tagging keeps `affected` (rows targeted), which is
+  // what it has always reported.
+  toast(on
+    ? `Tagged ${res.affected.toLocaleString()} rows · ${tag.name}`
+    : `Removed "${tag.name}" from ${res.changed.toLocaleString()} rows`);
 }

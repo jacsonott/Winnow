@@ -32,6 +32,14 @@ from . import workspace as WS
 
 FILE = "instances.json"
 
+# How long an entry that doesn't answer yet is given before it counts as a
+# ghost. main() registers BEFORE uvicorn binds (only it knows the port), so
+# every server spends its first seconds — imports, plugin load, the startup
+# sweep; longer on a slow box with on-access scanning — registered and
+# silent. Pruning it then was permanent: the server never registers again,
+# so it stayed invisible to every later association launch for its life.
+STARTUP_GRACE_S = 120.0
+
 
 def _read() -> list[dict]:
     try:
@@ -65,6 +73,7 @@ def register(port: int, case_path: str | None) -> None:
             "port": port,
             "case_path": os.path.abspath(case_path) if case_path else None,
             "started_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "registered_at": time.time(),
         })
         _write(items)
 
@@ -84,15 +93,33 @@ def unregister() -> None:
         _write([i for i in _read() if i.get("pid") != os.getpid()])
 
 
+def _starting(item: dict, now: float) -> bool:
+    """Registered recently enough that not answering yet is expected."""
+    at = item.get("registered_at")
+    return (isinstance(at, (int, float)) and not isinstance(at, bool)
+            and 0 <= now - at < STARTUP_GRACE_S)
+
+
 def running(_probe=None) -> list[dict]:
     """Every instance that actually answers, ghosts pruned. `_probe` is the
-    test seam — the suite must not depend on real sockets timing out."""
+    test seam — the suite must not depend on real sockets timing out.
+
+    An entry that doesn't answer but registered within STARTUP_GRACE_S is
+    not returned (nothing can be handed to it yet) and not pruned either:
+    it is a server still starting, and the next launcher will find it."""
     check = _probe or probe
+    now = time.time()
     with WS._LOCK:
         items = _read()
-        alive = [i for i in items if isinstance(i.get("port"), int) and check(i["port"])]
-        if len(alive) != len(items):
-            _write(alive)
+        alive, keep = [], []
+        for i in items:
+            if isinstance(i.get("port"), int) and check(i["port"]):
+                alive.append(i)
+                keep.append(i)
+            elif _starting(i, now):
+                keep.append(i)
+        if len(keep) != len(items):
+            _write(keep)
     return alive
 
 

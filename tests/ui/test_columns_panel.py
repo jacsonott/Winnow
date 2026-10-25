@@ -15,8 +15,11 @@ def test_columns_reorder_by_dragging_panel_rows(page):
     orig = page.evaluate("() => [...__winnow.S.order]")
 
     rows = page.locator(".collist-row")
-    rows.nth(2).drag_to(rows.nth(0))
-    page.wait_for_timeout(400)
+    # Drop in the top third of the target: wireDragReorder decides
+    # before/after against the row's midpoint, and a drop dead on it is a
+    # coin toss that any change to the row's height can flip.
+    rows.nth(2).drag_to(rows.nth(0), target_position={"x": 10, "y": 3})
+    page.wait_for_function("(was) => __winnow.S.order.join('\\n') !== was", arg="\n".join(orig))
 
     after = page.evaluate("() => [...__winnow.S.order]")
     assert after[0] == orig[2], f"dragged {orig[2]!r} to the front, got {after[:3]}"

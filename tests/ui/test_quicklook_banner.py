@@ -3,19 +3,11 @@ and Save-as promotes the case while the analyst watches."""
 
 from __future__ import annotations
 
-import json
-import subprocess
-import sys
-import socket
-import time
-import urllib.request
-from pathlib import Path
-
 import pytest
 
-pytestmark = pytest.mark.ui
+from spawn import running_server
 
-ROOT = Path(__file__).resolve().parent.parent.parent
+pytestmark = pytest.mark.ui
 
 
 def test_no_banner_on_a_real_case(page):
@@ -23,86 +15,80 @@ def test_no_banner_on_a_real_case(page):
 
 
 @pytest.fixture
-def quicklook_server(browser, tmp_path):
+def quicklook_server(tmp_path):
     """A real --assoc launch, since temp-ness is a fact about the path and
-    the shared fixture's case is real."""
+    the shared fixture's case is real. Its cases dir is tmp_path/cases (see
+    tests/spawn.py), which is where Save as a case should propose."""
     dropped = tmp_path / "dropped.csv"
     dropped.write_text("Host,User\nh1,alice\nh2,bob\n", encoding="utf-8")
-    # Same isolation as the backend launcher test: a real subprocess sees
-    # the real INSTALL_ROOT, so point its workspace and cases dir at
-    # tmp_path or "Promoted case" registers in the developer's install and
-    # collides with itself on every rerun.
-    env = {**__import__("os").environ,
-           "WINNOW_IDLE_EXIT_S": "600", "WINNOW_NEVER_CONNECTED_EXIT_S": "600",
-           "WINNOW_WORKSPACE_DIR": str(tmp_path / "ws"),
-           "WINNOW_ENV_FILE": str(tmp_path / "userenv"),
-           "WINNOW_CASES_DIR": str(tmp_path / "cases")}
-    proc = subprocess.Popen(
-        [sys.executable, "-u", str(ROOT / "server.py"), "--assoc", str(dropped),
-         "--no-browser", "--no-fts"],
-        cwd=str(tmp_path), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    port = None
-    deadline = time.monotonic() + 40
-    while time.monotonic() < deadline and port is None:
-        line = proc.stdout.readline().decode(errors="replace")
-        if "Winnow on http://127.0.0.1:" in line:
-            port = int(line.split(":")[2].split()[0])
-        if proc.poll() is not None:
-            pytest.fail("assoc server died during startup")
-    assert port
-    deadline = time.monotonic() + 30
-    while time.monotonic() < deadline:
-        try:
-            urllib.request.urlopen(f"http://127.0.0.1:{port}/api/version", timeout=1)
-            break
-        except OSError:
-            time.sleep(0.2)
-    yield port
-    proc.terminate()
-    try:
-        proc.wait(timeout=15)
-    except subprocess.TimeoutExpired:
-        proc.kill()
+    with running_server(tmp_path, "--assoc", dropped, "--no-fts", launcher=True, cwd=tmp_path,
+                        env={"WINNOW_IDLE_EXIT_S": "600", "WINNOW_NEVER_CONNECTED_EXIT_S": "600"}) as srv:
+        yield srv.base
 
 
-def test_banner_shows_and_save_as_promotes(browser, quicklook_server, tmp_path):
-    ctx = browser.new_context(viewport={"width": 1200, "height": 700})
-    ctx.add_init_script("localStorage.setItem('winnow.remotePrompt', 'seen');"
-                        "localStorage.setItem('winnow.appearance', JSON.stringify({ splash: false }))")
-    pg = ctx.new_page()
-    errors = []
-    pg.on("pageerror", lambda e: errors.append(str(e)))
-    try:
-        pg.goto(f"http://127.0.0.1:{quicklook_server}/")
-        pg.wait_for_selector("#tempBanner:not([hidden])", timeout=20_000)
+def _quicklook(own_page, base):
+    return own_page(base=base + "/", viewport=(1200, 700), wait_until="load",
+                    ready="#tempBanner:not([hidden])", ready_timeout=20_000)
+
+
+def test_banner_shows_and_save_as_promotes(own_page, quicklook_server, tmp_path):
+    with _quicklook(own_page, quicklook_server) as pg:
         assert "temporary" in pg.locator("#tempBanner").inner_text()
 
+        # Saving opens + New case's own dialog, not a bare name prompt
+        # (reported: it only asked for a name, so a quick look could not
+        # be given a group, a path or a profile like any other case).
         pg.locator("#tempSaveBtn").click()
-        pg.wait_for_selector(".confirm-overlay input")
-        pg.locator(".confirm-overlay input").fill("Promoted case")
-        pg.locator(".confirm-card .btn", has_text="OK").first.click()
+        pg.wait_for_selector("#modal:not([hidden])")
+        assert pg.locator("#modalTitle").text_content() == "Save as a case"
+        labels = pg.locator("#modalBody > label").all_inner_texts()
+        assert labels == ["Name", "Group", "Case file path", "Profile"], labels
+        assert pg.locator(".confirm-overlay").count() == 0
+
+        inputs = pg.locator("#modalBody input")
+        inputs.nth(0).fill("Promoted case")
+        inputs.nth(1).fill("ACME IR")
+        # The path follows the name into the folder the quick look already
+        # lives under, so the default save is a rename, not a copy.
+        path = inputs.nth(2).input_value()
+        assert path.startswith(str(tmp_path / "cases")), path
+        assert path.endswith("promoted-case.db-winnow"), path
+        pg.locator("#modalBody .btn", has_text="Save case").click()
 
         pg.wait_for_selector("#tempBanner[hidden]", state="attached", timeout=15_000)
         cur = pg.evaluate("""() => fetch('/api/case/current',
           { headers: { 'X-Timeline-Lite-Client': '1' } }).then((r) => r.json())""")
         assert cur["temp"] is False
         assert cur["name"] == "Promoted case"
-        assert not errors, errors
-    finally:
-        ctx.close()
+        assert cur["path"] == path
+        rec = next(c for c in pg.evaluate("""() => fetch('/api/cases',
+          { headers: { 'X-Timeline-Lite-Client': '1' } }).then((r) => r.json())""")
+                   if c["path"] == path)
+        assert rec["group"] == "ACME IR"
 
 
-def test_home_navigation_is_guarded_in_a_quicklook(browser, quicklook_server, tmp_path):
+def test_cancelling_save_from_the_leave_guard_goes_back_to_it(own_page, quicklook_server):
+    """The guard's Save opens the save dialog in its place (one modal at a
+    time); Cancel there returns to the guard's question rather than
+    dropping the analyst back into the quick look with no dialog."""
+    with _quicklook(own_page, quicklook_server) as pg:
+        pg.locator("#btnHome").click()
+        pg.wait_for_selector("#modal:not([hidden])")
+        pg.locator("#modal button", has_text="Save as a case").click()
+        pg.wait_for_function(
+            "() => document.getElementById('modalTitle').textContent === 'Save as a case'")
+        pg.locator("#modalBody .btn", has_text="Cancel").click()
+        pg.wait_for_function(
+            "() => /isn.t saved/.test(document.getElementById('modalTitle').textContent)")
+        assert not pg.evaluate("() => document.getElementById('modal').hidden")
+        assert pg.evaluate("() => document.getElementById('home').hidden")
+
+
+def test_home_navigation_is_guarded_in_a_quicklook(own_page, quicklook_server, tmp_path):
     """A quick look never appears in the case list, so the home screen
     has no way back to it — clicking the brand used to strand the case
     (reported). The guard offers the three real exits, and Stay works."""
-    ctx = browser.new_context(viewport={"width": 1200, "height": 700})
-    ctx.add_init_script("localStorage.setItem('winnow.remotePrompt', 'seen');"
-                        "localStorage.setItem('winnow.appearance', JSON.stringify({ splash: false }))")
-    pg = ctx.new_page()
-    try:
-        pg.goto(f"http://127.0.0.1:{quicklook_server}/")
-        pg.wait_for_selector("#tempBanner:not([hidden])", timeout=20_000)
+    with _quicklook(own_page, quicklook_server) as pg:
 
         pg.locator("#btnHome").click()
         pg.wait_for_selector("#modal:not([hidden])")
@@ -126,5 +112,3 @@ def test_home_navigation_is_guarded_in_a_quicklook(browser, quicklook_server, tm
         cur = pg.evaluate("""() => fetch('/api/case/current',
           { headers: { 'X-Timeline-Lite-Client': '1' } }).then((r) => r.json())""")
         assert cur["open"] is False
-    finally:
-        ctx.close()

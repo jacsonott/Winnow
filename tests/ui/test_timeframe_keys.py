@@ -47,35 +47,15 @@ def test_r_toggles_timeframe_and_a_jumps_to_timestamp(page):
     page.wait_for_function("() => __winnow.S.timeRange.enabled === false")
 
 
-def test_migration_moves_a_off_timeframe_onto_jump(page, browser, server):
+def test_migration_moves_a_off_timeframe_onto_jump(page, own_page):
     # A v2-era install with the old default migrates all the way through v4:
     # ['T','a'] -> ['r','a'] (v3) -> ['r'] (v4), and jump-ts picks up 'a'.
-    ctx = browser.new_context()
-    ctx.add_init_script(
-        "localStorage.setItem('winnow.remotePrompt', 'seen');"
-        "localStorage.setItem('winnow.appearance', JSON.stringify({ splash: false }));"
-        "localStorage.setItem('winnow.keymap', JSON.stringify({ toggleTimeRange: ['T', 'a'] }));"
-        "localStorage.setItem('winnow.keymap.v', '2');")
-    pg = ctx.new_page()
-    try:
-        pg.goto(server, wait_until="networkidle")
-        pg.wait_for_selector(".row")
+    with own_page(init="localStorage.setItem('winnow.keymap', JSON.stringify({ toggleTimeRange: ['T', 'a'] }));"
+                       "localStorage.setItem('winnow.keymap.v', '2');") as pg:
         assert sorted(pg.evaluate("() => __winnow.S.keymap.toggleTimeRange")) == ["r"]
         assert sorted(pg.evaluate("() => __winnow.S.keymap.openJumpTs")) == ["J", "a"]
-    finally:
-        ctx.close()
 
     # A deliberate rebinding is never migrated over.
-    ctx2 = browser.new_context()
-    ctx2.add_init_script(
-        "localStorage.setItem('winnow.remotePrompt', 'seen');"
-        "localStorage.setItem('winnow.appearance', JSON.stringify({ splash: false }));"
-        "localStorage.setItem('winnow.keymap', JSON.stringify({ toggleTimeRange: ['x'] }));"
-        "localStorage.setItem('winnow.keymap.v', '2');")
-    pg2 = ctx2.new_page()
-    try:
-        pg2.goto(server, wait_until="networkidle")
-        pg2.wait_for_selector(".row")
+    with own_page(init="localStorage.setItem('winnow.keymap', JSON.stringify({ toggleTimeRange: ['x'] }));"
+                       "localStorage.setItem('winnow.keymap.v', '2');") as pg2:
         assert pg2.evaluate("() => __winnow.S.keymap.toggleTimeRange") == ["x"]
-    finally:
-        ctx2.close()
