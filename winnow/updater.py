@@ -47,6 +47,13 @@ Design notes worth keeping:
   benign — a hostile or tampered archive passes `testzip()` fine. Any
   unsafe member refuses the whole archive rather than skipping the one
   entry, since a partially-applied traversal is worse than no update.
+- **Ctrl+C is the likeliest thing to stop an update part-way**, and it is
+  a KeyboardInterrupt, not an Exception. So the put-it-back guard in
+  `apply_update` catches BaseException, and every file goes in through a
+  temp name and `os.replace` (`_replace_from`) so that even when the
+  put-back cannot run, no file is left half-written. `except Exception`
+  there once left five modules new, one empty and four old, and the CLI
+  said "Cancelled.".
 """
 
 from __future__ import annotations
@@ -54,6 +61,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import shutil
 import time
 import urllib.error
@@ -90,6 +98,12 @@ KEEP_BACKUPS = 3
 
 # Analyst state, never touched by an update. Mirrors .gitignore's
 # user-state section — if you add one there, add it here.
+# tests/test_updater.py asks git itself whether each sample path is
+# ignored, and fails when this says otherwise.
+#
+# Three shapes, because .gitignore has three. These are anchored at the
+# install root (a .gitignore pattern with a slash before its end is
+# anchored), and are also what `plan_update` lists as "preserved":
 PROTECTED = (
     "workspace/",     # case registry, saved filters, tag template, prefs.json
     "plugins/",       # installed plugins (plugins/README.md is shipped; see _is_protected)
@@ -104,7 +118,22 @@ PROTECTED = (
     "__pycache__/",
     BACKUP_DIR + "/",
 )
-PROTECTED_SUFFIXES = (".db", ".db-wal", ".db-shm", ".winnow-lock", ".winnow_case.json")
+# ...these are directory names that are user state at ANY depth: `cases/`
+# in .gitignore has no other slash, so it matches examples/cases/ as well
+# as cases/ — and the root-only check above let an archive write into
+# winnow/__pycache__/ or a nested cases/ folder. BACKUP_DIR is here so no
+# archive can plant a backup for --rollback to restore.
+PROTECTED_DIR_NAMES = ("workspace", "sessions", "cases", ".venv", "venv",
+                       "__pycache__", ".pytest_cache", BACKUP_DIR)
+# ...and these are file patterns, any depth. A case file is `.db-winnow`
+# (store.CASE_SUFFIX), which `.db` never matched, so a malformed archive
+# carrying an empty `case.db-winnow` emptied the analyst's case.
+PROTECTED_SUFFIXES = (".db", ".db-wal", ".db-shm",
+                      ".db-winnow", ".db-winnow-wal", ".db-winnow-shm",
+                      ".winnow-lock", ".winnow_case.json",
+                      ".csv", ".tsv",           # evidence, per .gitignore
+                      ".pyc", ".pyo", ".pyd")   # *.py[cod]
+PROTECTED_NAMES = (MANIFEST,)   # the updater writes its own record, never an archive
 
 # plugins/README.md is source (it documents the folder), so the archive
 # carries it and writing it back is correct. Nothing else under plugins/
@@ -146,6 +175,18 @@ class UpdateError(Exception):
     backup that isn't there. Surfaces as a message, not a traceback."""
 
 
+class UpdateInterrupted(KeyboardInterrupt):
+    """Ctrl+C during apply_update, raised once the install is back in a
+    state this module can name — its message is that state, in a sentence.
+
+    Still a KeyboardInterrupt, so anything that treats Ctrl+C as "stop"
+    still stops. It exists because the CLI used to answer every Ctrl+C
+    with "Cancelled.", which reads as "nothing happened" — said about an
+    install that had been half replaced. Only apply_update knows whether
+    a Ctrl+C landed before the first write, mid-write (and was rolled
+    back), or after the update had finished."""
+
+
 def installed_version(root: Path | None = None) -> str:
     """The version of the install at `root` (default: this one), read from
     version.py as text rather than imported — `root` may be an archive we
@@ -169,19 +210,32 @@ def installed_version(root: Path | None = None) -> str:
 
 
 def _version_key(v: str) -> tuple:
-    """Sortable form of a dotted version, so 1.10.0 > 1.9.0. Anything
-    non-numeric sorts as 0 rather than raising — a tag like '1.2.0-rc1'
-    should still compare sanely against 1.1.0."""
-    parts = []
-    for chunk in v.lstrip("vV").replace("-", ".").split("."):
-        digits = ""
-        for ch in chunk:
-            if ch.isdigit():
-                digits += ch
-            else:
-                break
-        parts.append(int(digits) if digits else 0)
-    return tuple(parts)
+    """Sortable form of a version, so 1.10.0 > 1.9.0. Never raises: an
+    unparseable string sorts as 0.
+
+    Two rules beyond "compare the numbers", both ones the old key got
+    backwards. Trailing zeros don't count, so 0.3 and 0.3.0 are the same
+    version rather than 0.3.0 reading as newer. And a pre-release suffix
+    (1.2.0-rc1, 1.2.0rc1, 1.2.0.dev1) sorts BEFORE the release it leads up
+    to, as semver and PEP 440 both have it — the old key read "-rc1" as a
+    fourth number, 0, and so offered 1.2.0-rc1 as an update FROM 1.2.0.
+    Within a suffix, numbers compare as numbers (rc10 > rc9) and words as
+    words (beta > alpha). Build metadata after "+" is ignored."""
+    import re
+
+    s = v.strip().lstrip("vV").split("+", 1)[0]
+    m = re.match(r"\d+(?:\.\d+)*", s)
+    if not m:
+        return ((0,), (1,))
+    nums = [int(x) for x in m.group(0).split(".")]
+    while len(nums) > 1 and nums[-1] == 0:
+        nums.pop()
+    suffix = s[m.end():].lstrip(".-_")
+    if not suffix:
+        return (tuple(nums), (1,))          # a release outranks its pre-releases
+    pre = tuple((0, int(t), "") if t.isdigit() else (1, 0, t.lower())
+                for t in re.findall(r"\d+|[A-Za-z]+", suffix))
+    return (tuple(nums), (0,) + pre)
 
 
 def is_newer(candidate: str, current: str) -> bool:
@@ -289,9 +343,11 @@ def download(url: str, dest: Path, timeout: float = 120.0, _open=None) -> Path:
     try:
         with opener(url, timeout) as r, open(tmp, "wb") as out:
             shutil.copyfileobj(r, out)
-    except Exception as e:  # noqa: BLE001
+    except BaseException as e:  # noqa: BLE001 — Ctrl+C mid-download leaves no .part either
         with contextlib.suppress(OSError):
             tmp.unlink()
+        if not isinstance(e, Exception):
+            raise
         raise UpdateError(f"Download failed: {e}") from e
     tmp.replace(dest)
     return dest
@@ -300,10 +356,28 @@ def download(url: str, dest: Path, timeout: float = 120.0, _open=None) -> Path:
 # ------------------------------------------------------------------ apply
 
 def _is_protected(rel_path: str) -> bool:
-    rel = rel_path.replace(os.sep, "/").lstrip("./")
-    if rel in PROTECTED_EXCEPTIONS:
+    """Is `rel_path` (relative to the install root) analyst state?
+
+    Case is folded everywhere, not only on Windows and macOS: whether
+    `Workspace/` IS `workspace/` is the file system's call, not the OS's
+    (an exFAT stick on Linux folds case; case-sensitive APFS exists), and
+    a false "protected" costs a shipped file named like user state, which
+    tests/test_updater.py proves there are none of.
+
+    Components are split out rather than prefix-stripped: `.lstrip("./")`
+    strips CHARACTERS, so it turned `.winnow-backup/` into
+    `winnow-backup/` and the backup guard never matched. A path with a
+    `..` in it is protected outright — nothing here can say what it names,
+    and _safe_member refuses it before any write anyway."""
+    parts = [p.lower() for p in rel_path.replace("\\", "/").split("/") if p not in ("", ".")]
+    if not parts or ".." in parts:
+        return True
+    rel = "/".join(parts)
+    if rel in (e.lower() for e in PROTECTED_EXCEPTIONS):
         return False
-    if rel.endswith(PROTECTED_SUFFIXES):
+    if parts[-1].endswith(PROTECTED_SUFFIXES) or parts[-1] in PROTECTED_NAMES:
+        return True
+    if any(p in PROTECTED_DIR_NAMES for p in parts):
         return True
     return any(rel == p.rstrip("/") or rel.startswith(p) for p in PROTECTED)
 
@@ -330,11 +404,16 @@ def _safe_member(rel: str) -> bool:
     crafted release could plant files anywhere the analyst can write, or
     overwrite their own data outside the install). Absolute paths and any
     `..` component are refused; everything the extractor, planner and
-    manifest touch goes through here."""
-    if not rel or rel.startswith(("/", "\\")):
+    manifest touch goes through here — and restore(), since a backup's
+    restore.json is just as writable as an archive is.
+
+    No `:` anywhere: on Windows `root / "D:evil.py"` is a DRIVE-RELATIVE
+    path that discards the install root entirely, and `dir/x:y` writes an
+    NTFS alternate data stream. Only a two-character `X:` first component
+    used to be refused. Nothing Winnow ships has a colon in its name."""
+    if not rel or rel.startswith(("/", "\\")) or ":" in rel:
         return False
-    parts = rel.replace("\\", "/").split("/")
-    return ".." not in parts and not (len(parts[0]) == 2 and parts[0][1] == ":")
+    return ".." not in rel.replace("\\", "/").split("/")
 
 
 def _archive_members(zf: zipfile.ZipFile) -> tuple[str, list[str]]:
@@ -369,12 +448,55 @@ def _read_manifest(root: Path) -> list[str]:
 
 
 def _write_manifest(root: Path, version: str, files: list[str], source: str = "release") -> None:
-    (root / MANIFEST).write_text(json.dumps({
+    _write_text_atomic(root / MANIFEST, json.dumps({
         "version": version,
         "source": source,   # "release", or "main@<sha>" for a dev sync
         "installed_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "files": sorted(files),
-    }, indent=1), encoding="utf-8")
+    }, indent=1))
+
+
+# Every file this module writes into the install goes in under this suffix
+# and is renamed over its target, so an interrupt — Ctrl+C, a crash, a
+# power cut — leaves each file whole: the old version or the new one,
+# never the first half of either. Writing in place used to leave a
+# zero-byte module behind whenever Ctrl+C landed mid-copy, and nothing can
+# be rolled back over a file the process never got to finish.
+_TMP_SUFFIX = ".winnow-update-tmp"
+
+
+def _tmp_for(target: Path) -> Path:
+    return target.with_name(target.name + _TMP_SUFFIX)
+
+
+def _replace_from(target: Path, write, stat_from: Path | None = None) -> None:
+    """Create `target` (or replace it) with whatever `write(fileobj)`
+    writes, via a sibling temp file and os.replace. The temp file is gone
+    whether this returns or raises, KeyboardInterrupt included.
+
+    Permission bits come from `stat_from` (with its times — a restore
+    puts back what copy2 saved) or else from the target being replaced:
+    a replaced file is a new inode, and a script that was executable has
+    to stay so."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _tmp_for(target)
+    try:
+        with open(tmp, "wb") as out:
+            write(out)
+        with contextlib.suppress(OSError):
+            if stat_from is not None:
+                shutil.copystat(stat_from, tmp)
+            else:
+                shutil.copymode(target, tmp)
+        os.replace(tmp, target)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+
+
+def _write_text_atomic(target: Path, text: str) -> None:
+    _replace_from(target, lambda out: out.write(text.encode("utf-8")))
 
 
 def installed_source(root: Path | None = None) -> str:
@@ -438,49 +560,129 @@ def _version_from_archive(zf: zipfile.ZipFile, prefix: str) -> str:
 def apply_update(archive: Path, root: Path | None = None, source: str = "release") -> dict:
     """Install `archive` over the install at `root`, after backing up every
     shipped file it will touch. Returns the plan that was carried out plus
-    the backup path, so a caller can tell the analyst how to undo it."""
+    the backup path, so a caller can tell the analyst how to undo it.
+
+    Whatever stops it part-way — an error, or Ctrl+C — the files already
+    written are put back from that backup before it returns. Ctrl+C comes
+    out as UpdateInterrupted (a KeyboardInterrupt) saying which state the
+    install is in; anything else as an UpdateError saying the same."""
     root = Path(root or HERE)
     archive = Path(archive)
     if not archive.is_file():
         raise UpdateError(f"No such file: {archive}")
 
+    before = installed_version(root)
     try:
         zf = zipfile.ZipFile(archive)
     except _ZIP_ERRORS as e:
         raise _unusable(archive, e) from e
+    except KeyboardInterrupt as e:
+        raise UpdateInterrupted(
+            f"Update cancelled before anything was changed. Winnow is still on {before}.") from e
     with zf:
         try:
-            bad = zf.testzip()  # CRC check — catches a bundle damaged in transit
-        except _ZIP_ERRORS as e:
-            raise _unusable(archive, e) from e
-        if bad is not None:
-            raise UpdateError(f"That archive is damaged (bad entry: {bad}) — download it again")
-        prefix, members = _archive_members(zf)
-        incoming = [m for m in members if not _is_protected(m)]
-        if not any(m == "server.py" for m in incoming):
-            raise UpdateError(
-                "That doesn't look like a Winnow release (no server.py inside) — "
-                "check you downloaded the source archive")
-        plan = plan_update(archive, root)
-        before = installed_version(root)
-        backup = _backup(root, plan, before)
+            try:
+                bad = zf.testzip()  # CRC check — catches a bundle damaged in transit
+            except _ZIP_ERRORS as e:
+                raise _unusable(archive, e) from e
+            if bad is not None:
+                raise UpdateError(f"That archive is damaged (bad entry: {bad}) — download it again")
+            prefix, members = _archive_members(zf)
+            incoming = [m for m in members if not _is_protected(m)]
+            if not any(m == "server.py" for m in incoming):
+                raise UpdateError(
+                    "That doesn't look like a Winnow release (no server.py inside) — "
+                    "check you downloaded the source archive")
+            plan = plan_update(archive, root)
+            # A backup interrupted part-way has no restore.json yet (it is
+            # written last), so list_backups never offers it.
+            backup = _backup(root, plan, before)
+        except KeyboardInterrupt as e:
+            raise UpdateInterrupted(
+                f"Update cancelled before anything was changed. Winnow is still on {before}.") from e
         try:
-            for m in incoming:
-                target = root / m
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with zf.open(prefix + m) as src, open(target, "wb") as out:
-                    shutil.copyfileobj(src, out)
+            # Removals FIRST. A release that turns a shipped file into a
+            # directory (a single-file plugin becoming a package) can only
+            # create foo/ once the old foo is gone, and the reverse needs
+            # foo/'s files gone before foo can be written — with the writes
+            # first, both failed every time and rolled back. Everything
+            # removed here is already in the backup.
             for m in plan["removed"]:
                 with contextlib.suppress(OSError):
                     (root / m).unlink()
+            _prune_empty_dirs(root, plan["removed"])
+            for m in incoming:
+                with zf.open(prefix + m) as src:
+                    _replace_from(root / m, lambda out: shutil.copyfileobj(src, out))
+                _apply_exec_bits(zf.getinfo(prefix + m), root / m)
             _sweep_moved_modules(root, incoming)
             _write_manifest(root, plan["version"], incoming, source)
-        except Exception as e:  # noqa: BLE001 — a half-applied install is the one thing we can't leave behind
-            restore(backup, root)
+        except BaseException as e:  # noqa: BLE001 — a half-applied install is the one thing we can't leave behind
+            # BaseException, not Exception: Ctrl+C is KeyboardInterrupt,
+            # and it is the likeliest thing to stop an update part-way.
+            try:
+                restore(backup, root)
+            except BaseException as again:  # noqa: BLE001 — a second Ctrl+C here included
+                raise UpdateError(
+                    f"Update stopped part-way ({_reason(e)}), and putting {before} back did "
+                    f"not finish either ({_reason(again)}). Winnow is now a mix of {before} "
+                    f"and {plan['version']} and may not start. Run `python update.py "
+                    f"--rollback` to finish restoring {before} from {backup}.") from e
+            if isinstance(e, KeyboardInterrupt):
+                raise UpdateInterrupted(
+                    f"Update interrupted part-way; the files it had already replaced were "
+                    f"rolled back. Winnow is still on {before}.") from e
+            if not isinstance(e, Exception):
+                raise
             raise UpdateError(
                 f"Update failed and was rolled back ({e}). Winnow is still on {before}.") from e
-    _prune_backups(root)
+    try:
+        _prune_backups(root)
+    except KeyboardInterrupt as e:
+        raise UpdateInterrupted(
+            f"Updated {before} -> {plan['version']}; interrupted while removing old "
+            f"backups, which is harmless. Restart Winnow to run the new version.") from e
     return {**plan, "previous_version": before, "backup": str(backup)}
+
+
+def _apply_exec_bits(info: zipfile.ZipInfo, target: Path) -> None:
+    """Give `target` the executable bits its archive entry carries.
+
+    _replace_from carries over the mode of the file it replaces, but a file
+    NEW to this install has none to carry and lands at the umask default —
+    launch/winnow.sh the first time an update brings it arrived not
+    executable, and its double-click did nothing. git archive records the mode in the unix
+    half of external_attr; an entry with none (a zip made on Windows) is
+    left as written. Bits are only ever added, and only where they mean
+    something."""
+    if os.name == "nt" or info.create_system != 3:
+        return
+    exec_bits = (info.external_attr >> 16) & 0o111
+    if exec_bits:
+        with contextlib.suppress(OSError):
+            os.chmod(target, target.stat().st_mode | exec_bits)
+
+
+def _prune_empty_dirs(root: Path, removed: list[str]) -> None:
+    """Remove the directories that removing `removed` left empty — only
+    those, deepest first, and never one with anything left in it (a
+    non-empty directory holds something an update doesn't own)."""
+    dirs = {(root / rel).parent for rel in removed}
+    for d in sorted(dirs, key=lambda p: len(p.parts), reverse=True):
+        while d != root and root in d.parents:
+            if _is_protected(d.relative_to(root).as_posix() + "/"):
+                break   # an empty plugins/ is still the analyst's folder
+            try:
+                d.rmdir()
+            except OSError:
+                break
+            d = d.parent
+
+
+def _reason(e: BaseException) -> str:
+    if isinstance(e, KeyboardInterrupt):
+        return "interrupted"
+    return str(e) or type(e).__name__
 
 
 def _sweep_moved_modules(root: Path, incoming: list[str]) -> list[str]:
@@ -508,33 +710,88 @@ def _backup(root: Path, plan: dict, version: str) -> Path:
     the analyst's cases (which can be enormous, and which an update never
     touches anyway)."""
     stamp = time.strftime("%Y%m%d-%H%M%S")
+    # Strictly after every backup already here, whatever the clock's
+    # resolution: this is what list_backups orders by.
+    taken_at = max([time.time()] + [_taken_at(b) + 0.001 for b in list_backups(root)])
     dest = root / BACKUP_DIR / f"{version}-{stamp}"
-    dest.mkdir(parents=True, exist_ok=True)
-    saved = []
-    for rel in list(plan["changed"]) + list(plan["removed"]):
-        src = root / rel
-        if not src.is_file():
-            continue
-        out = dest / rel
-        out.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, out)
-        saved.append(rel)
-    # `added` files did not exist before, so restoring means removing them.
-    (dest / "restore.json").write_text(json.dumps({
-        "version": version,
-        "restore": sorted(saved),
-        "remove": sorted(plan["added"]),
-    }, indent=1), encoding="utf-8")
+    n = 1
+    while dest.exists():     # two updates from one version inside a second
+        n += 1
+        dest = root / BACKUP_DIR / f"{version}-{stamp}-{n}"
+    dest.mkdir(parents=True)
+    try:
+        saved = []
+        for rel in list(plan["changed"]) + list(plan["removed"]):
+            src = root / rel
+            if not src.is_file():
+                continue
+            out = dest / rel
+            out.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, out)
+            saved.append(rel)
+        # The manifest too: it is what the NEXT update decides removals
+        # from, and a rollback that left the newer one behind meant a file
+        # the old version shipped (restored here) was unknown to every
+        # later update, and installed_source() kept naming the version
+        # rolled away from.
+        had_manifest = (root / MANIFEST).is_file()
+        if had_manifest:
+            shutil.copy2(root / MANIFEST, dest / MANIFEST)
+        # `added` files did not exist before, so restoring means removing
+        # them. Written last, and whole or not at all: a backup only counts
+        # once this exists, so one interrupted part-way is never what
+        # --rollback picks.
+        _write_text_atomic(dest / "restore.json", json.dumps({
+            "version": version,
+            "taken_at": taken_at,
+            "restore": sorted(saved),
+            "remove": sorted(plan["added"]),
+            "manifest": had_manifest,
+        }, indent=1))
+    except BaseException:
+        # ...and for the same reason list_backups never sees it, so pruning
+        # never would either: a half-copied backup left here stays forever.
+        shutil.rmtree(dest, ignore_errors=True)
+        raise
     return dest
 
 
+def _taken_at(backup: Path) -> float:
+    """When `backup` was taken, as epoch seconds.
+
+    restore.json records it (`taken_at`) since backups were found sorted
+    by NAME — which starts with the version, so `0.10.0-…` came before
+    `0.9.0-…` and --rollback restored the wrong one, and pruning kept the
+    wrong three. A backup an older updater wrote has no `taken_at`, but
+    its directory name ends in the `%Y%m%d-%H%M%S` stamp it was taken at,
+    so that is the fallback; the file's mtime is the last resort."""
+    meta = backup / "restore.json"
+    try:
+        t = json.loads(meta.read_text(encoding="utf-8")).get("taken_at")
+        if isinstance(t, (int, float)) and not isinstance(t, bool):
+            return float(t)
+    except (OSError, ValueError, AttributeError):
+        pass
+    m = re.search(r"(\d{8}-\d{6})(?:-\d+)?$", backup.name)
+    if m:
+        try:
+            return time.mktime(time.strptime(m.group(1), "%Y%m%d-%H%M%S"))
+        except (ValueError, OverflowError):
+            pass
+    try:
+        return meta.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 def list_backups(root: Path | None = None) -> list[Path]:
+    """Every complete backup, oldest first."""
     root = Path(root or HERE)
     d = root / BACKUP_DIR
     if not d.is_dir():
         return []
     return sorted((p for p in d.iterdir() if (p / "restore.json").is_file()),
-                  key=lambda p: p.name)
+                  key=lambda p: (_taken_at(p), p.name))
 
 
 def _prune_backups(root: Path) -> None:
@@ -550,19 +807,54 @@ def restore(backup: Path, root: Path | None = None) -> dict:
     meta_path = backup / "restore.json"
     if not meta_path.is_file():
         raise UpdateError(f"Not a Winnow backup: {backup}")
-    meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    for rel in meta.get("restore", []):
-        if _is_protected(rel):
-            continue
-        src = backup / rel
-        if src.is_file():
-            (root / rel).parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, root / rel)
-    for rel in meta.get("remove", []):
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        to_restore, to_remove = meta.get("restore", []), meta.get("remove", [])
+        if not isinstance(to_restore, list) or not isinstance(to_remove, list):
+            raise ValueError("restore and remove must be lists")
+    except (OSError, ValueError, AttributeError) as e:
+        raise UpdateError(f"That backup's restore.json can't be read ({e}): {backup}") from e
+    entries = to_restore + to_remove
+    # restore.json is the updater's own, but it sits in a folder anything
+    # can write to, and --rollback acts on it with the analyst's
+    # privileges — so it gets the same checks an archive does, and the
+    # same refusal of the whole thing when one entry fails them. It used
+    # to be trusted, and a `../../x` entry wrote outside the install.
+    unsafe = [r for r in entries if not isinstance(r, str) or not _safe_member(r)]
+    if unsafe:
+        raise UpdateError(
+            f"That backup lists an unsafe path ({unsafe[0]!r}) and was not restored — "
+            f"Winnow's updater did not write it: {backup}")
+    # Removes before restores, for the same reason apply removes before it
+    # writes: undoing a file-to-directory change means emptying foo/ before
+    # foo can be put back.
+    removed = []
+    for rel in to_remove:
         if _is_protected(rel):
             continue
         with contextlib.suppress(OSError):
             (root / rel).unlink()
+            removed.append(rel)
+    _prune_empty_dirs(root, removed)
+    for rel in to_restore:
+        if _is_protected(rel):
+            continue
+        src = backup / rel
+        if src.is_file():
+            # Through a temp file like apply's writes, so a rollback that
+            # is itself interrupted leaves whole files and can be re-run.
+            def copy(out, src=src):
+                with open(src, "rb") as f:
+                    shutil.copyfileobj(f, out)
+            _replace_from(root / rel, copy, stat_from=src)
+    # A backup from before "manifest" was recorded says nothing either way;
+    # leave the current one alone rather than guess.
+    if meta.get("manifest") is True and (backup / MANIFEST).is_file():
+        saved_manifest = (backup / MANIFEST).read_bytes()
+        _replace_from(root / MANIFEST, lambda out: out.write(saved_manifest))
+    elif meta.get("manifest") is False:
+        with contextlib.suppress(OSError):
+            (root / MANIFEST).unlink()
     return {"version": meta.get("version", "unknown"), "backup": str(backup)}
 
 

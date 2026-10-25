@@ -2,6 +2,7 @@
 helpers that are the only sanctioned way to touch S.selection/S.selectAll.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
+import { nameMap } from './core.js';
 import { rowAt } from './grid.js';
 import { groupCoordAt } from './grouping.js';
 
@@ -24,10 +25,12 @@ export const S = {
   columns: [],          // [{name, type}] plus, for analyst-added derived columns, {derived, derived_from, derived_op, derived_status, derived_id, parse_failures}
   appSettings: {},      // system-wide prefs (workspace/app_settings.json) — currently default_ts_format
   caseSettings: {},     // this case's own overrides (case_settings table) — currently ts_format
-  layout: {},           // name -> {w, hidden, pinned, tsFormat, durFormat, valuePicker}
+  layout: nameMap(),    // name -> {w, hidden, pinned, tsFormat, durFormat, valuePicker} — keyed by column name, so always a nameMap (core.js)
   order: [],            // column names in display order
   valueFilterMode: 'auto', // 'auto' (on under VALUE_FILTER_AUTO_MAX rows) | 'on' | 'off' — this table's value-picker default, per-column overrides live in S.layout
-  filters: {},          // name -> raw filter text
+  hideEmptyRows: false, // the table menu's "Hide empty rows" — a per-table view preference, saved in the layout like valueFilterMode
+  filters: nameMap(),   // name -> raw filter text — a nameMap too, for the same reason
+  filterOpen: [],       // column names whose filter box is revealed under the filter bar — transient, per table, never persisted
   sort: [],             // [{column, dir}]
   search: '',
   searchMode: 'contains', // 'contains' | 'regex' | 'advanced'
@@ -53,16 +56,28 @@ export const S = {
   selectAll: false,
   selection: new Set(),
   anchor: -1,
+  selHidden: 0,          // picked rows that the current view no longer shows (filtered/sorted out) — see view.js remap
+  selUndo: [],           // snapshots of {selectAll, selection, viewId} before each selection gesture, for the chip's Undo
+  selVersion: 0,         // bumped by every sel* mutation — memo key for selRanges()
   rowsByPos: new Map(),
   reqId: 0,
   viewCache: new Map(), // source_id -> { key, view_id, row_count, elapsed_ms }
-  cellAnchor: null,      // {pos, col} — drag start, col is an index into visibleCols()
+  cellAnchor: null,      // {pos, col} — the FIXED corner: drag start, or the cell a
+                         //   Shift+Arrow run extends from. col indexes visibleCols()
+  cellFocus: null,       // {pos, col, name} — the ACTIVE cell: the moving corner, where
+                         //   the next arrow steps from, and the one drawn with a ring.
+                         //   `name` is the column, carried because `col` is an index into
+                         //   a list that hiding or reordering a column rewrites — see
+                         //   renderHead, which puts the cell back by name or not at all
   cellRange: null,       // {r0, c0, r1, c1} normalized — separate from row S.selection
+  cellRangeExplicit: false, // did the analyst ASK for this rectangle (a click, a drag,
+                         //   a Shift+Arrow) or is it just where the cell cursor is
+                         //   standing after a plain arrow? Only copy cares — see
+                         //   handleCopyShortcut
   importQueue: [],       // [{file, kind: 'csv'|'json', configured, ...kind-specific settings}] — Import modal's file queue
   groupByCols: [],         // ordered column names — [] for normal flat mode, nested grouping otherwise
   groupSort: 'count',      // 'count' | 'value' — how each level's groups are ordered
   groupSortDir: 'desc',    // 'asc' | 'desc' — direction within groupSort
-  preGroupOrder: null,     // S.order snapshot from just before the first column was dragged into grouping
   groups: [],              // flat array reflecting the currently-visible tree — see the group-by section below
   groupPrefix: [],         // prefix sums: virtual position where each group's header row starts
   groupTotalRows: 0,
@@ -71,7 +86,7 @@ export const S = {
   groupPageGen: 0,         // bumped by clearGroupPageCache so an in-flight fetch can't repopulate stale rows
   savedFilters: [],        // cross-case cyclable filters, loaded from workspace/filters.json
   headerNicknames: [],     // [{id, col_names, nickname}] — friendly names for a header set
-  timeRange: { enabled: false, column: null, start: '', end: '' }, // survives filter/preset/tab changes on purpose — see toggleTimeRange
+  timeRange: { enabled: false, column: null, start: '', end: '' }, // survives filter/preset/tab changes on purpose — see toggleTimeRange; tab changes only while timeframeAcrossTables is on
   timelineTemplates: [], // [{id, col_names, type_label, timestamp_column, body_columns}] — workspace/timeline_templates.json
   importProfiles: [],    // [{id, name, extensions, include_patterns, exclude_patterns, recursive}] — workspace/import_profiles.json
   plugins: [],           // loaded plugin records from GET /api/plugins — name/version/error, for the Plugins modal
@@ -83,11 +98,14 @@ export const S = {
   //  what, n, prevTree}  — what/n caption the banner, prevTree is what Done lands on.
   // Cleared by Done, Clear filters, opening another case, removing the table.
   diffMarks: null,
+  pluginDashboards: [],  // boards plugins offer (register_dashboard) — listed under Dashboards ▸ Library, added by ＋
   pluginRowActions: [],  // plugin-registered row-menu entries [{id, local_id, plugin, plugin_fs, label, description, max_rows}]
   pluginPanels: [],      // plugin-registered toolbar panels [{id, plugin, plugin_fs, label, entry, description, gen}] — see plugins.js
+  pluginPagePanels: [],   // register_page_panel — the SQL/Notes side-column panels, same shape plus `page`
   pluginDirs: [],        // where the server loads plugins from — shown in the Plugins modal so "drop it where?" has an answer
   lastBrowsePath: null,  // last dir the "Add from this machine…" picker was in — session-only convenience, not persisted
-  pluginsCaseOpen: false, // whether /api/plugins was answered with a case open — gates the per-case scope options in Settings → Plugins
+  pluginsCaseOpen: false, // whether /api/plugins was answered with a case open — gates the per-case scope options in the plugins manager
+  pluginApiVersion: null, // PLUGIN_API_VERSION this build provides — the manager shows it beside the version a plugin asks for
   sidebarFilter: '',      // substring filter typed into the sidebar's own search box
   dashboards: [],         // [{id, name, pos, widget_count}] named dashboards, from the case file (see dashboard.js)
   dashboardId: null,      // which named dashboard is currently showing
@@ -95,13 +113,22 @@ export const S = {
   collapsedFolders: new Set(), // folder ids collapsed in the sidebar — a per-browser view pref (localStorage)
   timeline: {
     view: null, pages: new Map(), pending: new Set(), reqId: 0,
-    tagFilter: null, // tag ids currently checked; null = not yet initialized (defaults to "every known tag" on first load)
+    tagsOff: new Set(), // tag ids the analyst switched OFF the timeline; every other tag is on (timelineTagIds), including one created after the case opened
+    raw: new Set(),  // "<source_id>:<rid>" for rows showing the raw source row instead of their summary — see fillTimelineBody
+    sel: null,       // the selected line {pos, source_id, rid, ts}, kept across rebuilds — see keepTimelinePlace
+    sourcesOff: new Set(), // table ids switched OFF in the overview's Tables view, as tagsOff is for tags
+    range: null,     // ['YYYY-MM-DD HH:MM:SS', …) the overview's drag narrowed the Timeline to, or null for all of it
+    overview: null,  // the overview strip's bars for the current view — see loadTimelineOverview
+    unfold: [],      // [[source_id, rid]]: the first rows of the folded runs opened to a line per row — see toggleTimelineFold
+    context: null,   // {minutes, around, start, end}: the untagged rows around a finding that are on the Timeline too, or null — see setTimelineContext
   },
   savedFilterCursor: -1,   // index into filtersForCurrentSource(), for [ and ] cycling
   cases: [],               // home screen's case registry, from workspace/cases.json
-  homeSearch: '',          // home screen's case/group name filter, persisted across re-renders
-  homeShowOlder: false,    // reveals cases not opened in >30 days once toggled
+  homeSearch: '',          // home screen's filter over case names, groups and notes, persisted across re-renders
+  homeSection: 'recent',   // the home screen's side-list section: 'recent' | 'all' | 'group:<name>' | 'nogroup'
+  homeSort: 'opened',      // the home screen's sort column: 'opened' | 'name' | 'source_count' | 'row_count' | 'tagged_row_count'
   activeTab: 'grid',       // 'grid' or a page tab's key ('sql' | 'timeline' | 'plugin:<id>') — which of #grid/#sqlview/#timelineview/.pluginview is up
+  gridRepaintPending: false, // a background job (the watchlist scan's auto-tags) dropped the row caches while the grid was off screen (a page tab, or the home screen) — showGridTab consumes it on the way back and pays it (render, rail, regroup-by-tag) unless the caller is painting for itself
   tabOrder: [],            // source/merge ids, drag-reordered — ids not listed here sort after, in loadSources() order
   tempCase: false,         // the open case is a quick look — gates the home-navigation guard
   tabHistory: [],          // recently visited page tabs, mouse back/forward — see tabhistory.js
@@ -112,8 +139,10 @@ export const S = {
   caseVariables: [],       // the open case's variables [{name, value, description, required}] — Case settings → Variables
   sqlTabs: [],             // [{id, name, sql, pos}] from the case file's sql_tabs table (see showSqlTab)
   sqlTabId: null,          // which sql tab the editor/result pane is currently showing
-  sqlResults: new Map(),   // sql tab id -> last {columns, rows, elapsed_ms, truncated} | {error}, in memory only
+  sqlResults: new Map(),   // sql tab id -> last {id, columns, rows (first page), total, elapsed_ms, stopped} | {error}, in memory only — the rows live on the server (sqlresults.py)
+  sqlRuns: new Map(),      // sql tab id -> the op token of the run it is waiting on; a result whose token is not here any more is dropped (see runSql)
   searchAll: null,         // in-flight/finished Search-all job — see searchAllState(); survives closing the modal
+  pendingViews: new Map(), // source_id -> a search-box build left to finish in the background — see view.js detach/applyPendingView
 };
 
 /* ------------------------------------------------------- row selection */
@@ -133,6 +162,13 @@ export const S = {
    headers) in grouped mode. Every bound on the shared position space goes
    through this rather than reaching for S.view.row_count, which is only
    half the answer once a grouping is on. */
+/* Case settings → "Dashboard creator mode". Off by default: the "Add to
+   dashboard" entries only appear in the header, row and Filters ▾ menus
+   when the case has opted in, so the menus stay short for everyone who
+   reads boards and never authors one. Stored as "1" (case_settings values
+   are TEXT); absent is off. */
+export const dashboardCreatorMode = () => !!(S.caseSettings && S.caseSettings.dashboard_creator === '1');
+
 export const gridRowCount = () => (S.groupByCols.length ? S.groupTotalRows : S.view ? S.view.row_count : 0);
 
 export const selViewRows = () => gridRowCount();
@@ -143,19 +179,136 @@ export function selCount() {
 
 export const selHas = (pos) => (S.selectAll ? !S.selection.has(pos) : S.selection.has(pos));
 
-export const selAdd = (pos) => { S.selectAll ? S.selection.delete(pos) : S.selection.add(pos); };
+export const selAdd = (pos) => { S.selectAll ? S.selection.delete(pos) : S.selection.add(pos); S.selVersion++; };
 
-export const selRemove = (pos) => { S.selectAll ? S.selection.add(pos) : S.selection.delete(pos); };
+export const selRemove = (pos) => { S.selectAll ? S.selection.add(pos) : S.selection.delete(pos); S.selVersion++; };
 
 export const selToggle = (pos) => { selHas(pos) ? selRemove(pos) : selAdd(pos); };
 
-export function selClear() { S.selectAll = false; S.selection.clear(); }
+/* Replace the selection wholesale. The one door for it, so the version
+   bump happens every time. */
+export function selReplace(selectAll, selection) {
+  S.selectAll = selectAll;
+  S.selection = selection;
+  S.selVersion++;
+}
 
-export function selSetAll() { S.selectAll = true; S.selection.clear(); }
+export function selClear() { selReplace(false, new Set()); }
+
+export function selSetAll() { selReplace(true, new Set()); }
+
+/* Every selection GESTURE snapshots first, so the chip's Undo (and a
+   stray Escape) can be taken back. Bounded; the newest wins. Stamped with
+   the view: positions from another view or table mean other rows, so an
+   entry from a rebuilt or switched-away view is discarded, never applied. */
+export function selSnapshot() {
+  S.selUndo.push({ selectAll: S.selectAll, selection: new Set(S.selection), viewId: S.view ? S.view.view_id : null });
+  if (S.selUndo.length > 30) S.selUndo.shift();
+}
+function pruneSelUndo() {
+  const vid = S.view ? S.view.view_id : null;
+  S.selUndo = S.selUndo.filter((s) => s.viewId === vid);
+}
+export function selUndoAvailable() { pruneSelUndo(); return S.selUndo.length > 0; }
+export function selUndoLast() {
+  pruneSelUndo();
+  const s = S.selUndo.pop();
+  if (!s) return false;
+  selReplace(s.selectAll, s.selection);
+  return true;
+}
+
+/* Add (on) or remove (!on) every real row between two positions, keeping
+   whatever else is picked — the additive half of a Shift+click or a drag.
+   selSetRange below is the replacing form the keyboard's own extend uses. */
+export function selRangeApply(from, to, on = true) {
+  const lo = Math.min(from, to), hi = Math.max(from, to);
+  for (let p = lo; p <= hi; p++) {
+    if (S.groupByCols.length && !groupCoordAt(p)) continue;
+    on ? selAdd(p) : selRemove(p);
+  }
+}
+
+/* The rows a cell range spans, as positions — group headings excluded,
+   since a heading is not a row anything can tag or copy. The ONE answer
+   to "which rows does the range mean" for the tag key, the row menu, the
+   toolbar and copy, which used to compute it three ways. */
+export function cellRangeRows() {
+  if (!S.cellRange) return [];
+  const out = [];
+  for (let p = S.cellRange.r0; p <= S.cellRange.r1; p++) {
+    if (S.groupByCols.length && !groupCoordAt(p)) continue;
+    out.push(p);
+  }
+  return out;
+}
+
+/* How MANY rows the range spans, without building the list. The toolbar
+   asks this on every paint, and Ctrl+Shift+Down makes the answer the
+   whole view — materialising 200,000 positions per scroll frame to read
+   `.length` off them is the difference between a smooth grid and a
+   janky one. Ungrouped, the count is arithmetic; grouped, the headings
+   have to be walked, and grouped views are bounded by what is expanded. */
+export function cellRangeRowCount() {
+  if (!S.cellRange) return 0;
+  if (!S.groupByCols.length) return S.cellRange.r1 - S.cellRange.r0 + 1;
+  return cellRangeRows().length;
+}
+
+/* Does every real row the range spans already carry a pick? Space over a
+   multi-row rectangle needs ONE answer for the whole block — take the
+   lot, or let the lot go — rather than flipping each row on its own,
+   which on a half-picked range only swaps which half is picked.
+
+   Asking is cheaper than answering: the first unpicked row settles it,
+   so the ordinary case (a fresh rectangle over rows nobody has picked)
+   stops at r0. Only an already-picked range walks to the end, and this
+   runs on a keypress, never on a paint — which is why it may loop where
+   cellRangeRowCount above may not.
+
+   `any` is the all-headings guard: a range holding no real rows is not
+   "all picked", it is nothing to pick, and the caller has to tell those
+   apart. selHas rather than S.selection.has, so an inverted select-all
+   selection answers for the rows it MEANS, not the rows it stores. */
+export function cellRangeAllSelected() {
+  if (!S.cellRange) return false;
+  let any = false;
+  for (let p = S.cellRange.r0; p <= S.cellRange.r1; p++) {
+    if (S.groupByCols.length && !groupCoordAt(p)) continue;
+    if (!selHas(p)) return false;
+    any = true;
+  }
+  return any;
+}
+
+/* The three cell fields go together, always: a rectangle with no corners
+   is unpaintable and an active cell with no rectangle is a highlight
+   nothing can copy. Eleven places drop the cell selection — a rebuild, a
+   table switch, Escape, Ctrl+A, the gutter, the select-all box, a group
+   toggle, renderHead — and before this was one call they were eleven
+   chances to clear two of the three. */
+export function clearCellSelection() {
+  S.cellRange = null;
+  S.cellAnchor = null;
+  S.cellFocus = null;
+  S.cellRangeExplicit = false;
+}
+
+/* Contiguous runs among the picked rows — the chip's "N ranges". Memoised
+   on selVersion: render() runs per scroll frame and this sorts the Set. */
+let rangesMemo = { version: -1, ranges: 0 };
+export function selRanges() {
+  if (S.selectAll) return 1;
+  if (rangesMemo.version === S.selVersion) return rangesMemo.ranges;
+  const ps = [...S.selection].sort((a, b) => a - b);
+  let n = 0;
+  for (let i = 0; i < ps.length; i++) if (i === 0 || ps[i] !== ps[i - 1] + 1) n++;
+  rangesMemo = { version: S.selVersion, ranges: n };
+  return n;
+}
 
 export function selSetRange(from, to) {
-  S.selectAll = false;
-  S.selection.clear();
+  selReplace(false, new Set());
   const lo = Math.min(from, to), hi = Math.max(from, to);
   // Grouped mode's position space interleaves group-header rows with data
   // rows, and a header isn't a row anything can tag or copy. groupCoordAt
@@ -166,6 +319,7 @@ export function selSetRange(from, to) {
     if (S.groupByCols.length && !groupCoordAt(p)) continue;
     S.selection.add(p);
   }
+  S.selVersion++;
 }
 
 /* The lowest selected position, without materializing the rest. */

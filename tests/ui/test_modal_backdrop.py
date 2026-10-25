@@ -14,6 +14,9 @@ pytestmark = pytest.mark.ui
 
 
 def test_backdrop_close_requires_press_and_release_there(page):
+    # The modal opens and closes inside the mouse handlers, which have run
+    # by the time Playwright's mouse calls return: each check reads the
+    # outcome of the gesture before it, with nothing left to wait for.
     page.keyboard.press("?")
     page.wait_for_selector("#modal:not([hidden])")
     card = page.locator(".modal-card").bounding_box()
@@ -23,7 +26,6 @@ def test_backdrop_close_requires_press_and_release_there(page):
     page.mouse.down()
     page.mouse.move(card["x"] + 200, card["y"] + 100, steps=5)
     page.mouse.up()
-    page.wait_for_timeout(150)
     assert not page.locator("#modal").is_hidden(), "a drag from the backdrop into the card closed the modal"
 
     # card → backdrop (must stay fixed)
@@ -31,9 +33,7 @@ def test_backdrop_close_requires_press_and_release_there(page):
     page.mouse.down()
     page.mouse.move(card["x"] - 80, card["y"] + 130, steps=5)
     page.mouse.up()
-    page.wait_for_timeout(150)
     assert not page.locator("#modal").is_hidden(), "a select-drag out of the card closed the modal"
 
     page.mouse.click(card["x"] - 60, card["y"] + 100)
-    page.wait_for_timeout(150)
     assert page.locator("#modal").is_hidden(), "a deliberate backdrop click must still close"

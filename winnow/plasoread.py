@@ -44,6 +44,8 @@ import sqlite3
 import zlib
 from typing import Any, Iterator
 
+from .paths import sqlite_ro_uri
+
 PLASO_COLUMNS = [
     "Datetime", "Timestamp desc", "Data type", "Parser",
     "Source file", "Host", "User", "Attributes (JSON)",
@@ -63,7 +65,7 @@ _DATA_CACHE = 4096
 
 
 def _connect(path: str) -> sqlite3.Connection:
-    ro = sqlite3.connect(f"file:{path}?mode=ro", uri=True, check_same_thread=False)
+    ro = sqlite3.connect(sqlite_ro_uri(path), uri=True, check_same_thread=False)
     ro.row_factory = sqlite3.Row
     return ro
 
@@ -115,6 +117,10 @@ def _loads(blob: Any, compression: str) -> dict:
         if compression == "zlib":
             blob = zlib.decompress(bytes(blob))
         blob = blob.decode("utf-8", "replace")
+    if not isinstance(blob, str):
+        # A NULL (or numeric) _data: json.loads raised TypeError, which no
+        # caller catches, and one such row failed the whole import.
+        raise ValueError(f"container holds {type(blob).__name__}, not serialized data")
     doc = json.loads(blob)
     if not isinstance(doc, dict):
         raise ValueError("serialized container is not an object")
@@ -167,13 +173,27 @@ def _ts_iso(ts: Any) -> str:
     return dt.strftime("%Y-%m-%d %H:%M:%S.%f")
 
 
+def _utf8_text(s: str) -> str:
+    """store._utf8_text's twin (this module imports nothing from the app):
+    a lone surrogate — the serializer's "\\udc80" for an NTFS name holding
+    one — has no UTF-8 encoding, and the insert of its batch stopped the
+    whole import. Written back as the escape the storage held."""
+    if s.isascii():
+        return s
+    try:
+        s.encode("utf-8")
+        return s
+    except UnicodeEncodeError:
+        return s.encode("utf-8", "backslashreplace").decode("utf-8")
+
+
 def _cell(value: Any) -> str:
     if value is None:
         return ""
     if isinstance(value, str):
-        return value
+        return _utf8_text(value)
     if isinstance(value, (dict, list)):
-        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+        return _utf8_text(json.dumps(value, ensure_ascii=False, sort_keys=True))
     return str(value)
 
 
@@ -241,7 +261,8 @@ def iter_plaso_rows(path: str) -> Iterator[list[str]]:
             return None
 
         if serialized_events:
-            cursor = ro.execute(f"SELECT _data FROM event ORDER BY {order_col}")
+            ts_sel = f", {order_col} AS _order_ts" if order_col in event_cols else ""
+            cursor = ro.execute(f"SELECT _data{ts_sel} FROM event ORDER BY {order_col}")
         else:
             sel = [c for c in ("timestamp", "timestamp_desc", "_event_data_identifier") if c in event_cols]
             cursor = ro.execute(f"SELECT {', '.join(sel)} FROM event ORDER BY {order_col}")
@@ -254,7 +275,16 @@ def iter_plaso_rows(path: str) -> Iterator[list[str]]:
                 if serialized_events:
                     try:
                         ev = _loads(r["_data"], compression)
-                    except (ValueError, zlib.error):
+                    except (ValueError, zlib.error) as e:
+                        # Kept as a row, not skipped: a bare `continue`
+                        # here left the table short with nothing saying
+                        # so. The event table's own timestamp column still
+                        # places it on the timeline; the Attributes cell
+                        # says why the rest is blank — the same note an
+                        # unreadable event_data row degrades to.
+                        yield ([_ts_iso(r["_order_ts"] if "_order_ts" in r.keys() else None)]
+                               + [""] * (len(PLASO_COLUMNS) - 2)
+                               + [json.dumps({"_winnow_error": f"unreadable event row: {e}"})])
                         continue
                     timestamp = ev.get("timestamp")
                     ts_desc = ev.get("timestamp_desc", "")
@@ -282,7 +312,7 @@ def iter_plaso_rows(path: str) -> Iterator[list[str]]:
                 if "_winnow_error" in data:
                     extras["_winnow_error"] = data["_winnow_error"]
                 source_file = _cell(merged.get("display_name") or "") \
-                    or stream_location(stream_ref) or _cell(merged.get("filename") or "")
+                    or _utf8_text(stream_location(stream_ref)) or _cell(merged.get("filename") or "")
                 yield [
                     _ts_iso(timestamp),
                     _cell(ts_desc),
@@ -291,7 +321,7 @@ def iter_plaso_rows(path: str) -> Iterator[list[str]]:
                     source_file,
                     _cell(merged.get("hostname")),
                     _cell(merged.get("username")),
-                    json.dumps(extras, ensure_ascii=False, sort_keys=True) if extras else "",
+                    _utf8_text(json.dumps(extras, ensure_ascii=False, sort_keys=True)) if extras else "",
                 ]
     finally:
         ro.close()

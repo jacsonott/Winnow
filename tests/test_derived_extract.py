@@ -62,7 +62,10 @@ def test_detect_struct_paths_finds_json_fields_with_coverage(store, write_csv):
     by_path = {p["path"]: p for p in found["paths"]}
     assert by_path["$.user.name"]["count"] == 3
     assert by_path["$.src.ip"]["count"] == 2       # one row has no src
-    assert by_path["$.user.name"]["suggested_name"] == "name"
+    # The full path, so two fields sharing a leaf name flatten to two
+    # columns that say which is which (target.ip / source.ip), not ip / ip 2
+    assert by_path["$.user.name"]["suggested_name"] == "user.name"
+    assert by_path["$.src.ip"]["suggested_name"] == "src.ip"
 
 
 def test_detect_struct_paths_on_xml(store, write_csv):
@@ -299,3 +302,18 @@ def test_regex_extract_rejects_bad_patterns_and_groups(store, write_csv):
         store.add_derived_column(sid, "X", "Uri", "regex_extract", {"pattern": "(a)", "group": 3})
     with pytest.raises(ValueError):
         store.add_derived_column(sid, "X", "Uri", "regex_extract", {"pattern": "a" * 600})
+
+
+def test_a_json_column_with_a_lone_surrogate_key_can_be_flattened(client, store, write_csv):
+    """The picker's route returned 500 (its response could not be encoded),
+    and a column named after the key could not be created."""
+    sid = _ingest(store, write_csv, [["Payload"], ['{"\\ud800x": "found", "ok": "1"}']])
+    r = client.post("/api/derived/paths", json={"source_id": sid, "column": "Payload"})
+    assert r.status_code == 200, r.text
+    specs = [{"name": p["suggested_name"], "input_column": "Payload", "op_id": "json_field",
+              "params": {"path": p["path"]}} for p in r.json()["paths"]]
+    res = store.add_derived_columns(sid, specs)
+    store.wait_for_ingest_job(res["job_id"], timeout=30)
+    by_name = {p["suggested_name"]: p for p in r.json()["paths"]}
+    assert set(by_name) == {"\\ud800x", "ok"}
+    assert _values(store, sid, "\\ud800x") == ["found"]

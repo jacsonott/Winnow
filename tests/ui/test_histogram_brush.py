@@ -1,0 +1,216 @@
+"""Selecting a smaller timeframe on the histogram strip, and seeing it.
+
+Two complaints, one cause and one consequence.
+
+The selection rectangle was painted with `--sel` at full opacity over the
+plot, so it covered the bars you were choosing between — you picked a
+range by hiding the thing you were picking it from.
+
+And the drag was rounded outwards to the CURRENT bar width, so a range
+narrower than one bar could not be expressed: over a table spanning days
+the bars are hours wide, any drag inside one became that whole bar, and
+the view never narrowed enough for the server to re-bucket. "Zoom in" did
+nothing. The server has always chosen its bucket from the span it is
+given (Store.HISTOGRAM_BUCKETS); it was never being given a smaller one.
+"""
+
+from __future__ import annotations
+
+import datetime
+import time
+from urllib.parse import parse_qs, urlparse
+
+import pytest
+
+pytestmark = pytest.mark.ui
+
+
+def _put_back(page, sid):
+    """Undo everything the fixture did. Called from teardown AND from a
+    failed setup: a yield fixture that raises before its yield runs no
+    teardown, and a wide.csv left open (with the strip left open) fails
+    the tab-strip, watchlist-badge and any later histogram test after it —
+    one slow import on a CI runner read as three unrelated failures."""
+    page.evaluate("() => { __winnow.S.timeRange = { enabled: false, column: null, start: '', end: '' }; }")
+    page.evaluate("""async (id) => {
+      const h = { 'X-Timeline-Lite-Client': '1' };
+      if (id != null) {
+        await fetch('/api/source/' + id, { method: 'DELETE', headers: h });
+        __winnow.S.viewCache.delete(id);
+      }
+      await __winnow.loadSources();
+      const first = __winnow.S.sources.find((s) => !s.is_merge);
+      if (first) __winnow.openSource(first.id);
+    }""", sid)
+    page.evaluate("() => { __winnow.toggleHistogram(false); localStorage.removeItem('winnow.histogram'); }")
+    page.wait_for_selector(".row")
+
+
+@pytest.fixture
+def wide_table(page, tmp_path, server_post):
+    """Three days of events, so the bars are hours wide — the shared
+    fixture spans three minutes, where every bucket is already seconds and
+    the rounding never bit."""
+    base = datetime.datetime(2026, 3, 14, 0, 0, 0)
+    lines = ["When,Host"]
+    for i in range(720):                       # every 6 minutes for 3 days
+        lines.append(f"{(base + datetime.timedelta(minutes=6 * i)):%Y-%m-%d %H:%M:%S},H{i % 3}")
+    f = tmp_path / "wide.csv"
+    f.write_text("\n".join(lines) + "\n")
+    sid = None
+    try:
+        server_post("/api/ingest/jobs/path", {"path": str(f), "name": "wide.csv", "kind": "csv"})
+        # Polled from Python: wait_for_function does not await a promise
+        # predicate, so the .then() form passes instantly and races the import
+        # (tests/test_ui_test_hygiene.py enforces this).
+        deadline = time.monotonic() + 25
+        while time.monotonic() < deadline:
+            names = page.evaluate(
+                "() => __winnow.loadSources().then(() => __winnow.S.sources.map((s) => s.name))")
+            if "wide.csv" in names:
+                break
+            time.sleep(0.25)
+        else:
+            raise AssertionError("wide.csv never appeared in S.sources")
+        sid = page.evaluate("() => __winnow.S.sources.find((s) => s.name === 'wide.csv').id")
+        page.evaluate("(id) => __winnow.openSource(id)", sid)
+        # The view, not just the id: sourceId flips before the new table's
+        # view and columns land, and a strip opened in between can ask about
+        # the wrong table. That is the likeliest reason the strip once never
+        # drew, in one of four full local runs. 720 rows is wide.csv's; the
+        # shared table has 200.
+        page.wait_for_function(
+            "(id) => __winnow.S.sourceId === id && __winnow.S.view && __winnow.S.view.row_count === 720"
+            " && __winnow.busyCount === 0", arg=sid)
+
+        btn = page.locator("#btnHistogram")
+        # Generous: a CI runner drawing the first histogram of a fresh
+        # table has taken more than ten seconds.
+        btn.wait_for(state="visible", timeout=30_000)
+        if btn.get_attribute("aria-pressed") == "false":
+            btn.click()
+        try:
+            page.wait_for_selector("#pluginPanels:not([hidden]) #histogramPanel canvas.th-canvas", timeout=30_000)
+        except Exception as e:
+            shows = page.evaluate("() => document.getElementById('histogramPanel').textContent")
+            raise AssertionError(f"the strip never drew; it shows {shows!r}") from e
+        page.wait_for_function("() => /rows/.test(document.getElementById('histogramPanel').textContent)",
+                               timeout=30_000)
+    except Exception:
+        _put_back(page, sid)
+        raise
+    yield sid
+    _put_back(page, sid)
+
+
+def _bucket_seconds(page):
+    """Read the bucket width off the strip's own caption ("… 1h buckets …")."""
+    txt = page.locator("#histogramPanel").inner_text()
+    import re
+    m = re.search(r"·\s*(\d+)([smhd])\s*buckets", txt)
+    assert m, txt
+    return int(m.group(1)) * {"s": 1, "m": 60, "h": 3600, "d": 86400}[m.group(2)]
+
+
+def _span_seconds(page):
+    tr = page.evaluate("() => __winnow.S.timeRange")
+    fmt = "%Y-%m-%d %H:%M:%S"
+    a = datetime.datetime.strptime(tr["start"], fmt)
+    b = datetime.datetime.strptime(tr["end"], fmt)
+    return (b - a).total_seconds()
+
+
+def _bucket_count_hint(page):
+    """How many bars the panel asked for, derived the way the panel does."""
+    w = page.locator("canvas.th-canvas").bounding_box()["width"]
+    return max(20, min(400, int(w // 7)))
+
+
+def _drag(page, frm, to):
+    box = page.locator("canvas.th-canvas").bounding_box()
+    y = box["y"] + box["height"] * 0.4
+    page.mouse.move(box["x"] + box["width"] * frm, y)
+    page.mouse.down()
+    page.mouse.move(box["x"] + box["width"] * to, y, steps=8)
+    page.mouse.up()
+
+
+def test_the_bars_get_finer_for_the_smaller_range(page, wide_table):
+    """Narrowing the timeframe is meant to be more detail, not the same
+    chart over fewer rows. The server has always chosen its bucket from the
+    span it is given; what it was not given was a bucket count the canvas
+    could actually show, so a zoomed view came back just as dense."""
+    before = _bucket_seconds(page)
+    assert before >= 300, f"expected coarse bars over three days, got {before}s"
+    _drag(page, 0.40, 0.46)
+    page.wait_for_function("() => __winnow.S.timeRange.enabled === true")
+    # "timeframe on" appears as soon as the panel redraws, which happens
+    # before its refetch lands — wait for the row count the new data brings.
+    page.wait_for_function("() => __winnow.S.view && __winnow.S.view.row_count < 720")
+    page.wait_for_function(
+        """() => { const v = __winnow.S.view;
+             if (!v) return false;          // mid-rebuild: S.view is briefly unset
+             const p = document.getElementById('histogramPanel');
+             if (!p) return false;
+             const m = /(\\d[\\d,]*) rows/.exec(p.textContent);
+             return !!m && Number(m[1].replace(/,/g, '')) === v.row_count; }""",
+        timeout=15_000)
+    after = _bucket_seconds(page)
+    assert after < before, (before, after)
+
+
+def test_the_panel_asks_for_as_many_bars_as_it_can_show(page, wide_table, until):
+    """A fixed 160 buckets made 5px slivers on a wide canvas and stayed 160
+    at every zoom level. The ask comes from the canvas now, so it changes
+    when the canvas does."""
+    asks = []
+    page.on("request", lambda r: asks.append(r.url) if "/api/histogram" in r.url else None)
+
+    wide = page.locator("canvas.th-canvas").bounding_box()["width"]
+    page.set_viewport_size({"width": 900, "height": 900})
+    page.wait_for_function(
+        "(w) => { const c = document.querySelector('canvas.th-canvas'); return !!c && c.clientWidth < w; }",
+        arg=int(wide))
+    asked = len(asks)
+    page.evaluate("() => __winnow.rebuildView({ keepScroll: false })")
+    # The panel refetches on the view change, after its own 150ms debounce.
+    until(page, lambda: len(asks) > asked, "the panel to ask again for the narrower canvas")
+
+    narrow = page.locator("canvas.th-canvas").bounding_box()["width"]
+    got = [int(parse_qs(urlparse(a).query)["max_buckets"][0]) for a in asks]
+    assert got, "the panel never asked for a histogram"
+    assert all(isinstance(n, int) and 20 <= n <= 400 for n in got), got
+    # The last ask was made for the narrower canvas, and fits it.
+    assert got[-1] <= narrow / 6 + 1, (got[-1], narrow)
+    assert got[-1] < wide / 6, (got[-1], wide)
+
+
+def test_the_selection_does_not_hide_the_bars_under_it(page, wide_table):
+    """It used to be painted opaque over the plot."""
+    box = page.locator("canvas.th-canvas").bounding_box()
+    y = box["y"] + box["height"] * 0.4
+    page.mouse.move(box["x"] + box["width"] * 0.20, y)
+    page.mouse.down()
+    page.mouse.move(box["x"] + box["width"] * 0.80, y, steps=8)
+    try:
+        # Inside the brush, the plot must still hold more than one colour:
+        # bars visible through the tint rather than a flat wash.
+        distinct = page.evaluate("""() => {
+          const c = document.querySelector('canvas.th-canvas');
+          const ctx = c.getContext('2d');
+          const dpr = window.devicePixelRatio || 1;
+          const y = Math.round((c.height / dpr - 25) * dpr);
+          const x0 = Math.round(c.width * 0.3), x1 = Math.round(c.width * 0.7);
+          const row = ctx.getImageData(x0, y, x1 - x0, 1).data;
+          const seen = new Set();
+          for (let i = 0; i < row.length; i += 4) seen.add(`${row[i]},${row[i+1]},${row[i+2]}`);
+          return seen.size;
+        }""")
+        assert distinct > 1, "the selection painted a flat wash over the bars"
+    finally:
+        # Back to where the drag started before releasing: this test is
+        # about what the brush LOOKS like, and letting it apply a timeframe
+        # leaves a rebuild in flight for the fixture to tear down under.
+        page.mouse.move(box["x"] + box["width"] * 0.20, y)
+        page.mouse.up()
+        page.evaluate("() => { __winnow.S.timeRange = { enabled: false, column: null, start: '', end: '' }; }")

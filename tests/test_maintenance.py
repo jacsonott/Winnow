@@ -17,9 +17,15 @@ from winnow import store as store_module
 from winnow.store import VIEWS_PREFIX, VIEWS_SUFFIX, Store, sweep_orphan_views
 
 
+def _columns(store, source_id):
+    return [ix["column"] for ix in store.list_column_indexes(source_id)]
+
+
 def test_column_index_listed_after_a_sargable_filter(ingested):
     store, source_id = ingested
-    assert store.list_column_indexes(source_id) == []
+    # The import's own (Store._build_import_indexes): a sort index on the
+    # first datetime column. Everything else waits for first use.
+    assert _columns(store, source_id) == ["Timestamp"]
     spec = {
         "source_id": source_id,
         "filters": [{"column": "EventId", "op": "equals", "value": "4624"}],
@@ -28,8 +34,8 @@ def test_column_index_listed_after_a_sargable_filter(ingested):
     store.build_view(source_id, spec)
     assert store.wait_for_column_index(source_id, "EventId", timeout=5)
     listed = store.list_column_indexes(source_id)
-    assert [ix["column"] for ix in listed] == ["EventId"]
-    assert listed[0]["building"] is False
+    assert [ix["column"] for ix in listed] == ["Timestamp", "EventId"]
+    assert listed[1]["building"] is False
 
 
 def test_column_values_triggers_an_index(ingested):
@@ -39,7 +45,7 @@ def test_column_values_triggers_an_index(ingested):
     store, source_id = ingested
     store.column_values(source_id, "Process")
     assert store.wait_for_column_index(source_id, "Process", timeout=5)
-    assert [ix["column"] for ix in store.list_column_indexes(source_id)] == ["Process"]
+    assert _columns(store, source_id) == ["Timestamp", "Process"]
 
 
 def test_group_summary_triggers_an_index_only_on_a_whole_source_view(ingested):
@@ -90,7 +96,7 @@ def test_drop_column_index_and_rebuild(ingested):
     store.column_values(source_id, "Process")
     assert store.wait_for_column_index(source_id, "Process", timeout=5)
     store.drop_column_index(source_id, "Process")
-    assert store.list_column_indexes(source_id) == []
+    assert _columns(store, source_id) == ["Timestamp"]
     # Nothing broke: the same query still answers correctly, and rebuilds it.
     assert store.column_values(source_id, "Process")
     assert store.wait_for_column_index(source_id, "Process", timeout=5)
@@ -154,13 +160,17 @@ def test_compact_refuses_without_enough_free_disk(ingested, monkeypatch):
         store.compact()
 
 
-def test_compact_restores_temp_store_to_memory(ingested):
-    # VACUUM's scratch copy obeys temp_store, so compact() forces FILE for
-    # the duration — but leaving it there would push every later sort and
-    # temp b-tree onto disk.
+def test_temp_store_is_file_for_vacuum_and_the_sorter(ingested):
+    # VACUUM's scratch copy obeys temp_store, so MEMORY would hold a whole
+    # case in RAM during compact(); and SQLite runs no sorter threads on a
+    # MEMORY connection, which made _tune's threads=4 a no-op. FILE before
+    # and after compact().
     store, _ = ingested
+    assert store.db.execute("PRAGMA temp_store").fetchone()[0] == 1  # 1 == FILE
     store.compact()
-    assert store.db.execute("PRAGMA temp_store").fetchone()[0] == 2  # 2 == MEMORY
+    assert store.db.execute("PRAGMA temp_store").fetchone()[0] == 1
+    with store._reader() as ro:
+        assert ro.execute("PRAGMA temp_store").fetchone()[0] == 1
 
 
 # ------------------------------------------- orphaned views databases (temp)

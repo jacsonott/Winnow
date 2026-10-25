@@ -35,8 +35,14 @@ stores longer than it was true:
                            freshly dropped-in plugin is on by default and
                            deleting workspace/ re-enables everything rather
                            than silently turning it all off
-  plugin_bundles.json     named sets of plugins ("case types") applied
-                           together from Settings → Plugins
+  plugin_bundles.json     PROFILES ("case types"): a named set of plugins
+                           plus the boards, starter watchlist and variable
+                           definitions a case of that kind carries, applied
+                           to a case as one unit from the profile manager.
+                           A copy of a shipped profile records which one it
+                           came from and at what version (from_profile /
+                           from_version), and one profile exports to a
+                           single "winnow-profile/1" file
   dashboards.json         the dashboard library — boards saved machine-wide
                            from a board's "Save to library…" and added to any
                            case from the sidebar's Dashboards → Library rows
@@ -49,8 +55,16 @@ stores longer than it was true:
                            first run rather than silently defaulting
 
 Never holds evidence data — only UI/workflow bookkeeping. Analyst work
-(tags, notes, layouts, saved views) lives in the case file instead, so it
+(tags, notes, layouts) lives in the case file instead, so it
 travels with the evidence; that split is deliberate.
+
+Human-readable means hand-editable, so a damaged file is expected, not
+exotic: one that won't parse or has the wrong shape is renamed to
+`<name>.corrupt-<time>`, logged, and the store starts from its defaults
+(see `_read`). Never read one of these files with a bare json.load that
+falls back to "empty" — the store's next write then replaces the
+analyst's file with that empty state, which is how three custom filters
+became the shipped defaults on a plain list().
 """
 
 from __future__ import annotations
@@ -104,8 +118,18 @@ class _WorkspaceLock:
         self._rlock.acquire()
         depth = getattr(self._depth, "n", 0)
         if depth == 0:
-            lock_path = _ensure_dir() / ".lock"
-            fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+            # Anything that raises between taking the RLock and returning
+            # never reaches __exit__, so it has to give the RLock back
+            # itself. It didn't: one failed open of .lock (EMFILE, a
+            # read-only install) left the RLock owned by that worker
+            # thread forever, and every other thread's next workspace call
+            # — nearly every route — blocked for the life of the process.
+            try:
+                lock_path = _ensure_dir() / ".lock"
+                fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+            except BaseException:
+                self._rlock.release()
+                raise
             try:
                 if os.name == "posix":
                     import fcntl
@@ -117,6 +141,10 @@ class _WorkspaceLock:
                 # A filesystem without advisory locks degrades to the old
                 # single-process behaviour rather than failing every save.
                 pass
+            except BaseException:
+                os.close(fd)
+                self._rlock.release()
+                raise
             self._fd.fd = fd
         self._depth.n = depth + 1
         return self
@@ -150,14 +178,90 @@ def _ensure_dir() -> Path:
 
 
 def _read(name: str, default: Any) -> Any:
+    """One store's document, or `default` when there is none to read.
+
+    These files are human-readable on purpose, so a hand edit is an
+    ordinary event and every way one goes wrong has to end somewhere
+    better than it used to. A file that can't be parsed (a trailing comma,
+    an ANSI save of an accented name, a power cut mid-write) or that
+    parses to the wrong shape (`null`, `[]`, `{}` where the store keeps
+    `{"cases": [...]}`) used to read as EMPTY, and the store's next write —
+    a plain filters list() re-seeds — replaced it, so the analyst's records
+    went without a word; or it raised out of every route touching the
+    store, and out of server.py's import for plugins.json. Now it is moved
+    aside to `<name>.corrupt-<time>` and logged, and the store starts from
+    its defaults: the analyst's file still exists, and nothing writes over
+    it. `utf-8-sig` because Notepad's "UTF-8 with BOM" is a valid save of
+    a valid file, not damage.
+
+    The shape check is `default`'s own: the same top-level type, and every
+    key the default names present with a value of the default's type for
+    it. Keys the default doesn't name are not checked, so a store that
+    grew a key since (plugins.json's enabled_bundled) still reads files
+    written before it — that store checks its own."""
     path = _ensure_dir() / name
-    if not path.exists():
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return default
+    except OSError:
+        # Unreadable is not damaged (a sharing violation, permissions):
+        # nothing here can tell, so it is left exactly where it is.
         return default
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (OSError, json.JSONDecodeError):
+        data = json.loads(raw.decode("utf-8-sig"))
+    except (ValueError, RecursionError) as e:   # UnicodeDecodeError and JSONDecodeError are ValueErrors
+        _set_aside(path, name, f"is not valid UTF-8 JSON ({type(e).__name__}: {e})")
         return default
+    problem = _shape_problem(data, default)
+    if problem:
+        _set_aside(path, name, problem)
+        return default
+    return data
+
+
+_TYPE_WORDS = {dict: "an object", list: "a list", str: "a string", int: "a number",
+               bool: "true/false", float: "a number", type(None): "null"}
+
+
+def _shape_problem(data: Any, default: Any) -> str | None:
+    def word(v):
+        return _TYPE_WORDS.get(type(v), type(v).__name__)
+
+    if type(data) is not type(default):
+        return f"holds {word(data)} where {word(default)} belongs"
+    if isinstance(default, dict):
+        for key, want in default.items():
+            if key not in data:
+                return f'has no "{key}"'
+            if type(data[key]) is not type(want):
+                return f'has {word(data[key])} for "{key}" where {word(want)} belongs'
+    return None
+
+
+def _set_aside(path: Path, name: str, why: str) -> None:
+    """Rename a damaged workspace file out of the way, so the store's next
+    write lands in a fresh file instead of replacing it. Called with the
+    workspace lock held (every _read is), so a second process can't be
+    reading the same file mid-rename."""
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    dest = path.with_name(f"{path.name}.corrupt-{stamp}")
+    n = 1
+    while dest.exists():
+        n += 1
+        dest = path.with_name(f"{path.name}.corrupt-{stamp}-{n}")
+    try:
+        os.rename(path, dest)
+        what = f"moved aside to workspace/{dest.relative_to(WORKSPACE_DIR).as_posix()}"
+    except OSError as e:
+        # Can't rename, so the next write most likely can't land either;
+        # say so rather than claim the file is safe.
+        what = f"could not be moved aside ({e}); fix or delete it by hand"
+    try:
+        from . import log as wlog
+        wlog.record("error", f"workspace/{name} {why} - {what}; starting from defaults")
+    except Exception:  # noqa: BLE001 — a log line must never fail the read it reports
+        pass
 
 
 def _write(name: str, data: Any) -> None:
@@ -166,6 +270,12 @@ def _write(name: str, data: Any) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
+        # Without this, a power cut shortly after os.replace can leave the
+        # NEW name pointing at a zero-length file on ext4/NTFS: the rename
+        # is journalled before the data is. These files are small, and
+        # written on an analyst's action, not per row.
+        f.flush()
+        os.fsync(f.fileno())
     os.replace(tmp, path)
 
 
@@ -179,15 +289,29 @@ def _now() -> str:
 
 class CaseRegistry:
     """The home screen's list of known case.db files — name/group/notes are
-    display metadata only, never mutate the underlying case file."""
+    display metadata only, never mutate the underlying case file.
+
+    A case's id is never handed out twice. The file keeps `next_id` beside
+    the list, because max+1 gives a forgotten newest case's id to the next
+    one registered — and a home screen still listing the forgotten one then
+    acts on the newcomer: "Delete with file" from a stale window deleted a
+    different case's file. A registry from before this field has no record
+    of what it gave out, so it starts from max+1 of what is still listed;
+    every id after that is new."""
 
     FILE = "cases.json"
 
     def _load(self) -> list[dict]:
         return _read(self.FILE, {"cases": []})["cases"]
 
-    def _save(self, items: list[dict]) -> None:
-        _write(self.FILE, {"cases": items})
+    def _save(self, items: list[dict], next_id: int | None = None) -> None:
+        data = _read(self.FILE, {"cases": []})
+        floor = max(_next_id(items), int(data.get("next_id") or 0), next_id or 0)
+        _write(self.FILE, {"cases": items, "next_id": floor})
+
+    def _allocate_id(self, items: list[dict]) -> int:
+        data = _read(self.FILE, {"cases": []})
+        return max(_next_id(items), int(data.get("next_id") or 0))
 
     def list(self) -> list[dict]:
         with _LOCK:
@@ -211,7 +335,7 @@ class CaseRegistry:
             if existing:
                 return existing
             rec = {
-                "id": _next_id(items),
+                "id": self._allocate_id(items),
                 "path": os.path.abspath(path),
                 "name": name,
                 "group": group,
@@ -220,7 +344,7 @@ class CaseRegistry:
                 "last_opened": None,
             }
             items.append(rec)
-            self._save(items)
+            self._save(items, next_id=rec["id"] + 1)
             return rec
 
     def update(self, case_id: int, **fields) -> dict:
@@ -249,6 +373,49 @@ class CaseRegistry:
             self._save(items)
 
 
+def _freeze(key) -> tuple:
+    return tuple(tuple(k) if isinstance(k, list) else k for k in key)
+
+
+def _seed_record(data: dict, shipped_version: int, keys: list[list]) -> set | None:
+    """Which shipped defaults this store has already been given, as frozen
+    keys — or None when there is nothing to do at all.
+
+    `seeded` is written by every seed from this release on. A file from
+    before it has only `seeded_version`, and what that version contained
+    can't be recovered, so two cases:
+
+    - already at the shipped version: everything shipped now is what it
+      was given — record that and add nothing (a write, once);
+    - behind it: the old present-by-identity rule decides this one bump
+      (an empty record here), and the record starts from it.
+
+    Recording at the current version is the case that matters: it means
+    the NEXT version bump, the one that would have resurrected deletes,
+    already has the record to go by."""
+    record = data.get("seeded")
+    at = data.get("seeded_version", 0)
+    if isinstance(record, list):
+        done = {_freeze(k) for k in record if isinstance(k, list)}
+        if at >= shipped_version and {_freeze(k) for k in keys} <= done:
+            return None
+        return done
+    if at >= shipped_version:
+        return {_freeze(k) for k in keys}
+    return set()
+
+
+def _merge_seed_record(data: dict, keys: list[list]) -> list:
+    record = data.get("seeded") if isinstance(data.get("seeded"), list) else []
+    seen = {_freeze(k) for k in record if isinstance(k, list)}
+    out = [k for k in record if isinstance(k, list)]
+    for k in keys:
+        if _freeze(k) not in seen:
+            out.append(k)
+            seen.add(_freeze(k))
+    return out
+
+
 class SavedFilters:
     """Cyclable, named filters — [ and ] in the grid. Every filter carries
     the column-name set it was built for (col_names), which is also what
@@ -262,11 +429,14 @@ class SavedFilters:
     def _load(self) -> list[dict]:
         return _read(self.FILE, {"filters": []})["filters"]
 
-    def _save(self, items: list[dict], seeded_version: int | None = None) -> None:
+    def _save(self, items: list[dict], seeded_version: int | None = None,
+              seeded: list | None = None) -> None:
         data = _read(self.FILE, {"filters": []})
         data["filters"] = items
         if seeded_version is not None:
             data["seeded_version"] = seeded_version
+        if seeded is not None:
+            data["seeded"] = seeded
         _write(self.FILE, data)
 
     def ensure_seeded(self) -> None:
@@ -276,26 +446,35 @@ class SavedFilters:
         HeaderNicknames.ensure_seeded, for the same reasons: lazy (called
         from the read path so a test's WORKSPACE_DIR monkeypatch is
         honored), and seeded rows become ordinary records afterward —
-        rename, edit, reorder, delete all stick. Identity for "already
-        present" is name + column set, matching import_all's merge rule, so
-        an analyst's edited copy of a default is never re-added beside
-        itself on a version bump."""
+        rename, edit, reorder, delete all stick.
+
+        A version bump adds only the defaults that are NEW: the file
+        records every default it has ever been given (`seeded`, name +
+        column set), and one already given is never offered again. Judging
+        that by what is *present* instead — the old rule — put back every
+        default the analyst had deleted, and re-added every one they had
+        renamed beside the renamed copy, the first time a release bumped
+        the version. See _seed_record for the one-off migration."""
         from . import defaults
 
         with _LOCK:
             data = _read(self.FILE, {"filters": []})
             shipped = defaults.filters()
-            if data.get("seeded_version", 0) >= shipped["version"]:
+            keys = [[name, list(cols)] for name, cols, _ in shipped["filters"]]
+            done = _seed_record(data, shipped["version"], keys)
+            if done is None:
                 return
             items = data["filters"]
             present = {(r["name"], tuple(r["col_names"])) for r in items}
             for name, cols, payload in shipped["filters"]:
-                if (name, tuple(cols)) in present:
+                key = (name, tuple(cols))
+                if key in done or key in present:
                     continue
                 items.append({"id": _next_id(items), "name": name,
                               "col_names": list(cols), "payload": payload,
                               "created_at": _now()})
-            self._save(items, seeded_version=shipped["version"])
+            self._save(items, seeded_version=max(shipped["version"], data.get("seeded_version", 0)),
+                       seeded=_merge_seed_record(data, keys))
 
     @staticmethod
     def _normalize_payload(rec: dict) -> bool:
@@ -425,11 +604,14 @@ class HeaderNicknames:
     def _load(self) -> list[dict]:
         return _read(self.FILE, {"nicknames": []})["nicknames"]
 
-    def _save(self, items: list[dict], seeded_version: int | None = None) -> None:
+    def _save(self, items: list[dict], seeded_version: int | None = None,
+              seeded: list | None = None) -> None:
         data = _read(self.FILE, {"nicknames": []})
         data["nicknames"] = items
         if seeded_version is not None:
             data["seeded_version"] = seeded_version
+        if seeded is not None:
+            data["seeded"] = seeded
         _write(self.FILE, data)
 
     def ensure_seeded(self) -> None:
@@ -442,25 +624,29 @@ class HeaderNicknames:
 
         Seeded records become ordinary rows — rename and delete stick,
         because after seeding nothing distinguishes them from records the
-        analyst created. Only header sets not already present are added,
-        so an analyst's own name for the EvtxECmd shape survives every
-        version bump."""
+        analyst created. Only header sets never seeded before and not
+        already present are added, so an analyst's own name for the
+        EvtxECmd shape survives every version bump, and so does their
+        deleting it (`seeded` is the record, see SavedFilters)."""
         from . import defaults
 
         with _LOCK:
             data = _read(self.FILE, {"nicknames": []})
             shipped = defaults.headers()
-            if data.get("seeded_version", 0) >= shipped["version"]:
+            keys = [[self._key(cols)] for _, cols in shipped["nicknames"]]
+            done = _seed_record(data, shipped["version"], keys)
+            if done is None:
                 return
             items = data["nicknames"]
             present = {tuple(r["col_names"]) for r in items}
             for nickname, cols in shipped["nicknames"]:
                 key = self._key(cols)
-                if tuple(key) in present:
+                if (tuple(key),) in done or tuple(key) in present:
                     continue
                 items.append({"id": _next_id(items), "col_names": key, "nickname": nickname})
                 present.add(tuple(key))
-            self._save(items, seeded_version=shipped["version"])
+            self._save(items, seeded_version=max(shipped["version"], data.get("seeded_version", 0)),
+                       seeded=_merge_seed_record(data, keys))
 
     @staticmethod
     def _key(col_names: list[str]) -> list[str]:
@@ -628,12 +814,15 @@ class TagTemplate:
 
     def get(self) -> list[dict]:
         with _LOCK:
+            # Read BEFORE the existence check: a damaged tags.json is moved
+            # aside by _read, and this then re-seeds the defaults rather
+            # than handing every new case an empty tag set.
+            current = _read(self.FILE, [])
             path = _ensure_dir() / self.FILE
             if not path.exists():
                 initial = [{"name": n, "color": c, "hotkey": h} for n, c, h in DEFAULT_TAGS]
                 self._save(initial)
                 return initial
-            current = _read(self.FILE, [])
             if current == self._LEGACY_SEED:
                 migrated = [{"name": n, "color": c, "hotkey": h} for n, c, h in DEFAULT_TAGS]
                 self._save(migrated)
@@ -721,8 +910,14 @@ class PluginPrefs:
 
     def _data(self) -> dict:
         d = _read(self.FILE, {"disabled": []})
-        d.setdefault("disabled", [])
-        d.setdefault("enabled_bundled", [])
+        # enabled_bundled is younger than the file, so _read's shape check
+        # (which only knows "disabled") can't require it — but a hand-edited
+        # null or bare string there would raise from set(), or become one
+        # plugin per letter, in the module-level _reload_plugins() that
+        # runs while server.py imports. Nothing to set aside for one key;
+        # it reads as empty and the next toggle rewrites it.
+        if not isinstance(d.get("enabled_bundled"), list):
+            d["enabled_bundled"] = []
         return d
 
     def disabled(self) -> set[str]:
@@ -792,7 +987,8 @@ class AppSettings:
     # quick-look starts a server on a free port — a different origin, so it
     # came up in the default skin every time. The machine copy is what a
     # fresh origin adopts on boot; localStorage stays the flash-free cache.
-    APPEARANCE_KEYS = {"style", "themeMode", "accent", "accentCustomized", "splash", "density", "pagesMenu"}
+    APPEARANCE_KEYS = {"style", "themeMode", "accent", "accentCustomized", "splash", "density", "pagesMenu", "openNewTables",
+                       "timeframeAcrossTables"}
 
     def save(self, values: dict) -> dict:
         fmt = values.get("default_ts_format")
@@ -903,15 +1099,62 @@ class PluginBundles:
 
     FILE = "plugin_bundles.json"
 
+    # The one JSON file a profile travels in. Bumped only if the KEYS
+    # change meaning — a new optional key is readable by an older Winnow
+    # (it drops it) and writable by a newer one, which is the same
+    # bargain "winnow-filters/1" makes.
+    EXPORT_FORMAT = "winnow-profile/1"
+
+    # Everything a profile is allowed to carry in that file. An import
+    # REFUSES a key outside this set rather than dropping it: a file
+    # written by a newer Winnow, or by hand, is more likely to be a
+    # profile whose extra part would be silently lost than a typo worth
+    # absorbing — and losing half a profile without saying so is the
+    # failure this whole PR exists to stop. `id`, `shipped` and
+    # `created_at` are deliberately absent: they describe a record on ONE
+    # machine, not the profile.
+    IMPORTABLE = ("name", "description", "plugins", "watchlist", "dashboard",
+                  "dashboards", "variables", "from_profile", "from_version")
+
+    # And what each of those keys has to BE, with what its list holds.
+    # The unknown-key refusal above only covers names nobody here knows;
+    # a KNOWN key carrying the wrong kind of value is the same failure
+    # wearing a familiar name, and it gets further. `save` stores
+    # `sorted({str(p) for p in plugins})`, so a hand-edited
+    # `"plugins": "lateral_movement"` imports as one plugin per LETTER,
+    # and a `dashboard` that is not a list reaches the manager as a board
+    # whose widgets cannot be iterated — half a profile that looks whole,
+    # again. None passes everywhere: an exported profile writes the keys
+    # it has no value for as null.
+    IMPORT_SHAPE = {"name": (str, None), "description": (str, None),
+                    "from_profile": (str, None), "from_version": (int, None),
+                    "plugins": (list, str), "watchlist": (list, dict),
+                    "dashboard": (list, dict), "dashboards": (list, dict),
+                    "variables": (list, dict)}
+
+    # What to call those types in a message an analyst reads.
+    TYPE_WORDS = {str: "string", int: "number", list: "list", dict: "object",
+                  bool: "true/false value", float: "number"}
+
     @staticmethod
     def _shipped() -> list[dict]:
         """Shipped default profiles (defaults/profiles.json), given negative
         ids and a shipped flag so they list alongside saved bundles but
-        can't be overwritten in place — Save-as makes an editable copy."""
+        can't be overwritten in place — Save-as makes an editable copy.
+
+        `version` is the profile's own, from the JSON: a copy records the
+        version it was taken at (see `save`'s from_version) so the manager
+        can say the shipped one has moved on since. Absent means 1 — a
+        profile that has never been revised."""
         from . import defaults
         out = []
         for i, prof in enumerate(defaults.profiles()):
+            try:
+                version = int(prof.get("version") or 1)
+            except (TypeError, ValueError):
+                version = 1
             out.append({"id": -(i + 1), "shipped": True, "name": prof["name"],
+                        "version": version,
                         "description": prof.get("description", ""),
                         "plugins": list(prof.get("plugins") or []),
                         "watchlist": list(prof.get("watchlist") or []),
@@ -927,10 +1170,25 @@ class PluginBundles:
             b.setdefault("description", "")
             b.setdefault("dashboards", [])
             b.setdefault("variables", [])
+            b.setdefault("watchlist", [])
+            b.setdefault("from_profile", None)
+            b.setdefault("from_version", None)
         try:
             shipped = self._shipped()
         except Exception:  # noqa: BLE001 — a broken profiles.json must not hide saved bundles
             shipped = []
+        # Lineage, answered here rather than by the client: a copy names
+        # the shipped profile it came from and the version it was taken
+        # at, so a shipped profile that has since been revised is
+        # something the manager can OFFER (one line, one button) instead
+        # of something that rewrites the analyst's copy behind them.
+        by_name = {s["name"].lower(): s for s in shipped}
+        for b in saved:
+            src = by_name.get(str(b.get("from_profile") or "").lower())
+            b["update_available"] = None
+            if src and isinstance(b.get("from_version"), int) and src["version"] > b["from_version"]:
+                b["update_available"] = {"name": src["name"], "taken_at": b["from_version"],
+                                         "now": src["version"]}
         return shipped + saved
 
     def get(self, bundle_id: int) -> dict:
@@ -941,18 +1199,28 @@ class PluginBundles:
 
     def save(self, name: str, plugins: list[str], dashboard: list | None = None,
              variables: list | None = None, dashboards: list | None = None,
-             description: str | None = None) -> dict:
+             description: str | None = None, watchlist: list | None = None,
+             from_profile: str | None = None, from_version: int | None = None) -> dict:
         """Upsert by name — 'Triage' means one thing per machine. A bundle
         is a PROFILE: its plugins plus an optional dashboard (a list of
-        widget definitions) and optional variable DEFINITIONS
-        ([{name, label?, description?, required?, default?}] — never
-        values, a profile is a template), so 'how I analyze this kind of
-        case' is one saveable, shareable thing."""
+        widget definitions), an optional starter watchlist and optional
+        variable DEFINITIONS ([{name, label?, description?, required?,
+        default?}] — never values, a profile is a template), so 'how I
+        analyze this kind of case' is one saveable, shareable thing.
+
+        `from_profile`/`from_version` are LINEAGE, written by the copy of
+        a shipped profile: which shipped profile it started as and what
+        version that was. They are the whole basis for "the shipped one
+        has changed since you copied it" — kept on the copy rather than
+        derived from the contents, because a copy is meant to be edited
+        and a content comparison would lose the thread on the first
+        edit. Every field stays None-means-leave-alone, so an edit that
+        sends only a description cannot silently drop a profile's board."""
         name = (name or "").strip()
         if not name:
-            raise ValueError("Name the bundle")
+            raise ValueError("Name the profile")
         if len(name) > 100:
-            raise ValueError("Bundle name is too long")
+            raise ValueError("Profile name is too long")
         plugins = sorted({str(p) for p in (plugins or [])})
         with _LOCK:
             data = _read(self.FILE, {"bundles": []})
@@ -968,12 +1236,20 @@ class PluginBundles:
                     existing["dashboards"] = dashboards
                 if description is not None:
                     existing["description"] = description[:400]
+                if watchlist is not None:
+                    existing["watchlist"] = watchlist
+                if from_profile is not None:
+                    existing["from_profile"] = from_profile
+                if from_version is not None:
+                    existing["from_version"] = int(from_version)
                 rec = existing
             else:
                 rec = {"id": _next_id(items), "name": name, "plugins": plugins,
                        "description": (description or "")[:400],
                        "dashboard": dashboard or [], "dashboards": dashboards or [],
-                       "variables": variables or [],
+                       "variables": variables or [], "watchlist": watchlist or [],
+                       "from_profile": from_profile,
+                       "from_version": int(from_version) if from_version is not None else None,
                        "created_at": _now()}
                 items.append(rec)
             _write(self.FILE, data)
@@ -984,6 +1260,186 @@ class PluginBundles:
             data = _read(self.FILE, {"bundles": []})
             data["bundles"] = [b for b in data["bundles"] if b["id"] != bundle_id]
             _write(self.FILE, data)
+
+    # ------------------------------------------------------ one-file export
+
+    def export_one(self, bundle_id: int) -> dict:
+        """One profile as the file it travels in.
+
+        A SHIPPED profile exports as a copy, not as a shipped record: the
+        file carries no id and no `shipped` flag (both describe a record
+        on one machine), and it records the shipped profile and version
+        it came from, so importing it on another box produces an editable
+        profile that still knows its ancestry — the same thing "Copy to
+        edit" produces here."""
+        b = self.get(bundle_id)
+        prof = {k: b.get(k) for k in self.IMPORTABLE if k in b}
+        prof["name"] = b["name"]
+        if b.get("shipped"):
+            prof["from_profile"] = b["name"]
+            prof["from_version"] = b.get("version", 1)
+        return {"format": self.EXPORT_FORMAT, "profile": prof}
+
+    @classmethod
+    def _check_shape(cls, prof: dict) -> None:
+        """Every key in that file is the shape this version can apply.
+
+        Refusing an unknown KEY and then accepting a known one holding
+        anything at all would be a strange place to stop: `save` is
+        permissive on purpose (it is fed by the builder, which validates
+        on the way in), so a file is the one door where the value types
+        have never been checked. The messages name the key and both
+        types, because the analyst who hand-edits a profile file is the
+        person who has to fix it."""
+        def word(v):
+            name = cls.TYPE_WORDS.get(type(v), type(v).__name__)
+            return f"{'an' if name[0] in 'aeiou' else 'a'} {name}"
+
+        def wanted(t):
+            name = cls.TYPE_WORDS[t]
+            return f"{'an' if name[0] in 'aeiou' else 'a'} {name}"
+
+        for key, (want, member) in cls.IMPORT_SHAPE.items():
+            val = prof.get(key)
+            if val is None:
+                continue
+            # bool is an int to isinstance, and `"from_version": true` is
+            # not a version.
+            if not isinstance(val, want) or (want is int and isinstance(val, bool)):
+                raise ValueError(f"“{key}” in that profile file is {word(val)}, "
+                                 f"not {wanted(want)}")
+            if member is None:
+                continue
+            for item in val:
+                if not isinstance(item, member) or (member is str and isinstance(item, bool)):
+                    raise ValueError(f"“{key}” in that profile file holds {word(item)} "
+                                     f"where it needs {wanted(member)}")
+
+    def import_one(self, data: dict) -> dict:
+        """Read one exported profile back, under a name that is free.
+
+        NOT an upsert: `save` replaces by name, and a file dropped in from
+        outside must not overwrite the profile an analyst spent an
+        afternoon on because the two happen to share a word. The imported
+        one is suffixed instead, and both are on screen to compare."""
+        if not isinstance(data, dict):
+            raise ValueError("That file is not a profile")
+        fmt = str(data.get("format") or "")
+        if fmt.split("/")[0] != self.EXPORT_FORMAT.split("/")[0]:
+            raise ValueError(f"Not a Winnow profile file (format is {fmt or 'missing'})")
+        prof = data.get("profile")
+        if not isinstance(prof, dict):
+            raise ValueError("That profile file has no profile in it")
+        unknown = sorted(set(prof) - set(self.IMPORTABLE))
+        if unknown:
+            raise ValueError("This profile carries something this version does not understand: "
+                             + ", ".join(unknown))
+        self._check_shape(prof)
+        name = str(prof.get("name") or "").strip()
+        if not name:
+            raise ValueError("That profile has no name")
+        taken = {b["name"].lower() for b in self.list()}
+        # A name that fills `save`'s 100-character cap has no room left
+        # for a suffix: `(name + " (imported 2)")[:100]` truncates
+        # straight back to the name it collided with, so every candidate
+        # is taken and the search never ends (the route is a plain `def`,
+        # so that spins a threadpool worker for the life of the process).
+        # Trim the BASE far enough for the longest suffix instead, and
+        # only when there is a collision at all, so an ordinary import
+        # keeps the name it arrived with. Bounded too, because a loop
+        # whose termination depends on string arithmetic should not be
+        # the only thing standing between a file and a hung worker.
+        base = name[:100 - len(" (imported 99)")]
+        candidate, n = name, 1
+        while candidate.lower() in taken:
+            n += 1
+            if n > 99:
+                raise ValueError(f"Too many profiles are already named “{name}” "
+                                 "— rename or delete one before importing another")
+            candidate = f"{base} (imported)" if n == 2 else f"{base} (imported {n})"
+        version = prof.get("from_version")
+        return self.save(candidate, prof.get("plugins") or [],
+                         dashboard=prof.get("dashboard") or [],
+                         variables=prof.get("variables") or [],
+                         dashboards=prof.get("dashboards") or [],
+                         description=prof.get("description") or "",
+                         watchlist=prof.get("watchlist") or [],
+                         from_profile=prof.get("from_profile") or None,
+                         from_version=int(version) if isinstance(version, int) else None)
+
+    # ---------------------------------------------------------- lineage
+
+    def upstream_diff(self, bundle_id: int) -> dict | None:
+        """What the shipped profile a copy came from has that the copy does
+        not — or None when there is no lineage, or the shipped one is gone
+        from this install.
+
+        The comparison is copy-vs-shipped-NOW, not shipped-then-vs-now:
+        only the version number of "then" is recorded, and reconstructing
+        an old shipped profile would mean shipping every past version.
+        What an analyst is deciding is whether to take today's shipped
+        profile, and this is exactly that question — it just also lists
+        their own edits, on the other side of each line, which is the
+        thing they would otherwise lose without being told."""
+        b = self.get(bundle_id)
+        if b.get("shipped"):
+            return None
+        src_name = str(b.get("from_profile") or "")
+        if not src_name:
+            return None
+        try:
+            offered = self._shipped()
+        except Exception:  # noqa: BLE001 — a broken profiles.json is "nothing upstream", not a 500
+            return None
+        shipped = next((s for s in offered if s["name"].lower() == src_name.lower()), None)
+        if shipped is None:
+            return None
+
+        def _titles(widgets):
+            return [str(w.get("title") or "(untitled)") for w in widgets or [] if isinstance(w, dict)]
+
+        def _split(mine, theirs):
+            ms, ts = list(mine or []), list(theirs or [])
+            return {"added": [x for x in ts if x not in ms],
+                    "removed": [x for x in ms if x not in ts]}
+
+        mine_boards = {str(d.get("name") or "") for d in b.get("dashboards") or []}
+        their_boards = {str(d.get("name") or "") for d in shipped.get("dashboards") or []}
+        return {
+            "from": shipped["name"],
+            "taken_at": b.get("from_version"),
+            "now": shipped["version"],
+            "plugins": _split(b.get("plugins"), shipped.get("plugins")),
+            "board": {"was": len(b.get("dashboard") or []),
+                      "now": len(shipped.get("dashboard") or []),
+                      **_split(_titles(b.get("dashboard")), _titles(shipped.get("dashboard")))},
+            "boards": _split(sorted(mine_boards), sorted(their_boards)),
+            "watchlist": _split([str(i.get("value") or "") for i in b.get("watchlist") or []],
+                                [str(i.get("value") or "") for i in shipped.get("watchlist") or []]),
+            "variables": _split([str(v.get("name") or "") for v in b.get("variables") or []],
+                                [str(v.get("name") or "") for v in shipped.get("variables") or []]),
+        }
+
+    def take_upstream(self, bundle_id: int) -> dict:
+        """Replace a copy's contents with the shipped profile's, keeping
+        its name and its id, and re-stamp the version it is now taken at.
+
+        A button, never automatic, and never a merge: an analyst's copy
+        and a revised shipped profile can disagree about any part of a
+        board, and a three-way merge of SQL widgets would produce a board
+        neither of them wrote. The diff above is what makes the trade
+        visible before this is pressed."""
+        b = self.get(bundle_id)
+        if b.get("shipped"):
+            raise ValueError("A shipped profile has nothing upstream of it")
+        src_name = str(b.get("from_profile") or "")
+        shipped = next((s for s in self._shipped() if s["name"].lower() == src_name.lower()), None)
+        if shipped is None:
+            raise ValueError(f"“{src_name}” is not shipped by this Winnow any more")
+        return self.save(b["name"], shipped["plugins"], dashboard=shipped["dashboard"],
+                         variables=shipped["variables"], dashboards=shipped["dashboards"],
+                         description=shipped["description"], watchlist=shipped["watchlist"],
+                         from_profile=shipped["name"], from_version=shipped["version"])
 
 
 class DashboardLibrary:

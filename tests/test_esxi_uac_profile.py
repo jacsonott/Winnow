@@ -71,7 +71,10 @@ def esxi_store(store, esxi_registry, tmp_path):
 
 
 def _widgets():
+    """The profile's board, refusing an empty one: the every-widget checks
+    below loop over it, and a loop over no widgets passes."""
     prof = next(p for p in defaults.profiles() if p["name"] == "ESXi / UAC triage")
+    assert prof["dashboard"], "the ESXi / UAC triage profile ships no widgets"
     return prof["dashboard"]
 
 
@@ -129,7 +132,7 @@ def test_sudo_widget(esxi_store):
 def test_every_widget_resolves(esxi_store):
     for w in _widgets():
         res = esxi_store.dashboard_widget_preview(w["source"], w["query"])
-        assert "rows" in res
+        assert res["columns"] and "rows" in res, w["title"]
 
 
 def test_union_placeholder_absent_is_a_friendly_error(store):

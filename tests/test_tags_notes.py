@@ -5,8 +5,10 @@ from __future__ import annotations
 
 
 def test_upsert_and_delete_tag(store):
-    created = store.upsert_tag(None, "Suspicious", "#ff0000", "1")
-    assert created["name"] == "Suspicious"
+    # Not a seeded default's name: a new tag never takes a name a tag
+    # already has (test_a_new_tag_never_takes_a_name_already_in_use).
+    created = store.upsert_tag(None, "Suspect", "#ff0000", "1")
+    assert created["name"] == "Suspect"
     assert created["id"] is not None
 
     renamed = store.upsert_tag(created["id"], "Very Suspicious", "#ff0000", "1")
@@ -16,6 +18,26 @@ def test_upsert_and_delete_tag(store):
 
     store.delete_tag(created["id"])
     assert created["id"] not in {t["id"] for t in store.list_tags()}
+
+
+def test_a_new_tag_never_takes_a_name_already_in_use(store, client):
+    """Add tag sent "New tag" every time, so two clicks made two tags
+    nothing outside the case could tell apart — and sessions, the diff and
+    copying tables all match tags by name, so a reload put both tags' rows
+    on one. A create now takes the first free name; any client, any
+    plugin, two windows at once."""
+    made = [client.post("/api/tags", json={"name": "New tag", "color": "#8e5cc2", "hotkey": None}).json()
+            for _ in range(3)]
+    assert [t["name"] for t in made] == ["New tag", "New tag 2", "New tag 3"]
+    assert store.upsert_tag(None, "TA", "#ff0000", None)["name"] == "TA 2"   # a seeded default's name
+    # Exact names, the rule session matching starts from: "Malware" and
+    # "malware" can be two tags on purpose (test_sessions.py).
+    assert store.upsert_tag(None, "new tag", "#000000", None)["name"] == "new tag"
+    # A name freed by a delete is free again.
+    client.delete(f"/api/tags/{made[1]['id']}")
+    assert store.upsert_tag(None, "New tag", "#000000", None)["name"] == "New tag 2"
+    # A rename is the analyst's own word for the tag, and is left alone.
+    assert store.upsert_tag(made[2]["id"], "New tag", "#000000", None)["name"] == "New tag"
 
 
 def test_set_tags_on_and_off(ingested):
@@ -40,6 +62,26 @@ def test_set_tags_pairs_mixed_sources(store, write_csv):
     assert result["counts"][str(tag["id"])] == 2
 
     assert store.set_tags_pairs([], tag["id"], True) == {"counts": {}}
+
+
+def test_set_tags_pairs_counts_the_whole_merge_it_was_made_in(store, client, write_csv):
+    """The client stores these counts as the merge's whole-table counts
+    (S.tagCountsAll). Counted over only the members the selection touched,
+    tagging one row of A in a merge whose B already held two showed the
+    ribbon a count of 1 where the merge held 3 — and undo recounted the
+    same partial set."""
+    a = store.ingest_csv(write_csv([["u"], ["1"], ["2"]], name="a.csv"), name="a.csv", build_fts=False)["id"]
+    b = store.ingest_csv(write_csv([["u"], ["3"], ["4"]], name="b.csv"), name="b.csv", build_fts=False)["id"]
+    tag = store.upsert_tag(None, "Malware", "#ff0000", None)["id"]
+    store.set_tags(b, [1, 2], tag, True)
+    mid = store.create_merge("M", [a, b])["id"]
+
+    out = store.set_tags_pairs([[a, 1]], tag, True, source_id=mid)
+    assert out["counts"][str(tag)] == 3 == store.tag_counts(mid)["counts"][str(tag)]
+    assert store.undo_last_tag_change()["counts"][str(tag)] == 2
+
+    r = client.post("/api/row_tags", json={"pairs": [[a, 2]], "source_id": mid, "tag_id": tag, "on": True})
+    assert r.status_code == 200 and r.json()["counts"][str(tag)] == 3
 
 
 def test_tag_view_tags_every_row_in_the_view(ingested):
@@ -220,3 +262,84 @@ def test_tag_counts_in_view_rejects_an_expired_view(store, write_csv):
     store.close_view(view["view_id"])
     with _pytest.raises(KeyError):
         store.tag_counts_in_view(view["view_id"])
+
+
+def _row_tags(store):
+    return [tuple(r) for r in store.db.execute("SELECT source_id, rid, tag_id FROM row_tags ORDER BY 1, 2, 3")]
+
+
+def test_a_tag_write_for_a_dropped_table_writes_nothing(store, write_csv):
+    """A second window still showing a table the first one deleted: its
+    tag write used to commit rows for the dead id and THEN fail (a 500 on
+    the way out), and the next import — handed the same id — inherited
+    them as tags nobody put there."""
+    import pytest
+
+    from winnow.store import RecordGone
+
+    a = store.ingest_csv(write_csv([["x"], ["1"], ["2"]], "a.csv"), build_fts=False)["id"]
+    b = store.ingest_csv(write_csv([["x"], ["1"], ["2"]], "b.csv"), build_fts=False)["id"]
+    tag = store.upsert_tag(None, "Seen", "#00ff00", None)["id"]
+    store.drop_source(b)
+    before = _row_tags(store)
+    with pytest.raises(RecordGone):
+        store.set_tags(b, [1, 2], tag, True)
+    with pytest.raises(RecordGone):
+        store.set_tags_pairs([[a, 1], [b, 1]], tag, True)   # all or nothing: not even A's row
+    assert _row_tags(store) == before
+    assert store.undo_peek()["available"] is False
+
+    fresh = store.ingest_csv(write_csv([["x"], ["1"], ["2"]], "fresh.csv"), build_fts=False)["id"]
+    assert store.tag_counts(fresh)["counts"] == {}
+
+
+def test_a_tag_write_with_a_deleted_tag_writes_nothing(ingested):
+    import pytest
+
+    from winnow.store import RecordGone
+
+    store, source_id = ingested
+    doomed = store.upsert_tag(None, "Lateral", "#ff0000", None)["id"]
+    store.delete_tag(doomed)
+    view = store.build_view(source_id, {"filters": []})
+    with pytest.raises(RecordGone):
+        store.set_tags(source_id, [1, 2], doomed, True)
+    with pytest.raises(RecordGone):
+        store.tag_view(view["view_id"], doomed, True)
+    with pytest.raises(RecordGone):
+        store.upsert_tag(doomed, "Renamed from a stale list", "#ff0000", None)
+    assert _row_tags(store) == []
+    # …so the next tag created (which may not take that id anyway) starts clean.
+    benign = store.upsert_tag(None, "Benign2", "#00ff00", None)["id"]
+    assert store.tag_counts(source_id)["counts"].get(str(benign)) is None
+
+
+def test_a_note_needs_a_row_that_is_there(ingested):
+    import pytest
+
+    from winnow.store import RecordGone
+
+    store, source_id = ingested
+    with pytest.raises(RecordGone):
+        store.set_note(99, 1, "ghost")                  # no such table
+    with pytest.raises(RecordGone):
+        store.set_note(source_id, 999, "past the end")  # no such row
+    assert store.db.execute("SELECT count(*) FROM row_notes").fetchone()[0] == 0
+
+
+def test_stale_tag_and_note_writes_are_a_404_with_nothing_committed(client, store, write_csv):
+    a = client.post("/api/ingest/path", json={"path": write_csv([["x"], ["1"]], "a.csv"),
+                                              "build_fts": False}).json()["id"]
+    b = client.post("/api/ingest/path", json={"path": write_csv([["x"], ["1"]], "b.csv"),
+                                              "build_fts": False}).json()["id"]
+    assert client.delete(f"/api/source/{b}").status_code == 200
+    r = client.post("/api/row_tags", json={"source_id": b, "rids": [1], "tag_id": 1, "on": True})
+    assert r.status_code == 404 and "no longer exists" in r.json()["detail"]
+    t = client.post("/api/tags", json={"name": "Lateral", "color": "#ff0000"}).json()["id"]
+    assert client.delete(f"/api/tags/{t}").status_code == 200
+    r = client.post("/api/row_tags", json={"source_id": a, "rids": [1], "tag_id": t, "on": True})
+    assert r.status_code == 404
+    r = client.post("/api/note", json={"source_id": 99, "rid": 1, "note": "ghost"})
+    assert r.status_code == 404
+    assert _row_tags(store) == []
+    assert store.db.execute("SELECT count(*) FROM row_notes").fetchone()[0] == 0

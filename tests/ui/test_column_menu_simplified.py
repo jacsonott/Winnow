@@ -4,9 +4,6 @@ for datetime columns. Driven against a table with a real JSON column."""
 
 from __future__ import annotations
 
-import json
-import urllib.request
-
 import time
 
 import pytest
@@ -14,19 +11,12 @@ import pytest
 pytestmark = pytest.mark.ui
 
 
-def _post(server, route, body):
-    req = urllib.request.Request(
-        server.rstrip("/") + route, data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json", "X-Timeline-Lite-Client": "1"})
-    return json.loads(urllib.request.urlopen(req, timeout=10).read())
-
-
-def test_flatten_appears_only_for_document_columns(page, server, tmp_path):
+def test_flatten_appears_only_for_document_columns(page, tmp_path, server_post):
     f = tmp_path / "events.csv"
     f.write_text("When,Payload,Note\n"
                  "2026-03-14 08:00:00,\"{\"\"user\"\": \"\"a\"\"}\",plain\n"
                  "2026-03-14 08:00:01,\"{\"\"user\"\": \"\"b\"\"}\",plain\n")
-    _post(server, "/api/ingest/jobs/path", {"path": str(f), "name": "events.csv", "kind": "csv"})
+    server_post("/api/ingest/jobs/path", {"path": str(f), "name": "events.csv", "kind": "csv"})
     # Polled from Python: wait_for_function does not await a promise
     # predicate, so the .then() form below passed instantly and raced the
     # import (see tests/ui/test_merge_flow.py for the same fix).

@@ -6,7 +6,16 @@
    collections at once. Everything here is READ-ONLY by construction
    (winnow/multicase.py): the open case keeps its lock and its writer, the
    others are opened mode=ro. Acting on a hit means opening it in the case
-   that owns it, which is what every row here offers. */
+   that owns it, which is what every row here offers.
+
+   WITHDRAWN FROM THE HEADER, September 2026. The feature isn't finished
+   enough to sit beside Search all: the three panes answer three
+   different questions with three different result shapes, and the
+   sweep's output stops short of the thing an analyst does next (tag the
+   hits, pivot to the case). The routes, this module and its UI test all
+   stay — openMultiCase() is still reachable via __winnow for whoever
+   picks the redesign up — but nothing in index.html points here until
+   it earns the space back. */
 import { $, api, el, post, toast } from './core.js';
 import { openCase } from './home.js';
 import { markModalAction, modal } from './ui.js';
@@ -149,7 +158,7 @@ export function openMultiCase() {
         const box = el('textarea', 'mc-values');
         box.rows = 2;
         box.placeholder = 'One value per line (blank = this case’s watchlist)';
-        const go = el('button', 'btn', 'Sweep');
+        const go = el('button', 'btn primary', 'Sweep');
         go.onclick = () => runSweep(box.value.split('\n').map((v) => v.trim()).filter(Boolean));
         controls.append(box, go);
         controls.dataset.mode = 'sweep';
@@ -157,7 +166,7 @@ export function openMultiCase() {
         const box = el('textarea', 'mc-sql');
         box.rows = 4;
         box.placeholder = 'SELECT * FROM c1.src_1 LIMIT 50';
-        const go = el('button', 'btn', 'Run');
+        const go = el('button', 'btn primary', 'Run');
         go.onclick = () => runSql(box.value);
         const schema = el('button', 'btn ghost', 'Show schema');
         schema.title = 'Cases attach as c1, c2… — they are schema names, so tables still need their own alias';

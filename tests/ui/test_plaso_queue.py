@@ -9,7 +9,6 @@ pytestmark = pytest.mark.ui
 
 
 def test_plaso_files_route_as_their_own_kind(page):
-    assert page.evaluate("() => __winnow.recognizedImportFile('timeline.plaso')")
     assert page.evaluate("() => __winnow.importKindFor('timeline.plaso')") == "plaso"
     item = page.evaluate("() => __winnow.queueItem({ path: '/x/timeline.plaso' }, 'timeline.plaso')")
     assert item["kind"] == "plaso"

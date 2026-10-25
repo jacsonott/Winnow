@@ -54,14 +54,23 @@ def test_a_plugin_can_remove_what_it_saved():
 
 @pytest.mark.parametrize("name", ["ANTHROPIC_API_KEY", "PATH", "AWS_SECRET_ACCESS_KEY",
                                   "winnow_lower_ok_but_this_is_fine", "WINNOW_"])
-def test_it_can_only_write_winnow_names(name):
+def test_it_can_only_write_winnow_names(name, monkeypatch):
+    # "Refused" means the environment is exactly what it was — compared
+    # with the value before, not asserted absent, because a developer
+    # machine that exports AWS_SECRET_ACCESS_KEY (or an API key) failed
+    # the absence check with nothing wrong in Winnow. Cleared first where
+    # it can be, so an already-set "v" can't make the comparison vacuous;
+    # PATH is kept, and now checked rather than skipped.
+    if name != "PATH":
+        monkeypatch.delenv(name, raising=False)
+    before = os.environ.get(name)
     req = _req()
     if name == "winnow_lower_ok_but_this_is_fine":
         assert req.set_env(name, "v") == name.upper()      # case is normalised, not rejected
         return
     with pytest.raises(ValueError):
         req.set_env(name, "v")
-    assert name not in os.environ or name == "PATH"
+    assert os.environ.get(name) == before
 
 
 def test_it_cannot_rewrite_winnows_own_settings():

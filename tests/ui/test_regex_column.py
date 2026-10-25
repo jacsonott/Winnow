@@ -8,20 +8,18 @@ import pytest
 pytestmark = pytest.mark.ui
 
 
-def test_regex_capture_column_from_the_modal(page):
+def test_regex_capture_column_from_the_modal(page, format_detected, derive_pick, derive_preview):
     page.evaluate("() => __winnow.openDerivedColumnModal('CommandLine')")
     page.wait_for_selector("#modal:not([hidden])")
     assert page.locator("#modalTitle").inner_text().lower() == "add derived column"
+    format_detected()
 
-    page.locator("#modalBody select").nth(1).select_option(label="Extract part of a value")  # type
-    op_sel = page.locator("#modalBody select").nth(2)                                          # operation
-    op_sel.select_option(label="Regex capture")
-    page.wait_for_timeout(200)
+    derive_pick("Regex capture")
     # the suggestion tracks the op kind
     assert page.locator(".derived-name").input_value() == "CommandLine (extract)"
 
     page.locator(".derived-param input").first.fill(r"\\([\w.]+\.exe)")
-    page.wait_for_selector(".derived-preview-row")
+    derive_preview()
     assert "powershell.exe" in page.locator(".derived-preview-row").first.inner_text()
 
     page.locator(".derived-name").fill("Binary")

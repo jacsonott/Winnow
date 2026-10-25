@@ -26,8 +26,19 @@ export function modal(title, build, opts = {}) {
   document.querySelector('.modal-card').classList.toggle('wide', !!opts.wide);
   document.querySelector('.modal-card').classList.toggle('xwide', opts.wide === 'x');
   document.querySelector('.modal-card').classList.toggle('tall', !!opts.tall);
-  const b = $('modalBody');
-  b.replaceChildren();
+  /* A fresh body per dialog, not the old one emptied. Builders are often
+     async — they draw a frame, await a fetch, then fill it — and they all
+     write into the `b` they were handed. With one shared #modalBody, a
+     builder whose fetch came back after the analyst had moved on wrote
+     into whatever dialog was open by then: a Profile Apply sheet, with a
+     working Apply button, turned up inside Settings. Replacing the node
+     leaves a stale builder holding a detached one, so its late writes go
+     nowhere, with no generation check for every builder to remember. It
+     also drops the previous dialog's data-* flags (pmReturn, sfReturn,
+     kind) and its scroll position, which emptying the old node kept. */
+  const b = el('div', 'modal-body');
+  b.id = 'modalBody';
+  $('modalBody').replaceWith(b);
   // Any modal opening supersedes the Search-all pane's repaint hook; the
   // search-all builder re-installs its own below. (The background job keeps
   // running either way — only the painting stops.)
@@ -213,13 +224,31 @@ export function confirmDialog(message, opts = {}) {
     const acts = el('div', 'confirm-actions');
     const cancelBtn = el('button', 'btn ghost', opts.cancelLabel || 'Cancel');
     cancelBtn.onclick = () => close(false);
-    const okBtn = el('button', 'btn' + (opts.danger ? ' danger' : ''), opts.okLabel || 'OK');
+    const okBtn = el('button', 'btn ' + (opts.danger ? 'danger' : 'primary'), opts.okLabel || 'OK');
     okBtn.onclick = () => close(true);
     acts.append(cancelBtn, okBtn);
     card.append(acts);
     setTimeout(() => okBtn.focus(), 0);
   };
   build.cancelValue = false;
+  return _spawnDialog(build);
+}
+
+/* The window.alert() replacement — one button, resolves when it's read.
+   Enter, Escape and the backdrop all count as "read": there is nothing to
+   decide, so there is nothing to cancel. */
+export function alertDialog(message, opts = {}) {
+  const build = (card, close) => {
+    card.append(el('p', 'confirm-message', message));
+    const acts = el('div', 'confirm-actions');
+    const okBtn = el('button', 'btn primary', opts.okLabel || 'OK');
+    okBtn.onclick = () => close(undefined);
+    okBtn.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); close(undefined); } };
+    acts.append(okBtn);
+    card.append(acts);
+    setTimeout(() => okBtn.focus(), 0);
+  };
+  build.cancelValue = undefined;
   return _spawnDialog(build);
 }
 
@@ -235,7 +264,7 @@ export function promptDialog(message, defaultValue = '', opts = {}) {
     const acts = el('div', 'confirm-actions');
     const cancelBtn = el('button', 'btn ghost', 'Cancel');
     cancelBtn.onclick = () => close(null);
-    const okBtn = el('button', 'btn', opts.okLabel || 'OK');
+    const okBtn = el('button', 'btn primary', opts.okLabel || 'OK');
     okBtn.onclick = () => close(input.value);
     acts.append(cancelBtn, okBtn);
     card.append(acts);
@@ -316,8 +345,12 @@ const isTextField = (n) => !!n && (/^(INPUT|TEXTAREA|SELECT)$/.test(n.tagName) |
    it. The arrows walk the menu the focus is in; Right opens a flyout and
    Left closes it, the way native menus do. From outside the menu (focus
    on the body, or on the button that opened it) Down and Up step in at
-   the first or last item and nothing else is claimed: a caret in a text
-   field keeps its arrows, and a menu only owns keys for a focus it owns. */
+   the first or last item, and Left/Right are swallowed without doing
+   anything — not because the menu has a use for them, but because the
+   grid does: they move the cell cursor now, and a menu the analyst opened
+   answering an arrow key by scrolling the table underneath itself is not
+   an answer. A caret in a text field still keeps its arrows, which is the
+   one case where the focus genuinely is not the menu's. */
 export function onMenuKeydown(e) {
   if (!openMenuEl) return;
   if (e.key === 'Escape') {
@@ -330,12 +363,20 @@ export function onMenuKeydown(e) {
   const active = document.activeElement;
   const inSub = openSubs.find((s) => s.el.contains(active));
   if (!inSub && !openMenuEl.contains(active)) {
-    if (isTextField(active) || (e.key !== 'ArrowDown' && e.key !== 'ArrowUp')) return;
+    if (isTextField(active)) return;
     const items = focusableIn(openMenuEl);
     if (!items.length) return;
     e.preventDefault();
     e.stopPropagation();
-    items[e.key === 'ArrowDown' ? 0 : items.length - 1].focus();
+    // Down/Up step into the menu. Left/Right have nothing to act on with
+    // no item focused yet — but they are swallowed all the same, because
+    // an open menu owns the arrow keys: left and right used to be bound
+    // to nothing, so letting them fall through cost nothing, and now they
+    // move the grid's cell cursor. A menu the analyst opened, answering by
+    // scrolling the table underneath it, is not an answer.
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      items[e.key === 'ArrowDown' ? 0 : items.length - 1].focus();
+    }
     return;
   }
   const focusable = focusableIn(inSub ? inSub.el : openMenuEl);
@@ -387,6 +428,276 @@ export function menuPins(key) {
     has: (id) => ids.includes(id),
     add: (id) => { if (!ids.includes(id)) { ids.push(id); save(); } },
     remove: (id) => { const i = ids.indexOf(id); if (i >= 0) { ids.splice(i, 1); save(); } },
+  };
+}
+
+/* ------------------------------------------------------- side list */
+
+/* Every word of the search has to appear somewhere in the entry's name
+   or group. The side list's default match; a caller with more to search
+   (formats, patterns) passes its own. */
+export function sideRailMatch(entry, query) {
+  const terms = String(query || '').toLowerCase().split(/\s+/).filter(Boolean);
+  const text = `${entry.label} ${entry.group}`.toLowerCase();
+  return terms.every((t) => text.includes(t)) ? {} : null;
+}
+
+/* The left pane of a two-pane dialog: what to choose, listed by group
+   under a search box, with the analyst's pinned favourites in a section
+   on top. The Add derived column dialog (what to make) and Import a
+   folder (which profile) both use it, so the two lists behave as one:
+   typing narrows, Escape clears the search before it closes the dialog,
+   the arrow keys walk the list choosing as they go, and ☆ pins a row.
+
+   Entries are {key, label, group, title?}. The caller owns which one is
+   chosen (`selected()` returns its key) and what choosing does
+   (`onPick(entry, hit)`), and calls sync() once it has moved the
+   choice. `entries` is a thunk, so a list that changes while the dialog
+   is open repaints with paint(). `match(entry, query)` returns null for
+   no match, else a hit: its `hint` is a second line under the label,
+   which says what a search found an entry by when that was not its name
+   (a timestamp format, a profile's pattern), and the hit goes to onPick.
+   `notes` maps a group to a line shown in its place while it has no
+   entries at all. `locked` (a re-derive, where what to make is fixed)
+   disables the search and every row but the chosen one. Pins are
+   menuPins(pinsKey): per browser, beside the row menu's.
+
+   A list of things the analyst is working through rather than choosing
+   between (the Import dialog's queue) has no favourites to pin: it passes
+   `action` instead — {glyph, title, label(entry), run(entry)} — and that
+   button takes the pin's place on every row. An entry's own `hint` is its
+   second line when a search found it by name (what is set on it now, as
+   the section lists say); `warn` marks that line as needing attention. */
+export function sideRail({ entries, groups, selected, onPick, pinsKey, match = sideRailMatch,
+                           notes = {}, locked = false, label = 'What to choose', action = null }) {
+  const pins = menuPins(action ? null : pinsKey);
+  const search = el('input', 'side-search');
+  search.type = 'search';
+  search.placeholder = 'Search…';
+  search.setAttribute('aria-label', 'Search ' + label.toLowerCase());
+  search.disabled = locked;
+  const list = el('div', 'side-rail-list');
+  list.setAttribute('role', 'listbox');
+  list.setAttribute('aria-label', label);
+  const rail = el('div', 'side-rail');
+  rail.append(search, list);
+
+  // In place rather than a repaint, so the item that was clicked (or
+  // arrowed to) keeps the focus.
+  function sync() {
+    const key = selected();
+    for (const item of list.querySelectorAll('.side-rail-item')) {
+      const on = item.dataset.key === key;
+      item.setAttribute('aria-selected', String(on));
+      item.parentElement.classList.toggle('selected', on);
+    }
+  }
+
+  function row(entry, hit, pinned) {
+    const r = el('div', 'side-rail-row');
+    const item = el('button', 'side-rail-item');
+    item.type = 'button';
+    item.dataset.key = entry.key;
+    item.setAttribute('role', 'option');
+    const on = entry.key === selected();
+    item.setAttribute('aria-selected', String(on));
+    r.classList.toggle('selected', on);
+    item.disabled = locked && !on;
+    item.append(el('span', 'side-rail-label', entry.label));
+    const hint = hit.hint || entry.hint;
+    if (hint) item.append(el('span', 'side-rail-hint' + (entry.warn && !hit.hint ? ' warn' : ''), hint));
+    item.title = entry.title || '';
+    item.onclick = () => onPick(entry, hit);
+    if (action) {
+      const act = el('button', 'side-rail-pin', action.glyph);
+      act.type = 'button';
+      act.title = action.title;
+      act.setAttribute('aria-label', action.label(entry));
+      act.onclick = () => action.run(entry);
+      r.append(item, act);
+      return r;
+    }
+    const pin = el('button', 'side-rail-pin', pinned ? '✕' : '☆');
+    pin.type = 'button';
+    pin.title = pinned ? 'Unpin from the top of this list' : 'Pin to the top of this list';
+    pin.setAttribute('aria-label', `${pinned ? 'Unpin' : 'Pin'} ${entry.label}`);
+    pin.onclick = () => {
+      if (pinned) pins.remove(entry.key); else pins.add(entry.key);
+      paint();
+    };
+    r.append(item, pin);
+    return r;
+  }
+
+  /* Pinned entries come off their group and sit in a Pinned section on
+     top, in the order they were pinned — the list is one column of a
+     fixed height, so an entry shown twice costs a row and lights two
+     rows for one choice. A pin whose entry is gone (a deleted profile)
+     shows nothing. */
+  function paint() {
+    // A repaint replaces every row; whatever had the focus in the list
+    // gets it back in its new place (a pin moves its row to the top).
+    const had = list.contains(document.activeElement) ? document.activeElement : null;
+    const hadRow = had && had.closest('.side-rail-row');
+    const hadKey = hadRow ? hadRow.querySelector('.side-rail-item').dataset.key : null;
+    const hadPin = !!had && had.classList.contains('side-rail-pin');
+    const all = entries();
+    const q = search.value;
+    const pinned = pins.ids.map((k) => all.find((e) => e.key === k)).filter(Boolean);
+    const sections = [['Pinned', pinned, true]];
+    for (const g of groups) sections.push([g, all.filter((e) => e.group === g && !pins.has(e.key)), false]);
+    const nodes = [];
+    for (const [title, members, isPinned] of sections) {
+      const rows = [];
+      for (const entry of members) {
+        const hit = match(entry, q);
+        if (hit) rows.push(row(entry, hit, isPinned));
+      }
+      if (rows.length) nodes.push(el('div', 'side-rail-group', title), ...rows);
+      else if (notes[title] && !q.trim() && !all.some((e) => e.group === title)) {
+        nodes.push(el('div', 'side-rail-group', title), el('div', 'side-rail-note', notes[title]));
+      }
+    }
+    if (!nodes.length) nodes.push(el('div', 'side-rail-empty', `Nothing matches “${q.trim()}”.`));
+    list.replaceChildren(...nodes);
+    const again = hadKey && list.querySelector(`.side-rail-item[data-key="${CSS.escape(hadKey)}"]`);
+    if (again) (hadPin ? again.nextElementSibling : again).focus();
+  }
+
+  const visibleItems = () => [...list.querySelectorAll('.side-rail-item:not(:disabled)')];
+  search.oninput = () => paint();
+  search.addEventListener('keydown', (e) => {
+    const first = visibleItems()[0];
+    if (e.key === 'ArrowDown' && first) {
+      e.preventDefault();
+      first.focus();
+      first.click();
+    } else if (e.key === 'Enter' && first) {
+      e.preventDefault();
+      first.click();
+      const now = list.querySelector(`.side-rail-item[data-key="${CSS.escape(selected())}"]`);
+      if (now) now.focus();
+    } else if (e.key === 'Escape' && search.value) {
+      // Clears the search; the next Escape closes the dialog (the global
+      // handler leaves a prevented Escape alone).
+      e.preventDefault();
+      search.value = '';
+      paint();
+    }
+  });
+  // Up and down walk the list, choosing as they go — the Settings
+  // dialog's section list behaves the same way. Up from the top goes
+  // back to the search box.
+  list.addEventListener('keydown', (e) => {
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    const items = visibleItems();
+    const i = items.indexOf(document.activeElement);
+    if (i < 0) return;
+    e.preventDefault();
+    if (e.key === 'ArrowUp' && i === 0) { if (!search.disabled) search.focus(); return; }
+    const next = items[Math.max(0, Math.min(items.length - 1, i + (e.key === 'ArrowDown' ? 1 : -1)))];
+    next.focus();
+    next.click();
+  });
+
+  return { rail, search, list, pins, paint, sync };
+}
+
+/* The two-pane frame of a dialog made of sections: the table menu, the
+   Tables manager and the home screen's case list. The sections go down a
+   side list by group, each with a line under its name saying what is set
+   there now, and the chosen one is built fresh into the pane on the right,
+   in a frame of a fixed height (.side-panes), so moving to a short section
+   moves nothing.
+
+   `sections` are {id, group, title, hint | asyncHint, build, labelCls?};
+   labelCls is a class for the name (the home screen sets a case group's
+   in mono, as a group is usually an engagement code). `build(pane,
+   refresh)` fills the pane, and may return {update}: what a caller's
+   background poll runs to repaint the pane in place, so a half-typed
+   filter or a scrolled list survives it (refresh() rebuilds instead). A
+   pane dispatches `changedEvent` when it changes something, and the hints
+   repaint. The list is a vertical tablist: one tab stop, and Up/Down/Home/
+   End walk it showing what they land on. Returns the node to append and
+   the controls: the caller appends `panes`, then calls show() — a pane is
+   built into the dialog, not into a detached node. */
+export function sectionPanes({ sections, label, cls = '', paneCls = '', changedEvent = 'sections:changed' }) {
+  const panes = el('div', 'side-panes' + (cls ? ' ' + cls : ''));
+  const rail = el('div', 'side-rail');
+  const nav = el('div', 'side-rail-list');
+  nav.setAttribute('role', 'tablist');
+  nav.setAttribute('aria-orientation', 'vertical');
+  nav.setAttribute('aria-label', label);
+  rail.append(nav);
+  const pane = el('div', 'side-pane' + (paneCls ? ' ' + paneCls : ''));
+  pane.setAttribute('role', 'tabpanel');
+  panes.append(rail, pane);
+
+  const entries = [];
+  let group = null;
+  for (const s of sections) {
+    if (s.group !== group) { group = s.group; nav.append(el('div', 'side-rail-group', group)); }
+    const row = el('div', 'side-rail-row');
+    const item = el('button', 'side-rail-item');
+    item.type = 'button';
+    item.dataset.section = s.id;
+    item.setAttribute('role', 'tab');
+    const hint = el('span', 'side-rail-hint');
+    item.append(el('span', 'side-rail-label' + (s.labelCls ? ' ' + s.labelCls : ''), s.title), hint);
+    item.onclick = () => show(s.id);
+    row.append(item);
+    nav.append(row);
+    entries.push({ s, item, hint });
+  }
+  let current = entries[0];
+  let built = null;
+
+  function paintHints() {
+    for (const e of entries) {
+      if (e.s.hint) e.hint.textContent = e.s.hint();
+      else if (e.s.asyncHint) e.s.asyncHint().then((h) => { if (e.hint.isConnected) e.hint.textContent = h; }).catch(() => {});
+    }
+  }
+  function refresh() {
+    pane.replaceChildren();
+    built = current.s.build(pane, refresh) || null;
+    paintHints();
+  }
+  function update() {
+    if (built && built.update) built.update();
+    else refresh();
+    paintHints();
+  }
+  function show(sid, { focus = false } = {}) {
+    current = entries.find((e) => e.s.id === sid) || entries[0];
+    for (const e of entries) {
+      const on = e === current;
+      e.item.setAttribute('aria-selected', String(on));
+      e.item.tabIndex = on ? 0 : -1;
+      e.item.parentElement.classList.toggle('selected', on);
+    }
+    pane.dataset.section = current.s.id;
+    refresh();
+    if (focus) current.item.focus();
+  }
+  pane.addEventListener(changedEvent, paintHints);
+  nav.addEventListener('keydown', (e) => {
+    const at = entries.findIndex((x) => x.item === document.activeElement);
+    if (at < 0 || e.altKey || e.ctrlKey || e.metaKey) return;
+    const last = entries.length - 1;
+    let to;
+    if (e.key === 'ArrowDown') to = at === last ? 0 : at + 1;
+    else if (e.key === 'ArrowUp') to = at === 0 ? last : at - 1;
+    else if (e.key === 'Home') to = 0;
+    else if (e.key === 'End') to = last;
+    else return;
+    e.preventDefault();
+    show(entries[to].s.id, { focus: true });
+  });
+  return {
+    panes, pane, show, refresh, update, paintHints,
+    current: () => current.s.id,
+    focusTarget: () => current.item,
   };
 }
 
@@ -471,7 +782,10 @@ function commitPin(id, on) {
    (renders a ✓ column — pass false for "checkable but off", omit entirely
    for a plain item), `swatch` (a color chip, for tags), `hint` (right-aligned
    keycap text, e.g. a hotkey), `note` (right-aligned dim text that is NOT a
-   key — a plugin's name), `keepOpen` (repaint the menu in place instead of
+   key — a plugin's name), `desc` (a dim SECOND line under the label, for a
+   verb whose consequence won't fit in its name — see rowMenuCellItems,
+   where it carries what each filter verb does to the filters already on),
+   `keepOpen` (repaint the menu in place instead of
    closing it, so toggling three tags is three clicks), `submenu` (an array,
    or a function for one that repaints — opens a flyout beside the item on
    hover or click; `key` names it when two siblings share a label), and
@@ -489,8 +803,22 @@ export function menuItemNode(item, ctx = null, depth = 0) {
     sw.style.background = item.swatch;
     b.append(sw);
   }
-  b.append(el('span', 'menu-item-text', item.label));
+  if (item.desc) {
+    // The two lines share one flex child so the ✓/swatch column on the
+    // left and the hint on the right still line up against the label,
+    // not against the middle of a two-line block.
+    const lines = el('span', 'menu-item-lines');
+    lines.append(el('span', 'menu-item-text', item.label));
+    lines.append(el('span', 'menu-item-desc', item.desc));
+    b.append(lines);
+  } else {
+    b.append(el('span', 'menu-item-text', item.label));
+  }
   if (item.note) b.append(el('span', 'menu-item-note', item.note));
+  // The same count pill the tab strip paints (.tab-badge), for a menu that
+  // stands in for a strip — the collapsed Pages ▾ list, where the badge has
+  // to travel with the row it belongs to rather than sit on the button.
+  if (item.badge) b.append(el('span', 'tab-badge', item.badge));
   if (item.hint) b.append(el('span', 'menu-item-hint', item.hint));
   if (item.submenu) {
     b.classList.add('menu-item-sub');
@@ -602,7 +930,11 @@ export function fillMenuNode(menu, items, ctx = null, depth = 0) {
     if (!item) continue;
     if (item === '-') { menu.append(el('div', 'menu-sep')); continue; }
     if (item.header) {
-      menu.append(el('div', 'menu-header' + (item.literal ? ' menu-header-literal' : ''), item.header));
+      const h = el('div', 'menu-header' + (item.literal ? ' menu-header-literal' : ''), item.header);
+      // A header that names a value has had it ellipsized to fit; the
+      // full text is worth having on hover, the way a clipped cell's is.
+      if (item.title) h.title = item.title;
+      menu.append(h);
       continue;
     }
     const node = menuItemNode(item, ctx, depth);
@@ -725,6 +1057,31 @@ export function anchoredPanel(anchorEl, cls, build) {
 export function closeModal() {
   $('modal').hidden = true;
   document.dispatchEvent(new CustomEvent('winnow:modalclose'));
+}
+
+/* An async click handler that runs one at a time: `btn.onclick =
+   oneAtATime(btn, async () => { ... })`. The button is disabled from the
+   first click until the handler settles, and a click that still gets
+   through is dropped. For any button whose handler awaits a POST before
+   its dialog closes — the second click of a double-click used to run the
+   whole handler again: every file of a folder import queued twice, two
+   cases created on one path, two merges, a second copy into a case the
+   first had locked. The disabled state is put back afterwards, so a
+   handler that failed and left its dialog open can be clicked again. */
+export function oneAtATime(btn, handler) {
+  let running = false;
+  return async (e) => {
+    if (running) return undefined;
+    running = true;
+    const was = btn.disabled;
+    btn.disabled = true;
+    try {
+      return await handler(e);
+    } finally {
+      running = false;
+      btn.disabled = was;
+    }
+  };
 }
 
 /* DOM wiring for this module, called once by main.js. Handlers can't

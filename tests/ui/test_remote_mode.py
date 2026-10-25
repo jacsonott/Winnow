@@ -1,4 +1,4 @@
-"""Remote session mode (Settings → Appearance → "Remote session mode").
+"""Remote session mode (Settings → Remote session → "Remote session mode").
 
 RDP-class protocols encode screen *changes*: smooth scrolling makes every
 wheel notch a dozen full-viewport re-encodes, infinite animations keep the
@@ -33,13 +33,20 @@ def reset_remote_setting(server):
 def _enable_via_settings(page):
     page.keyboard.press("?")
     page.wait_for_selector("#modal:not([hidden])")
-    page.click(".settings-section-head:has-text('Appearance')")
+    page.click("#modalBody .settings-nav-item:has-text('Remote session')")
     page.locator("label:has-text('Remote session mode') input").check()
     page.keyboard.press("Escape")
     page.wait_for_selector("#modal[hidden]", state="attached")
 
 
-def test_remote_mode_scrolls_by_whole_rows_and_stops_animations(page):
+def _wheel(page, wheel_settled, dy):
+    """The grid's scrollTop once a wheel of `dy` has finished scrolling it."""
+    with wheel_settled(page):
+        page.mouse.wheel(0, dy)
+    return page.evaluate("() => document.getElementById('body').scrollTop")
+
+
+def test_remote_mode_scrolls_by_whole_rows_and_stops_animations(page, wheel_settled):
     _enable_via_settings(page)
     assert page.evaluate("() => document.documentElement.classList.contains('remote')")
     # Server-side now — localStorage deliberately does NOT carry the key
@@ -51,15 +58,11 @@ def test_remote_mode_scrolls_by_whole_rows_and_stops_animations(page):
 
     row_h = page.evaluate("() => __winnow.ROW_H")
     page.mouse.move(700, 500)
-    page.mouse.wheel(0, 100)  # one wheel notch
-    page.wait_for_timeout(250)
-    st = page.evaluate("() => document.getElementById('body').scrollTop")
+    st = _wheel(page, wheel_settled, 100)  # one wheel notch
     assert st > 0 and st % row_h == 0, f"scrollTop {st} is not a whole-row position (ROW_H={row_h})"
     assert st // row_h == 3, "one notch should jump the Windows-default 3 rows"
 
-    page.mouse.wheel(0, -500)  # back up past the top: clamps, doesn't wrap
-    page.wait_for_timeout(250)
-    assert page.evaluate("() => document.getElementById('body').scrollTop") == 0
+    assert _wheel(page, wheel_settled, -500) == 0  # back up past the top: clamps, doesn't wrap
 
     # The busy bar's infinite sweep is exactly the kind of animation that
     # keeps a remote encoder busy around the clock.
@@ -67,65 +70,50 @@ def test_remote_mode_scrolls_by_whole_rows_and_stops_animations(page):
         "() => getComputedStyle(document.querySelector('.busy-bar')).animationName") == "none"
 
 
-def test_remote_mode_makes_row_hover_a_repaint_noop(page):
+def test_remote_mode_makes_row_hover_a_repaint_noop(page, painted):
     box = page.locator(".row").nth(4).bounding_box()
     bg = "() => getComputedStyle(document.querySelectorAll('.row')[4]).backgroundColor"
     page.mouse.move(box["x"] + 300, box["y"] + box["height"] / 2)
-    page.wait_for_timeout(100)
+    painted(page)
     hovered_native = page.evaluate(bg)
     page.mouse.move(box["x"] + 300, box["y"] + 300)  # move away
-    page.wait_for_timeout(100)
+    painted(page)
     resting = page.evaluate(bg)
     assert hovered_native != resting, "hover changes the row color natively, or this proves nothing"
 
     _enable_via_settings(page)
     page.mouse.move(box["x"] + 300, box["y"] + box["height"] / 2)
-    page.wait_for_timeout(100)
+    painted(page)
     assert page.evaluate(bg) == resting, "in remote mode hovering must not change a single pixel"
 
 
-def test_native_scrolling_is_untouched_when_off(page):
+def test_native_scrolling_is_untouched_when_off(page, wheel_settled):
     assert not page.evaluate("() => document.documentElement.classList.contains('remote')")
     page.mouse.move(700, 500)
-    page.mouse.wheel(0, 100)
-    page.wait_for_timeout(250)
     # 100px of native scroll — not quantized to the 24/20px row grid.
-    assert page.evaluate("() => document.getElementById('body').scrollTop") == 100
+    assert _wheel(page, wheel_settled, 100) == 100
 
 
-def test_remote_mode_survives_a_fresh_browser_context(page, browser, server):
+def test_remote_mode_survives_a_fresh_browser_context(page, own_page):
     """The reported bug: the setting lived in per-origin, per-profile
     localStorage, so an update restart (or a quick-look's random port)
     reset it. Machine-side storage means a completely fresh browser
     context — no localStorage at all — still comes up in remote mode."""
     _enable_via_settings(page)
-    ctx = browser.new_context()
-    ctx.add_init_script("localStorage.setItem('winnow.remotePrompt', 'seen');"
-                        "localStorage.setItem('winnow.appearance', JSON.stringify({ splash: false }))")
-    pg = ctx.new_page()
-    try:
-        pg.goto(server, wait_until="networkidle")
+    with own_page(ready=None) as pg:
         pg.wait_for_function("() => document.documentElement.classList.contains('remote')",
                              timeout=10_000)
-    finally:
-        ctx.close()
 
 
-def test_a_pre_move_localstorage_value_migrates_up_once(browser, server):
+def test_a_pre_move_localstorage_value_migrates_up_once(own_page):
     """An install that had remote mode on under the old localStorage
     scheme: the first boot pushes it to the server and drops the local
     key, so the machine keeps the analyst's answer."""
-    ctx = browser.new_context()
-    ctx.add_init_script(
-        "localStorage.setItem('winnow.remotePrompt', 'seen');"
-        "localStorage.setItem('winnow.appearance',"
-        " JSON.stringify({ splash: false, remoteSession: true }))")
-    pg = ctx.new_page()
-    try:
-        pg.goto(server, wait_until="networkidle")
+    with own_page(seed="localStorage.setItem('winnow.remotePrompt', 'seen');"
+                       "localStorage.setItem('winnow.appearance',"
+                       " JSON.stringify({ splash: false, remoteSession: true }))",
+                  ready=None) as pg:
         pg.wait_for_function("() => __winnow.S.appSettings.remote_session === true", timeout=10_000)
         assert pg.evaluate("() => document.documentElement.classList.contains('remote')")
         assert not pg.evaluate(
             "() => 'remoteSession' in JSON.parse(localStorage.getItem('winnow.appearance') || '{}')")
-    finally:
-        ctx.close()

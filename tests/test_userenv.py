@@ -52,9 +52,10 @@ def test_file_store_round_trip_is_owner_only(tmp_path):
     st.set("WINNOW_TOKEN", "s3cret=with=equals")
     st.set("WINNOW_OTHER", "two")
     assert st.load() == {"WINNOW_TOKEN": "s3cret=with=equals", "WINNOW_OTHER": "two"}
-    mode = stat.S_IMODE(st.path.stat().st_mode)
-    assert mode == 0o600, oct(mode)
-    assert stat.S_IMODE(st.path.parent.stat().st_mode) == 0o700
+    if os.name != "nt":   # POSIX file modes; Windows keeps these in HKCU, not this file
+        mode = stat.S_IMODE(st.path.stat().st_mode)
+        assert mode == 0o600, oct(mode)
+        assert stat.S_IMODE(st.path.parent.stat().st_mode) == 0o700
     st.delete("WINNOW_TOKEN")
     assert st.load() == {"WINNOW_OTHER": "two"}
     st.delete("WINNOW_MISSING")   # no-op

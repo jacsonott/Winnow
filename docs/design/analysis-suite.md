@@ -36,12 +36,24 @@ created_at)` + a materialized `watchlist_hits(watchlist_id, source_id,
 rid)` so hits survive and are taggable/exportable). This is the one place
 we diverge from search-all, which is ephemeral.
 
-**Auto-scan.** On ingest completion (`jobs.js` source-done hook) the
-client POSTs `/api/watchlist/scan?source_id=…`; the server runs each
-indicator through the same substring/FTS path `search_all_sources` uses,
-writes `watchlist_hits`, and — if the indicator names an `auto_tag_id` —
-routes the hit rids through `set_tags` (undoable, shows on the rail like
-any tag). A "Scan all tables" button re-runs everything.
+**Scan.** A background job (`POST /api/watchlist/scan/start` →
+`Store.start_watchlist_scan_job`, polled at `/api/watchlist/scan/job`),
+started by every entry point — Add (scoped to the new indicator), the
+imports (scoped to the new ones), "Scan all", and on ingest completion
+the `jobs.js` source-done hook (scoped to the new tables). Per
+(indicator, table) the server runs the rid SELECT on the reader pool in
+the WHERE shapes `search_all_sources` uses — the trigram index's
+`doc LIKE ?` when built, the escaped blob LIKE otherwise — uncapped,
+then takes the writer lock for one transaction that replaces that
+unit's `watchlist_hits` and, if the indicator names an `auto_tag_id`,
+tags the hit rids through `_apply_tag_change` (undoable, shows on the
+rail like any tag). Merges are not scanned (their rows are member
+rows). One scan is live per case: a start that displaces a running
+scan folds its remaining scope into the new job, so a scoped scan
+(an Add's, an import's) is never left half done by the one that
+follows it. The synchronous `POST /api/watchlist/scan` remains for
+profile apply and scripts. See docs/notes/store.md for the lock
+discipline.
 
 **Matching.** v1: case-insensitive substring / exact per kind (hash =
 exact, ip/domain/filename = contains), reusing FTS where present. Kinds
@@ -53,14 +65,37 @@ per line, `#` comments, optional `value,kind` — plus paste. A watchlist
 can be **saved to workspace** and re-applied to any case (a standing IOC
 set), the same save/apply pattern bundles use.
 
-**Tab UI.** Left: indicator list with hit counts + color swatch. Right:
-hits for the selected indicator (table, time, matched field, context),
-each double-clickable to open that source filtered to the row (the
-`openFiltered` seam from the plugin work generalizes here). Top: import /
-paste / scan-all / "auto-tag hits as…".
+**Tab UI.** Left: indicator list with hit counts + color swatch — a new
+entry appears at once with "…" until its scan lands, a zero says which
+kind of zero it is (`clean` / `not scanned` / `N/M tables`), and an entry
+whose rows another entry also covers carries an overlap marker that opens
+the merge dialog. Right, with nothing selected: the **latest flagged rows
+across every indicator**, newest first, one line per row naming the
+indicators on it, the table, the row and when. With an indicator selected:
+its hits **grouped by table** (a collapsible header per table with its
+exact count; up to 200 rows per table, then "…and N more — open the
+table"), each hit showing the matched column and the row as one line,
+clickable to open that table at the row. Top: import / from a case /
+export / scan-all / "auto-tag hits as…", and a summary that counts
+distinct flagged ROWS when two indicators cover the same ones.
 
-**Routes.** `GET/POST/DELETE /api/watchlist`, `POST /api/watchlist/scan`,
-`GET /api/watchlist/hits?watchlist_id=…`, `POST /api/watchlist/import`.
+**Findings, not counts.** Three questions the per-indicator counts cannot
+answer, all in `Store.watchlist_overview` / `latest_hits`: a `0` is
+disambiguated by `watchlist_scans`, one row per (indicator, table) unit a
+scan completed; indicators whose hit sets are identical or contained are
+reported by `watchlist_overlaps`, with `distinct_rows` as the honest total
+behind a sum that counts a shared row once per indicator; and
+`merge_indicators` folds a redundant entry into the one that covers it,
+carrying its auto-tag and refusing any direction that would lose rows.
+See docs/notes/store.md.
+
+**Routes.** `GET/POST/DELETE /api/watchlist`, `GET
+/api/watchlist/overview` (the tab's own read), `POST /api/watchlist/scan`
+(synchronous), `POST /api/watchlist/scan/start` + `GET
+/api/watchlist/scan/job` + `POST /api/watchlist/scan/cancel` (the job),
+`GET /api/watchlist/hits?watchlist_id=…` (`{sources, hits}`), `GET
+/api/watchlist/latest`, `POST /api/watchlist/merge`, `POST
+/api/watchlist/import`, `POST /api/watchlist/import_case`.
 
 ---
 
@@ -88,13 +123,20 @@ delivered as infrastructure: once a chart module eats `{rows, x, y,
 kind}`, the stack view, the timeline scrubber, and every dashboard widget
 draw through it.
 
+*As built:* the stack view no longer draws through the chart module. Its
+bars are DOM elements in a chart-first dialog (stack.js), so each can
+take focus, a full-value title and the value menu, and a long tail
+scrolls; the dashboard widgets and the timeline still use charts.js. See
+docs/notes/ui.md, "Stack view".
+
 ---
 
 ## 3. Case notes  (Markdown, own tab, travels in the .db)
 
 **What.** A free-form Markdown scratchpad per case — the running
-narrative, distinct from per-row notes. A **Notes** page tab with an
-edit/preview toggle.
+narrative, distinct from per-row notes. A **Notes** page tab with the
+editor and a live preview side by side (Edit and Preview collapse the
+other pane; the divider position is remembered per browser).
 
 **Where.** In the case file (`case_notes(id, body, updated_at)` — one row,
 read/written whole, same shape as session documents). Evidence-adjacent
@@ -120,7 +162,13 @@ destination, reusing the lateral-movement src/dst notion). The question
 analysts ask constantly ("what do we know about WKS07?") that today means
 filtering each table by hand.
 
-**Where it's reachable — three ways in:**
+**Where it's reachable — three ways in, none of them built.** The backend
+is the half that shipped: `Store.entity_pivot` and `POST
+/api/entity/pivot` exist and are tested, and nothing in the front end
+calls them. There is no pivot item in rowmenu.js, no pivot action on a
+watchlist indicator, and no entity-pivot page tab — the page-tab list
+holds SQL, Timeline, Notes, Watchlist, plugin tabs and pinned dashboards,
+and nothing else. What follows is the front end as intended:
 1. **Right-click any cell → "Pivot on 'WKS07'"** (rowmenu.js gains one
    item next to filter-by-value). Primary path — always one cell from a
    full-case view of that value.
@@ -133,13 +181,21 @@ Opens as a page tab (like SQL/Timeline). See the mockup: left rail =
 chronological evidence table; double-click a row opens that source
 filtered to it.
 
-**Backend.** `POST /api/entity/pivot {value, columns?}` that, per source,
-runs a counted scan across its text columns (or a chosen set), returns
-`{source_id, count, sample_rows, time_bounds}`, plus a merged timeline
-built the same way the super-timeline would — so entity pivot and the
+**Backend.** `POST /api/entity/pivot {value, limit}` (`EntityPivotBody`,
+`limit` defaulting to 60) that, per source, runs a counted scan across all
+of that table's base columns — the same all-columns blob match search-all
+uses — and returns `{value, sources, rows, buckets}`: one entry per
+matching source as `{source_id, source_name, count, columns, time_col}`, a
+merged, time-ordered `rows` sample capped at `limit`, and per-day
+`buckets` for the histogram. Merges and errored sources are skipped (a
+merge's rows are its members'). The timeline is built the same way the
+super-timeline would be, reusing `TS_NORMALIZE` — so entity pivot and the
 super-timeline share their normalization code. Column resolution ("which
-columns hold hosts") reuses header-set knowledge (RemoteHost/Computer/
-Workstation for EvtxECmd, etc.).
+columns hold hosts") deliberately needs no header-set knowledge: rather
+than knowing that RemoteHost/Computer/Workstation hold hosts for EvtxECmd,
+the scan reports which columns actually held the value — a general
+stand-in for "seen as source / destination" that needs no per-tool
+hardcoding.
 
 **Why high-value + low-risk.** Mostly assembly of parts that exist (search
 counting, chart module, `openFiltered`, header sets), and it's the
@@ -187,8 +243,19 @@ property, like bundles). The *data* is queried live from the open case. A
 profile exports to JSON and imports on another box — the portability the
 watchlist and sessions have.
 
-**Routes.** `GET/POST /api/dashboard` (the open case's active layout),
-profiles extend `/api/plugin_bundles` with `dashboard`/`watchlist` fields,
+**Routes.** `GET/POST /api/dashboards` — list the case's boards, create
+one; a case holds several named boards rather than a single active layout.
+`GET/POST /api/dashboards/{dashboard_id}` reads one and updates its name,
+widgets or pinned flag, `DELETE /api/dashboards/{dashboard_id}` removes
+it, `POST /api/dashboards/reorder` takes the sidebar's order and
+`POST /api/dashboards/{dashboard_id}/refresh` re-runs every widget on a
+board. `POST /api/dashboard/resolve` answers where a widget's placeholder
+table lands in *this* case — the source id a drilldown opens, or a query
+with its placeholders substituted for handing to the SQL pane. The
+machine-wide library is `GET/POST /api/dashboard_library`,
+`GET/DELETE /api/dashboard_library/{board_id}` and
+`POST /api/dashboard_library/{board_id}/add`. Profiles extend
+`/api/plugin_bundles` with `dashboard`/`watchlist` fields, and
 `POST /api/dashboard/widget/preview` runs a widget's query → render-ready
 data.
 

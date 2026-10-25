@@ -237,3 +237,82 @@ def test_undo_survives_a_view_rebuild(ingested):
 
     store.undo_last_tag_change()
     assert tagged_rids(store, source_id, tag["id"]) == set()
+
+
+def _scan_csv(store, write_csv, n=30):
+    rows = [["cmd"]] + [[f"<ioc{i}> payload"] for i in range(n)]
+    return store.ingest_csv(write_csv(rows, "scan.csv"), name="scan.csv",
+                            build_fts=False)["id"]
+
+
+def test_a_watchlist_scan_does_not_evict_the_analysts_history(store, write_csv):
+    """A scan wrote one undo entry per auto-tagging (indicator, table) unit.
+    UNDO_LIMIT of them — one import landing behind a 25-entry watchlist —
+    evicted everything the analyst had done, and Ctrl+Z then undid the scan
+    instead of the analyst. The auto-tags are not the analyst's action and
+    are not on their stack at all."""
+    sid = _scan_csv(store, write_csv)
+    reviewed = store.upsert_tag(None, "Reviewed", "#00ff00", None)["id"]
+    ioc = store.upsert_tag(None, "IOC", "#ff0000", None)["id"]
+    store.set_tags(sid, [1, 2, 3], reviewed, True)
+    for i in range(store.UNDO_LIMIT + 1):
+        store.add_indicator(f"<ioc{i}>", auto_tag_id=ioc)
+
+    store.scan_all()
+
+    assert len(tagged_rids(store, sid, ioc)) == store.UNDO_LIMIT + 1
+    peek = store.undo_peek()
+    assert peek["depth"] == 1 and peek["tag_id"] == reviewed
+    store.undo_last_tag_change()
+    assert tagged_rids(store, sid, reviewed) == set()
+    # And Ctrl+Z never strips a scan's tags while its hits remain.
+    assert not store.undo_peek()["available"]
+    assert len(tagged_rids(store, sid, ioc)) == store.UNDO_LIMIT + 1
+
+
+def test_undoing_the_analysts_tag_keeps_rows_a_scan_tagged_too(store, write_csv):
+    """The analyst tagged rows 1-3 IOC; a scan then matched rows 2-4 for an
+    indicator auto-tagging IOC, writing only row 4 (2 and 3 already carried
+    it). Undoing the analyst's change has to leave 2 and 3 tagged: the scan
+    put them in that state as well, and its hits are still there — the
+    invariant #7 overlap rule with the scan as the earlier writer."""
+    rows = [["cmd"], ["a"], ["x evil"], ["y evil"], ["z evil"], ["b"]]
+    sid = store.ingest_csv(write_csv(rows, "o.csv"), name="o.csv", build_fts=False)["id"]
+    ioc = store.upsert_tag(None, "IOC", "#ff0000", None)["id"]
+    store.set_tags(sid, [1, 2, 3], ioc, True)
+    store.add_indicator("evil", auto_tag_id=ioc)
+
+    store.scan_all()
+    assert tagged_rids(store, sid, ioc) == {1, 2, 3, 4}
+    assert store.undo_peek()["count"] == 1   # only row 1 is the analyst's alone
+
+    store.undo_last_tag_change()
+    assert tagged_rids(store, sid, ioc) == {2, 3, 4}
+
+
+def test_dropping_a_merge_member_drops_the_merge_s_undo(store, write_csv):
+    """An entry made on a merge is filed under the merge's id but holds the
+    members' rows. Dropping a member (after deleting the merge, which it
+    must be) only looked at that filing id, so the entry survived — and
+    with source ids reused, Ctrl+Z then tagged the next file imported,
+    whose rows nobody had touched."""
+    a = store.ingest_csv(write_csv([["x"], ["a1"], ["a2"], ["a3"]], "a.csv"), build_fts=False)["id"]
+    b = store.ingest_csv(write_csv([["x"], ["b1"], ["b2"], ["b3"]], "b.csv"), build_fts=False)["id"]
+    mal = store.upsert_tag(None, "Malware", "#ff0000", None)["id"]
+    store.set_tags(a, [1, 2, 3], mal, True)
+    store.set_tags(b, [1, 2, 3], mal, True)
+    merge = store.create_merge("AB", [a, b])["id"]
+    view = store.build_view(merge, {"filters": []})
+    store.tag_view(view["view_id"], mal, False)     # untag the lot, across both members
+    assert store.undo_peek()["source_id"] == merge
+
+    store.delete_merge(-merge)
+    store.drop_source(b)
+    c = store.ingest_csv(write_csv([["x"], ["c1"], ["c2"], ["c3"]], "c.csv"), build_fts=False)["id"]
+
+    # Neither the merge's entry nor B's own is left to replay; A's is.
+    peek = store.undo_peek()
+    assert peek["depth"] == 1 and peek["source_id"] == a
+    store.undo_last_tag_change()
+    assert tagged_rids(store, c, mal) == set()
+    assert tagged_rids(store, a, mal) == set()   # A's own tag, undone

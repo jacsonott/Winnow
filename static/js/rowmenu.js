@@ -6,10 +6,13 @@ import { quickAddWidget } from './dashboard.js';
 import { tableOf, widgetFrom } from './dashwidgets.js';
 import { displayValue, ellipsize, filterByValue, openValuePickerForColumn } from './filters.js';
 import { rowAt } from './grid.js';
-import { copyRowsAsText, loadRowsForPositions, writeClipboardText } from './grouping.js';
+import { copyRowsAsText, copyUniqueValues, loadRowsForPositions, uniqueRowsTooMany, wholeViewPicked, writeClipboardText } from './grouping.js';
+import { showValueInHistogram } from './histogram.js';
+import { keyLabel } from './keymap.js';
 import { showPluginTab } from './plugins.js';
-import { S, selCount, selPositions } from './state.js';
-import { UNDO_NEXT, applyTag, undoLastTagChange } from './tags.js';
+import { S, cellRangeRows, dashboardCreatorMode, selCount, selHas, selPositions } from './state.js';
+import { saveCurrentViewAsTable, saveRowsAsTable, saveSelectAllAsTable } from './subset.js';
+import { UNDO_NEXT, applyTag, tagRowsAtPositions, undoLastTagChange } from './tags.js';
 import { openTagEditor } from './timeframe.js';
 import { displayCell } from './tsformat.js';
 import { contextMenu } from './ui.js';
@@ -38,6 +41,7 @@ export const ROW_MENU_SECTIONS = [
   { id: 'cell', build: rowMenuCellItems },
   { id: 'dashboard', build: rowMenuDashboardItems },
   { id: 'clipboard', build: rowMenuClipboardItems },
+  { id: 'subset', build: rowMenuSubsetItems },
   { id: 'plugins', build: rowMenuPluginItems },
 ];
 
@@ -112,11 +116,22 @@ export async function runPluginRowAction(action, positions, ctx) {
    right-clicked row is part of it, otherwise just that row (openRowContextMenu
    has already moved the cursor there). */
 export function rowMenuTargets(ctx) {
-  const n = selCount();
-  const count = n || 1;
+  // Right-clicking a row that isn't picked acts on THAT row — and leaves
+  // the picks alone (picking is never clearing); inside the picks, on all
+  // of them. What every file manager does, minus the discard.
+  const inSelection = !!(selCount() && selHas(ctx.pos));
+  const n = inSelection ? selCount() : 0;
+  // No picks but a cell range across several rows: those rows are the
+  // scope, the same rows a tag key hits (cellRangeRows — headings
+  // excluded) — so the menu, the key and Ctrl+C agree about what "the
+  // selection" is.
+  const rangeRows = !n ? cellRangeRows() : [];
+  const range = rangeRows.length > 1 ? rangeRows : null;
+  const count = n || (range ? range.length : 1);
   return {
     count,
-    positions: n ? () => selPositions() : () => [ctx.pos],
+    inSelection,
+    positions: n ? () => selPositions() : range ? () => range : () => [ctx.pos],
     // The wording that tells the analyst how many rows an action hits —
     // every section reads it from here, and the UI tests assert on it.
     scope: count > 1 ? `${count.toLocaleString()} selected rows` : 'this row',
@@ -127,7 +142,7 @@ export function rowMenuTargets(ctx) {
 /* The tag list is a function, not an array: a keepOpen tag item repaints
    the flyout after tagging, and the ✓ has to read the row as it is now. */
 export function rowMenuTagList(ctx) {
-  const { scope } = rowMenuTargets(ctx);
+  const { scope, inSelection, positions } = rowMenuTargets(ctx);
   const items = [];
   const row = rowAt(ctx.pos);
   for (const t of S.tags) {
@@ -146,7 +161,10 @@ export function rowMenuTagList(ctx) {
       pinId: `tag:${t.name}`,
       keepOpen: true, // tagging three tags in a row shouldn't need three right-clicks
       title: `${on ? 'Remove' : 'Apply'} "${t.name}" — ${scope}`,
-      onclick: () => applyTag(t, !on),
+      // Inside the picks: the whole selection (applyTag keeps a select-all
+      // server-side). Outside them: exactly the rows the header names —
+      // applyTag would have tagged the picks instead of the clicked row.
+      onclick: () => (inSelection ? applyTag(t, !on) : tagRowsAtPositions(t, positions(), !on)),
     });
   }
   if (!S.tags.length) items.push({ label: 'No tags in this case yet', disabled: true });
@@ -183,22 +201,79 @@ export function rowMenuTagItems(ctx) {
   return items;
 }
 
+/* The clicked cell's filters: the value named ONCE, in the heading, and
+   three verbs under it whose second line says what each does to the
+   filters already on. Show in histogram sits with them because it acts
+   on the value too, and its second line says it leaves the filters alone.
+
+   These read "Filter to <value>", "Filter to <value> only" and "Exclude
+   <value>" until 2026-09. Three siblings repeating a 40-character
+   provider name, with the entire difference between the first two
+   carried by the word "only" at the end of the longer one — which is
+   past where the eye stops on a menu, and past where the label gets
+   ellipsized on a long value. Naming the value in the heading is also
+   what lets the verbs say something: the words the labels no longer
+   spend on the value now go on the consequence, which is the thing an
+   analyst three filters deep actually has to choose between.
+
+   The verbs are deliberately not "…" / "… only": a pair that differs by
+   one word is the bug, so "Narrow" and "Reset" carry the difference in
+   the first word of each, and the second lines spell it out. Behaviour
+   is untouched — the same three filterByValue calls, same options. */
 export function rowMenuCellItems(ctx) {
   if (!ctx.colName) return [];
-  const shown = ellipsize(displayValue(ctx.value));
+  const value = displayValue(ctx.value);
+  // The heading has to stay one line — it is what the menu sizes itself
+  // to, and a wrapped one breaks mid-value. A long column name is half
+  // the budget, so spend what it leaves rather than ellipsizing at the
+  // fixed width that only ever fitted short column names.
+  const shown = ellipsize(value, Math.max(16, 52 - ctx.colName.length));
+  // Literal, not the usual uppercased label: half of this heading is a
+  // value, and a value is case-sensitive — an uppercased hash or path is
+  // a different string to the eye. `=` rather than "is" because that is
+  // what the header filter box will hold once one of these is clicked.
+  const heading = { header: `${ctx.colName} = ${shown}`, literal: true };
+  // Only when there is more to see than the heading shows, and capped:
+  // a cell can hold a whole JSON document, and a tooltip of one is no
+  // more readable than the clipped heading.
+  if (shown !== value) heading.title = `${ctx.colName} = ${ellipsize(value, 400)}`;
   return [
-    { header: ctx.colName },
-    { label: `Filter to ${shown}`, onclick: () => filterByValue(ctx.colName, ctx.value) },
+    heading,
     {
-      label: `Filter to ${shown} only`,
+      label: 'Narrow to this value',
+      desc: 'adds to the filters already on',
+      title: `Filters ${ctx.colName} to this value — every other filter, the search and the timeframe stay as they are`,
+      onclick: () => filterByValue(ctx.colName, ctx.value),
+    },
+    {
+      label: 'Reset to this value',
+      desc: 'clears the other filters first',
       title: 'Drops every other filter and the search — the timeframe filter stays',
       onclick: () => filterByValue(ctx.colName, ctx.value, { only: true }),
     },
-    { label: `Exclude ${shown}`, onclick: () => filterByValue(ctx.colName, ctx.value, { exclude: true }) },
+    {
+      label: 'Exclude this value',
+      desc: 'hides it, leaving the other filters on',
+      title: `Filters ${ctx.colName} to everything except this value`,
+      onclick: () => filterByValue(ctx.colName, ctx.value, { exclude: true }),
+    },
+    {
+      // The histogram's Value view, on this value. Here, with the verbs on
+      // the value, rather than folded: choosing a value to chart is the
+      // whole of how that view is driven unless it follows the selection.
+      label: 'Show in histogram',
+      desc: 'colors its rows, leaving the filters on',
+      title: `Colors the rows where ${ctx.colName} is this value in the histogram strip, as if they were tagged`,
+      onclick: () => showValueInHistogram(ctx.colName, ctx.value),
+    },
     {
       // The way in when the column's own picker button is switched off for
       // size (see valueFilterEnabled) — an explicit click is consent to pay
       // for the scan, which the always-visible button isn't.
+      // No second line: one plain row under the three two-line verbs is
+      // what separates "act on this value" from "go pick some values",
+      // and it would have nothing true to say about the filters already
+      // on — the picker's own buttons decide that later.
       label: 'Filter by values…',
       onclick: () => openValuePickerForColumn(ctx.colName),
     },
@@ -212,9 +287,13 @@ export function rowMenuCellItems(ctx) {
    copy stays where the analyst put it rather than coming and going with
    where they right-clicked. */
 export function rowMenuDashboardItems(ctx) {
+  // Nothing at all unless the case opted in (Case settings → Dashboards):
+  // for a reader of boards the entry was a submenu they never wanted.
+  if (!dashboardCreatorMode()) return [];
   const merged = S.sourceId == null || S.sourceId < 0;
-  // A derived column's values live in the drv_<id> sidecar, and a widget
-  // queries src_<id> — counting one would produce "no such column".
+  // Boards don't offer derived columns anywhere (dashwidgets.js's
+  // widgetable), though a widget's own SQL can read one — run_sql's
+  // src_<id> view joins the drv_<id> sidecar.
   const derived = !!(S.columns || []).find((c) => c.name === ctx.colName && c.derived);
   const ok = !!ctx.colName && !merged && !derived;
   const shown = ok ? ellipsize(displayValue(ctx.value)) : '';
@@ -226,7 +305,7 @@ export function rowMenuDashboardItems(ctx) {
       disabled: !ok,
       title: !ctx.colName ? 'Right-click a cell to count its value'
         : merged ? 'A merged view is not one table a widget can count'
-        : derived ? 'A derived column is computed per row, not stored in the table a widget queries'
+        : derived ? 'Dashboard menus don’t offer derived columns — a widget’s own SQL can still use one'
         : 'A number on a dashboard that opens these rows when clicked',
       onclick: () => quickAddWidget(widgetFrom({
         template: 'countwhere', table: tableOf(S.sourceId), column: ctx.colName,
@@ -248,6 +327,66 @@ export function rowMenuClipboardItems(ctx) {
       },
       { label: `Copy ${rows}`, pinId: 'copy:rows', onclick: () => copyRowsAsText(positions(), false) },
       { label: `Copy ${rows} with headers`, pinId: 'copy:rows-headers', onclick: () => copyRowsAsText(positions(), true) },
+      rowMenuUniqueItem(ctx),
+    ],
+  }];
+}
+
+/* The clicked column's distinct values, one per line (copyUniqueValues).
+   Over the menu's own scope when that is several rows — the picks it was
+   opened inside, or the cell range it was opened on — and over the whole
+   view when it is one row, since one row has one value. The second line
+   says which, because the same click means a different list in each. */
+export function rowMenuUniqueItem(ctx) {
+  const { count, positions, scope, inSelection } = rowMenuTargets(ctx);
+  const whole = count <= 1 || (inSelection && wholeViewPicked(count));
+  const key = (S.keymap.copyUniqueValues || [])[0];
+  return {
+    label: 'Copy unique values',
+    desc: ctx.colName ? `of ${ctx.colName} in ${whole ? 'the whole view' : scope}` : undefined,
+    hint: key ? keyLabel(key) : '',
+    pinId: 'copy:unique',
+    disabled: !ctx.colName,
+    title: !ctx.colName ? 'Right-click a cell to pick the column'
+      : whole ? `Every distinct ${ctx.colName} value the current filters show, one per line, sorted`
+      : `The distinct ${ctx.colName} values in ${scope}, one per line, in the order they appear`,
+    onclick: () => {
+      if (whole) return copyUniqueValues(ctx.colName, null);
+      if (uniqueRowsTooMany(count)) return undefined;
+      return copyUniqueValues(ctx.colName, positions());
+    },
+  };
+}
+
+/* "Keep these rows": the selection (or the clicked row), or the whole
+   view, copied into a new table of the case badged as a subset of this
+   one (subset.js). Folded like Copy so the top level stays short; both
+   items pin. The two items mean two different things and say so: the
+   scope-worded one is the SELECTION — under a select-all that is the
+   view minus its unchecked rows, sent as exactly that (applyTag's rule —
+   never as positions() would materialise it); the whole-view one is
+   every row the view shows, unchecked rows included. */
+export function rowMenuSubsetItems(ctx) {
+  const { scope, inSelection, positions } = rowMenuTargets(ctx);
+  const selectAll = inSelection && S.selectAll;
+  return [{
+    label: 'Save as table',
+    title: 'Copy rows into a new table of this case, badged as a subset of this one — tags and notes stay here',
+    submenu: [
+      {
+        label: `Save ${scope} as new table…`,
+        pinId: 'subset:rows',
+        title: selectAll
+          ? 'Every row in this view minus the ones you unchecked, as a new table'
+          : 'These rows as a new table of the case — tags and notes stay on this one',
+        onclick: () => (selectAll ? saveSelectAllAsTable() : saveRowsAsTable(positions())),
+      },
+      {
+        label: 'Save this whole view as a table…',
+        pinId: 'subset:view',
+        title: 'Every row the current filters, search and timeframe show — unchecked rows included — as a new table',
+        onclick: () => saveCurrentViewAsTable(),
+      },
     ],
   }];
 }

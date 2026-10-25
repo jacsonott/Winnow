@@ -14,6 +14,21 @@ import pytest
 pytestmark = pytest.mark.ui
 
 
+# "Add to dashboard" only appears in the menus when the case has opted in
+# (Case settings → Dashboards); the whole module assumes it has.
+@pytest.fixture(autouse=True, scope="module")
+def _dashboard_creator_mode(server_post):
+    server_post("/api/case_settings", {"dashboard_creator": True})
+    yield
+    server_post("/api/case_settings", {"dashboard_creator": False})
+
+
+@pytest.fixture(autouse=True)
+def _fresh_case_settings(page, _dashboard_creator_mode):
+    """The page fixture is shared; make sure it has read the setting."""
+    page.evaluate("() => __winnow.loadCaseSettings()")
+
+
 def _root_text(page):
     return page.locator(".menu:not(.menu-sub)").inner_text()
 
@@ -45,9 +60,15 @@ def test_top_level_is_short_and_keeps_the_filters_broken_out(page, row_menu):
     assert any(l.startswith("Tag this row") for l in subs)
     assert any(l.startswith("Add to dashboard") for l in subs)
     assert any(l.startswith("Copy") for l in subs)
+    assert any(l.startswith("Save as table") for l in subs)
     # the filters are plain items at the top, not folded
-    assert any(l.startswith("Filter to") for l in labels) and any(l.startswith("Exclude") for l in labels)
-    assert len(labels) <= 8, labels
+    assert any(l.startswith("Narrow to this value") for l in labels) and any(l.startswith("Exclude this value") for l in labels)
+    # Nine at most, the folds included: eight until Show in histogram
+    # joined the value's verbs in 2026-10, since that is how the
+    # histogram's Value view is given its value. Undo is counted apart:
+    # it is only there while a tag write is on the stack, which depends on
+    # what ran before this module, and the budget should not depend on that.
+    assert len([l for l in labels if not l.startswith("Undo")]) <= 9, labels
     page.keyboard.press("Escape")
 
 
@@ -78,7 +99,7 @@ def test_the_tag_entry_advertises_the_hotkeys_the_tags_carry(page, row_menu):
 def test_hovering_a_sibling_closes_the_flyout(page, row_menu, flyout):
     row_menu(row=1, cell=1)
     flyout("Copy")
-    page.locator(".menu:not(.menu-sub) .menu-item", has_text="Filter to").first.hover()
+    page.locator(".menu:not(.menu-sub) .menu-item", has_text="Narrow to this value").first.hover()
     page.wait_for_selector(".menu-sub", state="detached")
     page.keyboard.press("Escape")
 
@@ -160,37 +181,54 @@ def test_a_pinned_action_runs_and_hides_while_its_plugin_is_off(page, row_menu, 
 
 
 def test_toggling_a_plugin_off_takes_its_row_actions_with_it(page, api):
-    """The plugins panel copies row_actions from the toggle response, so a
-    pinned action cannot outlive its plugin within a session (a stale list
-    would show the pin and 404 on click)."""
+    """applyPluginListing copies row_actions out of the toggle response, so
+    a pinned action cannot outlive its plugin within a session (a stale
+    list would show the pin and 404 on click)."""
     plugins = api("/api/plugins")["plugins"]
     p = next((p for p in plugins if p.get("bundled") and p.get("case_override") is None), None)
     if p is None:
         pytest.skip("no bundled plugin to toggle")
-    flip, restore = ("off_all", "on_all") if p.get("machine_enabled") else ("on_all", "off_all")
+    flip, restore = ("Off", "On") if p.get("machine_enabled") else ("On", "Off")
+    # The manager renders one .pm-item per S.plugins entry, in order, so
+    # the plugin is found by position keyed on fs_name — its display name
+    # is the wrong key (two plugins may share one; only the folder is
+    # unique) and, before this pane existed, changed once it loaded.
+    pick = ("(fs) => { const i = __winnow.S.plugins.findIndex((q) => q.fs_name === fs);"
+            " const items = [...document.querySelectorAll('#modalBody .pm-item')];"
+            " return items[i] || null; }")
+    # "Everywhere" is the machine-wide default — the row that is there
+    # whether or not a case is on screen.
+    everywhere = ("(label) => { const row = [...document.querySelectorAll('#modalBody .pl-scope-row')]"
+                  ".find((r) => r.querySelector('.pl-scope-label').textContent === 'Everywhere');"
+                  " return row ? [...row.querySelectorAll('button')].find((b) => b.textContent === label) : null; }")
+    set_scope = ("([fs, label]) => { (%s)(fs).click(); (%s)(label).click(); }" % (pick, everywhere))
+
+    landed = "([fs, on]) => (__winnow.S.plugins.find((q) => q.fs_name === fs) || {}).machine_enabled === on"
+
+    def open_on(fs):
+        # Opening the manager reloads the plugin listing in the background,
+        # and that reload drops the stand-in below as surely as a toggle
+        # does. Waited out, so only the toggle's own answer can take it.
+        page.evaluate("() => { window.__rowActions = __winnow.S.pluginRowActions; __winnow.openPluginManager(); }")
+        page.wait_for_selector("#modal:not([hidden])")
+        page.wait_for_function("(fs) => !!(%s)(fs)" % pick, arg=fs, timeout=10_000)
+        page.wait_for_function("() => __winnow.S.pluginRowActions !== window.__rowActions", timeout=10_000)
+
+    open_on(p["fs_name"])
     # A stand-in the server never listed: the toggle's refresh must drop it.
     page.evaluate("() => __winnow.S.pluginRowActions.push({ id: 'ghost', local_id: 'ghost', plugin: 'ghost', "
                   "plugin_fs: 'ghost', label: 'Ghost action', description: '', max_rows: 5 })")
-    page.keyboard.press("?")
-    page.wait_for_selector("#modal:not([hidden])")
-    page.click(".settings-section-head:has-text('Plugins')")
-    # The panel lists plugins after its own fetch, one scope select per
-    # entry of S.plugins in order; a plugin's display name changes once it
-    # loads, so it is found by position, keyed on fs_name.
-    find = ("(fs) => { const i = __winnow.S.plugins.findIndex((q) => q.fs_name === fs);"
-            " const sels = [...document.querySelectorAll('#modalBody select')]"
-            ".filter((s) => s.nextElementSibling && s.nextElementSibling.classList.contains('session-name'));"
-            " const sel = sels[i]; return sel && !sel.disabled ? sel : null; }")
-    set_scope = "([fs, value]) => { const sel = (%s)(fs); sel.value = value; sel.dispatchEvent(new Event('change')); }" % find
-    page.wait_for_function("(fs) => !!(%s)(fs)" % find, arg=p["fs_name"], timeout=10_000)
     page.evaluate(set_scope, [p["fs_name"], flip])
     try:
-        page.wait_for_function("() => !__winnow.S.pluginRowActions.some((a) => a.id === 'ghost')", timeout=10_000)
+        # The toggle has answered before anything is put back. A restore
+        # sent while it was still out could reach the server first, and the
+        # flip then landed after it and stayed for every later module.
+        page.wait_for_function(landed, arg=[p["fs_name"], flip == "On"], timeout=10_000)
+        assert not page.evaluate("() => __winnow.S.pluginRowActions.some((a) => a.id === 'ghost')")
     finally:
-        page.wait_for_function("(fs) => !!(%s)(fs)" % find, arg=p["fs_name"], timeout=10_000)
+        open_on(p["fs_name"])
         page.evaluate(set_scope, [p["fs_name"], restore])
-        page.wait_for_function("([fs, on]) => (__winnow.S.plugins.find((q) => q.fs_name === fs) || {}).machine_enabled === on",
-                               arg=[p["fs_name"], restore == "on_all"], timeout=10_000)
+        page.wait_for_function(landed, arg=[p["fs_name"], restore == "On"], timeout=10_000)
         page.keyboard.press("Escape")
 
 

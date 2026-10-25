@@ -141,4 +141,234 @@ def test_timeline_api_routes(client, write_csv):
     del_id = listed[0]["id"]
     r3 = client.delete(f"/api/timeline_templates/{del_id}")
     assert r3.status_code == 200
-    assert len(client.get("/api/timeline_templates").json()) == 1
+    # The other one is what is left, not the one asked for.
+    assert [t["id"] for t in client.get("/api/timeline_templates").json()] == [listed[1]["id"]]
+
+
+# ------------------------------------------- configs and derived columns
+#
+# Configure tables… saves a config under the table's OWN columns
+# (timeline.js leaves derived ones out of the key), and the server used to
+# look it up under every column, derived included — so the first derived
+# column added to a table silently dropped it back to the defaults. These
+# go through the routes, with the payload the dialog sends, because the
+# disagreement was between the two sides.
+
+def _proc_table(store, write_csv):
+    """Logged is the file's own datetime column; Epoch is a different
+    moment, so a timestamp read off the derived column built from it is
+    tellable apart from the fallback (the first datetime column)."""
+    p = write_csv([
+        ["Logged", "Epoch", "Process", "User"],
+        ["2026-03-10 10:00:00", "1700000000", "evil.exe", "alice"],
+        ["2026-03-11 10:00:00", "1700086400", "cmd.exe", "bob"],
+    ], name="proc.csv")
+    sid = store.ingest_csv(p, name="proc.csv", build_fts=False)["id"]
+    tag = store.list_tags()[0]["id"]
+    store.set_tags(sid, [1], tag, True)
+    return sid
+
+
+def _add_derived(store, sid, name="When"):
+    res = store.add_derived_column(sid, name, "Epoch", "unix_epoch", {})
+    store.wait_for_ingest_job(res["job_id"], timeout=30)
+
+
+def _save_config(client, store, sid, *, timestamp, body, label="Process log", base_only=True):
+    """What the dialog posts: the table's own columns as the key."""
+    cols = [c["name"] for c in store.get_source(sid)["columns"]
+            if not (base_only and c.get("derived"))]
+    r = client.post("/api/timeline_templates", json={
+        "col_names": cols, "type_label": label,
+        "timestamp_column": timestamp, "body_columns": body})
+    assert r.status_code == 200
+
+
+def _timeline_rows(client):
+    view = client.post("/api/timeline", json={"tag_ids": []}).json()
+    return client.get(f"/api/timeline_rows?view_id={view['view_id']}&start=0&count=10").json()["rows"]
+
+
+def test_a_derived_column_does_not_drop_the_tables_timeline_config(client, store, write_csv):
+    sid = _proc_table(store, write_csv)
+    _save_config(client, store, sid, timestamp="Logged", body=["Process"])
+    assert _timeline_rows(client)[0]["type_label"] == "Process log"
+
+    _add_derived(store, sid)
+
+    [row] = _timeline_rows(client)
+    # The symptom: these came back as "proc.csv" and every column joined.
+    assert row["type_label"] == "Process log"
+    assert row["body"] == "evil.exe"
+    assert row["ts"] == "2026-03-10 10:00:00"
+
+
+def test_a_derived_column_can_be_the_configured_timestamp(client, store, write_csv):
+    """The dialog lists derived datetime columns in its timestamp select,
+    so a config naming one has to be found under the same key as any
+    other — and then read off the derived column, not the first datetime
+    column the defaults would pick."""
+    sid = _proc_table(store, write_csv)
+    _add_derived(store, sid)
+    _save_config(client, store, sid, timestamp="When", body=["Process", "User"])
+
+    [row] = _timeline_rows(client)
+    assert row["ts"] == "2023-11-14 22:13:20"
+    assert row["type_label"] == "Process log"
+    assert row["body"] == "evil.exe | alice"
+
+
+def test_a_config_keyed_on_every_column_still_applies(client, store, write_csv):
+    """Nothing that matched before the base-column key stops matching: a
+    template saved under the full column list, derived included, is still
+    honoured when no base-column template exists."""
+    sid = _proc_table(store, write_csv)
+    _add_derived(store, sid)
+    _save_config(client, store, sid, timestamp="When", body=["User"], base_only=False)
+
+    [row] = _timeline_rows(client)
+    assert row["type_label"] == "Process log"
+    assert (row["ts"], row["body"]) == ("2023-11-14 22:13:20", "alice")
+
+
+# A table wider than ~500 columns (flattened JSON gets there easily) used to
+# fail the whole build: the body joins its columns with `||`, one chain
+# SQLite parses two levels deeper per column, and past its expression depth
+# limit of 1000 the INSERT raised "Expression tree is too large" — so ONE
+# wide table took every other table's findings off the Timeline with it.
+
+def _wide_table(store, write_csv, ncols=600, name="wide.csv"):
+    header = ["Timestamp"] + [f"c{i}" for i in range(1, ncols)]
+    row = ["2026-01-05T10:00:00"] + [f"v{i}" for i in range(1, ncols)]
+    sid = store.ingest_csv(write_csv([header, row], name=name), name=name, build_fts=False)["id"]
+    store.set_tags(sid, [1], store.list_tags()[0]["id"], True)
+    return sid, header
+
+
+def test_a_table_too_wide_for_the_body_still_builds_with_its_first_columns(store, write_csv):
+    rec1_id, rec2_id, tag_a, tag_b, configs = _two_tagged_sources(store, write_csv)
+    wide_id, header = _wide_table(store, write_csv)
+
+    res = store.build_timeline(configs=configs)
+    assert res["row_count"] == 4  # the three narrow findings are still there too
+    [trimmed] = res["body_trimmed"]
+    assert trimmed["source_id"] == wide_id and trimmed["total"] == 600
+    shown = trimmed["shown"]
+    assert 400 < shown < 600
+
+    rows = store.fetch_timeline_rows(res["view_id"], 0, 10)["rows"]
+    wide = next(r for r in rows if r["source_id"] == wide_id)
+    assert wide["body"].split(" | ") == ["2026-01-05T10:00:00"] + [f"v{i}" for i in range(1, shown)]
+
+
+def test_configured_body_columns_past_the_cap_keep_their_order(store, write_csv):
+    wide_id, header = _wide_table(store, write_csv)
+    body = list(reversed(header))  # every column, last first
+    res = store.build_timeline(configs={wide_id: {"body_columns": body}})
+    shown = res["body_trimmed"][0]["shown"]
+    [row] = store.fetch_timeline_rows(res["view_id"], 0, 10)["rows"]
+    assert row["body"].split(" | ")[:2] == ["v599", "v598"]
+    assert len(row["body"].split(" | ")) == shown
+
+
+def test_a_table_under_the_cap_is_not_trimmed(store, write_csv):
+    _two_tagged_sources(store, write_csv)
+    assert store.build_timeline()["body_trimmed"] == []
+
+
+def test_the_cap_follows_the_linked_sqlites_depth_limit(store, write_csv):
+    """Read off the connection rather than assumed, so a SQLite built with
+    a lower limit still fits — and the cap is exact enough that the column
+    after it would not have."""
+    import sqlite3
+
+    import pytest
+
+    if not hasattr(store.db, "setlimit"):
+        pytest.skip("Connection.setlimit needs Python 3.11+")
+    wide_id, header = _wide_table(store, write_csv, ncols=150)
+    store.db.setlimit(sqlite3.SQLITE_LIMIT_EXPR_DEPTH, 200)
+    res = store.build_timeline()
+    [trimmed] = res["body_trimmed"]
+    assert trimmed["shown"] == 95  # (200 - headroom 10) // 2
+    [row] = store.fetch_timeline_rows(res["view_id"], 0, 10)["rows"]
+    assert len(row["body"].split(" | ")) == 95
+
+
+def test_watchlist_latest_hits_survive_a_table_too_wide_for_the_body(store, write_csv):
+    """Latest hits joins the same body from the same config, and failed the
+    same way."""
+    wide_id, header = _wide_table(store, write_csv)
+    store.add_indicator("v7")
+    store.scan_source(wide_id)
+    [hit] = store.latest_hits()["rows"]
+    assert hit["source_id"] == wide_id and hit["body"].startswith("v1 | v2 | ")
+
+
+# --------------------------------------------- what a page reads, and when
+#
+# The view holds (source_id, rid, ts) and nothing else; each page reads
+# its rows' body, summary, tags and note (Store.fetch_timeline_rows).
+
+def test_a_page_reads_tags_and_the_note_as_they_are_now(store, write_csv):
+    """A line whose tags changed since the build shows the tags it has,
+    not the ones it had — and its note rides along for the ✎ mark."""
+    rec1_id, rec2_id, tag_a, tag_b, configs = _two_tagged_sources(store, write_csv)
+    res = store.build_timeline(configs=configs)
+    store.set_tags(rec1_id, [1], tag_b, True)
+    store.set_note(rec1_id, 1, "first logon from the jump box")
+    rows = store.fetch_timeline_rows(res["view_id"], 0, 10)["rows"]
+    first = next(r for r in rows if (r["source_id"], r["rid"]) == (rec1_id, 1))
+    assert first["tags"] == sorted([tag_a, tag_b])
+    assert first["note"] == "first logon from the jump box"
+    assert all(r["note"] == "" for r in rows if r is not first)
+
+
+def test_pages_cut_anywhere_read_the_same_lines(store, write_csv):
+    """Each page reads its own rows source by source, so a page that
+    starts or ends part way through a table must still line up."""
+    _, _, _, _, configs = _two_tagged_sources(store, write_csv)
+    res = store.build_timeline(configs=configs)
+    whole = store.fetch_timeline_rows(res["view_id"], 0, 10)["rows"]
+    pieced = [r for start, count in [(0, 1), (1, 1), (2, 5)]
+              for r in store.fetch_timeline_rows(res["view_id"], start, count)["rows"]]
+    assert pieced == whole
+    assert [r["pos"] for r in whole] == [0, 1, 2]
+
+
+def test_a_page_after_its_table_is_dropped_asks_for_a_rebuild(store, write_csv):
+    import pytest
+
+    from winnow.store import ViewExpired
+
+    _, rec2_id, _, _, configs = _two_tagged_sources(store, write_csv)
+    res = store.build_timeline(configs=configs)
+    store.drop_source(rec2_id)
+    with pytest.raises(ViewExpired):
+        store.fetch_timeline_rows(res["view_id"], 0, 10)
+
+
+def test_timeline_position_finds_the_line_again_after_a_rebuild(store, write_csv):
+    """What keeps the analyst's place: every visit to the tab rebuilds."""
+    rec1_id, rec2_id, tag_a, tag_b, configs = _two_tagged_sources(store, write_csv)
+    rows = store.fetch_timeline_rows(store.build_timeline(configs=configs)["view_id"], 0, 10)["rows"]
+    evil = rows[2]          # history row 2, the last line
+    bob = rows[1]           # evtx row 2, tagged tag_b only
+    narrowed = store.build_timeline(configs=configs, tag_ids=[tag_a])["view_id"]
+    # Still on it, one line further up now that bob's line is gone.
+    assert store.timeline_position(narrowed, rec2_id, 2, evil["ts"]) == {"pos": 1, "exact": True}
+    # No longer on it: the first line at or after its time.
+    assert store.timeline_position(narrowed, rec1_id, 2, bob["ts"]) == {"pos": 1, "exact": False}
+    # Later than everything left: the last line.
+    assert store.timeline_position(narrowed, rec1_id, 2, "2027-01-01 00:00:00") == {"pos": 1, "exact": False}
+
+
+def test_timeline_position_route(client, write_csv):
+    import server
+
+    rec1_id, _, _, _, _ = _two_tagged_sources(server.STORE, write_csv)
+    view = client.post("/api/timeline", json={"tag_ids": []}).json()
+    r = client.get(f"/api/timeline_position?view_id={view['view_id']}&source_id={rec1_id}&rid=2")
+    assert r.status_code == 200 and r.json() == {"pos": 1, "exact": True}
+    gone = client.get(f"/api/timeline_position?view_id=nope&source_id={rec1_id}&rid=2")
+    assert gone.status_code == 409

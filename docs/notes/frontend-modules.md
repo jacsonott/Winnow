@@ -33,7 +33,7 @@ split, found by loading the app:
    time, so the import cycles between modules (there are many, and that's
    fine) can't produce a temporal-dead-zone error.
 2. **`core.js` imports nothing.** It holds `$`, `el`, the constants, `api`/
-   `post`, the toast/busy chrome and `debounce`. Three modules initialise a
+   `post`, the toast/busy chrome and `debounce`. Seven modules initialise a
    top-level `const x = debounce(...)`, which *does* run at evaluation time —
    so `debounce` has to be reachable before any other module's body runs, and
    the only way to guarantee that is for its module to be a leaf. When
@@ -59,15 +59,17 @@ split, found by loading the app:
 
 | module | holds |
 | --- | --- |
-| `core` | `$`, `el`, constants, `api`/`post`, toast/busy, `debounce`. Imports nothing. |
+| `core` | `$`, `el`, constants, `api`/`post`, toast/busy, `debounce`, `nameMap` (every column-keyed map — see [ui.md](ui.md)). Imports nothing. |
 | `state` | `S` and the `sel*` row-selection helpers |
 | `view` | building/rebuilding the materialized view |
 | `grid` | paging, prefetch, painting, cell-range selection |
 | `columns` `tsformat` `derived` | column layout/widths; timestamp parsing and display formats; derived and extracted columns |
-| `filters` `filterbuilder` `savedfilters` `timeframe` | quick filters and the value picker; the guided tree; saved filters and nicknames; timeframe and jump-to-timestamp |
+| `filters` `filterbuilder` `savedfilters` `timeframe` `filterundo` | quick filters and the value picker; the guided tree; saved filters and nicknames; timeframe and jump-to-timestamp; undoing a filter change (`z`) |
 | `grouping` `tags` `rowmenu` `detail` | group-by; tagging and undo; the row right-click menu; the detail pane |
 | `sources` `importer` `merge` `tables` | sources/tabs/sidebar; every import path; the merge builder; the Tables manager |
-| `search` `sql` `timeline` `session` `plugins` | toolbar + search-all; the SQL pane; the timeline tab; session files; the plugin host frontend |
+| `search` `sql` `timeline` `timelineoverview` `timelinepane` `session` `plugins` | toolbar + search-all; the SQL pane; the timeline tab, its overview strip and its details pane; session files; the plugin host frontend |
+| `pluginmanager` `bundles` `profilebuilder` | the two-pane plugins manager (and the one-line Settings section that opens it); the profiles manager; the profile builder |
+| `histogram` | the built-in histogram strip between the toolbar and the grid — the time-proportional canvas, the brush that writes the timeframe filter, the `winnow.histogram` prefs; shares `#pluginPanels` with plugin toolbar panels (see [ui.md](ui.md)) |
 | `ui` `keymap` `settings` `home` | modal/dialog/menu primitives; keybindings; the Settings modal; the home screen and `boot()` |
 | `main` | imports everything, calls each `wire*()`, runs the startup sequence, exposes `window.__winnow` |
 
@@ -89,5 +91,5 @@ compiles without it, and that you haven't given `core.js` an import (rule 2).
 The browser tests in `tests/ui/` are the backstop, but they exercise a
 fraction of the surface; the static check covers all of it.
 
-- **dashwidgets.js** — widget recipes: `WIDGET_TEMPLATES` (row count, count matching a value, distinct, top, rarest, over time, activity window), `widgetFrom(build)` → the widget with its SQL, render, `build` and `drill`, `columnsForTable` (a case table's columns, or a {{…}} placeholder's header set from `S.headerSets`), `bucketRange` (a histogram label back to a timeframe). Pure — no DOM, no fetches; dashboard.js does the asking and saving.
-- **charts.js** — dependency-free canvas charts (`drawBars`, `drawHistogram`, `pickBar`), the shared visualization surface for the stack view, entity pivot and dashboard widgets. Declarations only; reads CSS tokens at draw time so a theme switch repaints. No chart library (airgap). See docs/design/analysis-suite.md.
+- **dashwidgets.js** — widget recipes: `WIDGET_TEMPLATES` (row count, count matching a value, distinct, top, rarest, over time, activity window), `WIDGET_SOURCES`/`WIDGET_RENDERS` (each stored source and render value with the name the editor shows it by), `widgetFrom(build)` → the widget with its SQL, render, `build` and `drill`, `columnsForTable` (a case table's columns, or a {{…}} placeholder's header set from `S.headerSets`), `bucketRange` (a histogram label back to a timeframe). Pure — no DOM, no fetches; dashboard.js does the asking and saving.
+- **charts.js** — dependency-free canvas charts (`drawBars`, `drawHistogram`, `pickBar`), the shared visualization surface for the entity pivot and dashboard widgets (Stack draws its bars as DOM elements instead, so they take focus and a menu: stack.js). Declarations only; reads CSS tokens at draw time so a theme switch repaints. No chart library (airgap). See docs/design/analysis-suite.md.

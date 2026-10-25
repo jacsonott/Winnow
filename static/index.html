@@ -76,7 +76,7 @@ try {
   <button class="brand" id="btnHome" title="Back to home screen"><span class="mark"></span><span id="brandLabel">Winnow</span></button>
 
   <button class="tab-jump" id="btnTabJump" title="Show every table and page in the case" aria-pressed="true">◀</button>
-  <nav id="sourceTabs" class="tabs" aria-label="Open files"></nav>
+  <nav id="sourceTabs" class="tabs" aria-label="Open tables"></nav>
   <!-- Splits the bar's flexible middle between the two strips. Both scroll
        horizontally on their own, so where this sits decides which one runs
        out of room first — see renderPageTabs/applyPageTabsSize in static/js/sources.js. -->
@@ -93,7 +93,6 @@ try {
 
   <div class="bar-actions">
     <button class="btn ghost" id="btnSearchAll" title="Search every table in this case">Search all</button>
-    <button class="btn ghost" id="btnAcrossCases" title="Read your other cases — IOC sweep, cross-case query, one timeline">Across cases</button>
     <button class="btn" id="btnCase" aria-haspopup="true" aria-expanded="false" title="Import, merge, export, sessions and settings for the open case">Case ▾</button>
     <button class="btn" id="btnSettings" title="Settings — also has keyboard shortcuts and filter syntax help">⚙</button>
   </div>
@@ -104,33 +103,57 @@ try {
   <div id="tagRibbon" class="tag-ribbon" aria-label="Tags"></div>
   <div class="spacer"></div>
   <div id="viewStats" class="stats"></div>
-  <!-- Plugin toolbar-panel toggles (PluginAPI.register_toolbar_panel) land here, left of the timeframe. -->
+  <!-- The grid's one gesture nothing on screen says: a single click selects a cell, and the
+       whole row opens on double-click (or the detail key). Shown beside the count until the
+       analyst has opened a row, then gone for good — detail.js owns both halves. -->
+  <span id="rowOpenHint" class="stats-hint" hidden>double-click a row to open it</span>
+  <!-- Plugin toolbar-panel toggles (PluginAPI.register_toolbar_panel) land here, left of the built-in
+       histogram toggle and the timeframe. The span is wiped and refilled on every plugin reload
+       (renderPluginPanelButtons), which is why #btnHistogram sits after it rather than inside it. -->
   <span id="pluginToolbarButtons" class="plugin-toolbar-buttons"></span>
+  <button class="btn ghost" id="btnHistogram" aria-pressed="false" title="When the rows in this view happened, as time buckets — drag across the bars to set the timeframe filter">Histogram</button>
   <button class="btn ghost" id="btnTimeRange" aria-pressed="false">⏱ Timeframe</button>
   <button class="btn ghost" id="btnFilters" aria-haspopup="true" aria-expanded="false" aria-pressed="false">Filters ▾</button>
   <button class="btn ghost" id="btnReset">Clear filters</button>
-  <button class="btn ghost search-icon-btn" id="btnSearchToggle" title="Search  —  press /" aria-label="Search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4.2-4.2"/></svg></button>
+  <!-- The tooltip and the placeholder below both name the key that opens the box, and
+       both are rewritten from the keymap by syncSearchKeyCopy (filters.js) at startup and
+       on every rebinding — what is in the markup is only what shows before that runs. -->
+  <button class="btn ghost search-icon-btn" id="btnSearchToggle" title="Search" aria-label="Search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4.2-4.2"/></svg></button>
   <div class="search-wrap" id="searchWrap" hidden>
-    <input id="search" type="search" placeholder="Search all columns  —  press /" autocomplete="off" spellcheck="false">
+    <input id="search" type="search" placeholder="All columns" autocomplete="off" spellcheck="false">
     <span class="hint" id="searchMode">substring</span>
   </div>
   <div class="search-mode-toggle" id="searchModeToggle" hidden>
-    <button class="btn ghost" data-mode="contains" aria-pressed="true">Contains</button>
-    <button class="btn ghost" data-mode="regex">Regex</button>
+    <button class="btn ghost" data-mode="contains" aria-pressed="true" title="Substring match. Ignores case for A–Z only — use Regex to ignore case in other scripts (Cyrillic, accented letters)">Contains</button>
+    <button class="btn ghost" data-mode="regex" title="Regular expression (Python syntax). Ignores case in every script">Regex</button>
     <button class="btn ghost" data-mode="advanced">Advanced</button>
   </div>
   <div id="advancedSearchBar" class="advanced-search-bar" hidden></div>
 </section>
 
-<!-- Plugin toolbar panels (a histogram of the view, …): a strip between the
-     toolbar and the grid, hidden when no panel is toggled on. -->
-<div id="pluginPanels" class="plugin-panels" hidden></div>
+<!-- The strip between the toolbar and the grid: the built-in histogram
+     (static/js/histogram.js) first, then plugin toolbar panels. Hidden when
+     nothing in it is toggled on — plugins.js syncPluginPanels owns the
+     host's `hidden`, histogram.js syncHistogramPanel its own section's. -->
+<div id="pluginPanels" class="plugin-panels" hidden>
+  <section id="histogramPanel" class="plugin-panel histogram-panel" hidden></section>
+</div>
 <!-- A session comparison pivoted into the grid: which two sessions, what
      the marks mean, and the way out. -->
 <div id="diffBanner" class="diff-banner" role="status" hidden></div>
 
 <div class="main-area" id="mainArea" data-dock="bottom">
   <div class="main-content">
+    <!-- The filter bar: the filters actually set, as chips, plus the way to
+         add one. Deliberately OUTSIDE #gridHead, which is inside the grid's
+         scroll container and is width: max-content — anything in there either
+         scrolls horizontally out of reach with the columns or needs a width
+         equal to the scrollport, which no CSS length can express from in
+         there. Here it is simply as wide as the grid, wraps when it has to,
+         and stays put while the columns scroll under it. renderFilterBar owns
+         its `hidden`: it is gone under the classic filter row, with no table
+         open, and behind every page tab (syncTabChrome). -->
+    <div class="filter-bar" id="filterBar" hidden></div>
     <main class="grid" id="grid">
       <div class="grid-body" id="body" tabindex="0" role="grid" aria-label="Rows">
         <!-- Inside the scroll container on purpose: position:sticky keeps
@@ -139,14 +162,35 @@ try {
              lag the rows the way the old JS translateX-on-scroll did. -->
         <div class="grid-head" id="gridHead">
           <div class="head-row" id="headRow"></div>
+          <!-- The per-column boxes. Every column gets one under the classic
+               setting (Settings → Grid & layout); under the filter bar only the
+               columns whose box has been opened (S.filterOpen) get an input,
+               the rest get an empty cell so the open one stays under its own
+               header, and the whole row is hidden while none is open. -->
           <div class="filter-row" id="filterRow"></div>
         </div>
         <div class="spacer-y" id="spacerY"></div>
         <div class="rows" id="rows"></div>
       </div>
-      <canvas class="rail" id="rail" width="14" title="Tagged rows in this view"></canvas>
+      <!-- The grid's vertical scrollbar, from the header's foot down. A
+           scroller of its own with nothing in it but a fill: #body's own
+           bar is hidden, since it would run up beside the sticky header,
+           and syncVbar (static/js/grid.js) keeps this one's range and
+           position equal to #body's. Outside #body, so it is not one of
+           the rows' event targets. display:none where the browser can't
+           hide #body's bar (style.css, .vbar). -->
+      <div class="vbar" id="vbar" aria-hidden="true"><div class="vbar-fill" id="vbarFill"></div></div>
+      <!-- The tag rail. It sits in the strip .grid-body's margin-right keeps
+           clear for it, never over the grid or its scrollbar — that is what
+           lets it take pointer events, and the title is why it wants them:
+           it is replaced per mark on hover (railTitleAt in
+           static/js/grouping.js), and this is what it says between them.
+           `width` is the pre-paint bitmap only; drawRail sizes it from the
+           box so --rail-w stays the one place the strip's width is set. -->
+      <canvas class="rail" id="rail" width="14"
+              title="Tagged rows in this view — hover a mark for its tag"></canvas>
       <div class="empty" id="empty">
-        <p class="empty-title">No file open</p>
+        <p class="empty-title">No table open</p>
         <p><button class="btn" id="emptyImportBtn">Import files…</button></p>
       </div>
       <div class="empty no-rows" id="noRows" hidden>
@@ -156,20 +200,33 @@ try {
       </div>
     </main>
 
-    <section class="sqlview" id="sqlview" hidden>
+    <!-- The SQL and Notes pages are two columns: the page itself, then a
+         resizable side column plugin page panels mount into
+         (PluginAPI.register_page_panel) — hidden until one is toggled on
+         from the button host in the page's toolbar. -->
+    <section class="sqlview page-with-panels" id="sqlview" hidden>
+      <div class="page-main">
       <nav id="sqlTabs" class="sql-tabs" aria-label="SQL queries"></nav>
       <div class="sql-head">
-        <span>Read-only query against the case file — src_N and merge_N include your derived columns plus Tags and Note; main.src_N is the raw import</span>
+        <!-- A sentence, not a label: mixed case with the identifiers in
+             <code> so the three names an analyst has to tell apart look
+             like names. Uppercased and letter-spaced, this wrapped to two
+             lines of shouting (see .sql-head in style.css). -->
+        <span>Read-only, against this case file. <code>src_N</code> and <code>merge_N</code> carry your derived columns, Tags and Note — <code>main.src_N</code> is the raw import.</span>
         <div>
           <button class="btn ghost" id="btnSqlSchema" title="Copy every table's definition (names, columns, types) to the clipboard — paste it into notes or an LLM">Copy schema</button>
           <button class="btn ghost" id="btnSqlTables" title="Every table's src_N name — click one to insert it at the cursor">Tables ▾</button>
           <button class="btn ghost" id="btnSqlWidget" title="Turn this query into a dashboard widget">To dashboard…</button>
-          <button class="btn" id="btnRunSql">Run  ⌘⏎</button>
+          <span id="sqlPluginButtons" class="plugin-toolbar-buttons"></span>
+          <button class="btn" id="btnRunSql" title="Ctrl+Enter or ⌘+Enter in the editor">Run</button>
         </div>
       </div>
       <textarea id="sqlText" spellcheck="false" rows="5"></textarea>
       <div class="sql-resize" id="sqlResize" title="Drag to resize the query box"></div>
       <div class="sql-result" id="sqlResult"></div>
+    </div>
+      <div class="page-panel-resize" id="sqlPanelResize" title="Drag to resize the panel" hidden></div>
+      <aside id="sqlPluginPanels" class="page-panels" hidden></aside>
     </section>
 
     <section class="timelineview" id="timelineview" hidden>
@@ -178,19 +235,34 @@ try {
         <div id="timelineTagFilter" class="timeline-tagfilter"></div>
         <div class="spacer"></div>
         <span class="stats" id="timelineStats"></span>
-        <button class="btn ghost" id="btnTimelineConfig">Configure sources…</button>
+        <span class="tl-context" id="timelineContext"></span>
+        <button class="btn ghost" id="btnTimelineFold" aria-pressed="false"
+                title="Put three or more rows in a row from one table, with one summary and one first tag, on one line">Fold repeats</button>
+        <button class="btn ghost" id="btnTimelineOverview" aria-pressed="true"
+                title="Show or hide the overview: the Timeline's lines over time">Overview</button>
+        <button class="btn ghost" id="btnTimelinePane" aria-pressed="true"
+                title="Show or hide the details pane: the selected line in full, beside the list">Details</button>
+        <button class="btn ghost" id="btnTimelineConfig">Configure tables…</button>
       </div>
-      <div class="timeline-cols">
-        <div class="tl-col-ts">Timestamp</div>
-        <div class="tl-col-type">Source type</div>
-        <div class="tl-col-body">Body</div>
-      </div>
-      <div class="timeline-body" id="timelineBody" tabindex="0">
-        <div class="timeline-spacer-y" id="timelineSpacerY"></div>
-        <div class="timeline-rows" id="timelineRows"></div>
-      </div>
-      <div class="timeline-empty" id="timelineEmpty" hidden>
-        No tagged rows yet — tag some rows in any table, then come back here.
+      <section class="tl-overview" id="timelineOverview" hidden></section>
+      <div class="tl-split">
+        <div class="tl-main">
+          <div class="timeline-cols">
+            <div class="tl-col-gutter"></div>
+            <div class="tl-col-ts" id="timelineColTs">Timestamp</div>
+            <div class="tl-col-gap" title="The time since the line above">Gap</div>
+            <div class="tl-col-type">Type</div>
+            <div class="tl-col-body">Body</div>
+          </div>
+          <div class="timeline-body" id="timelineBody" tabindex="0">
+            <div class="timeline-spacer-y" id="timelineSpacerY"></div>
+            <div class="timeline-rows" id="timelineRows"></div>
+          </div>
+          <div class="timeline-empty" id="timelineEmpty" hidden>
+            No tagged rows yet — tag some rows in any table, then come back here.
+          </div>
+        </div>
+        <aside class="tl-pane" id="timelinePane" aria-label="The selected line" hidden></aside>
       </div>
     </section>
 
@@ -227,29 +299,65 @@ try {
           </div>
           <div class="wl-list" id="wlList"></div>
         </div>
-        <div class="wl-hits" id="wlHits"><div class="note-status" style="padding:12px">Select an indicator to see its hits.</div></div>
+        <div class="wl-hits" id="wlHits"><div class="note-status" style="padding:12px">Reading the latest hits…</div></div>
       </div>
     </section>
 
-    <section class="notesview" id="notesview" hidden>
+    <section class="notesview page-with-panels" id="notesview" hidden>
+      <div class="page-main">
       <div class="notes-head">
         <span class="notes-label">Case notes</span>
-        <button class="btn ghost" id="btnNotesEdit" aria-pressed="true">Edit</button>
-        <button class="btn ghost" id="btnNotesPreview" aria-pressed="false">Preview</button>
-        <button class="btn ghost" id="btnNotesLink" title="Insert a link to a table, SQL query or dashboard — clickable in Preview">Link ▾</button>
+        <!-- Edit / Split / Preview: which of the two panes below show. The
+             page always opens in Split; only the divider position persists
+             (winnow.notes). Edit and Preview ids are load-bearing for tests. -->
+        <button class="btn ghost" id="btnNotesEdit" aria-pressed="false" title="Editor only">Edit</button>
+        <button class="btn" id="btnNotesSplit" aria-pressed="true" title="Editor and preview side by side">Split</button>
+        <button class="btn ghost" id="btnNotesPreview" aria-pressed="false" title="Preview only">Preview</button>
+        <button class="btn ghost" id="btnNotesLink" title="Insert a link to a table, SQL query or dashboard — clickable in the preview">Link ▾</button>
+        <span id="notesPluginButtons" class="plugin-toolbar-buttons"></span>
         <div class="spacer"></div>
         <span class="note-status" id="notesSaved"></span>
       </div>
+      <!-- Editor | divider | live preview, a flex row inside .page-main so the
+           plugin side column (#notesPanelResize + #notesPluginPanels) stays
+           the outermost sibling. The divider has its OWN id: syncPluginPanels
+           hides #notesPanelResize by id and must never touch this one. -->
+      <div class="notes-split" id="notesSplit" data-mode="split">
+      <!-- The placeholder is one sentence of prose and one of syntax, NOT a
+           sample note. It used to be a worked example — a heading, bullets,
+           timestamped lines — and on an empty case that read as a narrative
+           someone had written beside a preview pane that had failed to render
+           it. Dimming alone doesn't fix that: it's the SHAPE that reads as
+           content. Keep it prose, and keep the lines short enough not to wrap
+           into a block. .notes-editor::placeholder does the quietening. -->
       <textarea class="notes-editor" id="notesEditor" spellcheck="true"
-        placeholder="The story of this investigation — Markdown. Saved in the case file and travels with it.
+        placeholder="Write the story of this investigation here. It saves into the case file and travels with it.
 
-# Timeline
-- 2026-03-15 14:03 — spray from WKS07
-- 2026-03-15 14:18 — first success onto FILESRV01 as svc_backup
-
-## Leads
-- rclone.exe under \ProgramData"></textarea>
-      <div class="notes-preview" id="notesPreview" hidden></div>
+Markdown: # headings, - bullets, **bold**, `code`, tables. Link ▾ points at a table, query or dashboard."></textarea>
+      <div class="notes-divider" id="notesDivider" role="separator" aria-orientation="vertical"
+           title="Drag to resize · double-click to reset"></div>
+      <div class="notes-preview" id="notesPreview"><div class="notes-preview-body" id="notesPreviewBody"></div></div>
+      </div>
+      <!-- The OTHER thing called notes: the ones attached to evidence rows,
+           written in the detail pane and until now visible only there. An
+           analyst writing up findings had to remember which rows they had
+           annotated. Kept below the split rather than inside the preview
+           pane, because the preview is the narrative rendered and these are
+           not part of it; each entry opens its row. Collapsible, with the
+           state in winnow.notes beside the divider position. -->
+      <section class="notes-rows" id="notesRows">
+        <div class="notes-rows-head">
+          <button class="btn ghost notes-rows-toggle" id="btnNotesRows" aria-expanded="true"
+                  aria-controls="notesRowsBody" title="Notes written on rows, in the detail pane">
+            <span class="notes-rows-caret" aria-hidden="true">▾</span>
+            <span id="notesRowsCount">Row notes</span>
+          </button>
+        </div>
+        <div class="notes-rows-body" id="notesRowsBody"></div>
+      </section>
+    </div>
+      <div class="page-panel-resize" id="notesPanelResize" title="Drag to resize the panel" hidden></div>
+      <aside id="notesPluginPanels" class="page-panels" hidden></aside>
     </section>
   </div>
 
@@ -285,10 +393,16 @@ try {
 
 <!-- Shown when Winnow's server stops answering (static/js/connection.js). -->
 <div id="connBanner" class="conn-banner" role="status" hidden></div>
-<div class="toast" id="toast" hidden></div>
+<!-- Shown when another window switches this Winnow to a different case
+     (caseGone in static/js/connection.js). -->
+<div id="caseGone" class="case-gone" role="alertdialog" aria-modal="true" aria-labelledby="caseGoneTitle" hidden></div>
+<!-- Shown when Winnow runs as administrator on Windows, which stops files
+     being dragged in (maybeWarnElevated in static/js/importer.js). -->
+<div id="elevNotice" class="elev-notice" role="status" hidden></div>
+<div class="toast" id="toast" role="status" hidden></div>
 
 <!-- Cancel chip for a long-running cancellable op (view/timeline build,
-     group summary) — armOpCancel() shows it only once the op has been in
+     group summary, SQL pane query) — armOpCancel() shows it only once the op has been in
      flight long enough to be worth cancelling. -->
 <button class="busy-cancel" id="busyCancel" hidden>✕ Cancel</button>
 
@@ -297,7 +411,7 @@ try {
 <div class="jobs-panel" id="jobsPanel" hidden aria-live="polite"></div>
 <div class="tag-toolbar" id="tagToolbar" hidden></div>
 <div class="drop-overlay" id="dropOverlay" hidden aria-hidden="true">
-  <div class="drop-overlay-card">Drop to import — CSV/TSV/JSON, or a single SQLite file</div>
+  <div class="drop-overlay-card">Drop to import — CSV/TSV, JSON, SQLite, Excel, Plaso, archives, or any log as text</div>
 </div>
 
 <!-- type="module" so the app can be split across static/js/*.js with real

@@ -96,6 +96,49 @@ def test_tar_symlinks_are_skipped(tmp_path):
     assert any("not a regular file" in sk["reason"] for sk in rep["skipped"])
 
 
+def _mark_encrypted(path, name):
+    """zipfile can't write an encrypted member, so set the encrypted bit
+    (bit 0 of the general purpose flags) on one by hand, in its local
+    header and in its central directory entry. Its data stays plain."""
+    raw = bytearray(path.read_bytes())
+    with zipfile.ZipFile(path) as zf:
+        raw[zf.getinfo(name).header_offset + 6] |= 0x1
+    i = raw.find(b"PK\x01\x02")
+    while i != -1:
+        n = int.from_bytes(raw[i + 28:i + 30], "little")
+        if raw[i + 46:i + 46 + n] == name.encode():
+            raw[i + 8] |= 0x1
+        i = raw.find(b"PK\x01\x02", i + 46)
+    path.write_bytes(bytes(raw))
+
+
+def test_an_encrypted_member_is_skipped_and_the_rest_extracted(tmp_path):
+    z = tmp_path / "locked.zip"
+    _write_zip(z, {"before.txt": "a", "secret.txt": "pretend ciphertext", "after.txt": "b"})
+    _mark_encrypted(z, "secret.txt")
+    rep = archive.expand_archive(str(z))
+    assert _tree(rep["root"]) == ["after.txt", "before.txt"]
+    assert rep["skipped"] == [{"path": "secret.txt", "reason": "encrypted zip member"}]
+    assert rep["files"] == 2 and rep["truncated"] is False
+
+
+@pytest.mark.parametrize("kind", ["zip", "tgz"])
+def test_file_count_cap_marks_truncated(tmp_path, monkeypatch, kind):
+    monkeypatch.setattr(archive, "MAX_TOTAL_FILES", 2)
+    a = tmp_path / f"many.{kind}"
+    (_write_zip if kind == "zip" else _write_tgz)(a, {f"f{i}.txt": "x" for i in range(5)})
+    rep = archive.expand_archive(str(a))
+    assert rep["truncated"] is True
+    assert rep["files"] == 2 and len(_tree(rep["root"])) == 2
+
+
+def test_a_gzipped_log_is_one_file(tmp_path):
+    g = tmp_path / "auth.log.1.gz"
+    g.write_bytes(gzip.compress(b"old auth line\n"))
+    rep = archive.expand_archive(str(g))
+    assert (rep["files"], rep["archives"]) == (1, 1)
+
+
 def test_byte_budget_stops_a_bomb(tmp_path, monkeypatch):
     monkeypatch.setattr(archive, "MAX_TOTAL_BYTES", 1024)
     z = tmp_path / "bomb.zip"
@@ -148,3 +191,231 @@ def test_upload_route_extracts_beside_the_case(client, store, tmp_path):
     assert os.path.dirname(rep["root"]) == os.path.dirname(os.path.abspath(store.path))
     assert os.path.basename(rep["root"]).startswith("uac-host-extracted")
     assert _tree(rep["root"]) == ["log/shell.log"]
+
+
+def test_one_unwritable_member_is_skipped_and_the_rest_still_extract(tmp_path):
+    """A member whose name the filesystem refuses (a component past
+    NAME_MAX) or that clashes with one already written (a FILE named like
+    a later member's directory) used to raise out of the whole expansion,
+    so every member after it was silently missing from the tree. Each is
+    one member's problem: skipped, reported, and the rest extract."""
+    bundle = tmp_path / "b.zip"
+    with zipfile.ZipFile(bundle, "w") as zf:
+        zf.writestr("a.log", "first\n")
+        zf.writestr("x" * 300 + ".log", "too long a name\n")
+        zf.writestr("dir", "a file where a directory is about to be needed\n")
+        zf.writestr("dir/inner.log", "clashes with the file above\n")
+        zf.writestr("z.log", "last\n")
+    rep = archive.expand_archive(str(bundle))
+    assert _tree(rep["root"]) == ["a.log", "dir", "z.log"]
+    reasons = {s["path"][:5]: s["reason"] for s in rep["skipped"]}
+    assert set(reasons) == {"x" * 5, "dir/i"}
+    assert all("could not be written" in r for r in reasons.values())
+    assert rep["files"] == 3
+
+
+def test_an_unwritable_tar_member_does_not_stop_the_tar_either(tmp_path):
+    tgz = tmp_path / "b.tgz"
+    _write_tgz(tgz, {"a.log": "1\n", "y" * 300: "2\n", "b.log": "3\n"})
+    rep = archive.expand_archive(str(tgz))
+    assert _tree(rep["root"]) == ["a.log", "b.log"]
+    assert [s["path"] for s in rep["skipped"]] == ["y" * 300]
+
+
+def test_a_destination_that_cannot_be_created_is_a_clean_error(tmp_path, monkeypatch):
+    """_fresh_dest ran outside the error handling, so a read-only mount
+    or a name past the filesystem's limit was a 500 from the route."""
+    bundle = tmp_path / ("n" * 250 + ".zip")   # fits; "<stem>-extracted" does not
+    _write_zip(bundle, {"a.log": "1\n"})
+    with pytest.raises(archive.ArchiveError, match="Could not create"):
+        archive.expand_archive(str(bundle))
+
+
+def test_expand_route_is_a_400_when_the_destination_cannot_be_made(client, tmp_path):
+    bundle = tmp_path / ("n" * 250 + ".zip")   # fits; "<stem>-extracted" does not
+    _write_zip(bundle, {"a.log": "1\n"})
+    r = client.post("/api/ingest/archive/expand", json={"path": str(bundle)})
+    assert r.status_code == 400 and "Could not create" in r.json()["detail"]
+
+
+@pytest.mark.parametrize("member,expected", [
+    ("logs/evil.txt:hidden", "logs/evil.txt_hidden"),     # an NTFS alternate data stream
+    ("a?b*c<d>e|f\"g.log", "a_b_c_d_e_f_g.log"),          # refused outright by Windows
+    ("dir./trailing .log ", "dir_/trailing .log_"),       # Windows silently drops these
+    ("CON/aux.log", "_CON/_aux.log"),                     # reserved device names
+    ("plain/name.log", "plain/name.log"),
+])
+def test_member_names_are_made_safe_for_windows(member, expected):
+    """On Windows a ':' in a member name writes an alternate data stream
+    of the file before it, and ?*<>|" raise — which stopped the whole
+    expansion. Names are sanitised for the OS they land on; the check is
+    run here with the Windows rules forced, since the suite runs on POSIX
+    where every one of those characters is a legal name."""
+    assert archive._member_name_for_os(member, windows=True) == expected
+
+
+def test_posix_member_names_are_left_alone():
+    assert archive._member_name_for_os("a:b?c.log", windows=False) == "a:b?c.log"
+
+
+# ------------------------------------------- damaged archives, name clashes
+#
+# Every one of these used to escape expand_archive as a raw EOFError /
+# zlib.error / NotImplementedError — a 500 on the route — after part of
+# the tree was already on disk, with the members after the bad one never
+# extracted. And a name two members shared was silently overwritten.
+
+
+def _deflate64_zip(path):
+    """A zip whose middle member claims compression method 9 (Deflate64),
+    which Windows Explorer writes for large members and zipfile cannot
+    read. Built stored, then relabelled in both headers."""
+    import struct
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_STORED) as zf:
+        zf.writestr("C/small.csv", "a,b\n1,2\n")
+        zf.writestr("C/big.csv", "x" * 1000)
+        zf.writestr("C/after.csv", "c,d\n3,4\n")
+    raw = bytearray(path.read_bytes())
+    with zipfile.ZipFile(io.BytesIO(bytes(raw))) as zf:
+        offset = zf.infolist()[1].header_offset
+    struct.pack_into("<H", raw, offset + 8, 9)
+    cd, n = raw.find(b"PK\x01\x02"), 0
+    while cd != -1:
+        if n == 1:
+            struct.pack_into("<H", raw, cd + 10, 9)
+        n += 1
+        cd = raw.find(b"PK\x01\x02", cd + 4)
+    path.write_bytes(bytes(raw))
+
+
+def test_an_unsupported_zip_member_is_skipped_and_the_rest_extract(tmp_path):
+    z = tmp_path / "kape_output.zip"
+    _deflate64_zip(z)
+    rep = archive.expand_archive(str(z))
+    assert _tree(rep["root"]) == ["C/after.csv", "C/small.csv"]
+    assert [sk["path"] for sk in rep["skipped"]] == ["C/big.csv"]
+    assert "Deflate64" in rep["skipped"][0]["reason"]
+
+
+def test_a_corrupt_inner_gz_is_skipped_and_the_rest_extract(tmp_path):
+    bad = bytearray(gzip.compress(b"line\n" * 10000))
+    bad[30:60] = b"\xff" * 30
+    z = tmp_path / "b.zip"
+    _write_zip(z, {"a.log": "keep me\n", "rot/hostd.0.gz": bytes(bad), "z.log": "keep me too\n"})
+    rep = archive.expand_archive(str(z))
+    assert _tree(rep["root"]) == ["a.log", "z.log"]     # no half-written hostd.0
+    assert any(sk["path"] == "rot/hostd.0.gz" and "gzip" in sk["reason"] for sk in rep["skipped"])
+
+
+def test_a_truncated_tgz_keeps_what_it_held(tmp_path):
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        for i in range(50):
+            data = os.urandom(20000)
+            info = tarfile.TarInfo(f"logs/f{i:02}.log")
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+    raw = buf.getvalue()
+    t = tmp_path / "bundle.tgz"
+    t.write_bytes(raw[: len(raw) // 2])
+    rep = archive.expand_archive(str(t))
+    files = _tree(rep["root"])
+    assert 0 < len(files) < 50
+    # Only whole members are in the tree: the one the cut fell in is gone.
+    assert all(os.path.getsize(os.path.join(rep["root"], f)) == 20000 for f in files)
+    assert any("ends early" in sk["reason"] for sk in rep["skipped"])
+
+
+def test_a_damaged_archive_that_yields_nothing_is_a_clean_error(tmp_path):
+    t = tmp_path / "cut.gz"
+    t.write_bytes(gzip.compress(os.urandom(200_000))[:5000])
+    with pytest.raises(archive.ArchiveError, match="cut.gz"):
+        archive.expand_archive(str(t))
+    assert not [p for p in os.listdir(tmp_path) if "extracted" in p]
+
+
+def test_a_later_inner_archive_still_expands_after_a_broken_one(tmp_path):
+    """An inner zip whose central directory is damaged (its end record
+    intact, so it still reads as a zip) fails to open; that used to end
+    the whole nested pass, so every inner archive sorted after it stayed
+    packed. It is skipped, kept in the tree as it was, and the rest expand."""
+    broken = tmp_path / "broken.zip"
+    _write_zip(broken, {"x.log": "x\n"})
+    raw = broken.read_bytes()
+    broken.write_bytes(raw.replace(b"PK\x01\x02", b"XX\x01\x02"))
+    good = tmp_path / "good.zip"
+    _write_zip(good, {"inner.log": "fine\n"})
+    z = tmp_path / "outer.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.write(broken, "a/broken.zip")
+        zf.write(good, "b/good.zip")
+    rep = archive.expand_archive(str(z))
+    assert _tree(rep["root"]) == ["a/broken.zip", "b/good/inner.log"]
+    assert [sk["path"] for sk in rep["skipped"]] == ["a/broken.zip"]
+
+
+@pytest.mark.filterwarnings("ignore:Duplicate name")
+def test_duplicate_member_names_both_survive(tmp_path):
+    z = tmp_path / "dup.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.writestr("auth.log", "FIRST copy - attacker activity\n")
+        zf.writestr("auth.log", "second copy\n")
+    rep = archive.expand_archive(str(z))
+    assert _tree(rep["root"]) == ["auth (2).log", "auth.log"]
+    assert open(os.path.join(rep["root"], "auth.log")).read() == "FIRST copy - attacker activity\n"
+    assert rep["renamed"] == [{"path": "auth.log", "as": "auth (2).log"}]
+
+
+def test_a_gz_never_overwrites_the_live_log_beside_it(tmp_path):
+    z = tmp_path / "s.zip"
+    _write_zip(z, {"var/log/messages": "CURRENT messages\n",
+                   "var/log/messages.gz": gzip.compress(b"OLD rotated messages\n")})
+    rep = archive.expand_archive(str(z))
+    root = rep["root"]
+    assert open(os.path.join(root, "var/log/messages")).read() == "CURRENT messages\n"
+    assert open(os.path.join(root, "var/log/messages (2)")).read() == "OLD rotated messages\n"
+    assert rep["renamed"] == [{"path": "var/log/messages.gz", "as": "var/log/messages (2)"}]
+
+
+def test_one_unwritable_member_does_not_stop_the_rest(tmp_path):
+    """A member named past the filesystem's limit, or one that needs a
+    directory where a file already stands, is one member — not the end of
+    the expansion."""
+    z = tmp_path / "f.zip"
+    _write_zip(z, {"first.log": "1\n", "x": "x is a file\n", "x/y.log": "under x\n",
+                   "n" * 300 + ".log": "long\n", "later.log": "kept\n"})
+    rep = archive.expand_archive(str(z))
+    assert _tree(rep["root"]) == ["first.log", "later.log", "x"]
+    assert {sk["path"] for sk in rep["skipped"]} == {"x/y.log", "n" * 300 + ".log"}
+    assert rep["truncated"] is False
+
+
+def test_expand_route_answers_400_not_500_for_a_damaged_archive(client, tmp_path):
+    t = tmp_path / "cut.tgz"
+    t.write_bytes(b"\x1f\x8b\x08\x00" + os.urandom(64))
+    r = client.post("/api/ingest/archive/expand", json={"path": str(t)})
+    assert r.status_code == 400, r.text
+
+
+def test_upload_spools_privately_and_never_touches_a_same_named_temp_file(client, store, tmp_path,
+                                                                        monkeypatch):
+    """The upload was renamed to <tempdir>/<the browser's file name> so the
+    extraction would be named after it — overwriting, and then deleting,
+    whatever file of that name already sat in the shared temp folder (and
+    two same-named uploads raced on one path). It now spools under its own
+    name inside a private directory of its own."""
+    import tempfile
+    systmp = tmp_path / "systmp"
+    systmp.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(systmp))
+    victim = systmp / "bundle.zip"
+    victim.write_text("someone else's file in the temp folder")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("a.log", "hello\n")
+    r = client.post("/api/ingest/archive/upload",
+                    files={"file": ("bundle.zip", buf.getvalue(), "application/zip")})
+    assert r.status_code == 200, r.text
+    assert victim.read_text() == "someone else's file in the temp folder"
+    assert sorted(os.listdir(systmp)) == ["bundle.zip"]      # the private spool dir is gone
+    assert os.path.basename(r.json()["root"]).startswith("bundle-extracted")

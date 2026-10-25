@@ -48,7 +48,7 @@ def test_parse_json_path(text, expect):
         assert sp.parse_json_path(text) == expect
 
 
-@pytest.mark.parametrize("text", ["$.a.b", "$.a[0].b", '$["a.b"].c', '$["a\\"q"]'])
+@pytest.mark.parametrize("text", ["$.a.b", "$.a[0].b", '$["a.b"].c', '$["a\\"q"]', '$[" padded "]', '$["tab\t"].x'])
 def test_json_path_round_trips(text):
     """Paths are written into column definitions and session files, so
     format(parse(x)) has to be re-parseable — including for keys dot
@@ -83,6 +83,37 @@ def test_non_json_input_is_none():
     assert sp._extract_json("", {"path": "$.a"}, {}) is None
     assert sp._extract_json(None, {"path": "$.a"}, {}) is None
     assert sp._extract_json("{broken", {"path": "$.a"}, {}) is None
+
+
+def test_half_a_character_in_json_comes_out_as_text_sqlite_can_store():
+    """`"\\ud83d"` is legal JSON — an emoji cut in half by a logger that
+    truncates at a byte count — and json.loads hands back a str holding a
+    lone surrogate. Stored as is, SQLite refused the row and the whole
+    backfill failed on it. The broken half is written back as the escape
+    the cell held (utf8_text, JSON import's rule too), so two different
+    halves stay two different values; the rest of the value is kept."""
+    cell = '{"msg": "user typed \\ud83d", "nested": {"k\\udc00": "v"}}'
+    assert sp._extract_json(cell, {"path": "$.msg"}, {}) == "user typed \\ud83d"
+    whole = sp._extract_json(cell, {"path": "$.nested"}, {})
+    assert whole == '{"k\\udc00": "v"}'
+    assert json.loads(whole) == {"k\udc00": "v"}      # still the JSON it was
+    for out in (sp._extract_json(cell, {"path": "$.msg"}, {}), whole):
+        out.encode("utf-8")
+    # A complete pair is one character and is left alone.
+    assert sp._extract_json('{"e": "\\ud83d\\ude00"}', {"path": "$.e"}, {}) == "\U0001F600"
+
+
+def test_an_extracted_object_keeps_its_characters():
+    """An object or array comes out as JSON text, with its characters as
+    the data has them rather than as \\u escapes: `"José"`, not
+    `"Jos\\u00e9"`, which is not what a filter or a reader is looking for."""
+    cell = '{"user": {"name": "José", "groups": ["Администраторы"]}}'
+    assert sp._extract_json(cell, {"path": "$.user"}, {}) == '{"name": "José", "groups": ["Администраторы"]}'
+    assert sp._extract_json(cell, {"path": "$.user.groups"}, {}) == '["Администраторы"]'
+
+
+def test_xml_that_cannot_be_encoded_is_not_xml():
+    assert sp._extract_xml("<a>\ud800</a>", {"path": "a"}, {}) is None
 
 
 def test_wrong_shape_at_a_step_is_none():
@@ -133,7 +164,8 @@ def test_xml_path_parsing_handles_brackets_and_slashes():
 
 
 def test_xml_path_round_trips():
-    for text in ["Event/System/EventID", "Data[2]", "Data[@Name='X']", "Provider@Name"]:
+    for text in ["Event/System/EventID", "Data[2]", "Data[@Name='X']", "Provider@Name",
+                 'Data[@Name="O\'Brien"]', "Data[@Name='it''s \"x\"']", "Data[@Name='a]@b/c']@Name"]:
         steps, attr = sp.parse_xml_path(text)
         assert sp.format_xml_path(steps, attr) == text
 
@@ -193,11 +225,38 @@ def test_discover_paths_names_evtx_data_elements_after_their_name_attribute():
 def test_discovered_paths_all_extract():
     """Whatever discovery offers has to be addressable — a path in the
     picker that extracts nothing would build a column of NULLs."""
-    for row in sp.discover_paths([EVTX], "xml"):
+    xml = sp.discover_paths([EVTX], "xml")
+    assert xml, "discovery offered no XML path, so there was nothing to check"
+    for row in xml:
         assert sp._extract_xml(EVTX, {"path": row["path"]}, {}) is not None, row["path"]
     doc = json.dumps(DOC)
-    for row in sp.discover_paths([doc], "json"):
+    paths = sp.discover_paths([doc], "json")
+    assert paths, "discovery offered no JSON path, so there was nothing to check"
+    for row in paths:
         assert sp._extract_json(doc, {"path": row["path"]}, {}) is not None, row["path"]
+
+
+def test_discovered_paths_round_trip_awkward_names_and_keys():
+    """Discovery spliced a predicate value into '…' bare, so a Data Name
+    holding an apostrophe gave a path the parser refused — offered,
+    pre-ticked at 100%, and failing the whole flatten batch with it. JSON
+    keys with edge whitespace went out in dot notation, which strips, and
+    extracted NULL. Every offered path must validate AND extract the value
+    it was offered with, under the name its predicate gives it."""
+    xml = ('<Event><EventData><Data Name="O\'Brien">x1</Data><Data Name="a]b">x2</Data>'
+           '<Data Name="q&quot;x">x3</Data><Data Name="c@d">x4</Data><Data Name="e/f">x5</Data>'
+           '<Data Name="both\'&quot;">x6</Data><Data Name="a]@b">x7</Data></EventData></Event>')
+    doc = json.dumps({" padded ": "v1", "tab\t": "v2", "ok": "v3", "a\nb": "v4"})
+    from winnow import timeparse
+
+    for kind, value, op, n in (("xml", xml, "xml_field", 7), ("json", doc, "json_field", 4)):
+        rows = sp.discover_paths([value], kind)
+        assert len(rows) == n
+        for row in rows:
+            params = timeparse.validate_params(op, {"path": row["path"]})
+            assert timeparse.OPERATIONS[op]["parse"](value, params, {}) == row["sample"], row["path"]
+    names = {r["sample"]: r["suggested_name"] for r in sp.discover_paths([xml], "xml")}
+    assert names["x1"] == "O'Brien" and names["x6"] == "both'\"" and names["x7"] == "a]@b"
 
 
 def test_registered_ops_are_hidden_from_timestamp_detection():
@@ -233,3 +292,23 @@ def test_present_but_always_empty_fields_are_distinguished():
     assert found["E/EventID"]["nonempty"] == 3
     # Fields with something in them sort first.
     assert sp.discover_paths(rows, "xml")[-1]["path"] == "E/TimeCreated"
+
+
+def test_a_key_holding_a_lone_surrogate_gets_a_path_that_survives_utf8():
+    """'"\\ud800x"' is a legal JSON key that decodes to a string with no
+    UTF-8 form. Discovery put it into the path, the sample and the
+    suggested name as-is, and none of the three can cross the route (its
+    JSON body is UTF-8) or be stored. The path spells it as a \\uXXXX
+    escape inside bracket quotes, which reads back as the same key."""
+    doc = '{"\\ud800x": {"v": "found"}, "plain": "\\udc80"}'
+    rows = sp.discover_paths([doc], "json")
+    for r in rows:
+        for k in ("path", "sample", "suggested_name"):
+            r[k].encode("utf-8")
+        assert sp._extract_json(doc, {"path": r["path"]}, {}) is not None, r["path"]
+    found = {r["path"]: r for r in rows}
+    assert found['$["\\ud800x"].v']["sample"] == "found"
+    assert sp.parse_json_path('$["\\ud800x"].v') == ["\ud800x", "v"]
+    # A literal backslash-u in a key is still a backslash and a u.
+    for segs in (["\ud800x", "v"], ["a\\ub"], ["a\\ud800"]):
+        assert sp.parse_json_path(sp.format_json_path(segs)) == segs

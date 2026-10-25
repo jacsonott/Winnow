@@ -1,25 +1,29 @@
-/* The Settings modal — appearance, keyboard shortcuts, timestamps, tags.
+/* The Settings modal — appearance, grid & layout, keyboard shortcuts,
+   timestamps, tags and the rest, as two panes (settingsPanes).
 
    Split out of the former single static/app.js — see CLAUDE.md. */
-import { autofitMaxWidth } from './columns.js';
+import { autofitMaxWidth, fillsGrid, renderHead, renderHeadResized } from './columns.js';
 import { $, AUTOFIT_MAX_W_DEFAULT, ROW_H, ROW_H_COMFORTABLE, ROW_H_COMPACT, api, debounce, el, post, setRowH, toast } from './core.js';
 import { labeledRow } from './derived.js';
-import { VALUE_FILTER_AUTO_MAX } from './filters.js';
-import { headH, rScroll, render, spacerPx, vScroll } from './grid.js';
-import { drawRail, rebuildGroupPrefix, renderGrouped } from './grouping.js';
-import { ACTION_LABELS, defaultKeymap, findKeyConflict, keySpecFromEvent, saveKeymap } from './keymap.js';
-import { buildPluginsPanel } from './plugins.js';
+import { VALUE_FILTER_AUTO_MAX, syncSearchKeyCopy } from './filters.js';
+import { headH, rScroll, render, syncSpacer, vScroll } from './grid.js';
+import { drawRail, rebuildGroupPrefix, renderGrouped, writeClipboardText } from './grouping.js';
+import { syncHistogramPanel } from './histogram.js';
+import { shutdownWinnow } from './home.js';
+import { ACTION_LABELS, FIXED_KEYS, defaultKeymap, findKeyConflict, keyLabel, keySpecFromEvent, saveKeymap } from './keymap.js';
+import { buildPluginsPanel } from './pluginmanager.js';
+import { listBundles, openPluginBundlesModal } from './bundles.js';
 import { buildAssocPanel } from './assoc.js';
 import { buildEnvPanel } from './userenv.js';
 import { loadCaseVariables, loadSavedFilters } from './savedfilters.js';
-import { applyPageTabsSize, renderPageTabs } from './sources.js';
-import { lastSplash, reducedMotion } from './splash.js';
-import { S, gridRowCount } from './state.js';
-import { openSavedFiltersModal, updateFiltersButton } from './timeframe.js';
-import { TS_FORMATS } from './tsformat.js';
-import { markModalAction, confirmDialog, modal, promptDialog } from './ui.js';
-
- // reads S.keymap.toggleTimeRange for its tooltip — must come after the line above
+import { applyPageTabsSize, renderPageTabs, syncTabOverflow } from './sources.js';
+import { lastSplash, osSkipsSplash, reducedMotion, remoteSkipsSplash } from './splash.js';
+import { S, gridRowCount, dashboardCreatorMode } from './state.js';
+import { keepingFocus } from './tables.js';
+import { buildDefaultTagsEditor } from './tags.js';
+import { openSavedFiltersModal, setTimeframeAcrossTables, timeframeAcrossTables, updateFiltersButton, updateTimeRangeButton } from './timeframe.js';
+import { TS_FORMATS, formatTimestamp } from './tsformat.js';
+import { markModalAction, confirmDialog, dropdownMenu, modal, promptDialog, sectionPanes } from './ui.js';
 
 /* ------------------------------------------------------------ appearance */
 
@@ -37,14 +41,31 @@ export const APPEARANCE_KEY = 'winnow.appearance';
 export const STYLES = {
   // Harvest first because it is the default — the list is a menu, and the
   // one you are on should be the one you read first.
-  harvest:   { label: 'Harvest',   desc: 'Grain and chaff — wheat gold on near-black, parchment in light.', defaultAccent: '#d9a441', preview: ['#0a0c0b', '#d9a441'] },
-  panel:     { label: 'Panel',     desc: 'The older look — cooler greys, amber accent.', defaultAccent: '#d2a04a', preview: ['#13161a', '#d2a04a'] },
-  phosphor:  { label: 'Phosphor',  desc: 'Retro CRT terminal — glow, monospace chrome.', defaultAccent: '#39e881', preview: ['#060907', '#39e881'] },
-  blueprint: { label: 'Blueprint', desc: 'Bold borders, hard offset shadows.', defaultAccent: '#ff6a1a', preview: ['#0c0d10', '#ff6a1a'] },
-  studio:    { label: 'Studio',    desc: 'Rounded, soft shadows, calm motion.', defaultAccent: '#7c6cf6', preview: ['#111219', '#7c6cf6'] },
+  harvest:   { label: 'Harvest',   desc: 'Grain and chaff — wheat gold on deep green-black, parchment in light.', stripes: true, defaultAccent: '#cfa057', preview: ['#0f1211', '#cfa057'] },
+  panel:     { label: 'Panel',     desc: 'The older look — cooler greys, amber accent.', stripes: true, defaultAccent: '#d2a04a', preview: ['#13161a', '#d2a04a'] },
+  phosphor:  { label: 'Phosphor',  desc: 'Retro CRT terminal — glow, monospace chrome.', stripes: true, defaultAccent: '#39e881', preview: ['#060907', '#39e881'] },
+  blueprint: { label: 'Blueprint', desc: 'Bold borders, hard offset shadows.', stripes: true, defaultAccent: '#ff6a1a', preview: ['#0c0d10', '#ff6a1a'] },
+  studio:    { label: 'Studio',    desc: 'Rounded, soft shadows, calm motion.', stripes: true, defaultAccent: '#7c6cf6', preview: ['#111219', '#7c6cf6'] },
+  // Dark first in the preview swatch, because this one's dark half is the
+  // point of it — see the comment on the CSS block.
+  jenna:     { label: "Jenna's theme", desc: 'Timeline Explorer in its Office 2016 Black skin — flat, square, Segoe UI, amber on cool grey.', stripes: false, defaultAccent: '#d7a35e', preview: ['#1e1e1e', '#d7a35e'] },
 };
 
 export const ACCENT_PRESETS = ['#d2a04a', '#39e881', '#ff6a1a', '#7c6cf6', '#4a90d9', '#d9534f'];
+
+/* Which of the two filter surfaces a fresh install gets: 'row' (a box under
+   every column, always) or 'bar' (the filter bar — only the filters actually
+   set, as chips). THIS is the line to change to flip the default; nothing
+   else reads a hardcoded side of it.
+
+   'row' because a default is a bet on what the hands already know, and
+   typing straight into the box under a column header is the Timeline
+   Explorer reflex. The bar stays a setting rather than a removal because
+   the row was measured empty on a real seven-table case — 27 boxes on
+   screen with 0 in use, the heaviest thing in the viewport after the data
+   — and that case is the one the bar reclaims. Neither surface is a
+   casualty; which one ships is this line and nothing else. */
+export const FILTER_UI_DEFAULT = 'row';
 
 export function defaultAppearance() {
   return {
@@ -57,6 +78,32 @@ export function defaultAppearance() {
     // this therefore reads as on, which is what a new feature should do for
     // someone who has never seen the switch.
     splash: true,
+    // OFF by default: the strip is compact enough now (mono, 11px, no
+    // rules between the pages — see .page-tabs .tab-sql) that it costs the
+    // table tabs about 60px, and four labelled pages that are always there
+    // beat one button that is not. Collapsed, that button is labelled with
+    // whichever page is up, which is what let the Watchlist's hit count
+    // end up reading as SQL's. The preference stays, for a case carrying
+    // enough plugin tabs that the strip really is the problem it was
+    // added for — there it collapses, and the count moves into the menu
+    // with the page that owns it.
+    pagesMenu: false,
+    // Off unless turned on: a finished import updates the tab strip and
+    // leaves the analyst where they are (see jobs.js). On, the first table
+    // of an import batch to finish opens; the rest land quietly.
+    openNewTables: false,
+    // On unless turned off: the timeframe filter is one case-wide range that
+    // follows the analyst between tables. Off, each table keeps its own —
+    // see timeframeAcrossTables in timeframe.js.
+    timeframeAcrossTables: true,
+    // 'bar' | 'row' — see FILTER_UI_DEFAULT. An install that predates this
+    // has no key and therefore gets the default, like every other switch here.
+    filterUi: FILTER_UI_DEFAULT,
+    // Per-skin row-striping overrides, keyed by skin name — see stripesOn().
+    // Only the skins the analyst has actually set appear here; the rest read
+    // their own default out of STYLES, so the empty object every existing
+    // install effectively has changes nothing for anyone.
+    stripes: {},
   };
 }
 
@@ -105,6 +152,7 @@ export function syncAppearanceFromServer() {
   if (hasLocal) return;
   S.appearance = { ...S.appearance, ...remote };
   document.documentElement.setAttribute('data-style', S.appearance.style);
+  paintStripes();   // before paintTheme, whose announce carries the value
   paintTheme();
   paintAccent();
   paintDensity();
@@ -132,7 +180,7 @@ export function paintRemote() {
    where the default smooth scrolling feels terrible and nothing hints
    that a fix exists three menus deep. Asked exactly once per machine —
    the answer (either way) is remembered, and the setting stays in
-   Settings → Appearance. */
+   Settings → Remote session. */
 export async function maybeOfferRemoteMode() {
   const SEEN = 'winnow.remotePrompt';
   // The machine may already have answered (the setting is server-side and
@@ -160,7 +208,7 @@ export async function maybeOfferRemoteMode() {
     'First run on this machine — are you using Winnow through RDP or another '
     + 'remote desktop? Remote session mode scrolls by whole rows and stops '
     + 'animations, which remote displays handle far better. '
-    + '(Change any time in Settings → Appearance.)',
+    + '(Change any time in Settings → Remote session.)',
     { okLabel: 'Enable remote mode', cancelLabel: 'No, local session' });
   if (yes) {
     S.appearance.remoteSession = true;
@@ -185,7 +233,8 @@ export function paintTheme() {
    winnow.onAppearanceChange. */
 function announceAppearance() {
   document.dispatchEvent(new CustomEvent('winnow:appearance', {
-    detail: { style: S.appearance.style, themeMode: S.appearance.themeMode, accent: S.appearance.accent },
+    detail: { style: S.appearance.style, themeMode: S.appearance.themeMode,
+              accent: S.appearance.accent, stripes: stripesOn() },
   }));
 }
 
@@ -217,6 +266,9 @@ export function paintAccent() {
 export function applyStyle(styleName) {
   S.appearance.style = styleName;
   document.documentElement.setAttribute('data-style', styleName);
+  // The skin changed, so the effective striping may have too: a different
+  // default, or an override this skin carries and the last one did not.
+  paintStripes();
   if (!S.appearance.accentCustomized) applyAccent(STYLES[styleName].defaultAccent, false);
   else announceAppearance();   // applyAccent announces on the other branch
   saveAppearance();
@@ -225,6 +277,39 @@ export function applyStyle(styleName) {
 export function applyThemeMode(mode) {
   S.appearance.themeMode = mode;
   paintTheme();
+  saveAppearance();
+}
+
+/* Striped rows, remembered PER SKIN.
+
+   Per skin rather than one switch for the whole app because the skins
+   disagree about it by construction: Jenna's theme reconstructs a grid
+   with no zebra at all, while the others are drawn around having one. A
+   single global value would be wrong for half the list the moment it was
+   set, and would have the analyst re-toggling it on every skin change.
+
+   S.appearance.stripes holds ONLY the skins that have been overridden.
+   Anything absent reads its default from STYLES, which is what lets a
+   skin's shipped default change later without quietly overwriting a
+   deliberate choice someone already made. */
+export function stripesOn(style = S.appearance.style) {
+  const set = S.appearance.stripes || {};
+  if (Object.prototype.hasOwnProperty.call(set, style)) return !!set[style];
+  const meta = STYLES[style];
+  // An unknown skin — a name saved by a newer build, read after a
+  // downgrade — gets the striping every skin but Jenna has, which is also
+  // what the grid did before any of this was a setting.
+  return meta ? !!meta.stripes : true;
+}
+
+export function paintStripes() {
+  document.documentElement.setAttribute('data-stripes', stripesOn() ? 'on' : 'off');
+}
+
+export function setStripes(on) {
+  S.appearance.stripes = { ...(S.appearance.stripes || {}), [S.appearance.style]: !!on };
+  paintStripes();
+  announceAppearance();
   saveAppearance();
 }
 
@@ -264,9 +349,9 @@ export function applyDensity(density) {
   if (!S.view) return;
   if (S.groupByCols.length) {
     rebuildGroupPrefix();
-    $('spacerY').style.height = spacerPx(S.groupTotalRows) + 'px';
+    syncSpacer(S.groupTotalRows);
   } else {
-    $('spacerY').style.height = spacerPx(S.view.row_count) + 'px';
+    syncSpacer(S.view.row_count);
   }
   body.scrollTop = rScroll(body, total(), topRow * ROW_H, headH());
   S.groupByCols.length ? renderGrouped() : render();
@@ -275,7 +360,13 @@ export function applyDensity(density) {
 
 export function initAppearance() {
   S.appearance = loadAppearance();
+  // The server marks <html> when the machine is in Remote session mode
+  // (server.py index()), so the launch animation, which decides before
+  // loadAppSettings has answered, sees the machine's setting rather than
+  // the default. paintRemote() below would otherwise take the mark off.
+  if (document.documentElement.classList.contains('remote')) S.appearance.remoteSession = true;
   document.documentElement.setAttribute('data-style', S.appearance.style);
+  paintStripes();   // before paintTheme, whose announce carries the value
   paintTheme();
   paintAccent();
   paintDensity();
@@ -287,19 +378,11 @@ export function initAppearance() {
   }
 }
 
-/* One collapsible section of the Settings modal. Returns the node the
-   section's own code appends into — sections are otherwise written exactly
-   as they were when they all ran into the modal body directly, which is
-   also what keeps a section that fills itself later (buildPluginsPanel's
-   async listing) landing inside its own section rather than at the end of
-   the modal.
-
-   Collapsed on open, every time: Settings had grown to seven sections and
-   ~900px of scroll, so the thing you came for was rarely the thing you
-   could see. Expansion state is deliberately not remembered — "open where
-   I left it" and "collapsed by default" are different promises, and this
-   one is the asked-for one. Several can be open at once; opening one
-   doesn't close another.
+/* One collapsible section: a heading button over a body. Settings itself
+   used to be a column of these and is two panes now (settingsPanes,
+   below); the profile builder still lays its Plugins / Dashboards /
+   Variables out this way, open on arrival. Returns the node the section's
+   own code appends into.
 
    The header is a real <button> rather than a styled h4 so it's tabbable,
    keyboard-activatable and announces its aria-expanded state without any
@@ -320,6 +403,142 @@ export function settingsSection(parent, title, { open = false } = {}) {
   wrap.append(head, body);
   parent.append(wrap);
   return body;
+}
+
+/* The section Settings opens on: the last one shown in this browser. A
+   per-viewer convenience like the sidebar's width, so localStorage and
+   nothing more — a blocked or empty store just opens the first section. */
+export const SETTINGS_SECTION_KEY = 'winnow.settingsSection';
+
+export function rememberedSettingsSection() {
+  try { return localStorage.getItem(SETTINGS_SECTION_KEY) || ''; } catch { return ''; }
+}
+
+export function rememberSettingsSection(id) {
+  try { localStorage.setItem(SETTINGS_SECTION_KEY, id); } catch { /* private mode: opens on the first */ }
+}
+
+/* Settings as two panes, the way Plugins and Profiles are: every section
+   listed on the left, the chosen one's contents on the right, one at a
+   time. It was thirteen collapsible sections in one column, where only one
+   was readable at once anyway and the last few were a long scroll down.
+
+   `add(id, title)` returns the node a section's own code appends into, so
+   each section is written exactly as it was when it ran into the modal
+   body — and every section is BUILT on open, only hidden until chosen.
+   That keeps a section that fills itself later (the plugins count, the
+   update version, the associations list) landing in its own pane, and it
+   means switching sections is a `hidden` flip rather than a rebuild, so a
+   pane keeps its scroll position and anything half-typed in it.
+
+   The list is a vertical tablist: one tab stop (the chosen section), the
+   arrow keys and Home/End move along it and show what they land on, and
+   aria-selected marks the chosen one. `show` remembers what it showed,
+   which is what makes the next opening land there. */
+export function settingsPanes(parent) {
+  const wrap = el('div', 'settings-panes');
+  const nav = el('div', 'settings-nav');
+  nav.setAttribute('role', 'tablist');
+  nav.setAttribute('aria-orientation', 'vertical');
+  nav.setAttribute('aria-label', 'Settings sections');
+  wrap.append(nav);
+  parent.append(wrap);
+  const sections = [];
+
+  function show(id, { focus = false } = {}) {
+    const target = sections.find((s) => s.id === id) || sections[0];
+    if (!target) return;
+    for (const s of sections) {
+      const on = s === target;
+      s.item.setAttribute('aria-selected', String(on));
+      s.item.tabIndex = on ? 0 : -1;
+      s.pane.hidden = !on;
+    }
+    rememberSettingsSection(target.id);
+    if (focus) target.item.focus();
+  }
+
+  function add(id, title) {
+    const item = el('button', 'settings-nav-item', title);
+    item.type = 'button';
+    item.id = `settingsTab-${id}`;
+    item.dataset.section = id;
+    item.setAttribute('role', 'tab');
+    item.setAttribute('aria-controls', `settingsPane-${id}`);
+    item.onclick = () => show(id);
+    const pane = el('div', 'settings-pane');
+    pane.id = `settingsPane-${id}`;
+    pane.dataset.section = id;
+    pane.setAttribute('role', 'tabpanel');
+    pane.setAttribute('aria-labelledby', item.id);
+    pane.hidden = true;
+    const body = el('div', 'settings-pane-body');
+    pane.append(el('h3', 'settings-pane-title', title), body);
+    nav.append(item);
+    wrap.append(pane);
+    sections.push({ id, item, pane });
+    return body;
+  }
+
+  nav.addEventListener('keydown', (e) => {
+    const at = sections.findIndex((s) => s.item === document.activeElement);
+    if (at < 0 || e.altKey || e.ctrlKey || e.metaKey) return;
+    const last = sections.length - 1;
+    let to;
+    if (e.key === 'ArrowDown') to = at === last ? 0 : at + 1;
+    else if (e.key === 'ArrowUp') to = at === 0 ? last : at - 1;
+    else if (e.key === 'Home') to = 0;
+    else if (e.key === 'End') to = last;
+    else return;
+    e.preventDefault();
+    show(sections[to].id, { focus: true });
+  });
+
+  return { add, show };
+}
+
+/* Settings → Profiles: a count and the way in. The manager was reachable
+   only by its hotkey, which is fine once you know it exists and no help
+   at all before then — and Settings is where someone looks for "what
+   else is there". One line and a button, the same shape the Plugins
+   section takes, because the two answer the same kind of question and a
+   second full panel in this modal is what the plugins one was moved out
+   to avoid. */
+export function buildProfilesPanel(b) {
+  const box = el('div', 'settings-line');
+  b.append(box);
+
+  // `null` until the listing lands: an unloaded panel that says
+  // "0 profiles" for a moment is a wrong answer, and there are always at
+  // least the shipped two.
+  function paint(list) {
+    box.replaceChildren();
+    const shipped = list ? list.filter((x) => x.shipped).length : 0;
+    const mine = list ? list.length - shipped : 0;
+    const line = el('span', 'settings-line-text', !list ? ''
+      : `${list.length} profile${list.length === 1 ? '' : 's'}`
+        + (list.length ? ` · ${shipped} shipped, ${mine} your own` : ''));
+    const open = el('button', 'btn', 'Open profiles…');
+    // Came from Settings, goes back to Settings — to this section — the
+    // modal is shared, so without this the × drops the analyst on the grid.
+    open.onclick = () => openPluginBundlesModal({ returnTo: () => openSettings('profiles') });
+    box.append(line, open);
+    box.append(el('p', 'fb-help',
+      'A profile is a kind of case: the plugins it needs, the boards it opens with, a starter '
+      + 'watchlist and the values the case must carry. Applying one changes the open case, and '
+      + `says what it will change first. ${keyHint('openPluginBundles')}`));
+  }
+
+  paint(null);
+  listBundles().then(paint).catch(() => paint(null));
+}
+
+/* The key a rebindable action is on right now, as a sentence fragment —
+   read from S.keymap rather than written out, so a rebinding in the panel
+   above does not leave prose naming a key that no longer works. */
+function keyHint(action) {
+  const keys = (S.keymap && S.keymap[action]) || [];
+  return keys.length ? `Also on ${keys.join(' / ')}.` : '';
 }
 
 /* One skin as a card. Used twice: as the read-only "this is what you're
@@ -361,120 +580,232 @@ export function openSkinPicker(onPicked) {
     b.append(grid);
     const acts = el('div', 'row-actions');
     const done = el('button', 'btn', 'Done');
-    done.onclick = () => openSettings();   // back where they came from
+    done.onclick = () => openSettings('appearance');   // back where they came from
     acts.append(done);
     b.append(acts);
-  }, { wide: true });
+  }, { wide: true, tall: true });   // tall like Settings, so the card doesn't jump to centre and back
 }
 
 /* Settings that belong to the OPEN CASE rather than to this machine —
    they live in the case file and travel with it when it is handed to
    another analyst. Kept out of the main Settings modal because that one
    is reachable from the home screen, where there is no case for a "this
-   case" control to describe. */
-export function openCaseSettings() {
+   case" control to describe.
+
+   In the table menu's frame: the three settings down a side list, each
+   with what it is set to under its name, so the dialog answers "what has
+   this case got set?" before anything is opened. */
+export function openCaseSettings(section = 'timestamps') {
   markModalAction('openCaseSettings');
   modal('Case settings', (b) => {
-    b.append(el('p', null,
-      'These are stored in the case file, so they follow it to whoever you hand it to — '
-      + 'unlike Settings, which is about this machine.'));
-
-    b.append(el('div', 'settings-sub-label', 'Timestamps'));
-    b.append(el('p', 'fb-help',
-      'How datetime columns are displayed in this case. Presentation only — the stored and '
-      + 'exported value is always the text the file came with. A format picked on an individual '
-      + "column (right-click its header) beats this, which beats the machine-wide default."));
-
-    const sel = el('select');
-    const inherit = el('option', null, 'Use the machine-wide default');
-    inherit.value = '';
-    sel.append(inherit);
-    for (const [key, label] of Object.entries(TS_FORMATS)) {
-      const o = el('option', null, label);
-      o.value = key;
-      sel.append(o);
-    }
-    sel.value = S.caseSettings.ts_format || '';
-    sel.onchange = async () => {
-      try {
-        S.caseSettings = await post('/api/case_settings', { ts_format: sel.value });
-        render();
-        toast('Case timestamp format saved');
-      } catch (e) {
-        toast('Could not save: ' + e.message, 5000);
-      }
-    };
-    b.append(labeledRow('Timestamp format', sel));
-
-    b.append(el('div', 'settings-sub-label', 'Variables'));
-    b.append(el('p', 'fb-help',
-      'Named values this case carries for the plugins and people working it — the engagement '
-      + 'name, an API base URL, a link to the scoping document. Plugins read them as '
-      + 'req.variables / winnow.state.variables. Case data, so they travel with the file: '
-      + 'never put a token or password here (Settings → Environment is for those).'));
-    const varsBox = el('div', 'case-vars');
-    b.append(varsBox);
-    renderCaseVariables(varsBox);
+    const frame = sectionPanes({
+      sections: [
+        { id: 'timestamps', group: 'Saved in the case file', title: 'Timestamps', build: buildCaseTsPane,
+          hint: () => (S.caseSettings.ts_format ? TS_FORMATS[S.caseSettings.ts_format] : 'Machine default') },
+        { id: 'dashboards', group: 'Saved in the case file', title: 'Dashboards', build: buildCaseDashPane,
+          hint: () => (dashboardCreatorMode() ? 'Creator mode on' : 'Creator mode off') },
+        { id: 'variables', group: 'Saved in the case file', title: 'Variables', build: buildCaseVarsPane,
+          hint: () => {
+            const list = S.caseVariables || [];
+            const missing = list.filter((v) => v.required && !v.value).length;
+            return list.length ? `${list.length} set` + (missing ? ` · ${missing} missing` : '') : 'None yet';
+          } },
+      ],
+      label: 'Case settings sections', cls: 'list-panes case-settings', paneCls: 'list-pane case-settings-pane', changedEvent: 'casesettings:changed',
+    });
+    b.append(frame.panes);
+    const foot = el('div', 'table-menu-foot table-menu-strip');
+    const machine = el('button', 'btn ghost table-menu-close', 'Settings for this machine…');
+    machine.title = 'Skins, keys, the default timestamp format: kept on this machine, not in the case';
+    machine.onclick = () => openSettings();
+    foot.append(machine);
+    b.append(foot);
+    frame.show(section);
     // Plugins can set variables behind the UI's back; re-fetch on open.
-    loadCaseVariables().then(() => renderCaseVariables(varsBox)).catch(() => {});
-  });
+    loadCaseVariables().then(() => frame.update()).catch(() => {});
+  }, { wide: true, tall: true, focus: (b) => b.querySelector('.side-rail-item[aria-selected="true"]') });
 }
 
-/* Case settings → Variables: one row per variable (name · value · what
-   it's for), required ones flagged while empty, plus an add row. Saves
-   on change through the same route plugins use. */
-export function renderCaseVariables(box) {
-  // The add row is built once per box and never detached — a repaint
-  // landing mid-typing (the re-fetch on open) must not steal focus or
-  // text from it. Only the listed rows are replaced.
-  if (!box._addRow) box._addRow = buildCaseVariableAddRow(box);
-  if (!box._addRow.isConnected) box.append(box._addRow);
-  for (const c of [...box.children]) if (c !== box._addRow) c.remove();
-  const list = S.caseVariables || [];
-  const rows = [];
-  if (!list.length) rows.push(el('div', 'note-status', 'No variables yet.'));
-  for (const v of list) {
-    const row = el('div', 'case-var-row' + (v.required && !v.value ? ' missing' : ''));
-    const name = el('span', 'case-var-name', v.name);
-    name.title = v.name;
-    const val = el('input', 'case-var-value');
-    val.value = v.value || '';
-    val.placeholder = v.required ? 'required' : 'value';
-    val.onchange = async () => {
-      try { await post('/api/case/variables', { name: v.name, value: val.value }); await loadCaseVariables(); renderCaseVariables(box); }
-      catch (e) { toast('Could not save: ' + e.message, 5000); }
-    };
-    const desc = el('span', 'case-var-desc', (v.required ? 'required · ' : '') + (v.description || ''));
-    const del = el('button', 'btn ghost case-var-del', '✕');
-    del.title = 'Remove this variable';
-    del.onclick = async () => {
-      try { await api(`/api/case/variables/${encodeURIComponent(v.name)}`, { method: 'DELETE' }); await loadCaseVariables(); renderCaseVariables(box); }
-      catch (e) { toast('Could not remove: ' + e.message, 5000); }
-    };
-    row.append(name, val, desc, del);
-    rows.push(row);
+const caseChanged = (pane) => pane.dispatchEvent(new CustomEvent('casesettings:changed', { bubbles: true }));
+
+/* Timestamps: every format as a row with what a timestamp looks like in
+   it, ticked where the case is — rather than a dropdown whose options say
+   only a pattern. */
+function buildCaseTsPane(pane) {
+  const sample = '2026-03-14 00:16:17.482391';
+  const notes = el('ul', 'mb-notes');
+  notes.append(el('li', 'mb-note', 'Display only. A format set on a column (right-click its header) beats this.'));
+  const box = el('div', 'side-preview tm-cols-box tables-box cs-ts-box');
+  const head = el('div', 'tables-head cs-ts-head');
+  head.append(el('span'), el('span', 'tables-name-h', 'Format'), el('span', null, 'Shows as'));
+  const scroller = el('div', 'side-preview-rows');
+  const list = el('div', 'tables-list');
+  list.setAttribute('role', 'radiogroup');
+  list.setAttribute('aria-label', 'Timestamp format');
+  scroller.append(list);
+  box.append(head, scroller);
+  pane.append(notes, box);
+
+  async function pick(value) {
+    try {
+      S.caseSettings = await post('/api/case_settings', { ts_format: value });
+      render();
+      toast('Case timestamp format saved');
+    } catch (e) { toast('Could not save: ' + e.message, 5000); }
+    paint();
+    caseChanged(pane);
   }
-  for (const r of rows) box.insertBefore(r, box._addRow);
+  function row(value, label, sub) {
+    const on = (S.caseSettings.ts_format || '') === value;
+    const r = el('label', 'tables-row cs-ts-row' + (on ? ' open' : ''));
+    r.dataset.id = value || 'default';
+    const radio = el('input');
+    radio.type = 'radio';
+    radio.name = 'caseTsFormat';
+    radio.dataset.role = 'pick';
+    radio.checked = on;
+    radio.onchange = () => pick(value);
+    const cell = el('span', 'tables-name-cell');
+    cell.append(el('span', 'tables-name static', label));
+    if (sub) cell.append(el('span', 'tables-sub', sub));
+    const machineFmt = S.appSettings.default_ts_format || 'iso';
+    r.append(radio, cell, el('span', 'cs-ts-sample', formatTimestamp(sample, value || machineFmt)));
+    return r;
+  }
+  function paint() {
+    const machineFmt = S.appSettings.default_ts_format || 'iso';
+    keepingFocus(list, () => list.replaceChildren(
+      row('', 'Machine default', `from Settings · ${TS_FORMATS[machineFmt]}`),
+      ...Object.entries(TS_FORMATS).map(([key, label]) => row(key, label))));
+  }
+  paint();
+  return { update: paint };
 }
 
-function buildCaseVariableAddRow(box) {
-  const add = el('div', 'case-var-row case-var-add');
-  const nameIn = el('input', 'case-var-name-in');
-  nameIn.placeholder = 'name (e.g. engagement)';
-  const valIn = el('input', 'case-var-value');
+/* Dashboards: the one switch, with what it changes said beside it. */
+function buildCaseDashPane(pane) {
+  const field = el('label', 'cs-check');
+  const box = el('input');
+  box.type = 'checkbox';
+  box.id = 'caseDashboardCreator';
+  box.checked = dashboardCreatorMode();
+  box.onchange = async () => {
+    try {
+      S.caseSettings = await post('/api/case_settings', { dashboard_creator: box.checked });
+      toast(box.checked ? 'Dashboard creator mode on — "Add to dashboard" is back in the menus'
+        : 'Dashboard creator mode off');
+    } catch (e) {
+      box.checked = !box.checked;
+      toast('Could not save: ' + e.message, 5000);
+    }
+    caseChanged(pane);
+  };
+  const text = el('span', 'cs-check-text');
+  text.append(el('b', null, 'Dashboard creator mode'),
+    el('small', null, 'Shows "Add to dashboard" in column-header menus, row menus and the Filters ▾ button.'));
+  field.append(box, text);
+  const notes = el('ul', 'mb-notes');
+  notes.append(el('li', 'mb-note', 'Off, those menus stay short. Boards themselves are always there, under Dashboards.'));
+  pane.append(field, notes);
+}
+
+/* Variables: the case's named values as a list, each value edited in
+   place and saved on change; the add row is the list's last line. */
+function buildCaseVarsPane(pane) {
+  const notes = el('ul', 'mb-notes');
+  notes.append(el('li', 'mb-note', 'Named values plugins and people working this case read: the engagement name, an API base URL. '
+    + 'Plugins see them as req.variables and winnow.state.variables.'),
+  el('li', 'mb-note warn', 'They travel with the case file: never put a token or password here. Settings → Environment is for those.'));
+  const box = el('div', 'side-preview tm-cols-box tables-box cs-vars-box');
+  const head = el('div', 'tables-head cs-vars-head');
+  head.append(el('span', 'tables-name-h', 'Name'), el('span', null, 'Value'), el('span', null, 'For'), el('span'));
+  const scroller = el('div', 'side-preview-rows');
+  const list = el('div', 'tables-list');
+  scroller.append(list);
+  // Built once and never repainted: a re-fetch landing mid-typing must
+  // not steal focus or text from it.
+  const add = el('div', 'side-preview-foot cs-vars-add');
+  const nameIn = el('input', 'cs-var-in');
+  nameIn.placeholder = 'New variable name';
+  nameIn.setAttribute('aria-label', 'New variable name');
+  const valIn = el('input', 'cs-var-in');
   valIn.placeholder = 'value';
-  const addBtn = el('button', 'btn ghost', 'Add');
+  valIn.setAttribute('aria-label', 'New variable value');
+  const addBtn = el('button', 'btn ghost mb-small', 'Add');
   addBtn.onclick = async () => {
-    if (!nameIn.value.trim()) { toast('Name the variable'); return; }
+    if (!nameIn.value.trim()) { toast('Name the variable'); nameIn.focus(); return; }
     try {
       await post('/api/case/variables', { name: nameIn.value.trim(), value: valIn.value });
       nameIn.value = ''; valIn.value = '';
       await loadCaseVariables();
-      renderCaseVariables(box);
+      paint();
+      caseChanged(pane);
     } catch (e) { toast('Could not add: ' + e.message, 5000); }
   };
-  add.append(nameIn, valIn, el('span', 'case-var-desc', ''), addBtn);
-  return add;
+  for (const inp of [nameIn, valIn]) inp.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); addBtn.click(); } };
+  add.append(nameIn, valIn, addBtn);
+  box.append(head, scroller, add);
+  pane.append(notes, box);
+
+  function row(v) {
+    const r = el('div', 'tables-row cs-var-row' + (v.required && !v.value ? ' missing' : ''));
+    r.dataset.id = v.name;
+    const name = el('span', 'tables-name static', v.name);
+    name.title = v.name;
+    const val = el('input', 'cs-var-in');
+    val.dataset.role = 'value';
+    val.value = v.value || '';
+    val.placeholder = v.required ? 'required' : 'value';
+    val.setAttribute('aria-label', `Value of ${v.name}`);
+    val.onchange = async () => {
+      try { await post('/api/case/variables', { name: v.name, value: val.value }); await loadCaseVariables(); paint(); caseChanged(pane); }
+      catch (e) { toast('Could not save: ' + e.message, 5000); }
+    };
+    const desc = el('span', 'tables-sub', (v.required ? 'required · ' : '') + (v.description || ''));
+    desc.title = desc.textContent;
+    const more = el('button', 'btn ghost row-more tables-more', '⋯');
+    more.dataset.role = 'more';
+    more.setAttribute('aria-label', `Actions for ${v.name}`);
+    more.setAttribute('aria-haspopup', 'menu');
+    more.onclick = () => dropdownMenu(more, [
+      { label: 'Copy value', disabled: !v.value, onclick: () => writeClipboardText(Promise.resolve(v.value || ''), `Copied ${v.name}`) },
+      '-',
+      { label: 'Remove', onclick: async () => {
+        try { await api(`/api/case/variables/${encodeURIComponent(v.name)}`, { method: 'DELETE' }); await loadCaseVariables(); paint(); caseChanged(pane); }
+        catch (e) { toast('Could not remove: ' + e.message, 5000); }
+      } },
+    ]);
+    r.append(name, val, desc, more);
+    return r;
+  }
+  function paint() {
+    const vars = S.caseVariables || [];
+    keepingFocus(list, () => list.replaceChildren(...(vars.length ? vars.map(row)
+      : [el('p', 'fb-help tables-empty', 'No variables yet. Add one on the line below, or apply a profile that asks for some.')])));
+  }
+  paint();
+  return { update: paint };
+}
+
+/* The values prompt's fields, one per variable definition: its label
+   (starred when required), what it is for, and a box holding its default.
+   Its own function so the profile builder can show the prompt as it will
+   look (an inert copy) without drawing a look-alike that could drift. */
+export function variablePromptFields(defs) {
+  const inputs = new Map();
+  const fields = defs.map((d) => {
+    const inp = el('input', 'confirm-input case-var-prompt');
+    inp.dataset.var = d.name;
+    inp.placeholder = d.required ? 'required' : 'optional';
+    inp.value = d.default || '';
+    const field = el('div', 'dlg-field');
+    field.append(el('label', null, (d.label || d.name) + (d.required ? ' *' : '')));
+    if (d.description) field.append(el('small', null, d.description));
+    field.append(inp);
+    inputs.set(d.name, inp);
+    return field;
+  });
+  return { fields, inputs };
 }
 
 /* A profile's required variables, asked for in one dialog — used after
@@ -484,18 +815,10 @@ export function promptForVariables(defs, { title = 'This profile needs a few val
   return new Promise((resolve) => {
     modal(title, (b) => {
       b.append(el('p', 'fb-help', 'Stored in the case file for plugins to use. Not for tokens or passwords.'));
-      const inputs = new Map();
-      for (const d of defs) {
-        const inp = el('input', 'confirm-input case-var-prompt');
-        inp.dataset.var = d.name;
-        inp.placeholder = d.required ? 'required' : 'optional';
-        inp.value = d.default || '';
-        b.append(el('label', null, (d.label || d.name) + (d.required ? ' *' : '')), inp);
-        if (d.description) b.append(el('p', 'fb-help', d.description));
-        inputs.set(d.name, inp);
-      }
+      const { fields, inputs } = variablePromptFields(defs);
+      b.append(...fields);
       const acts = el('div', 'row-actions');
-      const save = el('button', 'btn', 'Save');
+      const save = el('button', 'btn primary', 'Save');
       save.onclick = async () => {
         const missing = defs.filter((d) => d.required && !(inputs.get(d.name).value || '').trim());
         if (missing.length) { toast(`Fill in: ${missing.map((d) => d.label || d.name).join(', ')}`); return; }
@@ -516,10 +839,18 @@ export function promptForVariables(defs, { title = 'This profile needs a few val
   });
 }
 
-export function openSettings() {
+/* `where` names the section to open on — one of the ids passed to
+   `section()` below — as a deep link, or a dialog handing the analyst
+   back, does. Anything else opens on the last section shown: this is also
+   a plain click handler, so a MouseEvent arrives here as often as nothing
+   does. An id that no longer exists falls back to the first section. */
+export function openSettings(where) {
   markModalAction('openSettings');
+  const want = typeof where === 'string' ? where : rememberedSettingsSection();
   modal('Settings', (b) => {
-    const secLook = settingsSection(b, 'Appearance');
+    const panes = settingsPanes(b);
+    const section = panes.add;
+    const secLook = section('appearance', 'Appearance');
     secLook.append(el('p', null, 'Your skin, theme and accent colour, all saved on this machine.'));
 
     /* Only the skin in use, plus a way to see the rest. Appearance had
@@ -528,16 +859,25 @@ export function openSettings() {
        is something an analyst does once, while the settings below it get
        revisited. */
     const currentRow = el('div', 'appearance-current');
-    const currentCard = styleCard(S.appearance.style, { interactive: false });
     const browse = el('button', 'btn ghost', 'Change skin…');
+    // The card is the obvious thing to click, so it opens the picker too
+    // — it stays the read-only tile visually, just with a pointer.
+    const currentCard = () => {
+      const card = styleCard(S.appearance.style, { interactive: false });
+      card.classList.add('style-card-link');
+      card.title = 'Change skin…';
+      card.onclick = () => browse.onclick();
+      return card;
+    };
     browse.onclick = () => openSkinPicker(() => {
       // Repaint in place: the analyst comes back to Settings, not to a
       // closed modal, so the card and the accent row have to agree with
       // what they just picked.
-      currentRow.replaceChildren(styleCard(S.appearance.style, { interactive: false }), browse);
+      currentRow.replaceChildren(currentCard(), browse);
       syncAccentUi();
+      syncStripesUi();   // per skin — the box and its note are about the new one
     });
-    currentRow.append(currentCard, browse);
+    currentRow.append(currentCard(), browse);
     secLook.append(currentRow);
 
     function syncAccentUi() {
@@ -599,8 +939,171 @@ export function openSettings() {
     }
     secLook.append(densitySeg);
 
-    secLook.append(el('div', 'settings-sub-label', 'Autofit column width limit'));
-    secLook.append(el('p', 'fb-help',
+    /* Striped rows. Saved per skin (see stripesOn), which the help text has
+       to say outright: an analyst who turns it off, changes skin and finds
+       it back on has every reason to read that as the setting not sticking
+       rather than as the skin having its own answer. Naming the skin the
+       box is currently about is the cheapest way to make that legible. */
+    const stripeLabel = el('label', 'check-row');
+    const stripeCb = el('input');
+    stripeCb.type = 'checkbox';
+    stripeCb.id = 'appearanceStripes';
+    stripeCb.onchange = () => { setStripes(stripeCb.checked); syncStripesUi(); };
+    stripeLabel.append(stripeCb, el('span', null, 'Striped rows'));
+    secLook.append(stripeLabel);
+    const stripeNote = el('p', 'fb-help');
+    secLook.append(stripeNote);
+    function syncStripesUi() {
+      stripeCb.checked = stripesOn();
+      const meta = STYLES[S.appearance.style];
+      stripeNote.textContent =
+        'Alternating row shading in the grid and the Timeline. Saved per skin, so each '
+        + `one keeps the answer that suits it — this is the setting for ${meta ? meta.label : S.appearance.style}.`;
+    }
+    syncStripesUi();
+
+    /* The winnowing animation on launch. On by default and skippable with
+       any key or click while it runs — this switch is for someone who opens
+       Winnow all day and doesn't want it at all. The box says whether it
+       will actually play: left at the default where the OS asks for reduced
+       motion (anywhere but Windows — splash.osSkipsSplash) it is skipped,
+       so it shows unticked. A ticked box over an animation that never
+       played is what had analysts unticking and re-ticking it to get it.
+       Remote session mode skips the default the same way (and can be
+       switched further down this dialog, hence a function). */
+    const splashLabel = el('label', 'check-row');
+    const splashCb = el('input');
+    splashCb.type = 'checkbox';
+    const syncSplashBox = () => {
+      splashCb.checked = S.appearance.splash === 'always'
+        || (S.appearance.splash !== false && !remoteSkipsSplash(S.appearance) && !osSkipsSplash());
+    };
+    syncSplashBox();
+    splashCb.onchange = () => {
+      // Ticked by hand means "play it" — including on a machine whose OS
+      // asks for reduced motion, or in Remote session mode (see
+      // splash.splashEnabled).
+      S.appearance.splash = splashCb.checked ? 'always' : false;
+      saveAppearance();
+      paintSplashNote();
+    };
+    splashLabel.append(splashCb, el('span', null, 'Launch animation'));
+    secLook.append(splashLabel);
+    const splashNote = el('p', 'fb-help');
+    const paintSplashNote = () => {
+      const last = lastSplash();
+      const parts = ['The winnowing animation Winnow starts with. Any key or click skips it.'];
+      if (remoteSkipsSplash(S.appearance)) {
+        if (S.appearance.splash === 'always') {
+          parts.push('Remote session mode is on; it plays anyway because you ticked this yourself.');
+        } else if (S.appearance.splash !== false) {
+          parts.push('Remote session mode is on, so it is skipped — tick the box to play it anyway.');
+        }
+      } else if (reducedMotion()) {
+        if (S.appearance.splash === 'always') {
+          parts.push('Your system asks for reduced motion; it plays anyway because you ticked this yourself.');
+        } else if (S.appearance.splash !== false) {
+          parts.push(osSkipsSplash()
+            ? 'Your system asks for reduced motion, so it is skipped — tick the box to play it anyway.'
+            : 'Windows has Animation effects off (Accessibility → Visual effects), as VM images and '
+              + 'performance settings often leave it; that does not skip it — untick the box if you would rather not see it.');
+        }
+      }
+      if (last && last.result) {
+        parts.push(`Last launch: ${last.result}${last.reason ? ` — ${last.reason}` : ''}.`);
+      }
+      splashNote.textContent = parts.join(' ');
+    };
+    paintSplashNote();
+    secLook.append(splashNote);
+
+    /* Hidden association launches (Windows): pythonw.exe instead of a
+       console window riding along with every double-clicked file. Lives
+       here rather than in File associations because it's about how the
+       app LOOKS when it starts, and this is where people hunt for that.
+       Only rendered where it means something — Linux .desktop launches
+       are already terminal-less — and quietly absent when the loopback-
+       only status route refuses (a remote browser). */
+    (async () => {
+      let info;
+      try { info = await api('/api/assoc/types'); } catch { return; }
+      if (info.platform !== 'windows') return;
+      const bgLabel = el('label', 'check-row');
+      const bgCb = el('input');
+      bgCb.type = 'checkbox';
+      bgCb.checked = !!info.background;
+      bgCb.onchange = async () => {
+        try {
+          const r = await post('/api/assoc/background', { enabled: bgCb.checked });
+          toast(bgCb.checked
+            ? (r.applied ? 'Winnow will start hidden when a file is opened'
+                         : 'Saved — takes effect when Winnow is registered for a type')
+            : 'Winnow will show its console when a file is opened');
+        } catch (e) {
+          toast('Could not change the setting: ' + e.message, 6000);
+        }
+      };
+      bgLabel.append(bgCb, el('span', null,
+        'Start Winnow hidden when a file is opened (no console window — the server log stays hidden too)'));
+      splashLabel.before(bgLabel);
+    })();
+
+    /* Grid & layout: what sits around the data and where — which filter
+       surface the grid carries, whether the page tabs are a strip or one
+       button, how wide autofit may make a column. All three were in
+       Appearance, which had become half settings that are not about the
+       look; the look stays there. The checkboxes come first so that none
+       of them reads as belonging under the autofit block's heading. */
+    const secGrid = section('grid', 'Grid & layout');
+    secGrid.append(el('p', null, 'How the grid and the tab strip above it are laid out.'));
+
+    /* The classic always-on filter row — a box under every column header.
+       Which side a fresh install starts on is FILTER_UI_DEFAULT's alone;
+       this checkbox only reports that value and writes it, so nothing
+       here needs editing when the default moves. Off, the filter bar
+       takes over: the filters actually set, as chips, and the ⌕ on a
+       header for a one-column box. One repaint covers both surfaces —
+       through renderHeadResized, because swapping them changes the head's
+       height by the whole filter row and the rows have to be moved to
+       match. */
+    const frLabel = el('label', 'check-row');
+    const frCb = el('input');
+    frCb.type = 'checkbox';
+    frCb.checked = S.appearance.filterUi === 'row';
+    frCb.onchange = () => {
+      S.appearance.filterUi = frCb.checked ? 'row' : 'bar';
+      saveAppearance();
+      renderHeadResized();
+    };
+    frLabel.append(frCb, el('span', null, 'Always-on filter row'));
+    secGrid.append(frLabel);
+    secGrid.append(el('p', 'fb-help',
+      'On: every column carries a filter box at all times, the way Timeline Explorer does it. '
+      + 'Off: a filter bar above the grid shows only the filters you have set, as chips you can '
+      + 'remove, and the \u2315 on a column header opens that column\u2019s box where it belongs.'));
+
+    /* Pages as one dropdown: the compact strip is the default, but a case
+       with several plugin or pinned-dashboard tabs still competes with the
+       table tabs for one bar — collapsing it to a single Pages ▾ button
+       (like Filters ▾) hands that width back. */
+    const pagesLabel = el('label', 'check-row');
+    const pagesCb = el('input');
+    pagesCb.type = 'checkbox';
+    pagesCb.checked = !!S.appearance.pagesMenu;
+    pagesCb.onchange = () => {
+      S.appearance.pagesMenu = pagesCb.checked;
+      saveAppearance();
+      renderPageTabs();
+      applyPageTabsSize();
+    };
+    pagesLabel.append(pagesCb, el('span', null, 'Pages as a dropdown'));
+    secGrid.append(pagesLabel);
+    secGrid.append(el('p', 'fb-help',
+      'Collapse SQL, Timeline, Notes, Watchlist and plugin tabs into one Pages \u25be button, the way Filters \u25be works. '
+      + 'Buys the table tabs the strip\u2019s width; the pages themselves, and their counts, then live in that button\u2019s menu.'));
+
+    secGrid.append(el('div', 'settings-sub-label', 'Autofit column width limit'));
+    secGrid.append(el('p', 'fb-help',
       'How wide fit-to-content (the ' + (S.keymap.autofitColumnWidths[0] || '=') + ' key, or double-clicking a column\u2019s '
       + 'right edge) may make one column. A column whose header name needs more than this still gets '
       + 'room for its name. Uncapped, a single base64 command line can make the grid enormously wide.'));
@@ -633,10 +1136,14 @@ export function openSettings() {
     };
     noCapLabel.append(noCap, el('span', null, 'No limit'));
     capRow.append(capInput, el('span', 'count', 'px'), noCapLabel);
-    secLook.append(capRow);
+    secGrid.append(capRow);
 
-    secLook.append(el('div', 'settings-sub-label', 'Remote session (RDP)'));
-    secLook.append(el('p', 'fb-help',
+    /* Remote session mode is about the display the app is drawn ON, not
+       its look or its layout: how the wheel scrolls and whether anything
+       animates, for a remote desktop's encoder. Its own small section,
+       which is also where the first-run offer points. */
+    const secRemote = section('remote', 'Remote session');
+    secRemote.append(el('p', 'fb-help',
       'For running Winnow inside RDP/VNC: scrolls the grid by whole rows (one repaint per wheel '
       + 'notch, like native apps), and stops animations and hover repaints, so the remote display '
       + 'encoder ships small deltas instead of re-encoding the viewport. Saved on this machine.'));
@@ -647,6 +1154,8 @@ export function openSettings() {
     remoteCb.onchange = async () => {
       S.appearance.remoteSession = remoteCb.checked;
       paintRemote();
+      syncSplashBox();
+      paintSplashNote();
       // Machine setting, saved server-side — localStorage proved fragile
       // (per-origin AND per-profile, so update restarts and quick-look
       // ports kept resetting it).
@@ -654,96 +1163,45 @@ export function openSettings() {
       catch (e) { toast('Could not save Remote session mode: ' + e.message, 6000); }
     };
     remoteLabel.append(remoteCb, el('span', null, 'Remote session mode'));
-    secLook.append(remoteLabel);
+    secRemote.append(remoteLabel);
 
-    /* Hidden association launches (Windows): pythonw.exe instead of a
-       console window riding along with every double-clicked file. Lives
-       here rather than in File associations because it's about how the
-       app LOOKS when it starts, and this is where people hunt for that.
-       Only rendered where it means something — Linux .desktop launches
-       are already terminal-less — and quietly absent when the loopback-
-       only status route refuses (a remote browser). */
-    (async () => {
-      let info;
-      try { info = await api('/api/assoc/types'); } catch { return; }
-      if (info.platform !== 'windows') return;
-      const bgLabel = el('label', 'check-row');
-      const bgCb = el('input');
-      bgCb.type = 'checkbox';
-      bgCb.checked = !!info.background;
-      bgCb.onchange = async () => {
-        try {
-          const r = await post('/api/assoc/background', { enabled: bgCb.checked });
-          toast(bgCb.checked
-            ? (r.applied ? 'Winnow will start hidden when a file is opened'
-                         : 'Saved — takes effect when Winnow is registered for a type')
-            : 'Winnow will show its console when a file is opened');
-        } catch (e) {
-          toast('Could not change the setting: ' + e.message, 6000);
-        }
-      };
-      bgLabel.append(bgCb, el('span', null,
-        'Start Winnow hidden when a file is opened (no console window — the server log stays hidden too)'));
-      remoteLabel.after(bgLabel);
-    })();
-
-    /* The winnowing animation on launch. On by default and skippable with
-       any key or click while it runs — this switch is for someone who opens
-       Winnow all day and doesn't want it at all. prefers-reduced-motion is
-       honoured without needing this turned off. */
-    const splashLabel = el('label', 'check-row');
-    const splashCb = el('input');
-    splashCb.type = 'checkbox';
-    splashCb.checked = S.appearance.splash !== false;
-    splashCb.onchange = () => {
-      // Ticked by hand means "play it" — including on a machine whose OS
-      // asks for reduced motion (see splash.splashEnabled).
-      S.appearance.splash = splashCb.checked ? 'always' : false;
+    /* Imports: how a finished import behaves. A machine preference like
+       the look (per browser, mirrored to the machine), not case data. */
+    const secImports = section('imports', 'Imports');
+    const openLabel = el('label', 'check-row');
+    const openCb = el('input');
+    openCb.type = 'checkbox';
+    openCb.checked = !!S.appearance.openNewTables;
+    openCb.onchange = () => {
+      S.appearance.openNewTables = openCb.checked;
       saveAppearance();
-      paintSplashNote();
     };
-    splashLabel.append(splashCb, el('span', null, 'Launch animation'));
-    secLook.append(splashLabel);
-    const splashNote = el('p', 'fb-help');
-    const paintSplashNote = () => {
-      const last = lastSplash();
-      const parts = ['The winnowing animation Winnow starts with. Any key or click skips it.'];
-      if (reducedMotion()) {
-        parts.push(S.appearance.splash === 'always'
-          ? 'Your system asks for reduced motion; it plays anyway because you ticked this yourself.'
-          : 'Your system asks for reduced motion (Windows: Accessibility → Visual effects → Animation effects), '
-            + 'so it is skipped — tick the box to play it regardless.');
-      }
-      if (last && last.result) {
-        parts.push(`Last launch: ${last.result}${last.reason ? ` — ${last.reason}` : ''}.`);
-      }
-      splashNote.textContent = parts.join(' ');
-    };
-    paintSplashNote();
-    secLook.append(splashNote);
+    openLabel.append(openCb, el('span', null, 'Open new tables when an import finishes'));
+    secImports.append(openLabel);
+    secImports.append(el('p', 'fb-help',
+      'Off: a finished import updates the tab strip and leaves you where you are. '
+      + 'On: the first table of a batch to finish opens; the rest of that batch land without moving you again.'));
 
-    /* Pages as one dropdown: with several plugin tabs the page strip
-       competes with the table tabs for the bar — collapsing it to a single
-       Pages ▾ button (like Filters ▾) hands that width back. */
-    const pagesLabel = el('label', 'check-row');
-    const pagesCb = el('input');
-    pagesCb.type = 'checkbox';
-    pagesCb.checked = !!S.appearance.pagesMenu;
-    pagesCb.onchange = () => {
-      S.appearance.pagesMenu = pagesCb.checked;
-      saveAppearance();
-      renderPageTabs();
-      applyPageTabsSize();
-    };
-    pagesLabel.append(pagesCb, el('span', null, 'Pages as a dropdown'));
-    secLook.append(pagesLabel);
-    secLook.append(el('p', 'fb-help',
-      'Collapse SQL, Timeline, Notes, Watchlist and plugin tabs into one Pages \u25be button, the way Filters \u25be works.'));
-
-    const secKeys = settingsSection(b, 'Keyboard shortcuts');
-    secKeys.append(el('p', null, 'Tag hotkeys (1–9) are set per-tag in Edit tags. Escape always clears the selection or closes a panel. '
+    const secKeys = section('keys', 'Keyboard shortcuts');
+    secKeys.append(el('p', null, 'Tag hotkeys (1–9) are set per-tag in Edit tags. The keys under Fixed keys, below the list, are not rebindable. '
       + '"+ key" waits for a full press — hold modifiers for a combination (e.g. Ctrl+Shift+K), or Shift+letter for a capital.'));
     const list = el('div', 'settings-keys');
+
+    // Every change to a binding goes through here: the toolbar copy that
+    // spells a key (⏱ Timeframe's toggle/open keys, the Histogram
+    // button's show/hide key, the search button's tooltip and the search
+    // box's placeholder) is built from S.keymap when its control syncs,
+    // so a rebinding has to rebuild it too or it names the old key until
+    // the next tab switch. The search pair matters most: the chord there
+    // is only dispatched while focusSearch holds it, so copy left behind
+    // would be advertising a key the browser has taken back.
+    function keymapChanged() {
+      saveKeymap();
+      updateTimeRangeButton();
+      syncHistogramPanel();
+      syncSearchKeyCopy();
+      renderList();
+    }
 
     function renderList() {
       list.replaceChildren();
@@ -753,10 +1211,10 @@ export function openSettings() {
         const chips = el('div', 'settings-key-chips');
         keys.forEach((k, i) => {
           const chip = el('span', 'settings-key-chip');
-          chip.append(el('kbd', null, k));
+          chip.append(el('kbd', null, keyLabel(k)));
           const rm = el('button', 'btn ghost', '✕');
           rm.title = 'Remove this binding';
-          rm.onclick = () => { keys.splice(i, 1); saveKeymap(); renderList(); };
+          rm.onclick = () => { keys.splice(i, 1); keymapChanged(); };
           chip.append(rm);
           chips.append(chip);
         });
@@ -795,10 +1253,9 @@ export function openSettings() {
             }
             done();
             const conflict = findKeyConflict(spec, action);
-            if (conflict) { toast(`"${spec}" is already used by ${conflict}`, 4000); return; }
+            if (conflict) { toast(`"${keyLabel(spec)}" is already used by ${conflict}`, 4000); return; }
             keys.push(spec);
-            saveKeymap();
-            renderList();
+            keymapChanged();
           };
           document.addEventListener('keydown', capture, true);
         };
@@ -812,32 +1269,37 @@ export function openSettings() {
 
     const reset = el('button', 'btn ghost', 'Reset to defaults');
     reset.style.marginTop = '14px';
-    reset.onclick = () => { S.keymap = defaultKeymap(); saveKeymap(); renderList(); };
+    reset.onclick = () => { S.keymap = defaultKeymap(); keymapChanged(); };
     secKeys.append(reset);
 
-    const fixedKeys = el('div', 'kv');
-    fixedKeys.style.marginTop = '10px';
-    fixedKeys.append(el('kbd', null, 'Shift + move keys'), el('span', null, 'Extend the selection'));
-    fixedKeys.append(el('kbd', null, '1 – 9'), el('span', null, 'Toggle the tag with that hotkey on the selection'));
-    fixedKeys.append(el('kbd', null, 'Shift + 1 – 9'), el('span', null, 'Apply that tag to every row in the current view'));
-    fixedKeys.append(el('kbd', null, 'Alt + 1 – 0'), el('span', null, 'Switch tabs — 1 is the table you were last in, 2 – 0 the page tabs in strip order'));
-    fixedKeys.append(el('kbd', null, 'Ctrl/⌘ + Z'), el('span', null, 'Undo the last tag applied or removed (repeat to keep stepping back)'));
-    fixedKeys.append(el('kbd', null, 'Esc'), el('span', null, 'Clear selection, or close a panel'));
-    fixedKeys.append(el('kbd', null, 'Right-click a row'), el('span', null, 'Tag it, filter to or exclude that cell’s value, copy'));
-    fixedKeys.append(el('kbd', null, 'Right-click a tab'), el('span', null, 'That table’s menu — columns, value dropdowns, layout'));
-    secKeys.append(fixedKeys);
+    // Everything the map above does not hold, grouped by where it works.
+    // The list lives beside the dispatcher in keymap.js (FIXED_KEYS), not
+    // here, so whoever hand-writes a new key handler finds it there.
+    secKeys.append(el('div', 'settings-sub-label', 'Fixed keys'));
+    for (const [where, keys] of FIXED_KEYS) {
+      secKeys.append(el('div', 'settings-fixed-where', where));
+      const kv = el('div', 'kv settings-fixed-keys');
+      for (const [key, what] of keys) kv.append(el('kbd', null, key), el('span', null, what));
+      secKeys.append(kv);
+    }
 
-    const secSyntax = settingsSection(b, 'Filter & search syntax');
+    const secSyntax = section('syntax', 'Filter & search syntax');
     const filters = [
       ['svchost', 'contains'],
       ['!svchost', 'does not contain'],
       ['=4624', 'exact match'],
+      ['!=4624', 'anything but this exact value'],
       ['^C:\\Users', 'starts with'],
-      ['>1000', 'greater than (numeric columns)'],
+      ['>1000', 'greater than — as numbers on a numeric column, in text order on any other'],
+      ['<1000', 'less than'],
+      ['>=1000', 'greater than or equal to'],
+      ['<=1000', 'less than or equal to'],
       ['/regex/', 'regular expression'],
       ['""', 'empty'],
       ['*', 'not empty'],
       ['a|b|c', 'any of these values'],
+      ['a|""', 'any of these values, or empty'],
+      ['=" x "  "a|b"|c', 'quotes keep edge spaces and |, and a leading < > = ! ^ /'],
     ];
     const f = el('div', 'kv');
     for (const [a, c] of filters) { f.append(el('kbd', null, a), el('span', null, c)); }
@@ -845,17 +1307,31 @@ export function openSettings() {
     secSyntax.append(el('p', null,
       'The ▾ on a filter box lists that column’s distinct values with counts — tick the ones to keep. '
       + `It appears automatically on tables under ${VALUE_FILTER_AUTO_MAX.toLocaleString()} rows (reading the values is a scan); `
-      + 'the table menu (right-click a tab) turns it on or off per table or per column, and a row’s '
+      + 'the table menu (C, or right-click a tab → Columns…) turns it on or off per table or per column, and a row’s '
       + 'right-click menu can open it for any column.'));
     secSyntax.append(el('p', null,
       'Search box — Contains is always a true substring match; Regex is a full scan; Advanced supports '
-      + 'multiple AND / OR / NOT terms and uses the FTS5 index when one was built at import.'));
+      + 'multiple AND / OR / NOT terms. Contains and Advanced (and Search tables) use the substring index, '
+      + 'which builds in the background after import — until it is ready, or for a term under 3 characters '
+      + 'or holding % or _, they scan instead, with the same results.'));
     secSyntax.append(el('p', null,
       'The ⏱ Timeframe button pins a start/end range against one datetime column, or every datetime '
       + "column at once (catches a row via its Modified time even if its Created time was timestomped) — "
-      + 'unlike the other filters, it stays applied when you clear filters, apply a saved filter, or switch tables.'));
+      + 'unlike the other filters, it stays applied when you clear filters or apply a saved filter.'));
+    // The same switch as the Timeframe dialog's — both write the one pref.
+    const tfLabel = el('label', 'check-row');
+    const tfCb = el('input');
+    tfCb.type = 'checkbox';
+    tfCb.id = 'settingsTimeframeAcrossTables';
+    tfCb.checked = timeframeAcrossTables();
+    tfCb.onchange = () => setTimeframeAcrossTables(tfCb.checked);
+    tfLabel.append(tfCb, el('span', null, 'Keep the timeframe applied when switching tables'));
+    secSyntax.append(tfLabel);
+    secSyntax.append(el('p', 'fb-help',
+      'On: one timeframe for the whole case, applied to whichever table you open. '
+      + 'Off: each table keeps its own, the way it keeps its own filters, and a table you have not set one on opens without one.'));
 
-    const secTs = settingsSection(b, 'Timestamps');
+    const secTs = section('timestamps', 'Timestamps');
     secTs.append(el('p', null,
       'How datetime columns are displayed. This is presentation only — the stored and exported '
       + 'value is always the text the file came with. A format picked on an individual column '
@@ -885,57 +1361,26 @@ export function openSettings() {
     secTs.append(el('p', 'fb-help',
       'This case can override it — Case menu → Case settings.'));
 
-    const secTags = settingsSection(b, 'Default tags for new cases');
+    const secTags = section('tags', 'Default tags for new cases');
     secTags.append(el('p', null,
-      "Seeds a brand-new case's tag set when you create one from the home screen. Doesn't change tags in "
-      + 'any case that already exists — use "Apply default template" in Edit tags for that.'));
-    const dtList = el('div', 'settings-keys');
-    let defaultTags = [];
+      "Seeds the tag set of every new case, however it's made — the home screen, a dropped or double-clicked "
+      + 'file, --case on the command line — and of a case left with no tags at all, the next time it opens. '
+      + "Doesn't change tags in a case that has any — use \"Apply default template\" in Edit tags for that."));
+    // Saves as it changes, the same row Edit tags uses (tags.js).
+    buildDefaultTagsEditor(secTags);
 
-    function renderDefaultTagRows() {
-      dtList.replaceChildren();
-      defaultTags.forEach((t, i) => {
-        const row = el('div', 'row-actions');
-        const color = el('input'); color.type = 'color'; color.value = t.color || '#8899aa';
-        color.oninput = () => { t.color = color.value; };
-        const name = el('input'); name.value = t.name || ''; name.placeholder = 'Tag name';
-        name.style.cssText = 'flex:1;background:var(--ink);color:var(--text);border:1px solid var(--line-2);padding:4px 7px;font:inherit';
-        name.oninput = () => { t.name = name.value; };
-        const key = el('input'); key.value = t.hotkey || ''; key.maxLength = 1;
-        key.style.cssText = 'width:34px;text-align:center;background:var(--ink);color:var(--text);border:1px solid var(--line-2);padding:4px;font-family:var(--mono)';
-        key.oninput = () => { t.hotkey = key.value || null; };
-        const rm = el('button', 'btn ghost', '✕');
-        rm.onclick = () => { defaultTags.splice(i, 1); renderDefaultTagRows(); };
-        row.append(color, name, key, rm);
-        dtList.append(row);
-      });
-    }
-
-    api('/api/settings/default_tags').then((t) => { defaultTags = t; renderDefaultTagRows(); }).catch(() => {});
-    secTags.append(dtList);
-
-    const dtActs = el('div', 'row-actions');
-    const dtAdd = el('button', 'btn ghost', '+ tag');
-    dtAdd.onclick = () => { defaultTags.push({ name: 'New tag', color: '#7f9bb5', hotkey: null }); renderDefaultTagRows(); };
-    const dtSave = el('button', 'btn', 'Save template');
-    dtSave.onclick = async () => {
-      defaultTags = await post('/api/settings/default_tags', { tags: defaultTags });
-      renderDefaultTagRows();
-      toast('Default tag template saved');
-    };
-    dtActs.append(dtAdd, dtSave);
-    secTags.append(dtActs);
-
-    const secFilters = settingsSection(b, 'Saved filters');
+    const secFilters = section('filters', 'Saved filters');
     secFilters.append(el('p', null,
-      `Cycle through filters saved for the current source's columns with `
+      `Cycle through filters saved for the current table's columns with `
       + `${S.keymap.cyclePrevFilter[0] || '['} / ${S.keymap.cycleNextFilter[0] || ']'}. `
       + `Browse, apply, rename, reorder and delete them — and nickname their header sets — from `
       + `Filters ▾ → Saved filters (also reachable from the Filter builder). Save one from the `
       + `builder's "Save filter…" button.`));
     const fActs = el('div', 'row-actions');
     const openBtn = el('button', 'btn', 'Open saved filters…');
-    openBtn.onclick = () => openSavedFiltersModal();
+    // Came from Settings, goes back to Settings — to this section — the
+    // modal is shared, so without this the × dropped the analyst on the grid.
+    openBtn.onclick = () => openSavedFiltersModal({ returnTo: () => openSettings('filters') });
     const exp = el('button', 'btn ghost', 'Export filters…');
     exp.onclick = () => { window.location = '/api/saved_filters/export'; };
     const impLabel = el('label', 'btn ghost', 'Import filters…');
@@ -956,18 +1401,46 @@ export function openSettings() {
     fActs.append(openBtn, exp, impLabel);
     secFilters.append(fActs);
 
-    const secPlugins = settingsSection(b, 'Plugins');
-    buildPluginsPanel(secPlugins);
+    const secPlugins = section('plugins', 'Plugins');
+    buildPluginsPanel(secPlugins, { returnTo: () => openSettings('plugins') });
 
-    const secAssoc = settingsSection(b, 'File associations');
+    const secProfiles = section('profiles', 'Profiles');
+    buildProfilesPanel(secProfiles);
+
+    const secAssoc = section('assoc', 'File associations');
     buildAssocPanel(secAssoc);
 
-    const secEnv = settingsSection(b, 'Environment');
+    const secEnv = section('env', 'Environment');
     buildEnvPanel(secEnv);
 
-    const secUpdates = settingsSection(b, 'Updates');
+    const secUpdates = section('updates', 'Updates');
     buildUpdatesPanel(secUpdates);
-  }, { tall: true });
+
+    /* Last, and deliberately: shutting the server down is the one thing in
+       here that ends the session, so it sits below everything an analyst
+       might have come to change. The ⏻ on the home screen and the Case ▾
+       entry both reach the same shutdownWinnow — including its "still
+       running" warning, which is the part that must not be bypassed by
+       adding a second button. */
+    const secOff = section('shutdown', 'Shut down');
+    secOff.append(el('p', null,
+      'Stops the Winnow server. Everything already committed is saved in the case file — '
+      + 'tags, notes and finished imports are never lost. This page, and any other tab using '
+      + 'this server, stops working until you start Winnow again.'));
+    const offActs = el('div', 'row-actions');
+    const offBtn = el('button', 'btn danger', '\u23fb  Shut down Winnow');
+    offBtn.title = 'Stop the server (asks first, and warns about anything still running)';
+    offBtn.onclick = () => { $('modal').hidden = true; shutdownWinnow(); };
+    offActs.append(offBtn);
+    secOff.append(offActs);
+
+    panes.show(want);
+    // Wide for the second pane's sake — the keymap rows and the
+    // associations table need the width the single column had. Tall
+    // anchors it at the top, like the skin picker it opens; the panes'
+    // fixed height (style.css, .settings-panes) does the rest. The chosen
+    // section takes the focus, so the arrow keys work from the first press.
+  }, { tall: true, wide: true, focus: (b) => b.querySelector('.settings-nav-item[aria-selected="true"]') });
 }
 
 /* Settings → Updates. Shows what this install is, and checks for a newer
@@ -979,8 +1452,10 @@ export function openSettings() {
    Updating replaces the files Winnow ships and nothing else — workspace/,
    installed plugins, sessions and case files are never touched (see
    updater.PROTECTED) — and the previous version is backed up first, so a
-   bad update is one button (or `python update.py --rollback`) away from
-   undone. */
+   bad update is `python update.py --rollback` away from undone. That is
+   the way back: this panel has no rollback button (/api/updates/rollback
+   exists, but nothing in the UI calls it), and the CLI still works when
+   an update has broken the UI. */
 export function buildUpdatesPanel(b) {
   const status = el('div', 'fb-help');
   const notes = el('pre', 'update-notes');
@@ -1061,11 +1536,55 @@ export function buildUpdatesPanel(b) {
     status.textContent = `Updated ${res.previous_version} → ${res.version}. Restart Winnow to run it.`;
     toast(`Updated to ${res.version} — restart Winnow to run the new version`, 12000);
   };
+
+  /* Alt+right-click on either button syncs to the tip of develop instead —
+     `python update.py --dev` without a terminal, for beta testers and
+     development. Semi-hidden on purpose: no title, no hint, nothing in
+     the wiki, because an analyst who stumbles onto unreleased code mid-case
+     is worse off than one who never knew it was there. A plain right-click
+     is left to the browser, and a left click is the release path above.
+     It still asks first and names the commit, as the CLI does. */
+  const devSync = async (e) => {
+    if (!e.altKey) return;
+    e.preventDefault();
+    if (checkBtn.disabled || installBtn.disabled) return;
+    checkBtn.disabled = true;
+    const before = status.textContent;
+    status.textContent = 'Checking develop…';
+    try {
+      const tip = await post('/api/updates/check', { dev: true });
+      const ok = await confirmDialog(
+        `Sync to ${tip.branch} build ${tip.short}?\n\n`
+        + (tip.message ? `${tip.message}${tip.committed_at ? ` (${tip.committed_at.slice(0, 10)})` : ''}\n\n` : '')
+        + 'This is unreleased code. Your saved filters, tags, installed plugins, case list and '
+        + 'case files are kept, and the current version is backed up first — '
+        + '"python update.py --rollback" undoes it.\n\n'
+        + 'Winnow has to be restarted afterwards to run it.',
+        { okLabel: `Sync to ${tip.short}` });
+      if (!ok) { status.textContent = before; return; }
+      status.textContent = `Downloading and installing ${tip.branch} build ${tip.short}…`;
+      const res = await post('/api/updates/apply', { confirm: true, dev: true });
+      installBtn.hidden = true;
+      status.textContent = `Synced to ${res.branch} build ${res.short}. Restart Winnow to run it.`;
+      toast(`Synced to ${res.branch} build ${res.short} — restart Winnow to run it`, 12000);
+    } catch (err) {
+      status.textContent = err.message;
+    } finally {
+      checkBtn.disabled = false;
+    }
+  };
+  checkBtn.oncontextmenu = devSync;
+  installBtn.oncontextmenu = devSync;
 }
 
 /* DOM wiring for this module, called once by main.js. Handlers can't
    fire during load, so the order these run in doesn't matter — the
    startup steps that DO depend on order live in main.js instead. */
 export function wireSettings() {
-window.addEventListener('resize', () => { render(); drawRail(); applyPageTabsSize(); });
+window.addEventListener('resize', () => {
+  // A lone base column is sized from the viewport (columns.fillsGrid), so
+  // the header has to follow the window as well as the rows.
+  if (S.columns.some(fillsGrid)) renderHead();
+  render(); drawRail(); applyPageTabsSize(); syncTabOverflow();
+});
 }

@@ -14,7 +14,6 @@ import os
 import threading
 import time
 
-import pytest
 
 
 def _fill(store, write_csv, n=20000, name="big"):

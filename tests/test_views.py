@@ -3,6 +3,8 @@ identifier quoting, view expiry, and the guided filter tree."""
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 
@@ -27,6 +29,55 @@ def test_filter_ops(ingested, op, value, expect_users):
     view = store.build_view(source_id, spec)
     users = {c[2] for c in _cells(store, view["view_id"])}
     assert users == expect_users
+
+
+
+@pytest.mark.parametrize("items,want", [
+    (["a.exe"], ('"Proc" IN (?)', ["a.exe"])),
+    (["a.exe", "b.exe"], ('"Proc" IN (?,?)', ["a.exe", "b.exe"])),
+    (["a.exe", "b.exe", "c.exe"], ('"Proc" IN (SELECT value FROM json_each(?))', ['["a.exe", "b.exe", "c.exe"]'])),
+])
+def test_a_one_or_two_value_in_list_binds_plain_parameters(monkeypatch, items, want):
+    """SQLite compares a one- or two-value IN list directly, but builds a
+    lookup table for any subquery, so the json_each form made the short
+    lists the value picker writes 30% slower to filter by on a full scan
+    (bench views/filter.in_list). Those keep their `?`s; a longer list is
+    still one JSON parameter, which is what keeps a pasted IOC list on a
+    merge under SQLite's variable limit."""
+    from winnow import store as store_module
+
+    monkeypatch.setattr(store_module, "_HAS_JSON_EACH", True)
+    assert store_module.Store._compile_condition("Proc", "in", items, {"Proc": "text"}) == want
+
+@pytest.mark.parametrize("json_each", [True, False])
+@pytest.mark.parametrize("where", ["filters", "filter_tree"])
+def test_an_in_list_holding_the_empty_string_matches_empty_cells(store, write_csv, monkeypatch, json_each, where):
+    """`a|""` in a column box — what the value picker writes when "(empty)"
+    is ticked beside real values — is one `in` list holding ''. That '' used
+    to be dropped, so the empty rows the analyst picked fell out of the
+    filter, which is why the picker parked those selections in the filter
+    tree and left the box empty. Both compile paths, both list shapes."""
+    from winnow import store as store_module
+
+    monkeypatch.setattr(store_module, "_HAS_JSON_EACH", json_each)
+    sid = store.ingest_csv(write_csv([["Proc"], ["a.exe"], [""], ["b.exe"], [""], ["c.exe"]], "e.csv"),
+                           name="e.csv", build_fts=False)["id"]
+
+    def count(value):
+        cond = {"column": "Proc", "op": "in", "value": value}
+        spec = ({"filters": [cond]} if where == "filters"
+                else {"filters": [], "filter_tree": {"type": "cond", **cond}})
+        return store.build_view(sid, {"source_id": sid, "sort": [], **spec})["row_count"]
+
+    assert count(["a.exe", ""]) == 3
+    assert count([""]) == 2
+    assert count(["a.exe", "b.exe"]) == 2
+    # Three values is past the short-list exception, so json_each (when the
+    # SQLite has it) carries the list here, not the `?` form.
+    assert count(["a.exe", "b.exe", ""]) == 4
+    # A newline-separated string is not a picked list: a blank line in it is
+    # a stray newline, and still drops out rather than adding the empties.
+    assert count("a.exe\n\nb.exe\n") == 2
 
 
 def test_sort_multi_column(store, write_csv):
@@ -126,6 +177,43 @@ def test_view_expires_after_close(ingested):
     store.close_view(view["view_id"])
     with pytest.raises(KeyError):
         store.fetch_rows(view["view_id"], 0, 10)
+
+
+def test_dropping_a_table_evicts_its_views(store, write_csv):
+    """A view id outlives its table in whatever window built it. drop_source
+    left the handle registered, so that window kept paging and tagging
+    through it — and with source ids reused, the next import's rows were
+    the ones it read, tagged and exported."""
+    from winnow.store import ViewExpired
+
+    a = store.ingest_csv(write_csv([["proc"], ["evil1"], ["benign"], ["evil3"]], "a.csv"),
+                         build_fts=False)["id"]
+    filtered = store.build_view(a, {"filters": [{"column": "proc", "op": "contains", "value": "evil"}]})
+    group = store.expand_group(filtered["view_id"], "proc", "evil1")
+    tag = store.upsert_tag(None, "Malware", "#ff0000", None)["id"]
+    store.drop_source(a)
+    c = store.ingest_csv(write_csv([["proc"], ["benign1"], ["benign2"], ["benign3"]], "c.csv"),
+                         build_fts=False)["id"]
+    for vid in (filtered["view_id"], group["view_id"]):
+        with pytest.raises(ViewExpired):
+            store.fetch_rows(vid, 0, 10)
+        with pytest.raises(ViewExpired):
+            store.tag_view(vid, tag, True)
+    assert store.tag_counts(c)["counts"] == {}
+    assert filtered["view_id"] not in _v_table_names(store)
+
+    # The unfiltered (virtual) view and a merge's views go the same way.
+    root = store.build_view(c, {"filters": []})
+    assert root["kind"] == "root_virtual"
+    d = store.ingest_csv(write_csv([["proc"], ["x"]], "d.csv"), build_fts=False)["id"]
+    merge = store.create_merge("CD", [c, d])["id"]
+    merged = store.build_view(merge, {"filters": []})
+    store.delete_merge(-merge)
+    with pytest.raises(ViewExpired):
+        store.fetch_rows(merged["view_id"], 0, 10)
+    store.drop_source(c)
+    with pytest.raises(ViewExpired):
+        store.tag_view(root["view_id"], tag, True)
 
 
 def _v_table_names(store):
@@ -397,6 +485,31 @@ def test_validate_where_fragment_rejects_select_and_unknown_identifier(ingested)
     store.validate_where_fragment(source_id, "EventId = '4624'")  # doesn't raise
 
 
+
+def test_a_raw_fragment_refuses_a_quoted_column_the_table_does_not_have(store, write_csv):
+    """SQLite's double-quoted-string fallback reads a quoted name that is
+    not a column as a string literal, so a typo'd column was accepted and
+    compared as text: `"Event Id " <> '4624'` (trailing space) matched
+    every row, `"EventID" = '4624'` matched none, and neither said why."""
+    sid = store.ingest_csv(write_csv([["Event ID", "User"], ["4624", "bob"], ["4625", "alice"],
+                                      ["1", "eve"]], "e.csv"), build_fts=False)["id"]
+
+    def rows(frag):
+        return store.build_view(sid, {"source_id": sid, "sort": [],
+                                      "filter_tree": {"type": "raw", "sql": frag}})["row_count"]
+
+    for frag, missing in (("\"Event Id \" <> '4624'", "Event Id "),
+                          ("\"EventID\" = '4624'", "EventID"),
+                          ("\"Event ID\" = \"4624\"", "4624")):
+        with pytest.raises(ValueError, match=re.escape(f'"{missing}"')):
+            rows(frag)
+    # What SQLite itself resolves still works: ASCII case, a doubled quote
+    # spelled out, and a double quote inside a single-quoted value.
+    assert rows("\"Event ID\" = '4624'") == 1
+    assert rows("\"event id\" = '4624'") == 1
+    assert rows("\"User\" <> 'say \"hi\"'") == 3
+
+
 # --------------------------------------------------------------- time_range
 
 def test_ts_normalize_handles_iso_us_ampm_and_missing_time():
@@ -489,6 +602,31 @@ def test_time_range_open_ended_start_or_end(mft_like):
     assert set(_names(store, only_before)) == {"old_file.txt", "created_only.dll"}
 
 
+@pytest.mark.parametrize("column", ["Time", None])
+def test_time_range_reads_us_format_timestamps_as_times(store, write_csv, column):
+    """Every test above is ISO, where comparing the raw text gives the
+    same answer as comparing times. US exports are month first with a
+    12-hour clock, so a range that stopped normalising them would go wrong
+    silently. Against the raw text every row here sorts before
+    "2026-01-01" and the range keeps none; read day first, the January and
+    February rows swap; with PM ignored, the last row moves inside."""
+    path = write_csv([
+        ["Time", "Name"],
+        ["1/5/2026 1:22:01 PM", "in_range"],
+        ["12/30/2025 11:00:00 PM", "before"],
+        ["2/1/2026 9:00:00 AM", "after"],
+        ["1/31/2026 1:00:00 PM", "afternoon_of_the_last_day"],
+    ])
+    sid = store.ingest_csv(path, name="us.csv", build_fts=False)["id"]
+    assert {c["name"]: c["type"] for c in store.get_source(sid)["columns"]}["Time"] == "datetime"
+    spec = {
+        "source_id": sid, "filters": [], "sort": [],
+        "time_range": {"enabled": True, "column": column, "start": "2026-01-01T00:00", "end": "2026-01-31T12:00"},
+    }
+    view = store.build_view(sid, spec)
+    assert [r["cells"][1] for r in store.fetch_rows(view["view_id"], 0, 10)["rows"]] == ["in_range"]
+
+
 def test_find_nearest_timestamp_on_every_view_kind(ingested):
     """Jump-to-timestamp measures closeness in real time (julianday over
     TS_NORMALIZE), not string order, and must return a position that
@@ -575,3 +713,44 @@ def test_root_virtual_pages_in_source_order_ignoring_saved_layout(store, write_c
     rows = store.fetch_rows(view["view_id"], 0, 10)["rows"]
     # source order, hidden column included — NOT the layout's ["C","A"]
     assert [r["cells"] for r in rows] == [["A0", "B0", "C0"], ["A1", "B1", "C1"]]
+
+
+def _rail(flat, n, height):
+    """What the rail drew from the flat list: round(pos / n * height) per
+    tagged row, [first, last] per pixel and tag."""
+    out: dict = {}
+    for p, tid in flat:
+        y = int(p / n * height + 0.5)
+        lo, hi = out.get((y, tid), (p, p))
+        out[(y, tid)] = (min(lo, p), max(hi, p))
+    return out
+
+
+@pytest.mark.parametrize("spec", [{}, {"filters": [{"column": "n", "op": "not_contains", "value": "x"}]},
+                                  {"sort": [{"column": "n", "dir": "desc"}]}],
+                         ids=["root", "filtered", "sorted"])
+def test_the_rail_is_bucketed_by_pixel_and_counts_every_tagged_row(store, write_csv, spec):
+    """The flat list stopped at `limit` tagged rows (20,000 in the app),
+    so the rail of a view with more had nothing below the last one sent."""
+    rows = [["n"]] + [[f"r{i:04d}"] for i in range(1000)]
+    sid = store.ingest_csv(write_csv(rows), name="t.csv", build_fts=False)["id"]
+    a = store.upsert_tag(None, "a", "#ff0000", None)["id"]
+    b = store.upsert_tag(None, "b", "#00ff00", None)["id"]
+    store.set_tags(sid, list(range(1, 1001, 3)), a, True)
+    store.set_tags(sid, list(range(500, 1001, 7)), b, True)
+    view = store.build_view(sid, {"source_id": sid, "filters": [], "sort": [], **spec})
+    vid, n = view["view_id"], view["row_count"]
+
+    flat = store.tag_positions(vid, limit=10_000)
+    assert len(store.tag_positions(vid, limit=100)) == 100
+    for height in (37, 400, 5000):
+        marks = store.tag_positions(vid, limit=100, height=height)
+        assert {(y, t): (lo, hi) for y, t, lo, hi in marks} == _rail(flat, n, height)
+        assert [m[3] for m in marks] == sorted(m[3] for m in marks)   # drawn in the order rows were
+
+
+def test_the_rail_of_an_untagged_view_is_empty(store, write_csv):
+    sid = store.ingest_csv(write_csv([["n"], ["a"], ["b"]]), name="t.csv", build_fts=False)["id"]
+    view = store.build_view(sid, {"source_id": sid, "filters": [{"column": "n", "op": "equals", "value": "a"}],
+                                  "sort": []})
+    assert store.tag_positions(view["view_id"], height=300) == []

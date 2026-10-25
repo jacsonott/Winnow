@@ -2,12 +2,17 @@
 
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { recordTabVisit } from './tabhistory.js';
-import { $, api, debounce, el, post, toast } from './core.js';
-import { hidePluginViews, sqlResultNodes, syncPluginPanels } from './plugins.js';
-import { setActiveSqlResult } from './sqlassist.js';
+import { renderFilterBar } from './columns.js';
+import { $, MOD_ENTER, api, debounce, el, post, toast } from './core.js';
+import { hideDetailPane } from './detail.js';
+import { render, renderTagToolbar } from './grid.js';
+import { drawRail, regroupIfGroupedByTag } from './grouping.js';
+import { abandonSqlRuns, hidePluginViews, runSql, sqlResultNodes, sqlRunningNodes, syncPluginPanels } from './plugins.js';
+import { syncHistogramPanel } from './histogram.js';
+import { quoteIdent, releaseSqlResults, setActiveSqlResult } from './sqlassist.js';
 import { checkPresets } from './savedfilters.js';
 import { syncDiffBanner } from './session.js';
-import { syncTabSelection, wireDragReorder } from './sources.js';
+import { paneTable, sourceLabel, syncTabSelection, wireDragReorder } from './sources.js';
 import { S } from './state.js';
 import { buildTimeline } from './timeline.js';
 import { confirmDialog, promptDialog } from './ui.js';
@@ -26,7 +31,8 @@ export function showSqlTab() {
   // The toolbar and the "matching saved filter" banner are about a
   // specific table's grid — meaningless here (see syncTabChrome).
   syncTabChrome();
-  loadSqlTabs().then(() => $('sqlText').focus());
+  // Returned so a caller (winnow.showPage('sql')) can await the tabs.
+  return loadSqlTabs().then(() => $('sqlText').focus());
 }
 
 /* ------------------------------------------------------ sql pane sub-tabs */
@@ -39,19 +45,161 @@ export function showSqlTab() {
    The editor holds exactly one tab's text at a time; switching tabs flushes
    the current text first (flushSqlTabSave — the debounced autosave is not
    allowed to lose an edit just because you clicked away within its window).
-   Result sets stay in memory only, in S.sqlResults keyed by tab id: they're
-   re-derivable by pressing Run, can be large, and are a snapshot of the
-   data rather than the analysis, so they don't belong in the case file. */
+   Result sets are not in the case file: they're re-derivable by pressing
+   Run, can be large, and are a snapshot of the data rather than the
+   analysis. The server holds each one's rows in a scratch database of its
+   own (winnow/sqlresults.py); S.sqlResults, keyed by tab id, holds the
+   handle and the first page. */
 
 export const SQL_AUTOSAVE_MS = 700;
 
+/* A SQLite string literal, for the table names the starters below embed as
+   data rather than as identifiers. A file called `O'Brien.csv` is not
+   hypothetical on a real case. */
+const sqlLiteral = (v) => `'${String(v).replace(/'/g, "''")}'`;
+
+/* "SELECT * FROM src_1" with the first line saying which file that is.
+   `src_1` is a name the analyst has never seen anywhere else — the tab
+   strip, the sidebar and the dashboards all call this table Security.csv —
+   so the query has to answer "which table is this?" before it answers
+   anything else, and a comment is the one place to say it that survives
+   being edited into a real query. */
+function browseSql(s) {
+  const table = paneTable(s);
+  return `-- ${sourceLabel(s)} (${table})\nSELECT * FROM ${table} LIMIT 50;`;
+}
+
 export function starterSql() {
-  // Merges (negative source_id) aren't a real src_N table — there's nothing
-  // to `SELECT * FROM src_${S.sourceId}` for one. Prefill against its first
-  // member instead of emitting invalid SQL like `src_-3`.
   if (!S.sourceId) return '';
-  if (S.sourceId < 0) return `SELECT * FROM merge_${-S.sourceId} LIMIT 50;`;
-  return `SELECT * FROM src_${S.sourceId} LIMIT 50;`;
+  const s = S.sources.find((x) => x.id === S.sourceId);
+  if (s) return browseSql(s);
+  // The source list hasn't landed — no caller does this today, but emitting
+  // a bare statement is better than naming the table wrongly. Merges
+  // (negative source_id) aren't a real src_N table: there's nothing to
+  // `SELECT * FROM src_${S.sourceId}` for one, and `src_-3` is a syntax
+  // error rather than a wrong answer.
+  const table = S.sourceId < 0 ? `merge_${-S.sourceId}` : `src_${S.sourceId}`;
+  return `SELECT * FROM ${table} LIMIT 50;`;
+}
+
+/* Two or three queries worth clicking, built from the tables THIS case
+   actually holds. Hardcoded examples were rejected outright: a starter
+   naming a table the analyst doesn't have teaches nothing and errors on
+   click, which is a worse first impression than the blank pane this
+   replaces.
+
+   Each one is offered only when it would return something — a "rows you
+   tagged" starter on an untagged case is a scan that ends in "0 rows" —
+   and each is written the way it is for a measured reason:
+     - the tagged-rows query drives off `row_tags` via the `rid IN (...)`
+       subquery rather than `WHERE Tags IS NOT NULL`, which cannot use an
+       index and scanned 200k rows in 32ms to find five (the subquery form
+       is 0.4ms on the same data, SEARCH by INTEGER PRIMARY KEY);
+     - the per-table counts read the `src_N` views, not `main.src_N`,
+       because SQLite flattens the view and never evaluates the Tags/Note
+       correlated subselects for a COUNT (measured: 1.4ms over 200k rows,
+       against 1.0ms for the raw table) — so the pane's own vocabulary
+       costs nothing here;
+     - a merge carries `source_id` and its rids are only unique per
+       member, so its tagged-rows form is the row-value `(source_id, rid)
+       IN (...)`. Invariant #9: the merge path ships with the feature. */
+export function sqlStarters() {
+  const usable = S.sources.filter((s) => !s.error);
+  if (!usable.length) return [];
+  const here = usable.find((s) => s.id === S.sourceId) || usable[0];
+  const table = paneTable(here);
+  const label = sourceLabel(here);
+  // `name` is what the query becomes if it opens in a tab of its own:
+  // short, because it has to fit the sub-tab strip beside the others.
+  const out = [{ label: `First 50 rows of ${label}`, name: label, sql: browseSql(here) }];
+
+  if (here.tagged_row_count > 0) {
+    const key = here.is_merge || here.id < 0
+      ? '(source_id, rid) IN (SELECT source_id, rid FROM row_tags)'
+      : `rid IN (SELECT rid FROM row_tags WHERE source_id = ${here.id})`;
+    out.push({
+      label: `Rows you tagged in ${label}`,
+      name: 'Tagged rows',
+      sql: `-- Tagged rows in ${label} — the Tags column is the pane's, not the file's.\n`
+        + `SELECT * FROM ${table} WHERE ${key} LIMIT 50;`,
+    });
+  }
+
+  // Merges are left out of the inventory on purpose: every merge row is
+  // also a member row, so counting both reports the case as larger than
+  // it is (the same reason _sources_for_header_set skips them).
+  const real = usable.filter((s) => !s.is_merge && s.id > 0);
+  if (real.length > 1) {
+    out.push({
+      label: 'Rows per table',
+      name: 'Rows per table',
+      sql: '-- How many rows each table in this case holds.\n'
+        + real.map((s, i) => `SELECT ${sqlLiteral(sourceLabel(s))}${i ? '' : ' AS "Table"'}, `
+            + `COUNT(*)${i ? '' : ' AS "Rows"'} FROM ${paneTable(s)}`).join('\nUNION ALL ')
+        + '\nORDER BY "Rows" DESC;',
+    });
+  }
+
+  // Timestamps are the one column shape where a value count is never the
+  // interesting question, so the pick skips them; whichever column it
+  // lands on is named in the label, so the analyst can see it was a guess
+  // and change it.
+  const col = (here.columns || []).find((c) => c.type !== 'datetime');
+  if (col) {
+    out.push({
+      label: `Most common ${col.name} in ${label}`,
+      name: `Top ${col.name}`,
+      sql: `-- Value counts for one column of ${label}.\n`
+        + `SELECT ${quoteIdent(col.name)} AS "Value", COUNT(*) AS "Rows"\n`
+        + `FROM ${table} GROUP BY 1 ORDER BY 2 DESC LIMIT 20;`,
+    });
+  }
+  return out.slice(0, 3);
+}
+
+/* The results area before anything has run in this query tab. It used to
+   be blank — about four fifths of the pane saying nothing at all, with no
+   sign that Ctrl+Enter is what runs a query (the Run button says so, but
+   only in a tooltip). */
+export function sqlEmptyState() {
+  const wrap = el('div', 'sql-empty');
+  wrap.append(el('p', 'empty-title', 'Nothing run yet'));
+  wrap.append(el('p', null,
+    `${MOD_ENTER} runs the query. Results become a table you can sort, tag and export.`));
+  const starters = sqlStarters();
+  if (!starters.length) return wrap;
+  const row = el('div', 'sql-starters');
+  for (const st of starters) {
+    const b = el('button', 'btn ghost sql-starter', st.label);
+    b.title = st.sql; // the query itself, so a click is never a surprise
+    b.onclick = () => openStarter(st);
+    row.append(b);
+  }
+  wrap.append(row);
+  return wrap;
+}
+
+/* Clicking a starter must not cost the analyst a draft. The editor holds
+   one tab's text and autosaves it into the case file, so overwriting a
+   half-written query is a real deletion — but demanding a new tab for the
+   very first click, when the editor holds nothing but the seeded starter,
+   would leave an abandoned "Query 1" behind in every case. So: fill this
+   tab when its text is blank or is itself a starter, and open a named tab
+   otherwise. */
+export async function openStarter(st) {
+  const cur = $('sqlText').value.trim();
+  const disposable = !cur || sqlStarters().some((x) => x.sql.trim() === cur);
+  if (!disposable) {
+    await newSqlTab(st.name, st.sql);
+  } else {
+    $('sqlText').value = st.sql;
+    // Through the editor's own input handler, so the tab record, the
+    // autosave and the box's auto-grow all see it the way they would a
+    // keystroke.
+    $('sqlText').dispatchEvent(new Event('input', { bubbles: true }));
+    await flushSqlTabSave();
+  }
+  await runSql();
 }
 
 export async function loadSqlTabs() {
@@ -77,6 +225,22 @@ export async function loadSqlTabs() {
   renderSqlTabs();
 }
 
+/* Forget the open case's SQL pane: its tabs, results and runs. A case
+   switch calls this — sql_tabs is a per-case table, and its ids restart
+   in the next case. Left empty rather than reloaded here; showSqlTab
+   loads lazily. A query still running belongs to the case that just
+   closed (closing its Store stopped it): abandoning it is what keeps it
+   from landing in this case's tab of the same id when its
+   request returns, and from being what Ctrl+C or a tag hotkey then acts
+   on. */
+export function resetSqlPane() {
+  S.sqlTabs = [];
+  S.sqlTabId = null;
+  S.sqlResults.clear();
+  abandonSqlRuns();
+  setActiveSqlResult(null);
+}
+
 export const activeSqlTab = () => S.sqlTabs.find((t) => t.id === S.sqlTabId) || null;
 
 /* Loads the active tab's stored text + last result into the editor/result
@@ -88,8 +252,12 @@ export function applySqlTabToEditor() {
   $('sqlText').disabled = !tab;
   const out = $('sqlResult');
   const cached = tab ? S.sqlResults.get(tab.id) : null;
-  setActiveSqlResult(cached && !cached.error ? cached : null);
-  if (!cached) out.replaceChildren();
+  const running = tab ? S.sqlRuns.get(tab.id) : null;
+  // A tab whose run is still out shows that run, not the result it is
+  // about to replace (and released when it started).
+  setActiveSqlResult(cached && !cached.error && !running ? cached : null);
+  if (running) out.replaceChildren(...sqlRunningNodes(running));
+  else if (!cached) out.replaceChildren(sqlEmptyState());
   else if (cached.error) out.replaceChildren(el('div', 'sql-error', cached.error));
   else out.replaceChildren(...sqlResultNodes(cached));
 }
@@ -151,7 +319,7 @@ export function renderSqlTabs() {
   }
   const add = el('button', 'sql-tab sql-tab-add', '+');
   add.title = 'New query';
-  add.onclick = newSqlTab;
+  add.onclick = () => newSqlTab();
   strip.append(add);
 }
 
@@ -164,7 +332,10 @@ export async function activateSqlTab(id) {
   $('sqlText').focus();
 }
 
-export async function newSqlTab() {
+/* A new query tab: the "+" button's (unnamed, empty) and a plugin's
+   (sqlPage.setText with newTab — named, filled). One path, so both land
+   the same way: created, selected, in the editor. */
+export async function newSqlTab(name = null, sql = '') {
   await flushSqlTabSave();
   // "Query N" by highest existing number, not by count — otherwise closing
   // "Query 2" of 3 makes the next new tab a duplicate "Query 3".
@@ -173,7 +344,7 @@ export async function newSqlTab() {
     return m ? Math.max(max, Number(m[1])) : max;
   }, 0) + 1;
   try {
-    const rec = await post('/api/sql_tabs', { name: `Query ${n}`, sql: '' });
+    const rec = await post('/api/sql_tabs', { name: name || `Query ${n}`, sql });
     rec.savedSql = rec.sql;
     S.sqlTabs.push(rec);
     S.sqlTabId = rec.id;
@@ -211,6 +382,11 @@ export async function closeSqlTab(t) {
   }
   const idx = S.sqlTabs.findIndex((x) => x.id === t.id);
   S.sqlTabs = S.sqlTabs.filter((x) => x.id !== t.id);
+  // Its run, if one is out, stops — nobody will read what it lands — and
+  // its result is let go.
+  abandonSqlRuns(t.id);
+  const gone = S.sqlResults.get(t.id);
+  if (gone && gone.id) releaseSqlResults([gone.id]);
   S.sqlResults.delete(t.id);
   if (S.sqlTabId === t.id) {
     const next = S.sqlTabs[Math.min(idx, S.sqlTabs.length - 1)];
@@ -228,14 +404,27 @@ export async function closeSqlTab(t) {
    a row of controls that silently does nothing reads as broken, and the
    space belongs to the pane you actually switched to.
 
-   Called by every show*Tab, so there's one place this rule lives rather
-   than four copies drifting apart. Grid: showGridTab re-runs checkPresets
-   afterward, which is what brings the banner back when it applies. */
+   The row detail pane is the same kind of thing: it shows a grid row, and
+   it sits beside .main-content rather than inside the grid, so the view
+   swap the pages do never reaches it (docs/notes/ui.md).
+
+   Called by every writer of S.activeTab — including showPluginTab, which
+   swaps views itself rather than through showMainView — so there's one
+   place this rule lives rather than copies drifting apart. Grid:
+   showGridTab re-runs checkPresets afterward, which is what brings the
+   banner back when it applies. */
 export function syncTabChrome() {
   const isGrid = S.activeTab === 'grid';
   $('toolbar').hidden = !isGrid;
+  // The detail pane reads a grid row, and no page shows the grid — but a
+  // one-way hide only: `hidden = !isGrid` would force it open, possibly
+  // empty, on every return to the grid.
+  if (!isGrid) hideDetailPane();
   syncPluginPanels();   // plugin toolbar panels live and die with the toolbar
+  syncHistogramPanel(); // as does the built-in histogram strip beside them
   syncDiffBanner();     // as does a session comparison's banner
+  renderFilterBar();    // and the filter bar, which describes the grid's rows
+  renderTagToolbar();   // and the "N selected" tagging bar
 }
 
 /* The mutually-exclusive main content views (grid / SQL / Timeline / and
@@ -253,11 +442,52 @@ export function showMainView(id) {
   if (e) e.hidden = false;
 }
 
-export function showGridTab() {
+/* Whether the grid is actually on screen, rather than merely the tab the
+   app would return to. S.activeTab stays 'grid' on the home screen, which
+   hides #app wholesale (#home and #app are siblings, only one visible), so
+   a background job that painted on "the grid tab is active" would measure
+   a zero-height viewport there exactly as it would behind a page tab.
+   One predicate, so the two answers can't drift apart. */
+export function gridIsShowing() {
+  return S.activeTab === 'grid' && !$('app').hidden;
+}
+
+/* Arriving at the grid, from a page tab or from a table that was opened
+   while one was showing. One paint on the way in, at most, and only for a
+   caller that wants this function to do the painting.
+
+   Two things owe that paint. Tags can change while the grid isn't
+   showing — the SQL pane's tag hotkey drops the row caches but can't
+   paint a hidden grid — so the rows on screen are whatever was painted
+   before leaving; and a background job (the watchlist scan's auto-tags)
+   that dropped the caches with the grid hidden left `S.gridRepaintPending`
+   behind rather than painting into nothing. The owed repaint carries the
+   rest of what a tag write does: the rail, and a regroup when the
+   grouping is BY TAG, since the rows the scan tagged changed bucket and
+   the tree still holds its pre-tag counts.
+
+   openSource and openCase come through here BEFORE swapping
+   S.view/S.sourceId and paint for themselves next; with the caches just
+   dropped, a render() here would fetch a page of the previous table's
+   view (or, on a case switch, ask the new Store for the old case's view
+   id and spin a spurious rebuild off the 409). Those two pass
+   repaint:false — for the owed repaint as much as the ordinary one, which
+   is why the flag is consumed either way: they satisfy it themselves
+   (installView renders, draws the rail and regroups; openSource's
+   cached-view path does the same), and honouring it here is exactly what
+   repaint:false exists to prevent. render() is a no-op with no S.view at
+   all. */
+export function showGridTab({ repaint = true } = {}) {
   S.activeTab = 'grid';
   showMainView('grid');
   syncTabSelection();
   syncTabChrome();
+  const owed = S.gridRepaintPending;
+  S.gridRepaintPending = false;
+  if (repaint) {
+    render();
+    if (owed && S.view) { drawRail(); regroupIfGroupedByTag(); }
+  }
   if (S.sourceId) checkPresets(S.sourceId); // refresh the Filters button's suggestion state
 }
 

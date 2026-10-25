@@ -5,10 +5,11 @@ import { applyPin, colWidth, pinnedOffsets, visibleCols } from './columns.js';
 import { $, GUTTER_W, MAX_SPACER_PX, OVERSCAN, PAGE, ROW_H, api, el } from './core.js';
 import { maybeShowDetail, showDetail } from './detail.js';
 import { ensureGroupPage, findGroupAt, groupCoordAt, groupDataRowAt, isLeafLevel, renderGrouped, toggleGroup } from './grouping.js';
-import { S, cellInRange, gridRowCount, selAdd, selClear, selCount, selHas, selRemove, selSetRange, selToggle } from './state.js';
+import { histogramFollowGrid } from './histogram.js';
+import { S, cellInRange, cellRangeAllSelected, cellRangeRowCount, cellRangeRows, clearCellSelection, gridRowCount, selAdd, selClear, selCount, selHas, selRangeApply, selRanges, selRemove, selReplace, selSnapshot, selToggle, selUndoAvailable, selUndoLast } from './state.js';
 import { applyTag } from './tags.js';
 import { displayCell } from './tsformat.js';
-import { rebuildView } from './view.js';
+import { rebuildInFlight, rebuildView } from './view.js';
 
 /* ------------------------------------------------------------ row paging */
 
@@ -65,12 +66,38 @@ export function trimPageCache(keep) {
    it would land afterwards and repopulate the cache with stale `tags`
    arrays. ensurePage checks the generation before storing, and clearing
    S.pending lets render() start fresh fetches for whatever's on screen
-   instead of waiting on the now-discarded ones. */
+   instead of waiting on the now-discarded ones.
+
+   This is only the flat half. A grouping keeps its own page cache for the
+   same view id (S.groupPages) and this one stays alive underneath it, so
+   a tag write reaches for tags.js's clearRowCaches, which drops both; the
+   two places that call this alone from a tag or note write do so because
+   they patched the group-page rows in place and only the flat copies of
+   those rids are stale. */
 export function clearPageCache() {
   S.pages.clear();
   S.rowsByPos.clear();
   S.pending.clear();
   S.pageGen++;
+  screenGlimpse = null;   // its rows went with rowsByPos; a glimpse in flight checks pageGen
+}
+
+/* The view handle the last recovery rebuild was started for — the two in
+   ensurePage below, for a page that came back expired or empty. One per
+   handle: a rebuild that fails (the filter names a column an edited merge
+   no longer has, the table was removed from another window) leaves
+   S.view as it was, and its failure path repaints, which asks for the
+   same page, gets the same answer and started the same rebuild again —
+   for ever, a hundred-odd requests a second, until the page was
+   reloaded. A rebuild that lands installs a new handle, and so does
+   reopening the table (sources.js builds a fresh one even for a cached
+   view), so each of those can recover once in its turn. */
+let recoveredView = null;
+
+function recoverView(view) {
+  if (recoveredView === view) return;
+  recoveredView = view;
+  rebuildView();
 }
 
 /* Returns a promise that resolves once the page is in S.pages, or once the
@@ -82,12 +109,15 @@ export function ensurePage(idx, { keep, prefetch } = {}) {
   if (S.pages.has(idx)) return Promise.resolve();
   const inFlight = S.pending.get(idx);
   if (inFlight) return inFlight;
-  const vid = S.view.view_id;
+  if (!S.view) return Promise.resolve();   // nothing to page against
+  const view = S.view;
+  const vid = view.view_id;
   const gen = S.pageGen;
   const p = (async () => {
     try {
       const data = await api(`/api/rows?view_id=${vid}&start=${idx * PAGE}&count=${PAGE}`);
       if (!S.view || S.view.view_id !== vid || S.pageGen !== gen) return;
+      if (S.pending.get(idx) !== p) return;   // disowned by refetchPageOf
       /* An in-range page that comes back empty means this client's view
          handle and the server's view disagree about how many rows there
          are. Caching the empty array would be the worst possible response:
@@ -100,9 +130,10 @@ export function ensurePage(idx, { keep, prefetch } = {}) {
          Rebuilding is the same recovery the expired-view path below takes,
          and it can't loop: a rebuild replaces both the view id and the row
          count, so if the view really is empty, row_count becomes 0 and
-         this branch stops being reachable. */
+         this branch stops being reachable — and a rebuild that fails
+         replaces nothing, which is what recoverView is for. */
       if (!data.rows.length && idx * PAGE < S.view.row_count) {
-        rebuildView();
+        recoverView(view);
         return;
       }
       S.pages.set(idx, data.rows);
@@ -118,9 +149,15 @@ export function ensurePage(idx, { keep, prefetch } = {}) {
         if (!$('detail').hidden && S.cursor >= 0 && rowAt(S.cursor)) showDetail(S.cursor);
       }
     } catch (e) {
-      if (String(e.message).includes('expired')) rebuildView();
+      // Expired = evicted by a build that finished after it was superseded.
+      // If the superseding build is still in flight its landing is the
+      // recovery — a rebuild from here would cancel it and start the same
+      // spec over. Nothing in flight means nobody else will: rebuild.
+      if (String(e.message).includes('expired') && !rebuildInFlight()) recoverView(view);
     } finally {
-      S.pending.delete(idx);
+      // Only its own entry: after clearPageCache or refetchPageOf the
+      // entry, if any, is a newer fetch's.
+      if (S.pending.get(idx) === p) S.pending.delete(idx);
     }
   })();
   S.pending.set(idx, p);
@@ -173,11 +210,17 @@ export function schedulePrefetch() {
 }
 
 export function prefetchFlatPages() {
+  if (!S.view) return;   // exported: not every caller is schedulePrefetch
   const maxPage = Math.floor(Math.max(0, S.view.row_count - 1) / PAGE);
   const [firstPage, lastPage] = visiblePageRange();
+  // Mid-jump the pages either side are pages the grid is about to leave,
+  // and while it is outrunning its fetches these would queue behind them
+  // (see the jumps block below). The paint that ends either schedules
+  // this again.
+  if (isJumping() || outrunning(firstPage, lastPage)) return;
   for (let d = 1; d <= PREFETCH_RADIUS; d++) {
     for (const idx of [lastPage + d, firstPage - d]) {
-      if (idx >= 0 && idx <= maxPage) ensurePage(idx, { prefetch: true });
+      if (idx >= 0 && idx <= maxPage && !S.pages.has(idx) && !S.pending.has(idx)) gridFetch(idx, { prefetch: true });
     }
   }
 }
@@ -186,6 +229,7 @@ export function prefetchFlatPages() {
    the next page *within* a big expanded group, and the first page of the
    *next* expanded group. Both stall the same way, so both get warmed. */
 export function prefetchGroupPages() {
+  if (isJumping()) return;   // as in prefetchFlatPages
   const body = $('body');
   const virt = vScroll(body, S.groupTotalRows, headH());
   const first = Math.max(0, Math.floor(virt / ROW_H) - OVERSCAN);
@@ -211,6 +255,190 @@ export function nextExpandedLeaf(gi, step) {
     if (g.expanded && isLeafLevel(g.level) && g.rowCount) return i;
   }
   return null;
+}
+
+/* ---------------------------------------------------------------- jumps */
+
+/* A long jump — the scrollbar's thumb dragged, Ctrl+End, a click on the
+   histogram — paints the rows it lands on by fetching just those rows, and
+   fetches the page around them only once the grid has stopped moving.
+
+   What it replaced: every frame of a thumb drag lands on a different page,
+   and render() asked for each one with nothing to cancel the pages the
+   thumb had already passed. The browser sends six requests to one host at
+   a time, so the page the analyst let go on queued behind every page the
+   drag crossed. Measured on a 1M-row EvtxECmd table (27 columns, 8.6 MB a
+   page, 110–390 ms to serve one warm, seconds cold): a one-second drag sent
+   ~31 page requests, and the rows it stopped on showed ~24 s after the
+   button came up. Those rows are ~60 of the page's 5,000, and fetching
+   only them takes ~7 ms.
+
+   So the screen never waits for a page: rows it is missing are fetched on
+   their own (a glimpse), whatever else is in flight. One glimpse is in
+   flight at a time and nothing queues behind it — when it lands it
+   repaints, and that paint asks for wherever the grid is by then, so a
+   drag shows rows as it goes and the rows it stops on are at most one
+   small round trip behind it.
+
+   And pages are only asked for where the grid will still be when they
+   land. Not while it is *jumping* — a paint in the last SETTLE_MS moved
+   further than JUMP_ROWS, which no wheel or key does (a notch is three
+   rows, PageDown a screen) and a thumb drag on any big table does — and
+   not while it is *outrunning* them: a page it or the prefetch asked for
+   is still on its way, for a place it has since left (a slow drag, one
+   that paused and went on, a jump before the last one's pages came back).
+   Asking for more then is the queue starting over. Either way the grid
+   comes back for the page — the settle timer, or the stale fetch's
+   landing — from wherever it came to rest, so the page cache, the
+   prefetch and everything that reads S.pages carry on as before, and a
+   glimpse only ever stands in for a page that is about to arrive. */
+export const JUMP_ROWS = 1000;
+export const SETTLE_MS = 150;
+
+let lastPaintFirst = null;   // the first row the last flat paint drew
+let jumpedAt = -Infinity;
+let settleTimer = null;
+const gridFetches = new Set();   // { page, gen }: asked for by a paint or the prefetch, not landed yet
+let waitingOnStale = false;      // a page or prefetch was held back for one of gridFetches
+
+export function isJumping() { return performance.now() - jumpedAt < SETTLE_MS; }
+
+function settleLater() {
+  clearTimeout(settleTimer);
+  settleTimer = setTimeout(() => { settleTimer = null; render(); }, SETTLE_MS);
+}
+
+export function noteViewportMove(first) {
+  if (lastPaintFirst !== null && Math.abs(first - lastPaintFirst) >= JUMP_ROWS) {
+    jumpedAt = performance.now();
+    settleLater();
+  }
+  lastPaintFirst = first;
+}
+
+/* A page the grid asked for, for pages pFirst..pLast and the prefetch
+   radius around them, that has not landed — the grid has moved on. */
+function outrunning(pFirst, pLast) {
+  for (const f of gridFetches) {
+    if (f.gen === S.pageGen && (f.page < pFirst - PREFETCH_RADIUS || f.page > pLast + PREFETCH_RADIUS)
+        && !S.pages.has(f.page)) {
+      waitingOnStale = true;
+      return true;
+    }
+  }
+  return false;
+}
+
+export function gridFetch(idx, opts) {
+  const f = { page: idx, gen: S.pageGen };
+  gridFetches.add(f);
+  ensurePage(idx, opts).finally(() => {
+    gridFetches.delete(f);
+    if (waitingOnStale) { waitingOnStale = false; settleLater(); }
+  });
+}
+
+/* What render() asks for, for rows [first, last) on pages pFirst..pLast. */
+function loadScreen(first, last, pFirst, pLast) {
+  let uncached = false;
+  for (let p = pFirst; p <= pLast; p++) if (!S.pages.has(p)) uncached = true;
+  if (!uncached) return;
+  glimpseIfMissing(first, last);
+  // Held back, the page is asked for again by the settle timer
+  // noteViewportMove armed, or by the stale fetch landing (gridFetch).
+  if (isJumping() || outrunning(pFirst, pLast)) return;
+  for (let p = pFirst; p <= pLast; p++) if (!S.pages.has(p) && !S.pending.has(p)) gridFetch(p);
+}
+
+/* The rows on screen, fetched on their own: { view, gen, start, end, rows }.
+   Its rows sit in S.rowsByPos, so rowAt and everything built on it read
+   them like any other — but only where their page isn't cached (a cached
+   page's row objects are the ones a tag or a note patches in place), and
+   only until the next glimpse replaces them or their page lands over them.
+   That keeps S.rowsByPos what trimPageCache assumes it is: the cached
+   pages' rows, plus at most one screenful. */
+export let screenGlimpse = null;
+let glimpseInFlight = null;   // { view, gen }
+/* The view a glimpse failed on. The page is the fallback, with its own
+   recovery; a glimpse retried on every paint would be the
+   request-per-repaint loop test_expired_view_recovers_once.py holds the
+   page fetches to. */
+let glimpseFailedView = null;
+
+/* A note written to a row whose page isn't cached went onto a glimpse
+   row, and the page that will land over it may have been asked for before
+   the write — answered with the old note, and showDetail would put that
+   in the note box the moment it landed. Disown that fetch, and a glimpse
+   in flight for the same reason (both drop what they bring), so the next
+   paint asks for the page afresh. */
+export function refetchPageOf(pos) {
+  if (S.groupByCols.length) return;
+  const idx = Math.floor(pos / PAGE);
+  if (S.pages.has(idx)) return;
+  S.pending.delete(idx);
+  glimpseInFlight = null;
+}
+
+/* A rebuild's first paint, from the rows runBuild fetched for where the
+   grid will land: put up as the glimpse a jump paints from, on a page
+   cache installView has just cleared, so the paint that follows asks for
+   their page in the background. */
+export function seedGlimpse(start, rows) {
+  for (const r of rows) S.rowsByPos.set(r.pos, r);
+  screenGlimpse = { view: S.view, gen: S.pageGen, start, end: start + rows.length, rows };
+}
+
+/* S.rowsByPos is the only record of what the screen has: a glimpse's
+   rows go when a page lands over them and that page is evicted later. */
+function glimpseIfMissing(first, last) {
+  for (let pos = first; pos < last; pos++) {
+    if (!S.rowsByPos.has(pos)) { fetchGlimpse(first, last); return; }
+  }
+}
+
+function fetchGlimpse(first, last) {
+  if (last <= first) return;   // scrolled past the end of a view that just got shorter
+  const view = S.view;
+  const gen = S.pageGen;
+  if (glimpseFailedView === view) return;
+  if (glimpseInFlight && glimpseInFlight.view === view && glimpseInFlight.gen === gen) return;
+  const req = { view, gen };
+  glimpseInFlight = req;
+  (async () => {
+    try {
+      const data = await api(`/api/rows?view_id=${view.view_id}&start=${first}&count=${last - first}`);
+      if (S.view !== view || S.pageGen !== gen || glimpseInFlight !== req) return;
+      // In range and empty: the same desync ensurePage guards against.
+      if (!data.rows.length && first < view.row_count) {
+        glimpseFailedView = view;
+        recoverView(view);
+        return;
+      }
+      glimpseInFlight = null;   // before anything below asks for the next one
+      // Mid-drag the grid has usually moved on by the time a glimpse lands.
+      // Off the screen it paints nothing, so skip the paint (it is most of
+      // a frame on a wide table) and go straight for where the grid is.
+      if (S.groupByCols.length) return;
+      const now = paintWindow();
+      if (now.last <= first || now.first >= first + data.rows.length) {
+        glimpseIfMissing(now.first, now.last);
+        return;
+      }
+      if (screenGlimpse) {
+        for (const r of screenGlimpse.rows) if (S.rowsByPos.get(r.pos) === r) S.rowsByPos.delete(r.pos);
+      }
+      for (const r of data.rows) if (!S.pages.has(Math.floor(r.pos / PAGE))) S.rowsByPos.set(r.pos, r);
+      screenGlimpse = { view, gen, start: first, end: first + data.rows.length, rows: data.rows };
+      render();
+      if (!$('detail').hidden && S.cursor >= first && S.cursor < last && rowAt(S.cursor)) showDetail(S.cursor);
+    } catch (e) {
+      glimpseFailedView = view;
+      // Same reading of "expired" as ensurePage's.
+      if (String(e.message).includes('expired') && !rebuildInFlight()) recoverView(view);
+    } finally {
+      if (glimpseInFlight === req) glimpseInFlight = null;
+    }
+  })();
 }
 
 /* `pos` is a view position in flat mode and a position in the flattened
@@ -258,8 +486,31 @@ export function syncSelectAllCheckbox() {
    its height must subtract it. */
 export function headH() { return $('gridHead').offsetHeight; }
 
-/* The spacer height to use for `total` rows — capped, see MAX_SPACER_PX. */
-export function spacerPx(total) { return Math.min(total * ROW_H, MAX_SPACER_PX); }
+/* The spacer height to use for `total` rows — capped, see MAX_SPACER_PX.
+   `rowH` (here, in vScroll and in rowsPaintY) defaults to the grid's own
+   ROW_H; the SQL pane's virtualized result passes its row height instead. */
+export function spacerPx(total, rowH = ROW_H) { return Math.min(total * rowH, MAX_SPACER_PX); }
+
+/* Sizes #spacerY — and so the scrollbar — for `total` rows. Both painters
+   call it with the count they are about to draw, flat and grouped alike,
+   so the scrollbar always describes the table on screen rather than
+   whichever count last happened to write it. The flat paint used to leave
+   that to the callers that change the count, and leaving a grouping is
+   not one of them: Ungroup, its hotkey and dragging off the last pill
+   repaint the flat rows with no rebuild, so the spacer kept the grouped
+   tree's height (a few collapsed headers' worth under the whole table).
+   The thumb was then sized by the painted rows block alone — far too
+   big at the top, shrinking as each scroll pushed the block further
+   down — and never sat beside the tag rail's marks for the rows on
+   screen, until the next filter change happened to rebuild the view.
+   Writes only on a change, since render() runs on every scroll frame.
+   Callers that set scrollTop before painting call it first: a scroller
+   still sized for the old count clamps the assignment. */
+export function syncSpacer(total) {
+  const h = spacerPx(total) + 'px';
+  const sp = $('spacerY');
+  if (sp.style.height !== h) sp.style.height = h;
+}
 
 /* scrollTop as the rest of the grid means it: an offset into `total * ROW_H`
    pixels of rows. Identity below the spacer cap; a linear rescale above it.
@@ -267,8 +518,8 @@ export function spacerPx(total) { return Math.min(total * ROW_H, MAX_SPACER_PX);
    for the timeline, whose header sits outside its scroller. Both ends are
    anchored (0 maps to 0, max-scroll maps to max-offset), so the last row is
    exactly reachable rather than merely nearly so. */
-export function vScroll(scroller, total, head = 0) {
-  const want = total * ROW_H;
+export function vScroll(scroller, total, head = 0, rowH = ROW_H) {
+  const want = total * rowH;
   if (want <= MAX_SPACER_PX) return scroller.scrollTop;
   const maxReal = Math.max(0, head + MAX_SPACER_PX - scroller.clientHeight);
   const maxWant = Math.max(0, head + want - scroller.clientHeight);
@@ -294,15 +545,95 @@ export function rScroll(scroller, total, virt, head = 0) {
    reduces to exactly first * ROW_H. Above it, subtracting the fractional part
    of the virtual offset is what keeps scrolling smooth — without it the top
    row snaps to the viewport edge and the whole grid moves in ROW_H steps. */
-export function rowsPaintY(scroller, virt, first) {
-  const anchor = Math.floor(virt / ROW_H);
-  return scroller.scrollTop - (virt - anchor * ROW_H) - (anchor - first) * ROW_H;
+export function rowsPaintY(scroller, virt, first, rowH = ROW_H) {
+  const anchor = Math.floor(virt / rowH);
+  return scroller.scrollTop - (virt - anchor * rowH) - (anchor - first) * rowH;
 }
 
+/* Also hands the same height to the stylesheet as --grid-head-h, which is
+   where #vbar's track and the tag rail start (style.css, .vbar) — the one
+   measurement, taken on every paint, rather than a second one of its own
+   that could go stale on a path that repaints the head. */
 export function syncRowsTop() {
   const t = headH() + 'px';
   const rowsEl = $('rows');
   if (rowsEl.style.top !== t) rowsEl.style.top = t;
+  const grid = $('grid');
+  if (grid.style.getPropertyValue('--grid-head-h') !== t) grid.style.setProperty('--grid-head-h', t);
+}
+
+/* ----------------------------------------------- the stand-in scrollbar */
+
+/* #vbar is the grid's vertical scrollbar wherever the browser can hide
+   #body's own (style.css, .vbar, behind the same test): a scroller beside
+   #body whose only content is a fill, so that its thumb and track say
+   what #body's would, from the header's foot down. Everything else about
+   scrolling — the wheel over the rows, keyboard paging, scrollIntoView,
+   the jumps logic — still happens on #body; this only has to mirror it. */
+export let vbarSupported = null;
+export function vbarInUse() {
+  if (vbarSupported === null) {
+    vbarSupported = typeof CSS !== 'undefined' && CSS.supports('selector(::-webkit-scrollbar)');
+  }
+  return vbarSupported;
+}
+
+/* How much of #body's right edge #vbar covers: its width while it is
+   showing, otherwise nothing (#body's own bar is outside clientWidth). */
+export function vbarCover() {
+  const bar = $('vbar');
+  return bar && vbarInUse() && !bar.hidden ? bar.offsetWidth : 0;
+}
+
+/* The scrollTop each side was last given by the other, until that write's
+   scroll event comes back. Passing an echo on would set the side that
+   started the move back to where it was a frame ago — a thumb drag or a
+   smooth wheel scroll fighting itself — so the echo is recognised by its
+   value and dropped. Null when nothing is in flight. */
+export let vbarSetTo = null;
+export let bodySetTo = null;
+
+/* Assigns a scrollTop and returns what the element actually took (it
+   clamps to its own range), or null when nothing moved — no scroll event
+   is coming then, so there is no echo to wait for. */
+export function pushScrollTop(node, top) {
+  const was = node.scrollTop;
+  node.scrollTop = top;
+  return node.scrollTop !== was ? node.scrollTop : null;
+}
+
+/* #body moved: bring the bar's thumb with it. */
+export function vbarFollowBody() {
+  const bar = $('vbar'), body = $('body');
+  if (!bar || bar.hidden || !vbarInUse()) return;
+  if (Math.abs(bar.scrollTop - body.scrollTop) >= 1) vbarSetTo = pushScrollTop(bar, body.scrollTop);
+}
+
+/* The bar's scroll range made equal to #body's: a fill as tall as the
+   bar's own box plus #body's range, so the thumb is the share of the rows
+   on screen and its travel is #body's. The bar's box is the viewport less
+   the header (its top) and #body's horizontal bar (its bottom, written
+   here), so its height is worked out rather than read back after that
+   write. Hidden with nothing to scroll, as #body's own bar would be.
+   Both painters call it on every paint, after the spacer and the header
+   have their sizes; the ResizeObserver in wireGrid covers a viewport that
+   changes size with no paint. The position is only pushed when the range
+   changed — between paints the scroll handlers keep the two together,
+   and pushing on every paint could land on a drag mid-frame. */
+export function syncVbar() {
+  const bar = $('vbar'), body = $('body');
+  if (!bar || !body || !vbarInUse()) return;
+  const range = body.scrollHeight - body.clientHeight;
+  const idle = range <= 0;
+  let changed = bar.hidden !== idle;
+  if (changed) bar.hidden = idle;
+  if (idle) return;
+  const bottom = (body.offsetHeight - body.clientHeight) + 'px';
+  const fill = Math.max(0, body.clientHeight - headH()) + range + 'px';
+  const fillEl = $('vbarFill');
+  if (bar.style.bottom !== bottom) { bar.style.bottom = bottom; changed = true; }
+  if (fillEl.style.height !== fill) { fillEl.style.height = fill; changed = true; }
+  if (changed) vbarFollowBody();
 }
 
 /* Explicit pixel width for #rows — the exact gutter + visible-column
@@ -315,18 +646,26 @@ export function syncRowsWidth(widths, cols) {
   if (rowsEl.style.width !== w) rowsEl.style.width = w;
 }
 
+/* The rows a flat paint draws: the screen, and OVERSCAN either side. */
+export function paintWindow(body = $('body')) {
+  const total = S.view.row_count;
+  const virt = vScroll(body, total, headH());
+  const first = Math.max(0, Math.floor(virt / ROW_H) - OVERSCAN);
+  const last = Math.min(total, first + Math.ceil(body.clientHeight / ROW_H) + OVERSCAN * 2);
+  return { virt, first, last };
+}
+
 export function render() {
   if (!S.view) return;
   syncSelectAllCheckbox();
-  if (S.groupByCols.length) { renderGrouped(); return; }
+  if (S.groupByCols.length) { renderGrouped(); histogramFollowGrid(); return; }
   syncRowsTop();
   const body = $('body');
   const rowsEl = $('rows');
   const total = S.view.row_count;
-  const virt = vScroll(body, total, headH());
-  const first = Math.max(0, Math.floor(virt / ROW_H) - OVERSCAN);
-  const visible = Math.ceil(body.clientHeight / ROW_H) + OVERSCAN * 2;
-  const last = Math.min(total, first + visible);
+  // Before paintWindow reads scrollTop: a spacer that shrinks clamps it.
+  syncSpacer(total);
+  const { virt, first, last } = paintWindow(body);
 
   /* Clamped to the pages the view actually has. Without the cap, a grid
      still scrolled past the end of a view that just got shorter asks for a
@@ -335,7 +674,8 @@ export function render() {
      on purpose would spin rebuilds for no reason. */
   const lastPage = Math.floor(Math.max(0, total - 1) / PAGE);
   const wantLast = Math.min(lastPage, Math.floor(Math.max(first, last - 1) / PAGE));
-  for (let p = Math.floor(first / PAGE); p <= wantLast; p++) ensurePage(p);
+  noteViewportMove(first);
+  loadScreen(first, last, Math.floor(first / PAGE), wantLast);
   schedulePrefetch();
 
   const ctx = rowPaintContext();
@@ -347,6 +687,56 @@ export function render() {
   for (let pos = first; pos < last; pos++) frag.append(buildDataRow(pos, rowAt(pos), ctx));
   rowsEl.replaceChildren(frag);
   renderTagToolbar();
+  syncVbar();
+  titleClippedCells();
+  histogramFollowGrid();
+}
+
+/* The rows actually on screen, as {first, last} positions — no overscan,
+   and none of the rows the sticky header covers. The same geometry
+   scrollIntoView uses: row `pos` is visible below the header when
+   pos * ROW_H reaches past the virtual offset, and above the bottom edge
+   while headH() + pos * ROW_H is short of it. Null when the grid has no
+   rows or is not laid out. The histogram strip marks these. */
+export function onScreenRows() {
+  const total = gridRowCount();
+  const body = $('body');
+  if (!S.view || !total || !body || !body.clientHeight) return null;
+  const head = headH();
+  const virt = vScroll(body, total, head);
+  const first = Math.min(total - 1, Math.floor(virt / ROW_H));
+  const last = Math.min(total - 1, Math.max(first, Math.ceil((virt + body.clientHeight - head) / ROW_H) - 1));
+  return { first, last };
+}
+
+/* A cell the column cut short says what it says, on hover — and only one
+   that was actually cut.
+
+   `LEVEL` painting `Informati…` with an empty title was the measured case:
+   the full value was reachable by widening the column or opening the row,
+   and nowhere else, while every other truncating surface in the app (tabs,
+   sidebar rows, column headers) has always carried a title.
+
+   Two things here are deliberate. It runs AFTER the rows are in the
+   document, because scrollWidth on a node still in a DocumentFragment is
+   0 — there is no way to ask "did this clip" before layout. And it titles
+   only the cells that clipped, rather than every cell unconditionally:
+   most values fit, and a title attribute on every cell of every painted
+   row is DOM string the grid does not need (invariant #6 is about what
+   the grid keeps in the document). The loop reads and never writes
+   geometry, so the first scrollWidth forces the one layout the frame was
+   going to do anyway and the rest come out of it — setting `title` cannot
+   dirty layout, so this must stay the last thing a paint does.
+
+   The 1px of slack is not superstition: scrollWidth and clientWidth are
+   rounded integers over fractional text and box widths, so an
+   exactly-fitting cell (an autofit column, most obviously) reports one
+   pixel of overflow it does not visibly have, and every cell in the
+   column would get a tooltip repeating what is already on screen. */
+export function titleClippedCells() {
+  for (const c of $('rows').querySelectorAll('.cell')) {
+    if (c.scrollWidth > c.clientWidth + 1) c.title = c.textContent;
+  }
 }
 
 /* Everything a paint pass hoists out of its row loop — built once per
@@ -354,20 +744,78 @@ export function render() {
    grouped painters so a change to either lands in both. */
 export function rowPaintContext() {
   const cols = visibleCols();
+  const widths = Object.fromEntries(cols.map((name) => [name, colWidth(name)]));
+  // Hoisted with the widths: pinned placement is identical for every row
+  // in a pass, and recomputing it per row would walk the column list once
+  // per painted row.
+  const pins = pinnedOffsets();
   return {
     cols,
     colMeta: Object.fromEntries(S.columns.map((c) => [c.name, c])),
     idx: Object.fromEntries(S.columns.map((c, i) => [c.name, i])),
     tagColor: Object.fromEntries(S.tags.map((t) => [t.id, t.color])),
-    widths: Object.fromEntries(cols.map((name) => [name, colWidth(name)])),
-    // Hoisted with the widths: pinned placement is identical for every row
-    // in a pass, and recomputing it per row would walk the column list once
-    // per painted row.
-    pins: pinnedOffsets(),
+    widths,
+    pins,
+    span: paintedColumns(cols, widths, pins),
     needle: S.search.trim().toLowerCase(),
     // A pivoted session comparison's rows, when they are this table's.
     diffRows: S.diffMarks && S.diffMarks.sourceId === S.sourceId ? S.diffMarks.rows : null,
   };
+}
+
+/* The columns a paint pass actually builds cells for: the ones inside the
+   horizontal viewport, COL_OVERSCAN_PX either side of it, and every pinned
+   column wherever it is. Invariant #6 for the other axis.
+
+   Every row used to carry a cell for every visible column. That is free
+   on a 20-column EVTX table and the whole cost of a wide one: a
+   150-column table painted 8,550 cells per scroll frame for the ~10 on
+   screen across, and each frame took ~470 ms to the 20-column table's
+   ~75 (measured, headless Chromium) — scrolling, arrow keys and a cell
+   click all wait on that paint. Built cells now follow the viewport, so a
+   paint costs what the screen shows, not how wide the table is.
+
+   Returns the run in column order, as `{ ci, name }` for a column that
+   gets a cell and `{ gap }` for a run of skipped columns between two that
+   do — the row is a flex line, so a gap keeps every painted cell at the x
+   it would have had with all of them present. `ci` is still the column's
+   index in visibleCols(), which is what dataset.col and the cell range
+   address, so nothing downstream knows a column was skipped. No trailing
+   gap: #rows already has the full width (syncRowsWidth) and the row
+   fills it.
+
+   A pinned column is kept even when its natural place has scrolled away:
+   it is `position: sticky`, so it has to be in the row, after the gap
+   that stands for the columns before it, for the stickiness to hold it at
+   its offset. The header and the filter row are untouched — they hold
+   every column, which is what gives the scroller its width and keeps an
+   off-screen filter box reachable.
+
+   A grid that is not laid out (a page tab is up, or the home screen) has
+   no viewport to window to, so it gets every column rather than a guess;
+   nothing hidden is laid out, so that costs the build and no more. The
+   ResizeObserver in wireGrid repaints when a viewport grows past what the
+   last paint built. */
+export const COL_OVERSCAN_PX = 600;
+let paintedRight = Infinity;   // content x the last pass built cells out to
+export function paintedColumns(cols, widths, pins) {
+  const body = $('body');
+  const all = !body || !body.clientWidth;
+  const from = all ? -Infinity : body.scrollLeft - COL_OVERSCAN_PX;
+  const to = all ? Infinity : body.scrollLeft + body.clientWidth + COL_OVERSCAN_PX;
+  paintedRight = to;
+  const span = [];
+  let x = GUTTER_W;
+  let gap = 0;
+  cols.forEach((name, ci) => {
+    const w = widths[name];
+    if ((x + w > from && x < to) || pins[name] !== undefined) {
+      if (gap) { span.push({ gap }); gap = 0; }
+      span.push({ ci, name });
+    } else gap += w;
+    x += w;
+  });
+  return span;
 }
 
 /* A session comparison's mark on a row: A, the left session only; B, the
@@ -375,6 +823,7 @@ export function rowPaintContext() {
    Shared with the panel's legend and the banner, so the pill in the
    gutter and the key explaining it can't drift apart. */
 const DIFF_GLYPH = { removed: 'A', added: 'B', changed: 'A→B' };
+const DIFF_ROW_CLASS = { removed: 'diff-a', added: 'diff-b', changed: 'diff-ab' };
 export function diffMarkNode(kind, title) {
   const m = el('span', 'diff-mark diff-mark-' + kind, DIFF_GLYPH[kind]);
   if (title) m.title = title;
@@ -405,7 +854,7 @@ function diffMarkTitle(dm) {
    mark and the cell-range highlight can't be present in one mode and
    quietly missing in the other. */
 export function buildDataRow(pos, r, ctx) {
-  const { cols, colMeta, idx, tagColor, widths, pins, needle } = ctx;
+  const { colMeta, idx, tagColor, widths, pins, needle } = ctx;
   const row = el('div', 'row' + (r ? '' : ' pending'));
   row.dataset.pos = pos;
   if (pos === S.cursor) row.classList.add('cursor');
@@ -417,6 +866,13 @@ export function buildDataRow(pos, r, ctx) {
   // number keep the same x-position on every row regardless of whether
   // that row happens to be tagged or annotated.
   const g = el('div', 'gutter');
+  // The line number says whether this row is IN the cell rectangle. It is
+  // the one column that never could: the range is painted per .cell and
+  // the gutter is not one, so with a rectangle two columns wide an
+  // analyst reading down the line numbers had nothing to read. Rows only
+  // — a rectangle spans whole rows vertically, so a per-column answer
+  // here would be a lie.
+  if (S.cellRange && pos >= S.cellRange.r0 && pos <= S.cellRange.r1) g.classList.add('gutter-in-range');
   g.style.flexBasis = GUTTER_W + 'px';
   const cb = el('input');
   cb.type = 'checkbox';
@@ -433,17 +889,50 @@ export function buildDataRow(pos, r, ctx) {
     // A session comparison's mark: which side tagged this row (see
     // session.js pivotDiff).
     const dm = ctx.diffRows && ctx.diffRows[r.rid];
-    if (dm) mid.append(diffMarkNode(diffKind(dm), diffMarkTitle(dm)));
+    if (dm) {
+      const kind = diffKind(dm);
+      mid.append(diffMarkNode(kind, diffMarkTitle(dm)));
+      // The whole row wears its side's wash, not just the pill.
+      row.classList.add(DIFF_ROW_CLASS[kind]);
+    }
   }
   g.append(cb, mid, el('span', 'rid', r ? String(r.rid) : '·'));
+  // How you open a row, said on the row. The gesture (double-click, or the
+  // detail hotkey) is unchanged — this is a place to point at for an
+  // analyst who single-clicked, got a highlighted cell, and had nothing on
+  // screen telling them the whole row was one more click away. Only on a
+  // row that has landed: there is nothing to show for a page still in
+  // flight. It sits in the gutter's middle slot (see style.css) rather
+  // than as a fourth column, so the three-slot contract the checkbox and
+  // the rid line up against is untouched — the slot is named there, row
+  // and column both, so appending it after the rid here does not decide
+  // where it lands (it once did, and it landed a row down). aria-hidden
+  // because the keyboard already has the hotkey, and one of these per
+  // painted row would otherwise be read out as a screenful of identical
+  // controls.
+  if (r) {
+    const open = el('span', 'row-open', '⤢');
+    open.title = 'Open this row (double-click, or the detail key)';
+    open.setAttribute('aria-hidden', 'true');
+    g.append(open);
+  }
   row.append(g);
 
-  cols.forEach((name, ci) => {
+  for (const { ci, name, gap } of ctx.span) {
+    if (gap) {
+      const sp = el('div', 'cell-gap');
+      sp.style.flexBasis = gap + 'px';
+      row.append(sp);
+      continue;
+    }
     const c = el('div', 'cell' + (colMeta[name] && colMeta[name].type === 'number' ? ' num' : ''));
     c.style.flexBasis = widths[name] + 'px';
     applyPin(c, name, pins);
     c.dataset.col = ci;
     if (cellInRange(pos, ci)) c.classList.add('cell-selected');
+    // The ring is where the next arrow steps from — without it a
+    // keyboard analyst cannot tell which corner of a rectangle is live.
+    if (S.cellFocus && S.cellFocus.pos === pos && S.cellFocus.col === ci) c.classList.add('cell-active');
     const val = r ? r.cells[idx[name]] : '';
     if (val != null && val !== '') {
       // Keep the raw value (with highlight) when it's what matched the
@@ -453,27 +942,58 @@ export function buildDataRow(pos, r, ctx) {
       else c.textContent = displayCell(name, val);
     }
     row.append(c);
-  });
+  }
   return row;
 }
 
 export function renderTagToolbar() {
   const bar = $('tagToolbar');
   const count = selCount();
-  if (!count) { bar.hidden = true; return; }
+  // Grid chrome, not app chrome. It is position:fixed at the bottom of the
+  // viewport, so it used to follow the analyst onto SQL, Timeline, Notes,
+  // the watchlist, a dashboard and every plugin tab — offering to tag "12
+  // selected" rows that nothing on that page has, beside a Clear selection
+  // button for a selection they could not see. The selection itself is
+  // kept: coming back to the grid brings the bar back with it.
+  // A cell range spanning several rows is what a tag key would hit when
+  // nothing is picked (applyTag) — say so, rather than tagging silently.
+  const rangeRows = !count ? cellRangeRowCount() : 0;   // headings excluded — the same rows a tag key hits
+  if ((!count && rangeRows < 2) || S.activeTab !== 'grid') { bar.hidden = true; return; }
   bar.hidden = false;
-  bar.replaceChildren(el('span', 'tag-toolbar-count', `${count.toLocaleString()} selected`));
+  const ranges = count && !S.selectAll ? selRanges() : 0;
+  const label = count
+    ? `${count.toLocaleString()} selected` + (ranges > 1 ? ` · ${ranges} ranges` : '')
+    : `${rangeRows.toLocaleString()} rows in the cell range`;
+  const countEl = el('span', 'tag-toolbar-count', label);
+  if (S.selHidden) {
+    countEl.append(el('span', 'tag-toolbar-warn', ` · ${S.selHidden.toLocaleString()} filtered out`));
+    countEl.title = `${S.selHidden.toLocaleString()} picked row(s) are not in the current view — a tag applies to the ${count.toLocaleString()} it shows`;
+  }
+  bar.replaceChildren(countEl);
+  const n = count || rangeRows;
   for (const t of S.tags) {
     const btn = el('button', 'tag-chip');
     const sw = el('span', 'swatch');
     sw.style.background = t.color;
     btn.append(sw, el('span', null, t.name));
-    btn.title = `Tag ${count.toLocaleString()} selected row(s) as ${t.name}`;
+    btn.title = `Tag ${n.toLocaleString()} row(s) as ${t.name}`;
     btn.onclick = () => applyTag(t);
     bar.append(btn);
   }
-  const clear = el('button', 'btn ghost', 'Clear selection');
-  clear.onclick = () => { selClear(); render(); };
+  if (count && !S.groupByCols.length) {
+    const inv = el('button', 'btn ghost', 'Invert');
+    inv.title = 'Select every row that is not picked, and drop the ones that are';
+    inv.onclick = () => { selSnapshot(); selReplace(!S.selectAll, S.selection); render(); };
+    bar.append(inv);
+  }
+  if (selUndoAvailable()) {
+    const undo = el('button', 'btn ghost', 'Undo');
+    undo.title = 'Take back the last selection change';
+    undo.onclick = () => { if (selUndoLast()) { S.selHidden = 0; render(); } };
+    bar.append(undo);
+  }
+  const clear = el('button', 'btn ghost', count ? 'Clear selection' : 'Clear');
+  clear.onclick = () => { selSnapshot(); selClear(); clearCellSelection(); S.selHidden = 0; render(); };
   bar.append(clear);
 }
 
@@ -491,18 +1011,50 @@ export function highlight(node, text, needle) {
 
 /* ------------------------------------------------------------- movement */
 
-export function moveCursor(to, extend) {
+/* Moves the ROW cursor. The arrow keys no longer come through here —
+   they drive the cell cursor (moveCell), and Shift+Arrow grows the cell
+   rectangle rather than a run of row picks. What still calls this is
+   every jump that is not an arrow: a cell click, the row-open chevron,
+   jump-to-timestamp, opening a watchlist hit, the right-click path.
+
+   It took an `extend` flag while the arrow keys drove it, for the
+   Shift+Arrow run that grew the row picks. Nothing produces that gesture
+   any more — every remaining caller passes a plain move — so the flag and
+   its run machinery are gone from here rather than left as a branch the
+   next reader would assume something reaches. The gutter's shift-click
+   calls selRangeApply directly and is untouched. */
+export function moveCursor(to) {
   const total = gridRowCount();
   if (!S.view || !total) return;
   to = Math.max(0, Math.min(total - 1, to));
-  if (extend) {
-    if (S.anchor < 0) S.anchor = S.cursor < 0 ? to : S.cursor;
-    selSetRange(S.anchor, to);
-  } else {
-    S.anchor = to;
-    selClear();
-  }
+  // Moving the cursor is looking, not choosing: the picks stay. They go
+  // with Escape, the chip, or a new pick.
+  S.anchor = to;
   S.cursor = to;
+  /* Carry the cell cursor to the row the row cursor just moved to. Every
+     jump that is not an arrow key comes through here — the row-open
+     chevron, jump-to-timestamp, opening a watchlist hit, the right-click
+     path — and each of them used to leave S.cellFocus on whatever row was
+     last arrowed to. The next ArrowDown then read that stale focus and
+     teleported the viewport back to it, taking the detail pane and the
+     tag keys along; with Shift held it selected everything in between.
+     The column is kept and the rectangle collapses, which is what a plain
+     move means everywhere else in this feature. Deliberately NOT a
+     clearCellSelection(): the cell click path sets the selection and THEN
+     calls this, so clearing would wipe the click's own work.
+
+     A cursor landing INSIDE the current rectangle leaves it alone. That
+     is the right-click-within-a-selection case, where the menu's scope IS
+     the rectangle (rowMenuTargets) — collapsing it there silently shrank
+     "these four rows" to "this one cell" and re-enabled plugin actions
+     that had been disabled for exceeding their row limit. */
+  const insideRange = S.cellRange && to >= S.cellRange.r0 && to <= S.cellRange.r1;
+  if (S.cellFocus && S.cellFocus.pos !== to && !insideRange) {
+    S.cellFocus = { ...S.cellFocus, pos: to };
+    S.cellAnchor = { pos: to, col: S.cellFocus.col };
+    setCellRange(S.cellAnchor, S.cellFocus);
+    S.cellRangeExplicit = false;   // the jump moved the cursor, it did not choose a cell
+  }
   scrollIntoView(to);
   render();
   maybeShowDetail(to);
@@ -561,11 +1113,14 @@ export function activateRow(pos, e) {
     && lastActivate && lastActivate.pos === pos && (now - lastActivate.time) < 400;
   lastActivate = isDoubleActivate ? null : { pos, time: now };
 
-  if (e.shiftKey) moveCursor(pos, true);
-  else if (e.metaKey || e.ctrlKey) {
+  if (e.metaKey || e.ctrlKey) {
+    // Ctrl+click on a cell: add or drop that row — the one modifier that
+    // still means rows on the cell surface. Shift means the cell range.
+    selSnapshot();
     selToggle(pos);
+    S.anchor = pos;
     S.cursor = pos; render(); maybeShowDetail(pos);
-  } else moveCursor(pos, false);
+  } else moveCursor(pos);
 
   if (isDoubleActivate) showDetail(pos);
 }
@@ -587,7 +1142,7 @@ export function setCellRange(a, b) {
    pick "what to copy," and they should stay mutually exclusive rather than
    one silently shadowing the other: clicking a cell commits a (possibly
    1-cell) range immediately AND clears row selection (via activateRow's
-   plain-click -> moveCursor(pos, false) path, which already clears
+   plain-click -> moveCursor(pos) path, which already clears
    S.selection); checking a checkbox clears any active cell range instead.
    Whichever the user touched most recently is what Ctrl+C acts on.
 
@@ -602,17 +1157,231 @@ export function setCellRange(a, b) {
    pane wouldn't. Doing both updates in the same synchronous handler avoids
    depending on that later event entirely. */
 
+
+/* ----------------------------------------- keyboard cell movement */
+
+/* Excel's model in the terms this grid already had: S.cellFocus is the
+   active cell, S.cellAnchor is the corner a Shift run extends FROM, and
+   S.cellRange is the rectangle between them. A plain move drags both
+   corners along together, so the rectangle collapses to the one cell the
+   analyst is standing on; Shift moves only the focus, so the rectangle
+   grows from wherever the anchor was left — by an earlier arrow or by a
+   mouse drag, since the pointer paths below set the same two fields.
+
+   A keypress can therefore create a cell range where the mouse used to be
+   the only thing that could. That is why handleCopyShortcut lets picked
+   rows beat a ONE-cell range (grouping.js): a single cell is where you
+   are, a rectangle is what you chose. */
+
+/* The next position up or down that can hold a cell. A group heading owns
+   a position but has no cells — grouping.js paints one spanning element —
+   so an active cell parked on one would be invisible, and every consumer
+   that asks which rows a range means skips it anyway (cellRangeRows).
+   Arrows step over headings rather than landing on them. */
+function nextCellRow(from, step) {
+  const total = gridRowCount();
+  let p = from + step;
+  while (p >= 0 && p < total && S.groupByCols.length && !groupCoordAt(p)) p += step;
+  return p >= 0 && p < total ? p : null;
+}
+
+/* The first or last position that can hold a cell — Ctrl+Up / Ctrl+Down.
+   Walks inward past trailing headings for the same reason. */
+function edgeCellRow(step) {
+  const total = gridRowCount();
+  if (!total) return null;
+  let p = step > 0 ? total - 1 : 0;
+  while (p >= 0 && p < total && S.groupByCols.length && !groupCoordAt(p)) p -= step;
+  return p >= 0 && p < total ? p : null;
+}
+
+/* Bring a column into view horizontally — the counterpart of
+   scrollIntoView(pos) above, and deliberately NOT the DOM's own
+   scrollIntoView: the gutter and every pinned column are position:sticky
+   over the left edge of the scroller, so a cell scrolled flush to
+   scrollLeft parks UNDERNEATH them and the analyst watches the highlight
+   disappear. The sticky block's width is the real left edge, and it is
+   the same sum pinnedOffsets() already computes for the paint. */
+export function scrollColIntoView(ci) {
+  const body = $('body');
+  const cols = visibleCols();
+  const name = cols[ci];
+  if (!name || !body) return;
+  const pins = pinnedOffsets();
+  if (pins[name] !== undefined) return;   // a pinned column is never off screen
+  let left = GUTTER_W;
+  for (let i = 0; i < ci; i++) left += colWidth(cols[i]);
+  let stuck = GUTTER_W;
+  for (const n of cols) if (pins[n] !== undefined) stuck += colWidth(n);
+  const w = colWidth(name);
+  // The stand-in scrollbar sits over the viewport's right edge, so a cell
+  // brought in from the right stops at its left edge rather than under it.
+  const viewW = body.clientWidth - vbarCover();
+  if (left < body.scrollLeft + stuck) body.scrollLeft = left - stuck;
+  else if (left + w > body.scrollLeft + viewW) body.scrollLeft = left + w - viewW;
+}
+
+/* One step of the cell cursor. dr/dc are -1, 0 or 1; `edge` turns the
+   step into a jump to the far end (Ctrl); `extend` keeps the anchor where
+   it is so the rectangle grows (Shift). Every keyboard movement action
+   goes through here, so the active cell and the row cursor can never
+   drift apart. */
+export function moveCell({ dr = 0, dc = 0, extend = false, edge = false, rows = 1 } = {}) {
+  const total = gridRowCount();
+  const cols = visibleCols();
+  if (!S.view || !total || !cols.length) return;
+  const lastCol = cols.length - 1;
+  /* Cold start: the arrows have to work on a grid nobody has clicked in.
+     The row cursor is wherever the analyst was last put — a search hit, a
+     row opened from the watchlist — so the first press continues from
+     there instead of teleporting to the top of the table. */
+  if (!S.cellFocus) {
+    const onHeading = S.groupByCols.length && !groupCoordAt(S.cursor);
+    const pos = S.cursor >= 0 && !onHeading ? S.cursor : edgeCellRow(-1);
+    if (pos == null) return;
+    S.cellFocus = { pos, col: 0, name: cols[0] };
+    S.cellAnchor = { pos, col: 0 };
+  }
+  let { pos, col } = S.cellFocus;
+  if (dr) {
+    if (edge) {
+      const to = edgeCellRow(dr);
+      if (to != null) pos = to;
+    } else {
+      // PageUp/PageDown ask for a stride; a heading inside it is stepped
+      // over one row at a time, so a page never lands on one.
+      for (let i = 0; i < rows; i++) {
+        const to = nextCellRow(pos, dr);
+        if (to == null) break;
+        pos = to;
+      }
+    }
+  }
+  if (dc) col = edge ? (dc > 0 ? lastCol : 0) : Math.max(0, Math.min(lastCol, col + dc));
+  S.cellFocus = { pos, col, name: cols[col] };
+  if (!extend) S.cellAnchor = { pos, col };
+  setCellRange(S.cellAnchor, S.cellFocus);
+  // Shift asked for a rectangle; a plain arrow only moved the cursor and
+  // left a one-cell range where it stopped. Copy is the one consumer that
+  // needs to tell those apart — see handleCopyShortcut.
+  S.cellRangeExplicit = extend;
+  /* The row cursor follows the active cell: the detail pane, the note
+     box, the tag keys and the row menu all read S.cursor, and a cell
+     highlight on one row while those act on another is the bug this
+     feature would otherwise ship. S.anchor follows too, so a later
+     shift-click in the gutter extends from where the keyboard left off,
+     exactly as it did when the arrows drove the row cursor directly. */
+  S.cursor = pos;
+  if (!extend) S.anchor = pos;
+  scrollIntoView(pos);
+  scrollColIntoView(col);
+  render();
+  maybeShowDetail(pos);
+}
+
 export let cellDragging = false;
 
 export let cellDragRaf = null;
+
+/* What the two Space keys mean, across the three functions below.
+   Both keys fall through to toggleCursorRow when there is no
+   rectangle to speak of, which is every press before the analyst
+   has touched a cell, and every press after the gutter (which
+   clears the cell selection) has had one.
+
+   Space is a toggle, and what it toggles is whatever the cell selection
+   says you are pointing at: a rectangle spanning several rows is ONE
+   block of rows, not the single row the active cell happens to sit on.
+   All-or-nothing across that block, the way a header checkbox behaves —
+   anything short of every row picked means the press picks the rest, and
+   only a fully picked block is let go. Flipping each row on its own is
+   the obvious alternative and is wrong: on a half-picked range it merely
+   swaps which half is picked, and a second press swaps it back, so the
+   block can never be made whole.
+
+   The rectangle SURVIVES the press, which is what gives a second press
+   something to act on — Shift+Space clears it instead, and if Space did
+   too there would be no block left to let go of. Letting it go is not an
+   undo, though: a row picked BEFORE the rectangle was drawn goes with
+   the block if the rectangle covers it, because all-or-nothing means the
+   block and not "the rows this press added". The toolbar's Undo, which
+   the selSnapshot below feeds, is the thing that restores the state
+   before a press.
+
+   Shift+Space is the other half: it only ever adds, and it spends the
+   rectangle doing it — the gesture for gathering several rectangles into
+   one set of picks, where a toggle would undo the last one gathered. */
+export function toggleCellRangeRows() {
+  if (cellRangeRowCount() < 2) return false;   // one row IS the cursor row; leave it to the plain path
+  selSnapshot();
+  /* S.anchor is deliberately left alone. It is the corner a later
+     Shift+click in the gutter extends FROM, and on a rectangle that is
+     already the row the run started on — the Shift+Arrow origin, or a
+     drag's mousedown. Moving it to r0 (what selectCellRangeRows does,
+     which loses the direction of an upward run) or to the cursor would
+     spend that on a gesture that chose no new origin. */
+  selRangeApply(S.cellRange.r0, S.cellRange.r1, !cellRangeAllSelected());
+  render();
+  return true;
+}
+export function toggleCursorRow() {
+  if (!S.view || S.cursor < 0) return;
+  if (S.groupByCols.length && !groupCoordAt(S.cursor)) return;
+  selSnapshot();
+  selToggle(S.cursor);
+  S.anchor = S.cursor;
+  render();
+}
+export function selectCellRangeRows() {
+  if (!S.cellRange) return false;
+  selSnapshot();
+  selRangeApply(S.cellRange.r0, S.cellRange.r1, true);
+  S.anchor = S.cellRange.r0;
+  clearCellSelection();
+  render();
+  return true;
+}
 
 /* DOM wiring for this module, called once by main.js. Handlers can't
    fire during load, so the order these run in doesn't matter — the
    startup steps that DO depend on order live in main.js instead. */
 export function wireGrid() {
 $('body').addEventListener('scroll', () => {
+  // The bar's own move coming back (see vbarSetTo) is not passed on.
+  const b = $('body');
+  if (bodySetTo !== null && Math.abs(b.scrollTop - bodySetTo) < 1) bodySetTo = null;
+  else { bodySetTo = null; vbarFollowBody(); }
   if (!bodyScrollRaf) bodyScrollRaf = requestAnimationFrame(() => { bodyScrollRaf = null; render(); });
 }, { passive: true });
+
+/* The stand-in scrollbar moved — a drag of its thumb, a click on its
+   track, the wheel over it: #body follows, and #body's own scroll event
+   paints from there exactly as a drag of its own bar used to. */
+$('vbar').addEventListener('scroll', () => {
+  const bar = $('vbar'), b = $('body');
+  if (vbarSetTo !== null && Math.abs(bar.scrollTop - vbarSetTo) < 1) { vbarSetTo = null; return; }
+  vbarSetTo = null;
+  if (Math.abs(b.scrollTop - bar.scrollTop) >= 1) bodySetTo = pushScrollTop(b, bar.scrollTop);
+}, { passive: true });
+
+/* The rows only hold the columns the last paint could see (paintedColumns),
+   so a viewport that GROWS past them owes a paint — and plenty of things
+   widen #body without a scroll or a window resize: closing the detail
+   pane, folding the sidebar, dragging its edge. Only growth past the
+   painted edge, so the many resizes that change nothing about which
+   columns are on screen (a height change, a narrower pane) cost nothing. */
+if (typeof ResizeObserver !== 'undefined') {
+  new ResizeObserver(() => {
+    const b = $('body');
+    // Gone once Shut down replaces the page with its farewell — and
+    // taking the grid out of the page is itself a resize this sees.
+    if (!b) return;
+    // A taller or shorter viewport is a different scroll range with no
+    // paint to say so (a detail-pane drag, the window).
+    syncVbar();
+    if (b.clientWidth && b.scrollLeft + b.clientWidth > paintedRight) render();
+  }).observe($('body'));
+}
 
 /* Remote session mode: replace the browser's smooth pixel scrolling with
    whole-row jumps. Smooth scrolling animates a wheel notch through a dozen
@@ -623,7 +1392,7 @@ $('body').addEventListener('scroll', () => {
    trackpad pixel deltas into the same discrete row steps. */
 let wheelAcc = 0;
 const REMOTE_PX_PER_ROW = 33; // ≈ one Chrome wheel notch (100px) → 3 rows, the Windows default
-$('body').addEventListener('wheel', (e) => {
+const remoteWheel = (e) => {
   if (!S.appearance.remoteSession) return;
   if (e.ctrlKey || !e.deltaY) return; // browser zoom / horizontal-only: leave native
   e.preventDefault();
@@ -638,7 +1407,11 @@ $('body').addEventListener('wheel', (e) => {
   if (!rows) return;
   const b = $('body');
   b.scrollTop = Math.max(0, Math.round(b.scrollTop / ROW_H) * ROW_H + rows * ROW_H);
-}, { passive: false });
+};
+$('body').addEventListener('wheel', remoteWheel, { passive: false });
+// The wheel over the stand-in scrollbar is the wheel over #body's own bar
+// as far as the analyst can tell, so it steps the same whole rows.
+$('vbar').addEventListener('wheel', remoteWheel, { passive: false });
 
 $('body').addEventListener('click', (e) => {
   const groupHeader = e.target.closest('.group-header-row');
@@ -650,88 +1423,142 @@ $('body').addEventListener('click', (e) => {
     toggleGroup(Number(groupHeader.dataset.groupIdx));
     return;
   }
-  if (e.target.closest('.rowcheck')) return; // owned by the delegated `change` listener below
-  // .cell clicks are handled synchronously from `mousedown` below (see the
-  // comment there), and so is the row number — this handler is left for the
-  // rest of the gutter (note icon, tag stripes, blank space).
-  if (e.target.closest('.cell') || e.target.closest('.rid')) return;
-  const row = e.target.closest('.row');
-  if (!row) return;
-  const pos = Number(row.dataset.pos);
-  activateRow(pos, e);
-  $('body').focus();
+  // The gutter is the row handle and is handled on mousedown below; the
+  // checkbox's native toggle is suppressed there too (its state is
+  // painted from the selection). .cell clicks are handled from mousedown
+  // as well. Nothing is left for a click on a row.
+  if (e.target.closest('.rowcheck')) e.preventDefault();
 });
 
-$('body').addEventListener('change', (e) => {
-  if (!e.target.classList.contains('rowcheck')) return;
-  const row = e.target.closest('.row');
-  const pos = Number(row.dataset.pos);
-  e.target.checked ? selAdd(pos) : selRemove(pos);
-  S.cellRange = null; // checking a box is a fresh "what to copy" choice — don't let a stale cell click win
-  S.cellAnchor = null;
-  render();
-});
+/* The gutter is the row handle — all 104 px of it.
 
-/* The row number is the checkbox, in cell form.
+   The 12px box and the digits beside it were the only targets, with a
+   dead strip between them that CLEARED the selection when hit. Now a
+   mousedown anywhere in the gutter toggles that row; Shift+click adds the
+   run from the last pick (Ctrl+Shift+click removes it) without dropping
+   what was picked before; and dragging selects the span from the press to
+   the pointer — worked out from the pointer's y, not from whatever element
+   it happens to be over, so a fast drag never skips a row and dragging
+   back shrinks the span. Past the top or bottom edge the grid scrolls and
+   the span follows.
 
-   The checkbox was the only way to select a row, which is a 12px target
-   that has to be aimed at, and nothing about the number beside it said it
-   was inert. Clicking the number now does exactly what ticking the box
-   does — toggles that one row, leaving the others alone — and dragging
-   down the column paints the same choice onto every row it crosses, the
-   way dragging across data cells extends a cell range.
+   Deliberately NOT routed through activateRow/moveCursor: the cursor
+   follows, so the detail pane and the keyboard stay on the row you just
+   picked, but picking is never clearing. */
+let gutterDrag = null;   // {from, on, base: {selectAll, selection}} while the button is down
+let dragLastY = 0;
+let dragRaf = null;
+let autoScroll = null;
+const AUTOSCROLL_EDGE = 28;
 
-   Deliberately NOT routed through activateRow/moveCursor: those clear the
-   row selection on a plain click, which is right for "I clicked a cell"
-   and exactly wrong for "I ticked a box". The cursor still follows, so
-   the detail pane and the keyboard stay on the row you just picked. */
-let ridPainting = null;   // the state a drag is painting: true = select
-let ridAnchor = -1;       // last row-number click, for shift-extend
-
-function ridRowAt(target) {
-  const rid = target.closest('.rid');
-  if (!rid) return -1;
-  const row = rid.closest('.row');
+function gutterRowAt(target) {
+  const g = target.closest('.gutter');
+  if (!g) return -1;
+  const row = g.closest('.row');
   if (!row) return -1;
   const pos = Number(row.dataset.pos);
   // Grouped mode interleaves group headings into the position space, and a
-  // heading is not a row anything can select (selSetRange skips them too).
+  // heading is not a row anything can select (selRangeApply skips them too).
   if (S.groupByCols.length && !groupCoordAt(pos)) return -1;
   return pos;
 }
 
+/* The position under a viewport y, from geometry: the pointer may be
+   between rows, over the sticky header, or moving faster than mousemove
+   samples. Clamped to the view. */
+function rowAtClientY(clientY) {
+  const body = $('body');
+  const rect = body.getBoundingClientRect();
+  const y = clientY - rect.top + body.scrollTop - headH();
+  return Math.max(0, Math.min(gridRowCount() - 1, Math.floor(y / ROW_H)));
+}
+
+function applyGutterSpan(pos) {
+  if (pos === gutterDrag.last) return;
+  gutterDrag.last = pos;
+  S.selectAll = gutterDrag.base.selectAll;
+  S.selection = new Set(gutterDrag.base.selection);
+  S.selVersion++;
+  selRangeApply(gutterDrag.from, pos, gutterDrag.on);
+  S.cursor = pos;
+  if (!dragRaf) dragRaf = requestAnimationFrame(() => { dragRaf = null; render(); });
+}
+
+let autoDy = 0;
+function stopAutoScroll() { if (autoScroll) { clearInterval(autoScroll); autoScroll = null; } autoDy = 0; }
+
 $('body').addEventListener('mousedown', (e) => {
   if (e.button !== 0) return;
-  const pos = ridRowAt(e.target);
+  const pos = gutterRowAt(e.target);
   if (pos < 0) return;
-  e.preventDefault();   // no native text-drag off the digits
-  if (e.shiftKey && ridAnchor >= 0) {
-    selSetRange(ridAnchor, pos);
-  } else {
-    ridPainting = !selHas(pos);
-    ridPainting ? selAdd(pos) : selRemove(pos);
-    ridAnchor = pos;
+  // The row's own "open me" affordance is the one thing in the gutter that
+  // isn't picking, so it has to be taken before the toggle below. On
+  // mousedown like the rest of this handler, and for the same reason: the
+  // render these two calls do replaces the pressed node before the button
+  // comes back up, and a 'click' listener on a detached target never
+  // fires. The cursor moves with it because the pane, its note box and
+  // Copy row all read the cursor row — opening one row while another is
+  // current is how "Copy row" would copy a row nobody was looking at.
+  if (e.target.closest('.row-open')) {
+    e.preventDefault();
+    moveCursor(pos);
+    showDetail(pos);
+    $('body').focus();   // as every other gutter gesture does: the arrow keys keep working
+    return;
   }
-  // Same reasoning as the checkbox's own handler: picking rows is a fresh
-  // "what to copy" choice, so a stale cell rectangle must not win.
-  S.cellRange = null;
-  S.cellAnchor = null;
+  e.preventDefault();   // no native text-drag off the digits, no native checkbox toggle
+  selSnapshot();
+  if (e.shiftKey && S.anchor >= 0) {
+    selRangeApply(S.anchor, pos, !(e.ctrlKey || e.metaKey));
+  } else {
+    // The base is the state BEFORE this press, captured before the toggle:
+    // re-applying the span from it is what lets the drag shrink again.
+    const base = { selectAll: S.selectAll, selection: new Set(S.selection) };
+    const on = !selHas(pos);
+    on ? selAdd(pos) : selRemove(pos);
+    gutterDrag = { from: pos, on, base, last: pos };
+    S.anchor = pos;
+  }
+  // Picking rows is a fresh "what to copy" choice, so a stale cell
+  // rectangle must not win over it.
+  clearCellSelection();
   S.cursor = pos;
-  S.anchor = pos;
   render();
   maybeShowDetail(pos);
   $('body').focus();
 });
 
 $('body').addEventListener('mousemove', (e) => {
-  if (ridPainting === null) return;
-  const pos = ridRowAt(e.target);
-  if (pos < 0 || selHas(pos) === ridPainting) return;
-  ridPainting ? selAdd(pos) : selRemove(pos);
-  render();
+  if (!gutterDrag) return;
+  dragLastY = e.clientY;
+  const pos = rowAtClientY(e.clientY);
+  if (pos !== S.cursor) applyGutterSpan(pos);
+  const rect = $('body').getBoundingClientRect();
+  const dy = e.clientY < rect.top + headH() + AUTOSCROLL_EDGE ? -ROW_H
+    : e.clientY > rect.bottom - AUTOSCROLL_EDGE ? ROW_H : 0;
+  // Restart the interval only when the direction changes: tearing it down
+  // on every mousemove meant it never fired while the pointer moved, and
+  // a pointer at the edge always moves a little.
+  if (dy !== autoDy) {
+    stopAutoScroll();
+    autoDy = dy;
+    if (dy) {
+      autoScroll = setInterval(() => {
+        if (!gutterDrag) { stopAutoScroll(); return; }
+        $('body').scrollTop += dy;
+        applyGutterSpan(rowAtClientY(dragLastY));
+      }, 40);
+    }
+  }
 });
 
-document.addEventListener('mouseup', () => { ridPainting = null; });
+document.addEventListener('mouseup', () => {
+  if (!gutterDrag) return;
+  gutterDrag = null;
+  stopAutoScroll();
+  if (dragRaf) { cancelAnimationFrame(dragRaf); dragRaf = null; }
+  render();
+});
 
 $('body').addEventListener('mousedown', (e) => {
   if (e.button !== 0) return;
@@ -741,15 +1568,26 @@ $('body').addEventListener('mousedown', (e) => {
   const pos = Number(cell.closest('.row').dataset.pos);
   const col = Number(cell.dataset.col);
   if (e.shiftKey && S.cellAnchor) {
-    setCellRange(S.cellAnchor, { pos, col });
+    // Shift on a cell is the cell rectangle and nothing else: it no longer
+    // also picks rows (that ambiguity was what made Ctrl+C and a tag key
+    // disagree). The toolbar says how many rows the range spans, and
+    // Shift+Space turns it into row picks.
+    S.cellFocus = { pos, col, name: visibleCols()[col] };
+    setCellRange(S.cellAnchor, S.cellFocus);
+    S.cellRangeExplicit = true;
+    S.cursor = pos;
+    render();
   } else {
     S.cellAnchor = { pos, col };
+    S.cellFocus = { pos, col, name: visibleCols()[col] };
     setCellRange(S.cellAnchor, S.cellAnchor); // commit immediately so a plain click alone selects that one cell
+    S.cellRangeExplicit = true;               // clicking a cell IS asking for it
     cellDragging = true;
+    activateRow(pos, e); // renders once, atomically, with the cell range above
   }
-  activateRow(pos, e); // renders once, atomically, with the cell range above
   $('body').focus();
 });
+
 
 $('body').addEventListener('mousemove', (e) => {
   if (!cellDragging) return;
@@ -757,7 +1595,9 @@ $('body').addEventListener('mousemove', (e) => {
   if (!cell) return;
   const pos = Number(cell.closest('.row').dataset.pos);
   const col = Number(cell.dataset.col);
-  setCellRange(S.cellAnchor, { pos, col });
+  S.cellFocus = { pos, col, name: visibleCols()[col] };
+  setCellRange(S.cellAnchor, S.cellFocus);
+  S.cellRangeExplicit = true;
   if (cellDragRaf) return;
   cellDragRaf = requestAnimationFrame(() => { render(); cellDragRaf = null; });
 });

@@ -1,12 +1,13 @@
 /* First/Last tab — group events, keep each group's bookends.
 
    The pivot tab's interaction model, applied here: drag fields from the
-   list into Group rows on / Ordered by / Include columns / Filters (click
-   works too — placeMenu is the keyboard/trackpad path), several bookend
-   sheets live as sub-tabs so two groupings can be compared without saving
-   either, and the result actions sit top-right on the bar. The preview
-   table is a working surface, not a printout: drag its included-column
-   headers to reorder the output, click/Shift/Ctrl rows to select, Ctrl+C
+   list into Group rows on / Ordered by / Include columns / Filters (or
+   click one: placeMenu, a small menu under the field, is the keyboard and
+   trackpad path) or into the description, several bookend sheets live
+   as sub-tabs so two groupings can be compared without saving either,
+   and the result actions sit top-right on the bar. The preview table is a working
+   surface, not a printout: drag its included-column headers to reorder
+   the output, click/Shift/Ctrl rows to select, Ctrl+C
    copies the selection as TSV. "Copy result" copies the ENTIRE result
    (the backend's rows route — the preview shows only the first few
    groups); "Create table…" lands it as a normal Winnow source and can
@@ -14,9 +15,222 @@
    unified Timeline. All styling rides Winnow's CSS tokens. */
 
 const REFRESH_MS = 350;
+/* Auto-update: every change to the controls re-runs the preview after a
+   short debounce. On a big table that is a lag on every keystroke of the
+   description, so it can be turned off — then edits mark the preview
+   stale and Refresh runs it. Remembered in localStorage: the analyst who
+   turned it off on this machine has the same data tomorrow. */
+const AUTO_KEY = 'winnow.firstlast.auto';
+/* The rail's width, dragged on its right edge and remembered per machine
+   — twenty chips and a long description want more than 280px, a wide
+   preview wants less. */
+const RAIL_KEY = 'winnow.firstlast.rail';
+const RAIL_MIN = 200, RAIL_MAX = 640, RAIL_DEFAULT = 280;
+const readRail = () => {
+  try { const n = Number(localStorage.getItem(RAIL_KEY)); return n >= RAIL_MIN && n <= RAIL_MAX ? n : RAIL_DEFAULT; }
+  catch { return RAIL_DEFAULT; }
+};
+const writeRail = (w) => { try { localStorage.setItem(RAIL_KEY, String(w)); } catch { /* private mode */ } };
+const readAuto = () => { try { return localStorage.getItem(AUTO_KEY) !== '0'; } catch { return true; } };
+const writeAuto = (on) => { try { localStorage.setItem(AUTO_KEY, on ? '1' : '0'); } catch { /* private mode */ } };
+
+/* ------------------------------------------------- saved sheets */
+
+/* The sheets survive the case being closed, because they live in the case
+   file: winnow.tabState (plugin API 10) is this mount's own row, written
+   as the analyst works — there is no teardown callback in the contract, so
+   saving on close is not a thing a plugin can do.
+
+   DEFINITIONS ONLY. What is saved is the question — which fields are in
+   which zone, the description, the dragged column widths, which sheet was
+   on top. The ANSWER is re-run against the case on open: a preview kept
+   from three weeks ago is a picture of evidence rather than the evidence,
+   and the row it shows may since have been re-imported, filtered out or
+   tagged.
+
+   Two things a payload cannot be trusted about, both of them things this
+   plugin would otherwise open on an error banner:
+   - the table. A dropped source's id is handed straight to the next
+     import, so the id is only believed when the name still matches; a
+     table re-imported under a new id is found by name instead.
+   - the columns. groupBy/carry/sums/unique/filters go into the request
+     unvalidated, and the backend's _check_columns answers a missing one
+     with a 400 (renderControls only ever re-defaults the sort column), so
+     restore drops what no longer resolves and says which. */
+
+const STATE_VERSION = 1;
+// A sheet is a few hundred bytes; two dozen of them is far past what
+// anyone builds and still nowhere near winnow.tabState's cap.
+const MAX_SAVED_SHEETS = 24;
+const TAG_MODES = ['', 'any', 'none', 'ids'];
+/* What the backend renders when the description box is empty. A sheet
+   starts with the box empty — this shows in it, greyed, as the placeholder
+   — so a new sheet's description is the analyst's to write rather than
+   one to delete first. */
+const DEFAULT_TEMPLATE = '{which} of {count}';
+
+/* A table's name as the analyst knows it: the nickname when one is set,
+   as the app's own sourceLabel does it (plugins cannot import that). */
+const labelOf = (s) => (s && (s.nickname || s.name)) || '';
+
+const emptySpec = (name) => ({
+  name,
+  sourceId: null,
+  groupBy: [], carry: [], sums: [], unique: [], values: [], filters: [],
+  tags: { mode: '', ids: [] }, rowJson: false,
+  sortColumn: null, colWidths: {}, template: '',
+});
+
+/* How a sheet names its table, and it takes two shapes because tables come
+   in two kinds.
+
+   A real source's `name` is the imported file's own, and nothing in the app
+   edits it (a nickname is a separate field), so it is what makes the id
+   believable after SQLite has handed that id to the next import.
+
+   A MERGE has no file behind it, so its name IS its display name and
+   Rename this merge rewrites it (Store.set_source_nickname) — checking the
+   name there would read a rename as "that table is gone". Its member
+   tables are the identity that survives, and they are also what tells it
+   apart from a different merge that took its id after a delete. */
+function savedSource(src) {
+  if (!src) return null;
+  const out = { id: src.id, name: src.name };
+  if (src.is_merge) out.members = (src.member_source_ids || []).map(Number);
+  return out;
+}
+
+/* One sheet, cut down to the spec — no preview, no meta, no selection, no
+   loading/stale flags. Those describe a moment, not a question. */
+export function sheetSpec(sh, sources) {
+  const src = (sources || []).find((s) => s.id === sh.sourceId) || null;
+  return {
+    name: sh.name,
+    source: savedSource(src),
+    groupBy: sh.groupBy, carry: sh.carry, sums: sh.sums, unique: sh.unique, values: sh.values, filters: sh.filters,
+    tags: sh.tags, rowJson: sh.rowJson, sortColumn: sh.sortColumn,
+    colWidths: sh.colWidths, template: sh.template,
+  };
+}
+
+const sameMembers = (a, b) => {
+  if (!Array.isArray(a) || !Array.isArray(b) || !a.length || a.length !== b.length) return false;
+  const x = a.map(Number).sort((p, q) => p - q);
+  const y = b.map(Number).sort((p, q) => p - q);
+  return x.every((n, i) => n === y[i]);
+};
+
+function resolveSource(saved, sources) {
+  if (!saved || typeof saved !== 'object') return null;
+  const name = saved.name == null ? null : String(saved.name);
+  if (saved.members) {
+    // A merge — matched on its members, never its name (savedSource says
+    // why). Its own id first, so two merges over the same tables stay
+    // apart; then any merge with those members, which is the merge rebuilt
+    // under a new id.
+    const same = sources.filter((s) => s.is_merge && sameMembers(saved.members, s.member_source_ids));
+    return same.find((s) => s.id === saved.id) || same[0] || null;
+  }
+  const byId = sources.find((s) => s.id === saved.id) || null;
+  if (byId && (name === null || byId.name === name)) return byId;
+  // Re-imported under a new id: here the name is the stronger identity.
+  return (name === null ? null : sources.find((s) => s.name === name)) || null;
+}
+
+/* What of a saved payload this case can still honour: the sheet specs to
+   restore, which one was on top, and a line per sheet that lost something.
+   Pure — it reads the payload, the live source list and the case's tags and
+   nothing else, which is what makes the id-reuse, dead-column and
+   deleted-tag cases testable. */
+export function planRestore(payload, sources, tags) {
+  if (!payload || payload.v !== STATE_VERSION) return null;
+  const saved = Array.isArray(payload.sheets) ? payload.sheets.slice(0, MAX_SAVED_SHEETS) : [];
+  if (!saved.length) return null;
+  const live = (sources || []).filter((s) => !s.error);   // merges included — invariant #9
+  const sheets = [];
+  const notes = [];
+  for (const sh of saved) {
+    if (!sh || typeof sh !== 'object') continue;
+    const name = String(sh.name || `Bookends ${sheets.length + 1}`);
+    const spec = emptySpec(name);
+    if (typeof sh.template === 'string' && sh.template) spec.template = sh.template;
+    const src = resolveSource(sh.source, live);
+    if (!src) {
+      // A sheet that never picked a table is not a loss to report — it is
+      // a fresh sheet, and fillSources gives it this case's first table.
+      if (sh.source) {
+        const was = sh.source.name ? `“${sh.source.name}”` : 'its table';
+        notes.push(`${name}: ${was} is not in this case any more`);
+      }
+      sheets.push(spec);
+      continue;
+    }
+    const cols = new Set((src.columns || []).map((c) => c.name));
+    const gone = [];
+    const kept = (list) => (Array.isArray(list) ? list : []).map(String).filter((n) => {
+      if (cols.has(n)) return true;
+      gone.push(n);
+      return false;
+    });
+    spec.sourceId = src.id;
+    spec.groupBy = kept(sh.groupBy);
+    spec.carry = kept(sh.carry);
+    spec.sums = kept(sh.sums);
+    spec.unique = kept(sh.unique);
+    spec.values = kept(sh.values);
+    spec.filters = (Array.isArray(sh.filters) ? sh.filters : []).filter((f) => {
+      if (!f || typeof f !== 'object' || !f.column) return false;
+      if (cols.has(f.column)) return true;
+      gone.push(String(f.column));
+      return false;
+    });
+    if (typeof sh.sortColumn === 'string' && cols.has(sh.sortColumn)) spec.sortColumn = sh.sortColumn;
+    else if (sh.sortColumn) gone.push(String(sh.sortColumn));
+    if (sh.tags && typeof sh.tags === 'object') {
+      spec.tags = {
+        mode: TAG_MODES.includes(sh.tags.mode) ? sh.tags.mode : '',
+        ids: (Array.isArray(sh.tags.ids) ? sh.tags.ids : []).filter((n) => typeof n === 'number'),
+      };
+      // A deleted tag is a column that has gone by another name: "only
+      // these tags" against an id nothing carries any more is not an
+      // error, it is an empty result, which is the worse failure.
+      if (spec.tags.mode === 'ids') {
+        const liveTags = new Set((tags || []).map((t) => t.id));
+        const before = spec.tags.ids.length;
+        spec.tags.ids = spec.tags.ids.filter((id) => liveTags.has(id));
+        if (spec.tags.ids.length !== before) {
+          if (spec.tags.ids.length) {
+            notes.push(`${name}: dropped ${before - spec.tags.ids.length} tag filter(s) this case no longer has`);
+          } else {
+            spec.tags = { mode: '', ids: [] };
+            notes.push(`${name}: the tags it was filtered to are gone — every row is in again`);
+          }
+        }
+      }
+    }
+    spec.rowJson = !!sh.rowJson;
+    // Preview widths are keyed by OUTPUT column, which includes Which /
+    // Description / Row (JSON) — not names to look for in the table.
+    if (sh.colWidths && typeof sh.colWidths === 'object') {
+      for (const c of Object.keys(sh.colWidths)) {
+        const w = sh.colWidths[c];
+        if (typeof w === 'number' && w > 0) spec.colWidths[c] = w;
+      }
+    }
+    if (gone.length) notes.push(`${name}: dropped ${[...new Set(gone)].join(', ')} — not in ${labelOf(src)} any more`);
+    sheets.push(spec);
+  }
+  if (!sheets.length) return null;
+  const a = payload.active;
+  const active = Number.isInteger(a) && a >= 0 && a < sheets.length ? a : 0;
+  return { sheets, active, notes };
+}
 
 let state = null;
 let refresh = null;
+let hideCompletion = null;
+let tabHidden = null;
+let tabShown = null;
 
 export default function mount(container, winnow) {
   const { el, post, api, toast, modal } = winnow;
@@ -29,16 +243,218 @@ export default function mount(container, winnow) {
   const newSheet = (name) => ({
     name,
     sourceId: null,
-    groupBy: [], carry: [], filters: [], tags: { mode: '', ids: [] }, rowJson: false,
+    groupBy: [], carry: [], sums: [], unique: [], values: [], filters: [], tags: { mode: '', ids: [] }, rowJson: false,
     sortColumn: null,
-    template: '{which} of {count}',
-    meta: sharedMeta, preview: null, error: null, loading: false,
+    colWidths: {},        // preview column name -> px, dragged on the header's edge
+    template: '',         // empty renders DEFAULT_TEMPLATE; see its comment
+    meta: sharedMeta, preview: null, error: null, loading: false, stale: false,
     selRows: new Set(), selAnchor: null,
+    run: null,            // the preview job in flight, {job, rec} — see runPreview
   });
   const sheets = [newSheet('Bookends 1')];
   let active = 0;
   let renamingIdx = null;
   state = sheets[0];
+
+  /* Nothing is written until the saved sheets have been read back and
+     folded in — the first render would otherwise save the empty default
+     over whatever the analyst left here. */
+  let saveOn = false;
+  /* One untouched sheet is what a fresh tab looks like, so saving it would
+     make the next open announce a restore of nothing. Emptying the zones
+     is also how an analyst says "forget this", and a null payload is how
+     that reaches the case file. */
+  const worthKeeping = () => sheets.length > 1 || sheets.some((sh) => (
+    sh.groupBy.length || sh.carry.length || sh.sums.length || sh.unique.length || sh.values.length || sh.filters.length
+    || sh.tags.mode || sh.rowJson || Object.keys(sh.colWidths).length
+    || (sh.template && sh.template !== DEFAULT_TEMPLATE)));
+  function saveState() {
+    if (!saveOn || !winnow.tabState) return;   // an older Winnow has no tabState
+    winnow.tabState.set(worthKeeping() ? {
+      v: STATE_VERSION,
+      active,
+      sheets: sheets.map((sh) => sheetSpec(sh, winnow.state.sources)),
+    } : null);
+  }
+  /* The same save, plus the restore line going away: once something has
+     been EDITED, "these came back from last time" has stopped being news.
+     Clicking between restored sheets is not an edit and saves silently —
+     the banner carries what the restore dropped and the only Start fresh
+     there is, and reading it must not be what destroys it. */
+  function saveEdit() {
+    hideBanner();
+    saveState();
+  }
+
+  /* ------------------------------------------------------- the banner */
+
+  /* Restoring silently would be worse than not restoring: the analyst
+     needs to know these sheets are from last time (and possibly older than
+     the evidence), when that was, and how to get an empty one back. Above
+     the sheet strip, so it reads before the thing it is about. */
+  const banner = el('div');
+  banner.className = 'fl-restored';
+  banner.hidden = true;
+  banner.style.cssText = 'display:flex;align-items:center;gap:9px;flex-wrap:wrap;padding:7px 10px;'
+    + 'background:var(--panel-2);border-left:2px solid var(--accent);'
+    + 'border-bottom:1px solid var(--line-2);font-size:12px;flex:0 0 auto';
+  container.append(banner);
+
+  // The restore line is news that goes stale; the "could not read" line is
+  // about what is happening now — it stays until the tab is rebuilt.
+  let bannerSticky = false;
+  function hideBanner() {
+    if (banner.hidden || bannerSticky) return;
+    banner.hidden = true;
+    banner.replaceChildren();
+  }
+
+  /* The read failed, so what is in the case file is unknown — which is not
+     the same as nothing being there, and this tab must not write its empty
+     default over sheets it never saw. Saving stays off until the tab is
+     built again, and that is worth saying out loud rather than leaving the
+     analyst to find out later. */
+  function showUnreadableBanner() {
+    banner.replaceChildren();
+    banner.className = 'fl-restored fl-state-unread';
+    banner.append(el('span', null, 'Could not read the sheets saved in this case, so nothing '
+      + 'here will be saved this time — close and reopen the tab to try again.'));
+    bannerSticky = true;
+    banner.hidden = false;
+  }
+
+  function showRestoredBanner(savedAt, notes) {
+    banner.replaceChildren();
+    banner.className = 'fl-restored';
+    banner.append(el('span', null, 'Restored the sheets you left open when this case was last closed.'));
+    const when = String(savedAt || '').replace('T', ' ').slice(0, 16);
+    const stamp = el('span', 'note-status', when ? `saved ${when}` : '');
+    stamp.style.cssText = 'margin-left:auto;font-size:11px';
+    // No link style exists in this app (see the .btn / .btn.ghost pair in
+    // static/style.css) — a real button, sized down to sit in the line.
+    const fresh = el('button', 'btn ghost fl-start-fresh', 'Start fresh');
+    fresh.style.cssText = 'padding:0 6px;font-size:11px;color:var(--accent)';
+    fresh.title = 'Forget the saved sheets and start from an empty one';
+    fresh.onclick = startFresh;
+    banner.append(stamp, fresh);
+    if (notes.length) {
+      // Its own row under the sentence — flex-wrap puts it there, and the
+      // dropped fields are the part worth reading twice.
+      const why = el('div', 'note-status', notes.join(' · '));
+      why.style.cssText = 'flex:1 0 100%;font-size:11px';
+      banner.append(why);
+    }
+    banner.hidden = false;
+  }
+
+  async function startFresh() {
+    hideBanner();
+    if (winnow.tabState) await winnow.tabState.clear();
+    for (const sh of sheets) stopPreview(sh);
+    sheets.splice(0, sheets.length, newSheet('Bookends 1'));
+    active = 0;
+    state = sheets[0];
+    state.meta = sharedMeta;
+    renderSheetTabs();
+    fillSources();
+    renderControls();
+    renderPreview();
+  }
+
+  /* -------------------------------------------------- background jobs */
+
+  /* Every result is a job on the server — job/start, then short polls of
+     job — and never a request held open for the work. The backend's
+     docstring has the numbers: on a big table each edit's 15-second
+     preview held one of the six connections a browser allows Winnow, a
+     few edits held them all, and the grid in another tab stopped
+     answering. Start answers at once, with the result when a small table
+     had it ready; a running job is polled, and cancel() stops it on the
+     server, query and all. The id is made here, so a cancel reaches a job
+     whose start has not answered yet.
+
+     A tab that has been torn down — a case switch, a plugin reload — stops
+     polling and cancels: its jobs describe a case that is no longer open. */
+  const POLL_FIRST_MS = 200, POLL_MAX_MS = 1000;
+  const jobId = () => `fl_${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
+  function startJob(kind, spec) {
+    const id = jobId();
+    const job = {
+      id, kind, cancelled: false,
+      cancel() {
+        if (job.cancelled) return;
+        job.cancelled = true;
+        post(`${winnow.base}/job/cancel`, { id }).catch(() => { /* it had finished */ });
+      },
+    };
+    job.done = (async () => {
+      let st = await post(`${winnow.base}/job/start`, { id, kind, spec });
+      for (let wait = POLL_FIRST_MS; st.status === 'running'; wait = Math.min(POLL_MAX_MS, wait * 1.5)) {
+        await new Promise((r) => setTimeout(r, wait));
+        if (!container.isConnected) {
+          job.cancel();
+          throw Object.assign(new Error('Cancelled'), { cancelled: true });
+        }
+        st = await api(`${winnow.base}/job?id=${encodeURIComponent(id)}`);
+      }
+      if (st.status === 'done') return st.result;
+      throw Object.assign(new Error(st.error || 'Cancelled'), { cancelled: st.status === 'cancelled' });
+    })();
+    return job;
+  }
+
+  /* Leaving the tab stops nothing. A preview or a Copy result still running
+     carries on, and says so in the jobs panel — the card an import gets —
+     which turns into the answer when it lands: "ready" with Show for a
+     preview, a Copy button for a result. Back on the tab, a preview's
+     cards go, since the tab itself now says what they said. Create table
+     has a card of its own from the moment it starts (createTable). */
+  const away = new Set();   // {title, detail, show, notice}: running jobs a card may stand for
+  const seen = new Set();   // finished preview cards, closed when the tab is looked at again
+  function background(title, detail, show, notice = null) {
+    const rec = { title, detail, show, notice };
+    away.add(rec);
+    if (container.hidden) card(rec);
+    return rec;
+  }
+  function card(rec) {
+    if (!rec.notice || !rec.notice.open) {
+      rec.notice = winnow.notify({ title: rec.title, detail: rec.detail, progress: null,
+        actions: [{ label: 'Show', onClick: rec.show }] });
+    }
+    return rec.notice;
+  }
+  /* The job behind `rec` is over. Seen from the tab there is nothing to
+     announce; away from it, `finish(card)` says how it went, or the error
+     does — and the card is returned. A null `finish` is a job that was let
+     go (its sheet closed, its table changed): nothing to tell anyone. */
+  function settle(rec, finish, error) {
+    away.delete(rec);
+    if (!finish || !container.hidden) {
+      if (rec.notice) rec.notice.close();
+      return null;
+    }
+    const n = card(rec);
+    if (error) n.fail({ detail: error.message, progress: false });
+    else finish(n);
+    return n;
+  }
+  tabHidden = () => { for (const rec of away) card(rec); };
+  tabShown = () => {
+    for (const rec of away) {
+      if (rec.notice) rec.notice.close();
+      rec.notice = null;
+    }
+    for (const n of seen) n.close();
+    seen.clear();
+  };
+  /* A card's Show: back to this tab — reopened if it was closed from the
+     strip — and to the sheet the card is about. */
+  async function showSheet(sh) {
+    await winnow.showTab();
+    const i = sheets.indexOf(sh);
+    if (i >= 0 && i !== active) activateSheet(i);
+  }
 
   /* ------------------------------------------------------- sheet strip */
 
@@ -55,6 +471,7 @@ export default function mount(container, winnow) {
           sh.name = inp.value.trim() || sh.name;
           renamingIdx = null;
           renderSheetTabs();
+          saveEdit();   // a rename is not a control change, so schedule() never sees it
         };
         inp.onkeydown = (e) => {
           if (e.key === 'Enter') commit();
@@ -89,6 +506,7 @@ export default function mount(container, winnow) {
     strip.append(add);
   }
   function activateSheet(i) {
+    acHide();   // state swaps under the input — an accept must not land in another sheet
     active = i;
     state = sheets[i];
     if (state.sourceId != null) srcSel.value = String(state.sourceId);
@@ -96,8 +514,14 @@ export default function mount(container, winnow) {
     fillSources();
     renderControls();
     renderPreview();
+    // Which sheet is on top is part of what gets restored, and a sheet
+    // restored but never run has nothing on screen until something asks.
+    // Both silent: looking at another sheet is not an edit.
+    saveState();
+    if (state.stale) queuePreview();
   }
   function closeSheet(i) {
+    stopPreview(sheets[i]);
     sheets.splice(i, 1);
     activateSheet(Math.max(0, Math.min(i <= active ? active - (i < active ? 1 : 0) : active, sheets.length - 1)));
   }
@@ -118,6 +542,26 @@ export default function mount(container, winnow) {
   srcSel.onchange = () => selectSource(Number(srcSel.value));
   const status = el('span', 'note-status', '');
   status.style.cssText = 'margin-left:auto;text-align:right';
+  // Auto-update and its manual counterpart sit between the status and
+  // the result actions: they're about the preview, not the result.
+  let auto = readAuto();
+  const autoRow = el('label');
+  autoRow.style.cssText = 'display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;white-space:nowrap';
+  const autoCb = el('input');
+  autoCb.type = 'checkbox';
+  autoCb.className = 'fl-auto';
+  autoCb.checked = auto;
+  autoCb.onchange = () => {
+    auto = autoCb.checked;
+    writeAuto(auto);
+    // Turning it back on catches up on whatever was edited meanwhile.
+    if (auto && state.stale) schedule();
+  };
+  autoRow.append(autoCb, el('span', null, 'Auto-update'));
+  autoRow.title = 'Re-run the preview as you change the controls. Off, changes wait for Refresh — easier on a large table.';
+  const refreshBtn = el('button', 'btn ghost fl-refresh', 'Refresh');
+  refreshBtn.title = 'Run the preview now';
+  refreshBtn.onclick = () => { clearTimeout(timer); runPreview(); };
   // Result actions live top-right, like every other tab's bar.
   const copyBtn = el('button', 'btn ghost', 'Copy result');
   copyBtn.title = 'Copy the ENTIRE result (not just the preview) as TSV — paste into a spreadsheet or notes';
@@ -125,7 +569,7 @@ export default function mount(container, winnow) {
   const createBtn = el('button', 'btn', 'Create table…');
   createBtn.title = 'Land the full result as a new table in this case — name it, optionally tag it onto the Timeline';
   createBtn.onclick = openCreateModal;
-  bar.append(srcSel, status, copyBtn, createBtn);
+  bar.append(srcSel, status, autoRow, refreshBtn, copyBtn, createBtn);
   container.append(bar);
 
   const body = el('div');
@@ -133,11 +577,48 @@ export default function mount(container, winnow) {
   container.append(body);
 
   const side = el('div');
-  side.style.cssText = 'flex:0 0 280px;min-width:0;border-right:1px solid var(--line-2);'
+  side.className = 'fl-rail';
+  side.style.cssText = `flex:0 0 ${readRail()}px;min-width:0;border-right:1px solid var(--line-2);`
     + 'display:flex;flex-direction:column;overflow:auto;background:var(--panel)';
+  // A drag handle on the rail's edge — the app sidebar's .sidebar-resize,
+  // done inline like everything else in this plugin: 7px wide, straddling
+  // the border, an accent line while hovered or dragged.
+  const rail = el('div');
+  rail.className = 'fl-rail-resize';
+  rail.title = 'Drag to resize the panel · double-click to reset';
+  rail.style.cssText = 'flex:0 0 7px;margin:0 -3px;cursor:col-resize;touch-action:none;z-index:2;position:relative';
+  const railLine = el('div');
+  railLine.style.cssText = 'position:absolute;inset:0 3px;background:transparent';
+  rail.append(railLine);
+  rail.onmouseenter = () => { railLine.style.background = 'var(--accent-dim)'; };
+  rail.onmouseleave = () => { if (!rail.dataset.drag) railLine.style.background = 'transparent'; };
+  rail.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const startX = e.clientX, startW = side.getBoundingClientRect().width;
+    rail.dataset.drag = '1';
+    railLine.style.background = 'var(--accent-dim)';
+    rail.setPointerCapture(e.pointerId);
+    const move = (ev) => {
+      const w = Math.round(Math.max(RAIL_MIN, Math.min(RAIL_MAX, startW + ev.clientX - startX)));
+      side.style.flexBasis = `${w}px`;
+    };
+    const up = () => {
+      rail.removeEventListener('pointermove', move);
+      rail.removeEventListener('pointerup', up);
+      rail.removeEventListener('pointercancel', up);
+      delete rail.dataset.drag;
+      railLine.style.background = 'transparent';
+      writeRail(Math.round(side.getBoundingClientRect().width));
+    };
+    rail.addEventListener('pointermove', move);
+    rail.addEventListener('pointerup', up);
+    rail.addEventListener('pointercancel', up);
+  });
+  rail.ondblclick = () => { side.style.flexBasis = `${RAIL_DEFAULT}px`; writeRail(RAIL_DEFAULT); };
   const main = el('div');
   main.style.cssText = 'flex:1 1 auto;min-width:0;overflow:auto;display:flex;flex-direction:column';
-  body.append(side, main);
+  body.append(side, rail, main);
 
   /* ------------------------------------------------------- field list */
 
@@ -169,6 +650,9 @@ export default function mount(container, winnow) {
     ['groupBy', 'Group rows on', 'What defines a group — Host + User makes one group per session pair'],
     ['sort', 'Ordered by', 'The column that orders each group; first/last are meaningless without one'],
     ['carry', 'Include columns', 'Columns carried into the result — drag chips (or the preview headers) to set their order'],
+    ['sums', 'Total up', 'Number columns summed over each WHOLE group — bytes moved in a session, not just the two bookends'],
+    ['unique', 'Count unique', 'How many different values of a column each WHOLE group has — users seen on a host, hosts a user logged on to (blanks not counted)'],
+    ['values', 'List values', 'Each group’s distinct values of a column, in one cell — every user seen on a host, not just the two bookends’ users'],
     ['filters', 'Filters', 'Only rows matching these are grouped'],
   ];
   const zoneBodies = {};
@@ -208,13 +692,251 @@ export default function mount(container, winnow) {
   const tmplInput = el('input');
   tmplInput.style.cssText = 'background:var(--ink);color:var(--text);border:1px solid var(--line-2);'
     + 'padding:5px 8px;font:12px var(--mono);width:100%';
-  tmplInput.oninput = () => { state.template = tmplInput.value; schedule(); };
+  tmplInput.placeholder = DEFAULT_TEMPLATE;
+  tmplInput.title = `Left empty, each row reads ${DEFAULT_TEMPLATE}`;
+  tmplInput.oninput = () => { state.template = tmplInput.value; schedule(); acRefresh(); };
   const chipRow = el('div');
   chipRow.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px';
   tmplWrap.append(tmplInput, chipRow, el('div', 'note-status',
-    'Free text plus placeholders — {which} is First/Last, {count} the group size, '
-    + '{Column} that row’s value. Click a chip to insert it.'));
+    'Free text plus placeholders — {which} is First/Last (Only, for a one-row group) and '
+    + '{which:number} the row’s position in its group instead (1, or the group size for the last), '
+    + '{count} the group size, {Column} that row’s value (any column — it need not be grouped or '
+    + 'included), {values:Column} the group’s distinct values of any column and {unique:Column} '
+    + 'how many there are, {sum:Column} / {min:Column} / {max:Column} a number column’s group '
+    + 'total, smallest and largest. Left empty, it reads ' + DEFAULT_TEMPLATE + '. Type { in the box '
+    + 'to complete a name, or drag a field into it. Click a function to start it, or drop a field '
+    + 'on one to fill it in.'));
   side.append(tmplWrap);
+
+  /* The chips are the functions, not the columns. A chip per column was
+     thirty-odd buttons on an EVTX table and sixty on a wide one, and every
+     column is already in the field list above: drag one into the box and
+     it lands as {Name} where it was dropped. A function that takes a
+     column starts on a click — `{sum:` and the completion, narrowed to
+     what it can take — or takes a field dropped on it whole. */
+  const FUNCS = [
+    { ph: '{which}', title: 'First or Last (Only, for a one-row group)' },
+    { ph: '{which:number}', title: 'The row’s position in its group: 1 for the first, the group size for the last' },
+    { ph: '{count}', title: 'How many rows the group has' },
+    { fn: 'sum', title: 'A number column added up over the whole group', numbers: true },
+    { fn: 'min', title: 'The smallest value of a number column in the group', numbers: true },
+    { fn: 'max', title: 'The largest value of a number column in the group', numbers: true },
+    { fn: 'values', title: 'The group’s different values of a column, listed' },
+    { fn: 'unique', title: 'How many different values of a column the group has' },
+  ];
+
+  /* `run: false` is for a fragment the completion is about to finish:
+     `{sum:` alone would fail the preview the moment the debounce ran. */
+  function insertAtCaret(text, { run = true } = {}) {
+    tmplInput.focus();
+    const at = tmplInput.selectionStart ?? tmplInput.value.length;
+    tmplInput.setRangeText(text, at, tmplInput.selectionEnd ?? at, 'end');
+    state.template = tmplInput.value;
+    if (run) schedule();
+  }
+
+  /* A field dragged from the list (or out of a zone — a preview header is
+     a reorder, not a field). A brace in its name cannot be a placeholder,
+     since the renderer stops at the first `}`, so that one is refused. */
+  function draggedField() {
+    if (!dragging || dragging.from === 'header') return null;
+    if (/[{}]/.test(dragging.name)) {
+      toast(`${dragging.name} has a brace in its name — the description cannot name it`, 4000);
+      return null;
+    }
+    return dragging.name;
+  }
+
+  for (const f of FUNCS) {
+    const b = el('button', 'btn ghost', f.ph || `{${f.fn}:…}`);
+    b.style.cssText = 'font-size:10px;padding:1px 5px;font-family:var(--mono)';
+    if (!f.fn) {
+      b.title = f.title;
+      b.onclick = () => insertAtCaret(f.ph);
+      chipRow.append(b);
+      continue;
+    }
+    b.dataset.fn = f.fn;
+    b.title = `${f.title} — click to start it, or drop a field on it`;
+    // Keep the box's focus and caret: a blur would take the completion
+    // this click opens straight back down (the box's blur handler).
+    b.onmousedown = (e) => e.preventDefault();
+    b.onclick = () => { insertAtCaret(`{${f.fn}:`, { run: false }); acRefresh(); };
+    b.addEventListener('dragover', (e) => {
+      if (!dragging || dragging.from === 'header') return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      b.style.outline = '1px solid var(--accent)';
+    });
+    b.addEventListener('dragleave', () => { b.style.outline = ''; });
+    b.addEventListener('drop', (e) => {
+      e.preventDefault();
+      b.style.outline = '';
+      const name = draggedField();
+      dragging = null;
+      if (!name) return;
+      // Only a number column has a total, as Total up says.
+      const col = (currentSource()?.columns || []).find((c) => c.name === name);
+      if (f.numbers && (!col || col.type !== 'number')) {
+        toast(`{${f.fn}:…} takes a number column — ${name} is not one`, 4000);
+        return;
+      }
+      insertAtCaret(`{${f.fn}:${name}}`);
+    });
+    chipRow.append(b);
+  }
+
+  /* Where in the box a drop at clientX lands. An input reports no caret
+     for a drop point, so the text is measured up to it; and a drop inside
+     an existing {…} goes after that placeholder, never into it. */
+  const measure = document.createElement('canvas').getContext('2d');
+  function dropIndex(clientX) {
+    const cs = getComputedStyle(tmplInput);
+    const r = tmplInput.getBoundingClientRect();
+    const x = clientX - r.left - parseFloat(cs.borderLeftWidth) - parseFloat(cs.paddingLeft) + tmplInput.scrollLeft;
+    measure.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+    const v = tmplInput.value;
+    let at = v.length;
+    for (let i = 0, prev = 0; i <= v.length; i++) {
+      const w = measure.measureText(v.slice(0, i)).width;
+      if (w >= x) { at = i > 0 && x - prev < w - x ? i - 1 : i; break; }
+      prev = w;
+    }
+    // (at 0 there is nothing before it: lastIndexOf would read -1 as 0.)
+    const open = at ? v.lastIndexOf('{', at - 1) : -1, close = at ? v.lastIndexOf('}', at - 1) : -1;
+    if (open > close) {
+      const end = v.indexOf('}', at);
+      if (end !== -1) at = end + 1;
+    }
+    return at;
+  }
+  tmplInput.addEventListener('dragover', (e) => {
+    if (!dragging || dragging.from === 'header') return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    tmplInput.style.borderColor = 'var(--accent)';
+  });
+  tmplInput.addEventListener('dragleave', () => { tmplInput.style.borderColor = ''; });
+  tmplInput.addEventListener('drop', (e) => {
+    // Always: left to itself the browser drops the dragged text in as is.
+    e.preventDefault();
+    tmplInput.style.borderColor = '';
+    const name = draggedField();
+    dragging = null;
+    if (!name) return;
+    const at = dropIndex(e.clientX);
+    acHide();
+    tmplInput.focus();
+    tmplInput.setRangeText(`{${name}}`, at, at, 'end');
+    state.template = tmplInput.value;
+    schedule();
+  });
+
+  /* ------------------------------------------- placeholder completion */
+
+  /* Typing `{` in the description offers every name the template can
+     resolve — {which}, {count}, every column of the table (the backend
+     projects whatever the template names, so none has to be grouped or
+     carried first), the sum:/min:/max: forms of each number column, and
+     the values:/unique: forms of every column — narrowed by what follows
+     the brace. Hand-rolled the way the SQL
+     pane's is: the winnow context exposes no dropdown, and riding the same
+     .menu/.sql-ac classes makes it look identical across the five styles.
+     It lives in this container rather than document.body so it dies with
+     the mount (case switch, plugin reload) and is hidden with the tab —
+     .menu is position:fixed, which the rail's overflow does not clip. */
+  let acEl = null, acItems = [], acIdx = 0, acFrom = 0;
+  function acHide() {
+    if (acEl) acEl.remove();
+    acEl = null;
+    acItems = [];
+  }
+  hideCompletion = acHide;
+  function acCandidates(partial) {
+    const needle = partial.toLowerCase();
+    const all = [{ name: 'which', kind: 'First/Last' }, { name: 'count', kind: 'group size' },
+      { name: 'which:number', kind: 'position' }];
+    const src = currentSource();
+    // A brace inside a column name cannot be a placeholder at all — the
+    // renderer stops at the first `}` — so it is not offered.
+    const named = (src ? src.columns : []).filter((c) => !/[{}]/.test(c.name));
+    for (const c of named) all.push({ name: c.name, kind: c.derived ? 'derived' : 'column' });
+    // After the plain names, so a bare `{` still opens on the columns;
+    // typing `{sum:` (or a click on the chip) narrows to these. Total up's
+    // columns first: they are the ones the analyst already said they
+    // wanted added up.
+    const numbers = named.filter((c) => c.type === 'number').map((c) => c.name)
+      .sort((a, b) => Number(!state.sums.includes(a)) - Number(!state.sums.includes(b)));
+    const AGG = { sum: 'total', min: 'smallest', max: 'largest' };
+    for (const c of numbers) for (const k of ['sum', 'min', 'max']) all.push({ name: `${k}:${c}`, kind: AGG[k] });
+    for (const c of named) all.push({ name: `values:${c.name}`, kind: 'distinct values' });
+    for (const c of named) all.push({ name: `unique:${c.name}`, kind: 'unique count' });
+    return all.filter((it) => it.name.toLowerCase().includes(needle)).slice(0, 12);
+  }
+  function acPaint() {
+    if (!acEl) {
+      acEl = el('div', 'menu sql-ac fl-ac');
+      container.append(acEl);
+    }
+    acEl.replaceChildren();
+    acItems.forEach((it, i) => {
+      const row = el('button', 'menu-item' + (i === acIdx ? ' sql-ac-active' : ''));
+      row.append(el('span', null, it.name), el('span', 'count', it.kind));
+      // mousedown, not click: a click would blur the input first and the
+      // blur handler would take the popup down before the click landed.
+      row.onmousedown = (e) => { e.preventDefault(); acAccept(it); };
+      acEl.append(row);
+    });
+    const r = tmplInput.getBoundingClientRect();
+    acEl.style.top = Math.min(r.bottom + 2, window.innerHeight - acEl.offsetHeight - 8) + 'px';
+    acEl.style.left = Math.min(r.left, window.innerWidth - acEl.offsetWidth - 8) + 'px';
+  }
+  function acAccept(item) {
+    // The chips' two lines, not renderControls(): that rewrites the
+    // input's value and drops the caret mid-edit.
+    tmplInput.setRangeText(`{${item.name}}`, acFrom, tmplInput.selectionStart, 'end');
+    acHide();
+    state.template = tmplInput.value;
+    schedule();
+    tmplInput.focus();
+  }
+  function acRefresh({ force = false } = {}) {
+    const caret = tmplInput.selectionStart;
+    const m = /\{([^{}]*)$/.exec(tmplInput.value.slice(0, caret));
+    if (!m && !force) { acHide(); return; }
+    // An unclosed brace before the caret is the trigger; Ctrl+Space with
+    // none inserts a whole {name} at the caret.
+    acFrom = m ? caret - m[0].length : caret;
+    acItems = acCandidates(m ? m[1] : '');
+    acIdx = 0;
+    if (!acItems.length) { acHide(); return; }
+    acPaint();
+  }
+  tmplInput.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === ' ') { e.preventDefault(); acRefresh({ force: true }); return; }
+    if (!acEl) return;
+    if (e.key === 'ArrowDown') { e.preventDefault(); acIdx = (acIdx + 1) % acItems.length; acPaint(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); acIdx = (acIdx + acItems.length - 1) % acItems.length; acPaint(); }
+    else if (e.key === 'Tab' || e.key === 'Enter') {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      acAccept(acItems[acIdx]);
+    } else if (e.key === 'Escape') {
+      // Consumed here — the app's own Escape would blur the field.
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      acHide();
+    } else if (/^(ArrowLeft|ArrowRight|Home|End)$/.test(e.key)) {
+      acHide();   // the caret leaves the token the popup was built for
+    }
+  });
+  /* Called off when the box gets focus back: a blur's pending hide that
+     outlives the blur closed the list a Ctrl+Space or a brace had just
+     opened, when focus left and came back inside the 150 ms. */
+  let acBlurTimer = 0;
+  tmplInput.addEventListener('blur', () => { acBlurTimer = setTimeout(acHide, 150); });
+  tmplInput.addEventListener('focus', () => clearTimeout(acBlurTimer));
+  tmplInput.addEventListener('click', acHide);
 
   /* --------------------------------------------------- drag and drop */
 
@@ -265,9 +987,37 @@ export default function mount(container, winnow) {
         openFilterEditor(f);
         return;
       }
+    } else if (zone === 'sums') {
+      // Only a number column has a total. Say so rather than adding a chip
+      // the server will refuse on the next preview.
+      const col = (currentSource()?.columns || []).find((c) => c.name === name);
+      if (!col || col.type !== 'number') {
+        toast(`${name} is not a number column — nothing to sum`, 4000);
+        return;
+      }
+      if (!state.sums.includes(name)) state.sums.push(name);
+    } else if (zone === 'unique' || zone === 'values') {
+      if (!state[zone].includes(name)) state[zone].push(name);
     } else if (zone === 'groupBy' || zone === 'carry') {
       const list = state[zone];
       if (from !== zone && !list.includes(name)) list.push(name);
+      /* A column you grouped on is one you want to READ in the result.
+         Without this the output of "group by Host + User" is a timestamp
+         and a description, and which pair a row belongs to is recoverable
+         only from whatever the description template happens to name — so
+         the commonest grouping needed two more drags before it said
+         anything, and forgetting them produced a table that looked right
+         and could not be read.
+
+         One way only. Taking a column back out of the grouping leaves it
+         in the output: dropping a column the analyst can see is the worse
+         half of being wrong, and Include columns is theirs to prune and
+         reorder. The carve-out is a drag that came FROM carry, which is a
+         move gesture — bouncing the chip back where it started would read
+         as the drag having failed. */
+      if (zone === 'groupBy' && from !== 'carry' && !state.carry.includes(name)) {
+        state.carry.push(name);
+      }
     }
     state.selRows = new Set();
     renderControls();
@@ -317,13 +1067,11 @@ export default function mount(container, winnow) {
     fieldList.replaceChildren();
     for (const col of cols) {
       if (needle && !col.name.toLowerCase().includes(needle)) continue;
-      const c = chip(col.name, { title: `${col.name} — ${col.type}` });
+      const c = chip(col.name, { title: `${col.name} — ${col.type} · click to place it, or drag it to a zone or into the description` });
       const type = el('span', 'count', col.type === 'number' ? '#' : col.type === 'datetime' ? '🕑' : '');
       c.insertBefore(type, c.firstChild);
       wireDragSource(c, { from: 'list', name: col.name });
-      // Click-to-place: drag isn't reachable from a keyboard and is fiddly
-      // on a trackpad.
-      c.onclick = () => placeMenu(col.name);
+      wirePlace(c, col.name);
       fieldList.append(c);
     }
     if (!fieldList.children.length) {
@@ -352,21 +1100,8 @@ export default function mount(container, winnow) {
       }
     }
 
-    chipRow.replaceChildren();
+    acHide();   // the value is rewritten below; the popup's brace index was for the old one
     tmplInput.value = state.template;
-    const insert = (text) => {
-      const at = tmplInput.selectionStart ?? tmplInput.value.length;
-      tmplInput.value = tmplInput.value.slice(0, at) + text + tmplInput.value.slice(tmplInput.selectionEnd ?? at);
-      state.template = tmplInput.value;
-      tmplInput.focus();
-      schedule();
-    };
-    for (const ph of ['{which}', '{count}', ...cols.map((c) => `{${c.name}}`)]) {
-      const chipBtn = el('button', 'btn ghost', ph);
-      chipBtn.style.cssText = 'font-size:10px;padding:1px 5px;font-family:var(--mono)';
-      chipBtn.onclick = () => insert(ph);
-      chipRow.append(chipBtn);
-    }
 
     rowJsonCb.checked = state.rowJson;
     renderTagFilter();
@@ -395,25 +1130,79 @@ export default function mount(container, winnow) {
     });
   }
 
-  function placeMenu(name) {
-    modal(`Place ${name}`, (b) => {
-      b.append(el('p', 'note-status', 'Drag works too — this is the click-only path.'));
-      const acts = el('div', 'row-actions');
-      for (const [id, label] of ZONES) {
-        const btn = el('button', 'btn ghost', label);
-        btn.onclick = () => {
-          document.getElementById('modal').hidden = true;
-          addField({ from: 'list', name }, id);
-        };
-        acts.append(btn);
-      }
-      b.append(acts);
+  /* Click-to-place: drag isn't reachable from a keyboard and is fiddly
+     on a trackpad. The field is focusable, and Enter or Space opens the
+     same menu a click does. */
+  function wirePlace(c, name) {
+    c.tabIndex = 0;
+    c.setAttribute('role', 'button');
+    c.setAttribute('aria-haspopup', 'menu');
+    c.onclick = () => placeMenu(c, name);
+    c.addEventListener('keydown', (e) => {
+      if ((e.key !== 'Enter' && e.key !== ' ') || e.target !== c) return;
+      e.preventDefault();   // Space would scroll the rail
+      if (!e.repeat) placeMenu(c, name, { fromKey: true });
     });
+  }
+
+  /* Why a zone will not take this field, or null — only the rules addField
+     (and the backend behind it) already apply, said before the click
+     rather than after it: a zone the field is already in is a no-op, Total
+     up refuses a column that is not a number (addField's toast), and Group
+     rows on stops at the backend's group-column limit (a 400 on the next
+     preview otherwise). */
+  function placeBlocked(name, zone) {
+    if (zone === 'sort') return state.sortColumn === name ? 'Already there' : null;
+    if (zone === 'filters') return state.filters.some((f) => f.column === name) ? 'Already there' : null;
+    if (state[zone].includes(name)) return 'Already there';
+    if (zone === 'sums') {
+      const col = (currentSource()?.columns || []).find((c) => c.name === name);
+      if (!col || col.type !== 'number') return 'Not a number column';
+    }
+    const most = state.meta?.limits?.group_cols;
+    if (zone === 'groupBy' && most && state.groupBy.length >= most) return `Full — ${most} columns at most`;
+    return null;
+  }
+
+  /* The zones as a small menu under the field — the app's own dropdown
+     (winnow.dropdownMenu), so Escape, an outside click and the arrow keys
+     behave as every other menu in Winnow does. It was a modal titled
+     "Place <field>", which is a whole dialog for one click and covered the
+     zones being arranged. Each item does exactly what dropping the field
+     on that zone does (addField). */
+  function placeMenu(anchor, name, { fromKey = false } = {}) {
+    const items = ZONES.map(([id, label, hint]) => {
+      const why = placeBlocked(name, id);
+      const item = {
+        label,
+        title: hint,
+        disabled: !!why,
+        onclick: () => {
+          addField({ from: 'list', name }, id);
+          // renderControls rebuilt the list, so the focused field is a new
+          // node; a keyboard pick goes back to it rather than to <body>
+          // (unless the pick opened a dialog — Filters does).
+          if (fromKey) refocusField(name);
+        },
+      };
+      if (why) item.desc = why;
+      // Ordered by is one slot: a pick replaces what is there.
+      else if (id === 'sort' && state.sortColumn) item.desc = `Replaces ${state.sortColumn}`;
+      return item;
+    });
+    winnow.dropdownMenu(anchor, [{ header: 'Place in' }, ...items]);
+  }
+
+  function refocusField(name) {
+    if (!document.getElementById('modal').hidden) return;
+    const again = [...fieldList.children].find((n) => n.dataset.field === name);
+    if (again) again.focus();
   }
 
   /* Tag filter — its own control rather than a column filter, because tags
      aren't a column and "only what I've tagged TA" is the most common way
      to scope a bookend pass. */
+  let tagNeedle = '';
   function renderTagFilter() {
     tagBox.replaceChildren();
     const sel = mkSel('Keep only rows with (or without) tags');
@@ -425,26 +1214,44 @@ export default function mount(container, winnow) {
       sel.append(o);
     }
     sel.value = state.tags.mode;
-    sel.onchange = () => { state.tags.mode = sel.value; renderTagFilter(); schedule(); };
+    sel.onchange = () => { state.tags.mode = sel.value; tagNeedle = ''; renderTagFilter(); schedule(); };
     tagBox.append(sel);
     if (state.tags.mode !== 'ids') return;
     const tags = winnow.state.tags || [];
     if (!tags.length) { tagBox.append(el('div', 'note-status', 'No tags in this case yet.')); return; }
-    for (const t of tags) {
-      const row = el('label');
-      row.style.cssText = 'display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer';
-      const cb = el('input');
-      cb.type = 'checkbox';
-      cb.checked = state.tags.ids.includes(t.id);
-      cb.onchange = () => {
-        state.tags.ids = cb.checked ? [...state.tags.ids, t.id] : state.tags.ids.filter((x) => x !== t.id);
-        schedule();
-      };
-      const dot = el('span');
-      dot.style.cssText = `width:10px;height:10px;border-radius:2px;background:${t.color};flex:0 0 auto`;
-      row.append(cb, dot, el('span', null, t.name));
-      tagBox.append(row);
-    }
+    // The same search the value list has — a case with forty tags wants it.
+    const search = el('input');
+    search.type = 'search';
+    search.placeholder = 'Find a tag…';
+    search.value = tagNeedle;
+    search.style.cssText = 'background:var(--ink);color:var(--text);border:1px solid var(--line-2);'
+      + 'padding:4px 7px;font:inherit;font-size:12px;margin:2px 0';
+    const rows = el('div');
+    rows.style.cssText = 'display:flex;flex-direction:column;gap:2px';
+    const paintRows = () => {
+      rows.replaceChildren();
+      const needle = tagNeedle.trim().toLowerCase();
+      for (const t of tags) {
+        if (needle && !t.name.toLowerCase().includes(needle)) continue;
+        const row = el('label');
+        row.style.cssText = 'display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer';
+        const cb = el('input');
+        cb.type = 'checkbox';
+        cb.checked = state.tags.ids.includes(t.id);
+        cb.onchange = () => {
+          state.tags.ids = cb.checked ? [...state.tags.ids, t.id] : state.tags.ids.filter((x) => x !== t.id);
+          schedule();
+        };
+        const dot = el('span');
+        dot.style.cssText = `width:10px;height:10px;border-radius:2px;background:${t.color};flex:0 0 auto`;
+        row.append(cb, dot, el('span', null, t.name));
+        rows.append(row);
+      }
+      if (!rows.children.length) rows.append(el('div', 'note-status', 'No tag matches that.'));
+    };
+    search.oninput = () => { tagNeedle = search.value; paintRows(); };
+    tagBox.append(search, rows);
+    paintRows();
   }
 
   function filterSummary(f) {
@@ -480,13 +1287,14 @@ export default function mount(container, winnow) {
       const area = el('div');
       area.style.cssText = 'margin-top:10px';
       b.append(area);
-      const apply = el('button', 'btn', 'Apply');
-      apply.style.marginTop = '12px';
-      apply.onclick = () => {
+      const applyNow = () => {
         document.getElementById('modal').hidden = true;
         renderControls();
         schedule();
       };
+      const apply = el('button', 'btn primary', 'Apply');
+      apply.style.marginTop = '12px';
+      apply.onclick = applyNow;
       b.append(apply);
 
       const paint = async () => {
@@ -511,22 +1319,60 @@ export default function mount(container, winnow) {
           return;
         }
         area.replaceChildren();
+        // The pivot editor's shape, copied rather than imported (plugins
+        // are standalone): a search over the values, All/None, and a note
+        // when the list is the capped most-common set, not every value.
+        const search = el('input');
+        search.type = 'search';
+        search.placeholder = 'Find a value…';
+        search.style.cssText = 'background:var(--ink);color:var(--text);border:1px solid var(--line-2);padding:4px 7px;font:inherit;width:100%';
         const list = el('div');
-        list.style.cssText = 'max-height:44vh;overflow:auto;display:flex;flex-direction:column;gap:2px';
+        list.style.cssText = 'max-height:44vh;overflow:auto;display:flex;flex-direction:column;gap:2px;margin-top:8px';
         const chosen = new Set(filter.values || []);
-        for (const v of res.values) {
-          const text = v.value == null || v.value === '' ? '(blank)' : String(v.value);
-          const row = el('label');
-          row.style.cssText = 'display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:11px';
-          const cb = el('input');
-          cb.type = 'checkbox';
-          const key = v.value == null ? '' : String(v.value);
-          cb.checked = chosen.has(key);
-          cb.onchange = () => { cb.checked ? chosen.add(key) : chosen.delete(key); filter.values = [...chosen]; };
-          row.append(cb, el('span', null, text), el('span', 'count', v.count.toLocaleString()));
-          list.append(row);
+        const keyOf = (v) => (v.value == null ? '' : String(v.value));
+        const textOf = (v) => (v.value == null || v.value === '' ? '(blank)' : String(v.value));
+        // What the needle leaves is what the list shows AND what All/None
+        // act on — the app's own value picker works the same way, and
+        // "type jsmith, All, Apply" is the workflow a search is for.
+        const shown = () => {
+          const needle = search.value.trim().toLowerCase();
+          return needle ? res.values.filter((v) => textOf(v).toLowerCase().includes(needle)) : res.values;
+        };
+        const paintList = () => {
+          list.replaceChildren();
+          const rows = shown();
+          for (const v of rows) {
+            const key = keyOf(v);
+            const row = el('label');
+            row.style.cssText = 'display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:11px';
+            const cb = el('input');
+            cb.type = 'checkbox';
+            cb.checked = chosen.has(key);
+            cb.onchange = () => { cb.checked ? chosen.add(key) : chosen.delete(key); filter.values = [...chosen]; };
+            const name = el('span', null, textOf(v));
+            name.style.cssText = 'flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+            row.append(cb, name, el('span', 'count', v.count.toLocaleString()));
+            list.append(row);
+          }
+          if (!rows.length) list.append(el('div', 'note-status', res.values.length ? 'No value matches that.' : 'No values.'));
+        };
+        search.oninput = paintList;
+        search.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); applyNow(); } };
+        const acts = el('div', 'row-actions');
+        const all = el('button', 'btn ghost', 'All');
+        all.title = 'Tick every value listed — with a search, only the matches';
+        all.onclick = () => { for (const v of shown()) chosen.add(keyOf(v)); filter.values = [...chosen]; paintList(); };
+        const none = el('button', 'btn ghost', 'None');
+        none.title = 'Untick every value listed — with a search, only the matches';
+        none.onclick = () => { for (const v of shown()) chosen.delete(keyOf(v)); filter.values = [...chosen]; paintList(); };
+        acts.append(all, none);
+        if (res.truncated) {
+          acts.append(el('span', 'note-status', `showing the ${res.values.length.toLocaleString()} most common`));
         }
-        area.append(list);
+        area.append(search, acts, list);
+        paintList();
+        // modal(opts.focus) cannot reach this — the list paints after the fetch.
+        search.focus();
       };
       opSel.onchange = paint;
       paint();
@@ -537,7 +1383,23 @@ export default function mount(container, winnow) {
 
   let timer = null;
   function schedule() {
+    // Above the auto-update gate on purpose: with it off, edits still have
+    // to be saved — they just do not re-run the preview.
+    saveEdit();
+    queuePreview();
+  }
+  /* The re-run on its own. Switching to a sheet that has not been run has
+     to fetch its rows, but nothing about the sheet changed — so it is not
+     an edit, and it neither writes nor dismisses the restore line. */
+  function queuePreview() {
     clearTimeout(timer);
+    if (!auto) {
+      // Nothing runs until Refresh — but the status says the preview on
+      // screen is behind the controls, so it isn't mistaken for current.
+      state.stale = true;
+      updateStatus();
+      return;
+    }
     timer = setTimeout(runPreview, REFRESH_MS);
   }
 
@@ -547,6 +1409,9 @@ export default function mount(container, winnow) {
       group_by: state.groupBy,
       sort_column: state.sortColumn,
       columns: state.carry,
+      sum_columns: state.sums,
+      unique_columns: state.unique,
+      value_columns: state.values,
       filters: state.filters,
       tags: state.tags.mode ? state.tags : null,
       row_json: state.rowJson,
@@ -556,28 +1421,67 @@ export default function mount(container, winnow) {
 
   const ready = () => state.sourceId != null && state.groupBy.length > 0 && !!state.sortColumn;
 
+  /* One preview job per sheet. An edit's run cancels the one it supersedes
+     — on the server, not just here: left to finish, they were what piled
+     up (startJob). It takes over that run's card too, so a sheet edited
+     while the analyst is away keeps one card rather than flickering a new
+     one in. A run that comes back to find itself superseded does nothing:
+     the sheet belongs to the newer run. */
   async function runPreview() {
+    const mine = state;
     if (!ready()) {
-      state.preview = null;
-      state.error = null;
+      stopPreview(mine);
+      mine.preview = null;
+      mine.error = null;
+      mine.stale = false;   // nothing to run, so nothing is pending either
       renderPreview();
       return;
     }
-    state.loading = true;
-    renderPreview();
-    const mine = state;
-    try {
-      const p = await post(`${winnow.base}/preview`, requestBody());
-      mine.preview = p;
-      mine.error = null;
-    } catch (e) {
-      mine.preview = null;
-      mine.error = e.message;
+    const prev = mine.run;
+    if (prev) {
+      prev.job.cancel();
+      away.delete(prev.rec);
     }
+    mine.loading = true;
+    mine.stale = false;
+    renderPreview();
+    const run = {
+      job: startJob('preview', requestBody()),
+      rec: background(`First/Last · ${mine.name}`, `Previewing ${labelOf(currentSource())}…`,
+        () => showSheet(mine), prev ? prev.rec.notice : null),
+    };
+    mine.run = run;
+    let preview = null, error = null;
+    try {
+      preview = await run.job.done;
+    } catch (e) {
+      error = e;
+    }
+    if (mine.run !== run || !container.isConnected) return;
+    mine.run = null;
+    mine.preview = preview;
+    mine.error = error ? error.message : null;
     mine.loading = false;
     mine.selRows = new Set();
     mine.selAnchor = null;
     if (mine === state) renderPreview();
+    const n = settle(run.rec, (c) => {
+      const g = preview.total_groups;
+      c.done({ phase: 'ready', progress: false,
+        detail: `${g.toLocaleString()} group${g === 1 ? '' : 's'} — the preview is ready` });
+    }, error);
+    if (n) seen.add(n);
+  }
+
+  /* A sheet letting its preview go — closed, switched to another table, or
+     emptied: the job stops on the server and its card, if it has one,
+     goes with nothing to say. */
+  function stopPreview(sh) {
+    if (!sh.run) return;
+    sh.run.job.cancel();
+    settle(sh.run.rec, null);
+    sh.run = null;
+    sh.loading = false;
   }
 
   const headCss = 'position:sticky;top:0;background:var(--panel-2);color:var(--dim);'
@@ -595,6 +1499,7 @@ export default function mount(container, winnow) {
 
   function updateStatus() {
     if (state.loading) { status.textContent = 'Previewing…'; return; }
+    if (state.stale) { status.textContent = 'Changed — press Refresh'; return; }
     if (!state.preview) { status.textContent = ''; return; }
     const n = state.preview.total_groups;
     const sel = state.selRows.size;
@@ -630,9 +1535,63 @@ export default function mount(container, winnow) {
     t.style.cssText = 'border-collapse:collapse;margin:8px;white-space:nowrap;user-select:none';
     const thead = el('thead');
     const hr = el('tr');
+    const applyWidth = (node, c) => {
+      const w = state.colWidths[c];
+      if (!w) return;
+      node.style.width = `${w}px`;
+      node.style.minWidth = `${w}px`;
+      node.style.maxWidth = `${w}px`;
+    };
     state.preview.columns.forEach((c, ci) => {
       const th = el('th', null, c);
       th.style.cssText = headCss;
+      applyWidth(th, c);
+      // Resize from the header's right edge. The handle is its own
+      // element so a press on it never starts the header's reorder drag,
+      // and it stops the pointer event there for the same reason.
+      const grip = el('div');
+      grip.className = 'fl-col-resize';
+      grip.title = 'Drag to resize · double-click to fit';
+      grip.style.cssText = 'position:absolute;top:0;right:-3px;bottom:0;width:7px;cursor:col-resize;touch-action:none;z-index:1';
+      grip.draggable = false;
+      grip.addEventListener('dragstart', (e) => e.preventDefault());
+      grip.addEventListener('pointerdown', (e) => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const startX = e.clientX, startW = th.getBoundingClientRect().width;
+        const wasDraggable = th.draggable;
+        th.draggable = false;
+        grip.setPointerCapture(e.pointerId);
+        grip.style.background = 'var(--accent-dim)';
+        const cells = [...t.querySelectorAll('tbody tr')].map((tr) => tr.children[ci]).filter(Boolean);
+        const move = (ev) => {
+          const w = Math.round(Math.max(40, startW + ev.clientX - startX));
+          state.colWidths[c] = w;
+          applyWidth(th, c);
+          for (const td of cells) applyWidth(td, c);
+        };
+        const up = () => {
+          grip.removeEventListener('pointermove', move);
+          grip.removeEventListener('pointerup', up);
+          grip.removeEventListener('pointercancel', up);
+          grip.style.background = '';
+          th.draggable = wasDraggable;
+          saveEdit();   // once, at the end of the drag, not per pointermove
+        };
+        grip.addEventListener('pointermove', move);
+        grip.addEventListener('pointerup', up);
+        grip.addEventListener('pointercancel', up);
+      });
+      grip.addEventListener('dblclick', (e) => {
+        e.stopPropagation();
+        delete state.colWidths[c];
+        saveEdit();
+        for (const node of [th, ...[...t.querySelectorAll('tbody tr')].map((tr) => tr.children[ci])]) {
+          if (node) { node.style.width = ''; node.style.minWidth = ''; node.style.maxWidth = ''; }
+        }
+      });
+      th.append(grip);
       // Included columns sit between the sort column (0) and the trailing
       // JSON/Description columns — exactly indices 1..carry.length.
       const carryIdx = ci - 1;
@@ -665,12 +1624,13 @@ export default function mount(container, winnow) {
     const tb = el('tbody');
     state.preview.rows.forEach((row, ri) => {
       const tr = el('tr');
-      for (const v of row) {
+      row.forEach((v, ci) => {
         const td = el('td', null, v == null ? '' : String(v));
         td.style.cssText = cellCss;
         td.title = v == null ? '' : String(v);
+        applyWidth(td, state.preview.columns[ci]);
         tr.append(td);
-      }
+      });
       // Table-tab selection semantics: click selects, Shift extends from
       // the anchor, Ctrl/Cmd toggles.
       tr.addEventListener('mousedown', (e) => {
@@ -711,19 +1671,55 @@ export default function mount(container, winnow) {
     return n;
   }
 
-  /* The whole result (backend rows route), TSV, to the clipboard. */
+  /* The whole result (the backend's rows job), TSV, to the clipboard. On a
+     big table that takes a while, and nothing waits on it: the button says
+     Copying… and the analyst can go anywhere. Still on this tab when it
+     lands, it goes straight to the clipboard. Elsewhere, the clipboard is
+     not this tab's to write — the analyst may have copied something else
+     since — so the card offers the copy instead, and the click on it is
+     the gesture a clipboard write may want anyway. */
+  let copying = false;
   async function copyResult() {
     if (!ready()) { toast('Build a grouping first'); return; }
-    let res;
-    try { res = await post(`${winnow.base}/rows`, requestBody()); }
-    catch (e) { toast('Could not compute the result: ' + e.message, 5000); return; }
+    if (copying) { toast('Still working out the result to copy'); return; }
+    copying = true;
+    copyBtn.disabled = true;
+    copyBtn.textContent = 'Copying…';
+    const job = startJob('rows', requestBody());
+    const rec = background('First/Last result', `Working out ${state.name} to copy…`, () => winnow.showTab());
+    let res = null, error = null;
+    try {
+      res = await job.done;
+    } catch (e) {
+      error = e;
+    }
+    copying = false;
+    copyBtn.disabled = false;
+    copyBtn.textContent = 'Copy result';
+    if (!container.isConnected) return;
+    if (error) {
+      if (!settle(rec, () => {}, error)) toast('Could not compute the result: ' + error.message, 5000);
+      return;
+    }
     const text = [res.columns.join('\t'),
       ...res.rows.map((r) => r.map((v) => (v == null ? '' : String(v))).join('\t'))].join('\n');
-    try {
-      await navigator.clipboard.writeText(text);
-      toast(`Copied ${res.rows.length.toLocaleString()} row${res.rows.length === 1 ? '' : 's'}`
-        + (res.truncated ? ' (truncated — Create a table for the full result)' : ''));
-    } catch { toast('Copy failed — the browser blocked clipboard access', 4000); }
+    const what = `${res.rows.length.toLocaleString()} row${res.rows.length === 1 ? '' : 's'}`
+      + (res.truncated ? ' (truncated — Create a table for the full result)' : '');
+    const offer = (c) => c.done({ phase: 'ready', progress: false, detail: `${what} ready to copy`,
+      actions: [{ label: 'Copy', onClick: () => writeClipboard(text, what, false) }] });
+    if (!settle(rec, offer, null)) writeClipboard(text, what, true);
+  }
+  /* `offer`: a write that fails is offered again on a card — a long wait
+     can cost the page the focus a clipboard write needs, and a click on
+     the card gives it back. From the card itself, a failure is final. */
+  function writeClipboard(text, what, offer) {
+    navigator.clipboard.writeText(text).then(
+      () => toast(`Copied ${what}`),
+      () => {
+        if (!offer) { toast('Copy failed — the browser blocked clipboard access', 4000); return; }
+        winnow.notify({ title: 'First/Last result' }).done({ phase: 'ready', detail: `${what} ready to copy`,
+          actions: [{ label: 'Copy', onClick: () => writeClipboard(text, what, false) }] });
+      });
   }
 
   /* Create table…: name it, and optionally put the bookends on the unified
@@ -733,10 +1729,14 @@ export default function mount(container, winnow) {
     if (!ready()) { toast('Build a grouping first'); return; }
     const src = currentSource();
     modal('Create table', (b) => {
-      const defaultName = src ? `First-Last of ${src.name}` : 'First-Last';
+      const defaultName = src ? `First-Last of ${labelOf(src)}` : 'First-Last';
       const name = el('input', 'confirm-input');
       name.placeholder = defaultName;
-      b.append(el('label', null, 'Table name'), name);
+      // Label above a full-width box (the host's .dlg-field), so the default
+      // name in the placeholder isn't cut off by a box sized to share a row.
+      const nameField = el('div', 'dlg-field');
+      nameField.append(el('label', null, 'Table name'), name);
+      b.append(nameField);
 
       const tlRow = el('label');
       tlRow.style.cssText = 'display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;margin-top:10px';
@@ -745,38 +1745,79 @@ export default function mount(container, winnow) {
       tlRow.append(tlCb, el('span', null, 'Add these rows to the Timeline (tags every row)'));
       b.append(tlRow);
       const tagName = el('input', 'confirm-input');
-      tagName.style.display = 'none';
-      b.append(tagName);
+      const tagField = el('div', 'dlg-field');
+      tagField.style.display = 'none';
+      tagField.append(tagName);
+      b.append(tagField);
       tlCb.onchange = () => {
-        tagName.style.display = tlCb.checked ? '' : 'none';
+        tagField.style.display = tlCb.checked ? '' : 'none';
         if (tlCb.checked && !tagName.value) tagName.value = name.value.trim() || defaultName;
       };
       b.append(el('p', 'fb-help', 'The Timeline shows every tagged row across the case — the tag '
         + '(created if needed) is what places these bookends on it, and the rail/tag ribbon pick it up too.'));
 
       const acts = el('div', 'row-actions');
-      const go = el('button', 'btn', 'Create table');
-      go.onclick = async () => {
-        go.disabled = true;
-        try {
-          const bodyReq = { ...requestBody(), name: name.value.trim() };
-          if (tlCb.checked) bodyReq.timeline_tag = tagName.value.trim() || defaultName;
-          const res = await post(`${winnow.base}/create`, bodyReq);
-          document.getElementById('modal').hidden = true;
-          toast(`Created "${res.source.name}" · ${res.source.row_count.toLocaleString()} rows`
-            + (res.timeline_tag ? ` · tagged "${res.timeline_tag.name}"` : ''));
-          // create is a synchronous ingest with no job record — refresh the
-          // app's source list ourselves, then jump to the new table.
-          if (winnow.refreshSources) await winnow.refreshSources();
-          winnow.openSource(res.source.id);
-        } catch (e) {
-          toast('Could not create the table: ' + e.message, 6000);
-          go.disabled = false;
-        }
+      const go = el('button', 'btn primary', 'Create table');
+      go.onclick = () => {
+        const bodyReq = { ...requestBody(), name: name.value.trim() };
+        if (tlCb.checked) bodyReq.timeline_tag = tagName.value.trim() || defaultName;
+        // The dialog goes now, not when the table lands: it covers the
+        // whole app, and waiting in it on a big table was the whole app
+        // locked for as long as the create took.
+        winnow.closeModal();
+        createTable(bodyReq, bodyReq.name || defaultName);
       };
       acts.append(go);
       b.append(acts);
       setTimeout(() => name.focus(), 0);
+    });
+  }
+
+  /* Create table, once the dialog has gone: a job with a card in the jobs
+     panel from the start — Cancel while it runs, Open table once it has
+     landed — so the analyst can do anything else meanwhile. A quick one
+     (under CREATE_OPEN_MS) that lands while this tab is still showing opens
+     the new table, as Create always has. A slow one, or one that lands
+     while the analyst is elsewhere, waits on its card instead of pulling
+     them away from whatever they went to do. A card dismissed while it ran
+     is put back when the table lands: that is the news it was waiting for. */
+  const CREATE_OPEN_MS = 1500;
+  async function createTable(bodyReq, label) {
+    const began = Date.now();
+    const job = startJob('create', bodyReq);
+    const n = winnow.notify({ title: `Creating "${label}"`, detail: 'First/Last — this says when it lands',
+      phase: 'creating', progress: null, actions: [{ label: 'Cancel', onClick: () => job.cancel() }] });
+    let res;
+    try {
+      res = await job.done;
+    } catch (e) {
+      if (!container.isConnected) return;
+      if (e.cancelled && job.cancelled) {
+        n.close();
+        toast(`Cancelled — "${label}" was not created`);
+        return;
+      }
+      (n.open ? n : winnow.notify({})).fail({ title: `Could not create "${label}"`, detail: e.message,
+        phase: null, progress: false, actions: [] });
+      return;
+    }
+    // A plugin route's ingest announces itself through no import job, so
+    // nothing else refreshes the app's table list: without this the new
+    // table is invisible until a reload.
+    if (winnow.refreshSources) await winnow.refreshSources();
+    const made = `${res.source.row_count.toLocaleString()} rows`
+      + (res.timeline_tag ? ` · tagged "${res.timeline_tag.name}"` : '');
+    if (!container.isConnected) return;
+    if (!container.hidden && !job.cancelled && Date.now() - began < CREATE_OPEN_MS) {
+      n.close();
+      toast(`Created "${res.source.name}" · ${made}`);
+      winnow.openSource(res.source.id);
+      return;
+    }
+    (n.open ? n : winnow.notify({})).done({
+      title: `Created "${res.source.name}"`, phase: null, progress: false,
+      detail: job.cancelled ? `${made} — it was written before the cancel reached it` : made,
+      actions: [{ label: 'Open table', onClick: () => winnow.openSource(res.source.id) }],
     });
   }
 
@@ -787,8 +1828,11 @@ export default function mount(container, winnow) {
     const previous = srcSel.value;
     srcSel.replaceChildren();
     for (const s of real) {
-      const o = el('option', null, `${s.name} (${s.row_count.toLocaleString()})`);
+      // The nickname, as the tab strip and sidebar show it; the file it
+      // came from stays a hover away.
+      const o = el('option', null, `${labelOf(s)} (${s.row_count.toLocaleString()})`);
       o.value = String(s.id);
+      o.title = s.nickname ? `${s.nickname} — from ${s.name}` : s.name;
       srcSel.append(o);
     }
     if (!real.length) { state.sourceId = null; return; }
@@ -801,17 +1845,25 @@ export default function mount(container, winnow) {
 
   function selectSource(id) {
     if (state.sourceId === id) return;
+    acHide();   // the column set changes under the popup
+    stopPreview(state);   // a preview of the old table is nobody's answer now
     state.sourceId = id;
     state.groupBy = [];
     state.carry = [];
+    state.sums = [];      // a total from the old table would 400 on the new one
+    state.unique = [];
+    state.values = [];
+    state.colWidths = {};
     state.filters = [];
     state.tags = { mode: '', ids: [] };
     state.rowJson = false;
     state.sortColumn = null;
     state.preview = null;
+    state.stale = false;
     state.selRows = new Set();
     renderControls();
     renderPreview();
+    saveEdit();   // the table is the sheet's first fact; nothing else fires here
   }
 
   refresh = () => { fillSources(); renderControls(); };
@@ -823,15 +1875,48 @@ export default function mount(container, winnow) {
       container.append(note('Could not load the plugin backend: ' + e.message, true));
       return;
     }
+    const saved = winnow.tabState ? await winnow.tabState.get() : null;
+    // A read that FAILED is not a mount with nothing saved: the row may be
+    // sitting there unread. See saveOn below.
+    const unreadable = !!(saved && saved.error);
+    const restored = saved && !unreadable
+      ? planRestore(saved.payload, winnow.state.sources, winnow.state.tags) : null;
+    if (restored) {
+      // Restored sheets start stale: the definitions are back, the rows
+      // are not, and the active one runs below.
+      sheets.splice(0, sheets.length,
+        ...restored.sheets.map((spec) => Object.assign(newSheet(spec.name), spec, { stale: true })));
+      active = restored.active;
+      state = sheets[active];
+      showRestoredBanner(saved.savedAt, restored.notes);
+    } else if (unreadable) {
+      showUnreadableBanner();
+    }
     for (const sh of sheets) sh.meta = sharedMeta;
     state.meta = sharedMeta;
     renderSheetTabs();
     fillSources();
     renderControls();
     renderPreview();
+    // Saving only starts once we know what a save would replace.
+    saveOn = !unreadable;
+    // The rows are re-run against the case as it is NOW. Regardless of
+    // Auto-update: this is the restore, not an edit, and restored controls
+    // over an empty table read as a broken tab.
+    if (restored) runPreview();
   })();
 }
 
 export function onShow() {
   if (refresh) refresh();
+  if (tabShown) tabShown();
+}
+
+/* Tab switches reach here (Alt+digit works while typing, so the popup can
+   be open); the container's `hidden` already hides the popup with it, but
+   the accept state must not survive to the next visit. Whatever is still
+   running carries on, and gets a card in the jobs panel (tabHidden). */
+export function onHide() {
+  if (hideCompletion) hideCompletion();
+  if (tabHidden) tabHidden();
 }

@@ -1,0 +1,537 @@
+# Derived columns
+
+A derived column is a new column Winnow computes from one that is already
+in the table: a sortable time from a Unix epoch or a FILETIME, a field
+lifted out of a JSON or XML document, a piece of a value cut out with a
+regex, a URL-encoded request or a base64 command decoded, the first
+non-empty of three user-name columns, or a value looked up in another
+table. The original column is never changed, and neither is the evidence
+file. Once built, a derived column sorts, filters, groups and exports like
+any other.
+
+## What a derived column is
+
+A derived column is marked with **ƒ** in its header; hover it to see what
+it was derived from and how. It is stored in the case file, values
+included, so it is there the next time you open the case and it goes
+wherever the case file goes (see
+[Derived columns travel with the case](#derived-columns-travel-with-the-case)).
+
+Things to know before you rely on one:
+
+- **The search box doesn't see it.** Search and **Search all** look at the
+  columns the file came with. A derived value is computed from text that
+  is already searchable, so search the source column, or filter the
+  derived column through its filter box.
+- **It works everywhere else.** Column filters, the value picker, sorting,
+  grouping, CSV and Excel export and the [SQL pane](SQL-pane.md) all
+  include it. A derived datetime column can be chosen in the timeframe
+  filter, the histogram and the [Timeline](Timeline-search-and-watchlist.md)
+  like any other datetime column.
+- **Numbers sort as numbers.** A column of extracted, decoded, combined
+  or looked-up values is a number column when every value in it is a
+  plain number such as `2048` or `-1.5`, the rule an imported column
+  follows, so a byte count captured with a regex sorts by size and
+  `>1000` compares numbers. Empty cells don't count either way; one value
+  that isn't a plain number (`1,024`, `0x1F`, `N/A`) keeps the column
+  text. The type is decided when the column finishes building, and again
+  after **Re-derive…**, and the table menu shows it as `number · derived`.
+  On a merged table the column is a number column when no member table's
+  copy holds text. A timestamp column is always a datetime column, and
+  **Duration between two columns** always a number column.
+- **It doesn't change what the table is.** Saved filters,
+  [Timeline configurations](Timeline-search-and-watchlist.md#choosing-the-timestamp-type-and-body)
+  and merging are matched on the file's own columns, so adding a derived
+  column never stops a table matching its saved filters or its Timeline
+  configuration, or merging with its siblings.
+- **It can feed another one.** Once a derived column has finished
+  building it appears in the **Parse column** list as `name · derived`,
+  so you can chain steps, for example a JSON field that itself holds XML.
+
+## Adding a derived column
+
+| From | Do this |
+| --- | --- |
+| A column header | Right-click the header → **Derive a column from this…** |
+| The table menu | Press `C` (that is Shift+C), or right-click the table's tab and choose **Columns…**, then **Show, hide & order** → **Add derived column…** |
+| The detail pane | Right-click a field inside a JSON or XML document → **Add as a column** |
+| After an import | When a column looks like a timestamp Winnow can't already read, a notice says so; click **Add datetime column** |
+| A whole document | Right-click the header → **Flatten JSON/XML into columns…**, or right-click a document node in the detail pane → **Flatten this document into columns…** |
+
+**Add as a column** in the detail pane adds the column straight away with
+no dialog, named after the field (`user.name`, `LogonType`); if that name
+is taken it becomes `LogonType 2`.
+
+### The Add derived column dialog
+
+The dialog has two sides. Down the left is a list of what you can make,
+grouped as **Time**, **Extract**, **Decode**, **Combine** and **Join**;
+click one and the right side shows everything about it. The dialog stays
+the same size and in the same place whatever you pick, so nothing jumps
+while you try different options.
+
+1. Pick what to make from the list. Every operation in the tables below
+   has its own entry, except the timestamp formats: they share one entry,
+   **Parse a timestamp**, and you choose the format from its **Format**
+   list.
+2. **Parse column** — the column to read. Opened from a header it is that
+   column. Opened from the table menu it starts on the first column that
+   looks like a timestamp: a datetime column, else one whose values or
+   name (`visit_time`, `Created`, `Epoch`) suggest a time, else the first
+   column.
+3. The settings box under it: a line on what the operation does, then its
+   own settings, if any (required ones are marked `*`). When there are
+   more settings than fit, the box scrolls and its bottom edge is shaded.
+4. **New column name** — prefilled as `Column (parsed)`, `Column
+   (extract)`, `Column (decoded)`, `Column elapsed` and so on. A name the table already has, in
+   any capitalisation, is refused.
+5. Check the **Preview**, then click **Add column**.
+
+The dialog opens on **Parse a timestamp**. Winnow tries every format
+against the column and picks the best one for you, saying so under
+**Format**: *Suggested: Unix epoch — 100% of sampled values parse.* Check
+the preview anyway. Some numbers are valid in two formats (see
+[Ambiguous numbers](#ambiguous-numbers)). A column of small numbers, such
+as a record number or an event ID, gets *No format detected — pick one to
+see what it produces.* instead of a suggestion (see
+[Counters are not suggested](#counters-are-not-suggested)). Once you pick
+a format yourself, changing to a different entry and back keeps it; a new
+**Parse column** gets a new suggestion.
+
+**Finding an entry.** Type in the **Search…** box at the top of the list,
+where the cursor starts, to narrow it: `json`, `base64`, `lookup`. A
+timestamp format is found through **Parse a timestamp**, which then shows
+the format that matched (`filetime` shows *Windows FILETIME*); click it
+and that format is picked. The arrow keys move through the list, and
+`Enter` in the search box picks the first match. `Esc` clears the
+search; with the search empty, it closes the dialog.
+
+**Pinning favourites.** Point at an entry and click the ☆ beside it to
+pin it to a **Pinned** section at the top of the list, in the order you
+pin them. A pinned entry leaves its group while it is pinned; click its ✕
+to put it back. Pins stay in this browser, for every case, like the tags
+pinned to the row menu.
+
+The preview shows up to ten real values and what each becomes; a value
+that won't convert shows *can't parse*. The verdict under it counts the
+failures in a sample of up to 200 values. **This view** samples the rows
+your current filters leave and **Whole table** samples from the top of the
+table; the dialog starts on **This view** when you have filtered.
+Operations that read several columns at once (Combine, Compare) always
+preview against the whole table, and the dialog says so.
+
+### While it fills in
+
+The new column appears at once, right after the column it was derived
+from, and the tooltip on the ƒ beside its name says *building…* while
+Winnow works through the table. When the job finishes the values appear where you are, without
+switching tables; your scroll position and picked rows stay as they were.
+Progress shows in the jobs panel, the same place imports appear, and the ✕
+on that row cancels. Cancelling an add removes the column; you can add it
+again at any time.
+
+When the job finishes, a notice gives the number of rows read and, if any
+failed, how many values were not found. A row whose input was blank is not
+a failure. If some values failed, the header's right-click menu offers
+**Show N unparsed rows** (for a timestamp) or **Show N rows without this
+field** (for an extracted or looked-up value), which filters the grid to
+exactly those rows.
+
+## Timestamps
+
+Every timestamp operation writes the same shape: `YYYY-MM-DD HH:MM:SS`,
+with a six-digit fraction (`.ffffff`) when the source carries sub-second
+precision. That is what makes the column sort correctly as text and line
+up with every other datetime column in the case. How it is *displayed* is
+a separate choice: right-click the header to pick a display format, or set
+the default in [Settings](Settings-and-shortcuts.md).
+
+**Time zones.** Epoch-style values (Unix, FILETIME, WebKit, Mac, .NET) are
+UTC by definition. A value that carries its own offset (`Z`, `UTC`, `GMT`,
+`+02:00`, `+0200`, `+02`) is converted to UTC. A value with no zone is kept
+exactly as written, unless you fill in **Source UTC offset** (`-05:00`,
+`+0530`, `+5`), a fixed offset Winnow subtracts to reach UTC. An offset in
+the value wins over the setting. Winnow never guesses daylight saving: in
+the ISO 8601, dd Mmm yyyy, Mmm dd yyyy and US formats, a value ending in a zone it
+can't convert, such as `EST` or `Europe/Paris`, counts as unparsed rather
+than being read as if it were UTC. RFC 2822 dates convert the zones that
+standard defines (`UT`, `GMT`, `Z`, `EST`/`EDT`, `CST`/`CDT`, `MST`/`MDT`,
+`PST`/`PDT` and `+hhmm` offsets, plus `UTC`); any other zone, such as `CET`,
+`AST` or a single military letter, counts as unparsed. `-0000` means the
+time is UTC and the sender's own zone is unknown, so it is kept as UTC and
+**Source UTC offset** doesn't shift it.
+
+| Operation | Accepts | Example input → output |
+| --- | --- | --- |
+| **Unix epoch** | Seconds, milliseconds, microseconds or nanoseconds since 1970, with an optional fraction. **Unit**: `auto`, `s`, `ms`, `us`, `ns` | `1704461121` → `2024-01-05 13:25:21`<br>`1704461121000` → `2024-01-05 13:25:21.000000` |
+| **Windows FILETIME** | 100-ns ticks since 1601: decimal, `0x` hex, or bare hex that contains a letter | `133489347210000000` → `2024-01-05 13:25:21.000000`<br>`0x01DA3FD5B5A3E000` → `2024-01-05 12:50:06.885068` |
+| **WebKit/Chrome epoch** | Microseconds since 1601 (Chromium History, Cookies, Downloads) | `13348934721000000` → `2024-01-05 13:25:21.000000` |
+| **BSD syslog (Mmm dd hh:mm:ss)** | Year-less syslog lines. **Year of first line** is required | `Dec 31 23:59:59 host sshd[2]: …` → `2023-12-31 23:59:59` |
+| **ISO 8601** | `YYYY-MM-DDThh:mm[:ss]`, `T` or a space, fraction with `.` or `,`, optional zone | `2024-01-05T13:22:01+02:00` → `2024-01-05 11:22:01`<br>`2024-01-05T13:22:01.5Z` → `2024-01-05 13:22:01.500000` |
+| **dd Mmm yyyy hh:mm:ss** | `05 Jan 2024 13:22:01` or `5-Jan-2024 …`, English month names, optional zone | `5-Jan-2024 13:22:01 +0200` → `2024-01-05 11:22:01` |
+| **Mmm dd yyyy hh:mm:ss** | Month first, abbreviated or in full, the day plain or with `st`/`nd`/`rd`/`th`, optional comma, seconds and fraction optional, optional AM/PM and optional zone | `Jul 28th 2026 01:02:22` → `2026-07-28 01:02:22`<br>`July 28, 2026 1:02 PM` → `2026-07-28 13:02:00` |
+| **Compact YYYYMMDDhhmmss** | 14 run-together digits | `20240105132201` → `2024-01-05 13:22:01` |
+| **Mac absolute (Cocoa) time** | Seconds since 2001-01-01; negative for earlier dates; `0` counts as unparsed | `726153721` → `2024-01-05 13:22:01` |
+| **Excel serial date** | Days since 1899-12-30, fraction = time of day, rounded to the second | `45296.5576` → `2024-01-05 13:22:57` |
+| **.NET ticks** | 100-ns ticks since 0001-01-01 (`DateTime.Ticks`), decimal | `638400581210000000` → `2024-01-05 13:28:41.000000` |
+| **Apache access log** | `dd/Mmm/yyyy:hh:mm:ss +zzzz`, brackets optional | `[05/Jan/2024:13:22:01 +0100]` → `2024-01-05 12:22:01` |
+| **RFC 2822 (email date)** | Email and HTTP dates; two-digit years 50–99 are 19xx, 00–49 are 20xx; a zone RFC 2822 doesn't define (`CET`, `IST`…) counts as unparsed | `Fri, 05 Jan 2024 13:22:01 -0500` → `2024-01-05 18:22:01` |
+| **US MM/DD/YYYY hh:mm:ss** | US dates, seconds optional, optional AM/PM in any common spelling (`PM`, `pm`, `p.m.`) and optional zone | `1/5/2024 1:22:01 PM` → `2024-01-05 13:22:01` |
+
+The text formats, BSD syslog and Excel serial dates also take **Source UTC
+offset**; Unix, FILETIME, WebKit, Mac and .NET values are UTC already and
+don't. With it set to `-05:00`, the ISO value `2024-01-05 13:22:01` becomes
+`2024-01-05 18:22:01`.
+
+### Auto-ranging epochs
+
+With **Unit** on `auto`, Winnow tries seconds, then milliseconds, then
+microseconds, then nanoseconds, and keeps the one unit whose result falls
+between 1990 and 2100. The units are a thousand times apart, so at most one
+fits. The same 1990–2100 window applies to every numeric format (Unix,
+FILETIME, WebKit, Mac, Excel, .NET) and to Compact and RFC 2822 values: a
+value outside it counts as unparsed even if you pick the unit yourself.
+That is deliberate. A `0`, a `-1` or a stray counter in a timestamp column
+should show up as a failure, not as a date in 1970.
+
+### Ambiguous numbers
+
+Some numbers are valid in two formats. Unix seconds and Mac absolute time
+overlap, and so do nanosecond Unix epochs and .NET ticks. Both formats
+then report a high match rate, and the suggestion is only the first of
+them. Compare the preview with a time you already know for one row before
+you add the column.
+
+### Counters are not suggested
+
+Mac absolute time counts seconds from 2001-01-01, which is inside the
+1990–2100 window, so any small number converts: `1` becomes
+`2001-01-01 00:00:01`. A record number, an event ID, a process ID or a
+duration would all match it completely. The suggestion, and the notice
+after an import, therefore skip Mac absolute time for values below
+`100000000` (March 2004), and skip Excel serial dates for whole numbers,
+which in a log are far more often IDs or ports than dates. Both formats
+still convert those values when you choose them yourself under
+**Format**.
+
+### Year-less syslog
+
+BSD syslog lines carry no year. Set **Year of first line** (it starts as
+the current year) and Winnow works down the table in file order, adding a
+year each time the month goes backwards, so `Dec 31` followed by `Jan 1`
+lands in the next year. This assumes the lines are in the order they were
+written: an out-of-order line whose month is earlier than the line before
+it is put in the following year. `Feb 29` in a year that isn't a leap year
+counts as unparsed. If the year was wrong, use **Re-derive…** (below) to
+change it in place.
+
+## Extracting part of a value
+
+The entries under **Extract** pull one piece out of each row:
+**JSON field**, **XML field** or **Regex capture**. A row that doesn't
+have the field, or doesn't match, is left empty and counted in **Show N
+rows without this field**.
+
+The easiest way to get a path right is not to type it: open the detail
+pane (`d`), right-click the field inside the document, and choose **Add as
+a column** or **Copy path**.
+
+### JSON paths
+
+| Path | Means | From `{"user":{"name":"alice"},"items":[{"id":7}],"odd.key":{"value":"x"},"props":[{"Name":"UserAgent","Value":"curl"}]}` |
+| --- | --- | --- |
+| `$.user.name` or `user.name` | A key inside a key. The leading `$` is optional | `alice` |
+| `items[0].id` | Array item by position, counting from 0; `[-1]` is the last | `7` |
+| `["odd.key"].value` | A key that contains a dot, bracket or quote, quoted | `x` |
+| `props[Name='UserAgent'].Value` | The entry of a list whose `Name` is `UserAgent`, wherever it sits in the list | `curl` |
+| `user` | A whole object or array comes out as JSON text | `{"name": "alice"}` |
+
+A JSON `null` gives an empty cell; a missing key gives no value at all.
+
+The `[Name='…']` form is for lists of Name/Value pairs, such as an M365
+audit record's `ExtendedProperties`, an EvtxECmd `Payload`'s
+`{"@Name": …, "#text": …}` entries, or Azure AD's `ModifiedProperties`.
+The order of their entries changes from one row to the next, so
+`props[3].Value` can be a different field in every row, where
+`props[Name='UserAgent'].Value` is always the same one. When you click or
+flatten, Winnow writes this form for you when every entry of a list has a
+`Name` or `Key` (in any case, with or without a leading `@`), no two
+entries share a name, and at least one entry has a value beside its name:
+`Value`, `#text`, or another key with "value" in it, such as `NewValue`.
+The column is named after the entry: `props[Name='UserAgent'].Value` is
+`UserAgent`, `Data[@Name='LogonType'].#text` is `LogonType`, and
+`ModifiedProperties[Name='StrongAuth'].NewValue` is `StrongAuth.NewValue`.
+Any other list, such as a list of files that each have a `name` and a
+`size`, is addressed by position.
+
+JSON fields are also read from values that are nearly JSON, when the whole
+value is one document: Python-style lists and dicts
+(`[{'Name': 'UserAgent', 'Value': None}]`, where `None` gives an empty
+cell), a raw line break in a string, an unescaped backslash, and a trailing
+comma. Such a value is read up to 1,000,000 characters; strict JSON is read
+up to 8 MB. Reading these is slower than reading strict JSON, so a column
+of them takes longer to fill.
+
+### XML paths
+
+| Path | Means |
+| --- | --- |
+| `Event/System/EventID` | Elements from the root down, separated by `/` |
+| `Event/System/Provider@Name` | A trailing `@` reads an attribute instead of the text |
+| `Event/EventData/Data[@Name='LogonType']` | The `Data` element whose `Name` attribute is `LogonType` |
+| `Event/EventData/Data[1]` | The second `Data` element (positions count from 0) |
+
+Paths start at the document's root element and are case-sensitive.
+Namespaces are ignored, so you write `Event`, never
+`{http://schemas.microsoft.com/…}Event`. A cell holding several top-level
+elements is read too, and its paths start at the first of them.
+
+The `[@Name='…']` form is what makes Windows event XML usable. Every field
+in `EventData` is a `<Data Name="…">` element, and positions shift from one
+event ID to the next, so `Data[@Name='LogonType']` gives a column that
+means the same thing in every row, where `Data[8]` would not. When you
+click or flatten, Winnow writes this form for you whenever a repeated
+element has a `Name`, `Key` or `ID` attribute that tells its copies apart,
+and names the column after the attribute value (`LogonType`).
+
+A document containing `<!DOCTYPE` is never parsed and counts as having no
+fields, and so does a cell over 8 MB.
+
+### Flattening a whole document
+
+**Flatten JSON/XML into columns…** samples 200 rows of the column and lists
+every field it found, with its path, an editable column name, how many of
+the sampled rows had it (**coverage**) and an example value. Fields present
+and non-empty in every sampled row start ticked; use **Select all** and
+**Select none** for the rest, then **Add columns**. All the ticked columns
+are built in one pass over the table, and the batch is all-or-nothing: if
+one name collides, nothing is added. The header menu offers Flatten only
+when the cells on screen start like a document (`{`, `[` or `<`), and only
+on a single table, not a merged one.
+
+### Regex capture
+
+**Regex** is searched for anywhere in the value, using Python syntax, and
+is case-sensitive unless it starts with `(?i)`. What lands in the column
+is the first capture group, or the whole match if there is no group.
+**Capture group** picks a different numbered group; **Named group** picks
+a `(?P<name>…)` group by name, which keeps working if you later edit the
+pattern and the numbers shift. Patterns are limited to 512 characters.
+A capture that is always a number, such as a size, a count or a status
+code, gives a number column that sorts by value (see
+[What a derived column is](#what-a-derived-column-is)).
+
+| Regex | Input | Output |
+| --- | --- | --- |
+| `^\w+://([^/:]+)` | `https://evil.example.com:8443/x` | `evil.example.com` |
+| `(?P<method>\w+) (?P<path>\S+) (?P<status>\d+)` with **Named group** `status` | `GET /index.html 200` | `200` |
+
+When a pattern names its groups, the dialog offers *This pattern names 3
+groups — make a column for each?*, with a box and a name per group and
+sample values under each. Leave them ticked and the button becomes **Add 3
+columns**: one pass over the table, one column per group. **New column
+name** steps aside while any are ticked, since each group's column takes
+the name beside it.
+
+### Patterns Winnow refuses
+
+Some patterns can take minutes on a single unlucky value, and Python's
+regex engine can't be interrupted once it starts. Winnow refuses those
+before they run, with a message saying why. The shape to avoid is a
+repeated group whose repetitions could divide the same text up in more
+than one way:
+
+| Refused | Use instead |
+| --- | --- |
+| `(\w+\s?)*` | `(\w+\s)*`, or one class: `[\w\s]*` |
+| `(\w+\.?)+` | `(\w+\.)+` |
+| `(\w+\s?){0,50}` | A fixed limit doesn't help; end each repetition at a character it can't match |
+
+The common delimited shapes pass: `(\.[a-z]+)*`, `([a-z0-9-]+\.)+`,
+`(?:[^,]*,)*`, `(\S+\s+){3}`. The same check applies to the regex filter,
+search and `REGEXP` in the SQL pane.
+
+## Decoding a value
+
+The **Decode a value** type turns an encoded value back into the text it
+stands for: **URL decode** or **Base64 decode**. Neither empties a value it
+can't decode. That value is copied unchanged, so these columns never have
+unparsed rows.
+
+### URL decode
+
+**URL decode** turns percent-encoding back into the text it stands for,
+the way the web server read the request:
+
+| Input | Output |
+| --- | --- |
+| `cmd%3Dwhoami%26x%3D%2Fetc%2Fpasswd` | `cmd=whoami&x=/etc/passwd` |
+| `q=hello+world%21` | `q=hello world!` |
+| `caf%C3%A9` | `café` |
+
+**Treat + as a space** is on by default, which is right for a query string
+or a form post. Turn it off for a URL path, where `+` is a plus. An encoded
+plus, `%2B`, is a plus either way.
+
+Nothing in a value is lost. Text that isn't an escape (`100%`, `%zz`) stays
+as it is, and so does an escape that isn't valid UTF-8, such as Latin-1's
+`caf%E9` or the overlong `%C0%AE` of a directory traversal:
+`%C0%AE%C0%AE%2Fetc` becomes `%C0%AE%C0%AE/etc`.
+
+Each value is decoded once, so a double-encoded `%252F` comes out as
+`%2F`. To decode it again, derive a second **URL decode** column from the
+first.
+
+### Base64 decode
+
+**Base64 decode** reads both alphabets, standard (`+` and `/`) and
+URL-safe (`-` and `_`, as in a JWT), with or without the `=` padding, and
+ignores line breaks.
+
+| Input | Output |
+| --- | --- |
+| `aGVsbG8gd29ybGQ=` | `hello world` |
+| `eyJhbGciOiJIUzI1NiJ9` | `{"alg":"HS256"}` |
+| `SQBFAFgAIAAoAE4AZQB3AC0ATwBiAGoAZQBjAHQAIABOAGUAdAAuAFcAZQBiAEMAbABpAGUAbgB0ACkA` | `IEX (New-Object Net.WebClient)` |
+
+**Text encoding** is **auto** by default. It reads UTF-8, or UTF-16LE when
+the bytes look like it. PowerShell's `-EncodedCommand` is UTF-16LE, so it
+comes out as the command. A UTF-16LE value in a script other than Latin,
+such as Cyrillic, isn't recognised automatically; choose **utf-16le** for
+it.
+
+A value that isn't base64 (`hello world`, `C:\Windows`) is copied
+unchanged, and so is one that decodes to something other than text, such
+as binary or `AAAA`, which is three zero bytes. A short ordinary value can
+still be valid base64 by accident: `WS01` decodes to `Y-5`. Use this on a
+column that holds base64, and check the preview.
+
+The value has to be base64 as a whole. For a command line such as
+`powershell -enc SQBFAFgA…`, first take the encoded part out with a
+**Regex capture** such as `(?i)-(?:e|ec|enc|encodedcommand)\s+(\S+)`, then
+derive **Base64 decode** from that column.
+
+## Combining columns
+
+| Operation | What it does | Example |
+| --- | --- | --- |
+| **First non-empty value** | The **Parse column**, then each column under **Then try**, in order; the first that isn't blank wins. All blank stays blank | `SubjectUserName` blank, then `TargetUserName` = `alice` → `alice` |
+| **Row as JSON** | The **Parse column** plus the listed **Columns** as one compact JSON object per row, for pasting into a ticket or a note. Every other column starts listed; remove what you don't want. **Skip empty cells** leaves blanks out | `{"Host":"WS01","EventId":4624,"Code":"007"}` |
+
+In **Row as JSON**, a cell is written as a bare number only when that
+number reads back exactly as the cell did, so `4624` is a number while
+`007` and `1.10` stay strings.
+
+## Comparing two times
+
+**Duration between two columns** (under **Time** in the dialog's list) stores
+**Parse column** minus **Subtract column**, in seconds, negative when the
+first is earlier. Both inputs should be datetime columns in ISO or US form,
+which every derived timestamp is. Right-click the header to show it as `1h
+23m 45s` or as plain **Seconds**: `2024-01-05 13:25:21` minus `2024-01-05
+13:00:00` is `25m 21s`.
+
+## Looking values up in another table
+
+**Look up from another table** (under **Join** in the dialog's list) works
+like VLOOKUP. The **Parse column** holds the key; choose the **Lookup
+table**, **Its key column** and the **Value to bring back**.
+
+| If several rows match | Host `SRV01`, with two `SRV01` rows in the lookup table |
+| --- | --- |
+| `first` — the earliest matching row | `carol` |
+| `all` — every distinct match, comma-separated | `carol, dave` |
+
+Keys match exactly, capitalisation included, and a blank key matches
+nothing. A key with no match leaves the cell empty and counts in **Show N
+rows without this field**. The lookup table must be a real table, not a
+merge or the table you are adding the column to, and can have at most
+2,000,000 rows.
+
+## Changing and removing a derived column
+
+All of these are on the derived column's header right-click menu.
+
+- **Re-derive…** reopens the dialog with the column and operation fixed
+  (the list shows the operation, and the rest of it is greyed out) and
+  the settings editable: the wrong syslog year, a forgotten UTC
+  offset, another column to try. It is offered for every derived column
+  except a JSON or XML field: timestamps, combined columns, durations, a
+  **Regex capture**'s pattern and group, a **URL decode**'s **Treat + as a
+  space**, a **Base64 decode**'s **Text encoding**, and a lookup's table and
+  columns.
+  The column keeps its name, position and width. Any
+  derived column built from this one is recomputed after it, and the
+  notice names them.
+- **Change the field path…** takes the place of Re-derive for a JSON or
+  XML field: edit the path and click **Recompute**.
+- **Rename derived column…** asks for the new name. The values stay as
+  they are, nothing is recomputed, and the column keeps its position,
+  width, display format and sort. A filter, grouping or timeframe set on
+  it stays applied under the new name. Derived columns built from this
+  one, including a lookup on another table that reads it, are pointed at
+  the new name. The name can't be one the table already has, and Winnow
+  refuses while the column, or one built from it, is still building.
+  Only derived columns can be renamed; the file's own columns keep their
+  names.
+- **Remove derived column…** asks first, then removes it. Winnow refuses
+  while another derived column is built from this one; remove that one
+  first.
+
+A rename doesn't change saved filters, default layouts, Timeline settings
+or SQL queries that use the old name. Those are kept outside the case or
+written by you, so update them yourself.
+
+Cancelling a re-derive from the jobs panel keeps the column with whatever
+it had computed. Its ƒ tooltip then says *incomplete — re-derive to
+finish*.
+
+## Derived columns on merged tables
+
+A [merged table](Working-with-tables.md) shows a derived column when every
+member table has a derived column of that name. Add one while the merge is
+open and Winnow adds it to each member table, checking all of them first,
+so a name clash on one member stops it everywhere. One job fills it in,
+working through the member tables one after another; its row in the jobs
+panel says which table it is on, such as `User — 2/4: b.csv`. Cancelling
+it removes the new column from every member table. The preview samples the
+first member, or the merged view under **This view**.
+
+A derived column on one member table is never shown as another member's
+column from its file, even when the two have the same name. If `b.csv`
+derives a column called `Host` and `a.csv` has a `Host` column of its own,
+the merge's **Host** is `a.csv`'s, and `b.csv`'s rows are empty there.
+
+Two things work differently on a merge:
+
+- **Flatten** isn't offered. Open a member table to flatten its documents.
+- A lookup's **Lookup table** must be a real table, never a merge.
+
+**Re-derive…**, **Change the field path…**, **Rename derived column…** and
+**Remove derived column…** on a merge change every member table's copy.
+Winnow checks all of them first: if another derived column on any member
+is built from it, or the members compute it with different operations,
+nothing changes. The members are recomputed by one job, one table after
+another; the merged column's ƒ
+tooltip says *building…* until all of them finish, and its **Show N unparsed rows**
+count covers every member. Cancelling that job part-way keeps the tables it
+finished, marks the one it was on *incomplete*, and leaves the rest as they
+were. **Remove derived column…** says it removes the
+column from all the tables in the merge. A rename on a merge checks the new
+name against every member table, including one without the column.
+
+## Derived columns travel with the case
+
+Definitions and values both live in the case file, so a case handed to
+another analyst opens with its derived columns built. A
+[session file](Sessions-and-export.md) carries the definitions only, and
+loading it rebuilds the columns from the receiving case's own data. A
+column whose name is already taken there is skipped with a warning. A
+lookup column is recreated only if the receiving case has a table that
+matches the lookup table it was built from; for a lookup table made inside
+Winnow, that means the same table or a copy of it.
+
+Saving a view as a new table copies a derived column's values into it as
+an ordinary column. Winnow refuses the copy while one of the table's
+derived columns is still building, because its values would come across
+blank.

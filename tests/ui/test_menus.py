@@ -20,7 +20,7 @@ def test_row_right_click_menu_has_tags_and_cell_actions(page, row_menu, flyout):
     items = page.locator(".menu:not(.menu-sub) .menu-item").all_inner_texts()
     joined = " | ".join(i.replace("\n", " ") for i in items)
     # The clicked column's filters are broken out at the top level …
-    assert "Filter to" in joined and "Exclude" in joined
+    assert "Narrow to this value" in joined and "Exclude this value" in joined
     # … everything else folds into a submenu so the list stays short.
     assert "Tag this row" in joined and "Copy" in joined
     assert "Edit tags…" not in joined and "Copy cell" not in joined
@@ -45,18 +45,23 @@ def test_row_menu_scope_follows_the_selection(page, row_menu):
     assert page.locator(".menu").count() == 0
     assert page.locator(".row.selected").count() == 3
 
-    # Right-clicking outside the selection collapses onto that one row.
+    # Right-clicking outside the selection acts on that one row — and the
+    # selection itself is kept (picking is never clearing).
     row_menu(row=9)
     assert "THIS ROW" in page.locator(".menu .menu-item-sub").first.inner_text().upper()
+    page.keyboard.press("Escape")
+    assert page.locator(".row.selected").count() == 3
 
 
-def test_row_menu_filters_by_the_clicked_cell(page):
+def test_row_menu_filters_by_the_clicked_cell(page, view_rebuilt):
     host_index = page.evaluate("() => __winnow.visibleCols().indexOf('Host')")
     value = page.locator(".row").first.locator(".cell").nth(host_index).inner_text()
     page.locator(".row").first.locator(".cell").nth(host_index).click(button="right")
     page.wait_for_selector(".menu")
-    page.click(f".menu .menu-item:has-text('Filter to {value}')")
-    page.wait_for_timeout(800)
+    # The value itself lives in the heading now, not in the verb's label.
+    assert f"Host = {value}" in page.locator(".menu:not(.menu-sub) .menu-header").last.inner_text()
+    with view_rebuilt(page):
+        page.click(".menu:not(.menu-sub) .menu-item:has-text('Narrow to this value')")
     assert page.locator('.fcell input[data-col="Host"]').input_value() == f"={value}"
     assert page.evaluate("() => __winnow.S.view.row_count") < 200
 
@@ -73,22 +78,26 @@ def test_column_header_right_click_opens_column_options(page):
     assert page.locator(".hcell-fmt").count() == 0, "the ▾ button was replaced by this menu"
 
 
-def test_tab_right_click_opens_the_table_menu(page):
+def test_tab_right_click_reaches_the_table_menu(page):
+    # A short menu at the pointer first (test_table_context_menu.py); the
+    # table menu itself is its Columns… entry.
     page.locator("#sourceTabs .tab").first.click(button="right")
+    page.wait_for_selector(".menu:not(.menu-sub)")
+    page.locator(".menu:not(.menu-sub) .menu-item", has_text="Columns…").click()
     page.wait_for_selector("#modal:not([hidden])")
     assert page.locator("#modalTitle").inner_text().upper().startswith("TABLE —")
-    assert page.locator(".table-menu-section h4").count() >= 3
+    assert page.locator(".table-menu .side-rail-item").count() >= 3
 
 
-def test_value_picker_writes_a_filter_the_grid_applies(page):
+def test_value_picker_writes_a_filter_the_grid_applies(page, view_rebuilt):
     page.click('.fcell-pick[data-col="EventId"]')
     page.wait_for_selector(".value-picker .vp-row")
     assert page.locator(".value-picker .vp-row").count() == 4  # the fixture's four EventIds
     page.click(".vp-actions .btn:has-text('None')")
     page.locator(".value-picker .vp-row input").nth(0).check()
     page.locator(".value-picker .vp-row input").nth(1).check()
-    page.click(".vp-actions .btn:has-text('Apply')")
-    page.wait_for_timeout(900)
+    with view_rebuilt(page):
+        page.click(".vp-actions .btn:has-text('Apply')")
     raw = page.locator('.fcell input[data-col="EventId"]').input_value()
     assert "|" in raw, f"two ticked values should become an any-of filter, got {raw!r}"
     assert page.evaluate("() => __winnow.S.view.row_count") == 100  # two of four, 50 rows each
@@ -98,39 +107,47 @@ def test_value_picker_writes_a_filter_the_grid_applies(page):
     page.click('.fcell-pick[data-col="EventId"]')
     page.wait_for_selector(".value-picker .vp-row")
     page.click(".vp-actions .btn:has-text('All')")
-    page.click(".vp-actions .btn:has-text('Apply')")
-    page.wait_for_timeout(900)
+    with view_rebuilt(page):
+        page.click(".vp-actions .btn:has-text('Apply')")
     assert page.locator('.fcell input[data-col="EventId"]').input_value() == ""
     assert page.evaluate("() => __winnow.S.view.row_count") == 200
 
 
 def test_value_picker_routes_unspellable_values_to_the_filter_tree(page):
-    """A value containing `|` can't go in the header box as part of an any-of
-    list — the box would read it as a separator. Those selections become a
-    condition in the guided filter tree instead, and the picker's own button
-    marks itself so the column doesn't look unfiltered."""
+    """A value with a line break in it can't go in the header box at all —
+    an <input> strips line breaks. That selection becomes a condition in
+    the guided filter tree instead, and the picker's own button marks
+    itself so the column doesn't look unfiltered. (A `|` in a value, edge
+    spaces and "(empty)" used to come here too, and left the box empty;
+    the box quotes those now — tests/ui/test_value_picker_fills_the_box.py.)"""
     # Driven through applyValueSelection directly rather than by ticking boxes:
     # what's under test is what the picker does with a selection it can't
-    # spell, not whether this fixture happens to contain a pipe.
+    # spell, not whether this fixture happens to contain a line break.
     applied = page.evaluate("""async () => {
-      await __winnow.applyValueSelection('Host', ['H1|x', 'H2'], { clearInstead: false });
+      await __winnow.applyValueSelection('Host', ['H1\\nx', 'H2'], { clearInstead: false });
       return {
         box: __winnow.S.filters['Host'] || '',
         tree: JSON.stringify(__winnow.S.filterTree),
         marked: !!document.querySelector('.fcell-pick[data-col="Host"].active'),
       };
     }""")
-    assert applied["box"] == "", "a pipe-carrying selection must not be written into the box"
-    assert '"op":"in"' in applied["tree"] and "H1|x" in applied["tree"]
+    assert applied["box"] == "", "a line break can't be written into the box"
+    assert '"op":"in"' in applied["tree"] and "H1\\nx" in applied["tree"]
     assert applied["marked"], "the column's picker button should show the filter lives in the tree"
 
 
-def test_settings_sections_start_collapsed_and_expand_on_click(page):
+def test_settings_shows_one_section_at_a_time_and_switches_on_click(page):
     page.keyboard.press("?")
     page.wait_for_selector("#modal:not([hidden])")
-    assert page.locator(".settings-section-head").count() >= 6
-    assert page.locator(".settings-section-body:not([hidden])").count() == 0
-    page.click(".settings-section-head:has-text('Appearance')")
-    page.wait_for_timeout(200)
-    assert page.locator(".settings-section-body:not([hidden])").count() == 1
+    assert page.locator(".settings-nav-item").count() >= 6
+    # One section on screen, and it is the one the list marks. A profile
+    # that has never opened Settings lands on the first, Appearance.
+    shown = page.evaluate("""() => [...document.querySelectorAll('.settings-pane')]
+        .filter((p) => !p.hidden).map((p) => p.dataset.section)""")
+    assert shown == ["appearance"], shown
+    assert page.locator(".settings-nav-item[aria-selected='true']").inner_text().strip() == "Appearance"
     assert page.locator(".style-card").first.is_visible()
+    page.click(".settings-nav-item:has-text('Keyboard shortcuts')")
+    assert page.locator(".settings-pane:not([hidden])").count() == 1
+    assert page.locator(".settings-pane[data-section='keys'] .settings-keys").is_visible()
+    assert not page.locator(".style-card").first.is_visible()

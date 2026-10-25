@@ -3,14 +3,18 @@ in the case.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { recordTabVisit } from './tabhistory.js';
-import { renderHead } from './columns.js';
-import { $, ROW_H, api, el, post, toast } from './core.js';
-import { derivedOps } from './derived.js';
+import { findDefaultLayout, placeUnorderedColumns, renderHead, saveLayout } from './columns.js';
+import { $, ROW_H, api, caseUrl, el, nameMap, pageCaseToken, post, toast } from './core.js';
+import { derivedOps, renameColumnIn } from './derived.js';
+import { hideDetailPane, syncRowOpenHint } from './detail.js';
 import { currentSpec, renderAdvancedChips, setSearchMode, updateSearchHint } from './filters.js';
-import { clearPageCache, headH, rScroll, render, rowAt, spacerPx } from './grid.js';
+import { clearFilterHistory, dropFilterHistory, filterHistoryStates, syncFilterBaseline } from './filterundo.js';
+import { clearPageCache, headH, rScroll, render, rowAt, syncSpacer } from './grid.js';
 import { closeAllGroupViews, drawRail, dropGrouping, regroupAll, renderGroupStrip, setGrouping } from './grouping.js';
+import { refreshHistogram } from './histogram.js';
 import { shutdownWinnow } from './home.js';
 import { openImportModal } from './importer.js';
+import { keyLabel } from './keymap.js';
 import { openMergeBuilder } from './merge.js';
 import { showPluginTab } from './plugins.js';
 import { checkPresets } from './savedfilters.js';
@@ -18,17 +22,16 @@ import { syncSearchExpansion } from './search.js';
 import { openSessionManager } from './session.js';
 import { showGridTab, showSqlTab, showTimelineTab } from './sql.js';
 import { showNotesTab } from './notes.js';
-import { paintWatchlistBadge, refreshWatchlistBadge, showWatchlistTab } from './watchlist.js';
+import { paintWatchlistBadge, refreshWatchlistBadge, showWatchlistTab, watchlistBadge } from './watchlist.js';
 import { dashDrag, loadDashboards, renderDashboardsInto, showDashboard } from './dashboard.js';
 import { openCaseSettings } from './settings.js';
-import { openErrorLog } from './errlog.js';
-import { S, selClear, selCount, selFirst, specKey } from './state.js';
-import { compactCaseFile, openTablesManager } from './tables.js';
+import { openLog } from './errlog.js';
+import { S, clearCellSelection, selClear, selCount, selFirst, specKey } from './state.js';
+import { compactCaseFile, countCell, mergesUsing, openTablesManager, plural, removeRefusal, removeSource } from './tables.js';
 import { loadTags, refreshTagCounts, renderTagRibbon } from './tags.js';
-import { openTableMenu, updateFiltersButton, updateTimeRangeButton } from './timeframe.js';
-import { baseColumns } from './tsformat.js';
-import { confirmDialog, dropdownMenu, modal, promptDialog } from './ui.js';
-import { rebuildView } from './view.js';
+import { openTableMenu, tableMenuSeg, tableMenuStat, timeframeAcrossTables, updateFiltersButton, updateTimeRangeButton } from './timeframe.js';
+import { confirmDialog, contextMenu, dropdownMenu, modal, promptDialog, sectionPanes } from './ui.js';
+import { dropPendingSelection, pendingViewStatsText, rebuildView, syncNoRows, writeStatsLine } from './view.js';
 
 /* --------------------------------------------------------------- sources */
 
@@ -47,6 +50,49 @@ import { rebuildView } from './view.js';
    have no nickname field (their name is already analyst-chosen), so this
    falls through to name for them. */
 export function sourceLabel(s) { return (s && (s.nickname || s.name)) || ''; }
+
+/* The name the SQL pane's connection knows a source by — the same question
+   as sourceLabel, asked of SQLite instead of a person. A merge has no
+   src_N of its own (invariant #9), only the merge_<id> TEMP VIEW
+   Store._pane_connection creates for it, and negative ids are how a merge
+   is spelled everywhere else in the client. Three places were computing
+   this inline; a fourth disagreeing about merges would emit `src_-3`,
+   which is a syntax error rather than a wrong answer. */
+export function paneTable(s) { return s.is_merge || s.id < 0 ? `merge_${-s.id}` : `src_${s.id}`; }
+
+/* The glyph that prefixes a source's label wherever it is listed (tab
+   strip, sidebar, Tables manager): ⛓ for a merge, ⊂ for a subset table
+   saved out of another table's view or selection (sources.origin —
+   see subset.js), nothing for an imported file. */
+export function sourceGlyph(s) {
+  if (!s) return '';
+  if (s.is_merge) return '⛓ ';
+  if (s.origin === 'subset') return '⊂ ';
+  return '';
+}
+
+/* "Subset of <parent>" from origin_meta — the parent's name as it was
+   when the subset was made, so it still reads right after the parent is
+   removed. Ids are reused by SQLite, so the live table under
+   parent_source_id only counts as the parent while its name still
+   matches. `withCount` adds "(N of M rows)"; the Tables manager leaves it
+   off because the row count follows on the same line. */
+export function subsetParentLabel(s, { withCount = false } = {}) {
+  const m = (s && s.origin_meta) || {};
+  const parent = m.parent_name || 'another table';
+  const live = S.sources.some((x) => x.id === m.parent_source_id && x.name === m.parent_name);
+  const of = withCount && m.parent_row_count != null
+    ? ` (${((s && s.row_count) || 0).toLocaleString()} of ${Number(m.parent_row_count).toLocaleString()} rows)` : '';
+  return `Subset of ${parent}${of}${live ? '' : ' — parent since removed'}`;
+}
+
+/* The hover line for a subset: where it came from, its size against the
+   parent's, and the rule an analyst might otherwise assume the other way
+   — its tags and notes are its own (none were copied from the parent,
+   none write back to it). */
+export function subsetDescription(s) {
+  return `${subsetParentLabel(s, { withCount: true })} · tags and notes on it are its own — none write back`;
+}
 
 /* The hover title for a nicknamed source — keeps the real file name one
    hover away wherever the nickname replaced it. */
@@ -68,6 +114,15 @@ export function sourceTitle(s, suffix) {
     if (s.is_merge) parts.push(`Merge of ${(s.members || []).length || 'several'} tables`);
     else if (s.nickname) parts.push(`${s.nickname} — from ${s.name}`);
     else parts.push(s.name);
+    // A derived table has no file on disk; say where it came from instead.
+    if (s.origin === 'subset') parts.push(subsetDescription(s));
+    else if (s.origin === 'sql') parts.push('Saved from a SQL pane query');
+    // An imported file's origin_meta, when it has one, says how its bytes
+    // were read — evidence that was not UTF-8 should say so where it is.
+    else if (!s.origin && s.origin_meta && s.origin_meta.encoding === 'cp1252') parts.push('Not UTF-8 — read as Windows-1252');
+    else if (!s.origin && s.origin_meta && s.origin_meta.cp1252_bytes) {
+      parts.push(`${Number(s.origin_meta.cp1252_bytes).toLocaleString()} bytes not valid UTF-8 — read as Windows-1252`);
+    }
     if (s.path) parts.push(s.path);
     if (s.imported_at) parts.push(`Imported ${s.imported_at.replace('T', ' ')}`);
   }
@@ -113,8 +168,12 @@ export function openTabsSorted() {
    action — hides the tab (stays in the case, reopen from Tables or the
    dropdown's Closed section), doesn't delete anything. */
 export async function closeTab(s) {
-  viewStateStash.delete(s.id);
-  await post(`/api/source/${s.id}/open`, { open: false });
+  // Every caller is a click handler that awaits this and nothing else, so
+  // a refusal has to be reported here — it was an unhandled rejection, and
+  // the tab simply stayed. The stash is only dropped once the tab is gone.
+  try { await post(`/api/source/${s.id}/open`, { open: false }); }
+  catch (e) { toast(`Could not close ${sourceLabel(s)}: ${e.message}`, 6000); return; }
+  dropViewStateFor(s.id);
   if (S.sourceId === s.id) S.sourceId = null;
   await loadSources();
 }
@@ -125,10 +184,44 @@ export async function closeTab(s) {
 export async function closeAllTabs() {
   try {
     await post('/api/tabs/close_all', {});
-    viewStateStash.clear();
+    clearViewStateStash();
     S.sourceId = null;
     await loadSources();
   } catch (e) { toast('Could not close tabs: ' + e.message, 6000); }
+}
+
+/* Above this many tabs at once, "open all" asks first: a directory
+   import can put 30+ tables in a case, and a tab strip that long is a
+   thing to choose, not to discover. */
+export const OPEN_ALL_CONFIRM_AT = 12;
+
+/* The tables "open all" would open: everything in the case that isn't
+   already open and isn't broken. Merges included — a merge is a table in
+   this tree like any other. */
+export function tablesToOpen() {
+  return S.sources.filter((s) => !s.is_open && !s.error);
+}
+
+/* The tables "open all with tags" would open. Merges excluded, the same
+   rule the Tables manager's "Open all tagged" has always applied: a
+   merge's tagged_row_count is its members' summed, so opening it as well
+   shows the same tagged rows twice, under two tabs. */
+export function taggedTablesToOpen() {
+  return S.sources.filter((s) => !s.is_open && !s.error && !s.is_merge && s.tagged_row_count > 0);
+}
+
+/* Opens these tables' tabs in one round trip and refreshes the strip,
+   landing on the first of them. Shared by the sidebar's two buttons and
+   the Tables manager, so "which tables" is decided once per button and
+   "how they are opened" exactly once. */
+export async function openTables(srcs, { navigate = true } = {}) {
+  if (!srcs.length) return 0;
+  let opened;
+  try {
+    ({ opened } = await post('/api/tabs/open', { source_ids: srcs.map((s) => s.id) }));
+  } catch (e) { toast('Could not open those tables: ' + e.message, 6000); return 0; }
+  await loadSources(navigate ? srcs[0].id : undefined, { navigate });
+  return opened;
 }
 
 /* Moves an open tab earlier/later in S.tabOrder — the same state
@@ -207,12 +300,93 @@ export function wireTabDrag(t, id) {
   wireDragReorder(t, id, { containerSelector: '#sourceTabs', rowSelector: '.tab', horizontal: true });
 }
 
+/* What a right-click on a table offers — on its tab, and on its rows in
+   the sidebar. It used to open the whole Table dialog (openTableMenu: every
+   column, the value dropdowns, layout defaults), a full-height modal for
+   what was most often a close or a rename; that dialog is one entry here
+   now, Columns…, and still `C` on its own. Each entry is the same call,
+   under the same label, as the place that already did it: the Table
+   dialog's (Close this tab, the nickname, the merge builder) and the
+   Tables manager's (Remove…, with its confirm and its refusal).
+
+   Items are built from S.sources on every paint rather than from the
+   record the row was drawn with — a background loadSources() can land
+   while the menu is up. Nothing here opens the table first: a nickname,
+   a merge or a removal doesn't need it on screen, and Columns… is
+   openTableMenu, which opens it itself. */
+export const TABLE_MENU_HINT = 'Right-click to close, rename, merge or remove — or for its columns';
+
+export function tableMenuItems(id) {
+  const s = S.sources.find((x) => x.id === id);
+  if (!s) return [];
+  const merge = !!s.is_merge;
+  const items = [];
+  // Only on an open table, like the Table dialog's own Close this tab: a
+  // closed one has no tab to close.
+  if (s.is_open) {
+    items.push({
+      label: 'Close this tab',
+      title: 'Stays in the case — reopen it from the sidebar',
+      onclick: () => closeTab(s),
+    });
+    items.push('-');
+  }
+  items.push({
+    label: merge ? 'Rename this merge…' : 'Nickname this table…',
+    title: merge ? 'Rename this merge' : 'A display name shown in place of the file name — clear it to go back',
+    onclick: () => editSourceNickname(s),
+  });
+  // The keycap only on the table that's showing: `C` opens the dialog for
+  // that one, so beside any other table it would promise the wrong thing.
+  const key = s.id === S.sourceId && S.activeTab === 'grid' ? ((S.keymap || {}).openTableMenu || [])[0] : null;
+  items.push({
+    label: 'Columns…',
+    title: 'The table menu: show, hide, pin and reorder columns, value filter dropdowns, layout defaults',
+    hint: key ? keyLabel(key) : '',
+    onclick: () => openTableMenu(s.id),
+  });
+  items.push({
+    label: merge ? 'Edit merge…' : 'Merge with other tables…',
+    title: merge
+      ? 'Add or remove tables, or change which columns this merge keeps. Its layout stays.'
+      : 'One table across this and others, matched by column name',
+    onclick: () => openMergeBuilder(merge ? { edit: s } : { preselect: [s.id] }),
+  });
+  items.push('-');
+  // Greyed out, with the merge named on the item itself, rather than
+  // left to the refusal dialog: the menu can say it before the click.
+  const usedBy = mergesUsing(s);
+  items.push({
+    label: 'Remove…',
+    disabled: usedBy.length > 0,
+    desc: usedBy.length ? `Merged into ${usedBy.map((m) => `"${sourceLabel(m)}"`).join(', ')}` : undefined,
+    title: usedBy.length ? removeRefusal(s)
+      : merge ? 'Delete this merge — the tables under it are untouched'
+      : 'Delete this table from the case, with its tags and notes',
+    onclick: () => removeSource(s),
+  });
+  return items;
+}
+
+/* The right-click itself, for a tab and both kinds of sidebar row. The
+   ContextMenu key and Shift+F10 fire this same event on the focused node,
+   but at a point the browser picks — Chromium the node's centre, with
+   button -1; others have used 0,0 — so a keyboard opening anchors the menu
+   under the node, the way a dropdown sits under its button. */
+export function openTableContextMenu(e, id) {
+  e.preventDefault();
+  const r = e.currentTarget.getBoundingClientRect();
+  const onNode = e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
+  const at = e.button === -1 || !onNode ? { clientX: r.left, clientY: r.bottom } : e;
+  contextMenu(at, () => tableMenuItems(id));
+}
+
 export function renderTabs() {
   const openTabs = openTabsSorted();
   const tabs = $('sourceTabs');
   tabs.replaceChildren();
   for (const s of openTabs) {
-    const t = el('button', 'tab' + (s.is_merge ? ' tab-merge' : ''));
+    const t = el('button', 'tab' + (s.is_merge ? ' tab-merge' : '') + (s.origin === 'subset' ? ' tab-subset' : ''));
     t.dataset.id = String(s.id);
     // Same condition syncTabSelection applies, for the same reason: a
     // background loadSources() (an import finishing, say) can land while a
@@ -222,7 +396,7 @@ export function renderTabs() {
       t.append(el('span', null, `⚠ ${s.name}`));
       t.title = s.error;
     } else {
-      t.append(el('span', null, (s.is_merge ? '⛓ ' : '') + sourceLabel(s)), el('span', 'count', s.row_count.toLocaleString()));
+      t.append(el('span', null, sourceGlyph(s) + sourceLabel(s)), el('span', 'count', s.row_count.toLocaleString()));
     }
     const x = el('span', 'x', '✕');
     x.title = 'Close tab — stays in this case, reopen it from Tables';
@@ -230,17 +404,32 @@ export function renderTabs() {
     t.append(x);
     if (!s.error) {
       t.onclick = () => openSource(s.id);
-      // Right-click is where the table menu lives now (the ▦ column-chooser
-      // button that used to sit here opened a strict subset of it) — same
-      // menu from the tab, the sidebar row and the openTableMenu keybind.
-      t.oncontextmenu = (e) => { e.preventDefault(); openTableMenu(s.id); };
-      t.title = sourceTitle(s, 'Right-click for the table menu');
+      // The same short menu from the tab and both sidebar rows
+      // (tableMenuItems); the Table dialog is its Columns…, and `C`.
+      t.oncontextmenu = (e) => openTableContextMenu(e, s.id);
+      t.title = sourceTitle(s, TABLE_MENU_HINT);
     }
     wireTabDrag(t, s.id);
     tabs.append(t);
   }
   renderSidebar(); // every caller here (loadSources, the tab drag-drop handler) means S.sources or S.tabOrder just changed
+  requestAnimationFrame(syncTabOverflow);
   return openTabs;
+}
+
+/* Which edges of each tab strip have tabs scrolled past them, as a
+   data-overflow attribute the stylesheet fades. Geometry only exists
+   after layout, so callers that just repainted a strip go through
+   requestAnimationFrame. */
+export function syncTabOverflow() {
+  for (const id of ['sourceTabs', 'pageTabs']) {
+    const strip = $(id);
+    if (!strip) continue;
+    const left = strip.scrollLeft > 1;
+    const right = strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 1;
+    const v = [left && 'left', right && 'right'].filter(Boolean).join(' ');
+    if (v) strip.dataset.overflow = v; else delete strip.dataset.overflow;
+  }
 }
 
 /* -------------------------------------------------------------- page tabs */
@@ -462,17 +651,29 @@ export function renderPageTabs() {
     const current = open.find((t) => t.key === S.activeTab);
     const btn = el('button', 'tab tab-sql pages-menu-btn');
     btn.id = 'pagesMenuBtn';
-    btn.append(el('span', null, current ? current.label : 'Pages'), el('span', 'caret', '\u25be'));
-    btn.title = 'Pages — SQL, Timeline, Notes, Watchlist and plugin tabs';
+    btn.append(el('span', 'pages-menu-label', current ? current.label : 'Pages'), el('span', 'caret', '\u25be'));
+    // Kept aside because paintWatchlistBadge appends "— N new hits" to it
+    // and would otherwise append to its own last answer on every repaint.
+    btn.dataset.baseTitle = 'Pages — SQL, Timeline, Notes, Watchlist and plugin tabs';
+    btn.title = btn.dataset.baseTitle;
     btn.setAttribute('aria-haspopup', 'true');
-    btn.onclick = () => dropdownMenu(btn, open.map((t) => ({
-      label: t.label, checked: t.key === S.activeTab, onclick: t.show,
-    })));
+    // Built per click, not per render, so the counts are the ones the
+    // analyst is looking at rather than the ones the strip last painted.
+    // A page's badge goes on that page's ROW — the button itself is
+    // labelled with whichever page is up and owns none of these numbers.
+    btn.onclick = () => dropdownMenu(btn, open.map((t) => {
+      const badge = t.key === 'watchlist' ? watchlistBadge() : null;
+      return {
+        label: t.label, checked: t.key === S.activeTab, onclick: t.show,
+        badge: badge ? badge.text : null, title: badge ? badge.title : t.title,
+      };
+    }));
     nodes.push(btn);
   }
   strip.replaceChildren(...nodes);
   syncTabSelection();
   paintWatchlistBadge();
+  requestAnimationFrame(syncTabOverflow);
 }
 
 /* One place paints "which tab is current". S.activeTab is either a page
@@ -494,7 +695,12 @@ export function syncTabSelection() {
     // The collapsed button stands in for whichever page is up.
     const cur = pageTabsSorted().find((t) => t.key === S.activeTab);
     pm.setAttribute('aria-selected', String(!!cur));
-    pm.firstChild.textContent = cur ? cur.label : 'Pages';
+    // By class, not firstChild: the new-hit dot is a sibling that comes
+    // and goes, and writing the label into it would blank the marker.
+    pm.querySelector('.pages-menu-label').textContent = cur ? cur.label : 'Pages';
+    // The button just changed width with its label; the strip is sized to
+    // its content, so it has to be told to re-fit.
+    applyPageTabsSize();
   }
   document.querySelectorAll('#sourceTabs .tab').forEach((t) =>
     t.setAttribute('aria-selected', String(S.activeTab === 'grid' && Number(t.dataset.id) === S.sourceId)));
@@ -534,6 +740,22 @@ export function clampPageTabsWidth(px) {
 
 export function applyPageTabsSize() {
   const strip = $('pageTabs');
+  // Collapsed to a dropdown, the strip IS one button whose label is the
+  // page that is up — so it has to be content-width, or a stored drag
+  // width from the expanded strip leaves "SQL" rattling around in 300px,
+  // or clips a long plugin tab's name. The stored width is kept, not
+  // cleared: turning the dropdown back off restores the strip the analyst
+  // had dragged.
+  const split = $('tabSplit');
+  if (S.appearance && S.appearance.pagesMenu) {
+    strip.style.flexBasis = '';
+    strip.style.maxWidth = '';
+    // Nothing to drag: the width is the button's. A handle that visibly
+    // does nothing is worse than no handle.
+    if (split) split.hidden = true;
+    return;
+  }
+  if (split) split.hidden = false;
   if (!S.pageTabPrefs.width) {
     // No preference: back to the stylesheet's content-width-with-a-60%-cap.
     strip.style.flexBasis = '';
@@ -542,11 +764,12 @@ export function applyPageTabsSize() {
   }
   strip.style.maxWidth = 'none'; // an explicit width IS the cap now
   strip.style.flexBasis = clampPageTabsWidth(S.pageTabPrefs.width) + 'px';
+  requestAnimationFrame(syncTabOverflow);
 }
 
  // paints the saved order onto SQL/Timeline before plugins load
 
-export async function loadSources(select, { navigate = true } = {}) {
+export async function loadSources(select, { navigate = true, openOpts = undefined } = {}) {
   const [sources, merges, folders] = await Promise.all([
     api('/api/sources'), api('/api/merges'), api('/api/folders'),
   ]);
@@ -583,16 +806,31 @@ export async function loadSources(select, { navigate = true } = {}) {
       && openTabs.some((s) => s.id === S.sourceId);
     if (onAPage || gridIsLive) return;
   }
-  if (target) await openSource(target);
+  // `openOpts` is passed straight through to openSource — search-all's
+  // "Open ↦" sends { skipBuild: true }, because it is about to replace
+  // the filters and wants to pay for one build, not two.
+  if (target) await openSource(target, openOpts);
   else {
     S.sourceId = null;
+    // The last tab closed, or the table on screen was removed: the same
+    // leave-the-table event as a switch, minus a table to switch to. The
+    // pane was showing a row of the one just gone — and a note typed into
+    // it after a Remove would post against a deleted source_id.
+    hideDetailPane();
     $('empty').hidden = false;
     $('noRows').hidden = true;
     $('viewStats').textContent = '';
+    // The stats line is gone, so the hint that sits beside it goes too —
+    // there is no row on screen to open.
+    syncRowOpenHint();
     // A fresh load with no tables (a quick-look just created, an empty
     // case) never reaches renderHead, so the strip stayed an 18px dashed
     // stub until a table opened.
     renderGroupStrip();
+    // No view landed, so no winnow:viewchange either — the histogram strip
+    // kept charting the table that just went (or the previous case's)
+    // until another table opened.
+    refreshHistogram();
   }
 }
 
@@ -600,22 +838,54 @@ export async function loadSources(select, { navigate = true } = {}) {
    filter, so coming back to a table lost what the analyst was looking at.
    Keyed by source id, in-memory only — a reload starts clean, which is
    also the escape hatch if a stashed filter ever misbehaves. The
-   timeframe filter isn't in here because it deliberately survives
-   globally (see clearAllFilters); the layout/sort aren't because the
-   server already persists those per source. */
+   timeframe is recorded but only put back when the analyst has turned
+   "Keep applied when switching tables" off (timeframeAcrossTables): on,
+   it is one case-wide range that survives the switch untouched (see
+   clearAllFilters). The layout/sort aren't here because the server
+   already persists those per source. */
 const viewStateStash = new Map();
 
-export function clearViewStateStash() { viewStateStash.clear(); }
+/* Cleared, the stash stays clear of what is still on screen. A case
+   switch clears it and then opens the new case's first table, and
+   openSource stashes the table being left before it reads the arriving
+   one's: the previous case's filters and search, under S.sourceId, which
+   a case switch keeps (see loadSources). Source ids restart at 1 in every
+   case, so the new table usually has that id, and it opened filtered by
+   the old case's values. So the first stash after a clear is skipped;
+   closeAllTabs nulls S.sourceId as well, so there it skips nothing. */
+let stashOnScreen = true;
+
+/* The filter-undo history goes with the stash, for the same reasons —
+   see filterundo.js. */
+export function clearViewStateStash() { viewStateStash.clear(); clearFilterHistory(); stashOnScreen = false; }
 
 /* One table's stash, dropped when that table is. SQLite reuses a deleted
    source's id, so a re-import can land on it and inherit the previous
    file's filters and sort — silently showing a slice of a table nobody
    filtered, or a filter on a column the new file doesn't have. closeTab
    already does this; Remove did not. */
-export function dropViewStateFor(id) { return viewStateStash.delete(id); }
+export function dropViewStateFor(id) { dropFilterHistory(id); return viewStateStash.delete(id); }
+
+/* A derived column renamed on these tables (derived.js
+   renameDerivedColumn): what each one has stashed moves to the new name,
+   so coming back to it doesn't rebuild a filter or sort on a column that
+   is no longer there. A merge over them has its own entry, keyed by its
+   own id, and moves with them when it is the table renamed from. Their
+   filter-undo history moves too, for the same reason. */
+export function renameColumnInStash(ids, from, to) {
+  const all = new Set(ids);
+  if (S.sourceId != null && S.sourceId < 0) all.add(S.sourceId);
+  for (const id of all) {
+    const st = viewStateStash.get(id);
+    if (st) renameColumnIn(st, from, to);
+    for (const fs of filterHistoryStates(id)) renameColumnIn(fs, from, to);
+  }
+}
 
 function stashViewState() {
-  if (S.sourceId == null || !S.view) return;
+  const keep = stashOnScreen;
+  stashOnScreen = true;
+  if (!keep || S.sourceId == null || !S.view) return;
   viewStateStash.set(S.sourceId, {
     filters: { ...S.filters },
     search: S.search,
@@ -628,6 +898,8 @@ function stashViewState() {
     groupBy: [...S.groupByCols],
     groupSort: S.groupSort,
     groupSortDir: S.groupSortDir,
+    hideEmptyRows: S.hideEmptyRows,
+    timeRange: { ...S.timeRange },
     scroll: $('body').scrollTop,
   });
 }
@@ -635,9 +907,18 @@ function stashViewState() {
 export async function openSource(id, { skipBuild = false } = {}) {
   const src = S.sources.find((s) => s.id === id);
   if (!src) return;
+  // Every refresh idiom re-enters here for the table already open —
+  // loadSources() with no select after a column add, a folder op or
+  // closing some OTHER tab, openSource(S.sourceId) from the derived-column
+  // modal — and none of those leaves
+  // the table, so none of them is a reason to take the detail pane away.
+  // Decided before S.sourceId is overwritten below.
+  const leaving = S.sourceId !== id;
   recordTabVisit({ kind: 'source', id });
   stashViewState();
-  if (S.activeTab !== 'grid') showGridTab();
+  // repaint:false — S.view still belongs to the table being left, and this
+  // function paints the new one itself once it has swapped state.
+  if (S.activeTab !== 'grid') showGridTab({ repaint: false });
   S.sourceId = id;
   S.columns = src.columns;
   /* A cached row's `cells` is an array positional to S.columns, so changing
@@ -649,7 +930,9 @@ export async function openSource(id, { skipBuild = false } = {}) {
      anything can paint, rather than in each branch below (only one of which
      used to do it). */
   clearPageCache();
-  S.filters = {};
+  S.filters = nameMap();
+  // Revealed filter boxes name columns of the table being left.
+  S.filterOpen = [];
   S.search = '';
   S.searchMode = 'contains';
   S.searchTerms = [];
@@ -657,11 +940,25 @@ export async function openSource(id, { skipBuild = false } = {}) {
   S.filterTree = { type: 'group', op: 'AND', children: [] };
   S.sort = [];
   S.tagFilter = [];
+  S.hideEmptyRows = false;
+  // Per table only when the analyst asked for that; otherwise the case-wide
+  // range rides along untouched. Only on a real switch: every refresh idiom
+  // re-enters here for the table already open, and that must not drop a
+  // timeframe just set on it. Before the build below, whose spec carries it.
+  if (leaving && !timeframeAcrossTables()) {
+    const back = viewStateStash.get(id);
+    S.timeRange = back && back.timeRange
+      ? { ...back.timeRange } : { enabled: false, column: null, start: '', end: '' };
+    updateTimeRangeButton();
+  }
   S.cursor = -1;
+  if (leaving) hideDetailPane();   // it showed a row of the table being left (hide only — see detail.js)
   selClear();
+  S.selUndo = [];      // another table's positions
+  S.selHidden = 0;
+  dropPendingSelection();
   await closeAllGroupViews();
   S.groupByCols = [];
-  S.preGroupOrder = null;
   S.groups = [];
   S.groupPages.clear();
   S.groupPending.clear();
@@ -678,34 +975,40 @@ export async function openSource(id, { skipBuild = false } = {}) {
   // check for a cross-case default saved for this exact set of column
   // names (Settings > "save default layout" hotkey), same seed-once
   // pattern as the default tag template for a brand-new case.
-  let defaultLayout = null;
-  if (!saved.order) {
-    const qp = new URLSearchParams();
-    for (const c of baseColumns()) qp.append('col_names', c.name);
-    const found = await api(`/api/column_layouts/find?${qp.toString()}`).catch(() => null);
-    if (found && found.order) defaultLayout = found;
-  }
-  S.layout = saved.columns || (defaultLayout && defaultLayout.columns) || {};
+  const defaultLayout = saved.order ? null : await findDefaultLayout().catch(() => null);
+  S.layout = nameMap(saved.columns || (defaultLayout && defaultLayout.columns));
   // Per-source, unlike the per-column overrides inside S.layout: this one is
   // a judgement about *this table's* size, and a cross-case default layout
   // (which is keyed by header set, not row count) has no business carrying it.
   S.valueFilterMode = saved.value_filters || 'auto';
+  S.hideEmptyRows = !!saved.hide_empty_rows;   // same per-source reasoning; the stash below wins if we're coming back
+  // The no-layout seed is the BASE columns only: a derived column is placed
+  // by the loop below, next to its input, rather than trailing the list
+  // in creation order.
   S.order = (saved.order && saved.order.filter((n) => S.columns.some((c) => c.name === n)))
     || (defaultLayout && defaultLayout.order.filter((n) => S.columns.some((c) => c.name === n)))
-    || S.columns.map((c) => c.name);
-  for (const c of S.columns) if (!S.order.includes(c.name)) S.order.push(c.name);
+    || S.columns.filter((c) => !c.derived).map((c) => c.name);
+  // A column the order has never seen — a derived column added since the
+  // layout was last saved — goes beside the column it was derived from.
+  const placed = placeUnorderedColumns(S.order);
 
   // Default sort: first datetime column, ascending — a timeline wants time order.
   const dt = S.columns.find((c) => c.type === 'datetime');
   if (dt && !saved.sort) S.sort = [{ column: dt.name, dir: 'asc' }];
   if (saved.sort) S.sort = saved.sort;
+  // A placement made against a saved layout is saved back at once, so the
+  // layout on disk — what an export orders its columns by — agrees with
+  // the grid without waiting for the next drag. (Store._export_columns
+  // places the same way for a layout that never saw the column; this
+  // keeps that a fallback rather than a second opinion.)
+  if (placed && saved.order) saveLayout();
 
   // Coming BACK to a table: reapply what was on screen when we left it.
   // After the reset above and the layout/sort defaults, before renderHead
   // (the header filter boxes render from S.filters).
   const stash = viewStateStash.get(id);
   if (stash) {
-    S.filters = { ...stash.filters };
+    S.filters = nameMap(stash.filters);
     S.search = stash.search;
     S.searchMode = stash.searchMode;
     S.searchTerms = stash.searchTerms.map((t) => ({ ...t }));
@@ -713,6 +1016,7 @@ export async function openSource(id, { skipBuild = false } = {}) {
     S.filterTree = JSON.parse(JSON.stringify(stash.filterTree));
     S.sort = stash.sort.map((x) => ({ ...x }));
     S.tagFilter = [...stash.tagFilter];
+    if (stash.hideEmptyRows !== undefined) S.hideEmptyRows = stash.hideEmptyRows;
     $('search').value = S.searchMode === 'advanced' ? '' : S.search;
     document.querySelectorAll('#searchModeToggle button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.mode === S.searchMode)));
     if (S.searchMode === 'advanced') renderAdvancedChips();
@@ -725,13 +1029,29 @@ export async function openSource(id, { skipBuild = false } = {}) {
   if (S.columns.some((c) => c.derived)) await derivedOps().catch(() => {});
   await loadTags();
   renderHead();
+  // Whatever the table opens with is where `z` starts from, not a filter
+  // change: a case-wide timeframe set on the last table is not this one's
+  // to undo.
+  syncFilterBaseline(id);
   // A caller about to replace the filters (a dashboard drill) builds the
   // view itself, once, rather than paying for the stashed one first.
   if (skipBuild) { syncTabSelection(); return; }
 
   const spec = currentSpec();
   const cached = S.viewCache.get(id);
-  if (cached && cached.key === specKey(spec)) {
+  // A search left running in the background for this table — or landed
+  // and waiting for Apply — is the spec the stash just put back, most of
+  // the time the analyst comes back to it. The cached view is still the
+  // right one to show then: a held build evicts nothing, so the rows the
+  // grid had are still what the server pages, and the notice's Apply is
+  // how the result installs. Posting the spec again as a normal build
+  // would queue on the writer lock behind the search's own scan, run it
+  // a second time, evict the held result when it landed, and leave that
+  // Apply to 409 into a third run. Any OTHER spec rebuilds below, and
+  // that rebuild calls the pending search off (view.js runBuild).
+  const pending = S.pendingViews.get(id);
+  const pendingIsSpec = !!(pending && cached && pending.cacheKey === specKey(spec));
+  if (cached && (cached.key === specKey(spec) || pendingIsSpec)) {
     // Same filter/sort/search as last time we had this source open — the
     // materialized v.view_N table is still alive server-side (Store only
     // evicts views for the SAME source on rebuild), so skip re-materializing.
@@ -742,10 +1062,20 @@ export async function openSource(id, { skipBuild = false } = {}) {
                elapsed_ms: cached.elapsed_ms, source_id: id };
     clearPageCache();
     selClear();
+    S.selHidden = 0;
     S.anchor = -1;
-    $('spacerY').style.height = spacerPx(cached.row_count) + 'px';
-    $('viewStats').innerHTML =
-      `<b>${cached.row_count.toLocaleString()}</b> of ${src.row_count.toLocaleString()} rows · cached`;
+    clearCellSelection();
+    syncSpacer(cached.row_count);
+    // The cached view is a real answer, empty or not — this path never
+    // went through installView, so nothing else puts the empty state back
+    // after the blanket hide above.
+    syncNoRows();
+    // Through the same writer as a freshly built view, so reopening a
+    // table doesn't re-describe it: the line is about the rows, and the
+    // fact that nothing had to be rebuilt to show them rides in its
+    // tooltip (see writeStatsLine).
+    if (pendingIsSpec) $('viewStats').textContent = pendingViewStatsText(pending);
+    else writeStatsLine(S.view, { cached: true });
     $('body').scrollTop = stash ? stash.scroll : 0;
     render();
     drawRail();
@@ -760,7 +1090,7 @@ export async function openSource(id, { skipBuild = false } = {}) {
     document.dispatchEvent(new CustomEvent('winnow:viewchange',
       { detail: { sourceId: S.sourceId, viewId: cached.view_id, rowCount: cached.row_count } }));
   } else {
-    await rebuildView({ keepScroll: false });
+    await rebuildView({ keepScroll: false, keepRow: false });
     // Same view spec as when we left (the stash IS the spec), so the raw
     // scrollTop still points at the same rows.
     if (stash && !S.groupByCols.length) $('body').scrollTop = stash.scroll;
@@ -803,14 +1133,34 @@ export async function openSource(id, { skipBuild = false } = {}) {
    folder" button on the row, and dragged back out via the root drop
    zone. */
 
-export const FOLDERS_KEY = 'winnow.folders';   // collapsed folder ids, per browser
+/* Collapsed folder ids, per browser AND per case: {caseToken: [ids]}.
+   Folder ids are numbered per case, so one list for every case collapsed
+   folder 3 of whichever case opened next — and every case Winnow opens on
+   one port shares this storage. An older plain list (no case to file it
+   under) reads as nothing collapsed. */
+export const FOLDERS_KEY = 'winnow.folders';
+const FOLDERS_CASES_KEPT = 50;
+
+function readCollapsedByCase() {
+  try {
+    const v = JSON.parse(localStorage.getItem(FOLDERS_KEY) || '{}');
+    return v && typeof v === 'object' && !Array.isArray(v) ? v : {};
+  } catch { return {}; }
+}
 
 export function loadCollapsedFolders() {
-  try { return new Set(JSON.parse(localStorage.getItem(FOLDERS_KEY) || '[]')); }
-  catch { return new Set(); }
+  const ids = pageCaseToken() && readCollapsedByCase()[pageCaseToken()];
+  return new Set(Array.isArray(ids) ? ids : []);
 }
 function saveCollapsedFolders() {
-  localStorage.setItem(FOLDERS_KEY, JSON.stringify([...S.collapsedFolders]));
+  const token = pageCaseToken();
+  if (!token) return;
+  const all = readCollapsedByCase();
+  delete all[token];                       // re-added last: the most recent case
+  if (S.collapsedFolders.size) all[token] = [...S.collapsedFolders];
+  const keys = Object.keys(all);
+  for (const k of keys.slice(0, Math.max(0, keys.length - FOLDERS_CASES_KEPT))) delete all[k];
+  try { localStorage.setItem(FOLDERS_KEY, JSON.stringify(all)); } catch { /* full or blocked: this page keeps it */ }
 }
 
 /* Within a folder, tables sort alphabetically by label — "what's open" is
@@ -833,8 +1183,9 @@ function foldersByParent() {
 }
 
 /* Every folder as a flat list with a "Parent / Child" path label, tree
-   order — for the row's "Move to a folder" menu. */
-function foldersFlattened() {
+   order — for the row's "Move to a folder" menu and the merge builder's
+   folder filter. */
+export function foldersFlattened() {
   const kids = foldersByParent();
   const out = [];
   (function walk(key, prefix) {
@@ -913,7 +1264,7 @@ export function renderSidebar() {
   if (!tables.length && !S.folders.length) {
     list.append(el('div', 'note-status', q ? 'No matching tables.' : 'No tables in this case yet.'));
   } else {
-    if (S.sources.length) list.append(el('div', 'menu-header', 'All tables'));
+    if (S.sources.length) list.append(allTablesHeader());
     renderInto('root', 0);
     if (S.folders.length) list.append(rootDropZone());  // drag a table back out of a folder
   }
@@ -935,6 +1286,43 @@ export function renderSidebar() {
   // having tables: a fresh case with a profile applied already has boards,
   // and an empty one still needs the "New dashboard" row to be reachable.
   renderDashboardsInto(list);
+}
+
+/* The "All tables" header, with the two bulk opens on it. They sit here
+   rather than beside "close all" on the Open header because that is what
+   they act on: everything in the tree below, open or not. Close all stays
+   with the tabs it closes. Each hides itself when it would do nothing —
+   a case with every table already open has no "open all" to offer. */
+function allTablesHeader() {
+  // Its own class, not the Open header's: that one is a drop target (drop
+  // a table on it to open it) and is how the Open section is identified.
+  const h = el('div', 'menu-header sidebar-all-header');
+  h.append(el('span', 'sidebar-all-label', 'All tables'));
+  const closed = tablesToOpen();
+  const tagged = taggedTablesToOpen();
+  if (tagged.length && tagged.length < closed.length) {
+    const t = el('button', 'sidebar-closeall', 'tagged');
+    t.title = `Open the ${tagged.length} closed table${tagged.length === 1 ? '' : 's'} that ${tagged.length === 1 ? 'has' : 'have'} tagged rows`;
+    t.onclick = async (e) => {
+      e.stopPropagation();
+      const n = await openTables(tagged);
+      toast(`Opened ${n} table${n === 1 ? '' : 's'} with tagged rows`);
+    };
+    h.append(t);
+  }
+  if (closed.length) {
+    const a = el('button', 'sidebar-closeall', 'open all');
+    a.title = `Open all ${closed.length} closed table${closed.length === 1 ? '' : 's'} as tabs`;
+    a.onclick = async (e) => {
+      e.stopPropagation();
+      if (closed.length > OPEN_ALL_CONFIRM_AT
+          && !(await confirmDialog(`Open ${closed.length} tables as tabs?`, { okLabel: 'Open all' }))) return;
+      const n = await openTables(closed);
+      toast(`Opened ${n} table${n === 1 ? '' : 's'}`);
+    };
+    h.append(a);
+  }
+  return h;
 }
 
 /* A folder in the tree: disclosure + name + recursive table count, the
@@ -1140,11 +1528,11 @@ function wirePagesDrop(node) {
 export function openSidebarRow(s, index, total) {
   const active = s.id === S.sourceId && S.activeTab === 'grid';
   const row = el('div', 'sidebar-row sidebar-openrow' + (active ? ' active' : ''));
-  const label = el('button', 'menu-item', (s.is_merge ? '⛓ ' : '') + sourceLabel(s) + (s.error ? ' ⚠' : ''));
+  const label = el('button', 'menu-item', sourceGlyph(s) + sourceLabel(s) + (s.error ? ' ⚠' : ''));
   label.disabled = !!s.error;
-  label.title = s.error || sourceTitle(s, 'Right-click for the table menu');
+  label.title = s.error || sourceTitle(s, TABLE_MENU_HINT);
   label.onclick = () => openSource(s.id);
-  if (!s.error) row.oncontextmenu = (e) => { e.preventDefault(); openTableMenu(s.id); };
+  if (!s.error) row.oncontextmenu = (e) => openTableContextMenu(e, s.id);
   row.append(label);
   if (!s.error) row.append(el('span', 'sidebar-row-count', s.row_count.toLocaleString()));
   const acts = el('div', 'sidebar-row-actions');
@@ -1180,9 +1568,10 @@ export function pageSidebarRow(t, index, total) {
   // Showing a closed page reopens it — the sidebar is the reopen path,
   // same as a closed table's row under All tables.
   label.onclick = () => { reopenPageTab(t.key); t.show(); };
-  if (t.key === 'watchlist' && S.watchlistNewHits) {
-    const pill = el('span', 'tab-badge', S.watchlistNewHits > 99 ? '99+' : String(S.watchlistNewHits));
-    pill.title = `${S.watchlistNewHits.toLocaleString()} new watchlist hits`;
+  const badge = t.key === 'watchlist' ? watchlistBadge() : null;
+  if (badge) {
+    const pill = el('span', 'tab-badge', badge.text);
+    pill.title = badge.title;
     label.append(pill);
   }
   row.append(label);
@@ -1227,7 +1616,7 @@ export function sidebarRow(s, { depth = 0 } = {}) {
   const active = open && s.id === S.sourceId && S.activeTab === 'grid';
   const row = el('div', 'sidebar-row' + (active ? ' active' : ''));
   row.style.setProperty('--depth', String(depth));
-  const label = el('button', 'menu-item', (s.is_merge ? '⛓ ' : '') + sourceLabel(s) + (s.error ? ' ⚠' : ''));
+  const label = el('button', 'menu-item', sourceGlyph(s) + sourceLabel(s) + (s.error ? ' ⚠' : ''));
   label.disabled = !!s.error;
   if (s.error) label.title = s.error;
   label.onclick = open ? () => openSource(s.id) : async () => {
@@ -1237,10 +1626,11 @@ export function sidebarRow(s, { depth = 0 } = {}) {
   row.append(label);
   if (!s.error) {
     // Same menu the tab strip's right-click opens, on the table's name in
-    // the sidebar — including for a closed table, which openTableMenu opens
-    // first (its panels all read the live S.layout/S.columns).
-    row.oncontextmenu = (e) => { e.preventDefault(); openTableMenu(s.id); };
-    label.title = sourceTitle(s, 'Right-click for the table menu');
+    // the sidebar — including for a closed table, which gets no Close and
+    // whose Columns… opens it first (openTableMenu: the dialog's panels all
+    // read the live S.layout/S.columns).
+    row.oncontextmenu = (e) => openTableContextMenu(e, s.id);
+    label.title = sourceTitle(s, TABLE_MENU_HINT);
     row.append(el('span', 'sidebar-row-count', s.row_count.toLocaleString()));
     const acts = el('div', 'sidebar-row-actions');
     const mv = el('button', 'menu-item-action', '🗀');
@@ -1335,9 +1725,11 @@ export function wireSidebarResize() {
 /* Row identity (source_id, rid) survives a view rebuild even though pos
    doesn't (see CLAUDE.md — positions are view-specific and get wiped on
    every rebuild). Capture whichever row was under the selection/cell-range/
-   cursor before the rebuild so clearAllFilters can find that same row again
-   afterward and re-center the grid on it instead of dropping the analyst
-   back at row 0. */
+   cursor so a caller can find that same row again after a rebuild and
+   re-center the grid on it (recenterOnRow). A flat view's filter changes no
+   longer need this pair — rebuildView carries the cursor row itself
+   (keepRow, view.js); it remains for the grouped case in landOnFilters
+   and for landings that come from elsewhere (the timeline, a plugin). */
 export function selectedRowAnchor() {
   let pos = -1;
   if (S.cellRange) pos = S.cellRange.r0;
@@ -1354,6 +1746,11 @@ export async function recenterOnRow(anchor) {
     ({ pos } = await api(`/api/row_position?view_id=${S.view.view_id}&source_id=${anchor.source_id}&rid=${anchor.rid}`));
   } catch { return; }
   if (pos == null) return;
+  // Checked again on the far side of the await: the view can go while that
+  // request is in flight — a case switch, a rebuild, the table being
+  // removed — and reading row_count off nothing throws where nobody is
+  // catching, which fails the whole page rather than skipping a scroll.
+  if (!S.view) return;
   S.cursor = pos;
   // Centers within the row band below the sticky header: the visible band
   // is [scrollTop + headH(), scrollTop + clientHeight], hence the extra
@@ -1367,11 +1764,59 @@ export async function recenterOnRow(anchor) {
    nothing else" (Shift+F, the row menu's "…only") is precisely this reset
    plus one filter, and spelling the reset out a second time is how the
    timeframe carve-out below gets forgotten in the copy. */
+/* Everything narrowing the table that is open, dropped — and named, so a
+   caller can say what it took away. State only: no rebuild, no chrome, so
+   the caller can set up the view it wants and pay for exactly one build.
+
+   "Narrowing" is anything that can hide a row: the header boxes, the
+   filter builder's tree, the tag filter and the timeframe. Grouping is
+   not in the list — it reorganises the rows it is given, it does not
+   remove any — and the search box is not either, since the callers here
+   are the ones replacing it.
+
+   Used by search-all's "Open ↦". A sweep counts rows in the table itself,
+   ignoring every one of these, so landing the analyst on a filtered view
+   of it shows fewer rows than the count they just clicked — with nothing
+   on screen to say why. The timeframe is in the list for that reason and
+   not by analogy: it is case-level, so it is the one most likely to be
+   on for a table you have not looked at yet. */
+export function clearViewNarrowing() {
+  const cleared = [];
+  const n = Object.values(S.filters).filter((v) => v !== '' && v != null).length;
+  if (n) cleared.push(`${n} column filter${n === 1 ? '' : 's'}`);
+  if ((S.filterTree.children || []).length) cleared.push('the filter builder');
+  if (S.tagFilter.length) cleared.push('the tag filter');
+  if (S.timeRange && S.timeRange.enabled && (S.timeRange.start || S.timeRange.end)) cleared.push('the timeframe');
+  S.filters = nameMap();
+  S.filterOpen = [];
+  S.filterTree = { type: 'group', op: 'AND', children: [] };
+  S.tagFilter = [];
+  S.timeRange = { enabled: false, column: null, start: '', end: '' };
+  // A pivoted session comparison is a filter plus marks, and the marks go
+  // with the filter — same reasoning as clearAllFilters below.
+  S.diffMarks = null;
+  // The chrome that reads these, all of it. renderHead is the one that is
+  // easy to forget and the one that shows: the header boxes are painted
+  // from S.filters, so without it the grid lands on the unfiltered count
+  // with the old filter still typed into the column it was cleared from —
+  // which is the same lie as landing on the wrong count, just told by a
+  // different part of the screen.
+  renderHead();
+  renderTagRibbon();
+  updateTimeRangeButton();
+  updateFiltersButton();
+  return cleared;
+}
+
 export async function clearAllFilters(seed = null) {
   // A pivoted session comparison is a filter plus marks; clearing the
   // filters clears the marks with it, so the grid never wears comparison
   // chrome over a view that isn't the comparison.
   S.diffMarks = null;
+  // A seed is the one filter to land on: a column's box text (`raw`), or a
+  // condition for the filter tree (`cond`) when the box would read the text
+  // as its own syntax — see filterByContains (detail.js).
+  if (seed && seed.cond) return landOnFilters({}, { type: 'group', op: 'AND', children: [seed.cond] });
   return landOnFilters(seed ? { [seed.column]: seed.raw } : {}, { type: 'group', op: 'AND', children: [] });
 }
 
@@ -1386,9 +1831,16 @@ export async function replaceFilters(tree, { clearTimeframe = false } = {}) {
 async function landOnFilters(filters, tree, { clearTimeframe = false } = {}) {
   // Deliberately doesn't touch S.timeRange — the timeframe filter is meant
   // to survive exactly this ("apply/clear filters shouldn't lose my
-  // timeframe"), same as it survives applyPreset() and a tab switch. Use
+  // timeframe"), same as it survives applyPreset() and — unless the analyst
+  // turned that off (timeframeAcrossTables) — a tab switch. Use
   // the Timeframe filter's own "Clear" button, or toggleTimeRange, for that.
-  const anchor = selectedRowAnchor();
+  //
+  // Landing on the same row afterwards is rebuildView's job now (keepRow)
+  // — except under a grouping, where it has nothing to anchor on: grouped
+  // positions are another address space, and dropGrouping below clears
+  // the cursor before the build. Capture the row here, while the tree can
+  // still resolve it, and recentre once the flat view is up.
+  const anchor = S.groupByCols.length ? selectedRowAnchor() : null;
   // Grouping goes with the filters (stashed first, so toggleGrouping can
   // bring it back) — clearing "the filters" should land on the plain
   // table, not on an empty filter under the old grouping.
@@ -1396,7 +1848,10 @@ async function landOnFilters(filters, tree, { clearTimeframe = false } = {}) {
     S.lastGroupBy = { cols: [...S.groupByCols], sort: S.groupSort, dir: S.groupSortDir };
     await dropGrouping();
   }
-  S.filters = filters;
+  S.filters = nameMap(filters);
+  // Whatever survives is stated by the bar's chips; a box left revealed
+  // over a filter this just replaced is the empty row all over again.
+  S.filterOpen = [];
   S.search = ''; S.tagFilter = []; S.searchTerms = []; S.advCollapsed = null;
   S.filterTree = tree;
   // A pivot from a COUNT has to show the rows behind that count. The
@@ -1412,37 +1867,191 @@ async function landOnFilters(filters, tree, { clearTimeframe = false } = {}) {
   updateFiltersButton();
   $('search').value = '';
   renderHead(); renderTagRibbon();
-  if (S.searchMode !== 'contains') await setSearchMode('contains'); // also rebuilds the view
+  // Either way one awaited build, never a detaching one: the two lines
+  // below act on the view it lands (docs/notes/ui.md — a build that goes
+  // to the background resolves with the old view still installed, and
+  // syncSearchExpansion and recenterOnRow would then run against the
+  // rows this function just cleared, under chrome already showing the
+  // cleared state).
+  if (S.searchMode !== 'contains') await setSearchMode('contains', { detach: false }); // also rebuilds the view
   else await rebuildView({ keepScroll: false });
   syncSearchExpansion(false);
   await recenterOnRow(anchor);
 }
 
-export function openExportModal() {
+/* Export, in the table menu's frame: what can be exported down a side
+   list — the view on screen, then the whole case as a workbook, tagged
+   rows or every row — each with its size under its name; the chosen one
+   on the right says what goes in the file, and the one main button on
+   the foot exports it, saying how much. It was two paragraphs, each over
+   a row of two buttons. */
+export function openExportModal(section = null) {
+  const real = () => (S.sources || []).filter((s) => !s.is_merge && !s.error);
+  const sum = (k) => real().reduce((n, s) => n + (s[k] || 0), 0);
+  const src = S.sources.find((s) => s.id === S.sourceId);
+  let viewTagged = false;
+  let plan = null;   // /api/export/all_xlsx/plan, for the every-row pane
   modal('Export', (b) => {
-    if (S.view) {
-      b.append(el('p', null, 'Exports what you are looking at now — current filters, sort and search — with Line, Tags and Note columns added in front.'));
-      const acts = el('div', 'row-actions');
-      const all = el('button', 'btn', 'Export current view');
-      all.onclick = () => { window.location = `/api/export?view_id=${S.view.view_id}`; $('modal').hidden = true; };
-      const tagged = el('button', 'btn', 'Export tagged rows only');
-      tagged.onclick = () => { window.location = `/api/export?view_id=${S.view.view_id}&tagged_only=true`; $('modal').hidden = true; };
-      acts.append(all, tagged);
-      b.append(acts);
+    const go = (url) => { window.location = caseUrl(url); $('modal').hidden = true; };
+    const main = el('button', 'btn primary table-menu-close');
+    let run = null;
+    const setMain = (label, fn, disabled = false) => { main.textContent = label; main.disabled = disabled; run = fn; };
+    main.onclick = () => run && run();
+
+    /* The view: what narrows it said in a line, then the file's columns
+       as a list, in the grid's order — the three Winnow adds first, and
+       a hidden column left out, as the export leaves it. */
+    function buildViewPane(pane) {
+      const stats = el('div', 'mb-stats');
+      const summary = el('div', 'mb-summary');
+      const seg = tableMenuSeg([['all', 'Every row', 'Every row the view shows'], ['tagged', 'Tagged rows only', 'Only the rows of the view that carry a tag']],
+        () => (viewTagged ? 'tagged' : 'all'), (key) => { viewTagged = key === 'tagged'; seg.paint(); paint(); });
+      summary.append(stats, seg.seg);
+      const notes = el('ul', 'mb-notes');
+      const box = el('div', 'side-preview tm-cols-box tables-box export-box');
+      const head = el('div', 'tables-head export-cols-head');
+      head.append(el('span', 'tables-name-h', 'Column in the file'), el('span', null, 'Holds'));
+      const scroller = el('div', 'side-preview-rows');
+      const list = el('div', 'tables-list');
+      scroller.append(list);
+      const foot = el('div', 'side-preview-foot');
+      box.append(head, scroller, foot);
+      pane.append(summary, notes, box);
+
+      function applied() {
+        const out = [];
+        const tree = S.filterTree || {};
+        const conds = (n) => (!n ? 0 : n.type === 'cond' || n.type === 'raw' ? 1 : (n.children || []).reduce((k, c) => k + conds(c), 0));
+        for (const [col, raw] of Object.entries(S.filters || {})) if (raw) out.push(`${col} ${raw}`);
+        if (conds(tree)) out.push(plural(conds(tree), 'built condition'));
+        if (S.search) out.push(`search “${S.search}”`);
+        if (S.timeRange && S.timeRange.enabled) out.push(`${S.timeRange.column} ${S.timeRange.start || '…'} → ${S.timeRange.end || '…'}`);
+        if ((S.tagFilter || []).length) out.push(plural(S.tagFilter.length, 'tag') + ' filtered');
+        return out;
+      }
+      const colRow = (name, holds, added) => {
+        const r = el('div', 'tables-row export-col-row' + (added ? ' added' : ''));
+        r.append(el('span', 'tables-name static', name), el('span', 'tables-sub', holds));
+        return r;
+      };
+      function paint() {
+        const rows = S.view ? S.view.row_count : 0;
+        const shown = S.columns.filter((c) => !(S.layout[c.name] || {}).hidden);
+        const hidden = S.columns.length - shown.length;
+        stats.replaceChildren(tableMenuStat(rows, 'rows in the view'), tableMenuStat(src ? src.row_count : 0, 'in the table'),
+          tableMenuStat(shown.length + 3, 'columns'));
+        const narrowed = applied();
+        const sort = (S.sort || []).map((x) => `${x.column} ${x.dir === 'desc' ? '↓' : '↑'}`).join(', ');
+        notes.replaceChildren(el('li', 'mb-note', 'What you are looking at now, as CSV: '
+          + (narrowed.length ? `narrowed by ${narrowed.join(' · ')}` : 'nothing narrows it, so every row of the table')
+          + (sort ? `, sorted by ${sort}.` : ', in its stored order.')));
+        list.replaceChildren(colRow('Line', 'the row’s line in the source', true), colRow('Tags', 'its tags, comma-separated', true),
+          colRow('Note', 'its note', true), ...shown.map((c) => colRow(c.name, c.derived ? `derived from ${c.derived_from}` : (c.type || 'text'))));
+        foot.replaceChildren(el('p', 'fb-help', hidden
+          ? `${plural(hidden, 'hidden column')} left out. Show ${hidden === 1 ? 'it' : 'them'} in the grid to export ${hidden === 1 ? 'it' : 'them'}.`
+          : 'The grid’s order, as you arranged it.'));
+        if (!S.view) setMain('Export the view (.csv)', null, true);
+        else if (viewTagged) setMain('Export tagged rows (.csv)', () => go(`/api/export?view_id=${S.view.view_id}&tagged_only=true`));
+        else setMain(`Export ${rows.toLocaleString()} rows (.csv)`, () => go(`/api/export?view_id=${S.view.view_id}`));
+      }
+      paint();
+      return { update: paint };
     }
-    b.append(el('p', null, 'Exports every tagged row from every table in this case — not just the one open now — one worksheet per table.'));
-    const xlsxActs = el('div', 'row-actions');
-    const xlsx = el('button', 'btn', 'Export tagged rows from all tables (.xlsx)');
-    xlsx.onclick = () => { window.location = '/api/export/tagged_xlsx'; $('modal').hidden = true; };
-    xlsxActs.append(xlsx);
-    b.append(xlsxActs);
-  });
+
+    /* The whole case as a workbook: one worksheet per table, listed with
+       what each sheet gets. Tagged rows skips the tables with none. */
+    const buildCasePane = (taggedOnly) => (pane) => {
+      const summary = el('div', 'mb-summary');
+      const stats = el('div', 'mb-stats');
+      summary.append(stats);
+      const notes = el('ul', 'mb-notes');
+      notes.append(el('li', 'mb-note', 'Every table in the case, not just the open one, each on its own worksheet. '
+        + 'A merge has no sheet of its own: its rows are on its tables’ sheets.'));
+      const box = el('div', 'side-preview tm-cols-box tables-box export-box');
+      const head = el('div', 'tables-head export-head');
+      head.append(el('span', 'tables-name-h', 'Worksheet'), el('span', 'tables-num', taggedOnly ? 'Tagged' : 'Rows'), el('span', 'tables-num', 'Sheets'));
+      const scroller = el('div', 'side-preview-rows');
+      const list = el('div', 'tables-list');
+      scroller.append(list);
+      const foot = el('div', 'side-preview-foot');
+      box.append(head, scroller, foot);
+      pane.append(summary, notes, box);
+      function paint() {
+        const tables = real();
+        const n = (s) => (taggedOnly ? s.tagged_row_count || 0 : s.row_count || 0);
+        const withRows = tables.filter((s) => n(s) > 0);
+        const sheetsOf = (s) => (taggedOnly ? (n(s) ? 1 : 0) : ((plan && plan.tables.find((t) => t.id === s.id)) || { sheets: 1 }).sheets);
+        stats.replaceChildren(tableMenuStat(taggedOnly ? sum('tagged_row_count') : sum('row_count'), taggedOnly ? 'tagged rows' : 'rows'),
+          tableMenuStat(withRows.length, withRows.length === 1 ? 'worksheet' : 'worksheets'));
+        list.replaceChildren(...tables.map((s) => {
+          const r = el('div', 'tables-row export-row' + (n(s) ? ' open' : ''));
+          const cell = el('span', 'tables-name-cell');
+          cell.append(el('span', 'tables-name static', sourceLabel(s)));
+          if (!n(s) && taggedOnly) cell.append(el('span', 'tables-sub', 'nothing tagged, no sheet'));
+          const sheets = sheetsOf(s);
+          r.append(cell, countCell(n(s), taggedOnly ? 'tables-tagged' : 'tables-rows'), countCell(sheets, 'tables-notes'));
+          return r;
+        }));
+        const over = plan ? plan.over_cap : [];
+        foot.replaceChildren(el('p', 'fb-help', over.length && !taggedOnly
+          ? `${over.length} table${over.length === 1 ? ' is' : 's are'} past Excel’s ${plan.rows_per_sheet.toLocaleString()} rows a sheet, continued on “Name (2)” sheets.`
+          : 'Excel holds 1,048,575 rows a sheet; a bigger table continues on “Name (2)”, “Name (3)”…'));
+        if (taggedOnly) {
+          setMain(`Export ${sum('tagged_row_count').toLocaleString()} tagged rows (.xlsx)`, () => go('/api/export/tagged_xlsx'), !sum('tagged_row_count'));
+        } else {
+          setMain(`Export ${plural(tables.length, 'table')} (.xlsx)`, async () => {
+            // Big cases take a while: past Excel's cap, say so first.
+            if (plan && plan.over_cap.length) {
+              const names = plan.over_cap.map((x) => `“${x}”`).join(', ');
+              const total = plan.tables.reduce((k, t) => k + t.rows, 0);
+              if (!(await confirmDialog(`${names} ${plan.over_cap.length === 1 ? 'has' : 'have'} more rows than Excel allows on one worksheet. `
+                + `Every row will still be exported, continued on “Name (2)” sheets. ${total.toLocaleString()} rows — this can take a while. Export anyway?`,
+              { okLabel: 'Export anyway' }))) return;
+            }
+            go('/api/export/all_xlsx');
+          }, !tables.length);
+        }
+      }
+      paint();
+      if (!taggedOnly && !plan) {
+        api('/api/export/all_xlsx/plan').then((p) => { plan = p; if (pane.isConnected) paint(); }).catch(() => {});
+      }
+      return { update: paint };
+    };
+
+    const frame = sectionPanes({
+      sections: [
+        { id: 'view', group: 'This table', title: 'Current view', build: buildViewPane,
+          hint: () => (S.view ? `${S.view.row_count.toLocaleString()} rows · .csv` : 'No table open') },
+        { id: 'tagged', group: 'Whole case', title: 'Tagged rows', build: buildCasePane(true),
+          hint: () => `${sum('tagged_row_count').toLocaleString()} rows · .xlsx` },
+        { id: 'all', group: 'Whole case', title: 'Every row', build: buildCasePane(false),
+          hint: () => `${sum('row_count').toLocaleString()} rows · ${plural(real().length, 'sheet')}` },
+      ],
+      label: 'What to export', cls: 'list-panes export-panes', paneCls: 'list-pane export-pane',
+    });
+    b.append(frame.panes);
+    const foot = el('div', 'table-menu-foot table-menu-strip');
+    foot.append(main);
+    b.append(foot);
+    frame.show(section || (S.view ? 'view' : 'tagged'));
+  }, { wide: true, tall: true, focus: (b) => b.querySelector('.side-rail-item[aria-selected="true"]') });
 }
 
 /* DOM wiring for this module, called once by main.js. Handlers can't
    fire during load, so the order these run in doesn't matter — the
    startup steps that DO depend on order live in main.js instead. */
 export function wireSources() {
+for (const id of ['sourceTabs', 'pageTabs']) $(id).addEventListener('scroll', syncTabOverflow, { passive: true });
+// A strip's room changes without any render of its own — plugin tabs
+// landing in the other strip, the divider dragged, the window resized —
+// so the fade follows the strip's box, not just its contents.
+if (typeof ResizeObserver !== 'undefined') {
+  const ro = new ResizeObserver(() => syncTabOverflow());
+  ro.observe($('sourceTabs'));
+  ro.observe($('pageTabs'));
+}
+
 $('tabSplit').addEventListener('mousedown', (e) => {
   e.preventDefault();
   const strip = $('pageTabs'), handle = $('tabSplit');
@@ -1489,7 +2098,7 @@ $('btnTabJump').onclick = () => setSidebarVisible($('sidebar').hidden);
    several here rather than the thing itself. */
 $('btnCase').onclick = () => dropdownMenu($('btnCase'), [
   { label: 'Import…', onclick: openImportModal },
-  { label: 'Merge sources…', onclick: openMergeBuilder },
+  { label: 'Merge tables…', onclick: () => openMergeBuilder() },
   { label: 'Tables…', onclick: openTablesManager },
   '-',
   { label: 'Export…', onclick: openExportModal },
@@ -1497,7 +2106,7 @@ $('btnCase').onclick = () => dropdownMenu($('btnCase'), [
   { label: 'Case settings…', onclick: openCaseSettings },
   { label: 'Compact case file…', onclick: () => compactCaseFile() },
   '-',
-  { label: 'Error log…', onclick: openErrorLog },
+  { label: 'Log…', onclick: openLog },
   { label: 'Shut down Winnow…', onclick: shutdownWinnow },
 ]);
 

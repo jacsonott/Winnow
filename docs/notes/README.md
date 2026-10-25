@@ -21,6 +21,7 @@ part you can't re-derive from the code.
 | [server.md](server.md) | `server.py` — routes, middleware, case open/shutdown, the 400-vs-500 split |
 | [derived.md](derived.md) | derived datetime columns (`timeparse.py`, `drv_<id>`, `/api/derived/*`) |
 | [plugins.md](plugins.md) | `plugin_api.py`, the plugin host, or the example plugins |
+| [testing.md](testing.md) | the test suite itself — what each file covers, and the traps of writing and running it |
 
 ## Adding to these
 

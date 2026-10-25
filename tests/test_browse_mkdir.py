@@ -6,7 +6,6 @@ result that provably lands inside the folder being browsed."""
 
 from __future__ import annotations
 
-import os
 
 import pytest
 from fastapi.testclient import TestClient
@@ -93,3 +92,47 @@ def test_the_new_folder_is_immediately_browsable(client, tmp_path):
     res = c.get(f"/api/browse_dir?path={made['path']}", headers=HEADERS)
     assert res.status_code == 200
     assert res.json()["path"] == made["path"]
+
+
+# The two routes that create folders as a SIDE effect. browse_dir/new
+# refusing a LAN peer meant nothing while these two would makedirs the same
+# folders for it. A real non-loopback peer address rather than a patched
+# _is_loopback, so the check is exercised where the request carries it.
+
+@pytest.fixture
+def lan(store, monkeypatch):
+    import server
+    monkeypatch.setattr(server, "STORE", store)
+    return TestClient(server.app, headers=HEADERS, client=("192.168.1.50", 40000))
+
+
+def test_a_lan_peer_cannot_make_folders_by_creating_a_case(lan, tmp_path):
+    target = tmp_path / "lan_made" / "deep"
+    res = lan.post("/api/cases", json={"path": str(target / "x.db-winnow"), "name": "x"})
+    assert res.status_code == 403
+    assert not (tmp_path / "lan_made").exists()
+
+
+def test_a_lan_peer_can_still_file_a_case_into_an_existing_folder(lan, tmp_path):
+    """Only the folder is the new reach; a case in a folder that is already
+    there is what a shared server is for."""
+    res = lan.post("/api/cases", json={"path": str(tmp_path / "x.db-winnow"), "name": "x"})
+    assert res.status_code == 200, res.text
+    assert (tmp_path / "x.db-winnow").is_file()
+
+
+def test_a_lan_peer_cannot_make_folders_through_the_cases_dir_pref(lan, tmp_path):
+    target = tmp_path / "lan_prefs" / "a"
+    res = lan.post("/api/prefs", json={"cases_dir": str(target)})
+    assert res.status_code == 403
+    assert not (tmp_path / "lan_prefs").exists()
+
+
+def test_this_machine_still_makes_both(client, tmp_path):
+    server, c = client
+    res = c.post("/api/cases", headers=HEADERS,
+                 json={"path": str(tmp_path / "new" / "x.db-winnow"), "name": "x"})
+    assert res.status_code == 200, res.text
+    res = c.post("/api/prefs", headers=HEADERS, json={"cases_dir": str(tmp_path / "cases" / "here")})
+    assert res.status_code == 200, res.text
+    assert (tmp_path / "new" / "x.db-winnow").is_file() and (tmp_path / "cases" / "here").is_dir()

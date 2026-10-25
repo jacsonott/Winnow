@@ -3,8 +3,11 @@
 These are double-click launchers for people who'd rather not open a terminal
 and type `python server.py`. Each one just finds Python and starts Winnow
 from the install root (the folder above this one) — no build step, nothing
-installed, so they're airgap-safe. Winnow still needs Python 3 and its
-runtime deps (`pip install -r requirements.txt`), same as running it by hand.
+installed, so they're airgap-safe. Winnow still needs Python 3.10 or newer
+and its runtime deps (`pip install -r requirements.txt`), same as running it
+by hand. The launchers run whichever Python they find on your PATH and
+don't look for a virtual environment, so if you installed the deps into one,
+start Winnow with that environment's Python instead.
 
 | OS | File | Notes |
 | --- | --- | --- |
@@ -13,14 +16,26 @@ runtime deps (`pip install -r requirements.txt`), same as running it by hand.
 | Windows | `winnow.bat` | Double-click; opens a small console window that stays while Winnow runs. |
 | Windows | `winnow.vbs` | Double-click for the same thing with **no** console window. |
 
-You can copy any of these somewhere handier (Desktop, taskbar, Dock) — they
-locate the install by their own path, so they keep working when moved as long
-as the install itself doesn't move.
+Leave them where they are. Each launcher works out the install root as the
+folder directly above itself (`cd "$(dirname "$0")/.."` in the shell scripts,
+`cd /d "%~dp0.."` in the batch file), so a copy sitting on the Desktop looks
+for `server.py` in your home folder and finds nothing — and `winnow.vbs` is
+the same story one step removed, since it runs the `winnow.bat` beside it. A
+symlink doesn't help either: none of them resolve one, so the link's own
+folder is what they measure from.
+
+For something handier, make a shortcut that points back here rather than a
+copy. On Windows, right-click → Send to → Desktop (create shortcut): a `.lnk`
+leaves `%~dp0` pointing at the original file. On macOS, a Finder alias, which
+opens the original wherever it lives. On Linux, the desktop entry below, with
+an absolute `Exec=` path.
 
 ## A Linux desktop entry (optional)
 
-For an app-menu / dock icon, create `~/.local/share/applications/winnow.desktop`
-with the absolute path to your install:
+For an app-menu / dock icon, create
+`~/.local/share/applications/winnow-launcher.desktop` with the absolute path to
+your install. Don't call it `winnow.desktop`: that is the entry Winnow's own
+file associations write, and unregistering the last file type deletes it.
 
 ```ini
 [Desktop Entry]

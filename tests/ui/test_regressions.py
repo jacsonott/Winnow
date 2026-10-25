@@ -33,6 +33,14 @@ MEASURE = """() => {
 }"""
 
 
+def _columns(page):
+    """MEASURE, refusing an empty answer: the checks below loop over it, and
+    a loop over no columns passes whatever the grid looks like."""
+    cols = page.evaluate(MEASURE)
+    assert cols, "no header cell matched .hcell[data-col], so there was nothing to check"
+    return cols
+
+
 def test_filter_cells_stay_the_width_of_their_columns(page):
     """The filter row is pinned to the header row by giving both the same
     flex-basis — which stops being true the moment a filter cell's *content*
@@ -42,7 +50,7 @@ def test_filter_cells_stay_the_width_of_their_columns(page):
     column narrower than that had a filter box wider than its header and the
     two rows drifted apart across the grid.
     """
-    for col in page.evaluate(MEASURE):
+    for col in _columns(page):
         assert col["filter"] == col["head"], (
             f"{col['col']}: filter cell {col['filter']}px under a {col['head']}px header — "
             "the filter row is no longer pinned to the columns"
@@ -68,15 +76,21 @@ def test_autofit_leaves_room_for_the_header_name(page):
     under a long header came out with the header ellipsised — the column was
     fitted to its content and became unidentifiable.
     """
-    page.click("#body")
-    page.keyboard.press("=")
-    page.wait_for_function("() => !document.querySelector('.busy-bar:not([hidden])')")
-    page.wait_for_timeout(400)
-    for col in page.evaluate(MEASURE):
+    _autofit(page)
+    for col in _columns(page):
         assert col["labelHas"] >= col["labelNeeds"], (
             f"{col['col']}: header needs {col['labelNeeds']}px, got {col['labelHas']}px — "
             "autofit truncated the column's own name"
         )
+
+
+def _autofit(page):
+    """= on the grid, and wait for the widths it asked the server for to
+    land. The key puts up "Measuring columns…" at once and replaces it when
+    the new widths are painted."""
+    page.click("#body")
+    page.keyboard.press("=")
+    page.wait_for_selector("#toast:not([hidden]):has-text('Columns autofit to content')")
 
 
 def test_autofit_respects_the_configured_cap(page):
@@ -87,9 +101,7 @@ def test_autofit_respects_the_configured_cap(page):
     other column has to be scrolled)."""
     def fit_with(cap):
         page.evaluate(f"() => {{ __winnow.S.appearance.autofitMax = {cap}; __winnow.saveAppearance(); }}")
-        page.click("#body")
-        page.keyboard.press("=")
-        page.wait_for_timeout(500)
+        _autofit(page)
         return next(c for c in page.evaluate(MEASURE) if c["col"] == "CommandLine")["head"]
 
     assert fit_with(900) == 900
@@ -109,9 +121,7 @@ def test_autofit_shrinks_an_over_wide_column_back(page):
       __winnow.renderHead(); __winnow.render();
     }""")
     assert next(c for c in page.evaluate(MEASURE) if c["col"] == "Host")["head"] == 600
-    page.click("#body")
-    page.keyboard.press("=")
-    page.wait_for_timeout(500)
+    _autofit(page)
     host = next(c for c in page.evaluate(MEASURE) if c["col"] == "Host")
     assert host["head"] < 200, f"autofit left a 600px column at {host['head']}px — it can only grow"
     assert host["labelHas"] >= host["labelNeeds"]
@@ -125,17 +135,15 @@ def test_resetting_the_keymap_actually_resets_it(page):
     now-polluted defaults straight back."""
     page.keyboard.press("?")
     page.wait_for_selector("#modal:not([hidden])")
-    page.click(".settings-section-head:has-text('Keyboard shortcuts')")
+    page.click("#modalBody .settings-nav-item:has-text('Keyboard shortcuts')")
     row = page.locator(".settings-key-row").first
     before = row.inner_text()
 
     row.locator(".btn", has_text="+ key").click()
     page.keyboard.press("y")
-    page.wait_for_timeout(200)
     assert "y" in row.inner_text(), "the new binding never landed, so this proves nothing"
 
     page.click("#modalBody .btn:has-text('Reset to defaults')")
-    page.wait_for_timeout(200)
     assert row.inner_text() == before, "reset did not restore the default bindings"
     # And the module-level defaults themselves must be unpolluted, which is
     # the actual bug — a reset that only fixes S.keymap would still pass above
@@ -220,13 +228,32 @@ def test_month_name_timestamps_parse_client_side(page):
     assert page.evaluate("() => __winnow.parseTimestamp('June 23, 2026 5:11 PM').h") == 17
     assert page.evaluate("() => __winnow.parseTimestamp('23 Jun 2026').d") == 23
     assert page.evaluate("() => __winnow.parseTimestamp('Monday 23 2026')") is None
+    # The day as an ordinal, either order, read as TS_NORMALIZE reads it.
+    got = page.evaluate("() => __winnow.parseTimestamp('Jul 28th 2026 01:02:22')")
+    assert got == {"y": 2026, "mo": 7, "d": 28, "h": 1, "mi": 2, "s": 22, "frac": ""}
+    assert page.evaluate("() => __winnow.parseTimestamp('July 1ST, 2026 5:11 PM').h") == 17
+    assert page.evaluate("() => __winnow.parseTimestamp('3rd Sep 2026').d") == 3
+
+
+def test_a_fractional_or_dotted_pm_is_an_afternoon_client_side(page):
+    """"1/5/2024 1:22:01.123 PM" read as 01:22 — the AM/PM group came
+    straight after the seconds, so a fraction in between (or "p.m.", or
+    "Pm") left it unmatched. Display and the client's time math have to
+    read the value the way TS_NORMALIZE now does."""
+    got = page.evaluate("() => __winnow.parseTimestamp('1/5/2024 1:22:01.123 PM')")
+    assert got == {"y": 2024, "mo": 1, "d": 5, "h": 13, "mi": 22, "s": 1, "frac": "123"}
+    for value in ("1/5/2024 1:22:01 p.m.", "1/5/2024 1:22:01 Pm", "June 23, 2026 1:22:01.5 P.M."):
+        assert page.evaluate("(v) => __winnow.parseTimestamp(v).h", value) == 13, value
+    assert page.evaluate("() => __winnow.parseTimestamp('1/5/2024 12:30:00 a.m.').h") == 0
+    assert page.evaluate("() => __winnow.parseTimestamp('1/5/2024 1:22:01 Amsterdam').h") == 1
+    assert page.evaluate("() => __winnow.formatTimestamp('1/5/2024 1:22:01.123 PM', 'iso_ms')") \
+        == "2024-01-05 13:22:01.123"
 
 
 def test_jump_to_timestamp_is_reachable_from_the_timeframe_dialog(page):
     page.evaluate("() => __winnow.openTimeRangeModal()")
     page.wait_for_selector("#modal:not([hidden])")
     page.click("#modalBody .btn:has-text('Jump to timestamp…')")
-    page.wait_for_timeout(200)
     assert page.locator("#modalTitle").inner_text().lower() == "jump to timestamp"
     page.keyboard.press("Escape")
 
@@ -240,10 +267,11 @@ def test_matching_saved_filters_ring_the_button_instead_of_a_banner(page):
     assert page.locator("#presetBanner").count() == 0
 
     # ui.csv's columns match no shipped filter — inject one client-side so
-    # the test never writes to the workspace on disk.
+    # the test never writes to the workspace on disk. Its columns are read
+    # off the open table, so a column added to the fixture can't unmatch it.
     page.evaluate("""() => {
       __winnow.S.savedFilters.push({ id: 9902, name: 'ui fixture filter',
-        col_names: ['Timestamp', 'EventId', 'Host', 'ExtremelyLongColumnHeaderName', 'CommandLine'],
+        col_names: __winnow.S.sources.find((s) => s.id === __winnow.S.sourceId).columns.map((c) => c.name),
         payload: { filter_tree: { type: 'group', op: 'AND', children: [
           { type: 'cond', column: 'EventId', op: 'in', value: ['4624'] }] },
           search: '', search_mode: 'contains', search_terms: [] } });
@@ -273,10 +301,15 @@ def test_saved_filters_modal_groups_by_header_set_and_stays_dense(page):
     ~52px pitch) drowned once the 28 shipped filters landed. Filters now
     sit under one header per column set — which is also the unit they
     cycle in — with the nickname control on the section, and rows dense
-    enough to scan."""
+    enough to scan. The sets are the dialog's side list now, under their
+    own heading, and Every saved filter heads each set in its list."""
     page.evaluate("() => __winnow.openSavedFiltersModal()")
-    page.wait_for_selector(".sf-group-head")
-    assert page.locator(".sf-group-head").count() >= 1
+    page.wait_for_selector(".sf-row")
+    rail = page.locator("#modalBody .side-rail")
+    assert rail.locator(".side-rail-group", has_text="Header sets").count() == 1
+    assert rail.locator(".side-rail-item[data-section^='set:']").count() >= 1
+    page.locator("#modalBody .side-rail-item[data-section=all]").click()
+    page.wait_for_selector("#modalBody .tables-group")
     rows = page.locator(".sf-row")
     assert rows.count() >= 2
     b1, b2 = rows.nth(0).bounding_box(), rows.nth(1).bounding_box()
@@ -290,11 +323,11 @@ def test_settings_no_longer_duplicates_the_saved_filters_list(page):
     alone."""
     page.keyboard.press("?")
     page.wait_for_selector("#modal:not([hidden])")
-    page.click(".settings-section-head:has-text('Saved filters')")
-    sec = page.locator(".settings-section:has(.settings-section-head:has-text('Saved filters'))")
+    page.click("#modalBody .settings-nav-item:has-text('Saved filters')")
+    sec = page.locator("#modalBody .settings-pane[data-section='filters']")
     assert sec.locator(".session-row, .sf-row").count() == 0
     sec.locator(".btn", has_text="Open saved filters").click()
-    page.wait_for_selector(".sf-group-head")
+    page.wait_for_selector(".sf-row")
     assert page.locator("#modalTitle").inner_text().lower() == "saved filters"
     page.keyboard.press("Escape")
 
@@ -306,12 +339,12 @@ def test_shortcuts_go_inert_while_a_dialog_is_open(page):
     page.keyboard.press("e")
     page.wait_for_selector("#modal:not([hidden])")
     page.keyboard.press("v")
-    page.wait_for_timeout(150)
+    page.wait_for_timeout(150)   # as long as the picker takes to open when it does
     assert page.locator(".menu").count() == 0, "the value picker opened behind the dialog"
     page.keyboard.press("Escape")
     page.wait_for_selector("#modal[hidden]", state="attached")
     page.keyboard.press("v")
-    page.wait_for_timeout(150)
+    page.wait_for_selector(".menu", timeout=5_000)
     assert page.locator(".menu").count() == 1, "v must still work once the dialog is gone"
     page.keyboard.press("Escape")
 
@@ -337,7 +370,6 @@ def test_saved_filters_are_reachable_from_the_builder(page):
     page.keyboard.press("e")
     page.wait_for_selector("#modal:not([hidden])")
     page.click("#modalBody .btn:has-text('Saved filters…')")
-    page.wait_for_timeout(200)
     assert page.locator("#modalTitle").inner_text().lower() == "saved filters"  # CSS uppercases it
     page.keyboard.press("Escape")
 

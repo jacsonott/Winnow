@@ -98,3 +98,21 @@ def test_the_cached_view_path_still_scopes_the_tag_counts(page):
     page.evaluate("(id) => __winnow.openSource(id)", sid)      # unchanged spec: cache hit
     page.wait_for_function("() => __winnow.S.view && __winnow.S.view.row_count === 200")
     assert page.evaluate("() => __winnow.S.view.source_id") == sid
+
+
+def test_a_recenter_whose_view_vanished_mid_flight_does_not_throw(page):
+    """recenterOnRow checks S.view, awaits /api/row_position, then reads
+    row_count off it — and the view can go during that await: a case
+    switch, a rebuild, the table being removed. The throw lands in an
+    async callback nobody catches, which fails the page rather than
+    skipping a scroll. (The shared fixture fails any test that logs an
+    uncaught error, so this asserting "no error" is not vacuous.)"""
+    sid = page.evaluate("() => __winnow.S.sourceId")
+    rid = page.evaluate("() => __winnow.rowAt(1).rid")
+    page.evaluate("""async ([sid, rid]) => {
+      const p = __winnow.recenterOnRow({ source_id: sid, rid });
+      __winnow.S.view = null;          // what a delete or a case switch does
+      await p;
+    }""", [sid, rid])
+    page.evaluate("(id) => __winnow.openSource(id)", sid)
+    page.wait_for_function("() => __winnow.S.view && __winnow.S.view.row_count === 200")

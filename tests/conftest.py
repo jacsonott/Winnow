@@ -69,6 +69,36 @@ def store(case_path):
     s.close()
 
 
+# SQLITE_MAX_VARIABLE_NUMBER as stock SQLite ships it (32766 since 3.32;
+# python.org's Windows and macOS builds). Debian's build raises it to
+# 250000, so a statement binding one parameter per row or per list item
+# passes here and fails on an analyst's machine — `stock_sqlite_limits`
+# puts the stock ceiling back on a store's every connection.
+STOCK_VARIABLE_LIMIT = 32766
+
+
+@pytest.fixture
+def stock_sqlite_limits(store, monkeypatch):
+    import sqlite3
+
+    if not hasattr(store.db, "setlimit"):
+        pytest.skip("Connection.setlimit needs Python 3.11+")
+    store.db.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, STOCK_VARIABLE_LIMIT)
+    real = store._open_reader
+
+    def limited():
+        ro = real()
+        ro.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, STOCK_VARIABLE_LIMIT)
+        return ro
+
+    monkeypatch.setattr(store, "_open_reader", limited)
+    with store._reader_lock:
+        idle, store._reader_pool = store._reader_pool, []
+    for conn in idle:
+        conn.close()
+    return store
+
+
 STANDARD_ROWS = [
     ["Timestamp", "EventId", "User", "Process", "CommandLine"],
     ["2024-01-05 13:22:01", "4624", "ACME\\jacson", "svchost.exe", "C:\\Windows\\System32\\svchost.exe"],
@@ -120,3 +150,34 @@ def client(store, monkeypatch):
     opened = server.STORE
     if opened is not None and opened is not store:
         opened.close()
+
+
+# `--shard K/N` — how CI splits a suite across runners. See tests/sharding.py.
+def pytest_addoption(parser):
+    parser.addoption("--shard", metavar="K/N", default=None,
+                     help="run only the K-th of N slices of the collected tests, "
+                          "split by file (see tests/sharding.py)")
+
+
+# trylast: slice what -k/-m left behind, not what they are about to remove.
+@pytest.hookimpl(trylast=True)
+def pytest_collection_modifyitems(config, items):
+    spec = config.getoption("--shard")
+    if not spec:
+        return
+    import sharding
+
+    try:
+        k, n = sharding.parse(spec)
+    except ValueError as e:
+        raise pytest.UsageError(str(e)) from None
+    sizes: dict[str, int] = {}
+    for item in items:
+        path = item.nodeid.split("::", 1)[0]
+        sizes[path] = sizes.get(path, 0) + 1
+    owner = sharding.deal(sizes, n)
+    keep = [it for it in items if owner[it.nodeid.split("::", 1)[0]] == k - 1]
+    if len(keep) < len(items):
+        kept = set(map(id, keep))
+        config.hook.pytest_deselected(items=[it for it in items if id(it) not in kept])
+        items[:] = keep

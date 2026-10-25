@@ -16,6 +16,7 @@ analyst downloads it.
 from __future__ import annotations
 
 import io
+import re
 import subprocess
 import tarfile
 from pathlib import Path
@@ -38,7 +39,7 @@ SHIPPED = {
 # by scripts/release.py's DEV_ONLY).
 DEV_ONLY = {
     "tests", "bench", "CLAUDE.md", ".claude", "requirements-dev.txt",
-    "screenshots", "design",
+    "ruff.toml", "screenshots", "design",
 }
 
 
@@ -64,7 +65,7 @@ def _export_ignore_patterns() -> set[str]:
         line = raw.strip()
         if not line or line.startswith("#") or "export-ignore" not in line:
             continue
-        out.add(line.split()[0].rstrip("/"))
+        out.add(line.split()[0].strip("/"))   # "/tests/" is the rule for tests
     return out
 
 
@@ -108,6 +109,40 @@ def test_the_built_archive_agrees_with_those_rules():
         assert unwanted not in entries, f"{unwanted} rides into the release archive"
 
 
+def test_the_docs_ship_whole():
+    """Everything under docs/, and everything README.md links to or shows,
+    is in the archive — the "deliberately NOT applied to docs/" promise in
+    .gitattributes, checked against what `git archive` actually writes.
+    Everything but docs/site/, the Pages site's own folder, which that
+    file leaves out on purpose: it is checked for being left out, since
+    the recordings in it are most of its size.
+
+    An export-ignore rule without a leading "/" matches its name at any
+    depth: `screenshots/` (meant for the top-level folder) also dropped
+    docs/screenshots/, so every image on the README was a broken link in
+    the zip an analyst downloads, with the rule-reading tests above green.
+    """
+    if not _worktree_is_clean():
+        pytest.skip("uncommitted changes — HEAD is not what this tree would ship")
+    blob = subprocess.run(["git", "archive", "--format=tar", "HEAD"], cwd=ROOT,
+                          capture_output=True, check=True).stdout
+    with tarfile.open(fileobj=io.BytesIO(blob)) as tf:
+        shipped = {n for n in tf.getnames() if n}
+    tracked = {p for p in _git("ls-files", "docs").splitlines() if p}
+    site = {p for p in tracked if p.startswith("docs/site/")}
+    docs = tracked - site
+    assert docs and site, "no tracked files under docs/ or docs/site/ — the checks below would pass vacuously"
+    assert not site & shipped, f"the Pages site's own files ride into the release archive: {sorted(site & shipped)[:5]}"
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    linked = {
+        target.split("#", 1)[0].rstrip("/")
+        for target in re.findall(r"\]\(([^)\s]+)\)", readme)
+        if "://" not in target and not target.startswith(("#", "mailto:"))
+    } - {""}
+    missing = sorted(p for p in docs | linked if p not in shipped)
+    assert not missing, f"left out of the release archive: {missing}"
+
+
 def test_no_case_file_is_tracked():
     """`.gitignore` used to say `*.db`, which never matched `.db-winnow`."""
     from winnow.store import CASE_SUFFIX
@@ -125,22 +160,29 @@ def test_a_case_file_anywhere_in_the_tree_is_ignored(name):
     assert ignored, f"{name} is not ignored — .gitignore does not cover the case suffix"
 
 
-def test_the_declared_version_is_not_already_released():
-    """A version that is already tagged means the bump was forgotten — the
-    release script refuses it, and catching it here is cheaper.
+def test_a_tagged_commit_declares_the_version_it_is_tagged_with():
+    """The check worth having, in the direction that stays quiet.
 
-    Unless THIS commit is that release. `scripts/release.py --write` builds
-    the snapshot and tags it in one step, so on the tagged commit the
-    version and the tag agree by construction; asserting otherwise would
-    fail CI on every release PR into main, which is the one run that must
-    pass for a release to ship at all. Caught by running this suite against
-    the snapshot before pushing it.
+    It used to assert the declared version was not already tagged, to
+    catch a forgotten bump. That fires on every commit after a release —
+    `develop` legitimately sits at the shipped version until someone opens
+    the next cycle — so it would have failed CI on every PR from the
+    moment 0.3.0 shipped until the next bump. A required check that is red
+    for reasons nobody can act on is the kind that teaches people to
+    re-run until green.
+
+    The forgotten bump is already refused where it matters and cannot be
+    skipped: `scripts/release.py` reads version.py off the source branch
+    and exits rather than tag a version that disagrees. What that guard
+    does NOT cover is a tag and a tree that disagree after the fact — a
+    hand-moved tag, a cherry-pick onto a release commit — so that is what
+    this asserts, and on an untagged commit it has nothing to say.
     """
     from winnow import version
 
-    want = f"v{version.VERSION}"
-    if want in _git("tag", "--points-at", "HEAD").split():
-        return          # this commit IS that release
-    assert want not in _git("tag", "-l").split(), (
-        f"winnow/version.py still says {version.VERSION}, which is already tagged — "
-        "bump it in the commit you want released")
+    tags = [t for t in _git("tag", "--points-at", "HEAD").split() if t.startswith("v")]
+    if not tags:
+        return          # an ordinary commit declares whatever it likes
+    assert f"v{version.VERSION}" in tags, (
+        f"this commit is tagged {tags} but winnow/version.py says {version.VERSION} — "
+        "the app would report a version its own tag contradicts")

@@ -28,54 +28,439 @@ see [docs/notes/README.md](README.md) for the whole set.
   store.py can't resolve these itself (can't import workspace.py — see
   `pop_legacy_presets`), so server.py's `_resolve_timeline_configs` does
   the header-set matching and hands `build_timeline` a plain `{source_id:
-  {...}}` dict; a source with no matching template still works, falling
-  back to its first datetime column, every column, and its own file name.
+  {...}}` dict. **The header set is the table's own columns, derived ones
+  left out**, on both sides: Configure tables… saves under that set and
+  the server looks it up under that set. The lookup used to take every
+  column, so the first derived column added to a table changed its key
+  and the config silently stopped applying — on the Timeline and in the
+  Watchlist's latest hits, which resolve the same configs. A derived
+  column can still be the configured timestamp (the dialog lists derived
+  datetime columns; `build_timeline`/`latest_hits` resolve the name
+  against every column), and a template keyed on the full column list
+  is still honoured when nothing matches the base set
+  (`tests/test_timeline.py`, `tests/test_watchlist_findings.py`). A
+  source with no matching template still works, falling back to its
+  first datetime column, its own file name, and the summary for its
+  artefact shape (next entry) or every column joined.
   Same materialize-into-`v.`-then-page-by-pos pattern as `build_view`
   (invariant #2) — only one timeline view is ever alive at a time, rebuilt
-  (and the old one evicted) on every tag-filter change.
+  (and the old one evicted) on every tag-filter change and on every visit
+  to the tab (`showTimelineTab`).
+  **The view holds `(pos, source_id, rid, ts, tag1)` and nothing else.**
+  `tag1` is the first of the tags asked for that the row carries (lowest
+  id: tag order), which the overview strip splits its bars by; it is the
+  build's snapshot, where the page's stripes are read live. The
+  body, the summary, the tags and the note are read by
+  `fetch_timeline_rows`, for the rows of the page asked for: one query
+  per source on the page, reading that source's slice of the page off the
+  view by pos range and its own rows by rid (a `CROSS JOIN`, so the order
+  is fixed). The view used to hold all of it, and the build joined every
+  column of every tagged row into a string and ran `TL_LEAD`/`TL_DETAILS`
+  over each before the first line showed: 13.7 s warm (28.8 s cold) for
+  250k tagged rows, paid on every visit to the tab and every tag chip
+  clicked. Ordering needs the timestamp alone: 0.6 s (2.7 s cold), with a
+  page of 5,000 lines costing ~140 ms to read instead of nothing. The
+  handle keeps the `configs` the build was given, so every page reads its
+  rows the way the build placed them. Two consequences worth knowing:
+  tags and notes are read as they are NOW (a line untagged since the
+  build shows no stripe rather than a stale one), and a source dropped
+  since the build makes the page raise `ViewExpired` (409) rather than
+  answer with lines it can no longer describe. `tests/test_timeline_summary.py`
+  holds the build to running no summary function at all, by counting
+  calls on the writer.
+  `timeline_position` (`GET /api/timeline_position`) finds a line again
+  in a rebuilt view — by `(source_id, rid)`, else the first line at or
+  after its `ts` — which is how the tab keeps the analyst's place across
+  the rebuild every visit is (`keepTimelinePlace` in timeline.js).
+  `timeline_overview` (`GET /api/timeline_overview`) is the overview
+  strip's bars: the view's lines per `HISTOGRAM_BUCKETS` width, split by
+  `tag1` or `source_id`, each with `first` = its `MIN(pos)`, which is
+  the bar's first line because the view is in time order. Its `start` is
+  floored in Python so `(epoch - start) / width` is never negative —
+  SQLite's integer division truncates toward zero, the pre-1970 trap
+  `time_histogram` documents, and FILETIME zero (1601) does reach the
+  Timeline. The strip narrows the build two ways: `exclude_sources` (the
+  tables switched OFF, as the tag chips keep theirs) and `ts_range`, a
+  half-open `[start, end)` compared with the line's normalised timestamp,
+  which leaves lines with no time out while it is set.
+  `tests/test_timeline_overview.py`.
+  **The rows around a finding** (`context`, a half-open `[start, end)`)
+  add a branch per table with a timestamp, tagged or not, selecting its
+  rows in the window that carry none of the tags switched on, with
+  `ctx = 1` (`tag1` NULL; the overview splits them as "ctx", and
+  `per_source` counts findings only, `context_rows` the rest). The
+  exact test is the normaliser on every row, which is a full scan — on
+  a 416k-row EvtxECmd table it added 0.44 s to every build, and it
+  grows with the table, not the window. So when every value of
+  the column starts with a date (`_column_is_date_led`: one `NOT GLOB`
+  probe, cached per `(source_id, column)` for the Store's life, which is
+  safe because source tables are never mutated), the branch first
+  narrows on the RAW text by day range, `col >= first_day COLLATE
+  NOCASE AND col < day_after COLLATE NOCASE`, which the import's
+  COLLATE NOCASE sort index on the first datetime column serves as a
+  SEARCH; the exact test then runs on those rows only. A window ending
+  at midnight ends the day before (or the prefilter would read a whole
+  extra day). A column that is not date-led (US dates, epochs, a derived
+  column) gets the exact test alone. `tests/test_timeline_context.py`
+  holds both paths to the same rows and the plan to the SEARCH.
+  **Folding repeats** (`fold`; `unfold` names the runs to leave open by
+  their first row) puts a run of `TIMELINE_FOLD_MIN` (3) or more
+  consecutive findings from one table, with the same fold key and the
+  same `tag1`, on one line. The fold key (`_timeline_fold_key`) is the
+  summary's lead, the first non-blank of the shape's lead columns,
+  trimmed, written as SQL in the tagged branch rather than read through
+  `TL_LEAD`, so the build still runs no summary function (the test
+  counts calls). A table with no summary, or with body columns picked
+  in Configure tables…, has no key and never folds: "the same lead"
+  would be nothing the analyst can see. A row around a finding never
+  folds and ends a run; a row with a note starts one, so a note is never
+  inside a fold. `_timeline_fold` works in steps: every row with its key
+  into `{vid}_all`; whether each row starts a run, compared with the row
+  above by a join on `pos - 1` (0.34 s at 250k rows where LAG() took
+  0.84 s), and a running sum of that for its run; the runs, each with its
+  first row, length and first line; then the view, which gains `n` (rows
+  on the line), `run_n` (a run's length on its first line, folded or
+  open, which the "fold" badge reads) and `ts_last`. **The rows are
+  kept** as `{vid}_rows`, each with its `line` (`handle["rows_table"]`,
+  also in `handle["tables"]`, which eviction drops with the view),
+  because two readers need rows rather than lines: `timeline_overview`
+  buckets each row at its own time and points `first` at its line, so a
+  fold never moves a bar; and `timeline_position` finds a folded-away row
+  on its run's line (`exact: False`). `per_source` sums `n` and the
+  answer carries `rows`, so every count stays a count of rows. The cost,
+  on the 416k-row EvtxECmd table with 250k tagged rows: 0.8 s → 1.9 s a
+  build, most of it reading the lead columns of every tagged row (the
+  plain build reads the timestamp alone). It is off by default, so only
+  whoever switches it on pays it.
+  `fetch_timeline_rows` also gives each line its `gap` (seconds since
+  the line above ended: that line's `ts_last` when folded, else its
+  `ts`; `None` when either has no time) and `new_day`. Both need the line
+  above, which for the first line of a page is on another page, so the
+  read starts one line early. `tests/test_timeline_story.py`.
+  `timeline_row` (`GET /api/timeline_row`) is a line's row in full for
+  the details pane: every column (derived included), its tags (all of
+  them, not just those switched on) and note; a merge id or a gone
+  table is a KeyError (404) and a gone rid `RecordGone` (404).
+  **The body join is capped at what SQLite's expression depth allows**
+  (`_fit_body_cols`, 495 columns at the default limit of 1000). The flat
+  `a || ' | ' || b || ...` chain is two tree levels per column, so a
+  500-column table used to raise "Expression tree is too large" and take
+  every other table's findings off the Timeline with it (and the
+  Watchlist's latest hits, which joins the same body). A wider table now
+  keeps its first 495 body columns, in body order; `build_timeline`
+  returns those sources in `body_trimmed` and the tab header says so. The
+  cap is read off the connection's `getlimit`, falling back to 1000 on
+  Pythons before 3.11. `_sql_chain` (search's balanced-tree fix for the
+  same limit) is the alternative if the body should ever keep every
+  column.
+- **A table a merge is built on cannot be dropped** (`drop_source`, via
+  `merges_using`). `merges.source_ids` is a JSON array of real source
+  ids — a holder of source ids exactly like `row_tags` or `layouts` —
+  and it is the one `drop_source` does NOT clean, deliberately: a member
+  that vanishes surfaces as a `KeyError` when the merge is opened
+  (`_merge_source_dict`) rather than as a merge that silently changed
+  shape. That is the right way to report a missing member and the wrong
+  thing to let anyone do by accident. (It was worse while source ids were
+  reused by the next import — dropping a member armed the merge, the next
+  file imported taking the freed id and joining a merge nobody added it
+  to. Ids are never reused now; next entry.)
+  So the drop raises `ValueError` naming the merges, `DELETE
+  /api/source/{id}` maps that to **409** (well-formed, and it will
+  succeed once the merge is gone), and deleting the merge first is one
+  click that leaves every table intact. The internal callers are all
+  ingest cancels dropping a partial import created seconds earlier,
+  which cannot be a member of anything.
+- **A quoted name that is not a column is not an error to SQLite — it is
+  a string.** SQLite's double-quoted-string fallback reads `"Nope"` as
+  the text 'Nope' when no column has that name, so every place a wrong
+  name can reach SQL quietly returns wrong rows instead of failing. Two
+  such places were real: a raw filter fragment with a typo'd quoted
+  column (`"Event Id " <> '4624'`, one trailing space, matched every row
+  — the EXPLAIN dry-run accepts it), and a merge whose members' names
+  differ only in non-ASCII case. SQLite folds identifier case for **A–Z
+  only**; the merge rule folded with `str.lower`, so "Größe"/"GRÖßE"
+  merged, and the second member, read through the first one's names,
+  paged its own header names as cell values. Now: `validate_where_fragment`
+  checks every double-quoted name against the columns (folded the SQLite
+  way, `_ascii_fold`) and says a text value takes single quotes;
+  `column_signature` folds ASCII only; and `_merge_columns` matches a
+  merge's columns with `_col_key` (ASCII fold too), so "Größe" and
+  "GRÖßE" are two columns of the merge, each `NULL` on the member without
+  it (see "Merge members don't share the merge's columns" below) — which
+  is also how a merge the old rule let into a case file now reads. On
+  Python 3.12+ the writer, the
+  reader pool and the fragment dry-run also switch the fallback off
+  (`_no_dq_strings`), so anything that slips past those checks fails
+  loudly — an extra layer only, since `Connection.setconfig` doesn't
+  exist on 3.10/3.11. The SQL pane keeps the fallback on purpose:
+  `WHERE Channel = "Security"` is an ordinary habit there, and the
+  analyst sees what came back.
+- **A merge member may spell a column differently — compare names the
+  way SQLite does.** Members are read through the first member's names,
+  which works in SQL because SQLite folds ASCII case; Python code that
+  compares names with `==` doesn't fold, and silently skips a member
+  whose column is "TIME" under a merge's "Time". That skipped the member
+  in jump-to-timestamp and in the tag time bounds, and built each
+  member's auto index under the MERGE's spelling — the index name hashes
+  the column, and `list_column_indexes`/`drop_column_index` hash the
+  member's own names, so the Tables modal never saw it. Compare through
+  `_ascii_fold`, and name anything per-table after `_table_spelling`
+  (the table's own spelling). The hash itself stays case-sensitive:
+  folding it would rename every index already on disk. Related, in the
+  same UNION: a merge projects each row's member id beside the data
+  columns, and a file with its own `source_id` column made ORDER BY
+  "source_id" sort by member — `_member_id_alias` picks a name no data
+  column has.
+- **An id a case hands out is never handed out again.** `sources`,
+  `tag_defs`, `merges` and `sql_tabs` are `AUTOINCREMENT`. As plain
+  `INTEGER PRIMARY KEY`s they gave a deleted newest row's id to the next
+  insert, and every one of those ids outlives its row somewhere — a view
+  handle or tag list in another window, an undo entry, an indicator's
+  `auto_tag_id`, a widget's `src_N`, a SQL result keyed by tab id. Reuse
+  turned "gone" into "a different table": a stale window tagged the next
+  import, Ctrl+Z after dropping a merge member tagged a file nobody had
+  touched, a deleted auto-tag's matches came back as "Benign".
+  `CREATE TABLE IF NOT EXISTS` cannot change an existing table, so
+  `_migrate_ids_never_reused` rebuilds the four in an older case file on
+  open, once, in one transaction (copy out, recreate from META_SCHEMA's
+  definition, copy back BY COLUMN NAME with ids intact — after the
+  `ALTER`s in `__init__` every file has the canonical columns, and one the
+  canonical DDL doesn't know is carried across, not dropped). The counter is seeded
+  from `_ID_HIGH_WATER_SQL`, the highest id still MENTIONED anywhere
+  (orphaned `row_tags`, a leftover `drv_9`, `src_9` in a widget), not
+  `MAX(id)`, which would hand the deleted newest id straight back. The same
+  pass deletes what reuse had already left: tag assignments and notes for a
+  missing table or tag, and an `auto_tag_id` naming a deleted tag.
+  Not relying on ids alone, the writes check their targets too:
+  `_apply_tag_change` (every tag write) and `set_note` refuse a missing
+  tag, table or row with `RecordGone` **inside** the transaction, before
+  writing — they used to commit and then 500 on the way out — and
+  server.py maps it to **404** globally (not 409: no rebuild brings a
+  deleted tag back). `drop_source` and `delete_merge` evict the views
+  built over them (`_evict_views_of`), `delete_tag` clears any
+  `watchlist.auto_tag_id` naming it, `add_indicator` refuses an
+  `auto_tag_id` that is not a tag here, and `_drop_undo_for_source` drops
+  an entry by the ROWS it recorded, not the id it was filed under — a
+  merge's entry holds member rows. `tests/test_ids_never_reused.py` builds
+  the old file from the old DDL rather than through a Store, which would
+  migrate it before the test could look.
+
+- **A Timeline row leads with what happened, not with the source row.**
+  Beside `body` (still the pipe-joined columns, unchanged) each row
+  carries `lead`/`detail` — "Special privileges assigned" plus
+  "svc_backup · WKSTN-4471 · id 4672" — read with the page by the
+  `TL_LEAD`/`TL_DETAILS` SQL functions from the artefact shape's
+  `summary` block in `defaults/headers.json`. Things worth knowing before
+  touching it:
+  - The shape is matched by `_timeline_summary_match` the way every
+    other header-set binding here is (`_sources_for_header_set`): the
+    source's **own imported columns** must CONTAIN the set's, so a derived
+    column the analyst added can't cost a table its summary, and the most
+    specific match wins.
+  - **The timestamp column is removed from the summary at build time**
+    (`_timeline_summary_exprs`), against the column the Timeline is
+    actually reading — a template can't know about an override or a
+    derived timestamp. Repeating the column immediately to the left is
+    what made the old body unreadable; don't reintroduce it by hardcoding
+    a template's ts column instead.
+  - **A shape with no template renders exactly the old join**, as does a
+    source whose body columns the analyst picked by hand in Configure
+    tables… — an explicit choice outranks a shipped default.
+  - `TL_LEAD`/`TL_DETAILS` are registered on the writer AND the reader
+    pool. A Timeline page (`fetch_timeline_rows`) and Configure tables…'
+    preview (`timeline_preview`) both run them on a reader, so a long
+    build or import holding the writer lock can't freeze either
+    (`tests/test_timeline_preview.py` holds the lock for the whole read).
+    The build no longer calls them at all (previous entry).
+  - **How a source reads on the Timeline is decided in one place,
+    `_timeline_parts`** — the timestamp fallback, the derived-timestamp
+    split, the body join and its 495-column cap, the summary-or-picks
+    rule, the empty-type fallback. `build_timeline` orders each source's
+    tagged rows by its timestamp, `fetch_timeline_rows` reads a page's
+    rows with the rest, and `timeline_preview` (`POST /api/timeline/preview`) runs
+    it over a few rows of one table under the dialog's UNSAVED settings,
+    so the preview cannot drift from the Timeline. A new rule about how a
+    row reads goes in there, not in either caller — and not in
+    `latest_hits`, which deliberately differs (its body leaves out the
+    timestamp column, since the Watchlist pane shows the time beside it).
+    The preview reads the table's first tagged rows (rid order over
+    `row_tags`' key), topped up with its first rows when fewer are
+    tagged, then sorts them the Timeline's way.
+  - Both halves are squashed to one line and capped (`TL_LEAD_MAX`,
+    `TL_DETAIL_MAX`). A Timeline row is exactly one `--row-h` tall, and a
+    Payload with newlines in it or a 4KB command line would otherwise own
+    the whole cell. The raw row stays reachable: it's the cell's `title`
+    and the per-row "raw" toggle (`fillTimelineBody` in timeline.js), and
+    clicking the row still opens it in its own table.
+- **A per-column chain of one operator is built by `_sql_chain`, never
+  `" OP ".join`.** The search blob (`COALESCE(a,'') || ' ' || …`) and
+  hide-empty-rows' OR of every column parse, written flat, into a
+  left-deep tree one level per operator, and SQLite refuses a statement
+  deeper than `SQLITE_MAX_EXPR_DEPTH` (1000). Flattened JSON gets a table
+  there easily: from ~500 columns every Contains/regex/Advanced search
+  was a 500, the trigram build failed in its thread with nothing said,
+  and the Search-all sweep — which recorded a count that raised as zero —
+  reported the table as "No matches." `_sql_chain` writes runs of up to
+  `_SQL_CHAIN_FLAT` as before (a narrow table's doc view keeps the exact
+  definition stored in its case file) and balanced parenthesised halves
+  beyond that; concatenation and OR are associative, so the value — the
+  `doc` text the index holds — is identical. Two things are kept from it
+  on purpose: the sweep now reports a table it could not count
+  (`{source_id, name, error}` — in `search_all_sources`' list, and in the
+  job's `failed`, apart from `hits` so that list still means "tables that
+  matched"), skipping only a table dropped mid-sweep; and
+  `_build_fts_worker` logs a build failure once per source and message.
 - The substring-search index (`fts_<id>`) is FTS5 `tokenize='trigram'` over a
   **single `doc` column** — every column concatenated via the `src_<id>_doc`
-  view (same `_blob_expr` the LIKE fallback scans, so indexed and fallback
-  results are identical by construction) — with `detail=none, columnsize=0`,
-  and it is queried with a bare `doc LIKE ?`, **never MATCH**. Each piece of
-  that shape is measured, not stylistic (332K-row/285MB EvtxECmd source):
-  `detail=none` drops per-occurrence position lists nothing here uses,
-  cutting the index 892MB→143MB (–84%; case files were ~4.2x their source
-  CSVs, now ~1.6x) at the cost of verifying candidates against the real
-  text — so query time scales with *result count*: unchanged for the
-  rare-IOC case, ~0.8s worst-case for a term matching ~all rows. Under
-  `detail=none` a multi-trigram MATCH is a *phrase* query and errors
-  outright ("phrase queries are not supported"); SQLite ≥3.45's trigram
-  LIKE pushdown is the query form instead. Three traps around that
-  pushdown, all verified: it's per-column — a table-level `fts LIKE ?`
-  runs against the hidden table-name column (NULL outside MATCH) and
-  silently returns **0 rows** (why the index is one `doc` column); it only
-  fires for a *bare* `LIKE ?` — adding `ESCAPE` reverts to a full scan —
-  so the pushdown pattern is deliberately unescaped and
-  `_fts_like_pattern()` refuses any term containing `%`/`_` (would match
-  as wildcards = silently-wrong superset), routing it to the escaped
-  blob-LIKE fallback (backslash needs no escape in bare LIKE — Windows
-  paths search fine); and pre-3.45 SQLite has no pushdown at all, so
-  `_ensure_fts_building` no-ops there (LIKE still returns correct rows by
-  scanning — an index would be pure wasted disk). A term under
-  `TRIGRAM_MIN_LEN` (3 chars) or a source whose index isn't built yet
-  falls back the same way, in `_compile_where`/`_advanced_fts_clause`/
-  `search_all_sources`. Building isn't free — `build_fts` is
-  `_ensure_fts_building`'d on a background daemon thread (batched the same
-  BATCH-sized-chunk way `ingest_csv` commits, so it never holds
-  `self.lock` for the whole build) rather than inline, both right after
-  ingest and lazily on a source's first Contains/Advanced search — so
-  browsing and searching both work immediately via the LIKE fallback, and
-  get fast once the build catches up. A case file from an earlier build
+  view (`_blob_expr`, which is what "the row contains the term" means) —
+  with `detail=none, columnsize=0`. The size is why: `detail=none` drops
+  per-occurrence position lists nothing here uses, cutting the index
+  892MB→143MB (–84%; case files were ~4.2x their source CSVs, now ~1.6x;
+  332K-row/285MB EvtxECmd source), at the cost that the index knows which
+  trigrams a row holds but not where, so every candidate has to be
+  checked against the real text and query time scales with *result
+  count*.
+- **Every substring match is `_contains_clause`** — the search box,
+  Advanced (one atom per term, `_advanced_clause`), the Search-all counts
+  and the watchlist scan — so they cannot disagree. Two parts:
+  candidates from the index, `rid IN (SELECT rowid FROM fts_N WHERE fts_N
+  MATCH ?)` with the term's distinct trigrams quoted one per string and
+  ANDed (`_trigram_match_query`), when the source's index is built and
+  the term is 3+ characters; and the check, `_contains_scan`, which is
+  the whole answer when there are no candidates to narrow to (index not
+  built, pre-3.45 SQLite, a 1–2 character term). The check is an escaped
+  LIKE asked **of each column on its own**, as `CASE WHEN c1 LIKE p OR c2
+  LIKE p … THEN 1 ELSE 0 END`, unless the term has a space in it. Each
+  piece measured on a 693k-row / 1 GB EvtxECmd table (27 columns, ~1.4 KB
+  a row joined):
+  - **Per column, not the joined text.** Joining every column was the
+    cost of a search, on every row a scan read and every candidate the
+    index returned. Columns are joined by one space, so a term without
+    one cannot straddle two columns and "some column holds it" is the
+    same rows. A scan that misses: 4.0 s → 1.7 s. A term on every row
+    (found in an early column, where the OR stops): 4.1 s → 0.35 s.
+  - **A term with a space asks the joined text, only where it could be.**
+    Every space-free piece of it sits inside one column wherever the term
+    is found, so the longest three pieces of 3+ characters are asked per
+    column first, longest first, in nested `CASE WHEN`s, and only a row
+    holding all of them builds the joined text. A scan for "Error
+    Microsoft-Windows-…": 4.8 s → 2.0 s. Pieces of one or two
+    characters are on nearly every row and are left out ("a b" paid
+    0.6 s for asking them).
+  - **`CASE WHEN`, not `COALESCE(… OR …, 0)`.** The check has to be 0/1,
+    never NULL (a NULL cell's LIKE is NULL, and Advanced's NOT of a NULL
+    drops the row from both sides), and SQLite 3.45 evaluates the OR
+    inside COALESCE as a value — every LIKE, no short-circuit (0.35 s →
+    1.7 s on the every-row term). CASE WHEN jumps.
+  - **The pattern is a literal in the SQL, not a parameter per column**:
+    a merge compiles this per member, and the parameter count would scale
+    with columns × members ("Nothing binds one parameter…" below).
+    `_sql_text_literal` quotes it; a term holding a NUL (which statement
+    text can't carry) takes the joined form, which binds.
+  - **MATCH, not the `doc LIKE ?` pushdown** the index was built for
+    (SQLite ≥3.45's trigram LIKE support). With that form FTS5 checks each
+    candidate itself, by fetching its `doc` through the content view —
+    joining every column of every candidate again. On the 1 GB table a
+    term on every row took 4.6 s that way, of which the index lookup is
+    0.13 s; MATCH + the per-column check is 0.59 s, and a 35k-row term
+    292 ms → 56 ms. MATCH has to be one string per trigram: a longer
+    string is a phrase, which `detail=none` refuses ("phrase queries are
+    not supported"). Since the trigrams are plain tokens, `%`/`_` in a
+    term are ordinary characters and those terms use the index now — the
+    pushdown pattern had to be unescaped (an `ESCAPE` clause turned it
+    back into a full scan), so it sent them to a scan. The pushdown's
+    other trap is why the index is one `doc` column: it is per-column,
+    and a table-level `fts LIKE ?` runs against the hidden table-name
+    column and silently returns **0 rows**.
+  - The tokenizer folds case for every script and LIKE for ASCII only, so
+    candidates can include non-matches ("администратор" for
+    "Администратор") — never miss one. The check removes them.
+  `_ensure_fts_building` still only builds on SQLite ≥3.45
+  (`TRIGRAM_LIKE_MIN_SQLITE`): MATCH needs only the trigram tokenizer
+  (3.34), but nothing has been measured below 3.45. Searches there scan,
+  with the same results.
+- Building the index isn't free — `build_fts` is
+  `_ensure_fts_building`'d on a background daemon thread (in chunks
+  sized to hold `self.lock` for about `FTS_COMMIT_SECONDS`, 0.5 s, not
+  `ingest_csv`'s BATCH: tokenizing is 2-3 MB/s, so a BATCH of wide
+  EvtxECmd rows held the lock ten seconds a commit and every tag queued
+  behind it; each chunk also advances `fts_progress`, so a build the case
+  closed under resumes there instead of starting over) rather than
+  inline, both right after ingest and lazily on a source's first
+  Contains/Advanced search — so
+  browsing and searching both work immediately by scanning, and get fast
+  once the build catches up. A third way in is on request:
+  `start_search_index` (the Tables manager's Build) is the same
+  `_ensure_fts_building`, with a KeyError for no such table and a
+  ValueError for a merge (it searches through its members' indexes), and
+  `search_index_supported()` is the 3.45 check the manager asks before
+  offering it (tests/test_search_index_build.py). A case file from an earlier build
   may have `has_fts=1` pointing at a stale-shape table — the original
   word-tokenized one, or the first-generation trigram (multi-column,
-  `detail=full`; the doc-LIKE query form would be a SQL error against it);
+  `detail=full`; not the one-`doc`-column shape the query is written for);
   `Store.__init__` detects both from `sqlite_master`'s own CREATE VIRTUAL
   TABLE text (`'detail=none'` only appears in current-shape DDL), resets
   `has_fts=0` for the lazy re-upgrade, and drops the stale tables on a
   background janitor thread (`wait_for_fts_maintenance` in tests) — freed
   pages go to the freelist for reuse; the file only shrinks under a VACUUM
   nothing runs automatically.
+- **A search-box Contains search the index can't narrow scans in
+  parallel** (`_parallel_contains`; only build_view asks for it, by
+  passing `_compile_where` the `scan_from` its rows are read through).
+  Before the writer lock, the table is split into `PARALLEL_SCAN_THREADS`
+  rid ranges, each scanned with `_contains_scan` on its own reader, and the
+  view is built from `rid IN (SELECT value FROM json_each(?))`. On a
+  6.9M-row, 10 GB EvtxECmd table: 17.9 s on one thread, 9.6 s on two,
+  4.8 s on four. What matters about it:
+  - Threads work because Python's sqlite3 lets go of the GIL inside a
+    statement and LIKE takes none of SQLite's locks. Not everything
+    scales that way: four threads each building an FTS5 index into its
+    own file reached 1,874 rows/s against 1,660 for one, because SQLite's
+    allocator serializes them (four processes: 6,946).
+  - Each range's rids come back as one `json_group_array`, gathered by
+    SQLite, not fetched a row at a time: every fetch takes the GIL, and
+    four threads taking it per row ran a term on 870k rows of a 2M-row
+    table at 25 s, where the single scan takes 5. The build then looks
+    each rid up again, about 1 µs apiece, against the 2-3 s per million
+    rows four threads save, so it hands back to the single scan only past
+    `PARALLEL_SCAN_MAX_RIDS` (split evenly between the ranges, a LIMIT on
+    each). Not on a share of the rows read so far, which it did at first:
+    matches are not spread evenly (EvtxECmd writes each .evtx file's
+    events together, so a Channel's rows are one run), and "Security", on
+    4% of that table, tripped it in the first rows of a range and paid
+    for both scans (6.1 s against 5.7 s).
+  - Before the writer lock, so a tag, an undo or another table's build no
+    longer waits for the scan, only for the build of the view from the
+    rids found.
+  - Cancel: the threads register under the build's `op_token` as one
+    `_ScanGroup`, which each polls from a progress handler. Not
+    `interrupt()` on each: an interrupt that lands before a connection's
+    statement has started is forgotten when it starts.
+  - While an index build is in progress, rids below its
+    `fts_progress.next_rid` are asked of the index (MATCH, then the same
+    check, as `_contains_clause` does) and only the rest are scanned —
+    at 15 GB the build takes hours. The point is read again inside the
+    MATCH's own read transaction: one that went back (a fresh build drops
+    the table) hands the search back to the single scan.
+  - `spec_sql` doesn't pass `scan_from`, so "open in the SQL pane" still
+    renders the search as the scan, SQL that runs on its own.
+- **Contains folds case for A–Z only; Regex folds every script.** Every
+  contains path — the search box, the `contains`/`starts`/`not_contains`
+  filters, Advanced, search-all — ends in SQLite's built-in `LIKE`, which
+  is case-insensitive for ASCII only, while `_regexp` is Python
+  `re.IGNORECASE`. So "администратор" finds "Администратор" under Regex and
+  not under Contains (same for "élodie"/"ÉLODIE"). Known and left as is,
+  deliberately: the trigram index itself already folds Unicode — its
+  candidates include both — and it is the per-candidate recheck that is
+  the built-in LIKE. Measured (SQLite 3.45, 300k rows): an app-defined
+  `like()` keeps the trigram pushdown (`VIRTUAL TABLE INDEX 0:L0`, rare-term
+  time unchanged) but makes every fallback scan ~2.6x slower (65ms →
+  167ms) — the not-yet-indexed source, terms under 3 chars or holding
+  `%`/`_`, every column filter — and would change `LIKE` in the SQL pane
+  too. Narrowing Regex to ASCII (`re.ASCII`) instead would make the mode an
+  analyst reaches for when Contains misses find less. Both are a trade for
+  the maintainer to make against `bench/`'s `search/contains.*` pairs; until
+  then the mode buttons' tooltips say which folds what.
 - A per-column filter with a **sargable op** (`equals`/`in` — see `SARGABLE_OPS`)
   lazily gets a plain B-tree index on that `(source_id, column)`, same
   fire-and-forget background pattern as FTS (`_ensure_column_index_building`
@@ -85,6 +470,11 @@ see [docs/notes/README.md](README.md) for the whole set.
   patterns a plain index can't accelerate (trigram FTS is the answer for
   substring search instead), and numeric `>`/`<` go through `_numeric_expr`,
   a functional expression a plain index on the raw column wouldn't match.
+  `_compile_where` is also where `hide_empty_rows` lands (every column
+  NULL or '' → dropped): a predicate emitted from inside it makes `where`
+  non-empty, which is what keeps an otherwise unfiltered view off the
+  `root_virtual` carve-out — appended to the SQL text after that gate it
+  would silently take the virtual path with every position wrong.
   This matters a lot more for a **merge**: `build_view` compiles the filter
   once per member and `UNION ALL`s the results (see `_resolve_members`), so
   an unindexed sargable filter is a full scan repeated across every member,
@@ -96,6 +486,231 @@ see [docs/notes/README.md](README.md) for the whole set.
   rather than the raw column name, since a column name is arbitrary CSV-
   header text and this sidesteps identifier-safety entirely rather than
   leaning on `q()` for a human-readable name nobody needs to read.
+- **Some columns are indexed at import, by shape** (`_build_import_indexes`,
+  from a header set's `indexes` in defaults/headers.json: EventId for
+  EvtxECmd). Not for the first filter's sake but for the planner's: once
+  the grid has lazily indexed a column, SQLite plans `WHERE EventId = 'x'
+  GROUP BY RemoteHost` as a walk of the RemoteHost index with a table
+  lookup per row, about 15x slower than scanning, and ANALYZE (with or
+  without `analysis_limit`) leaves that plan alone. An index on the WHERE
+  column makes it an index search. On 2.1M EvtxECmd rows: the KAPE board
+  45 s -> 10 s, Top remote hosts 10.3 s -> 0.55 s, lateral movement's
+  preview 10.7 s -> 0.05 s, for 1.5-2.7 s of build at the end of the
+  import. Same index name as the lazy filter index, so there is only ever
+  one; every import path and save-as-table call it before starting the
+  search index, whatever `build_fts` says.
+- **The first datetime column gets its sort index at import too**, in
+  the same step (`_build_import_indexes`): the `COLLATE NOCASE` index
+  `_ensure_sort_index_building` would otherwise start on the first sort,
+  by the same name. That column is the one the Timeline and the histogram
+  read a table by, and the one most analysts sort by first. Without it the
+  first sort sorts every row in a temp b-tree while the index builds
+  beside it, both after the writer lock: 5.6 s on 2.1M EvtxECmd rows,
+  11-14 s on 4.3M MFTECmd rows, against about 0.8 s with the index. It
+  costs 2.4 s of import on the EvtxECmd table. Only the first: a table
+  with several timestamps (MFT has eight) would pay for each, and the
+  others build on first use as before. `tests/test_shape_indexes.py`.
+- **A merge's view build selects only what it sorts on.** Each member's
+  branch of the `UNION ALL` projects its member id, `rid` and the sort
+  columns, never the merge's whole column list. It used to project every
+  column, and that one detail made SQLite read every column of every row
+  of every member on every build, whatever indexes existed: clearing the
+  filters on a 500k-row, five-member merge of EvtxECmd output read all
+  739 MB of its member tables per click (the sort indexes
+  `_ensure_sort_index_building` puts on each member were never used),
+  where a single table reads its 4 MB sort index. Measured with mmap off
+  so every page shows up in `/proc/self/io`: 739 MB → 20 MB, and ~370 →
+  ~190 ms with everything cached; on a machine where the case doesn't stay
+  in the OS cache that read is the whole cost. Two shapes, chosen by
+  whether any member has a `WHERE` (`build_view`): **unfiltered**, the
+  `ORDER BY` belongs to the compound (`_compile_merge_order`, terms by
+  position since a compound can only name its own result columns), so
+  each member streams in its sort index's order and SQLite merges them —
+  `MERGE (UNION ALL)` in the plan, no temp B-tree; **filtered**, the old
+  outer `ORDER BY` over the narrowed subquery, one sort of what matched.
+  The compound shape on a filtered merge has SQLite walk each member's
+  sort index and look every row up to test the filter, which measured
+  5–9% slower than scanning. Both keep every position where it was,
+  including rows tying on every key across members (member order — the
+  compound shape says so with a last `1 ASC`); tests/test_merge_view_build.py
+  holds the plan and the order.
+- **Nothing binds one parameter per row or per list item.** Stock SQLite
+  stops at 32,766 variables per statement (999 before 3.32), and the box
+  the suite usually runs on raises that to 250,000 — so a statement that
+  scales its `?` count with the data passes every test here and fails on
+  an analyst's machine (python.org's Windows Python is stock).
+  `tests/conftest.py`'s `stock_sqlite_limits` puts the stock ceiling back
+  on a store's every connection; use it when testing anything that takes
+  a list. Two that did: an `in` filter (`_compile_cond`) now binds its
+  whole list as one JSON parameter read through `json_each` — a merge
+  compiles the WHERE once per member, so 3,000 pasted hashes on an
+  11-member merge was 33,000 parameters — and still gets the column index
+  (`SEARCH … USING INDEX (x=?)` with a `LIST SUBQUERY`), except a list
+  of one or two values, which keeps its `?`s: SQLite compares a list that
+  short directly instead of building a lookup table, and the json_each
+  form cost `views/filter.in_list` 30% (19.7ms → 25.5ms at 200k rows; no
+  difference from three values up); and
+  `export_tagged_xlsx`, which put every tagged rid in one `IN (...)` and
+  now pages them by keyset, reading cells through a `rid IN (SELECT …
+  LIMIT n)` subquery and tags/notes by the page's rid range. Its sheets
+  continue past Excel's row cap through `_xlsx_write_sheets`, the
+  all-tables export's continuation rule.
+- **Nothing joins one branch per member with a bare `" UNION ALL ".join`.**
+  SQLite refuses a compound SELECT of more than 500 terms ("too many
+  terms in compound SELECT"; SQLITE_MAX_COMPOUND_SELECT, which
+  `setlimit` can only lower), and every merge read is a branch per
+  member — a merge of 1000 IIS logs could not build its view at all.
+  `store.union_all` is the join: the plain text up to 500, and past it
+  runs of 500 wrapped as `SELECT * FROM (…)` and unioned in turn, branch
+  and `?` order unchanged. SQLite's flattener undoes the nesting, so the
+  unfiltered sort's `MERGE (UNION ALL)` over each member's sort index
+  survives it. Every merge union in store.py and the bundled plugins'
+  `_scope` go through it, and so does any union with a branch per
+  *source* (the Timeline, latest hits, `{{all:…}}`): a case can hold 500
+  tables without a merge in sight. tests/test_merge_compound_limit.py
+  drives each one over a merge of 510 W3C logs.
+- **A `_reader()` block is one read transaction, and so is a SQL pane
+  query.** A statement whose schema changed between its prepare and its
+  step is re-prepared, up to 50 times, and in autocommit each try reads
+  the latest schema afresh, so a writer that commits schema changes
+  faster than a reader can load the schema wins every round and the read
+  fails with "database schema has changed". The first filter on a merge
+  of 1000 IIS logs did exactly that: an index build per member, each
+  committing a CREATE INDEX, against a schema of thousands of tables;
+  `get_source`, `column_values` and the next build failed for the minute
+  the builds took, and the pane, whose TEMP views are made the same way,
+  silently skipped the ones that hit it ("no such table: merge_1"). Inside
+  a transaction the retry reads the snapshot's schema and succeeds the
+  first time. A block never sees a commit made after its first read,
+  which no reader wanted anyway, but a WAL checkpoint cannot pass a page
+  its snapshot might read: a block that streams (the CSV exports, paced by
+  the download) or copies (Save as table, committing its own batches)
+  calls `_renew_snapshot` between batches, or the -wal grows by everything
+  written while it runs. That also keeps Save as table's refusal of a view
+  evicted mid-copy, which a snapshot held throughout would have copied
+  regardless. tests/test_schema_churn.py
+  commits a schema change from the reader's own authorizer, inside every
+  prepare, which fails every time without the transaction.
+- **A merge's background index builds are one batch.** `_build_batch()`
+  collects what the block's `_ensure_*` calls ask for; at its end one
+  reader checks them all and one worker builds them, as many to a commit
+  as fit in `INDEX_BATCH_HOLD_S` (search indexes go to
+  `FTS_BUILD_CONCURRENCY` workers, one build at a time each). Each
+  `_ensure_*` used to check on two readers of its own and start a thread:
+  with the snapshot above, a 1000-member merge's filter made 2000 checks,
+  each reloading a schema that another build had just changed, and took
+  up to 160 s. Merge loops that compile per member (`build_view`,
+  `spec_sql`, `group_summary`, `column_values`) are wrapped in it; a
+  single table's call is a batch of one. The registries hold a
+  `_QueuedBuild` per build, alive until the worker has done that one, so
+  `wait_for_column_index`, `list_column_indexes`' "building" and the
+  dedup read them as they read the thread they replace.
+- **A regex is checked before it runs, and some are refused**
+  (`_compiled_regex`, called by the regex filter op, regex search mode,
+  any `REGEXP '…'` literal in a raw fragment or the SQL pane
+  (`_check_regexp_literals`), and `_regexp` itself as the backstop for a
+  pattern only known at run time). An invalid pattern is a ValueError →
+  400 naming it: `_regexp` used to swallow `re.error` per row, so `C:\Users`
+  typed in regex mode (`\U` is a bad escape in Python) answered "0 rows"
+  — a false negative, the worst answer an evidence tool can give.
+  A pattern that can **backtrack exponentially** is refused the same
+  way, because cells are attacker-controlled and there is no other
+  defence: the REGEXP callback holds the GIL for one cell's whole match,
+  so `(a+)+$` against forty a's froze every thread — paging, the event
+  loop, the cancel request itself — for hours (measured 1.6s at 24
+  characters, doubling per character), and nothing in Python can
+  interrupt `re.search` (it polls for signals, which only reach the main
+  thread). Rejected alternatives: a timeout needs another regex engine (a
+  dependency) or a process per match; truncating cells would turn a hit
+  past the cut into a silent miss. The check (`winnow/rxguard.py`, its
+  own module so the regex_extract derived column meets the same one —
+  structparse cannot import store) walks the parsed pattern
+  (`re._parser`, `sre_parse` on 3.10) for the two shapes that blow up.
+  **A repeated group whose repetitions can match the same text more than
+  one way** — open-ended over anything variable-length, or a count of two
+  or more over something open-ended (`(a+){10}`; bounded-in-bounded like
+  `(\d{1,3}){3}` is a few dozen ways at most) — is decided EXACTLY, not by
+  shape (`_rx_splits`): the body becomes a small Thompson automaton
+  (an epsilon edge for every choice `re` can backtrack into, a character
+  edge per atom, the loop closed back on itself), and a search over
+  pairs of states asks whether two different paths can leave one point
+  of the loop and come back to it over the same text. If they can, n
+  trips round are 2^n paths and a cell that fails at the end walks them
+  all; if not, every cell splits one way. Both directions mattered.
+  Two rounds of shape rules each refused patterns analysts type: the
+  first any open-ended quantifier in a repeated group (IPv4, domains),
+  the second anything without a fixed delimiter character, which still
+  refused `(\S+\s+){3}` and `^(\S+\s+)*\S+$` — "field N of a command
+  line" — though `\S` and `\s` share no character, so every boundary is
+  where the text changes from one to the other. And shape rules miss
+  shapes: `(,a+.\s+)+$` passed the delimiter rule (the `,` pins each
+  repetition) yet blows up, because the `.` can take the last `a` or the
+  first space — two ways per repetition, 1.8s at 22 of them and
+  doubling. Extending the rule to count `\s+` as a delimiter let
+  `(.\s+[ab]+)+$` through the same hole. Fuzzing random patterns against
+  hostile cells found both; the automaton refuses both with no list of
+  exceptions to keep. Counted repeats past 8 copies are modelled as `E+` (or `E*`): each count
+  still has its own path, so any two ways through the original are two
+  ways through the model and the answer only gets more cautious. A body
+  the automaton does not model — a backreference, a conditional, a
+  possessive repeat or atomic group (which never give back what they
+  took), or one past 160 atoms or 20,000 state pairs — falls back to the
+  shape rules (`_rx_delimited`: a character none of the variable parts
+  can match, with all of them on one side of it; `_rx_ambiguous`: no two
+  variable parts that can share out the same text). A repetition that
+  can match nothing at all (`(a*)*`) is an epsilon cycle and refused
+  outright. Class against class (`\w` vs `\s`) is decided by matching
+  one against the BMP and searching the result with the other, the scan
+  cached per class (`_rx_members`). Alternations are the automaton's
+  too: `(a|a)*b`, `(a|aa)+` and `(?:\d|\d\d)+!` fail it (two ways
+  through every repetition), while a repeated keyword list whose words
+  share a first letter (`((?:lsadump|logonpasswords|kerberos)\s+)+`) and
+  the CSV-field pattern (`(?:[^,"]*|"[^"]*")(?:,(?:[^,"]*|"[^"]*"))*`,
+  one alternative empty) pass, since neither can match a cell two ways.
+  The older **alternation rule** — refuse an open-ended repeat of
+  alternatives that can *start* alike — judges by first characters and
+  refused both of those; it now applies only under a repeat the
+  automaton could not model (`_rx_hazard`'s `open_outer`), where nothing
+  better is available. (`re` factors a prefix every alternative shares,
+  so `(word0|word1)+` was always `word(?:0|1)` and never refused.) It
+  stays conservative: a refused pattern can be rewritten (end each
+  repetition with a delimiter, a class instead of an alternation, or
+  Contains), a hung case cannot be cancelled. **Not covered**: polynomial
+  blow-ups from adjacent repeats over the same characters (`.*a.*b` on a
+  megabyte cell) — slow rather than exponential, and refusing `.*x.*y`
+  would refuse ordinary searches. That is also why the cancel tests' slow
+  build is now `a*a*a*a*a*a*b` (tens of ms a row) rather than `(a+)+$`.
+- **Merge members don't share the merge's columns.** `_merge_columns`
+  exposes every member's base columns (matched by `_col_key`, first member
+  to have one decides its spelling and type), or only the shared ones in
+  `col_mode='shared'`. A member that lacks a column, or spells it in a way
+  SQLite won't resolve to the merge's name (surrounding spaces, which
+  `_col_key` strips), is read through `_member_projection`: `(SELECT rid, <exprs> FROM src_N)`
+  with `NULL AS "col"` / `"actual" AS "col"` / the label as the From
+  table column. That subquery is flattened by SQLite — EXPLAIN QUERY PLAN
+  still shows `SEARCH src_N USING INDEX` on each member, under the
+  member's own spelling. Same-shaped members return None and keep the
+  exact SQL they always had. The trap this closes: a quoted name the
+  member lacks isn't an error in an unqualified read, it's SQLite's
+  double-quoted-string fallback, so every cell came back as the column's
+  name. Every merge read goes through `_member_from`,
+  `_member_join_target`, `_member_rows_from` or `merge_select_list`;
+  nothing may write a merge column into a member table directly.
+  A member's *derived* column is never its copy of a merge *file* column
+  of the same name (`_member_column`, shared by `_member_projection`,
+  `merge_select_list` and the missing-columns count): that member reads
+  it as NULL. Matching
+  on name alone made such a member look already-shaped, so it was read
+  as its bare table — no sidecar — and every build of the merge failed
+  with "no such column"; with the From table column on, the projection
+  instead showed the analyst's derived values as the other member's
+  evidence. `_member_read_src` drops the shadowed derived column too, or
+  the timeframe takes the member as having that column and reads NULL.
+  `_ensure_purpose_index_building` builds under the member's own spelling
+  (`_table_own_spelling`) and skips a member that lacks the column. A
+  derived column is the exception that still needs every member: one is
+  made on the merge by making it on each member, so `add_derived_column`
+  and the previews before it refuse an input only some members have.
 - Column types are **inferred from a 500-row sample and stored as metadata only**;
   every value is stored TEXT. Don't "fix" this by typing the columns — mixed-type
   forensic CSVs then silently coerce, and evidence fidelity matters more than
@@ -113,11 +728,14 @@ see [docs/notes/README.md](README.md) for the whole set.
   otherwise grouping by a full timestamp puts nearly every row in its own
   group of one. Everywhere a group's *value* gets compared back against raw
   rows (`expand_group`, `_virtual_group_where`, and therefore tag/export on
-  a group) has to wrap the column in the same `DAY_BUCKET(...)` — that's
+  a group) has to bucket the column the same way — that's
   `_eq_condition`'s `is_datetime` flag, threaded through `_path_where` too
-  for nested-grouping's outer levels. `_eq_condition`/`_path_where` build
+  for nested-grouping's outer levels. Both sides write the bucket as
+  `day_bucket_sql(col)` (DAY_BUCKET with the full-ISO shape done by
+  SQLite; below), never one as `DAY_BUCKET(...)` and the other not.
+  `_eq_condition`/`_path_where` build
   the alias (`s.`) *inside* the returned fragment now rather than letting
-  the caller string-prepend it — `s.DAY_BUCKET(...)` isn't valid SQL the
+  the caller string-prepend it — `s.CASE ...` isn't valid SQL the
   way `s."col"` is, so a caller that goes back to prepending `s.` onto the
   result will get a syntax error the moment it hits a datetime column.
 - **`expand_group`'s virtual fast path only applies to an unfiltered
@@ -131,7 +749,24 @@ see [docs/notes/README.md](README.md) for the whole set.
   view and stayed correct), so the grid asked for `row_count` rows and got
   the first `row_count` of a longer, unfiltered list — and tag/export on the
   group read the same way, which made it an over-tagging bug and not just a
-  display one.
+  display one. **Nor to a group with a tag level anywhere in it** (the
+  group itself, or its nested path): the virtual predicate is re-run on
+  every page fetch while `row_count` is fixed at expansion, and tags —
+  unlike column values — change under the group, typically by the analyst
+  tagging the row they are looking at in "untagged". The membership then
+  shrinks under the next page's offset and a row is skipped without ever
+  being shown. Materialising snapshots it, as a tag *filter* already does.
+- **The tag filter is a UNION, compiled part by part.** `spec.tags` may
+  hold tag ids, `__any__`, `__none__`, or a mix; each part compiles on
+  its own and the parts are OR'd. It used to compare the whole list
+  against `["__any__"]` and `["__none__"]` as exact values, so a list
+  holding a sentinel alongside ids fell through to the ids branch and
+  dropped the sentinel silently — "untagged, plus the ones I marked"
+  answered "the ones I marked". OR and not AND is deliberate: two ticked
+  ribbon chips mean rows carrying either, the way two ticked values in
+  the value picker do, and an intersection belongs in the filter
+  builder, which can say it.
+
 - **Grouping by tag** is a pseudo-column, `TAG_GROUP_COLUMN` (`"__tag__"`),
   carried through every grouping path as an ordinary column name so nothing
   between the frontend and `group_summary` needs a second notion of what a level
@@ -160,6 +795,160 @@ see [docs/notes/README.md](README.md) for the whole set.
     whole-table case never touches the source at all — per-tag counts are
     `row_tags`' own aggregate and the untagged remainder is arithmetic on
     the member's `row_count`. `test_grouping.py` pins both with EXPLAIN.
+- **The histogram's tag split is one row, one segment.** `stack=tags`
+  attributes each row to the FIRST tag it carries in ribbon order — the
+  lowest tag id, since the ribbon renders tag_defs in id order — with
+  untagged rows as the base. So a stacked bar is exactly as tall as the
+  plain one and the two charts can be read against each other. Counting a
+  two-tag row under both segments is what grouping by tag does
+  deliberately (`_tag_group_branches`), and it is the wrong trade here:
+  bars taller than the rows they describe, for a per-tag total the ribbon
+  already carries exactly. The lookup is a correlated `MIN` over
+  row_tags' primary key, skipped entirely for a member with no tags at
+  all — the same short-circuit `tag_counts_in_view` makes. On a whole
+  table with at most a third of its rows tagged it is not made per row at
+  all: the bars come without the split, the tagged rows are reached from
+  row_tags (`MIN(tag_id) … GROUP BY rid`, then the row by rid) and
+  bucketed on their own, and untagged is what each bar has left. That
+  lookup was a third of the Tags pass (1.0 s against 0.7 s on 500k rows,
+  60k tagged); past a third tagged, reaching each from row_tags costs
+  more than it saves. Never for a derived column, which can change
+  between the two passes while it fills in.
+- **The histogram's value split names its values; it does not group
+  them.** `stack=value` (the strip's Value view: one value, chosen from a
+  cell's right-click menu or followed from the selected cell) and
+  `stack=groups` (its Groups view: the grid's first N groups) send the
+  values themselves, a JSON list in `split_values`, at most
+  `HISTOGRAM_SPLIT_MAX` (8, the palette's slots). Each row's slot is a
+  `CASE WHEN expr IS ? THEN 1 …` over them, numbered in the order they
+  were sent, because the client colors slot i as the i-th value it
+  asked for. Three things it has to agree with. `IS`, not `=`: the
+  "(empty)" group is NULL on some columns, and `= NULL` matches nothing,
+  so its rows went to "Other". "groups" compares a datetime column's
+  day, since that is what group_summary grouped by and so what the group
+  strip's values are; "value" compares the stored value, since that is
+  what a cell holds. And the expression goes through `_col_ref` per
+  member, so a derived column and a merge resolve the way the charted
+  column does. Same one-row-one-segment shape as the tag split (a row
+  holds one value per column), same single pass.
+  **The day is worked out once a row.** A CASE naming `DAY_BUCKET(col)`
+  in each WHEN called the Python function once per group per row:
+  grouping by a date was four times as slow as by a name (4.3 s against
+  1.2 s plain on 500k rows). The union now carries the day as its own
+  column (`sv`) and the CASE runs over that outside it, and the day is
+  `day_bucket_sql` — DAY_BUCKET with the full-ISO shape done by SQLite,
+  the same shortcut as `ts_normalize_sql`, held to the same answer by
+  tests/test_histogram.py. tests/test_histogram_value_split.py.
+- **The histogram finds its bar width first, then makes one pass by
+  bar.** Grouping sorts every row, so a pass costs about the same
+  whatever it groups by, and the number of passes is what matters. The
+  width depends on the span, so it comes first, as cheaply as it can be
+  had: the width this view was last drawn at (`_histogram_widths`, per
+  `(view, column, max_buckets)` — the strip asks about one view many
+  times: the plain chart as it lands, then Tags, each Value, Groups,
+  First N), or on a whole table one from the column's raw MIN/MAX
+  (`_histogram_guess_width`: a scan of one column, no parsing). One
+  pass then groups by `e - ((e % w) + w) % w` (floored, like the fold —
+  `%` keeps a pre-1970 epoch's sign) with MIN/MAX of `e` alongside, and
+  if the span it found calls for another width, one more pass draws the
+  right bars — so a width is only ever a hint, and nothing has to
+  invalidate it. The raw MIN/MAX is text order, which a column mixing
+  `T` and a space after the date can mislead; that costs the second
+  pass, never the chart. A filtered view with no width to try takes a
+  MIN/MAX pass first. A column whose first rows are not ISO text
+  (`_histogram_parsed_in_sql`) would pay `TS_NORMALIZE` in every pass,
+  so it takes the one pass by exact second below instead. Plain on 500k
+  rows: 1.15 s to 0.6 s.
+- **A histogram answer is kept by the rows it counted, not by view
+  id.** A sort, or a filter cleared back to the whole table, is a new
+  view of rows already counted, and each was a whole pass again (2.2 s
+  on a 2.1M-row event log, every sort). `_histogram_results` files each
+  answer under `_histogram_rows_key`: a view over every row of its
+  source is that source's members at their row count (rows never change
+  after import, ids are AUTOINCREMENT, a merge given other tables names
+  other ids); a root view holding some rows is its count plus two sums
+  of a hash of `(source_id, rid)` over `v.view_N`, worked out once per
+  view (0.23 s on 2.1M rows) and kept on the handle. The tag split also
+  keys on the state generation every tag write bumps
+  (`_bump_state_generation`), read before the pass. A derived column,
+  as the charted column or the split, is never kept: its values can
+  still be filling in. Group sub-views and the timeline are not keyed.
+  Sort and clear on the 2.1M-row log: 1.8 to 2.1 s to under 1 ms.
+  Tests that count passes set `HISTOGRAM_ANSWERS_KEPT = 0`, or a re-ask
+  would run none. `tests/test_histogram_answers.py`.
+- **Histogram buckets are floored, and 1601 is a real minimum.** A bucket
+  is `[b, b + bucket_seconds)` — the strip finds a row's bar that way.
+  The fold into buckets is Python's `//`, which floors; it was SQLite's
+  `/` once, which truncates toward zero and put every pre-1970 row one
+  bar late. The `start`/`end` labels come from SQLite's
+  `datetime(…, 'unixepoch')` rather than `time.gmtime`, which raises
+  OSError on Windows for any negative epoch — FILETIME zero is exactly
+  that. `tests/test_histogram.py`.
+- **The histogram parses each row once a pass, and SQLite will not do
+  that by itself.** For a column parsed in Python, `time_histogram` is
+  one query grouped by the exact second (and by split, when there is
+  one), with the bucket width picked from the first and last second it
+  returns and the fold done in Python over distinct seconds — not the
+  span pass, count pass and tag pass it used to be. Two things it
+  depends on, both counted in `test_each_row_is_parsed_once`:
+  the union subquery ends in `LIMIT -1`, without which SQLite flattens a
+  one-member subquery (or pushes `e IS NOT NULL` into each branch of a
+  merge's union) and copies the epoch expression to every place `e` is
+  named, two or three `TS_NORMALIZE` calls a row; and `ts_normalize_sql`
+  does the full-ISO shape in SQLite rather than Python, keeping
+  `TS_NORMALIZE` for everything else, held to the same answer by a
+  corpus and a fuzz test (`raw_epoch_sql` goes one step further on that
+  shape: SQLite reads `YYYY-MM-DDTHH:MM:SS` as it reads the spaced form,
+  so the first 19 characters go to `unixepoch` as they are). The old
+  three passes called `TS_NORMALIZE` six times a row; on a 500k-row view
+  that was 5–6 s. The same `LIMIT -1` applies to any aggregate here that
+  names a Python-function column more than once. The timeframe filter's
+  WHERE (`_compile_where`, what a drag across the strip builds) uses
+  `ts_normalize_sql` for the same reason: 0.64 s to 0.36 s to build a
+  timeframe'd view of 500k rows.
+- **Every other per-row timestamp read is on the fast path too**: day
+  groups and expanding a day (`day_bucket_sql`), jump to timestamp, tag
+  time bounds, and the Timeline's and the Findings pane's `ts`
+  (`ts_normalize_sql`). About twice as fast on a 2.1M-row EvtxECmd
+  table. The lateral_movement plugin keeps `TS_NORMALIZE`: its
+  conditions narrow the rows first (the EventId index), so the call a
+  row measured as nothing, and `ts_normalize_sql` is not part of the
+  plugin surface. `tests/test_timestamp_paths.py` holds each
+  one to what TS_NORMALIZE and DAY_BUCKET say over values the fast path
+  must leave to Python. Jump and tag time bounds take the same `LIMIT -1`
+  as the histogram, so the timestamp is worked out once a row and not
+  once for each place it is named. Dashboard SQL still says
+  `TS_NORMALIZE(col)` and pays the Python call; it is analyst-editable
+  text, so it gets the shortcut only by being rewritten.
+- **A root view holding every row is read through its table, not the
+  view, by expand a day and jump to timestamp.** Reading the view joins
+  the table to it in the view's order, one rid lookup per row, and on
+  any sort but rid's that is random access over the whole table: 30 s to
+  expand a day or jump on a 4.3M-row MFTECmd table sorted by a
+  timestamp, against 2 s and 5 s in the table's own order. A sorted,
+  unfiltered view holds every row (`_grouping_covers_whole_source`), so
+  `expand_group` counts the group from the member tables and gathers a
+  materialised group as `vv.rid IN (SELECT rid FROM member WHERE ...)`,
+  one pass over each, keeping the parent's order from `vv.pos`;
+  `_nearest_in_covering_view` finds the closest rows in the table and
+  asks the view only where they sit, so a tie still goes to the row
+  first in the view's order (and more than `NEAREST_TIES` tied rows read
+  through the view as before). The count still touches the parent's
+  table (`SELECT 1 ... LIMIT 0`) so a vanished parent reports expired.
+  `test_a_sorted_view_is_not_read_through_a_row_at_a_time` fails if any
+  of these goes back to `vv JOIN`.
+- **Jump ignores a timestamp julianday can't read.** `0000-00-00
+  00:00:00` normalises to itself but has no julianday, so its distance
+  is NULL, and `ORDER BY d` puts NULL first: one such row was "the
+  closest", had no distance to compare, and the column answered nothing
+  at all. The filter is `d IS NOT NULL`, not `ts IS NOT NULL`.
+- **Jump breaks a tie by the view's order, in its ORDER BY** (`d, pos,
+  rid`), not by the order the rows happen to be scanned in. Since the
+  first datetime column is indexed at import, SQLite reads an
+  unfiltered table's rid and timestamp out of that index, in timestamp
+  order, so `ORDER BY d LIMIT 1` alone kept whichever tied row the
+  index listed first rather than the first in the grid.
+
 - **`tag_counts_in_view`** is what the tag ribbon shows once a filter or
   search is on: the same shape `tag_counts` returns, counted over one view.
   Scope is the view exactly as built, tag filter included — a ribbon that
@@ -186,7 +975,139 @@ see [docs/notes/README.md](README.md) for the whole set.
   file for session matching; it is **not** an evidence integrity hash and must
   not be presented as one.
 - Session import remaps tag IDs **by name**, creating missing tags. Two analysts
-  with their own "Lateral movement" tag merge rather than duplicate.
+  with their own "Lateral movement" tag merge rather than duplicate. The
+  name rule is `pair_tag_names`, and session load, `copy_sources_to`
+  (`_map_tags_by_name`) and `diff_sessions` all use it: the exact name
+  first, then a name differing only in case **only when that is
+  unambiguous on both sides** (one local tag folds to it, no other
+  incoming tag does). `tag_defs.name` is not unique by case — "Malware" and
+  "malware" can be two tags kept apart on purpose — and load used to match
+  by `name.lower()` alone while copy and diff matched exactly, so reloading
+  your own session moved rows between the two and the diff said nothing
+  had changed.
+- **Two tags with the SAME name are a name nothing can match by**, and
+  nothing stops them: a rename can repeat a name, and until `upsert_tag`
+  gave a new tag a free one ("New tag 2"…, exact names, creates only) Add
+  tag made a "New tag" every time. Load kept the last id per name, so
+  reloading your own session put both tags' rows on one and emptied the
+  other (merge added them), and the diff — sets of names — said nothing
+  changed. Now `_session_tag_doubts` finds every name that more than one
+  tag carries on the session's rows, or that more than one live tag has,
+  before anything is re-imported or written. A session saved in THIS case
+  (`origin = 'saved'` — `_stored_session`; tag_defs is AUTOINCREMENT, so
+  its ids are still these tags) matches those names by its own ids, while
+  the tag still has the name, and otherwise gives the rows a new tag under
+  a free name with a warning. Anything else — a received session, a file
+  — is refused with a 400 naming them, the precedent
+  `_match_session_sources` set for tables: by name there is no right
+  answer to "which of the two", and ids from another case mean nothing
+  (invariant #10). The diff does the same (`_diff_tag_doubts`): split by
+  id ("New tag #4") when both sides were numbered here, else listed in
+  `duplicate_tag_names` so the panel doesn't call the two "agreed".
+  `copy_sources_to` (`_map_tags_by_name`) still collapses them.
+  tests/test_case_sessions.py, the shared-name section.
+- **Loading a case session with replace (`merge=False`) clears every table's
+  tags and notes, not just the snapshot's** — what the Load dialog promises.
+  It used to clear per table inside `import_session`, so a table imported
+  after the snapshot was taken kept its second-pass tags and the case became
+  a mix nobody had saved (and a diff against the session called it clean).
+  The clear and every table's writes are one transaction
+  (`import_case_session`); the one-table `import_session` still replaces
+  only its own table, since that is all a one-table session describes.
+  One exception: an open table a skipped session source may be — a
+  shape mismatch, or a file with several tables none of which is
+  unambiguously the source's — keeps what it has, with a warning naming
+  it. The session's tags for it were refused because they would land on
+  other rows; clearing its own as well would lose the analyst's work
+  there for nothing. The same goes for the tables an entry with no hash
+  could be (`_legacy_made_table_candidates`, next entry).
+- **A table made inside Winnow has an identity of its own: `file_hash =
+  'made:' + 32 random hex digits`** (`MADE_HASH_PREFIX`, set by
+  `ingest_rows` when there is no file to fingerprint — so `sql_to_table`
+  and every plugin's computed table; a subset has its `subset:` digest,
+  below). Matching requires a hash, and these tables had NULL: a load
+  skipped them, the replacing load's clear (above) took their tags and
+  notes anyway, and re-import "refused" them with a warning that the
+  table "isn't open" while it was — so loading a session saved a second
+  earlier lost every SQL-saved and first_last table's tags. **Random, not
+  derived from the rows**, on purpose: two analysts running the same query
+  over the same evidence get two tables with the same name, columns and
+  rows, and they are still two tables (the query may differ, the order
+  may differ), so a session from one case must never tag the other's — a
+  content hash would make exactly that match. A copy (`copy_sources_to`
+  carries `file_hash`) IS the table and matches, as a file's copy and a
+  subset's do. An older case gets one per NULL-hash table on its first
+  open (`Store.__init__`'s migration, `randomblob` per row) — once, so
+  sessions saved afterwards keep matching. A session saved BEFORE that
+  recorded no hash for such a table, and nothing in it says which table
+  here it was (a same-named one may have been dropped and made again
+  since; `imported_at` vs `exported_at` cannot rule that out, clocks
+  move between machines), so such an entry is **never matched** — not on
+  load, not by the diff's pivot (which uses the load rule, no
+  `hashless`), not by the lookup resolver — and a replace leaves the live
+  tables it could be alone (no file hash, same name, same base columns
+  and row count: a made table's never change) with a warning that says
+  so, rather than "isn't open". The diff still pairs two hashless
+  records with each other by name (`_diff_source_keys`, `hashless=True`)
+  — that compares two documents and pivots nowhere. `_is_file_hash` is
+  the one test for "a fingerprint of a file on disk" versus synthetic or
+  none; `_reimport_session_source` is only reached for the former, and
+  says "isn't in this case" (closed tables match too).
+  tests/test_case_sessions.py, the made-inside-Winnow section.
+- **A session source is matched to a table by hash AND by which table of
+  that file it is** (`_match_session_sources`, used by load and diff
+  alike). The hash is the FILE's: every table imported from one SQLite
+  database, every sheet of one workbook, and a file imported twice share
+  it. The old `{file_hash: id}` dict kept the last table per hash, so
+  loading a History session put `urls`' tags on `visits` ("replace" lost
+  them while reporting both restored) and the diff folded both tables
+  into one key and reported nothing while different rows were tagged.
+  Now the hash is required and the rest of what a session already
+  records — name, base columns, row count — picks the table, in tiers
+  from "all four agree" down to "hash alone, one of each" (the
+  single-table file, matched as it always was). Name is not required,
+  because a QC reviewer names their own tables; ids never enter it
+  (invariant #10). Below "all four agree" only one-to-one pairs count,
+  and anything left over is a warning naming the table — never put on a
+  sibling, and never re-imported, since its file IS in the case. The
+  diff gives each matched pair one key (the bare hash where that alone
+  is unambiguous, so `shared_sources`/`only_*_sources` read as before).
+  Nothing was added to the session document: old ones carry all four
+  fields already. tests/test_case_sessions.py, the shared-hash section.
+  A lookup column's table is found the same way on load
+  (`_resolve_session_lookup`): the session records the lookup table's
+  hash, name, base columns and row count beside the definition, so one
+  table of a multi-table file is told from its siblings by the same
+  tiers rather than by name alone.
+- **A session re-imports a missing table the way it was imported, from
+  the file it was recorded against, or not at all.** Its tags name rows
+  by rid, so a re-import is only any use if it produces the same rows in
+  the same order. Every reader records itself and the options that shape
+  its rows in `sources.ingest` (`_ingest_record`: the CSV delimiter
+  actually used and `has_header`, the SQLite table and its converted
+  timestamp columns, the sheet, the JSON flatten settings; `rows` for
+  `ingest_rows`, which nothing can re-run), and `export_session` carries
+  it. `import_case_session` used to re-parse every missing table as a
+  default CSV — a headerless CSV gained a header and every tag slid a
+  row, a JSONL file came back as one column, and `warnings` was empty.
+  Then, for every table a session is applied to — re-imported, or
+  matched by `_match_session_sources` above (which says which table,
+  not whether its rows are the session's: below "all four agree" the
+  match can be the same file read another way): the row count and
+  imported columns must be the session's
+  (`_session_shape_mismatch`), or nothing is applied — the same file
+  opened with a header the session's copy didn't have is the same hash
+  with every rid on another row. A session from before `ingest` existed
+  gets the extension's reader as a guess and that same check behind it;
+  a mis-guessed copy is dropped again. And the path is a claim from a
+  file somebody else may have written (`_reimport_session_source`): a
+  UNC/device path is refused on its shape before anything touches it
+  (on Windows, `isfile` alone would offer the host the analyst's
+  credentials), a relative one too, and the file is fingerprinted against
+  the session's `file_hash` *before* anything is ingested — a changed
+  file at the recorded path used to be imported and tagged with only a
+  toast. The single-table `import_session` keeps its warn-and-apply: an
+  analyst picked that table on purpose.
 - `search_all_sources` runs each source's count on a `_reader()`
   connection — the sweep never touches `self.lock` at all now (it used to
   take it per source's count, which still stalled a concurrent request for
@@ -219,15 +1140,16 @@ see [docs/notes/README.md](README.md) for the whole set.
   matches-everything, miss) while the file grew ~7%, because FTS5 automerges
   during the build and `detail=none` makes candidate verification, not
   segment walking, the cost.
-- `compact()` (`POST /api/case/compact`, the Tables modal's "Compact case
-  file…") is the only thing that returns freed pages to the OS. Everything
+- `compact()` (`POST /api/case/compact`, "Compact case file…" under the
+  **Case ▾** menu) is the only thing that returns freed pages to the OS. Everything
   else — dropping a source, the startup stale-FTS janitor, dropping a column
   index — frees to SQLite's freelist, which is the right default but can
   park tens of GB. Explicit and confirmed because it rewrites the whole file
   (minutes of held lock on a big case) and needs a full second copy free on
-  disk, checked up front. It forces `temp_store=FILE` for the duration:
-  `_tune` sets MEMORY, and VACUUM's scratch copy of the entire database
-  obeys that pragma. WAL is checkpoint-truncated on **both** sides — after,
+  disk, checked up front. VACUUM's scratch copy of the entire database
+  obeys `temp_store`, which is one reason `_tune` leaves it at FILE (it
+  used to set MEMORY, and compact forced FILE for the duration; see the
+  2026-10 sorter entry). WAL is checkpoint-truncated on **both** sides — after,
   so the reclaimed bytes don't just move into a `-wal`; before, so VACUUM
   starts from a folded-in file.
 - **`wal_checkpoint(TRUNCATE)` reports failure in its RESULT ROW (busy=1),
@@ -251,6 +1173,24 @@ see [docs/notes/README.md](README.md) for the whole set.
   per attempt so its own budget is the real wall-clock bound, and uses a
   monotonic deadline — it runs under `self.lock`, so overshooting stalls
   every writer.
+- **Only the last connection to close removes the `-wal` and `-shm`, and
+  only if it can write.** It checkpoints first, then deletes both; a
+  close with any other connection still open skips both, and a read-only
+  connection never does either. Two things left a pair beside closed
+  cases for good. A `mode=ro` look at a case nothing has open *creates*
+  the pair (the home screen's case list, registration's
+  `is_winnow_case_file`, the watchlist's case picker, multicase), so
+  every such look goes through `paths.sqlite_peek_uri`, which reads the
+  file `immutable=1` when there is no `-wal` to read and plain `mode=ro`
+  when there is. And `close()` with a reader still checked out wasn't the
+  last close: it now waits up to `FOLD_TIMEOUT_S` (under `self.lock`, so
+  no index build adds frames meanwhile) for `_readers_out` to reach zero,
+  and when a long download outlasts that, folds the `-wal` in with one
+  checkpoint attempt so what is left holds nothing the case file lacks.
+  A pair left anyway (a killed Winnow) is folded in and removed by
+  `fold_leftover_wal` when the home screen lists the case — through a
+  read-write connection's own last close, never by deleting files: a
+  `-wal` can hold the only copy of committed rows.
 - **compact's sizes are `main + -wal` on both sides, measured before any
   checkpoint**, which is what makes `reclaimed_bytes` honest without
   depending on a checkpoint succeeding. A checkpoint that can't complete
@@ -300,6 +1240,256 @@ see [docs/notes/README.md](README.md) for the whole set.
   opening any other modal supersedes it). Switching builder mode no longer
   auto-runs a search — with a real job that would abandon a sweep in
   progress just because you glanced at the other tab.
+- **The sweep can be scoped to chosen tables** (`source_ids` through
+  `SearchAllReq` → `start_search_all_job` → `_iter_search_all_sources`,
+  filtered onto the `list_sources()` snapshot the way
+  `_iter_watchlist_scan` filters its own). `None` is every real table,
+  which is all the sweep could ever do before. `resolve_search_all_scope`
+  turns a scope into ids the sweep can actually scan: deduped, in the
+  order asked, and **a merge expanded to its `member_source_ids`** — a
+  merge has no `src_N`, so "search this table" on one can only mean the
+  tables its rows live in (invariant #9). The expansion rides back in the
+  job record's `scope`, so the pane can say which tables the numbers in
+  front of it came from rather than quietly answering about different
+  ones. An id naming nothing is a **KeyError → 400** on the way in (a
+  typo'd scope that scanned nothing would come back as "no matches",
+  which is a wrong answer rather than an error) — the route resolves the
+  scope on its own line and calls the sweep outside the `except KeyError`,
+  so an internal defect in the scan can't come back as a 400 blaming the
+  request. The scope is resolved **once, where it is accepted**, and the
+  sweep never re-resolves it: a table dropped between the choice and the
+  scan reaching it is simply not in the `list_sources()` snapshot
+  `_iter_search_all_sources` filters, so it costs that table its scan
+  rather than the run, and the scan loop still never touches `self.lock`.
+  The **1,000-row count cap is unchanged at every scope**: scoping to one
+  table doesn't make that table smaller, and an exact count on an
+  unindexed one is the full scan the cap exists to prevent — the pane
+  names the cap and points at "Open ↦", where the grid's own `N of M` is
+  exact.
+- **The watchlist scan runs on the reader pool, one locked write per
+  (indicator, source), as a background job** (`scan_source`/`scan_all`
+  synchronous for profile apply and tests, `start_watchlist_scan_job` /
+  `get_watchlist_scan_job` / `cancel_watchlist_scan_job` for the UI,
+  all over `_iter_watchlist_scan` — one implementation, two callers,
+  the search-all shape). It used to run one
+  `instr(lower(blob), lower(?))` full scan PER INDICATOR PER TABLE
+  *under `self.lock`*, inside one POST the Add button awaited: every
+  locked read — the tab strip, the ribbon counts, tagging, the
+  watchlist list itself (N+1 locked queries) — stalled for the whole
+  scan while paging kept working — the lock-up where scrolling still
+  answered. Now each unit's match is a rid
+  SELECT on a `_reader()` connection with the WHERE
+  `_search_all_count_sql` uses — `_contains_clause`, through the
+  trigram index when the source has one (an ASCII case fold, like the
+  `lower()` it replaced, so the hits are the same rows) — **without
+  the LIMIT**: a scan writes every hit and auto-tags them, and a capped
+  scan would tag part of the matches and say nothing (invariant #7's
+  silent-partial-triage failure). `_ensure_fts_building` fires for an
+  unindexed table so the next scan gets the index. The write is one
+  `with self.lock, self.db:` per unit (invariant #4) that **re-reads
+  the indicator under the lock** before writing: the match's copy is
+  stale by then, `delete_indicator` can have landed in between, and
+  `watchlist.id` is not AUTOINCREMENT, so a deleted-then-re-added id
+  would have inherited the old value's hits — and re-reads the source
+  the same way, since `drop_source` deletes a table's hits and its id
+  is the next import's. The auto-tag goes through `_apply_tag_change`
+  in that same transaction, so hits and tags land together — with
+  `record=False`, so it is **not on the analyst's undo stack**: one entry
+  per auto-tagging unit meant a scan behind a 25-entry watchlist evicted
+  the analyst's whole history (`UNDO_LIMIT`), and Ctrl+Z then stripped
+  auto-tags off rows whose hits were still listed. An unrecorded write
+  also takes its rows out of any recorded entry that tagged them the same
+  way (`_claim_from_undo`), so undoing "tag rows 1-3" after a scan matched
+  2-4 leaves 2 and 3 tagged — the invariant #7 overlap rule with the scan
+  as the other writer. A unit
+  absorbs exactly one error from its match, "no such table": the
+  source's own table means it was dropped mid-scan (the unit is
+  skipped, there is nothing to record it against); its trigram table
+  means an index rebuild dropped it between listing and now, and the
+  unit retries on the LIKE path. Anything else surfaces as the job's
+  error — a unit quietly missing from the totals, with the table's old
+  hits left in place, would say "done" over a scan that was not.
+  `list_indicators` is one LEFT JOIN … GROUP BY on a reader.
+  The job is a `_JobRegistry` slot (one live scan per case; a poll on
+  a superseded id → None → 404 → the client stops). **A start that
+  displaces a running scan folds its remaining scope into the new
+  job** (`_union_scope`, None winning on either axis): the old scan
+  stops at its next unit as before, but a scoped scan is never left
+  half done — an Add's indicator scanned against three tables of
+  twelve, its count and auto-tags partial with nothing to say so,
+  every time another Add, an import landing or Search-all's "Add to
+  watchlist" started a scan behind it. Re-doing the units it finished
+  is safe (a unit replaces its slice); a scan that already finished
+  widens nothing. The registry's discard flag is the cooperative stop,
+  checked between units, and a unit's write re-checks `closing` under
+  the lock, so `Store.close()` — which sets it, flags the live job and
+  joins the thread before `self.db.close()`, as for view jobs — can
+  never be followed by a write on the closed connection even if the
+  join outwaits a slow unit. The record carries `scanned/total`,
+  `matched` per indicator, `by_source`, `auto_tagged` (the tables an
+  auto-tag was written to — the client invalidates its row caches
+  when the open table, or a member of the open merge, is among them)
+  and the scope it ended up with (`source_ids`/`watchlist_ids`, the
+  union) so the client knows which entries' counts it settles.
+  `_busy_reason` counts a running scan. Merges are skipped by design
+  (their rows are member rows, scanned there — invariant #9's list), and
+  so is a table that is **still filling** — a source whose `columns` is
+  still `'[]'` because an ingest job or a save-view-as-table copy has
+  the shell open. `_require_columns` calls that state "still importing"
+  and a scan cannot read it either: `_blob_expr([])` is empty, so the
+  unit would compile `WHERE () LIKE ?`, and that syntax error is not the
+  "no such table" a unit absorbs — it ended the whole job in error, with
+  every table after it unscanned. What covers those rows afterwards
+  depends on the fill: an import's tables are scanned when the job
+  reports done (jobs.js starts it), while a **save-view-as-table copy
+  has no post-copy scan**, so a scan that overlapped one leaves that
+  table without hits of its own until the next scan. Case-wide nothing
+  is missed — a subset's rows are copies of the parent's, scanned
+  there — and a scan-on-copy would be a new behaviour, not this fix: a
+  subset table has never been scanned on creation.
+  `indicator_hits` answers `{sources: [{source_id, source_name, count,
+  shown}], hits}`: the count per table is a GROUP BY, never derived
+  from the rows returned, and the cap (`WATCHLIST_HITS_PER_SOURCE`,
+  200) applies per table in rid order — the flat `LIMIT 500` with no
+  ORDER BY it replaced dropped a hot indicator's later tables outright.
+  `drop_source` deletes the table's `watchlist_hits` too: the id is
+  reused by the next import and stale hits would sit under its name.
+  `tests/test_watchlist_scan.py` pins the lock discipline structurally
+  (every match statement on a reader checked out with the lock unheld,
+  none on the writer), `tests/test_watchlist_grouped_hits.py` the shape.
+- **A sweep's answers are handed to the scan that follows it**
+  (`seed_watchlist_from_search_all`, `start_watchlist_scan_job`'s
+  `from_search_all`). Search-all's "Add to watchlist" started a full scan
+  of every table for terms the sweep had just answered for — twenty full
+  LIKE scans per indicator on a twenty-table case, to reach the numbers
+  already on screen. The two ask the same question: a per-term count goes
+  through `_search_all_count_sql`'s single-term path, and
+  `_watchlist_match_sql` compiles the same `_contains_clause` without
+  the cap. So a sweep that READ a table and found no
+  row holding a term has established the whole of what a scan of that
+  (indicator, table) pair would, and what the seeder writes is
+  byte-for-byte the write `_scan_unit` makes for a clean pair — the
+  pair's hits replaced by none plus a `watchlist_scans` upsert, in one
+  transaction, one source per transaction (invariant #4). Which is what
+  makes the handoff a shortcut rather than a second kind of answer:
+  `test_a_full_scan_afterwards_changes_nothing` reads every table
+  afterwards and asserts nothing moves.
+
+  The proof rides in the sweep's job record as `read` — one entry per
+  source, `{source_id, row_count, matched_terms}`, written by
+  `_iter_search_all_sources` and **only when the count returned**. A
+  count that raised is absorbed as `n = 0` for the progress report, which
+  is right there and would be a lie here: "clean" is a sentence an
+  analyst puts in a report, and a table nobody could read has not earned
+  it. `matched_terms` is `[]` when the union count was zero (no term
+  matched, so none of them did), the matching terms when there was a
+  per-term breakdown, and **None when the source matched without one** —
+  "something here matched, which of them is unknown", the one shape that
+  proves nothing per term. That last case is why a one-term sweep still
+  saves every clean table and never the matching one.
+
+  Five more refusals, each its own reason. A sweep that is not a plain OR
+  of positive terms (`_swept_or_terms` — under mixed AND/NOT the terms
+  constrain each other, so "no row matched the query" says nothing about
+  whether a row holds one of its terms). A sweep that errored, refused
+  whole: its per-source records are individually sound, but the exception
+  came from somewhere this does not model. A source whose `row_count` has
+  moved (unreachable through the app — source tables are never mutated
+  after ingest, invariant #1 — and guarded anyway for one integer
+  comparison). An indicator whose value is not one of the swept terms,
+  exact strings, so a box edited after the sweep gets a real scan. And
+  **any source not covered for EVERY indicator in the scan's scope**: one
+  unproven indicator sends the scan to every table regardless, and
+  trusting the sweep for the others would record a table as scanned for a
+  value nothing ever looked for there.
+
+  The saving is per TABLE, not per pair — a table where 49 of 50
+  indicators are clean is still read for all 50, because skipping pairs
+  inside a table the scan has to open anyway would mean teaching
+  `_iter_watchlist_scan` about exceptions for no I/O saved. The narrowing
+  is also the first thing a displaced scan undoes: the fold widens the new
+  job to whatever the scan it replaced still owed, and nothing promised
+  that one a sweep. The seeded records stay true either way — they are
+  facts about pairs, not about a job — so the worst case is a scan that
+  re-derives some of them. `seeded` in the job record is what the UI says
+  out loud. `tests/test_watchlist_from_search_all.py`.
+
+- **What a watchlist count cannot say on its own** —
+  `watchlist_overview` is the one read behind the tab, and it answers
+  three things a list of per-indicator counts cannot.
+  **How much of the case an indicator has actually been scanned
+  against**: `watchlist_scans` records one row per (indicator, table)
+  unit a scan completed, written in the SAME transaction as that unit's
+  hits (`_scan_unit`), so `scanned_sources` against `scan_targets`
+  (`watchlist_scan_sources`, so merges and still-filling imports are out
+  of both halves of the fraction) tells "read every table, it is not in
+  this case" from "nothing has looked yet" — a bare `0` meant both, and
+  only the first is a sentence an analyst can put in a report. Both
+  `delete_indicator` and `drop_source` delete the records, for the id-reuse
+  reason the hits already had on both sides.
+  **Which indicators are flagging the same rows**:
+  `watchlist_overlaps` reports only COMPLETE overlap (identical sets, or
+  one contained in the other — `mimikatz` and `mimikatz.exe` matching the
+  same 2,323 rows), both directions of every pair, plus `distinct_rows`,
+  which is the honest count behind a `total_hits` that adds the same row
+  up once per indicator matching it. A partial overlap is ordinary and
+  says nothing worth acting on; an indicator with NO hits is never
+  reported, because the empty set is a subset of everything and saying so
+  would call an unscanned entry redundant against the whole list. It is
+  linear, not pairwise: the supersets of an indicator are the
+  intersection, over its own rows, of the indicators on each row, so one
+  pass over `watchlist_hits` answers for all of them — the self-join it
+  replaces needs a sort on `(source_id, rid)` per side, and
+  `ix_watchlist_hits_row` is the index that makes "which indicators are
+  on this row" and "which rows of this table are flagged" cheap at all.
+  Above `WATCHLIST_OVERLAP_MAX_HITS` the pass is skipped and
+  `overlap_checked` says so — "not checked" must not render as "no
+  duplicates".
+  **What it has found lately**: `latest_hits` is the newest flagged rows
+  across every indicator, one entry per ROW with the indicators that
+  matched it (so a duplicated pair fills the pane once), capped per source
+  BEFORE the union as well as after it so the ordering sort is over
+  (sources x limit) rows. It takes `build_timeline`'s per-source config,
+  resolved by server.py against the analyst's timeline templates, so the
+  pane and the Timeline describe a row the same way; a source with no
+  datetime column sorts last rather than vanishing. Merges are absent for
+  invariant #9's reason — their rows are members' rows, flagged there.
+  `merge_indicators` folds a redundant entry into the one that covers it:
+  the only thing removal can lose is its auto-tag, which moves across when
+  the keeper has none, and the subset check is against the hits on disk,
+  not against an overlap report that may be a scan out of date.
+  `tests/test_watchlist_findings.py`.
+- **A view build yields the writer lock to the table the analyst just
+  switched to.** `build_view` holds `self.lock` for the whole
+  `INSERT..SELECT`, which is right for materialising a million rows and
+  wrong for the tab you click while a four-minute search runs: that
+  table's own build queued behind the search. A build for a DIFFERENT
+  source now asks the holder to stand aside (`_yield_the_writer`), the
+  interrupted build rolls back whole — a held build evicts nothing, so
+  nothing on screen depended on it — and its worker starts it again
+  (`_build_for_job`). Four things keep that from turning into a
+  merry-go-round, and none is optional: the ask is only ever across
+  tables (two builds for the same table are the ordinary supersede); a
+  RESTART never asks, so two builds cannot take the lock off each other
+  forever; a restart stands back while a foreground build is queued,
+  or the two race for the lock the moment it frees and the restart can
+  win; and `VIEW_BUILD_YIELD_MAX` caps how many times one job can be
+  asked, so flicking between tabs cannot starve a search. `OpPreempted`
+  subclasses `OpCancelled` so every existing handler unwinds one
+  correctly without being taught about it.
+
+- **The table-switch reads are on the pool, and they have to stay
+  there.** `list_sources`, `list_merges`, `list_folders`, `get_source`,
+  `_source_lite`, `_resolve_members`, `get_layout`, `list_tags`,
+  `tag_counts`, `list_derived_columns` and the rest of what opening a
+  table asks for used to read on the writer connection under
+  `self.lock`. Clicking another tab during a long build therefore blocked
+  on the FIRST await, before a view was even asked for — the analyst's
+  "it locks you on that table". Anything new on that path belongs on
+  `_reader()` too; `tests/test_search_does_not_pin_the_table.py` holds the
+  writer lock for the whole of a switch and asserts it completes, which
+  deadlocks rather than merely being slow if one moves back.
+
 - **Long view work is cancellable via a client-generated `op_token`**
   (`Store.cancel_op` / `_interruptible`, `POST /api/cancel_op`;
   `build_view`, `build_timeline`, `group_summary`). cancel_op marks the
@@ -320,6 +1510,111 @@ see [docs/notes/README.md](README.md) for the whole set.
   server.py maps `OpCancelled` → HTTP 499 in one exception handler; the frontend
   arms a cancel chip (`armOpCancel`) only after ~1.2s in flight, so fast
   rebuilds never flash it.
+  **SQL pane queries register too, and are also stopped wholesale**
+  (`_pane_query`, used by `run_sql` and `sql_to_table` — so dashboards
+  and plugin reads through `run_sql` get it as well). The token half is
+  the usual `_interruptible`; the other half is a set of running pane
+  connections that `stop_pane_queries()` interrupts all at once and that
+  refuses new queries afterwards, for close() and shutdown (see
+  docs/notes/server.md for why shutdown cannot leave it to close()).
+  close() interrupts them first thing and then **waits for them to close
+  before the writer does** — a pane connection holds the case file open,
+  which is exactly the reader-at-writer-close trap `_drain_idle_readers`
+  exists for. `sql_to_table`'s exact-count wrap swallows `sqlite3.Error`
+  to fall back to streaming; it must re-raise an interrupt, or a stopped
+  count falls through and starts the same runaway again uninterrupted.
+  **The frontend also cancels on supersede** (view.js `rebuildView`,
+  module-level `inflight`): a rebuild that starts while another is in
+  flight POSTs `cancel_op` for that one's token *and* aborts its fetch
+  (an `AbortController`, threaded through core.js `api()`/`post()`'s
+  `{ signal }`) before posting its own. Both halves are load-bearing.
+  Without the cancel, every keystroke past the search box's debounce
+  queued a whole build on the writer lock and each stale one still
+  committed — evicting the live view, so the grid's next page fetch
+  409'd into yet another rebuild — while every lock-taking read (the tab
+  strip, ribbon counts, tagging) waited behind the queue. Without the
+  abort, the superseded request kept one of the browser's six per-host
+  connections (one is the presence stream) until its build reached the
+  lock: a pre-cancelled token is only checked once `self.lock` is *held*
+  (`with self.lock, self._interruptible(...)`), so the cancel shortens the
+  work, not the wait, and two or three queued builds plus the jobs poll
+  could starve even reader-pool page fetches in the browser. A superseded
+  build's 499/abort is silent (the same seq/source guard the success path
+  paints behind); only the chip's cancel toasts. The grid's expired-view
+  recovery declines to rebuild while a build for the open table is in
+  flight (`rebuildInFlight`) — that build's landing is the recovery, and
+  a rebuild from the 409 would cancel it and start the same spec over.
+- **A search-box build runs as a job that builds a *held* view**
+  (`start_view_job` / `get_view_job` / `cancel_view_job`, `POST
+  /api/view/start`, `GET /api/view/job`, `POST /api/view/job/cancel`,
+  `POST /api/view/adopt`). `build_view(hold=True)` skips
+  `_evict_root_views` for everything but an earlier *pending* view of the
+  same source and registers its handle with `pending: True`; the grid's
+  live view stays exactly where it is — the reader paths only consult
+  `_views` by id, so both page — and `adopt_view` is the step that makes
+  the held one live: clear `pending`, evict the rest (`keep=` spares the
+  one being installed). That is what lets the client keep the old rows on
+  screen while a long search runs and offer Apply when it lands, instead
+  of every search evicting the view under the grid the moment it
+  commits. Three rules keep held views from piling up: a normal build
+  still evicts pending views along with everything else (newer intent
+  wins — a filter change makes a pending search moot, and the client's
+  adopt then 409s "expired" into a fresh build); a second held build for
+  a source evicts the first (one pending per source); and Discard
+  (`cancel_view_job` on a finished job) drops the view. `hold` reaches
+  **both** build paths on purpose — `_build_virtual_root_view` evicts
+  under the lock before it has a handle, and a cleared search box lands
+  there, so a hold that only covered the materialised block evicted the
+  live view on the most common search rebuild of all. The job registry
+  is `_JobRegistry` (own lock, one live job per slot, `get` answers only
+  for the slot's live job → 404 for a superseded id), written so the
+  next job of this shape is the same few lines; the worker's build
+  carries the spec's `op_token` (minted server-side when the client sent
+  none), so starting a second job for the source `cancel_op`s the first
+  and the cancel chip's `/api/cancel_op` works on a job exactly as on a
+  blocking build. `start_view_job` waits up to `wait_ms` (250) before
+  answering, so a fast search comes back `done` with its view inline and
+  costs the client no poll. `Store.close()` sets the registry `closing`,
+  cancels every running job's token and joins the threads **before**
+  `self.db.close()`, mirroring the ingest block: a worker queued on
+  `self.lock` at close time would otherwise take it after the connection
+  was gone. server.py's `_busy_reason` counts running view jobs, so idle
+  shutdown cannot reap a long search whose window was closed. A build
+  error lands in the record (`error`, `error_status` 400 for the
+  analyst-fixable kind api_view answers 400 with), never as the start
+  route's status. **A cancel is decided under the registry lock, not by
+  what `cancel_op` found**: `cancel_view_job` reads "running", and in
+  the gap before its `cancel_op` the worker can commit the held view —
+  `cancel_op` then has nothing to interrupt (the same is true of a build
+  between statements), the client has been told True and dropped its
+  record, and the pending table would sit in `/dev/shm` for nobody
+  until the next build for that source. So `_JobRegistry.request_discard`
+  flags the job under the lock `finish` records the outcome under: a
+  "done" that arrives after the flag is recorded "cancelled" and handed
+  back to the worker, which drops the view (`_drop_pending_view`).
+  Whichever runs first, the view is kept or dropped exactly once. The
+  inline wait is clamped (`VIEW_JOB_INLINE_WAIT_MAX_MS`): over HTTP it
+  parks a shared threadpool worker, and the client never sends a figure.
+  `tests/test_view_hold.py` / `tests/test_view_jobs.py`.
+- **A view handle goes into `_views` before the writer lock is
+  released, never after.** Eviction (`_evict_root_views`,
+  `_evict_views_of` when a table or merge is dropped, and the cascade
+  over `parent_view_id` children) only sees what is registered, and it
+  runs under `self.lock`. A build that committed its table, let
+  the lock go and *then* registered left a gap a rebuild of the same
+  source could take: the rebuild's eviction ran first, missed the
+  not-yet-registered view, and the late registration installed it on
+  top — a held search that could then be adopted over the newer view, a
+  group whose parent had been dropped (and its `v.view_N` table with
+  nobody left to evict it). `build_view` and both `expand_group`
+  branches therefore register inside the lock they built under, and
+  `expand_group` re-checks that its parent is still registered there —
+  a `root_virtual` parent has no table whose absence would raise. The
+  same gap let a view outlive a `drop_source` that ran in it, paging a
+  table that was gone instead of answering 409.
+  `tests/test_view_races.py` opens the gap deterministically by running
+  the competing rebuild (or drop) at the moment the build's lock is
+  released.
 - **The 2026-08 hot-path perf pass** (validated with `python3 -m bench
   --vs-ref` at both the 200k and 1.2M tiers — 0 slower, footprint
   unchanged), the shapes and their reasons:
@@ -351,11 +1646,39 @@ see [docs/notes/README.md](README.md) for the whole set.
     overhead on payloads that are already plain str/int/None) and go
     straight to json.dumps. `/api/rows` dropped ~62–77%. Anything these
     endpoints return must stay JSON-native types.
+  - **`/api/rows` goes one step further: SQLite writes the cells.**
+    `Store.fetch_rows_json` selects `json_array(col, ...)` per row and
+    splices the arrays into the page as text, so a cell is never read
+    into Python at all — a 5,000-row page of a 420-column JSON import
+    went from ~500ms to ~110ms, a 27-column EvtxECmd one from 80ms to
+    40ms, same bytes. Three things make that safe, and each is a test in
+    tests/test_rows_json.py: (1) SQLite escapes text exactly as
+    `json.dumps(ensure_ascii=False)` does, which `_sql_json_pages` checks
+    once per Store against a probe of the awkward characters before
+    trusting it; (2) it writes a REAL with 15 significant digits where
+    Python writes the shortest round-trip, and that cannot reach a page
+    because every column a page reads is declared TEXT (TEXT affinity
+    stores a number as its text) — **a non-TEXT grid column would
+    change the bytes**, so keep the coldefs TEXT or give such a column a
+    guard; (3) `json_array` takes at most 127 arguments
+    (SQLITE_MAX_FUNCTION_ARG), so cells go 100 to a call
+    (`JSON_CELLS_PER_CALL`) and the arrays are joined. A BLOB (which
+    SQLite's JSON refuses), a build without JSON functions, or a lower
+    argument cap all fall back to `fetch_rows` + `json.dumps`, so they
+    fail, or not, exactly as before. `fetch_rows` itself still returns
+    dicts for every other caller.
   - `tag_positions` fast-exits via one indexed `row_tags` probe per
     member before the join — the join's only plan is a full scan of the
     view probing row_tags per row (~115ms per 2M view rows even with
     zero tags), it runs after every view build, and an untagged source
     is the common case.
+  - The rail asks `tag_positions` for `height` (its pixel height) and gets
+    one `[y, tag_id, first pos, last pos]` per pixel row and tag, grouped
+    in SQL with the rail's own `round(pos / row_count * height)`, ordered
+    by last pos so drawing them in order paints what drawing every row
+    would. It used to fetch `[pos, tag_id]` per tagged row with a 20,000
+    `LIMIT`, so a view with more tagged rows than that had no marks below
+    the 20,000th. The flat list without `height` is unchanged.
   - `ingest_csv`'s per-row append loop is deliberate: a chunked
     `list(islice(reader, BATCH))` rewrite measured ~7% *slower* (islice's
     per-item indirection costs more than the tuple() copy it saves, and
@@ -365,6 +1688,8 @@ see [docs/notes/README.md](README.md) for the whole set.
     that helps a multi-million-row view-build sort), mmap_size at 1 GB
     (file-backed, shared with the OS page cache; costs address space,
     not RAM; SQLite clamps it to its compile-time max on old builds).
+    The threads did nothing until the 2026-10 sorter entry below:
+    `temp_store=MEMORY` switches them off.
 - **The 2026-08 reader-pool split** (invariants #3/#4 carry the rules;
   this entry carries the numbers and the traps that were checked):
   - Headline, via `bench/probe_concurrency.py` (a standalone before/after
@@ -398,12 +1723,49 @@ see [docs/notes/README.md](README.md) for the whole set.
     why the pool returns connections on the happy path but *closes* them
     on any exception (a connection whose last statement died mid-view-drop
     is cheaper to replace than to prove clean).
+- **The 2026-10 sorter settings: less memory, faster.** Measured on a
+  2.08M-row, 3 GB EVTX case (`gen_large.py evtx 3.0`), in-process
+  `Store` calls, two interleaved rounds; scripts and logs in the project's
+  `benchmarks/2026-10-23-sqlite-memory/`.
+  - Two SQLite rules, both in `vdbesort.c`: a connection with
+    `temp_store=MEMORY` starts **no** sorter worker threads (so `_tune`'s
+    `threads=4` was a no-op) and keeps the whole sort as one list in RAM;
+    and the sorter's chunk size is the main schema's `cache_size` (at
+    least 250 pages, 16 MB at 64 KB pages), so the writer's old 256 MB
+    cache left a 2M-row sort one chunk with nothing to hand a thread.
+  - Writer now `temp_store=FILE` + `cache_size=-16384`; readers and the
+    SQL pane add `threads=4` (they already had FILE and the default 2 MB
+    cache, so 16 MB chunks). Unindexed sort view 5.56 s -> 1.75 s,
+    column index build 3.58 s -> 1.67 s, `group_summary` on an
+    unindexed column 1.98 s -> 1.33 s, `column_values` 1.66 s -> 1.17 s,
+    peak private memory 653 -> 235 MB. Paging, filters, histograms,
+    export: unchanged. Import (3 GB CSV) and `build_fts` (208k rows):
+    unchanged, peak import RSS 1.59 -> 1.27 GB.
+  - Readers with the writer's old settings (256 MB cache,
+    `temp_store=MEMORY`) were measured too: GROUP BY 1.8x **slower**.
+    More page cache does not help a reader anyway: in WAL mode SQLite
+    drops a connection's whole cache whenever another connection has
+    committed since its last read, and mmap'd pages bypass it.
+  - The memory side matters most on big cases: a sort by Payload (1.29 GB
+    of text) held +1.1-1.6 GB of RAM under the old writer settings and
+    ~0.1 GB now, the rest going to temp files that SQLite only creates
+    once a chunk overflows.
+  - Also measured and rejected, for the record: a copy of the whole case
+    on /dev/shm and `mmap_size` at SQLite's 2 GB max were no faster than
+    a warm OS cache; a `:memory:` copy (DB Browser's in-memory mode) cost
+    RAM equal to the case and 9-15 s to load 3 GB, for 6-21% on plain
+    scans and sorts and nothing on LIKE, against 1.5-3x from the sorter
+    settings. It also can't serve the reader pool: a private `:memory:`
+    database has one connection.
 
 - **`copy_sources_to` runs through the TARGET, with the source attached.**
   The target opens as a full Store — which is what migrates an older
   case's schema before anything writes, and whose case lock is the
   exclusivity that makes the write correct; a target open in another
-  Winnow is refused with the holder named. Our own live file is ATTACHed
+  Winnow is refused with the holder named, and a target that is not a
+  case at all (`is_winnow_case_file`) is refused before the Store opens,
+  since that open is itself the write — META_SCHEMA plus WAL into a
+  browser history that was registered as a case by mistake. Our own live file is ATTACHed
   to the target's writer read-only-by-discipline (WAL makes the concurrent
   read safe). Rids copy byte-for-byte — they are what tags and notes point
   at — and tags map by NAME, the session-import rule, because two cases
@@ -411,4 +1773,104 @@ see [docs/notes/README.md](README.md) for the whole set.
   target rebuilds); merges are refused, their member ids being meaningless
   elsewhere. One trap: `create_merge` returns the SIGNED id (negative), so
   callers must not re-negate it — a double negation lands on a real
-  source id and copies the wrong table without an error.
+  source id and copies the wrong table without an error. A second copy
+  into a target this Store is already copying into is refused before the
+  lock probe (`_copying_into`): the first copy's own Store holds that
+  lock, so the probe called our own process "another Winnow" — a
+  double-clicked "Copy into this case" said exactly that, naming our pid.
+
+- **`save_view_as_source` copies a view — or a pick of its rows — into a
+  new source batch by batch, never through a Python list.** It is the
+  store half of "Save as table" (row menu, Filters ▾; `subset.js`) and
+  the second thing after `sql_to_table` that makes a table out of rows
+  already in the case. The shape, and why: a pooled `_reader()` walks the
+  view's keys `BATCH` at a time, keyset-paged (`WHERE pos > ?` / `rid >
+  ?`, never LIMIT/OFFSET), one walk per view kind — the same four
+  `fetch_rows` pages (root by `pos`, root_virtual by rid range, `group`
+  through its own `v.view_N`, `group_virtual` through
+  `_virtual_group_where`) — then reads each batch's cells through ITS
+  member's `_from_clause` (`WHERE rid IN (...)`, the `fetch_rows` shape:
+  derived sidecar joined `USING(rid)`, so a merge's canonical column list
+  runs unchanged against every member and a subset of a merge is a real
+  single source, rows resolved per member) and commits each batch under
+  the writer lock through `_commit_ingest_batch`. `sql_to_table` pulls
+  its whole result into a list first; on a 2M × 27 view that is
+  gigabytes, which is why this does not share its shape. The writer lock
+  is never held across the loop (invariant #4), and
+  `_ingest_synchronous_off` is deliberately not taken: a subset is
+  usually small, and that relaxed-fsync window covers every concurrent
+  tag write, not just the copy. `_create_source_shell` is the sources
+  row + open tab + empty `src_N` transaction factored out of
+  `ingest_rows` so both fill the same shell. Derived columns are copied
+  as VALUES (plain columns, the parent's types passed through — never
+  re-sampled, since a pick of blanks would re-type a numeric column), and
+  rid/source_id/Tags/Note are never data columns — that is the SQL
+  pane's `SELECT *` leak this exists to avoid.
+  `subset_rids(source_id, rid, parent_source_id, parent_rid)` records
+  where every new rid came from, per row (so a merge subset maps to its
+  members), written in the same transaction as the rows it describes —
+  the new rid is known before the INSERT because rid is assigned 1..N in
+  insertion order on the one writer (invariant #2). `drop_source` clears
+  it in BOTH directions (a subset's own rows, and every map naming the
+  dropped table as parent — the id is reused), and `_copy_sources_into`
+  carries `origin`/`origin_meta` and re-points the map only when the
+  parent travels in the same copy (otherwise `parent_source_id` becomes
+  null; `parent_name` stays for display).
+  A subset starts **untagged**: `copy_tags` defaults off at the store,
+  the route and the UI. The reason is double counting — `build_timeline`
+  and `export_tagged_xlsx` walk every source with a tagged row, a subset
+  included and on purpose (a tag put on a subset is real work, so they
+  must not skip `origin='subset'` the way `_sources_for_header_set`
+  does), which means a seeded copy would list each of the parent's
+  findings twice in the Timeline and give it a second worksheet in the
+  hand-over workbook. `copy_tags=True` stays available for a script that
+  wants a tagged copy, and is one rule that looks breakable and isn't:
+  one `INSERT OR IGNORE ... SELECT` over `subset_rids` into
+  `row_tags`/`row_notes` directly — an **invariant #7 exception** with
+  the `_copy_sources_into` precedent (a brand-new table nobody could have
+  tagged yet), deliberately not an undo entry, since undoing "create this
+  table" is deleting it. Either way, tagging the subset later does not
+  write back to the parent (the map is stored so that could come). And a
+  subset gets a synthetic `file_hash = 'subset:' + sha256(parent hash |
+  spec | created_at | id)`: `import_case_session` requires a hash to
+  match a source and skips a hashless one, so without it a saved session
+  would never give a subset its tags back (SQL-saved and plugin-made
+  tables had that gap until they got `made:` hashes — above, under
+  sessions). `diff_sessions` keys on the same hash through the same
+  matcher (`_match_session_sources`, below); nothing treats `file_hash`
+  as "a file on disk" (that is `path`, which stays NULL). Failure of any kind mid-copy
+  — `op_token` cancel via `_interruptible` (registered per statement:
+  innermost on the reader, and by `_commit_ingest_batch` while it holds
+  the lock, the writer discipline), the view evicted under the reader
+  (`_dropped_view_is_expired` → KeyError → 409), the case closing
+  (next), anything — drops the partial source, ingest.md's
+  cancel-drops-partial rule. **`close()` drains a copy the way it drains
+  ingest jobs**, through `_subset_copies` rather than `_ingest_jobs`: a
+  job owns a thread `close()` joins and a jobs-panel entry, and a copy
+  has neither (it runs on the request's threadpool thread, which
+  outlives the request), so its entry is `{cancelled, done}` — `close()`
+  sets `_closing` and flags every copy in one locked step, waits on each
+  `done` (bounded like the job join), then closes the writer; the copy
+  reads the flag once per batch, raises `OpCancelled`, and its drop runs
+  against a still-open writer. The entry spans the shell through the
+  metadata write that makes the table openable, and the shell is created
+  and registered under one hold of the re-entrant writer lock, so a copy
+  that arrives after the snapshot sees `_closing` and drops its own
+  shell instead of running into a closed database. `copies_in_flight()`
+  feeds server.py's `_busy_reason`, so save-as and copy_sources refuse
+  mid-copy as they do mid-import, in those words. Refused up front (ValueError → 400,
+  the column named) while any derived column the copy would take has
+  `derived_status != 'ready'`: values are copied as they stand, and a
+  backfill mid-way would land `''` for every row it had not reached in a
+  plain column nothing can re-derive — `add_derived_column`'s own rule
+  for its inputs; on a merge every member's copy of a canonical derived
+  column is checked. Not temporary: a subset is an ordinary table,
+  badged `origin='subset'`, removed from the Tables manager like any
+  other; nothing auto-deletes it (a drop on `close()` never runs after a
+  crash, and would take the analyst's tags on it along). `scan_all`
+  scans a subset like any table, on purpose — the watchlist counts are
+  per table and a subset is one. `_sources_for_header_set` skips
+  `origin='subset'` because a `{{all:…}}` dashboard would count those
+  rows twice; the Timeline and the tagged xlsx export deliberately do
+  not, which is the untagged-by-default rule above seen from the other
+  side.

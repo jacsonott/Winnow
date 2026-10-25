@@ -7,7 +7,6 @@ screen that did not mean what it said.
 
 from __future__ import annotations
 
-import csv
 
 import pytest
 

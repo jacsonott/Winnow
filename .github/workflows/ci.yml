@@ -1,17 +1,27 @@
-# Every PR into main runs the suite. Before this existed, the only thing
+# Every PR into develop or main runs the suite. Before this existed, the only thing
 # standing between a broken merge and main was somebody remembering to run
 # pytest — which, on a repo where changes arrive as whole features, is a lot
 # to leave to memory.
 #
-# Renaming a job here is not cosmetic: the branch ruleset requires these
-# checks *by job name*, so a rename that isn't mirrored there leaves every PR
-# waiting forever on a check that never reports. Change both together.
+# Renaming a job here is not cosmetic: the branch ruleset requires checks
+# *by job name* — `backend + frontend parse` and `browser` — so a rename
+# that isn't mirrored there leaves every PR waiting forever on a check that
+# never reports. Change both together.
 #
-# Two jobs, because they fail for different reasons and cost different
-# amounts: `tests` is the fast one (backend + the static/js parse, ~30s, no
-# browser), `ui` drives a real Chromium and is where the layout/state
-# regressions get caught. Both are required; keep the UI suite deterministic
-# rather than letting it become the check people re-run until it's green.
+# Two suites, because they fail for different reasons and cost different
+# amounts: the backend + static/js parse needs no browser, `tests/ui` drives
+# a real Chromium and is where the layout/state regressions get caught.
+# Both are required; keep the UI suite deterministic rather than letting it
+# become the check people re-run until it's green.
+#
+# Each suite is split across parallel runners with `pytest --shard K/N`
+# (tests/sharding.py: whole files, dealt by test count). Almost all of the
+# UI suite's time is ~800 tests each opening a fresh page, so one runner
+# took ~18 minutes and N take about 1/N of that. The shard jobs are NOT
+# what the ruleset requires — their names carry K/N and change with N.
+# The required names belong to the two small roll-up jobs at the bottom,
+# which pass only when every shard of their suite passed. That is what
+# lets N change here without touching the ruleset.
 name: CI
 
 on:
@@ -30,9 +40,66 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Twice: on 3.10, the oldest Python the README promises, and on 3.12.
+  # Running only 3.12 let three bugs ship that 3.12 does not have (a
+  # plugin table write that left the case refusing every write, CSVs with
+  # a NUL byte, deeply nested JSON), because sqlite3, csv and json each
+  # changed behaviour in 3.11 or 3.12. Raising the minimum means changing
+  # it here and wherever the docs state it (README.md, launch/README.md,
+  # docs/wiki/Installation.md) together.
   tests:
-    name: backend + frontend parse
+    name: backend py${{ matrix.python }} ${{ matrix.shard }}/2
     runs-on: ubuntu-latest
+    # A shard takes 1-3 minutes. Without a limit a hung test holds the
+    # runner for GitHub's default of six hours and reports nothing.
+    # pytest.ini's faulthandler_timeout prints every thread's stack first.
+    timeout-minutes: 15
+    strategy:
+      # Let the other shards finish: a failure in one says nothing about
+      # the tests in another, and "Re-run failed jobs" then re-runs only
+      # the shard that failed.
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.12"]
+        # The shard count is spelled out in the --shard argument below
+        # because strategy.job-total now counts the Pythons too. Change
+        # the two together.
+        shard: [1, 2]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      # Pyflakes over every .py in the repo (ruff.toml), ~50 ms. Once, not
+      # per shard: the answer doesn't depend on the shard or the Python.
+      - name: ruff check
+        if: matrix.shard == 1 && matrix.python == '3.12'
+        run: ruff check --output-format github .
+      # tests/ui is excluded here rather than left to skip on a missing
+      # browser: a silent skip in the fast job is how a suite quietly stops
+      # running at all. !cancelled() so a lint failure above still lets
+      # the tests report.
+      - if: ${{ !cancelled() }}
+        run: pytest -q --ignore=tests/ui --shard ${{ matrix.shard }}/2
+
+  # The backend suite again on Windows, where analysts run Winnow and no
+  # developer test run happens: assoc.py's registry adapter is tested
+  # against a fake registry only, and path handling, pythonw, and the
+  # mkstemp-then-open rule the xlsx export documents only break there.
+  # Part of the `backend + frontend parse` roll-up, so the ruleset needs
+  # no new name. Tests of something Windows doesn't have (SIGTERM, FIFOs,
+  # POSIX file modes) skip there by their own skipif.
+  windows:
+    name: backend windows ${{ matrix.shard }}/2
+    runs-on: windows-latest
+    timeout-minutes: 20   # a Windows runner is slower than ubuntu's; see the backend job
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -41,14 +108,50 @@ jobs:
           cache: pip
           cache-dependency-path: requirements-dev.txt
       - run: pip install -r requirements-dev.txt
-      # tests/ui is excluded here rather than left to skip on a missing
-      # browser: a silent skip in the fast job is how a suite quietly stops
-      # running at all.
-      - run: pytest -q --ignore=tests/ui
+      - run: pytest -q --ignore=tests/ui --shard ${{ matrix.shard }}/2
+      # The suite's servers are started by tests/spawn.py, with their own
+      # workspace. This one starts the way an analyst's does, from
+      # server.py with a case and a CSV, and has to answer with the CSV's
+      # rows.
+      - name: smoke - server.py opens a case, answers, and stops
+        if: ${{ matrix.shard == 1 && !cancelled() }}
+        shell: python
+        run: |
+          import json, os, subprocess, sys, time, urllib.request
+          tmp = os.environ["RUNNER_TEMP"]
+          csv = os.path.join(tmp, "smoke.csv")
+          with open(csv, "w", encoding="utf-8") as f:
+              f.write("Timestamp,EventId\n" + "".join(f"2026-01-01 00:00:{i:02d},{4624 + i}\n" for i in range(10)))
+          server = subprocess.Popen([sys.executable, "server.py", "--no-browser", "--port", "8799",
+                                     "--case", os.path.join(tmp, "smoke.db-winnow"), "--open", csv])
+          try:
+              deadline = time.monotonic() + 90
+              while True:
+                  if server.poll() is not None:
+                      sys.exit(f"server.py exited with {server.returncode}")
+                  try:
+                      with urllib.request.urlopen("http://127.0.0.1:8799/api/sources", timeout=5) as r:
+                          sources = json.loads(r.read())
+                      if any(s.get("row_count") == 10 for s in sources):
+                          print("smoke OK:", [(s["name"], s["row_count"]) for s in sources])
+                          break
+                  except OSError:
+                      pass
+                  if time.monotonic() > deadline:
+                      sys.exit("server.py never listed smoke.csv's 10 rows on /api/sources")
+                  time.sleep(1)
+          finally:
+              server.terminate()
+              server.wait(timeout=30)
 
   ui:
-    name: browser
+    name: browser ${{ matrix.shard }}/${{ strategy.job-total }}
     runs-on: ubuntu-latest
+    timeout-minutes: 20   # a shard takes about 4; see the backend job
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -59,8 +162,50 @@ jobs:
       - run: pip install -r requirements-dev.txt
       # --with-deps pulls the shared libraries Chromium needs on a bare
       # runner; without it the browser installs and then fails to launch.
-      - run: playwright install --with-deps chromium
-      # No artifact upload step: when a UI test fails it's almost always the
-      # server behind it, and the conftest fixture already folds the server's
-      # stdout into the failure report.
-      - run: pytest -q tests/ui
+      # --only-shell: the suite runs headless, which launches the headless
+      # shell; the full Chrome build alongside it is ~190MB nobody uses.
+      - run: playwright install --with-deps --only-shell chromium
+      # What the server logged during a failing test is already in that
+      # test's report (tests/ui/conftest.py). What the page did is not, so
+      # each failing test also leaves a Playwright trace, uploaded below.
+      - run: pytest -q tests/ui --shard ${{ matrix.shard }}/${{ strategy.job-total }}
+        env:
+          # Fail, don't skip, without Playwright or Chromium. The skip is
+          # right on an analyst's machine; here it would report this
+          # required check green having run nothing.
+          WINNOW_UI_REQUIRE_BROWSER: "1"
+          WINNOW_UI_TRACE_DIR: test-results/traces
+      # One zip per failing test: download the artifact from the run's
+      # summary page and open a zip with `playwright show-trace`, or drop
+      # it on trace.playwright.dev (it is read in the browser, not uploaded).
+      - name: upload traces of failing tests
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-traces-${{ matrix.shard }}
+          path: test-results/traces/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # The two checks the ruleset requires. `!cancelled()` rather than
+  # `always()` so a run superseded by a newer push stays cancelled, and NOT
+  # left at the default: a job skipped because a shard failed reports as
+  # skipped, and a skipped required check counts as passing.
+  backend-result:
+    name: backend + frontend parse
+    needs: [tests, windows]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: test "${{ needs.tests.result }}" = success
+      - run: test "${{ needs.windows.result }}" = success
+
+  ui-result:
+    name: browser
+    needs: ui
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: test "${{ needs.ui.result }}" = success

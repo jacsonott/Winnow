@@ -48,7 +48,16 @@ def test_toolbar_buttons_never_fold_into_two_lines(page):
         # The search box is the one thing that never shrinks.
         assert _rect(page, "#search")["w"] >= 300
     finally:
+        # Escape in the search box clears it and rebuilds the view, and a
+        # view that lands mid-selection resets it: when that fell between
+        # the two clicks below, the Shift-click selected one row, "1"
+        # untagged only that, and the wait timed out with seven rows still
+        # tagged on the shared case. Wait for the rebuild to land first.
+        before = page.evaluate("() => __winnow.S.view.view_id")
         page.keyboard.press("Escape")
+        page.wait_for_function(
+            "(vid) => __winnow.S.view && __winnow.S.view.view_id !== vid"
+            " && document.getElementById('searchWrap').hidden", arg=before)
         rows.nth(1).locator(".cell").nth(1).click()
         rows.nth(8).locator(".cell").nth(1).click(modifiers=["Shift"])
         page.keyboard.press("1")
@@ -69,14 +78,20 @@ def test_sql_run_button_shares_the_row_with_the_others(page):
     assert page.evaluate(tops)[0] == page.evaluate(tops)[1]
 
 
-def test_timeframe_enabled_and_column_are_separate_rows(page):
+def test_timeframe_dialog_labels_sit_on_rows_of_their_own(page):
+    """The dialog's first labels were glued into "EnabledColumn": a
+    checkbox and the label after it sharing a line. The Enabled box has
+    gone since (Apply turns the filter on); what leads now is the "Keep
+    applied when switching tables" box, then Column, then the range's
+    Start, and each still has to sit on a row of its own."""
     page.evaluate("() => __winnow.openTimeRangeModal()")
     page.wait_for_selector("#modal:not([hidden])")
     tops = page.evaluate(
-        "() => [...document.querySelectorAll('#modalBody label')].slice(0, 2).map(l => [l.textContent.trim(), l.getBoundingClientRect().top])")
+        "() => [...document.querySelectorAll('#modalBody label')].slice(0, 3).map(l => [l.textContent.trim(), l.getBoundingClientRect().top])")
     page.keyboard.press("Escape")
-    assert [t[0] for t in tops] == ["Enabled", "Column"]
+    assert [t[0] for t in tops] == ["Keep applied when switching tables", "Column", "Start"]
     assert tops[1][1] - tops[0][1] >= 10, tops
+    assert tops[2][1] - tops[1][1] >= 10, tops
 
 
 def test_regex_hint_sits_outside_the_typed_text(page):
@@ -98,18 +113,127 @@ def test_regex_hint_sits_outside_the_typed_text(page):
         page.keyboard.press("Escape")
 
 
-def test_value_picker_pressed_segment_is_the_filled_accent(page):
-    """Accent text on the accent-dim fill measured 1.4–2.7:1 across the
-    skins. The pressed segment is now the same filled look the Settings
-    segments use."""
-    page.evaluate("() => __winnow.openValuePickerForColumn('Host')")
-    page.wait_for_selector(".value-picker [aria-pressed='true']")
+# What a pressed segment and an unpressed one beside it actually paint, in
+# every skin and theme: each one's background composited over its
+# ancestors' down to the first opaque one (the builders' tint is 16% accent
+# over the dialog's panel, so its own background-color alone says nothing),
+# and the pressed one's text colour. Transitions are switched off while it
+# runs — .btn eases its colours, and a value read straight after a skin
+# change would be the old skin's.
+_SEGMENT_PAINT = """([sel, styles]) => {
+  const parse = (s) => {
+    let m = /^rgba?\\(([^)]*)\\)$/.exec(s);
+    if (m) {
+      const p = m[1].split(/[\\s,\\/]+/).filter(Boolean).map(Number);
+      return [p[0], p[1], p[2], p.length > 3 ? p[3] : 1];
+    }
+    m = /^color\\(srgb ([^)]*)\\)$/.exec(s);
+    if (m) {
+      const p = m[1].split(/[\\s\\/]+/).filter(Boolean).map(Number);
+      return [p[0] * 255, p[1] * 255, p[2] * 255, p.length > 3 ? p[3] : 1];
+    }
+    throw new Error('unreadable colour ' + s);
+  };
+  const painted = (node) => {
+    const layers = [];
+    for (let n = node; n && n.nodeType === 1; n = n.parentElement) {
+      const c = parse(getComputedStyle(n).backgroundColor);
+      layers.push(c);
+      if (c[3] >= 1) break;
+    }
+    let out = [0, 0, 0];
+    for (const [r, g, b, a] of layers.reverse()) {
+      out = [r * a + out[0] * (1 - a), g * a + out[1] * (1 - a), b * a + out[2] * (1 - a)];
+    }
+    return out;
+  };
+  const calm = document.createElement('style');
+  calm.textContent = '*, *::before, *::after { transition: none !important; }';
+  document.head.append(calm);
+  const out = [];
+  try {
+    for (const style of styles) {
+      for (const theme of ['dark', 'light']) {
+        __winnow.applyStyle(style);
+        __winnow.applyThemeMode(theme);
+        const on = document.querySelector(sel + '[aria-pressed="true"]');
+        const off = [...on.parentElement.children].find((b) => b !== on && b.getAttribute('aria-pressed') !== 'true');
+        out.push({ skin: style + ' ' + theme, on: painted(on), off: painted(off),
+                   text: parse(getComputedStyle(on).color).slice(0, 3) });
+      }
+    }
+  } finally {
+    calm.remove();
+  }
+  return out;
+}"""
+
+
+def _luminance(rgb):
+    def chan(c):
+        c = c / 255
+        return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+    r, g, b = (chan(c) for c in rgb)
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def _contrast(a, b):
+    la, lb = sorted((_luminance(a), _luminance(b)), reverse=True)
+    return (la + 0.05) / (lb + 0.05)
+
+
+def _delta_e(a, b):
+    """CIE76 ΔE between two sRGB colours: ~2 is the smallest difference
+    anyone notices, 10 one nobody misses."""
+    def lab(rgb):
+        r, g, b = (((c / 255) / 12.92) if c / 255 <= 0.04045 else (((c / 255) + 0.055) / 1.055) ** 2.4
+                   for c in rgb)
+        x = (0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.95047
+        y = 0.2126 * r + 0.7152 * g + 0.0722 * b
+        z = (0.0193 * r + 0.1192 * g + 0.9505 * b) / 1.08883
+        f = [t ** (1 / 3) if t > 0.008856 else 7.787 * t + 16 / 116 for t in (x, y, z)]
+        return 116 * f[1] - 16, 500 * (f[0] - f[1]), 200 * (f[1] - f[2])
+    return sum((p - q) ** 2 for p, q in zip(lab(a), lab(b))) ** 0.5
+
+
+def test_pressed_dialog_segments_read_in_every_skin(page):
+    """A pressed segment painted accent text on the accent-dim fill
+    (1.4–2.7:1); the filled accent that replaced it put --accent-fg on
+    --accent, 3.3:1 in Panel light and the loudest thing in each dialog.
+    Dialog segments are the builders' tint now — 16% accent under --text —
+    and in every skin and theme the pressed option has to read (4.5:1) and
+    has to look different from the one beside it."""
+    styles = page.evaluate("() => Object.keys(__winnow.STYLES)")
+    surfaces = [
+        ("Settings → Theme", "() => __winnow.openSettings()", "#modalBody .segmented button"),
+        ("Log", "() => __winnow.openLog()", "#modalBody .vp-seg .btn"),
+        ("Search tables", "() => __winnow.openSearchAllModal()", "#modalBody .search-mode-toggle .btn"),
+        ("Plugins", "() => __winnow.openPluginManager()", "#modalBody .pl-scope button"),
+        ("Value picker", "() => __winnow.openValuePickerForColumn('Host')", ".value-picker .vp-seg .btn"),
+    ]
+    bad = []
+    try:
+        for name, opener, sel in surfaces:
+            page.evaluate(opener)
+            page.wait_for_selector(sel + "[aria-pressed='true']", state="attached")
+            for m in page.evaluate(_SEGMENT_PAINT, [sel, styles]):
+                ratio, gap = _contrast(m["text"], m["on"]), _delta_e(m["on"], m["off"])
+                if ratio < 4.5 or gap < 8:
+                    bad.append(f"{name} / {m['skin']}: text {ratio:.2f}:1, {gap:.1f} ΔE from unpressed")
+            page.keyboard.press("Escape")
+            page.wait_for_function("() => document.getElementById('modal').hidden && !document.querySelector('.value-picker')")
+    finally:
+        page.evaluate("() => { __winnow.applyStyle('harvest'); __winnow.applyThemeMode('dark'); }")
+    assert not bad, bad
+
+
+def test_toolbar_toggles_keep_their_fill(page):
+    """The tint is for segments inside a dialog. The search box's own
+    Contains / Regex / Advanced toggle borrows the same class the search
+    dialog does, and stays the toolbar's accent-dim fill."""
     got = page.evaluate(
-        """() => { const cs = getComputedStyle(document.querySelector('.value-picker [aria-pressed="true"]'));
-             return { bg: cs.backgroundColor, color: cs.color }; }""")
-    page.keyboard.press("Escape")
-    assert got["bg"] == _token(page, "backgroundColor", "--accent")
-    assert got["color"] == _token(page, "color", "--accent-fg")
+        "() => getComputedStyle(document.querySelector('#searchModeToggle button[aria-pressed=\"true\"]')).backgroundColor")
+    assert got == _token(page, "backgroundColor", "--accent-dim")
 
 
 def test_blueprint_paints_close_and_tab_count_in_the_accent_foreground(page):
@@ -130,16 +254,22 @@ def test_blueprint_paints_close_and_tab_count_in_the_accent_foreground(page):
         page.evaluate("(s) => document.documentElement.setAttribute('data-style', s)", prev)
 
 
-def test_settings_dialog_holds_still_while_sections_expand(page):
+def test_settings_dialog_holds_still_while_sections_switch(page):
     page.locator("#btnSettings").click()
     page.wait_for_selector("#modal:not([hidden])")
-    heads = page.locator("#modal .settings-section-head")
+    items = page.locator("#modal .settings-nav-item")
     before = _rect(page, ".modal-card")
-    for i in (3, 5, 8):
-        heads.nth(i).click()
+    vh = page.evaluate("() => window.innerHeight")
+    # The panes are a fixed height and the card is anchored at the top, so
+    # picking a short section after a long one (or the reverse) moves
+    # nothing — not the top edge, not the size — and the card never passes
+    # the 82vh .tall allows.
+    for i in (3, 5, 8, items.count() - 1, 0):
+        items.nth(i).click()
         page.wait_for_timeout(100)
         after = _rect(page, ".modal-card")
-        assert (after["y"], after["h"]) == (before["y"], before["h"]), (i, before, after)
+        assert after == before, (i, before, after)
+        assert after["h"] <= vh * 0.82 + 1, (i, after)
     page.keyboard.press("Escape")
 
 
@@ -149,9 +279,10 @@ def test_help_text_clears_the_focus_ring(page):
     page.evaluate("() => __winnow.openJumpTsModal()")
     page.wait_for_selector("#modal:not([hidden])")
     gap = page.evaluate(
-        """() => { const row = document.querySelector('#modalBody .row-actions');
-             const help = row.nextElementSibling;
-             return help.getBoundingClientRect().top - row.getBoundingClientRect().bottom; }""")
+        """() => { const box = document.querySelector('#modalBody input[placeholder="YYYY-MM-DD HH:MM:SS"]');
+             const help = [...document.querySelectorAll('#modalBody .fb-help')]
+               .find((p) => p.textContent.startsWith('24-hour'));
+             return help.getBoundingClientRect().top - box.getBoundingClientRect().bottom; }""")
     page.keyboard.press("Escape")
     assert gap >= 4, gap
 
@@ -171,7 +302,7 @@ def test_dashboard_sidebar_count_follows_saved_widgets(page):
     try:
         src = page.evaluate("() => __winnow.S.sources[0].id")
         page.locator("#dashBar button", has_text="Add widget").click()
-        page.locator("#modal .confirm-input").first.fill("Rows")
+        page.locator("#modal .dash-title-input").fill("Rows")
         page.locator("#modal select").first.select_option("sql")
         page.locator("#modal .dash-sql").fill(f"SELECT COUNT(*) AS n FROM src_{src}")
         page.locator("#modal button", has_text="Save widget").click()
