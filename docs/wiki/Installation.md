@@ -27,7 +27,7 @@ box.
 
 Releases are published on GitHub at
 <https://github.com/jacsonott/Winnow/releases>, tagged `v0.1.0` through
-`v0.3.0` so far. Download **Source code (zip)** from the latest one and unzip
+`v0.4.0` so far. Download **Source code (zip)** from the latest one and unzip
 it wherever you want Winnow to live. That folder is the install: Winnow keeps
 its settings, plugins and (by default) your cases inside it, which is why
 updating is done in place rather than by replacing the folder (see
@@ -413,7 +413,7 @@ Winnow afterwards.
 `python update.py --dev` syncs the install to the tip of `develop`, with the
 same backup, protected folders and rollback as a release update. It is
 unreleased code, meant for beta testers. **Settings → Updates** then shows
-the build as `Winnow 0.3.0 — develop build <commit>`, because the version
+the build as `Winnow 0.4.0 — develop build <commit>`, because the version
 number on `develop` is still the last release's. `--dev --check` shows the
 commit it would sync to, and `--dev --download-only` saves it as
 `winnow-develop-<commit>.zip`. To go back to a release, use `--rollback`, or
