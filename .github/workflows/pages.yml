@@ -15,7 +15,10 @@
 #
 # Pages has to be switched on once, in the repository's Settings → Pages,
 # with "Source: GitHub Actions". Until then the deploy job fails and says
-# so; the build job is unaffected.
+# so; the build job is unaffected. The site's domain, winnow.jacson.tech,
+# is set on the same page under "Custom domain", not by a CNAME file: a
+# site deployed by Actions ignores one. build_wiki.py's SITE_DOMAINS has
+# to name the same domain.
 name: Pages
 
 on:

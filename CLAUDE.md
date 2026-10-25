@@ -283,7 +283,10 @@ docs/              Long-form documentation. writing-plugins.md — the plugin
                     in the wiki. Every page must be listed under Home.md's
                     "## Pages" (it becomes the sidebar) and every link must
                     resolve; tests/test_build_wiki.py fails otherwise.
-                    The same pages are the GitHub Pages site too, but from
+                    The same pages are the GitHub Pages site too
+                    (winnow.jacson.tech: the domain is set in Settings →
+                    Pages, and build_wiki.SITE_DOMAINS names it for
+                    site_url), but from
                     main, not develop: it is the manual for the released
                     version, so .github/workflows/pages.yml rebuilds it when
                     a release lands (build_wiki.py --site, then MkDocs;

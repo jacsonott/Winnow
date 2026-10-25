@@ -209,6 +209,16 @@ def test_every_site_link_resolves_where_it_lands(site):
                 assert (docs / path).is_file(), f"{filename}: {target}"
 
 
+def test_the_site_says_it_is_at_its_custom_domain(site):
+    """The project's site is served at winnow.jacson.tech (Settings →
+    Pages), so the pages say so: site_url is what Material builds the 404
+    page's asset paths and the canonical links from, and the github.io
+    address has a /Winnow/ prefix the custom domain doesn't."""
+    config = (site / "mkdocs.yml").read_text(encoding="utf-8")
+    assert 'site_url: "https://winnow.jacson.tech/"' in config
+    assert build_wiki.site_url("someone/Winnow") == "https://someone.github.io/Winnow/"
+
+
 def test_site_pages_open_their_source_on_develop_for_editing(site):
     for filename, text in _site_pages(site).items():
         m = re.match(r'---\nedit_url: "([^"]+)"\n', text)
