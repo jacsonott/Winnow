@@ -10,7 +10,7 @@
 #
 # Deliberately NOT applied to docs/ or .github/: a downloaded tree that
 # can't tell you how it's meant to work is a worse artifact than a
-# slightly larger one.
+# slightly larger one. The one exception is docs/site/, below.
 #
 # Every directory rule is anchored with a leading "/". Unanchored, a
 # pattern matches that name at ANY depth: `screenshots/` also took
@@ -29,6 +29,11 @@ tests/test_release_script.py export-ignore
 # stick. README.md's own images are docs/screenshots/, which ships.
 /screenshots/        export-ignore
 /design/             export-ignore
+# The Pages site's own folder: its theme, the feature pages and their
+# recordings, which are megabytes of GIF. The site is built from the
+# repository (.github/workflows/pages.yml), not from the zip, and the
+# manual it is made of, docs/wiki/, ships.
+/docs/site/          export-ignore
 
 # Images are binary — never line-ending-convert or diff them as text.
 *.png binary

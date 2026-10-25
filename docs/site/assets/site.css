@@ -264,6 +264,15 @@
   }
 }
 
+/* A feature page's recording (docs/site/features/, put in a <picture> by
+   hooks.py), framed as the front page's pictures are. */
+.md-typeset .wn-recording img {
+  display: block;
+  border: 1px solid #363d38;
+  border-radius: .3rem;
+  box-shadow: 0 .6rem 1.6rem #00000040;
+}
+
 /* The footer's "Built from docs/wiki/ on main" sits on the footer's dark
    ground in both schemes; light mode's parchment code boxes glare there. */
 .md-copyright code {

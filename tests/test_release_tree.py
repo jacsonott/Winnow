@@ -113,6 +113,9 @@ def test_the_docs_ship_whole():
     """Everything under docs/, and everything README.md links to or shows,
     is in the archive — the "deliberately NOT applied to docs/" promise in
     .gitattributes, checked against what `git archive` actually writes.
+    Everything but docs/site/, the Pages site's own folder, which that
+    file leaves out on purpose: it is checked for being left out, since
+    the recordings in it are most of its size.
 
     An export-ignore rule without a leading "/" matches its name at any
     depth: `screenshots/` (meant for the top-level folder) also dropped
@@ -125,8 +128,11 @@ def test_the_docs_ship_whole():
                           capture_output=True, check=True).stdout
     with tarfile.open(fileobj=io.BytesIO(blob)) as tf:
         shipped = {n for n in tf.getnames() if n}
-    docs = {p for p in _git("ls-files", "docs").splitlines() if p}
-    assert docs, "no tracked files under docs/ — the check below would pass vacuously"
+    tracked = {p for p in _git("ls-files", "docs").splitlines() if p}
+    site = {p for p in tracked if p.startswith("docs/site/")}
+    docs = tracked - site
+    assert docs and site, "no tracked files under docs/ or docs/site/ — the checks below would pass vacuously"
+    assert not site & shipped, f"the Pages site's own files ride into the release archive: {sorted(site & shipped)[:5]}"
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     linked = {
         target.split("#", 1)[0].rstrip("/")
