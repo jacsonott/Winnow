@@ -293,7 +293,13 @@ docs/              Long-form documentation. writing-plugins.md — the plugin
                     nav from the same "## Pages" list, theme and the
                     front page's banner and feature rows in docs/site/; Home.md's list
                     also becomes the front page's cards, and its
-                    "# Title" gives way to the banner). PRs that touch the
+                    "# Title" gives way to the banner). Each feature row
+                    links to a site-only page, docs/site/features/
+                    (build_wiki.SITE_FEATURES orders them), showing a
+                    recording from docs/site/media/; scripts/screenshots.py
+                    --only feature-<name> remakes it and its still.
+                    docs/site/ is export-ignored, the one part of docs/
+                    the release zip leaves out. PRs that touch the
                     docs run its build with --strict, which also catches a
                     link to a missing #anchor — the wiki test checks
                     files, not headings.

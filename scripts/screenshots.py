@@ -2,11 +2,17 @@
 """Regenerate the README's and the Pages site's screenshots against the
 app as it is today.
 
-    python3 scripts/screenshots.py                  # -> docs/screenshots/*
+    python3 scripts/screenshots.py                  # all of them
     python3 scripts/screenshots.py --keep           # leave the demo case behind
     python3 scripts/screenshots.py --only grid      # one shot, while iterating
     python3 scripts/screenshots.py --only triage    # the Pages site's banner GIF
-    python3 scripts/screenshots.py --only feature-sql   # one of its features
+    python3 scripts/screenshots.py --only feature-sql-pane   # one feature's
+                                                    # still and recording
+
+The README's pictures go to docs/screenshots/, which ships in the release
+zip because the README does. The rest are the Pages site's alone and go to
+docs/site/media/, which doesn't ship (.gitattributes): the recordings are
+megabytes an analyst pulling the zip over a slow link has no use for.
 
 Why this exists: the four images the README shows went 766 commits without
 being regenerated, because regenerating them meant hand-building a case,
@@ -23,8 +29,8 @@ misrepresents the product.
 
 Needs the dev extras (playwright) — it is a maintenance tool, not part of
 the app. `pip install -r requirements-dev.txt && playwright install chromium`.
-The GIF also needs Pillow (`pip install pillow`), which nothing else in the
-repository uses, so it is asked for only when the GIF is.
+The GIFs also need Pillow (`pip install pillow`), which nothing else in the
+repository uses, so it is asked for only when a GIF is.
 """
 from __future__ import annotations
 
@@ -43,6 +49,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "docs" / "screenshots"
+SITE_MEDIA = ROOT / "docs" / "site" / "media"
+README_SHOTS = {"grid", "value-picker", "timeline", "pivot"}
+
+
+def dest_for(name: str, ext: str) -> Path:
+    return (OUT if name in README_SHOTS else SITE_MEDIA) / f"{name}.{ext}"
 
 # The EvtxECmd header set, verbatim from winnow/defaults/headers.json. If that
 # file's column list changes, this must change with it or the saved filters
@@ -299,7 +311,9 @@ def shoot_pivot(pg, win):
 
 # The website's feature list (docs/site/overrides/home.html): one picture
 # per feature, cropped to the part of the window that shows it, small
-# enough that its text stays legible in half the page's width.
+# enough that its text stays legible in half the page's width. Each is
+# also its feature page's picture for a reader who asked for less motion,
+# in place of the recording of the same name (record_feature_* below).
 
 def _box(pg, selector: str) -> dict:
     box = pg.locator(selector).first.bounding_box()
@@ -358,7 +372,7 @@ def shoot_feature_histogram(pg, win):
     return _clip(pg, panel["x"] + panel["width"] - 820, 40, 820, panel["y"] + panel["height"] + 190)
 
 
-def shoot_feature_derived(pg, win):
+def shoot_feature_derived_columns(pg, win):
     """Add derived column, lifting one field out of the JSON in Payload,
     with the preview showing what each row becomes."""
     win.open_table("Security.csv")
@@ -377,7 +391,7 @@ def shoot_feature_derived(pg, win):
     return _clip(pg, card["x"] - 20, card["y"] - 20, card["width"] + 40, card["height"] + 40)
 
 
-def shoot_feature_sql(pg, win):
+def shoot_feature_sql_pane(pg, win):
     """A query over the case and its answer."""
     win.open_table("Security.csv")
     pg.evaluate("() => __winnow.showSqlTab()")
@@ -432,8 +446,8 @@ SHOTS = {
     "feature-saved-filters": shoot_feature_saved_filters,
     "feature-timeframe": shoot_feature_timeframe,
     "feature-histogram": shoot_feature_histogram,
-    "feature-derived": shoot_feature_derived,
-    "feature-sql": shoot_feature_sql,
+    "feature-derived-columns": shoot_feature_derived_columns,
+    "feature-sql-pane": shoot_feature_sql_pane,
     "feature-first-last": shoot_feature_first_last,
     "feature-pivot": shoot_feature_pivot,
 }
@@ -491,8 +505,208 @@ def record_triage(pg, win, reel):
     pg.evaluate("() => __winnow.post('/api/row_tags/undo', {})")
 
 
+# The feature pages' recordings (docs/site/features/): one thing each,
+# shown from the click that starts it to the result, in a few seconds.
+# Provider and Channel go too, on top of the bookkeeping columns: they are
+# one value all the way down, and the window is narrower than the banner's.
+FEATURE_HIDDEN = (*BOOKKEEPING_COLUMNS, "Provider", "Channel")
+
+
+def unfocus(pg):
+    """Drop the focus ring a click leaves on a toolbar button, which would
+    otherwise stay lit through every frame after it."""
+    pg.evaluate("() => document.activeElement && document.activeElement.blur()")
+
+
+def record_feature_saved_filters(pg, win, reel):
+    """Pick a shipped filter from Filters ▾; then, from the whole table,
+    step into the first with ] and back out with [."""
+    win.open_table("Security.csv")
+    win.hide_columns(*FEATURE_HIDDEN)
+    reel.rest(640, 420)
+    reel.frame(1300)
+    reel.click("#btnFilters", hold=1300)
+    reel.click(".menu .menu-item:has-text('EVTX — Logons')", hold=1700, settle=win.quiet)
+    reel.click("#btnReset", hold=900, settle=lambda: (win.quiet(), unfocus(pg)))
+    reel.glide(640, 470)
+    # ] and [ step from wherever the last step left off, not from a filter
+    # picked from the menu, so this starts from the whole table.
+    reel.key("]", hold=2100, settle=win.quiet)
+    # Back past the first filter is the whole table again, which is also
+    # where the recording starts, so the loop has no seam.
+    reel.key("[", hold=900, settle=win.quiet)
+
+
+def record_feature_timeframe(pg, win, reel):
+    """Type a range and apply it, then show it outlasting a saved filter
+    and Clear filters. With the histogram open, which charts the range."""
+    win.open_table("Security.csv")
+    win.hide_columns(*FEATURE_HIDDEN)
+    win.histogram(True)
+    reel.rest(560, 470)
+    reel.frame(1100)
+    reel.click("#btnTimeRange", hold=900)
+    ends = ".modal-card input.confirm-input"
+    for i, value in enumerate(("2026-03-14 06:00", "2026-03-14 09:30")):
+        reel.click(f"{ends} >> nth={i}", hold=120)
+        pg.keyboard.press("ControlOrMeta+A")
+        reel.type(value, per_frame=4)
+        reel.frame(400)
+    reel.click(".modal-card button:has-text('Apply')", hold=1700, settle=win.quiet)
+    reel.click("#btnFilters", hold=900)
+    reel.click(".menu .menu-item:has-text('EVTX — Logons')", hold=1700, settle=win.quiet)
+    reel.click("#btnReset", hold=2200, settle=lambda: (win.quiet(), unfocus(pg)))
+
+
+def record_feature_histogram(pg, win, reel):
+    """Open it, color it by tag, chart one user's rows with Show in
+    histogram, then drag across the bars to set the timeframe."""
+    win.open_table("Security.csv")
+    win.hide_columns(*FEATURE_HIDDEN)
+    reel.rest(520, 420)
+    reel.frame(900)
+    reel.click("#btnHistogram", hold=1300, settle=lambda: (
+        pg.wait_for_selector("#histogramPanel", state="attached"), win.quiet(), unfocus(pg)))
+    reel.click("#histogramPanel button:has-text('Tags')", hold=1600, settle=win.quiet)
+    reel.click('#body .cell:text-is("ACME\\\\mreyes")', hold=800, button="right")
+    reel.click(".menu .menu-item:has-text('Show in histogram')", hold=1900, settle=lambda: (
+        pg.wait_for_function("() => /mreyes/.test(document.getElementById('histogramPanel')"
+                             ".textContent)", timeout=30_000),
+        win.quiet()))
+    bars = _box(pg, "#histogramPanel canvas")
+    y = bars["y"] + bars["height"] * .55
+    reel.drag(bars["x"] + bars["width"] * .30, y, bars["x"] + bars["width"] * .52, y,
+              hold=2400, settle=win.quiet)
+
+
+def record_feature_derived_columns(pg, win, reel):
+    """Derive a column from Payload's JSON: right-click its header, pick
+    JSON field, type the path and a name, add it, and watch it fill in."""
+    sid = win.ids["Security.csv"]
+    api = "(path) => __winnow.api(path)"
+    before = {d["id"] for d in pg.evaluate(api, f"/api/derived?source_id={sid}")}
+    layout = pg.evaluate(api, f"/api/layout?source_id={sid}")
+    win.open_table("Security.csv")
+    # Payload stays, and enough of what is left of it goes for the new
+    # column to land on screen beside it. Saved, as hiding them by hand
+    # saves them: adding a column reloads the table's layout, and an
+    # unsaved one would come back with every column.
+    win.hide_columns(*(c for c in FEATURE_HIDDEN if c != "Payload"), "Computer", "RemoteHost",
+                     *(f"PayloadData{i}" for i in range(1, 7)), "SourceFile")
+    pg.evaluate("() => __winnow.saveLayoutNow()")
+    try:
+        reel.rest(520, 420)
+        reel.frame(900)
+        reel.click('#headRow .hcell[data-col="Payload"]', hold=900, button="right")
+        reel.click(".menu .menu-item:has-text('Derive a column from this')", hold=900)
+        reel.click(".modal-card .side-rail-label:has-text('JSON field')", hold=700)
+        reel.click(".modal-card input:not(.side-search):not(.derived-name)", hold=100)
+        reel.type("$.EventData.SubjectUserName", per_frame=4)
+        pg.wait_for_function(
+            "() => /All \\d+ sampled values in the whole table parse/.test("
+            "document.querySelector('.modal-card').textContent)", timeout=30_000)
+        reel.frame(1300)
+        reel.click(".modal-card input.derived-name", hold=100)
+        pg.keyboard.press("ControlOrMeta+A")
+        reel.type("SubjectUserName", per_frame=4)
+        reel.frame(700)
+        reel.click(".modal-card button.primary:has-text('Add column')", hold=2600, settle=lambda: (
+            pg.wait_for_selector(".modal-card", state="hidden"),
+            pg.wait_for_function("() => [...document.querySelectorAll('#body .row .cell')]"
+                                 ".some((c) => c.textContent === 'mreyes')", timeout=30_000),
+            win.quiet(600)))
+    finally:
+        for d in pg.evaluate(api, f"/api/derived?source_id={sid}"):
+            if d["id"] not in before:
+                pg.evaluate("(path) => __winnow.api(path, { method: 'DELETE' })",
+                            f"/api/derived/{d['id']}?source_id={sid}")
+        pg.evaluate("([sid, payload]) => __winnow.post('/api/layout', { source_id: sid, payload })",
+                    [sid, layout])
+
+
+def record_feature_sql_pane(pg, win, reel):
+    """Open the SQL pane, write a query the filters can't ask, run it."""
+    win.open_table("Security.csv")
+    reel.rest(560, 380)
+    reel.frame(700)
+    reel.click("#tabSql", hold=1100, settle=lambda: (
+        pg.wait_for_selector("#sqlText", state="visible"), win.quiet(400)))
+    query = ("SELECT UserName, Computer, COUNT(*) AS failed_logons\n"
+             f"FROM src_{win.ids['Security.csv']}\n"
+             "WHERE EventId = 4625\n"
+             "GROUP BY UserName, Computer\n"
+             "ORDER BY failed_logons DESC")
+    reel.click("#sqlText", hold=100)
+    # Filled a few characters at a time rather than typed: typed, the
+    # editor's autocomplete would take the Enter at the end of a line.
+    for n in range(0, len(query) + 6, 6):
+        pg.fill("#sqlText", query[:n])
+        reel.frame(60)
+    reel.frame(700)
+    reel.click("#btnRunSql", hold=2800, settle=lambda: (
+        pg.wait_for_function("() => document.querySelectorAll('#sqlResult tr').length > 8",
+                             timeout=30_000),
+        win.quiet(300)))
+
+
+def _place(pg, reel, field: str, zone: str, *, find: str, hold: int):
+    """A field into one of a plugin's zones, as an analyst does it without
+    dragging: find it in the field list, click it, pick from Place in."""
+    reel.click('.pluginview input[placeholder^="Find a field"]', hold=100)
+    pg.keyboard.press("ControlOrMeta+A")
+    reel.type(find, per_frame=2, ms=90)
+    reel.frame(300)
+    reel.click(f'.pluginview [data-field="{field}"]', hold=700)
+    # Then the field in a zone, and a moment for the plugin's own preview
+    # of a 2,400-row table to redraw with it.
+    reel.click(f".menu .menu-item:has-text('{zone}')", hold=hold, settle=lambda: (
+        pg.wait_for_function("(f) => [...document.querySelectorAll('.pluginview [data-zone]')]"
+                             ".some((z) => z.textContent.includes(f))", arg=field, timeout=30_000),
+        pg.wait_for_timeout(900)))
+
+
+def record_feature_first_last(pg, win, reel):
+    """From an empty sheet: group on the host, which gives the first and
+    last of each host's events, then carry what each of them was."""
+    open_plugin_tab(pg, win, "first_last", {
+        "v": 1, "active": 0,
+        "sheets": [{"name": "Sheet 1", "source": {"id": win.ids["Security.csv"], "name": "Security.csv"},
+                    "groupBy": [], "carry": [], "sums": [], "values": [], "filters": [],
+                    "tags": {"mode": "", "ids": []}, "rowJson": False, "sortColumn": "TimeCreated",
+                    "colWidths": {}, "template": ""}],
+    }, "!!document.querySelector('.pluginview [data-zone]')")
+    reel.rest(560, 300)
+    reel.frame(1000)
+    _place(pg, reel, "Computer", "Group rows on", find="comp", hold=2000)
+    _place(pg, reel, "MapDescription", "Include columns", find="map", hold=2800)
+
+
+def record_feature_pivot(pg, win, reel):
+    """From an empty pivot: hosts down, event IDs across, then only the
+    rows tagged Suspicious."""
+    open_plugin_tab(pg, win, "pivot", {
+        "v": 1, "active": 0,
+        "pivots": [{"name": "Pivot 1", "source": {"id": win.ids["Security.csv"], "name": "Security.csv"},
+                    "rows": [], "cols": [], "values": [], "filters": [],
+                    "subtotals": True, "grandTotals": True}],
+    }, "!!document.querySelector('.pluginview [data-zone]')")
+    reel.rest(560, 300)
+    reel.frame(1000)
+    _place(pg, reel, "Computer", "Rows", find="comp", hold=1500)
+    _place(pg, reel, "EventId", "Columns", find="eventid", hold=1800)
+    reel.click('.pluginview [data-zone="filters"] .tag-chip:has-text("Suspicious")', hold=2600,
+               settle=lambda: (pg.wait_for_timeout(900), win.quiet(300)))
+
+
 GIFS = {
     "triage": record_triage,
+    "feature-saved-filters": record_feature_saved_filters,
+    "feature-timeframe": record_feature_timeframe,
+    "feature-histogram": record_feature_histogram,
+    "feature-derived-columns": record_feature_derived_columns,
+    "feature-sql-pane": record_feature_sql_pane,
+    "feature-first-last": record_feature_first_last,
+    "feature-pivot": record_feature_pivot,
 }
 
 
@@ -511,7 +725,15 @@ POINTER = """() => {
   ring.id = 'reel-ring';
   ring.style.cssText = 'position:fixed;left:0;top:0;z-index:2147483646;'
     + 'pointer-events:none;border:2px solid #e0a94a;border-radius:50%;opacity:0';
-  document.body.append(ring, p);
+  // A key press leaves nothing on screen, so the key is drawn as a keycap.
+  const key = document.createElement('kbd');
+  key.id = 'reel-key';
+  key.style.cssText = 'position:fixed;left:50%;bottom:22px;z-index:2147483647;'
+    + 'pointer-events:none;transform:translateX(-50%);min-width:34px;padding:6px 12px;'
+    + 'border:1px solid #7b8079;border-bottom-width:3px;border-radius:7px;background:#232825;'
+    + 'color:#f4f1e8;font:600 19px/1.2 ui-monospace,Menlo,Consolas,monospace;text-align:center;'
+    + 'box-shadow:0 8px 22px rgba(0,0,0,.5);opacity:0';
+  document.body.append(ring, p, key);
 }"""
 
 
@@ -547,12 +769,13 @@ class Reel:
             self._point(px, py)
             self.frame(ms)
 
-    def click(self, selector: str, *, hold: int, settle=None, modifiers=None):
+    def target(self, selector: str):
         box = self.pg.locator(selector).first.bounding_box()
         if box is None:
             raise SystemExit(f"nothing to click for {selector!r} — did the UI move?")
-        x, y = box["x"] + min(box["width"] / 2, 60), box["y"] + box["height"] / 2
-        self.glide(x, y)
+        return box["x"] + min(box["width"] / 2, 60), box["y"] + box["height"] / 2
+
+    def _ring(self, x: float, y: float):
         for size, alpha in ((14, .9), (30, .45)):
             self.pg.evaluate("""([x, y, d, a]) => {
               const r = document.getElementById('reel-ring');
@@ -562,16 +785,54 @@ class Reel:
             }""", [x, y, size, alpha])
             self.frame(60)
         self.pg.evaluate("() => { document.getElementById('reel-ring').style.opacity = 0; }")
-        for key in modifiers or ():
-            self.pg.keyboard.down(key)
-        self.pg.mouse.click(x, y)
-        for key in modifiers or ():
-            self.pg.keyboard.up(key)
+
+    @staticmethod
+    def _settle(pg, settle):
         if settle:
             settle()
         else:
-            self.pg.wait_for_timeout(250)
+            pg.wait_for_timeout(250)
+
+    def click(self, selector: str, *, hold: int, settle=None, modifiers=None,
+              button: str = "left"):
+        x, y = self.target(selector)
+        self.glide(x, y)
+        self._ring(x, y)
+        for key in modifiers or ():
+            self.pg.keyboard.down(key)
+        self.pg.mouse.click(x, y, button=button)
+        for key in modifiers or ():
+            self.pg.keyboard.up(key)
+        self._settle(self.pg, settle)
         self.frame(hold)
+
+    def drag(self, x0: float, y0: float, x1: float, y1: float, *, hold: int, settle=None):
+        """Press at one point, move to the other in frames, let go there."""
+        self.glide(x0, y0)
+        self._ring(x0, y0)
+        self.pg.mouse.down()
+        self.glide(x1, y1, steps=12, ms=50)
+        self.pg.mouse.up()
+        self._settle(self.pg, settle)
+        self.frame(hold)
+
+    def key(self, key: str, *, hold: int, label: str | None = None, settle=None):
+        """Press a key with its keycap on screen, held into the frame after."""
+        self.pg.evaluate("""(t) => {
+          const k = document.getElementById('reel-key');
+          k.textContent = t; k.style.opacity = 1;
+        }""", label or key)
+        self.frame(160)
+        self.pg.keyboard.press(key)
+        self._settle(self.pg, settle)
+        self.frame(hold)
+        self.pg.evaluate("() => { document.getElementById('reel-key').style.opacity = 0; }")
+
+    def type(self, text: str, *, per_frame: int = 3, ms: int = 70):
+        """Type into whatever has focus, a frame every few characters."""
+        for i in range(0, len(text), per_frame):
+            self.pg.keyboard.type(text[i:i + per_frame])
+            self.frame(ms)
 
 
 def save_gif(frames, dest: Path):
@@ -721,21 +982,34 @@ class Win:
             self.enable_plugin(name, False)
 
 
+# The feature pages' recordings: a smaller window than the banner's, and
+# the table list put away (as a case opens by default), so each one shows
+# in the page's column at about the size it was recorded.
+FEATURE_GIF_SIZE = (960, 600)
+SIDEBAR_AWAY = "localStorage.setItem('winnow.sidebar', JSON.stringify({ collapsed: true }))"
+
+
 def record_gif(browser, name: str, a, ids):
     """One of GIFS, recorded at the GIF's own size and at 1x, so text is
     drawn at the size it is shown rather than scaled down to it — scaling
     blurs it, and the in-between colours the blur makes cost the GIF a
     third of its size again."""
-    w, h = (int(n) for n in a.gif_size.split("x"))
+    feature = name.startswith("feature-")
+    w, h = FEATURE_GIF_SIZE if feature else (int(n) for n in a.gif_size.split("x"))
     ctx = browser.new_context(viewport={"width": w, "height": h})
     ctx.add_init_script(FIRST_RUN)
+    if feature:
+        ctx.add_init_script(SIDEBAR_AWAY)
     pg = ctx.new_page()
     pg.goto(f"http://127.0.0.1:{a.port}/")
     pg.wait_for_function("() => window.__winnow && __winnow.S.sources.length > 0",
                          timeout=60_000)
-    reel = Reel(pg)
-    GIFS[name](pg, Win(pg, ids), reel)
-    dest = OUT / f"{name}.gif"
+    reel, win = Reel(pg), Win(pg, ids)
+    try:
+        GIFS[name](pg, win, reel)
+    finally:
+        win.plugins_off()
+    dest = dest_for(name, "gif")
     save_gif(reel.frames, dest)
     print(f"  {dest.relative_to(ROOT)}  ({len(reel.frames)} frames, "
           f"{dest.stat().st_size // 1024} KB)")
@@ -750,7 +1024,8 @@ def main() -> int:
     ap.add_argument("--width", type=int, default=1680)
     ap.add_argument("--height", type=int, default=1000)
     ap.add_argument("--gif-size", default="1200x740",
-                    help="the GIF's size in pixels, which is the window it is recorded in")
+                    help="the banner GIF's size in pixels, which is the window it is "
+                         "recorded in (the feature pages' are FEATURE_GIF_SIZE)")
     a = ap.parse_args()
 
     try:
@@ -763,6 +1038,7 @@ def main() -> int:
     work = Path(tempfile.mkdtemp(prefix="winnow-shots-"))
     case = work / "demo.db-winnow"
     OUT.mkdir(parents=True, exist_ok=True)
+    SITE_MEDIA.mkdir(parents=True, exist_ok=True)
     ids = build_case(case, work)
     proc = serve(case, a.port)
     wanted = a.only or [*sorted(GIFS), *sorted(SHOTS)]
@@ -789,7 +1065,7 @@ def main() -> int:
                     continue
                 win.reset()
                 clip = SHOTS[name](pg, win)
-                dest = OUT / f"{name}.png"
+                dest = dest_for(name, "png")
                 pg.screenshot(path=str(dest), clip=clip)
                 print(f"  {dest.relative_to(ROOT)}  ({dest.stat().st_size // 1024} KB)")
                 win.plugins_off()

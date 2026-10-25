@@ -8,8 +8,9 @@
 # opens develop, because that is where a docs pull request goes.
 #
 # scripts/build_wiki.py --site turns the pages into MkDocs' input (nav
-# from Home.md's page list, links to the rest of the repository pointing
-# at main), and docs/site/mkdocs.yml is the theme. Pull requests build the
+# from Home.md's page list, after the site's own feature pages in
+# docs/site/features/; links to the rest of the repository pointing at
+# main), and docs/site/mkdocs.yml is the theme. Pull requests build the
 # site without deploying it, with --strict, so a dead link or anchor
 # fails here rather than on the published site.
 #

@@ -166,17 +166,25 @@ def site(tmp_path_factory):
 
 
 def _site_pages(site):
-    return {p.name: p.read_text(encoding="utf-8") for p in (site / "docs").glob("*.md")}
+    """Each page by its path under docs/: "Plugins.md", "features/pivot.md"."""
+    docs = site / "docs"
+    return {p.relative_to(docs).as_posix(): p.read_text(encoding="utf-8")
+            for p in docs.rglob("*.md")}
 
 
 def _nav_targets(config):
     return re.findall(r'^\s+- "[^"]+": "([^"]+)"$', config, flags=re.M)
 
 
-def test_the_site_carries_every_page_and_the_plugin_guide(site):
+def test_the_site_carries_every_page_the_plugin_guide_and_the_feature_pages(site):
     wiki = {p.name for p in (ROOT / "docs" / "wiki").glob("*.md")}
-    expected = (wiki - {"Home.md"}) | {"index.md", "writing-plugins.md"}
+    features = {f"features/{name}.md" for name in build_wiki.SITE_FEATURES}
+    expected = (wiki - {"Home.md"}) | {"index.md", "writing-plugins.md"} | features
     assert set(_site_pages(site)) == expected
+    # And SITE_FEATURES names exactly the pages there are: one it misses
+    # fails the build (below), one it names that isn't there is dropped.
+    assert {p.stem for p in (ROOT / "docs" / "site" / "features").glob("*.md")} \
+        == set(build_wiki.SITE_FEATURES)
 
 
 def test_the_site_nav_is_homes_page_list_and_reaches_every_page(site):
@@ -205,8 +213,8 @@ def test_every_site_link_resolves_where_it_lands(site):
                 assert "raw.githubusercontent.com" not in path, \
                     f"{filename}: {target} should be copied into the site"
             else:
-                # A page or an image, beside the page in docs/.
-                assert (docs / path).is_file(), f"{filename}: {target}"
+                # A page or an image, relative to the page in docs/.
+                assert (docs / Path(filename).parent / path).is_file(), f"{filename}: {target}"
 
 
 def test_the_site_says_it_is_at_its_custom_domain(site):
@@ -251,11 +259,11 @@ def _anchors(markdown):
 
 def test_every_link_on_the_front_page_lands(site):
     """MkDocs checks the links in pages, not in templates: the banner's,
-    and each feature's picture and its section of the manual."""
+    and each feature's picture and its page."""
     home = (ROOT / "docs" / "site" / "overrides" / "home.html").read_text(encoding="utf-8")
     named = re.findall(r"\{\{ '([^']+)' \| url \}\}", home)
-    assert {"Installation/", "screenshots/triage.gif", "screenshots/grid.png",
-            "screenshots/feature-pivot.png", "Plugins/"} <= set(named)
+    assert {"Installation/", "media/triage.gif", "screenshots/grid.png",
+            "media/feature-pivot.png", "features/pivot/"} <= set(named)
     docs = site / "docs"
     for rel in named:
         if rel.endswith("/"):
@@ -265,10 +273,38 @@ def test_every_link_on_the_front_page_lands(site):
     pages = _site_pages(site)
     for anchor in re.findall(r'href="#([\w-]+)"', home):
         assert anchor in _anchors(pages["index.md"]), anchor
-    deep = re.findall(r"\{\{ '([^']+)/' \| url \}\}#([\w-]+)", home)
-    assert ("Plugins", "first_last") in deep
-    for page, anchor in deep:
+    for page, anchor in re.findall(r"\{\{ '([^']+)/' \| url \}\}#([\w-]+)", home):
         assert anchor in _anchors(pages[f"{page}.md"]), f"{page}/#{anchor}"
+
+
+def test_the_front_page_lists_the_feature_pages_in_nav_order(site):
+    home = (ROOT / "docs" / "site" / "overrides" / "home.html").read_text(encoding="utf-8")
+    listed = re.findall(r"\{\{ 'features/([\w-]+)/' \| url \}\}", home)
+    assert list(dict.fromkeys(listed)) == list(build_wiki.SITE_FEATURES)
+    config = (site / "mkdocs.yml").read_text(encoding="utf-8")
+    nav = [t for t in _nav_targets(config) if t.startswith("features/")]
+    assert nav == [f"features/{name}.md" for name in build_wiki.SITE_FEATURES]
+    assert config.index('  - "Features":') < config.index('  - "Getting set up":')
+
+
+def test_each_feature_page_shows_its_recording_and_links_into_the_manual(site):
+    """The recording and the still a reader who asked for less motion gets
+    (hooks.py), both by the feature's name; and a way on to the manual,
+    to a heading that is there."""
+    pages = _site_pages(site)
+    media = site / "docs" / "media"
+    for name in build_wiki.SITE_FEATURES:
+        page = pages[f"features/{name}.md"]
+        assert f"](../media/feature-{name}.gif)" in page, name
+        assert (media / f"feature-{name}.gif").is_file(), name
+        assert (media / f"feature-{name}.png").is_file(), name
+        manual = [t for t in _targets(page) if not t.startswith("../media/")]
+        assert manual, f"{name} links nowhere into the manual"
+        for target in manual:
+            path, _, anchor = target.partition("#")
+            assert path.startswith("../") and path[3:] in pages, f"{name}: {target}"
+            if anchor:
+                assert anchor in _anchors(pages[path[3:]]), f"{name}: {target}"
 
 
 def test_the_front_page_is_homes_text_under_the_banner_with_cards(site):
@@ -351,6 +387,64 @@ def test_links_are_rewritten_for_the_site(tmp_path):
     assert "[top](#other)" in other and "`[code](Missing.md)`" in other
     assert "![shot](shots/a.png)" in other
     assert (out / "docs" / "shots" / "a.png").is_file()
+
+
+def _feature_tree(tmp_path, features):
+    root = _tree(tmp_path / "src", {"Home.md": HOME, "Other.md": "# Other\n\n## Part\n"},
+                 extra=["docs/site/media/feature-one.gif", "docs/shots/a.png"])
+    folder = root / "docs" / "site" / "features"
+    folder.mkdir(parents=True)
+    for name, text in features.items():
+        (folder / name).write_text(text, encoding="utf-8")
+    return root
+
+
+def test_feature_pages_are_published_under_features_and_link_from_there(tmp_path, monkeypatch):
+    monkeypatch.setattr(build_wiki, "SITE_FEATURES", ("one", "two"))
+    root = _feature_tree(tmp_path, {
+        "one.md": ("# The first\n\n![rec](../media/feature-one.gif)\n\n"
+                   "[More](../../wiki/Other.md#part), ![shot](../../shots/a.png)\n"),
+        "two.md": "# The second\n",
+    })
+    out = _build_site(root, tmp_path)
+    one = (out / "docs" / "features" / "one.md").read_text(encoding="utf-8")
+    assert one.startswith(f'---\nedit_url: "https://github.com/{REPO}/edit/dev/'
+                          'docs/site/features/one.md"\nhide:\n  - toc\n---\n\n# The first\n')
+    assert "![rec](../media/feature-one.gif)" in one
+    assert "[More](../Other.md#part)" in one
+    assert "![shot](../shots/a.png)" in one
+    assert (out / "docs" / "media" / "feature-one.gif").is_file()
+    assert (out / "docs" / "shots" / "a.png").is_file()
+    config = (out / "mkdocs.yml").read_text(encoding="utf-8")
+    assert ('nav:\n  - "Home": "index.md"\n  - "Features":\n'
+            '      - "The first": "features/one.md"\n'
+            '      - "The second": "features/two.md"\n  - "Group":\n') in config
+
+
+def test_a_feature_page_site_features_does_not_list_fails_the_site(tmp_path, monkeypatch):
+    monkeypatch.setattr(build_wiki, "SITE_FEATURES", ("one",))
+    root = _feature_tree(tmp_path, {"one.md": "# One\n", "stray.md": "# Stray\n"})
+    with pytest.raises(build_wiki.BuildError, match="stray.md: not in SITE_FEATURES"):
+        _build_site(root, tmp_path)
+    assert not (tmp_path / "site-out").exists()
+
+
+def test_the_hook_gives_a_recording_its_still_for_less_motion(tmp_path):
+    spec = importlib.util.spec_from_file_location("site_hooks", ROOT / "docs" / "site" / "hooks.py")
+    hooks = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(hooks)
+    (tmp_path / "media").mkdir()
+    (tmp_path / "media" / "a.png").write_bytes(b"")
+
+    class Page:
+        url = "features/one/"
+
+    html = '<p><img alt="A" src="../../media/a.gif" /> <img src="../../media/b.gif" /></p>'
+    # a.gif has a still beside it; b.gif doesn't, and is left as it is.
+    assert hooks.on_page_content(html, page=Page(), config={"docs_dir": str(tmp_path)}) == (
+        '<p><picture class="wn-recording"><source media="(prefers-reduced-motion: reduce)"'
+        ' srcset="../../media/a.png"><img alt="A" src="../../media/a.gif" /></picture>'
+        ' <img src="../../media/b.gif" /></p>')
 
 
 def test_homes_page_list_becomes_cards_on_the_site(tmp_path):

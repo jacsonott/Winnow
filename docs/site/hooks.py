@@ -11,12 +11,19 @@ as inline SVG. build_wiki.py writes an empty span naming each one. The
 pymdownx.emoji extension would do the same from `:material-name:`, but it
 also turns every other :word: on every page into an emoji fetched from a
 CDN, and the wiki writes times as hh:mm:ss.
+
+A recording on a page (each feature page's GIF) with a still of the same
+name beside it is shown as that still to a reader who asked for less
+motion, as the front page's banner is. Markdown has no way to say so, and
+the pages are written to read on GitHub too, so it is said here.
 """
 
+import posixpath
 import re
 from pathlib import Path
 
 _ICON = re.compile(r'(<span class="twemoji[^"]*" data-icon="([\w/-]+)">)(</span>)')
+_GIF = re.compile(r'<img [^>]*?src="([^":]+)\.gif"[^>]*>')
 
 
 def _icons_dir():
@@ -30,7 +37,24 @@ def on_page_markdown(markdown, page, **kwargs):
     return markdown
 
 
-def on_page_content(html, page, **kwargs):
+def _stills(html, page, docs_dir):
+    # The src is relative to the page's address, and docs_dir holds each
+    # file at the address it is served from.
+    here = page.url if page.url.endswith("/") or not page.url else posixpath.dirname(page.url)
+
+    def swap(m):
+        still = m.group(1) + ".png"
+        if not (docs_dir / posixpath.normpath(posixpath.join(here, still))).is_file():
+            return m.group(0)
+        return (f'<picture class="wn-recording"><source media="(prefers-reduced-motion: reduce)"'
+                f' srcset="{still}">{m.group(0)}</picture>')
+
+    return _GIF.sub(swap, html)
+
+
+def on_page_content(html, page, config=None, **kwargs):
+    if config is not None and '.gif"' in html:
+        html = _stills(html, page, Path(config["docs_dir"]))
     if 'data-icon="' not in html:
         return html
     icons = _icons_dir()

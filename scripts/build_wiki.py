@@ -42,6 +42,13 @@ and its page list is shown as a card per group. The site's look, which
 doesn't change from build to build, is docs/site/mkdocs.yml, which the
 generated file INHERITs.
 
+The site also has pages the wiki doesn't: one per feature the front page
+lists (docs/site/features/, in SITE_FEATURES' order), each a short
+recording and a few lines with a link into the manual. They are
+features/ on the site and the first group in its nav, and their pictures
+are docs/site/media/, published as media/. Neither folder is in the wiki,
+or in the release zip (.gitattributes).
+
     python scripts/build_wiki.py OUT_DIR [--repo OWNER/NAME] [--ref BRANCH]
     python scripts/build_wiki.py --site OUT_DIR --ref main [--edit-ref BRANCH]
     mkdocs build --strict -f OUT_DIR/mkdocs.yml     # the site, in OUT_DIR/site
@@ -72,16 +79,22 @@ SITE_EXTRA_PAGES = {"docs/writing-plugins.md": "writing-plugins.md"}
 
 # Files the theme uses rather than a page, copied in at build time rather
 # than kept twice: the app's brand mark as logo and favicon (named in
-# docs/site/mkdocs.yml), and the pictures the front page shows
-# (docs/site/overrides/home.html): the banner's recording, its still for
-# reduced motion, and one per feature.
+# docs/site/mkdocs.yml), and the README's picture of the grid, which the
+# front page's banner (docs/site/overrides/home.html) shows a reader who
+# asked for less motion. The site's own pictures, docs/site/media/, are
+# copied in whole.
 SITE_ASSETS = {"static/icons/winnow-mark.svg": "assets/winnow-mark.svg",
                "static/icons/winnow-icon.svg": "assets/favicon.svg",
-               "docs/screenshots/grid.png": "screenshots/grid.png",
-               "docs/screenshots/triage.gif": "screenshots/triage.gif",
-               **{f"docs/screenshots/feature-{name}.png": f"screenshots/feature-{name}.png"
-                  for name in ("saved-filters", "timeframe", "histogram", "derived",
-                               "sql", "first-last", "pivot")}}
+               "docs/screenshots/grid.png": "screenshots/grid.png"}
+
+# The feature pages, in the order the front page lists them and the nav
+# shows them: docs/site/features/<name>.md, published as
+# features/<name>.md. Each shows docs/site/media/feature-<name>.gif, and
+# the front page shows feature-<name>.png; scripts/screenshots.py makes
+# both.
+SITE_FEATURES = ("saved-filters", "timeframe", "histogram", "derived-columns",
+                 "sql-pane", "first-last", "pivot")
+SITE_FEATURES_DIR = f"{SITE_CONFIG}/features"
 
 # The icon on each of the front page's section cards, by the group's name
 # in Home.md: a name in Material's icon set, which docs/site/hooks.py
@@ -104,13 +117,15 @@ class BuildError(Exception):
 
 
 def _rewrite_target(target, *, image, pages, root, repo, ref, where, errors,
-                    base=SOURCE, images=None):
+                    base=SOURCE, images=None, at=""):
     """One link target as the output spells it.
 
     `pages` maps the repository path of each page the output carries to
-    how a link to it is written there. `images` is None to link images
-    from GitHub; otherwise each image is added to it (repository path ->
-    path in the output) and linked where it will be copied to.
+    where it is in the output. `images` is None to link images from
+    GitHub; otherwise each image is added to it (repository path -> path
+    in the output) and linked where it will be copied to. `at` is the
+    folder in the output of the page the link is on: page and image links
+    are written relative to it.
     """
     if target.startswith("#") or _SCHEME.match(target):
         return target
@@ -120,7 +135,7 @@ def _rewrite_target(target, *, image, pages, root, repo, ref, where, errors,
         errors.append(f"{where}: {target} points outside the repository")
         return target
     if resolved in pages:
-        return pages[resolved] + hash_ + anchor
+        return _from(at, pages[resolved]) + hash_ + anchor
     if posixpath.dirname(resolved) == SOURCE and resolved.endswith(".md"):
         errors.append(f"{where}: {target} is not a page in {SOURCE}/")
         return target
@@ -129,15 +144,21 @@ def _rewrite_target(target, *, image, pages, root, repo, ref, where, errors,
         errors.append(f"{where}: {target} names {resolved}, which does not exist")
         return target
     if image and images is not None:
-        dest = posixpath.relpath(resolved, "docs") if resolved.startswith("docs/") else resolved
+        # A picture under docs/site/ (the site's own) or docs/ keeps its
+        # path below that folder.
+        top = next((d for d in (SITE_CONFIG, "docs") if resolved.startswith(d + "/")), None)
+        dest = posixpath.relpath(resolved, top) if top else resolved
         images[resolved] = dest
-        # Every site page sits at the top of docs_dir, so this is relative
-        # to all of them.
-        return dest
+        return _from(at, dest)
     if image:
         return f"https://raw.githubusercontent.com/{repo}/{ref}/{resolved}"
     kind = "tree" if on_disk.is_dir() else "blob"
     return f"https://github.com/{repo}/{kind}/{ref}/{resolved}{hash_}{anchor}"
+
+
+def _from(at, path):
+    """`path`, a path in the output, as a link from a page in folder `at`."""
+    return posixpath.relpath(path, at) if at else path
 
 
 def _relink(lines, *, where, errors, **target_kw):
@@ -431,6 +452,19 @@ def build_site(out_dir, *, root=ROOT, repo=DEFAULT_REPO, ref=DEFAULT_REF,
             site_pages[path] = dest
 
     errors, images = [], {}
+    features = []
+    for name in SITE_FEATURES:
+        path = f"{SITE_FEATURES_DIR}/{name}.md"
+        if (root / path).exists():
+            sources[path] = (root / path).read_text(encoding="utf-8")
+            site_pages[path] = f"features/{name}.md"
+            features.append(path)
+    if (root / SITE_FEATURES_DIR).is_dir():
+        for unlisted in sorted((root / SITE_FEATURES_DIR).glob("*.md")):
+            if unlisted.stem not in SITE_FEATURES:
+                errors.append(f"{SITE_FEATURES_DIR}/{unlisted.name}: not in SITE_FEATURES, "
+                              "so the site's nav would have no way to it")
+
     built = {}
     for path, text in sources.items():
         meta = [f"edit_url: {_q(f'https://github.com/{repo}/edit/{edit_ref}/{path}')}"]
@@ -439,13 +473,26 @@ def build_site(out_dir, *, root=ROOT, repo=DEFAULT_REPO, ref=DEFAULT_REF,
             # The banner, and room for the cards: the cards are the nav
             # here, and Home has three headings to list.
             meta += ["template: home.html", "hide:", "  - navigation", "  - toc"]
+        elif path in features:
+            # A recording and a few lines, under no heading but the title:
+            # the column the contents list would take goes to the picture.
+            meta += ["hide:", "  - toc"]
         body = _relink(text.splitlines(), pages=site_pages, root=root, repo=repo,
                        ref=ref, where=posixpath.basename(path), errors=errors,
-                       base=posixpath.dirname(path), images=images)
+                       base=posixpath.dirname(path), images=images,
+                       at=posixpath.dirname(site_pages[path]))
         built[site_pages[path]] = ("---\n" + "\n".join(meta) + "\n---\n\n"
                                    + _table_pipes(body))
 
     nav, listed = [(None, [("Home", "index.md")])], set()
+    if features:
+        entries = []
+        for path in features:
+            title = re.match(r"# (.+)", sources[path])
+            if not title:
+                errors.append(f"{path}: starts with no '# Title' to name it by in the nav")
+            entries.append((title.group(1) if title else path, site_pages[path]))
+        nav.append(("Features", entries))
     for group, items in _page_list(pages["Home"], errors) or []:
         entries = []
         for label, target in items:
@@ -466,15 +513,17 @@ def build_site(out_dir, *, root=ROOT, repo=DEFAULT_REPO, ref=DEFAULT_REF,
         _site_config(nav, root=root, repo=repo, ref=ref, edit_ref=edit_ref),
         encoding="utf-8")
     for filename, text in built.items():
+        (docs / filename).parent.mkdir(parents=True, exist_ok=True)
         (docs / filename).write_text(text, encoding="utf-8")
     for src, dest in images.items():
         (docs / dest).parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(root / src, docs / dest)
     # The theme's own files go to docs/assets/, where docs/site/mkdocs.yml
-    # points.
-    assets = root / SITE_CONFIG / "assets"
-    if assets.is_dir():
-        shutil.copytree(assets, docs / "assets", dirs_exist_ok=True)
+    # points, and the site's pictures to docs/media/, where its pages and
+    # front page link.
+    for folder in ("assets", "media"):
+        if (root / SITE_CONFIG / folder).is_dir():
+            shutil.copytree(root / SITE_CONFIG / folder, docs / folder, dirs_exist_ok=True)
     for src, dest in SITE_ASSETS.items():
         if (root / src).exists():
             (docs / dest).parent.mkdir(parents=True, exist_ok=True)
