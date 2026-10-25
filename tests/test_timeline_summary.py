@@ -202,3 +202,31 @@ def test_a_summary_column_used_as_the_timestamp_drops_out_of_the_summary(store, 
     # is what the config says) takes Name out of the details.
     odd = _rows(store, configs={rec["id"]: {"timestamp_column": "Name"}})[0]
     assert odd["detail"] == ".\\Users\\jdoe · entry 4711"
+
+
+# ------------------------------------------- the summary is read a page at a time
+
+
+def test_building_the_timeline_runs_no_summary(evtx):
+    """The build used to run TL_LEAD and TL_DETAILS over every tagged row
+    before the first line could show: 13.7 s for 250k rows, on every
+    visit to the tab. The view only has to put the rows in order; the
+    summary is worked out for the rows a page asks for."""
+    store, _ = evtx
+    calls = {"TL_LEAD": 0, "TL_DETAILS": 0}
+
+    def counted(name, fn):
+        def wrapper(*args):
+            calls[name] += 1
+            return fn(*args)
+        return wrapper
+
+    # The build runs on the writer; replacing its functions there counts
+    # every call the build makes and none of a page's (those are readers').
+    store.db.create_function("TL_LEAD", -1, counted("TL_LEAD", _tl_lead))
+    store.db.create_function("TL_DETAILS", -1, counted("TL_DETAILS", _tl_details))
+    res = store.build_timeline()
+    assert res["row_count"] == 2
+    assert calls == {"TL_LEAD": 0, "TL_DETAILS": 0}
+    rows = store.fetch_timeline_rows(res["view_id"], 0, 50)["rows"]
+    assert rows[0]["lead"] == "Special privileges assigned"

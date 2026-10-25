@@ -276,6 +276,17 @@ keys**, below **Reset to defaults**, in the same groups as here.
 
 More on selecting and tagging results is in [SQL pane](SQL-pane.md).
 
+**Timeline**
+
+| Key | What it does |
+| --- | --- |
+| `↓` / `↑`, `j` / `k`, `PgDn` / `PgUp`, `g` / `G` | Move the selected line. These are the grid's movement keys, so a key you rebind moves the Timeline too. |
+| `Enter` | Open the selected line's row in its table. |
+| Double-click a line | Open its row in its table. A single click selects it. |
+| `Esc` | Let go of the selected line. |
+
+More on reading the Timeline is in [Timeline, Search all and the Watchlist](Timeline-search-and-watchlist.md#the-timeline).
+
 **Menus and dialogs**
 
 | Key | What it does |
@@ -316,8 +327,9 @@ covered in [Tagging and notes](Tagging-and-notes.md).
 
 - Most keys act on the grid and work only while a table is showing. `?`,
   `t`, `s`, `p` and `` ` `` also work from the SQL, Timeline, Notes,
-  Watchlist and plugin tabs. `Alt+1`–`Alt+0` and `Ctrl+F` work anywhere in
-  a case; `Ctrl+F` switches to the table first.
+  Watchlist and plugin tabs, and the movement keys move the selected line
+  on the Timeline. `Alt+1`–`Alt+0` and `Ctrl+F` work anywhere in a case;
+  `Ctrl+F` switches to the table first.
 - While you are typing in a box, keys type. `Esc`, `Alt+1`–`Alt+0` and
   `Ctrl+F` still work.
 - While a dialog is open, keys go to the dialog, except that the key that
@@ -503,10 +515,13 @@ this server stops working until you start Winnow again. See
 
 **Case ▾ → Case settings…** holds the settings stored in the open case file,
 which go with it when you hand it to another analyst. Settings, by contrast,
-is about this machine.
+is about this machine; **Settings for this machine…** at the bottom opens
+it. The three sections are down the left, each with what it is set to under
+its name.
 
-- **Timestamps**: this case's display format, or **Use the machine-wide
-  default**. It is display only: the stored and exported value is always
+- **Timestamps**: every format as a row, with a timestamp shown in it, and
+  **Machine default** (the format Settings sets) at the top. Pick one for
+  this case. It is display only: the stored and exported value is always
   the text the file came with. A format picked on one column (right-click
   its header) beats this one, and this one beats the machine-wide default
   (see [Timestamps](#timestamps)).
@@ -515,5 +530,9 @@ is about this machine.
   menus stay short; boards are always available under Dashboards. See
   [Dashboards](Dashboards.md).
 - **Variables**: named values the case carries for plugins and the people
-  working it (an engagement name, a link to the scoping document). Never put
+  working it (an engagement name, a link to the scoping document). Each is a
+  row whose value you edit in place; it is saved when you leave the box. A
+  required one with no value is flagged, and the side list counts it as
+  missing. Add one on the list's last line (**New variable name**, a value,
+  **Add**). A variable's **⋯** has **Copy value** and **Remove**. Never put
   a token or password here; use [Environment](#environment).

@@ -22,6 +22,8 @@ import { S, clearCellSelection, selClear, selCount, selSetAll, selSnapshot } fro
 import { openTablesManager } from './tables.js';
 import { applyTag, applyTagToView, undoLastTagChange } from './tags.js';
 import { doJumpTs, openJumpTsModal, openTableMenu, openTimeRangeModal, toggleTimeRange } from './timeframe.js';
+import { clearTimelineSelection, timelineKey } from './timeline.js';
+import { tagTimelineLine } from './timelinepane.js';
 
 /* ------------------------------------------------------ keyboard shortcuts */
 
@@ -456,6 +458,12 @@ export const FIXED_KEYS = [
     ['Ctrl/⌘-click a row', 'Add it to the result selection, or take it out'],
     ['Shift-click a row', 'Select every result row from the last one clicked to it'],
   ]],
+  ['Timeline', [
+    ['↓ / ↑, j / k, PgDn / PgUp, g / G', 'Move the selected line — the grid’s movement keys, so a rebinding above moves it too'],
+    ['Enter', 'Open the selected line’s row in its table'],
+    ['Double-click a line', 'Open its row in its table (a single click selects it)'],
+    ['Esc', 'Let go of the selected line'],
+  ]],
   ['Menus and dialogs', [
     ['↑ / ↓', 'Move through a menu’s items (from outside it, step in at the first or last)'],
     ['→ / ←', 'Open a submenu / close it again'],
@@ -586,8 +594,9 @@ document.addEventListener('keydown', (e) => {
     // closeModal, not a bare hide: whatever armed itself for the close
     // (a return-to-Settings hook, the keybinding capture) has to hear it.
     if (!$('modal').hidden) { closeModal(); return; }
-    if (typing) { e.target.blur(); $('body').focus(); return; }
+    if (typing) { e.target.blur(); (S.activeTab === 'timeline' ? $('timelineBody') : $('body')).focus(); return; }
     if (S.activeTab === 'sql' && sqlClearSelection()) return;
+    if (S.activeTab === 'timeline' && clearTimelineSelection()) return;
     // Escape lets go of everything picked — rows and the cell range — and
     // the chip's Undo brings it back if it was a slip.
     if (selCount() || S.cellRange) selSnapshot();
@@ -732,6 +741,12 @@ document.addEventListener('keydown', (e) => {
 
   const pageRows = Math.floor(($('body').clientHeight - headH()) / ROW_H) - 1;
   const action = matchAction(e);
+  // The Timeline's list takes the grid's movement keys (and Enter) for
+  // its selected line, from the same keymap.
+  if (S.activeTab === 'timeline' && timelineKey(e, action)) {
+    e.preventDefault();
+    return;
+  }
   if (action && ACTION_HANDLERS[action] && (S.activeTab === 'grid' || TAB_AGNOSTIC_ACTIONS.has(action))) {
     e.preventDefault();
     ACTION_HANDLERS[action](e, pageRows);
@@ -749,6 +764,12 @@ document.addEventListener('keydown', (e) => {
   if (/^[1-9]$/.test(digit) && S.activeTab === 'sql' && sqlSelectionCount()) {
     const t = S.tags.find((x) => x.hotkey === digit);
     if (t) { e.preventDefault(); sqlTagHotkey(t, () => applySqlTabToEditor()); }
+  }
+  // And the Timeline's selected line, the row its detail pane shows. One
+  // line, so a key toggles it, as the per-row key does in the grid.
+  if (/^[1-9]$/.test(digit) && S.activeTab === 'timeline' && S.timeline.sel && !e.shiftKey) {
+    const t = S.tags.find((x) => x.hotkey === digit);
+    if (t) { e.preventDefault(); tagTimelineLine(t); }
   }
 });
 }

@@ -131,12 +131,14 @@ def test_create_merge_merges_once(page):
 
 
 def test_copy_into_a_case_copies_once(page):
-    """The quick-look banner's "Copy into this case": the second click's
-    copy found the target case locked by the first one's Store and said
-    it was open in another Winnow — naming this one."""
+    """The quick-look copy's main button: the second click's copy found
+    the target case locked by the first one's Store and said it was open
+    in another Winnow — naming this one. A case is picked from the list
+    first; the button names it."""
     page.evaluate("() => __winnow.tempCopyModal()")
-    go = page.locator("#modalBody button", has_text="Copy into this case").first
-    go.wait_for()
+    page.locator("#modalBody .copyto-row").first.click()
+    go = page.locator("#modal .table-menu-foot .btn.primary")
+    page.wait_for_function("() => /^Copy \\d+ tables? into /.test(document.querySelector('#modal .table-menu-foot .btn.primary').textContent)")
     gate = _Gate(page, "**/api/case/copy_sources")
     try:
         go.dblclick()

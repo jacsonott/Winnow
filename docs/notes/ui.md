@@ -880,7 +880,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   the grid, never rows in the panel. The first cut listed the differing
   rows inside the modal, three columns of tag names per row: it read as
   cramped at twenty rows and useless at two thousand, and the rows were
-  a copy of what the grid already shows. So `renderDiff` draws one line
+  a copy of what the grid already shows. So `diffRows` draws one line
   per table with a count per kind (only-left, only-right, tagged
   differently, notes) from the server's uncapped per-table tally
   (`sources`), and each count calls `pivotDiff`, which sets
@@ -1570,6 +1570,40 @@ see [docs/notes/README.md](README.md) for the whole set.
     two-pane dialogs, and Tables, Tagged, notes and the group chip drop
     out of the row.
   tests/ui/test_home_screen.py, test_home_fixes.py.
+- **The rest of the older dialogs are the frame too**: Sessions
+  (session.js), Saved filters (timeframe.js `openSavedFiltersModal`), the
+  folder and file picker (home.js `openFolderBrowser`), the quick look's
+  Add these tables to a case (home.js `tempCopyModal`), Case settings and
+  Export (settings.js, sources.js, on `sectionPanes`), the filter builder
+  (filterbuilder.js, the merge builder's `.mb-*` panes), lateral_movement's
+  Movement events, and Stack (below). Each was paragraphs over rows of
+  buttons. Decisions:
+  - **`.list-panes`/`.list-pane` are the Tables manager's pane rules,
+    shared**: the frame's sizes, the box that scrolls, the 640px narrow
+    layout. The rules that draw the manager's own columns stay scoped to
+    `.tables-manager`, since the other dialogs' `.tables-row` lists have
+    columns of their own.
+  - **A row's actions are in its ⋯ and its right-click**, and a click on
+    its name is the one gesture that changes nothing, or the one it is
+    opened for: compare a session with the current work, apply a saved
+    filter, go into a folder, pick a case to copy into. Load, Delete and
+    the like are a menu away, behind their own confirm as before.
+  - **One main button on the foot, naming what it does** ("Copy 3 tables
+    into ACME", "Export 1,204 rows (.csv)", "Add 2 files"). The copy is
+    guarded by `oneAtATime`, as the old per-row button was
+    (test_double_click_submits_once.py).
+  - **Comparing runs as the sides change**; `runCompare` clears the last
+    answer before asking, so a pane never shows one comparison's counts
+    under the other's names. The heads are A/B, as the gutter marks are,
+    and the figures above them spell the names out.
+  - **No intro paragraphs.** What each takes is said in its panes' notes
+    and feet (test_dialog_intros.py keeps the Timeframe filter's one line).
+  - **`sectionPanes` is in the plugin API** (14; tab context `apiVersion`
+    8) so a plugin's dialog can be the same frame; lateral_movement's
+    Events… is the example.
+  tests/ui/test_sessions_panel.py, test_saved_filters_rows.py,
+  test_case_variables_ui.py, test_import_ux.py, test_export_all_xlsx_ui.py,
+  test_quicklook_copy_targets.py, test_stack.py.
 - **A header set's default layout seeds a table once, so it needs its
   own way onto the rest** (the table menu's Layout section with the
   default chosen; columns.js `applyDefaultLayout` is the same as a
@@ -2154,7 +2188,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   would change along with it and see no difference at the next build.
   `tests/ui/test_undo_filter_change.py`.
 
-- **Stack view** (stack.js) — the column-header menu's "Stack values (rarest first)…" opens a modal of the current view's distinct values by count (via group_summary, order=count direction=asc), drawn with charts.js. Click a bar to filter the grid to that value. Least-frequency-of-occurrence triage. **The box is sized to its bars** — `max-height: min(60vh,520px)` over a canvas whose height is `rows × 22`, not a fixed height: a column that stacks to nine distinct values used to open a screen-high modal with nine bars in the top corner and four fifths of nothing under them. See docs/design/analysis-suite.md.
+- **Stack view** (stack.js) — the column-header menu's "Stack values (rarest first)…" opens a chart of the current view's distinct values by count (via group_summary, order=count, up to 1,000 values), one bar per value, click-to-filter. Least-frequency-of-occurrence triage. **The chart is the dialog**: the table's columns down a side list (`sideRail`, pinnable) and the bars taking the rest of an `xwide`, tall modal. It used to be a canvas drawn with charts.js in a box sized to its bars, which read as too small. Decisions: **the bars are DOM elements, not canvas bars**, so each is focusable (ArrowUp/Down walk them, Enter filters), carries its full value in its title, takes the row menu (Filter to / Exclude / Copy value) and scrolls; **one scale for the column**, ending at the largest count with gridlines on the nearest 1-2-5 step (`scaleStep`, so 412 gets 0…400 by 100 and the longest bar spans the track — rounding the axis up to 600 wasted a third of it), kept when Filter values… narrows the bars; **the row height shares the chart's height out** (`size`: between 26 and 44px), so five values are five broad bars and a long tail scrolls; the value gutter is measured in the chart's face, at most two fifths of it. The foot says when the count or the drawing (500 bars) was cut short. tests/ui/test_stack.py. See docs/design/analysis-suite.md.
 
 - **Case notes tab** (notes.js) — a free-form Markdown scratchpad for the investigation narrative, stored in the case file (Store.case_notes) so it travels with the .db — distinct from the per-row notes, which the page now LISTS below the split (see below). The editor and a live preview sit side by side (`#notesSplit`, a flex row inside `.page-main`) split by a draggable divider; Edit / Split / Preview collapse one pane or the other through `data-mode` on the row, and the stylesheet does the hiding. Debounced autosave, a tiny dependency-free Markdown renderer (airgap). Page tabs now route visibility through sql.js's showMainView(id)/MAIN_VIEWS registry so adding a tab is a one-place edit. See docs/design/analysis-suite.md. Things that bite here:
   - **The mode never persists, the layout does** (`winnow.notes = { split, rows }` — the divider ratio as a ratio of the row, and whether the row-note strip is open; per browser, like `winnow.sidebar`, and written only when the analyst drags or toggles, never on a visit that touched nothing): Notes always opens in Split, and `showNotesTab` re-applies both *synchronously before* `await ensureNotesLoaded()` — the page is already showing by then, so applying them after the fetch paints the markup's 50/50 default and then jumps. A remembered preview-only mode would also hide the editor from Playwright's `fill()` in tests/ui/test_case_notes.py after its reload.
@@ -2182,6 +2216,148 @@ see [docs/notes/README.md](README.md) for the whole set.
   and keeps the plain `openSource` fast path for a table already open.
   A failed POST still jumps: the grid can show the row, which is what was
   asked for. `tests/ui/test_watchlist_opens_the_table.py`.
+
+- **A Timeline line is picked by a click, not opened by it**
+  (timeline.js, `selectTimelineLine`). A click used to call
+  `jumpToTimelineRow`, so reading the Timeline meant not touching it.
+  Now: click picks (`S.timeline.sel`), double-click, Enter or the
+  gutter's ⤢ open. Things worth knowing before touching it:
+  - **The keys are the keymap's**, not a second set: keymap.js hands
+    `moveDown`/`moveUp`/`pageDown`/`pageUp`/`jumpFirst`/`jumpLast` (and
+    the edge jumps) to `timelineKey` while the Timeline is the page
+    showing, plus Enter from the list itself, and Escape to
+    `clearTimelineSelection`. A rebinding in Settings moves this list
+    too. The digits tag the selected line (`tagTimelineLine`, see the
+    details pane entry below); the header's tag chips still carry no
+    hotkey, since they filter rather than tag.
+  - **Clicks are delegated on `#timelineRows`** (invariant #6), and a
+    click that picks a line on screen moves the `.selected` class rather
+    than repainting: a repaint replaces the node under the pointer, and a
+    double-click whose second click landed on a node the first one threw
+    away never reached the listener (`tests/ui/test_timeline_lines.py`
+    has the double-click).
+  - **The place survives the rebuild every visit is**
+    (`keepTimelinePlace`): `showTimelineTab` rebuilds, so opening a line
+    and coming back used to land at the top. The selection is found
+    again by `(source_id, rid)` through `GET /api/timeline_position`
+    and scrolled a third of the way down; a line that left the Timeline
+    puts the list where it was in time, with nothing selected. Scrolling
+    goes through `rScroll`/`vScroll`, since a long Timeline's spacer is
+    capped like the grid's (MAX_SPACER_PX).
+  - **The Type column is the kind of table plus the host**
+    (`timelineKinds`): the configured Type, else the header set's
+    nickname less the tool in brackets, else the table's name; tables of
+    one kind are told apart by their names less the common prefix and
+    suffix. One `--series-N` colour per table, tables with tagged rows
+    first. The pill keeps `.type-badge` and the file name as its title,
+    and its text is the kind alone (the host is a sibling `.tl-host`),
+    which `tests/ui/test_timeline_config_builder.py` reads. The memo is
+    keyed on `S.sources`, `S.timelineTemplates` and `S.headerNicknames`
+    by identity — each is replaced, never mutated, when it changes.
+  - **The gutter is the grid's**: a stripe per tag, ✎ for a note (the
+    page now carries `note`), ⤢ to open. The tag dots it replaces sat in
+    the Type column. The raw toggle shows on the line under the mouse or
+    the one picked (opacity, so it keeps its place and Playwright can
+    still click it), and stays shown on a line showing its raw row.
+  `tests/ui/test_timeline_lines.py`.
+
+- **The Timeline's overview strip** (timelineoverview.js) is the
+  histogram strip's look over the Timeline's own view, with three things
+  worth knowing before touching it:
+  - **Its classes are its own** (`.tl-ov-*`, `.tl-overview`), not the
+    histogram's `.th-*`. The histogram's tests find that strip's parts by
+    bare class (`.th-info`, `.th-legend-item`, `canvas.th-canvas`), and a
+    second strip under the same names put them in strict-mode violations
+    the moment the Timeline had been opened. The rules in style.css copy
+    the histogram's rather than sharing them.
+  - **What it narrows is kept as what is OFF or what was dragged**:
+    `S.timeline.sourcesOff` (the tag chips' rule, so a table tagged later
+    is on) and `S.timeline.range`, a half-open `[start, end)` that
+    `build_timeline` compares with each line's normalised timestamp. The
+    drag is snapped with the histogram's rule (a unit picked from the
+    drag's width, never coarser than a bar), not to the bars: snapping to
+    bars made a stretch inside one bar impossible to pick. Both reset on
+    a case switch (home.js), as `tagsOff` does.
+  - **The bars come from the server, the marks from the client.**
+    `GET /api/timeline_overview` after each build (and on Tags/Tables);
+    the band, the thumb and the selected line's mark are worked out from
+    lines the list already holds, on `renderTimelineRows`' and
+    `selectTimelineLine`'s call, coalesced to a frame and repainted only
+    when they would land on other pixels. A chart whose `view_id` is not
+    the current view's is drawn faded and takes no clicks (`fresh`).
+  Bars are square-root scaled (single findings beside a burst of
+  hundreds were a pixel tall on a linear scale); the hover gives each
+  bar's real count. `timelineOverviewX` is what the strip paints with and
+  what `tests/ui/test_timeline_overview_strip.py` clicks by.
+
+- **The Timeline's details pane** (timelinepane.js) shows the selected
+  line in full and is where "What else happened then" lives:
+  - **It does not open on a click.** It is always there (until Details
+    or its ✕ puts it away, remembered in `winnow.timelinePane`), empty
+    with nothing selected. A first version opened on the first click and
+    closed on Esc; opening narrowed the list under the pointer, so the
+    second click of a double-click landed on whatever had moved there
+    and the row never opened. `tests/ui/test_timeline_pane.py` asserts
+    `#timelineBody`'s box is the same before and after a pick, and
+    test_timeline_lines.py's double-click is the one that caught it.
+  - **It follows `S.timeline.sel`, cheaply.** `syncTimelinePane` runs on
+    every `renderTimelineRows` (so every scroll frame) and only redraws
+    when the selected row changes or its page object does; the row is
+    asked for (`GET /api/timeline_row`) debounced, so holding j does not
+    fetch every line it passes. After a rebuild `refreshTimelinePane`
+    asks again but keeps the old row on screen until the answer lands,
+    so a tag key does not blink the pane to "Loading…".
+  - **A redraw keeps the note being typed**: the textarea is rebuilt
+    with the pending text and the caret put back. A pending note is
+    saved before the pane takes another row (`flushTimelineNote`), so
+    moving on with j never drops one.
+  - **Tagging is one pair through `/api/row_tags`**, which journals it
+    (invariant #7), then the usual clearRowCaches / regroup / undo-state
+    refresh and a Timeline rebuild. The digits route here only on the
+    Timeline tab with a line selected; `undoLastTagChange` rebuilds the
+    Timeline when it is the tab showing.
+  - **Values are shown as stored.** The grid's detail pane formats a
+    datetime column with the open table's display format (`displayCell`
+    reads `S.columns`); this pane's row is from any table, usually not
+    the open one, so it does not.
+  - **The rows around a finding** are `S.timeline.context` (`{minutes,
+    around, start, end}`, reset on a case switch), posted as
+    `build_timeline`'s `context`. They come back with `ctx` set and get
+    `.ctx` (hatched, faded, ○ in the gutter). The header's count is the
+    findings (`row_count - context_rows`); the chip carries the rest.
+
+- **The Timeline reads as a story** (`timelineRowNode`'s `story`, which
+  only `renderTimelineRows` passes; Configure tables…' preview keeps the
+  plain timestamp, since its lines are samples rather than neighbours):
+  - **The Timestamp cell holds the time of day**, plus the day on the
+    first line of each, so **a line is found by its `data-ts`**, not by
+    the cell's text. The UI tests' `_line` helpers match
+    `.timeline-row[data-ts^='…']`; matching the cell's text stopped
+    working when it lost the date.
+  - **The rules are borders inside the row** (`day-start`, `gap`), and
+    rows are border-box, so a rule costs no height: the virtual list
+    places every row at `pos * ROW_H`, and a row one pixel taller would
+    drift every line under it. `tests/ui/test_timeline_story_lines.py`
+    holds every row to one height.
+  - **`gap` and `new_day` come from the server** (store.md), since the
+    line above the first line on a page is on another page.
+  - **The lead does not shrink** (`flex: 0 0 auto`, up to 55% of the
+    cell); the note and then the details give way. With the details
+    pane open the Body column is narrow, and a lead that shrank with the
+    rest came out as "PowerShell script…".
+  - **Fold repeats is off by default** (`winnow.timelineFold`): a line on
+    the Timeline is a finding, and a fold nobody asked for hides
+    findings. `S.timeline.unfold` holds the runs opened, by first row,
+    reset on a case switch and on the toggle. A tag on a folded line
+    goes on its first row only, which the pane says. A selected row that
+    folds away (`timeline_position`'s `folded`) leaves its run's line
+    selected, as `{pos, rid: null}`, which the line's row fills in when
+    its page paints, the way a line picked by key before its page
+    arrived does.
+  - **The header's switches are tinted when on, not filled.**
+    `.btn[aria-pressed]` fills with `--accent-dim`; Overview's and
+    Details' rule set the text to `--accent` and kept that fill, which on
+    the light themes was gold on gold.
 
 - **The Timeline's tag filter is the grid's tag chips** (`.tag-chip`,
   renderTimelineTagFilter). It asks what the ribbon asks, from the same
@@ -2227,8 +2403,8 @@ see [docs/notes/README.md](README.md) for the whole set.
     the Timeline still applied the old template.
   - **A blank Type saves as blank**, not as the first table's file name
     (what the per-table dialog sent). The template is shared, so that
-    name went on every other table's badges; blank lets `build_timeline`
-    fall back to each table's own name.
+    name went on every other table's badges; blank lets each table read
+    as its kind (the nickname-derived pill, `timelineKinds`).
   - **Edits are kept per header set until saved** (`state.drafts`):
     switching sets keeps them, the list marks each `unsaved`, and the
     footer names the others, because Save writes only the set shown.
@@ -2241,7 +2417,7 @@ see [docs/notes/README.md](README.md) for the whole set.
     clickable.
   - **The preview is the server's, not a re-implementation**:
     `POST /api/timeline/preview` runs `_timeline_parts` (the code
-    `build_timeline` uses) over a few rows under the UNSAVED settings, and
+    `fetch_timeline_rows` uses) over a few rows under the UNSAVED settings, and
     the rows are painted by `timelineRowNode`/`paintTimelineBody`, the
     Timeline's own row code, minus the raw/summary toggle (that state is
     the Timeline's, `S.timeline.raw`). Debounced, with a sequence number

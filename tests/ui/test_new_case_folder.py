@@ -46,13 +46,13 @@ def test_the_folder_picker_can_make_a_folder(page, tmp_path):
         # loads; typing into the box mid-chain is a race the app now guards
         # against, but a test should not be the thing proving it wins.
         page.wait_for_function(
-            "() => document.querySelector('#modalBody input').value !== ''", timeout=15_000)
+            "() => document.querySelector('#modalBody .browse-path').value !== ''", timeout=15_000)
 
         # Point the browser at a directory this test owns.
-        path_input = page.locator("#modalBody input").first
+        path_input = page.locator("#modalBody .browse-path")
         path_input.fill(str(tmp_path))
         path_input.press("Enter")
-        page.wait_for_function("(p) => document.querySelector('#modalBody input').value === p",
+        page.wait_for_function("(p) => document.querySelector('#modalBody .browse-path').value === p",
                                arg=str(tmp_path))
 
         page.locator("#modalBody .btn", has_text="New folder").click()
@@ -83,7 +83,7 @@ def test_the_folder_picker_can_make_a_folder(page, tmp_path):
         # which can normalise a symlinked temp dir into the same folder under
         # a different string.
         page.wait_for_function(
-            "() => document.querySelector('#modalBody input').value.endsWith('Intrusion 2026')",
+            "() => document.querySelector('#modalBody .browse-path').value.endsWith('Intrusion 2026')",
             timeout=10_000)
     finally:
         _back_to_app(page)
@@ -96,11 +96,11 @@ def test_a_duplicate_folder_name_is_reported_not_swallowed(page, tmp_path):
         page.locator("#modalBody .btn", has_text="Browse").click()
         page.wait_for_selector("#modalBody .btn:has-text('New folder')")
         page.wait_for_function(
-            "() => document.querySelector('#modalBody input').value !== ''", timeout=15_000)
-        path_input = page.locator("#modalBody input").first
+            "() => document.querySelector('#modalBody .browse-path').value !== ''", timeout=15_000)
+        path_input = page.locator("#modalBody .browse-path")
         path_input.fill(str(tmp_path))
         path_input.press("Enter")
-        page.wait_for_function("(p) => document.querySelector('#modalBody input').value === p",
+        page.wait_for_function("(p) => document.querySelector('#modalBody .browse-path').value === p",
                                arg=str(tmp_path))
 
         page.locator("#modalBody .btn", has_text="New folder").click()

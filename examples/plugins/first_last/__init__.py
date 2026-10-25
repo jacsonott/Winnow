@@ -97,7 +97,7 @@ import threading
 import time
 import traceback
 
-from winnow.store import OpCancelled, q
+from winnow.store import OpCancelled, q, union_all
 
 PLUGIN = {
     "name": "first-last",
@@ -216,12 +216,15 @@ def _scope(req, src):
     (invariant #9: the merge path is part of the operation)."""
     if not src.get("is_merge"):
         return _from_clause(src)
-    branches = []
-    for mid in src["member_source_ids"]:
-        m = req.store.get_source(mid)
-        sel = req.store.merge_select_list(src, m)  # NULL-pads columns a member lacks
-        branches.append(f"SELECT {int(m['id'])} AS source_id, s.rid AS rid, {sel} FROM {_from_clause(m)}")
-    return "(" + " UNION ALL ".join(branches) + ") s"
+    branches = [_member_select(req, src, req.store.get_source(mid)) for mid in src["member_source_ids"]]
+    return "(" + union_all(branches) + ") s"
+
+
+def _member_select(req, src, m):
+    """One member of merge `src` as _scope's union reads it: source_id, rid
+    and the merge's columns, NULL-padding the ones this member lacks."""
+    sel = req.store.merge_select_list(src, m)
+    return f"SELECT {int(m['id'])} AS source_id, s.rid AS rid, {sel} FROM {_from_clause(m)}"
 
 
 def _col(src, name):
@@ -669,36 +672,27 @@ def _bookend_rows(req, src, group_cols, sort_col, carry, where, params, limit,
         f" group_n{''.join(f', agg{i}' for i in range(len(aggs)))}"
         f"{''.join(f', uq{j}' for j in range(len(uniq)))}{counted}"
         f" FROM fl_groups CROSS JOIN (SELECT 1 AS w UNION ALL SELECT 2) WHERE w = 1 OR NOT ({same})),"
-        f" fl_top AS {_ONCE if merge else ''}(SELECT * FROM fl_ends ORDER BY {order} LIMIT {int(limit) + 1})"
+        f" fl_top AS (SELECT * FROM fl_ends ORDER BY {order} LIMIT {int(limit) + 1})"
     )
+    if merge:
+        return _merge_bookend_rows(req, src, needed, aggs, uniq, f"WITH {groups}, {ends}",
+                                   params, order, limit, op_token, count_groups)
     # Laid out as the window query this replaced laid its rows out — the
     # columns, then rn_first, rn_last, group_n and the aggregates — so a
     # column named like one of those reads the same as it always did. What
     # follows is this query's own and is cut off before the rows are named.
-    extra = (([", e.total"] if count_groups else []) + [", e.ord"]
-             + ([", e.sid"] if merge else []) + [", e.rid"])
+    extra = ([", e.total"] if count_groups else []) + [", e.ord", ", e.rid"]
     cols = (", ".join(f"{_col(src, c)} AS {q(c)}" for c in needed)
             + ", e.rn_first AS rn_first, e.rn_last AS rn_last, e.group_n AS group_n"
             + "".join(f", e.agg{i} AS {q(alias)}" for i, (_, _, alias) in enumerate(aggs))
             + "".join(f", e.uq{j} AS {q(_unique_alias(c))}" for j, c in enumerate(uniq))
             + "".join(extra))
     # A CROSS JOIN keeps fl_top the outer loop, so each bookend is one
-    # lookup by rid. A merge looks each member up in its own table: a join
-    # to _scope's union would read every member whole to find them.
-    if merge:
-        arms = []
-        for mid in src["member_source_ids"]:
-            m = req.store.get_source(mid)
-            member = (f"(SELECT {int(m['id'])} AS source_id, s.rid AS rid,"
-                      f" {req.store.merge_select_list(src, m)} FROM {_from_clause(m)}) s")
-            arms.append(f"SELECT {cols} FROM fl_top e CROSS JOIN {member}"
-                        f" ON s.rid = e.rid WHERE e.sid = {int(m['id'])}")
-        fetch = " UNION ALL ".join(arms)
-    else:
-        target = f"{q(src['table_name'])} s ON s.rid = e.rid"
-        if _derived_names(src):
-            target += f" LEFT JOIN {q('drv_' + str(src['id']))} d ON d.rid = s.rid"
-        fetch = f"SELECT {cols} FROM fl_top e CROSS JOIN {target}"
+    # lookup by rid.
+    target = f"{q(src['table_name'])} s ON s.rid = e.rid"
+    if _derived_names(src):
+        target += f" LEFT JOIN {q('drv_' + str(src['id']))} d ON d.rid = s.rid"
+    fetch = f"SELECT {cols} FROM fl_top e CROSS JOIN {target}"
     # fl_top's order again, now that the lookups have shuffled it, by
     # position: a source column can have any of these names.
     width = len(needed) + 3 + len(aggs) + len(uniq) + len(extra)
@@ -713,6 +707,50 @@ def _bookend_rows(req, src, group_cols, sort_col, carry, where, params, limit,
     cols = res["columns"][:keep]
     total = res["rows"][0][keep] if count_groups and res["rows"] else 0
     return [dict(zip(cols, r[:keep])) for r in res["rows"]], res["truncated"], total
+
+
+def _merge_bookend_rows(req, src, needed, aggs, uniq, with_groups, params, order, limit,
+                        op_token, count_groups):
+    """_bookend_rows for a merge, in two queries: the bookends' places
+    (member, rid and the per-group values) in order, then their columns,
+    each member's looked up in its own table by rid.
+
+    Not one query, as a single table's is, because a merge's lookup is a
+    UNION ALL with an arm per member, and an arm that joined fl_top made
+    SQLite expand fl_top, and with it the whole union beneath it, once per
+    arm: members squared references to every table, past SQLite's 65,535
+    from 120 to 250 members by the options ("too many references to
+    row_tags"). Joining
+    fl_top to _scope's union instead would read every member whole to find
+    two rows a group."""
+    per_group = (["rn_first", "rn_last", "group_n"] + [f"agg{i}" for i in range(len(aggs))]
+                 + [f"uq{j}" for j in range(len(uniq))] + (["total"] if count_groups else []))
+    sql = f"{with_groups} SELECT sid, rid, {', '.join(per_group)} FROM fl_top ORDER BY {order}"
+    top = req.store.run_sql(_inline(sql, params), limit=limit, op_token=op_token)
+    places = top["rows"]
+    if not places:
+        return [], top["truncated"], 0
+    rids = {}
+    for sid, rid, *_ in places:
+        rids.setdefault(sid, []).append(rid)
+    # Selected under the single-table query's names, NULL standing in for
+    # the per-group values, and through `SELECT *`, so SQLite names a
+    # repeated one (a column called group_n) as it does there: group_n:1.
+    keep = len(per_group) - (1 if count_groups else 0)
+    sel = (", ".join(f"{_col(src, c)} AS {q(c)}" for c in needed)
+           + ", NULL AS rn_first, NULL AS rn_last, NULL AS group_n"
+           + "".join(f", NULL AS {q(alias)}" for _, _, alias in aggs)
+           + "".join(f", NULL AS {q(_unique_alias(c))}" for c in uniq))
+    arms = [f"SELECT {sel}, {int(sid)}, s.rid FROM ({_member_select(req, src, req.store.get_source(sid))}) s"
+            f" WHERE s.rid IN ({', '.join(str(int(r)) for r in sorted(member))})"
+            for sid, member in sorted(rids.items())]
+    res = req.store.run_sql(f"SELECT * FROM ({union_all(arms)})", limit=len(places), op_token=op_token)
+    names = res["columns"][:len(needed) + keep]
+    found = {(r[-2], r[-1]): r[:len(needed)] for r in res["rows"]}
+    rows = [dict(zip(names, list(found[(sid, rid)]) + rest[:keep]))
+            for sid, rid, *rest in places if (sid, rid) in found]
+    total = places[0][-1] if count_groups else 0
+    return rows, top["truncated"], total
 
 
 def _values_alias(col):

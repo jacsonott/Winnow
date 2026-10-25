@@ -6,7 +6,7 @@ import { makePickerNode, parseFilter, setColumnFilter } from './filters.js';
 import { checkPresets } from './savedfilters.js';
 import { setGrouping } from './grouping.js';
 import { S, normalizeTree } from './state.js';
-import { currentFilterPayload, openSavedFiltersModal, updateFiltersButton } from './timeframe.js';
+import { currentFilterPayload, openSavedFiltersModal, tableMenuSeg, tableMenuStat, updateFiltersButton } from './timeframe.js';
 import { baseColumns } from './tsformat.js';
 import { datePickerButton, markModalAction, modal, promptDialog } from './ui.js';
 import { rebuildView } from './view.js';
@@ -294,15 +294,12 @@ export function renderCondRow(node, onStructural, onPreview) {
 export function renderFilterGroup(node, onStructural, onPreview, isRoot) {
   const wrap = el('div', 'fb-group');
   const head = el('div', 'fb-group-head');
-  const opSel = el('select', 'fb-group-op');
-  for (const o of ['AND', 'OR']) {
-    const opt = document.createElement('option');
-    opt.value = o; opt.textContent = o;
-    if (node.op === o) opt.selected = true;
-    opSel.append(opt);
-  }
-  opSel.onchange = () => { node.op = opSel.value; onStructural(); };
-  head.append(el('span', 'fb-group-label', isRoot ? 'Match' : 'Group:'), opSel, el('span', 'fb-group-label', 'of:'));
+  // All / Any as the builders' segment, in words: "Match [AND] of:" read
+  // as a sentence only to someone who already knew it meant AND.
+  const op = tableMenuSeg([['AND', 'All', 'Every condition here has to hold (AND)'], ['OR', 'Any', 'One condition here is enough (OR)']],
+    () => node.op, (key) => { node.op = key; onStructural(); }, 'fb-group-op');
+  head.append(el('span', 'fb-group-label', isRoot ? 'Match' : 'A group matching'), op.seg,
+    el('span', 'fb-group-label', isRoot ? 'of these' : 'of'));
   wrap.append(head);
 
   const list = el('div', 'fb-children');
@@ -320,13 +317,13 @@ export function renderFilterGroup(node, onStructural, onPreview, isRoot) {
   wrap.append(list);
 
   const actions = el('div', 'fb-actions');
-  const addCond = el('button', 'btn ghost', '+ condition');
+  const addCond = el('button', 'btn ghost mb-small', '+ Condition');
   addCond.onclick = () => {
     node.children = node.children || [];
     node.children.push({ type: 'cond', column: S.columns[0] ? S.columns[0].name : '', op: 'contains', value: '' });
     onStructural();
   };
-  const addGroup = el('button', 'btn ghost', '+ group');
+  const addGroup = el('button', 'btn ghost mb-small', '+ Group');
   addGroup.onclick = () => {
     node.children = node.children || [];
     node.children.push({ type: 'group', op: 'AND', children: [] });
@@ -373,19 +370,61 @@ export function openFilterBuilder(editing = null) {
     }
   }
   modal(editing ? `Edit filter — ${editing.name}` : 'Filter builder', (b) => {
-    const help = el('p', 'fb-help',
-      'Build filters visually, or type/paste SQL directly below — edits sync both ways when the SQL is simple enough to parse back into the structured editor.');
+    /* The builders' shape (the merge builder's .mb-*): the conditions on
+       the left; on the right what they come to — the rows they match in
+       this table, counted as they change, and the same filter as SQL,
+       editable, with the grouping under it. */
+    const root = el('div', 'mb fb-builder');
+    const panes = el('div', 'mb-panes fb-panes');
+    const left = el('div', 'mb-pane fb-left');
+    const right = el('div', 'mb-pane mb-result fb-right');
     const treeContainer = el('div', 'fb-tree');
-    const sqlLabel = el('div', 'fb-sql-label', 'Equivalent SQL (editable):');
+    left.append(el('div', 'mb-head', 'Conditions'), treeContainer);
+
+    const summary = el('div', 'mb-summary');
+    const stats = el('div', 'mb-stats');
+    summary.append(stats);
+    const countNote = el('ul', 'mb-notes');
+    const sqlHead = el('div', 'fb-sql-head');
+    const status = el('span', 'fb-status');
+    sqlHead.append(el('span', 'mb-head', 'SQL'), status);
     const sqlBox = el('textarea', 'fb-sql');
-    sqlBox.rows = 3;
+    sqlBox.rows = 4;
     sqlBox.spellcheck = false;
-    const status = el('div', 'fb-status');
+    sqlBox.setAttribute('aria-label', 'The filter as SQL (editable)');
+    right.append(summary, countNote, sqlHead, sqlBox);
+    panes.append(left, right);
+    root.append(panes);
+
+    const src = S.sources.find((s) => s.id === S.sourceId);
+    // Counted with a plain COUNT over the table, which a merge has no
+    // table of its own for; its grid's count is the one to read there.
+    const countable = !!(src && src.table_name && !src.is_merge);
+    let countSeq = 0;
+    const paintStats = (n, note) => {
+      stats.replaceChildren(tableMenuStat(n == null ? '—' : n, 'rows match'),
+        tableMenuStat(src ? src.row_count : 0, 'rows in the table'),
+        tableMenuStat(conditionCount(S.filterTree), 'conditions'));
+      countNote.replaceChildren(el('li', 'mb-note' + (note && note.warn ? ' warn' : ''), note ? note.text
+        : 'Counted over the whole table. The search box, the tag filter and the timeframe narrow the grid further.'));
+    };
+    const recount = debounce(async () => {
+      if (!countable) { paintStats(null, { text: 'A merge isn’t counted here: apply the filter and read the grid’s count.' }); return; }
+      const where = S.filterTree.type === 'raw' ? (S.filterTree.sql || '').trim() : serializeTree(S.filterTree);
+      const seq = ++countSeq;
+      try {
+        const res = await post('/api/sql', { sql: `SELECT COUNT(*) AS n FROM ${src.table_name}` + (where ? ` WHERE ${where}` : ''), limit: 1 });
+        if (seq === countSeq) paintStats(res.rows[0][0]);
+      } catch (e) {
+        if (seq === countSeq) paintStats(null, { warn: true, text: 'Not counted: ' + e.message });
+      }
+    }, 300);
 
     function refreshPreview() {
       if (document.activeElement !== sqlBox) {
         sqlBox.value = S.filterTree.type === 'raw' ? (S.filterTree.sql || '') : serializeTree(S.filterTree);
       }
+      recount();
     }
 
     function rerenderTree() {
@@ -430,7 +469,7 @@ export function openFilterBuilder(editing = null) {
     const gbWrap = el('div', 'fb-groupby');
     function renderGroupBy() {
       gbWrap.replaceChildren();
-      gbWrap.append(el('div', 'fb-groupby-label', 'Group by'));
+      gbWrap.append(el('div', 'mb-head', 'Group by'));
       const chips = el('div', 'fb-groupby-chips');
       gbCols.forEach((name, i) => {
         const chip = el('span', 'fb-groupby-chip', name);
@@ -448,24 +487,19 @@ export function openFilterBuilder(editing = null) {
       gbWrap.append(chips);
       if (gbCols.length) {
         const sortRow = el('div', 'fb-groupby-sort');
-        sortRow.append(el('span', 'fb-groupby-sublabel', 'order groups'));
-        const by = el('select');
-        for (const [v, l] of [['count', 'by count'], ['value', 'by value']]) by.append(new Option(l, v));
-        by.value = gbSort;
-        by.onchange = () => { gbSort = by.value; };
-        const dir = el('select');
-        for (const [v, l] of [['desc', 'high → low'], ['asc', 'low → high']]) dir.append(new Option(l, v));
-        dir.value = gbDir;
-        dir.onchange = () => { gbDir = dir.value; };
-        sortRow.append(by, dir);
+        sortRow.append(el('span', 'fb-groupby-sublabel', 'Order groups'));
+        const by = tableMenuSeg([['count', 'By count'], ['value', 'By value']], () => gbSort, (k) => { gbSort = k; by.paint(); });
+        const dir = tableMenuSeg([['desc', 'High → low'], ['asc', 'Low → high']], () => gbDir, (k) => { gbDir = k; dir.paint(); });
+        sortRow.append(by.seg, dir.seg);
         gbWrap.append(sortRow);
       }
     }
     renderGroupBy();
+    right.append(gbWrap);
 
-    b.append(help, treeContainer, sqlLabel, sqlBox, status, gbWrap);
-
-    const actions = el('div', 'row-actions');
+    // Along the foot: where filters are kept on the left, then saving,
+    // and Apply — the main one — on the right.
+    const actions = el('div', 'table-menu-foot table-menu-strip fb-foot');
     const apply = el('button', 'btn primary', 'Apply');
     apply.onclick = () => {
       const doApply = () => {
@@ -484,11 +518,12 @@ export function openFilterBuilder(editing = null) {
       } else doApply();
     };
     const clear = el('button', 'btn ghost', 'Clear');
+    clear.title = 'Remove every condition (Apply to see the table unfiltered)';
     clear.onclick = () => { S.filterTree = { type: 'group', op: 'AND', children: [] }; rerenderTree(); };
     const browse = el('button', 'btn ghost', 'Saved filters…');
     browse.title = 'Browse, apply and manage saved filters (the builder\'s state stays as-is)';
     browse.onclick = () => openSavedFiltersModal();
-    const saveFilterAs = el('button', 'btn ghost', editing ? 'Save as new…' : 'Save filter…');
+    const saveFilterAs = el('button', 'btn ghost table-menu-close', editing ? 'Save as new…' : 'Save filter…');
     saveFilterAs.title = `Saves for these ${S.columns.length} columns — cyclable with `
       + `${S.keymap.cyclePrevFilter[0] || '['} / ${S.keymap.cycleNextFilter[0] || ']'}, and suggested `
       + `automatically next time you open a table with matching columns`;
@@ -502,14 +537,14 @@ export function openFilterBuilder(editing = null) {
       checkPresets(S.sourceId); // this filter may now match the open table's banner
       toast(`Saved filter "${name.trim()}"`);
     };
-    actions.append(apply, clear, saveFilterAs, browse);
+    actions.append(browse, clear, saveFilterAs);
 
     if (editing) {
       // Deliberately doesn't send col_names: the header set is the filter's
       // identity for [ / ] cycling and the suggested-filter banner, so an
       // edit keeps it bound to the set it was saved for even if the table
       // open right now has a different one. "Save as new…" is the rebind path.
-      const update = el('button', 'btn', `Update "${editing.name}"`);
+      const update = el('button', 'btn ghost', `Update "${editing.name}"`);
       update.title = 'Overwrite this saved filter with the conditions above';
       update.onclick = async () => {
         const payload = currentFilterPayload();
@@ -529,9 +564,19 @@ export function openFilterBuilder(editing = null) {
       };
       actions.append(update);
     }
+    actions.append(apply);
+    root.append(actions);
+    b.append(root);
 
-    b.append(actions);
-
+    paintStats(null);
     rerenderTree();
-  }, { wide: true });
+  }, { wide: 'x', tall: true });
+}
+
+/* Conditions in a tree, counted as the builder shows them: a raw SQL
+   expression is one. */
+function conditionCount(node) {
+  if (!node) return 0;
+  if (node.type === 'cond' || node.type === 'raw') return node.type === 'raw' && !(node.sql || '').trim() ? 0 : 1;
+  return (node.children || []).reduce((n, c) => n + conditionCount(c), 0);
 }

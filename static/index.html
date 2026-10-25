@@ -235,19 +235,34 @@ try {
         <div id="timelineTagFilter" class="timeline-tagfilter"></div>
         <div class="spacer"></div>
         <span class="stats" id="timelineStats"></span>
+        <span class="tl-context" id="timelineContext"></span>
+        <button class="btn ghost" id="btnTimelineFold" aria-pressed="false"
+                title="Put three or more rows in a row from one table, with one summary and one first tag, on one line">Fold repeats</button>
+        <button class="btn ghost" id="btnTimelineOverview" aria-pressed="true"
+                title="Show or hide the overview: the Timeline's lines over time">Overview</button>
+        <button class="btn ghost" id="btnTimelinePane" aria-pressed="true"
+                title="Show or hide the details pane: the selected line in full, beside the list">Details</button>
         <button class="btn ghost" id="btnTimelineConfig">Configure tables…</button>
       </div>
-      <div class="timeline-cols">
-        <div class="tl-col-ts">Timestamp</div>
-        <div class="tl-col-type">Type</div>
-        <div class="tl-col-body">Body</div>
-      </div>
-      <div class="timeline-body" id="timelineBody" tabindex="0">
-        <div class="timeline-spacer-y" id="timelineSpacerY"></div>
-        <div class="timeline-rows" id="timelineRows"></div>
-      </div>
-      <div class="timeline-empty" id="timelineEmpty" hidden>
-        No tagged rows yet — tag some rows in any table, then come back here.
+      <section class="tl-overview" id="timelineOverview" hidden></section>
+      <div class="tl-split">
+        <div class="tl-main">
+          <div class="timeline-cols">
+            <div class="tl-col-gutter"></div>
+            <div class="tl-col-ts" id="timelineColTs">Timestamp</div>
+            <div class="tl-col-gap" title="The time since the line above">Gap</div>
+            <div class="tl-col-type">Type</div>
+            <div class="tl-col-body">Body</div>
+          </div>
+          <div class="timeline-body" id="timelineBody" tabindex="0">
+            <div class="timeline-spacer-y" id="timelineSpacerY"></div>
+            <div class="timeline-rows" id="timelineRows"></div>
+          </div>
+          <div class="timeline-empty" id="timelineEmpty" hidden>
+            No tagged rows yet — tag some rows in any table, then come back here.
+          </div>
+        </div>
+        <aside class="tl-pane" id="timelinePane" aria-label="The selected line" hidden></aside>
       </div>
     </section>
 

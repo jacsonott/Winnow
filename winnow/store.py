@@ -634,6 +634,32 @@ def _sql_chain(parts: list[str], op: str) -> str:
     return f"({_sql_chain(parts[:mid], op)}){op}({_sql_chain(parts[mid:], op)})"
 
 
+# Most terms one compound SELECT may have. SQLite refuses more than
+# SQLITE_MAX_COMPOUND_SELECT ("too many terms in compound SELECT"), which
+# is 500 in every stock build, and sqlite3_limit can only lower it.
+MAX_COMPOUND_TERMS = 500
+
+
+def union_all(branches: Iterable[str], sep: str = " UNION ALL ") -> str:
+    """`branches` joined by UNION ALL, at any count. A merge reads through
+    one branch per member, and a merge of 1000 IIS logs is twice what one
+    compound may hold — its view would not even build. Past the cap each
+    run of MAX_COMPOUND_TERMS branches is wrapped as `SELECT * FROM (...)`
+    and those are unioned in turn (again, if even they are too many), so
+    no single compound is over it. At or under the cap the text is the
+    plain join it always was. Branch order, and with it the order of any
+    `?` parameters, is unchanged, and the columns are still named by the
+    first branch. SQLite flattens the nesting back out when it plans the
+    query: a merge's compound ORDER BY still merges each member's sorted
+    index (MERGE (UNION ALL), no temp B-tree), as the flat one did.
+    Public: the bundled plugins build their merge scopes with it."""
+    out = list(branches)
+    while len(out) > MAX_COMPOUND_TERMS:
+        out = [f"SELECT * FROM ({sep.join(out[i:i + MAX_COMPOUND_TERMS])})"
+               for i in range(0, len(out), MAX_COMPOUND_TERMS)]
+    return sep.join(out)
+
+
 def _blob_expr(cols: list[str]) -> str:
     """Every column concatenated into one search target. This is what
     substring search means — a row matches when this text holds the term —
@@ -1045,6 +1071,20 @@ def _tl_squash(raw: Any) -> str:
 
 def _tl_cap(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "\u2026"
+
+
+_TIMELINE_EPOCH = datetime.datetime(1970, 1, 1)
+
+
+def _timeline_seconds(ts: str) -> int | None:
+    """A Timeline timestamp ('YYYY-MM-DD HH:MM:SS', maybe with a
+    fraction) as whole seconds since 1970, or None. Naive and UTC by
+    construction — every Timeline timestamp is — so a gap never crosses a
+    daylight-saving change that isn't there."""
+    try:
+        return int((datetime.datetime.fromisoformat(ts[:19]) - _TIMELINE_EPOCH).total_seconds())
+    except (TypeError, ValueError):
+        return None
 
 
 def _tl_lead(*values: Any) -> str:
@@ -2673,6 +2713,27 @@ def describe_case_lock(holder: dict) -> str:
     return bits
 
 
+class _QueuedBuild:
+    """One background build a batch worker has taken on, standing in a
+    build registry (Store._index_threads, Store._fts_threads) where a
+    thread per build used to: alive until the worker has done this one,
+    and joined as that thread was."""
+
+    __slots__ = ("_done",)
+
+    def __init__(self) -> None:
+        self._done = threading.Event()
+
+    def is_alive(self) -> bool:
+        return not self._done.is_set()
+
+    def join(self, timeout: float | None = None) -> None:
+        self._done.wait(timeout)
+
+    def finish(self) -> None:
+        self._done.set()
+
+
 class _CaseLock:
     """The marker one Store holds for its case file, for its whole life.
 
@@ -3026,6 +3087,8 @@ class Store:
         # and no invalidation: reader threads write it, and it must not
         # queue behind the writer.
         self._histogram_widths: dict[tuple, int] = {}
+        # _column_is_date_led's answers, (source_id, column) -> bool.
+        self._date_led: dict[tuple[int, str], bool] = {}
         self._histogram_widths_lock = threading.Lock()
         # time_histogram's answers by the ROWS a view holds rather than by
         # view id, so a sort or a filter cleared back to the whole table
@@ -3042,9 +3105,11 @@ class Store:
         # (invariant #3) and dies with the process, same as a view.
         self._undo: list[dict] = []
         self._maxlen_cache: dict[int, tuple[tuple, dict[str, int]]] = {}
-        self._fts_threads: dict[int, threading.Thread] = {}
+        self._fts_threads: dict[int, _QueuedBuild] = {}
         self._fts_failures: set[tuple[int, str]] = set()   # logged once each (_build_fts_worker)
-        self._index_threads: dict[tuple[int, str], threading.Thread] = {}
+        self._index_threads: dict[tuple[int, str, str], _QueuedBuild] = {}
+        # Where _build_batch collects the builds its block asks for.
+        self._batch = threading.local()
         # Caps how many trigram builds run at once. A broad action — a
         # search-all sweep over a case with many unindexed sources — calls
         # _ensure_fts_building for every one of them, and each build holds
@@ -3298,24 +3363,75 @@ class Store:
         every search still ran at fallback speed."""
         if sqlite3.sqlite_version_info < TRIGRAM_LIKE_MIN_SQLITE:
             return
+        batch = getattr(self._batch, "builds", None)
+        if batch is not None:
+            batch["fts"].append(source_id)
+            return
+        self._start_fts_builds([source_id])
+
+    @contextlib.contextmanager
+    def _build_batch(self) -> Iterator[None]:
+        """Collects the background builds the block's _ensure_* calls ask
+        for, index and search index alike, and starts them when the block
+        ends: one reader checks them all, and the builds run in turn on one
+        worker (search indexes on FTS_BUILD_CONCURRENCY). A block inside
+        another adds to the outer one's.
+
+        For a merge, whose operations ask once per member. Asked one at a
+        time, a 1000-member merge's first filter made 2000 checks on as
+        many readers and started 1000 threads, each committing its own
+        CREATE INDEX: every commit changed the schema, every check after
+        one reloaded a schema of thousands of tables, and the filter's own
+        compile took minutes. Nothing starts when the block raises."""
+        if getattr(self._batch, "builds", None) is not None:
+            yield
+            return
+        builds: dict[str, list] = {"index": [], "fts": []}
+        self._batch.builds = builds
+        try:
+            yield
+        finally:
+            self._batch.builds = None
+        self._start_index_builds(builds["index"])
+        self._start_fts_builds(builds["fts"])
+
+    def _start_fts_builds(self, source_ids: list[int]) -> None:
+        """_ensure_fts_building for each of `source_ids`, built in turn by as
+        many workers as may build at once (FTS_BUILD_CONCURRENCY)."""
         with self._threads_lock:
-            existing = self._fts_threads.get(source_id)
-            if existing and existing.is_alive():
-                return
+            todo = [sid for sid in dict.fromkeys(source_ids)
+                    if not (sid in self._fts_threads and self._fts_threads[sid].is_alive())]
+        if not todo:
+            return
         # A _reader() for the has_fts check, not _source_lite/self.lock:
         # this helper is called from read paths mid-scan, and every call
         # site runs outside any writer transaction (ingest fires it after
         # its final commit), so committed state is exactly what to check.
         with self._reader() as ro:
-            if self._source_lite_on(ro, source_id).get("has_fts"):
-                return
+            ready = {sid for (sid,) in ro.execute("SELECT id FROM sources WHERE has_fts=1")}
+        todo = [sid for sid in todo if sid not in ready]
         with self._threads_lock:
-            existing = self._fts_threads.get(source_id)
-            if existing and existing.is_alive():
-                return
-            t = threading.Thread(target=self._build_fts_worker, args=(source_id,), daemon=True)
-            self._fts_threads[source_id] = t
-        t.start()
+            jobs = []
+            for sid in todo:
+                existing = self._fts_threads.get(sid)
+                if existing and existing.is_alive():
+                    continue
+                self._fts_threads[sid] = _QueuedBuild()
+                jobs.append((sid, self._fts_threads[sid]))
+        workers = min(len(jobs), self.FTS_BUILD_CONCURRENCY)
+        for k in range(workers):
+            threading.Thread(target=self._build_fts_batch_worker, args=(jobs[k::workers],), daemon=True).start()
+
+    def _build_fts_batch_worker(self, jobs: list[tuple[int, _QueuedBuild]]) -> None:
+        try:
+            for source_id, handle in jobs:
+                if self._closing:
+                    break
+                self._build_fts_worker(source_id)
+                handle.finish()
+        finally:
+            for _, handle in jobs:
+                handle.finish()
 
     @staticmethod
     def search_index_supported() -> bool:
@@ -3342,7 +3458,7 @@ class Store:
                 "supported": self.search_index_supported()}
 
     def _build_fts_worker(self, source_id: int) -> None:
-        # The thread is registered (so _is_fts_building sees it and the
+        # The build is registered (so _is_fts_building sees it and the
         # per-source dedup holds) before it waits here for a build slot —
         # bounding writer contention when many builds are requested at once
         # (the search-all sweep). The heavy, lock-holding build_fts runs
@@ -3399,14 +3515,16 @@ class Store:
         return f"idx_{table_name}_{h}"
 
     def _column_index_exists(self, table_name: str, column: str, purpose: str = "filter") -> bool:
-        name = self._column_index_name(table_name, column, purpose)
         # A _reader(), same reasoning as _ensure_fts_building's has_fts
         # check: called from read paths, always outside a writer
         # transaction, and an index only "exists" once its CREATE commits.
         with self._reader() as ro:
-            row = ro.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='index' AND name=?", (name,)
-            ).fetchone()
+            return self._column_index_exists_on(ro, table_name, column, purpose)
+
+    def _column_index_exists_on(self, conn: sqlite3.Connection, table_name: str, column: str,
+                                purpose: str = "filter") -> bool:
+        name = self._column_index_name(table_name, column, purpose)
+        row = conn.execute("SELECT 1 FROM sqlite_master WHERE type='index' AND name=?", (name,)).fetchone()
         return row is not None
 
     def _ensure_column_index_building(self, source_id: int, column: str, table_name: str | None = None) -> None:
@@ -3537,48 +3655,110 @@ class Store:
         a member of a merge whose tables have different columns lacks some
         of the merge's. Matched as _col_key does, so a member's " Host" is
         the merge's "Host" too."""
-        key = _col_key(column)
         with self._reader() as ro:
-            names = [name for (name,) in ro.execute("SELECT name FROM pragma_table_info(?)", (table_name,))]
+            return self._own_spelling(self._table_columns_on(ro, table_name), column)
+
+    @staticmethod
+    def _table_columns_on(conn: sqlite3.Connection, table_name: str) -> list[str]:
+        return [name for (name,) in conn.execute("SELECT name FROM pragma_table_info(?)", (table_name,))]
+
+    @staticmethod
+    def _own_spelling(names: list[str], column: str) -> str | None:
+        """_table_own_spelling against a table's column `names`."""
         if column in names:
             return column
+        key = _col_key(column)
         return next((name for name in names if _col_key(name) == key), None)
 
     def _ensure_purpose_index_building(self, source_id: int, column: str, purpose: str,
                                         table_name: str | None = None) -> None:
         table_name = table_name or self._source_lite(source_id)["table_name"]
-        # Callers pass a merge's spelling of the column, once per member.
-        # Index the member's own spelling (the name list_column_indexes
-        # hashes), and nothing at all on a member that lacks the column:
-        # a merge of tables with different columns asks every member for
-        # every one of its columns.
-        column = self._table_own_spelling(table_name, column)
-        if column is None:
+        batch = getattr(self._batch, "builds", None)
+        if batch is not None:
+            batch["index"].append((source_id, column, purpose, table_name))
             return
-        key = (source_id, column, purpose)
-        with self._threads_lock:
-            existing = self._index_threads.get(key)
-            if existing and existing.is_alive():
-                return
-        if self._column_index_exists(table_name, column, purpose):
-            return
-        with self._threads_lock:
-            existing = self._index_threads.get(key)
-            if existing and existing.is_alive():
-                return
-            t = threading.Thread(target=self._build_column_index_worker,
-                                 args=(column, table_name, purpose), daemon=True)
-            self._index_threads[key] = t
-        t.start()
+        self._start_index_builds([(source_id, column, purpose, table_name)])
 
-    def _build_column_index_worker(self, column: str, table_name: str, purpose: str = "filter") -> None:
+    def _start_index_builds(self, wanted: list[tuple[int, str, str, str]]) -> None:
+        """_ensure_purpose_index_building for each (source_id, column,
+        purpose, table_name) in `wanted`: checked on one reader, built by
+        one worker."""
+        if not wanted:
+            return
+        todo = []
+        with self._reader() as ro:
+            columns: dict[str, list[str]] = {}
+            for source_id, column, purpose, table_name in wanted:
+                if table_name not in columns:
+                    columns[table_name] = self._table_columns_on(ro, table_name)
+                # Callers pass a merge's spelling of the column, once per
+                # member. Index the member's own spelling (the name
+                # list_column_indexes hashes), and nothing at all on a member
+                # that lacks the column: a merge of tables with different
+                # columns asks every member for every one of its columns.
+                own = self._own_spelling(columns[table_name], column)
+                if own is None:
+                    continue
+                key = (source_id, own, purpose)
+                with self._threads_lock:
+                    existing = self._index_threads.get(key)
+                    if existing and existing.is_alive():
+                        continue
+                if not self._column_index_exists_on(ro, table_name, own, purpose):
+                    todo.append((key, table_name, own, purpose))
+        jobs = []
+        with self._threads_lock:
+            for key, table_name, column, purpose in todo:
+                existing = self._index_threads.get(key)
+                if existing and existing.is_alive():
+                    continue
+                self._index_threads[key] = _QueuedBuild()
+                jobs.append((self._index_threads[key], table_name, column, purpose))
+        if jobs:
+            threading.Thread(target=self._build_column_indexes_worker, args=(jobs,), daemon=True).start()
+
+    # How long the index worker holds the writer lock for one transaction of
+    # index builds. A merge of small tables builds dozens in one commit, and
+    # each commit is one schema change for every reader to reload, not one
+    # per table; a table big enough to take longer is built alone.
+    INDEX_BATCH_HOLD_S = 0.25
+
+    def _build_column_indexes_worker(self, jobs: list[tuple[_QueuedBuild, str, str, str]]) -> None:
         try:
-            name = self._column_index_name(table_name, column, purpose)
-            collate = " COLLATE NOCASE" if purpose == "sort" else ""
-            with self.lock, self.db:
-                self.db.execute(f"CREATE INDEX IF NOT EXISTS {q(name)} ON {q(table_name)}({q(column)}{collate})")
+            i = 0
+            while i < len(jobs) and not self._closing:
+                done = []
+                with self.lock:
+                    t0 = time.perf_counter()
+                    # Never someone else's transaction to commit or roll back.
+                    own = not self.db.in_transaction
+                    if own:
+                        self.db.execute("BEGIN")
+                    try:
+                        while i < len(jobs) and (not done or time.perf_counter() - t0 < self.INDEX_BATCH_HOLD_S):
+                            handle, table_name, column, purpose = jobs[i]
+                            i += 1
+                            done.append(handle)
+                            name = self._column_index_name(table_name, column, purpose)
+                            collate = " COLLATE NOCASE" if purpose == "sort" else ""
+                            with contextlib.suppress(sqlite3.Error):   # its table dropped since: skip it
+                                self.db.execute(f"CREATE INDEX IF NOT EXISTS {q(name)} "
+                                                f"ON {q(table_name)}({q(column)}{collate})")
+                        if own:
+                            self.db.commit()
+                    except BaseException:
+                        if own:
+                            self.db.rollback()
+                        raise
+                for handle in done:
+                    handle.finish()
+                if i < len(jobs):
+                    time.sleep(0.02)  # same anti-starvation yield build_fts uses
         except Exception:
             pass  # best-effort background upgrade — the next filter/sort application retries
+        finally:
+            for handle, *_ in jobs:
+                handle.finish()
 
     def wait_for_column_index(self, source_id: int, column: str, timeout: float | None = None,
                                purpose: str = "filter") -> bool:
@@ -4236,6 +4416,16 @@ class Store:
         the store closing, and a connection whose last statement died is
         cheaper to replace than to prove clean. The pool refills lazily.
 
+        The block is one read transaction, so everything in it reads one
+        snapshot of the case. That is what keeps a read from failing with
+        "database schema has changed" while the writer commits schema
+        changes back to back, as the per-member index builds of a big
+        merge do: a statement that finds the schema changed under it is
+        re-prepared, and in autocommit SQLite reads the schema afresh for
+        each of its 50 tries, which a writer committing faster than a
+        schema of thousands of tables loads can outrun every time. Inside
+        a transaction the retry reads the snapshot's schema and succeeds.
+
         Checked-out connections are counted, so that close() can wait for
         them to come back: one still open when the writer closes keeps
         SQLite from tidying the -wal and -shm away (see close())."""
@@ -4256,7 +4446,9 @@ class Store:
         try:
             if conn is None:
                 conn = self._open_reader()
+            conn.execute("BEGIN")
             yield conn
+            conn.rollback()
             with self._reader_lock:
                 if not self._readers_closed and len(self._reader_pool) < self.READER_POOL_CAP:
                     self._reader_pool.append(conn)
@@ -4273,6 +4465,17 @@ class Store:
                 with self._reader_lock:
                     self._readers_out -= 1
                     self._readers_back.notify_all()
+
+    @staticmethod
+    def _renew_snapshot(ro: sqlite3.Connection) -> None:
+        """Ends a _reader() block's snapshot; the next read starts another.
+        For a block that streams or copies batch by batch, called between
+        batches, with none of its statements open: a WAL checkpoint cannot
+        pass a page that a reader's snapshot might still read, so a snapshot
+        held across a slow download, or across a copy's own commits, would
+        grow the -wal by everything written in the meantime."""
+        ro.rollback()
+        ro.execute("BEGIN")
 
     @staticmethod
     @contextlib.contextmanager
@@ -7084,13 +7287,17 @@ class Store:
         row = self._merge_row(merge_id)
         member_ids = json.loads(row["source_ids"])
         members = [self.get_source(sid) for sid in member_ids]
+        # Once, not once per member as well: it reads every member's
+        # columns, so per member it made opening a merge quadratic — ~3 s
+        # for 510 members, and four times that at 1000.
+        columns = self._merge_columns(row, members)
         return {
             "id": -merge_id,
             "name": row["name"],
             "path": None,
             "table_name": None,
             "row_count": sum(m["row_count"] for m in members),
-            "columns": self._merge_columns(row, members),
+            "columns": columns,
             "col_mode": row["col_mode"],
             "source_column": bool(row["source_column"]),
             # Per member, which merge columns it lacks — what the builder's
@@ -7098,7 +7305,7 @@ class Store:
             "members": [
                 {"id": m["id"], "label": m.get("nickname") or m["name"], "name": m["name"],
                  "row_count": m["row_count"],
-                 "missing": self._member_missing_columns(row, members, m)}
+                 "missing": self._member_missing_columns(columns, m)}
                 for m in members
             ],
             "file_hash": None,
@@ -7190,8 +7397,9 @@ class Store:
             cols.insert(0, {"name": name, "type": "text", "source_column": True})
         return cols
 
-    def _member_missing_columns(self, row: sqlite3.Row, members: list[dict], member: dict) -> list[str]:
-        return [c["name"] for c in self._merge_columns(row, members)
+    @staticmethod
+    def _member_missing_columns(columns: list[dict], member: dict) -> list[str]:
+        return [c["name"] for c in columns
                 if not c.get("source_column") and _member_column(member, c) is None]
 
     @staticmethod
@@ -9074,7 +9282,7 @@ class Store:
                     f"WHERE {ref} IS NOT NULL AND {ref} <> '' "
                     f"ORDER BY {order} LIMIT {int(per)})")
 
-        union = " UNION ALL ".join(branch(m) for m in members)
+        union = union_all(branch(m) for m in members)
         with self._reader() as ro, self._dropped_view_is_expired():
             return [r[0] for r in ro.execute(f"SELECT v FROM ({union}) LIMIT ?", (want,))]
 
@@ -9368,22 +9576,23 @@ class Store:
             parts = []
             filtered = False
             params: list[Any] = []
-            for m in self._resolve_members(source_id):
-                msrc = m["src"]
-                read_src = self._member_read_src(src, msrc)
-                scan_from = self._member_from(src, m, uses=[c["name"] for c in self._base_cols(read_src)])
-                where, p = self._compile_where(m["source_id"], read_src, spec, colnames, scan_from=scan_from)
-                for col in sort_cols:
-                    self._ensure_sort_index_building(
-                        m["source_id"], col,
-                        self._index_table_for(src, col, msrc["table_name"], m["source_id"]))
-                parts.append((int(m["source_id"]),
-                              f" FROM {self._member_from(src, m)}" + (f" WHERE {where}" if where else "")))
-                filtered = filtered or bool(where)
-                params.extend(p)
+            with self._build_batch():   # one batch for every member's index builds
+                for m in self._resolve_members(source_id):
+                    msrc = m["src"]
+                    read_src = self._member_read_src(src, msrc)
+                    scan_from = self._member_from(src, m, uses=[c["name"] for c in self._base_cols(read_src)])
+                    where, p = self._compile_where(m["source_id"], read_src, spec, colnames, scan_from=scan_from)
+                    for col in sort_cols:
+                        self._ensure_sort_index_building(
+                            m["source_id"], col,
+                            self._index_table_for(src, col, msrc["table_name"], m["source_id"]))
+                    parts.append((int(m["source_id"]),
+                                  f" FROM {self._member_from(src, m)}" + (f" WHERE {where}" if where else "")))
+                    filtered = filtered or bool(where)
+                    params.extend(p)
 
             def union(cols: str) -> str:
-                return " UNION ALL ".join(f"SELECT {mid} AS {sid_col}, rid{cols}{rest}" for mid, rest in parts)
+                return union_all(f"SELECT {mid} AS {sid_col}, rid{cols}{rest}" for mid, rest in parts)
 
             vid = self._next_view_id()
             # Each member SELECTs its id, rid and what the sort needs, and
@@ -9596,6 +9805,9 @@ class Store:
             return
         if handle.get("kind") not in ("group_virtual", "root_virtual"):
             self.db.execute(f"DROP TABLE IF EXISTS v.{q(vid)}")
+        # Tables a view keeps beside its own (a folded Timeline's rows).
+        for extra in handle.get("tables", ()):
+            self.db.execute(f"DROP TABLE IF EXISTS v.{q(extra)}")
         for child_vid, child in list(self._views.items()):
             if child.get("parent_view_id") == vid:
                 self._evict_view_and_children(child_vid)
@@ -9691,9 +9903,10 @@ class Store:
         parameters, and the type label — plus what was chosen, for the
         callers that have to say so.
 
-        The one place these rules live. build_timeline unions a branch of
-        this per source, and timeline_preview (Configure tables…) runs the
-        very same expressions over a few rows, so the dialog's preview
+        The one place these rules live. build_timeline orders each source's
+        tagged rows by its timestamp, fetch_timeline_rows reads a page's
+        rows with the rest, and timeline_preview (Configure tables…) runs
+        the very same expressions over a few rows, so the dialog's preview
         cannot drift from what the Timeline then shows.
 
         - The timestamp is `cfg`'s column when the source has it, else
@@ -9751,13 +9964,14 @@ class Store:
         `cfg` — the not-yet-saved settings in Configure tables…, so the
         dialog can show the result of a pick before it is saved.
 
-        Built by _timeline_parts, the same expressions build_timeline
-        materialises, so a preview and the Timeline cannot disagree about
-        what a row reads as (the summary, its timestamp-column drop, the
-        495-column cap, the derived-column timestamp). Which rows: the
-        table's first TAGGED rows, since those are the ones the Timeline
-        holds, then its first rows when fewer are tagged, so a table nobody
-        has tagged yet still previews. In Timeline order among themselves.
+        Built by _timeline_parts, the same expressions fetch_timeline_rows
+        reads a Timeline page with, so a preview and the Timeline cannot
+        disagree about what a row reads as (the summary, its timestamp-
+        column drop, the 495-column cap, the derived-column timestamp).
+        Which rows: the table's first TAGGED rows, since those are the ones
+        the Timeline holds, then its first rows when fewer are tagged, so a
+        table nobody has tagged yet still previews. In Timeline order among
+        themselves.
 
         `body` says what the Body is made of: "columns" (the ones picked),
         "summary" (the shipped one for `summary_shape`) or "all" (every
@@ -9823,12 +10037,14 @@ class Store:
         }
 
     def build_timeline(self, configs: dict[int, dict] | None = None, tag_ids: list[int] | None = None,
-                       op_token: str | None = None) -> dict:
+                       op_token: str | None = None, ts_range: list[str] | None = None,
+                       exclude_sources: list[int] | None = None,
+                       context: list[str] | None = None, fold: bool = False,
+                       unfold: list[list[int]] | None = None) -> dict:
         """Materialises one row per *tagged* row across every real source in
         the case (open or closed — this is "every finding in the case", not
-        "every finding in a currently-open tab"), each contributing its own
-        timestamp/body/type-label per `configs.get(source_id)`. `configs` is
-        resolved by the caller (server.py's _resolve_timeline_configs,
+        "every finding in a currently-open tab"), in time order. `configs`
+        is resolved by the caller (server.py's _resolve_timeline_configs,
         matching each source's header set against workspace.timeline_
         templates) rather than looked up in here — store.py can't import
         workspace.py (workspace.py already imports from store.py; see
@@ -9837,96 +10053,355 @@ class Store:
         (a timestamp_column that isn't one of its own columns), falls back
         to its first datetime column, every column, and its own name.
 
-        Each row also carries a **summary** — a lead ("Special privileges
-        assigned") and a few identifying details ("svc_backup · WKSTN-4471
-        · id 4672") — built here, beside the body, from the artefact
-        shape's template in defaults/headers.json. Built here rather than
-        client-side for the reason the body is: the client is a virtualized
-        list that already has the row, and re-deriving a summary there
-        would mean shipping it the source columns it deliberately never
-        fetches. A shape nothing describes, or a source whose body columns
-        the analyst chose by hand, gets an empty summary and reads exactly
-        as it did before.
+        **Only what orders the rows is materialised**: (source_id, rid, ts).
+        The body, the summary, the tags and the note are read a page at a
+        time by fetch_timeline_rows, for the rows on that page. This view
+        used to hold all of them, and building it meant joining every
+        column of every tagged row into a string and running the summary's
+        Python functions (TL_LEAD/TL_DETAILS) over each one before the
+        first line could show: 13.7 s for 250k tagged rows, paid again on
+        every visit to the tab (showTimelineTab rebuilds, since tags change
+        while it isn't showing) and on every tag chip clicked. Ordering
+        needs the timestamp alone, which is 0.6 s for the same rows. The
+        `configs` are kept on the view's handle, so every page reads its
+        rows the way the build said it would.
 
         `tag_ids` narrows to rows carrying at least one of those tags;
         None/empty means every tagged row regardless of which tag(s).
+        `exclude_sources` leaves those tables out (the overview strip's
+        table chips): the tables switched OFF rather than the ones on, for
+        the reason the tag chips remember theirs that way — a table tagged
+        after the list was read is on the Timeline, not missing from it.
+        `ts_range` is [start, end), normalised 'YYYY-MM-DD HH:MM:SS' text
+        compared with the line's own timestamp (the strip's drag); a line
+        with no timestamp has no place in a stretch of time and is left out
+        while one is set.
+
+        `context` is [start, end) as well: the rows around a finding (the
+        detail pane's "What else happened then"). Every row of every real
+        table whose Timeline timestamp falls in it and that is not a line
+        already — untagged, or carrying only tags switched off — joins the
+        Timeline with `ctx` = 1, so the finding reads in its surroundings.
+        Tables switched off stay off; a table with no timestamp has no
+        rows "around" anything. How each table is read for it is
+        _timeline_context_branch's docstring.
+
+        `fold` puts a run of TIMELINE_FOLD_MIN or more lines in a row from
+        one table, with one summary lead and one first tag, on one line
+        (`n` rows from `ts` to `ts_last`); `unfold` lists the runs, by
+        their first row's [source_id, rid], to leave open. How a run is
+        told is _timeline_fold's docstring. Folded, the view is the lines
+        and the rows are kept beside it, for the overview's bars and for
+        finding a row that is inside a run (timeline_position).
+
+        Beside its timestamp each line keeps `tag1`, the first of the tags
+        asked for that it carries (lowest id — tag order, the order the
+        histogram's Tags view colours by), which is what the overview strip
+        splits its bars by (timeline_overview). `per_source` in the result
+        counts the lines from each table, for the strip's table chips.
 
         A source whose body would join more columns than SQLite's expression
         depth allows (_fit_body_cols — 495 at the default limit) keeps only
-        the first that many, in body order, rather than failing the whole
-        build. Each one trimmed that way is listed in the result's
-        `body_trimmed` so the tab can say so.
+        the first that many, in body order, rather than failing. Each one
+        trimmed that way is listed in the result's `body_trimmed` so the tab
+        can say so.
 
         Same materialize-into-v.-then-page-by-pos pattern as build_view
         (CLAUDE.md invariant #2) — a heavily-tagged case can still be
-        thousands of rows, so this isn't exempt from the no-LIMIT/OFFSET
-        rule just because it's a cross-table view rather than a single-
-        source one. Only one timeline view is ever alive at a time (an
-        analyst has one Timeline tab, not several) — building a new one
-        evicts whatever timeline view existed before, same as build_view
-        evicts the previous root view for a source."""
+        hundreds of thousands of rows, so this isn't exempt from the
+        no-LIMIT/OFFSET rule just because it's a cross-table view rather
+        than a single-source one. Only one timeline view is ever alive at a
+        time (an analyst has one Timeline tab, not several) — building a
+        new one evicts whatever timeline view existed before, same as
+        build_view evicts the previous root view for a source."""
         configs = configs or {}
         tag_clause = f" AND tag_id IN ({','.join('?' * len(tag_ids))})" if tag_ids else ""
 
         branches = []
         params: list[Any] = []
         body_trimmed: list[dict] = []
+        skip = {int(x) for x in exclude_sources or ()}
+        if context is not None and (len(context) != 2 or not all(isinstance(x, str) and x for x in context)):
+            raise ValueError("context must be [start, end]")
         for src in self.list_sources():
-            if not src["tagged_row_count"]:
-                continue
             source_id = src["id"]
+            tagged = bool(src["tagged_row_count"])
+            if source_id in skip or not (tagged or context) or src.get("error") or not src.get("columns"):
+                continue
             p = self._timeline_parts(src, configs.get(source_id, {}))
+            around = context is not None and p["ts_col"] is not None
+            if not (tagged or around):
+                continue
             if p["body_shown"] < p["body_total"]:
                 body_trimmed.append({"source_id": source_id, "source_name": src["name"],
                                      "shown": p["body_shown"], "total": p["body_total"]})
+            if around:
+                sql, more = self._timeline_context_branch(src, p, context, tag_clause, tag_ids)
+                branches.append(sql)
+                params.extend(more)
+            if not tagged:
+                continue
+            # row_tags first (CROSS JOIN fixes the order), read off its
+            # (source_id, rid, tag_id) key a rid at a time, then each row
+            # looked up by its rid. `uses` keeps the derived sidecar out of
+            # the join unless the timestamp is a derived column.
+            uses = [p["ts_col"]] if p["ts_col"] else []
+            fkey = "NULL"
+            if fold:
+                fkey, lead_cols = self._timeline_fold_key(src, p)
+                uses += lead_cols
             branches.append(
-                f"SELECT {int(source_id)} AS source_id, s.rid AS rid, {p['ts_expr']} AS ts, "
-                f"({p['body_expr']}) AS body, "
-                f"{p['lead_expr']} AS summary_lead, {p['detail_expr']} AS summary_detail, "
-                f"? AS type_label, ? AS source_name, "
-                f"(SELECT GROUP_CONCAT(tag_id) FROM row_tags WHERE source_id={int(source_id)} AND rid=s.rid) AS tag_ids "
-                f"FROM {self._from_clause(src, 's')} "
-                f"WHERE s.rid IN (SELECT rid FROM row_tags WHERE source_id={int(source_id)}{tag_clause})"
+                f"SELECT {int(source_id)} AS source_id, t.trid AS rid, {p['ts_expr']} AS ts, t.tag1 AS tag1, "
+                f"0 AS ctx, {fkey} AS fkey "
+                f"FROM (SELECT rid AS trid, MIN(tag_id) AS tag1 FROM row_tags "
+                f"WHERE source_id = ?{tag_clause} GROUP BY rid) t "
+                f"CROSS JOIN {self._from_clause(src, 's', uses)} WHERE s.rid = t.trid"
             )
-            # Parameter order follows the order the placeholders appear in
-            # the SELECT above, since SQLite binds by ordinal across the
-            # whole UNION: the summary's detail labels, then the two label
-            # columns, then this branch's tag ids.
-            params.extend(p["summary_params"])
-            params.append(p["type_label"])
-            params.append(src["name"])
+            params.append(source_id)
             if tag_ids:
                 params.extend(tag_ids)
 
+        where = ""
+        if ts_range is not None:
+            if len(ts_range) != 2 or not all(isinstance(x, str) and x for x in ts_range):
+                raise ValueError("ts_range must be [start, end]")
+            where = "WHERE ts >= ? AND ts < ? "
+            params.extend(ts_range)
+
         vid = self._next_view_id()
+        rows_table = f"{vid}_rows" if fold else None
+        per_source: dict[int, int] = {}
         with self.lock, self._interruptible(op_token, self.db), self.db:
+            # `n` rows on the line from `ts` to `ts_last` when it is a folded
+            # run; `run_n` the length of the run the line heads, folded or
+            # left open (None when it heads none).
             self.db.execute(
                 f"CREATE TABLE v.{q(vid)} (pos INTEGER PRIMARY KEY, source_id INTEGER, rid INTEGER, "
-                f"ts TEXT, body TEXT, summary_lead TEXT, summary_detail TEXT, "
-                f"type_label TEXT, source_name TEXT, tag_ids TEXT)"
+                f"ts TEXT, tag1 INTEGER, ctx INTEGER, n INTEGER NOT NULL DEFAULT 1, run_n INTEGER, ts_last TEXT)"
             )
             n = 0
+            rows = 0
+            context_rows = 0
             if branches:
-                union_sql = " UNION ALL ".join(branches)
+                union_sql = union_all(branches)
                 # ORDER BY-fed insert, same as build_view: pos auto-assigns
                 # in sorted order ((source_id, rid) makes the order fully
                 # determined), rowcount replaces a count(*) re-scan.
+                into = f"{vid}_all" if fold else vid
+                if fold:
+                    self.db.execute(
+                        f"CREATE TABLE v.{q(into)} (pos INTEGER PRIMARY KEY, source_id INTEGER, "
+                        f"rid INTEGER, ts TEXT, tag1 INTEGER, ctx INTEGER, fkey TEXT)")
                 n = self.db.execute(
-                    f"INSERT INTO v.{q(vid)}(source_id, rid, ts, body, summary_lead, summary_detail, "
-                    f"type_label, source_name, tag_ids) "
-                    f"SELECT source_id, rid, ts, body, summary_lead, summary_detail, "
-                    f"type_label, source_name, tag_ids FROM ({union_sql}) "
+                    f"INSERT INTO v.{q(into)}(source_id, rid, ts, tag1, ctx{', fkey' if fold else ''}) "
+                    f"SELECT source_id, rid, ts, tag1, ctx{', fkey' if fold else ''} "
+                    f"FROM ({union_sql}) {where}"
                     f"ORDER BY (ts IS NULL) ASC, ts ASC, source_id, rid",
                     params,
                 ).rowcount
+                rows = n
+                if fold:
+                    n = self._timeline_fold(vid, into, rows_table, unfold or [])
+                # The table chips count findings; a table's rows around one
+                # are on top of that, and counted on their own.
+                for sid, found, near in self.db.execute(
+                        f"SELECT source_id, SUM(CASE WHEN ctx = 0 THEN n ELSE 0 END), SUM(ctx) "
+                        f"FROM v.{q(vid)} GROUP BY source_id"):
+                    if found:
+                        per_source[sid] = found
+                    context_rows += near
             # Same evict-after-build ordering (and reasoning) as build_view.
             for old in list(self._views):
                 h = self._views.get(old)
                 if h and h.get("kind") == "timeline":
                     self._evict_view_and_children(old)
 
-        self._views[vid] = {"view_id": vid, "kind": "timeline", "row_count": n}
-        return {"view_id": vid, "row_count": n, "body_trimmed": body_trimmed}
+        self._views[vid] = {"view_id": vid, "kind": "timeline", "row_count": n, "rows": rows,
+                            "configs": configs, "rows_table": rows_table,
+                            "tables": [rows_table] if rows_table else []}
+        return {"view_id": vid, "row_count": n, "rows": rows, "body_trimmed": body_trimmed,
+                "per_source": per_source, "context_rows": context_rows}
+
+    # The fewest lines in a row that fold into one.
+    TIMELINE_FOLD_MIN = 3
+
+    def _timeline_fold_key(self, src: dict, p: dict) -> tuple[str, list[str]]:
+        """What tells one line of a run from the next when the Timeline
+        folds repeats — the summary's lead, in plain SQL — and the columns
+        it reads. ("NULL", []) for a table read without a summary (body
+        columns picked, or a shape nothing describes): its lines never fold.
+
+        Not TL_LEAD itself, which is a Python call per row and the build
+        runs none (tests/test_timeline_summary.py counts). The first lead
+        column with something in it, trimmed of the whitespace _tl_squash
+        drops at either end: two rows with the same key show the same lead,
+        which is the property folding needs. Two rows that differ only
+        inside their whitespace, or past TL_LEAD_MAX, are told apart here
+        and shown alike — a run left unfolded, never one folded wrongly."""
+        if p["body_columns"] or not self._timeline_summary_exprs(src, p["ts_col"]):
+            return "NULL", []
+        spec = self._timeline_summary_template(src)
+        have = {c["name"].strip().lower(): c["name"] for c in self._base_cols(src)}
+        skip = (p["ts_col"] or "").strip().lower()
+        cols = [have[k] for k in (n.strip().lower() for n in spec["lead"]) if k in have and k != skip]
+        if not cols:
+            return "NULL", []
+        ws = "char(32, 9, 10, 13)"
+        return ("COALESCE(" + ", ".join(f"NULLIF(TRIM({self._col_ref(src, c, 's')}, {ws}), '')" for c in cols)
+                + ", NULL)"), cols
+
+    def _timeline_fold(self, vid: str, all_table: str, rows_table: str, unfold: list[list[int]]) -> int:
+        """Fills the view `vid` with the lines of `all_table` (every row, in
+        Timeline order, with its fold key), a run of repeats on one line,
+        and keeps the rows as `rows_table`, each with the line it is on.
+        Returns the number of lines. Caller holds the writer lock, in a
+        transaction; `all_table` is dropped.
+
+        A row continues the run above it when it is a finding (not a row
+        around one), has a fold key, and the line before it is a finding
+        from the same table with the same key and the same first tag. A
+        row with a note starts a run of its own, so a note is never inside
+        a fold; it can head one, and the folded line shows it. Runs
+        shorter than TIMELINE_FOLD_MIN, and those listed in `unfold` by
+        their first row, stay a line per row.
+
+        In steps, each a table with a key the next one reads by, and the
+        row before compared by a join on `pos - 1` rather than LAG(): at
+        250k rows the window functions took 0.84 s for what the join does
+        in 0.34 s. A run's rows are consecutive lines, so a row's line is
+        its run's first line (`hl`), plus how far into the run it is when
+        the run is left open."""
+        runs_t, opened, each = f"{vid}_runs", f"{vid}_open", f"{vid}_each"
+        pairs = set()
+        for pair in unfold:
+            if len(pair) != 2:
+                raise ValueError("unfold must be a list of [source_id, rid]")
+            pairs.add((int(pair[0]), int(pair[1])))
+        fold_min = int(self.TIMELINE_FOLD_MIN)
+        a_t = f"v.{q(all_table)}"
+        try:
+            # Which run each row is in: a running total of the rows that
+            # start one.
+            self.db.execute(f"CREATE TABLE v.{q(each)} (pos INTEGER PRIMARY KEY, run INTEGER, brk INTEGER)")
+            self.db.execute(f"""
+                INSERT INTO v.{q(each)}(pos, run, brk)
+                SELECT pos, SUM(brk) OVER (ORDER BY pos ROWS UNBOUNDED PRECEDING), brk FROM (
+                  SELECT a.pos,
+                         CASE WHEN a.fkey IS NOT NULL AND a.ctx = 0 AND b.ctx = 0 AND a.fkey = b.fkey
+                                   AND a.source_id = b.source_id AND a.tag1 IS b.tag1
+                                   AND NOT EXISTS (SELECT 1 FROM row_notes nt
+                                                   WHERE nt.source_id = a.source_id AND nt.rid = a.rid
+                                                     AND nt.note != '')
+                              THEN 0 ELSE 1 END AS brk
+                  FROM {a_t} a LEFT JOIN {a_t} b ON b.pos = a.pos - 1)""")
+            self.db.execute(f"CREATE TABLE v.{q(opened)} (source_id INTEGER, rid INTEGER, "
+                            f"PRIMARY KEY (source_id, rid)) WITHOUT ROWID")
+            self.db.executemany(f"INSERT INTO v.{q(opened)} VALUES (?, ?)", sorted(pairs))
+            # Each run: its first row, its length (up to the next run's first
+            # row), whether it is folded, and the line it starts on (hl) — a
+            # running total of the lines the runs before it take, one for a
+            # folded run, cnt for an open one.
+            self.db.execute(f"CREATE TABLE v.{q(runs_t)} (run INTEGER PRIMARY KEY, p0 INTEGER, cnt INTEGER, "
+                            f"folded INTEGER, hl INTEGER)")
+            self.db.execute(f"""
+                INSERT INTO v.{q(runs_t)}(run, p0, cnt, folded, hl)
+                SELECT run, p0, cnt, folded,
+                       SUM(CASE WHEN folded THEN 1 ELSE cnt END) OVER (ORDER BY run ROWS UNBOUNDED PRECEDING)
+                         - CASE WHEN folded THEN 1 ELSE cnt END + 1
+                FROM (SELECT g.run, g.p0, g.cnt,
+                             CASE WHEN g.cnt < {fold_min} THEN 0 ELSE NOT EXISTS (
+                                SELECT 1 FROM {a_t} a JOIN v.{q(opened)} o
+                                ON o.source_id = a.source_id AND o.rid = a.rid WHERE a.pos = g.p0) END AS folded
+                      FROM (SELECT run, pos AS p0,
+                                   LEAD(pos, 1, (SELECT MAX(pos) + 1 FROM v.{q(each)})) OVER (ORDER BY pos) - pos AS cnt
+                            FROM v.{q(each)} WHERE brk) g)""")
+            self.db.execute(
+                f"CREATE TABLE v.{q(rows_table)} (pos INTEGER PRIMARY KEY, source_id INTEGER, rid INTEGER, "
+                f"ts TEXT, tag1 INTEGER, ctx INTEGER, line INTEGER)")
+            self.db.execute(f"""
+                INSERT INTO v.{q(rows_table)}
+                SELECT a.pos, a.source_id, a.rid, a.ts, a.tag1, a.ctx,
+                       r.hl + CASE WHEN r.folded THEN 0 ELSE a.pos - r.p0 END
+                FROM {a_t} a JOIN v.{q(each)} e ON e.pos = a.pos JOIN v.{q(runs_t)} r ON r.run = e.run
+                ORDER BY a.pos""")
+            n = self.db.execute(f"""
+                INSERT INTO v.{q(vid)}(source_id, rid, ts, tag1, ctx, n, run_n, ts_last)
+                SELECT a.source_id, a.rid, a.ts, a.tag1, a.ctx,
+                       CASE WHEN r.folded THEN r.cnt ELSE 1 END,
+                       CASE WHEN a.pos = r.p0 AND r.cnt >= {fold_min} THEN r.cnt END,
+                       CASE WHEN r.folded THEN (SELECT z.ts FROM {a_t} z WHERE z.pos = r.p0 + r.cnt - 1) END
+                FROM {a_t} a JOIN v.{q(each)} e ON e.pos = a.pos JOIN v.{q(runs_t)} r ON r.run = e.run
+                WHERE NOT r.folded OR a.pos = r.p0
+                ORDER BY a.pos""").rowcount
+        finally:
+            for t in (all_table, each, runs_t, opened):
+                self.db.execute(f"DROP TABLE IF EXISTS v.{q(t)}")
+        return n
+
+    # (source_id, column) -> whether every value the column holds starts
+    # with a YYYY-MM-DD date. Source tables are never written after ingest
+    # (invariant #1), so the answer holds for the Store's life; a derived
+    # column is never asked (it is canonical by construction).
+    _DATE_LED_GLOB = "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*"
+
+    def _column_is_date_led(self, src: dict, column: str) -> bool:
+        key = (src["id"], column)
+        cache = self._date_led
+        if key not in cache:
+            ref = q(column)
+            with self._reader() as ro:
+                odd = ro.execute(
+                    f"SELECT 1 FROM {q(src['table_name'])} WHERE {ref} IS NOT NULL AND {ref} != '' "
+                    f"AND NOT ({ref} GLOB ?) LIMIT 1", (self._DATE_LED_GLOB,)).fetchone()
+            cache[key] = odd is None
+        return cache[key]
+
+    def _timeline_context_branch(self, src: dict, p: dict, context: list[str], tag_clause: str,
+                                 tag_ids: list[int] | None) -> tuple[str, list]:
+        """One table's rows in the window `context` = [start, end) that are
+        not lines already, as a branch of build_timeline's UNION, and its
+        parameters.
+
+        The exact test is the Timeline's own timestamp (`ts_expr`, the
+        normalised value every line is ordered by) in [start, end). On its
+        own that is a scan of the whole table with the normaliser run on
+        every row, which on a few million rows is seconds per build — and
+        the Timeline rebuilds on every visit to the tab. So a base column
+        whose every value starts with a YYYY-MM-DD date
+        (_column_is_date_led, asked once per table and column) is first
+        narrowed on the raw text: the window's first day to the day after
+        its last, with COLLATE NOCASE, which is what the sort index the
+        first datetime column gets at import is built with, so the range is
+        an index search. The raw text of such a value starts with the date
+        its normalised form has (the fast path of ts_normalize_sql keeps
+        the first ten characters as they are), so the day range never
+        drops a row the exact test would keep. A column holding anything
+        else — US dates, epoch numbers — gets the exact test alone: slower,
+        and right."""
+        start, end = context
+        ref = self._col_ref(src, p["ts_col"], "s")
+        uses = [p["ts_col"]]
+        conds = [f"{p['ts_expr']} >= ?", f"{p['ts_expr']} < ?"]
+        params: list[Any] = [start, end]
+        if not self._is_derived(src, p["ts_col"]) and self._column_is_date_led(src, p["ts_col"]):
+            try:
+                first = datetime.date.fromisoformat(start[:10])
+                last = datetime.date.fromisoformat(end[:10])
+                if end[10:].strip(" T0:.") == "":
+                    last -= datetime.timedelta(days=1)   # [start, midnight) ends the day before
+                after = (last + datetime.timedelta(days=1)).isoformat()
+                conds = [f"{ref} >= ? COLLATE NOCASE", f"{ref} < ? COLLATE NOCASE", *conds]
+                params = [first.isoformat(), after, *params]
+            except (ValueError, OverflowError):
+                pass   # not a date this side of year 9999: the exact test alone
+        sid = int(src["id"])
+        sql = (f"SELECT {sid} AS source_id, s.rid AS rid, {p['ts_expr']} AS ts, NULL AS tag1, 1 AS ctx, NULL AS fkey "
+               f"FROM {self._from_clause(src, 's', uses)} WHERE {' AND '.join(conds)} "
+               f"AND s.rid NOT IN (SELECT rid FROM row_tags WHERE source_id = ?{tag_clause})")
+        params.append(sid)
+        if tag_ids:
+            params.extend(tag_ids)
+        return sql, params
 
     def _fit_body_cols(self, cols: list[str]) -> list[str]:
         """The first of `cols` that one ' | '-joined body can hold before
@@ -9941,37 +10416,223 @@ class Store:
         return cols[:max(1, (depth - TIMELINE_BODY_DEPTH_HEADROOM) // 2)]
 
     def fetch_timeline_rows(self, view_id: str, start: int, count: int) -> dict:
+        """A page of the Timeline: the view's positions, then what each row
+        reads as — its body, summary, tags and note — worked out here, for
+        the rows on this page only (see build_timeline for why the view
+        doesn't hold them). One query per source on the page, each reading
+        that source's rows of the page by pos range off the view and its
+        own rows by rid, so a page costs the same at any depth.
+
+        `body` stays the raw row it has always been and `lead`/`detail`
+        ride along beside it, rather than the summary replacing the body:
+        the row has to be able to show both (the client's "raw" toggle),
+        and a client that re-fetches after a rebuild must not depend on
+        which shape the row happened to get.
+
+        Tags and the note are read as they are NOW, not as they were when
+        the view was built, so a line whose tag was just taken off says so
+        rather than showing a stripe the row no longer carries. A source
+        removed since the build makes the view stale: ViewExpired, the
+        client's cue to rebuild. `ctx` marks a row that is on the Timeline
+        because it falls around a finding (build_timeline's `context`),
+        not because it is tagged.
+
+        Each line also says how it sits against the line above it, which
+        the page alone cannot know for its first line: `gap`, the seconds
+        since that line ended (its `ts_last` when it is a folded run), and
+        `new_day`, whether this line is on another day — the first line of
+        the Timeline is. Both are None/False for a line with no time.
+        `n`, `run_n` and `ts_last` are build_timeline's fold."""
         handle = self._views.get(view_id)
         if not handle or handle.get("kind") != "timeline":
             raise ViewExpired("View expired — rebuild it")
+        configs = handle.get("configs") or {}
+        lo, hi = start + 1, start + 1 + count
         with self._reader() as ro, self._dropped_view_is_expired():
             rows = ro.execute(
-                f"SELECT pos, source_id, rid, ts, body, summary_lead, summary_detail, "
-                f"type_label, source_name, tag_ids "
-                f"FROM v.{q(view_id)} WHERE pos >= ? AND pos < ? ORDER BY pos",
-                (start + 1, start + 1 + count),
+                f"SELECT pos, source_id, rid, ts, ctx, n, run_n, ts_last FROM v.{q(view_id)} "
+                f"WHERE pos >= ? AND pos < ? ORDER BY pos",
+                (lo - 1, hi),
             ).fetchall()
-        # `body` stays the raw row it has always been and `lead`/`detail`
-        # ride along beside it, rather than the summary replacing the body:
-        # the row has to be able to show both (the client's "raw" toggle),
-        # and a client that re-fetches after a rebuild must not depend on
-        # which shape the row happened to get.
-        out = [
-            {
+            above = rows[0] if rows and rows[0]["pos"] < lo else None
+            if above is not None:
+                rows = rows[1:]
+            got: dict[tuple[int, int], Any] = {}
+            labels: dict[int, tuple[str, str]] = {}
+            for source_id in sorted({r["source_id"] for r in rows}):
+                try:
+                    src = self.get_source(source_id)
+                except KeyError:
+                    raise ViewExpired("View expired — rebuild it") from None
+                p = self._timeline_parts(src, configs.get(source_id, {}))
+                labels[source_id] = (p["type_label"], src["name"])
+                for r in ro.execute(
+                    f"SELECT s.rid AS rid, ({p['body_expr']}) AS body, "
+                    f"{p['lead_expr']} AS summary_lead, {p['detail_expr']} AS summary_detail, "
+                    f"(SELECT GROUP_CONCAT(tag_id) FROM row_tags WHERE source_id = {int(source_id)} AND rid = s.rid) AS tag_ids, "
+                    f"(SELECT note FROM row_notes WHERE source_id = {int(source_id)} AND rid = s.rid) AS note "
+                    f"FROM (SELECT rid AS trid FROM v.{q(view_id)} "
+                    f"WHERE pos >= ? AND pos < ? AND source_id = {int(source_id)}) t "
+                    f"CROSS JOIN {self._from_clause(src, 's')} WHERE s.rid = t.trid",
+                    # Bound in the order the placeholders appear: the
+                    # summary's detail labels (in the SELECT), then the page.
+                    [*p["summary_params"], lo, hi],
+                ):
+                    got[(source_id, r["rid"])] = r
+        out = []
+        prev_end = (above["ts_last"] or above["ts"]) if above is not None else None
+        for r in rows:
+            gap, new_day = None, False
+            if r["ts"]:
+                here = _timeline_seconds(r["ts"])
+                if prev_end is None:
+                    new_day = r["pos"] == 1
+                else:
+                    new_day = prev_end[:10] != r["ts"][:10]
+                    before = _timeline_seconds(prev_end)
+                    if here is not None and before is not None:
+                        gap = here - before
+            prev_end = r["ts_last"] or r["ts"]
+            g = got.get((r["source_id"], r["rid"]))
+            type_label, source_name = labels[r["source_id"]]
+            out.append({
                 "pos": r["pos"] - 1,
                 "source_id": r["source_id"],
                 "rid": r["rid"],
                 "ts": r["ts"],
-                "body": r["body"],
-                "lead": r["summary_lead"] or "",
-                "detail": r["summary_detail"] or "",
-                "type_label": r["type_label"],
-                "source_name": r["source_name"],
-                "tags": [int(x) for x in r["tag_ids"].split(",")] if r["tag_ids"] else [],
-            }
-            for r in rows
-        ]
+                "body": g["body"] if g else "",
+                "lead": (g["summary_lead"] if g else "") or "",
+                "detail": (g["summary_detail"] if g else "") or "",
+                "type_label": type_label,
+                "source_name": source_name,
+                "tags": sorted(int(x) for x in g["tag_ids"].split(",")) if g and g["tag_ids"] else [],
+                "note": (g["note"] if g else "") or "",
+                "ctx": bool(r["ctx"]),
+                "n": r["n"],
+                "run_n": r["run_n"],
+                "ts_last": r["ts_last"],
+                "gap": gap,
+                "new_day": new_day,
+            })
         return {"start": start, "rows": out}
+
+    def timeline_position(self, view_id: str, source_id: int, rid: int, ts: str | None) -> dict:
+        """Where a line is in the Timeline view now: its own position when
+        it is still on it, else the first line at or after `ts` (a line
+        whose tag was taken off, or narrowed away), else the last line.
+        What lets the Timeline keep the analyst's place across a rebuild —
+        every visit to the tab is one (showTimelineTab), so opening a line
+        in its table and coming back used to land at the top. A scan of
+        the view, which holds four narrow columns: milliseconds at 250k
+        lines. `exact` says which answer it is; `folded`, that the row is
+        on the Timeline but inside a folded run, whose line `pos` is."""
+        handle = self._views.get(view_id)
+        if not handle or handle.get("kind") != "timeline":
+            raise ViewExpired("View expired — rebuild it")
+        with self._reader() as ro, self._dropped_view_is_expired():
+            row = ro.execute(
+                f"SELECT pos FROM v.{q(view_id)} WHERE source_id = ? AND rid = ?", (source_id, rid)
+            ).fetchone()
+            if row:
+                return {"pos": row[0] - 1, "exact": True}
+            # Folded into a run: the run's line.
+            if handle.get("rows_table"):
+                row = ro.execute(
+                    f"SELECT line FROM v.{q(handle['rows_table'])} WHERE source_id = ? AND rid = ?",
+                    (source_id, rid)).fetchone()
+                if row:
+                    return {"pos": row[0] - 1, "exact": False, "folded": True}
+            row = ro.execute(
+                f"SELECT MIN(pos) FROM v.{q(view_id)} WHERE ts >= ?", (ts,)
+            ).fetchone() if ts else None
+        if row and row[0] is not None:
+            return {"pos": row[0] - 1, "exact": False}
+        return {"pos": max(0, handle["row_count"] - 1), "exact": False}
+
+    def timeline_row(self, source_id: int, rid: int) -> dict:
+        """One Timeline line's row in full, for the detail pane: every
+        column the table has (derived ones included, in its column order)
+        with its value, the tags it carries and its note, as they are now.
+        A line is always a real table's row — the Timeline unions real
+        sources, never a merge — so this reads that table by rid.
+        KeyError for a table that has gone (the server's 404), RecordGone
+        for a rid it never had."""
+        src = self.get_source(source_id)
+        if src.get("is_merge") or source_id < 0:
+            raise KeyError(f"No table {source_id}")
+        cols = [c["name"] for c in src["columns"]]
+        with self._reader() as ro:
+            row = ro.execute(
+                f"SELECT {', '.join(self._col_ref(src, c, 's') for c in cols) or 'NULL'} "
+                f"FROM {self._from_clause(src, 's')} WHERE s.rid = ?", (rid,)).fetchone()
+            if row is None:
+                raise RecordGone(f"No row {rid} in {src['name']}")
+            tags = [r[0] for r in ro.execute(
+                "SELECT tag_id FROM row_tags WHERE source_id = ? AND rid = ? ORDER BY tag_id", (source_id, rid))]
+            note = ro.execute("SELECT note FROM row_notes WHERE source_id = ? AND rid = ?",
+                              (source_id, rid)).fetchone()
+        return {
+            "source_id": source_id, "rid": rid, "source_name": src["name"],
+            "columns": [{"name": c["name"], "type": c["type"], "derived": bool(c.get("derived"))}
+                        for c in src["columns"]],
+            "values": list(row) if cols else [],
+            "tags": tags, "note": (note[0] if note else "") or "",
+        }
+
+    # Bars the Timeline's overview strip is drawn with at most: about one
+    # per 5px across a full-width strip.
+    TIMELINE_OVERVIEW_BARS = 240
+
+    def timeline_overview(self, view_id: str, by: str = "tags",
+                          max_buckets: int = TIMELINE_OVERVIEW_BARS) -> dict:
+        """The Timeline's lines over time, for the strip above the list:
+        one bar per HISTOGRAM_BUCKETS width (the narrowest that fits the
+        span in `max_buckets`), each split by the line's first tag
+        (`by="tags"`, the view's tag1, "ctx" for a row around a finding)
+        or by its table (`by="sources"`),
+        and each with `first`, the position of its first line, which is
+        where a click on it takes the list. The view is in time order, so
+        that is the bar's MIN(pos).
+
+        Two aggregates over the view on the reader pool: the span, then
+        the bars. Bar b covers [start + b*width, start + (b+1)*width), and
+        `start` is floored here in Python, so every epoch less `start` is
+        positive and SQLite's truncating division is a floor — the trap
+        time_histogram documents for a pre-1970 epoch (FILETIME zero is a
+        value real artefacts carry). Lines with no time, or one SQLite
+        cannot read, are `undated`: at the end of the list, and on no bar."""
+        if by not in ("tags", "sources"):
+            raise ValueError(f"by must be 'tags' or 'sources', not {by!r}")
+        handle = self._views.get(view_id)
+        if not handle or handle.get("kind") != "timeline":
+            raise ViewExpired("View expired — rebuild it")
+        key = "tag1" if by == "tags" else "source_id"
+        # Folded, the bars count the rows, each at its own time, and a bar's
+        # first line is the line its first row is on.
+        table, line = (handle["rows_table"], "line") if handle.get("rows_table") else (view_id, "pos")
+        total = handle.get("rows", handle["row_count"])
+        lines = f"SELECT {epoch_sql('ts')} AS e, {key} AS k, {line} AS pos FROM v.{q(table)} WHERE ts IS NOT NULL"
+        with self._reader() as ro, self._dropped_view_is_expired():
+            lo, hi, dated = ro.execute(f"SELECT MIN(e), MAX(e), COUNT(e) FROM ({lines})").fetchone()
+            if lo is None:
+                return {"start": None, "end": None, "width": 0,
+                        "undated": total, "buckets": []}
+            width = self._histogram_width(max(1, hi - lo), max_buckets)
+            start = lo // width * width
+            rows = ro.execute(
+                f"SELECT (e - ?) / ? AS b, k, COUNT(*), MIN(pos) FROM ({lines}) "
+                f"WHERE e IS NOT NULL GROUP BY b, k ORDER BY b, k",
+                (start, width),
+            ).fetchall()
+        buckets: dict[int, dict] = {}
+        for b, k, n, first in rows:
+            bar = buckets.setdefault(b, {"b": b, "n": 0, "first": first - 1, "split": {}})
+            bar["n"] += n
+            bar["first"] = min(bar["first"], first - 1)
+            # A row around a finding has no tag: "ctx" in the split by tag.
+            bar["split"]["ctx" if k is None else str(k)] = n
+        return {"start": start, "end": hi, "width": width, "undated": total - dated,
+                "buckets": [buckets[b] for b in sorted(buckets)]}
 
     # ---------------------------------------------------------------- group-by
 
@@ -10195,10 +10856,11 @@ class Store:
             # true whole_source (unfiltered, no path) case, same scope as
             # before this had to also cover root_virtual.
             if whole_source and not is_datetime:
-                for m in members:
-                    self._ensure_column_index_building(
-                        m["source_id"], column, self._index_table_for(src, column, m["table_name"], m["source_id"])
-                    )
+                with self._build_batch():
+                    for m in members:
+                        self._ensure_column_index_building(
+                            m["source_id"], column, self._index_table_for(src, column, m["table_name"], m["source_id"])
+                        )
 
         branches: list[str] = []
         params: list[Any] = []
@@ -10220,7 +10882,7 @@ class Store:
                     )
                 branches.append(f"SELECT {_val_expr(m, derived_alias)} AS val, count(*) AS n {scope} GROUP BY 1")
                 params.extend(path_params)
-        union_sql = " UNION ALL ".join(branches)
+        union_sql = union_all(branches)
         if direction is None:
             direction = "asc" if order == "value" else "desc"
         dir_sql = "DESC" if direction == "desc" else "ASC"
@@ -10457,7 +11119,7 @@ class Store:
             else:
                 tag_of = self._histogram_tag_exprs(ro, members) if split_in_pass else {}
                 params = []
-            union = " UNION ALL ".join(
+            union = union_all(
                 branch(m, "EPOCH AS e" + (f", {tag_of[m['source_id']]} AS {'sv' if split_day else 'tag'}"
                                           if split_in_pass else ""))
                 for m in members)
@@ -10510,7 +11172,7 @@ class Store:
                 # The span first, then the bars: two scans of SQL arithmetic
                 # and a few hundred rows back, where one pass by second
                 # sends Python every distinct second to fold.
-                spans = " UNION ALL ".join(branch(m, "EPOCH AS e") for m in members)
+                spans = union_all(branch(m, "EPOCH AS e") for m in members)
                 lo, hi = ro.execute(f"SELECT MIN(e), MAX(e) FROM ({spans} LIMIT -1)").fetchone()
                 if lo is not None:
                     take(by_bar(self._histogram_width(hi - lo, max_buckets)), -1)
@@ -10525,7 +11187,7 @@ class Store:
             bucket = self._histogram_width(hi - lo, max_buckets)
             apart = []
             if tags_apart and tagged_n:
-                tagged = " UNION ALL ".join(branch(m, "EPOCH AS e, t.tag AS tag", tagged=True) for m in members)
+                tagged = union_all(branch(m, "EPOCH AS e, t.tag AS tag", tagged=True) for m in members)
                 apart = by_bar(bucket, split=", tag", keys="1, 2",
                                rows_from=f"FROM ({tagged} LIMIT -1) WHERE e IS NOT NULL")
             # The labels come from SQLite too, not time.gmtime: on Windows
@@ -10964,7 +11626,7 @@ class Store:
                         f"WHERE {where_sql}"
                     )
                     params.extend([m["source_id"], *where_params])
-            union_sql = " UNION ALL ".join(branches)
+            union_sql = union_all(branches)
             with self.lock:
                 with self._dropped_view_is_expired(), self.db:
                     # The parent can have been rebuilt away since its
@@ -11329,12 +11991,12 @@ class Store:
                     conn.set_progress_handler(group.stopped, PARALLEL_SCAN_POLL_OPS)
                     try:
                         if index:
-                            # The progress check and the MATCH in one read
-                            # transaction, so the index asked is one that
+                            # The progress check and the MATCH read one
+                            # snapshot (a _reader() block is one read
+                            # transaction), so the index asked is one that
                             # holds every rid below `start`. A build started
                             # over since (a fresh build drops the table)
                             # holds fewer, and its rows would be missed.
-                            conn.execute("BEGIN")
                             if (self._fts_partial_point(src, conn) or 0) < start:
                                 group.give_up()
                                 return None
@@ -11342,8 +12004,6 @@ class Store:
                             f"SELECT count(*), json_group_array(rid) FROM ({sql} LIMIT ?)",
                             [*args, per_range + 1]).fetchone()
                     finally:
-                        if conn.in_transaction:
-                            conn.rollback()   # a read transaction: ending it is all this does
                         conn.set_progress_handler(None, 0)
             except sqlite3.OperationalError:
                 if group.gave_up and not group.cancelled:
@@ -11737,22 +12397,23 @@ class Store:
             sid_col = q(self._member_id_alias(colnames))
             branches = []
             params: list[Any] = []
-            for m in self._resolve_members(source_id):
-                msrc = m["src"]
-                where, p = self._compile_where(m["source_id"], self._member_read_src(src, msrc), spec, colnames)
-                # The pane's own src_<id> name, projected when the member
-                # doesn't carry the merge's columns as-is — run_sql's shadow
-                # view supplies any derived columns the projection names.
-                exprs = self._member_projection(src, msrc)
-                from_sql = (q(m["table_name"]) if exprs is None
-                            else f"(SELECT rid, {', '.join(exprs)} FROM {q(m['table_name'])})")
-                branches.append(
-                    f"SELECT {int(m['source_id'])} AS {sid_col}, rid, {collist}\n"
-                    f"FROM {from_sql}"
-                    + (f"\nWHERE {where}" if where else "")
-                )
-                params.extend(p)
-            sql = "\nUNION ALL\n".join(branches) + f"\n{order}"
+            with self._build_batch():
+                for m in self._resolve_members(source_id):
+                    msrc = m["src"]
+                    where, p = self._compile_where(m["source_id"], self._member_read_src(src, msrc), spec, colnames)
+                    # The pane's own src_<id> name, projected when the member
+                    # doesn't carry the merge's columns as-is — run_sql's shadow
+                    # view supplies any derived columns the projection names.
+                    exprs = self._member_projection(src, msrc)
+                    from_sql = (q(m["table_name"]) if exprs is None
+                                else f"(SELECT rid, {', '.join(exprs)} FROM {q(m['table_name'])})")
+                    branches.append(
+                        f"SELECT {int(m['source_id'])} AS {sid_col}, rid, {collist}\n"
+                        f"FROM {from_sql}"
+                        + (f"\nWHERE {where}" if where else "")
+                    )
+                    params.extend(p)
+            sql = union_all(branches, "\nUNION ALL\n") + f"\n{order}"
         else:
             where, params = self._compile_where(source_id, src, spec, colnames)
             collist = ", ".join(q(c) for c in colnames)
@@ -12359,11 +13020,12 @@ class Store:
             if column not in names:
                 raise KeyError(column)
             members = self._resolve_members_on(ro, source_id)
-            for m in members:
-                self._ensure_column_index_building(
-                    m["source_id"], column, self._index_table_for(src, column, m["table_name"], m["source_id"])
-                )
-            union_sql = " UNION ALL ".join(
+            with self._build_batch():
+                for m in members:
+                    self._ensure_column_index_building(
+                        m["source_id"], column, self._index_table_for(src, column, m["table_name"], m["source_id"])
+                    )
+            union_sql = union_all(
                 f"SELECT {q(column)} AS val FROM {self._member_from(src, m, uses=(column,))}" for m in members
             )
             rows = ro.execute(
@@ -14239,7 +14901,7 @@ class Store:
             params.append(limit)
         if not branches:
             return {"rows": [], "limit": limit}
-        sql = " UNION ALL ".join(branches) + " ORDER BY 4 DESC, 2, 3 DESC LIMIT ?"
+        sql = union_all(branches) + " ORDER BY 4 DESC, 2, 3 DESC LIMIT ?"
         params.append(limit)
         with self._reader() as ro:
             rows = ro.execute(sql, params).fetchall()
@@ -15179,7 +15841,7 @@ class Store:
                 from . import defaults
                 want = dict(defaults.headers()["nicknames"]).get(hs) or []
                 cols = ", ".join(q(c) for c in want)
-                union = " UNION ALL ".join(
+                union = union_all(
                     f"SELECT {cols} FROM {q(s['table_name'])}" for s in srcs)
                 return f"({union})"
             hs = _hs_of(key)
@@ -16854,6 +17516,7 @@ class Store:
             buf = io.StringIO()
             w = csv.writer(buf, lineterminator="\n")
             w.writerow(_export_header(cols, _csv_safe))
+            self._renew_snapshot(ro)
             yield buf.getvalue()
             buf.seek(0), buf.truncate(0)
 
@@ -16903,6 +17566,7 @@ class Store:
             buf = io.StringIO()
             w = csv.writer(buf, lineterminator="\n")
             w.writerow(_export_header(cols, _csv_safe))
+            self._renew_snapshot(ro)
             yield buf.getvalue()
             buf.seek(0), buf.truncate(0)
 
@@ -16941,6 +17605,7 @@ class Store:
                         continue
                     w.writerow([r["rid"], _csv_safe("; ".join(tmap.get(r["rid"], []))), _csv_safe(nmap.get(r["rid"], "")),
                                *[_csv_safe(r[c]) for c in cols]])
+                self._renew_snapshot(ro)
                 yield buf.getvalue()
                 buf.seek(0), buf.truncate(0)
 
@@ -16982,6 +17647,7 @@ class Store:
             if member_names is not None:
                 head.insert(1, "Table")
             w.writerow(head)
+            self._renew_snapshot(ro)
             yield buf.getvalue()
             buf.seek(0), buf.truncate(0)
 
@@ -17041,6 +17707,7 @@ class Store:
                         _csv_safe(nmap.get(key, "")),
                         *[_csv_safe(v) for v in cellmap[key]],
                     ])
+                self._renew_snapshot(ro)
                 yield buf.getvalue()
                 buf.seek(0), buf.truncate(0)
 
@@ -17850,7 +18517,7 @@ class Store:
             branches.append(
                 f"SELECT {int(mid)} AS source_id, s.rid AS rid, {sel}, "
                 f"{self._annotation_cols(mid, taken)} FROM {frm}")
-        return " UNION ALL ".join(branches)
+        return union_all(branches)
 
     @staticmethod
     def _annotation_cols(source_id: int, taken: set[str], alias: str = "s",
@@ -17913,6 +18580,10 @@ class Store:
         # _reader() pool (see _open_reader and _tune).
         ro.execute("PRAGMA temp_store=FILE")
         ro.execute("PRAGMA threads=4")
+        # One snapshot for the views and the query, as on _reader(): a view
+        # whose CREATE hit "database schema has changed" was skipped below,
+        # and the query then failed with "no such table: merge_1".
+        ro.execute("BEGIN")
         try:
             for row in ro.execute("SELECT id FROM merges ORDER BY id"):
                 try:
@@ -18248,6 +18919,7 @@ class Store:
                         if rows:
                             total = self._commit_ingest_batch(insert, rows, new_id, total,
                                                               also=(map_sql, mapping), op_token=op_token)
+                        self._renew_snapshot(ro)
 
                 # The metadata write is what makes the table openable
                 # (_require_columns reads columns='[]' as "still importing"),

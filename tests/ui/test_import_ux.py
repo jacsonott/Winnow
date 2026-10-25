@@ -55,11 +55,11 @@ def test_the_file_picker_filters_and_sorts(page, tmp_path):
     os.utime(big, (1_650_000_000, 1_650_000_000))
     page.evaluate("() => localStorage.removeItem('winnow.browse.sort')")
     page.evaluate("(p) => __winnow.openFolderBrowser(p, () => {}, () => { document.getElementById('modal').hidden = true; }, { mode: 'files' })", str(tmp_path))
-    page.wait_for_selector("#modalBody .browse-row .session-name")
-    names = lambda: page.locator("#modalBody .browse-row:visible .session-name").all_inner_texts()  # noqa: E731
+    page.wait_for_selector("#modalBody .browse-row-file .tables-name")
+    names = lambda: page.locator("#modalBody .browse-row-file:visible .tables-name").all_inner_texts()  # noqa: E731
     assert names() == ["a_small.csv", "b_big.csv", "c_old.txt"]
     # A modified column, per file.
-    assert page.locator("#modalBody .browse-row .browse-mtime").first.inner_text().startswith("20")
+    assert page.locator("#modalBody .browse-row-file .browse-mtime").first.inner_text().startswith("20")
 
     # A sort change re-asks the server (the cap is cut in that order), so
     # each one waits for the WHOLE order to land — never for the first row
@@ -73,32 +73,37 @@ def test_the_file_picker_filters_and_sorts(page, tmp_path):
     # `paint()` over the listing already in hand, not another `load()`.
     def order_is(*expected):
         page.wait_for_function(
-            "(want) => [...document.querySelectorAll('#modalBody .browse-row .session-name')]"
+            "(want) => [...document.querySelectorAll('#modalBody .browse-row-file .tables-name')]"
             ".map((n) => n.textContent).join() === want",
             arg=",".join(expected), timeout=10_000)
 
-    page.locator("#modalBody .browse-sort").select_option("size")
-    order_is("a_small.csv", "c_old.txt", "b_big.csv")
-    assert names() == ["a_small.csv", "c_old.txt", "b_big.csv"]
-    page.locator("#modalBody .browse-sort-dir").click()
+    # The column heads are the sort: a new column starts largest or newest
+    # first, and its head again turns it round.
+    sort_by = lambda key: page.locator(f"#modalBody .browse-head .tables-sort[data-sort={key}]")  # noqa: E731
+    sort_by("size").click()
     order_is("b_big.csv", "c_old.txt", "a_small.csv")
     assert names() == ["b_big.csv", "c_old.txt", "a_small.csv"]
-    page.locator("#modalBody .browse-sort").select_option("mtime")
+    assert sort_by("size").get_attribute("aria-pressed") == "true"
+    sort_by("size").click()
+    order_is("a_small.csv", "c_old.txt", "b_big.csv")
+    assert names() == ["a_small.csv", "c_old.txt", "b_big.csv"]
+    sort_by("mtime").click()
     order_is("a_small.csv", "b_big.csv", "c_old.txt")
     assert names() == ["a_small.csv", "b_big.csv", "c_old.txt"], "newest first, descending"
 
     # A selection survives re-sorting and filtering.
-    page.locator("#modalBody .browse-row", has_text="c_old.txt").locator("input").check()
-    page.locator("#modalBody .browse-filter").fill("csv")
+    page.locator("#modalBody .browse-row-file[data-id='c_old.txt'] input").check()
+    filter_box = page.locator("#modalBody input[aria-label='Filter this folder']")
+    filter_box.fill("csv")
     assert names() == ["a_small.csv", "b_big.csv"]
-    assert "Add 1 file" in page.locator("#modalBody .btn", has_text="Add").first.inner_text()
-    page.locator("#modalBody .browse-filter").fill("zzz")
-    assert page.locator("#modalBody .note-status", has_text="No files here match").count() == 1
-    page.locator("#modalBody .browse-filter").fill("")
+    assert page.locator("#modal .table-menu-foot .btn.primary").inner_text() == "Add 1 file"
+    filter_box.fill("zzz")
+    assert page.locator("#modalBody .tables-empty", has_text="Nothing here matches").count() == 1
+    filter_box.fill("")
     assert len(names()) == 3
     # The sort is remembered for the next opening.
     assert page.evaluate("() => JSON.parse(localStorage.getItem('winnow.browse.sort'))") == {"by": "mtime", "dir": "desc"}
-    page.locator("#modalBody .btn", has_text="Cancel").click()
+    page.locator("#modal .table-menu-foot .btn", has_text="Cancel").click()
     page.wait_for_selector("#modal", state="hidden")
     page.evaluate("() => localStorage.removeItem('winnow.browse.sort')")
 

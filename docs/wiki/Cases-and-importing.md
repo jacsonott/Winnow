@@ -133,11 +133,11 @@ numbers. If an analyst did either, check the cases they had open then.
 Winnow keeps no record of which window made a tag, so it cannot pick the
 misplaced ones out for you. What can:
 
-- **A session saved before the mix-up.** In **Case ▾ → Sessions… → Compare
-  two sessions**, compare that session (**From**) with **Current work
-  (live)** (**to**). **Only in** *Current work* lists every row tagged
-  since, and clicking the count opens those rows. Untag the ones that don't
-  belong, or **Load** the session to put the whole case back as it was then
+- **A session saved before the mix-up.** In **Case ▾ → Sessions…**, click
+  that session's name to compare it (**From · A**) with **Current work
+  (live)** (**To · B**). **B only** counts every row tagged since, and
+  clicking the count opens those rows. Untag the ones that don't belong, or
+  **Load…** the session from its **⋯** menu to put the whole case back as it was then
   (save the current work first if some of the later tags are real; see
   [Sessions and export](Sessions-and-export.md#comparing-two-sessions)).
 - **Tags you know you applied then.** Filter the case by those tags and
@@ -173,7 +173,7 @@ this case is temporary and isn't saved anywhere yet.*:
 | Button | What it does |
 | --- | --- |
 | **Save as a case…** | Opens the same dialog as **+ New case** (**Name**, **Group**, **Case file path**, **Profile**), titled *Save as a case*. **Save case** moves the quick look's file to that path, lists it on the home screen and applies the profile. The path starts in the cases folder. Refused while an import is running, and while a download or a search started before your latest changes is still reading the case: save again when it finishes. |
-| **Add tables to an existing case…** | Copies every table, with its tags and notes, into a case you pick. |
+| **Add tables to an existing case…** | Copies every table, with its tags and notes, into a case you pick. The dialog lists your cases the way the home screen does (**Recent**, **All cases** and your groups down the left); click one, then **Copy N tables into** *case*. Double-clicking a case copies straight away. |
 | **Discard…** | Deletes the quick look. |
 
 The brand button asks the same question before leaving, since there is no
@@ -208,9 +208,13 @@ and the imports run in the background while you work (see
 
 - **Add from this machine…** browses the disk Winnow runs on and imports in
   place, with no copy — the fast route for big files. Type a path or click
-  down to it; **Filter this folder…** and **Sort** (Name, Size, Modified)
-  help in a big folder. It only works when the browser runs on the same
-  machine as Winnow.
+  down to it; **Filter this folder…** narrows a big folder, and the
+  **Name**, **Modified** and **Size** headings sort it (click one again to
+  turn it round). Down the left are places to start from: **Home**, the
+  **Cases folder**, **This case’s folder** and the folder you **Last used**,
+  with ☆ to pin any folder you keep going back to. Tick the files, then
+  **Add N files**. It only works when the browser runs on the same machine
+  as Winnow.
 - **Upload from browser…** is the browser's own picker. The file is copied
   to the server's temporary folder first, which needs the space and takes
   longer; a file over 1 GB gets a reminder to add it by path.

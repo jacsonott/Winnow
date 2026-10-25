@@ -23,11 +23,11 @@ import { resetSqlPane, showGridTab } from './sql.js';
 import { openSettings, syncAppearanceFromServer } from './settings.js';
 import { drawWordmark } from './splash.js';
 import { S } from './state.js';
-import { fmtBytes } from './tables.js';
+import { fmtBytes, keepingFocus } from './tables.js';
 import { loadCaseTags } from './tags.js';
-import { updateTimeRangeButton } from './timeframe.js';
+import { tableMenuStat, updateTimeRangeButton } from './timeframe.js';
 import { loadTimelineTemplates } from './timeline.js';
-import { confirmDialog, contextMenu, dropdownMenu, modal, oneAtATime, promptDialog, sectionPanes } from './ui.js';
+import { confirmDialog, contextMenu, dropdownMenu, modal, oneAtATime, promptDialog, sectionPanes, sideRail } from './ui.js';
 import { writeClipboardText } from './grouping.js';
 
 /* -------------------------------------------------------------- home screen */
@@ -213,7 +213,8 @@ export async function openCaseNow(path, opts = {}) {
   // instance that just closed, and its switched-off tag ids belong to the
   // previous case's tag_defs — neither means anything here.
   S.timeline = { view: null, pages: new Map(), pending: new Set(), reqId: S.timeline.reqId + 1,
-                 tagsOff: new Set(), raw: new Set() };
+                 tagsOff: new Set(), raw: new Set(), sel: null,
+                 sourcesOff: new Set(), range: null, overview: null, context: null, unfold: [] };
   // sql_tabs is a per-case table, so the previous case's tabs (and the
   // results and runs keyed by their ids) don't describe this one.
   resetSqlPane();
@@ -292,66 +293,130 @@ export function groupOptionsDatalist(id) {
    more files; onSelect gets {dir, files: [{path, name, size}]} — the
    import modal's "Add from this machine…", i.e. the no-upload transport.
    Both modes take a typed path too (the box at the top): analysts who
-   know where the evidence sits shouldn't have to click down to it. */
+   know where the evidence sits shouldn't have to click down to it.
+
+   In the side-list frame: places down the left (home, the cases folder,
+   the open case's folder, the last folder used, and any the analyst has
+   pinned — an evidence share is usually the same folder all week), the
+   folder on the right as a list with the Tables manager's column heads,
+   which are also the sort. */
 export function openFolderBrowser(startPath, onSelect, onCancel, { mode = 'folder' } = {}) {
   const filesMode = mode === 'files';
   let listing = null;
   const picked = new Map(); // path -> {path, name, size}, insertion-ordered
+  const places = { home: null, caseDir: null };
   modal(filesMode ? 'Add files from this machine' : 'Choose a folder', (b) => {
+    const SORT_KEY = 'winnow.browse.sort';
+    let sort = { by: 'name', dir: 'asc' };
+    try { sort = { ...sort, ...JSON.parse(localStorage.getItem(SORT_KEY) || '{}') }; } catch { /* default */ }
+    let query = '';
+    const leaf = (p) => (p || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop() || p;
+
+    /* ---------------------------------------------- the side list */
+    const entries = () => {
+      const out = [];
+      const seen = new Set();
+      const add = (path, label, group, title) => {
+        if (!path || seen.has(path)) return;
+        seen.add(path);
+        // Marks around the path keep its leading / where it belongs in the
+        // rtl line that shows the path's end (.browse-panes .side-rail-hint).
+        out.push({ key: path, label, group, hint: `\u200e${path}\u200e`, title: title || path });
+      };
+      add(places.home, 'Home', 'Places');
+      add(S.casesDir || S.defaultCasesDir, 'Cases folder', 'Places', 'Where new case files go (Settings → Cases)');
+      add(places.caseDir, 'This case’s folder', 'Places');
+      add(S.lastBrowsePath, 'Last used', 'Places');
+      // A pinned folder comes off its group into Pinned; it needs an entry
+      // to come off, whether or not it is one of the places above.
+      for (const p of rail.pins.ids) add(p, leaf(p), 'Places');
+      if (listing) add(listing.path, leaf(listing.path), 'This folder');
+      return out;
+    };
+    const rail = sideRail({
+      entries, groups: ['Places', 'This folder'], selected: () => (listing ? listing.path : null),
+      onPick: (entry) => load(entry.key), pinsKey: 'browse', label: 'Places',
+      notes: {},
+    });
+    rail.search.placeholder = 'Filter places…';
+
+    /* ---------------------------------------------- the folder */
+    const pane = el('div', 'side-pane list-pane browse-pane');
+    const top = el('div', 'browse-top');
+    const up = el('button', 'btn ghost browse-up', '↑');
+    up.type = 'button';
+    up.title = 'Up a level';
+    up.setAttribute('aria-label', 'Up a level');
+    up.onclick = () => { if (listing && listing.parent) load(listing.parent); };
     const pathInput = fieldInput('');
-    pathInput.style.cssText += ';width:100%;font-family:var(--mono);font-size:12px;margin-bottom:8px';
+    pathInput.classList.add('browse-path');
     pathInput.placeholder = filesMode ? 'Type a folder or file path, or browse below' : 'Type a folder path, or browse below';
+    pathInput.setAttribute('aria-label', 'Path');
     pathInput.onkeydown = (e) => {
       if (e.key !== 'Enter') return;
       e.preventDefault();
       const typed = pathInput.value.trim();
       if (typed) load(typed);
     };
-    b.append(pathInput);
-    // Files mode gets a filter box and a sort: a tool's output folder is
-    // hundreds of files, and the ones wanted are "the big ones" or "the
-    // ones from this run" as often as they are a name. Folders always
-    // list first; the sort is remembered across folders and sessions.
-    const SORT_KEY = 'winnow.browse.sort';
-    let sort = { by: 'name', dir: 'asc' };
-    try { sort = { ...sort, ...JSON.parse(localStorage.getItem(SORT_KEY) || '{}') }; } catch { /* default */ }
-    let query = '';
-    const filterBox = el('input', 'panel-search browse-filter');
-    const sortSel = el('select', 'browse-sort');
-    const sortDir = el('button', 'btn ghost browse-sort-dir');
-    if (filesMode) {
-      const tools = el('div', 'browse-tools');
-      filterBox.type = 'search';
-      filterBox.placeholder = 'Filter this folder…';
-      filterBox.autocomplete = 'off';
-      filterBox.oninput = () => { query = filterBox.value.trim().toLowerCase(); if (listing) paint(); };
-      for (const [v, l] of [['name', 'Name'], ['size', 'Size'], ['mtime', 'Modified']]) sortSel.append(new Option(l, v));
-      sortSel.value = sort.by;
-      const paintDir = () => {
-        sortDir.textContent = sort.dir === 'asc' ? '↑' : '↓';
-        sortDir.title = sort.dir === 'asc' ? 'Ascending — click for descending' : 'Descending — click for ascending';
-      };
-      const remember = () => { try { localStorage.setItem(SORT_KEY, JSON.stringify(sort)); } catch { /* private mode */ } };
-      // A sort change re-asks the server: the listing is capped at 2000
-      // entries, and the cap has to be taken in the order being shown.
-      const resort = () => { remember(); if (listing) load(listing.path); };
-      sortSel.onchange = () => { sort.by = sortSel.value; resort(); };
-      sortDir.onclick = () => { sort.dir = sort.dir === 'asc' ? 'desc' : 'asc'; paintDir(); resort(); };
-      paintDir();
-      tools.append(filterBox, el('span', 'fb-help', 'Sort'), sortSel, sortDir);
-      b.append(tools);
-    }
-    const list = el('div', 'session-list');
-    list.style.maxHeight = '42vh';
-    list.style.overflow = 'auto';
-    b.append(list);
-    const status = el('div', 'note-status', '');
-    b.append(status);
+    top.append(up, pathInput);
+    pane.append(top);
 
-    const actions = el('div', 'row-actions');
+    const tools = el('div', 'tm-cols-top');
+    const filterBox = el('input', 'side-search');
+    filterBox.type = 'search';
+    filterBox.placeholder = filesMode ? 'Filter this folder…' : 'Filter these folders…';
+    filterBox.autocomplete = 'off';
+    filterBox.setAttribute('aria-label', 'Filter this folder');
+    filterBox.oninput = () => { query = filterBox.value.trim().toLowerCase(); if (listing) paint(); };
+    filterBox.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && filterBox.value) { e.preventDefault(); e.stopPropagation(); filterBox.value = ''; query = ''; paint(); }
+    });
+    const count = el('span', 'tm-cols-count');
+    tools.append(filterBox, count);
+    pane.append(tools);
+
+    const box = el('div', 'side-preview tm-cols-box tables-box browse-box' + (filesMode ? '' : ' folders-only'));
+    const head = el('div', 'tables-head browse-head');
+    const all = el('input');
+    all.type = 'checkbox';
+    all.title = 'Pick every file shown';
+    all.setAttribute('aria-label', 'Pick every file shown');
+    all.hidden = !filesMode;
+    // A sort change re-asks the server: the listing is capped at 2000
+    // entries, and the cap has to be taken in the order being shown.
+    const sortBtn = (key, label, cls) => {
+      const s = el('button', 'tables-sort ' + cls, label);
+      s.type = 'button';
+      s.dataset.sort = key;
+      s.disabled = !filesMode;
+      s.onclick = () => {
+        sort = sort.by === key ? { by: key, dir: sort.dir === 'asc' ? 'desc' : 'asc' } : { by: key, dir: key === 'name' ? 'asc' : 'desc' };
+        try { localStorage.setItem(SORT_KEY, JSON.stringify(sort)); } catch { /* private mode */ }
+        if (listing) load(listing.path);
+      };
+      return s;
+    };
+    head.append(all, sortBtn('name', 'Name', 'tables-name-h'), sortBtn('mtime', 'Modified', 'browse-mtime-h'),
+      sortBtn('size', 'Size', 'tables-num'));
+    const scroller = el('div', 'side-preview-rows');
+    const list = el('div', 'tables-list browse-list');
+    scroller.append(list);
+    const status = el('div', 'side-preview-foot');
+    box.append(head, scroller, status);
+    pane.append(box);
+
+    const panes = el('div', 'side-panes list-panes browse-panes');
+    panes.append(rail.rail, pane);
+    b.append(panes);
+
+    /* ---------------------------------------------- the foot */
+    const foot = el('div', 'table-menu-foot table-menu-strip');
     const useBtn = el('button', 'btn primary', filesMode ? 'Add selected' : 'Use this folder');
     const paintUse = () => {
-      if (!filesMode) return;
+      if (!filesMode) {
+        useBtn.textContent = listing ? `Use ${leaf(listing.path)}` : 'Use this folder';
+        return;
+      }
       useBtn.disabled = !picked.size;
       useBtn.textContent = picked.size ? `Add ${picked.size} file${picked.size === 1 ? '' : 's'}` : 'Add selected';
     };
@@ -364,9 +429,8 @@ export function openFolderBrowser(startPath, onSelect, onCancel, { mode = 'folde
       const typed = pathInput.value.trim();
       onSelect(typed && listing && typed !== listing.path ? typed : (listing ? listing.path : typed));
     };
-    const cancel = el('button', 'btn ghost', 'Cancel');
+    const cancel = el('button', 'btn ghost table-menu-close', 'Cancel');
     cancel.onclick = () => { if (onCancel) onCancel(); else $('modal').hidden = true; };
-    actions.append(useBtn);
     if (!filesMode) {
       // Filing a case somewhere that doesn't exist yet shouldn't mean
       // leaving Winnow to make the folder and coming back.
@@ -386,10 +450,10 @@ export function openFolderBrowser(startPath, onSelect, onCancel, { mode = 'folde
         toast(`Created ${res.name}`);
         load(res.path);   // step into it — it's where they're going
       };
-      actions.append(mk);
+      foot.append(mk);
     }
-    actions.append(cancel);
-    b.append(actions);
+    foot.append(cancel, useBtn);
+    b.append(foot);
 
     /* Loads are async and can overtake each other — the walk-up on open
        fires a chain of them, and an analyst typing a path while that is
@@ -413,13 +477,12 @@ export function openFolderBrowser(startPath, onSelect, onCancel, { mode = 'folde
         // rather than silently landing somewhere else.
         if (seq !== loadSeq) return;   // superseded while we waited
         if (fallback) {
-          // Walk up to the nearest folder that does exist. A path with no
-          // separator is the RELATIVE default ('cases', resolved against
-          // the server's cwd) — stripping a segment leaves it unchanged, so
-          // that case falls back to the server's own default listing
-          // instead of looping.
-          const up = /[\\/]/.test(path || '') ? path.replace(/[\\/][^\\/]*$/, '') : '';
-          if (up !== path) { load(up, { fallback: up !== '' }); return; }
+          // A path with no separator is the RELATIVE default ('cases',
+          // resolved against the server's cwd) — stripping a segment
+          // leaves it unchanged, so that case falls back to the server's
+          // own default listing instead of looping.
+          const upPath = /[\\/]/.test(path || '') ? path.replace(/[\\/][^\\/]*$/, '') : '';
+          if (upPath !== path) { load(upPath, { fallback: upPath !== '' }); return; }
         }
         toast(filesMode ? 'No folder or file at that path: ' + e.message
           : 'Could not list that folder: ' + e.message, 4000);
@@ -433,86 +496,122 @@ export function openFolderBrowser(startPath, onSelect, onCancel, { mode = 'folde
         onSelect({ dir: res.path, files: [{ path: res.path + '/' + res.picked.name, name: res.picked.name, size: res.picked.size }] });
         return;
       }
+      if (!path) places.home = res.path;
       listing = res;
       pathInput.value = listing.path;
+      pathInput.scrollLeft = pathInput.scrollWidth;   // the end of a long path is the part that says where
+      up.disabled = !listing.parent;
       // A filter is about the folder it was typed over.
-      if (filesMode) { query = ''; filterBox.value = ''; }
+      query = '';
+      filterBox.value = '';
+      rail.paint();
       paint();
+      scroller.scrollTop = 0;
     }
 
-    /* The listing arrives name-sorted from the server; the picker's own
-       sort and filter are applied here, over what it already has, so a
-       change is a repaint and not a round trip. */
-    /* The server already returns the files in the picker's order (see
-       the sort= param) — only the filter is applied here, so a keystroke
-       is a repaint and not a round trip. */
-    function sortedFiles(files) {
-      return query ? files.filter((f) => f.name.toLowerCase().includes(query)) : files.slice();
-    }
+    // The server already returns the files in the picker's order (the
+    // sort= param) — only the filter is applied here, so a keystroke is a
+    // repaint and not a round trip.
+    const shownFiles = () => (listing.files || []).filter((f) => !query || f.name.toLowerCase().includes(query));
     const fmtDay = (epoch) => {
       const d = new Date(epoch * 1000);
       return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
     };
 
+    all.onchange = () => {
+      for (const f of shownFiles()) {
+        const path = listing.path + '/' + f.name;
+        if (all.checked) picked.set(path, { path, name: f.name, size: f.size }); else picked.delete(path);
+      }
+      paint();
+    };
+
     function paint() {
       if (!listing) return;   // a control poked before the first listing landed
+      for (const s of head.querySelectorAll('.tables-sort')) {
+        const on = filesMode && s.dataset.sort === sort.by;
+        s.setAttribute('aria-pressed', String(on));
+        s.dataset.dir = on ? sort.dir : '';
+      }
       // Built off-DOM: up to 2×BROWSE_LIST_CAP rows appended one at a time
       // into a live scroll container re-layouts on every append.
       const frag = document.createDocumentFragment();
-      if (listing.parent) {
-        const up = el('button', 'btn ghost browse-row', '.. (up a level)');
-        up.style.cssText = 'justify-content:flex-start;text-align:left';
-        up.onclick = () => load(listing.parent);
-        frag.append(up);
+      const dirs = listing.dirs.filter((d) => !query || d.toLowerCase().includes(query));
+      for (const d of dirs) {
+        const r = el('div', 'tables-row browse-row-dir');
+        r.dataset.id = d;
+        const name = el('button', 'tables-name browse-dir', d + '/');
+        name.type = 'button';
+        name.dataset.role = 'name';
+        name.title = 'Open this folder';
+        name.onclick = () => load(listing.path + '/' + d);
+        const cell = el('span', 'tables-name-cell');
+        cell.append(name);
+        r.append(el('span', 'browse-glyph', '▸'), cell, el('span', 'browse-mtime'), el('span', 'tables-num', ''));
+        r.ondblclick = () => load(listing.path + '/' + d);
+        frag.append(r);
       }
-      for (const d of listing.dirs) {
-        const row = el('button', 'btn ghost browse-row', '📁 ' + d);
-        row.style.cssText = 'justify-content:flex-start;text-align:left;width:100%';
-        row.onclick = () => load(listing.path + '/' + d);
-        frag.append(row);
+      const files = filesMode ? shownFiles() : [];
+      for (const f of files) {
+        const path = listing.path + '/' + f.name;
+        const r = el('label', 'tables-row browse-row-file' + (picked.has(path) ? ' open' : ''));
+        r.dataset.id = f.name;
+        const cb = el('input');
+        cb.type = 'checkbox';
+        cb.dataset.role = 'pick';
+        cb.checked = picked.has(path);
+        cb.onchange = () => {
+          if (cb.checked) picked.set(path, { path, name: f.name, size: f.size });
+          else picked.delete(path);
+          r.classList.toggle('open', cb.checked);
+          paintStatus();
+        };
+        const cell = el('span', 'tables-name-cell');
+        cell.append(el('span', 'tables-name static', f.name));
+        r.append(cb, cell, el('span', 'browse-mtime', f.mtime ? fmtDay(f.mtime) : ''),
+          el('span', 'tables-num some tables-rows', fmtBytes(f.size)));
+        frag.append(r);
       }
-      if (filesMode) {
-        const files = sortedFiles(listing.files || []);
-        for (const f of files) {
-          const path = listing.path + '/' + f.name;
-          const row = el('label', 'session-row browse-row');
-          row.style.cssText = 'cursor:pointer';
-          const cb = el('input');
-          cb.type = 'checkbox';
-          cb.checked = picked.has(path);
-          cb.onchange = () => {
-            if (cb.checked) picked.set(path, { path, name: f.name, size: f.size });
-            else picked.delete(path);
-            paintStatus();
-          };
-          row.append(cb, el('span', 'session-name', f.name),
-            el('span', 'browse-mtime', f.mtime ? fmtDay(f.mtime) : ''),
-            el('span', 'count', fmtBytes(f.size)));
-          frag.append(row);
-        }
-        if (!files.length && (listing.files || []).length) {
-          frag.append(el('div', 'note-status', 'No files here match that filter.'));
-        } else if (!(listing.files || []).length && !listing.dirs.length) {
-          frag.append(el('div', 'note-status', 'Nothing here.'));
-        }
-      } else if (!listing.dirs.length) {
-        frag.append(el('div', 'note-status', 'No subfolders here.'));
+      if (!dirs.length && !files.length) {
+        const any = listing.dirs.length || (filesMode && (listing.files || []).length);
+        frag.append(el('p', 'fb-help tables-empty', any ? `Nothing here matches “${filterBox.value.trim()}”.`
+          : filesMode ? 'Nothing here.' : 'No subfolders here.'));
       }
-      list.replaceChildren(frag);
+      keepingFocus(list, () => list.replaceChildren(frag));
+      const nFiles = (listing.files || []).length;
+      count.textContent = [plural(listing.dirs.length, 'folder'), filesMode && plural(nFiles, 'file')].filter(Boolean).join(' · ');
+      const shownAll = files.length && files.every((f) => picked.has(listing.path + '/' + f.name));
+      all.checked = !!shownAll;
+      all.indeterminate = !shownAll && files.some((f) => picked.has(listing.path + '/' + f.name));
       paintStatus();
     }
 
     function paintStatus() {
       // The number comes from the response, so the message can't lie when
       // the server's cap changes.
-      status.textContent = filesMode && listing && listing.truncated
-        ? `Showing the first ${listing.limit.toLocaleString()} entries — type a full path to reach anything past them.` : '';
+      const bytes = [...picked.values()].reduce((n, f) => n + (f.size || 0), 0);
+      const elsewhere = listing ? [...picked.keys()].filter((p) => !p.startsWith(listing.path + '/')).length : 0;
+      const line = !filesMode
+        ? 'Click a folder to go into it. The button below picks the folder you are in.'
+        : listing && listing.truncated
+          ? `Showing the first ${listing.limit.toLocaleString()} entries — type a full path to reach anything past them.`
+          : picked.size ? `${plural(picked.size, 'file')} picked · ${fmtBytes(bytes)}` + (elsewhere ? ` · ${elsewhere} in other folders` : '')
+            : 'Tick the files to add. They are read where they are, with no upload copy.';
+      status.replaceChildren(el('p', 'fb-help', line));
       paintUse();
     }
 
+    // Where home and the open case's folder are, for the side list. Home is
+    // the server's default listing; asked for once, quietly.
+    if (startPath) api('/api/browse_dir?path=').then((r) => { places.home = r.path; rail.paint(); }).catch(() => {});
+    api('/api/case/current').then((c) => {
+      const p = c && c.path;
+      if (p) { places.caseDir = p.replace(/[\\/][^\\/]*$/, ''); rail.paint(); }
+    }).catch(() => {});
+    rail.paint();
     load(startPath, { fallback: true });
     paintUse();
-  }, { wide: true });
+  }, { wide: true, tall: true, focus: '.browse-path' });
 }
 
 /* `state` carries everything back across a "Browse..." round trip —
@@ -1276,6 +1375,13 @@ export async function tempSaveAs({ onSaved, onCancel } = {}) {
   });
 }
 
+/* Copy the quick look's tables into a saved case, in the home screen's
+   frame: the case list's sections down the side (Recent, All cases, the
+   groups), the cases on the right with the home screen's columns, and
+   what is being copied over them as figures. A click picks a case — it
+   used to be a "Copy into this case" button on every row, each path in
+   full beside it — and the copy is the one main button on the foot,
+   naming where it goes. */
 export function tempCopyModal({ thenDiscard = false } = {}) {
   (async () => {
     let cases;
@@ -1285,35 +1391,121 @@ export function tempCopyModal({ thenDiscard = false } = {}) {
     try { cases = (await api('/api/cases')).filter((c) => c.exists !== false); }
     catch (e) { toast(e.message, 5000); return; }
     if (!cases.length) { toast('No saved cases yet — use "Save as a case…" instead', 6000); return; }
+    const tables = S.sources.filter((s) => s.id > 0 && !s.error);
+    let chosen = null;
+    let query = '';
     modal('Add these tables to a case', (b) => {
-      b.append(el('p', null,
-        'Every table here — rows, tags and notes included — is copied into the case you pick. '
-        + (thenDiscard
-          ? 'The quick look is discarded once the copy lands, and you go back to the case list.'
-          : 'This quick look stays as it is; discard it afterwards if you are done with it.')));
-      const list = el('div', 'session-list');
-      for (const c of cases) {
-        const row = el('div', 'row-actions session-row');
-        row.append(el('span', 'session-name', c.name),
-                   el('span', 'count', c.path));
-        const go = el('button', 'btn ghost', 'Copy into this case');
-        go.onclick = oneAtATime(go, async () => {
-          const ids = S.sources.filter((s) => s.id > 0 && !s.error).map((s) => s.id);
-          if (!ids.length) { toast('Nothing here to copy yet'); return; }
-          setBusy(true);
-          let res;
-          try { res = await post('/api/case/copy_sources', { target_path: c.path, source_ids: ids }); }
-          catch (e) { toast(e.message, 8000); return; }
-          finally { setBusy(false); }
-          $('modal').hidden = true;
-          toast(`Copied ${res.copied.length} table${res.copied.length === 1 ? '' : 's'} into "${c.name}"`, 8000);
-          if (thenDiscard) await tempDiscard({ confirm: false });
-        });
-        row.append(go);
-        list.append(row);
+      const sections = homeSections(cases);
+      const frame = sectionPanes({ sections: sections.map((s) => ({ ...s, build: buildPickPane(s) })),
+        label: 'Case list sections', cls: 'list-panes copyto-panes', paneCls: 'list-pane copyto-pane' });
+
+      function buildPickPane(section) {
+        return (pane) => {
+          const summary = el('div', 'mb-summary');
+          const stats = el('div', 'mb-stats');
+          const sum = (k) => tables.reduce((n, s) => n + (s[k] || 0), 0);
+          stats.append(tableMenuStat(tables.length, tables.length === 1 ? 'table' : 'tables'), tableMenuStat(sum('row_count'), 'rows'),
+            tableMenuStat(sum('tagged_row_count'), 'tagged'), tableMenuStat(sum('note_count'), 'notes'));
+          summary.append(stats);
+          const notes = el('ul', 'mb-notes');
+          notes.append(el('li', 'mb-note', 'Every table here is copied into the case you pick, its tags and notes with it. '
+            + (thenDiscard ? 'The quick look is discarded once the copy lands.' : 'The quick look stays as it is.')));
+          const top = el('div', 'tm-cols-top');
+          const search = el('input', 'side-search');
+          search.type = 'search';
+          search.placeholder = 'Filter cases, groups and notes…';
+          search.setAttribute('aria-label', 'Filter cases');
+          search.value = query;
+          const count = el('span', 'tm-cols-count');
+          top.append(search, count);
+          const box = el('div', 'side-preview tm-cols-box tables-box home-box');
+          const head = el('div', 'tables-head home-list-head');
+          head.append(el('span', 'tables-name-h', 'Case'), el('span', 'tables-num', 'Tables'), el('span', 'tables-num', 'Rows'),
+            el('span', 'tables-num', 'Tagged'), el('span', 'home-opened-h', 'Opened'), el('span'));
+          const scroller = el('div', 'side-preview-rows');
+          const list = el('div', 'tables-list home-list');
+          list.setAttribute('role', 'listbox');
+          list.setAttribute('aria-label', 'Cases');
+          scroller.append(list);
+          const foot = el('div', 'side-preview-foot');
+          box.append(head, scroller, foot);
+          pane.append(summary, notes, top, box);
+
+          const row = (c, showGroup) => {
+            const r = el('div', 'home-row copyto-row' + (chosen === c ? ' picked' : ''));
+            r.dataset.id = String(c.id);
+            r.setAttribute('role', 'option');
+            r.setAttribute('aria-selected', String(chosen === c));
+            const cell = el('span', 'home-name-cell');
+            const name = el('button', 'home-name', c.name);
+            name.type = 'button';
+            name.dataset.role = 'name';
+            name.title = c.path;
+            cell.append(name);
+            if (showGroup && c.group) cell.append(el('span', 'home-group-chip', c.group));
+            if (c.notes) cell.append(el('span', 'home-sub', c.notes));
+            const num = (n, cls) => el('span', 'tables-num ' + cls + (n ? ' some' : ''), n ? n.toLocaleString() : '—');
+            const opened = el('span', 'home-opened' + (c.last_opened ? '' : ' never'), openedAgo(c.last_opened));
+            r.append(cell, num(c.source_count, 'home-tables'), num(c.row_count, 'tables-rows'), num(c.tagged_row_count, 'tables-tagged'),
+              opened, el('span', 'copyto-tick', chosen === c ? '✓' : ''));
+            r.onclick = () => { chosen = c; paint(); syncCopy(); };
+            r.ondblclick = () => { chosen = c; syncCopy(); copy.click(); };
+            return r;
+          };
+
+          function paint() {
+            const q = query.trim().toLowerCase();
+            const shown = sortCases(section.cases.filter(caseMatches(q)), 'opened');
+            count.textContent = q ? `${shown.length} of ${plural(section.cases.length, 'case')}` : plural(section.cases.length, 'case');
+            const nodes = [];
+            if (section.byGroup) {
+              for (const s of sections) {
+                if (!s.id.startsWith('group:') && s.id !== 'nogroup') continue;
+                const mine = sortCases(s.cases.filter(caseMatches(q)), 'opened');
+                if (!mine.length) continue;
+                nodes.push(caseGroupHead(s.title, mine, { code: s.id !== 'nogroup' }), ...mine.map((c) => row(c, false)));
+              }
+              if (!nodes.length) nodes.push(...shown.map((c) => row(c, true)));
+            } else nodes.push(...shown.map((c) => row(c, !section.id.startsWith('group:'))));
+            if (!shown.length) nodes.push(el('p', 'fb-help tables-empty', q ? `No case here matches “${query.trim()}”.` : 'No cases here.'));
+            keepingFocus(list, () => list.replaceChildren(...nodes));
+            foot.replaceChildren(el('p', 'fb-help', chosen ? `Into ${chosen.path}` : 'Click the case to copy into.'));
+          }
+          search.oninput = () => { query = search.value; paint(); };
+          search.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && search.value) { e.preventDefault(); e.stopPropagation(); search.value = ''; query = ''; paint(); }
+          });
+          paint();
+          return { update: paint };
+        };
       }
-      b.append(list);
-    }, { wide: true });
+      b.append(frame.panes);
+
+      const foot = el('div', 'table-menu-foot table-menu-strip');
+      const cancel = el('button', 'btn ghost table-menu-close', 'Cancel');
+      cancel.onclick = () => { $('modal').hidden = true; };
+      const copy = el('button', 'btn primary');
+      const syncCopy = () => {
+        copy.disabled = !chosen || !tables.length;
+        copy.textContent = chosen ? `Copy ${plural(tables.length, 'table')} into ${chosen.name}` : `Copy ${plural(tables.length, 'table')}`;
+      };
+      copy.onclick = oneAtATime(copy, async () => {
+        if (!chosen) return;
+        if (!tables.length) { toast('Nothing here to copy yet'); return; }
+        setBusy(true);
+        let res;
+        try { res = await post('/api/case/copy_sources', { target_path: chosen.path, source_ids: tables.map((s) => s.id) }); }
+        catch (e) { toast(e.message, 8000); return; }
+        finally { setBusy(false); }
+        $('modal').hidden = true;
+        toast(`Copied ${res.copied.length} table${res.copied.length === 1 ? '' : 's'} into "${chosen.name}"`, 8000);
+        if (thenDiscard) await tempDiscard({ confirm: false });
+      });
+      foot.append(cancel, copy);
+      b.append(foot);
+      syncCopy();
+      frame.show(sections[0].cases.length ? sections[0].id : 'all');
+    }, { wide: 'x', tall: true, focus: (b) => b.querySelector('.copyto-pane .side-search') });
   })();
 }
 

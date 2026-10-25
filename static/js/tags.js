@@ -6,7 +6,7 @@ import { clearPageCache, render, rowAt } from './grid.js';
 import { clearGroupPageCache, drawRail, groupCoordAt, loadRowsForPositions, positionsNeedLoading, regroupIfGroupedByTag, waitForPages } from './grouping.js';
 import { S, cellRangeRows, selCount, selExcludedPairs, selExcludedPositions, selFirst, selPositions } from './state.js';
 import { openTagEditor } from './timeframe.js';
-import { renderTimelineTagFilter } from './timeline.js';
+import { buildTimeline, renderTimelineTagFilter } from './timeline.js';
 import { confirmDialog, contextMenu, oneAtATime } from './ui.js';
 import { rebuildView } from './view.js';
 
@@ -634,6 +634,9 @@ export async function undoLastTagChange() {
   render();
   drawRail();
   regroupIfGroupedByTag(); // undo moved rows between tag groups too
+  // A tag put on from the Timeline's pane is undone from there too, and
+  // the Timeline is built from the tags.
+  if (S.activeTab === 'timeline') buildTimeline();
   toast(`Undone: ${res.undone}`);
 }
 

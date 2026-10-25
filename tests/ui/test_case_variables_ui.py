@@ -18,28 +18,34 @@ def _open_case_settings(page):
     page.click("#btnCase")
     page.wait_for_selector(".menu")
     page.locator(".menu-item", has_text="Case settings").click()
-    page.wait_for_selector("#modal:not([hidden]) .case-vars")
+    page.wait_for_selector("#modal:not([hidden]) .case-settings")
+    page.locator("#modalBody .side-rail-item[data-section=variables]").click()
+    page.wait_for_selector("#modalBody .cs-vars-box")
 
 
 def test_case_settings_lists_adds_edits_and_removes_variables(page, api):
     try:
         _clear_variables(page, api)
         _open_case_settings(page)
-        box = page.locator("#modalBody .case-vars")
+        box = page.locator("#modalBody .cs-vars-box")
         assert "No variables yet" in box.inner_text()
+        assert page.locator("#modalBody .side-rail-item[data-section=variables]").inner_text().endswith("None yet")
 
-        # add
-        box.locator(".case-var-name-in").fill("engagement")
-        box.locator(".case-var-add .case-var-value").fill("ACME-2026-09")
-        box.locator(".case-var-add .btn", has_text="Add").click()
-        page.wait_for_selector("#modalBody .case-var-row .case-var-name:has-text('engagement')")
+        # add, from the list's last line
+        box.locator(".cs-vars-add input[aria-label='New variable name']").fill("engagement")
+        box.locator(".cs-vars-add input[aria-label='New variable value']").fill("ACME-2026-09")
+        box.locator(".cs-vars-add .btn", has_text="Add").click()
+        page.wait_for_selector("#modalBody .cs-var-row[data-id=engagement]")
         assert api("/api/case/variables") == [
             {"name": "engagement", "value": "ACME-2026-09", "description": "", "required": False}]
+        # the side list says what the case has now
+        page.wait_for_function("() => document.querySelector('#modalBody .side-rail-item[data-section=variables]')"
+                               ".textContent.includes('1 set')")
 
         # edit in place saves on change
-        row = box.locator(".case-var-row", has_text="engagement")
-        row.locator(".case-var-value").fill("ACME-2026-10")
-        row.locator(".case-var-value").press("Tab")
+        row = box.locator(".cs-var-row[data-id=engagement]")
+        row.locator("[data-role=value]").fill("ACME-2026-10")
+        row.locator("[data-role=value]").press("Tab")
         page.wait_for_function(
             "() => (__winnow.S.caseVariables.find((v) => v.name === 'engagement') || {}).value === 'ACME-2026-10'")
 
@@ -47,15 +53,17 @@ def test_case_settings_lists_adds_edits_and_removes_variables(page, api):
         api("/api/case/variables", "POST", {"name": "report_api", "required": True, "description": "where reports go"})
         page.keyboard.press("Escape")
         _open_case_settings(page)   # reopening re-fetches, so an out-of-band change shows
-        page.wait_for_selector("#modalBody .case-var-row:has-text('report_api')")
-        flagged = page.locator("#modalBody .case-var-row.missing")
+        page.wait_for_selector("#modalBody .cs-var-row[data-id=report_api]")
+        flagged = page.locator("#modalBody .cs-var-row.missing")
         assert flagged.count() == 1 and "report_api" in flagged.inner_text()
-        assert "required" in flagged.locator(".case-var-desc").inner_text()
+        assert "required" in flagged.locator(".tables-sub").inner_text()
+        assert "1 missing" in page.locator("#modalBody .side-rail-item[data-section=variables]").inner_text()
 
-        # remove
-        flagged.locator(".case-var-del").click()
+        # remove, from the row's ⋯
+        flagged.locator("[data-role=more]").click()
+        page.locator(".menu .menu-item", has_text="Remove").click()
         page.wait_for_function("() => !__winnow.S.caseVariables.some((v) => v.name === 'report_api')")
-        assert page.locator("#modalBody .case-var-row.missing").count() == 0
+        page.wait_for_selector("#modalBody .cs-var-row.missing", state="detached")
         page.keyboard.press("Escape")
     finally:
         page.keyboard.press("Escape")
@@ -65,9 +73,9 @@ def test_case_settings_lists_adds_edits_and_removes_variables(page, api):
 def test_a_bad_variable_name_is_refused_with_a_toast(page, api):
     try:
         _open_case_settings(page)
-        box = page.locator("#modalBody .case-vars")
-        box.locator(".case-var-name-in").fill("1 bad name")
-        box.locator(".case-var-add .btn", has_text="Add").click()
+        box = page.locator("#modalBody .cs-vars-box")
+        box.locator(".cs-vars-add input[aria-label='New variable name']").fill("1 bad name")
+        box.locator(".cs-vars-add .btn", has_text="Add").click()
         page.wait_for_selector("#toast:not([hidden])")
         assert "Could not add" in page.locator("#toast").inner_text()
         assert not any(v["name"] == "1 bad name" for v in api("/api/case/variables"))

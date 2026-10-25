@@ -44,7 +44,103 @@ see [docs/notes/README.md](README.md) for the whole set.
   artefact shape (next entry) or every column joined.
   Same materialize-into-`v.`-then-page-by-pos pattern as `build_view`
   (invariant #2) — only one timeline view is ever alive at a time, rebuilt
-  (and the old one evicted) on every tag-filter change.
+  (and the old one evicted) on every tag-filter change and on every visit
+  to the tab (`showTimelineTab`).
+  **The view holds `(pos, source_id, rid, ts, tag1)` and nothing else.**
+  `tag1` is the first of the tags asked for that the row carries (lowest
+  id: tag order), which the overview strip splits its bars by; it is the
+  build's snapshot, where the page's stripes are read live. The
+  body, the summary, the tags and the note are read by
+  `fetch_timeline_rows`, for the rows of the page asked for: one query
+  per source on the page, reading that source's slice of the page off the
+  view by pos range and its own rows by rid (a `CROSS JOIN`, so the order
+  is fixed). The view used to hold all of it, and the build joined every
+  column of every tagged row into a string and ran `TL_LEAD`/`TL_DETAILS`
+  over each before the first line showed: 13.7 s warm (28.8 s cold) for
+  250k tagged rows, paid on every visit to the tab and every tag chip
+  clicked. Ordering needs the timestamp alone: 0.6 s (2.7 s cold), with a
+  page of 5,000 lines costing ~140 ms to read instead of nothing. The
+  handle keeps the `configs` the build was given, so every page reads its
+  rows the way the build placed them. Two consequences worth knowing:
+  tags and notes are read as they are NOW (a line untagged since the
+  build shows no stripe rather than a stale one), and a source dropped
+  since the build makes the page raise `ViewExpired` (409) rather than
+  answer with lines it can no longer describe. `tests/test_timeline_summary.py`
+  holds the build to running no summary function at all, by counting
+  calls on the writer.
+  `timeline_position` (`GET /api/timeline_position`) finds a line again
+  in a rebuilt view — by `(source_id, rid)`, else the first line at or
+  after its `ts` — which is how the tab keeps the analyst's place across
+  the rebuild every visit is (`keepTimelinePlace` in timeline.js).
+  `timeline_overview` (`GET /api/timeline_overview`) is the overview
+  strip's bars: the view's lines per `HISTOGRAM_BUCKETS` width, split by
+  `tag1` or `source_id`, each with `first` = its `MIN(pos)`, which is
+  the bar's first line because the view is in time order. Its `start` is
+  floored in Python so `(epoch - start) / width` is never negative —
+  SQLite's integer division truncates toward zero, the pre-1970 trap
+  `time_histogram` documents, and FILETIME zero (1601) does reach the
+  Timeline. The strip narrows the build two ways: `exclude_sources` (the
+  tables switched OFF, as the tag chips keep theirs) and `ts_range`, a
+  half-open `[start, end)` compared with the line's normalised timestamp,
+  which leaves lines with no time out while it is set.
+  `tests/test_timeline_overview.py`.
+  **The rows around a finding** (`context`, a half-open `[start, end)`)
+  add a branch per table with a timestamp, tagged or not, selecting its
+  rows in the window that carry none of the tags switched on, with
+  `ctx = 1` (`tag1` NULL; the overview splits them as "ctx", and
+  `per_source` counts findings only, `context_rows` the rest). The
+  exact test is the normaliser on every row, which is a full scan — on
+  a 416k-row EvtxECmd table it added 0.44 s to every build, and it
+  grows with the table, not the window. So when every value of
+  the column starts with a date (`_column_is_date_led`: one `NOT GLOB`
+  probe, cached per `(source_id, column)` for the Store's life, which is
+  safe because source tables are never mutated), the branch first
+  narrows on the RAW text by day range, `col >= first_day COLLATE
+  NOCASE AND col < day_after COLLATE NOCASE`, which the import's
+  COLLATE NOCASE sort index on the first datetime column serves as a
+  SEARCH; the exact test then runs on those rows only. A window ending
+  at midnight ends the day before (or the prefilter would read a whole
+  extra day). A column that is not date-led (US dates, epochs, a derived
+  column) gets the exact test alone. `tests/test_timeline_context.py`
+  holds both paths to the same rows and the plan to the SEARCH.
+  **Folding repeats** (`fold`; `unfold` names the runs to leave open by
+  their first row) puts a run of `TIMELINE_FOLD_MIN` (3) or more
+  consecutive findings from one table, with the same fold key and the
+  same `tag1`, on one line. The fold key (`_timeline_fold_key`) is the
+  summary's lead, the first non-blank of the shape's lead columns,
+  trimmed, written as SQL in the tagged branch rather than read through
+  `TL_LEAD`, so the build still runs no summary function (the test
+  counts calls). A table with no summary, or with body columns picked
+  in Configure tables…, has no key and never folds: "the same lead"
+  would be nothing the analyst can see. A row around a finding never
+  folds and ends a run; a row with a note starts one, so a note is never
+  inside a fold. `_timeline_fold` works in steps: every row with its key
+  into `{vid}_all`; whether each row starts a run, compared with the row
+  above by a join on `pos - 1` (0.34 s at 250k rows where LAG() took
+  0.84 s), and a running sum of that for its run; the runs, each with its
+  first row, length and first line; then the view, which gains `n` (rows
+  on the line), `run_n` (a run's length on its first line, folded or
+  open, which the "fold" badge reads) and `ts_last`. **The rows are
+  kept** as `{vid}_rows`, each with its `line` (`handle["rows_table"]`,
+  also in `handle["tables"]`, which eviction drops with the view),
+  because two readers need rows rather than lines: `timeline_overview`
+  buckets each row at its own time and points `first` at its line, so a
+  fold never moves a bar; and `timeline_position` finds a folded-away row
+  on its run's line (`exact: False`). `per_source` sums `n` and the
+  answer carries `rows`, so every count stays a count of rows. The cost,
+  on the 416k-row EvtxECmd table with 250k tagged rows: 0.8 s → 1.9 s a
+  build, most of it reading the lead columns of every tagged row (the
+  plain build reads the timestamp alone). It is off by default, so only
+  whoever switches it on pays it.
+  `fetch_timeline_rows` also gives each line its `gap` (seconds since
+  the line above ended: that line's `ts_last` when folded, else its
+  `ts`; `None` when either has no time) and `new_day`. Both need the line
+  above, which for the first line of a page is on another page, so the
+  read starts one line early. `tests/test_timeline_story.py`.
+  `timeline_row` (`GET /api/timeline_row`) is a line's row in full for
+  the details pane: every column (derived included), its tags (all of
+  them, not just those switched on) and note; a merge id or a gone
+  table is a KeyError (404) and a gone rid `RecordGone` (404).
   **The body join is capped at what SQLite's expression depth allows**
   (`_fit_body_cols`, 495 columns at the default limit of 1000). The flat
   `a || ' | ' || b || ...` chain is two tree levels per column, so a
@@ -151,9 +247,9 @@ see [docs/notes/README.md](README.md) for the whole set.
 
 - **A Timeline row leads with what happened, not with the source row.**
   Beside `body` (still the pipe-joined columns, unchanged) each row
-  carries `summary_lead`/`summary_detail` — "Special privileges assigned"
-  plus "svc_backup · WKSTN-4471 · id 4672" — built in the same INSERT by
-  the `TL_LEAD`/`TL_DETAILS` SQL functions from the artefact shape's
+  carries `lead`/`detail` — "Special privileges assigned" plus
+  "svc_backup · WKSTN-4471 · id 4672" — read with the page by the
+  `TL_LEAD`/`TL_DETAILS` SQL functions from the artefact shape's
   `summary` block in `defaults/headers.json`. Things worth knowing before
   touching it:
   - The shape is matched by `_timeline_summary_match` the way every
@@ -171,15 +267,17 @@ see [docs/notes/README.md](README.md) for the whole set.
     source whose body columns the analyst picked by hand in Configure
     tables… — an explicit choice outranks a shipped default.
   - `TL_LEAD`/`TL_DETAILS` are registered on the writer AND the reader
-    pool. The build's INSERT runs them on the writer; Configure tables…'
-    preview (`timeline_preview`) runs the same SELECT on a reader, so a
-    long build or import holding the writer lock can't freeze the dialog
+    pool. A Timeline page (`fetch_timeline_rows`) and Configure tables…'
+    preview (`timeline_preview`) both run them on a reader, so a long
+    build or import holding the writer lock can't freeze either
     (`tests/test_timeline_preview.py` holds the lock for the whole read).
+    The build no longer calls them at all (previous entry).
   - **How a source reads on the Timeline is decided in one place,
     `_timeline_parts`** — the timestamp fallback, the derived-timestamp
     split, the body join and its 495-column cap, the summary-or-picks
-    rule, the empty-type fallback. `build_timeline` unions a branch of it
-    per source and `timeline_preview` (`POST /api/timeline/preview`) runs
+    rule, the empty-type fallback. `build_timeline` orders each source's
+    tagged rows by its timestamp, `fetch_timeline_rows` reads a page's
+    rows with the rest, and `timeline_preview` (`POST /api/timeline/preview`) runs
     it over a few rows of one table under the dialog's UNSAVED settings,
     so the preview cannot drift from the Timeline. A new rule about how a
     row reads goes in there, not in either caller — and not in
@@ -453,6 +551,56 @@ see [docs/notes/README.md](README.md) for the whole set.
   LIMIT n)` subquery and tags/notes by the page's rid range. Its sheets
   continue past Excel's row cap through `_xlsx_write_sheets`, the
   all-tables export's continuation rule.
+- **Nothing joins one branch per member with a bare `" UNION ALL ".join`.**
+  SQLite refuses a compound SELECT of more than 500 terms ("too many
+  terms in compound SELECT"; SQLITE_MAX_COMPOUND_SELECT, which
+  `setlimit` can only lower), and every merge read is a branch per
+  member — a merge of 1000 IIS logs could not build its view at all.
+  `store.union_all` is the join: the plain text up to 500, and past it
+  runs of 500 wrapped as `SELECT * FROM (…)` and unioned in turn, branch
+  and `?` order unchanged. SQLite's flattener undoes the nesting, so the
+  unfiltered sort's `MERGE (UNION ALL)` over each member's sort index
+  survives it. Every merge union in store.py and the bundled plugins'
+  `_scope` go through it, and so does any union with a branch per
+  *source* (the Timeline, latest hits, `{{all:…}}`): a case can hold 500
+  tables without a merge in sight. tests/test_merge_compound_limit.py
+  drives each one over a merge of 510 W3C logs.
+- **A `_reader()` block is one read transaction, and so is a SQL pane
+  query.** A statement whose schema changed between its prepare and its
+  step is re-prepared, up to 50 times, and in autocommit each try reads
+  the latest schema afresh, so a writer that commits schema changes
+  faster than a reader can load the schema wins every round and the read
+  fails with "database schema has changed". The first filter on a merge
+  of 1000 IIS logs did exactly that: an index build per member, each
+  committing a CREATE INDEX, against a schema of thousands of tables;
+  `get_source`, `column_values` and the next build failed for the minute
+  the builds took, and the pane, whose TEMP views are made the same way,
+  silently skipped the ones that hit it ("no such table: merge_1"). Inside
+  a transaction the retry reads the snapshot's schema and succeeds the
+  first time. A block never sees a commit made after its first read,
+  which no reader wanted anyway, but a WAL checkpoint cannot pass a page
+  its snapshot might read: a block that streams (the CSV exports, paced by
+  the download) or copies (Save as table, committing its own batches)
+  calls `_renew_snapshot` between batches, or the -wal grows by everything
+  written while it runs. That also keeps Save as table's refusal of a view
+  evicted mid-copy, which a snapshot held throughout would have copied
+  regardless. tests/test_schema_churn.py
+  commits a schema change from the reader's own authorizer, inside every
+  prepare, which fails every time without the transaction.
+- **A merge's background index builds are one batch.** `_build_batch()`
+  collects what the block's `_ensure_*` calls ask for; at its end one
+  reader checks them all and one worker builds them, as many to a commit
+  as fit in `INDEX_BATCH_HOLD_S` (search indexes go to
+  `FTS_BUILD_CONCURRENCY` workers, one build at a time each). Each
+  `_ensure_*` used to check on two readers of its own and start a thread:
+  with the snapshot above, a 1000-member merge's filter made 2000 checks,
+  each reloading a schema that another build had just changed, and took
+  up to 160 s. Merge loops that compile per member (`build_view`,
+  `spec_sql`, `group_summary`, `column_values`) are wrapped in it; a
+  single table's call is a batch of one. The registries hold a
+  `_QueuedBuild` per build, alive until the worker has done that one, so
+  `wait_for_column_index`, `list_column_indexes`' "building" and the
+  dedup read them as they read the thread they replace.
 - **A regex is checked before it runs, and some are refused**
   (`_compiled_regex`, called by the regex filter op, regex search mode,
   any `REGEXP '…'` literal in a raw fragment or the SQL pane
