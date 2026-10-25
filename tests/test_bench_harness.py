@@ -20,7 +20,7 @@ import time
 import pytest
 
 from bench import compare as C
-from bench.harness import REGISTRY, Timed, _measure_once, benchmark, run_benchmark
+from bench.harness import REGISTRY, Timed, _measure_once, run_benchmark
 
 
 # --------------------------------------------------------------------------

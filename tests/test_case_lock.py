@@ -108,7 +108,6 @@ def test_release_leaves_a_marker_that_names_someone_else(case_path):
 # ------------------------------------------------------------------ HTTP layer
 
 def test_open_conflicting_case_409s_with_the_holder(client, tmp_path, monkeypatch):
-    import server
 
     other = str(tmp_path / "other.db")
     Store(other, default_tags=DEFAULT_TAGS).close()

@@ -8,7 +8,6 @@ platforms with nothing actually present."""
 
 from __future__ import annotations
 
-import pytest
 
 from winnow import browser
 

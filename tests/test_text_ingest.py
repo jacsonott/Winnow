@@ -12,7 +12,7 @@ import time
 
 import pytest
 
-from winnow.store import TEXT_COLUMN, Store, looks_binary
+from winnow.store import TEXT_COLUMN, looks_binary
 
 LOG = (
     "2026-03-14T08:00:01Z hostd[2098]: verbose Starting, commas, inside, the line\n"

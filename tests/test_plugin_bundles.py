@@ -7,7 +7,6 @@ from pathlib import Path
 
 import pytest
 
-from winnow import workspace as WS
 from winnow.plugin_api import PluginRegistry
 
 EXAMPLES = Path(__file__).resolve().parent.parent / "examples" / "plugins"

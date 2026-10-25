@@ -36,7 +36,10 @@ def test_no_wait_on_a_promise_predicate(path):
     """
     src = path.read_text(encoding="utf-8")
     hits = []
-    for m in re.finditer(r"wait_for_function\(\s*(\"\"\"|['\"])(.*?)\1", src, re.S):
+    # [rRfF]*: an f-string predicate is one too. This scan skipped them,
+    # and the one fetch-in-a-wait it missed came to light only when ruff
+    # took the `f` off a placeholder-free f-string.
+    for m in re.finditer(r"wait_for_function\(\s*[rRfF]*(\"\"\"|['\"])(.*?)\1", src, re.S):
         pred = m.group(2)
         if ".then(" in pred or re.search(r"\b(async|await)\b", pred):
             hits.append(src[:m.start()].count("\n") + 1)

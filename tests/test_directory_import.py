@@ -247,7 +247,7 @@ def test_directory_import_files_nested_tables_into_matching_folders(kape_tree, s
     # a nested file: basename name, filed under a folder mirroring its dir
     nested = matched["RegistryHives/SYSTEM.csv"]
     slash = nested["rel_path"].rfind("/")
-    base, folder_path = nested["rel_path"][slash + 1:], nested["rel_path"][:slash]
+    folder_path = nested["rel_path"][:slash]
     nid = _run_dir_import(store, nested["path"], folder_path)
     nsrc = next(s for s in store.list_sources() if s["id"] == nid)
     assert nsrc["name"] == "SYSTEM.csv"                 # basename, NOT the rel_path

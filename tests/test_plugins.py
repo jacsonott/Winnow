@@ -1516,7 +1516,6 @@ def test_lateral_movement_saved_defs_persist_machine_side(lateral_client):
 # exact request kwargs so the tests can assert on the API shape (model,
 # fallbacks, cache breakpoint) rather than just the happy path.
 
-import sys
 import types
 
 
@@ -2232,7 +2231,6 @@ def test_case_scope_overrides_travel_with_the_case(scoped_client, store):
     """"Off in this case" lives in the case file: it must beat the machine
     default while this case is open, survive a close/reopen of the same
     case, and vanish from the effective state under a different case."""
-    import server
 
     r = scoped_client.post("/api/plugins/toggle", json={"fs_name": "demo", "scope": "off_case"})
     assert r.status_code == 200
@@ -2260,7 +2258,6 @@ def test_follow_case_drops_the_override_without_touching_the_default(scoped_clie
     want is the one already set, and a silent rewrite of every OTHER
     case's behaviour when it isn't. Removing one case's override must not
     be able to do that."""
-    import json as _json
 
     # Machine default is on; this case says off.
     scoped_client.post("/api/plugins/toggle", json={"fs_name": "demo", "scope": "off_case"})

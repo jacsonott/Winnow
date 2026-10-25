@@ -117,7 +117,6 @@ def main() -> None:
         }
 
         during: list[float] = []
-        stop = threading.Event()
         build_done = threading.Event()
         build_elapsed = {}
 

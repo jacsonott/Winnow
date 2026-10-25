@@ -279,7 +279,6 @@ def test_the_sweep_keeps_any_kind_of_work(tmp_path, monkeypatch):
     one — was deleted as empty after 7 days. Deleting findings to save disk
     is the worst trade this app can make."""
     import os
-    import sqlite3
     import server
     from winnow.store import Store
 

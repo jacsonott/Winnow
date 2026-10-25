@@ -262,7 +262,7 @@ def test_the_active_cell_does_not_park_under_a_pinned_column(page, painted):
         page.keyboard.press("ArrowLeft")
         painted(page)
         ring = page.locator("#body .cell-active").bounding_box()
-        pinned = page.locator(f'#body .row .cell.pinned').first.bounding_box()
+        pinned = page.locator('#body .row .cell.pinned').first.bounding_box()
         assert ring["x"] >= pinned["x"] + pinned["width"] - 1, (ring, pinned)
     finally:
         # Put the layout back exactly as it was found, in memory only —

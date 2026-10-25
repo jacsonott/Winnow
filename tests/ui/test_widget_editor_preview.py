@@ -212,7 +212,7 @@ def test_changing_only_the_look_repaints_without_asking_again(page):
         _drop(page, did)
 
 
-def test_the_preview_files_nothing_in_the_board_cache(page):
+def test_the_preview_files_nothing_in_the_board_cache(page, until):
     """A draft is not the widget until it is saved: a preview of edited SQL
     that wrote its answer into the case file would put that number on the
     board's card after Escape, under the old query."""
@@ -222,8 +222,11 @@ def test_the_preview_files_nothing_in_the_board_cache(page):
         "query": {"sql": f"SELECT COUNT(*) AS n FROM src_{src}"}}])
     try:
         page.wait_for_selector("#dashGrid .dash-stat")
-        page.wait_for_function(f"""(id) => fetch('/api/dashboards/' + id).then(r => r.json())
-          .then(d => Object.values(d.cache || {{}}).some(c => c.ran_at))""", arg=did)
+        # Polled from Python: this was a wait_for_function on a fetch, which
+        # returns a Promise at once, so `before` could be read ahead of the
+        # board's own run landing in its cache.
+        until(page, lambda: any(c.get("ran_at") for c in (_board_json(page, did).get("cache") or {}).values()),
+              "the board's first run in its cache")
         before = _board_json(page, did)["cache"]
         asks = _Asks(page)
         try:

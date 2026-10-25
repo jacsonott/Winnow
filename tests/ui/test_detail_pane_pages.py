@@ -10,7 +10,6 @@ when the grid leaves the table it was showing — a switch to another table,
 or the last tab closing — while a refresh of the table already open, the
 idiom behind adding a column or closing some other tab, leaves it be.
 """
-import json
 import urllib.request
 
 import pytest

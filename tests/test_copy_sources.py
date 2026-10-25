@@ -7,7 +7,6 @@ and a target open in another Winnow is refused with the holder named."""
 
 from __future__ import annotations
 
-import json
 
 import pytest
 
