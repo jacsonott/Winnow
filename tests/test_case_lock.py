@@ -16,8 +16,13 @@ import time
 
 import pytest
 
+from winnow import store as store_module
 from winnow.store import (CASE_LOCK_STALE_AFTER_SEC, DEFAULT_TAGS, Store, case_lock_path,
                    describe_case_lock, probe_case_lock)
+
+# Windows has no flock (store.py imports fcntl or does without), so there a
+# live Store is known by its heartbeat alone.
+HAS_FLOCK = store_module.fcntl is not None
 
 
 def _write_marker(case_path, **fields):
@@ -41,7 +46,7 @@ def test_live_store_is_reported_held_and_names_itself(case_path):
         holder = probe_case_lock(case_path)
         assert holder is not None
         assert holder["pid"] == os.getpid()
-        assert holder["evidence"] == "flock"
+        assert holder["evidence"] == ("flock" if HAS_FLOCK else "heartbeat")
         assert str(os.getpid()) in describe_case_lock(holder)
     finally:
         s.close()
@@ -83,13 +88,14 @@ def test_a_stale_marker_does_not_stop_a_new_store(case_path):
 def test_unparseable_marker_falls_back_to_the_flock(case_path):
     """A torn read is expected — the marker is rewritten in place every
     heartbeat — so a corrupt record must not be mistaken for "free" while a
-    live Store still holds the flock."""
+    live Store still holds the flock. Without flock (Windows) a torn record
+    is all there is to go on, and it still reads as held: "unreadable"."""
     s = Store(case_path, default_tags=DEFAULT_TAGS)
     try:
         with open(case_lock_path(case_path), "w", encoding="utf-8") as f:
             f.write('{"host": "trunc')
         holder = probe_case_lock(case_path)
-        assert holder is not None and holder["evidence"] == "flock"
+        assert holder is not None and holder["evidence"] == ("flock" if HAS_FLOCK else "unreadable")
     finally:
         s.close()
 

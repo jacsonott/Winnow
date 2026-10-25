@@ -411,6 +411,14 @@ def test_save_as_keeps_what_an_open_download_would_have_stranded_in_the_wal(clie
         rows.fetchone()   # mid-statement, the way a streaming export holds it
         res = c.post("/api/case/save_as", json={"name": "Saved mid-download"}, headers=HEADERS)
         rows.close()
+    if os.name == "nt":
+        # Windows won't rename a file the reader still has open, so there
+        # the save waits for the download (409, the case left as it was)
+        # and goes through whole once it is done.
+        assert res.status_code == 409, res.text
+        assert "still reading" in res.json()["detail"]
+        assert c.get("/api/case/current", headers=HEADERS).json()["temp"] is True
+        res = c.post("/api/case/save_as", json={"name": "Saved mid-download"}, headers=HEADERS)
     assert res.status_code == 200, res.text
     assert server.STORE.list_sources()[0]["row_count"] == 200
     assert server.STORE.tag_counts(src)["counts"][str(tag)] == 3

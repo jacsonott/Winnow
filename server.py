@@ -1986,17 +1986,23 @@ def _case_save_as(request: Request, body: CaseSaveAsBody):
             raise HTTPException(400, f"A case file named {os.path.basename(dest)} already exists")
 
     old_path = STORE.path
+    still_reading = ("Something is still reading this case (a download or a search) "
+                     "— save again when it finishes")
     # Only the case file moves, and its -wal is deleted below, so every
     # write must be in the file itself first. A download or a search-all
     # still reading an older snapshot can stop that; then nothing moves.
     if not STORE.close(fold_wal=True):
         STORE = _open_store(old_path)
-        raise HTTPException(409, "Something is still reading this case (a download or a search) "
-                                 "— save again when it finishes")
+        raise HTTPException(409, still_reading)
     try:
         _move_case_file(old_path, dest)
     except OSError as e:
         STORE = _open_store(old_path)   # failed move leaves everything as it was
+        if getattr(e, "winerror", None) == 32:
+            # ERROR_SHARING_VIOLATION. Windows won't rename a file that any
+            # handle still has open, and the reader a streaming download
+            # holds outlives the store's close.
+            raise HTTPException(409, still_reading)
         raise HTTPException(400, f"Could not move the case file: {e}")
     for suffix in ("-wal", "-shm", ".winnow-lock"):
         with contextlib.suppress(OSError):

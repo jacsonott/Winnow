@@ -11,6 +11,7 @@ set of hosts.
 from __future__ import annotations
 
 import csv
+import os
 import sqlite3
 
 import pytest
@@ -320,7 +321,7 @@ def registered(cases, monkeypatch):
     are allowed to read."""
     from winnow import workspace as WS
     for p in cases:
-        WS.cases.create(p, name=p.split("/")[-1].replace(".db", ""))
+        WS.cases.create(p, name=os.path.basename(p).replace(".db", ""))
     return cases
 
 

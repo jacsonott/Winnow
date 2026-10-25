@@ -124,10 +124,12 @@ def sqlite_peek_uri(path: str | os.PathLike) -> str:
     `mode=ro`, which reads them; the -wal is already there, and the -shm
     almost always is.
 
-    The -wal is looked for under the real path as well as the given one:
-    SQLite names it after the file a symlink points at, so a case reached
-    through a link has its -wal beside the target, and missing it would
-    read a live case without the rows only its -wal has yet.
+    The -wal is looked for under the real path as well as the given one,
+    and the file is opened by whichever spelling has it: off Windows SQLite
+    names the -wal after the file a symlink points at, and on Windows after
+    the path it was opened by. Opening a link whose -wal sits beside the
+    target read a live case without the rows only its -wal has yet — on
+    Windows, a case reopened through a link was "not a Winnow case file".
 
     For a read that is over within a request, not a connection kept
     around: immutable tells SQLite nobody else will change the file, so it
@@ -137,9 +139,10 @@ def sqlite_peek_uri(path: str | os.PathLike) -> str:
     pages) or that Winnow closing the case again, which a look like this
     is long over before. A rollback-journal database creates nothing
     under `mode=ro` and gets it unchanged."""
-    uri = sqlite_ro_uri(path)
     p = os.fspath(path)
-    if sqlite_header_is_wal(p) and not any(
-            os.path.exists(q + "-wal") for q in (p, os.path.realpath(p))):
-        uri += "&immutable=1"
-    return uri
+    if not sqlite_header_is_wal(p):
+        return sqlite_ro_uri(p)
+    for q in (p, os.path.realpath(p)):
+        if os.path.exists(q + "-wal"):
+            return sqlite_ro_uri(q)
+    return sqlite_ro_uri(p) + "&immutable=1"
