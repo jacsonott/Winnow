@@ -218,7 +218,11 @@ def test_a_build_lands_after_its_table_is_removed_under_it(page, until):
         assert errors == []
     finally:
         builds.close()
-        page.evaluate("(id) => { __winnow.loadSources(id); }", sid)
+        # Awaited: the wait below is already true of the view the test
+        # left, which belongs to this table too, so on a slow page it let
+        # _reset clear the search while the reload was still to put the
+        # stashed '4625' back and build it, after the reset's own build.
+        page.evaluate("(id) => __winnow.loadSources(id)", sid)
         page.wait_for_function("(id) => __winnow.S.sourceId === id && !!__winnow.S.view"
                                " && __winnow.S.view.source_id === id", arg=sid, timeout=30_000)
         _reset(page)
