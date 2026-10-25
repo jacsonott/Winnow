@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import calendar
 import codecs
+import concurrent.futures
 import contextlib
 import copy
 import csv
@@ -122,6 +123,31 @@ TRIGRAM_LIKE_MIN_SQLITE = (3, 45, 0)
 # 480,113 is no more useful than "1,000+", and getting it costs a full
 # count over every matching row on a source whose index isn't built yet.
 SEARCH_ALL_COUNT_CAP = 1000
+# A Contains search the index can't narrow (not built yet, or a term too
+# short for it) is one scan of every row, and LIKE is CPU work, so on one
+# connection it runs at one core's speed: 17-23 s on a 6.9M-row, 10 GB
+# EvtxECmd table. build_view splits that scan by rid range over this many
+# reader connections, one thread each, before it takes the writer lock
+# (Store._parallel_contains): 17.9 s on one thread, 9.6 s on two, 4.8 s on
+# four. Python's sqlite3 lets go of the GIL while a statement runs and LIKE
+# takes none of SQLite's locks, so the threads really do run at once.
+PARALLEL_SCAN_THREADS = max(1, min(8, os.cpu_count() or 1))
+# Under this many rows a scan takes tens of milliseconds, and starting the
+# threads is not worth it.
+PARALLEL_SCAN_MIN_ROWS = 100_000
+# The matches go into the build as one JSON list of rids, about 8 bytes and
+# 1 µs each (the build looks each one up again), against the 2-3 s per
+# million rows a scan saves on four cores. Past this many (split evenly
+# between the ranges, so this is also the most the build is handed) the
+# parallel scan gives up and the build scans as before. A count, not a
+# share of the rows read so far: a term's matches are not spread evenly
+# (EvtxECmd writes each .evtx file's events together, so a Channel's rows
+# are one run), and a share measured on the first rows of a range gave up
+# on a term on 4% of the table.
+PARALLEL_SCAN_MAX_RIDS = 8_000_000
+# How often (in SQLite VM steps) a scan thread looks for a cancel. Each look
+# takes the GIL, so not often: a million steps is a few milliseconds.
+PARALLEL_SCAN_POLL_OPS = 1_000_000
 # How many terms a "paste a list" sweep will break down per source before it
 # reports the union count alone. The breakdown costs one extra capped count
 # per term on each source that matched at all (see
@@ -2230,6 +2256,29 @@ class OpPreempted(OpCancelled):
     the view-job worker looks for the distinction, and only so it can
     start the build again instead of telling the analyst their search was
     cancelled — which nobody asked for."""
+
+
+class _ScanGroup:
+    """The threads of one parallel scan (Store._parallel_contains), as the
+    one "connection" _interruptible registers under the build's op_token:
+    interrupt() is what cancel_op calls on it. Each thread's connection
+    asks stopped() from a progress handler rather than being interrupt()ed
+    itself, because sqlite3_interrupt on a connection whose statement has
+    not started yet is forgotten when it starts: a cancel landing while the
+    threads were still checking out readers would have missed them."""
+
+    def __init__(self) -> None:
+        self.cancelled = False
+        self.gave_up = False
+
+    def interrupt(self) -> None:
+        self.cancelled = True
+
+    def give_up(self) -> None:
+        self.gave_up = True
+
+    def stopped(self) -> bool:
+        return self.cancelled or self.gave_up
 
 
 def _union_scope(a: list[int] | None, b: list[int] | None) -> list[int] | None:
@@ -6631,10 +6680,8 @@ class Store:
         # the same evidence match twice — and keeping the doc view over the
         # source table alone means the index needs no rebuild when a
         # derived column is added or removed.
-        table, cols = src["table_name"], [c["name"] for c in self._base_cols(src)]
-        fts = f"fts_{source_id}"
-        doc_view = f"{table}_doc"
-        doc_sql = f"CREATE VIEW {q(doc_view)} AS SELECT rid, {_blob_expr(cols)} AS doc FROM {q(table)}"
+        table = src["table_name"]
+        fts, doc_view, doc_sql = self._fts_shape(src)
         with self.lock, self.db:
             start = self._fts_resume_point(source_id, fts, doc_view, doc_sql)
             if start is None:
@@ -6673,6 +6720,18 @@ class Store:
         with self.lock, self.db:
             self.db.execute("UPDATE sources SET has_fts=1 WHERE id=?", (source_id,))
             self.db.execute("DELETE FROM fts_progress WHERE source_id=?", (source_id,))
+
+    def _fts_shape(self, src: dict) -> tuple[str, str, str]:
+        """A source's index table, its doc view, and the view's DDL as
+        build_fts writes it, which fts_progress records: what a build
+        resumes only when it still matches (_fts_resume_point), and what a
+        search reading a build in progress checks first
+        (_fts_partial_point). `src` is the source's own, not a merge
+        member's renamed copy."""
+        table, cols = src["table_name"], [c["name"] for c in self._base_cols(src)]
+        doc_view = f"{table}_doc"
+        return (f"fts_{src['id']}", doc_view,
+                f"CREATE VIEW {q(doc_view)} AS SELECT rid, {_blob_expr(cols)} AS doc FROM {q(table)}")
 
     def _fts_resume_point(self, source_id: int, fts: str, doc_view: str, doc_sql: str) -> int | None:
         """The rid an interrupted build_fts should carry on from, or None
@@ -9521,7 +9580,9 @@ class Store:
             with self._build_batch():   # one batch for every member's index builds
                 for m in self._resolve_members(source_id):
                     msrc = m["src"]
-                    where, p = self._compile_where(m["source_id"], self._member_read_src(src, msrc), spec, colnames)
+                    read_src = self._member_read_src(src, msrc)
+                    scan_from = self._member_from(src, m, uses=[c["name"] for c in self._base_cols(read_src)])
+                    where, p = self._compile_where(m["source_id"], read_src, spec, colnames, scan_from=scan_from)
                     for col in sort_cols:
                         self._ensure_sort_index_building(
                             m["source_id"], col,
@@ -9567,7 +9628,7 @@ class Store:
             sql = f"INSERT INTO v.{q(vid)}(source_id, rid) {select}"
         else:
             table = src["table_name"]
-            where, params = self._compile_where(source_id, src, spec, colnames)
+            where, params = self._compile_where(source_id, src, spec, colnames, scan_from=q(table))
             derived_names = {c["name"] for c in src["columns"] if c.get("derived")}
             for col in sort_cols:
                 # A derived column's values live in the sidecar, so its sort
@@ -11886,7 +11947,146 @@ class Store:
         finally:
             ro.close()
 
-    def _compile_where(self, source_id, src, spec, colnames) -> tuple[str, list]:
+    def _parallel_contains(self, src: dict, frm: str, cols: list[str], term: str,
+                           token: str | None) -> tuple[str, list] | None:
+        """A Contains search answered by scanning `frm` (src's rows) in
+        PARALLEL_SCAN_THREADS rid ranges at once, one reader connection
+        each: `rid IN (the rids found)` as a WHERE fragment and its one
+        parameter. None to scan the usual way instead — a small table, one
+        core, no json_each, or more matches than are worth carrying back
+        (PARALLEL_SCAN_MAX_RIDS).
+
+        The same check as the scan it replaces (_contains_scan), on the
+        same rows, so the same rows match. rids run 1..row_count on every
+        source (invariant #2's carve-out), which is what the ranges split;
+        the last range has no upper end, so a row past row_count is still
+        read. Runs before build_view takes the writer lock, so a long
+        search no longer holds it while it reads: only the build of the
+        view from the rids found does.
+
+        While the source's index is still being built, the rows it already
+        holds are asked of it (MATCH, then the same check on each
+        candidate, as _contains_clause does once it is built) and only the
+        rest are scanned: on a 15 GB table the build takes hours, and
+        without this a search halfway through it scanned every row anyway.
+
+        Cancellable under `token` like the build: the threads are
+        registered together (_ScanGroup) and each stops at its next poll.
+        One thread's error stops the others and is raised as the build's."""
+        rows = int(src.get("row_count") or 0)
+        n = PARALLEL_SCAN_THREADS
+        if n < 2 or rows < PARALLEL_SCAN_MIN_ROWS or not _HAS_JSON_EACH:
+            return None
+        scan, scan_params = _contains_scan(cols, term)
+        query = None if src.get("has_fts") else _trigram_match_query(term)
+        indexed_to = self._fts_partial_point(src) if query is not None else None
+        start = indexed_to or 1
+        group = _ScanGroup()
+        per_range = max(1, PARALLEL_SCAN_MAX_RIDS // n)
+
+        def run(sql: str, args: list, index: bool = False) -> str | None:
+            """One connection's share, as the inside of a JSON array (""
+            for none), or None once the parallel scan has given up.
+
+            Gathered by SQLite (json_group_array), one row back, rather
+            than fetched a row at a time: each fetch takes the GIL, and four
+            threads taking it per row ran a term on 870k rows of a 2M-row
+            table at 25 s, where the single scan takes 5. The LIMIT stops a
+            range that has too many."""
+            try:
+                with self._reader() as conn:
+                    conn.set_progress_handler(group.stopped, PARALLEL_SCAN_POLL_OPS)
+                    try:
+                        if index:
+                            # The progress check and the MATCH read one
+                            # snapshot (a _reader() block is one read
+                            # transaction), so the index asked is one that
+                            # holds every rid below `start`. A build started
+                            # over since (a fresh build drops the table)
+                            # holds fewer, and its rows would be missed.
+                            if (self._fts_partial_point(src, conn) or 0) < start:
+                                group.give_up()
+                                return None
+                        count, found = conn.execute(
+                            f"SELECT count(*), json_group_array(rid) FROM ({sql} LIMIT ?)",
+                            [*args, per_range + 1]).fetchone()
+                    finally:
+                        conn.set_progress_handler(None, 0)
+            except sqlite3.OperationalError:
+                if group.gave_up and not group.cancelled:
+                    return None   # stopped by another thread giving up, not an error
+                group.give_up()
+                raise
+            except BaseException:
+                group.give_up()
+                raise
+            if count > per_range:
+                group.give_up()
+                return None
+            return found[1:-1]
+
+        tasks: list[tuple] = []
+        if indexed_to:
+            fts = q(self._fts_shape(self._own_src(src))[0])
+            tasks.append((f"SELECT rid FROM {frm} WHERE rid IN "
+                          f"(SELECT rowid FROM {fts} WHERE {fts} MATCH ? AND rowid < ?) AND {scan}",
+                          [query, start, *scan_params], True))
+        step = -(-max(rows - start + 1, 1) // n)
+        for i in range(n):
+            lo = start + i * step
+            if i == n - 1:
+                tasks.append((f"SELECT rid FROM {frm} WHERE rid >= ? AND {scan}", [lo, *scan_params]))
+            else:
+                tasks.append((f"SELECT rid FROM {frm} WHERE rid >= ? AND rid < ? AND {scan}",
+                              [lo, lo + step, *scan_params]))
+
+        with self._interruptible(token, group):
+            with concurrent.futures.ThreadPoolExecutor(len(tasks), thread_name_prefix="winnow-scan") as pool:
+                futures = [pool.submit(run, *t) for t in tasks]
+            parts = [f.result() for f in futures]
+        if any(p is None for p in parts):
+            return None
+        return "rid IN (SELECT value FROM json_each(?))", ["[" + ",".join(p for p in parts if p) + "]"]
+
+    def _own_src(self, src: dict) -> dict:
+        """The source's own src dict, for a merge member's renamed copy
+        (_member_read_src) the source itself: what its index was built
+        from."""
+        return self._source_lite(src["id"]) if src.get("merge_id") else src
+
+    def _fts_partial_point(self, src: dict, conn: sqlite3.Connection | None = None) -> int | None:
+        """How far a search index still being built has got: every rid
+        below the one returned is in the source's fts_ table, by
+        build_fts's own record of it (fts_progress), and the table and its
+        doc view are of the current shape — the same checks a build makes
+        before it resumes (_fts_resume_point). None when no build is in
+        progress, or it has indexed nothing yet. On `conn` when given, so a
+        caller can make it part of its own read transaction."""
+        own = self._own_src(src)
+        fts, doc_view, doc_sql = self._fts_shape(own)
+
+        def read(c: sqlite3.Connection) -> int | None:
+            row = c.execute("SELECT next_rid, doc_sql FROM fts_progress WHERE source_id=?",
+                            (own["id"],)).fetchone()
+            if not row or row[1] != doc_sql or int(row[0]) <= 1:
+                return None
+            found = {r[0]: r[1] for r in c.execute(
+                "SELECT name, sql FROM sqlite_master WHERE name IN (?, ?)", (fts, doc_view))}
+            if "detail=none" not in (found.get(fts) or "") or found.get(doc_view) != doc_sql:
+                return None
+            return int(row[0])
+        if conn is not None:
+            return read(conn)
+        with self._reader() as c:
+            return read(c)
+
+    def _compile_where(self, source_id, src, spec, colnames, *,
+                       scan_from: str | None = None) -> tuple[str, list]:
+        """`scan_from`: the FROM text this WHERE will read the rows through,
+        passed by build_view alone. With it, a Contains search the index
+        can't narrow is answered here, by a parallel scan, and compiles to
+        the rids it found (_parallel_contains). Without it (spec_sql) the
+        search compiles to the scan itself, as SQL that stands on its own."""
         clauses: list[str] = []
         params: list[Any] = []
 
@@ -11940,7 +12140,11 @@ class Store:
             if not src["has_fts"]:
                 self._ensure_fts_building(source_id)
             fts_ident = q("fts_" + str(source_id)) if src["has_fts"] else None
-            clause, p = _contains_clause([c["name"] for c in self._base_cols(src)], search, fts_ident)
+            cols = [c["name"] for c in self._base_cols(src)]
+            found = None
+            if scan_from is not None and (fts_ident is None or _trigram_match_query(search) is None):
+                found = self._parallel_contains(src, scan_from, cols, search, spec.get("op_token"))
+            clause, p = found or _contains_clause(cols, search, fts_ident)
             clauses.append(clause)
             params.extend(p)
 
