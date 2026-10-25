@@ -930,7 +930,12 @@ export default function mount(container, winnow) {
       acHide();   // the caret leaves the token the popup was built for
     }
   });
-  tmplInput.addEventListener('blur', () => setTimeout(acHide, 150));
+  /* Called off when the box gets focus back: a blur's pending hide that
+     outlives the blur closed the list a Ctrl+Space or a brace had just
+     opened, when focus left and came back inside the 150 ms. */
+  let acBlurTimer = 0;
+  tmplInput.addEventListener('blur', () => { acBlurTimer = setTimeout(acHide, 150); });
+  tmplInput.addEventListener('focus', () => clearTimeout(acBlurTimer));
   tmplInput.addEventListener('click', acHide);
 
   /* --------------------------------------------------- drag and drop */

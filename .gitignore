@@ -3,6 +3,8 @@ __pycache__/
 .venv/
 venv/
 .pytest_cache/
+# Playwright traces of failing UI tests (WINNOW_UI_TRACE_DIR in ci.yml)
+test-results/
 
 # Case files and evidence — never commit these
 *.db
