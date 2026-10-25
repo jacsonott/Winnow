@@ -38,7 +38,7 @@ import json
 import os
 import re
 import sqlite3
-from typing import Any, Iterator
+from typing import Iterator
 
 from winnow.paths import sqlite_peek_uri
 from winnow.store import _esc_like, _ts_normalize, q, read_only_authorizer

@@ -722,6 +722,13 @@ lot to leave to memory.
   When a UI test fails, its report carries what the shared server logged
   while it ran ("Captured server log"). Marker: `-m ui` / `-m "not ui"`.
 
+**Lint: `ruff check .`**, pyflakes rules only (ruff.toml): unused imports
+and variables, undefined names, redefinitions — the Python half of what
+test_static_syntax.py does for static/js. CI runs it once in the backend
+job, ahead of that shard's tests, which still run if it fails. `ruff check
+--fix .` clears the unused imports; an import kept for its side effect
+takes `# noqa: F401`, as store.py's register-into-timeparse imports do.
+
 **CI runs each suite in shards.** `pytest --shard K/N` (tests/sharding.py)
 keeps whole files, dealt by test count, and ci.yml runs that as a matrix —
 six browser jobs, and two backend on each of Python 3.10 (the minimum the
@@ -759,6 +766,7 @@ Run it with:
 pip install -r requirements-dev.txt
 playwright install chromium   # once, for tests/ui
 pytest
+ruff check .
 ```
 
 `requirements-dev.txt` (pytest, httpx2 for FastAPI's `TestClient`, esprima,

@@ -28,7 +28,6 @@ import hashlib
 import io
 import itertools
 import json
-import math
 import os
 import re
 import secrets
@@ -1967,14 +1966,14 @@ def _lenient_text_factory(undecodable: list[int] | None = None):
     errors="replace" follows, and counted in `undecodable[0]` so the
     import can say how many values that touched. BLOBs never come
     through here — sqlite3 only calls a text_factory for TEXT."""
-    def decode(b: bytes) -> str:
+    def lenient(b: bytes) -> str:
         try:
             return b.decode("utf-8")
         except UnicodeDecodeError:
             if undecodable is not None:
                 undecodable[0] += 1
             return b.decode("utf-8", "replace")
-    return decode
+    return lenient
 
 
 def _json_leaf_text(value: Any) -> str:
@@ -4956,7 +4955,6 @@ class Store:
         fh.seek(0)
         fallback0 = _cp1252_fallback_count()
 
-        cols = [TEXT_COLUMN]
         with self.lock, self.db:
             cur = self.db.execute(
                 "INSERT INTO sources(name, path, table_name, columns, file_hash, imported_at, ingest)"
@@ -17565,7 +17563,6 @@ class Store:
         sid = handle["source_id"]
         with self._reader() as ro, self._dropped_view_is_expired():
             src = self._source_lite_on(ro, sid)
-            table = src["table_name"]
             cols = self._export_columns(ro, src)
             sel = ", ".join(q(c) for c in cols)
 

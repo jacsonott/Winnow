@@ -73,10 +73,17 @@ jobs:
           cache: pip
           cache-dependency-path: requirements-dev.txt
       - run: pip install -r requirements-dev.txt
+      # Pyflakes over every .py in the repo (ruff.toml), ~50 ms. Once, not
+      # per shard: the answer doesn't depend on the shard or the Python.
+      - name: ruff check
+        if: matrix.shard == 1 && matrix.python == '3.12'
+        run: ruff check --output-format github .
       # tests/ui is excluded here rather than left to skip on a missing
       # browser: a silent skip in the fast job is how a suite quietly stops
-      # running at all.
-      - run: pytest -q --ignore=tests/ui --shard ${{ matrix.shard }}/2
+      # running at all. !cancelled() so a lint failure above still lets
+      # the tests report.
+      - if: ${{ !cancelled() }}
+        run: pytest -q --ignore=tests/ui --shard ${{ matrix.shard }}/2
 
   ui:
     name: browser ${{ matrix.shard }}/${{ strategy.job-total }}

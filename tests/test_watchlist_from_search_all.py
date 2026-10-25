@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import pytest
 
-from winnow.store import DEFAULT_TAGS, Store
 
 TERMS = ["ALPHAIOC", "BETAIOC", "GAMMAIOC"]
 

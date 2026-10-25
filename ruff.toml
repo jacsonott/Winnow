@@ -1,0 +1,13 @@
+# `ruff check` runs in CI's backend job (.github/workflows/ci.yml). Pyflakes
+# only: unused imports and variables, undefined names, redefinitions — the
+# Python half of what tests/test_static_syntax.py catches for static/js.
+# Style rules are deliberately off; the codebase has its own idiom and a
+# reformat would touch every file for no change in behaviour.
+#
+# An import kept only for its side effect (store.py's register-into-
+# timeparse imports) carries `# noqa: F401`; that marker is what keeps it
+# out of this check, so don't strip one as clutter.
+target-version = "py310"
+
+[lint]
+select = ["F"]

@@ -39,7 +39,7 @@ SHIPPED = {
 # by scripts/release.py's DEV_ONLY).
 DEV_ONLY = {
     "tests", "bench", "CLAUDE.md", ".claude", "requirements-dev.txt",
-    "screenshots", "design",
+    "ruff.toml", "screenshots", "design",
 }
 
 

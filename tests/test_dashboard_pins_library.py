@@ -6,9 +6,7 @@ from __future__ import annotations
 
 import sqlite3
 
-import pytest
 
-from winnow import workspace as WS
 from winnow.store import DEFAULT_TAGS, Store
 
 

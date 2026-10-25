@@ -376,7 +376,7 @@ def test_the_site_nav_follows_homes_groups(tmp_path):
         '      - "Other": "Other.md"\n'
         '  - "Second":\n'
         '      - "Third": "Third.md"\n')
-    assert f"tree/dev/docs/wiki" in config and "<code>rel</code>" in config
+    assert "tree/dev/docs/wiki" in config and "<code>rel</code>" in config
 
 
 def test_a_page_home_does_not_list_fails_the_site_too(tmp_path):

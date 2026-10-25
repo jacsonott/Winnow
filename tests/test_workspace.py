@@ -92,9 +92,9 @@ def test_saved_filters_update_unknown_id_raises():
 def test_saved_filters_reorder_only_touches_the_given_group():
     # Two header-set groups interleaved in creation order: A, X, B, Y, C
     a = WS.filters.create("A", ["Col1"], {})
-    x = WS.filters.create("X", ["Other"], {})
+    WS.filters.create("X", ["Other"], {})
     b = WS.filters.create("B", ["Col1"], {})
-    y = WS.filters.create("Y", ["Other"], {})
+    WS.filters.create("Y", ["Other"], {})
     c = WS.filters.create("C", ["Col1"], {})
 
     # Reverse just the ["Col1"] group's order (A, B, C -> C, B, A) — X/Y
@@ -263,7 +263,6 @@ def test_header_nickname_seed_never_overrides_or_resurrects():
     """Seeded rows are ordinary records afterward: a rename sticks, a delete
     sticks across every later read, and re-seeding (same version) adds
     nothing back."""
-    from winnow import defaults
 
     hn = WS.HeaderNicknames()
     recs = hn.list()

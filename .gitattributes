@@ -23,6 +23,7 @@ tests/test_release_script.py export-ignore
 /bench/              export-ignore
 /CLAUDE.md           export-ignore
 /requirements-dev.txt export-ignore
+/ruff.toml           export-ignore
 # Neither is read at runtime: /screenshots/ is development screenshots kept
 # at full resolution, /design/ is prototype HTML. Together they were over
 # half the bytes an analyst pulled over a slow link or carried in on a USB

@@ -22,7 +22,6 @@ from pathlib import Path
 from winnow import paths
 import server
 from winnow import updater
-from winnow import workspace as WS
 
 
 def test_install_root_is_the_directory_winnow_was_installed_into():
