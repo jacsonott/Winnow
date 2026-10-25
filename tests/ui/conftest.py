@@ -35,6 +35,12 @@ from spawn import ServerLog, spawn_server
 
 REQUIRE_BROWSER = os.environ.get("WINNOW_UI_REQUIRE_BROWSER") == "1"
 
+# A directory to keep a Playwright trace in for every failing test (CI sets
+# it and uploads what lands there; `playwright show-trace <zip>` opens one).
+# Unset, nothing is recorded. Every browser context comes from OwnPage, so
+# that is the one place that starts and stops a trace.
+TRACE_DIR = Path(os.environ["WINNOW_UI_TRACE_DIR"]).resolve() if os.environ.get("WINNOW_UI_TRACE_DIR") else None
+
 if REQUIRE_BROWSER:
     from playwright.sync_api import sync_playwright   # an ImportError fails the run
 else:
@@ -102,9 +108,19 @@ def ui_csv(tmp_path_factory) -> Path:
 _server_log: ServerLog | None = None
 _LOG_MARK = pytest.StashKey[int]()
 
+# For OwnPage's trace: the test running now (what a kept trace is named
+# after), and how many setup/call/teardown phases have failed so far. A
+# context compares the count at close with the count at open, so `page`,
+# which closes in teardown after the test body failed, and a module-scoped
+# page that some test in its module failed under, both keep theirs.
+_current_test = ""
+_failed_phases = 0
+
 
 @pytest.hookimpl(tryfirst=True)
 def pytest_runtest_setup(item):
+    global _current_test
+    _current_test = item.nodeid
     item.stash[_LOG_MARK] = _server_log.mark() if _server_log else 0
 
 
@@ -112,8 +128,11 @@ def pytest_runtest_setup(item):
 def pytest_runtest_makereport(item, call):
     """A failing UI test's report carries what the server logged while it
     ran: when a UI test fails it is usually the server behind it."""
+    global _failed_phases
     outcome = yield
     rep = outcome.get_result()
+    if rep.failed:
+        _failed_phases += 1
     if not rep.failed or _server_log is None:
         return
     time.sleep(0.3)   # uvicorn logs a handler's traceback after sending the 500
@@ -287,6 +306,17 @@ def first_run_init():
     return FIRST_RUN_INIT
 
 
+def _trace_path() -> Path:
+    """TRACE_DIR/<test id>[-N].zip, N for a test's second context on."""
+    stem = re.sub(r"[^\w.-]+", "_", _current_test or "session")[-150:]
+    TRACE_DIR.mkdir(parents=True, exist_ok=True)
+    path, n = TRACE_DIR / f"{stem}.zip", 1
+    while path.exists():
+        n += 1
+        path = TRACE_DIR / f"{stem}-{n}.zip"
+    return path
+
+
 class OwnPage:
     """A page in a browser context of its own, for what the shared `page`
     can't give a test: another viewport or localStorage, a page that lasts
@@ -306,7 +336,12 @@ class OwnPage:
     (the shared server unless given) and waits for `ready`; `ready=None`
     waits for nothing more than the load, and `goto=False` doesn't load at
     all. `extra_page()` opens another tab in the same context, checked the
-    same way. Anything else goes to browser.new_context."""
+    same way. Anything else goes to browser.new_context.
+
+    With WINNOW_UI_TRACE_DIR set, the context records a Playwright trace
+    and keeps it, at close, if a test failed while it was open or the
+    `with` block raised. One that fails only after its block has closed
+    the context loses the trace: assert inside the block."""
 
     def __init__(self, browser, base, *, seed=FIRST_RUN_INIT, init="", viewport=(1500, 900),
                  route=None, goto=True, wait_until="networkidle", ready=".row",
@@ -326,6 +361,9 @@ class OwnPage:
     def __enter__(self):
         w, h = self.viewport
         self.ctx = self.browser.new_context(viewport={"width": w, "height": h}, **self.context)
+        if TRACE_DIR:
+            self.failed_at_open = _failed_phases
+            self.ctx.tracing.start(screenshots=True, snapshots=True, sources=True)
         if self.script:
             self.ctx.add_init_script(self.script)
         if self.route:
@@ -338,6 +376,11 @@ class OwnPage:
         return self.page
 
     def __exit__(self, kind, *_):
+        if TRACE_DIR:
+            if kind is not None or _failed_phases > self.failed_at_open:
+                self.ctx.tracing.stop(path=_trace_path())
+            else:
+                self.ctx.tracing.stop()
         self.ctx.close()
         if kind is None:
             assert not self.errors, "uncaught JS errors: " + " | ".join(self.errors)

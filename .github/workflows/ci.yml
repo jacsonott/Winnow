@@ -99,15 +99,27 @@ jobs:
       # --only-shell: the suite runs headless, which launches the headless
       # shell; the full Chrome build alongside it is ~190MB nobody uses.
       - run: playwright install --with-deps --only-shell chromium
-      # No artifact upload step: when a UI test fails it's almost always the
-      # server behind it, and tests/ui/conftest.py attaches what the server
-      # logged during a failing test to that test's report.
+      # What the server logged during a failing test is already in that
+      # test's report (tests/ui/conftest.py). What the page did is not, so
+      # each failing test also leaves a Playwright trace, uploaded below.
       - run: pytest -q tests/ui --shard ${{ matrix.shard }}/${{ strategy.job-total }}
         env:
           # Fail, don't skip, without Playwright or Chromium. The skip is
           # right on an analyst's machine; here it would report this
           # required check green having run nothing.
           WINNOW_UI_REQUIRE_BROWSER: "1"
+          WINNOW_UI_TRACE_DIR: test-results/traces
+      # One zip per failing test: download the artifact from the run's
+      # summary page and open a zip with `playwright show-trace`, or drop
+      # it on trace.playwright.dev (it is read in the browser, not uploaded).
+      - name: upload traces of failing tests
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-traces-${{ matrix.shard }}
+          path: test-results/traces/
+          if-no-files-found: ignore
+          retention-days: 14
 
   # The two checks the ruleset requires. `!cancelled()` rather than
   # `always()` so a run superseded by a newer push stays cancelled, and NOT
