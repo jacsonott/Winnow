@@ -1400,7 +1400,7 @@ suite skips itself where playwright or a browser is missing, so a machine
 with neither still runs everything else. Separately, the esprima
 parse-and-scope check in `tests/test_static_syntax.py` covers `static/js/`
 rather than plugin JS, but it's a cheap technique to point at your own
-`ui/*.js` — see the Testing section of [`CLAUDE.md`](../CLAUDE.md).
+`ui/*.js` — see the Testing section of `CLAUDE.md` on develop.
 
 ---
 

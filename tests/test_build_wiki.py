@@ -10,6 +10,7 @@ published; the second pins the rewriting rules on small synthetic pages.
 from __future__ import annotations
 
 import importlib.util
+import posixpath
 import re
 from pathlib import Path
 
@@ -74,6 +75,39 @@ def test_the_sidebar_reaches_every_page(published):
 def test_pages_do_not_repeat_the_title_the_wiki_prints(published):
     for filename, text in published.items():
         assert not text.startswith("# "), filename
+
+
+def _export_ignored():
+    """What `git archive` leaves out, read from .gitattributes (as
+    tests/test_release_tree.py reads it)."""
+    out = set()
+    for raw in (ROOT / ".gitattributes").read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if line and not line.startswith("#") and "export-ignore" in line:
+            out.add(line.split()[0].strip("/"))
+    return out
+
+
+def test_pages_link_only_to_what_a_release_carries():
+    """A relative link from a page into development-only material resolves
+    on develop, so every other check here passes, and is dead everywhere
+    else the page is read. The release zip leaves that material out
+    (export-ignore), and main never has it (scripts/release.py's DEV_ONLY,
+    all export-ignored as well), so the Pages site, built from main, fails
+    its build on it. A develop URL fails on main too, in
+    test_every_link_resolves_where_it_lands, so name the file as code."""
+    ignored = _export_ignored()
+    pages = [*sorted((ROOT / "docs" / "wiki").glob("*.md")), ROOT / "docs" / "writing-plugins.md"]
+    dead = []
+    for page in pages:
+        where = page.relative_to(ROOT).as_posix()
+        for target in _targets(page.read_text(encoding="utf-8")):
+            if target.startswith("#") or build_wiki._SCHEME.match(target):
+                continue
+            path = posixpath.normpath(posixpath.join(posixpath.dirname(where), target.split("#")[0]))
+            if any(path == i or path.startswith(i + "/") for i in ignored):
+                dead.append(f"{where}: {target}")
+    assert not dead, f"links into material a release leaves out: {dead}"
 
 
 # --- the rewriting rules, on synthetic pages --------------------------------
