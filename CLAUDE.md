@@ -648,6 +648,7 @@ what you're about to touch:
 | [docs/notes/server.md](docs/notes/server.md) | routes and middleware, one-case-one-Winnow, CSRF header, 400-vs-500, shutdown |
 | [docs/notes/derived.md](docs/notes/derived.md) | derived datetime columns end to end |
 | [docs/notes/plugins.md](docs/notes/plugins.md) | the plugin host and the example plugins |
+| [docs/notes/testing.md](docs/notes/testing.md) | what each test file covers, and working on the suite: the shared UI server, clicks lost to a re-render, waits that don't wait, pipelines that hide a failure |
 
 A new trap goes in the file for its subsystem, not back here — see
 [docs/notes/README.md](docs/notes/README.md).
@@ -665,17 +666,7 @@ A new trap goes in the file for its subsystem, not back here — see
    the first step: a second view already lives beside the live one until
    it is adopted or discarded. Filter tabs need that plus a way to keep
    several adopted at once.
-3. **A timeline that isn't only tagged rows.** The merged view itself is
-   built: `Store.build_timeline` UNION ALLs a branch per source into one
-   `v.view_N`, normalising each source's timestamp so tables in different
-   formats interleave. What it unions is every *tagged* row, which is the
-   right default — a case-wide view of "everything I've flagged as a
-   finding" rather than of whichever table happens to be open — but it is
-   not the only shape an analyst wants: reconstructing the hour around a
-   finding means seeing the rows nobody has tagged yet. The extension is a
-   timeline scoped by time window or by source instead of by `row_tags`,
-   without materialising every row in the case to get there.
-4. `.tle_sess` import, so existing Timeline Explorer sessions carry over.
+3. `.tle_sess` import, so existing Timeline Explorer sessions carry over.
 
 ## Plugin-facing changes ship with their docs
 
@@ -698,7 +689,7 @@ before merging, which on a repo where changes arrive as whole features is a
 lot to leave to memory.
 
 - **Backend** (`tests/test_*.py`) — `store.py`, `server.py`, `workspace.py`.
-  The bulk of it; see the coverage notes below.
+  The bulk of it; what each file covers is in docs/notes/testing.md.
 - **`tests/test_static_syntax.py`** — parses every `static/js/*.js` with
   `esprima` (the Python port) *and* proves each module imports everything it
   uses (`tests/jsscope.py` does the scope analysis; anything left over must be
@@ -778,79 +769,9 @@ Every test gets its own `tmp_path`-backed case file and a monkeypatched
 `isolate_workspace` fixture) — nothing in the suite touches the repo's real
 `case.db`, `sample.csv`, or `workspace/`.
 
-Coverage is organized one file per concern (`test_ingest.py`,
-`test_views.py`, `test_search.py`, `test_grouping.py`, ...) and is weighted
-toward the invariants above and the traps in [docs/notes/](docs/notes/) — numeric
-NULL-not-zero, ragged-row padding, the contains-mode substring fix, nested
-grouping's `path` threading through the virtual small-group fast path,
-that same fast path refusing a *filtered* parent (counts stayed right while
-the rows went wrong, so only an assertion on the rows catches it), grouping
-by tag — including two EXPLAIN assertions, since the wrong join order there
-returns the right numbers and takes minutes — tag counts scoped to a view,
-search-all's per-term breakdown, session import's tag-remap-by-name, CSV
-formula-injection prefixing not touching the stored value, and so on. `test_api_routes.py` covers the HTTP
-layer itself (the CSRF header gate, request parsing, 400-vs-500) rather
-than re-testing logic the `Store`-level tests already cover directly.
-`test_maintenance.py` covers the things that only exist because everything
-else only ever grows: the auto-created column indexes (listing/dropping),
-`compact()`, and `sweep_orphan_views()` — whose load-bearing test is that a
-*live* Store's views database survives a sweep, since that's the assumption
-that makes deleting another process's file safe at all. `test_ingest_jobs.py` covers the
-background ingest jobs (lifecycle, byte-progress, the queued-cancel path,
-cancel-drops-the-partial-source — driven through `ingest_csv`'s own
-`cancel` hook so the cancellation point is deterministic, not a race —
-multi-table sqlite jobs, spool deletion, close-with-running-job).
-`test_cancel_op.py` covers cancellable builds, using a
-catastrophic-backtracking regex filter as a reliably-slow build to
-interrupt; its key regression assert is that the *previous* view still
-pages after a cancelled rebuild. `test_concurrency.py` pins the
-reader-pool split (invariant #4) structurally: each test holds the writer
-lock for the *entire duration* of a read and asserts the read completes —
-a deterministic deadlock against a single-connection implementation, not a
-race — plus the dropped-view → KeyError mapping, pool recycling/drain on
-close, and read-your-committed-writes across the connection split.
-`test_plugins.py` covers the plugin
-system end to end — loader isolation (a broken plugin never takes the
-rest down; a disabled one is discovered but never imported, proved with a
-plugin whose module body raises), `ingest_rows`' conventions, the HTTP
-routes (toggle persistence, install path-traversal rejection, the
-409-then-overwrite flow), tabs/assets/API dispatch (register_tab entry
-validation, asset containment, the gen cache-buster changing per reload,
-405/404/400 splits, disabled = no assets + no routes + no tabs), the
-mft_usn example parsed against synthetic NTFS fixtures built byte-by-byte
-in the test file (both fixup states; no real evidence files in the repo),
-lateral_movement's edge aggregation, and claude_assistant against a fake
-`anthropic` module injected into sys.modules (asserts the request shape —
-model, fallbacks, the schema cache breakpoint — with no network). `test_sql_tabs.py` covers the SQL
-pane's sub-tabs, including that they actually survive closing and
-reopening the case file (the whole reason they live there rather than in
-`localStorage`) and that `reorder` keeps tabs it wasn't given.
-`test_timeparse.py` covers every timestamp operation as pure functions —
-epoch auto-ranging boundaries, hex-vs-decimal FILETIME, the syslog year
-rollover (including across a batch boundary and Feb 29 in a non-leap
-year), offset-to-UTC conversion — plus the guarantee that every parser's
-output is accepted by `_TS_ISO_RE`/`TS_NORMALIZE`/`DAY_BUCKET`, which is
-what makes derived columns need no new regexes on either side.
-`test_tag_undo.py` covers the undo stack, and its load-bearing test is the
-one that tags an overlapping selection and asserts the *pre-existing*
-assignments survive the undo — a naive re-send-inverted implementation
-passes every other test in that file and fails only that one.
-`test_structparse.py` covers the JSON/XML path syntaxes and extraction as
-pure functions (same shape as `test_timeparse.py`), including the round-trip
-property that makes paths safe to write into a column definition, the
-EVTX `[@Name='…']` predicate form, and the DOCTYPE refusal.
-`test_derived_extract.py` covers the store-level integration: that an
-extracted column is an ordinary derived column everywhere, that discovery
-only ever offers paths that actually extract, and that a batch is
-all-or-nothing (a name collision in the fifth spec must not leave four
-columns behind).
-`test_derived.py` covers the column lifecycle and, more importantly, the
-integration choices that are easy to reverse by accident: the
-virtual-root EXPLAIN plan (invariant #2), that derived values are *not*
-searchable, that merge eligibility is unaffected, and both cancel
-semantics (driven through the backfill's own cancel hook, so the
-cancellation point is deterministic rather than a race — same technique
-as `test_ingest_jobs.py`).
+What each test file covers, and why the load-bearing tests in them are
+the ones they are, is in [docs/notes/testing.md](docs/notes/testing.md),
+with the traps that bite when working on the suite itself.
 
 A UI test earns its place by pinning something that *actually broke*, in the
 terms it broke in — assert the symptom (a filter cell wider than its header,
@@ -858,13 +779,6 @@ a header label whose `scrollWidth` exceeds its `clientWidth`), not the fix,
 so it fails again if the fix is refactored away or re-broken from a different
 direction. Keep them deterministic: a flaky required check is worse than no
 check, because it teaches everyone to re-run until green.
-
-A note on the lock-scope test in `test_search.py`: it asserts *structurally*
-(a `_CountingLock` counting how many times the lock goes fully unheld)
-rather than by racing a competing thread, because a racing thread also
-passes against the broken implementation — it can grab the lock in the
-window before the sweep ever takes it. If you write another concurrency
-test here, check it actually fails against the shape it's meant to catch.
 
 For manual/perf testing outside the suite, generate fixtures rather than
 committing large CSVs:

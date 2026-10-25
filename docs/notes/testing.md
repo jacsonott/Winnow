@@ -1,0 +1,145 @@
+# The test suite: what it covers, and working on it
+
+What each file under `tests/` covers and why its load-bearing tests are
+the ones they are, then the traps that bite when working on the suite
+itself, most of them learned working a batch of PRs at once. How the
+suite is laid out, run and sharded is in CLAUDE.md's Testing section.
+
+Part of the working notes split out of [CLAUDE.md](../../CLAUDE.md) —
+see [docs/notes/README.md](README.md) for the whole set.
+
+---
+
+## What the suite covers
+
+Coverage is organized one file per concern (`test_ingest.py`,
+`test_views.py`, `test_search.py`, `test_grouping.py`, ...) and is weighted
+toward CLAUDE.md's invariants and the traps in [these notes](README.md) — numeric
+NULL-not-zero, ragged-row padding, the contains-mode substring fix, nested
+grouping's `path` threading through the virtual small-group fast path,
+that same fast path refusing a *filtered* parent (counts stayed right while
+the rows went wrong, so only an assertion on the rows catches it), grouping
+by tag — including two EXPLAIN assertions, since the wrong join order there
+returns the right numbers and takes minutes — tag counts scoped to a view,
+search-all's per-term breakdown, session import's tag-remap-by-name, CSV
+formula-injection prefixing not touching the stored value, and so on. `test_api_routes.py` covers the HTTP
+layer itself (the CSRF header gate, request parsing, 400-vs-500) rather
+than re-testing logic the `Store`-level tests already cover directly.
+`test_maintenance.py` covers the things that only exist because everything
+else only ever grows: the auto-created column indexes (listing/dropping),
+`compact()`, and `sweep_orphan_views()` — whose load-bearing test is that a
+*live* Store's views database survives a sweep, since that's the assumption
+that makes deleting another process's file safe at all. `test_ingest_jobs.py` covers the
+background ingest jobs (lifecycle, byte-progress, the queued-cancel path,
+cancel-drops-the-partial-source — driven through `ingest_csv`'s own
+`cancel` hook so the cancellation point is deterministic, not a race —
+multi-table sqlite jobs, spool deletion, close-with-running-job).
+`test_cancel_op.py` covers cancellable builds, using a
+catastrophic-backtracking regex filter as a reliably-slow build to
+interrupt; its key regression assert is that the *previous* view still
+pages after a cancelled rebuild. `test_concurrency.py` pins the
+reader-pool split (invariant #4) structurally: each test holds the writer
+lock for the *entire duration* of a read and asserts the read completes —
+a deterministic deadlock against a single-connection implementation, not a
+race — plus the dropped-view → KeyError mapping, pool recycling/drain on
+close, and read-your-committed-writes across the connection split.
+`test_plugins.py` covers the plugin
+system end to end — loader isolation (a broken plugin never takes the
+rest down; a disabled one is discovered but never imported, proved with a
+plugin whose module body raises), `ingest_rows`' conventions, the HTTP
+routes (toggle persistence, install path-traversal rejection, the
+409-then-overwrite flow), tabs/assets/API dispatch (register_tab entry
+validation, asset containment, the gen cache-buster changing per reload,
+405/404/400 splits, disabled = no assets + no routes + no tabs), the
+mft_usn example parsed against synthetic NTFS fixtures built byte-by-byte
+in the test file (both fixup states; no real evidence files in the repo),
+lateral_movement's edge aggregation, and claude_assistant against a fake
+`anthropic` module injected into sys.modules (asserts the request shape —
+model, fallbacks, the schema cache breakpoint — with no network). `test_sql_tabs.py` covers the SQL
+pane's sub-tabs, including that they actually survive closing and
+reopening the case file (the whole reason they live there rather than in
+`localStorage`) and that `reorder` keeps tabs it wasn't given.
+`test_timeparse.py` covers every timestamp operation as pure functions —
+epoch auto-ranging boundaries, hex-vs-decimal FILETIME, the syslog year
+rollover (including across a batch boundary and Feb 29 in a non-leap
+year), offset-to-UTC conversion — plus the guarantee that every parser's
+output is accepted by `_TS_ISO_RE`/`TS_NORMALIZE`/`DAY_BUCKET`, which is
+what makes derived columns need no new regexes on either side.
+`test_tag_undo.py` covers the undo stack, and its load-bearing test is the
+one that tags an overlapping selection and asserts the *pre-existing*
+assignments survive the undo — a naive re-send-inverted implementation
+passes every other test in that file and fails only that one.
+`test_structparse.py` covers the JSON/XML path syntaxes and extraction as
+pure functions (same shape as `test_timeparse.py`), including the round-trip
+property that makes paths safe to write into a column definition, the
+EVTX `[@Name='…']` predicate form, and the DOCTYPE refusal.
+`test_derived_extract.py` covers the store-level integration: that an
+extracted column is an ordinary derived column everywhere, that discovery
+only ever offers paths that actually extract, and that a batch is
+all-or-nothing (a name collision in the fifth spec must not leave four
+columns behind).
+`test_derived.py` covers the column lifecycle and, more importantly, the
+integration choices that are easy to reverse by accident: the
+virtual-root EXPLAIN plan (invariant #2), that derived values are *not*
+searchable, that merge eligibility is unaffected, and both cancel
+semantics (driven through the backfill's own cancel hook, so the
+cancellation point is deterministic rather than a race — same technique
+as `test_ingest_jobs.py`).
+
+## Things that bite
+
+- A note on the lock-scope test in `test_search.py`: it asserts *structurally*
+  (a `_CountingLock` counting how many times the lock goes fully unheld)
+  rather than by racing a competing thread, because a racing thread also
+  passes against the broken implementation — it can grab the lock in the
+  window before the sweep ever takes it. If you write another concurrency
+  test here, check it actually fails against the shape it's meant to catch.
+
+- **`pytest … | tail` reports tail's exit status, not pytest's.** A
+  pipeline's status is its last command's, so `pytest -q | tail -5 && git
+  commit …` commits on a red suite, and a script that gates on it passes
+  whatever pytest said. Write the output to a file and read the end of it
+  after checking pytest's own status, or run under `set -o pipefail`.
+
+- **With several worktrees open, `cd` explicitly in every command.** A
+  shell that keeps its directory between commands, as an agent's does,
+  runs the next `pytest` or `git commit` wherever the last command left
+  it, which is easily another branch's worktree. The run is green for the
+  wrong code, or the commit lands on the wrong branch. Name the directory
+  in each command (`cd /path/to/wt && …`, `git -C /path/to/wt …`) rather
+  than relying on where the shell happens to be.
+
+- **A change two branches both need merges clean if the hunk is
+  byte-identical.** When two PRs in a batch each need the same small
+  addition (a shared CSS rule, a conftest fixture), make it the same
+  bytes in both: git takes an identical change on both sides without a
+  conflict, so whichever PR merges second still merges clean. A
+  difference anywhere in the hunk, a comment or a blank line, turns it
+  back into a conflict.
+
+- **Every module in a browser shard shares one server and one case.**
+  What a module leaves in the case (a table, a tag, a saved session, a
+  plugin switched on) is the next module's starting state, and the
+  failure shows up in whichever unrelated module the shard deals next,
+  only in a full run (#227). `case_left_as_found` (tests/ui/conftest.py)
+  fails the module that leaves the case changed, at its own teardown.
+  Clean up in a `finally`, by id or name rather than by repeating the
+  gesture under test, and let the `api` fixture raise on a non-2xx
+  answer rather than catching it: a cleanup call that 404'd and was
+  swallowed is how that issue went unnoticed.
+
+- **A click that lands while its target is being re-rendered fires
+  nothing.** Not a refusal: the click hits a node that is being replaced,
+  so no handler runs and no request goes out, and the test times out
+  waiting for an answer to a question it never asked. It shows up on
+  loaded CI runners. Where a gesture re-renders the control the next
+  gesture clicks, retry the click until the request it should send is
+  seen, inside `page.expect_response`, and assert on that response.
+  `_click_add` in tests/ui/test_plugin_dashboard_offered.py is the
+  pattern.
+
+- **`wait_for_function` does not await its predicate.** One that returns
+  `fetch(…).then(…)` hands back a Promise, which is truthy, so the wait
+  returns at once and the test races what it meant to wait for.
+  tests/test_ui_test_hygiene.py fails on one; poll from Python with the
+  `until` fixture instead, since `page.evaluate` does await.
