@@ -134,7 +134,7 @@ python3 -m bench --size quick                   # about two minutes
 
 It reports a regression only when a change clears several thresholds at
 once, so two runs of identical code report nothing.
-[`bench/README.md`](../../bench/README.md) has the details.
+`bench/README.md`, on develop, has the details.
 
 ## Documentation travels with the change
 
