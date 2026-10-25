@@ -31,6 +31,24 @@ def test_filter_ops(ingested, op, value, expect_users):
     assert users == expect_users
 
 
+
+@pytest.mark.parametrize("items,want", [
+    (["a.exe"], ('"Proc" IN (?)', ["a.exe"])),
+    (["a.exe", "b.exe"], ('"Proc" IN (?,?)', ["a.exe", "b.exe"])),
+    (["a.exe", "b.exe", "c.exe"], ('"Proc" IN (SELECT value FROM json_each(?))', ['["a.exe", "b.exe", "c.exe"]'])),
+])
+def test_a_one_or_two_value_in_list_binds_plain_parameters(monkeypatch, items, want):
+    """SQLite compares a one- or two-value IN list directly, but builds a
+    lookup table for any subquery, so the json_each form made the short
+    lists the value picker writes 30% slower to filter by on a full scan
+    (bench views/filter.in_list). Those keep their `?`s; a longer list is
+    still one JSON parameter, which is what keeps a pasted IOC list on a
+    merge under SQLite's variable limit."""
+    from winnow import store as store_module
+
+    monkeypatch.setattr(store_module, "_HAS_JSON_EACH", True)
+    assert store_module.Store._compile_condition("Proc", "in", items, {"Proc": "text"}) == want
+
 @pytest.mark.parametrize("json_each", [True, False])
 @pytest.mark.parametrize("where", ["filters", "filter_tree"])
 def test_an_in_list_holding_the_empty_string_matches_empty_cells(store, write_csv, monkeypatch, json_each, where):
@@ -54,6 +72,9 @@ def test_an_in_list_holding_the_empty_string_matches_empty_cells(store, write_cs
     assert count(["a.exe", ""]) == 3
     assert count([""]) == 2
     assert count(["a.exe", "b.exe"]) == 2
+    # Three values is past the short-list exception, so json_each (when the
+    # SQLite has it) carries the list here, not the `?` form.
+    assert count(["a.exe", "b.exe", ""]) == 4
     # A newline-separated string is not a picked list: a blank line in it is
     # a stray newline, and still drops out rather than adding the empties.
     assert count("a.exe\n\nb.exe\n") == 2
