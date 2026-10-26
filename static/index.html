@@ -235,14 +235,20 @@ try {
         <div id="timelineTagFilter" class="timeline-tagfilter"></div>
         <div class="spacer"></div>
         <span class="stats" id="timelineStats"></span>
+        <!-- The timeframe's chip (renderTimelineTimeRange): what the Timeline is narrowed to, and ✕. -->
+        <span class="tl-timeframe" id="timelineTimeRange"></span>
         <span class="tl-context" id="timelineContext"></span>
-        <button class="btn ghost" id="btnTimelineFold" aria-pressed="false"
-                title="Put three or more rows in a row from one table, with one summary and one first tag, on one line">Fold repeats</button>
-        <button class="btn ghost" id="btnTimelineOverview" aria-pressed="true"
-                title="Show or hide the overview: the Timeline's lines over time">Overview</button>
-        <button class="btn ghost" id="btnTimelinePane" aria-pressed="true"
-                title="Show or hide the details pane: the selected line in full, beside the list">Details</button>
-        <button class="btn ghost" id="btnTimelineConfig">Configure tables…</button>
+        <!-- One group, so on a narrow window the switches wrap together, to the right. -->
+        <div class="timeline-head-acts">
+          <button class="btn ghost" id="btnTimelineTimeRange" aria-pressed="false">⏱ Timeframe</button>
+          <button class="btn ghost" id="btnTimelineFold" aria-pressed="false"
+                  title="Put three or more rows in a row from one table, with one summary and one first tag, on one line">Fold repeats</button>
+          <button class="btn ghost" id="btnTimelineOverview" aria-pressed="true"
+                  title="Show or hide the overview: the Timeline's lines over time">Overview</button>
+          <button class="btn ghost" id="btnTimelinePane" aria-pressed="true"
+                  title="Show or hide the details pane: the selected line in full, beside the list">Details</button>
+          <button class="btn ghost" id="btnTimelineConfig">Configure tables…</button>
+        </div>
       </div>
       <section class="tl-overview" id="timelineOverview" hidden></section>
       <div class="tl-split">

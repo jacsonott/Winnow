@@ -2272,12 +2272,49 @@ see [docs/notes/README.md](README.md) for the whole set.
     the histogram's rather than sharing them.
   - **What it narrows is kept as what is OFF or what was dragged**:
     `S.timeline.sourcesOff` (the tag chips' rule, so a table tagged later
-    is on) and `S.timeline.range`, a half-open `[start, end)` that
-    `build_timeline` compares with each line's normalised timestamp. The
+    is on) and the Timeline's timeframe (next entry): a drag over
+    `[t0, t1)` writes `t0 → t1 - 1s`, inclusive, so the chip and the
+    dialog read the same stretch the drag picked. The
     drag is snapped with the histogram's rule (a unit picked from the
     drag's width, never coarser than a bar), not to the bars: snapping to
     bars made a stretch inside one bar impossible to pick. Both reset on
     a case switch (home.js), as `tagsOff` does.
+
+- **The Timeline's timeframe filter** (`S.timeline.timeRange`,
+  `{enabled, start, end}`; the "timeframe" section of timeline.js) is the
+  table pages' ⏱ Timeframe over the Timeline, and copies its rules
+  rather than its state:
+  - **It is not `S.timeRange`.** The tables' range is set to read one
+    table (and can follow the analyst between them); applied to the
+    Timeline it would take findings off it unasked. The dialog shows
+    the tables' range under "From the tables' timeframe" with Fill range
+    to copy it in, as the tables' dialog offers "From tagged rows".
+  - **Same keys, same dialog shape.** `timelineKey` handles
+    `openTimeRange`/`toggleTimeRange` while the Timeline is the page
+    showing, before its `!total` return — a timeframe that matches
+    nothing leaves an empty list, and the key that turns it off has to
+    work there. `markModalAction('openTimeRange')` lets R close the
+    dialog it opened. Apply always turns it on; `r` keeps the range;
+    Clear and the chip's ✕ forget it; the dialog says "Off right now"
+    when it opens on a range that is off — all as the tables' does.
+  - **Stored as ISO, validated before the build.** The boxes are read
+    with `parseTimestamp` (tsformat.js, the client twin of
+    `_ts_normalize`), so "7/9/2026 9:30 AM" is kept, shown in the chip
+    and reopened as `2026-07-09 09:30:00`, and text it cannot read is
+    refused with a toast in the dialog instead of a 400 after it closed.
+  - **The chip is the header's** (`#timelineTimeRange`), not the
+    overview strip's. It was the strip's while only the drag set a
+    range; with the strip hidden the Timeline was narrowed and nothing
+    said so. `renderTimelineTimeRange` paints it and the button, and is
+    called from every place that changes the range, from
+    `buildTimeline`, at boot, on a case switch and on a keymap change
+    (the button's title names the keys).
+  - **The header wraps.** With both chips on, a 1280px window had no
+    room for the switches: they ran off the right edge and the tag
+    chips were squeezed into a column. `.timeline-head` is
+    `flex-wrap: wrap`, and the switches are one group
+    (`.timeline-head-acts`, `margin-left: auto`) so they wrap together.
+  `tests/ui/test_timeline_timeframe.py`.
   - **The bars come from the server, the marks from the client.**
     `GET /api/timeline_overview` after each build (and on Tags/Tables);
     the band, the thumb and the selected line's mark are worked out from
@@ -2329,11 +2366,17 @@ see [docs/notes/README.md](README.md) for the whole set.
 - **The Timeline reads as a story** (`timelineRowNode`'s `story`, which
   only `renderTimelineRows` passes; Configure tables…' preview keeps the
   plain timestamp, since its lines are samples rather than neighbours):
-  - **The Timestamp cell holds the time of day**, plus the day on the
-    first line of each, so **a line is found by its `data-ts`**, not by
-    the cell's text. The UI tests' `_line` helpers match
-    `.timeline-row[data-ts^='…']`; matching the cell's text stopped
-    working when it lost the date.
+  - **The Timestamp cell holds the whole ISO timestamp**, on every
+    line, and so do the pane's large "when" and both chips. The story
+    redesign had it as the time of day with the day said once at the
+    first line of each ("Fri 13 Mar") and in the column heading;
+    ISO was asked for back — a line read, copied or compared on its
+    own has to carry its date, and every other place in Winnow writes
+    times as `YYYY-MM-DD HH:MM:SS`. The day is still marked by the
+    `day-start` rule. **A line is found by its `data-ts`**, not by the
+    cell's text; the UI tests' `_line` helpers match
+    `.timeline-row[data-ts^='…']`. `timelineDayLabel` survives for the
+    overview's axis, which has room for a day only at its first tick.
   - **The rules are borders inside the row** (`day-start`, `gap`), and
     rows are border-box, so a rule costs no height: the virtual list
     places every row at `pos * ROW_H`, and a row one pixel taller would

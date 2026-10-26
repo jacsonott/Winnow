@@ -30,8 +30,7 @@ import { regroupIfGroupedByTag, writeClipboardText } from './grouping.js';
 import { sourceLabel } from './sources.js';
 import { S } from './state.js';
 import { clearRowCaches, refreshUndoState } from './tags.js';
-import { buildTimeline, jumpToTimelineRow, renderTimelineRows, timelineDayLabel,
-  timelineRowAt, typeParts } from './timeline.js';
+import { buildTimeline, jumpToTimelineRow, renderTimelineRows, timelineRowAt, typeParts } from './timeline.js';
 import { timelineEpoch, timelineIso } from './timelineoverview.js';
 
 // How far either side of a line "What else happened then" reaches, minutes.
@@ -174,9 +173,10 @@ function drawPane(err = null) {
   }
   const sel = S.timeline.sel;
   const ts = (line && line.ts) || (sel && sel.ts) || '';
+  // The whole timestamp, as the line has it (timelineRowNode).
   const when = el('div', 'tl-pane-when');
-  when.append(el('b', null, ts ? ts.slice(11) : '—'),
-    el('span', null, ts ? `${timelineDayLabel(ts)} ${ts.slice(0, 4)}` : 'No timestamp'));
+  when.append(el('b', null, ts || '—'));
+  if (!ts) when.append(el('span', null, 'No timestamp'));
   body.append(when);
   if (line && line.lead) body.append(el('div', 'tl-pane-lead', line.lead));
   if (line && line.detail) body.append(el('div', 'tl-pane-detail', line.detail));
@@ -188,7 +188,7 @@ function drawPane(err = null) {
   const c = S.timeline.context;
   if (ctx && c) {
     body.append(el('p', 'tl-pane-hint',
-      `On the Timeline because it is within ${reach(c.minutes)} of ${c.around.slice(11, 19)}, `
+      `On the Timeline because it is within ${reach(c.minutes)} of ${c.around}, `
       + 'not because of a tag that is switched on. Tag it to keep it here.'));
   }
   if (line && line.n > 1) {
@@ -395,7 +395,7 @@ export function renderTimelineContextChip() {
   const v = S.timeline.view;
   const n = (v && v.context_rows) || 0;
   const chip = el('span', 'tl-range-chip tl-context-chip');
-  chip.append(el('span', null, `± ${reach(c.minutes)} around ${c.around.slice(11, 19)}`),
+  chip.append(el('span', null, `± ${reach(c.minutes)} around ${c.around}`),
     el('span', 'tl-context-n', `· ${n.toLocaleString()} untagged`));
   chip.title = `Every untagged row from ${c.start} up to ${c.end}, from every table, is on the Timeline`;
   const x = el('button', 'tl-range-x', '✕');

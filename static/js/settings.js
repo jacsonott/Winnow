@@ -22,6 +22,7 @@ import { S, gridRowCount, dashboardCreatorMode } from './state.js';
 import { keepingFocus } from './tables.js';
 import { buildDefaultTagsEditor } from './tags.js';
 import { openSavedFiltersModal, setTimeframeAcrossTables, timeframeAcrossTables, updateFiltersButton, updateTimeRangeButton } from './timeframe.js';
+import { renderTimelineTimeRange } from './timeline.js';
 import { TS_FORMATS, formatTimestamp } from './tsformat.js';
 import { markModalAction, confirmDialog, dropdownMenu, modal, promptDialog, sectionPanes } from './ui.js';
 
@@ -1188,7 +1189,7 @@ export function openSettings(where) {
     const list = el('div', 'settings-keys');
 
     // Every change to a binding goes through here: the toolbar copy that
-    // spells a key (⏱ Timeframe's toggle/open keys, the Histogram
+    // spells a key (⏱ Timeframe's toggle/open keys, the Timeline's too, the Histogram
     // button's show/hide key, the search button's tooltip and the search
     // box's placeholder) is built from S.keymap when its control syncs,
     // so a rebinding has to rebuild it too or it names the old key until
@@ -1198,6 +1199,7 @@ export function openSettings(where) {
     function keymapChanged() {
       saveKeymap();
       updateTimeRangeButton();
+      renderTimelineTimeRange();
       syncHistogramPanel();
       syncSearchKeyCopy();
       renderList();

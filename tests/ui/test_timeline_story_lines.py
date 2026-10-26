@@ -1,6 +1,6 @@
-"""The Timeline read as a story: the day said once, at the first line of
-each day; a Gap column with the time since the line above, and a rule
-over a long one; a row's note in its line; and Fold repeats, which puts a
+"""The Timeline read as a story: every line's whole ISO timestamp, with a
+rule over the first line of each day; a Gap column with the time since
+the line above, and a rule over a long one; a row's note in its line; and Fold repeats, which puts a
 run of the same thing on one line that says how many, and opens it again.
 
 The server half (which rows make a run, what never folds, the gap and the
@@ -63,7 +63,7 @@ def story(page, tmp_path, api):
             localStorage.removeItem(key);
             __winnow.renderTimelineFoldButton();
             __winnow.S.sourceId = null; __winnow.S.view = null;
-            Object.assign(__winnow.S.timeline, { sel: null, range: null, context: null, unfold: [] });
+            Object.assign(__winnow.S.timeline, { sel: null, timeRange: { enabled: false, start: '', end: '' }, context: null, unfold: [] });
             await __winnow.loadSources();
           }""", FOLD_KEY)
 
@@ -84,15 +84,14 @@ def _line(page, ts):
     return page.locator(f"#timelineRows .timeline-row[data-ts^='{ts}']")
 
 
-def test_the_day_is_said_once_and_each_line_says_the_gap_above_it(page, story):
+def test_each_line_says_its_whole_timestamp_and_the_gap_above_it(page, story):
     _open_timeline(page)
-    # The day at the first line of each day only, not on every line.
-    assert page.locator("#timelineRows .tl-day").all_inner_texts() == ["Thu 11 Jun", "Fri 12 Jun"]
-    assert _line(page, ROWS[5][0]).locator(".tl-day").inner_text() == "Fri 12 Jun"
-    # Each line's time of day, and the full timestamp kept as the title.
-    ts = _line(page, ROWS[1][0]).locator(".tl-col-ts")
-    assert ts.inner_text().strip() == "23:10:20"
-    assert ts.get_attribute("title") == ROWS[1][0]
+    # Every line its whole ISO timestamp — the date too, not the day said
+    # once at the first line of each day and then only the time of day.
+    stamps = page.locator("#timelineRows .timeline-row .tl-col-ts").all_inner_texts()
+    assert [s.strip() for s in stamps] == [ts for ts, _ in ROWS]
+    assert page.locator("#timelineColTs").text_content() == "Timestamp"
+    assert page.locator("#timelineRows .tl-day").count() == 0
     gaps = page.locator("#timelineRows .timeline-row .tl-col-gap").all_inner_texts()
     assert gaps == ["", "+20s", "+45s", "+55s", "+2m 17s", "+2h 30m", "+1h 15m"]
     # Half an hour or more is said louder, with a rule over the line; a

@@ -5486,7 +5486,7 @@ def _resolve_timeline_configs() -> dict[int, dict]:
 class TimelineBuild(BaseModel):
     tag_ids: list[int] = []
     op_token: str | None = None
-    ts_range: list[str] | None = None        # [start, end), the overview strip's drag
+    time_range: dict | None = None           # {start, end}, the timeframe filter (both inclusive, either optional)
     exclude_sources: list[int] = []          # tables switched off on the strip
     context: list[str] | None = None         # [start, end) of the rows around a finding
     fold: bool = False                       # a run of repeats on one line
@@ -5497,7 +5497,7 @@ class TimelineBuild(BaseModel):
 def api_timeline_build(body: TimelineBuild):
     try:
         return store().build_timeline(_resolve_timeline_configs(), body.tag_ids or None,
-                                      op_token=body.op_token, ts_range=body.ts_range,
+                                      op_token=body.op_token, time_range=body.time_range,
                                       exclude_sources=body.exclude_sources or None,
                                       context=body.context, fold=body.fold, unfold=body.unfold)
     except ValueError as e:
