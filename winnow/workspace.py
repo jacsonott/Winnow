@@ -416,6 +416,33 @@ def _merge_seed_record(data: dict, keys: list[list]) -> list:
     return out
 
 
+def _retire_filters(data: dict, retired: list) -> list | None:
+    """Drops each retired default (defaults.filters()["retired"]) this
+    workspace still holds exactly as it shipped — same name, same column
+    set, same payload — and returns the updated `retired` record, or None
+    when every retirement has been handled here before.
+
+    Only an untouched copy goes: one the analyst renamed or edited is
+    their filter now, the same rule TagTemplate's legacy migration
+    follows. And each retirement runs once per workspace, recorded by
+    name + column set like `seeded`, so a copy imported back afterwards
+    from an older export is the analyst's choice and stays."""
+    record = [k for k in data.get("retired") or [] if isinstance(k, list)]
+    handled = {_freeze(k) for k in record}
+    new = [(name, list(cols), payload) for name, cols, payload in retired
+           if _freeze([name, list(cols)]) not in handled]
+    if not new:
+        return None
+    shipped = {(name, tuple(cols)): payload for name, cols, payload in new}
+
+    def untouched(f: dict) -> bool:
+        key = (f.get("name"), tuple(f.get("col_names") or ()))
+        return key in shipped and f.get("payload") == shipped[key]
+
+    data["filters"] = [f for f in data["filters"] if not untouched(f)]
+    return record + [[name, cols] for name, cols, _ in new]
+
+
 class SavedFilters:
     """Cyclable, named filters — [ and ] in the grid. Every filter carries
     the column-name set it was built for (col_names), which is also what
@@ -430,13 +457,15 @@ class SavedFilters:
         return _read(self.FILE, {"filters": []})["filters"]
 
     def _save(self, items: list[dict], seeded_version: int | None = None,
-              seeded: list | None = None) -> None:
+              seeded: list | None = None, retired: list | None = None) -> None:
         data = _read(self.FILE, {"filters": []})
         data["filters"] = items
         if seeded_version is not None:
             data["seeded_version"] = seeded_version
         if seeded is not None:
             data["seeded"] = seeded
+        if retired is not None:
+            data["retired"] = retired
         _write(self.FILE, data)
 
     def ensure_seeded(self) -> None:
@@ -454,15 +483,21 @@ class SavedFilters:
         that by what is *present* instead — the old rule — put back every
         default the analyst had deleted, and re-added every one they had
         renamed beside the renamed copy, the first time a release bumped
-        the version. See _seed_record for the one-off migration."""
+        the version. See _seed_record for the one-off migration.
+
+        A default the release takes back (`retired`) leaves the workspace
+        here too, while it is still the untouched copy — _retire_filters."""
         from . import defaults
 
         with _LOCK:
             data = _read(self.FILE, {"filters": []})
             shipped = defaults.filters()
+            retired = _retire_filters(data, shipped["retired"])
             keys = [[name, list(cols)] for name, cols, _ in shipped["filters"]]
             done = _seed_record(data, shipped["version"], keys)
             if done is None:
+                if retired is not None:
+                    self._save(data["filters"], retired=retired)
                 return
             items = data["filters"]
             present = {(r["name"], tuple(r["col_names"])) for r in items}
@@ -474,7 +509,7 @@ class SavedFilters:
                               "col_names": list(cols), "payload": payload,
                               "created_at": _now()})
             self._save(items, seeded_version=max(shipped["version"], data.get("seeded_version", 0)),
-                       seeded=_merge_seed_record(data, keys))
+                       seeded=_merge_seed_record(data, keys), retired=retired)
 
     @staticmethod
     def _normalize_payload(rec: dict) -> bool:

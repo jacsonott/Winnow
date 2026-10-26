@@ -85,7 +85,7 @@ contains, `!svchost` doesn't, `=4624` exact, `^C:\Users` starts with,
 `>1000` greater than, `/re/` regex, `a|b|c` any of, `""` empty, `*` not
 empty. The `▾` opens that column's distinct values with counts,
 Excel-style. A search box above the grid searches whole rows at once,
-and the timeframe filter and histogram narrow by time. Twenty-eight
+and the timeframe filter and histogram narrow by time. Twenty-seven
 ready-made triage filters ship for EvtxECmd, RECmd and MFTECmd output, so
 when an EvtxECmd export opens, Logons, RDP, Defender tampering, service
 installs and scheduled tasks are one click away in **Filters ▾**.

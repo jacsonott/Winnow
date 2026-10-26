@@ -145,11 +145,11 @@ Applying a saved filter replaces the builder's conditions, the search and the gr
 
 ### Shipped triage filters
 
-Winnow ships 28 ready-made triage filters for EvtxECmd, RECmd and MFTECmd output. They are added to your saved filters the first time Winnow runs, and they are offered like any other saved filter: nothing is applied until you pick one. If you delete or rename one, it stays that way.
+Winnow ships 27 ready-made triage filters for EvtxECmd, RECmd and MFTECmd output. They are added to your saved filters the first time Winnow runs, and they are offered like any other saved filter: nothing is applied until you pick one. If you delete or rename one, it stays that way. When an update stops shipping one, it leaves your list too, unless you edited or renamed it.
 
 | Column set | Filters |
 | --- | --- |
-| Event logs (EvtxECmd) | 20 filters named `EVTX — …`: log clearing and Defender off; Defender detections and tamper; Defender config changes; logons; incoming and outgoing RDP; Sysmon present; network share access (5140/5145); service installs; WMI; process create/exit (4688/4689); crashed applications; user and group changes; PowerShell; firewall rule changes; scheduled tasks; BITS transfers; Group Policy (client and DC); system shutdowns |
+| Event logs (EvtxECmd) | 19 filters named `EVTX — …`: log clearing and Defender off; Defender detections and tamper; logons; incoming and outgoing RDP; Sysmon present; network share access (5140/5145); service installs; WMI; process create/exit (4688/4689); crashed applications; user and group changes; PowerShell; firewall rule changes; scheduled tasks; BITS transfers; Group Policy (client and DC); system shutdowns |
 | Registry (RECmd batch) | 5 filters named `Registry — …`: basic system info; audit and PowerShell policy; TypedPaths / RecentDocs; UserAssist / BAM; Run keys (autoruns) |
 | NTFS $MFT (MFTECmd) | 3 filters named `MFT — …`: executables in odd places; Startup folder and run-key paths; a suspicious tool sweep that uses Advanced search |
 

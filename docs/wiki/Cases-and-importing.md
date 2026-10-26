@@ -692,7 +692,7 @@ Recognition gets you:
 - **A name** in place of a raw column list, in the **Filters** menu and in
   **Merge tables…**.
 - **Shipped triage filters** that light up when a matching table opens:
-  twenty for EvtxECmd (logons, RDP, Defender tampering, services, scheduled
+  nineteen for EvtxECmd (logons, RDP, Defender tampering, services, scheduled
   tasks…), five for RECmd batch output, three for MFTECmd `$MFT`. See
   [Filtering and searching](Filtering-and-searching.md).
 - **Timeline summaries**: a tagged row reads as one line ("Special privileges
