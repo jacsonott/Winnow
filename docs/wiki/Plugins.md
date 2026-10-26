@@ -273,8 +273,18 @@ replaces ("Replaces Timestamp").
 | **Total up** | Numeric columns to total per group |
 | **Count unique** | Columns whose distinct values each group counts, blanks left out, as a `Unique count of <column>` column |
 | **List values** | Columns whose distinct values each group lists in one cell, as a `Values of <column>` column |
-| Filters | Which source rows take part |
+| Filters | Which source rows take part, and which tags they carry (the tag chips) |
 | Description | A template for each row's description; left empty, it reads `{which} of {count}` |
+
+The top of **Filters** carries the case's tags as chips, and they work as
+the tag ribbon above the grid does, and as the Pivot tab's do: click a tag
+to group only the rows carrying it, click a second one to add its rows,
+and right-click a tag for **Filter to *tag***, **Exclude *tag*** and
+**Clear the tag filter**. **Any tag** takes every tagged row and **No
+tags** every row nobody has tagged yet. The number on a chip is how many
+rows of the sheet's table carry that tag. When you come back to the
+First/Last tab from the grid, a sheet filtered on tags runs again, so rows
+you tagged in the meantime are grouped.
 
 The description template accepts `{which}` (`First`, `Last` or `Only`),
 `{which:number}` (the row's position in its group: `1` for the first, the

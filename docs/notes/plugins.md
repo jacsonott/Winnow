@@ -423,6 +423,20 @@ see [docs/notes/README.md](README.md) for the whole set.
   because its ties were in no particular order. It and the timings are in
   the project's benchmarks folder (2026-10-22-firstlast).
 
+- **First/Last's tag filter is the pivot's chips, and still reads the
+  select it replaced.** The tab sends the grid ribbon's spelling (tag
+  ids, `__any__`, `__none__`, `!<id>`), and `_tag_where` compiles it the
+  way pivot's `_tag_clauses` does: exclusions ANDed, the rest ORed, and a
+  tag id the case doesn't have refused by name rather than grouped as no
+  rows (so the tab drops a deleted tag on show, as pivot does). Before the
+  chips it sent `{mode, ids}`; `_tag_keys` turns that into the chips that
+  mean the same, and `tagKeysOf` does it for a sheet saved then, so
+  neither an old saved sheet nor a script loses its filter. On a merge
+  the match stays the correlated `EXISTS` on `(source_id, rid)` it always
+  was: that is a seek on row_tags' key per row, so it holds up under
+  `NOT` (an exclusion, No tags), where the row-value `IN` the pivot note
+  above warns about does not.
+
 - **lateral_movement's event builder previews through the graph's own
   SQL.** `preview` and `edges` both build on `_prepare`, so "273 rows
   match, 12 links" in the builder is the row set Build turns into edges
