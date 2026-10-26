@@ -14,8 +14,9 @@
    - a band behind the bars, and a thumb above them, where the lines on
      screen are, and a line through the plot at the selected line;
    - a click on a bar takes the list to that bar's first line and selects
-     it; a drag across bars builds the Timeline for that stretch only, said
-     as a chip with ✕ to undo it;
+     it; a drag across bars sets the Timeline's timeframe to that stretch
+     (the ⏱ Timeframe dialog's range, timeline.js), said by the chip in
+     the header with ✕ to undo it;
    - in Tables, a chip per table with its count, which switches that
      table off the Timeline (S.timeline.sourcesOff, the tag chips' rule:
      the tables OFF are remembered, so one tagged later is on).
@@ -33,8 +34,8 @@
 import { $, ROW_H, api, el } from './core.js';
 import { rScroll, vScroll } from './grid.js';
 import { S } from './state.js';
-import { buildTimeline, renderTimelineRows, selectTimelineLine, timelineDayLabel, timelineKinds,
-  timelineRowAt } from './timeline.js';
+import { buildTimeline, renderTimelineRows, selectTimelineLine, setTimelineTimeRange, timelineDayLabel,
+  timelineKinds, timelineRowAt, timelineTimeRangeOn } from './timeline.js';
 
 export const TIMELINE_OVERVIEW_KEY = 'winnow.timelineOverview';
 const HEIGHT = 76;
@@ -91,7 +92,7 @@ export function timelineEpoch(ts) {
   return Number.isNaN(t) ? null : Math.floor(t / 1000);
 }
 
-/* The other way: the shape ts_range is compared in. */
+/* The other way: the shape the timeframe's bounds are written in. */
 export function timelineIso(epoch) {
   const d = new Date(epoch * 1000);
   return `${String(d.getUTCFullYear()).padStart(4, '0')}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())} `
@@ -145,10 +146,11 @@ function fresh() {
 }
 
 /* Whether the strip has anything to say: lines to chart, or a narrowing
-   (a stretch, a table off) to undo even though it left no lines. */
+   (a timeframe, a table off) that left no lines — the Tables view is
+   where a table switched off is put back. */
 function wanted() {
   const v = S.timeline.view;
-  return !!((v && v.row_count) || S.timeline.range || S.timeline.sourcesOff.size);
+  return !!((v && v.row_count) || timelineTimeRangeOn() || S.timeline.sourcesOff.size);
 }
 
 /* ------------------------------------------------------------ chrome */
@@ -171,11 +173,8 @@ function buildChrome(box) {
   const tables = viewBtn('tables', 'Tables',
     'Colour each bar by table, with a chip per table that takes it off the Timeline');
   const legend = el('span', 'tl-ov-legend');
-  const range = el('span', 'tl-ov-range');
   const info = el('span', 'tl-ov-info');
-  // The stretch chip before the legend: it is what the whole strip, and
-  // the list under it, is narrowed to.
-  head.append(title, views, range, legend, info);
+  head.append(title, views, legend, info);
   const canvas = el('canvas', 'tl-ov-canvas');
   canvas.style.height = `${HEIGHT}px`;
   const hint = el('div', 'note-status tl-ov-hint',
@@ -183,11 +182,11 @@ function buildChrome(box) {
   const empty = el('div', 'note-status tl-ov-empty');
   empty.hidden = true;
   box.append(head, canvas, hint, empty);
-  ui = { box, head, legend, range, info, canvas, hint, empty, views: { tags, tables } };
+  ui = { box, head, legend, info, canvas, hint, empty, views: { tags, tables } };
 }
 
 /* Everything but the bars: which split is pressed, the legend or the
-   table chips, the stretch chip, the line under the bars. Then the bars. */
+   table chips, the line under the bars. Then the bars. */
 export function renderTimelineOverview() {
   if (!ui) return;
   const open = timelineOverviewOpen();
@@ -199,11 +198,10 @@ export function renderTimelineOverview() {
   for (const [k, b] of Object.entries(ui.views)) b.setAttribute('aria-pressed', String(by === k));
   ui.box.classList.toggle('is-outdated', !!S.timeline.overview && !fresh());
   renderLegend(by);
-  renderRange();
   const o = fresh() ? S.timeline.overview : null;
   const v = S.timeline.view;
   if (!v || !v.row_count) {
-    showEmpty(S.timeline.range ? 'No tagged rows in this stretch of time.' : 'No tagged rows on the Timeline.');
+    showEmpty(timelineTimeRangeOn() ? 'No tagged rows in this timeframe.' : 'No tagged rows on the Timeline.');
     ui.info.textContent = '';
     return;
   }
@@ -291,27 +289,6 @@ function renderLegend(by) {
     item.title = `${per.ctx.toLocaleString()} untagged line${per.ctx === 1 ? '' : 's'} around a finding`;
     ui.legend.append(item);
   }
-}
-
-/* The stretch of time the Timeline is narrowed to, as a chip whose ✕
-   builds it whole again. */
-function renderRange() {
-  ui.range.replaceChildren();
-  const r = S.timeline.range;
-  if (!r) return;
-  const a = timelineEpoch(r[0]);
-  const b = timelineEpoch(r[1]);
-  const sameDay = Math.floor(a / 86400) === Math.floor((b - 1) / 86400);
-  const chip = el('span', 'tl-range-chip');
-  chip.append(el('span', null, `${dayOf(a)} ${clock(a)} → ${sameDay ? '' : `${dayOf(b)} `}${clock(b)}`));
-  chip.title = `Only the lines from ${r[0]} up to ${r[1]} are on the Timeline`;
-  const x = el('button', 'tl-range-x', '✕');
-  x.type = 'button';
-  x.title = 'Show the whole Timeline again';
-  x.setAttribute('aria-label', 'Show the whole Timeline again');
-  x.onclick = () => { S.timeline.range = null; buildTimeline(); };
-  chip.append(x);
-  ui.range.append(chip);
 }
 
 /* ----------------------------------------------------------- canvas */
@@ -604,7 +581,7 @@ function barTitle(bar) {
     ? (k) => { const kk = timelineKinds().get(Number(k)); return kk ? (kk.host ? `${kk.kind} · ${kk.host}` : kk.kind) : k; }
     : (k) => (k === 'ctx' ? 'Untagged'
       : (S.tags.find((tg) => String(tg.id) === k) || {}).name || 'a tag since deleted');
-  return `${dayOf(t0)} ${clock(t0)} – ${clock(t0 + o.width)} · ${bar.n.toLocaleString()} line${bar.n === 1 ? '' : 's'}\n`
+  return `${timelineIso(t0)} → ${timelineIso(t0 + o.width - 1)} · ${bar.n.toLocaleString()} line${bar.n === 1 ? '' : 's'}\n`
     + Object.entries(bar.split).map(([k, n]) => `${name(k)}: ${n.toLocaleString()}`).join('\n');
 }
 
@@ -643,8 +620,10 @@ export function wireTimelineOverview() {
       const r = wide ? snapped() : null;
       brush = null;
       if (r) {
-        S.timeline.range = [timelineIso(r.start), timelineIso(r.end)];
-        buildTimeline();
+        // The bars' edges as a timeframe, which keeps both its ends: the
+        // last whole second of the last bar, so a line at the next bar's
+        // first second is not taken in with it.
+        setTimelineTimeRange(timelineIso(r.start), timelineIso(r.end - 1));
         return;
       }
       paintTimelineOverview();

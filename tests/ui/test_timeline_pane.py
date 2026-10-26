@@ -78,7 +78,7 @@ def two_hosts(page, tmp_path, api):
             api(f"/api/source/{sid}", "DELETE")
         page.evaluate("""async () => {
             __winnow.S.sourceId = null; __winnow.S.view = null;
-            Object.assign(__winnow.S.timeline, { sel: null, range: null, context: null });
+            Object.assign(__winnow.S.timeline, { sel: null, timeRange: { enabled: false, start: '', end: '' }, context: null });
             __winnow.S.timeline.sourcesOff.clear();
             await __winnow.loadSources();
           }""")
@@ -91,8 +91,7 @@ def _open_timeline(page, lines=2):
 
 
 def _line(page, ts):
-    # By the row's own timestamp: the cell says only the time of day, and
-    # the day once, at the first line of each.
+    # By the row's own timestamp, which is also what the cell says.
     return page.locator(f"#timelineRows .timeline-row[data-ts^='{ts}']")
 
 
@@ -120,7 +119,8 @@ def test_a_picked_line_is_shown_in_full_beside_the_list(page, two_hosts, copied)
     _line(page, FINDING).click()
     _pane_shows(page, FINDING)
     assert _head(page) == "Finding"
-    assert page.locator("#timelinePane .tl-pane-when b").inner_text() == "10:00:00"
+    # The whole ISO timestamp, as the line says it.
+    assert page.locator("#timelinePane .tl-pane-when b").inner_text() == FINDING
     assert page.locator("#timelinePane .tl-pane-lead").inner_text() == "Successful logon"
     assert _chip(page, two_hosts["tags"][0]).get_attribute("aria-pressed") == "true"
     assert _chip(page, two_hosts["tags"][1]).get_attribute("aria-pressed") == "false"
@@ -209,7 +209,7 @@ def test_what_else_happened_then_brings_in_the_rows_around_a_finding(page, two_h
     assert "ctx" not in _line(page, FINDING).get_attribute("class")
     assert page.locator("#timelineStats").inner_text().startswith("2 tagged rows")
     chip = page.locator("#timelineContext .tl-context-chip")
-    assert chip.inner_text().replace("\n", " ").startswith("± 5 min around 10:00:00 · 3 untagged")
+    assert chip.inner_text().replace("\n", " ").startswith(f"± 5 min around {FINDING} · 3 untagged")
     # Still on the finding, and its window button says it is the one on.
     _pane_shows(page, FINDING)
     assert page.locator("#timelinePane .tl-pane-seg .btn", has_text="± 5 min").get_attribute("aria-pressed") == "true"

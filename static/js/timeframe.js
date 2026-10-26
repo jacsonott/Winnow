@@ -23,9 +23,10 @@ import { rebuildView } from './view.js';
 /* ------------------------------------------------------ jump to timestamp */
 
 /* A timestamp box with its label above and the 📅 picker beside it — the
-   builders' field shape (.dlg-field), shared by Jump and Timeframe so the
-   two dialogs' boxes look and line up the same. */
-function timestampField(label, input) {
+   builders' field shape (.dlg-field), shared by Jump, Timeframe and the
+   Timeline's Timeframe (timeline.js) so their boxes look and line up the
+   same. */
+export function timestampField(label, input) {
   const field = el('div', 'dlg-field');
   const row = el('div', 'dlg-input');
   row.append(input, datePickerButton(input));

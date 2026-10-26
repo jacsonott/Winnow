@@ -9,7 +9,8 @@
      fire during load, so these are order-independent; they're grouped only
      because that's easier to read than interleaving them below.
    - the startup sequence, which is not. loadKeymap() must precede
-     updateTimeRangeButton(), syncHistogramPanel() and syncSearchKeyCopy()
+     updateTimeRangeButton(), renderTimelineTimeRange(), syncHistogramPanel()
+     and syncSearchKeyCopy()
      (they read S.keymap for their tooltips and placeholders);
      loadPageTabPrefs() must precede renderPageTabs(); loadDetailPrefs()
      must precede applyDetailPrefs(). Keep them in this order.
@@ -84,7 +85,7 @@ import { applyPageTabsSize, initSidebar, wireSidebarResize, loadPageTabPrefs, re
 import { wireSql } from './sql.js';
 import { S } from './state.js';
 import { updateTimeRangeButton } from './timeframe.js';
-import { wireTimeline } from './timeline.js';
+import { renderTimelineTimeRange, wireTimeline } from './timeline.js';
 import { wireTimelineOverview } from './timelineoverview.js';
 import { wireTimelinePane } from './timelinepane.js';
 import { wireUi } from './ui.js';
@@ -145,6 +146,7 @@ applyDetailPrefs();
 S.keymap = loadKeymap();
 
 updateTimeRangeButton();
+renderTimelineTimeRange();
 syncHistogramPanel();
 syncSearchKeyCopy();
 

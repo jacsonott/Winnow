@@ -26,7 +26,7 @@ import { S } from './state.js';
 import { fmtBytes, keepingFocus } from './tables.js';
 import { loadCaseTags } from './tags.js';
 import { tableMenuStat, updateTimeRangeButton } from './timeframe.js';
-import { loadTimelineTemplates } from './timeline.js';
+import { loadTimelineTemplates, renderTimelineTimeRange } from './timeline.js';
 import { confirmDialog, contextMenu, dropdownMenu, modal, oneAtATime, promptDialog, sectionPanes, sideRail } from './ui.js';
 import { writeClipboardText } from './grouping.js';
 
@@ -214,7 +214,9 @@ export async function openCaseNow(path, opts = {}) {
   // previous case's tag_defs — neither means anything here.
   S.timeline = { view: null, pages: new Map(), pending: new Set(), reqId: S.timeline.reqId + 1,
                  tagsOff: new Set(), raw: new Set(), sel: null,
-                 sourcesOff: new Set(), range: null, overview: null, context: null, unfold: [] };
+                 sourcesOff: new Set(), timeRange: { enabled: false, start: '', end: '' },
+                 overview: null, context: null, unfold: [] };
+  renderTimelineTimeRange();
   // sql_tabs is a per-case table, so the previous case's tabs (and the
   // results and runs keyed by their ids) don't describe this one.
   resetSqlPane();

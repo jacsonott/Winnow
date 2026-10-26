@@ -1854,10 +1854,17 @@ textarea:focus { border-color: var(--accent); outline: none; }
    fill-the-main-area shape as .sqlview/.timelineview; everything inside
    is the plugin's own DOM. */
 .pluginview { flex: 1 1 auto; min-height: 0; background: var(--ink); display: flex; flex-direction: column; overflow: auto; }
+/* Wraps: with the timeframe's and the context's chips both on, a window
+   of 1280px had no room left for the switches, which went off its right
+   edge while the tag chips were squeezed into a column. Wrapped, each
+   item keeps its own width and what does not fit starts a second line,
+   the switches as one group on the right. */
 .timeline-head {
-  display: flex; align-items: center; gap: 10px; padding: 6px 10px;
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; padding: 6px 10px;
   border-bottom: 1px solid var(--line); background: var(--panel);
 }
+.timeline-head-acts { display: flex; align-items: center; gap: 10px; margin-left: auto; }
+.timeline-head-acts > .btn { white-space: nowrap; }
 .timeline-head-label { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--dim); }
 /* .tag-ribbon's geometry, because these are the ribbon's chips: the
    timeline's tag filter is .tag-chip buttons (renderTimelineTagFilter),
@@ -1875,7 +1882,7 @@ textarea:focus { border-color: var(--accent); outline: none; }
    under this rule's --accent text, which on the light themes was gold on
    gold, unreadable. */
 #btnTimelineOverview[aria-pressed="true"], #btnTimelinePane[aria-pressed="true"],
-#btnTimelineFold[aria-pressed="true"] {
+#btnTimelineFold[aria-pressed="true"], #btnTimelineTimeRange[aria-pressed="true"] {
   background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--text); border-color: var(--accent-dim);
 }
 .tl-ov-head {
@@ -1910,7 +1917,6 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .tl-ov-canvas { display: block; width: 100%; cursor: crosshair; user-select: none; }
 .tl-ov-hint { padding: 0 10px 4px; font-size: 10px; }
 .tl-ov-empty { padding: 2px 10px 6px; font-size: 11px; white-space: normal; }
-.tl-ov-range:empty { display: none; }
 .tl-range-chip {
   display: inline-flex; align-items: center; gap: 6px; padding: 1px 4px 1px 8px;
   border: 1px solid var(--accent); border-radius: var(--radius-sm);
@@ -2009,16 +2015,12 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .timeline-row:hover .tl-raw-toggle, .timeline-row.selected .tl-raw-toggle,
 .timeline-row .tl-raw-toggle:focus-visible, .timeline-row .tl-raw-toggle[aria-pressed="true"] { opacity: 1; }
 .timeline-row .tl-raw-toggle:hover { color: var(--text); border-color: var(--accent); }
-/* The Timeline read as a story (timelineRowNode's `story`): the day once,
-   at its first line, over a solid rule; then each line's time of day; the
+/* The Timeline read as a story (timelineRowNode's `story`): a solid rule
+   over the first line of each day, whose timestamp is in --text; the
    gap since the line above, bold over a dashed rule from half an hour.
    The rules are borders, inside the row's fixed height (border-box), so
    they cost the virtual list nothing. */
-.timeline-row .tl-col-ts .tl-day {
-  font-family: var(--ui); font-size: 11px; font-weight: 600; color: var(--accent); white-space: nowrap;
-  margin-right: 8px; flex: 0 0 auto;
-}
-.timeline-row .tl-col-ts .tl-time { margin-left: auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.timeline-row .tl-col-ts .tl-time { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .timeline-row.day-start .tl-time { color: var(--text); }
 .timeline-row .tl-col-gap { justify-content: flex-end; font-family: var(--mono); font-size: 11px; color: var(--text-faint); }
 .timeline-row .tl-col-gap.long { color: var(--num); font-weight: 600; }
@@ -2055,7 +2057,9 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .timeline-row.ctx.selected { background: var(--row-selected); }
 .timeline-row.ctx.selected > div:not(.tl-col-gutter) { opacity: 1; }
 .timeline-row.ctx.selected .tl-lead { color: var(--text); }
-.tl-context:empty { display: none; }
+.tl-context:empty, .tl-timeframe:empty { display: none; }
+/* The Timeline's Timeframe dialog: the tables' range, beside Fill range. */
+.tl-tf-tables { font-family: var(--mono); font-size: 12px; color: var(--dim); }
 .tl-context-n { color: var(--dim); }
 
 /* The list, and beside it the selected line's pane (timelinepane.js).
