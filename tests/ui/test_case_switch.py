@@ -215,3 +215,169 @@ def test_the_last_cases_filters_do_not_open_on_the_next_cases_table(case_page, o
         {"source": 1, "rows": 7, "filters": {}, "search": ""}
     assert page.locator('.fcell input[data-col="Host"]').input_value() == ""
     assert page.locator("#search").input_value() == ""
+
+
+# ---------------------------------------------------------------- the switch itself
+#
+# The reports these pin were "crashes" switching back and forth between
+# cases: the page saying something had failed when it had only moved on,
+# a click on a case doing nothing, and the app taking itself back off the
+# home screen. Each one holds a request in flight across the switch,
+# because the window that request is out for is where every one of them
+# lived.
+
+def _register(own_server, name):
+    path = str(own_server["dir"] / f"{name}.db-winnow")
+    case = own_server["post"]("/api/cases", {"path": path, "name": name, "group": "", "notes": ""})
+    return path, case["id"]
+
+
+def _case_a(own_server):
+    path = str(own_server["dir"] / "caseA.db")
+    cid = next(c["id"] for c in own_server["get"]("/api/cases") if c["path"] == path)
+    return path, cid
+
+
+def _record_toasts(page):
+    """Every message the toast shows from here on. It holds one at a time,
+    each replacing the last, so a look afterwards misses any that came and
+    went in between."""
+    page.evaluate("""() => {
+      window.__toastsSeen = [];
+      const t = document.getElementById('toast');
+      new MutationObserver(() => { if (!t.hidden) window.__toastsSeen.push(t.textContent); })
+        .observe(t, { childList: true, characterData: true, subtree: true,
+                      attributes: true, attributeFilter: ['hidden'] });
+    }""")
+
+
+def _tag_first_row(page):
+    """Tag row 1 of the open case's first table, through the page, so the
+    Timeline has something to build."""
+    page.evaluate("""async () => {
+      const tag = __winnow.S.tags[0];
+      await __winnow.post('/api/row_tags', { pairs: [[__winnow.S.sources[0].id, 1]], tag_id: tag.id, on: true });
+      await __winnow.loadSources();
+    }""")
+
+
+def test_a_request_the_last_case_still_had_out_does_not_toast_in_the_next(case_page, own_server, until, painted):
+    """The Timeline still building when another case opened toasted "Could
+    not build timeline: …" over the case just opened — the server refusing
+    a request about the case the page had left, which the page itself had
+    asked to leave. Nothing had failed, but on every switch it read as the
+    app falling over; any request still out did the same (a job poll put
+    "Job poll failed" in the Log)."""
+    page = case_page
+    case_b, _ = _register(own_server, "B")
+    _tag_first_row(page)
+    held = []
+    pattern = re.compile(r".*/api/timeline$")
+    page.route(pattern, lambda route: held.append(route) if not held else route.continue_())
+    try:
+        page.evaluate("() => __winnow.showTimelineTab()")
+        until(page, lambda: held, "the Timeline's build held")
+        _record_toasts(page)
+        page.evaluate("(p) => __winnow.openCase(p)", case_b)
+        assert page.evaluate("() => fetch('/api/case/current').then((r) => r.json())")["path"] == case_b
+
+        with page.expect_response(pattern) as answer:
+            held[0].continue_()
+        assert answer.value.status == 409   # the server did refuse it: this is the case under test
+        painted(page)
+        seen = page.evaluate("() => window.__toastsSeen")
+        assert not [m for m in seen if "timeline" in m.lower() or "case" in m.lower()], seen
+        assert page.locator("#caseGone").is_hidden()
+    finally:
+        page.unroute(pattern)
+    log = own_server["get"]("/api/log")["entries"]
+    assert not [e["message"] for e in log if e["level"] == "error" and "case" in e["message"].lower()]
+
+
+def test_the_case_clicked_last_is_the_one_that_opens(case_page, own_server, until):
+    """Going Home while a case was still opening and clicking another one
+    did nothing: the click was handed the open already in flight and
+    dropped, and the case that ended up open was the one clicked first."""
+    page = case_page
+    case_a, a_id = _case_a(own_server)
+    case_b, _ = _register(own_server, "B")
+    held = []
+    page.route("**/api/case/open", lambda route: held.append(route) if not held else route.continue_())
+    try:
+        page.evaluate("(p) => { window.__opening = __winnow.openCase(p); }", case_b)
+        until(page, lambda: held, "case B's open held")
+        page.click("#btnHome")
+        row = page.locator(f"#home .home-row[data-id='{a_id}'] .home-name")
+        row.click()
+        held[0].continue_()
+        page.evaluate("() => window.__opening")
+    finally:
+        page.unroute("**/api/case/open")
+
+    assert own_server["get"]("/api/case/current")["path"] == case_a
+    page.wait_for_function("() => __winnow.S.sources.length === 1 && __winnow.S.sources[0].row_count === 30")
+    assert page.locator("#app").is_visible()
+    assert page.locator("#home").is_hidden()
+    assert page.locator("#brandLabel").text_content() == "caseA"
+
+
+def test_going_home_while_a_case_opens_stays_home(case_page, own_server, until):
+    """A case still opening when the analyst went Home put the app back up
+    over the home screen when it finished — mid-way through their picking
+    another case, so the click meant for a case row landed on whatever the
+    app had there instead."""
+    page = case_page
+    case_b, b_id = _register(own_server, "B")
+    held = []
+    page.route("**/api/case/open", lambda route: held.append(route) if not held else route.continue_())
+    try:
+        page.evaluate("(p) => { window.__opening = __winnow.openCase(p); }", case_b)
+        until(page, lambda: held, "case B's open held")
+        page.click("#btnHome")
+        held[0].continue_()
+        page.evaluate("() => window.__opening")
+    finally:
+        page.unroute("**/api/case/open")
+
+    assert own_server["get"]("/api/case/current")["path"] == case_b
+    assert page.locator("#home").is_visible()
+    assert page.locator("#app").is_hidden()
+
+    # And asking for it again shows it.
+    page.locator(f"#home .home-row[data-id='{b_id}'] .home-name").click()
+    page.wait_for_selector("#app:not([hidden])")
+    assert page.locator("#brandLabel").text_content() == "B"
+
+
+def test_a_timeline_note_typed_just_before_a_switch_stays_with_its_case(case_page, own_server):
+    """A note typed in the Timeline's pane and not yet saved — inside its
+    half-second pause — was saved after the switch, into the NEW case, on
+    whichever of its rows had the same table and row number. The case it
+    was typed in never got it."""
+    page = case_page
+    case_a, _ = _case_a(own_server)
+    case_b, _ = _register(own_server, "B")
+    page.evaluate("(p) => __winnow.openCase(p)", case_b)
+    csv_b = own_server["dir"] / "b.csv"
+    csv_b.write_text("When,Host\n" + "".join(f"2024-06-0{d} 12:00:00,B{d}\n" for d in range(1, 8)),
+                     encoding="utf-8")
+    own_server["post"]("/api/ingest/path", {"path": str(csv_b), "build_fts": False})
+    page.evaluate("(p) => __winnow.openCase(p)", case_a)
+    page.wait_for_function("() => __winnow.S.sources.length === 1 && __winnow.S.sources[0].row_count === 30")
+
+    _tag_first_row(page)
+    page.evaluate("() => __winnow.showTimelineTab()")
+    page.wait_for_function("() => (__winnow.S.timeline.view || {}).row_count === 1", timeout=10_000)
+    page.locator("#timelineRows .timeline-row").first.click()
+    page.wait_for_selector("#timelineNote")
+    page.locator("#timelineNote").fill("seen on H0 first")
+    # No blur, no pause: the switch comes while the note is still waiting.
+    page.evaluate("(p) => __winnow.openCase(p)", case_b)
+    page.wait_for_function("() => __winnow.S.sources.length === 1 && __winnow.S.sources[0].row_count === 7")
+    page.wait_for_timeout(1000)   # past the note's own pause, when a note still held would have gone
+    notes_b = own_server["get"]("/api/row_notes")
+    assert "seen on H0 first" not in repr(notes_b)
+
+    page.evaluate("(p) => __winnow.openCase(p)", case_a)
+    page.wait_for_function("() => __winnow.S.sources.length === 1 && __winnow.S.sources[0].row_count === 30")
+    assert "seen on H0 first" in repr(own_server["get"]("/api/row_notes"))

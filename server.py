@@ -536,13 +536,22 @@ async def _unhandled_error_handler(request: Request, exc: Exception):
 # newly opened case could silently show the wrong case's data under the
 # old tab's name. Any other ProgrammingError is a genuine bug and stays a
 # 500.
+#
+# Structured, like the case guard's `case_changed`, because the commonest
+# way to get here is not another window at all: it is this window's own
+# case switch closing the Store under a request it sent a moment earlier
+# (a Timeline build, a page of rows). core.js's caseRefused tells the two
+# apart by the token the request carried and drops this one quietly; read
+# as a bare string it was a toast telling the analyst to reload a window
+# that was fine.
 @app.exception_handler(sqlite3.ProgrammingError)
 async def closed_database_handler(request: Request, exc: sqlite3.ProgrammingError):
     # JSONResponse with a `detail` key, matching HTTPException's shape —
-    # app.js's api() reads err.message from there.
+    # core.js's api() reads err.message from detail.message.
     if "closed database" in str(exc).lower():
         return JSONResponse(
-            {"detail": "The case this request targeted has been closed or switched — reload the page."},
+            {"detail": {"error": "case_closed",
+                        "message": "The case this request targeted has been closed or switched — reload the page."}},
             status_code=409,
         )
     return JSONResponse({"detail": f"Internal error: {exc}"}, status_code=500)

@@ -152,6 +152,24 @@ see [docs/notes/README.md](README.md) for the whole set.
   `_announce_case()`; the client wraps the request in `switchCase()`, which
   is what keeps its own switch from reading as another window's.
   `tests/test_case_guard.py`, `tests/ui/test_two_windows_one_case.py`.
+- **A refusal about the case this page itself left says nothing.** Any
+  request still out when the page switches (a Timeline build, a job poll,
+  a page of rows) comes back 409 `case_changed` — or, if it reached the
+  old Store after `close()`, `case_closed` from `closed_database_handler`,
+  which answers a structured detail for exactly this reason (it was a
+  bare string, so the client could not tell it from any other 409).
+  Their wording is written for another window's switch: every catch site
+  that toasts `'Could not …: ' + e.message` put "This window is out of
+  date: Winnow now has “B” open, opened from another window" over the
+  case the analyst had just opened themselves, and that is what was
+  reported as crashes switching back and forth between cases. `caseRefused`
+  (core.js) recognises it — the page is mid-switch, or the request went
+  out under a token the page has since left — marks it `aborted` and
+  replaces the message with `CASE_LEFT_MESSAGE`, which `toast`,
+  `toastAction` and `clientLog` drop, so the ~200 catch sites need no
+  check each. Uploads are the exception: a file that was not imported
+  must still say so (jobs.js rewrites the message to a plain one).
+  `tests/ui/test_case_switch.py`.
 - **The presence stream says which case is open.** A `case` event when the
   stream opens and whenever `_announce_case()` wakes it (a sync route on a
   worker thread, so the wake goes through `loop.call_soon_threadsafe`):
@@ -175,9 +193,11 @@ see [docs/notes/README.md](README.md) for the whole set.
   life of the process, so the case read as "open in another Winnow"
   naming this one — and on one path both passed the already-open check
   and the case got two writer Stores. A new route that swaps `STORE` takes
-  the lock too. The client has its own guard (`openCase` hands a second
-  call the in-flight one's promise), but the server cannot rely on it: two
-  windows, or a script, race just the same. `tests/test_case_lock.py`.
+  the lock too. The client runs its own opens one at a time (`openCase`
+  hands a second call for the same case the in-flight one's promise, and
+  queues one for another case — see [ui.md](ui.md)), but the server cannot
+  rely on it: two windows, or a script, race just the same.
+  `tests/test_case_lock.py`.
 - Static assets (`/`, `/static/*`) get an explicit `Cache-Control: no-cache`
   from a middleware in server.py — FastAPI's `StaticFiles` only sends
   `ETag`/`Last-Modified`, and without an explicit `Cache-Control` the

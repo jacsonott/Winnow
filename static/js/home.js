@@ -27,6 +27,7 @@ import { fmtBytes, keepingFocus } from './tables.js';
 import { loadCaseTags } from './tags.js';
 import { tableMenuStat, updateTimeRangeButton } from './timeframe.js';
 import { loadTimelineTemplates, renderTimelineTimeRange } from './timeline.js';
+import { flushTimelineNote, resetTimelinePane } from './timelinepane.js';
 import { confirmDialog, contextMenu, dropdownMenu, modal, oneAtATime, promptDialog, sectionPanes, sideRail } from './ui.js';
 import { writeClipboardText } from './grouping.js';
 
@@ -100,7 +101,11 @@ export async function otherWindows() {
   } catch { return null; }
 }
 
-export function showHome() { $('app').hidden = true; $('home').hidden = false; setBrandLabel(null); }
+/* Counts the trips to the home screen, so that an open still finishing
+   can tell the analyst went Home after it started (openCaseNow). */
+let homeVisits = 0;
+
+export function showHome() { homeVisits += 1; $('app').hidden = true; $('home').hidden = false; setBrandLabel(null); }
 
 // The brand button doubles as "which case is this" once one's open — falls
 // back to the app name on the home screen / before any case has loaded.
@@ -133,18 +138,78 @@ export function describeCaseHolder(holder) {
 /* One case switch at a time from this page. A double-click on a case card
    is two clicks, and each used to start its own open: two POSTs racing on
    the server (which serialises them now — see _CASE_SWITCH in server.py),
-   then two state resets and two loadSources interleaving here. A second
-   call while one is in flight gets the first one's promise instead —
-   whichever case was asked for first is the one that opens. */
-let caseOpening = null;
+   then two state resets and two loadSources interleaving here. So opens
+   run one after another, never side by side.
 
-export function openCase(path, opts = {}) {
-  if (caseOpening) return caseOpening;
-  caseOpening = openCaseNow(path, opts).finally(() => { caseOpening = null; });
-  return caseOpening;
+   A call for the case already opening — the double-click — gets that
+   open's promise. A call for ANOTHER case used to get it too, and so was
+   dropped: an analyst who went Home while a case was still painting its
+   first table (seconds, on a big one) and picked a different case saw the
+   click do nothing at all. It waits now, the newest such call replacing
+   any older one, and runs as soon as the open in flight is done; that
+   open sees it waiting and skips the rest of its own load, which the
+   next open would only reset. So the case clicked last is the one that
+   ends up open. */
+let caseOpening = null;   // the open in flight: { path, opts, reasked, done }
+const SUPERSEDED = 'superseded';   // what an open that stopped short for caseNext resolves
+let caseNext = null;      // { path, opts }: another case asked for meanwhile
+
+/* The busy bar is up while a case waits its turn, so the click that
+   queued it visibly did something — the home screen has nothing else
+   to show for it until its open starts. */
+function setCaseNext(next) {
+  if (!!next !== !!caseNext) setBusy(!!next);
+  caseNext = next;
 }
 
-export async function openCaseNow(path, opts = {}) {
+export function openCase(path, opts = {}) {
+  if (caseOpening) {
+    if (path === caseOpening.path) {
+      // The double-click, or a change of mind back to this case: nothing
+      // queued is wanted any more, and this case is wanted on screen even
+      // if the analyst went Home since it started.
+      setCaseNext(null);
+      caseOpening.reasked = true;
+    } else {
+      setCaseNext({ path, opts });
+    }
+    return caseOpening.done;
+  }
+  const open = { path, opts, reasked: false, done: null };
+  caseOpening = open;
+  open.done = (async () => {
+    try {
+      for (;;) {
+        let outcome;
+        try {
+          outcome = await openCaseNow(open.path, open.opts, open);
+        } catch (e) {
+          if (!caseNext) throw e;
+        }
+        if (caseNext) {
+          Object.assign(open, caseNext, { reasked: false });
+          setCaseNext(null);
+        } else if (outcome !== SUPERSEDED) {
+          return;
+        }
+        // Otherwise it stopped short for a case that was then un-asked-for
+        // by a click back on this one (so `reasked`, and it shows): run it
+        // again, which for the case the server already has open is the
+        // client half alone.
+      }
+    } finally {
+      caseOpening = null;
+      setCaseNext(null);
+    }
+  })();
+  return open.done;
+}
+
+/* `run` is openCase's record of this open, when it came through there.
+   Resolves SUPERSEDED when it stopped short for a case asked for since. */
+export async function openCaseNow(path, opts = {}, run = null) {
+  const superseded = () => run !== null && caseNext !== null;
+  const homeVisitsAtStart = homeVisits;
   // A note save still inside its 500 ms debounce fires after the server
   // has swapped stores, and /api/note writes into whichever store is
   // current — the previous case's {source_id, rid} landing on an unrelated
@@ -159,6 +224,10 @@ export async function openCaseNow(path, opts = {}) {
   // fix: whatever it was about to write describes THIS case, and the POST
   // below hands the server another one. Dropped before the swap, not after.
   dropPendingTabState();
+  // The Timeline's note box is the same hazard again, but saved rather than
+  // dropped: the server still has the case it was typed in, for one more
+  // request. resetTimelinePane, once the switch lands, forgets its row.
+  await flushTimelineNote();
   let res;
   try {
     // switchCase: from here, a request this page made about the case it is
@@ -173,7 +242,7 @@ export async function openCaseNow(path, opts = {}) {
       if (!go) return;
       // Straight to the worker: this IS the in-flight open, still holding
       // the guard above, so going through openCase would get itself back.
-      return openCaseNow(path, { force: true });
+      return openCaseNow(path, { force: true }, run);
     }
     toast('Could not open case: ' + e.message, 6000);
     return;
@@ -217,6 +286,7 @@ export async function openCaseNow(path, opts = {}) {
                  sourcesOff: new Set(), timeRange: { enabled: false, start: '', end: '' },
                  overview: null, context: null, unfold: [] };
   renderTimelineTimeRange();
+  resetTimelinePane();
   // sql_tabs is a per-case table, so the previous case's tabs (and the
   // results and runs keyed by their ids) don't describe this one.
   resetSqlPane();
@@ -233,10 +303,16 @@ export async function openCaseNow(path, opts = {}) {
   // The histogram strip's chart is the previous case's rows; it waits for
   // this case's first view (or says there is no table) instead.
   resetHistogram();
+  // Everything above is the previous case's state let go of, which has to
+  // happen whatever comes next. Everything below loads this one, and when
+  // another case has been asked for meanwhile, its open is about to reset
+  // all of it again: stop here, and never put this case on screen.
+  if (superseded()) return SUPERSEDED;
   // The effective plugin set is per-case (case_settings overrides beat the
   // machine default), and the server reloaded its registry when this case
   // opened — refetch so tabs/formats/panel reflect THIS case's plugins.
   await loadPlugins();
+  if (superseded()) return SUPERSEDED;
   // The pane shows a row of the previous case's table; the grid it
   // belongs to is about to be rebuilt against this one. Before showApp,
   // so it is never on screen for a frame beside the new case.
@@ -247,8 +323,14 @@ export async function openCaseNow(path, opts = {}) {
   // would hit the new Store, 409 as expired, and rebuild the old filters
   // against whichever of this case's sources shares the number.
   if (S.activeTab !== 'grid') showGridTab({ repaint: false });
-  setBrandLabel(res.name);
-  showApp();
+  // Not when the analyst has gone Home since this open started: it took
+  // them straight back off the home screen, mid-way through picking
+  // another case, and their click landed on whatever the app had there.
+  // The case still loads, out of sight, and shows when it is asked for
+  // again (below, or a fresh openCase, which finds it already open).
+  const reveal = () => { setBrandLabel(res.name); showApp(); };
+  const leftForHome = () => homeVisits !== homeVisitsAtStart && !(run && run.reasked);
+  if (!leftForHome()) reveal();
   // A quick-look (temp) case — e.g. one made by dropping files on the home
   // screen — surfaces its banner so it can be saved or discarded, the same
   // as one opened at boot (only boot painted this before).
@@ -259,7 +341,11 @@ export async function openCaseNow(path, opts = {}) {
   // Tag definitions are per case too (see loadCaseTags), and an empty case
   // never opens a table to reload them on the way in.
   await loadCaseTags();
+  if (superseded()) return SUPERSEDED;
   await loadSources();
+  // Went Home, then clicked this same case again while it was loading.
+  if ($('app').hidden && run && run.reasked && !caseNext) reveal();
+  return undefined;
 }
 
 export function slugify(name) {

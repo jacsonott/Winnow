@@ -245,6 +245,37 @@ see [docs/notes/README.md](README.md) for the whole set.
   read by the rest of the switch: loadSources picks its tab from
   `S.sourceId`. tests/ui/test_case_switch.py.
 
+- **Opens run one at a time, and the case clicked last wins.**
+  `openCase` (home.js) used to hand ANY call made during an open the
+  in-flight promise — right for a double-click, but a click on a
+  different case after going Home was dropped, and the case that ended
+  up open was the one clicked first. Now a call for the same case gets
+  the promise (and marks it `reasked`), a call for another case waits
+  in `caseNext` (newest replaces older, with the busy bar up), and the
+  open in flight stops short at its next `superseded()` check — after
+  the per-case resets, which must always run, and before each load the
+  next open would only reset again — resolving `SUPERSEDED` so the loop
+  runs the queued one. Each open still runs the whole `openCaseNow`;
+  never start a second one beside it.
+
+- **An open does not take the analyst back off the home screen.**
+  `showApp()` at the end of an open the analyst had left for Home (the
+  `homeVisits` counter, bumped by every `showHome`) put the app up over
+  the case list mid-pick, and the click meant for a case row landed on
+  the app. The case still loads out of sight and shows when it is asked
+  for again: by a click on it while the open is still running
+  (`reasked`, revealed after `loadSources`), or by a fresh `openCase`,
+  which the server short-circuits as already open.
+
+- **The Timeline pane's note is saved before the switch, then
+  forgotten.** It is the detail pane's `#noteInput` hazard in another
+  box: a note inside its 500 ms debounce posted after the swap, under the
+  NEW case's token, onto whichever row of it shared the `{source_id, rid}`. Blanking
+  would lose it, so `openCaseNow` awaits `flushTimelineNote()` before the
+  `/api/case/open` POST — the server still has the case it was typed in
+  — and `resetTimelinePane()` drops the shown row, the pending note and
+  any row still on its way afterwards. tests/ui/test_case_switch.py.
+
 - **The histogram strip** (`static/js/histogram.js`, `GET /api/histogram`
   over `Store.time_histogram`, toggled by `#btnHistogram` or `h`) was the
   `table_histogram` example plugin until 2026-09 and is built in now;
@@ -1551,8 +1582,8 @@ see [docs/notes/README.md](README.md) for the whole set.
     Tagged is `tagged_row_count` from `/api/cases`: distinct rows in
     `row_tags`, in the same read-only peek as the other counts.
   - **One ⋯ per row** (`caseMenuItems`, also the row's right-click), and
-    the whole row still opens the case, behind `openCase`'s double-click
-    guard. A missing file's Open and Delete are disabled, not hidden.
+    the whole row still opens the case, behind `openCase`'s queue (a
+    double-click opens it once). A missing file's Open and Delete are disabled, not hidden.
   - **The filter looks inside its section**, and says when a match is in
     another one ("1 more match in All cases"): the old "Show N cases not
     opened in over 30 days…" fold hid older cases from the search box too.

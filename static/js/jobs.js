@@ -100,7 +100,12 @@ export function uploadWithProgress(url, fd, name) {
         const err = new Error((typeof detail === 'string' ? detail : detail && detail.message) || xhr.statusText);
         err.status = xhr.status;
         err.detail = detail;
-        caseRefused(err, sentCase);
+        // Not the quiet CASE_LEFT_MESSAGE every other request left behind
+        // by a case switch gets: this one is a file the analyst asked to
+        // have in a case, and it is in none. They need to hear that.
+        if (caseRefused(err, sentCase) && err.aborted) {
+          err.message = 'this window opened another case before it finished uploading, so it was not imported';
+        }
         reject(err);
       }
     };
