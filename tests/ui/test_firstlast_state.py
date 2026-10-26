@@ -175,7 +175,7 @@ def _src(sid, name, columns=("Host", "EventId", "Timestamp"), **extra):
 def _payload(**sheet):
     base = {"name": "Logons by host", "source": {"id": 1, "name": "ui.csv"},
             "groupBy": ["Host"], "carry": [], "sums": [], "filters": [],
-            "tags": {"mode": "", "ids": []}, "rowJson": False,
+            "tags": [], "rowJson": False,
             "sortColumn": "Timestamp", "colWidths": {}, "template": "{which} of {count}"}
     base.update(sheet)
     return {"v": 1, "active": 0, "sheets": [base]}
@@ -216,19 +216,35 @@ def test_columns_the_table_no_longer_has_are_dropped_and_named(fl_page):
 
 
 def test_a_tag_filter_whose_tag_is_gone_is_not_left_filtering_on_nothing(fl_page):
-    """"Only these tags" against an id this case no longer has is not an
-    error the analyst would see — it is an empty result, which reads as
-    "there is nothing here" instead of "your filter is stale"."""
-    payload = _payload(tags={"mode": "ids", "ids": [4, 5]})
+    """A chip on an id this case no longer has is not an error the analyst
+    would see — it is an empty result, which reads as "there is nothing
+    here" instead of "your filter is stale"."""
+    payload = _payload(tags=[4, "!5", "__none__", "junk"])
     plan = _plan(fl_page, PLAN, payload, [_src(1, "ui.csv")],
                  tags=[{"id": 4, "name": "TA", "color": "#c0392b"}])
-    assert plan["sheets"][0]["tags"] == {"mode": "ids", "ids": [4]}
+    assert plan["sheets"][0]["tags"] == [4, "__none__"]
     assert "tag filter" in plan["notes"][0]
 
     # None of them left: the sheet goes back to every row, and says so.
-    plan = _plan(fl_page, PLAN, payload, [_src(1, "ui.csv")], tags=[])
-    assert plan["sheets"][0]["tags"] == {"mode": "", "ids": []}
+    plan = _plan(fl_page, PLAN, _payload(tags=[4, 5]), [_src(1, "ui.csv")], tags=[])
+    assert plan["sheets"][0]["tags"] == []
     assert "every row is in again" in plan["notes"][0]
+
+
+@pytest.mark.parametrize("old, chips", [
+    ({"mode": "", "ids": []}, []),
+    ({"mode": "any", "ids": []}, ["__any__"]),
+    ({"mode": "none", "ids": []}, ["__none__"]),
+    ({"mode": "ids", "ids": [4, 5]}, [4, 5]),
+])
+def test_a_sheet_saved_before_the_chips_restores_as_chips(fl_page, old, chips):
+    """The tag filter was a select — every row, any tag, no tag, these
+    tags — and each of its answers is a set of chips, so a sheet saved
+    then comes back pressing those chips rather than losing its filter."""
+    tags = [{"id": 4, "name": "TA", "color": "#c0392b"}, {"id": 5, "name": "Suspicious", "color": "#d68a2e"}]
+    plan = _plan(fl_page, PLAN, _payload(tags=old), [_src(1, "ui.csv")], tags=tags)
+    assert plan["sheets"][0]["tags"] == chips
+    assert plan["notes"] == []
 
 
 def test_a_sheet_on_a_merge_restores(fl_page):
@@ -251,7 +267,7 @@ def test_a_merge_renamed_since_it_was_saved_still_restores(fl_page):
     members = [1, 3]
     merge = _src(-2, "Merged (2 tables)", is_merge=True, member_source_ids=members)
     sheet = {"name": "Logons", "sourceId": -2, "groupBy": ["Host"], "carry": [], "sums": [],
-             "filters": [], "tags": {"mode": "", "ids": []}, "rowJson": False,
+             "filters": [], "tags": [], "rowJson": False,
              "sortColumn": "Timestamp", "colWidths": {}, "template": "{which} of {count}"}
     spec = _spec(fl_page, sheet, [_src(1, "ui.csv"), _src(3, "other.csv"), merge])
     assert spec["source"]["members"] == members, "a merge is saved by its member tables"
@@ -332,7 +348,7 @@ def test_a_read_that_failed_is_not_mistaken_for_nothing_saved(fl_page, server):
     keep = {"v": 1, "active": 0, "sheets": [{
         "name": "Logons by host", "source": {"id": 1, "name": "ui.csv"},
         "groupBy": ["Host"], "carry": [], "sums": [], "filters": [],
-        "tags": {"mode": "", "ids": []}, "rowJson": False, "sortColumn": None,
+        "tags": [], "rowJson": False, "sortColumn": None,
         "colWidths": {}, "template": "{which} of {count}"}]}
     urlopen(Request(server + "/api/plugin_state", data=json.dumps({"key": KEY, "payload": keep}).encode(),
                     headers={"Content-Type": "application/json", "X-Timeline-Lite-Client": "1"}),
@@ -401,6 +417,6 @@ def test_count_unique_is_saved_and_restored_and_an_older_sheet_has_none(fl_page)
     assert "Gone" in plan["notes"][0]
     assert _plan(fl_page, PLAN, _payload(), [_src(1, "ui.csv")])["sheets"][0]["unique"] == []
     sheet = {"name": "Logons", "sourceId": 1, "groupBy": ["Host"], "carry": [], "sums": [],
-             "unique": ["EventId"], "values": [], "filters": [], "tags": {"mode": "", "ids": []},
+             "unique": ["EventId"], "values": [], "filters": [], "tags": [],
              "rowJson": False, "sortColumn": "Timestamp", "colWidths": {}, "template": ""}
     assert _spec(fl_page, sheet, [_src(1, "ui.csv")])["unique"] == ["EventId"]

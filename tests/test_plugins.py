@@ -2696,7 +2696,8 @@ def test_first_last_validation(fl_client, body, fragment):
 
 def test_first_last_tag_filter_scopes_the_grouping(fl_client, store):
     """Tags aren't a column — they live in the row_tags sidecar — so the
-    plugin filters on membership: specific tags, any tag, or untagged."""
+    plugin filters on membership, in the grid ribbon's spelling: tag ids,
+    Any tag, No tags, and "!<id>" to leave a tag's rows out."""
     client, sid = fl_client
     tag = store.list_tags()[0]
     rids = [r[0] for r in store.run_sql(
@@ -2704,34 +2705,122 @@ def test_first_last_tag_filter_scopes_the_grouping(fl_client, store):
     store.set_tags(sid, rids, tag["id"], True)
 
     out = _fl(client, "preview", source_id=sid, group_by=["User"], sort_column="When",
-              columns=[], template="{which} of {count}",
-              tags={"mode": "ids", "ids": [tag["id"]]})
+              columns=[], template="{which} of {count}", tags=[tag["id"]])
     assert out["total_groups"] == 1
     assert {r[-1] for r in out["rows"]} == {"First of 3", "Last of 3"}
 
     out = _fl(client, "preview", source_id=sid, group_by=["User"], sort_column="When",
-              columns=[], template="{which}", tags={"mode": "any"})
+              columns=[], template="{which}", tags=["__any__"])
     assert out["total_groups"] == 1
     out = _fl(client, "preview", source_id=sid, group_by=["User"], sort_column="When",
-              columns=[], template="{which}", tags={"mode": "none"})
+              columns=[], template="{which}", tags=["__none__"])
     assert out["total_groups"] == 2  # bob and carol never got the tag
+    out = _fl(client, "preview", source_id=sid, group_by=["User"], sort_column="When",
+              columns=[], template="{which}", tags=[f"!{tag['id']}"])
+    assert out["total_groups"] == 2  # excluding it is the same two, here
 
     # ...and it ANDs with the column filters rather than replacing them.
     out = _fl(client, "preview", source_id=sid, group_by=["User"], sort_column="When",
-              columns=[], template="{which} of {count}",
-              tags={"mode": "ids", "ids": [tag["id"]]},
+              columns=[], template="{which} of {count}", tags=[tag["id"]],
               filters=[{"column": "EventId", "op": "in", "values": ["4624"]}])
     assert out["total_groups"] == 1
     assert [r[-1] for r in out["rows"]] == ["Only of 1"]
 
 
+# The tab's tag chips, against FL_ROWS' rids 1-6: Suspicious on 1, 2 and 4;
+# Benign on 2 (so 2 carries both); TA on 5; 3 and 6 untagged. Grouped on
+# every column, each row is its own group, so the group count is the row
+# count the filter kept.
+@pytest.fixture
+def tagged_fl(fl_client, store):
+    client, sid = fl_client
+    tags = {t["name"]: t["id"] for t in store.list_tags()}
+    store.set_tags(sid, [1, 2, 4], tags["Suspicious"], True)
+    store.set_tags(sid, [2], tags["Benign"], True)
+    store.set_tags(sid, [5], tags["TA"], True)
+    return client, sid, tags
+
+
+def _fl_rows_kept(client, sid, tags):
+    return _fl(client, "preview", source_id=sid, group_by=["When", "Host", "User", "EventId"],
+               sort_column="When", columns=[], template="{which}", tags=tags)["total_groups"]
+
+
+FL_TAG_FILTER_CASES = [
+    (["Suspicious"], 3),
+    (["Suspicious", "TA"], 4),               # two chips: rows carrying either
+    (["Suspicious", "!Benign"], 2),          # 2 carries both, so it goes
+    (["!Benign"], 5),                        # an exclusion alone keeps untagged rows
+    (["__any__"], 4),
+    (["__none__"], 2),
+    (["__none__", "TA"], 3),                 # untagged, plus TA's
+    (["__any__", "!Benign"], 3),
+    ([], 6),
+]
+
+
+@pytest.mark.parametrize("names, expected", FL_TAG_FILTER_CASES)
+def test_first_last_tag_chips_keep_the_rows_the_grid_keeps(tagged_fl, store, names, expected):
+    """The chips are the grid ribbon's, so they have to select the grid's
+    rows: the same keys through Store.build_view and through the plugin."""
+    client, sid, tags = tagged_fl
+    keys = _tag_keys(tags, *names)
+    assert _fl_rows_kept(client, sid, keys) == expected
+    assert store.build_view(sid, {"tags": keys})["row_count"] == expected
+
+
+@pytest.mark.parametrize("old, names", [
+    ({"mode": ""}, []),
+    ({"mode": "any"}, ["__any__"]),
+    ({"mode": "none"}, ["__none__"]),
+    ({"mode": "ids", "ids": []}, []),
+    ({"mode": "ids", "ids": ["Suspicious", "TA"]}, ["Suspicious", "TA"]),
+])
+def test_first_last_reads_the_tag_filter_it_used_to_send(tagged_fl, old, names):
+    """Before the chips the tab sent a select's {mode, ids}. Each of its
+    four answers is a set of chips, and a script still sending one gets the
+    rows those chips keep."""
+    client, sid, tags = tagged_fl
+    if old.get("ids"):
+        old = {**old, "ids": [tags[n] for n in old["ids"]]}
+    assert _fl_rows_kept(client, sid, old) == _fl_rows_kept(client, sid, _tag_keys(tags, *names))
+
+
+def test_first_last_tag_chips_on_a_merge_match_each_row_through_its_own_member(tagged_fl, store, write_csv):
+    """Invariant #9. A merge's tags live on its members, keyed by the
+    member's own rid — and rids collide across members, so matching on rid
+    alone would count the second table's rows 1, 2 and 4 as Suspicious too."""
+    client, sid, tags = tagged_fl
+    other = store.ingest_csv(write_csv(FL_ROWS, "fl_other.csv"), name="fl_other", build_fts=False)["id"]
+    store.set_tags(other, [6], tags["Suspicious"], True)
+    mid = store.create_merge("fltags", [sid, other])["id"]
+    for names, expected in [(["Suspicious"], 4), (["__none__"], 7), (["Suspicious", "!Benign"], 3),
+                            (["!Suspicious"], 8), (["__any__", "!Benign"], 4)]:
+        keys = _tag_keys(tags, *names)
+        assert store.build_view(mid, {"tags": keys})["row_count"] == expected, names
+        assert _fl_merge_rows_kept(client, mid, keys) == expected, names
+
+
+def _fl_merge_rows_kept(client, mid, keys):
+    """The rows a merge's preview grouped. Its members hold the same rows,
+    so a group can hold one row of each: the sizes are summed rather than
+    the groups counted, off each group's first row (an Only is both)."""
+    out = _fl(client, "preview", source_id=mid, group_by=["When", "Host", "User", "EventId"],
+              sort_column="When", columns=[], template="{which}:{count}", tags=keys)
+    return sum(int(r[-1].split(":")[1]) for r in out["rows"] if not r[-1].startswith("Last"))
+
+
 def test_first_last_rejects_a_bad_tag_filter(fl_client):
     client, sid = fl_client
-    for tags in ({"mode": "wat"}, {"mode": "ids", "ids": ["TA"]}):
+    for tags in ({"mode": "wat"}, {"mode": "ids", "ids": ["TA"]}, "1", ["wat"], [True], [999], ["!999"]):
         r = client.post("/api/plugin/first_last/preview", json=dict(
             source_id=sid, group_by=["User"], sort_column="When",
             columns=[], template="{which}", tags=tags))
-        assert r.status_code == 400, r.text
+        assert r.status_code == 400, (tags, r.text)
+    # A deleted tag is named, not grouped as "no rows".
+    r = client.post("/api/plugin/first_last/preview", json=dict(
+        source_id=sid, group_by=["User"], sort_column="When", columns=[], template="{which}", tags=[999]))
+    assert "No tag 999" in r.json()["detail"]
 
 
 def test_first_last_carry_order_is_the_output_order(fl_client):
