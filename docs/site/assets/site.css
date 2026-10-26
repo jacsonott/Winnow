@@ -1,13 +1,17 @@
 /* The Pages site in the app's Harvest skin (static/style.css): gold on
-   green-cast greys in dark, gold on parchment in light. The values are
-   Harvest's own tokens; where a token is named, it's the one copied. */
+   neutral greys in dark, gold on parchment in light. The values are
+   Harvest's own tokens; where a token is named, it's the one copied.
+   Harvest's dark greys have a green cast, which in the app sits behind a
+   grid of data but over a page of prose reads as green, so the site's
+   are those greys at the same lightness with the cast taken out: "dark
+   --panel, neutral" is #141816 made #161616. */
 
 :root {
   /* The header and tabs are Harvest's dark panel in both schemes, so the
      brand mark's gold reads the same way on either. */
-  --md-primary-fg-color: #1b201d;          /* dark --panel-2 */
-  --md-primary-fg-color--light: #272d29;   /* dark --line */
-  --md-primary-fg-color--dark: #141816;    /* dark --panel */
+  --md-primary-fg-color: #1d1d1d;          /* dark --panel-2, neutral */
+  --md-primary-fg-color--light: #2a2a2a;   /* dark --line, neutral */
+  --md-primary-fg-color--dark: #161616;    /* dark --panel, neutral */
   --md-primary-bg-color: #e3dfd2;
   --md-primary-bg-color--light: #e3dfd2b3;
 }
@@ -23,17 +27,32 @@
 }
 
 [data-md-color-scheme="slate"] {
-  /* Material's slate greys take their cast from --md-hue; Harvest's are
-     green, not Material's default blue. */
-  --md-hue: 140;
-  --md-default-bg-color: #141816;          /* dark --panel */
-  --md-code-bg-color: #1b201d;             /* dark --panel-2 */
+  /* Material spells every slate grey as hsla(var(--md-hue), 15%, …), and
+     no hue is neutral at 15% saturation, so each one is restated here
+     with none: the same lightness and alpha as Material's, no cast. */
+  --md-default-fg-color: hsla(0, 0%, 90%, .82);
+  --md-default-fg-color--light: hsla(0, 0%, 90%, .56);
+  --md-default-fg-color--lighter: hsla(0, 0%, 90%, .32);
+  --md-default-fg-color--lightest: hsla(0, 0%, 90%, .12);
+  --md-default-bg-color: #161616;          /* dark --panel, neutral */
+  --md-default-bg-color--light: #1616168a;
+  --md-default-bg-color--lighter: #16161642;
+  --md-default-bg-color--lightest: #16161612;
+  --md-code-fg-color: hsla(0, 0%, 86%, .82);
+  --md-code-bg-color: #1d1d1d;             /* dark --panel-2, neutral */
+  --md-code-bg-color--light: #1d1d1de6;
+  --md-code-bg-color--lighter: #1d1d1d8a;
+  --md-typeset-kbd-color: hsla(0, 0%, 90%, .12);
+  --md-typeset-kbd-accent-color: hsla(0, 0%, 90%, .2);
+  --md-typeset-kbd-border-color: #161616;
+  --md-typeset-table-color: hsla(0, 0%, 95%, .12);
+  --md-typeset-table-color--light: hsla(0, 0%, 95%, .035);
   --md-accent-fg-color: #cfa057;           /* dark --accent */
   --md-accent-fg-color--transparent: #cfa0571a;
   --md-typeset-a-color: #cfa057;
   --md-typeset-mark-color: #cfa05740;
-  --md-footer-bg-color: #0f1211;           /* dark --ink */
-  --md-footer-bg-color--dark: #0b0d0c;
+  --md-footer-bg-color: #111111;           /* dark --ink, neutral */
+  --md-footer-bg-color--dark: #0c0c0c;
 }
 
 /* The header's search box and the active sidebar entry pick up the gold. */
@@ -58,9 +77,9 @@
 .wn-hero {
   background:
     radial-gradient(60rem 28rem at 85% -10%, #cfa05726, transparent 60%),
-    linear-gradient(180deg, #1b201d 0%, #141816 100%);
-  border-bottom: 1px solid #272d29;
-  color: #c3c8be;
+    linear-gradient(180deg, #1d1d1d 0%, #161616 100%);
+  border-bottom: 1px solid #2a2a2a;
+  color: #c4c4c4;
   overflow: hidden;
 }
 .wn-hero__inner {
@@ -89,7 +108,7 @@
    static/style.css). */
 .wn-hero__tagline {
   margin: .8rem 0 0;
-  color: #c3c8be;
+  color: #c4c4c4;
   font-family: var(--md-code-font-family);
   font-size: .7rem;
   letter-spacing: .32em;
@@ -110,7 +129,7 @@
   margin: 0;
   padding: .55em 1.6em;
   color: #e3dfd2;
-  border: .1rem solid #4a524c;
+  border: .1rem solid #4d4d4d;
   border-radius: .2rem;
   font-size: .75rem;
   font-weight: 700;
@@ -118,12 +137,12 @@
 }
 .wn-hero .md-button:hover,
 .wn-hero .md-button:focus {
-  color: #0f1211;
+  color: #111111;
   background-color: #e3b46a;
   border-color: #e3b46a;
 }
 .wn-hero .md-button--primary {
-  color: #0f1211;
+  color: #111111;
   background-color: #cfa057;
   border-color: #cfa057;
 }
@@ -136,7 +155,7 @@
   display: block;
   width: 100%;
   height: auto;
-  border: 1px solid #363d38;
+  border: 1px solid #383838;
   border-radius: .3rem;
   box-shadow: 0 1.2rem 3rem #00000080, 0 0 0 1px #00000040;
   transform: rotateY(-7deg) rotateX(2deg);
@@ -248,7 +267,7 @@
 .md-typeset .wn-feature__shot img {
   display: block;
   width: 100%;
-  border: 1px solid #363d38;
+  border: 1px solid #383838;
   border-radius: .3rem;
   box-shadow: 0 .6rem 1.6rem #00000040;
 }
@@ -268,7 +287,7 @@
    hooks.py), framed as the front page's pictures are. */
 .md-typeset .wn-recording img {
   display: block;
-  border: 1px solid #363d38;
+  border: 1px solid #383838;
   border-radius: .3rem;
   box-shadow: 0 .6rem 1.6rem #00000040;
 }
