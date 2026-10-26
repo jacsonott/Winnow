@@ -163,7 +163,11 @@ from the defaults.
 ### Default keys
 
 These are all rebindable. They are listed in the order Settings shows them,
-with the action names Settings uses.
+with the action names Settings uses, except for the first and last row.
+Settings gives `g` and `G` rows of their own (**Jump to first row** and
+**Jump to last row**, after **Page up**) so they can be rebound apart from
+the `Ctrl` and `Meta` chords; they go to the same row, so each is listed here
+once, with all its keys.
 
 | Action | Default keys |
 | --- | --- |
@@ -171,14 +175,12 @@ with the action names Settings uses.
 | Move the cell cursor up | `ArrowUp`, `k` |
 | Move the cell cursor left | `ArrowLeft` |
 | Move the cell cursor right | `ArrowRight` |
-| Jump to the first row | `Ctrl+ArrowUp`, `Meta+ArrowUp` |
-| Jump to the last row | `Ctrl+ArrowDown`, `Meta+ArrowDown` |
+| Jump to the first row | `g`, `Ctrl+ArrowUp`, `Meta+ArrowUp` |
+| Jump to the last row | `G`, `Ctrl+ArrowDown`, `Meta+ArrowDown` |
 | Jump to the first column | `Ctrl+ArrowLeft`, `Meta+ArrowLeft` |
 | Jump to the last column | `Ctrl+ArrowRight`, `Meta+ArrowRight` |
 | Page down | `PageDown` |
 | Page up | `PageUp` |
-| Jump to first row | `g` |
-| Jump to last row | `G` |
 | Focus search box | `/`, `Ctrl+f` |
 | Filter the column under the cursor | none |
 | Focus note field | `n` |
@@ -212,9 +214,10 @@ with the action names Settings uses.
 | Jump again to the saved timestamp (works across tables) | `.` |
 | Profiles — the plugins, boards, watchlist and variables a kind of case carries | `p` |
 
-`Meta` is `⌘` on a Mac and the Windows key elsewhere. The two "first row"
-actions differ in one way: add Shift to `Ctrl+ArrowUp` and it extends the
-selection to the first row, while `g` always just jumps.
+`Meta` is `⌘` on a Mac and the Windows key elsewhere. The keys for the first
+and last row differ in one way: add Shift to `Ctrl+ArrowUp` or
+`Ctrl+ArrowDown` and it extends the selection to that row, while `g` and `G`
+always just jump.
 
 **Focus search box** also answers to `⌘+F`, and to `Ctrl+F` with Shift or
 Caps Lock, for as long as `Ctrl+f` stays bound to it. Winnow takes that chord
