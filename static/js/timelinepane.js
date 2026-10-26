@@ -307,6 +307,23 @@ export async function flushTimelineNote() {
   if (status && same(row) && !notePending) status.textContent = 'Saved';
 }
 
+/* A case switch: the row the pane shows and a note typed into it belong
+   to the case being left. Both outlived the switch, and the note was the
+   dangerous half — the next flush (any pick, or the pane closing) posted
+   it under the NEW case's token, onto whichever of its rows shares the
+   source id and rid. openCaseNow saves it first, to the case it was typed
+   in (flushTimelineNote, while the server still has that one open), and
+   then this lets go of the rest. */
+export function resetTimelinePane() {
+  clearTimeout(noteTimer);
+  noteTimer = null;
+  notePending = null;
+  shownKey = '';
+  row = null;
+  line = null;
+  asking += 1;   // a row still on its way is the old case's
+}
+
 /* "What else happened then": a button per reach, pressed for the window
    the Timeline is built with when it is around this line's time. */
 function aroundBox(ts) {

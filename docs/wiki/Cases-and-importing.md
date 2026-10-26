@@ -59,6 +59,12 @@ database, is refused; open a case and import it instead. A path with no
 file at it is refused too (*No case file at …*) rather than creating an
 empty case there; **+ New case** makes new cases.
 
+A large case can take a few seconds to open. If you go back to the home
+screen in the meantime, Winnow stays there: the case finishes opening out
+of sight and appears when you click it again. Clicking a different case
+instead opens that one as soon as the first has finished, so the case you
+clicked last is the one you end up in.
+
 Each row's **⋯** button, or right-clicking the row, opens its menu:
 
 | Menu item | What it does |

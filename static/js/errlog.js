@@ -7,7 +7,7 @@
    hasn't been looked at — info entries never light it, or the dot would
    mean nothing by the third import. */
 
-import { $, api, el, post } from './core.js';
+import { $, api, el, isCaseLeftMessage, post } from './core.js';
 import { modal } from './ui.js';
 
 const SEEN_KEY = 'winnow.log.seen';
@@ -43,6 +43,10 @@ export async function refreshLogBadge() {
    logging must never be the thing that fails. */
 const recentClientLogs = new Map();
 export function clientLog(level, message) {
+  // A poll refused because this page switched case is not news either
+  // (see CASE_LEFT_MESSAGE): "Job poll failed: Stopped …" in the Log after
+  // every switch reads as something having broken.
+  if (isCaseLeftMessage(message)) return;
   const now = Date.now();
   const last = recentClientLogs.get(message) || 0;
   if (now - last < 30000) return;
