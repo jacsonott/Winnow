@@ -201,7 +201,7 @@ place for a secret.
 | [pivot](#pivot) | pivot-table | A **Pivot** tab: cross-tabs over a table |
 | [first_last](#first_last) | first-last | A **First/Last** tab: the first and last event of each group, as a new table |
 | [mft_usn](#mft_usn) | mft-usn | Import formats for raw `$MFT` and `$J` |
-| [lateral_movement](#lateral_movement) | lateral-movement | A **Lateral movement** tab: a host-to-host graph over time |
+| [lateral_movement](#lateral_movement) | lateral-movement | A **Lateral movement** tab: movement between hosts over time, by account, with paths |
 | [esxi_logs](#esxi_logs) | esxi-logs | An import format for ESXi and Linux host logs, and a board |
 | [top_values](#top_values) | top-values | A **Top values** panel above the grid |
 | [claude_assistant](#claude_assistant) | claude-assistant | A **Claude** tab and a **Copilot** panel in the SQL pane. Uses the network |
@@ -375,9 +375,10 @@ section always can.
 
 ### lateral_movement
 
-Draws movement between hosts as a directed graph, with a timeline under it.
-The **Movement events** panel lists the ways a table can describe one host
-reaching another; six ship ready for EvtxECmd output:
+Follows movement between hosts through a case: who reached which host, as
+which account, in what order. The **Movement events** panel lists the ways
+a table can describe one host reaching another; six ship ready for
+EvtxECmd output:
 
 - Remote logons (4624, logon types 3 and 10)
 - Failed logons (4625)
@@ -386,26 +387,85 @@ reaching another; six ship ready for EvtxECmd output:
 - RDP connection attempts (1149)
 - Share access (5140/5145)
 
-Tick one or more movement events in the panel (each is offered for the
-tables it fits), then **Build graph**. Edge width is the number of events,
-arrows show direction, and a node's size is its total events. Drag nodes to arrange them, scroll to zoom, drag the background to
-pan. Brush the histogram under the graph to narrow it to a time window.
-Double-click a host to open the first selected event's table filtered to
-that host. **Apply case timeframe** (on by default) limits the graph to the
+The first time you open the tab on a case it ticks every event that fits
+one of the case's tables and draws them; tick and untick events in the
+panel to change what is drawn. The panel's header says how many are on
+(**6 of 6 on**) and folds away with its caret. A table nothing reads is
+named at the bottom of the panel; click its name to define an event for
+it. **Apply case timeframe** (on by default) limits every view to the
 timeframe filter set in the grid.
+
+One machine is written several ways across an export (`WKSTN-17.corp.local`,
+`WKSTN-17 (10.1.0.117)`, a bare `10.1.0.117`). Each is folded to one host
+name, and an address is given the name that rows write beside it, across
+every ticked table, so a netflow export's addresses land on the same hosts
+as the event log's names. Hover a host to see how it was written.
+
+There are five views:
+
+- **Chain over time**: a lane per host, in the order hosts first appear,
+  and an arrow for each link (two hosts and an account) where it first
+  happens. RDP sessions are bars under the host they ended on, from logon
+  to logoff. A diamond marks a **credential switch**: an account leaves a
+  host soon after a different account arrived there, without ever having
+  logged on to that host itself, and leaves it on no other day. An
+  Explicit credentials event states the same thing outright, and is drawn
+  the same way.
+- **Host matrix**: sources down the side, destinations across the top, a
+  filled cell for each pair; the busiest 300 sources are listed.
+- **By account**: every account, ranked by what stands out about it:
+  credential switches, a sweep (four or more hosts reached from one source
+  within 15 minutes, hosts it touches on no other day), failed logons
+  followed by a success, explicit credentials, hops between two
+  workstations, all of its movement on one day, ten or more hosts. Each row
+  has its activity across the case; **Show in Chain ›** draws only that
+  account.
+- **Pivot** (from a host's menu): where the host's access came from, and
+  where it went next, up to three hops on, each hop no earlier than the one
+  before it.
+- **Path** (from a host's menu): routes between two hosts in time order,
+  each hop leaving no earlier than the one before it arrived and within 12
+  hours of it. Where the account changes along a route, a credential switch
+  has to explain the step; routes with fewer unexplained steps are listed
+  first. **Show in Chain ›** highlights a route in the chain.
+
+Click or right-click a host for its menu: **Pivot from** it, **Find a path
+from here…** (then right-click the host the path should end at and choose
+**Path from … to here**), **Mark as crown jewel** (marked hosts get a star,
+and **Paths from here to crown jewels**), **Only hops that touch this host**
+and **Open its rows in** the table it came from, filtered to every way that
+table writes it. A link's menu has **Open the rows behind it**, **Only** its
+account, and **Mark … as expected**, which hides a service account or a
+known admin everywhere (the hint says when an account reaches the same
+hosts every day of the case).
+
+Above the views, a chip for each event type hides or shows it in every
+view. **Hide machine accounts ($)** is on by default. The histogram under
+the views counts rows over the whole case: drag across it to zoom every
+view into a window, and **Only links new in this window** then hides links
+that already happened before it. **Whole case** clears the window.
 
 **+ New event type** defines your own movement event, for firewall or
 netflow tables, say, or a narrower version of a shipped one. The builder
 reads its columns from one table (**Read columns from**) and guesses the
 **Source host**, **Destination host**, **User column** and **Time column**
-from their names. Under **Only rows where**, add conditions such as
-EventId is 4624; the chips under each condition are the column's most
-common values, and clicking one fills it in. As you change anything, the
-right side shows what the event finds in that table: how many rows match,
-how many links and hosts they make, and the busiest links. **Start from**
-copies an existing event as a starting point, and **Offer it on** chooses
-between every table of the same kind (Event logs (EvtxECmd) tables, say)
-and any table that has the columns the event reads. Names must be unique.
+from their names. **Acting account** is for a row that names two accounts,
+as a 4648 does (who used whose credentials); it is never guessed. Tick
+**These rows are failed attempts** for an event like 4625: its hops are
+drawn, but switches and paths skip them. An event copied from RDP sessions
+keeps its session rule (**Draw sessions**). Under **Only rows where**, add
+conditions such as EventId is 4624; the chips under each condition are the
+column's most common values, and clicking one fills it in. As you change
+anything, the right side shows what the event finds in that table: how many
+rows match, how many links and hosts they make, the busiest links, which
+addresses fold to a host name, which links no other ticked event draws,
+and, for an event with no user column, how many of its rows line up with a
+hop another event already draws (those back that hop up rather than drawing
+again). **Start from** copies an existing event as a starting point, and
+**Offer it on** chooses between every table of the same kind (Event logs
+(EvtxECmd) tables, say) and any table that has the columns the event reads.
+Names must be unique. An event needs a time column to be drawn: every view
+is ordered by time.
 
 Your definitions are saved on this machine and offered in every case.
 **Events…** lists them in two sections, **Yours** and **Shipped**, each
@@ -414,8 +474,12 @@ case's tables it fits. Click an event's name to open it in the builder:
 yours to edit, a shipped one as a new event of your own. An event's **⋯**
 has **Edit…**, **Copy to a new event…** and **Delete…** for yours, and
 **Copy to a new event…** for a shipped one. **+ New event…** at the bottom
-starts one from nothing. A graph
-takes up to 20 selections and 8,000 edge rows.
+starts one from nothing. The tab reads up to 20 events at once and up to
+250,000 (event, hosts, account, minute) rows; past that it keeps the
+earliest and says so, and narrowing the timeframe brings in the rest.
+
+Which events are ticked, the view, crown jewels and expected accounts are
+kept with the case.
 
 The shipped **KAPE triage** profile turns this plugin on.
 

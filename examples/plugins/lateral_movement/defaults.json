@@ -1,6 +1,6 @@
 {
-  "version": 1,
-  "comment": "Shipped movement-event definitions, shaped against real KAPE triage output (EvtxECmd CSVs). Each ties to a header_set (a named column set from the app's defaults/headers.json) so it only offers itself on a table that IS that artifact; requires is the fallback column list for events with no header_set. Conditions are ANDed; op is equals | not_equals | contains | not_contains | in | not_in (comma list).",
+  "version": 2,
+  "comment": "Shipped movement-event definitions, shaped against real KAPE triage output (EvtxECmd CSVs). Each ties to a header_set (a named column set from the app's defaults/headers.json) so it only offers itself on a table that IS that artifact; requires is the fallback column list for events with no header_set. Conditions are ANDed; op is equals | not_equals | contains | not_contains | in | not_in (comma list). actor_col is the account that acted (4648's own UserName beside the target it named); fails marks failed attempts; session pairs opening and closing values of one column into spans.",
   "events": [
     {
       "name": "Remote logons (4624 type 3/10)",
@@ -66,7 +66,8 @@
           "value": "4625"
         }
       ],
-      "color": "#d9534f"
+      "color": "#d9534f",
+      "fails": true
     },
     {
       "name": "Explicit credentials (4648)",
@@ -103,7 +104,8 @@
           "value": "TargetServerName: localhost,TargetServerName: -,-"
         }
       ],
-      "color": "#7c6cf6"
+      "color": "#7c6cf6",
+      "actor_col": "UserName"
     },
     {
       "name": "RDP sessions (21/24/25)",
@@ -138,7 +140,17 @@
           "value": "LOCAL,-"
         }
       ],
-      "color": "#39a8e8"
+      "color": "#39a8e8",
+      "session": {
+        "column": "EventId",
+        "open": [
+          "21",
+          "25"
+        ],
+        "close": [
+          "24"
+        ]
+      }
     },
     {
       "name": "RDP connection attempts (1149)",

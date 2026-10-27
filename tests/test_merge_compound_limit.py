@@ -266,9 +266,10 @@ def test_plugins_past_the_limit(big, monkeypatch):
     assert sorted(pivot["sets"][0]["rows"]) == [["GET", N_MEMBERS], ["POST", N_MEMBERS]]
     values = post("/api/plugin/first_last/values", {"source_id": mid, "column": "cs-method"})["values"]
     assert {v["value"]: v["count"] for v in values} == {"GET": N_MEMBERS, "POST": N_MEMBERS}
-    edges = post("/api/plugin/lateral_movement/edges", {"selections": [
-        {"source_id": mid, "src_col": "c-ip", "dst_col": "s-ip"}]})["edges"]
-    assert sum(e["n"] for e in edges) == 2 * N_MEMBERS
+    feed = post("/api/plugin/lateral_movement/feed", {"selections": [
+        {"source_id": mid, "src_col": "c-ip", "dst_col": "s-ip", "time_col": TS}]})
+    assert feed["per"][0]["drawn"] == 2 * N_MEMBERS
+    assert sum(h[5] for h in feed["hops"]) == 2 * N_MEMBERS
 
 
 def test_first_last_bookends_past_the_reference_limit(big, monkeypatch):
