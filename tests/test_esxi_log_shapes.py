@@ -45,7 +45,7 @@ def _parse(esxi_format, path):
 def _read(esxi_format, tmp_path, name, text):
     """The rows of a file holding `text`, as {column: value} dicts."""
     p = tmp_path / name
-    p.write_text(text)
+    p.write_text(text, encoding="utf-8")
     cols, rows = _parse(esxi_format, p)
     return cols, [dict(zip(cols, r)) for r in rows]
 
@@ -311,6 +311,8 @@ def test_every_shape_together_in_one_file(esxi_format, tmp_path):
     """Pass one plans what pass two fills: a line that needs a column the
     plan didn't make stops the import (iisread.FileChanged)."""
     p = tmp_path / "syslog.log"
-    p.write_text("\n".join(line for line in CORPUS if line.strip()) + "\n")
+    # utf-8, not the locale's: the corpus holds a BOM, which Windows'
+    # cp1252 can't write.
+    p.write_text("\n".join(line for line in CORPUS if line.strip()) + "\n", encoding="utf-8")
     cols, rows = _parse(esxi_format, p)
     assert rows and all(len(r) == len(cols) for r in rows)
