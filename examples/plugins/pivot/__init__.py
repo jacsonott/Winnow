@@ -47,7 +47,7 @@ PLUGIN = {
     "description": "Excel-style pivot tables: drag fields into rows, columns and values for cross-tabs with subtotals.",
 }
 
-WINNOW_API_VERSION = 13   # winnow.dropdownMenu: the click-to-place menu under a field
+WINNOW_API_VERSION = 15   # winnow.openFiltered options: "Show these rows in the grid"
 
 # Grouping levels per refresh: one UNION ALL arm each over the base. Rows ×
 # columns levels stay small in practice (Excel's own field wells get
