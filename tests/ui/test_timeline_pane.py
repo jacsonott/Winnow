@@ -104,6 +104,17 @@ def _pane_shows(page, ts):
       }""", arg=ts)
 
 
+def _not_around(page, ts):
+    """Waits for the line at `ts` to be drawn as a finding rather than a
+    row around one. The view lands a step before the rows repaint (the
+    selected line's place is looked up in between), so reading the class
+    as soon as S.timeline.view changes can read the old list."""
+    page.wait_for_function("""(ts) => {
+        const r = document.querySelector(`#timelineRows .timeline-row[data-ts^='${ts}']`);
+        return !!r && !r.classList.contains('ctx');
+      }""", arg=ts, timeout=10_000)
+
+
 def _head(page):
     return page.evaluate("() => document.querySelector('#timelinePane .tl-pane-head span').textContent")
 
@@ -223,13 +234,13 @@ def test_what_else_happened_then_brings_in_the_rows_around_a_finding(page, two_h
         page.keyboard.press(first["key"])
     page.wait_for_function("() => __winnow.S.timeline.view.context_rows === 2", timeout=10_000)
     page.wait_for_function("() => document.querySelector('#timelinePane .tl-pane-head span').textContent === 'Finding'")
-    assert "ctx" not in _line(page, NEAR[2]).get_attribute("class")
+    _not_around(page, NEAR[2])
 
     # ✕ takes the rows around off again; the one tagged stays.
     chip.locator(".tl-range-x").click()
     page.wait_for_function("() => (__winnow.S.timeline.view || {}).row_count === 3", timeout=10_000)
     assert page.locator("#timelineContext .tl-context-chip").count() == 0
-    assert page.locator("#timelineRows .timeline-row.ctx").count() == 0
+    page.wait_for_function("() => !document.querySelector('#timelineRows .timeline-row.ctx')", timeout=10_000)
     _line(page, NEAR[2]).wait_for()
 
 
