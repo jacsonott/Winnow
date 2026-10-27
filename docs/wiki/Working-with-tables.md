@@ -32,13 +32,13 @@ With a tab or a sidebar row focused, the keyboard's menu key or `Shift+F10` open
 
 ### Opening a page in its own window
 
-Any page tab can go in a window of its own: SQL, Timeline, Notes, Watchlist, a plugin's tab such as the Pivot, or a pinned dashboard. That puts the page beside the table it is about, rather than taking turns with it. Right-click the page's tab and pick **Open in its own window**, or click ⧉ on its row in the sidebar's **Pages**. If nothing opens, the browser blocked it: allow pop-ups for Winnow and try again. The same menu has **Close this tab** (**Unpin this board** on a dashboard), which does what ✕ on the page's sidebar row does.
+Any page tab can go in a window of its own: SQL, Timeline, Notes, Watchlist, a plugin's tab such as the Pivot, or a pinned dashboard. That puts the page beside the table it is about, rather than taking turns with it. Right-click the page's tab and pick **Open in its own window**, or click ⧉ on its row in the sidebar's **Pages**. With **Pages as a dropdown** on ([Settings](Settings-and-shortcuts.md#pages-as-a-dropdown)) there are no page tabs, so right-click the page in the **Pages ▾** list instead, or the **Pages ▾** button itself while that page is showing. If nothing opens, the browser blocked it: allow pop-ups for Winnow and try again. The same menu has **Close this tab** (**Unpin this board** on a dashboard), which does what ✕ on the page's sidebar row does.
 
 The new window shows that page and nothing else. Its bar names the page and the case, and **⇤ Back to main window** closes it and puts the page back as a tab. Closing the window with its own ✕ does the same.
 
 While a page is in its own window:
 
-- The main window goes back to the table you had open. The page's tab is marked ⧉, and clicking it shows **Show the … window** and **Bring it back as a tab** instead of a second copy of the page. Right-click the tab for the same two.
+- The main window goes back to the table you had open. The page's tab is marked ⧉ (its row in the **Pages ▾** list too), and clicking it shows **Show the … window** and **Bring it back as a tab** instead of a second copy of the page. Right-click the tab for the same two.
 - What you do in either window shows in the other. Tag rows in the grid and the Timeline beside it updates; tag from the Timeline's details and the grid's rows update. Notes, imports, new tables and watchlist hits work the same way.
 - Anything in the page that opens a table or a row, such as a dashboard drill-down or double-clicking a Timeline line, opens it in the main window, which comes to the front. A link to another page shows that page in the main window too.
 - Opening another case in the main window takes the page with it. If that case has no such page (a board of the old case, or a plugin switched off there), the window says so.

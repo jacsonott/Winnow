@@ -788,9 +788,11 @@ function commitPin(id, on) {
    `keepOpen` (repaint the menu in place instead of
    closing it, so toggling three tags is three clicks), `submenu` (an array,
    or a function for one that repaints — opens a flyout beside the item on
-   hover or click; `key` names it when two siblings share a label), and
+   hover or click; `key` names it when two siblings share a label),
    `pinId` (a stable id; the analyst may pin the item to the top of a menu
-   opened with pins). '-' is a separator and {header} a section label.
+   opened with pins), and `oncontextmenu` (a right-click on the item —
+   for a list that stands in for tabs with menus of their own, as the
+   collapsed Pages ▾ does). '-' is a separator and {header} a section label.
    `ctx` is the root menu's {pins, repaint}; `depth` 0 is the root. */
 export function menuItemNode(item, ctx = null, depth = 0) {
   // menu-item-flex, not plain .menu-item: the ✓/swatch/hint slots need a
@@ -828,6 +830,7 @@ export function menuItemNode(item, ctx = null, depth = 0) {
   }
   b.disabled = !!item.disabled;
   if (item.title) b.title = item.title;
+  if (item.oncontextmenu) b.oncontextmenu = (e) => item.oncontextmenu(e);
   if (item.submenu) {
     const open = () => openSubmenu(b, depth);
     BTN.set(b, { item, key: `${depth}:${item.key != null ? item.key : item.label}`, ctx, open });
