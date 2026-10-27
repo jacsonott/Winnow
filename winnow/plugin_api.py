@@ -27,19 +27,28 @@ plugin needing to change):
 - **API routes** (register_api): backend endpoints under
   /api/plugin/<fs_name>/<route>, for whatever the plugin's UI (or a
   script) needs the server to do — query the case, call an external
-  service, run a computation. Folder plugins only, same as tabs.
+  service, run a computation. Works from a single-file plugin too; only
+  the UI hooks need a folder to serve their module from.
 - **Row actions** (register_row_action): an entry in every table view's
   row right-click menu that hands the selected rows to a handler — a
   VirusTotal lookup on the highlighted hashes, an enrichment that lands
   a new table, anything that operates on "these rows". Works from a
   single-file plugin.
 - **Toolbar panels** (register_toolbar_panel): a toggle button in the
-  table toolbar (beside search) that drops the plugin's own UI in
-  between the toolbar and the grid — a histogram of the view, a
-  sparkline, a legend. The panel's module gets the same `winnow`
-  context as a tab plus view-change events, so it can follow every
-  filter the analyst applies. Folder plugins only (there's a module to
-  serve).
+  table toolbar (left of the built-in Histogram and ⏱ Timeframe) that
+  drops the plugin's own UI in between the toolbar and the grid — the
+  top values of a column, a sparkline, a legend. The panel's module gets
+  the same `winnow` context as a tab, whose view-change events let it
+  follow every filter the analyst applies. Folder plugins only (there's
+  a module to serve).
+- **Page panels** (register_page_panel): the same thing on the SQL or
+  Notes page — a toggle in that page's toolbar and a resizable column
+  beside it, whose module drives the page through `winnow.sqlPage` /
+  `winnow.notesPage` (the claude_assistant example's SQL Copilot).
+  Folder plugins only.
+- **Dashboards** (register_dashboard): a board the plugin OFFERS under
+  Dashboards ▸ Library, which the analyst adds to a case with ＋ — never
+  applied by loading the plugin. Works from a single-file plugin.
 
 A plugin module provides:
 
@@ -115,7 +124,7 @@ A tab plus its backend route, the full custom-UI shape:
     # ("/api/plugin/<fs_name>") for the plugin's own routes, winnow.assets
     # for its other files, winnow.sql() for read-only case queries,
     # winnow.schemaText() for an LLM-ready schema dump, and winnow.state
-    # (live sources/tags/selection getters).
+    # (live getters: sources, sourceId, tags, variables, timeRange, view).
     # winnow.tabState (get/set/clear) is this mount's own row in the CASE
     # file, for state that should survive the case being closed — a mount
     # is torn down with no callback, so it is written as the analyst works
@@ -173,7 +182,7 @@ A tab plus its backend route, the full custom-UI shape:
         # req.variables is the open case's variables, {name: value} — e.g.
         # req.variables.get("engagement"), req.variables.get("api_base") —
         # and req.set_variable(name, value) writes one. Case data, not
-        # secrets (see register_row_action's note on WINNOW_* env vars).
+        # secrets (see PluginRequest.env for WINNOW_* environment variables).
         # req: PluginRequest — method, route, query (dict of str), body
         # (parsed JSON or None), and store (the open Store, or None when no
         # case is open). Also storage (per-plugin JSON), variables /
@@ -642,8 +651,9 @@ class PluginAPI:
 
     def register_toolbar_panel(self, *, id: str, label: str, entry: str,
                                description: str = "") -> None:
-        """A toggle button in the table toolbar (next to search) that shows
-        the plugin's own UI in a strip between the toolbar and the grid.
+        """A toggle button in the table toolbar (left of the built-in
+        Histogram and ⏱ Timeframe) that shows the plugin's own UI in a
+        strip between the toolbar and the grid.
         `entry` is an ES module (relative to the plugin folder, validated
         to exist now like a tab's) exporting `mount(container, winnow)`
         and optional `onShow(container)` / `onHide(container)`. The

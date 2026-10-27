@@ -39,7 +39,9 @@ What you can do:
   with its columns. Saved on this machine (via `req.storage`), surviving
   case switches and updates like the app's own saved filters.
   **Events…** lists every event, edits and deletes yours, and copies a
-  shipped one into the builder.
+  shipped one into the builder, in two panes: **Yours** and **Shipped**,
+  each event with the hop it draws, the tables it is offered on and how
+  many of this case's tables it fits.
 - **Collapse the event list** with the header caret when the graph needs
   the room — the header keeps a count of what's selected.
 
@@ -64,15 +66,23 @@ in [`plugin_api.py`](../../../winnow/plugin_api.py):
 - `register_tab(id, label, entry)` — a pinned tab whose content is
   `ui/tab.js` (+ `ui/tab.css`), ES modules served from the plugin folder,
   mounted with `export default function mount(container, winnow)`.
-- `register_api(route, handler, methods)` — the backend the tab calls;
-  the handler gets a plain `PluginRequest` and uses `req.store.run_sql`
-  for reads and `req.storage` for its own persistent state.
+- `register_api(route, handler, methods)` — the backend the tab calls
+  (`edges` builds the graph, `preview` is the builder's live count over
+  the same SQL, `values` fills its value chips, `defs` reads and saves
+  definitions); the handler gets a plain `PluginRequest` and uses
+  `req.store.run_sql` for reads and `req.storage` for its own persistent
+  state. A merge is read as a union of its members built with
+  `merge_select_list` and `union_all`.
 - **Shipping defaults** — `defaults.json` beside the module, read by the
   `defs` route and merged with the analyst's saved definitions, the same
   pattern the app uses for its filter defaults.
 - The `winnow` context object: `el`/`post`/`api`/`toast`,
   `winnow.state.sources`/`timeRange`, `winnow.openFiltered(id, pairs)` to
   jump to evidence, and `onShow` for refresh-on-activation.
+- The app's own dialog pieces: `winnow.modal` for the builder,
+  `winnow.sectionPanes` for the **Events…** dialog's two panes (plugin
+  API 14), `winnow.dropdownMenu` for each event's **⋯** menu and
+  `winnow.confirmDialog` before a delete.
 - Theming: every canvas color is read from Winnow's CSS tokens
   (`--accent`, `--line-2`, …) at draw time, and `ui/tab.css` uses the same
   tokens, so all styles and both themes just work.

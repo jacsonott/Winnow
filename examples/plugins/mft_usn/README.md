@@ -8,12 +8,12 @@ MFTECmd/EZTools (and no .NET runtime) in the loop:
   entry was reused shows `<orphan>` instead of a made-up location),
   `$STANDARD_INFORMATION` and `$FILE_NAME` timestamps side by side with an
   `SI<FN Created` timestomp hint, in-use and deleted records alike (an
-  option restricts to either). Matches `$MFT`, `*.mft`.
+  option restricts to either). Matches `$MFT`, `$MFT.copy*`, `*.mft`.
 - **NTFS USN journal ($J, raw)** — USN_RECORD v2/v3 entries: timestamp,
   filename, decoded reason flags (`FILE_CREATE|CLOSE`), and MFT
   entry/sequence numbers. The sparse leading zero run is skipped at C
   speed; torn records are carved past, not fatal. Matches `$J`,
-  `*$UsnJrnl*`, `*.usn`.
+  `*$UsnJrnl*`, `$Extend*$J`, `*.usn`.
 
 Because both formats emit MFT entry + sequence numbers, the two tables
 join in Winnow's SQL pane:
@@ -28,13 +28,10 @@ WHERE m.InUse = 'false' ORDER BY u.Timestamp;
 
 ## Install
 
-**Settings → Plugins → Manage plugins… → "Install a plugin…"**, choose the
-folder picker, and pick this folder
-(takes effect immediately, no restart), or copy it in by hand:
-
-```bash
-cp -r examples/plugins/mft_usn plugins/
-```
+It ships with Winnow, switched off: turn it on in **Settings → Plugins →
+Manage plugins…** (no restart). To run a modified copy instead, copy this
+folder into `plugins/` (or use **Install a plugin… → Pick a plugin
+folder…** there); a copy in `plugins/` replaces the bundled one.
 
 Then import a raw `$MFT`/`$J` by drag-and-drop, through **Import files…**,
 a folder import, or the per-format picker in the plugins manager

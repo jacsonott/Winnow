@@ -11,7 +11,8 @@ This is also the reference example for the plugin system: a folder
 plugin with metadata, two registered ingest formats (extension AND
 bare-filename matching — "$MFT"/"$J" have no extension), per-format
 options, explicit column_types, and helper modules imported relatively.
-To install it, copy this folder into plugins/ (see plugins/README.md).
+It ships switched off in examples/plugins/; turn it on in Settings →
+Plugins → Manage plugins… (see plugins/README.md).
 """
 
 from . import mft, usn
