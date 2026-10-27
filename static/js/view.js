@@ -180,6 +180,26 @@ function stopIndicator(seq, restore) {
   return before;
 }
 
+/* Calls off the build in flight without starting another, for
+   openSource's cached path, which puts a table's view back without
+   building one. Every other way a view goes up is a build, and a build
+   supersedes the one before it; this path superseded nothing, and
+   installView's checks (the newest seq, the same table) let a build
+   already running for that table land on top of it. One that started
+   while openSource had the table's filters and sort cleared, waiting on
+   its layout, built the whole table: the grid showed every row under a
+   filter box that said otherwise, the scroll went back to the top, and
+   the server evicted the view that had just been put back. A header
+   box's debounce firing mid-switch did exactly that
+   (tests/ui/test_view_state.py). */
+export function supersedeBuild() {
+  ++rebuildSeq;
+  cancelInflight();
+  // Its finally would put the stats from before it back over the line
+  // the cached path is about to write.
+  if (indicator) stopIndicator(indicator.seq, false);
+}
+
 /* The stats line a landed view writes. The table it is for can be gone
    by then — Remove drops the record from S.sources while a build for it
    is still in flight, and the landing is a beat behind — so the record is
