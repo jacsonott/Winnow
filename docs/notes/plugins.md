@@ -223,7 +223,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   The module's default export gets `(container, winnow)` where
   `winnow` is `buildPluginTabContext`'s stable surface (api/post/el/
   modal helpers, `sql()` → run_sql's own RO connection, `schemaText()`,
-  live state getters incl. state.timeRange, plus openFiltered(source_id, [{column, value}]) to jump to the evidence); optional onShow/onHide exports fire per switch.
+  live state getters incl. state.timeRange, plus openFiltered(source_id, [{column, value}], {where, tags, clearTimeframe}) to jump to the evidence); optional onShow/onHide exports fire per switch.
   `register_api` registers backend routes dispatched at request time by
   the one catch-all `/api/plugin/{fs}/{route}` handler — deliberately
   not real FastAPI routes, so a Settings toggle's registry reload is
@@ -307,6 +307,24 @@ see [docs/notes/README.md](README.md) for the whole set.
     *can* see: `row_tags` is in the case file, so the pivot's tag chips
     compile straight into its query, from the grid's own `S.tagFilter`
     spelling (`_tag_clauses`).
+  - **"Show these rows in the grid" is a translation, and it has to be
+    exact.** The cell's rows reach the grid through
+    `winnow.openFiltered(id, pairs, {where, tags, clearTimeframe})`:
+    the cell's values as box filters, the Filters area as filter-tree
+    conditions (`gridFilterFor` in ui/tab.js), the chips as `S.tagFilter`
+    verbatim. Each pivot operator maps to the grid operator whose SQL is
+    the same — `not_in` is an AND of `not_equals`, each already
+    `(c <> ? OR c IS NULL)` — and tests/test_plugins.py
+    (`test_pivot_filters_open_the_rows_the_grid_finds`) runs every one
+    through both compilers and compares counts. Two had to move to make
+    that true. **(blank) in a list** was a bare `IN ('')`, which missed
+    NULL cells although the value list shows NULL as (blank); it is now the
+    grid's empty-in-a-list, NULL included. And **`>`/`<`**: the pivot
+    casts every column, the grid only one it types as a number, so on a
+    text column the two compare differently — that one is refused in the
+    UI rather than translated. A new operator needs a twin in
+    `_compile_condition` and a line in that test, or the grid opens other
+    rows than the cell counted, under a filter that looks right.
   - **One statement for every grouping level, or the pivot is a table
     scan per level.** It used to run one `GROUP BY` per level, each a full
     scan of the source, and on a wide table the scan is most of the cost:

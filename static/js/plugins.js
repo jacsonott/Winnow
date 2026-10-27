@@ -15,7 +15,8 @@ import { moveCursor, rowsPaintY, spacerPx, vScroll } from './grid.js';
 import { loadCaseVariables } from './savedfilters.js';
 import { S } from './state.js';
 import { alertDialog, closeModal, confirmDialog, dropdownMenu, modal, promptDialog, sectionPanes } from './ui.js';
-import { updateTimeRangeButton } from './timeframe.js';
+import { updateFiltersButton, updateTimeRangeButton } from './timeframe.js';
+import { renderTagRibbon } from './tags.js';
 import { histogramOpen } from './histogram.js';
 import { announceChange, inPopout, pageElsewhere, popoutPage, sendToMain } from './popout.js';
 
@@ -462,7 +463,7 @@ export async function showPage(name) {
 
 export function buildPluginTabContext(tab, kind = 'tab') {
   return {
-    apiVersion: 8,
+    apiVersion: 9,
     plugin: tab.plugin,
     base: `/api/plugin/${tab.plugin_fs}`,      // the plugin's own register_api routes
     assets: `/plugin_assets/${tab.plugin_fs}`, // the plugin's own files (css, workers, data)
@@ -559,8 +560,11 @@ export function buildPluginTabContext(tab, kind = 'tab') {
     clearTimeRange: () => setCaseTimeRange({ enabled: false, column: null, start: '', end: '' }),
     // Jump from a plugin's visualization to the EVIDENCE: open the source
     // and exact-filter it to the given column values (clearing whatever
-    // filters were there — this is a navigation, not a refinement).
-    openFiltered: (sourceId, pairs) => openFilteredRows(sourceId, pairs),
+    // filters were there — this is a navigation, not a refinement). The
+    // options carry the rest of a count's question — conditions, a tag
+    // filter, and whether the count ignored the timeframe (API 15 /
+    // apiVersion 9).
+    openFiltered: (sourceId, pairs, opts) => openFilteredRows(sourceId, pairs, opts),
   };
 }
 
@@ -577,17 +581,58 @@ export function setCaseTimeRange(range) {
 /* winnow.openFiltered: the rows behind a mark, in the grid. From a pop-out
    the grid is the main window's, so it is asked to do the whole of it —
    opening the table there and then setting filters here would filter
-   nothing anyone can see. */
-export async function openFilteredRows(sourceId, pairs) {
-  if (inPopout()) { sendToMain('openFiltered', sourceId, pairs); return; }
+   nothing anyone can see.
+
+   `pairs` are exact values, written into the columns' filter boxes, where
+   the filter bar shows them. The options are for a mark whose rows a set
+   of exact values can't describe — the Pivot's cell, under its own
+   Filters area and tag chips:
+   - `where`: conditions in the filter builder's vocabulary
+     ({column, op, value}, op one of equals, not_equals, contains,
+     not_contains, starts, in, empty, not_empty, >, <, >=, <=, regex),
+     ANDed into the filter tree;
+   - `tags`: the tag filter, in the ribbon's spelling (a tag id, '!<id>',
+     '__any__', '__none__');
+   - `clearTimeframe`: the count ignored the case timeframe, so it is turned
+     off — said out loud, since it is global — or the grid would show fewer
+     rows than the number promised (session.js openDiffRows, the same).
+   Every part is applied or the call says why: a pair the box can't spell
+   (a value with a line break) goes into the tree as an equals rather than
+   being dropped, which used to show the whole table under a chip that
+   claimed otherwise. */
+export async function openFilteredRows(sourceId, pairs, { where = [], tags = [], clearTimeframe = false } = {}) {
+  if (inPopout()) { sendToMain('openFiltered', sourceId, pairs, { where, tags, clearTimeframe }); return; }
   await openSource(sourceId);
+  const hadTimeframe = !!(clearTimeframe && S.timeRange && S.timeRange.enabled);
   await clearAllFilters();
   let applied = 0;
+  const conds = [];
   for (const { column, value } of pairs || []) {
     const raw = valueFilterText(value);
     if (raw !== null) { setColumnFilter(column, raw); applied++; }
+    else conds.push({ type: 'cond', column, op: 'equals', value: String(value) });
+  }
+  for (const c of where || []) {
+    if (!c || !c.column || !c.op) continue;
+    conds.push({ type: 'cond', column: String(c.column), op: String(c.op), value: c.value == null ? '' : c.value });
+  }
+  if (conds.length) {
+    S.filterTree = { type: 'group', op: 'AND', children: conds };
+    updateFiltersButton();
+    applied++;
+  }
+  if (Array.isArray(tags) && tags.length) {
+    S.tagFilter = [...tags];
+    renderTagRibbon();
+    applied++;
+  }
+  if (hadTimeframe) {
+    S.timeRange = { enabled: false, column: null, start: '', end: '' };
+    updateTimeRangeButton();
+    applied++;
   }
   if (applied) await rebuildView({ keepScroll: false });
+  if (hadTimeframe) toast('Timeframe filter turned off — these are the rows that were counted', 4000);
 }
 
 export async function showPluginTab(tabId) {
