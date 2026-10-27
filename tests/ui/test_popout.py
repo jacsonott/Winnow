@@ -19,6 +19,7 @@ from __future__ import annotations
 import contextlib
 
 import pytest
+from playwright.sync_api import Error as PlaywrightError
 
 from spawn import running_server
 
@@ -53,6 +54,19 @@ def popped_out(page, key="timeline", tab="#tabTimeline"):
     assert not errors, "uncaught JS errors in the pop-out: " + " | ".join(errors)
 
 
+def _dock(pop):
+    """Click ⇤ Back to main window, which closes the window it is in. The
+    window can be gone before Playwright hears the click land, and it says
+    so as an error; that is the click having worked. Whether the window
+    really closed is what expect_event checks."""
+    with pop.expect_event("close"):
+        try:
+            pop.click("#btnPopoutDock")
+        except PlaywrightError as e:
+            if "closed" not in str(e):
+                raise
+
+
 def _show_placeholder(page):
     page.click("#tabTimeline")
     page.wait_for_selector("#popoutPlaceholder:not([hidden])")
@@ -79,8 +93,7 @@ def test_pop_out_shows_the_page_alone_and_main_stands_down(page):
 def test_back_to_main_window_closes_the_pop_out_and_shows_the_page(page):
     with popped_out(page) as pop:
         _show_placeholder(page)
-        with pop.expect_event("close"):
-            pop.click("#btnPopoutDock")
+        _dock(pop)
         page.wait_for_selector("#timelineview:not([hidden])")
         assert page.locator("#popoutPlaceholder").is_hidden()
         assert not page.locator("#tabTimeline").evaluate("(b) => b.classList.contains('tab-popped')")
@@ -230,8 +243,7 @@ def test_the_pivot_moves_between_windows_with_what_was_built_in_it(page, pivot):
         assert page.locator(".pluginview").count() == 0, "the main window kept its Pivot mounted"
 
         pop.evaluate(DRAG_FIELD, ["[data-field='EventId']", "[data-zone='rows']"])
-        with pop.expect_event("close"):
-            pop.click("#btnPopoutDock")
+        _dock(pop)
 
         page.click(tab)
         page.wait_for_selector(".pluginview [data-zone='rows'] [data-field='EventId']", timeout=10_000)
