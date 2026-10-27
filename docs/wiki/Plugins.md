@@ -222,7 +222,9 @@ Values can be **Count**, **Distinct count**, **Sum**,
 **Average**, **Min** or **Max**; Count counts non-empty cells, and Sum and
 Average ignore text that isn't a number. Filters use `is any of`,
 `is none of`, `contains`, `does not contain`, `starts with`,
-`> (numeric)`, `< (numeric)`, `is empty` and `is not empty`.
+`> (numeric)`, `< (numeric)`, `is empty` and `is not empty`. In
+`is any of` and `is none of`, **(blank)** is an empty cell, whether the
+file had an empty value there or the row was too short to have one.
 
 The top of **Filters** carries the case's tags as chips, and they work as
 the tag ribbon above the grid does (see [Tagging and notes](Tagging-and-notes.md)):
@@ -240,7 +242,18 @@ tagged in the meantime are counted.
   new one replaces it. Its numbers can't be clicked in the meantime.
 - **Copy** puts the result on the clipboard as tab-separated text; **CSV**
   downloads it as a file.
-- Click any number to see the rows behind it (up to 500).
+- Click any number to see the rows behind it (up to 500). **Show these
+  rows in the grid**, at the top of that list or on the number's
+  right-click menu, opens the table in the grid on all of them: the
+  cell's values in the column filters, the pivot's **Filters** as
+  conditions in the filter builder, and its tag chips on the tag ribbon,
+  ready to read, tag and export. The timeframe filter is turned off on the
+  way, because the pivot counts the whole table. A `> (numeric)` or
+  `< (numeric)` filter on a column the grid holds as text can't be carried
+  over, since the grid would compare it as text; the button says so
+  instead. With the Pivot in a window of its own (see
+  [Working with tables](Working-with-tables.md#opening-a-page-in-its-own-window)),
+  the rows open in the main window.
 - Several pivots can be open as sub-tabs (`+` at the end of the sub-tabs
   adds one; double-click one to rename it). They are saved in the case,
   tag filter included, and restored when you come back; **Start fresh** on

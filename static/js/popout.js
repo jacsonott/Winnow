@@ -386,7 +386,7 @@ export function openPageTabMenu(e, key) {
    navigation, since the main window is where every part of it shows. */
 const ACTIONS = {
   openSource: (id) => openSource(id),
-  openFiltered: (sourceId, pairs) => openFilteredRows(sourceId, pairs),
+  openFiltered: (sourceId, pairs, opts) => openFilteredRows(sourceId, pairs, opts),
   jumpToRow: (sourceId, rid) => jumpToTimelineRow(sourceId, rid),
   drill: (w, extra) => drillInto(w, extra),
   setTimeRange: (range) => setCaseTimeRange(range),

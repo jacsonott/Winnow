@@ -462,7 +462,7 @@ Prefer it to reaching into the app's globals — this is what's supported.
 
 | Field | What it is |
 | --- | --- |
-| `apiVersion` | Contract version of this object (currently `8`) |
+| `apiVersion` | Contract version of this object (currently `9`) |
 | `plugin` | Your plugin's display name |
 | `base` | `/api/plugin/<fs_name>` — prefix for your own routes |
 | `assets` | `/plugin_assets/<fs_name>` — prefix for your own files |
@@ -494,11 +494,33 @@ Prefer it to reaching into the app's globals — this is what's supported.
 | `onViewChange(cb)` | Fires after every grid rebuild that installs a view — filter, sort, search, timeframe, table switch — with `{sourceId, viewId, rowCount}`. A search left running in the background fires when it is applied, not when it finishes. Returns an unsubscribe |
 | `onAppearanceChange(cb)` | Fires after every skin / theme / accent change with `{style, themeMode, accent}`. A canvas doesn't inherit CSS, so redraw here. Returns an unsubscribe |
 | `setTimeRange({column, start, end, enabled})` / `clearTimeRange()` | Drive the tables' timeframe filter (the table toolbar's ⏱) — the same object its Timeframe dialog writes, so every other consumer sees it as if typed there. The Timeline's own range is not reachable from a plugin |
-| `openFiltered(sourceId, pairs)` | Jump from your visualization to the EVIDENCE: opens the source and exact-filters it to `[{column, value}, …]`. Clears existing filters — it is a navigation, not a refinement |
+| `openFiltered(sourceId, pairs, opts)` | Jump from your visualization to the EVIDENCE: opens the source and exact-filters it to `[{column, value}, …]`. Clears existing filters — it is a navigation, not a refinement. `opts` carries the rest of a count's question; see [Opening the rows behind a number](#opening-the-rows-behind-a-number) |
 
 **Always call your backend through `winnow.api` / `winnow.post`.** A raw
 `fetch()` won't carry the `X-Timeline-Lite-Client` header that Winnow's
 CSRF middleware requires on non-GET `/api/*` calls, and will 403.
+
+### Opening the rows behind a number
+
+A count is only worth something if the analyst can get to the rows behind
+it, in the grid, where they can be read, tagged and exported.
+`winnow.openFiltered(sourceId, pairs, opts)` does that. `pairs` are exact
+values, written into the columns' filter boxes, where the filter bar shows
+them. When the count also depended on something exact values can't say,
+pass it in `opts` (API 15):
+
+| Option | What it is |
+| --- | --- |
+| `where` | Conditions in the filter builder's vocabulary, ANDed into the filter tree: `[{column, op, value}, …]`, `op` one of `equals`, `not_equals`, `contains`, `not_contains`, `starts`, `in` (`value` a list, where `''` is the empty cell, NULL included), `empty`, `not_empty`, `>`, `<`, `>=`, `<=` (numeric on a column the grid types as a number, text comparison otherwise), `regex` |
+| `tags` | The tag filter, in the ribbon's spelling: a tag id, `'!<id>'` to exclude one, `'__any__'`, `'__none__'` |
+| `clearTimeframe` | `true` when your count ignored the tables' timeframe filter (the table toolbar's ⏱). The grid turns it off and says so, or it would show fewer rows than your number |
+
+Whatever the table had before is replaced. Make the conditions compile to
+the SQL your count ran: the Pivot's cell does (its `gridFilterFor`), and
+where it can't — a `>` on a column the grid holds as text — it refuses by
+name rather than open other rows under the same filter. A value a filter
+box can't spell (one with a line break) still filters: it goes into the
+tree as an `equals` instead of being dropped.
 
 ### Keeping a tab's state across a case close
 
@@ -1607,9 +1629,10 @@ python server.py --plugins-dir ~/src/my-winnow-plugins
 
 Installs from the UI always land in the first directory (`plugins/`).
 
-**Versioning:** the current plugin API version is **14** (the tab
-context's `sectionPanes` arrived in 14, which took the context's own
-`apiVersion` to 8; its `dropdownMenu` arrived in 13, which took it to 7;
+**Versioning:** the current plugin API version is **15** (the tab
+context's `openFiltered` options — `where`, `tags`, `clearTimeframe` —
+arrived in 15, which took the context's own `apiVersion` to 9;
+`sectionPanes` arrived in 14, which took it to 8; its `dropdownMenu` arrived in 13, which took it to 7;
 in 12 the SQL
 pane started holding results on the server: `sqlPage` results gained
 `total` and `stopped`, their `rows` became the first 5,000, and

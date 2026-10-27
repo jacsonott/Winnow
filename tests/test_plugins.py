@@ -1973,6 +1973,101 @@ def test_pivot_like_filters_escape_their_own_wildcards(client, store, write_csv,
     assert out["sets"][0]["rows"][0][0] == 0
 
 
+# "Show these rows in the grid": each Filters operator beside the grid
+# conditions the Pivot hands openFiltered for it (gridFilterFor in
+# examples/plugins/pivot/ui/tab.js). The grid has to land on the rows the
+# cell counted, so each pair goes through both compilers.
+PIVOT_TO_GRID = [
+    ({"op": "in", "values": ["SRV1"], "column": "Host"},
+     [{"op": "in", "value": ["SRV1"], "column": "Host"}]),
+    ({"op": "in", "values": [""], "column": "Note"},
+     [{"op": "in", "value": [""], "column": "Note"}]),
+    ({"op": "in", "values": ["ok", ""], "column": "Note"},
+     [{"op": "in", "value": ["ok", ""], "column": "Note"}]),
+    ({"op": "not_in", "values": ["ok"], "column": "Note"},
+     [{"op": "not_equals", "value": "ok", "column": "Note"}]),
+    ({"op": "not_in", "values": ["ok", "late"], "column": "Note"},
+     [{"op": "not_equals", "value": "ok", "column": "Note"},
+      {"op": "not_equals", "value": "late", "column": "Note"}]),
+    ({"op": "not_in", "values": ["ok", ""], "column": "Note"},
+     [{"op": "not_equals", "value": "ok", "column": "Note"}, {"op": "not_empty", "column": "Note"}]),
+    ({"op": "contains", "value": "a", "column": "Note"}, [{"op": "contains", "value": "a", "column": "Note"}]),
+    ({"op": "not_contains", "value": "a", "column": "Note"},
+     [{"op": "not_contains", "value": "a", "column": "Note"}]),
+    ({"op": "starts", "value": "SRV", "column": "Host"}, [{"op": "starts", "value": "SRV", "column": "Host"}]),
+    ({"op": "gt", "value": "50", "column": "Bytes"}, [{"op": ">", "value": "50", "column": "Bytes"}]),
+    ({"op": "lt", "value": "150", "column": "Bytes"}, [{"op": "<", "value": "150", "column": "Bytes"}]),
+    ({"op": "empty", "column": "Note"}, [{"op": "empty", "column": "Note"}]),
+    ({"op": "not_empty", "column": "Note"}, [{"op": "not_empty", "column": "Note"}]),
+]
+
+
+@pytest.fixture
+def grid_pivot(client, store, write_csv, example_registry, monkeypatch):
+    """A table with both kinds of nothing in it: '' as the CSV has it, and
+    NULL, which a JSON import or a short row from another reader leaves. The
+    NULLs are written in directly — no CSV produces one."""
+    import server
+
+    monkeypatch.setattr(server, "PLUGINS", example_registry)
+    rows = [["Host", "Note", "Bytes"],
+            ["SRV1", "ok", "100"],
+            ["SRV1", "late", "200"],
+            ["SRV1", "", "40"],
+            ["SRV2", "ok", ""],
+            ["SRV2", "x", "70"],
+            ["SRV2", "x", "160"],
+            ["SRV2", "", "90"],
+            ["SRV3", "NULL", "300"],
+            ["SRV3", "NULL", "10"]]
+    sid = store.ingest_csv(write_csv(rows, "togrid.csv"), name="togrid", build_fts=False)["id"]
+    with store.lock:
+        store.db.execute(f'UPDATE src_{sid} SET "Note" = NULL WHERE rid IN (8, 9)')
+        store.db.commit()
+    assert {c["name"]: c["type"] for c in store.get_source(sid)["columns"]}["Bytes"] == "number"
+    return client, sid
+
+
+@pytest.mark.parametrize("pivot_filter, grid_conds", PIVOT_TO_GRID,
+                         ids=[f"{p['op']}-{p['column']}-{i}" for i, (p, _) in enumerate(PIVOT_TO_GRID)])
+def test_pivot_filters_open_the_rows_the_grid_finds(grid_pivot, store, pivot_filter, grid_conds):
+    client, sid = grid_pivot
+    tree = {"type": "group", "op": "AND",
+            "children": [{"type": "cond", "value": "", **c} for c in grid_conds]}
+    counted = _count(client, sid, filters=[pivot_filter])
+    assert counted == store.build_view(sid, {"filter_tree": tree})["row_count"]
+
+
+def test_pivot_blank_in_a_list_is_the_empty_cell_null_included(grid_pivot):
+    """The value list shows a NULL as (blank), and ticking (blank) found only
+    the '' cells: the NULLs were neither kept by `is any of` nor dropped by
+    `is none of`."""
+    client, sid = grid_pivot
+    assert _count(client, sid, filters=[{"column": "Note", "op": "in", "values": [""]}]) == 4
+    assert _count(client, sid, filters=[{"column": "Note", "op": "not_in", "values": [""]}]) == 5
+    # Nothing else moved: excluding a value still keeps every blank cell.
+    assert _count(client, sid, filters=[{"column": "Note", "op": "not_in", "values": ["ok"]}]) == 7
+
+
+def test_a_pivot_cell_opens_the_rows_it_counted(grid_pivot, store):
+    """The cell's own values go into the column boxes as `=value` (`""` for
+    a blank), under the Filters area's conditions. The boxes reach the store
+    parsed, as the client sends them."""
+    client, sid = grid_pivot
+    pivot_filter = {"column": "Bytes", "op": "gt", "value": "50"}
+    out = _agg(client, sid, values=[{"agg": "count"}], group_sets=[["Host", "Note"]], filters=[pivot_filter])
+    tree = {"type": "group", "op": "AND", "children": [{"type": "cond", "column": "Bytes", "op": ">", "value": "50"}]}
+    seen = set()
+    for host, note, n in out["sets"][0]["rows"]:
+        seen.add((host, note))
+        if note is None:
+            continue   # a NULL key opens as (blank), '' and NULL alike — as Show the rows here does
+        boxes = [{"column": "Host", "op": "equals", "value": host},
+                 {"column": "Note", "op": "equals", "value": note} if note else {"column": "Note", "op": "empty"}]
+        assert store.build_view(sid, {"filters": boxes, "filter_tree": tree})["row_count"] == n, (host, note)
+    assert {("SRV2", "x"), ("SRV2", "")} <= seen   # a cell of two rows, and a blank one
+
+
 def test_pivot_distinct_count_ignores_blanks_like_count_does(pivot_client):
     """Blank is the absence of a value, not one more distinct value. Counting
     '' as a category makes Distinct count exceed Count on the same column."""
