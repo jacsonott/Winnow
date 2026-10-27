@@ -408,6 +408,31 @@ the end.
 (new sources imported, theme changed) and `onHide` to pause timers or
 animation loops.
 
+### In a window of its own
+
+The analyst can pop any tab out into a window beside the main one
+(right-click its tab → **Open in its own window**), so your tab can sit
+next to the table it is about. That window is a second copy of the app
+showing only your tab, and your module is mounted there the usual way.
+What differs:
+
+- **There is no grid in it.** `state.view` and `state.sourceId` are
+  `null`, and `onViewChange` never fires. Read what you need through
+  `api`/`sql`, not through the view.
+- **Navigation happens in the main window.** `openSource`,
+  `openFiltered`, `showPage`, `setTimeRange` and `clearTimeRange` are
+  carried out there, whole, and the main window comes to the front.
+  Don't split one into steps (open the table, then filter it): the second
+  step would run in the window that has no table.
+- **`onShow` also fires when another window wrote.** A tag, a note, a new
+  table or a case variable changed elsewhere re-reads `state` and calls
+  `onShow` again, so a tab that refreshes in `onShow` stays current with
+  no extra work. `refreshSources()` tells the other windows too.
+- **Only one copy of your tab is live.** While it is out, the main window
+  shows a placeholder instead of mounting it, so `tabState` has one
+  writer. What `set()` has pending is saved before the tab moves either
+  way.
+
 ### The `winnow` context
 
 The second argument to `mount` is Winnow's stable surface for plugins.

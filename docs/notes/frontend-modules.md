@@ -71,6 +71,7 @@ split, found by loading the app:
 | `pluginmanager` `bundles` `profilebuilder` | the two-pane plugins manager (and the one-line Settings section that opens it); the profiles manager; the profile builder |
 | `histogram` | the built-in histogram strip between the toolbar and the grid — the time-proportional canvas, the brush that writes the timeframe filter, the `winnow.histogram` prefs; shares `#pluginPanels` with plugin toolbar panels (see [ui.md](ui.md)) |
 | `ui` `keymap` `settings` `home` | modal/dialog/menu primitives; keybindings; the Settings modal; the home screen and `boot()` |
+| `popout` | page tabs in windows of their own: the `BroadcastChannel` between a main window and its pop-outs, the placeholder that stands in for a page that is out, the `pageElsewhere` guard every page's show function starts with, navigation forwarded to the main window, cross-window refresh (see [ui.md](ui.md)) |
 | `main` | imports everything, calls each `wire*()`, runs the startup sequence, exposes `window.__winnow` |
 
 ## `window.__winnow`

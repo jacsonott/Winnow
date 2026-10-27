@@ -30,6 +30,7 @@ import { loadTimelineTemplates, renderTimelineTimeRange } from './timeline.js';
 import { flushTimelineNote, resetTimelinePane } from './timelinepane.js';
 import { confirmDialog, contextMenu, dropdownMenu, modal, oneAtATime, promptDialog, sectionPanes, sideRail } from './ui.js';
 import { writeClipboardText } from './grouping.js';
+import { enterPopout, inPopout, ownPopoutCount, popoutWithoutCase } from './popout.js';
 
 /* -------------------------------------------------------------- home screen */
 
@@ -94,10 +95,13 @@ export async function shutdownWinnow() {
 }
 
 /* Windows other than this one with a presence stream open, or null when
-   the server can't say — the confirm then keeps its general wording. */
+   the server can't say — the confirm then keeps its general wording. This
+   window's own pop-outs (popout.js) are left out: they are part of it, not
+   somebody else's work that would stop. */
 export async function otherWindows() {
   try {
-    return (await api(`/api/presence/others?page=${PAGE_ID}`)).others;
+    const { others } = await api(`/api/presence/others?page=${PAGE_ID}`);
+    return Math.max(0, others - ownPopoutCount());
   } catch { return null; }
 }
 
@@ -1658,8 +1662,13 @@ export async function boot() {
     showApp();
     await loadCaseSettings();
     await loadCaseTags();   // same reason as openCase: an empty case opens no table
+    // A pop-out shows one page and opens no table; the main window runs the
+    // jobs poll for both (popout.js).
+    if (inPopout()) { await enterPopout(cur); return; }
     await loadSources();
     startJobsPoll(); // an import (or index build) from before a reload shows back up
+  } else if (inPopout()) {
+    popoutWithoutCase();
   } else {
     showHome();
     await refreshCases();

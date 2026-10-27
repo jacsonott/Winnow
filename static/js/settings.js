@@ -1583,6 +1583,20 @@ export function buildUpdatesPanel(b) {
    fire during load, so the order these run in doesn't matter — the
    startup steps that DO depend on order live in main.js instead. */
 export function wireSettings() {
+// Another window on this Winnow changed the look. The event only fires in
+// the OTHER windows of the origin, which is the point: a pop-out
+// (popout.js) has no Settings of its own and follows the main window's,
+// and two windows of one install should not show two skins. The remote
+// mode is the machine's (see saveAppearance), so it is kept, not reread.
+window.addEventListener('storage', (e) => {
+  if (e.key !== APPEARANCE_KEY) return;
+  S.appearance = { ...loadAppearance(), remoteSession: S.appearance.remoteSession };
+  document.documentElement.setAttribute('data-style', S.appearance.style);
+  paintStripes();   // before paintTheme, whose announce carries the value
+  paintTheme();
+  paintAccent();
+  paintDensity();
+});
 window.addEventListener('resize', () => {
   // A lone base column is sized from the viewport (columns.fillsGrid), so
   // the header has to follow the window as well as the rows.

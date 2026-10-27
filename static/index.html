@@ -98,6 +98,17 @@ try {
   </div>
 </header>
 
+<!-- A pop-out window's own bar, in the place .bar has in the main window
+     (static/js/popout.js; html[data-popout] hides the rest of the chrome).
+     Hidden everywhere else. -->
+<div class="popout-bar" id="popoutBar" hidden>
+  <span class="mark" aria-hidden="true"></span>
+  <span class="popout-bar-page" id="popoutPage"></span>
+  <span class="popout-bar-case" id="popoutCase"></span>
+  <div class="spacer"></div>
+  <button class="btn ghost" id="btnPopoutDock" title="Close this window and show the page as a tab in the main window again">⇤ Back to main window</button>
+</div>
+
 <section class="toolbar" id="toolbar">
   <div id="groupStrip" class="group-strip"></div>
   <div id="tagRibbon" class="tag-ribbon" aria-label="Tags"></div>
@@ -365,6 +376,10 @@ Markdown: # headings, - bullets, **bold**, `code`, tables. Link ▾ points at a 
       <div class="page-panel-resize" id="notesPanelResize" title="Drag to resize the panel" hidden></div>
       <aside id="notesPluginPanels" class="page-panels" hidden></aside>
     </section>
+
+    <!-- Where a page out in its own window would be (static/js/popout.js),
+         and in a pop-out, why it has nothing to show. -->
+    <section class="popout-placeholder" id="popoutPlaceholder" hidden></section>
   </div>
 
   <div class="detail-resize" id="detailResize" hidden title="Drag to resize"></div>

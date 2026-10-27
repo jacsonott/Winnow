@@ -644,6 +644,84 @@ see [docs/notes/README.md](README.md) for the whole set.
     is 0 before a case is open, which would otherwise pin the strip at 0px
     for the whole session, since only `showApp()` and the window `resize`
     handler re-run it.
+- **A page tab can be popped out into a window of its own**
+  (static/js/popout.js; asked for so the Pivot could sit beside the table
+  it counts). The pop-out is the whole app booted at
+  `/?popout=<page key>&owner=<main window id>`, with the main window's
+  chrome hidden by `html[data-popout]` — deliberately not the main
+  window's DOM rendered into a child window, which would share `S` but
+  open every menu, dialog and toast (and run every document-level
+  listener a plugin adds) in the wrong window. The server needed nothing:
+  several windows on one case were already safe (per-window presence, the
+  case token on every request — docs/notes/server.md). What it costs is
+  four rules in the browser, each a trap for whoever adds the next page or
+  route:
+  - **One live copy of a page.** Every page's show function starts with
+    `if (pageElsewhere(key)) return;` — in the main window that shows
+    `#popoutPlaceholder` for a page that is out, in a pop-out it sends any
+    page but its own to the main window. **A new page's show function
+    needs that line.** Two Pivots would both save the same
+    `winnow.tabState` row through a 500ms debounce, last write wins,
+    silently. For the same reason the saves a page has pending are
+    flushed before it moves either way (`flushPageSaves`: plugin tab
+    state, the SQL tab's text, the Notes narrative), and on a pop-out's
+    pagehide with `keepalive` — the window the page lands in reads them
+    back as it mounts. The main window also waits `GONE_SETTLE_MS` after a
+    closed pop-out's "gone" before it remounts, so that keepalive post has
+    landed.
+  - **Navigation goes to the main window, whole.** A pop-out has no grid,
+    so `openSource`, `openFilteredRows`, `jumpToTimelineRow`, dashboard
+    `drillInto`, `setCaseTimeRange` and showing another page each check
+    `inPopout()` first and `sendToMain(name, …args)` to the `ACTIONS`
+    table. Whole: opening the table there and then filtering here would
+    filter nothing anyone can see. A new navigation needs an action.
+  - **Writes are announced, from an allowlist.** Each window holds its
+    own copy of the case (`S.tags`, `S.sources`, the row caches), so
+    core.js's `api()` tells popout.js about every non-GET that succeeded
+    (`onMutation` — a registry, because core.js imports nothing), and
+    `MUTATION_KINDS` names the ones that changed case data. The rest stay
+    quiet on purpose: most POSTs are reads with a body (view builds,
+    previews, SQL runs) or this window's own bookkeeping (layouts, tab
+    state), and a refresh in every other window per keystroke of those
+    would be the bill. **A new route that changes tags, tables or notes
+    needs a line there**, or the other windows stay stale until they next
+    load. Changes no route of this window makes — a job finishing (jobs.js),
+    a watchlist scan (finishScan) — call `announceChange` themselves. The
+    listener reloads what it holds and repaints what is showing the way a
+    visit to it would (`runRefresh`); the Timeline keeps its scroll
+    (`buildTimeline({keepScroll})`), where a visit goes to the top.
+  - **A pop-out belongs to the main window that opened it.** Messages on
+    the `winnow.windows` channel carry that window's id (`family`), so a
+    second main window on the same server neither drives nor hears
+    another's pop-outs. The id is in sessionStorage so a reloaded main
+    window keeps it — and **a pop-out must never ask for its own**:
+    `window.open` copies the opener's sessionStorage into the new window,
+    so it would find its owner's id and answer to itself. A main window
+    says "leaving" on pagehide and "hello" when it boots; a pop-out waits
+    `OWNER_GRACE_MS` for the hello (a reload) and closes otherwise, and
+    also watches `window.opener.closed`, for a main window killed without
+    a pagehide.
+  - The window is opened **before anything is awaited**:
+    `window.open('', name, features)` inside the click, then the saves are
+    flushed, then `win.location.replace(url)`. A browser allows a window
+    only while the click that asked is fresh; awaiting the flush first got
+    it refused as a pop-up.
+  - A pop-out boots with `S.activeTab` set to its page *before*
+    `loadSources({navigate: false})`, which is what keeps that from
+    opening a table (it opens one when nothing is on screen) and flipping
+    the window to a grid it hides.
+  - A case switch in the main window is **followed, not refused**: the
+    pop-out's `caseGone` reloads it (`followCaseSwitch`) onto the case now
+    open instead of covering it with "This window is out of date", and
+    says nothing on the way out, so the main window doesn't remount the
+    page for the moment until it says "here" again. A page the new case
+    doesn't have (a board, a plugin switched off) gets a card saying so.
+  - The look follows through the `storage` event on `winnow.appearance`
+    (settings.js), and **Shut down**'s "other windows" count leaves out
+    this window's own pop-outs (`otherWindows`). The keys that switch tabs
+    or open Settings/Tables/Search all do nothing in a pop-out.
+  - tests/ui/test_popout.py, including that a pop-out survives its main
+    window's reload and follows it to another case.
 - **`syncTabChrome` is the registry of grid-only chrome.** The toolbar,
   a plugin's toolbar panels, the session-comparison banner, the "N
   selected" tag bar and the row detail pane all describe one table's
