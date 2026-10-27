@@ -245,6 +245,26 @@ see [docs/notes/README.md](README.md) for the whole set.
   read by the rest of the switch: loadSources picks its tab from
   `S.sourceId`. tests/ui/test_case_switch.py.
 
+- **Coming back to a table must call off any build already running for
+  it.** `openSource` clears the filters, search and sort, awaits the
+  table's layout (and its derived columns and tags), and only then puts
+  the stash back. A rebuild that starts in that gap builds the whole
+  table. When the return then finds its view cached, nothing used to
+  supersede that build, and installView's checks (the newest seq, the
+  same table) let it land afterwards: the grid showed every row under a
+  filter box that still said `=4624`, the scroll went back to the top,
+  and the server evicted the restored view. The cached path now calls
+  `supersedeBuild()` (view.js) first, which bumps `rebuildSeq`, cancels
+  the build in flight and drops its indicator, as a new build would. The
+  rebuild path needed nothing, since its own build supersedes. What
+  started the stray build in CI was the header filter box: typing arms
+  `rebuildSoon` (220 ms) and Enter or Escape builds at once, but neither
+  called the debounce off, so every filter committed with Enter was
+  built twice, and the second build could fire mid-switch. Both keys
+  now cancel it, as the search box's Enter always did with `searchSoon`.
+  This was the intermittent `scrollTop === 240` timeout in
+  tests/ui/test_view_state.py, which also pins each half on its own.
+
 - **Opens run one at a time, and the case clicked last wins.**
   `openCase` (home.js) used to hand ANY call made during an open the
   in-flight promise — right for a double-click, but a click on a

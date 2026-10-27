@@ -31,7 +31,7 @@ import { compactCaseFile, countCell, mergesUsing, openTablesManager, plural, rem
 import { loadTags, refreshTagCounts, renderTagRibbon } from './tags.js';
 import { openTableMenu, tableMenuSeg, tableMenuStat, timeframeAcrossTables, updateFiltersButton, updateTimeRangeButton } from './timeframe.js';
 import { confirmDialog, contextMenu, dropdownMenu, modal, promptDialog, sectionPanes } from './ui.js';
-import { dropPendingSelection, pendingViewStatsText, rebuildView, syncNoRows, writeStatsLine } from './view.js';
+import { dropPendingSelection, pendingViewStatsText, rebuildView, supersedeBuild, syncNoRows, writeStatsLine } from './view.js';
 import { inPopout, isPoppedOut, openPageTabMenu, popOut, sendToMain, showPopout } from './popout.js';
 
 /* --------------------------------------------------------------- sources */
@@ -1067,6 +1067,8 @@ export async function openSource(id, { skipBuild = false } = {}) {
     // source_id included: refreshTagCounts compares it against S.sourceId
     // and returns early without it, so the tag ribbon silently kept showing
     // whole-table counts beside a filtered view for as long as it lasted.
+    // A build still running for this table would land over it otherwise.
+    supersedeBuild();
     S.view = { view_id: cached.view_id, row_count: cached.row_count,
                elapsed_ms: cached.elapsed_ms, source_id: id };
     clearPageCache();

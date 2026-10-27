@@ -95,6 +95,16 @@ as `test_ingest_jobs.py`).
   window before the sweep ever takes it. If you write another concurrency
   test here, check it actually fails against the shape it's meant to catch.
 
+- **A browser test that only fails on a loaded runner may be a real race
+  in the app.** test_view_state.py's scroll wait timed out now and then
+  in CI for days and was waved through as pre-existing. It was a
+  product bug: a second, stray view build landing over the restored one
+  (see "Coming back to a table" in [ui.md](ui.md)). Before loosening a
+  wait, reproduce the failure: run the test on repeat with every core
+  busy (`python3 -c "while True: pass" &`, one per core), which turned
+  a rare CI failure into roughly one run in eight, and record what each
+  build and landing did in a `window` array to read back on failure.
+
 - **`pytest … | tail` reports tail's exit status, not pytest's.** A
   pipeline's status is its last command's, so `pytest -q | tail -5 && git
   commit …` commits on a red suite, and a script that gates on it passes

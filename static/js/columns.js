@@ -555,13 +555,21 @@ export function renderHead() {
       // filter in it is the row this replaced, rebuilt one column at a
       // time. What the filter says then is the chip's job. Under the
       // classic row there is nothing to put away.
+      //
+      // Both build at once, so the typing's debounce is called off first,
+      // as the search box's Enter does. Left armed, it built the same view
+      // a second time 220 ms later, and when that build started during a
+      // table switch it built the table with its filters cleared and landed
+      // over the view the switch had just put back (see supersedeBuild).
       if (e.key === 'Escape') {
+        rebuildSoon.cancel();
         inp.value = ''; S.filters[name] = ''; inp.classList.remove('active');
         closeColumnFilter(name);
         rebuildView();
       }
       if (e.key === 'Enter') {
         e.preventDefault();
+        rebuildSoon.cancel();
         closeColumnFilter(name);
         rebuildView();
         $('body').focus();
