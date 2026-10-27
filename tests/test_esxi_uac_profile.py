@@ -92,9 +92,15 @@ def test_esxi_plugin_loads_without_error(esxi_registry):
 def test_plugin_parses_each_log_type_into_the_shared_schema(esxi_store):
     got = {s["name"]: s for s in esxi_store.list_sources()}
     assert set(got) == set(LOGS)
+    shared = ["Timestamp", "Log", "Severity", "Component", "PID", "CPU", "User", "SourceIP"]
+    # The nine shared columns in every table, plus what that file's lines
+    # carry: hostd's Originator key, a Linux auth log's host and logged stamp.
     cols = [c["name"] for c in got["hostd.log"]["columns"]]
-    assert cols == ["Timestamp", "Log", "Severity", "Component", "PID", "CPU",
-                    "User", "SourceIP", "Message"]
+    assert cols == shared + ["sub", "Message"]
+    cols = [c["name"] for c in got["auth.log"]["columns"]]
+    assert cols == ["Timestamp", "Timestamp (as logged)"] + shared[1:] + ["Host", "Message"]
+    cols = [c["name"] for c in got["shell.log"]["columns"]]
+    assert cols == shared + ["Message"]
 
 
 def test_union_placeholder_spans_every_log(esxi_store):

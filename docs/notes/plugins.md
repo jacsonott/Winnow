@@ -576,19 +576,21 @@ see [docs/notes/README.md](README.md) for the whole set.
   ordinary `{{header_set:Name}}` placeholder binds to the FIRST matching
   source, which would silently ignore every other log. So the store grew a
   sibling: `{{all:header_set:Name}}` expands to a parenthesised
-  `SELECT * FROM src_a UNION ALL SELECT * FROM src_b …` over every matching
-  source (schemas identical by construction, so the union lines up by
-  position), and the dashboard slices it back apart on the plugin's `Log`
+  `SELECT <set's columns> FROM src_a UNION ALL …` over every matching
+  source (named, not `*`: since 2.0.0 the plugin's tables share the nine
+  columns but not the rest, see below), and the dashboard slices it back
+  apart on the plugin's `Log`
   column ('hostd'/'auth'/'shell'/…, set from the filename's stem, with
   the ` (N)` that archive expansion gives a clashing name taken off first,
   so `messages (2)` is still syslog). A profile still
   can't create a merge, and this isn't one — it's a read-time union, so it
   needs no new object in the case file and picks up rotated logs imported
-  later with no re-wiring. The plugin parses two line shapes per line, not
-  per file (ESXi ISO and year-less Linux syslog both appear in one
-  syslog.log), and folds timestamp-less continuation lines onto the
-  previous row rather than emitting orphans. Folding collects the lines
-  and joins once, and stops at `FOLD_MAX_CHARS` (64 Ki). The format
+  later with no re-wiring. The plugin detects the line shape per line,
+  not per file (ESXi ISO and year-less Linux syslog both appear in one
+  syslog.log), and folds timestamp-less continuation lines — and ESXi
+  7.0 U2+'s `-->` lines, which repeat the full prefix, when app and pid
+  match — onto the previous row rather than emitting orphans. Folding
+  collects the lines and joins once, and stops at `FOLD_MAX_CHARS` (64 Ki). The format
   claims every .log, so a dated header over a 100k-line dump is a real
   input, and repeated `message + " " + line` took minutes over it to build
   one 9 MB cell. Past the cap, lines are rows of their own, as they are
@@ -600,11 +602,59 @@ see [docs/notes/README.md](README.md) for the whole set.
   timeparse's `syslog_bsd` op does (a year added at each Dec→Jan wrap,
   in file order), but anchors at the other end, because a parser can't
   ask for the first line's year. The last stamp belongs to the year of
-  the file's mtime, or the year before if that day is still to come. That
-  costs one extra read, only for a file that has a year-less stamp. The
-  output is naive ISO, since syslog doesn't say its zone. An upload's
+  the file's mtime, or the year before if that day is still to come. The
+  wraps and the last stamp are counted in the first pass, which reads the
+  whole file anyway. The
+  output is naive, since syslog doesn't say its zone. An upload's
   spool carries the upload time as its mtime (browsers don't send it),
   so only an import by path gets the file's real one.
+- **esxi_logs reads a line the way iisread reads one (2.0.0).** It used
+  to read two shapes and keep the rest as Message: on ESXi 7.0 U2+
+  (`In(166) Hostd[pid]:`) it found neither severity nor app, hostd's
+  `[Originator@6876 sub= opID= user=]` was Message text, vmkernel's
+  world and opID were thrown away, a Linux hostname came out as the app,
+  and timestamps were left as logged, so a merged bundle sorted ESXi's
+  `…T…Z` and syslog's stamps apart (text order) and an offset was never
+  applied. What iisread established and the plugin now follows:
+  **the line names its fields, and nothing it names is dropped.** The
+  Originator block is RFC 5424 structured data and is read as W3C's
+  `#Fields:` are — every key any line carries is a column, the union in
+  first-seen order, matched case-insensitively (`opID`/`opid` are one
+  column, spelled as first seen), `user` going to the shared User. A key
+  that a fixed column already names (`Message=`, `Log=`) is suffixed
+  `_1` by the plugin itself, so the fixed column keeps its name rather
+  than losing it to `sanitize_columns`. Columns beyond the shared nine
+  (`Timestamp (as logged)`, Host, Facility, Thread, the keys, MSGID,
+  EventType) exist only in a table whose file has one, which is why the
+  `{{all:…}}` union names its columns. **Timestamp is timeparse's
+  canonical shape**, `YYYY-MM-DD HH:MM:SS[.ffffff]`: the grid sorts a
+  text column by its text, and only one shape across every table makes
+  text order time order. An offset is converted to UTC (datetime only
+  for a non-zero offset; the common `Z` case is sliced), a stamp that
+  isn't a date after conversion is "" rather than a guess, and
+  `Timestamp (as logged)` (IIS NCSA's name) appears when any stamp in the
+  file had its year inferred, its zone applied, or couldn't be read.
+  **Two passes, as iisread**: pass one (`plan`) works out the columns
+  and counts the lines; pass two (`rows`) islices to that count, so a
+  live log's new lines can't need an unplanned column, and an unplanned
+  value raises `iisread.FileChanged`. Keeping pass one's records instead
+  was measured at ~1.3 KB each, too much for a multi-GB vmkernel.log.
+  The file is opened as iisread opens one — `sniff_text_encoding` with
+  `TEXT_DECODE_ERRORS`, `newline="\n"` (a `\r` in an sshd username is
+  that line's text, not a forged row; universal newlines split there),
+  and `iisread.logical_lines` for NUL runs, with the same wlog warning.
+  **Speed**: the general path, `_parse_line_slow`, is a chain of regexes
+  with Python between them, and was 2.5× the old parser's time on 400k
+  lines. `_FAST_APP`/`_FAST_VMK` read the shapes nearly every line of a
+  bundle has with one regex each, built so they can't backtrack into an
+  answer the general path wouldn't give (the lookaheads after each
+  optional part), and `test_esxi_log_shapes.py` holds the two to the same
+  answer over every combination of stamp, header and body it knows. A
+  change to the general path needs the same change there, or the shape
+  taken out of the fast regex. Other measured costs: `ipaddress` is
+  ~10 µs a call, so a dotted quad is checked by hand and only IPv6 goes
+  through it; a key's column is cached by its spelling; the canonical
+  stamp is built in pass two only.
 
 - **A plugin's dashboard is offered, not applied** (`register_dashboard`,
   API 8). It appears under Dashboards ▸ Library beside the machine-wide
