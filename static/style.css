@@ -570,6 +570,22 @@ html[data-stripes="off"][data-style][data-theme] { --row-even: var(--ink); }
    matter because .bar itself never gets constrained to the viewport. */
 #app > * { min-width: 0; }
 
+/* A pop-out window (static/js/popout.js): one page, none of the main
+   window's chrome. Its own bar takes .bar's track and both columns; the
+   sidebar's column collapses to nothing with the sidebar gone. The grid's
+   own furniture (toolbar, panels, banners, the row detail) goes too —
+   there is no grid here, only the page. */
+.popout-bar { grid-column: 1 / -1; grid-row: 2; }
+html[data-popout] #sidebar,
+html[data-popout] .bar,
+html[data-popout] .toolbar,
+html[data-popout] .plugin-panels,
+html[data-popout] .diff-banner,
+html[data-popout] .temp-banner,
+html[data-popout] #detail,
+html[data-popout] #detailResize { display: none !important; }
+html[data-popout] .main-area { grid-column: 1 / -1; }
+
 #home {
   height: 100%;
   overflow: auto;
@@ -685,6 +701,42 @@ input::placeholder { text-overflow: ellipsis; }
 /* A closed page's row in the sidebar Pages section — present (it's the
    reopen path) but visibly parked. */
 .sidebar-page-closed .menu-item { color: var(--dim); opacity: .65; }
+/* A page out in its own window (popout.js): marked in the strip and the
+   sidebar, so its tab showing a placeholder is never a surprise. */
+.tab.tab-popped::after { content: '\29C9'; margin-left: 6px; color: var(--dim); font-size: 11px; }
+.sidebar-page-popped .menu-item::after { content: '\29C9'; margin-left: 6px; color: var(--dim); }
+
+.popout-bar {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--panel); border-bottom: 1px solid var(--line);
+  padding: 0 8px 0 12px; height: 38px; min-width: 0;
+}
+.popout-bar[hidden] { display: none; }
+.popout-bar .mark { flex: 0 0 auto; margin-right: 10px; }
+.popout-bar-page { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.popout-bar-case {
+  color: var(--dim); font-size: 12px; min-width: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.popout-bar .spacer { flex: 1 1 auto; }
+.popout-bar .btn { flex: 0 0 auto; }
+
+/* The main window's stand-in for a page that is out — and a pop-out's
+   note when its page has gone. */
+.popout-placeholder {
+  flex: 1 1 auto; min-height: 0; overflow: auto;
+  display: flex; align-items: center; justify-content: center; padding: 24px;
+}
+.popout-placeholder[hidden] { display: none; }
+.popout-card {
+  max-width: 440px; text-align: center;
+  background: var(--panel); border: var(--border-w) solid var(--line);
+  border-radius: var(--radius-md); padding: 24px 28px;
+}
+.popout-card-mark { font-size: 28px; color: var(--accent); line-height: 1; margin-bottom: 10px; }
+.popout-card-title { font-size: 15px; font-weight: 600; margin-bottom: 8px; }
+.popout-card p { color: var(--dim); margin: 0 0 16px; line-height: 1.5; }
+.popout-card-actions { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
 /* Dashboards: a pinned board reads as a page (weight), library boards
    read as available-not-present (dim), under a lighter sub-header. */
 .sidebar-dash-pinned .menu-item { font-weight: 600; }

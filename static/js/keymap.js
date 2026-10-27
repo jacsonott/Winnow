@@ -24,6 +24,7 @@ import { applyTag, applyTagToView, undoLastTagChange } from './tags.js';
 import { doJumpTs, openJumpTsModal, openTableMenu, openTimeRangeModal, toggleTimeRange } from './timeframe.js';
 import { clearTimelineSelection, timelineKey } from './timeline.js';
 import { tagTimelineLine } from './timelinepane.js';
+import { inPopout } from './popout.js';
 
 /* ------------------------------------------------------ keyboard shortcuts */
 
@@ -481,6 +482,7 @@ export const FIXED_KEYS = [
     ['Right-click a row', 'Tag it, filter to or exclude that cell’s value, copy'],
     ['Right-click a header', 'Column options — stack or copy its values, derive a column'],
     ['Right-click a tab', 'Close, rename, merge or remove it, or Columns… for the table menu'],
+    ['Right-click a page tab', 'Open that page in its own window beside this one, or close it'],
     ['Right-click a tag chip', 'Filter to that tag, or exclude the rows carrying it'],
   ]],
 ];
@@ -649,6 +651,8 @@ document.addEventListener('keydown', (e) => {
   if (e.altKey && !e.ctrlKey && !e.metaKey && /^[0-9]$/.test(digit)) {
     if (!$('modal').hidden || document.querySelector('.confirm-overlay')) return;
     e.preventDefault();
+    // A pop-out has one page and no tabs to switch to (popout.js).
+    if (inPopout()) return;
     activateTabSlot(digit);
     return;
   }
@@ -685,7 +689,9 @@ document.addEventListener('keydown', (e) => {
      Off the grid, switch first: syncTabChrome hides the whole toolbar on
      a page tab, so focusing #search there would put the caret in a
      display:none input and read as a keystroke that did nothing. */
-  if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === 'f' || e.key === 'F') && searchChordBound()) {
+  // Not in a pop-out: it has no grid to search, and its one page is small
+  // enough to be in the DOM, where the browser's own find tells the truth.
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === 'f' || e.key === 'F') && searchChordBound() && !inPopout()) {
     if (!$('modal').hidden || document.querySelector('.confirm-overlay')) return;
     e.preventDefault();
     closeMenu();
@@ -747,7 +753,9 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault();
     return;
   }
-  if (action && ACTION_HANDLERS[action] && (S.activeTab === 'grid' || TAB_AGNOSTIC_ACTIONS.has(action))) {
+  // The tab-agnostic ones open the main window's panels (Settings, Tables,
+  // Search all, the sidebar), which a pop-out leaves to it.
+  if (action && ACTION_HANDLERS[action] && (S.activeTab === 'grid' || (TAB_AGNOSTIC_ACTIONS.has(action) && !inPopout()))) {
     e.preventDefault();
     ACTION_HANDLERS[action](e, pageRows);
     return;

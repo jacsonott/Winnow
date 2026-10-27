@@ -100,6 +100,15 @@ const connListeners = [];
 export function onConnectionChange(fn) { connListeners.push(fn); }
 function announce(up) { for (const fn of connListeners) fn(up); }
 
+/* Told after every request that could have changed something — any
+   method but GET — once the server has said yes. `path` is as sent. Pop-out
+   windows (popout.js) are the listener: each window holds its own copy of
+   the case's tags and tables, and this is how the others hear that one of
+   them wrote. A registry rather than an import, because this module
+   imports nothing (docs/notes/frontend-modules.md). */
+const mutationListeners = [];
+export function onMutation(fn) { mutationListeners.push(fn); }
+
 /* Which case this page's state belongs to: the token the server named it
    by (case_token, on /api/case/current and on every route that switches
    case). Every request carries it, and the server refuses (409
@@ -243,11 +252,16 @@ export async function api(path, opts) {
     caseRefused(err, sentCase);
     throw err;
   }
+  if (o.method && o.method !== 'GET') {
+    for (const fn of mutationListeners) { try { fn(path, o.method); } catch (e) { console.error(e); } }
+  }
   return r.json();
 }
 
-export const post = (path, body, { signal } = {}) =>
-  api(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal });
+/* `keepalive` lets the request outlive the page — for a save made on
+   pagehide, which a plain fetch loses to the unload. */
+export const post = (path, body, { signal, keepalive } = {}) =>
+  api(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal, keepalive });
 
 /* Thin top-of-viewport progress indicator for anything that can take a
    real amount of time on a large source (a view rebuild — filter/sort/

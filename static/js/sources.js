@@ -32,6 +32,7 @@ import { loadTags, refreshTagCounts, renderTagRibbon } from './tags.js';
 import { openTableMenu, tableMenuSeg, tableMenuStat, timeframeAcrossTables, updateFiltersButton, updateTimeRangeButton } from './timeframe.js';
 import { confirmDialog, contextMenu, dropdownMenu, modal, promptDialog, sectionPanes } from './ui.js';
 import { dropPendingSelection, pendingViewStatsText, rebuildView, syncNoRows, writeStatsLine } from './view.js';
+import { inPopout, isPoppedOut, openPageTabMenu, popOut, sendToMain, showPopout } from './popout.js';
 
 /* --------------------------------------------------------------- sources */
 
@@ -628,6 +629,10 @@ export function renderPageTabs() {
       btn.onclick = t.show;
     }
     btn.dataset.pageKey = t.key;
+    // Its own window, or not (popout.js). Set on every render, the static
+    // four included, so a page brought back loses the mark here too.
+    btn.classList.toggle('tab-popped', isPoppedOut(t.key));
+    btn.oncontextmenu = (e) => openPageTabMenu(e, t.key);
     // Closed tabs stay IN the strip's DOM, hidden — the four static nodes
     // (#tabSql & co.) are found by id on every render, and a skipped node
     // would leave the document with replaceChildren and never come back.
@@ -905,6 +910,10 @@ function stashViewState() {
 }
 
 export async function openSource(id, { skipBuild = false } = {}) {
+  // A pop-out has no grid (popout.js). The navigations that do more than
+  // open a table are sent whole before they get here; this catches the
+  // rest, so the table at least opens where the analyst can see it.
+  if (inPopout()) { sendToMain('openSource', id); return; }
   const src = S.sources.find((s) => s.id === id);
   if (!src) return;
   // Every refresh idiom re-enters here for the table already open —
@@ -1562,7 +1571,10 @@ export function openSidebarRow(s, index, total) {
    plugin's checkbox in Settings), so there's nothing for one to do. */
 export function pageSidebarRow(t, index, total) {
   const closed = pageTabClosed(t.key);
-  const row = el('div', 'sidebar-row' + (S.activeTab === t.key ? ' active' : '') + (closed ? ' sidebar-page-closed' : ''));
+  const out = isPoppedOut(t.key);
+  const row = el('div', 'sidebar-row' + (S.activeTab === t.key ? ' active' : '') + (closed ? ' sidebar-page-closed' : '')
+    + (out ? ' sidebar-page-popped' : ''));
+  row.oncontextmenu = (e) => openPageTabMenu(e, t.key);
   const label = el('button', 'menu-item', t.label);
   label.title = closed ? `${t.label} — closed; click to reopen` : (t.title || t.label);
   // Showing a closed page reopens it — the sidebar is the reopen path,
@@ -1576,6 +1588,10 @@ export function pageSidebarRow(t, index, total) {
   }
   row.append(label);
   const acts = el('div', 'sidebar-row-actions');
+  const pop = el('button', 'menu-item-action sidebar-popout', '⧉');
+  pop.title = out ? 'Open in its own window — click to bring that window forward' : 'Open in its own window';
+  pop.onclick = (e) => { e.stopPropagation(); if (out) showPopout(t.key); else popOut(t.key); };
+  acts.append(pop);
   if (closed) {
     const add = el('button', 'menu-item-action', '＋');
     add.title = 'Reopen this page tab';

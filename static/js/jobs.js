@@ -11,6 +11,7 @@ import { scanWatchlistForSources, watchlistScanRunning } from './watchlist.js';
 import { loadSources } from './sources.js';
 import { S } from './state.js';
 import { refreshSourcesQuietly } from './tables.js';
+import { announceChange } from './popout.js';
 
 /* ---------------------------------------------------------- import jobs */
 
@@ -316,6 +317,9 @@ export async function pollJobs() {
       // re-select side effects (same reasoning as the Tables modal poll).
       try { await refreshSourcesQuietly(); } catch {}
     }
+    // Pop-outs keep a source list of their own and run no jobs poll: they
+    // hear about the new tables from here (popout.js).
+    if (finishedNow.length) announceChange(['sources']);
     // That refresh leaves a live grid alone on purpose, so the table a
     // derive ran on is brought up to date separately: its header still
     // says "(building…)" and its cached rows predate the values.

@@ -314,6 +314,7 @@ More on reading the Timeline is in [Timeline, Search all and the Watchlist](Time
 | Right-click a row | Tag it, filter to or exclude that cell's value, copy. |
 | Right-click a header | Column options: stack or copy its values, derive a column. |
 | Right-click a tab | Close it, rename it, merge it or remove it, or **Columns…** for the table menu. |
+| Right-click a page tab | Open that page in its own window beside this one, or close it. See [Opening a page in its own window](Working-with-tables.md#opening-a-page-in-its-own-window). |
 | Right-click a tag chip | Filter to that tag, or exclude the rows carrying it. |
 
 ### Tag keys

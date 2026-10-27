@@ -135,6 +135,12 @@ A tab plus its backend route, the full custom-UI shape:
     # itself failed, so a mount can refuse to save over state it could not
     # see.
     # Optional exports: onShow/onHide, called on every tab switch.
+    # A tab can be popped out into a window of its own (static/js/popout.js),
+    # which is a second copy of the app showing only that tab: there,
+    # state.view and state.sourceId are null (the grid is the main
+    # window's), every navigation (openSource, openFiltered, showPage,
+    # setTimeRange) is carried out in the main window, and onShow is also
+    # called when another window changed tags, tables, notes or variables.
     #
     #   export default function mount(container, winnow) { ... }
 

@@ -30,6 +30,22 @@ Right-click a table's tab, or the table in the sidebar, for a short menu of what
 
 With a tab or a sidebar row focused, the keyboard's menu key or `Shift+F10` opens the same menu under it. `↓` moves into it, the arrow keys move through it and `Enter` picks.
 
+### Opening a page in its own window
+
+Any page tab can go in a window of its own: SQL, Timeline, Notes, Watchlist, a plugin's tab such as the Pivot, or a pinned dashboard. That puts the page beside the table it is about, rather than taking turns with it. Right-click the page's tab and pick **Open in its own window**, or click ⧉ on its row in the sidebar's **Pages**. If nothing opens, the browser blocked it: allow pop-ups for Winnow and try again. The same menu has **Close this tab** (**Unpin this board** on a dashboard), which does what ✕ on the page's sidebar row does.
+
+The new window shows that page and nothing else. Its bar names the page and the case, and **⇤ Back to main window** closes it and puts the page back as a tab. Closing the window with its own ✕ does the same.
+
+While a page is in its own window:
+
+- The main window goes back to the table you had open. The page's tab is marked ⧉, and clicking it shows **Show the … window** and **Bring it back as a tab** instead of a second copy of the page. Right-click the tab for the same two.
+- What you do in either window shows in the other. Tag rows in the grid and the Timeline beside it updates; tag from the Timeline's details and the grid's rows update. Notes, imports, new tables and watchlist hits work the same way.
+- Anything in the page that opens a table or a row, such as a dashboard drill-down or double-clicking a Timeline line, opens it in the main window, which comes to the front. A link to another page shows that page in the main window too.
+- Opening another case in the main window takes the page with it. If that case has no such page (a board of the old case, or a plugin switched off there), the window says so.
+- Closing the main window closes the pages it opened. Reloading it doesn't.
+
+Each page opens where its window was last, at the size you left it. The keys that switch tabs or open Settings, the Tables manager or Search all work in the main window only.
+
 ### Folders
 
 Folders are labels for keeping a large case tidy. Click 🗀+ at the top of the sidebar to create one, or ＋ on a folder to create a folder inside it. To put a table in a folder, drag it onto the folder, or click the 🗀 on its row and choose the folder (or **＋ New folder…**). **↥ Remove from folder** in the same menu, or dragging the table onto **drop here to remove from folder**, takes it back out.

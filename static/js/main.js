@@ -68,6 +68,7 @@ import * as settings from './settings.js';
 import * as userenv from './userenv.js';
 import * as home from './home.js';
 import * as errlog from './errlog.js';
+import * as popout from './popout.js';
 import { toast } from './core.js';
 import { wireColumnDividers } from './columns.js';
 import { applyDetailPrefs, loadDetailPrefs, wireDetail } from './detail.js';
@@ -97,13 +98,18 @@ import { wireUi } from './ui.js';
    spread would freeze the value of a rebindable export like ROW_H at boot.
    Collision-free by construction — these names all shared one scope until
    the file was split. Not an API; nothing in the app reads it. */
-const NAMESPACES = { splash, core, connection, state, jobs, tabhistory, charts, stack, notes, watchlist, dashboard, dashwidgets, filters, filterundo, sources, view, columns, tsformat, derived, grid, grouping, tags, detail, ui, filterbuilder, savedfilters, timeframe, histogram, merge, multicase, importer, tables, plugins, search, session, sql, timeline, timelineoverview, timelinepane, rowmenu, subset, keymap, settings, bundles, profilebuilder, pluginmanager, userenv, home, errlog };
+const NAMESPACES = { splash, core, connection, state, jobs, tabhistory, charts, stack, notes, watchlist, dashboard, dashwidgets, filters, filterundo, sources, view, columns, tsformat, derived, grid, grouping, tags, detail, ui, filterbuilder, savedfilters, timeframe, histogram, merge, multicase, importer, tables, plugins, search, session, sql, timeline, timelineoverview, timelinepane, rowmenu, subset, keymap, settings, bundles, profilebuilder, pluginmanager, userenv, home, errlog, popout };
 window.__winnow = {};
 for (const ns of Object.values(NAMESPACES)) {
   for (const key of Object.keys(ns)) {
     Object.defineProperty(window.__winnow, key, { get: () => ns[key], configurable: true });
   }
 }
+
+// First, so a pop-out window (popout.js) hides the main window's chrome
+// before anything paints it, and so every window is on the channel the
+// others announce their changes over before it can make one.
+popout.wirePopout();
 
 // Mouse thumb buttons walk the recent-tab history (tabhistory.js). On
 // mouseup, where browsers fire their own history navigation from.
@@ -162,7 +168,8 @@ wireFileDrop();
    onto a screen that is already there — the transition is a reveal, not a
    second load. It also means a slow case list waits behind something worth
    looking at rather than an empty page. */
-if (splash.splashEnabled(S.appearance)) {
+// Not in a pop-out: it opens beside a window that has already played it.
+if (splash.splashEnabled(S.appearance) && !popout.inPopout()) {
   splash.runSplash();   // takes its colours from the live skin, not an argument
 }
 // Presence, plus the banner that says so when the server stops answering.
@@ -170,13 +177,18 @@ connection.wireConnection();
 
 boot().catch((e) => toast('Could not start: ' + e.message, 8000));
 
-// Surface server-side errors in the app (Case menu → Log) with a dot
-// on the Case button when new ones land — they used to go only to the
-// terminal.
-errlog.startLogBadgePoll();
+// What follows is the main window's to say, once. A pop-out has no Case
+// button to put a dot on, and asking its questions again would ask them
+// twice.
+if (!popout.inPopout()) {
+  // Surface server-side errors in the app (Case menu → Log) with a dot
+  // on the Case button when new ones land — they used to go only to the
+  // terminal.
+  errlog.startLogBadgePoll();
 
-maybeOfferRemoteMode().then(() => maybeOfferStorageDir()).then(() => maybeOfferDefaultPrompt());
+  maybeOfferRemoteMode().then(() => maybeOfferStorageDir()).then(() => maybeOfferDefaultPrompt());
 
-// Not in that chain: it asks nothing and blocks nothing, so it needn't
-// wait behind a dialog the analyst hasn't answered yet.
-maybeWarnElevated();
+  // Not in that chain: it asks nothing and blocks nothing, so it needn't
+  // wait behind a dialog the analyst hasn't answered yet.
+  maybeWarnElevated();
+}

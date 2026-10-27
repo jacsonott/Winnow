@@ -16,6 +16,7 @@ import { paneTable, sourceLabel, syncTabSelection, wireDragReorder } from './sou
 import { S } from './state.js';
 import { buildTimeline } from './timeline.js';
 import { confirmDialog, promptDialog } from './ui.js';
+import { inPopout, pageElsewhere } from './popout.js';
 
 /* ------------------------------------------------------------------ sql */
 
@@ -24,6 +25,7 @@ import { confirmDialog, promptDialog } from './ui.js';
    #timelineview occupies the main content area, the same way opening a
    different source tab swaps the visible grid. */
 export function showSqlTab() {
+  if (pageElsewhere('sql')) return Promise.resolve();
   recordTabVisit({ kind: 'page', key: 'sql' });
   S.activeTab = 'sql';
   showMainView('sqlview');
@@ -267,8 +269,9 @@ export const scheduleSqlTabSave = debounce(() => { flushSqlTabSave(); }, SQL_AUT
 /* Persists the active tab's current editor text now. Awaited before any
    action that changes which tab the editor represents, so a pending
    debounced save can never land on the wrong tab (it captures the id it
-   read the text for). */
-export async function flushSqlTabSave() {
+   read the text for). `keepalive` for a window that is closing (a pop-out,
+   popout.js), where a plain fetch is cancelled with the page. */
+export async function flushSqlTabSave({ keepalive = false } = {}) {
   const tab = activeSqlTab();
   if (!tab) return;
   const id = tab.id;
@@ -277,7 +280,7 @@ export async function flushSqlTabSave() {
   tab.sql = text;
   try {
     await api(`/api/sql_tabs/${id}`, {
-      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sql: text }),
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sql: text }), keepalive,
     });
     const rec = S.sqlTabs.find((t) => t.id === id);
     if (rec) rec.savedSql = text;
@@ -431,7 +434,7 @@ export function syncTabChrome() {
    the analysis-suite tabs). Each new page tab adds its view id here and
    routes through showMainView, so no show-function has to know about the
    others — the trap that made adding a tab an N-place edit. */
-export const MAIN_VIEWS = ['grid', 'sqlview', 'timelineview', 'notesview', 'watchlistview', 'dashboardview'];
+export const MAIN_VIEWS = ['grid', 'sqlview', 'timelineview', 'notesview', 'watchlistview', 'dashboardview', 'popoutPlaceholder'];
 export function hideMainViews() {
   for (const v of MAIN_VIEWS) { const e = $(v); if (e) e.hidden = true; }
 }
@@ -478,6 +481,9 @@ export function gridIsShowing() {
    repaint:false exists to prevent. render() is a no-op with no S.view at
    all. */
 export function showGridTab({ repaint = true } = {}) {
+  // A pop-out shows its one page and nothing else (popout.js); the grid is
+  // the main window's, and whatever wanted it there has been sent there.
+  if (inPopout()) return;
   S.activeTab = 'grid';
   showMainView('grid');
   syncTabSelection();
@@ -492,6 +498,7 @@ export function showGridTab({ repaint = true } = {}) {
 }
 
 export function showTimelineTab() {
+  if (pageElsewhere('timeline')) return;
   recordTabVisit({ kind: 'page', key: 'timeline' });
   S.activeTab = 'timeline';
   showMainView('timelineview');

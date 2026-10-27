@@ -13,6 +13,7 @@
    stream drops when the server goes (even if nobody clicks anything), and
    a failed request proves it (even if the stream is mid-retry). */
 import { $, api, el, noticeServerCase, onCaseChanged, onConnectionChange, setCaseToken } from './core.js';
+import { followCaseSwitch, inPopout } from './popout.js';
 
 // EventSource reconnects by itself every few seconds, so a single error is
 // usually a blip — a restart, a proxy hiccup. Wait before crying wolf.
@@ -128,6 +129,10 @@ function onShutdown() {
    the page just stops speaking for it — the next case opened there sets a
    new one. */
 function caseGone(now) {
+  // A pop-out follows the case rather than covering itself: it is one page
+  // of the main window, which switched (popout.js). The reload boots it on
+  // whatever case is open now, and says so if its page isn't in that one.
+  if (inPopout()) { followCaseSwitch(); return; }
   if (!$('home').hidden) { setCaseToken(null); return; }
   const box = $('caseGone');
   if (!box) return;

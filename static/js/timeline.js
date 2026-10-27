@@ -13,6 +13,7 @@ import { loadTimelineOverview, renderTimelineOverview, timelineOverviewFollow } 
 import { refreshTimelinePane, renderTimelineContextChip, syncTimelinePane } from './timelinepane.js';
 import { pad2, parseTimestamp } from './tsformat.js';
 import { closeModal, confirmDialog, markModalAction, modal, oneAtATime } from './ui.js';
+import { inPopout, sendToMain } from './popout.js';
 
 /* ---------------------------------------------------------- unified timeline */
 
@@ -93,7 +94,10 @@ export function renderTimelineTagFilter() {
   }
 }
 
-export async function buildTimeline() {
+/* `keepScroll`: a rebuild nobody asked for here — another window tagged
+   (popout.js) — stays where the list was rather than going to the top
+   when no line is selected to go back to. */
+export async function buildTimeline({ keepScroll = false } = {}) {
   const tagIds = timelineTagIds();
   // The ⏱ button and the chip say what this build is narrowed to, from
   // the moment it is asked for rather than when it lands.
@@ -178,7 +182,7 @@ export async function buildTimeline() {
     $('timelineStats').append(note);
   }
   renderTimelineContextChip();
-  await keepTimelinePlace(v, reqId);
+  await keepTimelinePlace(v, reqId, keepScroll);
   if (reqId !== S.timeline.reqId) return;
   renderTimelineRows();
   refreshTimelinePane();
@@ -194,12 +198,12 @@ export async function buildTimeline() {
    tag was taken off, or switched off above) puts the list where it was in
    time, with nothing selected. Scrolled a third of the way down, so what
    came before it is on screen too. */
-async function keepTimelinePlace(v, reqId) {
+async function keepTimelinePlace(v, reqId, keepScroll = false) {
   const body = $('timelineBody');
   const sel = S.timeline.sel;
   if (!sel || sel.rid == null || !v.row_count) {
     S.timeline.sel = null;
-    body.scrollTop = 0;
+    if (!keepScroll) body.scrollTop = 0;
     return;
   }
   let at;
@@ -855,6 +859,8 @@ const timelineEpochOf = (ts) => {
    in this one). That answers 404; the listing is reloaded so the grid
    lands on a table that exists rather than the half-opened ghost. */
 export async function jumpToTimelineRow(sourceId, rid) {
+  // From a pop-out (popout.js) the row is opened where the grid is.
+  if (inPopout()) { sendToMain('jumpToRow', sourceId, rid); return; }
   try {
     const src = S.sources.find((s) => s.id === sourceId);
     if (src && !src.is_open) {
