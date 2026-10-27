@@ -117,7 +117,9 @@ opens that column's box. See [Filtering and searching](Filtering-and-searching.m
 Off by default. On, the page tabs (SQL, Timeline, Notes, Watchlist and any
 plugin tabs) collapse into one **Pages ▾** button, giving the table tabs the
 width; while a page is showing, the button carries that page's name. The
-pages and their counts then live in that button's menu.
+pages and their counts then live in that button's menu. Right-clicking a
+page in it gives the menu its tab had, **Open in its own window** included
+(see [Working with tables](Working-with-tables.md#opening-a-page-in-its-own-window)).
 
 ### Autofit column width limit
 

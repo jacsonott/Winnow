@@ -30,13 +30,16 @@ POPPED = "document.documentElement.hasAttribute('data-popout') && !document.getE
 
 
 @contextlib.contextmanager
-def popped_out(page, key="timeline", tab="#tabTimeline"):
-    """Pop a page out from its tab's menu. Yields the pop-out, checked for
-    uncaught errors like `page` is, and closed on the way out if the test
-    didn't — then waits for the main window to have the page back, so the
-    next test starts from a main window with nothing out."""
-    page.click(tab, button="right")
-    page.wait_for_selector(".menu:not(.menu-sub)")
+def popped_out(page, key="timeline", tab="#tabTimeline", open_menu=None):
+    """Pop a page out from its tab's menu (or whatever `open_menu` right-
+    clicks to get that menu). Yields the pop-out, checked for uncaught
+    errors like `page` is, and closed on the way out if the test didn't —
+    then waits for the main window to have the page back, so the next test
+    starts from a main window with nothing out."""
+    if open_menu:
+        open_menu()
+    else:
+        page.click(tab, button="right")
     with page.expect_popup() as info:
         page.locator(".menu:not(.menu-sub) .menu-item", has_text="Open in its own window").click()
     pop = info.value
@@ -108,6 +111,61 @@ def test_closing_the_pop_out_gives_the_page_back(page):
         pop.close()
         page.wait_for_selector("#timelineview:not([hidden])")
         assert not page.evaluate("() => __winnow.isPoppedOut('timeline')")
+
+
+@pytest.fixture
+def pages_dropdown(page):
+    """Settings → Pages as a dropdown, for this test only."""
+    def _set(on):
+        page.evaluate("""(on) => { __winnow.S.appearance.pagesMenu = on;
+          __winnow.renderPageTabs(); __winnow.applyPageTabsSize(); }""", on)
+    _set(True)
+    page.wait_for_selector("#pagesMenuBtn")
+    try:
+        yield
+    finally:
+        _set(False)
+
+
+def _right_click_in_pages_list(page, label):
+    page.click("#pagesMenuBtn")
+    page.locator(".menu:not(.menu-sub) .menu-item", has_text=label).click(button="right")
+    page.wait_for_selector(".menu:not(.menu-sub) .menu-item:has-text('Close this tab')")
+
+
+def test_with_pages_as_a_dropdown_a_page_pops_out_from_its_row(page, pages_dropdown):
+    """With the tabs collapsed into Pages ▾ there was no tab left to
+    right-click, so "Open in its own window" was nowhere but the
+    sidebar's ⧉. The page's row in the list carries the tab's menu."""
+    with popped_out(page, open_menu=lambda: _right_click_in_pages_list(page, "Timeline")) as pop:
+        pop.wait_for_selector("#timelineview:not([hidden])")
+        page.wait_for_function("() => __winnow.isPoppedOut('timeline')")
+        # The row says where the page is, as its tab would, and its menu
+        # offers the window rather than a second one.
+        page.click("#pagesMenuBtn")
+        row = page.locator(".menu:not(.menu-sub) .menu-item", has_text="Timeline")
+        assert row.locator(".menu-item-note").inner_text() == "\u29c9"
+        row.click(button="right")
+        page.wait_for_selector(".menu:not(.menu-sub) .menu-item:has-text('Bring it back as a tab')")
+        assert page.locator(".menu .menu-item", has_text="Open in its own window").count() == 0
+        page.keyboard.press("Escape")
+
+
+def test_with_pages_as_a_dropdown_the_button_has_the_showing_pages_menu(page, pages_dropdown):
+    """The button carries the name of the page that is up, so a right-click
+    on it means that page. With no page up it names none, and opens the
+    list instead."""
+    page.evaluate("() => __winnow.showGridTab()")
+    page.wait_for_function("() => document.getElementById('pagesMenuBtn').textContent.includes('Pages')")
+    page.click("#pagesMenuBtn", button="right")
+    page.wait_for_selector(".menu:not(.menu-sub) .menu-item:has-text('Timeline')")
+    assert page.locator(".menu .menu-item", has_text="Open in its own window").count() == 0
+    page.keyboard.press("Escape")
+
+    page.evaluate("() => __winnow.showTimelineTab()")
+    page.wait_for_function("() => document.getElementById('pagesMenuBtn').textContent.includes('Timeline')")
+    with popped_out(page, open_menu=lambda: page.click("#pagesMenuBtn", button="right")) as pop:
+        pop.wait_for_selector("#timelineview:not([hidden])")
 
 
 def test_a_tag_written_in_either_window_shows_in_the_other(page, api, tag_written):
