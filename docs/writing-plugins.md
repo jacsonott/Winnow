@@ -57,20 +57,21 @@ handed to its `register()` function:
 
 They compose: a tab usually pairs with one or more routes; a row action
 often pairs with a tab that shows its results; a toolbar panel usually
-pairs with a route that reads through the current view. Ingest formats
-and row actions work in a single-file plugin; tabs and panels (both
-kinds) need a folder plugin (there has to be somewhere to serve the JS from).
+pairs with a route that reads through the current view. Ingest formats,
+routes, row actions and dashboards work in a single-file plugin; tabs and
+panels (both kinds) need a folder plugin (there has to be somewhere to
+serve the JS from).
 
 The shipped examples map onto these:
 
 | Example | Demonstrates |
 | --- | --- |
 | [`mft_usn/`](../examples/plugins/mft_usn/) | Ingest formats — two of them, with options, streaming parsers, extension *and* bare-filename matching |
-| [`lateral_movement/`](../examples/plugins/lateral_movement/) | A tab + a route — canvas UI, case queries, theming |
+| [`lateral_movement/`](../examples/plugins/lateral_movement/) | A tab + routes — canvas UI, case queries, theming, definitions kept in `req.storage`, a builder that previews as it is edited, and the **Events…** dialog built with `winnow.sectionPanes` |
 | [`claude_assistant/`](../examples/plugins/claude_assistant/) | A tab + a route that calls an external service, with credentials and dependencies — and a **page panel**, the SQL Copilot, that inserts and runs the queries it writes |
 | [`top_values/`](../examples/plugins/top_values/) | A toolbar panel with no backend — following the grid with `onViewChange`, reading the current view through the app's own `/api/group_summary` |
-| [`first_last/`](../examples/plugins/first_last/) | A tab that writes a TABLE back — `ingest_rows` output an analyst browses, tags and exports like any other source |
-| [`pivot/`](../examples/plugins/pivot/) | A tab that aggregates the current view — drag-and-drop rows/columns/values over the case's own data |
+| [`first_last/`](../examples/plugins/first_last/) | A tab that writes a TABLE back — `ingest_rows` output an analyst browses, tags and exports like any other source — and does its long work on a thread of its own, polled from the tab, with `winnow.notify` when a result lands elsewhere |
+| [`pivot/`](../examples/plugins/pivot/) | A tab that aggregates a whole table — drag-and-drop rows/columns/values, the grid's tag chips compiled into its own query, and every subtotal level from one scan |
 | [`esxi_logs/`](../examples/plugins/esxi_logs/) | Ingest formats for a support bundle's ESXi/Linux logs, the profile that pairs them with a dashboard, and the reference `register_dashboard` board |
 
 ---
@@ -121,11 +122,12 @@ def register(api):
 ```
 
 Restart the server, or make the registry reload without one: open or
-switch a case, or flip any plugin's scope in **Settings → Plugins**
-(installs and toggles reload; opening the panel by itself only re-reads
-the set that is already loaded). You now have a `hosts file` format:
-drag a `hosts` file onto the window, or use Settings → Plugins → the
-format's own **Import files…** picker. Rows land in a normal `src_N`
+switch a case, or switch any plugin on or off in **Settings → Plugins →
+Manage plugins…** (installs and switches reload; opening the manager by
+itself only re-reads the set that is already loaded). You now have a
+`hosts file` format: drag a `hosts` file onto the window, or use the
+**Import files…** button beside the format in the manager's **What it
+adds** section. Rows land in a normal `src_N`
 table, so tagging, filtering, search, sessions and the SQL pane all work
 on it immediately.
 
@@ -152,7 +154,7 @@ plugins/
 ```
 
 Names starting with `.` or `_` are skipped entirely — handy for parking a
-plugin without deleting it (`_wip_plugin.py`), though Settings → Plugins
+plugin without deleting it (`_wip_plugin.py`), though the plugin manager
 is the better off switch since it keeps the plugin visible.
 
 ### The module contract
@@ -284,10 +286,25 @@ imports to pick them up.
 route to Winnow's CSV parser by default — your format stays reachable
 through its own picker in the plugins manager (beside the format, under
 "What it adds"), but it won't hijack
-existing behavior. Everything else goes to your format *before* the
+existing behavior. Two built-in readers recognise a file by something
+other than its extension, and they win too: an **IIS log** by its name
+(`u_ex…`, `ex…`, `nc…`, `in….log`), and a **key=value log** (FortiGate
+and the other Fortinet products) by its first line, on a file no reader
+claims by name. So a plugin that claims `.log` — `esxi_logs` does — still
+never sees `u_ex240501.log`, or a `.log` whose first line is `date=…
+time=… devname=…`. Everything else goes to your format *before* the
 raw-text catch-all: a name nothing claims imports as plain text, one
 line per row, so a plugin that registers `hostd*` gets `hostd.log` and
 an unregistered `vpxa.log` still imports — as lines.
+
+**Your extensions become file types.** Every extension in `extensions`
+of a plugin that is on is offered in **Settings → File associations**
+under your plugin's name, with **Make default**, and Winnow asks about it
+once at launch if it is registered for any other type. Nothing becomes
+the double-click default without the analyst choosing it. A
+`filename_patterns` entry can't be associated — no operating system
+associates a file with no extension — so `$MFT` stays a drag-and-drop or
+folder-import artifact.
 
 ### The `parse` contract
 
@@ -329,6 +346,11 @@ def parse(path, options) -> dict:
   sorting/filtering and datetime handling); every value is still stored
   as TEXT. Declare it when you *know* — a parser that produced the
   timestamps shouldn't leave typing to a 500-row sample.
+- **A plugin import runs inside its request**, not as a background job:
+  the analyst sees an *Importing …* notice rather than a progress row,
+  and there is no Cancel. It runs on a worker thread, so the rest of
+  Winnow keeps working, but a slow parser is slow with no way out — one
+  more reason to stream.
 
 Timestamps: emit `YYYY-MM-DD HH:MM:SS[.ffffff]` if you can. That's the
 shape Winnow's timeframe filter, day-bucketing and timeline normalize
@@ -437,16 +459,16 @@ Prefer it to reaching into the app's globals — this is what's supported.
 | `tabState` | This mount's own state in the case file: `get()`, `set(obj)`, `clear()` — see [Keeping a tab's state](#keeping-a-tabs-state-across-a-case-close) |
 | `openSource(id)` | Switch the app to a source's grid tab |
 | `refreshSources()` | Re-fetch the app's source list — call after your backend creates a table via `ingest_rows` (a sync ingest announces itself through no job), then `openSource(new_id)` if the analyst should see it. It moves nobody: the page and table on screen, and that table's filters, stay as they are, so it is safe after work that finished while the analyst was elsewhere |
-| `state.sources` | Live source list (`{id, name, columns, row_count, is_merge, error}`) |
+| `state.sources` | Live source list: every table (`{id, name, nickname, columns, row_count, …}` — `nickname` is the analyst's name for it, `null` when they gave none, and it is what the app shows in place of `name`), then every merge (`{id, name, columns, row_count, is_merge: true, member_source_ids, …}`, `id` negative; a merge that can no longer be read carries `error` instead — skip those). `columns` includes the analyst's derived columns, marked `derived: true` |
 | `state.sourceId` | Currently selected source id |
 | `state.tags` | Tag definitions |
 | `state.variables` | The case's variables as `{name: value}` — see [Case variables](#case-variables) |
-| `state.timeRange` | The case timeframe filter verbatim — `{enabled, column, start, end}`. Honouring it is what makes "the timeframe applies everywhere" true for your tab too |
+| `state.timeRange` | The tables' timeframe filter verbatim — `{enabled, column, start, end}`, the one the table toolbar's ⏱ sets for whichever table the grid shows. Honour it and your tab follows it too. The Timeline page keeps a range of its own and does not follow this one |
 | `state.view` | What the grid is showing right now — `{view_id, row_count}`, filters/search/timeframe applied, or `null` before a table is open. Hand `view_id` to a route that reads THROUGH the view |
 | `setVariable(name, value)` | Set one case variable (creates it if new) |
 | `onViewChange(cb)` | Fires after every grid rebuild that installs a view — filter, sort, search, timeframe, table switch — with `{sourceId, viewId, rowCount}`. A search left running in the background fires when it is applied, not when it finishes. Returns an unsubscribe |
 | `onAppearanceChange(cb)` | Fires after every skin / theme / accent change with `{style, themeMode, accent}`. A canvas doesn't inherit CSS, so redraw here. Returns an unsubscribe |
-| `setTimeRange({column, start, end, enabled})` / `clearTimeRange()` | Drive the case timeframe filter (the toolbar's ⏱) — the same object the Timeframe dialog writes, so every other consumer sees it as if typed there |
+| `setTimeRange({column, start, end, enabled})` / `clearTimeRange()` | Drive the tables' timeframe filter (the table toolbar's ⏱) — the same object its Timeframe dialog writes, so every other consumer sees it as if typed there. The Timeline's own range is not reachable from a plugin |
 | `openFiltered(sourceId, pairs)` | Jump from your visualization to the EVIDENCE: opens the source and exact-filters it to `[{column, value}, …]`. Clears existing filters — it is a navigation, not a refinement |
 
 **Always call your backend through `winnow.api` / `winnow.post`.** A raw
@@ -674,7 +696,7 @@ dialog is one.
 ### Theming
 
 Read colors from Winnow's CSS custom properties instead of hardcoding
-them, and your UI works across all four styles and both light and dark:
+them, and your UI works across all six skins and both light and dark:
 
 ```js
 const accent = getComputedStyle(document.documentElement)
@@ -1049,10 +1071,13 @@ api.register_row_action(
 ```
 
 Right-clicking a row (or a selection) in any table view shows a
-**Plugins** section listing every registered action. Choosing one has
+**Plugins ▸** submenu listing every registered action, each with its
+plugin's name beside it (see the [Reference](#register_row_action-id-label-handler-description-max_rows1000)
+for pinning one to the top of the menu). Choosing one has
 the server resolve the selected rows to their full cells — by
 `(source_id, rid)`, so a merged view hands you each member's own row —
-and call your handler.
+and call your handler. The menu sends at most 20,000 rows, whatever
+`max_rows` says.
 
 ### The handler
 
@@ -1109,13 +1134,43 @@ Winnow's own hot read paths use an internal pooled-reader mechanism
 isn't positioned to guarantee — don't reach for it; `run_sql` is the
 supported plugin read path.
 
-Other useful methods:
+### What `run_sql` sees
+
+`run_sql` runs on the SQL pane's own connection, so it sees the case the
+way the pane does (and `winnow.sql()` from a tab is the same call):
+
+| Name | What it is |
+| --- | --- |
+| `src_<id>` | A table as the grid shows it: `rid`, the file's columns, the analyst's derived columns, then `Tags` (the row's tag names joined with `, `) and `Note`. When the file has a `Tags` or `Note` column of its own, the added ones are `Winnow Tags` and `Winnow Note` |
+| `main.src_<id>` | The raw import: `rid` and the file's columns, nothing else |
+| `merge_<n>` | A merge, where `n` is minus its `source_id` (merge `-3` is `merge_3`): each row's own table as `source_id`, its `rid`, the merge's columns, `Tags` and `Note`. A derived column is in it only when every member has it |
+| `row_tags(source_id, rid, tag_id)`, `row_notes(source_id, rid, note)`, `tag_defs(id, name, color, hotkey)` | The analyst's findings. Rows are keyed by their own table, and rids repeat across tables, so join on `source_id` *and* `rid` |
+
+`Tags` is a convenience: `Tags LIKE '%Suspicious%'` also matches a tag
+called *Not Suspicious*, so join `row_tags` and `tag_defs` when you mean
+one tag exactly. The pane's three functions are there too: `x REGEXP
+'pattern'` (Python syntax, case-insensitive), `DAY_BUCKET(x)` (the
+calendar day of a timestamp, as `YYYY-MM-DD`) and `TS_NORMALIZE(x)` (a
+timestamp as `YYYY-MM-DD HH:MM:SS`, so ones written differently sort
+together); both give NULL for text that isn't a timestamp, epoch numbers
+included.
+
+**`run_sql` takes no parameters** — there is no `?` binding. Put values
+into the SQL as literals you built from input you validated (a string
+as `"'" + s.replace("'", "''") + "'"`), or filter in Python.
+
+### Other useful methods
 
 | Call | Returns |
 | --- | --- |
-| `store.list_sources()` | `list[dict]` — every source, shape below |
-| `store.get_source(source_id)` | One source dict; raises `KeyError` if absent |
-| `store.ingest_rows(columns, rows, name=...)` | Create a new table from computed rows |
+| `store.list_sources()` | `list[dict]` — every imported table, shape below. Merges are not in it |
+| `store.list_merges()` | `list[dict]` — every merge: a negative `id`, `is_merge: True`, `member_source_ids` |
+| `store.get_source(source_id)` | One source dict — a table, or a merge for a negative id; raises `KeyError` if absent |
+| `store.ingest_rows(columns, rows, name=...)` | Create a new table from computed rows (see [Writing tables from a plugin](#writing-tables-from-a-plugin)) |
+| `store.list_tags()` | The case's tags, `[{id, name, color, hotkey}]` |
+| `store.upsert_tag(None, name, color, hotkey)` | Create a tag (see [Tagging rows](#tagging-rows)) |
+| `store.set_tags(source_id, rids, tag_id, on)` | Put a tag on rows of one table, or take it off (see [Tagging rows](#tagging-rows)) |
+| `store.merge_select_list(merge_src, member_src)` | One member's SELECT list, for a merge union you build yourself (below) |
 | `store.path` | The case file's path |
 
 A source dict:
@@ -1123,9 +1178,12 @@ A source dict:
 ```python
 {
   "id": 1,
-  "name": "evtx-security.csv",       # display name (the tab caption)
+  "name": "evtx-security.csv",       # the file's name
+  "nickname": "DC01 Security",       # the analyst's name for it, or None; the app shows
+                                     # this in place of `name` wherever it is set
   "table_name": "src_1",             # what you query — always src_<id>
-  "columns": [{"name": "Timestamp", "type": "datetime"}, ...],
+  "columns": [{"name": "Timestamp", "type": "datetime"}, ...,
+              {"name": "Day", "type": "datetime", "derived": True, ...}],  # derived ones last
   "row_count": 331_642,
   "path": "/evidence/…",             # absolute source path, may be None
   "file_hash": "…",                  # the file's fingerprint; "made:…" / "subset:…" for a
@@ -1137,21 +1195,57 @@ A source dict:
 }
 ```
 
-Two things to know about ids: a **negative** `source_id` is a *merge*
-(a virtual union of several sources) with no single backing table — if
-your feature needs `table_name`, reject negatives with a `ValueError`
-rather than building broken SQL, or read every member yourself. A
-merge's members **don't all have its columns** (a column only some
-tables have is empty for the rest), so never write a merge's column
-names straight into a member's SELECT: an unknown double-quoted name is
-a string literal in SQLite, and every cell would read as the column's
-name. `req.store.merge_select_list(merge_src, member_src)` gives one
-member's SELECT list over `src_<id> s LEFT JOIN drv_<id> d ON d.rid =
-s.rid`, padding what it lacks with NULL — the bundled pivot, first/last
-and lateral movement plugins build their merge unions with it. And the sidecar tables are queryable
-too: `row_tags(source_id, rid, tag_id)`, `row_notes(source_id, rid,
-note)`, `tag_defs(id, name, color, hotkey)` — that's how you join
-analyst findings to evidence rows.
+**Derived columns are listed but not stored in the table.** An entry
+with `derived: True` is a column the analyst added (a datetime parsed
+out of an epoch, a field pulled out of JSON); its values live in a
+sidecar table, `drv_<id>`, keyed by `rid`. Through `run_sql`, `src_<id>`
+already includes them, so `SELECT "Day" FROM src_1` just works. What
+does not work is naming one against `main.src_<id>`, or anywhere the
+`src_<id>` view isn't in play: an unknown double-quoted name is a string
+literal in SQLite, so every cell reads `Day` and nothing fails.
+
+**A negative `source_id` is a merge** (a union of several tables). It has
+no `src_` table of its own, and its `table_name` is `None`. The simplest
+way to read one is the `merge_<n>` view above. When you need more control
+— the bundled pivot, first/last and lateral movement plugins match tags
+per member, and read each member through its own table — build the union
+yourself, and mind two traps:
+
+- **A merge's members don't all have its columns** (a column only some
+  tables have is empty for the rest), so never write a merge's column
+  names straight into a member's SELECT — the same string-literal
+  fallback as above. `req.store.merge_select_list(merge_src, member_src)`
+  gives one member's SELECT list, padding what it lacks with NULL. It
+  reads a file column as `s."col"` and a derived one as `d."col"`, so
+  that member's FROM is `src_<id> s`, plus `LEFT JOIN drv_<id> d ON d.rid
+  = s.rid` when that member has derived columns — and only then: a table
+  nobody added a column to has no `drv_<id>`, and the join fails with
+  "no such table".
+- **Join the branches with `union_all`, not `" UNION ALL ".join(…)`.**
+  SQLite allows at most 500 terms in one compound SELECT, and a merge of
+  a thousand IIS logs is an ordinary case; `union_all` nests the
+  branches under the cap and is otherwise the same text.
+
+```python
+from winnow.store import q, union_all
+
+
+def rows_of(store, src):
+    """FROM text for every row of a table or a merge, aliased `s`, its
+    columns read as s."col" either way. A merge's rows also carry
+    s.source_id, the table each one came from."""
+    if not src.get("is_merge"):
+        return f"{q(src['table_name'])} s"
+    arms = []
+    for mid in src["member_source_ids"]:
+        m = store.get_source(mid)
+        frm = f"{q(m['table_name'])} s"
+        if any(c.get("derived") for c in m["columns"]):
+            frm += f" LEFT JOIN {q('drv_' + str(mid))} d ON d.rid = s.rid"
+        arms.append(f"SELECT {int(mid)} AS source_id, s.rid AS rid, "
+                    f"{store.merge_select_list(src, m)} FROM {frm}")
+    return "(" + union_all(arms) + ") s"
+```
 
 ### Quoting identifiers
 
@@ -1170,10 +1264,11 @@ agree with the rest of the app.
 
 Module-level helpers that never see `api` can import them directly
 instead; the three bundled examples that build SQL this way do exactly
-that, and it stays supported:
+that, and it stays supported. `union_all`, for [a merge
+union](#other-useful-methods), is only available this way:
 
 ```python
-from winnow.store import NUM_RE, q
+from winnow.store import NUM_RE, q, union_all
 ```
 
 Prefer `api.q` in handler code. It is the stable surface: it does not
@@ -1264,9 +1359,50 @@ fingerprint, so the table gets an identity of its own (`file_hash`
 it in another case matches, but a table another case made the same way —
 same name, same rows — does not.
 
+It returns the new table's source dict (`id`, `name`, `row_count`, …).
+Hand the `id` back to your tab, which calls `winnow.refreshSources()` and
+then `winnow.openSource(id)` if the analyst should see it.
+
 **Never write to a `src_` table.** Source tables are immutable by
 contract — that's what makes re-import non-destructive and sessions
 portable. Derive a new table instead.
+
+### Tagging rows
+
+A plugin that finds something — a row action's lookup, a scoring route —
+can tag the rows it found, and the tag is a real one: on the grid's
+ribbon, on the Timeline, in a saved session and in the case's tag undo
+history, like the analyst's own. Find the tag by name, create it if it
+isn't there, then write it:
+
+```python
+def flag(req, source_id, rids):
+    tag = next((t for t in req.store.list_tags() if t["name"] == "VT hit"), None)
+    if tag is None:
+        tag = req.store.upsert_tag(None, "VT hit", "#d2a04a", None)   # name, colour, hotkey
+    req.store.set_tags(source_id, rids, tag["id"], True)              # False takes it off
+```
+
+- **Look the name up first.** `upsert_tag(None, …)` always creates one,
+  and a name that is taken gets a number on the end (`VT hit 2`), because
+  tags are matched by name wherever two cases meet.
+- **`set_tags` takes one real table** and that table's rids. A merge's
+  rows are tagged through their own tables: a row action is handed each
+  row's own `source_id` (`req.body["rows"][i]["source_id"]`), which is
+  the one to use, and `req.store.set_tags_pairs([[source_id, rid], …],
+  tag_id, on)` takes rows of several tables at once.
+- **It is the grid's own write path**, which records exactly the rows it
+  changed, so undoing it never strips the tag off a row that already had
+  it. Never INSERT into `row_tags` yourself — `t.execute` refuses to, and
+  `run_sql` is read-only.
+- **The grid on screen is not told.** Rows it already loaded show the
+  new tag once it loads them again — after the next filter change or
+  table switch, say — so tell the analyst what you tagged in your
+  `message`.
+
+The bundled [`first_last/`](../examples/plugins/first_last/) tags every
+row of the table it creates this way, when the analyst asks for its rows
+on the Timeline.
 
 ### Case variables
 
@@ -1406,21 +1542,24 @@ rather than plugin JS, but it's a cheap technique to point at your own
 
 ## 12. Installing and sharing
 
-**Install:** Settings → Plugins → *Install a plugin…* — pick the `.py`
-file for a single-file plugin, or the folder that directly contains
-`__init__.py` for a folder plugin (the dialog states the rule and checks
-your pick before any bytes move). It copies into `plugins/` and loads
-immediately, no restart. Copying in by hand works too, but nothing
-notices the new file until the registry next reloads: a server restart,
-opening or switching a case, changing any plugin's scope, applying a
-profile, or installing through the dialog. Opening the panel is not
-enough on its own — it re-reads the set already loaded. The bundled
-examples in `examples/plugins/` never need installing — they're always listed, with
-a scope dropdown like any other plugin, just defaulting to off.
+**Install:** Settings → Plugins → **Manage plugins…** → *Install a
+plugin…* — pick the `.py` file for a single-file plugin, or the folder
+that directly contains `__init__.py` for a folder plugin (the dialog
+states the rule and checks your pick before any bytes move). It copies
+into `plugins/` and loads immediately, no restart. Copying in by hand
+works too, but nothing notices the new file until the registry next
+reloads: a server restart, opening or switching a case, switching any
+plugin on or off, applying a profile, or installing through the dialog.
+Opening the manager is not enough on its own — it re-reads the set
+already loaded. The bundled examples in `examples/plugins/` never need
+installing — they're always listed, with the same switches as any other
+plugin, just defaulting to off.
 
-**Scopes:** each plugin is on/off *for all cases* (machine default,
-`workspace/plugins.json`) or *for this case only* (an override stored in
-the case file's `case_settings`, so it travels with the evidence). The
+**Scopes:** each plugin has two switches in the manager — **Everywhere**
+(**Off** / **On**: the machine default, `workspace/plugins.json`) and
+**In "*case*"** (**Follow** / **On** / **Off**: an override stored in the
+case file's `case_settings`, so it travels with the evidence). Picking
+an Everywhere setting also clears the open case's override. The
 registry reloads on every case switch — per-case disablement really
 unloads the code, same guarantee as the machine-level switch. A reload
 is built beside the running set and switched in whole, one reload at a
@@ -1554,12 +1693,12 @@ def lookup_handler(req):
 
 | Symptom | Cause |
 | --- | --- |
-| Plugin missing from Settings → Plugins | Filename starts with `.` or `_`; or it's a folder with no `__init__.py`; or it's not in a scanned directory (check the paths listed in the panel) |
+| Plugin missing from the plugin manager | Filename starts with `.` or `_`; or it's a folder with no `__init__.py`; or it's not in a scanned directory (check **Read from** in the manager); or a plugin of the same file/folder name in an earlier directory shadows it |
 | Listed as "failed to load" | Your `register()` raised, or the module failed to import. The panel shows the message; the server console has the full traceback |
 | "needs Winnow plugin API vN" | Your `WINNOW_API_VERSION` is newer than this Winnow |
-| Format never triggers on a file | Extension collides with a built-in (built-ins win — use the format's own picker), or the name doesn't match your patterns. Patterns match the bare filename, not the path |
+| Format never triggers on a file | Extension collides with a built-in (built-ins win — use the format's own picker), the file is an IIS log by name or a key=value log by its first line (those readers win too), or the name doesn't match your patterns. Patterns match the bare filename, not the path |
 | Tab doesn't appear | Registration failed (see "failed to load"), or the plugin is toggled off. `register_tab` needs a **folder** plugin |
-| Tab JS changes don't show up | Toggle the plugin off and on in Settings — that bumps the cache-buster and re-imports the module |
+| Tab JS changes don't show up | Switch the plugin off and on in the manager — that bumps the cache-buster and re-imports the module |
 | Tab shows "failed to load: …" | Your module threw during import or `mount`. Open the browser console for the stack |
 | Route returns 403 | Non-GET call that bypassed `winnow.api`/`winnow.post` and so lacks the CSRF header |
 | Route returns 404 | Wrong name in the URL — routes use the **filesystem** name, not `PLUGIN["name"]`. Use `winnow.base` |
@@ -1808,8 +1947,8 @@ What every API-route and row-action handler receives:
 
 | Endpoint | Purpose |
 | --- | --- |
-| `GET /api/plugins` | Everything loaded: plugins, formats, tabs, directories |
-| `POST /api/plugins/toggle` | `{fs_name, enabled}` — persists and reloads |
+| `GET /api/plugins` | Everything loaded: plugins, formats, tabs, row actions, dashboards, toolbar and page panels, directories, and this build's `api_version` |
+| `POST /api/plugins/toggle` | `{fs_name, scope}` — `scope` is `on_all` / `off_all` (Everywhere), `on_case` / `off_case` / `follow_case` (this case); persists and reloads. The older `{fs_name, enabled}` still means `on_all` / `off_all` |
 | `POST /api/plugins/install` | Multipart install; copies into `plugins/` |
 | `POST /api/ingest/plugin/path` | `{path, format_id, name?, options?}` — ingest by server path |
 | `POST /api/ingest/plugin/upload` | Multipart sibling of the above |
@@ -1846,12 +1985,12 @@ tokenizer run):
 
 | What you paste | Size | Use it when |
 | --- | ---: | --- |
-| **This guide alone** | **~20k tokens** | Anything described here — which is every hook |
-| \+ `plugin_api.py` | ~34k tokens | You want the enforcing code beside the prose (validation rules, exact error text) |
-| \+ one `examples/plugins/*` | ~22–54k tokens | You're building something close to that example and want a full working precedent |
-| The whole codebase | ~830k tokens | You're changing Winnow itself, not writing a plugin |
+| **This guide alone** | **~26k tokens** | Anything described here — which is every hook |
+| \+ `plugin_api.py` | ~44k tokens | You want the enforcing code beside the prose (validation rules, exact error text) |
+| \+ one `examples/plugins/*` | ~28–68k tokens | You're building something close to that example and want a full working precedent |
+| The whole codebase | ~1.2M tokens | You're changing Winnow itself, not writing a plugin |
 
-So the guide is roughly **1/40th** the cost of loading the tool, and the
+So the guide is roughly **1/45th** the cost of loading the tool, and the
 step up to guide + contract is still under a tenth.
 
 ### A prompt that works

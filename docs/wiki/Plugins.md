@@ -65,10 +65,11 @@ The defaults differ by where a plugin came from:
 - a plugin you installed, or dropped into a plugins folder, is **On**
   everywhere from the start.
 
-[Applying a profile](Dashboards.md#applying-a-profile) sets the per-case
-switch for *every* installed plugin: **On** for the profile's plugins,
-**Off** for all the others. If a plugin you expect is off in one case, look
-at its **In "*case*"** row first.
+[Applying a profile](Dashboards.md#applying-a-profile) with its
+**Plugins** part ticked sets the per-case switch for *every* installed
+plugin: **On** for the profile's plugins, **Off** for all the others. If a
+plugin you expect is off in one case, look at its **In "*case*"** row
+first.
 
 ### What the manager shows before you switch one on
 
@@ -417,7 +418,11 @@ force one type.
 
 **With this plugin on, every `.log` file you import goes to it**, including
 logs from other systems; one it doesn't recognise is read as type `other`.
-Switch it off for cases where `.log` files should import some other way.
+Two kinds of `.log` are still read by Winnow itself: an
+[IIS log](Cases-and-importing.md#iis-web-server-logs), known by its name,
+and a [key=value log](Cases-and-importing.md#fortigate-and-other-fortinet-logs)
+such as FortiGate's, known by its first line. Switch the plugin off for
+cases where other `.log` files should import some other way.
 
 Syslog-style lines carry no year; the plugin works one out so they sort and
 filter as real dates. Import the whole bundle as an archive or folder and
