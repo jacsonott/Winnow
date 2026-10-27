@@ -171,7 +171,8 @@ see [docs/notes/README.md](README.md) for the whole set.
   name collision is a 409 the frontend confirms into `overwrite=true`,
   and an install whose *load* then fails still keeps the files and
   reports the error (same standing as a hand-copied broken plugin).
-  Three extension points on PluginAPI:
+  Seven extension points on PluginAPI now (docs/writing-plugins.md §1);
+  these three came first, and the rest of this entry is about them:
   `register_ingest_format` parses a file into columns + a row iterable
   that feeds `Store.ingest_rows` — the generic sibling of `ingest_csv`
   with every one of its conventions (all-TEXT via `sanitize_columns`,
@@ -243,7 +244,13 @@ see [docs/notes/README.md](README.md) for the whole set.
   the pre-plugin behavior for analyst-added extensions) and why the
   Plugins modal's per-format picker sets no `accept` attribute. Routing
   precedence (`pluginFormatFor` in `static/js/importer.js`): a built-in extension always
-  wins over a plugin claiming the same one. Parse errors are 400s like
+  wins over a plugin claiming the same one, and so do the two readers that
+  go by something else — an IIS log's name, a key=value log's first line —
+  which is why `esxi_logs` claiming `.log` never takes either. A format's
+  `extensions` are also file-association candidates (`assoc.supported_types`:
+  default-eligible, never default without the analyst choosing it); its
+  `filename_patterns` cannot be, since no OS associates a file with no
+  extension. The guide's §4 tells authors both. Parse errors are 400s like
   every other ingest route. Security model is Notepad++'s: a plugin is
   arbitrary local Python with the app's privileges, installed by the
   analyst physically placing it — never fetched, so the airgap rule holds.

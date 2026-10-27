@@ -117,4 +117,8 @@ pivot/
 ```
 
 Backend tests live with Winnow's own suite, in `tests/test_plugins.py`
-(`-k pivot`).
+(`-k pivot`); the tab itself is driven by `tests/ui/test_pivot_tags.py`
+(the tag chips), `tests/ui/test_pivot_state.py` (the saved pivots),
+`tests/ui/test_pivot_refresh.py` (the table kept, dimmed, while the next
+one is worked out) and `tests/ui/test_field_place_menu.py` (the **Place
+in** menu, shared with First/Last).
