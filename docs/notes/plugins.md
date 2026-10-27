@@ -462,12 +462,12 @@ see [docs/notes/README.md](README.md) for the whole set.
   `NOT` (an exclusion, No tags), where the row-value `IN` the pivot note
   above warns about does not.
 
-- **lateral_movement's event builder previews through the graph's own
-  SQL.** `preview` and `edges` both build on `_prepare`, so "273 rows
-  match, 12 links" in the builder is the row set Build turns into edges
-  (a test holds `hops` to the edges' summed `n`); a preview with its own
-  WHERE would drift the first time the noise list changed. Four more
-  things the builder depends on:
+- **lateral_movement's event builder previews through the feed's own
+  SQL.** `preview` and `feed` both build on `_prepare` and `_grouped`, so
+  "273 rows match, 12 links" in the builder is the row set the views
+  draw (a test holds the preview's `hops` to the feed's drawn plus
+  untimed rows); a preview with its own WHERE would drift the first time
+  the noise list changed. Four more things the builder depends on:
   - **An event's NAME is its identity in the tab.** A tick is keyed
     `source_id::name`, so a saved event named like a shipped one ticked
     and unticked with it. The builder refuses a taken name
@@ -487,6 +487,61 @@ see [docs/notes/README.md](README.md) for the whole set.
     `/user/` matched the SID in `UserId` before `UserName`. `st.picked`
     is what keeps a table switch from rewriting an edited event's columns
     while it is only being previewed elsewhere.
+
+- **lateral_movement v3 is one feed and five views over it** (Chain over
+  time, Host matrix, By account, Pivot, Path), replacing v2's force
+  graph and its `edges` route. What bites:
+  - **Hosts fold before anything is counted.** `fold_host` strips the
+    field prefix, the bracketed address, UNC slashes and the domain, and
+    maps an address to the name rows write beside it, across every
+    selection (`address_names`), so a flow export's bare addresses land
+    on the event log's names. v2 drew each spelling as its own node: a
+    host that received a logon and then made one was two unconnected
+    dots. `_Folder` folds each distinct spelling once; per row, it was
+    most of the feed's time (4.1s of a 250k-row feed, 1.6s after).
+  - **`_grouped` groups by position.** A GROUP BY name resolves to a
+    table column before the result's alias, so a table with a column
+    called `u` merged two accounts into one hop
+    (`test_lateral_movement_feed_groups_by_position`).
+  - **No time column, no hop.** Every view is ordered by time, so a row
+    with no minute is counted in `per[k].untimed` and drawn nowhere; the
+    builder says so before the event is saved.
+  - **A hop with no account backs up a named one.** A flow row on the
+    same two hosts within a minute (`LINEUP`) of a logon is the same
+    movement seen twice: it adds to that hop's `also` instead of drawing
+    a link of its own, or every logon in a case with netflow would draw
+    twice.
+  - **Hosts and accounts are numbered per mount**, not per feed
+    (`hostId`/`userId`), so a pivot, a crown jewel or an account filter
+    survives the feed being read again; tabState saves NAMES, which is
+    what survives a reload.
+  - **`compute()` is cached by `computeKey`, the switches by
+    `computeBase`'s key.** At 250k hops the switches alone are ~0.5s, and
+    a view switch or a histogram drag ran them again every frame. Anything
+    new `compute()` reads has to join the key, or a view shows the last
+    answer.
+  - **The canvas views are one sticky canvas over a spacer** as tall as
+    what is drawn (`canvasFor`), drawn a screen at a time: a canvas a
+    thousand lanes tall passes the browser's size limit. Measure text on
+    the separate `measure()` context; sizing the visible canvas to
+    measure shrank the spacer and threw the scroll position away.
+  - **What is under the pointer is rebuilt with every redraw**, so hover
+    compares links by `linkKey` and pivot edges by their hop, never by
+    object identity (a hover that never matched redrew on every mouse
+    move).
+  - **Menus at a point are `winnow.dropdownMenu` on a zero-size fixed
+    anchor**: the plugin context has no contextMenu. "Open its rows"
+    passes `openFiltered` an `in` with a LIST of every spelling the feed
+    saw in that column, plus the event's own conditions, with `not_in`
+    expanded into one `not_equals` per value (the filter tree has no
+    `not_in`).
+  - **`scheduleFetch` marks the tab busy when the read is scheduled**,
+    not when it starts: the "Added ..." note after a save waits for a
+    feed that holds the new event, and a repaint inside the debounce
+    reported it from the old feed.
+  - `tests/ui/test_lateral_movement.py` right-clicks hosts through
+    `canvas.lmHosts` (name → where its label is drawn, for every label on
+    screen; the matrix lists its slanted column labels too).
 
 - **A plugin's menu is the app's menu** (`winnow.dropdownMenu`, plugin
   API 13 / context `apiVersion` 7). Pivot's and First/Last's
