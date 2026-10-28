@@ -75,8 +75,9 @@ def test_an_unknown_stem_parses_as_other(esxi_format, bundle):
     (row,) = list(out["rows"])
     by = dict(zip(out["columns"], row))
     assert by["Log"] == "other"
-    assert by["Timestamp"] == "2026-03-14T08:00:00.123Z"
+    assert by["Timestamp"] == "2026-03-14 08:00:00.123000"
     assert by["Severity"] == "info" and by["Component"] == "clomd" and by["PID"] == "2098"
+    assert by["sub"] == "Foo"
     assert by["Message"] == "hello from clomd"
 
 
@@ -138,7 +139,7 @@ def test_continuation_folding_is_linear_and_capped(esxi_format, tmp_path):
 
     first = rows[0][-1]
     assert first.startswith("Exception in thread main at com.vmware") and len(first) <= cap
-    assert rows[-1][0] == "2026-03-14T08:00:00.123Z" and rows[-1][-1] == "hello from clomd"
+    assert rows[-1][0] == "2026-03-14 08:00:00.123000" and rows[-1][-1] == "hello from clomd"
     # Every frame exactly once, in order, across the folded row and the overflow rows.
     seen = [int(x) for r in rows[:-1] for x in re.findall(r"SomeFrame\.java:(\d+)\)", r[-1])]
     assert seen == list(range(n))
@@ -157,6 +158,12 @@ def _write_syslog(tmp_path, name, lines, mtime_utc):
 def _stamps(esxi_format, p):
     out = esxi_format.parse(str(p), esxi_format.resolve_options({}))
     return [r[0] for r in out["rows"]]
+
+
+def _logged(esxi_format, p):
+    out = esxi_format.parse(str(p), esxi_format.resolve_options({}))
+    at = out["columns"].index("Timestamp (as logged)")
+    return [r[at] for r in out["rows"]]
 
 
 def test_yearless_syslog_stamps_get_their_year_from_the_file(esxi_format, tmp_path, store):
@@ -192,25 +199,29 @@ def test_yearless_syslog_stamps_get_their_year_from_the_file(esxi_format, tmp_pa
     p = _write_syslog(tmp_path, "auth.log", ["Nov  5 09:00:00 h sshd[1]: x"], datetime(2025, 3, 1))
     assert _stamps(esxi_format, p) == ["2024-11-05 09:00:00"]
 
-    # ISO lines are left exactly as written; a stamp that is no date in the
-    # resolved year (Feb 29 of 2025) keeps its own text rather than a guess.
+    # An ISO line is written in the same shape, so the two sort together; a
+    # stamp that is no date in the resolved year (Feb 29 of 2025) gets no
+    # Timestamp rather than a guess, and keeps its own text beside it.
     p = _write_syslog(tmp_path, "syslog.log", [
         "2025-02-27T10:00:00Z hostd[1]: iso line",
         "Feb 28 10:00:00 h k: ok",
         "Feb 29 10:00:00 h k: no such day",
     ], datetime(2025, 3, 1))
-    assert _stamps(esxi_format, p) == ["2025-02-27T10:00:00Z", "2025-02-28 10:00:00", "Feb 29 10:00:00"]
+    assert _stamps(esxi_format, p) == ["2025-02-27 10:00:00", "2025-02-28 10:00:00", ""]
+    assert _logged(esxi_format, p) == ["2025-02-27T10:00:00Z", "Feb 28 10:00:00", "Feb 29 10:00:00"]
 
 
 def test_a_stamp_that_is_no_real_time_never_stops_the_parse(esxi_format, tmp_path):
     """The year pre-pass orders the last stamp against the file's mtime. A
     last line reading hour 99, or a file whose mtime is nonsense, must
-    still parse; the stamp that is no time keeps its own text."""
+    still parse; the stamp that is no time gets no Timestamp and keeps its
+    own text in Timestamp (as logged)."""
     from datetime import datetime
 
     p = _write_syslog(tmp_path, "messages", ["Jan  4 10:00:00 h k: a", "Jan  5 99:00:00 h k: b"],
                       datetime(2025, 1, 6))
-    assert _stamps(esxi_format, p) == ["2025-01-04 10:00:00", "Jan  5 99:00:00"]
+    assert _stamps(esxi_format, p) == ["2025-01-04 10:00:00", ""]
+    assert _logged(esxi_format, p) == ["Jan  4 10:00:00", "Jan  5 99:00:00"]
     os.utime(p, (0, 2 ** 62))
     assert len(_stamps(esxi_format, p)) == 2
 
