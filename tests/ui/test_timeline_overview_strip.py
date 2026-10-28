@@ -141,6 +141,16 @@ def test_a_click_in_a_quiet_stretch_goes_on_to_the_next_line(page, two_hosts):
     page.wait_for_function("(ts) => (__winnow.S.timeline.sel || {}).ts === ts", arg=WS_EXFIL)
 
 
+def test_midnight_is_marked_by_the_rules_the_histogram_shares(page, two_hosts):
+    """The dashed rule at midnight comes from charts.js calendarRules now,
+    which the histogram strip over the grid draws too: under 10-minute
+    bars it is still the one midnight between the morning's burst and
+    the next afternoon, not a week rule."""
+    _open_timeline(page)
+    midnight = page.evaluate("() => __winnow.timelineEpoch('2026-05-07 00:00:00')")
+    assert page.evaluate("() => __winnow.timelineOverviewRules()") == {"unit": "day", "times": [midnight]}
+
+
 def test_a_drag_across_bars_narrows_the_timeline_to_that_stretch(page, two_hosts):
     _open_timeline(page)
     x0, y = _x(page, "2026-05-06 19:50:00")
