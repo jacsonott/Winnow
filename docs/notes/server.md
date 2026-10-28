@@ -481,6 +481,72 @@ see [docs/notes/README.md](README.md) for the whole set.
   (`GET /api/presence/others?page=`, the asking page excluded).
   `tests/test_shutdown.py`, `tests/ui/test_shutdown_and_log.py`.
 
+- **`POST /api/restart` (Settings → Updates) is Shut down followed by a
+  start, and the start is main()'s job, not the route's.** An update
+  replaces the program files under a server that has already imported the
+  old ones, so the new version only runs in a new process. The route sets
+  `_RESTART["requested"]` and calls `_trigger_shutdown`; uvicorn shuts down
+  gracefully exactly as for Shut down (`_lifespan` closes the case, which
+  releases its lock and views file, and records the path in `_LAST_CASE`);
+  then main(), after `server.run` returns, calls `_relaunch`. Things that
+  bite:
+  - **The pid can't tell a window it is talking to the new server**:
+    POSIX `execve`s in place, so the pid is the same. `/api/version`
+    carries `boot` (`BOOT_ID`, per process run) and the page waits for it
+    to change (connection.js `awaitRestart`). The presence streams end
+    with `event: restart` + the old boot instead of `shutdown`, so the
+    other windows wait and reload too rather than reporting a lost
+    connection.
+  - **Windows has no exec.** `os.execv` there starts a new process and
+    exits the old one, so a terminal returns to its prompt with the server
+    still writing into it and the launcher thinks Winnow ended. `_relaunch`
+    instead `Popen`s the new one and waits on it, leaving with its exit
+    code; Ctrl+C reaches both (one console), so the wait swallows its own
+    KeyboardInterrupt and lets the child shut down. `in_place=False`
+    runs that path on Linux in tests/test_restart.py.
+  - **The listening socket is handed over, not re-bound.** The route
+    `dup()`s it before uvicorn closes its own handle; `_relaunch` marks the
+    dup inheritable and names it in `WINNOW_LISTENER`; the new main() pops
+    that and adopts it (`_adopt_listener`), making it non-inheritable
+    again so a plugin's helper process can't hold the port. The port is
+    therefore never free: nothing else can take it, and a request in the
+    gap waits in the backlog for the new server instead of being refused
+    (the integration test asserts zero refusals). Re-binding by number is
+    only the fallback, retried for `RESTART_BIND_S`, because a Windows
+    socket closed under `SO_EXCLUSIVEADDRUSE` can keep its port unbindable
+    while its last connections linger. On Windows the inheritance rides
+    `close_fds=False`; Python makes every other handle non-inheritable, so
+    only the socket and the standard handles go.
+  - **The command line is rebuilt, not replayed** (`_relaunch_argv`):
+    same interpreter, host, port, `--allow-host`, `--plugins-dir` and
+    `--no-idle-shutdown`, plus `--no-browser` (the windows are already
+    open) and `--case` with the case open at the END. `--open`/`--assoc`
+    would import their files again and `--force` was for a lock this
+    process just released, so they are dropped.
+  - **The environment is the launch environment** (`_LAUNCH["env"]`),
+    captured in main() before `userenv.load_into_environ`. Handing on the
+    process's own `os.environ` would pass the stored `WINNOW_*` values as
+    real exports, which then win over the store in every later run.
+  - **Nothing is restarted into that won't start.** Before it stops
+    anything, the route runs `server.py --help` with the launch
+    interpreter and environment (`_new_version_problem`): that imports
+    everything a start does and exits before a port or a case. A new
+    version needing a package this Python lacks is a 400 telling the
+    analyst to run `pip install -r requirements.txt`, not a server that
+    went away and never came back. `--help` rather than a flag of our
+    own because every version, older ones included, answers it.
+  - **`execve` skips atexit**, and the console writer thread goes with
+    the old program, so `_relaunch` drains the queue itself
+    (`console.drain()`) or the last lines, its own "Restarting Winnow"
+    among them, never reach the console.
+  - **A server main() didn't start can't restart** (`_LAUNCH` is None:
+    a bare `uvicorn server:app`, the TestClient). `/api/version`'s
+    `can_restart` says so and the panel offers nothing. The shared UI
+    test server IS main()-started, so a UI test that installs an update
+    must answer `/api/restart` in the browser (tests/ui/test_updates_panel.py's
+    `_Stub`) or it restarts the server every other module shares.
+  `tests/test_restart.py`, `tests/ui/test_restart_ui.py`.
+
 - **Idle shutdown rides the presence stream, not request traffic.** An
   analyst reading the grid makes no requests for hours, so "last request
   time" would reap a live session; instead every page holds an EventSource

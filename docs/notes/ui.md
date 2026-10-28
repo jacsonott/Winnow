@@ -1375,6 +1375,24 @@ see [docs/notes/README.md](README.md) for the whole set.
   click is still the release path; `tests/ui/test_updates_panel.py`
   answers every `/api/updates/*` call in the browser, because the real
   dev apply would overwrite the checkout the suite runs from.
+- **Settings → Updates restarts into what it installed, and every
+  window follows.** When `/api/version` says `can_restart`, both install
+  confirms (release and the develop sync) carry a ticked "Restart Winnow
+  when it’s installed" box — `confirmDialog`'s `check` option, which keeps
+  the boolean answer and writes the box's state back into the object it
+  was given — and **Restart now** stays beside the buttons after an install
+  that didn't restart, or whose restart was refused (the refusal's text,
+  e.g. a package to `pip install`, goes in the status line). The restart
+  itself is `restartWinnow` in home.js, beside `shutdownWinnow`: it warns
+  about `inFlightWork()` as Shut down does but not about other windows,
+  because they come back. `awaitRestart` (connection.js) covers the page
+  with `#restarting` (the `.case-gone` cover, accent border) and polls
+  `/api/version` until `boot` changes, then reloads; the presence stream's
+  `restart` event brings every other window, pop-outs included, to the
+  same place. While it waits, the lost-connection banner is held off
+  (`show()` returns), since the server being away is expected. After 90s
+  it says Winnow hasn't come back and how to start it or roll back, and
+  keeps polling. Server side: docs/notes/server.md.
 - **`S.keymap` must hold its own key arrays, not `DEFAULT_KEYMAP`'s.**
   The settings UI's "+ key"/"✕" handlers splice and push those arrays in
   place, so the old shallow `{...DEFAULT_KEYMAP}` handed them the

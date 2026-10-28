@@ -208,7 +208,10 @@ update.py          The CLI front door to updater.py — --check, --dry-run,
                     rather than a release; the install records
                     develop@<sha>; --branch NAME overrides which).
                     Settings → Updates reaches --dev too, by a deliberately
-                    unadvertised Alt+right-click (docs/notes/ui.md).
+                    unadvertised Alt+right-click (docs/notes/ui.md), and
+                    can then restart the server into what it installed
+                    (POST /api/restart → server._relaunch: same port, same
+                    case, windows reload; docs/notes/server.md).
                     The one that still works when a bad update has broken
                     the UI, since it needs no running server.
 xlsxread.py        Excel .xlsx/.xlsm reading for import — a thin typed-cell→
