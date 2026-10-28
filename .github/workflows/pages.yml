@@ -2,7 +2,7 @@
 #
 # The site is the manual for the released version, so it is built from
 # main, which only moves at a release. docs/wiki/ keeps changing on
-# develop in the same pull requests as the behaviour it describes; the
+# develop in the same pull requests as the behavior it describes; the
 # GitHub wiki (wiki.yml) follows develop and shows that, and the site
 # catches up when the release does. "Edit this page" on the site still
 # opens develop, because that is where a docs pull request goes.
@@ -19,7 +19,11 @@
 # so; the build job is unaffected. The site's domain, winnow.jacson.tech,
 # is set on the same page under "Custom domain", not by a CNAME file: a
 # site deployed by Actions ignores one. build_wiki.py's SITE_DOMAINS has
-# to name the same domain.
+# to name the same domain. jacson.tech's DNS is on Cloudflare, where the
+# record is a CNAME from winnow to jacsonott.github.io, and it has to be
+# "DNS only", not proxied: behind the proxy GitHub sees Cloudflare's
+# addresses instead of the CNAME, can't issue the domain's certificate,
+# and leaves "Enforce HTTPS" unavailable.
 name: Pages
 
 on:
