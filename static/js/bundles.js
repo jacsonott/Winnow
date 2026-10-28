@@ -2,7 +2,7 @@
    kind needs, the boards it opens with, a starter watchlist, and the
    variables the case must carry. Managed from the M menu here, and picked
    from the side list of the new-case dialog (home.js), which describes
-   each one with boardsOf and summaryOf below.
+   each one with summaryOf below.
 
    Two things this module is deliberate about, both because applying a
    profile CHANGES THE OPEN CASE and used to say nothing first:
@@ -31,9 +31,8 @@ export async function listBundles() {
 
 /* Apply a profile to the open case. `parts` is the subset of
    plugins/boards/watchlist/variables the analyst agreed to — omitted
-   means all four, which is what the new-case dialog sends (its pane says
-   what each part will do before the case is made) and what apply meant
-   before the sheet existed. */
+   means all four, which is what the new-case dialog sends and what apply
+   meant before the sheet existed. */
 export async function applyBundle(bundle, parts = null) {
   const res = await post(`/api/plugin_bundles/${bundle.id}/apply`, parts ? { parts } : {});
   await loadPlugins();
@@ -65,7 +64,7 @@ export async function applyBundle(bundle, parts = null) {
 
 /* ------------------------------------------------------------ describing */
 
-export function boardsOf(bd) {
+function boardsOf(bd) {
   /* Every board a profile carries, in the order apply lands them: its own
      board (which takes the profile's name) first, then the extra named
      ones. One shape, so the manager and the summary count the same

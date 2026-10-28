@@ -42,8 +42,8 @@ the server until you open another one.
 
 ### Creating and opening cases
 
-**+ New case** opens a dialog in the same frame: profiles down the left,
-the case on the right. Give it a **Name**, an optional **Group** (an
+**+ New case** opens a dialog with the profiles down the left and the case
+on the right. Give it a **Name**, an optional **Group** (an
 engagement name, say; it gets its own section on the home screen and is
 offered again as you type) and a **Case file path**. The path is filled in
 from the name — `ACME Breach` becomes
@@ -54,22 +54,15 @@ The list on the left is the profile the case starts with. **None** (chosen
 to begin with) keeps this machine's plugins and adds no boards. Below it
 are the shipped profiles, such as **KAPE triage**, then **Your profiles**,
 each with what it carries under its name (*1 plugin · 10 widgets · 5
-IOCs*). Choosing one shows what it will do before the case exists: how
-many plugins it turns on, boards it adds, indicators it starts the
-watchlist with and values it asks for; its description; the plugins it
-turns on, by name (every other plugin is turned off for the case); and the
-board it opens with. Under that are the case variables it asks for,
-required ones marked `*`. What you have typed stays put when you choose
-another profile, or go to **Browse…** and back. See
+IOCs*). Choosing one shows its description and the case variables it asks
+for, required ones marked `*`. What you have typed stays put when you
+choose another profile, or go to **Browse…** and back. A profile turns its
+own plugins on for the case and every other plugin off; see
 [Dashboards](Dashboards.md#profiles) for what a profile holds.
 
-The button at the bottom names what it will make — *Create “ACME Breach”
-with KAPE triage* — and the line beside it says what is still missing
-(*Name the case to create it.*, *“KAPE triage” needs: Engagement.*) or
-where the file will be written. Pressing it, or Enter in the **Name**,
-**Case file path** or a variable's box, writes the file, opens the case and
-applies the profile. A required variable left empty is outlined and the
-case isn't created.
+**Create case**, or Enter in the **Name**, **Case file path** or a
+variable's box, writes the file, opens the case and applies the profile. A
+required variable left empty is outlined and the case isn't created.
 
 **Open existing case file…** takes a path (typed, or **Browse…**) and adds
 the case to this machine's list as it opens it — for a case someone handed
@@ -198,7 +191,7 @@ this case is temporary and isn't saved anywhere yet.*:
 
 | Button | What it does |
 | --- | --- |
-| **Save as a case…** | Opens the same dialog as **+ New case** (profiles down the left; **Name**, **Group** and **Case file path** on the right), titled *Save as a case*. **None** keeps the quick look's plugins and boards as they are. The button at the bottom, *Save as “…”*, moves the quick look's file to that path, lists it on the home screen and applies the profile. The path starts in the cases folder. Refused while an import is running, and while a download or a search started before your latest changes is still reading the case: save again when it finishes. |
+| **Save as a case…** | Opens the same dialog as **+ New case** (profiles down the left; **Name**, **Group** and **Case file path** on the right), titled *Save as a case*. **None** keeps the quick look's plugins and boards as they are. **Save case** moves the quick look's file to that path, lists it on the home screen and applies the profile. The path starts in the cases folder. Refused while an import is running, and while a download or a search started before your latest changes is still reading the case: save again when it finishes. |
 | **Add tables to an existing case…** | Copies every table, with its tags and notes, into a case you pick. The dialog lists your cases the way the home screen does (**Recent**, **All cases** and your groups down the left); click one, then **Copy N tables into** *case*. Double-clicking a case copies straight away. |
 | **Discard…** | Deletes the quick look. |
 

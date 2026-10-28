@@ -1736,13 +1736,11 @@ see [docs/notes/README.md](README.md) for the whole set.
 - **+ New case is the frame too, with the profiles as the side list**
   (`openNewCaseModal` in home.js, `.nc-*` in style.css; also the quick
   look's Save as a case). It was the last form drawn the old way: captioned
-  boxes down the card and the profile a `<select>` of names, so what a
-  profile turned on, which board it opened with and what it asked for only
-  showed once the case existed — and applying one turns every other plugin
-  off. The side list is None, the shipped profiles, then Your profiles,
-  each hinted with the manager's `summaryOf`; the pane is the case's
-  fields on top and the chosen profile under them, in the other panes'
-  vocabulary (`.mb-stats`, `.mb-notes`). Decisions:
+  boxes down the card and the profile a `<select>` of names. The side list
+  is None, the shipped profiles, then Your profiles, each hinted with the
+  manager's `summaryOf`; the pane is the case's fields on top and, under
+  them, the chosen profile's description and the values it asks for.
+  Decisions:
   - **A profile is a kind of case, so it is the side list**, as the
     template list is in a "new document" dialog; the case's own fields
     are the same on every profile. They are built once (`caseBox`) and
@@ -1760,16 +1758,21 @@ see [docs/notes/README.md](README.md) for the whole set.
   - **Browse… is still a snapshot and a re-open** (modal() replaces the
     card), now carrying the chosen profile's id (`state.profile`, the
     section id) and `typed`.
-  - **One main button, naming what it makes** ("Create “ACME” with KAPE
-    triage", "Save as “ACME”"), with the reason it would refuse in the
-    line beside it (`.nc-status`). It is never disabled: a click on a
-    case that still needs a value says so in a toast, outlines the boxes
-    (`.invalid`) and focuses the first, as the old Create did. Enter in
-    Name, the path or a variable box is the same click; not in Group,
+  - **Kept to the fields.** The first cut read as too chatty: a stats
+    row, a sentence for each thing the profile would do (its plugins by
+    name, its board, its watchlist), a heading and a help line over the
+    values, a note under the path, and a status line beside a button that
+    named the case and the profile. Every one of them repeated something
+    already on screen, mostly the side list's hint. What stays is the
+    profile's own description, two lines at most (`.nc-about`, the rest on
+    hover), and its value fields; None adds nothing under the case.
+    test_new_case_dialog.py pins the absence, so the sentences don't drift
+    back one at a time.
+  - **One main button, Create case / Save case**, never disabled: a click
+    on a case that still needs a value says so in a toast, outlines the
+    boxes (`.invalid`) and focuses the first, as the old Create did. Enter
+    in Name, the path or a variable box is the same click; not in Group,
     where Enter picks one of the groups its datalist offers.
-  - **No intro paragraph.** None's pane says what a profile is and that
-    one can be applied later; Save as a case's old line ("Its tables,
-    tags and notes move into the case file below") is the foot's.
   tests/ui/test_new_case_dialog.py, test_case_variables_ui.py,
   test_home_fixes.py, test_quicklook_banner.py.
 - **A header set's default layout seeds a table once, so it needs its

@@ -3565,26 +3565,24 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .list-pane .tables-head > span { overflow: hidden; text-overflow: ellipsis; }
 /* + New case and Save as a case (openNewCaseModal, in home.js): the
    profiles down the side, the case on the right — its name, group and
-   file on top, then what the chosen profile does to it and the values it
+   file on top, then the chosen profile's description and the values it
    asks for. A form rather than a list, so the pane is what scrolls when
    the card is short, not a box inside it. */
 .list-pane.nc-pane { overflow: auto; padding-right: 2px; }
+/* Still a fixed height, so choosing a profile moves nothing, but a form's:
+   three fields and a profile's few values leave the list frame's 600px
+   mostly empty. The pane scrolls past it. */
+.side-panes.nc-panes { height: max(320px, min(440px, calc(82vh - 130px))); }
 .nc-case .confirm-input { width: 100%; min-width: 0; }
 .nc-case .dlg-pair { margin-bottom: 10px; }
 .nc-profile { border-top: 1px solid var(--line); padding-top: 12px; }
-.nc-profile .mb-summary { margin-bottom: 10px; }
-.nc-plugin { font-family: var(--mono); font-size: 12px; }
-.nc-vars { margin-top: 4px; }
-.nc-head {
-  margin: 4px 0 8px; font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--dim);
+/* A profile's own description, two lines at most; the rest is on hover. */
+.nc-about {
+  margin: 0 0 10px; color: var(--dim); font-size: 12px; line-height: 1.45;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden;
 }
 .nc-vars-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 12px; }
 .nc-vars-fields .confirm-input { width: 100%; min-width: 0; }
-.nc-vars .fb-help { margin: 2px 0 0; }
-/* What is still missing, or where the file goes, beside the one button
-   that makes the case. Both give way before Cancel does. */
-.nc-status { flex: 1 1 auto; min-width: 0; margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.nc-go { flex: 0 1 auto; max-width: 55%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* One grid for the column heads and every row, so the counts line up
    down fifty tables. The name cell takes what is left and ellipsizes. */
 .tables-head, .tables-row {

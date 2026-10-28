@@ -92,8 +92,7 @@ def test_create_case_creates_once(page):
     page.locator("#home .btn", has_text="New case").click()
     page.wait_for_selector("#modal:not([hidden])")
     page.locator("#modalBody input").first.fill("Double clicked")
-    create = page.locator("#modal .nc-go")
-    page.wait_for_function("() => document.querySelector('#modal .nc-go').textContent.includes('Double clicked')")
+    create = page.locator("#modalBody .btn", has_text="Create case")
     gate = _Gate(page, "**/api/cases")
     try:
         create.dblclick()

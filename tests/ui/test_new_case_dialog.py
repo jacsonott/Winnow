@@ -1,12 +1,11 @@
 """+ New case on the side-list frame: the profiles down the side, the case
-and what the chosen profile will do to it on the right.
+and the chosen profile's values on the right.
 
 The dialog was a column of captioned boxes with the profile a <select> of
-names, so which plugins a profile turned on, which board it opened with
-and what it asked for only showed once the case had been made. These pin
-what the frame has to keep true: the profile's effect is on screen before
-anything is created, choosing another profile loses nothing that was
-typed, and the folder browser's round trip comes back to the same choice.
+names. These pin what the frame has to keep true: each profile says what
+it carries in the side list, the pane holds the fields and nothing to
+read past them, choosing another profile loses nothing that was typed,
+and the folder browser's round trip comes back to the same choice.
 """
 
 from __future__ import annotations
@@ -62,28 +61,26 @@ def test_the_profiles_are_down_the_side_with_what_each_carries(page, profile):
         assert "UI New Case Profile | 1 plugin · 1 widget" in rail, rail
         assert page.locator("#modalBody .side-rail-item[data-section=none]").get_attribute("aria-selected") == "true"
         assert page.locator("#modal .nc-go").text_content() == "Create case"
-        assert page.locator("#modal .nc-status").text_content() == "Name the case to create it."
     finally:
         _close(page)
 
 
-def test_a_profile_says_what_it_will_do_before_the_case_exists(page, profile):
+def test_the_pane_is_the_fields_and_nothing_to_read_past_them(page, profile):
+    """"Too chatty" was the complaint about the first cut: a stats row, a
+    sentence per thing the profile did, a heading and a help line over its
+    values, a status line beside the button. None of that comes back: the
+    side list already says what a profile carries."""
     _open(page)
     try:
         page.locator("#modalBody .nc-name").fill("Acme intrusion")
+        assert page.locator("#modalBody .nc-profile").is_hidden(), "None has nothing to add under the case"
         page.locator(f"#modalBody .side-rail-item[data-section='{profile['id']}']").click()
-        page.wait_for_selector("#modalBody .nc-profile .mb-stats")
-        stats = page.locator("#modalBody .nc-profile .mb-stat").all_inner_texts()
-        assert [" ".join(s.split()) for s in stats] == ["1 PLUGIN ON", "1 BOARD", "0 INDICATORS", "2 VALUES"], stats
-        notes = page.locator("#modalBody .nc-profile .mb-note").all_inner_texts()
-        assert notes[0] == "What the new-case test chooses", notes
-        assert "Turns on lateral_movement for this case, and every other plugin off." in notes, notes
-        assert "Opens with the “UI board” board: 1 widget." in notes, notes
-        assert page.locator("#modalBody .nc-plugin").all_inner_texts() == ["lateral_movement"]
-        # The button names the case and the profile; the line beside it
-        # says what is still missing.
-        assert page.locator("#modal .nc-go").text_content() == "Create “Acme intrusion” with UI New Case Profile"
-        assert page.locator("#modal .nc-status").text_content() == "“UI New Case Profile” needs: Engagement."
+        page.wait_for_selector("#modalBody input[data-var=engagement]")
+        assert page.locator("#modalBody .nc-about").inner_text() == "What the new-case test chooses"
+        text = page.locator("#modalBody .nc-pane").inner_text()
+        for gone in ("PLUGIN ON", "Turns on", "Opens with", "asks for", "Not for tokens"):
+            assert gone not in text, (gone, text)
+        assert page.locator("#modal .table-menu-foot").inner_text().split() == ["Cancel", "Create", "case"]
     finally:
         _close(page)
 
@@ -103,7 +100,6 @@ def test_choosing_another_profile_keeps_what_was_typed(page, profile):
         assert page.locator("#modalBody .nc-name").input_value() == "Keep me"
         assert page.locator("#modalBody .nc-case input[list]").input_value() == "ACME IR"
         assert page.locator("#modalBody .nc-path").input_value().endswith("keep-me.db-winnow")
-        assert page.locator("#modal .nc-status").text_content().startswith("Writes ")
     finally:
         _close(page)
 

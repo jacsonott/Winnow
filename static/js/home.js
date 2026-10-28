@@ -1,7 +1,7 @@
 /* The home screen: the case registry, opening/creating cases, and boot().
 
    Split out of the former single static/app.js — see CLAUDE.md. */
-import { applyBundle, boardsOf, listBundles, summaryOf } from './bundles.js';
+import { applyBundle, listBundles, summaryOf } from './bundles.js';
 import { PAGE_ID, closePresence } from './connection.js';
 import { $, api, dragHas, el, post, setBusy, setCaseToken, switchCase, toast } from './core.js';
 import { pad2 } from './tsformat.js';
@@ -710,13 +710,9 @@ export function openFolderBrowser(startPath, onSelect, onCancel, { mode = 'folde
    the other dialogs moved to. The profiles are down the side — None, the
    shipped ones, then this machine's own, each with what it carries under
    its name — and the case is on the right: its name, group and file on
-   top, then what the chosen profile will do to it and the values it asks
-   for. One main button on the foot names what it makes ("Create “ACME
-   intrusion” with KAPE triage"), and the line beside it says what is
-   still missing. It used to be a column of captioned boxes with the
-   profile a <select> of names, so which plugins a profile turned on,
-   which board it opened with and what it asked for only showed once the
-   case was made.
+   top, then the chosen profile's description and the values it asks for.
+   Kept to the fields: what a profile carries is the line under its name,
+   and what is missing is said when Create is pressed, not before.
 
    `state` carries everything back across a "Browse..." round trip —
    opening the folder browser swaps this modal's content out entirely
@@ -745,7 +741,7 @@ export async function openNewCaseModal(state = {}) {
     // is showing, so choosing another profile never loses what was typed.
     const caseBox = el('div', 'nc-case');
     const nameInput = ncInput(state.name || '', 'e.g. ACME intrusion', 'nc-name');
-    const groupInput = ncInput(state.group || '', 'Optional — an IR engagement, say');
+    const groupInput = ncInput(state.group || '', 'Optional');
     groupInput.setAttribute('list', 'home-new-case-groups');
     let chosenDir = state.chosenDir || S.casesDir || S.defaultCasesDir || 'cases';
     const pathInput = ncInput(state.path || joinPath(chosenDir, slugify(state.name || '') + CASE_EXT), '', 'mono nc-path');
@@ -772,69 +768,37 @@ export async function openNewCaseModal(state = {}) {
     const pair = el('div', 'dlg-pair');
     pair.append(captioned('Name', nameInput),
       captioned('Group', groupInput, groupOptionsDatalist('home-new-case-groups')));
-    caseBox.append(pair, captioned('Case file path', pathBox,
-      el('small', null, 'Filled in from the name until you change it.')));
+    caseBox.append(pair, captioned('Case file path', pathBox));
 
     const varInputs = new Map();     // variable name -> input, for the chosen profile
     const chosen = () => byId.get(frame.current()) || null;    // null is None
     const missingVars = () => ((chosen() || {}).variables || [])
       .filter((d) => d.required && !(varInputs.get(d.name)?.value || '').trim());
 
-    // What the chosen profile does to the case, in the figures and notes
-    // the other panes use, then the values it asks for — the same fields
-    // the values prompt draws (variablePromptFields), so what the profile
-    // builder previews is what this shows.
+    // The chosen profile under the case: what it is for, in its own words,
+    // and the values it asks for — the same fields the values prompt draws
+    // (variablePromptFields). None has neither.
     function profilePart(bd) {
       const part = el('div', 'nc-profile');
       varInputs.clear();
-      const notes = el('ul', 'mb-notes');
-      const note = (...kids) => { const li = el('li', 'mb-note'); li.append(...kids); notes.append(li); };
-      if (!bd) {
-        note(saving ? 'The quick look keeps the plugins and boards it has now.'
-          : 'The case starts with the plugins this machine has on, and no boards.');
-        note('A profile sets a case up for one kind of work: the plugins it needs, the boards it opens with, '
-          + 'a starter watchlist and the values it must carry. Pick one on the left, or apply one later from '
-          + 'Settings → Profiles.');
-        part.append(notes);
-        return part;
+      if (bd && bd.description) {
+        const about = el('p', 'nc-about', bd.description);
+        about.title = bd.description;   // clamped to two lines
+        part.append(about);
       }
-      const plugins = bd.plugins || [];
-      const boards = boardsOf(bd);
-      const watch = bd.watchlist || [];
-      const defs = bd.variables || [];
-      const summary = el('div', 'mb-summary');
-      const stats = el('div', 'mb-stats');
-      stats.append(tableMenuStat(plugins.length, plugins.length === 1 ? 'plugin on' : 'plugins on'),
-        tableMenuStat(boards.length, boards.length === 1 ? 'board' : 'boards'),
-        tableMenuStat(watch.length, watch.length === 1 ? 'indicator' : 'indicators'),
-        tableMenuStat(defs.length, defs.length === 1 ? 'value' : 'values'));
-      summary.append(stats);
-      if (bd.description) note(bd.description);
-      if (plugins.length) {
-        const names = plugins.flatMap((p, i) => [i ? ', ' : '', el('span', 'nc-plugin', p)]);
-        note('Turns on ', ...names, ' for this case, and every other plugin off.');
-      } else note('Turns every plugin off for this case.');
-      for (const board of boards) {
-        note(`Opens with the “${board.name}” board: ${plural(board.widgets.length, 'widget')}.`);
-      }
-      if (watch.length) note(`Starts the watchlist with ${plural(watch.length, 'indicator')}.`);
-      part.append(summary, notes);
+      const defs = (bd && bd.variables) || [];
       if (defs.length) {
-        const vars = el('div', 'nc-vars');
         const { fields, inputs } = variablePromptFields(defs);
         for (const [vname, inp] of inputs) {
           if (typed.has(vname)) inp.value = typed.get(vname);
-          inp.oninput = () => { typed.set(vname, inp.value); inp.classList.remove('invalid'); paintFoot(); };
+          inp.oninput = () => { typed.set(vname, inp.value); inp.classList.remove('invalid'); };
           varInputs.set(vname, inp);
         }
         const grid = el('div', 'nc-vars-fields');
         grid.append(...fields);
-        vars.append(el('div', 'nc-head', `What “${bd.name}” asks for`), grid,
-          el('p', 'fb-help', 'Kept in the case file for plugins to read'
-            + (defs.some((d) => d.required) ? '; * marks the ones the case needs' : '')
-            + '. Not for tokens or passwords.'));
-        part.append(vars);
+        part.append(grid);
       }
+      part.hidden = !part.childElementCount;
       return part;
     }
 
@@ -849,45 +813,25 @@ export async function openNewCaseModal(state = {}) {
         hint: () => summaryOf(bd) });
     }
     for (const s of sections) {
-      s.build = (pane) => {
-        pane.append(caseBox, profilePart(byId.get(s.id) || null));
-        paintFoot();
-      };
+      s.build = (pane) => pane.append(caseBox, profilePart(byId.get(s.id) || null));
     }
     const frame = sectionPanes({ sections, label: 'Profiles', cls: 'list-panes nc-panes', paneCls: 'list-pane nc-pane' });
     b.append(frame.panes);
 
-    const foot = el('div', 'table-menu-foot table-menu-strip nc-foot');
-    const status = el('p', 'fb-help nc-status');
+    const foot = el('div', 'table-menu-foot table-menu-strip');
     const cancel = el('button', 'btn ghost table-menu-close', 'Cancel');
     cancel.onclick = () => {
       $('modal').hidden = true;
       if (saving && saving.onCancel) saving.onCancel();
     };
-    const go = el('button', 'btn primary nc-go');
-    foot.append(status, cancel, go);
+    const go = el('button', 'btn primary nc-go', saving ? 'Save case' : 'Create case');
+    foot.append(cancel, go);
     b.append(foot);
 
-    function paintFoot() {
-      const name = nameInput.value.trim();
-      const path = pathInput.value.trim();
-      const bd = chosen();
-      go.textContent = name ? `${saving ? 'Save as' : 'Create'} “${name}”${bd ? ` with ${bd.name}` : ''}`
-        : (saving ? 'Save case' : 'Create case');
-      go.title = go.textContent;
-      const missing = missingVars();
-      status.textContent = !name ? `Name the case to ${saving ? 'save' : 'create'} it.`
-        : !path ? 'Give the case file a path.'
-          : missing.length ? `“${bd.name}” needs: ${missing.map((d) => d.label || d.name).join(', ')}.`
-            : saving ? `Moves the quick look to ${path} and lists it on the home screen.`
-              : `Writes ${path} and opens it.`;
-      status.title = status.textContent;
-    }
     nameInput.oninput = () => {
       if (!pathTouched) pathInput.value = joinPath(chosenDir, slugify(nameInput.value) + CASE_EXT);
-      paintFoot();
     };
-    pathInput.oninput = () => { pathTouched = true; paintFoot(); };
+    pathInput.oninput = () => { pathTouched = true; };
     // Enter in a box makes the case, as the main button would. Not in
     // Group: Enter there picks one of the groups it offers.
     b.addEventListener('keydown', (e) => {

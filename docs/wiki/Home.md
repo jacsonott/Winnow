@@ -10,9 +10,9 @@ With an EvtxECmd export as the example:
 
 1. **Install and start it.** `pip install -r requirements.txt`, then
    `python server.py`. ([Installation](Installation.md))
-2. **Make a case.** **+ New case**, name it, then the **Create “…”** button
-   at the bottom. Pick **KAPE triage** on the left to also get a dashboard
-   and a starter watchlist.
+2. **Make a case.** **+ New case**, name it, **Create case**. Pick
+   **KAPE triage** on the left to also get a dashboard and a starter
+   watchlist.
    ([Cases and importing](Cases-and-importing.md))
 3. **Import.** **Import files…**, **Add from this machine…**, then
    **Import 1 file**. For a whole KAPE output, **Import a whole folder…**.

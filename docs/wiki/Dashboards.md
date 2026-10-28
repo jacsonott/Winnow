@@ -441,9 +441,8 @@ case, as four parts you can tick separately. Nothing happens until you press
 | **Variables** | Adds the variable definitions. Values already set are kept; required ones still empty are asked for after applying |
 
 You can also pick a profile from the list down the left of the **New case**
-dialog, which says what each part will do before the case exists. Every part
-is then applied as soon as the case is created, and required variables are
-asked for in the dialog itself.
+dialog. Every part is then applied as soon as the case is created, and
+required variables are asked for in the dialog itself.
 
 Applying a profile again replaces its board with the profile's current
 version, which is how a case picks up a revised profile. Cases are never

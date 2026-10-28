@@ -54,9 +54,7 @@ def test_banner_shows_and_save_as_promotes(own_page, quicklook_server, tmp_path)
         path = inputs.nth(2).input_value()
         assert path.startswith(str(tmp_path / "cases")), path
         assert path.endswith("promoted-case.db-winnow"), path
-        save = pg.locator("#modal .nc-go")
-        assert save.text_content() == "Save as \u201cPromoted case\u201d"
-        save.click()
+        pg.locator("#modalBody .btn", has_text="Save case").click()
 
         pg.wait_for_selector("#tempBanner[hidden]", state="attached", timeout=15_000)
         cur = pg.evaluate("""() => fetch('/api/case/current',
