@@ -6,6 +6,7 @@ import { columnMenuItems, opLabel } from './derived.js';
 import { columnFilterChips, openValuePicker, pickerTreeNode, removeColumnFilter, valueFilterEnabled } from './filters.js';
 import { render, setCellRange } from './grid.js';
 import { renderGroupStrip } from './grouping.js';
+import { histogramFollowColumns } from './histogram.js';
 import { S, clearCellSelection, gridRowCount, selClear, selSetAll, selSnapshot } from './state.js';
 import { baseColumns, columnMeta } from './tsformat.js';
 import { anchoredPanel, contextMenu } from './ui.js';
@@ -601,6 +602,9 @@ export function renderHead() {
   // table — which is the thing the bar exists to stop drawing.
   filt.hidden = !classicFilterRow() && !S.filterOpen.length;
   renderFilterBar();
+  // The histogram charts only columns that are shown, and nothing else
+  // tells it one was just hidden.
+  histogramFollowColumns();
 
   // The active cell, put back on the column it was on if that column
   // survived this repaint. The rectangle is NOT restored: its far corner

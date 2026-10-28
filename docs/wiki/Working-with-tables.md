@@ -89,6 +89,8 @@ In a narrow window the sections go across the top instead.
 
 In the table menu's **Columns** list, untick a column to hide it and tick it to show it again. **Filter columns…** finds a column by name in a wide table. **Show all** brings every hidden column back. **Hide empty columns** hides every column that has no value in the first 2,000 rows of the current view, so a column whose values only appear further down can be hidden by it.
 
+A hidden datetime column is also left out of the [histogram](Filtering-and-searching.md#the-histogram)'s column list, so the histogram only charts columns you can see.
+
 **Hide empty rows** is a toggle in the same place. It drops rows in which every column is empty, such as blank lines in a raw text import. It counts as a filter: the row count follows it, and it is remembered for the table.
 
 Each column's type (text, number or datetime) is shown after its name, in a colour of its own so the two don't run together, with "derived" after a derived column. When the menu is too narrow for a long name, the name is shortened with "…" so every row's buttons stay in view; hover the row to see it in full.

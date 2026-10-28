@@ -21,6 +21,12 @@
    The grid's render() asks for that through histogramFollowGrid, so a
    scroll or a cursor move repaints the canvas and never refetches.
 
+   It charts only the datetime columns the grid shows. A column hidden
+   from the grid is one the analyst has put away, and a chart of it
+   describes the rows by a time nobody on screen can see, so it is left
+   out of the column list, and hiding the charted one moves the chart to
+   another (histogramFollowColumns, from the header's repaint).
+
    And it never passes the previous view's chart off as this one's. From
    the moment a rebuild starts until the answer for the view it lands has
    come back, the bars are faded and gray, the position marks are gone and
@@ -95,6 +101,7 @@ let stale = false;
 let opening = false;
 let shown = false;      // what syncHistogramPanel last applied (its onShow edge)
 let ui = null;          // {colSel, info, canvas, hint, empty} once wired
+let listed = null;      // the column list as last written into colSel
 let chartUp = false;    // the canvas holds a chart (draw() reached paintChart)
 let marks = null;       // the grid position the canvas last painted (gridMarks)
 let marksRaf = null;    // one repaint per frame, however often the grid renders
@@ -509,7 +516,7 @@ function buildChrome(container) {
   const bar = el('div', 'histogram-head');
   const title = el('span', 'th-title', 'Histogram');
   const colSel = el('select');
-  colSel.title = 'Which datetime column to chart';
+  colSel.title = 'Which datetime column to chart — columns hidden from the grid are left out';
   colSel.onchange = () => { column = colSel.value || null; savePrefs({ column }); draw(); schedule(); };
   const info = el('span', 'th-info', '');
   const legend = el('span', 'th-legend');
@@ -645,24 +652,52 @@ const iso = (epoch) => {
 const humanBucket = (s) => (s % 86400 === 0 ? `${s / 86400}d` : s % 3600 === 0 ? `${s / 3600}h`
   : s % 60 === 0 ? `${s / 60}m` : `${s}s`);
 
+/* The datetime columns the strip may chart: the table's, less the ones
+   hidden from the grid (the table menu's Columns list, Hide empty
+   columns, an applied layout). A column grouped on is not hidden — it
+   moved into the group headings — so it stays. */
+function chartableColumns() {
+  return datetimeColumns().filter((n) => !(S.layout[n] || {}).hidden);
+}
+
 /* Which datetime column to chart. S.columns includes derived columns and
    a merge's, the same list Store.time_histogram accepts. A column the
-   analyst picked (kept per browser) wins while the table has it; else
-   the timeframe filter's column; else the first. */
+   analyst picked (kept per browser) wins whenever the table shows it —
+   so hiding it and showing it again brings the chart back to it, rather
+   than leaving it on the one it moved to meanwhile; else the column
+   charted now, while it is still shown; else the timeframe filter's
+   column; else the first. */
 function pickColumn() {
-  const cols = datetimeColumns();
-  if (!(column && cols.includes(column))) {
-    const want = prefs().column;
+  const cols = chartableColumns();
+  const want = prefs().column;
+  if (want && cols.includes(want)) column = want;
+  else if (!(column && cols.includes(column))) {
     const tr = S.timeRange;
-    column = want && cols.includes(want) ? want
-      : tr && tr.column && cols.includes(tr.column) ? tr.column
-        : (cols[0] || null);
+    column = tr && tr.column && cols.includes(tr.column) ? tr.column : (cols[0] || null);
   }
-  ui.colSel.replaceChildren();
-  for (const c of cols) { const o = el('option', null, c); o.value = c; ui.colSel.append(o); }
+  const key = cols.join('\u0000');
+  if (key !== listed) {
+    listed = key;
+    ui.colSel.replaceChildren();
+    for (const c of cols) { const o = el('option', null, c); o.value = c; ui.colSel.append(o); }
+  }
   if (column) ui.colSel.value = column;
   ui.colSel.hidden = !cols.length;
   return column;
+}
+
+/* The grid's header was repainted — renderHead calls this, and it runs
+   on every hide, show, reorder and pin, and when a derived column comes
+   or goes. Nothing about the rows changed, so no view change is coming
+   to make the strip look again: a column hidden here would stay charted
+   until the next filter. Only for the table whose view is up: mid table
+   switch S.columns is already the new table's while S.view is still the
+   old one's, and the switch's own view change re-picks for it. */
+export function histogramFollowColumns() {
+  if (!ui || opening || !S.view || S.view.source_id !== S.sourceId) return;
+  const before = column;
+  pickColumn();
+  if (column !== before) ask();
 }
 
 /* Span used for the x axis: the view's [start, end + one bucket). */
@@ -948,8 +983,13 @@ function draw() {
     info.textContent = '';
     return;
   }
+  // No column yet with one to chart is the gap between a case switch's
+  // view landing and the ask it schedules, not a table with none.
   if (!column) {
-    showEmpty('No datetime column in this table — derive one from a column header to chart it.');
+    showEmpty(chartableColumns().length ? 'Loading…'
+      : datetimeColumns().length
+        ? 'Every datetime column in this table is hidden — show one from the table menu\'s Columns list to chart it.'
+        : 'No datetime column in this table — derive one from a column header to chart it.');
     info.textContent = '';
     return;
   }
