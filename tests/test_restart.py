@@ -202,6 +202,11 @@ def test_restart_comes_back_on_the_same_port_and_case(tmp_path):
     finally:
         for w in windows:
             w.close()
+        # Asked, not terminated: on Windows the process spawned is the old
+        # one, waiting on the new one, which terminating it would orphan.
+        with contextlib.suppress(OSError, urllib.error.URLError):
+            server.post("/api/shutdown", {})
+            server.wait_exit(20)
         server.stop()
 
 
