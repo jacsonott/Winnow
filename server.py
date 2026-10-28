@@ -1246,6 +1246,12 @@ def _relaunch(in_place: bool = os.name != "nt") -> int:
     argv = _relaunch_argv(launch["args"], _LAST_CASE)
     env = dict(launch["env"])
     sock = _RESTART["listener"]
+    if sock is not None and not _release_completion_port(sock):
+        # The next process couldn't serve on it: let the port go, and
+        # have that one bind it by number (_adopt_listener's retries).
+        sock.close()
+        sock = None
+        env[_LISTENER_ENV] = "port"
     if sock is not None:
         sock.set_inheritable(True)
         env[_LISTENER_ENV] = str(sock.fileno())
@@ -1272,6 +1278,44 @@ def _relaunch(in_place: bool = os.name != "nt") -> int:
             # The console's Ctrl+C reached the new process too, which shuts
             # down on it. Wait for that rather than leaving it behind.
             continue
+
+
+def _release_completion_port(sock: socket.socket) -> bool:
+    """Untie `sock` from the I/O completion port this process's event loop
+    tied it to, so the next process's loop can tie it to its own. False if
+    it is still tied.
+
+    asyncio serves through a completion port on Windows, and a socket
+    belongs to at most one for as long as it is open. It is the socket
+    that is tied, not the handle, so the handle the next Winnow inherits
+    is tied to this process's port too, closed loop or not, and that
+    server's first accept fails ("[WinError 87] The parameter is
+    incorrect"): it starts, says where, and never answers. Windows 8.1
+    added the one way to untie it, FileReplaceCompletionInformation with
+    no port. Elsewhere there is nothing to untie."""
+    if os.name != "nt":
+        return True
+    import ctypes
+    from ctypes import wintypes
+
+    class IoStatusBlock(ctypes.Structure):
+        _fields_ = [("status", ctypes.c_void_p), ("information", ctypes.c_size_t)]
+
+    class CompletionInformation(ctypes.Structure):
+        _fields_ = [("port", wintypes.HANDLE), ("key", ctypes.c_void_p)]
+
+    file_replace_completion_information = 61
+    try:
+        set_info = ctypes.WinDLL("ntdll").NtSetInformationFile
+    except (OSError, AttributeError):
+        return False
+    set_info.restype = ctypes.c_long
+    set_info.argtypes = [wintypes.HANDLE, ctypes.c_void_p, ctypes.c_void_p,
+                         wintypes.ULONG, ctypes.c_int]
+    info = CompletionInformation()
+    status = set_info(sock.fileno(), ctypes.byref(IoStatusBlock()), ctypes.byref(info),
+                      ctypes.sizeof(info), file_replace_completion_information)
+    return status == 0
 
 
 def _adopt_listener(handle: str, host: str, port: int | None) -> socket.socket:

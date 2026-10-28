@@ -517,6 +517,21 @@ see [docs/notes/README.md](README.md) for the whole set.
     while its last connections linger. On Windows the inheritance rides
     `close_fds=False`; Python makes every other handle non-inheritable, so
     only the socket and the standard handles go.
+  - **On Windows the socket has to be untied from the old event loop
+    first** (`_release_completion_port`). asyncio serves through an I/O
+    completion port there, and a socket belongs to at most one for as
+    long as it is open. It is the socket that is tied, not the handle, so
+    the inherited copy is still tied to the old process's port, and the
+    new server starts, prints its address, and then fails every accept
+    ("Accept failed on a socket … [WinError 87] The parameter is
+    incorrect"). It never answers, and nothing on screen says why. Windows
+    8.1's `FileReplaceCompletionInformation` with no port unties it (via
+    `NtSetInformationFile`). Where that fails, `_relaunch` closes the
+    socket and passes `WINNOW_LISTENER=port`, so the new process binds by
+    number with the retries above rather than serving a socket it can't
+    accept on. Only Windows CI catches this:
+    test_restart.py's Windows-way test ties its listener to a loop first
+    (`_served_and_stopped`), as uvicorn leaves the real one.
   - **The command line is rebuilt, not replayed** (`_relaunch_argv`):
     same interpreter, host, port, `--allow-host`, `--plugins-dir` and
     `--no-idle-shutdown`, plus `--no-browser` (the windows are already

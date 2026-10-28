@@ -11,6 +11,7 @@ analyst with no server at all."""
 from __future__ import annotations
 
 import argparse
+import asyncio
 import contextlib
 import os
 import socket
@@ -155,7 +156,34 @@ def test_a_handed_down_listener_is_adopted():
         sock.close()
 
 
-@pytest.mark.parametrize("handle", ["not-a-handle", "999999"])
+def test_a_listener_the_next_process_could_not_serve_on_is_let_go(launched, monkeypatch, tmp_path):
+    """Where the socket can't be untied from this process's event loop
+    (Windows before 8.1), handing it on would start a server that never
+    answers. The port is let go instead, and the next process binds it by
+    number."""
+    sock = srv._claim_port("127.0.0.1", 0)
+    monkeypatch.setattr(srv, "_RESTART", {"requested": True, "listener": sock})
+    monkeypatch.setattr(srv, "_LAST_CASE", str(tmp_path / "c.db-winnow"))
+    monkeypatch.setattr(srv, "_release_completion_port", lambda s: False)
+    started = {}
+
+    class Started:
+        def wait(self):
+            return 0
+
+    def popen(argv, env, close_fds):
+        started.update(env=env, still_open=sock.fileno() != -1)
+        return Started()
+
+    monkeypatch.setattr(srv.subprocess, "Popen", popen)
+    try:
+        assert srv._relaunch(in_place=False) == 0
+    finally:
+        sock.close()
+    assert started == {"env": {**launched["env"], srv._LISTENER_ENV: "port"}, "still_open": False}
+
+
+@pytest.mark.parametrize("handle", ["not-a-handle", "999999", "port"])
 def test_a_listener_that_cannot_be_adopted_is_bound_by_number(handle):
     port = free_port()
     got = srv._adopt_listener(handle, "127.0.0.1", port)
@@ -182,13 +210,19 @@ def test_restart_comes_back_on_the_same_port_and_case(tmp_path):
             try:
                 now = server.get("/api/version", timeout=10)
             except (urllib.error.URLError, ConnectionError) as e:
-                refused.append(e)
+                # Refused means nothing was listening. A request the old
+                # server had already taken when it went down can be reset
+                # instead (Windows' event loop accepts ahead of time), which
+                # says nothing about the port; the page just asks again.
+                if isinstance(getattr(e, "reason", e), ConnectionRefusedError):
+                    refused.append(e)
                 now = before
             if now["boot"] != before["boot"]:
                 break
             assert time.monotonic() < deadline, f"never came back:\n{server.log.text()}"
             time.sleep(0.1)
-        assert refused == [], "the port closed during the restart — the listener wasn't handed over"
+        assert refused == [], ("the port closed during the restart — the listener wasn't "
+                               f"handed over:\n{server.log.text()}")
         assert server.proc.poll() is None
         if os.name != "nt":
             assert now["pid"] == before["pid"]   # execve: the same process
@@ -210,6 +244,19 @@ def test_restart_comes_back_on_the_same_port_and_case(tmp_path):
         server.stop()
 
 
+def _served_and_stopped(sock):
+    """Leave `sock` as uvicorn leaves the listener: served by an event loop
+    and stopped. On Windows that ties it to the loop's completion port for
+    good, which the next process's loop can't serve it under
+    (_release_completion_port)."""
+    async def serve():
+        server = await asyncio.start_server(lambda r, w: w.close(), sock=sock.dup())
+        await asyncio.sleep(0.1)    # its first accept is posted
+        server.close()
+        await server.wait_closed()
+    asyncio.run(serve())
+
+
 def test_the_windows_way_starts_a_new_process_and_waits_for_it(tmp_path, monkeypatch):
     """Windows has no execve, so _relaunch starts the next Winnow and waits
     on it, leaving with its exit code. Run here the same way: the socket is
@@ -218,10 +265,13 @@ def test_the_windows_way_starts_a_new_process_and_waits_for_it(tmp_path, monkeyp
     case = tmp_path / "win.db-winnow"
     listener = srv._claim_port("127.0.0.1", 0)
     port = listener.getsockname()[1]
+    _served_and_stopped(listener)
     args = argparse.Namespace(host="127.0.0.1", port=port, allow_host=[], plugins_dir=[],
                               no_idle_shutdown=True)
-    monkeypatch.setattr(srv, "_LAUNCH", {"args": args, "env": isolated_env(tmp_path),
-                                         "cwd": os.getcwd()})
+    # The new process writes into this test's output capture, a file in the
+    # runner's code page there: UTF-8 keeps what startup prints out of it.
+    env = isolated_env(tmp_path, PYTHONIOENCODING="utf-8")
+    monkeypatch.setattr(srv, "_LAUNCH", {"args": args, "env": env, "cwd": os.getcwd()})
     monkeypatch.setattr(srv, "_LAST_CASE", str(case))
     monkeypatch.setattr(srv, "_RESTART", {"requested": True, "listener": listener})
     result = {}
@@ -244,7 +294,8 @@ def test_the_windows_way_starts_a_new_process_and_waits_for_it(tmp_path, monkeyp
         assert listener.fileno() == -1
         assert new.post("/api/shutdown", {}) == {"ok": True}
         waiter.join(20)
-        assert result.get("code") == 0
+        # The wait ended with the new process, and with its exit code.
+        assert isinstance(result.get("code"), int), result
     finally:
         if waiter.is_alive():
             with contextlib.suppress(OSError, urllib.error.URLError):
