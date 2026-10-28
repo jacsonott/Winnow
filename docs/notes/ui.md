@@ -340,6 +340,26 @@ see [docs/notes/README.md](README.md) for the whole set.
   `view` and read when `view` is missing); the plugin's
   `winnow.panels['table-histogram.histogram']` is migrated to `open`
   once and deleted.
+- **The strip charts only the datetime columns the grid shows**
+  (histogram.js `chartableColumns`: `datetimeColumns()` less
+  `S.layout[n].hidden`; a column grouped on is not hidden and stays). A
+  hidden column is one the analyst has put away, and a chart of it
+  described the rows by a time nobody on screen could see. Two things
+  make it hold. **Hiding is not a view change**, so nothing used to tell
+  the strip: `renderHead` (columns.js) calls `histogramFollowColumns()`
+  on every repaint of the header — every hide, show, reorder and pin,
+  and a derived column coming or going — which re-picks and asks at once
+  when the charted column changed. It does nothing unless
+  `S.view.source_id === S.sourceId`: mid table switch `S.columns` is
+  already the new table's while `S.view` is still the old one's, and an
+  ask then would name the new table's column to the old view (a 400);
+  the switch's own view change re-picks instead. **The analyst's pick
+  wins whenever it is shown** (`pickColumn`): the `column` pref used to
+  win only once the column charted now was gone, so hiding the pick and
+  showing it again left the chart on the column it had moved to. With
+  every datetime column hidden the empty state says so ("Every datetime
+  column in this table is hidden — …"), not "No datetime column".
+  tests/ui/test_histogram_hidden_columns.py.
 - **The strip's color-by views — Tags, Value, Groups — are one pref,
   one pressed at a time** (histogram.js `histogramView`; the store side
   is in store.md). Five things to know before touching them. **Value
