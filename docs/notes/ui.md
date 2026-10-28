@@ -422,6 +422,36 @@ see [docs/notes/README.md](README.md) for the whole set.
   it. **Times outside the chart's span are dropped, not clamped**: between
   a rebuild and the strip's next answer the rows are the new view's and
   the axis is the old one's. tests/ui/test_histogram_position.py.
+- **The strip marks the days, or the weeks** (charts.js `calendarRules`
+  / `drawCalendarRules`, drawn from `paintChart`). A dashed `--line-2`
+  rule at each midnight while the bars are finer than a day, at each
+  Monday's midnight once they are not, none once the bars are a week;
+  the Timeline overview strip draws the same rules through the same two
+  functions, so the two cannot drift. Four things to know before
+  touching it. **The unit follows the bar width first and the pixels
+  second**: a rule per bar says nothing the bars do not, so days need
+  bars under a day and weeks bars under a week, and a unit whose rules
+  would land under `RULE_MIN_PX` (8) apart drops to the next — hour bars
+  over two months give weeks, not a midnight every 6px. **UTC, Monday**:
+  the bars are UTC epochs and every label on the strip is UTC, so a
+  local midnight would sit mid-bar; the week is ISO 8601's.
+  `calendarRules` floors from 1970-01-05 (the first Monday after the
+  epoch) rather than truncating, so a span before 1970 — FILETIME zero,
+  a bad clock — still lands on midnights and Mondays. **Behind the
+  bars, as the Timeline's were**: they show in the gaps and across a
+  quiet stretch and never tint a bar the color split is read by; on a
+  week of day bars a Monday rule is mostly under Monday's bar, which is
+  why each one's date is also written under the axis — `YYYY-MM-DD`,
+  the ISO form of the start and end labels beside it — where it fits
+  clear of them and of its neighbors; the middle timestamp the axis used to carry
+  is drawn only when no rule got a label. **Strictly inside the span**:
+  a rule on the axis's very edge marks nothing, so a span that starts
+  at midnight does not rule its own left edge (the Timeline strip did,
+  before it shared these). `histogramRules()` / `timelineOverviewRules()`
+  say what was last painted, for tests/ui, which cannot read a dashed
+  line's meaning off the canvas. The hover names the day a rule marks.
+  tests/ui/test_histogram_calendar_rules.py,
+  tests/ui/test_timeline_overview_strip.py.
 - There's no separate "preset" concept anymore — a preset is just a saved
   filter (`workspace.SavedFilters`, cross-case) whose `col_names` happens to
   match (exactly, or "similar" per the same Jaccard/subset heuristic the old

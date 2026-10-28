@@ -183,6 +183,8 @@ The same switch is in Settings, under **Filter & search syntax**.
 
 Click **Histogram** or press `h` to show a bar chart above the grid of when the rows in the current view happened. Choose which datetime column to chart from its list. Only the columns shown in the grid are in that list: a column you have hidden is left out, and if you hide the column being charted, the histogram switches to another one straight away. Show your chosen column again and the histogram goes back to it. The line beside it gives the row count, the bucket size and the tallest bar. Winnow picks a bucket size, from one second up to a year, that gives bars a few pixels wide across the strip, so narrowing the timeframe gives finer buckets. Hover a bar to see its time range and row count.
 
+Dashed lines behind the bars mark the days or the weeks, as on the [Timeline's overview](Timeline-search-and-watchlist.md#the-overview). While the bars are shorter than a day, a line marks each midnight. Once they are a day or longer, or the days are too close together to tell apart, a line marks the start of each week (Monday) instead, and when even the weeks are too close, there are none. Under the chart, each line is labeled with its date in ISO form, such as **2026-03-11**, where there is room between the start and end times. Like every time on the chart, they are in UTC. Hover a line to see the day it marks.
+
 Three buttons color the bars, one at a time; click the pressed one again to go back to plain bars. In each, a row counts once, so the bars stay as tall as the plain ones.
 
 - **Tags** colors the bars by tag: each row counts under the first tag it carries, with untagged rows underneath.
