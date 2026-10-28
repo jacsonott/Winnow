@@ -41,8 +41,9 @@ def test_banner_shows_and_save_as_promotes(own_page, quicklook_server, tmp_path)
         pg.locator("#tempSaveBtn").click()
         pg.wait_for_selector("#modal:not([hidden])")
         assert pg.locator("#modalTitle").text_content() == "Save as a case"
-        labels = pg.locator("#modalBody > label").all_inner_texts()
-        assert labels == ["Name", "Group", "Case file path", "Profile"], labels
+        labels = pg.locator("#modalBody .nc-case .dlg-field > label").all_inner_texts()
+        assert labels == ["Name", "Group", "Case file path"], labels
+        pg.wait_for_selector("#modalBody .side-rail-item[data-section=none][aria-selected=true]")
         assert pg.locator(".confirm-overlay").count() == 0
 
         inputs = pg.locator("#modalBody input")
@@ -53,7 +54,9 @@ def test_banner_shows_and_save_as_promotes(own_page, quicklook_server, tmp_path)
         path = inputs.nth(2).input_value()
         assert path.startswith(str(tmp_path / "cases")), path
         assert path.endswith("promoted-case.db-winnow"), path
-        pg.locator("#modalBody .btn", has_text="Save case").click()
+        save = pg.locator("#modal .nc-go")
+        assert save.text_content() == "Save as \u201cPromoted case\u201d"
+        save.click()
 
         pg.wait_for_selector("#tempBanner[hidden]", state="attached", timeout=15_000)
         cur = pg.evaluate("""() => fetch('/api/case/current',

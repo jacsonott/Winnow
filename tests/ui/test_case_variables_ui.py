@@ -98,12 +98,13 @@ def test_new_case_dialog_asks_for_a_profiles_required_variables(page, api):
         page.wait_for_selector("#home:not([hidden]) .home-head")
         page.locator("#home .btn", has_text="New case").click()
         page.wait_for_selector("#modal:not([hidden])")
-        sel = page.locator("#modalBody select").first
-        page.wait_for_function("() => [...document.querySelectorAll('#modalBody select option')].some((o) => o.textContent.startsWith('UI Vars Profile'))")
-        assert page.locator("#modalBody .new-case-vars").is_hidden()
-        sel.select_option(str(rec["id"]))
-        page.wait_for_selector("#modalBody .new-case-vars:not([hidden])")
-        vars_box = page.locator("#modalBody .new-case-vars")
+        item = page.locator(f"#modalBody .side-rail-item[data-section='{rec['id']}']")
+        assert "UI Vars Profile" in item.inner_text()
+        # None is chosen until a profile is, and asks for nothing
+        assert page.locator("#modalBody .nc-vars").count() == 0
+        item.click()
+        page.wait_for_selector("#modalBody .nc-vars")
+        vars_box = page.locator("#modalBody .nc-vars")
         assert "Engagement *" in vars_box.inner_text()
         assert vars_box.locator("input[data-var=doc_link]").input_value() == "https://docs.local/x"
         assert "for report titles" in vars_box.inner_text()
@@ -111,10 +112,12 @@ def test_new_case_dialog_asks_for_a_profiles_required_variables(page, api):
         # required and empty → Create refuses, case not made
         before = page.evaluate("() => fetch('/api/cases').then((r) => r.json()).then((c) => c.length)")
         page.locator("#modalBody input").first.fill("Vars gate case")
-        page.locator("#modalBody .btn", has_text="Create").click()
+        assert "needs: Engagement" in page.locator("#modal .nc-status").inner_text()
+        page.locator("#modal .nc-go", has_text="Create").click()
         page.wait_for_selector("#toast:not([hidden])")
         assert "needs: Engagement" in page.locator("#toast").inner_text()
         assert page.locator("#modal:not([hidden])").count() == 1
+        assert "invalid" in vars_box.locator("input[data-var=engagement]").get_attribute("class")
         after = page.evaluate("() => fetch('/api/cases').then((r) => r.json()).then((c) => c.length)")
         assert after == before
     finally:

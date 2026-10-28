@@ -2554,8 +2554,7 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .collist-type { flex: 0 1 auto; min-width: 0; color: var(--col-type); }
 .modal-body .row-actions { display: flex; gap: 6px; margin-top: 12px; align-items: center; }
 .modal-body .row-actions h4 { flex: 1; margin: 0; }
-/* A form dialog's field captions (New case / Save as a case, Edit case,
-   Open existing case file). The gap goes ABOVE each caption and only a
+/* A form dialog's field captions (Edit case, Open existing case file). The gap goes ABOVE each caption and only a
    small one below it, so a caption reads with the box under it — with the
    row's 12px on top instead, "Group" sat flush under the Name box and read
    as its caption. */
@@ -3564,6 +3563,28 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .list-pane .mb-notes { list-style: none; margin: 0 0 10px; padding: 0; display: grid; gap: 5px; }
 .list-pane .mb-notes[hidden] { display: none; }
 .list-pane .tables-head > span { overflow: hidden; text-overflow: ellipsis; }
+/* + New case and Save as a case (openNewCaseModal, in home.js): the
+   profiles down the side, the case on the right — its name, group and
+   file on top, then what the chosen profile does to it and the values it
+   asks for. A form rather than a list, so the pane is what scrolls when
+   the card is short, not a box inside it. */
+.list-pane.nc-pane { overflow: auto; padding-right: 2px; }
+.nc-case .confirm-input { width: 100%; min-width: 0; }
+.nc-case .dlg-pair { margin-bottom: 10px; }
+.nc-profile { border-top: 1px solid var(--line); padding-top: 12px; }
+.nc-profile .mb-summary { margin-bottom: 10px; }
+.nc-plugin { font-family: var(--mono); font-size: 12px; }
+.nc-vars { margin-top: 4px; }
+.nc-head {
+  margin: 4px 0 8px; font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--dim);
+}
+.nc-vars-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 12px; }
+.nc-vars-fields .confirm-input { width: 100%; min-width: 0; }
+.nc-vars .fb-help { margin: 2px 0 0; }
+/* What is still missing, or where the file goes, beside the one button
+   that makes the case. Both give way before Cancel does. */
+.nc-status { flex: 1 1 auto; min-width: 0; margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.nc-go { flex: 0 1 auto; max-width: 55%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* One grid for the column heads and every row, so the counts line up
    down fifty tables. The name cell takes what is left and ellipsizes. */
 .tables-head, .tables-row {
@@ -3806,6 +3827,8 @@ button.tables-num:hover { text-decoration: underline; color: var(--text); }
   .list-panes .side-rail-group, .list-panes .side-rail-hint { display: none; }
   .list-pane .tm-cols-top { flex-wrap: wrap; }
   .list-pane .tm-cols-top .side-search { flex-basis: 100%; }
+  .nc-case .dlg-pair, .nc-vars-fields { grid-template-columns: minmax(0, 1fr); }
+  .nc-case .dlg-pair > .dlg-field + .dlg-field { margin-top: 10px; }
   .sessions-head, .sessions-row { grid-template-columns: minmax(0, 1fr) 56px 26px; }
   .sessions-head > :nth-child(3), .sessions-head > :nth-child(4), .sessions-head > :nth-child(5),
   .sessions-row > :nth-child(3), .sessions-row > :nth-child(4), .sessions-row > :nth-child(5) { display: none; }
@@ -4027,18 +4050,14 @@ html.remote .row.selected:hover { background: var(--row-selected); }
 .assoc-ext { font-family: var(--mono, monospace); min-width: 4.5em; }
 .assoc-desc { color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .assoc-handleronly { color: var(--dim); font-size: 0.85em; }
-/* Case settings → Variables */
-.case-vars { display: grid; gap: 4px; margin: 6px 0 10px; }
-.case-var-row, .env-row { display: grid; grid-template-columns: 160px minmax(120px, 1fr) minmax(0, 1fr) auto;
-  gap: 8px; align-items: center; padding: 3px 6px; border-radius: var(--radius-sm); background: var(--panel-2); }
-.case-var-row.missing { box-shadow: inset 2px 0 0 var(--danger); }
-.case-var-name, .env-name { font-family: var(--mono); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.case-var-name-in, .case-var-value, .env-name-in, .env-value-in { background: var(--ink); color: var(--text); border: 1px solid var(--line-2);
+/* Settings → Environment */
+.env-row { display: grid; gap: 8px; align-items: center; padding: 3px 6px; border-radius: var(--radius-sm); background: var(--panel-2); }
+.env-name { font-family: var(--mono); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.env-name-in, .env-value-in { background: var(--ink); color: var(--text); border: 1px solid var(--line-2);
   border-radius: var(--radius-sm); padding: 4px 7px; font: 12px var(--mono); min-width: 0; }
-.case-var-desc, .env-src { color: var(--dim); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.case-var-del, .env-del { padding: 0 6px; }
-.case-var-add, .env-add { background: transparent; border: 1px dashed var(--line-2); }
-/* Settings → Environment — shares the case-variables row styling above */
+.env-src { color: var(--dim); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.env-del { padding: 0 6px; }
+.env-add { background: transparent; border: 1px dashed var(--line-2); }
 .env-list { display: grid; gap: 4px; margin: 6px 0 4px; }
 .env-row { grid-template-columns: minmax(180px, 1fr) minmax(0, 1.4fr) auto; }
 .env-name-wrap { display: flex; align-items: center; min-width: 0; }
