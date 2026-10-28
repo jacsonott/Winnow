@@ -16,6 +16,6 @@ dragging across it sets the timeframe.
 - A mark along the top spans the rows on screen and moves as you scroll,
   and a line through the bars marks the selected row.
 - Dashed lines mark each midnight, or the start of each week once the
-  bars are a day or longer, with the day written under the chart.
+  bars are a day or longer, with the date written under the chart.
 
 **In the manual:** [Filtering and searching › The histogram](../../wiki/Filtering-and-searching.md#the-histogram)

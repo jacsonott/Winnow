@@ -11,9 +11,9 @@ days are packed too tight to tell apart.
 
 The rules' times are read from histogramRules(), what the strip last
 painted; the day test also reads the canvas, in a night with no rows, so
-a rule that is computed but never drawn fails here too. Each rule's day
-is written under the axis where it fits, as the Timeline strip's axis
-names its days.
+a rule that is computed but never drawn fails here too. Each rule's date
+is written under the axis where it fits, ISO like the start and end
+labels beside it.
 """
 
 from __future__ import annotations
@@ -114,8 +114,10 @@ def test_midnights_are_marked_while_the_bars_are_finer_than_a_day(page, server_p
         rules = page.evaluate("() => __winnow.histogramRules()")
         assert rules["unit"] == "day", rules
         assert rules["times"] == [_epoch(days[1]), _epoch(days[2])], rules
-        # Three days across the strip leave room to name both under the axis.
-        assert rules["labeled"] == rules["times"], rules
+        # Three days across the strip leave room to date both under the
+        # axis, in the ISO form the start and end labels are in.
+        assert rules["labels"] == [{"t": _epoch(days[1]), "text": "2026-02-11"},
+                                   {"t": _epoch(days[2]), "text": "2026-02-12"}], rules
         # Drawn, and only there: a dashed line down the plot at midnight,
         # nothing an hour and a half later in the same quiet night.
         assert _painted_in_column(page, _epoch(days[1])) > 10
@@ -137,8 +139,11 @@ def test_weeks_are_marked_once_the_bars_are_a_day(page, server_post, tmp_path):
         assert when[0].date() == datetime.date(2026, 1, 12), when
         assert all(b - a == datetime.timedelta(days=7) for a, b in zip(when, when[1:])), when
         assert stamps[-1] - when[-1].replace(tzinfo=None) < datetime.timedelta(days=7), when
-        # Named under the axis where they fit: some, and only rules.
-        assert rules["labeled"] and set(rules["labeled"]) <= set(rules["times"]), rules
+        # Dated under the axis where they fit: some, only rules, each in ISO.
+        assert rules["labels"], rules
+        for label in rules["labels"]:
+            assert label["t"] in rules["times"], rules
+            assert label["text"] == f"{datetime.datetime.fromtimestamp(label['t'], UTC):%Y-%m-%d}", rules
 
 
 def test_the_scale_decides_day_week_or_nothing(page):

@@ -18,8 +18,7 @@
 
    And the day/week rules the two time strips (histogram.js,
    timelineoverview.js) draw behind their bars: calendarRules picks
-   them, drawCalendarRules paints them on a context the caller owns,
-   calendarDayLabel names the day one marks.
+   them, drawCalendarRules paints them on a context the caller owns.
 */
 
 const cssVar = (n, fallback) =>
@@ -159,15 +158,6 @@ export function calendarRules(t0, t1, bucket, pxPerSec) {
   const times = [];
   for (let t = Math.floor((t0 - offset) / len) * len + offset + len; t < t1; t += len) times.push(t);
   return { unit, times };
-}
-
-/* The UTC day an epoch falls on, as the Timeline names a day
-   ('Wed 11 Mar'): what the histogram strip writes under each rule. */
-const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-export function calendarDayLabel(epoch) {
-  const d = new Date(epoch * 1000);
-  return `${DOW[d.getUTCDay()]} ${d.getUTCDate()} ${MON[d.getUTCMonth()]}`;
 }
 
 /* The rules calendarRules picked, drawn as the Timeline's overview strip

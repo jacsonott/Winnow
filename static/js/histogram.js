@@ -24,8 +24,8 @@
    And it says where the days are: a faint dashed rule at each midnight
    while the bars are finer than a day, at the start of each week once
    they are not — the Timeline overview strip's rules (charts.js
-   calendarRules), drawn behind the bars — each named under the axis
-   where there is room.
+   calendarRules), drawn behind the bars — each one's ISO date written
+   under the axis where there is room.
 
    And it never passes the previous view's chart off as this one's. From
    the moment a rebuild starts until the answer for the view it lands has
@@ -51,7 +51,7 @@
    nothing to dispose. It shares #pluginPanels with plugin toolbar
    panels; plugins.js syncPluginPanels() is the one writer of that host's
    `hidden` and asks histogramOpen() so the host shows for either kind. */
-import { calendarDayLabel, calendarRules, drawCalendarRules } from './charts.js';
+import { calendarRules, drawCalendarRules } from './charts.js';
 import { $, api, el } from './core.js';
 import { displayValue, ellipsize } from './filters.js';
 import { onScreenRows, render, rowAt } from './grid.js';
@@ -322,11 +322,11 @@ export function histogramPosition() {
     ticks: marks.ticks.map((tk) => tk.t), cursor: marks.cursor && marks.cursor.t };
 }
 /* The day or week rules as last painted: {unit: 'day' | 'week' | null,
-   times: [epoch…], labeled: [epoch…]} — `labeled` the ones whose day is
-   written under the axis — or null with no chart up. */
+   times: [epoch…], labels: [{t, text}…]} — `labels` what was written
+   under the axis, and for which rule — or null with no chart up. */
 export function histogramRules() {
   if (!chartUp || !rules) return null;
-  return { unit: rules.unit, times: [...rules.times], labeled: [...rules.labeled] };
+  return { unit: rules.unit, times: [...rules.times], labels: rules.labels.map((l) => ({ ...l })) };
 }
 
 /* Whether the chart on screen is the answer for the grid as it is now.
@@ -1039,7 +1039,7 @@ function paintChart(current = true) {
   // as faint dashed rules behind everything else: the Timeline overview
   // strip's own (charts.js), so a night reads as one on both strips. On
   // a faded chart too — they belong to its axis, as its bars do.
-  rules = { ...calendarRules(s.t0, s.t1, data.bucket_seconds, w / (s.t1 - s.t0)), labeled: [] };
+  rules = { ...calendarRules(s.t0, s.t1, data.bucket_seconds, w / (s.t1 - s.t0)), labels: [] };
   drawCalendarRules(ctx, rules.times, (tt) => xOf(tt, w), top, bottom, t.line2);
   // No position on a faded chart: the rows on screen are (or are about to
   // be) another view's, placed on this one's axis.
@@ -1084,9 +1084,9 @@ function paintChart(current = true) {
       ctx.fillRect(x, bottom - h, bw, h);
     }
   }
-  // baseline + axis labels: start and end, and between them the day each
-  // rule marks, as the Timeline strip's axis names its days — each where
-  // it fits clear of its neighbors. A middle tick when no rule got one.
+  // baseline + axis labels: start and end, and between them the date each
+  // rule marks, in the same ISO form as they are — each where it fits
+  // clear of its neighbors. A middle tick when no rule got one.
   ctx.strokeStyle = t.line;
   ctx.beginPath(); ctx.moveTo(0, bottom + 0.5); ctx.lineTo(w, bottom + 0.5); ctx.stroke();
   ctx.fillStyle = t.dim;
@@ -1097,15 +1097,15 @@ function paintChart(current = true) {
   ctx.fillText(endLabel, endLeft, HEIGHT - 4);
   let lastRight = 4 + ctx.measureText(startLabel).width;
   for (const tt of rules.times) {
-    const label = calendarDayLabel(tt);
+    const label = iso(tt).slice(0, 10);
     const left = Math.round(xOf(tt, w)) + 3;
     const right = left + ctx.measureText(label).width;
     if (left < lastRight + 12 || right > endLeft - 12) continue;
     ctx.fillText(label, left, HEIGHT - 4);
-    rules.labeled.push(tt);
+    rules.labels.push({ t: tt, text: label });
     lastRight = right;
   }
-  if (!rules.labeled.length) {
+  if (!rules.labels.length) {
     const mid = iso((s.t0 + s.t1) / 2);
     ctx.fillText(mid, w / 2 - ctx.measureText(mid).width / 2, HEIGHT - 4);
   }

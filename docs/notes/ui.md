@@ -421,9 +421,9 @@ see [docs/notes/README.md](README.md) for the whole set.
   bars, as the Timeline's were**: they show in the gaps and across a
   quiet stretch and never tint a bar the color split is read by; on a
   week of day bars a Monday rule is mostly under Monday's bar, which is
-  why each one is also named under the axis (`calendarDayLabel`, the
-  Timeline's 'Wed 11 Mar') where it fits clear of the start and end
-  labels and its neighbors — the middle timestamp the axis used to carry
+  why each one's date is also written under the axis — `YYYY-MM-DD`,
+  the ISO form of the start and end labels beside it — where it fits
+  clear of them and of its neighbors; the middle timestamp the axis used to carry
   is drawn only when no rule got a label. **Strictly inside the span**:
   a rule on the axis's very edge marks nothing, so a span that starts
   at midnight does not rule its own left edge (the Timeline strip did,
