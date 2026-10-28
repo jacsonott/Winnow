@@ -138,6 +138,19 @@ as `test_ingest_jobs.py`).
   answer rather than catching it: a cleanup call that 404'd and was
   swallowed is how that issue went unnoticed.
 
+- **A debounced save outlives the test that made it.** A module-scoped
+  page lives across tests, so a write the app puts off (tabState's
+  half-second debounce, a note's autosave) goes out in whichever test is
+  running by then. Start fresh in test_firstlast_state.py leaves one,
+  since the empty sheet it puts back saves itself as nothing, and the
+  read-failure test after it wrote its row through the API before
+  reloading. Depending on how long the tests between took, that save
+  landed over the row or in the test's own watch for writes, failing
+  the shard on develop now and then. Write the server-side state a test
+  depends on after the reload, which kills a timer still waiting. And a
+  check that a debounced write did NOT happen waits past the debounce:
+  a fast round trip can end before it, so the check looks too early.
+
 - **A click that lands while its target is being re-rendered fires
   nothing.** Not a refusal: the click hits a node that is being replaced,
   so no handler runs and no request goes out, and the test times out
