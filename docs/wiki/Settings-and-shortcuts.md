@@ -117,7 +117,9 @@ opens that column's box. See [Filtering and searching](Filtering-and-searching.m
 Off by default. On, the page tabs (SQL, Timeline, Notes, Watchlist and any
 plugin tabs) collapse into one **Pages ▾** button, giving the table tabs the
 width; while a page is showing, the button carries that page's name. The
-pages and their counts then live in that button's menu.
+pages and their counts then live in that button's menu. Right-clicking a
+page in it gives the menu its tab had, **Open in its own window** included
+(see [Working with tables](Working-with-tables.md#opening-a-page-in-its-own-window)).
 
 ### Autofit column width limit
 
@@ -163,7 +165,11 @@ from the defaults.
 ### Default keys
 
 These are all rebindable. They are listed in the order Settings shows them,
-with the action names Settings uses.
+with the action names Settings uses, except for the first and last row.
+Settings gives `g` and `G` rows of their own (**Jump to first row** and
+**Jump to last row**, after **Page up**) so they can be rebound apart from
+the `Ctrl` and `Meta` chords; they go to the same row, so each is listed here
+once, with all its keys.
 
 | Action | Default keys |
 | --- | --- |
@@ -171,14 +177,12 @@ with the action names Settings uses.
 | Move the cell cursor up | `ArrowUp`, `k` |
 | Move the cell cursor left | `ArrowLeft` |
 | Move the cell cursor right | `ArrowRight` |
-| Jump to the first row | `Ctrl+ArrowUp`, `Meta+ArrowUp` |
-| Jump to the last row | `Ctrl+ArrowDown`, `Meta+ArrowDown` |
+| Jump to the first row | `g`, `Ctrl+ArrowUp`, `Meta+ArrowUp` |
+| Jump to the last row | `G`, `Ctrl+ArrowDown`, `Meta+ArrowDown` |
 | Jump to the first column | `Ctrl+ArrowLeft`, `Meta+ArrowLeft` |
 | Jump to the last column | `Ctrl+ArrowRight`, `Meta+ArrowRight` |
 | Page down | `PageDown` |
 | Page up | `PageUp` |
-| Jump to first row | `g` |
-| Jump to last row | `G` |
 | Focus search box | `/`, `Ctrl+f` |
 | Filter the column under the cursor | none |
 | Focus note field | `n` |
@@ -212,9 +216,10 @@ with the action names Settings uses.
 | Jump again to the saved timestamp (works across tables) | `.` |
 | Profiles — the plugins, boards, watchlist and variables a kind of case carries | `p` |
 
-`Meta` is `⌘` on a Mac and the Windows key elsewhere. The two "first row"
-actions differ in one way: add Shift to `Ctrl+ArrowUp` and it extends the
-selection to the first row, while `g` always just jumps.
+`Meta` is `⌘` on a Mac and the Windows key elsewhere. The keys for the first
+and last row differ in one way: add Shift to `Ctrl+ArrowUp` or
+`Ctrl+ArrowDown` and it extends the selection to that row, while `g` and `G`
+always just jump.
 
 **Focus search box** also answers to `⌘+F`, and to `Ctrl+F` with Shift or
 Caps Lock, for as long as `Ctrl+f` stays bound to it. Winnow takes that chord
@@ -284,6 +289,7 @@ More on selecting and tagging results is in [SQL pane](SQL-pane.md).
 | `Enter` | Open the selected line's row in its table. |
 | Double-click a line | Open its row in its table. A single click selects it. |
 | `Esc` | Let go of the selected line. |
+| `R` / `r` | Set the Timeline's timeframe, and turn it off and on again: the same keys as the table pages' timeframe, acting on the Timeline's own. |
 
 More on reading the Timeline is in [Timeline, Search all and the Watchlist](Timeline-search-and-watchlist.md#the-timeline).
 
@@ -310,6 +316,7 @@ More on reading the Timeline is in [Timeline, Search all and the Watchlist](Time
 | Right-click a row | Tag it, filter to or exclude that cell's value, copy. |
 | Right-click a header | Column options: stack or copy its values, derive a column. |
 | Right-click a tab | Close it, rename it, merge it or remove it, or **Columns…** for the table menu. |
+| Right-click a page tab | Open that page in its own window beside this one, or close it. See [Opening a page in its own window](Working-with-tables.md#opening-a-page-in-its-own-window). |
 | Right-click a tag chip | Filter to that tag, or exclude the rows carrying it. |
 
 ### Tag keys
@@ -327,9 +334,9 @@ covered in [Tagging and notes](Tagging-and-notes.md).
 
 - Most keys act on the grid and work only while a table is showing. `?`,
   `t`, `s`, `p` and `` ` `` also work from the SQL, Timeline, Notes,
-  Watchlist and plugin tabs, and the movement keys move the selected line
-  on the Timeline. `Alt+1`–`Alt+0` and `Ctrl+F` work anywhere in a case;
-  `Ctrl+F` switches to the table first.
+  Watchlist and plugin tabs, and the movement keys and the timeframe's
+  keys (`R`, `r`) work on the Timeline. `Alt+1`–`Alt+0` and `Ctrl+F` work
+  anywhere in a case; `Ctrl+F` switches to the table first.
 - While you are typing in a box, keys type. `Esc`, `Alt+1`–`Alt+0` and
   `Ctrl+F` still work.
 - While a dialog is open, keys go to the dialog, except that the key that
@@ -500,8 +507,12 @@ on.
 
 Shows the installed version, with **Check for updates** and, when there is a
 newer release, **Install update**. Nothing is checked until you press the
-button. See [Updating](Installation.md#updating) for what an update keeps,
-the command-line updater, airgapped updates and rollback.
+button. The new version runs once Winnow restarts: the confirmation has a
+**Restart Winnow when it’s installed** box, ticked, and if you untick it,
+**Restart now** appears beside the buttons once the update is in. Either way
+Winnow comes back on the same case and every open window reloads by itself.
+See [Updating](Installation.md#updating) for what an update keeps, how the
+restart works, the command-line updater, airgapped updates and rollback.
 
 ## Shut down
 

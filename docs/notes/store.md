@@ -79,10 +79,20 @@ see [docs/notes/README.md](README.md) for the whole set.
   floored in Python so `(epoch - start) / width` is never negative —
   SQLite's integer division truncates toward zero, the pre-1970 trap
   `time_histogram` documents, and FILETIME zero (1601) does reach the
-  Timeline. The strip narrows the build two ways: `exclude_sources` (the
-  tables switched OFF, as the tag chips keep theirs) and `ts_range`, a
-  half-open `[start, end)` compared with the line's normalised timestamp,
-  which leaves lines with no time out while it is set.
+  Timeline. The build is narrowed two ways besides tags: `exclude_sources`
+  (the tables switched OFF, as the tag chips keep theirs) and
+  `time_range`, the Timeline's timeframe filter, which the dialog and
+  the strip's drag both write. It is `{start, end}` read the way the
+  grid's `ViewSpec.time_range` is — both ends inclusive, either one
+  optional, each bound through `_ts_normalize` so a bare date is
+  midnight and a US date works, and a bound that is not a timestamp a
+  ValueError (400) rather than a Timeline that silently matches
+  nothing. The end compares `substr(ts, 1, 19)`, not `ts`: a derived
+  timestamp keeps its fraction in the view, and `…:00.500 <= …:00`
+  is false, so a line at exactly the end second fell out. It started
+  as `ts_range`, a half-open `[start, end)` only the drag wrote; an
+  analyst typing an end means that second included, as on the grid.
+  Lines with no time are out while either end is set.
   `tests/test_timeline_overview.py`.
   **The rows around a finding** (`context`, a half-open `[start, end)`)
   add a branch per table with a timestamp, tagged or not, selecting its

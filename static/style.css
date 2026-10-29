@@ -570,6 +570,22 @@ html[data-stripes="off"][data-style][data-theme] { --row-even: var(--ink); }
    matter because .bar itself never gets constrained to the viewport. */
 #app > * { min-width: 0; }
 
+/* A pop-out window (static/js/popout.js): one page, none of the main
+   window's chrome. Its own bar takes .bar's track and both columns; the
+   sidebar's column collapses to nothing with the sidebar gone. The grid's
+   own furniture (toolbar, panels, banners, the row detail) goes too —
+   there is no grid here, only the page. */
+.popout-bar { grid-column: 1 / -1; grid-row: 2; }
+html[data-popout] #sidebar,
+html[data-popout] .bar,
+html[data-popout] .toolbar,
+html[data-popout] .plugin-panels,
+html[data-popout] .diff-banner,
+html[data-popout] .temp-banner,
+html[data-popout] #detail,
+html[data-popout] #detailResize { display: none !important; }
+html[data-popout] .main-area { grid-column: 1 / -1; }
+
 #home {
   height: 100%;
   overflow: auto;
@@ -685,6 +701,42 @@ input::placeholder { text-overflow: ellipsis; }
 /* A closed page's row in the sidebar Pages section — present (it's the
    reopen path) but visibly parked. */
 .sidebar-page-closed .menu-item { color: var(--dim); opacity: .65; }
+/* A page out in its own window (popout.js): marked in the strip and the
+   sidebar, so its tab showing a placeholder is never a surprise. */
+.tab.tab-popped::after { content: '\29C9'; margin-left: 6px; color: var(--dim); font-size: 11px; }
+.sidebar-page-popped .menu-item::after { content: '\29C9'; margin-left: 6px; color: var(--dim); }
+
+.popout-bar {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--panel); border-bottom: 1px solid var(--line);
+  padding: 0 8px 0 12px; height: 38px; min-width: 0;
+}
+.popout-bar[hidden] { display: none; }
+.popout-bar .mark { flex: 0 0 auto; margin-right: 10px; }
+.popout-bar-page { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.popout-bar-case {
+  color: var(--dim); font-size: 12px; min-width: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.popout-bar .spacer { flex: 1 1 auto; }
+.popout-bar .btn { flex: 0 0 auto; }
+
+/* The main window's stand-in for a page that is out — and a pop-out's
+   note when its page has gone. */
+.popout-placeholder {
+  flex: 1 1 auto; min-height: 0; overflow: auto;
+  display: flex; align-items: center; justify-content: center; padding: 24px;
+}
+.popout-placeholder[hidden] { display: none; }
+.popout-card {
+  max-width: 440px; text-align: center;
+  background: var(--panel); border: var(--border-w) solid var(--line);
+  border-radius: var(--radius-md); padding: 24px 28px;
+}
+.popout-card-mark { font-size: 28px; color: var(--accent); line-height: 1; margin-bottom: 10px; }
+.popout-card-title { font-size: 15px; font-weight: 600; margin-bottom: 8px; }
+.popout-card p { color: var(--dim); margin: 0 0 16px; line-height: 1.5; }
+.popout-card-actions { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
 /* Dashboards: a pinned board reads as a page (weight), library boards
    read as available-not-present (dim), under a lighter sub-header. */
 .sidebar-dash-pinned .menu-item { font-weight: 600; }
@@ -1854,10 +1906,17 @@ textarea:focus { border-color: var(--accent); outline: none; }
    fill-the-main-area shape as .sqlview/.timelineview; everything inside
    is the plugin's own DOM. */
 .pluginview { flex: 1 1 auto; min-height: 0; background: var(--ink); display: flex; flex-direction: column; overflow: auto; }
+/* Wraps: with the timeframe's and the context's chips both on, a window
+   of 1280px had no room left for the switches, which went off its right
+   edge while the tag chips were squeezed into a column. Wrapped, each
+   item keeps its own width and what does not fit starts a second line,
+   the switches as one group on the right. */
 .timeline-head {
-  display: flex; align-items: center; gap: 10px; padding: 6px 10px;
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; padding: 6px 10px;
   border-bottom: 1px solid var(--line); background: var(--panel);
 }
+.timeline-head-acts { display: flex; align-items: center; gap: 10px; margin-left: auto; }
+.timeline-head-acts > .btn { white-space: nowrap; }
 .timeline-head-label { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--dim); }
 /* .tag-ribbon's geometry, because these are the ribbon's chips: the
    timeline's tag filter is .tag-chip buttons (renderTimelineTagFilter),
@@ -1875,7 +1934,7 @@ textarea:focus { border-color: var(--accent); outline: none; }
    under this rule's --accent text, which on the light themes was gold on
    gold, unreadable. */
 #btnTimelineOverview[aria-pressed="true"], #btnTimelinePane[aria-pressed="true"],
-#btnTimelineFold[aria-pressed="true"] {
+#btnTimelineFold[aria-pressed="true"], #btnTimelineTimeRange[aria-pressed="true"] {
   background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--text); border-color: var(--accent-dim);
 }
 .tl-ov-head {
@@ -1910,7 +1969,6 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .tl-ov-canvas { display: block; width: 100%; cursor: crosshair; user-select: none; }
 .tl-ov-hint { padding: 0 10px 4px; font-size: 10px; }
 .tl-ov-empty { padding: 2px 10px 6px; font-size: 11px; white-space: normal; }
-.tl-ov-range:empty { display: none; }
 .tl-range-chip {
   display: inline-flex; align-items: center; gap: 6px; padding: 1px 4px 1px 8px;
   border: 1px solid var(--accent); border-radius: var(--radius-sm);
@@ -2009,16 +2067,12 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .timeline-row:hover .tl-raw-toggle, .timeline-row.selected .tl-raw-toggle,
 .timeline-row .tl-raw-toggle:focus-visible, .timeline-row .tl-raw-toggle[aria-pressed="true"] { opacity: 1; }
 .timeline-row .tl-raw-toggle:hover { color: var(--text); border-color: var(--accent); }
-/* The Timeline read as a story (timelineRowNode's `story`): the day once,
-   at its first line, over a solid rule; then each line's time of day; the
+/* The Timeline read as a story (timelineRowNode's `story`): a solid rule
+   over the first line of each day, whose timestamp is in --text; the
    gap since the line above, bold over a dashed rule from half an hour.
    The rules are borders, inside the row's fixed height (border-box), so
    they cost the virtual list nothing. */
-.timeline-row .tl-col-ts .tl-day {
-  font-family: var(--ui); font-size: 11px; font-weight: 600; color: var(--accent); white-space: nowrap;
-  margin-right: 8px; flex: 0 0 auto;
-}
-.timeline-row .tl-col-ts .tl-time { margin-left: auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.timeline-row .tl-col-ts .tl-time { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .timeline-row.day-start .tl-time { color: var(--text); }
 .timeline-row .tl-col-gap { justify-content: flex-end; font-family: var(--mono); font-size: 11px; color: var(--text-faint); }
 .timeline-row .tl-col-gap.long { color: var(--num); font-weight: 600; }
@@ -2055,7 +2109,9 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .timeline-row.ctx.selected { background: var(--row-selected); }
 .timeline-row.ctx.selected > div:not(.tl-col-gutter) { opacity: 1; }
 .timeline-row.ctx.selected .tl-lead { color: var(--text); }
-.tl-context:empty { display: none; }
+.tl-context:empty, .tl-timeframe:empty { display: none; }
+/* The Timeline's Timeframe dialog: the tables' range, beside Fill range. */
+.tl-tf-tables { font-family: var(--mono); font-size: 12px; color: var(--dim); }
 .tl-context-n { color: var(--dim); }
 
 /* The list, and beside it the selected line's pane (timelinepane.js).
@@ -2457,6 +2513,9 @@ textarea:focus { border-color: var(--accent); outline: none; }
 }
 .confirm-input:focus { border-color: var(--accent); outline: none; }
 .confirm-actions { display: flex; justify-content: flex-end; gap: 8px; }
+/* A tick box under the message (confirmDialog's `check`); .check-row
+   lines it up with its label. */
+.confirm-check { font-size: 13px; cursor: pointer; }
 .btn.danger { background: var(--danger-bg); border-color: var(--danger-border); color: var(--danger); }
 .btn.danger:hover { border-color: var(--danger); }
 /* A dialog's main action: the button that does what the dialog is for
@@ -2498,8 +2557,7 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .collist-type { flex: 0 1 auto; min-width: 0; color: var(--col-type); }
 .modal-body .row-actions { display: flex; gap: 6px; margin-top: 12px; align-items: center; }
 .modal-body .row-actions h4 { flex: 1; margin: 0; }
-/* A form dialog's field captions (New case / Save as a case, Edit case,
-   Open existing case file). The gap goes ABOVE each caption and only a
+/* A form dialog's field captions (Edit case, Open existing case file). The gap goes ABOVE each caption and only a
    small one below it, so a caption reads with the box under it — with the
    row's 12px on top instead, "Group" sat flush under the Name box and read
    as its caption. */
@@ -3508,6 +3566,26 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .list-pane .mb-notes { list-style: none; margin: 0 0 10px; padding: 0; display: grid; gap: 5px; }
 .list-pane .mb-notes[hidden] { display: none; }
 .list-pane .tables-head > span { overflow: hidden; text-overflow: ellipsis; }
+/* + New case and Save as a case (openNewCaseModal, in home.js): the
+   profiles down the side, the case on the right — its name, group and
+   file on top, then the chosen profile's description and the values it
+   asks for. A form rather than a list, so the pane is what scrolls when
+   the card is short, not a box inside it. */
+.list-pane.nc-pane { overflow: auto; padding-right: 2px; }
+/* Still a fixed height, so choosing a profile moves nothing, but a form's:
+   three fields and a profile's few values leave the list frame's 600px
+   mostly empty. The pane scrolls past it. */
+.side-panes.nc-panes { height: max(320px, min(440px, calc(82vh - 130px))); }
+.nc-case .confirm-input { width: 100%; min-width: 0; }
+.nc-case .dlg-pair { margin-bottom: 10px; }
+.nc-profile { border-top: 1px solid var(--line); padding-top: 12px; }
+/* A profile's own description, two lines at most; the rest is on hover. */
+.nc-about {
+  margin: 0 0 10px; color: var(--dim); font-size: 12px; line-height: 1.45;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden;
+}
+.nc-vars-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 12px; }
+.nc-vars-fields .confirm-input { width: 100%; min-width: 0; }
 /* One grid for the column heads and every row, so the counts line up
    down fifty tables. The name cell takes what is left and ellipsizes. */
 .tables-head, .tables-row {
@@ -3750,6 +3828,8 @@ button.tables-num:hover { text-decoration: underline; color: var(--text); }
   .list-panes .side-rail-group, .list-panes .side-rail-hint { display: none; }
   .list-pane .tm-cols-top { flex-wrap: wrap; }
   .list-pane .tm-cols-top .side-search { flex-basis: 100%; }
+  .nc-case .dlg-pair, .nc-vars-fields { grid-template-columns: minmax(0, 1fr); }
+  .nc-case .dlg-pair > .dlg-field + .dlg-field { margin-top: 10px; }
   .sessions-head, .sessions-row { grid-template-columns: minmax(0, 1fr) 56px 26px; }
   .sessions-head > :nth-child(3), .sessions-head > :nth-child(4), .sessions-head > :nth-child(5),
   .sessions-row > :nth-child(3), .sessions-row > :nth-child(4), .sessions-row > :nth-child(5) { display: none; }
@@ -3971,18 +4051,14 @@ html.remote .row.selected:hover { background: var(--row-selected); }
 .assoc-ext { font-family: var(--mono, monospace); min-width: 4.5em; }
 .assoc-desc { color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .assoc-handleronly { color: var(--dim); font-size: 0.85em; }
-/* Case settings → Variables */
-.case-vars { display: grid; gap: 4px; margin: 6px 0 10px; }
-.case-var-row, .env-row { display: grid; grid-template-columns: 160px minmax(120px, 1fr) minmax(0, 1fr) auto;
-  gap: 8px; align-items: center; padding: 3px 6px; border-radius: var(--radius-sm); background: var(--panel-2); }
-.case-var-row.missing { box-shadow: inset 2px 0 0 var(--danger); }
-.case-var-name, .env-name { font-family: var(--mono); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.case-var-name-in, .case-var-value, .env-name-in, .env-value-in { background: var(--ink); color: var(--text); border: 1px solid var(--line-2);
+/* Settings → Environment */
+.env-row { display: grid; gap: 8px; align-items: center; padding: 3px 6px; border-radius: var(--radius-sm); background: var(--panel-2); }
+.env-name { font-family: var(--mono); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.env-name-in, .env-value-in { background: var(--ink); color: var(--text); border: 1px solid var(--line-2);
   border-radius: var(--radius-sm); padding: 4px 7px; font: 12px var(--mono); min-width: 0; }
-.case-var-desc, .env-src { color: var(--dim); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.case-var-del, .env-del { padding: 0 6px; }
-.case-var-add, .env-add { background: transparent; border: 1px dashed var(--line-2); }
-/* Settings → Environment — shares the case-variables row styling above */
+.env-src { color: var(--dim); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.env-del { padding: 0 6px; }
+.env-add { background: transparent; border: 1px dashed var(--line-2); }
 .env-list { display: grid; gap: 4px; margin: 6px 0 4px; }
 .env-row { grid-template-columns: minmax(180px, 1fr) minmax(0, 1.4fr) auto; }
 .env-name-wrap { display: flex; align-items: center; min-width: 0; }
@@ -4023,6 +4099,9 @@ html.remote .row.selected:hover { background: var(--row-selected); }
 }
 .case-gone-title { font-weight: 600; font-size: 15px; margin-bottom: 6px; }
 .case-gone-card p { margin: 0 0 10px; }
+/* The same cover while the server restarts (awaitRestart in connection.js):
+   expected and on its way back, so the accent rather than danger. */
+.restart-card { border-color: var(--accent); }
 
 /* Running as administrator (maybeWarnElevated in static/js/importer.js).
    Bottom left, clear of the toast and the connection banner (centre) and

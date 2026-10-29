@@ -20,9 +20,11 @@ import ipaddress
 import json
 import os
 import re
+import secrets
 import shutil
 import socket
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import threading
@@ -222,7 +224,7 @@ async def _lifespan(_app: FastAPI):
     OOM, power loss) plus whatever backlog a machine already has; it can't
     hurt a second live Winnow, see sweep_orphan_views. Attached here rather
     than in main() so `uvicorn server:app` gets both too."""
-    global STORE
+    global STORE, _LAST_CASE
     swept = sweep_orphan_views()
     with contextlib.suppress(Exception):
         gone = _sweep_quicklook()
@@ -254,6 +256,9 @@ async def _lifespan(_app: FastAPI):
         with contextlib.suppress(Exception):
             instances.unregister()
         old, STORE = STORE, None
+        # What a restart reopens (_relaunch): the case open at the end, not
+        # the one the server started with.
+        _LAST_CASE = old.path if old is not None and not old.closed else None
         if old is not None:
             # Also cancels and joins running ingest jobs (bounded by one
             # batch commit each), so Ctrl+C mid-import drops its partial
@@ -536,13 +541,22 @@ async def _unhandled_error_handler(request: Request, exc: Exception):
 # newly opened case could silently show the wrong case's data under the
 # old tab's name. Any other ProgrammingError is a genuine bug and stays a
 # 500.
+#
+# Structured, like the case guard's `case_changed`, because the commonest
+# way to get here is not another window at all: it is this window's own
+# case switch closing the Store under a request it sent a moment earlier
+# (a Timeline build, a page of rows). core.js's caseRefused tells the two
+# apart by the token the request carried and drops this one quietly; read
+# as a bare string it was a toast telling the analyst to reload a window
+# that was fine.
 @app.exception_handler(sqlite3.ProgrammingError)
 async def closed_database_handler(request: Request, exc: sqlite3.ProgrammingError):
     # JSONResponse with a `detail` key, matching HTTPException's shape —
-    # app.js's api() reads err.message from there.
+    # core.js's api() reads err.message from detail.message.
     if "closed database" in str(exc).lower():
         return JSONResponse(
-            {"detail": "The case this request targeted has been closed or switched — reload the page."},
+            {"detail": {"error": "case_closed",
+                        "message": "The case this request targeted has been closed or switched — reload the page."}},
             status_code=409,
         )
     return JSONResponse({"detail": f"Internal error: {exc}"}, status_code=500)
@@ -631,7 +645,7 @@ CASE_HEADER = "X-Winnow-Case"
 # switch itself, the home screen's list, and the plumbing that has no case.
 _CASE_FREE_PATHS = ("/api/case/open", "/api/case/current", "/api/case/quicklook/new",
                     "/api/cases", "/api/presence", "/api/goodbye", "/api/version",
-                    "/api/shutdown", "/api/log")
+                    "/api/shutdown", "/api/restart", "/api/log")
 
 
 @functools.lru_cache(maxsize=64)
@@ -1118,6 +1132,224 @@ def _trigger_shutdown() -> None:
     threading.Timer(0.3, lambda: signal.raise_signal(signal.SIGINT)).start()
 
 
+# ------------------------------------------------------------ restart
+#
+# An update replaces the program files under a server that has already
+# imported the old ones, so the new version only runs once the process
+# starts again. POST /api/restart does that from Settings → Updates: the
+# same graceful shutdown as Shut down (_trigger_shutdown), then main(),
+# once uvicorn has returned and _lifespan has closed the case, starts
+# Winnow again (_relaunch) on the same port and the same case, with no new
+# window. The windows already open reload themselves when the new server
+# answers (connection.js awaitRestart), which they tell by BOOT_ID.
+
+# Which run of this server is answering. A restart on POSIX keeps the pid
+# (execve), so the pid can't say a window is talking to the new one.
+BOOT_ID = secrets.token_hex(8)
+# main()'s parsed arguments, launch environment and working directory:
+# what _relaunch starts again with. None when main() never ran (a bare
+# `uvicorn server:app`, the test client), and then nothing can restart.
+_LAUNCH: dict | None = None
+# The socket main() serves on, so a restart can hand it down.
+_LISTENER: socket.socket | None = None
+# The case _lifespan closed on the way out, which a restart reopens.
+_LAST_CASE: str | None = None
+# Set by POST /api/restart: main() relaunches once uvicorn has returned,
+# handing `listener` (a second handle on _LISTENER) to the next process.
+_RESTART: dict = {"requested": False, "listener": None}
+_RESTART_LOCK = threading.Lock()
+# Where a restarting Winnow tells the next one which inherited socket is
+# its listener (_adopt_listener).
+_LISTENER_ENV = "WINNOW_LISTENER"
+# How long a restarted Winnow that couldn't take over the listener keeps
+# trying to bind the port by number while the old process lets go of it.
+RESTART_BIND_S = 15.0
+# How long the "does the new version start" check may take.
+RESTART_CHECK_S = 60.0
+
+
+def _restart_blocker() -> str | None:
+    """Why this server can't start itself again, or None if it can."""
+    if _LAUNCH is None:
+        return ("This Winnow wasn't started with \"python server.py\", so it can't start "
+                "itself again. Restart it the way you started it.")
+    return None
+
+
+def _new_version_problem() -> str | None:
+    """Why the program files on disk now would not start, or None.
+
+    A restart runs whatever an update just installed. A new version that
+    needs a package this Python doesn't have (what the wiki's "pip install
+    -r requirements.txt after an update" is about) would stop the server
+    the analyst was working in and never bring it back. `server.py --help`
+    imports everything a start imports and stops before it touches a port,
+    a case or a window, under the interpreter and environment the restart
+    would use."""
+    launch = _LAUNCH
+    try:
+        r = subprocess.run(
+            [sys.executable, str(Path(__file__).resolve()), "--help"],
+            env=launch["env"], cwd=launch["cwd"], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=RESTART_CHECK_S,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return f"Couldn't check that the installed version of Winnow starts ({e})."
+    if r.returncode == 0:
+        return None
+    lines = (r.stderr or r.stdout or "").strip().splitlines()
+    detail = lines[-1] if lines else f"exit code {r.returncode}"
+    return (f"The installed version of Winnow doesn't start ({detail}). Run "
+            "\"pip install -r requirements.txt\" in the Winnow folder, then restart Winnow; "
+            "\"python update.py --rollback\" puts the previous version back.")
+
+
+def _relaunch_argv(args: argparse.Namespace, case: str | None) -> list[str]:
+    """The command line that starts this server again: the same
+    interpreter and address, the case it had open when it stopped (not the
+    --case it started with, since the analyst may have opened another
+    since), and no window, because the ones already open reload
+    themselves. What a start DID rather than what it is stays behind:
+    --open and --assoc would import their files a second time, and --force
+    was for a lock this process has just let go of."""
+    argv = [sys.executable, str(Path(__file__).resolve()),
+            "--host", args.host, "--port", str(args.port), "--no-browser"]
+    for h in args.allow_host:
+        argv += ["--allow-host", h]
+    for d in args.plugins_dir:
+        argv += ["--plugins-dir", d]
+    if args.no_idle_shutdown:
+        argv.append("--no-idle-shutdown")
+    if case:
+        argv += ["--case", os.path.abspath(case)]
+    return argv
+
+
+def _relaunch(in_place: bool = os.name != "nt") -> int:
+    """Start Winnow again in place of this process, once it has shut down:
+    the case lock and views file are released by then, so the new process
+    finds them as a fresh start would. Returns the exit code to leave with.
+
+    POSIX replaces the process (execve), so its pid, its terminal and
+    whatever launched it all carry on. Windows has no exec: os.execv
+    starts a new process and lets the old one go, so a terminal would
+    return to its prompt with the server still writing into it. There the
+    new process is started and this one waits for it and leaves with its
+    exit code, which keeps the console, the launcher and Ctrl+C as they
+    were. Either way the listening socket goes with it (_adopt_listener).
+    `in_place` picks between the two, so tests can run Windows' way here."""
+    launch = _LAUNCH
+    # Back where it started (a plugin may have moved it), so the relative
+    # paths in its command line mean what they meant then.
+    with contextlib.suppress(OSError):
+        os.chdir(launch["cwd"])
+    argv = _relaunch_argv(launch["args"], _LAST_CASE)
+    env = dict(launch["env"])
+    sock = _RESTART["listener"]
+    if sock is not None and not _release_completion_port(sock):
+        # The next process couldn't serve on it: let the port go, and
+        # have that one bind it by number (_adopt_listener's retries).
+        sock.close()
+        sock = None
+        env[_LISTENER_ENV] = "port"
+    if sock is not None:
+        sock.set_inheritable(True)
+        env[_LISTENER_ENV] = str(sock.fileno())
+    print("Restarting Winnow" + (f" on {_LAST_CASE}" if _LAST_CASE else "") + " …", flush=True)
+    console.drain()
+    try:
+        if in_place:
+            os.execve(argv[0], argv, env)
+        # close_fds=False is what lets the socket through: Python makes
+        # every other handle non-inheritable, so only it and the standard
+        # handles go.
+        proc = subprocess.Popen(argv, env=env, close_fds=False)
+    except OSError as e:
+        print(f"ERROR: Winnow could not start again: {e}\n"
+              "  Start it the way you usually do.", file=sys.stderr, flush=True)
+        console.drain()
+        return 1
+    if sock is not None:
+        sock.close()
+    while True:
+        try:
+            return proc.wait()
+        except KeyboardInterrupt:
+            # The console's Ctrl+C reached the new process too, which shuts
+            # down on it. Wait for that rather than leaving it behind.
+            continue
+
+
+def _release_completion_port(sock: socket.socket) -> bool:
+    """Untie `sock` from the I/O completion port this process's event loop
+    tied it to, so the next process's loop can tie it to its own. False if
+    it is still tied.
+
+    asyncio serves through a completion port on Windows, and a socket
+    belongs to at most one for as long as it is open. It is the socket
+    that is tied, not the handle, so the handle the next Winnow inherits
+    is tied to this process's port too, closed loop or not, and that
+    server's first accept fails ("[WinError 87] The parameter is
+    incorrect"): it starts, says where, and never answers. Windows 8.1
+    added the one way to untie it, FileReplaceCompletionInformation with
+    no port. Elsewhere there is nothing to untie."""
+    if os.name != "nt":
+        return True
+    import ctypes
+    from ctypes import wintypes
+
+    class IoStatusBlock(ctypes.Structure):
+        _fields_ = [("status", ctypes.c_void_p), ("information", ctypes.c_size_t)]
+
+    class CompletionInformation(ctypes.Structure):
+        _fields_ = [("port", wintypes.HANDLE), ("key", ctypes.c_void_p)]
+
+    file_replace_completion_information = 61
+    try:
+        set_info = ctypes.WinDLL("ntdll").NtSetInformationFile
+    except (OSError, AttributeError):
+        return False
+    set_info.restype = ctypes.c_long
+    set_info.argtypes = [wintypes.HANDLE, ctypes.c_void_p, ctypes.c_void_p,
+                         wintypes.ULONG, ctypes.c_int]
+    info = CompletionInformation()
+    status = set_info(sock.fileno(), ctypes.byref(IoStatusBlock()), ctypes.byref(info),
+                      ctypes.sizeof(info), file_replace_completion_information)
+    return status == 0
+
+
+def _adopt_listener(handle: str, host: str, port: int | None) -> socket.socket:
+    """The listening socket a restarting Winnow handed down (_relaunch).
+
+    Taken over rather than bound again, so the port is never free in
+    between: nothing else can take it, and a window asking for the new
+    server while the old one is still stopping waits in the socket's
+    backlog instead of being refused. A Windows socket closed under
+    SO_EXCLUSIVEADDRUSE can also keep its port from being bound again for
+    as long as its last connections linger. If it can't be taken over, the
+    port is bound by number, retried while the old process lets go."""
+    try:
+        sock = socket.socket(fileno=int(handle))
+    except (ValueError, OSError):
+        sock = None
+    if sock is not None:
+        if port is None or sock.getsockname()[1] == port:
+            # Not on to anything this process starts (a plugin's helper).
+            sock.set_inheritable(False)
+            return sock
+        sock.detach()   # somebody else's descriptor: leave it be
+    deadline = time.monotonic() + RESTART_BIND_S
+    while True:
+        try:
+            return _claim_port(host, port)
+        except socket.gaierror:
+            raise
+        except OSError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.25)
+
+
 class UpdateCheck(BaseModel):
     """`dev` asks for the tip of the develop branch rather than the latest
     release — `update.py --dev --check`, reached from Settings → Updates
@@ -1221,8 +1453,12 @@ async def api_presence(page: str = ""):
                     await asyncio.wait_for(wake.wait(), 15)
             # Said, not just dropped: a page that only sees its stream end
             # tells the analyst the connection was lost. Non-empty data, or
-            # EventSource never dispatches the event.
-            yield "event: shutdown\ndata: shutdown\n\n"
+            # EventSource never dispatches the event. A restart names the
+            # run that is going, so the page can tell when the next answers.
+            if _RESTART["requested"]:
+                yield f"event: restart\ndata: {BOOT_ID}\n\n"
+            else:
+                yield "event: shutdown\ndata: shutdown\n\n"
         finally:
             PRESENCE.wakers.discard(wake)
             _presence_close(page)
@@ -1409,9 +1645,11 @@ def api_version():
     can reproduce."""
     src = updater.installed_source()
     # `pid` says WHICH Winnow answered: main() opens its window only once
-    # the server on its port is itself (browser.open_when_ready).
+    # the server on its port is itself (browser.open_when_ready). `boot`
+    # says which run of it, which a restart changes and the pid may not.
     return {"version": version.VERSION, "source": src,
-            "is_release": src == "release", "pid": os.getpid()}
+            "is_release": src == "release", "pid": os.getpid(),
+            "boot": BOOT_ID, "can_restart": _restart_blocker() is None}
 
 
 @app.post("/api/updates/check")
@@ -1482,6 +1720,34 @@ def api_shutdown():
     which otherwise kept the server up until the last window closed."""
     _trigger_shutdown()
     return {"ok": True}
+
+
+@app.post("/api/restart")
+def api_restart():
+    """Stop this server and start it again, so the program files an update
+    just installed are the ones running (Settings → Updates). Answers
+    first, with this run's `boot`, which the page waits to see change;
+    then the same graceful shutdown as /api/shutdown, then _relaunch.
+
+    Refused (400) when it couldn't come back: a server main() didn't start
+    has nothing to start again with, and installed files that don't start
+    (a package the new version needs and this Python lacks) would leave the
+    analyst with no server at all. The page warns about work still running
+    before it asks, as Shut down does; open windows need no warning, since
+    each one reloads on its own."""
+    why = _restart_blocker() or _new_version_problem()
+    if why:
+        raise HTTPException(400, why)
+    with _RESTART_LOCK:
+        if _RESTART["requested"] or _SHUTDOWN_ONCE.locked():
+            raise HTTPException(409, "Winnow is already shutting down.")
+        # A second handle on the listener, taken before uvicorn closes its
+        # own: the socket stays open, and listening, until the next process
+        # takes it over.
+        _RESTART["listener"] = _LISTENER.dup() if _LISTENER is not None else None
+        _RESTART["requested"] = True
+    _trigger_shutdown()
+    return {"ok": True, "boot": BOOT_ID}
 
 
 @app.post("/api/case/open")
@@ -5486,7 +5752,7 @@ def _resolve_timeline_configs() -> dict[int, dict]:
 class TimelineBuild(BaseModel):
     tag_ids: list[int] = []
     op_token: str | None = None
-    ts_range: list[str] | None = None        # [start, end), the overview strip's drag
+    time_range: dict | None = None           # {start, end}, the timeframe filter (both inclusive, either optional)
     exclude_sources: list[int] = []          # tables switched off on the strip
     context: list[str] | None = None         # [start, end) of the rows around a finding
     fold: bool = False                       # a run of repeats on one line
@@ -5497,7 +5763,7 @@ class TimelineBuild(BaseModel):
 def api_timeline_build(body: TimelineBuild):
     try:
         return store().build_timeline(_resolve_timeline_configs(), body.tag_ids or None,
-                                      op_token=body.op_token, ts_range=body.ts_range,
+                                      op_token=body.op_token, time_range=body.time_range,
                                       exclude_sources=body.exclude_sources or None,
                                       context=body.context, fold=body.fold, unfold=body.unfold)
     except ValueError as e:
@@ -6654,6 +6920,13 @@ def main() -> None:
     # in a QuickEdit window does it) must stall only the thread that writes
     # to it, never a request or the event loop: winnow/console.py.
     console.install()
+    # A restart's listener (_adopt_listener) is this process's alone.
+    handed_listener = os.environ.pop(_LISTENER_ENV, None)
+    # What a restart starts again with (_relaunch): the environment as this
+    # process was launched, taken before the stored values below join it.
+    # Handed on, those would read as real exports in the next process and
+    # win over the store from then on.
+    launch_env = dict(os.environ)
     # Stored WINNOW_* variables (tokens plugins read) join the process
     # environment here, not at import — `import server` in a test must
     # never read the developer's real store. A real export wins.
@@ -6741,7 +7014,8 @@ def main() -> None:
     # case, import into it, or open a window — least of all on the port
     # another Winnow already has (see _listener).
     try:
-        listener = _claim_port(args.host, args.port)
+        listener = (_adopt_listener(handed_listener, args.host, args.port) if handed_listener
+                    else _claim_port(args.host, args.port))
     except OSError as e:
         print(f"ERROR: Winnow can't listen on {args.host}:{args.port or DEFAULT_PORT}: {e}\n"
               "  Another program (often another Winnow) has that port. "
@@ -6856,6 +7130,11 @@ def main() -> None:
             _end_presence_streams()
             await super().shutdown(sockets=sockets)
 
+    # What POST /api/restart needs to start this server again (_relaunch).
+    global _LAUNCH, _LISTENER
+    _LAUNCH = {"args": args, "env": launch_env, "cwd": os.getcwd()}
+    _LISTENER = listener
+
     # uvicorn.run, less the reload/workers branches Winnow never takes, so
     # that the signal handler and shutdown above are the ones uvicorn runs.
     server = _Server(uvicorn.Config(app, host=args.host, port=args.port, log_level="warning"))
@@ -6863,6 +7142,8 @@ def main() -> None:
         server.run(sockets=[listener])
     if not server.started:
         sys.exit(3)   # uvicorn.run's STARTUP_FAILURE: startup raised (the port is already ours)
+    if _RESTART["requested"]:
+        sys.exit(_relaunch())
 
 
 def _stop_pane_queries() -> None:

@@ -309,43 +309,96 @@ def _where(src, filters):
     return (" WHERE " + " AND ".join(clauses)) if clauses else "", params
 
 
-def _tag_where(src, tags):
-    """The tag filter's WHERE clause, or None. Tags live in the row_tags
-    sidecar (keyed source_id, rid) in the same case file run_sql reads, so
-    membership is one IN-subquery — no join, no new privileges. Everything
-    interpolated is a validated int, so nothing here touches `params`."""
+# The tag filter, spelled as the grid's tag ribbon spells it (S.tagFilter in
+# static/js/tags.js, and the pivot example's `tags`): a tag id keeps rows
+# carrying it, TAG_ANY rows carrying any tag, TAG_NONE rows carrying none —
+# those OR'd, as two chips are on the ribbon — and "!<id>" drops rows
+# carrying that tag, ANDed onto the rest.
+TAG_ANY = "__any__"
+TAG_NONE = "__none__"
+
+
+def _tag_keys(tags):
+    """The tag filter as a list of ribbon keys. Before the tab had chips it
+    sent a select's {mode, ids} — every row, any tag, no tag, or any of
+    these tags — and each of those is a set of chips, so a script or a
+    saved request still in that shape is read as one."""
     if not tags:
-        return None
-    mode = tags.get("mode")
-    if src.get("is_merge"):
-        sub = "SELECT 1 FROM row_tags rt WHERE rt.source_id = s.source_id AND rt.rid = s.rid"
+        return []
+    if isinstance(tags, dict):
+        mode = tags.get("mode")
+        if not mode:
+            return []
         if mode == "any":
-            return f"EXISTS ({sub})"
+            return [TAG_ANY]
         if mode == "none":
-            return f"NOT EXISTS ({sub})"
+            return [TAG_NONE]
         if mode == "ids":
             try:
-                ids = [int(i) for i in (tags.get("ids") or [])]
+                return [int(i) for i in (tags.get("ids") or [])]
             except (TypeError, ValueError):
                 raise ValueError("Tag ids must be integers")
-            if not ids:
-                return None
-            return f"EXISTS ({sub} AND rt.tag_id IN ({','.join(str(i) for i in ids)}))"
         raise ValueError(f"Unknown tag filter mode {mode!r}")
-    sub = f"SELECT rid FROM row_tags WHERE source_id = {int(src['id'])}"
-    if mode == "any":
-        return f"s.rid IN ({sub})"
-    if mode == "none":
-        return f"s.rid NOT IN ({sub})"
-    if mode == "ids":
-        try:
-            ids = [int(i) for i in (tags.get("ids") or [])]
-        except (TypeError, ValueError):
-            raise ValueError("Tag ids must be integers")
-        if not ids:
-            return None
-        return f"s.rid IN ({sub} AND tag_id IN ({','.join(str(i) for i in ids)}))"
-    raise ValueError(f"Unknown tag filter mode {mode!r}")
+    if not isinstance(tags, list):
+        raise ValueError("tags must be a list")
+    return tags
+
+
+def _tagged(src, tag_ids=None):
+    """SQL that is true for a row carrying any of `tag_ids` — any tag at all
+    when None. Tags live in the row_tags sidecar (keyed source_id, rid) in
+    the same case file run_sql reads, so membership is a subquery — no
+    join, no new privileges. Every id is an int() by the time it gets here,
+    which is what lets them sit in the SQL text with no placeholder."""
+    ids = ",".join(str(int(t)) for t in tag_ids) if tag_ids else ""
+    if src.get("is_merge"):
+        # A merge's tags live on its members, and _scope's union carries
+        # the member each row came from; rids collide across members, so
+        # the row is matched on both.
+        only = f" AND rt.tag_id IN ({ids})" if ids else ""
+        return (f"EXISTS (SELECT 1 FROM row_tags rt WHERE rt.source_id = s.source_id"
+                f" AND rt.rid = s.rid{only})")
+    only = f" AND tag_id IN ({ids})" if ids else ""
+    return f"s.rid IN (SELECT rid FROM row_tags WHERE source_id = {int(src['id'])}{only})"
+
+
+def _tag_where(req, src, tags):
+    """The tag filter's WHERE clause, or None: one part for the exclusions
+    and one for the OR of everything kept. Everything interpolated is a
+    validated int, so nothing here touches `params`.
+
+    A tag id that isn't in the case is refused rather than compiled.
+    Filtered to a deleted tag, the bookends would otherwise come back empty
+    — a confident nothing, which in triage reads as "none of these
+    happened". The tab drops a deleted tag from its sheets before asking."""
+    keys = _tag_keys(tags)
+    if not keys:
+        return None
+    known = {int(t["id"]) for t in req.store.list_tags()}
+    kept, dropped, any_tag, no_tag = [], [], False, False
+    for key in keys:
+        if key == TAG_ANY:
+            any_tag = True
+            continue
+        if key == TAG_NONE:
+            no_tag = True
+            continue
+        text = "" if isinstance(key, bool) else str(key)
+        excluded = text.startswith("!")
+        digits = text[1:] if excluded else text
+        if not digits.isdecimal():
+            raise ValueError(f"Unknown tag filter {key!r}")
+        if int(digits) not in known:
+            raise ValueError(f"No tag {int(digits)} in this case — it may have been deleted")
+        (dropped if excluded else kept).append(int(digits))
+    clauses = []
+    if dropped:
+        clauses.append(f"NOT {_tagged(src, dropped)}")
+    either = ([_tagged(src)] if any_tag else []) + ([f"NOT {_tagged(src)}"] if no_tag else []) \
+        + ([_tagged(src, kept)] if kept else [])
+    if either:
+        clauses.append("(" + " OR ".join(either) + ")")
+    return " AND ".join(clauses) or None
 
 
 def _inline(sql, params):
@@ -419,7 +472,7 @@ def _validated(req, body):
     for f in body.get("filters") or []:
         _check_columns(src, [f.get("column")])
     where, params = _where(src, body.get("filters"))
-    tag_clause = _tag_where(src, body.get("tags"))
+    tag_clause = _tag_where(req, src, body.get("tags"))
     if tag_clause:
         where = f"{where} AND {tag_clause}" if where else f" WHERE {tag_clause}"
     template = body.get("template") or DEFAULT_TEMPLATE

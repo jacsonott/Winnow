@@ -98,6 +98,17 @@ try {
   </div>
 </header>
 
+<!-- A pop-out window's own bar, in the place .bar has in the main window
+     (static/js/popout.js; html[data-popout] hides the rest of the chrome).
+     Hidden everywhere else. -->
+<div class="popout-bar" id="popoutBar" hidden>
+  <span class="mark" aria-hidden="true"></span>
+  <span class="popout-bar-page" id="popoutPage"></span>
+  <span class="popout-bar-case" id="popoutCase"></span>
+  <div class="spacer"></div>
+  <button class="btn ghost" id="btnPopoutDock" title="Close this window and show the page as a tab in the main window again">⇤ Back to main window</button>
+</div>
+
 <section class="toolbar" id="toolbar">
   <div id="groupStrip" class="group-strip"></div>
   <div id="tagRibbon" class="tag-ribbon" aria-label="Tags"></div>
@@ -235,14 +246,20 @@ try {
         <div id="timelineTagFilter" class="timeline-tagfilter"></div>
         <div class="spacer"></div>
         <span class="stats" id="timelineStats"></span>
+        <!-- The timeframe's chip (renderTimelineTimeRange): what the Timeline is narrowed to, and ✕. -->
+        <span class="tl-timeframe" id="timelineTimeRange"></span>
         <span class="tl-context" id="timelineContext"></span>
-        <button class="btn ghost" id="btnTimelineFold" aria-pressed="false"
-                title="Put three or more rows in a row from one table, with one summary and one first tag, on one line">Fold repeats</button>
-        <button class="btn ghost" id="btnTimelineOverview" aria-pressed="true"
-                title="Show or hide the overview: the Timeline's lines over time">Overview</button>
-        <button class="btn ghost" id="btnTimelinePane" aria-pressed="true"
-                title="Show or hide the details pane: the selected line in full, beside the list">Details</button>
-        <button class="btn ghost" id="btnTimelineConfig">Configure tables…</button>
+        <!-- One group, so on a narrow window the switches wrap together, to the right. -->
+        <div class="timeline-head-acts">
+          <button class="btn ghost" id="btnTimelineTimeRange" aria-pressed="false">⏱ Timeframe</button>
+          <button class="btn ghost" id="btnTimelineFold" aria-pressed="false"
+                  title="Put three or more rows in a row from one table, with one summary and one first tag, on one line">Fold repeats</button>
+          <button class="btn ghost" id="btnTimelineOverview" aria-pressed="true"
+                  title="Show or hide the overview: the Timeline's lines over time">Overview</button>
+          <button class="btn ghost" id="btnTimelinePane" aria-pressed="true"
+                  title="Show or hide the details pane: the selected line in full, beside the list">Details</button>
+          <button class="btn ghost" id="btnTimelineConfig">Configure tables…</button>
+        </div>
       </div>
       <section class="tl-overview" id="timelineOverview" hidden></section>
       <div class="tl-split">
@@ -359,6 +376,10 @@ Markdown: # headings, - bullets, **bold**, `code`, tables. Link ▾ points at a 
       <div class="page-panel-resize" id="notesPanelResize" title="Drag to resize the panel" hidden></div>
       <aside id="notesPluginPanels" class="page-panels" hidden></aside>
     </section>
+
+    <!-- Where a page out in its own window would be (static/js/popout.js),
+         and in a pop-out, why it has nothing to show. -->
+    <section class="popout-placeholder" id="popoutPlaceholder" hidden></section>
   </div>
 
   <div class="detail-resize" id="detailResize" hidden title="Drag to resize"></div>
@@ -396,6 +417,9 @@ Markdown: # headings, - bullets, **bold**, `code`, tables. Link ▾ points at a 
 <!-- Shown when another window switches this Winnow to a different case
      (caseGone in static/js/connection.js). -->
 <div id="caseGone" class="case-gone" role="alertdialog" aria-modal="true" aria-labelledby="caseGoneTitle" hidden></div>
+<!-- Shown while Winnow's server restarts after an update (awaitRestart in
+     static/js/connection.js). -->
+<div id="restarting" class="case-gone" role="alertdialog" aria-modal="true" aria-labelledby="restartingTitle" aria-live="polite" hidden></div>
 <!-- Shown when Winnow runs as administrator on Windows, which stops files
      being dragged in (maybeWarnElevated in static/js/importer.js). -->
 <div id="elevNotice" class="elev-notice" role="status" hidden></div>

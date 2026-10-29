@@ -62,7 +62,17 @@ const STATE_VERSION = 1;
 // A sheet is a few hundred bytes; two dozen of them is far past what
 // anyone builds and still nowhere near winnow.tabState's cap.
 const MAX_SAVED_SHEETS = 24;
-const TAG_MODES = ['', 'any', 'none', 'ids'];
+/* The tag filter, spelled as the grid's ribbon spells it (S.tagFilter in
+   static/js/tags.js) and as the pivot tab does, so a chip means the same
+   thing on all three: a tag id keeps rows carrying it, TAG_ANY rows
+   carrying any tag, TAG_NONE rows carrying none — those OR'd, as two chips
+   are on the ribbon — and '!<id>' drops rows carrying that tag, AND'd onto
+   the rest. The backend's _tag_where compiles exactly this list. */
+const TAG_ANY = '__any__';
+const TAG_NONE = '__none__';
+const tagExcludeKey = (id) => `!${id}`;
+const isTagExclusion = (key) => typeof key === 'string' && key.startsWith('!');
+const tagIdOf = (key) => (isTagExclusion(key) ? Number(key.slice(1)) : key);
 /* What the backend renders when the description box is empty. A sheet
    starts with the box empty — this shows in it, greyed, as the placeholder
    — so a new sheet's description is the analyst's to write rather than
@@ -77,9 +87,43 @@ const emptySpec = (name) => ({
   name,
   sourceId: null,
   groupBy: [], carry: [], sums: [], unique: [], values: [], filters: [],
-  tags: { mode: '', ids: [] }, rowJson: false,
+  tags: [], rowJson: false,
   sortColumn: null, colWidths: {}, template: '',
 });
+
+/* A sheet saved before the chips kept its tag filter as a select's
+   {mode, ids}: every row, any tag, no tag, or any of these tags. Each of
+   those is a set of chips, so it is read as one. */
+function tagKeysOf(saved) {
+  if (Array.isArray(saved)) return saved;
+  if (!saved || typeof saved !== 'object') return [];
+  if (saved.mode === 'any') return [TAG_ANY];
+  if (saved.mode === 'none') return [TAG_NONE];
+  if (saved.mode === 'ids') return Array.isArray(saved.ids) ? saved.ids : [];
+  return [];
+}
+
+/* A saved tag filter, against the case's tags as they are now. Tag ids are
+   never reused (tag_defs is AUTOINCREMENT), so an id that is still listed is
+   still the tag that was meant, and one that isn't was deleted: dropped, and
+   said, because "only rows tagged X" against a tag nothing carries any more
+   is an empty result, which reads as "there is nothing here" rather than
+   "your filter is stale". A list that can't be read (`tags` null) is kept
+   as saved, and the backend refuses a dead id by name. */
+function restoreTags(saved, tags, gone) {
+  const out = [];
+  const live = Array.isArray(tags) ? new Set(tags.map((t) => t.id)) : null;
+  for (const key of tagKeysOf(saved)) {
+    let kept = null;
+    if (key === TAG_ANY || key === TAG_NONE) kept = key;
+    else if (Number.isInteger(tagIdOf(key))) {
+      if (!live || live.has(tagIdOf(key))) kept = key;
+      else gone.push(key);
+    }
+    if (kept !== null && !out.includes(kept)) out.push(kept);
+  }
+  return out;
+}
 
 /* How a sheet names its table, and it takes two shapes because tables come
    in two kinds.
@@ -186,27 +230,13 @@ export function planRestore(payload, sources, tags) {
     });
     if (typeof sh.sortColumn === 'string' && cols.has(sh.sortColumn)) spec.sortColumn = sh.sortColumn;
     else if (sh.sortColumn) gone.push(String(sh.sortColumn));
-    if (sh.tags && typeof sh.tags === 'object') {
-      spec.tags = {
-        mode: TAG_MODES.includes(sh.tags.mode) ? sh.tags.mode : '',
-        ids: (Array.isArray(sh.tags.ids) ? sh.tags.ids : []).filter((n) => typeof n === 'number'),
-      };
-      // A deleted tag is a column that has gone by another name: "only
-      // these tags" against an id nothing carries any more is not an
-      // error, it is an empty result, which is the worse failure.
-      if (spec.tags.mode === 'ids') {
-        const liveTags = new Set((tags || []).map((t) => t.id));
-        const before = spec.tags.ids.length;
-        spec.tags.ids = spec.tags.ids.filter((id) => liveTags.has(id));
-        if (spec.tags.ids.length !== before) {
-          if (spec.tags.ids.length) {
-            notes.push(`${name}: dropped ${before - spec.tags.ids.length} tag filter(s) this case no longer has`);
-          } else {
-            spec.tags = { mode: '', ids: [] };
-            notes.push(`${name}: the tags it was filtered to are gone — every row is in again`);
-          }
-        }
-      }
+    const goneTags = [];
+    spec.tags = restoreTags(sh.tags, tags, goneTags);
+    if (goneTags.length) {
+      notes.push(spec.tags.length
+        ? `${name}: dropped ${goneTags.length === 1 ? 'a tag' : `${goneTags.length} tags`}`
+          + ' from its tag filter — not in this case any more'
+        : `${name}: the tags it was filtered to are gone — every row is in again`);
     }
     spec.rowJson = !!sh.rowJson;
     // Preview widths are keyed by OUTPUT column, which includes Which /
@@ -243,7 +273,7 @@ export default function mount(container, winnow) {
   const newSheet = (name) => ({
     name,
     sourceId: null,
-    groupBy: [], carry: [], sums: [], unique: [], values: [], filters: [], tags: { mode: '', ids: [] }, rowJson: false,
+    groupBy: [], carry: [], sums: [], unique: [], values: [], filters: [], tags: [], rowJson: false,
     sortColumn: null,
     colWidths: {},        // preview column name -> px, dragged on the header's edge
     template: '',         // empty renders DEFAULT_TEMPLATE; see its comment
@@ -266,7 +296,7 @@ export default function mount(container, winnow) {
      that reaches the case file. */
   const worthKeeping = () => sheets.length > 1 || sheets.some((sh) => (
     sh.groupBy.length || sh.carry.length || sh.sums.length || sh.unique.length || sh.values.length || sh.filters.length
-    || sh.tags.mode || sh.rowJson || Object.keys(sh.colWidths).length
+    || sh.tags.length || sh.rowJson || Object.keys(sh.colWidths).length
     || (sh.template && sh.template !== DEFAULT_TEMPLATE)));
   function saveState() {
     if (!saveOn || !winnow.tabState) return;   // an older Winnow has no tabState
@@ -513,6 +543,7 @@ export default function mount(container, winnow) {
     renderSheetTabs();
     fillSources();
     renderControls();
+    loadTagCounts();   // the counts are per table, and this sheet's may be another
     renderPreview();
     // Which sheet is on top is part of what gets restored, and a sheet
     // restored but never run has nothing on screen until something asks.
@@ -656,6 +687,10 @@ export default function mount(container, winnow) {
     ['filters', 'Filters', 'Only rows matching these are grouped'],
   ];
   const zoneBodies = {};
+  // The grid's own .tag-ribbon / .tag-chip classes, so the chips look as
+  // they do on the ribbon in every skin and theme with no CSS of ours.
+  const tagRibbon = el('div', 'tag-ribbon');
+  tagRibbon.style.cssText = 'margin-bottom:2px';
   for (const [id, label, hint] of ZONES) {
     const box = el('div');
     box.style.cssText = 'border:1px dashed var(--line-2);border-radius:var(--radius-sm);'
@@ -666,17 +701,18 @@ export default function mount(container, winnow) {
     head.style.cssText = 'font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--dim)';
     const list = el('div');
     list.style.cssText = 'display:flex;flex-direction:column;gap:4px';
-    box.append(head, list);
+    box.append(head);
+    // The tag chips head the Filters well, as they do on the pivot: they
+    // decide which rows are grouped, as the field filters below them do,
+    // and a sheet bookending only Suspicious rows should say so there.
+    if (id === 'filters') box.append(tagRibbon);
+    box.append(list);
     zoneBodies[id] = list;
     wireDropTarget(box, id);
     zoneWrap.append(box);
   }
 
-  // Tag filter + whole-row JSON + template, below the zones.
-  side.append(sectionLabel('Only rows with tags'));
-  const tagBox = el('div');
-  tagBox.style.cssText = 'display:flex;flex-direction:column;gap:2px;padding:0 8px';
-  side.append(tagBox);
+  // Whole-row JSON + template, below the zones.
   const rowJsonRow = el('label');
   rowJsonRow.style.cssText = 'display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;padding:8px 8px 0';
   const rowJsonCb = el('input');
@@ -1104,7 +1140,7 @@ export default function mount(container, winnow) {
     tmplInput.value = state.template;
 
     rowJsonCb.checked = state.rowJson;
-    renderTagFilter();
+    renderTagRibbon();
   }
 
   /* Chips inside Include columns reorder by drag — their order IS the
@@ -1199,59 +1235,141 @@ export default function mount(container, winnow) {
     if (again) again.focus();
   }
 
-  /* Tag filter — its own control rather than a column filter, because tags
-     aren't a column and "only what I've tagged TA" is the most common way
-     to scope a bookend pass. */
-  let tagNeedle = '';
-  function renderTagFilter() {
-    tagBox.replaceChildren();
-    const sel = mkSel('Keep only rows with (or without) tags');
-    sel.style.maxWidth = '100%';
-    for (const [v, t] of [['', 'Tags: all rows'], ['any', 'Tags: only tagged rows'],
-                          ['none', 'Tags: only untagged rows'], ['ids', 'Tags: only these tags…']]) {
-      const o = el('option', null, t);
-      o.value = v;
-      sel.append(o);
+  /* ----------------------------------------------------- tag filter */
+
+  /* The grid's tag ribbon, in the Filters well: the same chips, the same
+     clicks and the same right-click menu (static/js/tags.js), as the pivot
+     tab has them, so an analyst who knows one knows the others. Its own
+     control rather than a column filter, because tags aren't a column and
+     "only what I've tagged TA" is the most common way to scope a bookend
+     pass. It was a select and then a checkbox per tag — the one tag
+     control left answering with a form. The chip counts are this TABLE's
+     (the grid's are its view's); the tooltip says which. */
+
+  // How many rows of the sheet's table carry each tag, keyed like the
+  // grid's S.tagCountsAll, and which table they were counted on: a sheet
+  // switched to another table shows no number until its own arrive,
+  // rather than the last table's under its chips.
+  let tagCounts = {};
+  let tagCountsFor = null;
+  let tagCountsSeq = 0;
+
+  const caseTags = () => winnow.state.tags || [];
+
+  async function loadTagCounts() {
+    const id = state.sourceId;
+    const seq = ++tagCountsSeq;
+    if (id == null) { tagCounts = {}; tagCountsFor = null; renderTagRibbon(); return; }
+    let res;
+    try {
+      res = await api(`/api/tags?source_id=${id}`);
+    } catch (e) {
+      return;   // the chips go without numbers; the filter itself is unaffected
     }
-    sel.value = state.tags.mode;
-    sel.onchange = () => { state.tags.mode = sel.value; tagNeedle = ''; renderTagFilter(); schedule(); };
-    tagBox.append(sel);
-    if (state.tags.mode !== 'ids') return;
-    const tags = winnow.state.tags || [];
-    if (!tags.length) { tagBox.append(el('div', 'note-status', 'No tags in this case yet.')); return; }
-    // The same search the value list has — a case with forty tags wants it.
-    const search = el('input');
-    search.type = 'search';
-    search.placeholder = 'Find a tag…';
-    search.value = tagNeedle;
-    search.style.cssText = 'background:var(--ink);color:var(--text);border:1px solid var(--line-2);'
-      + 'padding:4px 7px;font:inherit;font-size:12px;margin:2px 0';
-    const rows = el('div');
-    rows.style.cssText = 'display:flex;flex-direction:column;gap:2px';
-    const paintRows = () => {
-      rows.replaceChildren();
-      const needle = tagNeedle.trim().toLowerCase();
-      for (const t of tags) {
-        if (needle && !t.name.toLowerCase().includes(needle)) continue;
-        const row = el('label');
-        row.style.cssText = 'display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer';
-        const cb = el('input');
-        cb.type = 'checkbox';
-        cb.checked = state.tags.ids.includes(t.id);
-        cb.onchange = () => {
-          state.tags.ids = cb.checked ? [...state.tags.ids, t.id] : state.tags.ids.filter((x) => x !== t.id);
-          schedule();
-        };
-        const dot = el('span');
-        dot.style.cssText = `width:10px;height:10px;border-radius:2px;background:${t.color};flex:0 0 auto`;
-        row.append(cb, dot, el('span', null, t.name));
-        rows.append(row);
-      }
-      if (!rows.children.length) rows.append(el('div', 'note-status', 'No tag matches that.'));
-    };
-    search.oninput = () => { tagNeedle = search.value; paintRows(); };
-    tagBox.append(search, rows);
-    paintRows();
+    if (seq !== tagCountsSeq) return;   // a newer table's counts are on the way
+    tagCounts = res.counts || {};
+    tagCountsFor = id;
+    renderTagRibbon();
+  }
+
+  function setTagFilter(next) {
+    state.tags = next;
+    renderTagRibbon();
+    schedule();
+  }
+
+  /* The ribbon's click rules, copied rather than imported (a plugin sees
+     the app through `winnow` only): click adds, click again removes, a
+     specific tag drops Any tag, and an exclusion stays put except for the
+     tag being picked, which can't be both. */
+  function toggleTagFilterKey(key) {
+    const has = state.tags.includes(key);
+    const out = state.tags.filter(isTagExclusion).filter((k) => k !== tagExcludeKey(key));
+    let next = state.tags.filter((k) => !isTagExclusion(k) && k !== key);
+    if (key === TAG_ANY) next = has ? [] : [TAG_ANY];
+    else if (!has) next = [...next.filter((k) => k !== TAG_ANY), key];
+    setTagFilter([...next, ...out]);
+  }
+
+  // Excluding a tag that was filtered TO swaps it, rather than leaving both
+  // on and nothing to group.
+  function toggleTagExclusion(id) {
+    const key = tagExcludeKey(id);
+    const has = state.tags.includes(key);
+    const next = state.tags.filter((k) => k !== key && k !== id);
+    setTagFilter(has ? next : [...next, key]);
+  }
+
+  function tagChipMenuItems(t) {
+    return [
+      { label: `Filter to ${t.name}`, checked: state.tags.includes(t.id),
+        title: 'Group only rows carrying this tag — the same as clicking the chip',
+        onclick: () => toggleTagFilterKey(t.id) },
+      { label: `Exclude ${t.name}`, checked: state.tags.includes(tagExcludeKey(t.id)),
+        title: 'Leave out every row carrying this tag. Combines with the rest of the tag filter: Suspicious with this one excluded means Suspicious rows that are not also this.',
+        onclick: () => toggleTagExclusion(t.id) },
+      '-',
+      { label: 'Clear the tag filter', disabled: !state.tags.length, onclick: () => setTagFilter([]) },
+    ];
+  }
+
+  function renderTagRibbon() {
+    tagRibbon.replaceChildren();
+    const counts = tagCountsFor === state.sourceId ? tagCounts : {};
+    for (const t of caseTags()) {
+      const chip = el('button', 'tag-chip');
+      const on = state.tags.includes(t.id);
+      const out = state.tags.includes(tagExcludeKey(t.id));
+      chip.dataset.tag = String(t.id);
+      chip.setAttribute('aria-pressed', String(on));
+      chip.classList.toggle('excluded', out);
+      chip.style.color = on || out ? t.color : '';
+      const sw = el('span', 'swatch');
+      sw.style.background = t.color;
+      chip.append(sw, el('span', 'name', t.name));
+      const n = counts[t.id] || 0;
+      if (n) chip.append(el('span', 'n', n.toLocaleString()));
+      // No hotkey badge: the keys tag rows in the grid, and there are no
+      // rows to tag here.
+      chip.title = out
+        ? `Excluded: rows tagged ${t.name} are left out of the groups. Click to put them back.`
+        : `${n.toLocaleString()} row${n === 1 ? '' : 's'} in this table tagged ${t.name}. Click to group only those`
+          + ' — chips add up, so two of them mean rows carrying either. Right-click to exclude it instead.';
+      chip.onclick = () => (out ? toggleTagExclusion(t.id) : toggleTagFilterKey(t.id));
+      chip.oncontextmenu = (e) => {
+        e.preventDefault();
+        winnow.dropdownMenu(chip, tagChipMenuItems(t));
+      };
+      tagRibbon.append(chip);
+    }
+    const any = el('button', 'tag-chip');
+    any.dataset.tag = TAG_ANY;
+    any.setAttribute('aria-pressed', String(state.tags.includes(TAG_ANY)));
+    any.title = 'Rows carrying any tag at all. Picking a specific tag replaces it — it already includes every tag.';
+    any.append(el('span', null, 'Any tag'));
+    any.onclick = () => toggleTagFilterKey(TAG_ANY);
+    const none = el('button', 'tag-chip');
+    none.dataset.tag = TAG_NONE;
+    none.setAttribute('aria-pressed', String(state.tags.includes(TAG_NONE)));
+    none.title = 'Rows with no tag on them — what is left to go through. Adds to any tags picked beside it.';
+    none.append(el('span', null, 'No tags'));
+    none.onclick = () => toggleTagFilterKey(TAG_NONE);
+    tagRibbon.append(any, none);
+  }
+
+  /* A tag deleted in the grid while this tab was open: its key would name
+     nothing, and the backend refuses it rather than group no rows. Dropped
+     from every sheet; returns the sheets that lost one. */
+  function dropDeletedTags() {
+    const live = new Set(caseTags().map((t) => t.id));
+    const changed = new Set();
+    for (const sh of sheets) {
+      const kept = sh.tags.filter((k) => k === TAG_ANY || k === TAG_NONE || live.has(tagIdOf(k)));
+      if (kept.length === sh.tags.length) continue;
+      sh.tags = kept;
+      changed.add(sh);
+    }
+    return changed;
   }
 
   function filterSummary(f) {
@@ -1413,7 +1531,7 @@ export default function mount(container, winnow) {
       unique_columns: state.unique,
       value_columns: state.values,
       filters: state.filters,
-      tags: state.tags.mode ? state.tags : null,
+      tags: state.tags,
       row_json: state.rowJson,
       template: state.template,
     };
@@ -1855,18 +1973,40 @@ export default function mount(container, winnow) {
     state.values = [];
     state.colWidths = {};
     state.filters = [];
-    state.tags = { mode: '', ids: [] };
+    // The tag filter goes with them, though tags are case-wide: a switch
+    // starts the sheet over, as the grid starts each table on its own filter.
+    state.tags = [];
     state.rowJson = false;
     state.sortColumn = null;
     state.preview = null;
     state.stale = false;
     state.selRows = new Set();
     renderControls();
+    loadTagCounts();
     renderPreview();
     saveEdit();   // the table is the sheet's first fact; nothing else fires here
   }
 
-  refresh = () => { fillSources(); renderControls(); };
+  /* Back from the grid, where rows get tagged and tags get deleted: the
+     chips and their counts are read again, a deleted tag leaves every
+     sheet's filter (the backend would refuse it by name), and a sheet
+     filtered on tags runs again, because the rows it grouped may not be
+     the rows carrying those tags any more. The fields are drawn on every
+     show, the first one included; the tag half waits for the saved sheets
+     to be read back, since until then there is nothing filtered to re-run. */
+  let readBack = false;
+  refresh = () => {
+    const dropped = readBack ? dropDeletedTags() : new Set();
+    fillSources();
+    renderControls();
+    if (!readBack) return;
+    loadTagCounts();
+    // Not an edit, so no saveEdit: the restore line stays, as it does when
+    // a restore drops a tag.
+    if (dropped.size) saveState();
+    for (const sh of sheets) if (sh !== state && (sh.tags.length || dropped.has(sh))) sh.stale = true;
+    if (dropped.has(state) || state.tags.length) queuePreview();
+  };
 
   (async () => {
     try {
@@ -1880,7 +2020,7 @@ export default function mount(container, winnow) {
     // sitting there unread. See saveOn below.
     const unreadable = !!(saved && saved.error);
     const restored = saved && !unreadable
-      ? planRestore(saved.payload, winnow.state.sources, winnow.state.tags) : null;
+      ? planRestore(saved.payload, winnow.state.sources, winnow.state.tags || null) : null;
     if (restored) {
       // Restored sheets start stale: the definitions are back, the rows
       // are not, and the active one runs below.
@@ -1897,9 +2037,11 @@ export default function mount(container, winnow) {
     renderSheetTabs();
     fillSources();
     renderControls();
+    loadTagCounts();
     renderPreview();
     // Saving only starts once we know what a save would replace.
     saveOn = !unreadable;
+    readBack = true;
     // The rows are re-run against the case as it is NOW. Regardless of
     // Auto-update: this is the restore, not an edit, and restored controls
     // over an empty table read as a broken tab.

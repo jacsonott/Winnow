@@ -13,6 +13,7 @@ import { showPluginTab } from './plugins.js';
 import { openSource } from './sources.js';
 import { showSqlTab, showTimelineTab } from './sql.js';
 import { S } from './state.js';
+import { inPopout } from './popout.js';
 
 let navigating = false;   // a replayed visit must not re-record itself
 
@@ -66,6 +67,7 @@ export function tabHistoryGo(delta) {
    the analyst out of the app (or do nothing) — either way the buttons
    were dead weight before this. */
 export function onMouseNav(e) {
+  if (inPopout()) return;   // one page, no tabs to walk (popout.js)
   if (e.button === 3) { e.preventDefault(); tabHistoryGo(-1); }
   else if (e.button === 4) { e.preventDefault(); tabHistoryGo(1); }
 }

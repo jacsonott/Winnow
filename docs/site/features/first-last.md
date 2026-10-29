@@ -16,6 +16,8 @@ in **Settings → Plugins → Manage plugins…**, which takes no restart.
 - **Include columns** carries columns onto each row. **Total up**,
   **Count unique** and **List values** sum up each whole group, not just
   its two ends.
+- The tag chips at the top of **Filters** work as the Pivot's do: click
+  one to group only its rows, right-click one to exclude it.
 - A description template such as `{which} of {count}: {MapDescription}`
   says what each row is.
 - **Create table…** writes the result into the case as a table you can

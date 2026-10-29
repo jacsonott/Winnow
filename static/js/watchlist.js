@@ -27,6 +27,7 @@ import { S } from './state.js';
 import { clearRowCaches, refreshTagCounts } from './tags.js';
 import { modal } from './ui.js';
 import { jumpToTimelineRow } from './timeline.js';
+import { announceChange, pageElsewhere } from './popout.js';
 
 const KIND_COLOR = { hash: '#7c6cf6', ip: '#39a8e8', domain: '#39e881',
                      filename: '#d9a441', other: '#8a8a90' };
@@ -366,6 +367,9 @@ async function finishScan(rec, job) {
   // the server whether anything actually moved, so a re-scan that found
   // the same hits leaves the board alone.
   if (job.status === 'done') markDashboardStale();
+  // The auto-tags and the hits are news to the other windows (popout.js):
+  // no route they could hear wrote them — the scan did, server-side.
+  if (job.status === 'done') announceChange(['watchlist', 'tags']);
   if (S.view && openTableWasTagged(job)) {
     clearRowCaches();
     refreshTagCounts();
@@ -1128,6 +1132,7 @@ export function resetWatchlist() {
 }
 
 export async function showWatchlistTab() {
+  if (pageElsewhere('watchlist')) return;
   recordTabVisit({ kind: 'page', key: 'watchlist' });
   S.activeTab = 'watchlist';
   showMainView('watchlistview');

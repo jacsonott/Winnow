@@ -138,36 +138,6 @@
       }
     },
     {
-      "name": "EVTX — Defender config changes (noisy)",
-      "header_set": "Event logs (EvtxECmd)",
-      "payload": {
-        "filter_tree": {
-          "type": "group",
-          "op": "AND",
-          "children": [
-            {
-              "type": "cond",
-              "column": "EventId",
-              "op": "in",
-              "value": [
-                "1013",
-                "5007"
-              ]
-            },
-            {
-              "type": "cond",
-              "column": "Provider",
-              "op": "contains",
-              "value": "Microsoft-Windows-Windows Defender"
-            }
-          ]
-        },
-        "search": "",
-        "search_mode": "contains",
-        "search_terms": []
-      }
-    },
-    {
       "name": "EVTX — Logons",
       "header_set": "Event logs (EvtxECmd)",
       "payload": {
@@ -1318,6 +1288,38 @@
             "exclude": false
           }
         ]
+      }
+    }
+  ],
+  "retired": [
+    {
+      "name": "EVTX — Defender config changes (noisy)",
+      "header_set": "Event logs (EvtxECmd)",
+      "payload": {
+        "filter_tree": {
+          "type": "group",
+          "op": "AND",
+          "children": [
+            {
+              "type": "cond",
+              "column": "EventId",
+              "op": "in",
+              "value": [
+                "1013",
+                "5007"
+              ]
+            },
+            {
+              "type": "cond",
+              "column": "Provider",
+              "op": "contains",
+              "value": "Microsoft-Windows-Windows Defender"
+            }
+          ]
+        },
+        "search": "",
+        "search_mode": "contains",
+        "search_terms": []
       }
     }
   ]

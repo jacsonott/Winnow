@@ -21,6 +21,7 @@ import { openSource, sourceLabel, syncTabSelection } from './sources.js';
 import { S } from './state.js';
 import { jumpToTimelineRow } from './timeline.js';
 import { dropdownMenu } from './ui.js';
+import { pageElsewhere } from './popout.js';
 
 let loaded = false;   // whether this case's notes have been fetched into the editor
 let previewStale = true;   // the preview body doesn't reflect the editor (typed while it was hidden)
@@ -119,13 +120,28 @@ export function renderMarkdown(src) {
   return out.join('\n');
 }
 
+/* Typed since the last save went out — what flushNotesSave has to write. */
+let unsaved = false;
+
 const save = debounce(async () => {
   const status = $('notesSaved');
   try {
+    unsaved = false;
     await post('/api/case/notes', { body: $('notesEditor').value });
     if (status) { status.textContent = 'Saved'; setTimeout(() => { if (status.textContent === 'Saved') status.textContent = ''; }, 1500); }
-  } catch (e) { if (status) status.textContent = 'Save failed'; }
+  } catch (e) { unsaved = true; if (status) status.textContent = 'Save failed'; }
 }, 600);
+
+/* The narrative, saved now rather than at the end of the debounce — for
+   Notes leaving this window for a pop-out or back (popout.js): the window
+   it goes to reads the body back as it opens. `keepalive` for a window
+   that is closing, where a plain fetch is cancelled with the page. */
+export async function flushNotesSave({ keepalive = false } = {}) {
+  if (!unsaved) return;
+  save.cancel();
+  unsaved = false;
+  try { await post('/api/case/notes', { body: $('notesEditor').value }, { keepalive }); } catch { unsaved = true; }
+}
 
 /* ------------------------------------------------------- layout: split */
 
@@ -421,6 +437,7 @@ export function wireNotes() {
   // live preview follow it, so nothing can update one without the other.
   $('notesEditor').oninput = () => {
     $('notesSaved').textContent = 'Saving…';
+    unsaved = true;
     save();
     previewStale = true;
     renderLive();
@@ -516,6 +533,7 @@ export async function ensureNotesLoaded() {
 }
 
 export async function showNotesTab() {
+  if (pageElsewhere('notes')) return;
   recordTabVisit({ kind: 'page', key: 'notes' });
   S.activeTab = 'notes';
   showMainView('notesview');

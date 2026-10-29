@@ -4,14 +4,14 @@ Three pages work across the whole case rather than one table. The **Timeline** r
 
 ## The Timeline
 
-![The Timeline: the overview strip over tagged rows from six tables in one stream, read as a story with the day at the first line of Fri 13 Mar, the gap since the line above beside each time and notes in their lines; a run of 36 failed logons folded onto one line; one line selected and shown in full in the details pane, with the untagged rows from five minutes either side of it hatched between the findings](../screenshots/timeline.png)
+![The Timeline: the overview strip over tagged rows from six tables in one stream, each line with its whole ISO timestamp, the gap since the line above beside it and notes in their lines; a run of 36 failed logons folded onto one line; one line selected and shown in full in the details pane, with the untagged rows from five minutes either side of it hatched between the findings](../screenshots/timeline.png)
 
 Open the **Timeline** tab (top right, beside SQL and Notes). It lists every tagged row in the case, from every table, oldest first; tag a row anywhere and it is here. The header says how many tagged rows there are, and with [Fold repeats](#fold-repeats) on, how many lines they take (**77 tagged rows in 39 lines**). It is rebuilt each time you open the tab, so it always reflects the tags as they are now.
 
 Each line has five columns:
 
 - **The gutter**, as on the grid — a stripe per tag on the row in the tag's colour (hover for the tag's name), `✎` when the row has a note (hover to read it), and `⤢` on the line under the mouse to open the row in its table.
-- **Timestamp** — the row's time of day. The first line of each day also names the day (**Fri 13 Mar**), over a rule across the list, so the day is read once rather than on every line. Hover for the full timestamp, always written `YYYY-MM-DD HH:MM:SS` whatever display format Settings uses, so tables with different date formats sort together. A derived datetime column is used as it is, keeping any fractions of a second. Rows with no usable timestamp come last and show `—`. The column's heading names the day of the line at the top of the list (**Timestamp · Fri 13 Mar**).
+- **Timestamp** — the row's whole timestamp, always written `YYYY-MM-DD HH:MM:SS` whatever display format Settings uses, so tables with different date formats sort together and every line can be read, copied or compared on its own. A rule across the list marks the first line of each day. A derived datetime column is used as it is, keeping any fractions of a second. Rows with no usable timestamp come last and show `—`.
 - **Gap** — how long after the line above this one happened: `+40s`, `+2m 17s`, `+2h 31m`, `+3d 4h`. Half an hour or more is in bold, with a dashed rule over the line, so the quiet stretches between bursts of activity stand out. After a folded run it is counted from the run's last row.
 - **Type** — a pill naming the kind of table, in a colour of its own for each table: the type you set (see [Choosing the timestamp, type and body](#choosing-the-timestamp-type-and-body)), else the header set's nickname without the tool's name (**Event logs** for EvtxECmd output), else the table's name. When two tables are of the same kind, what tells their names apart follows the pill — `WKSTN-014` and `SRV-DC01` for `WKSTN-014_EvtxECmd_Output.csv` and `SRV-DC01_EvtxECmd_Output.csv`. Hover the pill for the file name.
 - **Body** — a one-line summary of the row when Winnow knows the artefact, otherwise the whole row with its columns joined by ` | `. Hover it for the whole row. A row's [note](Tagging-and-notes.md#row-notes) is written into its line, in italics after what happened (`✎ Patient zero: the invoice 'PDF' is a LNK…`). A table with more than 495 columns shows only its first 495 in the Body, and the Timeline header says which table; pick body columns under **Configure tables…** to choose which ones.
@@ -24,14 +24,14 @@ Each line has five columns:
 
 The **Overview** strip above the list shows the Timeline's lines over time: how they are spread across the case, and where the lines on screen sit in it. **Overview** in the header hides or shows it, and Winnow remembers which.
 
-- **Bars.** Each bar is a stretch of time, as wide as fits the whole Timeline across the strip; the width is on the right (**15 min bars**). Dashed lines mark midnight when the bars are shorter than a day. A bar's height grows with the square root of its lines, so a burst of a few hundred failed logons does not flatten single findings to nothing. Hover a bar for its time, its count and what it is made of.
+- **Bars.** Each bar is a stretch of time, as wide as fits the whole Timeline across the strip; the width is on the right (**15 min bars**). Dashed lines mark midnight when the bars are shorter than a day, and the start of each week (Monday) when the bars are a day or longer or the days are too close together to tell apart; the histogram above the grid draws the same lines. A bar's height grows with the square root of its lines, so a burst of a few hundred failed logons does not flatten single findings to nothing. Hover a bar for its time, its count and what it is made of.
 - **Tags** colours each bar by the first tag on each line (the first in the tag order, as the grid's histogram does), and the legend counts the lines under each tag. A line with two tags is counted once.
 - **Tables** colours each bar by table, in the colour of its **Type** pill, and gives each table a chip with its count. Click a chip to take that table off the Timeline and again to put it back; while one is off, the header says so (**5 of 6 tables**).
 - **Where you are.** The shaded band, and the bar along the top of the strip, cover the lines on screen. The selected line is marked by a line through the bars.
 - **Click a bar** to go to its first line and select it. A click where there are no bars goes on to the next one.
-- **Drag across bars** to show only that stretch of time. The Timeline is rebuilt for it, the strip redraws with finer bars, and a chip names the stretch (**Fri 13 Mar 01:30 → 06:15**); click its **✕** for the whole Timeline again. Lines with no timestamp are left out while a stretch is set. Otherwise they are on no bar, and the strip counts them on the right (**3 with no time**).
+- **Drag across bars** to show only that stretch of time. This sets the [timeframe](#the-timeframe-filter), the same one **⏱ Timeframe** sets: the Timeline is rebuilt for it, the strip redraws with finer bars, and the chip in the header names the stretch (**2026-03-13 01:30:00 → 2026-03-13 06:14:59**); click its **✕** for the whole Timeline again. Lines with no timestamp are left out while a timeframe is set. Otherwise they are on no bar, and the strip counts them on the right (**3 with no time**).
 
-Tables you switch off and the stretch you drag stay while the case is open; opening another case starts with the whole Timeline again.
+Tables you switch off and the timeframe stay while the case is open; opening another case starts with the whole Timeline again.
 
 ### The details pane
 
@@ -39,7 +39,7 @@ The pane to the right of the list shows the selected line in full, so you can re
 
 From the top down:
 
-- **The line**: its Type pill, its time in large type with the day and year beside it, and the summary.
+- **The line**: its Type pill, its whole timestamp in large type, and the summary.
 - **Tags**: a chip for each tag in the case, pressed when the row carries it. Click a chip, or press the tag's key (`1`–`9`), to put that tag on the row or take it off. The Timeline is rebuilt straight away, so a row you untag leaves it unless another of its tags is still switched on. `Ctrl+Z` undoes it, as it does on the grid.
 - **Note**: the row's [note](Tagging-and-notes.md#row-notes), which you can edit here (*Why does this row matter?*). It saves as you type (**Saving…**, then **Saved**), and the line's `✎` follows.
 - **Open in table ↦**: opens the row in its table on the grid page, the same as double-clicking the line.
@@ -51,12 +51,25 @@ From the top down:
 A tagged row is rarely the whole story. The rows around it in time, in every table, usually hold the rest, and nobody has tagged them yet. The buttons under **What else happened then** add them to the Timeline: **± 1 min**, **± 5 min**, **± 15 min** or **± 1 h** either side of the selected line.
 
 - The untagged rows in that window, from every table in the case, join the Timeline in time order between the findings. They are hatched and faded, with `○` in the gutter, and the pane calls one an **Untagged row** when you select it.
-- A chip in the header names the window and counts what it added (**± 5 min around 02:00:03 · 28 untagged**). Its **✕**, or pressing the same button again, takes them off. The count of tagged rows beside it does not include them.
+- A chip in the header names the window and counts what it added (**± 5 min around 2026-03-13 02:00:03 · 28 untagged**). Its **✕**, or pressing the same button again, takes them off. The count of tagged rows beside it does not include them.
 - The overview counts them as **Untagged**, in grey on top of each bar.
 - Tag one and it becomes a finding: it stays on the Timeline when the window is closed.
-- Tables you switch off in the overview's **Tables** view add nothing, and a stretch you drag still applies. A row with only a tag you have switched off counts as untagged here; the pane calls it **Around a finding**.
+- Tables you switch off in the overview's **Tables** view add nothing, and the [timeframe](#the-timeframe-filter) still applies. A row with only a tag you have switched off counts as untagged here; the pane calls it **Around a finding**.
 
 The window lasts until you close it or open another case. It goes by each table's timestamp column as set under **Configure tables…**, the same one the Timeline sorts by; a table with no timestamp column adds nothing.
+
+### The timeframe filter
+
+The Timeline has a timeframe filter of its own, set the way the [table pages' timeframe](Filtering-and-searching.md#the-timeframe-filter) is. Click **⏱ Timeframe** in the Timeline header, or press `R` while the Timeline is showing, to open **Timeframe filter**:
+
+- **Start** and **End** take `YYYY-MM-DD HH:MM:SS` in 24-hour time. A date alone, or a date with `HH:MM`, also works, and so do US-style `1/5/2024 1:22:01 PM` and month names, as on the table pages. You can set only one end. The 📅 button opens a date picker. What you type is kept and shown as `YYYY-MM-DD HH:MM:SS`, and text that is not a timestamp is refused before anything is rebuilt.
+- Both ends are inclusive. A date without a time means midnight at the start of that day, so an end of `2026-03-13` stops at `2026-03-13 00:00:00`. Each line goes by its own timestamp, the one in its **Timestamp** column; a timestamp with fractions of a second is compared to the second, as on the grid.
+- **From the tables' timeframe**, shown when a timeframe is set on the table pages, says what that range is, and **Fill range** copies it into **Start** and **End**. The Timeline does not follow the tables' timeframe on its own: a range set to read one table would otherwise take findings off the Timeline without asking.
+- **Apply** turns it on. The header shows a chip with the range (**2026-03-13 01:50:00 → 2026-03-13 03:00:00**) and **⏱ Timeframe** stays pressed; the chip's **✕** shows the whole Timeline again. **Clear** in the dialog does the same.
+
+Press `r` to turn it off without losing the range, and `r` again to turn it back on; opened while it is off, the dialog says *Off right now — Apply turns it back on.* Pressed with no range set, `r` opens the dialog. Dragging across the [overview](#the-overview) sets the same timeframe. Lines with no timestamp are left out while it is on, and when nothing is left the list says **No tagged rows in this timeframe**.
+
+The timeframe lasts while the case is open; opening another case starts with the whole Timeline again.
 
 ### Narrowing by tag
 

@@ -1,7 +1,7 @@
 # Saved filters
 
 A filter you build once is offered again on every table with the same
-columns, in this case and the next. Winnow ships 28 of them for EvtxECmd,
+columns, in this case and the next. Winnow ships 27 of them for EvtxECmd,
 RECmd and MFTECmd output, so a fresh export has a triage set before you
 have saved anything.
 

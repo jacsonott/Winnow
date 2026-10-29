@@ -1,7 +1,7 @@
 """The Timeline's overview strip: the lines over time above the list, and
 the three things it does — a click on a bar takes the list there, a drag
-across bars narrows the Timeline to that stretch, and a table's chip takes
-that table off it.
+across bars sets the Timeline's timeframe to that stretch, and a table's
+chip takes that table off it.
 
 The bars' places are read from timelineOverviewX, the function the strip
 paints with, so these tests click where a bar IS rather than where a
@@ -75,7 +75,7 @@ def two_hosts(page, tmp_path, api):
             api(f"/api/source/{sid}", "DELETE")
         page.evaluate("""async () => {
             __winnow.S.sourceId = null; __winnow.S.view = null;
-            __winnow.S.timeline.sel = null; __winnow.S.timeline.range = null;
+            __winnow.S.timeline.sel = null; __winnow.S.timeline.timeRange = { enabled: false, start: '', end: '' };
             __winnow.S.timeline.sourcesOff.clear();
             await __winnow.loadSources();
           }""")
@@ -141,6 +141,16 @@ def test_a_click_in_a_quiet_stretch_goes_on_to_the_next_line(page, two_hosts):
     page.wait_for_function("(ts) => (__winnow.S.timeline.sel || {}).ts === ts", arg=WS_EXFIL)
 
 
+def test_midnight_is_marked_by_the_rules_the_histogram_shares(page, two_hosts):
+    """The dashed rule at midnight comes from charts.js calendarRules now,
+    which the histogram strip over the grid draws too: under 10-minute
+    bars it is still the one midnight between the morning's burst and
+    the next afternoon, not a week rule."""
+    _open_timeline(page)
+    midnight = page.evaluate("() => __winnow.timelineEpoch('2026-05-07 00:00:00')")
+    assert page.evaluate("() => __winnow.timelineOverviewRules()") == {"unit": "day", "times": [midnight]}
+
+
 def test_a_drag_across_bars_narrows_the_timeline_to_that_stretch(page, two_hosts):
     _open_timeline(page)
     x0, y = _x(page, "2026-05-06 19:50:00")
@@ -152,15 +162,22 @@ def test_a_drag_across_bars_narrows_the_timeline_to_that_stretch(page, two_hosts
     page.mouse.up()
     page.wait_for_function("() => (__winnow.S.timeline.view || {}).row_count === 2", timeout=10_000)
     page.wait_for_function(OVERVIEW_UP)
-    lo, hi = page.evaluate("() => __winnow.S.timeline.range")
-    assert lo <= DC_PRIV and DC_SVC < hi and hi <= "2026-05-06 20:30:00"
+    # The drag is the ⏱ Timeframe dialog's range: the bars' edges, both
+    # kept, so the end is the last whole second of the last bar.
+    tr = page.evaluate("() => __winnow.S.timeline.timeRange")
+    lo, hi = tr["start"], tr["end"]
+    assert tr["enabled"] and len(lo) == len(hi) == 19
+    assert lo <= DC_PRIV and DC_SVC <= hi and hi < "2026-05-06 20:30:00"
     for ts in (DC_PRIV, DC_SVC):
         _line(page, ts).wait_for()
-    chip = page.locator("#timelineOverview .tl-range-chip")
-    assert chip.inner_text().startswith("Wed 6 May")
+    assert page.locator("#btnTimelineTimeRange").get_attribute("aria-pressed") == "true"
+    # Said in the header, in ISO, whether or not the strip is open.
+    chip = page.locator("#timelineTimeRange .tl-range-chip")
+    assert chip.inner_text().startswith(f"{lo} → {hi}")
     chip.locator(".tl-range-x").click()
     page.wait_for_function("() => (__winnow.S.timeline.view || {}).row_count === 63", timeout=10_000)
-    assert page.locator("#timelineOverview .tl-range-chip").count() == 0
+    assert page.locator("#timelineTimeRange .tl-range-chip").count() == 0
+    assert page.locator("#btnTimelineTimeRange").get_attribute("aria-pressed") == "false"
 
 
 def test_a_tables_chip_takes_that_table_off_the_timeline(page, two_hosts):

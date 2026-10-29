@@ -1,8 +1,8 @@
 /* The home screen: the case registry, opening/creating cases, and boot().
 
    Split out of the former single static/app.js — see CLAUDE.md. */
-import { applyBundle } from './bundles.js';
-import { PAGE_ID, closePresence } from './connection.js';
+import { applyBundle, listBundles, summaryOf } from './bundles.js';
+import { PAGE_ID, awaitRestart, closePresence } from './connection.js';
 import { $, api, dragHas, el, post, setBusy, setCaseToken, switchCase, toast } from './core.js';
 import { pad2 } from './tsformat.js';
 import { loadPlugins, openImportModal, queueFiles } from './importer.js';
@@ -20,15 +20,17 @@ import { updateSearchAllButton } from './search.js';
 import { clearViewStateStash, applyPageTabsSize, loadCollapsedFolders, loadSources } from './sources.js';
 import { clearTabHistory } from './tabhistory.js';
 import { resetSqlPane, showGridTab } from './sql.js';
-import { openSettings, syncAppearanceFromServer } from './settings.js';
+import { openSettings, syncAppearanceFromServer, variablePromptFields } from './settings.js';
 import { drawWordmark } from './splash.js';
 import { S } from './state.js';
 import { fmtBytes, keepingFocus } from './tables.js';
 import { loadCaseTags } from './tags.js';
 import { tableMenuStat, updateTimeRangeButton } from './timeframe.js';
-import { loadTimelineTemplates } from './timeline.js';
+import { loadTimelineTemplates, renderTimelineTimeRange } from './timeline.js';
+import { flushTimelineNote, resetTimelinePane } from './timelinepane.js';
 import { confirmDialog, contextMenu, dropdownMenu, modal, oneAtATime, promptDialog, sectionPanes, sideRail } from './ui.js';
 import { writeClipboardText } from './grouping.js';
+import { enterPopout, inPopout, ownPopoutCount, popoutWithoutCase } from './popout.js';
 
 /* -------------------------------------------------------------- home screen */
 
@@ -92,15 +94,46 @@ export async function shutdownWinnow() {
   document.body.replaceChildren(note);
 }
 
+/* Stop the server and start it again, so an update that just landed is
+   what runs (Settings → Updates). Unlike Shut down nothing is left
+   stopped: the server hands its port to the new process and reopens the
+   same case, and every window — this one, its pop-outs, any other —
+   reloads by itself when the new one answers (awaitRestart). So other
+   windows need no warning here; work still running does, since a restart
+   interrupts it exactly as Shut down would. Resolves false if the analyst
+   kept it running; throws the server's refusal (a version that won't
+   start, a Winnow started some other way) for the caller to show. */
+export async function restartWinnow() {
+  const busy = inFlightWork();
+  if (busy.length) {
+    const go = await confirmDialog(
+      `Restart Winnow now?\n\n\u26a0 Still running: ${busy.join(', ')}. Restarting now interrupts `
+      + `${busy.length === 1 ? 'it' : 'them'} — anything already committed is saved, but unfinished `
+      + 'work is not.',
+      { okLabel: 'Restart anyway', cancelLabel: 'Not now', danger: true });
+    if (!go) return false;
+  }
+  const { boot } = await post('/api/restart', {});
+  awaitRestart(boot);
+  return true;
+}
+
 /* Windows other than this one with a presence stream open, or null when
-   the server can't say — the confirm then keeps its general wording. */
+   the server can't say — the confirm then keeps its general wording. This
+   window's own pop-outs (popout.js) are left out: they are part of it, not
+   somebody else's work that would stop. */
 export async function otherWindows() {
   try {
-    return (await api(`/api/presence/others?page=${PAGE_ID}`)).others;
+    const { others } = await api(`/api/presence/others?page=${PAGE_ID}`);
+    return Math.max(0, others - ownPopoutCount());
   } catch { return null; }
 }
 
-export function showHome() { $('app').hidden = true; $('home').hidden = false; setBrandLabel(null); }
+/* Counts the trips to the home screen, so that an open still finishing
+   can tell the analyst went Home after it started (openCaseNow). */
+let homeVisits = 0;
+
+export function showHome() { homeVisits += 1; $('app').hidden = true; $('home').hidden = false; setBrandLabel(null); }
 
 // The brand button doubles as "which case is this" once one's open — falls
 // back to the app name on the home screen / before any case has loaded.
@@ -133,18 +166,78 @@ export function describeCaseHolder(holder) {
 /* One case switch at a time from this page. A double-click on a case card
    is two clicks, and each used to start its own open: two POSTs racing on
    the server (which serialises them now — see _CASE_SWITCH in server.py),
-   then two state resets and two loadSources interleaving here. A second
-   call while one is in flight gets the first one's promise instead —
-   whichever case was asked for first is the one that opens. */
-let caseOpening = null;
+   then two state resets and two loadSources interleaving here. So opens
+   run one after another, never side by side.
 
-export function openCase(path, opts = {}) {
-  if (caseOpening) return caseOpening;
-  caseOpening = openCaseNow(path, opts).finally(() => { caseOpening = null; });
-  return caseOpening;
+   A call for the case already opening — the double-click — gets that
+   open's promise. A call for ANOTHER case used to get it too, and so was
+   dropped: an analyst who went Home while a case was still painting its
+   first table (seconds, on a big one) and picked a different case saw the
+   click do nothing at all. It waits now, the newest such call replacing
+   any older one, and runs as soon as the open in flight is done; that
+   open sees it waiting and skips the rest of its own load, which the
+   next open would only reset. So the case clicked last is the one that
+   ends up open. */
+let caseOpening = null;   // the open in flight: { path, opts, reasked, done }
+const SUPERSEDED = 'superseded';   // what an open that stopped short for caseNext resolves
+let caseNext = null;      // { path, opts }: another case asked for meanwhile
+
+/* The busy bar is up while a case waits its turn, so the click that
+   queued it visibly did something — the home screen has nothing else
+   to show for it until its open starts. */
+function setCaseNext(next) {
+  if (!!next !== !!caseNext) setBusy(!!next);
+  caseNext = next;
 }
 
-export async function openCaseNow(path, opts = {}) {
+export function openCase(path, opts = {}) {
+  if (caseOpening) {
+    if (path === caseOpening.path) {
+      // The double-click, or a change of mind back to this case: nothing
+      // queued is wanted any more, and this case is wanted on screen even
+      // if the analyst went Home since it started.
+      setCaseNext(null);
+      caseOpening.reasked = true;
+    } else {
+      setCaseNext({ path, opts });
+    }
+    return caseOpening.done;
+  }
+  const open = { path, opts, reasked: false, done: null };
+  caseOpening = open;
+  open.done = (async () => {
+    try {
+      for (;;) {
+        let outcome;
+        try {
+          outcome = await openCaseNow(open.path, open.opts, open);
+        } catch (e) {
+          if (!caseNext) throw e;
+        }
+        if (caseNext) {
+          Object.assign(open, caseNext, { reasked: false });
+          setCaseNext(null);
+        } else if (outcome !== SUPERSEDED) {
+          return;
+        }
+        // Otherwise it stopped short for a case that was then un-asked-for
+        // by a click back on this one (so `reasked`, and it shows): run it
+        // again, which for the case the server already has open is the
+        // client half alone.
+      }
+    } finally {
+      caseOpening = null;
+      setCaseNext(null);
+    }
+  })();
+  return open.done;
+}
+
+/* `run` is openCase's record of this open, when it came through there.
+   Resolves SUPERSEDED when it stopped short for a case asked for since. */
+export async function openCaseNow(path, opts = {}, run = null) {
+  const superseded = () => run !== null && caseNext !== null;
+  const homeVisitsAtStart = homeVisits;
   // A note save still inside its 500 ms debounce fires after the server
   // has swapped stores, and /api/note writes into whichever store is
   // current — the previous case's {source_id, rid} landing on an unrelated
@@ -159,6 +252,10 @@ export async function openCaseNow(path, opts = {}) {
   // fix: whatever it was about to write describes THIS case, and the POST
   // below hands the server another one. Dropped before the swap, not after.
   dropPendingTabState();
+  // The Timeline's note box is the same hazard again, but saved rather than
+  // dropped: the server still has the case it was typed in, for one more
+  // request. resetTimelinePane, once the switch lands, forgets its row.
+  await flushTimelineNote();
   let res;
   try {
     // switchCase: from here, a request this page made about the case it is
@@ -173,7 +270,7 @@ export async function openCaseNow(path, opts = {}) {
       if (!go) return;
       // Straight to the worker: this IS the in-flight open, still holding
       // the guard above, so going through openCase would get itself back.
-      return openCaseNow(path, { force: true });
+      return openCaseNow(path, { force: true }, run);
     }
     toast('Could not open case: ' + e.message, 6000);
     return;
@@ -214,7 +311,10 @@ export async function openCaseNow(path, opts = {}) {
   // previous case's tag_defs — neither means anything here.
   S.timeline = { view: null, pages: new Map(), pending: new Set(), reqId: S.timeline.reqId + 1,
                  tagsOff: new Set(), raw: new Set(), sel: null,
-                 sourcesOff: new Set(), range: null, overview: null, context: null, unfold: [] };
+                 sourcesOff: new Set(), timeRange: { enabled: false, start: '', end: '' },
+                 overview: null, context: null, unfold: [] };
+  renderTimelineTimeRange();
+  resetTimelinePane();
   // sql_tabs is a per-case table, so the previous case's tabs (and the
   // results and runs keyed by their ids) don't describe this one.
   resetSqlPane();
@@ -231,10 +331,16 @@ export async function openCaseNow(path, opts = {}) {
   // The histogram strip's chart is the previous case's rows; it waits for
   // this case's first view (or says there is no table) instead.
   resetHistogram();
+  // Everything above is the previous case's state let go of, which has to
+  // happen whatever comes next. Everything below loads this one, and when
+  // another case has been asked for meanwhile, its open is about to reset
+  // all of it again: stop here, and never put this case on screen.
+  if (superseded()) return SUPERSEDED;
   // The effective plugin set is per-case (case_settings overrides beat the
   // machine default), and the server reloaded its registry when this case
   // opened — refetch so tabs/formats/panel reflect THIS case's plugins.
   await loadPlugins();
+  if (superseded()) return SUPERSEDED;
   // The pane shows a row of the previous case's table; the grid it
   // belongs to is about to be rebuilt against this one. Before showApp,
   // so it is never on screen for a frame beside the new case.
@@ -245,8 +351,14 @@ export async function openCaseNow(path, opts = {}) {
   // would hit the new Store, 409 as expired, and rebuild the old filters
   // against whichever of this case's sources shares the number.
   if (S.activeTab !== 'grid') showGridTab({ repaint: false });
-  setBrandLabel(res.name);
-  showApp();
+  // Not when the analyst has gone Home since this open started: it took
+  // them straight back off the home screen, mid-way through picking
+  // another case, and their click landed on whatever the app had there.
+  // The case still loads, out of sight, and shows when it is asked for
+  // again (below, or a fresh openCase, which finds it already open).
+  const reveal = () => { setBrandLabel(res.name); showApp(); };
+  const leftForHome = () => homeVisits !== homeVisitsAtStart && !(run && run.reasked);
+  if (!leftForHome()) reveal();
   // A quick-look (temp) case — e.g. one made by dropping files on the home
   // screen — surfaces its banner so it can be saved or discarded, the same
   // as one opened at boot (only boot painted this before).
@@ -257,7 +369,11 @@ export async function openCaseNow(path, opts = {}) {
   // Tag definitions are per case too (see loadCaseTags), and an empty case
   // never opens a table to reload them on the way in.
   await loadCaseTags();
+  if (superseded()) return SUPERSEDED;
   await loadSources();
+  // Went Home, then clicked this same case again while it was loading.
+  if ($('app').hidden && run && run.reasked && !caseNext) reveal();
+  return undefined;
 }
 
 export function slugify(name) {
@@ -614,7 +730,15 @@ export function openFolderBrowser(startPath, onSelect, onCancel, { mode = 'folde
   }, { wide: true, tall: true, focus: '.browse-path' });
 }
 
-/* `state` carries everything back across a "Browse..." round trip —
+/* + New case, and the quick look's Save as a case, on the side-list frame
+   the other dialogs moved to. The profiles are down the side — None, the
+   shipped ones, then this machine's own, each with what it carries under
+   its name — and the case is on the right: its name, group and file on
+   top, then the chosen profile's description and the values it asks for.
+   Kept to the fields: what a profile carries is the line under its name,
+   and what is missing is said when Create is pressed, not before.
+
+   `state` carries everything back across a "Browse..." round trip —
    opening the folder browser swaps this modal's content out entirely
    (modal() replaces #modal's content in place rather than stacking), so
    there's no surviving DOM to read values back out of afterward; the only
@@ -625,39 +749,35 @@ export function openFolderBrowser(startPath, onSelect, onCancel, { mode = 'folde
    `state.saveQuickLook` makes this the quick look's "Save as a case…"
    (tempSaveAs): the same fields, but the open quick look's file moves to
    the path rather than a new case being made there. */
-export function openNewCaseModal(state = {}) {
+export async function openNewCaseModal(state = {}) {
   const saving = state.saveQuickLook || null;
+  // Read before the dialog draws, so the side list is whole on its first
+  // frame. A failed read still leaves None, which makes a case like any
+  // other.
+  const bundles = await listBundles().catch(() => []);
+  const byId = new Map(bundles.map((bd) => [String(bd.id), bd]));
+  // What was typed into a profile's values, by variable name: switching
+  // to another profile and back, or to one asking for the same
+  // `engagement`, keeps it rather than starting over.
+  const typed = new Map(Object.entries(state.vars || {}));
   modal(saving ? 'Save as a case' : 'New case', (b) => {
-    if (saving) {
-      b.append(el('p', null, 'Its tables, tags and notes move into the case file below, '
-        + 'and the case is listed on the home screen.'));
-    }
-    const nameInput = fieldInput(state.name || '');
-    nameInput.placeholder = 'Case name';
-    const nameRow = el('div', 'row-actions');
-    nameRow.append(nameInput);
-    b.append(el('label', 'field-label', 'Name'), nameRow);
-
-    const groupInput = fieldInput(state.group || '');
-    groupInput.placeholder = 'Group (optional) — e.g. an IR engagement name';
+    // The case itself, drawn once and moved into whichever profile's pane
+    // is showing, so choosing another profile never loses what was typed.
+    const caseBox = el('div', 'nc-case');
+    const nameInput = ncInput(state.name || '', 'e.g. ACME intrusion', 'nc-name');
+    const groupInput = ncInput(state.group || '', 'Optional');
     groupInput.setAttribute('list', 'home-new-case-groups');
-    const groupRow = el('div', 'row-actions');
-    groupRow.append(groupInput, groupOptionsDatalist('home-new-case-groups'));
-    b.append(el('label', 'field-label', 'Group'), groupRow);
-
     let chosenDir = state.chosenDir || S.casesDir || S.defaultCasesDir || 'cases';
-    const pathInput = fieldInput(state.path || joinPath(chosenDir, slugify(state.name || '') + CASE_EXT));
-    pathInput.style.fontFamily = 'var(--mono)';
+    const pathInput = ncInput(state.path || joinPath(chosenDir, slugify(state.name || '') + CASE_EXT), '', 'mono nc-path');
     let pathTouched = state.pathTouched || false;
-    pathInput.oninput = () => { pathTouched = true; };
-    nameInput.oninput = () => { if (!pathTouched) pathInput.value = joinPath(chosenDir, slugify(nameInput.value) + CASE_EXT); };
     const browseBtn = el('button', 'btn ghost', 'Browse…');
+    browseBtn.type = 'button';
     browseBtn.onclick = () => {
+      for (const [k, inp] of varInputs) typed.set(k, inp.value);
       const snapshot = {
         name: nameInput.value, group: groupInput.value, path: pathInput.value,
         chosenDir, pathTouched, saveQuickLook: state.saveQuickLook,
-        caseType: typeSel.value,
-        vars: Object.fromEntries([...varInputs].map(([k, inp]) => [k, inp.value])),
+        profile: frame.current(), vars: Object.fromEntries(typed),
       };
       openFolderBrowser(
         chosenDir,
@@ -667,73 +787,93 @@ export function openNewCaseModal(state = {}) {
         () => openNewCaseModal(snapshot),
       );
     };
-    const pathRow = el('div', 'row-actions');
-    pathRow.append(pathInput, browseBtn);
-    b.append(el('label', 'field-label', 'Case file path'), pathRow);
+    const pathBox = el('div', 'dlg-input');
+    pathBox.append(pathInput, browseBtn);
+    const pair = el('div', 'dlg-pair');
+    pair.append(captioned('Name', nameInput),
+      captioned('Group', groupInput, groupOptionsDatalist('home-new-case-groups')));
+    caseBox.append(pair, captioned('Case file path', pathBox));
 
-    // The profile, applied right after the case opens, so a Triage case
-    // starts with the triage plugins on — no settings trip. (The record is
-    // a plugin_bundles row; only the word the analyst reads is "profile".)
-    const typeSel = el('select');
-    typeSel.style.cssText = 'flex:1;background:var(--ink);color:var(--text);border:1px solid var(--line-2);padding:6px 8px;font:inherit';
-    const noneOpt = el('option', null, 'None — machine defaults');
-    noneOpt.value = '';
-    typeSel.append(noneOpt);
-    let bundlesById = new Map();
-    const varsBox = el('div', 'case-vars new-case-vars');
-    varsBox.hidden = true;
     const varInputs = new Map();     // variable name -> input, for the chosen profile
-    // A profile can declare variables the case should carry (the
-    // engagement name, an API base URL…); required ones are asked for
-    // here, before the case exists, rather than as a surprise afterwards.
-    const renderProfileVars = () => {
-      varsBox.replaceChildren();
+    const chosen = () => byId.get(frame.current()) || null;    // null is None
+    const missingVars = () => ((chosen() || {}).variables || [])
+      .filter((d) => d.required && !(varInputs.get(d.name)?.value || '').trim());
+
+    // The chosen profile under the case: what it is for, in its own words,
+    // and the values it asks for — the same fields the values prompt draws
+    // (variablePromptFields). None has neither.
+    function profilePart(bd) {
+      const part = el('div', 'nc-profile');
       varInputs.clear();
-      const bd = bundlesById.get(Number(typeSel.value));
+      if (bd && bd.description) {
+        const about = el('p', 'nc-about', bd.description);
+        about.title = bd.description;   // clamped to two lines
+        part.append(about);
+      }
       const defs = (bd && bd.variables) || [];
-      varsBox.hidden = !defs.length;
-      if (!defs.length) return;
-      varsBox.append(el('div', 'fb-help', `“${bd.name}” asks for:`));
-      for (const d of defs) {
-        const row = el('div', 'case-var-row');
-        const name = el('span', 'case-var-name', (d.label || d.name) + (d.required ? ' *' : ''));
-        name.title = d.name;
-        const inp = el('input', 'case-var-value');
-        inp.dataset.var = d.name;
-        inp.value = state.vars && state.vars[d.name] != null ? state.vars[d.name] : (d.default || '');
-        inp.placeholder = d.required ? 'required' : 'optional';
-        row.append(name, inp, el('span', 'case-var-desc', d.description || ''), el('span'));
-        varInputs.set(d.name, inp);
-        varsBox.append(row);
+      if (defs.length) {
+        const { fields, inputs } = variablePromptFields(defs);
+        for (const [vname, inp] of inputs) {
+          if (typed.has(vname)) inp.value = typed.get(vname);
+          inp.oninput = () => { typed.set(vname, inp.value); inp.classList.remove('invalid'); };
+          varInputs.set(vname, inp);
+        }
+        const grid = el('div', 'nc-vars-fields');
+        grid.append(...fields);
+        part.append(grid);
       }
+      part.hidden = !part.childElementCount;
+      return part;
+    }
+
+    // A section per profile, keyed by its id. (The record is a
+    // plugin_bundles row; the word the analyst reads is "profile".)
+    const sections = [{ id: 'none', group: 'Profile', title: 'None',
+      hint: () => (saving ? 'Plugins as they are now' : 'This machine’s plugins') }];
+    // Shipped first, as the profile manager lists them, so each group's
+    // heading is drawn once.
+    for (const bd of [...bundles.filter((x) => x.shipped), ...bundles.filter((x) => !x.shipped)]) {
+      sections.push({ id: String(bd.id), group: bd.shipped ? 'Profile' : 'Your profiles', title: bd.name,
+        hint: () => summaryOf(bd) });
+    }
+    for (const s of sections) {
+      s.build = (pane) => pane.append(caseBox, profilePart(byId.get(s.id) || null));
+    }
+    const frame = sectionPanes({ sections, label: 'Profiles', cls: 'list-panes nc-panes', paneCls: 'list-pane nc-pane' });
+    b.append(frame.panes);
+
+    const foot = el('div', 'table-menu-foot table-menu-strip');
+    const cancel = el('button', 'btn ghost table-menu-close', 'Cancel');
+    cancel.onclick = () => {
+      $('modal').hidden = true;
+      if (saving && saving.onCancel) saving.onCancel();
     };
-    api('/api/plugin_bundles').then((bundles) => {
-      bundlesById = new Map(bundles.map((bd) => [bd.id, bd]));
-      for (const bd of bundles) {
-        const o = el('option', null, `${bd.name} (${bd.plugins.length} plugin${bd.plugins.length === 1 ? '' : 's'})`);
-        o.value = String(bd.id);
-        typeSel.append(o);
-      }
-      if (state.caseType) typeSel.value = state.caseType;
-      renderProfileVars();
-    }).catch(() => {});
-    typeSel.onchange = renderProfileVars;
-    const typeRow = el('div', 'row-actions');
-    typeRow.append(typeSel);
-    b.append(el('label', 'field-label', 'Profile'), typeRow, varsBox);
+    const go = el('button', 'btn primary nc-go', saving ? 'Save case' : 'Create case');
+    foot.append(cancel, go);
+    b.append(foot);
 
+    nameInput.oninput = () => {
+      if (!pathTouched) pathInput.value = joinPath(chosenDir, slugify(nameInput.value) + CASE_EXT);
+    };
+    pathInput.oninput = () => { pathTouched = true; };
+    // Enter in a box makes the case, as the main button would. Not in
+    // Group: Enter there picks one of the groups it offers.
+    b.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' || e.isComposing || !e.target.matches('.nc-name, .nc-path, .case-var-prompt')) return;
+      e.preventDefault();
+      go.click();
+    });
 
-    const actions = el('div', 'row-actions');
-    const create = el('button', 'btn primary', saving ? 'Save case' : 'Create case');
-    create.onclick = oneAtATime(create, async () => {
+    go.onclick = oneAtATime(go, async () => {
       const name = nameInput.value.trim();
-      if (!name) { toast('Name the case first'); return; }
+      if (!name) { toast('Name the case first'); nameInput.focus(); return; }
       const path = pathInput.value.trim();
-      if (!path) { toast('Give the case file a path'); return; }
-      const bd = bundlesById.get(Number(typeSel.value));
-      const missing = ((bd && bd.variables) || []).filter((d) => d.required && !(varInputs.get(d.name)?.value || '').trim());
+      if (!path) { toast('Give the case file a path'); pathInput.focus(); return; }
+      const bd = chosen();
+      const missing = missingVars();
       if (missing.length) {
         toast(`“${bd.name}” needs: ${missing.map((d) => d.label || d.name).join(', ')}`, 5000);
+        for (const d of missing) varInputs.get(d.name).classList.add('invalid');
         varInputs.get(missing[0].name).focus();
         return;
       }
@@ -760,28 +900,48 @@ export function openNewCaseModal(state = {}) {
         $('modal').hidden = true;
         await openCase(path); // shared with the home screen's "open" flow — same brand-label/view-cache handling
       }
-      if (typeSel.value) {
+      if (bd) {
         try {
           // Values typed above land first, so applying the profile (which
           // seeds definitions without overwriting values) finds them filled.
           for (const [vname, inp] of varInputs) {
             if (inp.value.trim()) await post('/api/case/variables', { name: vname, value: inp.value.trim() });
           }
-          await applyBundle({ id: Number(typeSel.value) });
+          await applyBundle(bd);
         } catch (e) {
           toast(`Case ${saving ? 'saved' : 'created'}, but the profile failed to apply: ` + e.message, 6000);
         }
       }
       if (saving && saving.onSaved) await saving.onSaved();
     });
-    const cancel = el('button', 'btn ghost', 'Cancel');
-    cancel.onclick = () => {
-      $('modal').hidden = true;
-      if (saving && saving.onCancel) saving.onCancel();
-    };
-    actions.append(create, cancel);
-    b.append(actions);
-  });
+
+    frame.show(byId.has(String(state.profile)) ? String(state.profile) : 'none');
+  }, { wide: true, tall: true, focus: (b) => (state.name ? null : b.querySelector('.nc-name')) });
+}
+
+/* A box in the dialogs' field shape (.confirm-input, which .dlg-field
+   sizes), rather than fieldInput's inline style. */
+function ncInput(value, placeholder, cls = '') {
+  const inp = el('input', 'confirm-input' + (cls ? ' ' + cls : ''));
+  inp.type = 'text';
+  inp.autocomplete = 'off';
+  inp.value = value;
+  if (placeholder) inp.placeholder = placeholder;
+  return inp;
+}
+
+/* A caption above its box (.dlg-field), tied to the box's input by
+   for/id so a click on the words lands in it. `box` is the input, or a
+   .dlg-input holding it and its button. */
+let captionSeq = 0;
+function captioned(caption, box, ...after) {
+  const f = el('div', 'dlg-field');
+  const input = box.matches('input') ? box : box.querySelector('input');
+  if (!input.id) input.id = `ncField${++captionSeq}`;
+  const l = el('label', null, caption);
+  l.htmlFor = input.id;
+  f.append(l, box, ...after);
+  return f;
 }
 
 /* First run of this Winnow instance (no cases_dir configured, no cases
@@ -1570,8 +1730,13 @@ export async function boot() {
     showApp();
     await loadCaseSettings();
     await loadCaseTags();   // same reason as openCase: an empty case opens no table
+    // A pop-out shows one page and opens no table; the main window runs the
+    // jobs poll for both (popout.js).
+    if (inPopout()) { await enterPopout(cur); return; }
     await loadSources();
     startJobsPoll(); // an import (or index build) from before a reload shows back up
+  } else if (inPopout()) {
+    popoutWithoutCase();
   } else {
     showHome();
     await refreshCases();

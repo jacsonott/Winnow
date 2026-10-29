@@ -303,7 +303,7 @@ def _bump_filters(monkeypatch, extra=()):
     from winnow import defaults
     shipped = defaults.filters()
     monkeypatch.setattr(defaults, "filters", lambda: {
-        "version": shipped["version"] + 1,
+        **shipped, "version": shipped["version"] + 1,
         "filters": list(shipped["filters"]) + list(extra)})
 
 
@@ -361,6 +361,88 @@ def test_a_workspace_seeded_before_the_record_existed_is_recorded_at_its_version
     assert "seeded" in json.loads(path.read_text(encoding="utf-8"))
     _bump_filters(monkeypatch)
     assert victim["name"] not in [f["name"] for f in WS.filters.list()]
+
+
+# What a release that TAKES BACK a default does: its entry moves from
+# `filters` to `retired` unchanged, at the same version.
+
+def _retire_filters(monkeypatch, names):
+    from winnow import defaults
+    shipped = defaults.filters()
+    taken = [e for e in shipped["filters"] if e[0] in names]
+    assert len(taken) == len(names)
+    monkeypatch.setattr(defaults, "filters", lambda: {
+        "version": shipped["version"],
+        "filters": [e for e in shipped["filters"] if e[0] not in names],
+        "retired": list(shipped["retired"]) + taken})
+
+
+def test_a_retired_default_filter_leaves_only_where_it_is_untouched(monkeypatch):
+    """Removing a default from the shipped list alone changes nothing for
+    anyone already running Winnow: theirs was seeded long ago. So the
+    untouched copy goes on the next read — but an edited or renamed one
+    is the analyst's filter now, and stays."""
+    before = WS.filters.list()
+    untouched, edited, renamed = before[0], before[1], before[2]
+    WS.filters.update(edited["id"], payload={**edited["payload"], "search": "mine"})
+    WS.filters.update(renamed["id"], name="MY triage")
+
+    _retire_filters(monkeypatch, {untouched["name"], edited["name"], renamed["name"]})
+    names = [f["name"] for f in WS.filters.list()]
+    assert untouched["name"] not in names
+    assert names.count(edited["name"]) == 1
+    assert names.count("MY triage") == 1 and renamed["name"] not in names
+    assert len(names) == len(before) - 1
+
+
+def test_a_retired_default_filter_imported_back_afterwards_stays(monkeypatch):
+    """A retirement runs once per workspace. Importing the filter back from
+    an export made before it is the analyst asking for it, and the next
+    read must not take it away again."""
+    before = WS.filters.list()
+    export = WS.filters.export_all()
+    gone = before[0]["name"]
+
+    _retire_filters(monkeypatch, {gone})
+    assert gone not in [f["name"] for f in WS.filters.list()]
+    assert WS.filters.import_all(export, merge=True) == 1
+    assert [f["name"] for f in WS.filters.list()].count(gone) == 1
+
+
+def test_the_noisy_defender_config_filter_is_retired():
+    """"EVTX — Defender config changes (noisy)" was taken out of the
+    shipped set. A fresh workspace never gets it, and one an earlier
+    release seeded loses its untouched copy on the next read."""
+    import json
+    from winnow import defaults
+
+    name = "EVTX — Defender config changes (noisy)"
+    assert name not in [n for n, _, _ in defaults.filters()["filters"]]
+    assert name not in [f["name"] for f in WS.filters.list()]
+
+    # The workspace as the earlier release left it: the filter as it
+    # shipped, recorded in `seeded`, no retirement handled yet.
+    [(_, cols, payload)] = [r for r in defaults.filters()["retired"] if r[0] == name]
+    path = WS.WORKSPACE_DIR / WS.SavedFilters.FILE
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data.pop("retired")
+    data["filters"].insert(2, {"id": 999, "name": name, "col_names": cols,
+                               "payload": payload, "created_at": "2026-01-01T00:00:00"})
+    data["seeded"].append([name, cols])
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    after = WS.filters.list()
+    assert name not in [f["name"] for f in after]
+    assert len(after) == len(data["filters"]) - 1
+
+
+def test_no_shipped_filter_is_also_retired():
+    """An entry in both lists would be seeded into a fresh workspace and
+    taken out of every older one — moving it means moving it."""
+    from winnow import defaults
+    shipped = defaults.filters()
+    assert not ({(n, tuple(c)) for n, c, _ in shipped["filters"]}
+                & {(n, tuple(c)) for n, c, _ in shipped["retired"]})
 
 
 def test_tag_template_seeds_ta_first_and_migrates_only_untouched_legacy():

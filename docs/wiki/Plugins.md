@@ -65,10 +65,11 @@ The defaults differ by where a plugin came from:
 - a plugin you installed, or dropped into a plugins folder, is **On**
   everywhere from the start.
 
-[Applying a profile](Dashboards.md#applying-a-profile) sets the per-case
-switch for *every* installed plugin: **On** for the profile's plugins,
-**Off** for all the others. If a plugin you expect is off in one case, look
-at its **In "*case*"** row first.
+[Applying a profile](Dashboards.md#applying-a-profile) with its
+**Plugins** part ticked sets the per-case switch for *every* installed
+plugin: **On** for the profile's plugins, **Off** for all the others. If a
+plugin you expect is off in one case, look at its **In "*case*"** row
+first.
 
 ### What the manager shows before you switch one on
 
@@ -221,7 +222,9 @@ Values can be **Count**, **Distinct count**, **Sum**,
 **Average**, **Min** or **Max**; Count counts non-empty cells, and Sum and
 Average ignore text that isn't a number. Filters use `is any of`,
 `is none of`, `contains`, `does not contain`, `starts with`,
-`> (numeric)`, `< (numeric)`, `is empty` and `is not empty`.
+`> (numeric)`, `< (numeric)`, `is empty` and `is not empty`. In
+`is any of` and `is none of`, **(blank)** is an empty cell, whether the
+file had an empty value there or the row was too short to have one.
 
 The top of **Filters** carries the case's tags as chips, and they work as
 the tag ribbon above the grid does (see [Tagging and notes](Tagging-and-notes.md)):
@@ -239,7 +242,18 @@ tagged in the meantime are counted.
   new one replaces it. Its numbers can't be clicked in the meantime.
 - **Copy** puts the result on the clipboard as tab-separated text; **CSV**
   downloads it as a file.
-- Click any number to see the rows behind it (up to 500).
+- Click any number to see the rows behind it (up to 500). **Show these
+  rows in the grid**, at the top of that list or on the number's
+  right-click menu, opens the table in the grid on all of them: the
+  cell's values in the column filters, the pivot's **Filters** as
+  conditions in the filter builder, and its tag chips on the tag ribbon,
+  ready to read, tag and export. The timeframe filter is turned off on the
+  way, because the pivot counts the whole table. A `> (numeric)` or
+  `< (numeric)` filter on a column the grid holds as text can't be carried
+  over, since the grid would compare it as text; the button says so
+  instead. With the Pivot in a window of its own (see
+  [Working with tables](Working-with-tables.md#opening-a-page-in-its-own-window)),
+  the rows open in the main window.
 - Several pivots can be open as sub-tabs (`+` at the end of the sub-tabs
   adds one; double-click one to rename it). They are saved in the case,
   tag filter included, and restored when you come back; **Start fresh** on
@@ -273,8 +287,18 @@ replaces ("Replaces Timestamp").
 | **Total up** | Numeric columns to total per group |
 | **Count unique** | Columns whose distinct values each group counts, blanks left out, as a `Unique count of <column>` column |
 | **List values** | Columns whose distinct values each group lists in one cell, as a `Values of <column>` column |
-| Filters | Which source rows take part |
+| Filters | Which source rows take part, and which tags they carry (the tag chips) |
 | Description | A template for each row's description; left empty, it reads `{which} of {count}` |
+
+The top of **Filters** carries the case's tags as chips, and they work as
+the tag ribbon above the grid does, and as the Pivot tab's do: click a tag
+to group only the rows carrying it, click a second one to add its rows,
+and right-click a tag for **Filter to *tag***, **Exclude *tag*** and
+**Clear the tag filter**. **Any tag** takes every tagged row and **No
+tags** every row nobody has tagged yet. The number on a chip is how many
+rows of the sheet's table carry that tag. When you come back to the
+First/Last tab from the grid, a sheet filtered on tags runs again, so rows
+you tagged in the meantime are grouped.
 
 The description template accepts `{which}` (`First`, `Last` or `Only`),
 `{which:number}` (the row's position in its group: `1` for the first, the
@@ -407,7 +431,11 @@ force one type.
 
 **With this plugin on, every `.log` file you import goes to it**, including
 logs from other systems; one it doesn't recognise is read as type `other`.
-Switch it off for cases where `.log` files should import some other way.
+Two kinds of `.log` are still read by Winnow itself: an
+[IIS log](Cases-and-importing.md#iis-web-server-logs), known by its name,
+and a [key=value log](Cases-and-importing.md#fortigate-and-other-fortinet-logs)
+such as FortiGate's, known by its first line. Switch the plugin off for
+cases where other `.log` files should import some other way.
 
 Syslog-style lines carry no year; the plugin works one out so they sort and
 filter as real dates. Import the whole bundle as an archive or folder and

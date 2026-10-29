@@ -96,7 +96,10 @@ def test_the_new_case_dialog_asks_for_a_profile(page):
     try:
         text = _modal_text(page)
         assert not CASE_TYPE.search(text), text
-        labels = page.locator("#modal label").all_inner_texts()
-        assert "Profile" in labels, labels
+        # The profiles are the side list; its first heading names them.
+        # text_content: .side-rail-group is text-transform: uppercase.
+        heads = [h.text_content() for h in page.locator("#modal .side-rail-group").all()]
+        assert heads[0] == "Profile", heads
+        assert page.locator("#modal .side-rail-list").get_attribute("aria-label") == "Profiles"
     finally:
         _close_modal(page)

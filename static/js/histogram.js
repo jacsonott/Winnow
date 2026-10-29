@@ -21,6 +21,18 @@
    The grid's render() asks for that through histogramFollowGrid, so a
    scroll or a cursor move repaints the canvas and never refetches.
 
+   It charts only the datetime columns the grid shows. A column hidden
+   from the grid is one the analyst has put away, and a chart of it
+   describes the rows by a time nobody on screen can see, so it is left
+   out of the column list, and hiding the charted one moves the chart to
+   another (histogramFollowColumns, from the header's repaint).
+
+   And it says where the days are: a faint dashed rule at each midnight
+   while the bars are finer than a day, at the start of each week once
+   they are not — the Timeline overview strip's rules (charts.js
+   calendarRules), drawn behind the bars — each one's ISO date written
+   under the axis where there is room.
+
    And it never passes the previous view's chart off as this one's. From
    the moment a rebuild starts until the answer for the view it lands has
    come back, the bars are faded and gray, the position marks are gone and
@@ -45,6 +57,7 @@
    nothing to dispose. It shares #pluginPanels with plugin toolbar
    panels; plugins.js syncPluginPanels() is the one writer of that host's
    `hidden` and asks histogramOpen() so the host shows for either kind. */
+import { calendarRules, drawCalendarRules } from './charts.js';
 import { $, api, el } from './core.js';
 import { displayValue, ellipsize } from './filters.js';
 import { onScreenRows, render, rowAt } from './grid.js';
@@ -95,8 +108,10 @@ let stale = false;
 let opening = false;
 let shown = false;      // what syncHistogramPanel last applied (its onShow edge)
 let ui = null;          // {colSel, info, canvas, hint, empty} once wired
+let listed = null;      // the column list as last written into colSel
 let chartUp = false;    // the canvas holds a chart (draw() reached paintChart)
 let marks = null;       // the grid position the canvas last painted (gridMarks)
+let rules = null;       // the day/week rules the canvas last painted (calendarRules)
 let marksRaf = null;    // one repaint per frame, however often the grid renders
 /* The Value view's value: {column, value}. Chosen — "Show in histogram"
    on a cell's right-click menu — and kept while the analyst clicks
@@ -289,6 +304,7 @@ export function resetHistogram() {
   brush = null;
   column = null;
   marks = null;
+  rules = null;
   picked = null;
   pickedFocus = null;
   askedSplit = null;
@@ -311,6 +327,13 @@ export function histogramPosition() {
   if (!chartUp || !marks) return null;
   return { band: marks.band && { start: marks.band.start, end: marks.band.end },
     ticks: marks.ticks.map((tk) => tk.t), cursor: marks.cursor && marks.cursor.t };
+}
+/* The day or week rules as last painted: {unit: 'day' | 'week' | null,
+   times: [epoch…], labels: [{t, text}…]} — `labels` what was written
+   under the axis, and for which rule — or null with no chart up. */
+export function histogramRules() {
+  if (!chartUp || !rules) return null;
+  return { unit: rules.unit, times: [...rules.times], labels: rules.labels.map((l) => ({ ...l })) };
 }
 
 /* Whether the chart on screen is the answer for the grid as it is now.
@@ -509,7 +532,7 @@ function buildChrome(container) {
   const bar = el('div', 'histogram-head');
   const title = el('span', 'th-title', 'Histogram');
   const colSel = el('select');
-  colSel.title = 'Which datetime column to chart';
+  colSel.title = 'Which datetime column to chart — columns hidden from the grid are left out';
   colSel.onchange = () => { column = colSel.value || null; savePrefs({ column }); draw(); schedule(); };
   const info = el('span', 'th-info', '');
   const legend = el('span', 'th-legend');
@@ -594,7 +617,7 @@ function buildChrome(container) {
         ? `${iso(b[0])} — ${b[1].toLocaleString()} rows`
           + (seg ? '\n' + seg[1].map((n, i) => (n ? `${stack.labels[i]}: ${n.toLocaleString()}` : ''))
                             .filter(Boolean).join('\n') : '')
-        : iso(tt)) + marksTitle(x);
+        : iso(tt)) + marksTitle(x) + rulesTitle(x, w);
     }
   });
   canvas.addEventListener('mouseup', endBrush);
@@ -645,24 +668,52 @@ const iso = (epoch) => {
 const humanBucket = (s) => (s % 86400 === 0 ? `${s / 86400}d` : s % 3600 === 0 ? `${s / 3600}h`
   : s % 60 === 0 ? `${s / 60}m` : `${s}s`);
 
+/* The datetime columns the strip may chart: the table's, less the ones
+   hidden from the grid (the table menu's Columns list, Hide empty
+   columns, an applied layout). A column grouped on is not hidden — it
+   moved into the group headings — so it stays. */
+function chartableColumns() {
+  return datetimeColumns().filter((n) => !(S.layout[n] || {}).hidden);
+}
+
 /* Which datetime column to chart. S.columns includes derived columns and
    a merge's, the same list Store.time_histogram accepts. A column the
-   analyst picked (kept per browser) wins while the table has it; else
-   the timeframe filter's column; else the first. */
+   analyst picked (kept per browser) wins whenever the table shows it —
+   so hiding it and showing it again brings the chart back to it, rather
+   than leaving it on the one it moved to meanwhile; else the column
+   charted now, while it is still shown; else the timeframe filter's
+   column; else the first. */
 function pickColumn() {
-  const cols = datetimeColumns();
-  if (!(column && cols.includes(column))) {
-    const want = prefs().column;
+  const cols = chartableColumns();
+  const want = prefs().column;
+  if (want && cols.includes(want)) column = want;
+  else if (!(column && cols.includes(column))) {
     const tr = S.timeRange;
-    column = want && cols.includes(want) ? want
-      : tr && tr.column && cols.includes(tr.column) ? tr.column
-        : (cols[0] || null);
+    column = tr && tr.column && cols.includes(tr.column) ? tr.column : (cols[0] || null);
   }
-  ui.colSel.replaceChildren();
-  for (const c of cols) { const o = el('option', null, c); o.value = c; ui.colSel.append(o); }
+  const key = cols.join('\u0000');
+  if (key !== listed) {
+    listed = key;
+    ui.colSel.replaceChildren();
+    for (const c of cols) { const o = el('option', null, c); o.value = c; ui.colSel.append(o); }
+  }
   if (column) ui.colSel.value = column;
   ui.colSel.hidden = !cols.length;
   return column;
+}
+
+/* The grid's header was repainted — renderHead calls this, and it runs
+   on every hide, show, reorder and pin, and when a derived column comes
+   or goes. Nothing about the rows changed, so no view change is coming
+   to make the strip look again: a column hidden here would stay charted
+   until the next filter. Only for the table whose view is up: mid table
+   switch S.columns is already the new table's while S.view is still the
+   old one's, and the switch's own view change re-picks for it. */
+export function histogramFollowColumns() {
+  if (!ui || opening || !S.view || S.view.source_id !== S.sourceId) return;
+  const before = column;
+  pickColumn();
+  if (column !== before) ask();
 }
 
 /* Span used for the x axis: the view's [start, end + one bucket). */
@@ -774,6 +825,18 @@ function marksTitle(x) {
     out.push('Rows on screen — not in time order, so each one is marked on its own');
   }
   return out.length ? '\n\n' + out.join('\n') : '';
+}
+
+/* What a dashed rule under the pointer marks, for the same tooltip —
+   within a couple of pixels, as the marks are. */
+const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+function rulesTitle(x, w) {
+  if (!rules || !rules.unit) return '';
+  const t = rules.times.find((tt) => Math.abs(xOf(tt, w) - x) <= 2);
+  if (t == null) return '';
+  const day = `${WEEKDAYS[new Date(t * 1000).getUTCDay()]} ${iso(t).slice(0, 10)}`;
+  return rules.unit === 'week' ? `\n\nDashed line: the start of the week of ${day}`
+    : `\n\nDashed line: midnight, the start of ${day}`;
 }
 
 /* Called by the grid's render() — every scroll frame, cursor move and
@@ -948,8 +1011,13 @@ function draw() {
     info.textContent = '';
     return;
   }
+  // No column yet with one to chart is the gap between a case switch's
+  // view landing and the ask it schedules, not a table with none.
   if (!column) {
-    showEmpty('No datetime column in this table — derive one from a column header to chart it.');
+    showEmpty(chartableColumns().length ? 'Loading…'
+      : datetimeColumns().length
+        ? 'Every datetime column in this table is hidden — show one from the table menu\'s Columns list to chart it.'
+        : 'No datetime column in this table — derive one from a column header to chart it.');
     info.textContent = '';
     return;
   }
@@ -1006,6 +1074,13 @@ function paintChart(current = true) {
   const max = Math.max(...data.buckets.map((b) => b[1]));
   const s = span();
   const bw = Math.max(1, (data.bucket_seconds / (s.t1 - s.t0)) * w - 1);
+  // Midnights while the bars are finer than a day, the start of each
+  // week once they are not (or the days are too close to tell apart),
+  // as faint dashed rules behind everything else: the Timeline overview
+  // strip's own (charts.js), so a night reads as one on both strips. On
+  // a faded chart too — they belong to its axis, as its bars do.
+  rules = { ...calendarRules(s.t0, s.t1, data.bucket_seconds, w / (s.t1 - s.t0)), labels: [] };
+  drawCalendarRules(ctx, rules.times, (tt) => xOf(tt, w), top, bottom, t.line2);
   // No position on a faded chart: the rows on screen are (or are about to
   // be) another view's, placed on this one's axis.
   marks = current ? gridMarks(w) : { key: '', band: null, ticks: [], cursor: null };
@@ -1049,15 +1124,31 @@ function paintChart(current = true) {
       ctx.fillRect(x, bottom - h, bw, h);
     }
   }
-  // baseline + axis labels (start / end, and a middle tick)
+  // baseline + axis labels: start and end, and between them the date each
+  // rule marks, in the same ISO form as they are — each where it fits
+  // clear of its neighbors. A middle tick when no rule got one.
   ctx.strokeStyle = t.line;
   ctx.beginPath(); ctx.moveTo(0, bottom + 0.5); ctx.lineTo(w, bottom + 0.5); ctx.stroke();
   ctx.fillStyle = t.dim;
-  ctx.fillText(iso(s.t0), 4, HEIGHT - 4);
+  const startLabel = iso(s.t0);
+  ctx.fillText(startLabel, 4, HEIGHT - 4);
   const endLabel = iso(s.t1);
-  ctx.fillText(endLabel, w - ctx.measureText(endLabel).width - 4, HEIGHT - 4);
-  const mid = iso((s.t0 + s.t1) / 2);
-  ctx.fillText(mid, w / 2 - ctx.measureText(mid).width / 2, HEIGHT - 4);
+  const endLeft = w - ctx.measureText(endLabel).width - 4;
+  ctx.fillText(endLabel, endLeft, HEIGHT - 4);
+  let lastRight = 4 + ctx.measureText(startLabel).width;
+  for (const tt of rules.times) {
+    const label = iso(tt).slice(0, 10);
+    const left = Math.round(xOf(tt, w)) + 3;
+    const right = left + ctx.measureText(label).width;
+    if (left < lastRight + 12 || right > endLeft - 12) continue;
+    ctx.fillText(label, left, HEIGHT - 4);
+    rules.labels.push({ t: tt, text: label });
+    lastRight = right;
+  }
+  if (!rules.labels.length) {
+    const mid = iso((s.t0 + s.t1) / 2);
+    ctx.fillText(mid, w / 2 - ctx.measureText(mid).width / 2, HEIGHT - 4);
+  }
   // The lane above the plot: the band's thumb, like a scrollbar's, or a
   // tick per row when the rows on screen are not one stretch of time.
   ctx.fillStyle = t.text;
