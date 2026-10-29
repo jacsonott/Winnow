@@ -41,8 +41,9 @@ def test_banner_shows_and_save_as_promotes(own_page, quicklook_server, tmp_path)
         pg.locator("#tempSaveBtn").click()
         pg.wait_for_selector("#modal:not([hidden])")
         assert pg.locator("#modalTitle").text_content() == "Save as a case"
-        labels = pg.locator("#modalBody > label").all_inner_texts()
-        assert labels == ["Name", "Group", "Case file path", "Profile"], labels
+        labels = pg.locator("#modalBody .nc-case .dlg-field > label").all_inner_texts()
+        assert labels == ["Name", "Group", "Case file path"], labels
+        pg.wait_for_selector("#modalBody .side-rail-item[data-section=none][aria-selected=true]")
         assert pg.locator(".confirm-overlay").count() == 0
 
         inputs = pg.locator("#modalBody input")

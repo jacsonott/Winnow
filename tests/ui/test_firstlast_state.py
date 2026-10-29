@@ -350,9 +350,6 @@ def test_a_read_that_failed_is_not_mistaken_for_nothing_saved(fl_page, server):
         "groupBy": ["Host"], "carry": [], "sums": [], "filters": [],
         "tags": [], "rowJson": False, "sortColumn": None,
         "colWidths": {}, "template": "{which} of {count}"}]}
-    urlopen(Request(server + "/api/plugin_state", data=json.dumps({"key": KEY, "payload": keep}).encode(),
-                    headers={"Content-Type": "application/json", "X-Timeline-Lite-Client": "1"}),
-            timeout=10).read()
 
     writes: list[str] = []
 
@@ -371,6 +368,17 @@ def test_a_read_that_failed_is_not_mistaken_for_nothing_saved(fl_page, server):
     pg.route("**/api/plugin_state**", fail_the_read)
     try:
         pg.reload(wait_until="networkidle")
+        # The row goes in only once the page the tests above used is gone.
+        # Start fresh leaves a save behind: the empty sheet it puts back
+        # saves itself, as nothing, half a second after the clear. Written
+        # first, `keep` was there for that save to land on — counted against
+        # this mount when it fired after the watch began, or quietly over
+        # the row when it fired before. A reload kills a timer still
+        # waiting, and one that had fired has landed by networkidle.
+        writes.clear()
+        urlopen(Request(server + "/api/plugin_state", data=json.dumps({"key": KEY, "payload": keep}).encode(),
+                        headers={"Content-Type": "application/json", "X-Timeline-Lite-Client": "1"}),
+                timeout=10).read()
         pg.wait_for_selector(".row", timeout=30_000)
         pg.evaluate("() => __winnow.loadPlugins()")
         pg.wait_for_function("() => __winnow.S.pluginTabs.some((t) => t.id.includes('firstlast'))",
@@ -387,16 +395,18 @@ def test_a_read_that_failed_is_not_mistaken_for_nothing_saved(fl_page, server):
         assert unread.is_visible()
         assert "Could not read" in unread.inner_text()
 
-        # Two edits, each waited out through its own preview round trip —
-        # well past the save debounce that would otherwise have fired. The
-        # preview is a background job now (a start, then polls when it
-        # runs long), so its round trip ends when the tab stops saying so.
+        # Two edits, each waited out through its own preview round trip.
+        # The preview is a background job now (a start, then polls when it
+        # runs long), so its round trip ends when the tab stops saying so —
+        # and on this table that is sooner than the half-second save
+        # debounce, so the round trips alone no longer outlast a save.
         for field in ("Host", "EventId"):
             with pg.expect_request(lambda r: "/api/plugin/first_last/job/start" in r.url, timeout=15_000):
                 pg.evaluate(DRAG, [f"[data-field='{field}']", "[data-zone='groupBy']"])
             pg.wait_for_function("() => ![...document.querySelectorAll('.pluginview .note-status')]"
                                  ".some((n) => n.textContent === 'Previewing…')", timeout=15_000)
         pg.wait_for_selector(".pluginview tbody tr", timeout=15_000)
+        pg.wait_for_timeout(700)   # past the 500ms save debounce: a write that must NOT happen has no signal to wait on
         assert not writes, f"a mount that could not read wrote anyway: {writes}"
         # And the warning stays: it is about what is happening now.
         assert unread.is_visible()
