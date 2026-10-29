@@ -201,7 +201,7 @@ If the table has no datetime column, the histogram says so. You can make one fro
 
 ## The search box
 
-The search box looks for text anywhere in a row. Click the magnifier, or press `/` or `Ctrl+F`, to open it. It has three modes:
+The search box looks for text anywhere in a row. Click the magnifier at the right end of the toolbar, or press `/` or `Ctrl+F`, to open it. In a narrow window, when the toolbar runs onto more than one line, the search moves down but stays at the right edge, with its mode buttons beside it. It has three modes:
 
 | Mode | How it matches |
 | --- | --- |
