@@ -340,6 +340,26 @@ see [docs/notes/README.md](README.md) for the whole set.
   `view` and read when `view` is missing); the plugin's
   `winnow.panels['table-histogram.histogram']` is migrated to `open`
   once and deleted.
+- **The strip charts only the datetime columns the grid shows**
+  (histogram.js `chartableColumns`: `datetimeColumns()` less
+  `S.layout[n].hidden`; a column grouped on is not hidden and stays). A
+  hidden column is one the analyst has put away, and a chart of it
+  described the rows by a time nobody on screen could see. Two things
+  make it hold. **Hiding is not a view change**, so nothing used to tell
+  the strip: `renderHead` (columns.js) calls `histogramFollowColumns()`
+  on every repaint of the header — every hide, show, reorder and pin,
+  and a derived column coming or going — which re-picks and asks at once
+  when the charted column changed. It does nothing unless
+  `S.view.source_id === S.sourceId`: mid table switch `S.columns` is
+  already the new table's while `S.view` is still the old one's, and an
+  ask then would name the new table's column to the old view (a 400);
+  the switch's own view change re-picks instead. **The analyst's pick
+  wins whenever it is shown** (`pickColumn`): the `column` pref used to
+  win only once the column charted now was gone, so hiding the pick and
+  showing it again left the chart on the column it had moved to. With
+  every datetime column hidden the empty state says so ("Every datetime
+  column in this table is hidden — …"), not "No datetime column".
+  tests/ui/test_histogram_hidden_columns.py.
 - **The strip's color-by views — Tags, Value, Groups — are one pref,
   one pressed at a time** (histogram.js `histogramView`; the store side
   is in store.md). Five things to know before touching them. **Value
@@ -402,6 +422,36 @@ see [docs/notes/README.md](README.md) for the whole set.
   it. **Times outside the chart's span are dropped, not clamped**: between
   a rebuild and the strip's next answer the rows are the new view's and
   the axis is the old one's. tests/ui/test_histogram_position.py.
+- **The strip marks the days, or the weeks** (charts.js `calendarRules`
+  / `drawCalendarRules`, drawn from `paintChart`). A dashed `--line-2`
+  rule at each midnight while the bars are finer than a day, at each
+  Monday's midnight once they are not, none once the bars are a week;
+  the Timeline overview strip draws the same rules through the same two
+  functions, so the two cannot drift. Four things to know before
+  touching it. **The unit follows the bar width first and the pixels
+  second**: a rule per bar says nothing the bars do not, so days need
+  bars under a day and weeks bars under a week, and a unit whose rules
+  would land under `RULE_MIN_PX` (8) apart drops to the next — hour bars
+  over two months give weeks, not a midnight every 6px. **UTC, Monday**:
+  the bars are UTC epochs and every label on the strip is UTC, so a
+  local midnight would sit mid-bar; the week is ISO 8601's.
+  `calendarRules` floors from 1970-01-05 (the first Monday after the
+  epoch) rather than truncating, so a span before 1970 — FILETIME zero,
+  a bad clock — still lands on midnights and Mondays. **Behind the
+  bars, as the Timeline's were**: they show in the gaps and across a
+  quiet stretch and never tint a bar the color split is read by; on a
+  week of day bars a Monday rule is mostly under Monday's bar, which is
+  why each one's date is also written under the axis — `YYYY-MM-DD`,
+  the ISO form of the start and end labels beside it — where it fits
+  clear of them and of its neighbors; the middle timestamp the axis used to carry
+  is drawn only when no rule got a label. **Strictly inside the span**:
+  a rule on the axis's very edge marks nothing, so a span that starts
+  at midnight does not rule its own left edge (the Timeline strip did,
+  before it shared these). `histogramRules()` / `timelineOverviewRules()`
+  say what was last painted, for tests/ui, which cannot read a dashed
+  line's meaning off the canvas. The hover names the day a rule marks.
+  tests/ui/test_histogram_calendar_rules.py,
+  tests/ui/test_timeline_overview_strip.py.
 - There's no separate "preset" concept anymore — a preset is just a saved
   filter (`workspace.SavedFilters`, cross-case) whose `col_names` happens to
   match (exactly, or "similar" per the same Jaccard/subset heuristic the old
@@ -1355,6 +1405,24 @@ see [docs/notes/README.md](README.md) for the whole set.
   click is still the release path; `tests/ui/test_updates_panel.py`
   answers every `/api/updates/*` call in the browser, because the real
   dev apply would overwrite the checkout the suite runs from.
+- **Settings → Updates restarts into what it installed, and every
+  window follows.** When `/api/version` says `can_restart`, both install
+  confirms (release and the develop sync) carry a ticked "Restart Winnow
+  when it’s installed" box — `confirmDialog`'s `check` option, which keeps
+  the boolean answer and writes the box's state back into the object it
+  was given — and **Restart now** stays beside the buttons after an install
+  that didn't restart, or whose restart was refused (the refusal's text,
+  e.g. a package to `pip install`, goes in the status line). The restart
+  itself is `restartWinnow` in home.js, beside `shutdownWinnow`: it warns
+  about `inFlightWork()` as Shut down does but not about other windows,
+  because they come back. `awaitRestart` (connection.js) covers the page
+  with `#restarting` (the `.case-gone` cover, accent border) and polls
+  `/api/version` until `boot` changes, then reloads; the presence stream's
+  `restart` event brings every other window, pop-outs included, to the
+  same place. While it waits, the lost-connection banner is held off
+  (`show()` returns), since the server being away is expected. After 90s
+  it says Winnow hasn't come back and how to start it or roll back, and
+  keeps polling. Server side: docs/notes/server.md.
 - **`S.keymap` must hold its own key arrays, not `DEFAULT_KEYMAP`'s.**
   The settings UI's "+ key"/"✕" handlers splice and push those arrays in
   place, so the old shallow `{...DEFAULT_KEYMAP}` handed them the

@@ -417,6 +417,9 @@ Markdown: # headings, - bullets, **bold**, `code`, tables. Link ▾ points at a 
 <!-- Shown when another window switches this Winnow to a different case
      (caseGone in static/js/connection.js). -->
 <div id="caseGone" class="case-gone" role="alertdialog" aria-modal="true" aria-labelledby="caseGoneTitle" hidden></div>
+<!-- Shown while Winnow's server restarts after an update (awaitRestart in
+     static/js/connection.js). -->
+<div id="restarting" class="case-gone" role="alertdialog" aria-modal="true" aria-labelledby="restartingTitle" aria-live="polite" hidden></div>
 <!-- Shown when Winnow runs as administrator on Windows, which stops files
      being dragged in (maybeWarnElevated in static/js/importer.js). -->
 <div id="elevNotice" class="elev-notice" role="status" hidden></div>

@@ -218,9 +218,21 @@ export function _spawnDialog(build) {
   });
 }
 
+/* `opts.check` ({ label, checked }) adds one tick box under the message
+   for a choice that goes with the yes; the answer stays a boolean and the
+   box's state is written back to `opts.check.checked`. */
 export function confirmDialog(message, opts = {}) {
   const build = (card, close) => {
     card.append(el('p', 'confirm-message', message));
+    if (opts.check) {
+      const row = el('label', 'check-row confirm-check');
+      const box = el('input');
+      box.type = 'checkbox';
+      box.checked = !!opts.check.checked;
+      box.onchange = () => { opts.check.checked = box.checked; };
+      row.append(box, el('span', null, opts.check.label));
+      card.append(row);
+    }
     const acts = el('div', 'confirm-actions');
     const cancelBtn = el('button', 'btn ghost', opts.cancelLabel || 'Cancel');
     cancelBtn.onclick = () => close(false);

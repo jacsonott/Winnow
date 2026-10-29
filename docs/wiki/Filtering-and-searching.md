@@ -181,7 +181,9 @@ The same switch is in Settings, under **Filter & search syntax**.
 
 ## The histogram
 
-Click **Histogram** or press `h` to show a bar chart above the grid of when the rows in the current view happened. Choose which datetime column to chart from its list. The line beside it gives the row count, the bucket size and the tallest bar. Winnow picks a bucket size, from one second up to a year, that gives bars a few pixels wide across the strip, so narrowing the timeframe gives finer buckets. Hover a bar to see its time range and row count.
+Click **Histogram** or press `h` to show a bar chart above the grid of when the rows in the current view happened. Choose which datetime column to chart from its list. Only the columns shown in the grid are in that list: a column you have hidden is left out, and if you hide the column being charted, the histogram switches to another one straight away. Show your chosen column again and the histogram goes back to it. The line beside it gives the row count, the bucket size and the tallest bar. Winnow picks a bucket size, from one second up to a year, that gives bars a few pixels wide across the strip, so narrowing the timeframe gives finer buckets. Hover a bar to see its time range and row count.
+
+Dashed lines behind the bars mark the days or the weeks, as on the [Timeline's overview](Timeline-search-and-watchlist.md#the-overview). While the bars are shorter than a day, a line marks each midnight. Once they are a day or longer, or the days are too close together to tell apart, a line marks the start of each week (Monday) instead, and when even the weeks are too close, there are none. Under the chart, each line is labeled with its date in ISO form, such as **2026-03-11**, where there is room between the start and end times. Like every time on the chart, they are in UTC. Hover a line to see the day it marks.
 
 Three buttons color the bars, one at a time; click the pressed one again to go back to plain bars. In each, a row counts once, so the bars stay as tall as the plain ones.
 
@@ -195,7 +197,7 @@ Drag across the bars to set the timeframe filter to that range on the charted co
 
 The histogram also shows where you are in the table. A mark along the top of the chart covers the time span of the rows on screen and moves as you scroll, and a line through the bars marks the selected row. When the rows on screen are not in time order, as when the table is sorted by a process ID, they are spread across the chart, so each one gets a short tick of its own instead. Hover a mark to see the times it stands for.
 
-If the table has no datetime column, the histogram says so. You can make one from a text timestamp; see [Derived columns](Derived-columns.md).
+If the table has no datetime column, the histogram says so. You can make one from a text timestamp; see [Derived columns](Derived-columns.md). If it has datetime columns but every one is hidden, the histogram says "Every datetime column in this table is hidden — show one from the table menu's Columns list to chart it." See [Showing and hiding columns](Working-with-tables.md#showing-and-hiding-columns).
 
 ## The search box
 

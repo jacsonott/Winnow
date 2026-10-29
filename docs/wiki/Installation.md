@@ -329,9 +329,31 @@ check is something you clicked or typed.
 **Settings → Updates** shows the installed version. **Check for updates**
 asks GitHub for the latest release. If there is a newer one it shows the
 release notes and an **Install update** button, which asks for confirmation,
-downloads and installs it. Restart Winnow afterwards: the running server
-keeps running the old code until it restarts. Settings has no rollback
-button; use `update.py --rollback` for that.
+downloads and installs it. Settings has no rollback button; use
+`update.py --rollback` for that.
+
+The running server keeps running the old code until it restarts, so the
+confirmation has a **Restart Winnow when it’s installed** box, ticked by
+default. With it ticked, Winnow restarts as soon as the update is in. If you
+untick it, **Restart now** appears once the update is in, for when you are
+ready. A restart:
+
+- comes back on the same address and the same case, with no new window.
+  Every open window, pop-outs included, shows **Restarting Winnow…** and
+  reloads by itself when the new version answers, usually within a few
+  seconds;
+- asks first if an import, search or other work is still running, since a
+  restart interrupts it the way shutting down does. Anything already
+  committed is saved;
+- checks that the new version starts before stopping the old one. If it
+  needs a Python package this machine doesn't have, nothing is stopped and
+  the panel says so: run `pip install -r requirements.txt` in the Winnow
+  folder, then press **Restart now**.
+
+Winnow can only restart itself when it was started with `python server.py`,
+which includes the launchers in `launch/` and file associations. When it
+wasn't, the box and the button aren't offered: restart Winnow the way you
+started it.
 
 ### From the command line
 
@@ -364,7 +386,8 @@ downloaded archive is saved as `winnow-<version>.zip` in the current folder
 The first update of an install made from a zip cannot tell which old files
 the new version dropped, so it removes none; later updates can. After an
 update, run `pip install -r requirements.txt` again before restarting, in
-case the new version needs a package the old one did not.
+case the new version needs a package the old one did not. (A restart from
+**Settings → Updates** checks for this itself.)
 
 ### Updating an airgapped machine
 
