@@ -32,7 +32,18 @@ Then pick the **Pivot** page tab.
   chip shows how many rows of the pivot's table carry it. Coming back to the
   tab from the grid re-runs a pivot filtered on tags, since rows may have
   been tagged in the meantime.
-- **Click any cell** for the underlying rows.
+- **Click any cell** for the underlying rows, and **Show these rows in the
+  grid** (there, or on the cell's right-click menu) to open them in the
+  grid: the cell's values as column filters, the Filters area as
+  filter-builder conditions, the tag chips as the ribbon's tag filter, and
+  the timeframe turned off, since the pivot counts the whole table. Each
+  Filters operator is handed over as the grid operator that compiles to
+  the same SQL, so the grid lands on exactly the rows the cell counted;
+  `>`/`<` on a column the grid holds as text has no such twin and is
+  refused by name. From a pop-out Pivot the rows open in the main window.
+- **(blank)** in *is any of* / *is none of* is the empty cell, NULL
+  included — what the value list shows a NULL as, and what a list's `''`
+  means to the grid.
 - **Copy** (TSV — pastes straight into a spreadsheet) and **CSV** download.
 - Sort the rows by any value column: click its header, again to reverse,
   a third time for key order.
@@ -106,4 +117,8 @@ pivot/
 ```
 
 Backend tests live with Winnow's own suite, in `tests/test_plugins.py`
-(`-k pivot`).
+(`-k pivot`); the tab itself is driven by `tests/ui/test_pivot_tags.py`
+(the tag chips), `tests/ui/test_pivot_state.py` (the saved pivots),
+`tests/ui/test_pivot_refresh.py` (the table kept, dimmed, while the next
+one is worked out) and `tests/ui/test_field_place_menu.py` (the **Place
+in** menu, shared with First/Last).

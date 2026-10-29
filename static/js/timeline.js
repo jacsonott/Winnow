@@ -8,9 +8,12 @@ import { headerSig, nicknameFor } from './savedfilters.js';
 import { loadSources, openSource, recenterOnRow, sourceLabel } from './sources.js';
 import { showGridTab } from './sql.js';
 import { S } from './state.js';
+import { timestampField } from './timeframe.js';
 import { loadTimelineOverview, renderTimelineOverview, timelineOverviewFollow } from './timelineoverview.js';
 import { refreshTimelinePane, renderTimelineContextChip, syncTimelinePane } from './timelinepane.js';
-import { confirmDialog, modal, oneAtATime } from './ui.js';
+import { pad2, parseTimestamp } from './tsformat.js';
+import { closeModal, confirmDialog, markModalAction, modal, oneAtATime } from './ui.js';
+import { inPopout, sendToMain } from './popout.js';
 
 /* ---------------------------------------------------------- unified timeline */
 
@@ -91,8 +94,14 @@ export function renderTimelineTagFilter() {
   }
 }
 
-export async function buildTimeline() {
+/* `keepScroll`: a rebuild nobody asked for here — another window tagged
+   (popout.js) — stays where the list was rather than going to the top
+   when no line is selected to go back to. */
+export async function buildTimeline({ keepScroll = false } = {}) {
   const tagIds = timelineTagIds();
+  // The ⏱ button and the chip say what this build is narrowed to, from
+  // the moment it is asked for rather than when it lands.
+  renderTimelineTimeRange();
   S.timeline.pages.clear();
   S.timeline.pending.clear();
   // Which rows are showing their raw text is per-build state: the rows a
@@ -116,12 +125,15 @@ export async function buildTimeline() {
     const token = opToken();
     const disarmCancel = armOpCancel(token);
     try {
-      // The overview strip's two narrowings: a stretch of time, and the
-      // tables switched off (timelineoverview.js). And the one widening:
-      // the untagged rows around a finding (timelinepane.js).
+      // The two narrowings: the timeframe (the ⏱ dialog, or a drag on the
+      // overview strip) and the tables switched off on the strip
+      // (timelineoverview.js). And the one widening: the untagged rows
+      // around a finding (timelinepane.js).
       const ctx = S.timeline.context;
+      const tr = S.timeline.timeRange;
       v = await post('/api/timeline', {
-        tag_ids: tagIds, op_token: token, ts_range: S.timeline.range,
+        tag_ids: tagIds, op_token: token,
+        time_range: timelineTimeRangeOn() ? { start: tr.start, end: tr.end } : null,
         exclude_sources: [...S.timeline.sourcesOff],
         context: ctx ? [ctx.start, ctx.end] : null,
         // Runs of repeats on one line, less the runs opened (fillTimelineBody).
@@ -170,7 +182,7 @@ export async function buildTimeline() {
     $('timelineStats').append(note);
   }
   renderTimelineContextChip();
-  await keepTimelinePlace(v, reqId);
+  await keepTimelinePlace(v, reqId, keepScroll);
   if (reqId !== S.timeline.reqId) return;
   renderTimelineRows();
   refreshTimelinePane();
@@ -186,12 +198,12 @@ export async function buildTimeline() {
    tag was taken off, or switched off above) puts the list where it was in
    time, with nothing selected. Scrolled a third of the way down, so what
    came before it is on screen too. */
-async function keepTimelinePlace(v, reqId) {
+async function keepTimelinePlace(v, reqId, keepScroll = false) {
   const body = $('timelineBody');
   const sel = S.timeline.sel;
   if (!sel || sel.rid == null || !v.row_count) {
     S.timeline.sel = null;
-    body.scrollTop = 0;
+    if (!keepScroll) body.scrollTop = 0;
     return;
   }
   let at;
@@ -237,7 +249,7 @@ export function timelineRowAt(pos) {
 function emptyReason() {
   const on = timelineTagIds().length;
   if (S.tags.length && !on) return 'Every tag is switched off — turn one back on above to see its rows.';
-  if (S.timeline.range) return 'No tagged rows in this stretch of time — ✕ on the overview shows the whole Timeline again.';
+  if (timelineTimeRangeOn()) return 'No tagged rows in this timeframe — ✕ on its chip above shows the whole Timeline again.';
   if (S.timeline.sourcesOff.size) {
     const tagged = S.sources.filter((s) => s.tagged_row_count && !s.is_merge);
     if (tagged.length && tagged.every((s) => S.timeline.sourcesOff.has(s.id))) {
@@ -281,7 +293,6 @@ export function renderTimelineRows() {
     frag.append(row);
   }
   rowsEl.replaceChildren(frag);
-  syncTimelineDay(timelineRowAt(Math.min(total - 1, Math.floor(virt / ROW_H))));
   timelineOverviewFollow();
   syncTimelinePane();
 }
@@ -302,14 +313,18 @@ export function renderTimelineRows() {
    stripes would be.
 
    `story` is the Timeline's own list, read as a story rather than a
-   table: the day said once, at the first line of each day, over a solid
-   rule, and each line's time of day after it; a Gap column, the time
-   since the line above, with a dashed rule over a gap of half an hour or
-   more (TIMELINE_LONG_GAP) and the gap itself bold. The server works out
-   both (gap, new_day), since the line above the first line of a page is
-   on another page. The full timestamp stays the cell's title and the
-   row's data-ts. Configure tables…' preview leaves `story` out and keeps
-   the plain timestamp, since its lines are samples, not neighbours. */
+   table: a solid rule over the first line of each day; a Gap column, the
+   time since the line above, with a dashed rule over a gap of half an
+   hour or more (TIMELINE_LONG_GAP) and the gap itself bold. The server
+   works out both (gap, new_day), since the line above the first line of
+   a page is on another page. Every line keeps its whole timestamp,
+   YYYY-MM-DD HH:MM:SS (and a derived column's fraction of a second): it
+   said the day once, at the first line of each day, and then only the
+   time of day, and the analyst asked for the ISO timestamp back — it is
+   what gets read across into a report, and what the grid, the exports
+   and the timeframe filter all write. It is also the row's data-ts.
+   Configure tables…' preview leaves `story` out, since its lines are
+   samples, not neighbours. */
 export function timelineRowNode(r, tagColor, fillBody, { open = false, story = false } = {}) {
   const row = el('div', 'timeline-row' + (r ? (r.ctx ? ' ctx' : '') : ' pending'));
   const gutter = el('div', 'tl-col-gutter');
@@ -317,11 +332,8 @@ export function timelineRowNode(r, tagColor, fillBody, { open = false, story = f
   const gapCell = story ? el('div', 'tl-col-gap') : null;
   if (r && story) {
     row.dataset.ts = r.ts || '';
-    if (r.new_day) {
-      row.classList.add('day-start');
-      tsCell.append(el('span', 'tl-day', timelineDayLabel(r.ts)));
-    }
-    tsCell.append(el('span', 'tl-time', r.ts ? r.ts.slice(11) : '—'));
+    if (r.new_day) row.classList.add('day-start');
+    tsCell.append(el('span', 'tl-time', r.ts || '—'));
     tsCell.title = r.ts || 'No timestamp';
     if (r.gap != null) {
       gapCell.textContent = timelineGap(r.gap);
@@ -411,6 +423,179 @@ function setRunOpen(r, open) {
   buildTimeline();
 }
 
+/* ------------------------------------------------------------ timeframe
+
+   The table pages' timeframe filter (timeframe.js), on the Timeline: a
+   ⏱ Timeframe button in the header and the same dialog — Start and End
+   typed as YYYY-MM-DD HH:MM:SS with the 📅 picker, either one optional,
+   both ends included — and the same keys (openTimeRange,
+   toggleTimeRange: timelineKey takes them while the Timeline is the page
+   showing). Apply always turns it on, Clear forgets it, the toggle key
+   keeps it. The server reads the bounds the way the grid's timeframe
+   reads its own (Store.build_timeline), so a range typed on a table and
+   here keeps the same rows.
+
+   A range of its own (S.timeline.timeRange), not the tables' S.timeRange.
+   The Timeline is every finding in the case, and a range set to read one
+   table, carried here unasked, would take findings off it with nothing
+   on this page saying why; the dialog offers the tables' range to copy
+   in instead. The overview strip's drag writes this one too, so a
+   stretch dragged there opens in the dialog as the text it stands for,
+   and the toggle key turns it off and on again.
+
+   Held as ISO text, the shape the Timeline's lines are written in:
+   what was typed (a date alone, a US date) is put into it on Apply by
+   parseTimestamp, the client twin of the server's TS_NORMALIZE, so the
+   chip and the dialog say exactly which moment a bound is — a bare
+   "2024-01-05" reads back as 2024-01-05 00:00:00, which is where an end
+   of it stops. */
+export function timelineTimeRangeOn() {
+  const tr = S.timeline.timeRange;
+  return !!(tr.enabled && (tr.start || tr.end));
+}
+
+/* A typed timestamp as 'YYYY-MM-DD HH:MM:SS'; '' for nothing typed, null
+   for text that is not a timestamp. */
+export function timelineIsoOf(text) {
+  const v = String(text ?? '').trim();
+  if (!v) return '';
+  const p = parseTimestamp(v);
+  return p ? `${String(p.y).padStart(4, '0')}-${pad2(p.mo)}-${pad2(p.d)} ${pad2(p.h)}:${pad2(p.mi)}:${pad2(p.s)}` : null;
+}
+
+export function setTimelineTimeRange(start, end) {
+  S.timeline.timeRange = { enabled: true, start: start || '', end: end || '' };
+  buildTimeline();
+}
+
+export function clearTimelineTimeRange() {
+  S.timeline.timeRange = { enabled: false, start: '', end: '' };
+  buildTimeline();
+}
+
+export function toggleTimelineTimeRange() {
+  const tr = S.timeline.timeRange;
+  if (!tr.start && !tr.end) {
+    toast('Set a timeframe first, from ⏱ Timeframe in the Timeline\'s header');
+    openTimelineTimeRangeModal();
+    return;
+  }
+  tr.enabled = !tr.enabled;
+  toast(tr.enabled ? 'Timeframe filter on' : 'Timeframe filter off');
+  buildTimeline();
+}
+
+const timeRangeText = (tr) => `${tr.start || '…'} → ${tr.end || '…'}`;
+
+/* The ⏱ button — pressed while the timeframe narrows the Timeline, its
+   title the range and the keys, as the toolbar's is — and the chip beside
+   the header's count: the range, with ✕ for the whole Timeline again. The
+   chip is in the header rather than on the overview strip, where the
+   drag's used to be, so it is on screen with the strip hidden too. */
+export function renderTimelineTimeRange() {
+  const btn = $('btnTimelineTimeRange');
+  const box = $('timelineTimeRange');
+  const tr = S.timeline.timeRange;
+  const on = timelineTimeRangeOn();
+  const toggleKey = S.keymap.toggleTimeRange[0] || '';
+  const openKey = S.keymap.openTimeRange[0] || '';
+  btn.setAttribute('aria-pressed', String(on));
+  btn.title = on
+    ? `Timeframe filter on: ${timeRangeText(tr)} — "${toggleKey}" to toggle off, "${openKey}" to edit`
+    : tr.start || tr.end
+      ? `Timeframe filter set but off — "${toggleKey}" to toggle on, "${openKey}" to edit`
+      : `Show only the lines from a stretch of time — "${openKey}" to open, "${toggleKey}" to toggle`;
+  box.replaceChildren();
+  if (!on) return;
+  const chip = el('span', 'tl-range-chip');
+  chip.append(el('span', null, timeRangeText(tr)));
+  chip.title = `Only the lines from ${tr.start || 'the first'} to ${tr.end || 'the last'}, both included, are on the Timeline`;
+  const x = el('button', 'tl-range-x', '✕');
+  x.type = 'button';
+  x.title = 'Clear the timeframe: show the whole Timeline again';
+  x.setAttribute('aria-label', 'Clear the timeframe');
+  x.onclick = () => clearTimelineTimeRange();
+  chip.append(x);
+  box.append(chip);
+}
+
+/* The dialog: openTimeRangeModal's, less what only a table has — the
+   Column (a line has one timestamp, the one it is ordered by), the
+   across-tables switch, and Fill range from the table's tagged rows (here
+   that would be the whole Timeline). In their place, the tables'
+   timeframe to copy in, when one is set. */
+export function openTimelineTimeRangeModal() {
+  markModalAction('openTimeRange');
+  modal('Timeframe filter', (b) => {
+    const tr = S.timeline.timeRange;
+    const toggleKey = S.keymap.toggleTimeRange[0] || '(unbound)';
+    b.append(el('p', null, `Shows only the Timeline's lines from a stretch of time — "${toggleKey}" turns it off without clearing it.`));
+    if (!tr.enabled && (tr.start || tr.end)) {
+      b.append(el('p', 'fb-help tf-off', 'Off right now — Apply turns it back on.'));
+    }
+
+    const box = (value) => {
+      const input = el('input', 'confirm-input mono');
+      input.type = 'text';
+      input.placeholder = 'YYYY-MM-DD HH:MM:SS';
+      input.value = value || '';
+      input.onkeydown = (e) => { if (e.key === 'Enter') apply.click(); };
+      return input;
+    };
+    const startInput = box(tr.start);
+    const endInput = box(tr.end);
+    const range = el('div', 'dlg-pair');
+    range.append(timestampField('Start', startInput), timestampField('End', endInput));
+    b.append(range);
+    b.append(el('p', 'fb-help', '24-hour time, e.g. 2024-01-05 13:22:01 — the date alone, or date plus HH:MM, '
+      + 'also work. Both ends are included, and each line goes by its own timestamp.'));
+
+    const t = S.timeRange;
+    if (t.start || t.end) {
+      const field = el('div', 'dlg-field');
+      field.append(el('label', null, 'From the tables\' timeframe'));
+      const row = el('div', 'dlg-chips');
+      const fill = el('button', 'btn ghost', 'Fill range');
+      fill.type = 'button';
+      fill.title = 'Set Start and End to the timeframe set on the table pages';
+      fill.onclick = () => {
+        startInput.value = timelineIsoOf(t.start) || t.start || '';
+        endInput.value = timelineIsoOf(t.end) || t.end || '';
+        toast('Range set from the tables\' timeframe — Apply to use it');
+      };
+      row.append(el('span', 'mono tl-tf-tables', timeRangeText(t)), fill);
+      field.append(row);
+      b.append(field);
+    }
+
+    // Read as the toolbar's dialog reads its boxes (validateTimeInput):
+    // text the server could not place in time is refused here, rather
+    // than built into a Timeline with no lines.
+    const read = (input, label) => {
+      const iso = timelineIsoOf(input.value);
+      if (iso === null) toast(`${label}: not a recognized timestamp — try YYYY-MM-DD HH:MM:SS`, 4000);
+      return iso;
+    };
+    const actions = el('div', 'row-actions');
+    const apply = el('button', 'btn primary', 'Apply');
+    apply.onclick = () => {
+      if (!startInput.value.trim() && !endInput.value.trim()) { toast('Set a start and/or end'); return; }
+      const start = read(startInput, 'Start');
+      if (start === null) return;
+      const end = read(endInput, 'End');
+      if (end === null) return;
+      closeModal();
+      setTimelineTimeRange(start, end);
+    };
+    const clear = el('button', 'btn ghost', 'Clear');
+    clear.onclick = () => { closeModal(); clearTimelineTimeRange(); };
+    const cancel = el('button', 'btn ghost', 'Cancel');
+    cancel.onclick = () => closeModal();
+    actions.append(apply, clear, cancel);
+    b.append(actions);
+  });
+}
+
 /* What kind of table a line came from, and which one: the Type column.
    The kind is said the way the app already names a header set — the Type
    set for it in Configure tables… (the row's type_label), else its header
@@ -493,9 +678,8 @@ export function typeParts(r) {
   return k && k.host ? [badge, el('span', 'tl-host', k.host)] : [badge];
 }
 
-/* "Timestamp · Fri 13 Mar" over the column: the day of the line at the
-   top of the list, since every line below says only its own time of
-   day once the day has been read off it once. */
+/* "Fri 13 Mar", for the overview strip's axis, where a whole timestamp
+   under every tick would not fit. */
 const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -504,13 +688,6 @@ export function timelineDayLabel(ts) {
   if (!m) return '';
   const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
   return Number.isNaN(d.getTime()) ? '' : `${DOW[d.getUTCDay()]} ${d.getUTCDate()} ${MON[d.getUTCMonth()]}`;
-}
-
-function syncTimelineDay(r) {
-  const cell = $('timelineColTs');
-  const day = r ? timelineDayLabel(r.ts) : '';
-  const text = day ? `Timestamp · ${day}` : 'Timestamp';
-  if (cell.textContent !== text) cell.textContent = text;
 }
 
 /* ------------------------------------------------- the selected line
@@ -570,6 +747,10 @@ export function clearTimelineSelection() {
    (keymap.js routes them here while the Timeline is the page showing).
    True when the key was this list's. */
 export function timelineKey(e, action) {
+  // The timeframe's keys are the Timeline's own timeframe here — on an
+  // empty list too, which is what a timeframe matching nothing leaves.
+  if (action === 'openTimeRange') { openTimelineTimeRangeModal(); return true; }
+  if (action === 'toggleTimeRange') { toggleTimelineTimeRange(); return true; }
   const total = S.timeline.view ? S.timeline.view.row_count : 0;
   if (!total) return false;
   const body = $('timelineBody');
@@ -678,6 +859,8 @@ const timelineEpochOf = (ts) => {
    in this one). That answers 404; the listing is reloaded so the grid
    lands on a table that exists rather than the half-opened ghost. */
 export async function jumpToTimelineRow(sourceId, rid) {
+  // From a pop-out (popout.js) the row is opened where the grid is.
+  if (inPopout()) { sendToMain('jumpToRow', sourceId, rid); return; }
   try {
     const src = S.sources.find((s) => s.id === sourceId);
     if (src && !src.is_open) {
@@ -1252,6 +1435,7 @@ $('timelineRows').addEventListener('dblclick', (e) => {
 });
 
 $('btnTimelineConfig').onclick = openTimelineSourceConfig;
+$('btnTimelineTimeRange').onclick = () => openTimelineTimeRangeModal();
 $('btnTimelineFold').onclick = () => toggleTimelineFold();
 renderTimelineFoldButton();
 }

@@ -71,6 +71,7 @@ split, found by loading the app:
 | `pluginmanager` `bundles` `profilebuilder` | the two-pane plugins manager (and the one-line Settings section that opens it); the profiles manager; the profile builder |
 | `histogram` | the built-in histogram strip between the toolbar and the grid — the time-proportional canvas, the brush that writes the timeframe filter, the `winnow.histogram` prefs; shares `#pluginPanels` with plugin toolbar panels (see [ui.md](ui.md)) |
 | `ui` `keymap` `settings` `home` | modal/dialog/menu primitives; keybindings; the Settings modal; the home screen and `boot()` |
+| `popout` | page tabs in windows of their own: the `BroadcastChannel` between a main window and its pop-outs, the placeholder that stands in for a page that is out, the `pageElsewhere` guard every page's show function starts with, navigation forwarded to the main window, cross-window refresh (see [ui.md](ui.md)) |
 | `main` | imports everything, calls each `wire*()`, runs the startup sequence, exposes `window.__winnow` |
 
 ## `window.__winnow`
@@ -92,4 +93,4 @@ The browser tests in `tests/ui/` are the backstop, but they exercise a
 fraction of the surface; the static check covers all of it.
 
 - **dashwidgets.js** — widget recipes: `WIDGET_TEMPLATES` (row count, count matching a value, distinct, top, rarest, over time, activity window), `WIDGET_SOURCES`/`WIDGET_RENDERS` (each stored source and render value with the name the editor shows it by), `widgetFrom(build)` → the widget with its SQL, render, `build` and `drill`, `columnsForTable` (a case table's columns, or a {{…}} placeholder's header set from `S.headerSets`), `bucketRange` (a histogram label back to a timeframe). Pure — no DOM, no fetches; dashboard.js does the asking and saving.
-- **charts.js** — dependency-free canvas charts (`drawBars`, `drawHistogram`, `pickBar`), the shared visualization surface for the entity pivot and dashboard widgets (Stack draws its bars as DOM elements instead, so they take focus and a menu: stack.js). Declarations only; reads CSS tokens at draw time so a theme switch repaints. No chart library (airgap). See docs/design/analysis-suite.md.
+- **charts.js** — dependency-free canvas charts (`drawBars`, `drawHistogram`, `pickBar`), the shared visualization surface for the entity pivot and dashboard widgets, plus the day/week rules both time strips draw behind their bars (`calendarRules`, `drawCalendarRules` — histogram.js and timelineoverview.js; see [ui.md](ui.md)) (Stack draws its bars as DOM elements instead, so they take focus and a menu: stack.js). Declarations only; reads CSS tokens at draw time so a theme switch repaints. No chart library (airgap). See docs/design/analysis-suite.md.

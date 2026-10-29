@@ -171,7 +171,8 @@ see [docs/notes/README.md](README.md) for the whole set.
   name collision is a 409 the frontend confirms into `overwrite=true`,
   and an install whose *load* then fails still keeps the files and
   reports the error (same standing as a hand-copied broken plugin).
-  Three extension points on PluginAPI:
+  Seven extension points on PluginAPI now (docs/writing-plugins.md §1);
+  these three came first, and the rest of this entry is about them:
   `register_ingest_format` parses a file into columns + a row iterable
   that feeds `Store.ingest_rows` — the generic sibling of `ingest_csv`
   with every one of its conventions (all-TEXT via `sanitize_columns`,
@@ -223,7 +224,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   The module's default export gets `(container, winnow)` where
   `winnow` is `buildPluginTabContext`'s stable surface (api/post/el/
   modal helpers, `sql()` → run_sql's own RO connection, `schemaText()`,
-  live state getters incl. state.timeRange, plus openFiltered(source_id, [{column, value}]) to jump to the evidence); optional onShow/onHide exports fire per switch.
+  live state getters incl. state.timeRange, plus openFiltered(source_id, [{column, value}], {where, tags, clearTimeframe}) to jump to the evidence); optional onShow/onHide exports fire per switch.
   `register_api` registers backend routes dispatched at request time by
   the one catch-all `/api/plugin/{fs}/{route}` handler — deliberately
   not real FastAPI routes, so a Settings toggle's registry reload is
@@ -243,7 +244,13 @@ see [docs/notes/README.md](README.md) for the whole set.
   the pre-plugin behavior for analyst-added extensions) and why the
   Plugins modal's per-format picker sets no `accept` attribute. Routing
   precedence (`pluginFormatFor` in `static/js/importer.js`): a built-in extension always
-  wins over a plugin claiming the same one. Parse errors are 400s like
+  wins over a plugin claiming the same one, and so do the two readers that
+  go by something else — an IIS log's name, a key=value log's first line —
+  which is why `esxi_logs` claiming `.log` never takes either. A format's
+  `extensions` are also file-association candidates (`assoc.supported_types`:
+  default-eligible, never default without the analyst choosing it); its
+  `filename_patterns` cannot be, since no OS associates a file with no
+  extension. The guide's §4 tells authors both. Parse errors are 400s like
   every other ingest route. Security model is Notepad++'s: a plugin is
   arbitrary local Python with the app's privileges, installed by the
   analyst physically placing it — never fetched, so the airgap rule holds.
@@ -307,6 +314,24 @@ see [docs/notes/README.md](README.md) for the whole set.
     *can* see: `row_tags` is in the case file, so the pivot's tag chips
     compile straight into its query, from the grid's own `S.tagFilter`
     spelling (`_tag_clauses`).
+  - **"Show these rows in the grid" is a translation, and it has to be
+    exact.** The cell's rows reach the grid through
+    `winnow.openFiltered(id, pairs, {where, tags, clearTimeframe})`:
+    the cell's values as box filters, the Filters area as filter-tree
+    conditions (`gridFilterFor` in ui/tab.js), the chips as `S.tagFilter`
+    verbatim. Each pivot operator maps to the grid operator whose SQL is
+    the same — `not_in` is an AND of `not_equals`, each already
+    `(c <> ? OR c IS NULL)` — and tests/test_plugins.py
+    (`test_pivot_filters_open_the_rows_the_grid_finds`) runs every one
+    through both compilers and compares counts. Two had to move to make
+    that true. **(blank) in a list** was a bare `IN ('')`, which missed
+    NULL cells although the value list shows NULL as (blank); it is now the
+    grid's empty-in-a-list, NULL included. And **`>`/`<`**: the pivot
+    casts every column, the grid only one it types as a number, so on a
+    text column the two compare differently — that one is refused in the
+    UI rather than translated. A new operator needs a twin in
+    `_compile_condition` and a line in that test, or the grid opens other
+    rows than the cell counted, under a filter that looks right.
   - **One statement for every grouping level, or the pivot is a table
     scan per level.** It used to run one `GROUP BY` per level, each a full
     scan of the source, and on a wide table the scan is most of the cost:
@@ -422,6 +447,20 @@ see [docs/notes/README.md](README.md) for the whole set.
   row for row; the old one needs file order added to its ORDER BY first,
   because its ties were in no particular order. It and the timings are in
   the project's benchmarks folder (2026-10-22-firstlast).
+
+- **First/Last's tag filter is the pivot's chips, and still reads the
+  select it replaced.** The tab sends the grid ribbon's spelling (tag
+  ids, `__any__`, `__none__`, `!<id>`), and `_tag_where` compiles it the
+  way pivot's `_tag_clauses` does: exclusions ANDed, the rest ORed, and a
+  tag id the case doesn't have refused by name rather than grouped as no
+  rows (so the tab drops a deleted tag on show, as pivot does). Before the
+  chips it sent `{mode, ids}`; `_tag_keys` turns that into the chips that
+  mean the same, and `tagKeysOf` does it for a sheet saved then, so
+  neither an old saved sheet nor a script loses its filter. On a merge
+  the match stays the correlated `EXISTS` on `(source_id, rid)` it always
+  was: that is a seek on row_tags' key per row, so it holds up under
+  `NOT` (an exclusion, No tags), where the row-value `IN` the pivot note
+  above warns about does not.
 
 - **lateral_movement's event builder previews through the graph's own
   SQL.** `preview` and `edges` both build on `_prepare`, so "273 rows

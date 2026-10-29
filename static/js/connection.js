@@ -13,6 +13,7 @@
    stream drops when the server goes (even if nobody clicks anything), and
    a failed request proves it (even if the stream is mid-retry). */
 import { $, api, el, noticeServerCase, onCaseChanged, onConnectionChange, setCaseToken } from './core.js';
+import { followCaseSwitch, inPopout } from './popout.js';
 
 // EventSource reconnects by itself every few seconds, so a single error is
 // usually a blip — a restart, a proxy hiccup. Wait before crying wolf.
@@ -22,11 +23,13 @@ let stream = null;
 let pending = null;
 let down = false;
 let shutDown = false;   // the server said it was going (onShutdown), not just vanished
+let restarting = false; // waiting for a restarted server (awaitRestart)
 
 function banner() { return $('connBanner'); }
 
 function show() {
-  if (down) return;
+  // A restart's own screen already says the server is away, and why.
+  if (down || restarting) return;
   down = true;
   const b = banner();
   if (!b) return;
@@ -117,6 +120,66 @@ function onShutdown() {
   show();
 }
 
+/* The server is restarting (Settings → Updates; server.py api_restart), so
+   this window waits for it rather than reporting it lost. The new server
+   reopens the same case on the same port, so a reload is all it takes to
+   be back where the analyst was, running the new code. Told apart from
+   the old server by `boot`, not the pid: a restart on Linux or macOS
+   replaces the process and keeps its pid. Covers the page, as caseGone
+   does: nothing on it can be saved until the server is back.
+
+   The window that asked and every other window (by the presence stream's
+   `restart` event) all come here; the first call is the one that waits. */
+const RESTART_POLL_MS = 500;
+const RESTART_GIVE_UP_MS = 90000;
+
+export function awaitRestart(from) {
+  if (restarting) return;
+  restarting = true;
+  if (pending) { clearTimeout(pending); pending = null; }
+  const b = banner();
+  if (b) b.hidden = true;
+  const box = $('restarting');
+  const title = el('div', 'case-gone-title', 'Restarting Winnow…');
+  title.id = 'restartingTitle';
+  const waiting = 'This window reloads by itself as soon as Winnow is back, with the same case open.';
+  const msg = el('p', null, waiting);
+  const card = el('div', 'case-gone-card restart-card');
+  card.append(title, msg);
+  if (box) { box.replaceChildren(card); box.hidden = false; }
+
+  let deadline = Date.now() + RESTART_GIVE_UP_MS;
+  const giveUp = () => {
+    title.textContent = 'Winnow hasn’t come back';
+    msg.textContent = 'It may still be starting, or the new version may not start. Start Winnow '
+      + 'again the way you usually do — your case file and everything saved in it are untouched. '
+      + 'If it won’t start, "python update.py --rollback" in the Winnow folder puts the previous '
+      + 'version back. This window reloads by itself if Winnow comes back here.';
+    const again = el('button', 'btn primary', 'Keep waiting');
+    again.onclick = () => {
+      again.remove();
+      title.textContent = 'Restarting Winnow…';
+      msg.textContent = waiting;
+      deadline = Date.now() + RESTART_GIVE_UP_MS;
+    };
+    card.append(again);
+  };
+  const tick = async () => {
+    // Its own timeout: while the old server stops, a request can sit in
+    // the listening socket's queue for the new one to pick up.
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), 5000);
+    try {
+      const r = await fetch('/api/version', { cache: 'no-store', signal: ctl.signal });
+      const v = r.ok ? await r.json() : null;
+      if (v && v.boot && v.boot !== from) { location.reload(); return; }
+    } catch { /* not back yet */ } finally { clearTimeout(t); }
+    if (deadline && Date.now() > deadline) { deadline = 0; giveUp(); }
+    setTimeout(tick, RESTART_POLL_MS);
+  };
+  setTimeout(tick, RESTART_POLL_MS);
+}
+
 /* Another window switched this server to a different case (or the server
    came back with another one open): everything this page shows and holds —
    source ids, rids, tag ids, views — belongs to a case the server no
@@ -128,6 +191,10 @@ function onShutdown() {
    the page just stops speaking for it — the next case opened there sets a
    new one. */
 function caseGone(now) {
+  // A pop-out follows the case rather than covering itself: it is one page
+  // of the main window, which switched (popout.js). The reload boots it on
+  // whatever case is open now, and says so if its page isn't in that one.
+  if (inPopout()) { followCaseSwitch(); return; }
   if (!$('home').hidden) { setCaseToken(null); return; }
   const box = $('caseGone');
   if (!box) return;
@@ -163,6 +230,7 @@ export function wireConnection() {
   window.addEventListener('pagehide', sayGoodbye);
   stream = new EventSource(`/api/presence?page=${PAGE_ID}`);
   stream.addEventListener('shutdown', onShutdown);
+  stream.addEventListener('restart', (e) => awaitRestart(e.data));
   // Which case the server has open: said when the stream opens (so a
   // reconnect to a server restarted on another case is caught at once)
   // and whenever another window switches it.

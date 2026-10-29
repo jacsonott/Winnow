@@ -28,9 +28,12 @@ Both files carry a `version`. Bump it when you add entries: workspace's
 in the workspace file) and on a bump adds only the ones it never has, so
 an analyst's deleted default stays deleted and a renamed one is never
 re-added beside itself. Renaming an entry HERE therefore reads as a new
-default to every workspace — which is what it is. Never edit an
-existing header set in place — files produced by an older release of the
-tool are still out there and still have to match.
+default to every workspace — which is what it is. To take a filter
+back, move its entry from `filters` to `retired` unchanged; that needs
+no bump, since workspaces record retirements on their own (`retired`,
+see SavedFilters.ensure_seeded). Never edit an existing header set in
+place — files produced by an older release of the tool are still out
+there and still have to match.
 """
 
 from __future__ import annotations
@@ -176,21 +179,32 @@ def profiles() -> list[dict]:
 
 @lru_cache(maxsize=1)
 def filters() -> dict:
-    """{"version": int, "filters": [(name, [columns], payload), ...]}.
+    """{"version": int, "filters": [(name, [columns], payload), ...],
+    "retired": [(name, [columns], payload), ...]}.
 
     `header_set` is resolved to that set's column list here, so a filter
-    and the table it targets cannot describe different columns."""
+    and the table it targets cannot describe different columns.
+
+    `retired` is the defaults an earlier release shipped and this one
+    takes back, each exactly as it shipped: SavedFilters.ensure_seeded
+    removes a workspace's copy only while it still matches, so one the
+    analyst edited or renamed is theirs and stays."""
     data = _load(FILTERS_FILE)
     by_name = dict(headers()["nicknames"])
-    out = []
-    for i, rec in enumerate(data.get("filters") or []):
-        name, hs, payload = rec.get("name"), rec.get("header_set"), rec.get("payload")
-        if not name or not payload:
-            raise DefaultsError(f"filters.json entry {i} needs a name and a payload")
-        cols = by_name.get(hs)
-        if cols is None:
-            raise DefaultsError(
-                f"filter {name!r} targets header set {hs!r}, which headers.json "
-                f"does not define — a filter bound to nothing would never apply")
-        out.append((name, list(cols), payload))
-    return {"version": int(data.get("version") or 0), "filters": out}
+
+    def resolve(key: str) -> list:
+        out = []
+        for i, rec in enumerate(data.get(key) or []):
+            name, hs, payload = rec.get("name"), rec.get("header_set"), rec.get("payload")
+            if not name or not payload:
+                raise DefaultsError(f"filters.json {key} entry {i} needs a name and a payload")
+            cols = by_name.get(hs)
+            if cols is None:
+                raise DefaultsError(
+                    f"filter {name!r} targets header set {hs!r}, which headers.json "
+                    f"does not define — a filter bound to nothing would never apply")
+            out.append((name, list(cols), payload))
+        return out
+
+    return {"version": int(data.get("version") or 0), "filters": resolve("filters"),
+            "retired": resolve("retired")}

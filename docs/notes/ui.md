@@ -245,6 +245,57 @@ see [docs/notes/README.md](README.md) for the whole set.
   read by the rest of the switch: loadSources picks its tab from
   `S.sourceId`. tests/ui/test_case_switch.py.
 
+- **Coming back to a table must call off any build already running for
+  it.** `openSource` clears the filters, search and sort, awaits the
+  table's layout (and its derived columns and tags), and only then puts
+  the stash back. A rebuild that starts in that gap builds the whole
+  table. When the return then finds its view cached, nothing used to
+  supersede that build, and installView's checks (the newest seq, the
+  same table) let it land afterwards: the grid showed every row under a
+  filter box that still said `=4624`, the scroll went back to the top,
+  and the server evicted the restored view. The cached path now calls
+  `supersedeBuild()` (view.js) first, which bumps `rebuildSeq`, cancels
+  the build in flight and drops its indicator, as a new build would. The
+  rebuild path needed nothing, since its own build supersedes. What
+  started the stray build in CI was the header filter box: typing arms
+  `rebuildSoon` (220 ms) and Enter or Escape builds at once, but neither
+  called the debounce off, so every filter committed with Enter was
+  built twice, and the second build could fire mid-switch. Both keys
+  now cancel it, as the search box's Enter always did with `searchSoon`.
+  This was the intermittent `scrollTop === 240` timeout in
+  tests/ui/test_view_state.py, which also pins each half on its own.
+
+- **Opens run one at a time, and the case clicked last wins.**
+  `openCase` (home.js) used to hand ANY call made during an open the
+  in-flight promise — right for a double-click, but a click on a
+  different case after going Home was dropped, and the case that ended
+  up open was the one clicked first. Now a call for the same case gets
+  the promise (and marks it `reasked`), a call for another case waits
+  in `caseNext` (newest replaces older, with the busy bar up), and the
+  open in flight stops short at its next `superseded()` check — after
+  the per-case resets, which must always run, and before each load the
+  next open would only reset again — resolving `SUPERSEDED` so the loop
+  runs the queued one. Each open still runs the whole `openCaseNow`;
+  never start a second one beside it.
+
+- **An open does not take the analyst back off the home screen.**
+  `showApp()` at the end of an open the analyst had left for Home (the
+  `homeVisits` counter, bumped by every `showHome`) put the app up over
+  the case list mid-pick, and the click meant for a case row landed on
+  the app. The case still loads out of sight and shows when it is asked
+  for again: by a click on it while the open is still running
+  (`reasked`, revealed after `loadSources`), or by a fresh `openCase`,
+  which the server short-circuits as already open.
+
+- **The Timeline pane's note is saved before the switch, then
+  forgotten.** It is the detail pane's `#noteInput` hazard in another
+  box: a note inside its 500 ms debounce posted after the swap, under the
+  NEW case's token, onto whichever row of it shared the `{source_id, rid}`. Blanking
+  would lose it, so `openCaseNow` awaits `flushTimelineNote()` before the
+  `/api/case/open` POST — the server still has the case it was typed in
+  — and `resetTimelinePane()` drops the shown row, the pending note and
+  any row still on its way afterwards. tests/ui/test_case_switch.py.
+
 - **The histogram strip** (`static/js/histogram.js`, `GET /api/histogram`
   over `Store.time_histogram`, toggled by `#btnHistogram` or `h`) was the
   `table_histogram` example plugin until 2026-09 and is built in now;
@@ -289,6 +340,26 @@ see [docs/notes/README.md](README.md) for the whole set.
   `view` and read when `view` is missing); the plugin's
   `winnow.panels['table-histogram.histogram']` is migrated to `open`
   once and deleted.
+- **The strip charts only the datetime columns the grid shows**
+  (histogram.js `chartableColumns`: `datetimeColumns()` less
+  `S.layout[n].hidden`; a column grouped on is not hidden and stays). A
+  hidden column is one the analyst has put away, and a chart of it
+  described the rows by a time nobody on screen could see. Two things
+  make it hold. **Hiding is not a view change**, so nothing used to tell
+  the strip: `renderHead` (columns.js) calls `histogramFollowColumns()`
+  on every repaint of the header — every hide, show, reorder and pin,
+  and a derived column coming or going — which re-picks and asks at once
+  when the charted column changed. It does nothing unless
+  `S.view.source_id === S.sourceId`: mid table switch `S.columns` is
+  already the new table's while `S.view` is still the old one's, and an
+  ask then would name the new table's column to the old view (a 400);
+  the switch's own view change re-picks instead. **The analyst's pick
+  wins whenever it is shown** (`pickColumn`): the `column` pref used to
+  win only once the column charted now was gone, so hiding the pick and
+  showing it again left the chart on the column it had moved to. With
+  every datetime column hidden the empty state says so ("Every datetime
+  column in this table is hidden — …"), not "No datetime column".
+  tests/ui/test_histogram_hidden_columns.py.
 - **The strip's color-by views — Tags, Value, Groups — are one pref,
   one pressed at a time** (histogram.js `histogramView`; the store side
   is in store.md). Five things to know before touching them. **Value
@@ -351,6 +422,36 @@ see [docs/notes/README.md](README.md) for the whole set.
   it. **Times outside the chart's span are dropped, not clamped**: between
   a rebuild and the strip's next answer the rows are the new view's and
   the axis is the old one's. tests/ui/test_histogram_position.py.
+- **The strip marks the days, or the weeks** (charts.js `calendarRules`
+  / `drawCalendarRules`, drawn from `paintChart`). A dashed `--line-2`
+  rule at each midnight while the bars are finer than a day, at each
+  Monday's midnight once they are not, none once the bars are a week;
+  the Timeline overview strip draws the same rules through the same two
+  functions, so the two cannot drift. Four things to know before
+  touching it. **The unit follows the bar width first and the pixels
+  second**: a rule per bar says nothing the bars do not, so days need
+  bars under a day and weeks bars under a week, and a unit whose rules
+  would land under `RULE_MIN_PX` (8) apart drops to the next — hour bars
+  over two months give weeks, not a midnight every 6px. **UTC, Monday**:
+  the bars are UTC epochs and every label on the strip is UTC, so a
+  local midnight would sit mid-bar; the week is ISO 8601's.
+  `calendarRules` floors from 1970-01-05 (the first Monday after the
+  epoch) rather than truncating, so a span before 1970 — FILETIME zero,
+  a bad clock — still lands on midnights and Mondays. **Behind the
+  bars, as the Timeline's were**: they show in the gaps and across a
+  quiet stretch and never tint a bar the color split is read by; on a
+  week of day bars a Monday rule is mostly under Monday's bar, which is
+  why each one's date is also written under the axis — `YYYY-MM-DD`,
+  the ISO form of the start and end labels beside it — where it fits
+  clear of them and of its neighbors; the middle timestamp the axis used to carry
+  is drawn only when no rule got a label. **Strictly inside the span**:
+  a rule on the axis's very edge marks nothing, so a span that starts
+  at midnight does not rule its own left edge (the Timeline strip did,
+  before it shared these). `histogramRules()` / `timelineOverviewRules()`
+  say what was last painted, for tests/ui, which cannot read a dashed
+  line's meaning off the canvas. The hover names the day a rule marks.
+  tests/ui/test_histogram_calendar_rules.py,
+  tests/ui/test_timeline_overview_strip.py.
 - There's no separate "preset" concept anymore — a preset is just a saved
   filter (`workspace.SavedFilters`, cross-case) whose `col_names` happens to
   match (exactly, or "similar" per the same Jaccard/subset heuristic the old
@@ -613,6 +714,84 @@ see [docs/notes/README.md](README.md) for the whole set.
     is 0 before a case is open, which would otherwise pin the strip at 0px
     for the whole session, since only `showApp()` and the window `resize`
     handler re-run it.
+- **A page tab can be popped out into a window of its own**
+  (static/js/popout.js; asked for so the Pivot could sit beside the table
+  it counts). The pop-out is the whole app booted at
+  `/?popout=<page key>&owner=<main window id>`, with the main window's
+  chrome hidden by `html[data-popout]` — deliberately not the main
+  window's DOM rendered into a child window, which would share `S` but
+  open every menu, dialog and toast (and run every document-level
+  listener a plugin adds) in the wrong window. The server needed nothing:
+  several windows on one case were already safe (per-window presence, the
+  case token on every request — docs/notes/server.md). What it costs is
+  four rules in the browser, each a trap for whoever adds the next page or
+  route:
+  - **One live copy of a page.** Every page's show function starts with
+    `if (pageElsewhere(key)) return;` — in the main window that shows
+    `#popoutPlaceholder` for a page that is out, in a pop-out it sends any
+    page but its own to the main window. **A new page's show function
+    needs that line.** Two Pivots would both save the same
+    `winnow.tabState` row through a 500ms debounce, last write wins,
+    silently. For the same reason the saves a page has pending are
+    flushed before it moves either way (`flushPageSaves`: plugin tab
+    state, the SQL tab's text, the Notes narrative), and on a pop-out's
+    pagehide with `keepalive` — the window the page lands in reads them
+    back as it mounts. The main window also waits `GONE_SETTLE_MS` after a
+    closed pop-out's "gone" before it remounts, so that keepalive post has
+    landed.
+  - **Navigation goes to the main window, whole.** A pop-out has no grid,
+    so `openSource`, `openFilteredRows`, `jumpToTimelineRow`, dashboard
+    `drillInto`, `setCaseTimeRange` and showing another page each check
+    `inPopout()` first and `sendToMain(name, …args)` to the `ACTIONS`
+    table. Whole: opening the table there and then filtering here would
+    filter nothing anyone can see. A new navigation needs an action.
+  - **Writes are announced, from an allowlist.** Each window holds its
+    own copy of the case (`S.tags`, `S.sources`, the row caches), so
+    core.js's `api()` tells popout.js about every non-GET that succeeded
+    (`onMutation` — a registry, because core.js imports nothing), and
+    `MUTATION_KINDS` names the ones that changed case data. The rest stay
+    quiet on purpose: most POSTs are reads with a body (view builds,
+    previews, SQL runs) or this window's own bookkeeping (layouts, tab
+    state), and a refresh in every other window per keystroke of those
+    would be the bill. **A new route that changes tags, tables or notes
+    needs a line there**, or the other windows stay stale until they next
+    load. Changes no route of this window makes — a job finishing (jobs.js),
+    a watchlist scan (finishScan) — call `announceChange` themselves. The
+    listener reloads what it holds and repaints what is showing the way a
+    visit to it would (`runRefresh`); the Timeline keeps its scroll
+    (`buildTimeline({keepScroll})`), where a visit goes to the top.
+  - **A pop-out belongs to the main window that opened it.** Messages on
+    the `winnow.windows` channel carry that window's id (`family`), so a
+    second main window on the same server neither drives nor hears
+    another's pop-outs. The id is in sessionStorage so a reloaded main
+    window keeps it — and **a pop-out must never ask for its own**:
+    `window.open` copies the opener's sessionStorage into the new window,
+    so it would find its owner's id and answer to itself. A main window
+    says "leaving" on pagehide and "hello" when it boots; a pop-out waits
+    `OWNER_GRACE_MS` for the hello (a reload) and closes otherwise, and
+    also watches `window.opener.closed`, for a main window killed without
+    a pagehide.
+  - The window is opened **before anything is awaited**:
+    `window.open('', name, features)` inside the click, then the saves are
+    flushed, then `win.location.replace(url)`. A browser allows a window
+    only while the click that asked is fresh; awaiting the flush first got
+    it refused as a pop-up.
+  - A pop-out boots with `S.activeTab` set to its page *before*
+    `loadSources({navigate: false})`, which is what keeps that from
+    opening a table (it opens one when nothing is on screen) and flipping
+    the window to a grid it hides.
+  - A case switch in the main window is **followed, not refused**: the
+    pop-out's `caseGone` reloads it (`followCaseSwitch`) onto the case now
+    open instead of covering it with "This window is out of date", and
+    says nothing on the way out, so the main window doesn't remount the
+    page for the moment until it says "here" again. A page the new case
+    doesn't have (a board, a plugin switched off) gets a card saying so.
+  - The look follows through the `storage` event on `winnow.appearance`
+    (settings.js), and **Shut down**'s "other windows" count leaves out
+    this window's own pop-outs (`otherWindows`). The keys that switch tabs
+    or open Settings/Tables/Search all do nothing in a pop-out.
+  - tests/ui/test_popout.py, including that a pop-out survives its main
+    window's reload and follows it to another case.
 - **`syncTabChrome` is the registry of grid-only chrome.** The toolbar,
   a plugin's toolbar panels, the session-comparison banner, the "N
   selected" tag bar and the row detail pane all describe one table's
@@ -1226,6 +1405,24 @@ see [docs/notes/README.md](README.md) for the whole set.
   click is still the release path; `tests/ui/test_updates_panel.py`
   answers every `/api/updates/*` call in the browser, because the real
   dev apply would overwrite the checkout the suite runs from.
+- **Settings → Updates restarts into what it installed, and every
+  window follows.** When `/api/version` says `can_restart`, both install
+  confirms (release and the develop sync) carry a ticked "Restart Winnow
+  when it’s installed" box — `confirmDialog`'s `check` option, which keeps
+  the boolean answer and writes the box's state back into the object it
+  was given — and **Restart now** stays beside the buttons after an install
+  that didn't restart, or whose restart was refused (the refusal's text,
+  e.g. a package to `pip install`, goes in the status line). The restart
+  itself is `restartWinnow` in home.js, beside `shutdownWinnow`: it warns
+  about `inFlightWork()` as Shut down does but not about other windows,
+  because they come back. `awaitRestart` (connection.js) covers the page
+  with `#restarting` (the `.case-gone` cover, accent border) and polls
+  `/api/version` until `boot` changes, then reloads; the presence stream's
+  `restart` event brings every other window, pop-outs included, to the
+  same place. While it waits, the lost-connection banner is held off
+  (`show()` returns), since the server being away is expected. After 90s
+  it says Winnow hasn't come back and how to start it or roll back, and
+  keeps polling. Server side: docs/notes/server.md.
 - **`S.keymap` must hold its own key arrays, not `DEFAULT_KEYMAP`'s.**
   The settings UI's "+ key"/"✕" handlers splice and push those arrays in
   place, so the old shallow `{...DEFAULT_KEYMAP}` handed them the
@@ -1551,8 +1748,8 @@ see [docs/notes/README.md](README.md) for the whole set.
     Tagged is `tagged_row_count` from `/api/cases`: distinct rows in
     `row_tags`, in the same read-only peek as the other counts.
   - **One ⋯ per row** (`caseMenuItems`, also the row's right-click), and
-    the whole row still opens the case, behind `openCase`'s double-click
-    guard. A missing file's Open and Delete are disabled, not hidden.
+    the whole row still opens the case, behind `openCase`'s queue (a
+    double-click opens it once). A missing file's Open and Delete are disabled, not hidden.
   - **The filter looks inside its section**, and says when a match is in
     another one ("1 more match in All cases"): the old "Show N cases not
     opened in over 30 days…" fold hid older cases from the search box too.
@@ -1604,6 +1801,48 @@ see [docs/notes/README.md](README.md) for the whole set.
   tests/ui/test_sessions_panel.py, test_saved_filters_rows.py,
   test_case_variables_ui.py, test_import_ux.py, test_export_all_xlsx_ui.py,
   test_quicklook_copy_targets.py, test_stack.py.
+- **+ New case is the frame too, with the profiles as the side list**
+  (`openNewCaseModal` in home.js, `.nc-*` in style.css; also the quick
+  look's Save as a case). It was the last form drawn the old way: captioned
+  boxes down the card and the profile a `<select>` of names. The side list
+  is None, the shipped profiles, then Your profiles, each hinted with the
+  manager's `summaryOf`; the pane is the case's fields on top and, under
+  them, the chosen profile's description and the values it asks for.
+  Decisions:
+  - **A profile is a kind of case, so it is the side list**, as the
+    template list is in a "new document" dialog; the case's own fields
+    are the same on every profile. They are built once (`caseBox`) and
+    moved into whichever pane `sectionPanes` builds, so a switch keeps
+    what was typed. The variables are not: they belong to a profile, so
+    each pane draws its own from `variablePromptFields` (the values
+    prompt's own fields, which the profile builder previews), and what
+    was typed into them is kept by NAME in `typed`. Two profiles asking
+    for `engagement` share the one value, and choosing None and back
+    restores it.
+  - **The profiles are read before the dialog draws**, so the side list
+    is whole on its first frame; a failed read leaves None. The function
+    is async now for that, which is why tests `await` it through
+    `page.evaluate`.
+  - **Browse… is still a snapshot and a re-open** (modal() replaces the
+    card), now carrying the chosen profile's id (`state.profile`, the
+    section id) and `typed`.
+  - **Kept to the fields.** The first cut read as too chatty: a stats
+    row, a sentence for each thing the profile would do (its plugins by
+    name, its board, its watchlist), a heading and a help line over the
+    values, a note under the path, and a status line beside a button that
+    named the case and the profile. Every one of them repeated something
+    already on screen, mostly the side list's hint. What stays is the
+    profile's own description, two lines at most (`.nc-about`, the rest on
+    hover), and its value fields; None adds nothing under the case.
+    test_new_case_dialog.py pins the absence, so the sentences don't drift
+    back one at a time.
+  - **One main button, Create case / Save case**, never disabled: a click
+    on a case that still needs a value says so in a toast, outlines the
+    boxes (`.invalid`) and focuses the first, as the old Create did. Enter
+    in Name, the path or a variable box is the same click; not in Group,
+    where Enter picks one of the groups its datalist offers.
+  tests/ui/test_new_case_dialog.py, test_case_variables_ui.py,
+  test_home_fixes.py, test_quicklook_banner.py.
 - **A header set's default layout seeds a table once, so it needs its
   own way onto the rest** (the table menu's Layout section with the
   default chosen; columns.js `applyDefaultLayout` is the same as a
@@ -2272,12 +2511,49 @@ see [docs/notes/README.md](README.md) for the whole set.
     the histogram's rather than sharing them.
   - **What it narrows is kept as what is OFF or what was dragged**:
     `S.timeline.sourcesOff` (the tag chips' rule, so a table tagged later
-    is on) and `S.timeline.range`, a half-open `[start, end)` that
-    `build_timeline` compares with each line's normalised timestamp. The
+    is on) and the Timeline's timeframe (next entry): a drag over
+    `[t0, t1)` writes `t0 → t1 - 1s`, inclusive, so the chip and the
+    dialog read the same stretch the drag picked. The
     drag is snapped with the histogram's rule (a unit picked from the
     drag's width, never coarser than a bar), not to the bars: snapping to
     bars made a stretch inside one bar impossible to pick. Both reset on
     a case switch (home.js), as `tagsOff` does.
+
+- **The Timeline's timeframe filter** (`S.timeline.timeRange`,
+  `{enabled, start, end}`; the "timeframe" section of timeline.js) is the
+  table pages' ⏱ Timeframe over the Timeline, and copies its rules
+  rather than its state:
+  - **It is not `S.timeRange`.** The tables' range is set to read one
+    table (and can follow the analyst between them); applied to the
+    Timeline it would take findings off it unasked. The dialog shows
+    the tables' range under "From the tables' timeframe" with Fill range
+    to copy it in, as the tables' dialog offers "From tagged rows".
+  - **Same keys, same dialog shape.** `timelineKey` handles
+    `openTimeRange`/`toggleTimeRange` while the Timeline is the page
+    showing, before its `!total` return — a timeframe that matches
+    nothing leaves an empty list, and the key that turns it off has to
+    work there. `markModalAction('openTimeRange')` lets R close the
+    dialog it opened. Apply always turns it on; `r` keeps the range;
+    Clear and the chip's ✕ forget it; the dialog says "Off right now"
+    when it opens on a range that is off — all as the tables' does.
+  - **Stored as ISO, validated before the build.** The boxes are read
+    with `parseTimestamp` (tsformat.js, the client twin of
+    `_ts_normalize`), so "7/9/2026 9:30 AM" is kept, shown in the chip
+    and reopened as `2026-07-09 09:30:00`, and text it cannot read is
+    refused with a toast in the dialog instead of a 400 after it closed.
+  - **The chip is the header's** (`#timelineTimeRange`), not the
+    overview strip's. It was the strip's while only the drag set a
+    range; with the strip hidden the Timeline was narrowed and nothing
+    said so. `renderTimelineTimeRange` paints it and the button, and is
+    called from every place that changes the range, from
+    `buildTimeline`, at boot, on a case switch and on a keymap change
+    (the button's title names the keys).
+  - **The header wraps.** With both chips on, a 1280px window had no
+    room for the switches: they ran off the right edge and the tag
+    chips were squeezed into a column. `.timeline-head` is
+    `flex-wrap: wrap`, and the switches are one group
+    (`.timeline-head-acts`, `margin-left: auto`) so they wrap together.
+  `tests/ui/test_timeline_timeframe.py`.
   - **The bars come from the server, the marks from the client.**
     `GET /api/timeline_overview` after each build (and on Tags/Tables);
     the band, the thumb and the selected line's mark are worked out from
@@ -2329,11 +2605,17 @@ see [docs/notes/README.md](README.md) for the whole set.
 - **The Timeline reads as a story** (`timelineRowNode`'s `story`, which
   only `renderTimelineRows` passes; Configure tables…' preview keeps the
   plain timestamp, since its lines are samples rather than neighbours):
-  - **The Timestamp cell holds the time of day**, plus the day on the
-    first line of each, so **a line is found by its `data-ts`**, not by
-    the cell's text. The UI tests' `_line` helpers match
-    `.timeline-row[data-ts^='…']`; matching the cell's text stopped
-    working when it lost the date.
+  - **The Timestamp cell holds the whole ISO timestamp**, on every
+    line, and so do the pane's large "when" and both chips. The story
+    redesign had it as the time of day with the day said once at the
+    first line of each ("Fri 13 Mar") and in the column heading;
+    ISO was asked for back — a line read, copied or compared on its
+    own has to carry its date, and every other place in Winnow writes
+    times as `YYYY-MM-DD HH:MM:SS`. The day is still marked by the
+    `day-start` rule. **A line is found by its `data-ts`**, not by the
+    cell's text; the UI tests' `_line` helpers match
+    `.timeline-row[data-ts^='…']`. `timelineDayLabel` survives for the
+    overview's axis, which has room for a day only at its first tick.
   - **The rules are borders inside the row** (`day-start`, `gap`), and
     rows are border-box, so a rule costs no height: the virtual list
     places every row at `pos * ROW_H`, and a row one pixel taller would
@@ -2479,7 +2761,7 @@ see [docs/notes/README.md](README.md) for the whole set.
 
 - **The widget editor's preview is live, and an answer belongs to a QUESTION, not to a request** (dashboard.js `openWidgetEditor`: `runPreview`, `changed`, `shown`/`asking`). The editor is in the builders' shape now — the question on the left (Data from, What to show, Table, the recipe's picks, Advanced — the SQL, Title), how it looks on the right (Render as chips, Sub-label, a Width segmented control, Run every time and the cost line) above a `.dash-card.dash-preview` that runs the same `draft()` Save stores, `PREVIEW_DELAY_MS` (500) after the last edit, with no Preview button. Things that bite. **Stale answers are dropped by comparing the answer's `questionOf` with the CURRENT draft's**, not by a sequence number bumped per edit: an edit that only changes the look (render, title, sub-label, width) does not ask again — `changed()` repaints the answer already on the card at once — so a counter bumped by that edit would discard the in-flight answer that is still right, and nothing would ever ask for it again. `asking` dedupes the one question already out (edit away and back inside the pause and the answer still paints when it lands). **There is no cancel**: `/api/dashboard/widget/preview` is a sync route with no `op_token`, so a half-typed runaway (a cross join before its WHERE) runs to the end on a server thread; the client only refuses to paint it. Making it stoppable is the SQL pane's recipe — an async route through `_run_pane_query` and an `AbortController` on the fetch — and has not been done. **The preview names no board and no widget**, so the server files nothing and an unsaved draft never replaces the number the board's card is showing (tests/ui/test_widget_editor_preview.py reads the case file's cache back after an Escape). **"Is this dialog still open?" is `b.isConnected && !#modal.hidden`**: Escape hides the modal and leaves its body in the document until the next `modal()` replaces it, so `isConnected` alone says yes to a timer that fires after the dialog closed. The first run is a `setTimeout(…, 0)` for the same reason in reverse — `modal()` unhides only after the builder returns. **A draft that cannot run says why and asks nothing** (`whyNot`: no query, a template whose column the table cannot offer, header sets still loading, a signals card with no cells); an empty answer says what the board will do with it (fold into the empty-cards line, via `emptyStateOf`/`emptyReason`) rather than drawing a box the board never shows. **Run now runs the SAVED widget**, so it repaints the preview only when the draft still asks the saved question. **Names**: `WIDGET_SOURCES` / `WIDGET_RENDERS` (dashwidgets.js) map the stored values to what the editor shows ("A query", "Signals card"; "Number", "Key / value", "Yes / no chips"…); the stored values never change, a source this version has no name for is kept as an extra option rather than becoming "A query" on Save, and an unknown render stays the widget's render with no chip pressed. **Title moved to the bottom of the left pane**, so `#modal .confirm-input` first is the recipe's Value box now — tests select the title by `.dash-title-input`, Render as by `.dash-kinds [data-render]` and Width by `.dash-width [data-span]`. Save widget is `oneAtATime` (it awaits `persist()` before closing, and a double-click pushed the widget twice). tests/ui/test_widget_editor_preview.py.
 
-- **Profiles: a two-pane manager, and a sheet in front of Apply** (bundles.js; `WS.plugin_bundles`, `/api/plugin_bundles/*`). A profile is a kind of case — plugins, boards, a starter watchlist, variable definitions — and the list this replaced was one ellipsised row per profile, with the shipped description pushing Apply and Copy off the end of it. The manager (M) is `.pm` : profiles left with a one-line count summary, the whole selected profile right — every plugin, every board with EVERY widget's render kind and whether it is `live`, the watchlist, the variables. Sections carry `data-sec` (plugins/board/watchlist/variables) because a board section is headed with the board's NAME and "Watchlist" is also the start of a widget title on the shipped board. **The sheet is the point.** Apply sets an explicit on/off override for every installed plugin (so everything not in the profile is turned OFF), upserts boards BY NAME, seeds indicators and starts a scan, and said none of it first. `GET /api/plugin_bundles/{id}/plan` counts each of those against the OPEN CASE — which plugins go on and off and how many stay off, what each board replaces and by how many widgets, which indicators are new and how many tables seeding them scans (`Store.watchlist_scan_sources`, the scan's own predicate, so the number cannot disagree with the scan), which variables are required and unset (a required one with a declared DEFAULT is not among them: the apply creates the row carrying the default, so nothing prompts for it) — and `POST .../apply` takes `parts` from `APPLY_PARTS`, so a board can be taken without the watchlist. The plugins part stays ticked even when the case's set already matches the profile, because applying writes an explicit override per installed plugin and that write is what pins the case against a later machine-wide toggle. **No body still means all four parts**: the new-case dialog's Profile select and every script predate the sheet. **"You have edited this board" is answered by `origin`**, which the profile apply now stamps `profile:<name>` — any hand edit clears it (`set_dashboard_widgets`), a board stamped by this profile is its own untouched copy and worth no warning, and a plugin offering a board of the same name still asks, because a profile stamp is not a plugin stamp. A board applied before the stamp existed reads as edited, which errs toward warning. **Which profiles this case has had applied** is a `profiles_applied` case setting (a name → timestamp map) — the badge cannot be inferred from a board of the same name, which the analyst may have built by hand. **One profile exports as one file** (`winnow-profile/1`, `{format, profile}`) the way saved filters already do, minus the id and the `shipped` flag; a SHIPPED profile exports as a copy that records its ancestry. Import REFUSES a key it does not understand rather than dropping it, and refuses a KNOWN key holding the wrong kind of value for the same reason (`PluginBundles.IMPORT_SHAPE`; `save` is permissive by design, so `"plugins": "lateral_movement"` would store one plugin per letter and a string `dashboard` would reach the manager as a board whose widgets cannot be iterated). It never upserts by name either — a file from outside must not overwrite an afternoon's work, so a taken name is suffixed `(imported)`, from a base trimmed to leave room for the suffix, since a 100-character name plus a suffix truncates back to itself and the search for a free name never ends. **Lineage**: a copy records `from_profile`/`from_version` (written by "Copy to edit" and carried through every later edit, since a content comparison would lose the thread on the first edit), `profiles.json` carries a per-profile `version`, `list()` answers `update_available` when the shipped one is newer, and the manager shows one line offering the diff. Taking it is `POST .../take_update`: always a button, never a merge — an analyst's copy and a revised shipped profile can disagree about any part of a board, and a three-way merge of SQL widgets produces a board neither of them wrote. tests/test_profile_export.py and tests/ui/test_profile_manager.py.
+- **Profiles: a two-pane manager, and a sheet in front of Apply** (bundles.js; `WS.plugin_bundles`, `/api/plugin_bundles/*`). A profile is a kind of case — plugins, boards, a starter watchlist, variable definitions — and the list this replaced was one ellipsised row per profile, with the shipped description pushing Apply and Copy off the end of it. The manager (M) is `.pm` : profiles left with a one-line count summary, the whole selected profile right — every plugin, every board with EVERY widget's render kind and whether it is `live`, the watchlist, the variables. Sections carry `data-sec` (plugins/board/watchlist/variables) because a board section is headed with the board's NAME and "Watchlist" is also the start of a widget title on the shipped board. **The sheet is the point.** Apply sets an explicit on/off override for every installed plugin (so everything not in the profile is turned OFF), upserts boards BY NAME, seeds indicators and starts a scan, and said none of it first. `GET /api/plugin_bundles/{id}/plan` counts each of those against the OPEN CASE — which plugins go on and off and how many stay off, what each board replaces and by how many widgets, which indicators are new and how many tables seeding them scans (`Store.watchlist_scan_sources`, the scan's own predicate, so the number cannot disagree with the scan), which variables are required and unset (a required one with a declared DEFAULT is not among them: the apply creates the row carrying the default, so nothing prompts for it) — and `POST .../apply` takes `parts` from `APPLY_PARTS`, so a board can be taken without the watchlist. The plugins part stays ticked even when the case's set already matches the profile, because applying writes an explicit override per installed plugin and that write is what pins the case against a later machine-wide toggle. **No body still means all four parts**: the new-case dialog's profile list and every script predate the sheet. **"You have edited this board" is answered by `origin`**, which the profile apply now stamps `profile:<name>` — any hand edit clears it (`set_dashboard_widgets`), a board stamped by this profile is its own untouched copy and worth no warning, and a plugin offering a board of the same name still asks, because a profile stamp is not a plugin stamp. A board applied before the stamp existed reads as edited, which errs toward warning. **Which profiles this case has had applied** is a `profiles_applied` case setting (a name → timestamp map) — the badge cannot be inferred from a board of the same name, which the analyst may have built by hand. **One profile exports as one file** (`winnow-profile/1`, `{format, profile}`) the way saved filters already do, minus the id and the `shipped` flag; a SHIPPED profile exports as a copy that records its ancestry. Import REFUSES a key it does not understand rather than dropping it, and refuses a KNOWN key holding the wrong kind of value for the same reason (`PluginBundles.IMPORT_SHAPE`; `save` is permissive by design, so `"plugins": "lateral_movement"` would store one plugin per letter and a string `dashboard` would reach the manager as a board whose widgets cannot be iterated). It never upserts by name either — a file from outside must not overwrite an afternoon's work, so a taken name is suffixed `(imported)`, from a base trimmed to leave room for the suffix, since a 100-character name plus a suffix truncates back to itself and the search for a free name never ends. **Lineage**: a copy records `from_profile`/`from_version` (written by "Copy to edit" and carried through every later edit, since a content comparison would lose the thread on the first edit), `profiles.json` carries a per-profile `version`, `list()` answers `update_available` when the shipped one is newer, and the manager shows one line offering the diff. Taking it is `POST .../take_update`: always a button, never a merge — an analyst's copy and a revised shipped profile can disagree about any part of a board, and a three-way merge of SQL widgets produces a board neither of them wrote. tests/test_profile_export.py and tests/ui/test_profile_manager.py.
 
 - **The profile builder is the builders' two panes, and its Save waits
   for its lists** (profilebuilder.js, `.pb-*`). It was one column of three

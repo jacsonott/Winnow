@@ -1973,6 +1973,101 @@ def test_pivot_like_filters_escape_their_own_wildcards(client, store, write_csv,
     assert out["sets"][0]["rows"][0][0] == 0
 
 
+# "Show these rows in the grid": each Filters operator beside the grid
+# conditions the Pivot hands openFiltered for it (gridFilterFor in
+# examples/plugins/pivot/ui/tab.js). The grid has to land on the rows the
+# cell counted, so each pair goes through both compilers.
+PIVOT_TO_GRID = [
+    ({"op": "in", "values": ["SRV1"], "column": "Host"},
+     [{"op": "in", "value": ["SRV1"], "column": "Host"}]),
+    ({"op": "in", "values": [""], "column": "Note"},
+     [{"op": "in", "value": [""], "column": "Note"}]),
+    ({"op": "in", "values": ["ok", ""], "column": "Note"},
+     [{"op": "in", "value": ["ok", ""], "column": "Note"}]),
+    ({"op": "not_in", "values": ["ok"], "column": "Note"},
+     [{"op": "not_equals", "value": "ok", "column": "Note"}]),
+    ({"op": "not_in", "values": ["ok", "late"], "column": "Note"},
+     [{"op": "not_equals", "value": "ok", "column": "Note"},
+      {"op": "not_equals", "value": "late", "column": "Note"}]),
+    ({"op": "not_in", "values": ["ok", ""], "column": "Note"},
+     [{"op": "not_equals", "value": "ok", "column": "Note"}, {"op": "not_empty", "column": "Note"}]),
+    ({"op": "contains", "value": "a", "column": "Note"}, [{"op": "contains", "value": "a", "column": "Note"}]),
+    ({"op": "not_contains", "value": "a", "column": "Note"},
+     [{"op": "not_contains", "value": "a", "column": "Note"}]),
+    ({"op": "starts", "value": "SRV", "column": "Host"}, [{"op": "starts", "value": "SRV", "column": "Host"}]),
+    ({"op": "gt", "value": "50", "column": "Bytes"}, [{"op": ">", "value": "50", "column": "Bytes"}]),
+    ({"op": "lt", "value": "150", "column": "Bytes"}, [{"op": "<", "value": "150", "column": "Bytes"}]),
+    ({"op": "empty", "column": "Note"}, [{"op": "empty", "column": "Note"}]),
+    ({"op": "not_empty", "column": "Note"}, [{"op": "not_empty", "column": "Note"}]),
+]
+
+
+@pytest.fixture
+def grid_pivot(client, store, write_csv, example_registry, monkeypatch):
+    """A table with both kinds of nothing in it: '' as the CSV has it, and
+    NULL, which a JSON import or a short row from another reader leaves. The
+    NULLs are written in directly — no CSV produces one."""
+    import server
+
+    monkeypatch.setattr(server, "PLUGINS", example_registry)
+    rows = [["Host", "Note", "Bytes"],
+            ["SRV1", "ok", "100"],
+            ["SRV1", "late", "200"],
+            ["SRV1", "", "40"],
+            ["SRV2", "ok", ""],
+            ["SRV2", "x", "70"],
+            ["SRV2", "x", "160"],
+            ["SRV2", "", "90"],
+            ["SRV3", "NULL", "300"],
+            ["SRV3", "NULL", "10"]]
+    sid = store.ingest_csv(write_csv(rows, "togrid.csv"), name="togrid", build_fts=False)["id"]
+    with store.lock:
+        store.db.execute(f'UPDATE src_{sid} SET "Note" = NULL WHERE rid IN (8, 9)')
+        store.db.commit()
+    assert {c["name"]: c["type"] for c in store.get_source(sid)["columns"]}["Bytes"] == "number"
+    return client, sid
+
+
+@pytest.mark.parametrize("pivot_filter, grid_conds", PIVOT_TO_GRID,
+                         ids=[f"{p['op']}-{p['column']}-{i}" for i, (p, _) in enumerate(PIVOT_TO_GRID)])
+def test_pivot_filters_open_the_rows_the_grid_finds(grid_pivot, store, pivot_filter, grid_conds):
+    client, sid = grid_pivot
+    tree = {"type": "group", "op": "AND",
+            "children": [{"type": "cond", "value": "", **c} for c in grid_conds]}
+    counted = _count(client, sid, filters=[pivot_filter])
+    assert counted == store.build_view(sid, {"filter_tree": tree})["row_count"]
+
+
+def test_pivot_blank_in_a_list_is_the_empty_cell_null_included(grid_pivot):
+    """The value list shows a NULL as (blank), and ticking (blank) found only
+    the '' cells: the NULLs were neither kept by `is any of` nor dropped by
+    `is none of`."""
+    client, sid = grid_pivot
+    assert _count(client, sid, filters=[{"column": "Note", "op": "in", "values": [""]}]) == 4
+    assert _count(client, sid, filters=[{"column": "Note", "op": "not_in", "values": [""]}]) == 5
+    # Nothing else moved: excluding a value still keeps every blank cell.
+    assert _count(client, sid, filters=[{"column": "Note", "op": "not_in", "values": ["ok"]}]) == 7
+
+
+def test_a_pivot_cell_opens_the_rows_it_counted(grid_pivot, store):
+    """The cell's own values go into the column boxes as `=value` (`""` for
+    a blank), under the Filters area's conditions. The boxes reach the store
+    parsed, as the client sends them."""
+    client, sid = grid_pivot
+    pivot_filter = {"column": "Bytes", "op": "gt", "value": "50"}
+    out = _agg(client, sid, values=[{"agg": "count"}], group_sets=[["Host", "Note"]], filters=[pivot_filter])
+    tree = {"type": "group", "op": "AND", "children": [{"type": "cond", "column": "Bytes", "op": ">", "value": "50"}]}
+    seen = set()
+    for host, note, n in out["sets"][0]["rows"]:
+        seen.add((host, note))
+        if note is None:
+            continue   # a NULL key opens as (blank), '' and NULL alike — as Show the rows here does
+        boxes = [{"column": "Host", "op": "equals", "value": host},
+                 {"column": "Note", "op": "equals", "value": note} if note else {"column": "Note", "op": "empty"}]
+        assert store.build_view(sid, {"filters": boxes, "filter_tree": tree})["row_count"] == n, (host, note)
+    assert {("SRV2", "x"), ("SRV2", "")} <= seen   # a cell of two rows, and a blank one
+
+
 def test_pivot_distinct_count_ignores_blanks_like_count_does(pivot_client):
     """Blank is the absence of a value, not one more distinct value. Counting
     '' as a category makes Distinct count exceed Count on the same column."""
@@ -2696,7 +2791,8 @@ def test_first_last_validation(fl_client, body, fragment):
 
 def test_first_last_tag_filter_scopes_the_grouping(fl_client, store):
     """Tags aren't a column — they live in the row_tags sidecar — so the
-    plugin filters on membership: specific tags, any tag, or untagged."""
+    plugin filters on membership, in the grid ribbon's spelling: tag ids,
+    Any tag, No tags, and "!<id>" to leave a tag's rows out."""
     client, sid = fl_client
     tag = store.list_tags()[0]
     rids = [r[0] for r in store.run_sql(
@@ -2704,34 +2800,122 @@ def test_first_last_tag_filter_scopes_the_grouping(fl_client, store):
     store.set_tags(sid, rids, tag["id"], True)
 
     out = _fl(client, "preview", source_id=sid, group_by=["User"], sort_column="When",
-              columns=[], template="{which} of {count}",
-              tags={"mode": "ids", "ids": [tag["id"]]})
+              columns=[], template="{which} of {count}", tags=[tag["id"]])
     assert out["total_groups"] == 1
     assert {r[-1] for r in out["rows"]} == {"First of 3", "Last of 3"}
 
     out = _fl(client, "preview", source_id=sid, group_by=["User"], sort_column="When",
-              columns=[], template="{which}", tags={"mode": "any"})
+              columns=[], template="{which}", tags=["__any__"])
     assert out["total_groups"] == 1
     out = _fl(client, "preview", source_id=sid, group_by=["User"], sort_column="When",
-              columns=[], template="{which}", tags={"mode": "none"})
+              columns=[], template="{which}", tags=["__none__"])
     assert out["total_groups"] == 2  # bob and carol never got the tag
+    out = _fl(client, "preview", source_id=sid, group_by=["User"], sort_column="When",
+              columns=[], template="{which}", tags=[f"!{tag['id']}"])
+    assert out["total_groups"] == 2  # excluding it is the same two, here
 
     # ...and it ANDs with the column filters rather than replacing them.
     out = _fl(client, "preview", source_id=sid, group_by=["User"], sort_column="When",
-              columns=[], template="{which} of {count}",
-              tags={"mode": "ids", "ids": [tag["id"]]},
+              columns=[], template="{which} of {count}", tags=[tag["id"]],
               filters=[{"column": "EventId", "op": "in", "values": ["4624"]}])
     assert out["total_groups"] == 1
     assert [r[-1] for r in out["rows"]] == ["Only of 1"]
 
 
+# The tab's tag chips, against FL_ROWS' rids 1-6: Suspicious on 1, 2 and 4;
+# Benign on 2 (so 2 carries both); TA on 5; 3 and 6 untagged. Grouped on
+# every column, each row is its own group, so the group count is the row
+# count the filter kept.
+@pytest.fixture
+def tagged_fl(fl_client, store):
+    client, sid = fl_client
+    tags = {t["name"]: t["id"] for t in store.list_tags()}
+    store.set_tags(sid, [1, 2, 4], tags["Suspicious"], True)
+    store.set_tags(sid, [2], tags["Benign"], True)
+    store.set_tags(sid, [5], tags["TA"], True)
+    return client, sid, tags
+
+
+def _fl_rows_kept(client, sid, tags):
+    return _fl(client, "preview", source_id=sid, group_by=["When", "Host", "User", "EventId"],
+               sort_column="When", columns=[], template="{which}", tags=tags)["total_groups"]
+
+
+FL_TAG_FILTER_CASES = [
+    (["Suspicious"], 3),
+    (["Suspicious", "TA"], 4),               # two chips: rows carrying either
+    (["Suspicious", "!Benign"], 2),          # 2 carries both, so it goes
+    (["!Benign"], 5),                        # an exclusion alone keeps untagged rows
+    (["__any__"], 4),
+    (["__none__"], 2),
+    (["__none__", "TA"], 3),                 # untagged, plus TA's
+    (["__any__", "!Benign"], 3),
+    ([], 6),
+]
+
+
+@pytest.mark.parametrize("names, expected", FL_TAG_FILTER_CASES)
+def test_first_last_tag_chips_keep_the_rows_the_grid_keeps(tagged_fl, store, names, expected):
+    """The chips are the grid ribbon's, so they have to select the grid's
+    rows: the same keys through Store.build_view and through the plugin."""
+    client, sid, tags = tagged_fl
+    keys = _tag_keys(tags, *names)
+    assert _fl_rows_kept(client, sid, keys) == expected
+    assert store.build_view(sid, {"tags": keys})["row_count"] == expected
+
+
+@pytest.mark.parametrize("old, names", [
+    ({"mode": ""}, []),
+    ({"mode": "any"}, ["__any__"]),
+    ({"mode": "none"}, ["__none__"]),
+    ({"mode": "ids", "ids": []}, []),
+    ({"mode": "ids", "ids": ["Suspicious", "TA"]}, ["Suspicious", "TA"]),
+])
+def test_first_last_reads_the_tag_filter_it_used_to_send(tagged_fl, old, names):
+    """Before the chips the tab sent a select's {mode, ids}. Each of its
+    four answers is a set of chips, and a script still sending one gets the
+    rows those chips keep."""
+    client, sid, tags = tagged_fl
+    if old.get("ids"):
+        old = {**old, "ids": [tags[n] for n in old["ids"]]}
+    assert _fl_rows_kept(client, sid, old) == _fl_rows_kept(client, sid, _tag_keys(tags, *names))
+
+
+def test_first_last_tag_chips_on_a_merge_match_each_row_through_its_own_member(tagged_fl, store, write_csv):
+    """Invariant #9. A merge's tags live on its members, keyed by the
+    member's own rid — and rids collide across members, so matching on rid
+    alone would count the second table's rows 1, 2 and 4 as Suspicious too."""
+    client, sid, tags = tagged_fl
+    other = store.ingest_csv(write_csv(FL_ROWS, "fl_other.csv"), name="fl_other", build_fts=False)["id"]
+    store.set_tags(other, [6], tags["Suspicious"], True)
+    mid = store.create_merge("fltags", [sid, other])["id"]
+    for names, expected in [(["Suspicious"], 4), (["__none__"], 7), (["Suspicious", "!Benign"], 3),
+                            (["!Suspicious"], 8), (["__any__", "!Benign"], 4)]:
+        keys = _tag_keys(tags, *names)
+        assert store.build_view(mid, {"tags": keys})["row_count"] == expected, names
+        assert _fl_merge_rows_kept(client, mid, keys) == expected, names
+
+
+def _fl_merge_rows_kept(client, mid, keys):
+    """The rows a merge's preview grouped. Its members hold the same rows,
+    so a group can hold one row of each: the sizes are summed rather than
+    the groups counted, off each group's first row (an Only is both)."""
+    out = _fl(client, "preview", source_id=mid, group_by=["When", "Host", "User", "EventId"],
+              sort_column="When", columns=[], template="{which}:{count}", tags=keys)
+    return sum(int(r[-1].split(":")[1]) for r in out["rows"] if not r[-1].startswith("Last"))
+
+
 def test_first_last_rejects_a_bad_tag_filter(fl_client):
     client, sid = fl_client
-    for tags in ({"mode": "wat"}, {"mode": "ids", "ids": ["TA"]}):
+    for tags in ({"mode": "wat"}, {"mode": "ids", "ids": ["TA"]}, "1", ["wat"], [True], [999], ["!999"]):
         r = client.post("/api/plugin/first_last/preview", json=dict(
             source_id=sid, group_by=["User"], sort_column="When",
             columns=[], template="{which}", tags=tags))
-        assert r.status_code == 400, r.text
+        assert r.status_code == 400, (tags, r.text)
+    # A deleted tag is named, not grouped as "no rows".
+    r = client.post("/api/plugin/first_last/preview", json=dict(
+        source_id=sid, group_by=["User"], sort_column="When", columns=[], template="{which}", tags=[999]))
+    assert "No tag 999" in r.json()["detail"]
 
 
 def test_first_last_carry_order_is_the_output_order(fl_client):

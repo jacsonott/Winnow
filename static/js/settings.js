@@ -9,7 +9,7 @@ import { VALUE_FILTER_AUTO_MAX, syncSearchKeyCopy } from './filters.js';
 import { headH, rScroll, render, syncSpacer, vScroll } from './grid.js';
 import { drawRail, rebuildGroupPrefix, renderGrouped, writeClipboardText } from './grouping.js';
 import { syncHistogramPanel } from './histogram.js';
-import { shutdownWinnow } from './home.js';
+import { restartWinnow, shutdownWinnow } from './home.js';
 import { ACTION_LABELS, FIXED_KEYS, defaultKeymap, findKeyConflict, keyLabel, keySpecFromEvent, saveKeymap } from './keymap.js';
 import { buildPluginsPanel } from './pluginmanager.js';
 import { listBundles, openPluginBundlesModal } from './bundles.js';
@@ -22,6 +22,7 @@ import { S, gridRowCount, dashboardCreatorMode } from './state.js';
 import { keepingFocus } from './tables.js';
 import { buildDefaultTagsEditor } from './tags.js';
 import { openSavedFiltersModal, setTimeframeAcrossTables, timeframeAcrossTables, updateFiltersButton, updateTimeRangeButton } from './timeframe.js';
+import { renderTimelineTimeRange } from './timeline.js';
 import { TS_FORMATS, formatTimestamp } from './tsformat.js';
 import { markModalAction, confirmDialog, dropdownMenu, modal, promptDialog, sectionPanes } from './ui.js';
 
@@ -1188,7 +1189,7 @@ export function openSettings(where) {
     const list = el('div', 'settings-keys');
 
     // Every change to a binding goes through here: the toolbar copy that
-    // spells a key (⏱ Timeframe's toggle/open keys, the Histogram
+    // spells a key (⏱ Timeframe's toggle/open keys, the Timeline's too, the Histogram
     // button's show/hide key, the search button's tooltip and the search
     // box's placeholder) is built from S.keymap when its control syncs,
     // so a rebinding has to rebuild it too or it names the old key until
@@ -1198,6 +1199,7 @@ export function openSettings(where) {
     function keymapChanged() {
       saveKeymap();
       updateTimeRangeButton();
+      renderTimelineTimeRange();
       syncHistogramPanel();
       syncSearchKeyCopy();
       renderList();
@@ -1455,7 +1457,13 @@ export function openSettings(where) {
    bad update is `python update.py --rollback` away from undone. That is
    the way back: this panel has no rollback button (/api/updates/rollback
    exists, but nothing in the UI calls it), and the CLI still works when
-   an update has broken the UI. */
+   an update has broken the UI.
+
+   The new files only run once the server starts again. When it can start
+   itself again (/api/version's can_restart: it was started by `python
+   server.py`), the install confirm offers to restart as soon as they are
+   in, ticked, and Restart now stays on offer after an install that
+   didn't; otherwise the panel says to restart Winnow, as it always has. */
 export function buildUpdatesPanel(b) {
   const status = el('div', 'fb-help');
   const notes = el('pre', 'update-notes');
@@ -1464,8 +1472,12 @@ export function buildUpdatesPanel(b) {
   const checkBtn = el('button', 'btn ghost', 'Check for updates');
   const installBtn = el('button', 'btn', 'Install update');
   installBtn.hidden = true;
-  acts.append(checkBtn, installBtn);
+  const restartBtn = el('button', 'btn primary', 'Restart now');
+  restartBtn.hidden = true;
+  restartBtn.title = 'Restart Winnow to run the version just installed. The open case reopens and every window reloads.';
+  acts.append(checkBtn, installBtn, restartBtn);
 
+  let canRestart = false;
   const version = el('div', 'fb-help', 'Version: …');
   api('/api/version')
     .then((r) => {
@@ -1475,8 +1487,44 @@ export function buildUpdatesPanel(b) {
       version.textContent = r.is_release
         ? `Winnow ${r.version}`
         : `Winnow ${r.version} — ${r.source.replace('@', ' build ').slice(0, 26)}`;
+      canRestart = !!r.can_restart;
     })
     .catch(() => { version.textContent = 'Version: unknown'; });
+
+  // The tick box both installs offer, or null when there is nothing to
+  // restart into. A fresh object per confirm: confirmDialog writes the
+  // answer back into it.
+  const restartChoice = () => (canRestart
+    ? { label: 'Restart Winnow when it’s installed', checked: true }
+    : null);
+  // How a confirm ends: what the box does, or the instruction it replaces.
+  const howItRuns = (choice, later) => (choice
+    ? 'With the box below ticked, Winnow restarts as soon as it’s installed, reopens the '
+      + 'same case and reloads every open window.'
+    : later);
+
+  // What was installed, which the status keeps saying while it restarts.
+  let done = '';
+  const restart = async () => {
+    restartBtn.disabled = true;
+    status.textContent = `${done} Restarting…`;
+    try {
+      if (await restartWinnow()) return;   // the restart screen takes it from here
+      status.textContent = `${done} Restart Winnow to run it.`;
+    } catch (e) {
+      status.textContent = `${done} ${e.message}`;
+    }
+    restartBtn.disabled = false;
+  };
+  restartBtn.onclick = restart;
+  const installed = (what, choice, toastText) => {
+    installBtn.hidden = true;
+    done = what;
+    restartBtn.hidden = !canRestart;
+    if (canRestart && choice && choice.checked) { restart(); return; }
+    status.textContent = `${done} Restart Winnow to run it.`;
+    toast(toastText, 12000);
+  };
 
   b.append(version, acts, status, notes,
     el('div', 'fb-help',
@@ -1515,12 +1563,13 @@ export function buildUpdatesPanel(b) {
 
   installBtn.onclick = async () => {
     if (!latest) return;
+    const choice = restartChoice();
     const ok = await confirmDialog(
       `Install Winnow ${latest.latest}?\n\n`
       + 'Your saved filters, tags, installed plugins, case list and case files are kept — '
       + 'only the program files are replaced, and the current version is backed up first.\n\n'
-      + 'Winnow has to be restarted afterwards to run the new version.',
-      { okLabel: `Install ${latest.latest}` });
+      + howItRuns(choice, 'Winnow has to be restarted afterwards to run the new version.'),
+      { okLabel: `Install ${latest.latest}`, check: choice });
     if (!ok) return;
     installBtn.disabled = true;
     status.textContent = 'Downloading and installing…';
@@ -1532,9 +1581,8 @@ export function buildUpdatesPanel(b) {
       installBtn.disabled = false;
       return;
     }
-    installBtn.hidden = true;
-    status.textContent = `Updated ${res.previous_version} → ${res.version}. Restart Winnow to run it.`;
-    toast(`Updated to ${res.version} — restart Winnow to run the new version`, 12000);
+    installed(`Updated ${res.previous_version} → ${res.version}.`, choice,
+      `Updated to ${res.version} — restart Winnow to run the new version`);
   };
 
   /* Alt+right-click on either button syncs to the tip of develop instead —
@@ -1553,20 +1601,20 @@ export function buildUpdatesPanel(b) {
     status.textContent = 'Checking develop…';
     try {
       const tip = await post('/api/updates/check', { dev: true });
+      const choice = restartChoice();
       const ok = await confirmDialog(
         `Sync to ${tip.branch} build ${tip.short}?\n\n`
         + (tip.message ? `${tip.message}${tip.committed_at ? ` (${tip.committed_at.slice(0, 10)})` : ''}\n\n` : '')
         + 'This is unreleased code. Your saved filters, tags, installed plugins, case list and '
         + 'case files are kept, and the current version is backed up first — '
         + '"python update.py --rollback" undoes it.\n\n'
-        + 'Winnow has to be restarted afterwards to run it.',
-        { okLabel: `Sync to ${tip.short}` });
+        + howItRuns(choice, 'Winnow has to be restarted afterwards to run it.'),
+        { okLabel: `Sync to ${tip.short}`, check: choice });
       if (!ok) { status.textContent = before; return; }
       status.textContent = `Downloading and installing ${tip.branch} build ${tip.short}…`;
       const res = await post('/api/updates/apply', { confirm: true, dev: true });
-      installBtn.hidden = true;
-      status.textContent = `Synced to ${res.branch} build ${res.short}. Restart Winnow to run it.`;
-      toast(`Synced to ${res.branch} build ${res.short} — restart Winnow to run it`, 12000);
+      installed(`Synced to ${res.branch} build ${res.short}.`, choice,
+        `Synced to ${res.branch} build ${res.short} — restart Winnow to run it`);
     } catch (err) {
       status.textContent = err.message;
     } finally {
@@ -1581,6 +1629,20 @@ export function buildUpdatesPanel(b) {
    fire during load, so the order these run in doesn't matter — the
    startup steps that DO depend on order live in main.js instead. */
 export function wireSettings() {
+// Another window on this Winnow changed the look. The event only fires in
+// the OTHER windows of the origin, which is the point: a pop-out
+// (popout.js) has no Settings of its own and follows the main window's,
+// and two windows of one install should not show two skins. The remote
+// mode is the machine's (see saveAppearance), so it is kept, not reread.
+window.addEventListener('storage', (e) => {
+  if (e.key !== APPEARANCE_KEY) return;
+  S.appearance = { ...loadAppearance(), remoteSession: S.appearance.remoteSession };
+  document.documentElement.setAttribute('data-style', S.appearance.style);
+  paintStripes();   // before paintTheme, whose announce carries the value
+  paintTheme();
+  paintAccent();
+  paintDensity();
+});
 window.addEventListener('resize', () => {
   // A lone base column is sized from the viewport (columns.fillsGrid), so
   // the header has to follow the window as well as the rows.

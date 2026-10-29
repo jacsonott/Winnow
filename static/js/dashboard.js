@@ -21,6 +21,7 @@ import { S } from './state.js';
 import { updateFiltersButton, updateTimeRangeButton } from './timeframe.js';
 import { dropdownMenu, modal, oneAtATime, promptDialog, confirmDialog } from './ui.js';
 import { rebuildView } from './view.js';
+import { inPopout, pageElsewhere, sendToMain } from './popout.js';
 
 let widgets = [];   // the CURRENT board's widgets (the one with S.dashboardId)
 /* The board `widgets` was loaded from. Usually S.dashboardId, but not
@@ -197,6 +198,7 @@ async function persist() {
 /* --------------------------------------------------------- show a board */
 
 export async function showDashboard(id) {
+  if (pageElsewhere('dashboard:' + id)) return;
   recordTabVisit({ kind: 'page', key: 'dashboard:' + id });
   S.activeTab = 'dashboard';
   S.dashboardId = id;
@@ -627,6 +629,8 @@ const deepCopy = (x) => JSON.parse(JSON.stringify(x));
    either `where` (conditions ANDed) or `tree` (a whole filter-tree node,
    for the OR-shaped ones); `column` is what a clicked value filters on. */
 export async function drillInto(w, extra = {}) {
+  // The rows go in the grid, and a pop-out's grid is the main window's.
+  if (inPopout()) { sendToMain('drill', w, extra); return; }
   const drill = w.drill;
   if (!drill) {
     if (w.source === 'sql' && w.query && w.query.sql) return openAsQuery(w);

@@ -10036,7 +10036,7 @@ class Store:
         }
 
     def build_timeline(self, configs: dict[int, dict] | None = None, tag_ids: list[int] | None = None,
-                       op_token: str | None = None, ts_range: list[str] | None = None,
+                       op_token: str | None = None, time_range: dict | None = None,
                        exclude_sources: list[int] | None = None,
                        context: list[str] | None = None, fold: bool = False,
                        unfold: list[list[int]] | None = None) -> dict:
@@ -10071,12 +10071,20 @@ class Store:
         table chips): the tables switched OFF rather than the ones on, for
         the reason the tag chips remember theirs that way — a table tagged
         after the list was read is on the Timeline, not missing from it.
-        `ts_range` is [start, end), normalised 'YYYY-MM-DD HH:MM:SS' text
-        compared with the line's own timestamp (the strip's drag); a line
-        with no timestamp has no place in a stretch of time and is left out
-        while one is set.
+        `time_range` is the Timeline's timeframe filter, `{start, end}`
+        with either end optional: the table pages' timeframe on this page
+        (the ⏱ Timeframe dialog, and the overview strip's drag, which writes
+        the same range). Its bounds are read the way the grid's timeframe
+        reads its own (_ts_normalize: ISO, US M/D/YYYY, month names; a
+        date alone is midnight) and both ends are inclusive, as there
+        (_compile_where's BETWEEN), so a range typed on a table and here
+        keeps the same rows. Each line is compared by its own timestamp,
+        the one it is ordered by; a line with no timestamp has no place in
+        a stretch of time and is left out while one is set. A bound that is
+        not a timestamp is a ValueError (400) rather than a filter that
+        quietly matches nothing.
 
-        `context` is [start, end) as well: the rows around a finding (the
+        `context` is [start, end): the rows around a finding (the
         detail pane's "What else happened then"). Every row of every real
         table whose Timeline timestamp falls in it and that is not a line
         already — untagged, or carrying only tags switched off — joins the
@@ -10161,11 +10169,26 @@ class Store:
                 params.extend(tag_ids)
 
         where = ""
-        if ts_range is not None:
-            if len(ts_range) != 2 or not all(isinstance(x, str) and x for x in ts_range):
-                raise ValueError("ts_range must be [start, end]")
-            where = "WHERE ts >= ? AND ts < ? "
-            params.extend(ts_range)
+        if time_range is not None:
+            if not isinstance(time_range, dict):
+                raise ValueError("time_range must be {start, end}")
+            bounds = []
+            for key, test in (("start", "ts >= ?"),
+                              # A derived timestamp keeps its fraction of a
+                              # second (_timeline_parts), and 13:22:01.5 is
+                              # inside an end of 13:22:01: the end is
+                              # compared to the second, as the grid's is.
+                              ("end", "substr(ts, 1, 19) <= ?")):
+                raw = time_range.get(key)
+                if raw is None or not str(raw).strip():
+                    continue
+                norm = _ts_normalize(raw)
+                if norm is None:
+                    raise ValueError(f"time_range {key} is not a timestamp: {raw!r}")
+                bounds.append(test)
+                params.append(norm)
+            if bounds:
+                where = f"WHERE {' AND '.join(bounds)} "
 
         vid = self._next_view_id()
         rows_table = f"{vid}_rows" if fold else None

@@ -11,6 +11,7 @@ import { scanWatchlistForSources, watchlistScanRunning } from './watchlist.js';
 import { loadSources } from './sources.js';
 import { S } from './state.js';
 import { refreshSourcesQuietly } from './tables.js';
+import { announceChange } from './popout.js';
 
 /* ---------------------------------------------------------- import jobs */
 
@@ -100,7 +101,12 @@ export function uploadWithProgress(url, fd, name) {
         const err = new Error((typeof detail === 'string' ? detail : detail && detail.message) || xhr.statusText);
         err.status = xhr.status;
         err.detail = detail;
-        caseRefused(err, sentCase);
+        // Not the quiet CASE_LEFT_MESSAGE every other request left behind
+        // by a case switch gets: this one is a file the analyst asked to
+        // have in a case, and it is in none. They need to hear that.
+        if (caseRefused(err, sentCase) && err.aborted) {
+          err.message = 'this window opened another case before it finished uploading, so it was not imported';
+        }
         reject(err);
       }
     };
@@ -311,6 +317,9 @@ export async function pollJobs() {
       // re-select side effects (same reasoning as the Tables modal poll).
       try { await refreshSourcesQuietly(); } catch {}
     }
+    // Pop-outs keep a source list of their own and run no jobs poll: they
+    // hear about the new tables from here (popout.js).
+    if (finishedNow.length) announceChange(['sources']);
     // That refresh leaves a live grid alone on purpose, so the table a
     // derive ran on is brought up to date separately: its header still
     // says "(building…)" and its cached rows predate the values.

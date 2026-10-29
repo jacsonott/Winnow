@@ -522,14 +522,17 @@ def test_request_against_closed_store_is_409_not_500(client, ingested):
     rather than an unhandled sqlite3.ProgrammingError traceback. The
     message deliberately avoids the word 'expired': app.js auto-rebuilds
     on 409s that contain it, and a stale tab auto-rebuilding against a
-    newly opened case could show the wrong case's data."""
+    newly opened case could show the wrong case's data. Structured, with
+    `case_closed`, so the page that switched can tell its own request
+    from another window's (core.js's caseRefused)."""
     store, source_id = ingested
     store.close()
     r = client.post("/api/view", json={"source_id": source_id})
     assert r.status_code == 409
     detail = r.json()["detail"]
-    assert "closed" in detail
-    assert "expired" not in detail.lower()
+    assert detail["error"] == "case_closed"
+    assert "closed" in detail["message"]
+    assert "expired" not in detail["message"].lower()
     # GET endpoints go through the same handler
     r = client.get("/api/sources")
     assert r.status_code == 409

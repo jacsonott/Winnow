@@ -344,6 +344,16 @@ A plugin can also fail because it needs a newer plugin API than this
 Winnow provides; the error says so. Switch it off, fix or remove it, or
 update Winnow. See [Plugins](Plugins.md).
 
+## Winnow didn't come back after restarting
+
+A restart from **Settings → Updates** normally takes a few seconds. If the
+**Restarting Winnow…** screen changes to **Winnow hasn’t come back**, the
+new version did not start on this address. Look at the terminal Winnow was
+started from, if there is one, for the reason. Then start Winnow again the
+way you usually do: the window reloads by itself if Winnow comes back on the
+same address, and your case file is untouched either way. If the new
+version will not start at all, roll it back as below.
+
 ## An update broke something
 
 Roll back from a terminal in the Winnow folder:

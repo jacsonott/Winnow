@@ -15,7 +15,6 @@ they are, timeline_position finds the line again) is tests/test_timeline.py.
 
 from __future__ import annotations
 
-import datetime as dt
 
 import pytest
 
@@ -94,8 +93,7 @@ def _open_timeline(page):
 
 
 def _line(page, ts):
-    # By the row's own timestamp: the cell says only the time of day, and
-    # the day once, at the first line of each.
+    # By the row's own timestamp, which is also what the cell says.
     return page.locator(f"#timelineRows .timeline-row[data-ts^='{ts}']")
 
 
@@ -201,9 +199,14 @@ def test_the_open_mark_opens_the_row_in_its_table(page, two_hosts):
         "(id) => __winnow.S.activeTab === 'grid' && __winnow.S.sourceId === id", arg=two_hosts["ws"])
 
 
-def test_the_header_names_the_day_of_the_top_line(page, two_hosts):
+def test_every_line_says_its_whole_iso_timestamp(page, two_hosts):
+    """YYYY-MM-DD HH:MM:SS on every line, the date included: the shape the
+    grid, the exports and the timeframe filter write, and what is read
+    across into a report. It was the time of day, with the day said at
+    the first line of each day and over the column."""
     _open_timeline(page)
-    top = page.locator("#timelineRows .timeline-row:not(.pending)").first.get_attribute("data-ts")
-    day = dt.date.fromisoformat(top[:10])
-    want = f"Timestamp · {day.strftime('%a')} {day.day} {day.strftime('%b')}"
-    assert page.locator("#timelineColTs").text_content() == want
+    page.wait_for_selector("#timelineRows .timeline-row:not(.pending)")
+    rows = page.evaluate("""() => [...document.querySelectorAll('#timelineRows .timeline-row:not(.pending)')]
+        .map((r) => [r.dataset.ts, r.querySelector('.tl-col-ts').textContent])""")
+    assert rows and all(text == ts and len(ts) == 19 for ts, text in rows), rows
+    assert page.locator("#timelineColTs").text_content() == "Timestamp"

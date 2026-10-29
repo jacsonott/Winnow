@@ -1293,8 +1293,16 @@ export default function mount(container, winnow) {
           + (colVals === null ? ';border-left:2px solid var(--line-2)' : '');
         if (v != null && !isTotal) {
           td.style.cursor = 'pointer';
-          td.title = 'Click to see the rows behind this cell';
+          td.title = 'Click to see the rows behind this cell — right-click to show them in the grid';
           td.onclick = () => showDetail(rowPath, colVals || []);
+          td.oncontextmenu = (e) => {
+            e.preventDefault();
+            const plan = gridFilterFor(rowPath, colVals || []);
+            winnow.dropdownMenu(td, [
+              { label: 'Show the rows here', onclick: () => showDetail(rowPath, colVals || []) },
+              gridMenuItem(plan),
+            ]);
+          };
         }
         tr.append(td);
       }
@@ -1333,18 +1341,100 @@ export default function mount(container, winnow) {
 
   /* -------------------------------------------------------- details */
 
+  /* The rows behind a cell, as the grid's own filters — so they can be
+     read, tagged and exported there, beside everything else the grid does.
+     The cell's values go into the column filter boxes (the filter bar shows
+     them); the Filters area becomes filter-builder conditions; the tag
+     chips are already in the ribbon's spelling. Each operator is matched to
+     the grid's one that compiles to the same SQL (Store._compile_condition
+     and this plugin's _where), so the grid lands on the very rows the cell
+     counted — tests/test_plugins.py holds the two to that, operator by
+     operator.
+
+     The one the grid can't say the same way is > / < on a column it holds
+     as text: the pivot compares numbers there, the grid would compare
+     strings. That is refused, by name, rather than showing other rows under
+     the same filter. The pivot counts the whole table, so the timeframe is
+     turned off on the way (openFiltered says so when it does). */
+  function gridFilterFor(rowPath, colVals) {
+    const src = currentSource();
+    if (!src) return { refused: 'Pick a table first' };
+    const typeOf = (name) => ((src.columns || []).find((c) => c.name === name) || {}).type;
+    const text = (v) => (v == null ? '' : String(v));
+    const pairs = [
+      ...rowPath.map((v, i) => ({ column: state.rows[i], value: text(v) })),
+      ...colVals.map((v, i) => ({ column: state.cols[i], value: text(v) })),
+    ];
+    const where = [];
+    for (const f of state.filters) {
+      const kind = ((state.meta.operators || []).find((o) => o.id === f.op) || {}).value_kind;
+      if (kind === 'many') {
+        const vals = (f.values || []).map(text);
+        if (!vals.length) continue;   // "(All)", as the pivot reads it
+        if (f.op === 'in') where.push({ column: f.column, op: 'in', value: vals });
+        else {
+          for (const v of vals) {
+            where.push(v === '' ? { column: f.column, op: 'not_empty' } : { column: f.column, op: 'not_equals', value: v });
+          }
+        }
+      } else if (kind === 'one') {
+        const v = text(f.value);
+        if (v === '') continue;
+        if (f.op === 'gt' || f.op === 'lt') {
+          const sign = f.op === 'gt' ? '>' : '<';
+          if (typeOf(f.column) !== 'number') {
+            return { refused: `The grid compares ${f.column} as text, so “${sign} ${v}” would find other rows there than it counted here` };
+          }
+          where.push({ column: f.column, op: sign, value: v });
+        } else {
+          where.push({ column: f.column, op: f.op, value: v });   // contains, not_contains, starts
+        }
+      } else {
+        where.push({ column: f.column, op: f.op });               // empty, not_empty
+      }
+    }
+    return { pairs, where, tags: [...state.tags] };
+  }
+
+  function showInGrid(plan) {
+    if (plan.refused) { toast(plan.refused, 6000); return; }
+    winnow.openFiltered(state.sourceId, plan.pairs, { where: plan.where, tags: plan.tags, clearTimeframe: true });
+  }
+
+  function gridMenuItem(plan) {
+    return {
+      label: 'Show these rows in the grid',
+      disabled: !!plan.refused,
+      title: plan.refused || 'Open the table filtered to this cell, the Filters area and the tag chips',
+      onclick: () => showInGrid(plan),
+    };
+  }
+
   async function showDetail(rowPath, colVals) {
     const cell = [
       ...rowPath.map((v, i) => ({ column: state.rows[i], value: v })),
       ...colVals.map((v, i) => ({ column: state.cols[i], value: v })),
     ];
     const label = cell.map((c) => `${c.column}=${c.value === '' ? BLANK : c.value}`).join(' · ');
+    const plan = gridFilterFor(rowPath, colVals);
     modal(`Rows behind ${label}`, (b) => {
-      b.append(el('p', 'note-status', 'Reading…'));
+      // Above the rows, so it is there before they load — and when there
+      // are more than the 500 this shows, it is the way to all of them.
+      const bar = el('div', 'row-actions');
+      bar.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:8px';
+      const toGrid = el('button', 'btn', 'Show these rows in the grid');
+      toGrid.disabled = !!plan.refused;
+      toGrid.title = plan.refused || 'Open the table filtered to this cell, the Filters area and the tag chips';
+      toGrid.onclick = () => { winnow.closeModal(); showInGrid(plan); };
+      bar.append(toGrid);
+      if (plan.refused) bar.append(el('span', 'note-status', plan.refused));
+      const body = el('div');
+      b.append(bar, body);
+      body.append(el('p', 'note-status', 'Reading…'));
       post(`${winnow.base}/detail`, { source_id: state.sourceId, cell, filters: state.filters, tags: state.tags })
         .then((res) => {
-          b.replaceChildren();
-          if (!res.rows.length) { b.append(el('p', 'note-status', 'No rows.')); return; }
+          body.replaceChildren();
+          if (!res.rows.length) { body.append(el('p', 'note-status', 'No rows.')); return; }
           const wrap = el('div');
           wrap.style.cssText = 'overflow:auto;max-height:60vh';
           const t = el('table');
@@ -1371,13 +1461,13 @@ export default function mount(container, winnow) {
           }
           t.append(tb);
           wrap.append(t);
-          b.append(wrap);
+          body.append(wrap);
           if (res.truncated) {
-            b.append(el('p', 'note-status',
-              `First ${res.rows.length.toLocaleString()} rows — open the table and filter to see the rest.`));
+            body.append(el('p', 'note-status',
+              `First ${res.rows.length.toLocaleString()} rows — Show these rows in the grid for all of them.`));
           }
         })
-        .catch((e) => { b.replaceChildren(el('p', 'note-status', 'Could not read rows: ' + e.message)); });
+        .catch((e) => { body.replaceChildren(el('p', 'note-status', 'Could not read rows: ' + e.message)); });
     }, { wide: true });
   }
 

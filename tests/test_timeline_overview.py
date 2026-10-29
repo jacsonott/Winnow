@@ -1,12 +1,14 @@
 """The Timeline's overview strip, server side: Store.timeline_overview's
-bars over the built view, and the two ways the strip narrows the build —
-a stretch of time (`ts_range`) and tables switched off
+bars over the built view, and the two ways the build is narrowed from
+the strip — the timeframe (`time_range`, which the strip's drag writes
+and the ⏱ Timeframe dialog types) and tables switched off
 (`exclude_sources`).
 
 The strip's clicks take the list to a bar's `first` line, so the property
-that matters most is that `first` IS the first line of that bar; the
-drag sets `ts_range` from bar edges, so the range is half-open and a bar's
-last fraction of a second still belongs to it."""
+that matters most is that `first` IS the first line of that bar. The
+timeframe is the table pages' timeframe on this page, so it reads its
+bounds the way the grid's does and keeps both ends: a range typed on a
+table and on the Timeline keeps the same rows."""
 
 from __future__ import annotations
 
@@ -91,20 +93,75 @@ def test_the_first_tag_is_the_first_of_the_tags_switched_on(store, write_csv):
     assert {k for bar in ov["buckets"] for k in bar["split"]} == {str(b)}
 
 
-def test_a_stretch_of_time_is_start_inclusive_end_exclusive(store, write_csv):
-    evtx, web, a, b = _case(store, write_csv)
-    v = store.build_timeline(ts_range=["2026-01-06 00:00:00", "2026-01-07 00:00:00"])
-    assert [r["ts"] for r in _lines(store, v["view_id"])] == [
+def _ts_in(store, **time_range):
+    v = store.build_timeline(time_range=time_range)
+    return [r["ts"] for r in _lines(store, v["view_id"])]
+
+
+def test_a_timeframe_keeps_both_its_ends(store, write_csv):
+    """Inclusive at both ends, as the grid's timeframe is (BETWEEN): a
+    line at exactly the start and one at exactly the end are both in."""
+    _case(store, write_csv)
+    assert _ts_in(store, start="2026-01-05 10:00:00", end="2026-01-05 10:20:00") == [
+        "2026-01-05 10:00:00", "2026-01-05 10:20:00"]
+    # A whole day, its last second's fraction included.
+    assert _ts_in(store, start="2026-01-06 00:00:00", end="2026-01-06 23:59:59") == [
         "2026-01-06 11:00:00", "2026-01-06 23:59:59"]
-    # A line at exactly the start is in; one at exactly the end is not.
-    v = store.build_timeline(ts_range=["2026-01-05 10:00:00", "2026-01-05 10:20:00"])
-    assert [r["ts"] for r in _lines(store, v["view_id"])] == ["2026-01-05 10:00:00"]
+
+
+def test_a_timeframe_can_leave_either_end_open(store, write_csv):
+    _case(store, write_csv)
+    assert _ts_in(store, start="2026-01-06 11:00:00") == [
+        "2026-01-06 11:00:00", "2026-01-06 23:59:59", "2026-01-07 12:00:00"]
+    assert _ts_in(store, end="2026-01-05 10:20:00", start="") == [
+        "2026-01-05 10:00:00", "2026-01-05 10:20:00"]
+    # Neither end set is no timeframe at all.
+    assert len(_ts_in(store, start="", end=None)) == 5
+
+
+def test_a_timeframe_reads_its_bounds_as_the_grids_timeframe_does(store, write_csv):
+    """_ts_normalize, the grid's own reading: a date alone is midnight
+    (so an end of a bare date stops at its first second, as the wiki says
+    of the grid), and a US date reads as the same moment as its ISO twin."""
+    _case(store, write_csv)
+    assert _ts_in(store, start="2026-01-06", end="2026-01-07") == [
+        "2026-01-06 11:00:00", "2026-01-06 23:59:59"]
+    assert _ts_in(store, start="1/5/2026 10:00 AM", end="1/5/2026 10:20:00 AM") == [
+        "2026-01-05 10:00:00", "2026-01-05 10:20:00"]
+
+
+def test_a_timeframe_end_holds_a_derived_timestamps_fraction(store, write_csv):
+    """A derived column keeps its fraction of a second on the Timeline
+    (_timeline_parts uses it as it is), and 22:13:20.5 happened inside an
+    end of 22:13:20, which is how the grid, comparing whole seconds, reads
+    it too."""
+    sid = store.ingest_csv(write_csv([["Epoch", "What"], ["1700000000500", "half a second in"]],
+                                     name="ms.csv"), name="ms.csv", build_fts=False)["id"]
+    res = store.add_derived_column(sid, "When", "Epoch", "unix_epoch", {})
+    store.wait_for_ingest_job(res["job_id"], timeout=30)
+    store.set_tags(sid, [1], store.list_tags()[0]["id"], True)
+    configs = {sid: {"timestamp_column": "When"}}
+    v = store.build_timeline(configs, time_range={"start": "2023-11-14 22:13:20", "end": "2023-11-14 22:13:20"})
+    assert [r["ts"] for r in _lines(store, v["view_id"])] == ["2023-11-14 22:13:20.500000"]
+    v = store.build_timeline(configs, time_range={"end": "2023-11-14 22:13:19"})
+    assert v["row_count"] == 0
+
+
+def test_a_timeframe_bound_that_is_not_a_timestamp_is_refused(store, write_csv):
+    _case(store, write_csv)
+    for bad in ({"start": "yesterday"}, {"end": "last tuesday", "start": "2026-01-05"}):
+        try:
+            store.build_timeline(time_range=bad)
+        except ValueError as e:
+            assert "not a timestamp" in str(e)
+        else:
+            raise AssertionError(f"{bad} was taken as a timeframe")
 
 
 def test_the_bars_rescale_to_a_narrowed_timeline(store, write_csv):
     evtx, web, a, b = _case(store, write_csv)
     whole = store.timeline_overview(store.build_timeline()["view_id"])
-    v = store.build_timeline(ts_range=["2026-01-05 00:00:00", "2026-01-06 00:00:00"])
+    v = store.build_timeline(time_range={"start": "2026-01-05 00:00:00", "end": "2026-01-05 23:59:59"})
     narrow = store.timeline_overview(v["view_id"])
     assert narrow["width"] < whole["width"]
     assert sum(bar["n"] for bar in narrow["buckets"]) == v["row_count"] == 2
@@ -120,7 +177,9 @@ def test_a_line_with_no_time_is_left_out_of_a_stretch_and_off_the_bars(store, wr
     ov = store.timeline_overview(v["view_id"])
     assert ov["undated"] == 1
     assert sum(bar["n"] for bar in ov["buckets"]) == 5
-    v = store.build_timeline(ts_range=["2000-01-01 00:00:00", "2100-01-01 00:00:00"])
+    v = store.build_timeline(time_range={"start": "2000-01-01 00:00:00", "end": "2100-01-01 00:00:00"})
+    assert v["row_count"] == 5
+    v = store.build_timeline(time_range={"start": "2000-01-01 00:00:00"})
     assert v["row_count"] == 5
 
 
@@ -161,8 +220,10 @@ def test_overview_routes(client, write_csv, store):
     assert {k for bar in ov["buckets"] for k in bar["split"]} == {str(evtx)}
     assert client.get("/api/timeline_overview", params={"view_id": v["view_id"], "by": "hosts"}).status_code == 400
     assert client.get("/api/timeline_overview", params={"view_id": "view_nope"}).status_code == 409
-    bad = client.post("/api/timeline", json={"tag_ids": [a], "ts_range": ["2026-01-05 00:00:00"]})
+    bad = client.post("/api/timeline", json={"tag_ids": [a], "time_range": {"start": "not a time"}})
     assert bad.status_code == 400
+    bad = client.post("/api/timeline", json={"tag_ids": [a], "time_range": ["2026-01-05 00:00:00"]})
+    assert bad.status_code in (400, 422)
     ok = client.post("/api/timeline", json={"tag_ids": [a, b],
-                                            "ts_range": ["2026-01-07 00:00:00", "2026-01-08 00:00:00"]})
+                                            "time_range": {"start": "2026-01-07 00:00:00", "end": "2026-01-08"}})
     assert ok.json()["row_count"] == 1

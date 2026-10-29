@@ -47,7 +47,7 @@ PLUGIN = {
     "description": "Excel-style pivot tables: drag fields into rows, columns and values for cross-tabs with subtotals.",
 }
 
-WINNOW_API_VERSION = 13   # winnow.dropdownMenu: the click-to-place menu under a field
+WINNOW_API_VERSION = 15   # winnow.openFiltered options: "Show these rows in the grid"
 
 # Grouping levels per refresh: one UNION ALL arm each over the base. Rows ×
 # columns levels stay small in practice (Excel's own field wells get
@@ -341,12 +341,27 @@ def _where(src, filters, coltypes, tag_clauses=()):
             vals = [v for v in (f.get("values") or [])]
             if not vals:
                 continue  # an empty selection filters nothing, like Excel's "(All)"
+            # (blank) in the list is the empty cell, NULL included — what the
+            # value list shows it as (it lists a NULL as ''), what a click on
+            # a (blank) cell means (/detail), and what '' in a list means to
+            # the grid (Store._compile_condition), which "Show these rows in
+            # the grid" hands this filter to. As a bare IN it found only ''.
+            blank = any(v in (None, "") for v in vals)
+            vals = [v for v in vals if v not in (None, "")]
             marks = ",".join("?" * len(vals))
-            # A NULL never matches IN/NOT IN, so the not_in arm spells out
-            # that a missing value is *kept* — otherwise excluding one value
-            # would silently drop every empty cell too.
-            clauses.append(f"{ident} IN ({marks})" if op == "in"
-                           else f"({ident} NOT IN ({marks}) OR {ident} IS NULL)")
+            empty = f"{ident} IS NULL OR {ident} = ''"
+            if op == "in":
+                clauses.append(f"({ident} IN ({marks}) OR {empty})" if vals and blank
+                               else f"{ident} IN ({marks})" if vals else f"({empty})")
+            else:
+                # A NULL never matches NOT IN, so this spells out that a
+                # missing value is *kept* — otherwise excluding one value
+                # would silently drop every empty cell too. Unless (blank) is
+                # one of the values excluded.
+                parts = [f"({ident} NOT IN ({marks}) OR {ident} IS NULL)"] if vals else []
+                if blank:
+                    parts.append(f"({ident} IS NOT NULL AND {ident} != '')")
+                clauses.append(" AND ".join(parts))
             params.extend(vals)
         elif kind == "one":
             val = f.get("value")

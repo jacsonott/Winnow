@@ -95,6 +95,16 @@ as `test_ingest_jobs.py`).
   window before the sweep ever takes it. If you write another concurrency
   test here, check it actually fails against the shape it's meant to catch.
 
+- **A browser test that only fails on a loaded runner may be a real race
+  in the app.** test_view_state.py's scroll wait timed out now and then
+  in CI for days and was waved through as pre-existing. It was a
+  product bug: a second, stray view build landing over the restored one
+  (see "Coming back to a table" in [ui.md](ui.md)). Before loosening a
+  wait, reproduce the failure: run the test on repeat with every core
+  busy (`python3 -c "while True: pass" &`, one per core), which turned
+  a rare CI failure into roughly one run in eight, and record what each
+  build and landing did in a `window` array to read back on failure.
+
 - **`pytest … | tail` reports tail's exit status, not pytest's.** A
   pipeline's status is its last command's, so `pytest -q | tail -5 && git
   commit …` commits on a red suite, and a script that gates on it passes
@@ -127,6 +137,19 @@ as `test_ingest_jobs.py`).
   gesture under test, and let the `api` fixture raise on a non-2xx
   answer rather than catching it: a cleanup call that 404'd and was
   swallowed is how that issue went unnoticed.
+
+- **A debounced save outlives the test that made it.** A module-scoped
+  page lives across tests, so a write the app puts off (tabState's
+  half-second debounce, a note's autosave) goes out in whichever test is
+  running by then. Start fresh in test_firstlast_state.py leaves one,
+  since the empty sheet it puts back saves itself as nothing, and the
+  read-failure test after it wrote its row through the API before
+  reloading. Depending on how long the tests between took, that save
+  landed over the row or in the test's own watch for writes, failing
+  the shard on develop now and then. Write the server-side state a test
+  depends on after the reload, which kills a timer still waiting. And a
+  check that a debounced write did NOT happen waits past the debounce:
+  a fast round trip can end before it, so the check looks too early.
 
 - **A click that lands while its target is being re-rendered fires
   nothing.** Not a refusal: the click hits a node that is being replaced,

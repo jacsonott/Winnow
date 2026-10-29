@@ -100,6 +100,15 @@ const connListeners = [];
 export function onConnectionChange(fn) { connListeners.push(fn); }
 function announce(up) { for (const fn of connListeners) fn(up); }
 
+/* Told after every request that could have changed something — any
+   method but GET — once the server has said yes. `path` is as sent. Pop-out
+   windows (popout.js) are the listener: each window holds its own copy of
+   the case's tags and tables, and this is how the others hear that one of
+   them wrote. A registry rather than an import, because this module
+   imports nothing (docs/notes/frontend-modules.md). */
+const mutationListeners = [];
+export function onMutation(fn) { mutationListeners.push(fn); }
+
 /* Which case this page's state belongs to: the token the server named it
    by (case_token, on /api/case/current and on every route that switches
    case). Every request carries it, and the server refuses (409
@@ -150,17 +159,45 @@ export async function switchCase(request) {
   }
 }
 
+/* What a request this page sent about the case it has since left fails
+   with, in place of the server's words. Those were written for ANOTHER
+   window switching the server ("This window is out of date … opened from
+   another window … Reload"), and on this page's own switch they were
+   false: a Timeline build, a plugin tab's state or the jobs poll still in
+   flight when the analyst opened another case came back as a toast telling
+   them to reload a window that was fine. Every catch in the app prints
+   e.message one way or another, so rather than teach each of them about
+   this one error, toast() and clientLog() drop anything carrying it —
+   nothing it could say is about a case anyone is still looking at. */
+export const CASE_LEFT_MESSAGE = 'Stopped: this window has opened another case since';
+
+export function isCaseLeftMessage(msg) {
+  return typeof msg === 'string' && msg.includes(CASE_LEFT_MESSAGE);
+}
+
 /* Whether a failed request was the server refusing it for naming a case it
    no longer has open. `sentCase` is the token the request went out with.
    A refusal of a request this page sent before its own switch is marked
    `aborted` (see api()): it asked about the case being left, and nobody
-   needs telling. Shared with jobs.js's upload XHR. */
+   needs telling. Shared with jobs.js's upload XHR.
+
+   Two refusals mean that. `case_changed` is the case guard's, for a
+   request that arrived after the switch. `case_closed` is the one a
+   request gets that arrived BEFORE it and was still running on the old
+   case when the switch closed it (server.py's closed_database_handler):
+   from the page's side it is the same request, about the same case, and
+   only the timing differs. Seen on another window's switch it still says
+   so, as it always has; the presence stream is what covers the page. */
 export function caseRefused(err, sentCase) {
   const d = err.detail;
-  if (err.status !== 409 || !d || d.error !== 'case_changed') return false;
+  if (err.status !== 409 || !d || (d.error !== 'case_changed' && d.error !== 'case_closed')) return false;
   err.caseChanged = true;
-  if (caseSwitching || sentCase !== caseToken) err.aborted = true;
-  else noticeServerCase(d.open || null);
+  if (caseSwitching || sentCase !== caseToken) {
+    err.aborted = true;
+    err.message = CASE_LEFT_MESSAGE;
+  } else if (d.error === 'case_changed') {
+    noticeServerCase(d.open || null);
+  }
   return true;
 }
 
@@ -215,11 +252,16 @@ export async function api(path, opts) {
     caseRefused(err, sentCase);
     throw err;
   }
+  if (o.method && o.method !== 'GET') {
+    for (const fn of mutationListeners) { try { fn(path, o.method); } catch (e) { console.error(e); } }
+  }
   return r.json();
 }
 
-export const post = (path, body, { signal } = {}) =>
-  api(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal });
+/* `keepalive` lets the request outlive the page — for a save made on
+   pagehide, which a plain fetch loses to the unload. */
+export const post = (path, body, { signal, keepalive } = {}) =>
+  api(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal, keepalive });
 
 /* Thin top-of-viewport progress indicator for anything that can take a
    real amount of time on a large source (a view rebuild — filter/sort/
@@ -235,6 +277,7 @@ export function setBusy(on) {
 }
 
 export function toast(msg, ms = 2600) {
+  if (isCaseLeftMessage(msg)) return;   // see CASE_LEFT_MESSAGE
   const t = $('toast');
   t.textContent = msg;
   t.hidden = false;
@@ -246,6 +289,7 @@ export function toast(msg, ms = 2600) {
    toast (it's only useful if it's still there when you look up) and
    dismissed by acting on it. */
 export function toastAction(msg, label, onclick, ms = 12000) {
+  if (isCaseLeftMessage(msg)) return;
   const t = $('toast');
   t.replaceChildren(el('span', null, msg));
   const btn = el('button', 'toast-action', label);
