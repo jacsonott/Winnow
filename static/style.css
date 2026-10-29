@@ -782,6 +782,13 @@ input::placeholder { text-overflow: ellipsis; }
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap; row-gap: 4px;
   padding: 6px 10px; background: var(--ink);
   border-bottom: 1px solid var(--line);
+  /* The stats, the buttons and the search are the toolbar's right-hand
+     side, and they stay there when it wraps: a line the spacer is on
+     gives the spacer all the slack, so this changes nothing there, and a
+     line below it — the right-hand side spilling over — hugs the right
+     edge instead of starting again at the left. The search used to jump
+     from the right edge to the left one as the window narrowed. */
+  justify-content: flex-end;
 }
 /* Under width pressure (tag counts, the search box, a 1280px laptop, the
    wider Phosphor/Blueprint fonts) the flex items used to share the squeeze
@@ -792,6 +799,10 @@ input::placeholder { text-overflow: ellipsis; }
    "drag a column header here" hint costs nothing. */
 .toolbar .btn, .sql-head .btn, .detail-head .btn, .dash-bar .btn, .wl-head .btn { white-space: nowrap; flex: 0 0 auto; }
 .toolbar > .group-strip { flex: 0 6 auto; min-width: 150px; } /* the first to give: its hint is decoration; 150px keeps the label and + Tag */
+/* The left-hand side's anchor against the flex-end above: on a narrow
+   window the strip can end up alone on the first line, with the ribbon
+   wrapped below it, and without this it would be pushed to the right. */
+.toolbar > .group-strip { margin-right: auto; }
 /* min-content, not 0: the ribbon may wrap its chips but never shrink
    past its widest chip, which is what let the chips spill out under the
    row count. And the toolbar itself wraps (above): when even that isn't
@@ -800,7 +811,15 @@ input::placeholder { text-overflow: ellipsis; }
    one-chip column and every button breaking its label. */
 .toolbar > .tag-ribbon { flex: 0 1 auto; min-width: min-content; }
 .toolbar > .spacer { flex: 1 1 0; }
-.toolbar > .search-wrap { flex: 0 0 auto; }                  /* the box you type in never shrinks */
+/* The icon, or the box and its Contains/Regex/Advanced, as one item, so
+   they move to the next line together. It wraps only once even the box
+   and its modes side by side are wider than the toolbar, and then each
+   keeps to the right edge like the rest of the right-hand side. */
+.toolbar > .search-group {
+  display: flex; align-items: center; gap: 10px; row-gap: 4px;
+  flex-wrap: wrap; justify-content: flex-end;
+}
+.search-group > .search-wrap { flex: 0 0 auto; }              /* the box you type in never shrinks */
 .group-strip-hint { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 /* Empty, the strip is one line — label, hint, + Tag — and clips rather than
    folding "+ Tag" under the label. With pills in it, it wraps as before. */

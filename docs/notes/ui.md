@@ -104,7 +104,21 @@ see [docs/notes/README.md](README.md) for the whole set.
   `nowrap` too), and **the toolbar itself `flex-wrap`s**, so once even
   that isn't enough (the search box open on a laptop) the stats and
   buttons move to a second line as a whole instead of the ribbon folding
-  into a one-chip column. The header bar has the same shape:
+  into a one-chip column. **What wraps keeps to its side.** `.toolbar` is
+  `justify-content: flex-end`: on a line the spacer is on, the spacer
+  takes all the slack and nothing moves, and every line below it — the
+  right-hand side spilling over — hugs the right edge. Before, those lines
+  started at the left, so the search jumped from one side of the toolbar
+  to the other as the window narrowed. The group strip's
+  `margin-right: auto` holds it at the left when it ends up alone on the
+  first line (the ribbon wrapped below it). The magnifier, the box and its
+  Contains/Regex/Advanced are one item, `.search-group`, so the box and its
+  modes move down together instead of splitting across two lines; the
+  group wraps inside itself only once the two side by side are wider than
+  the toolbar. `#advancedSearchBar` stays outside it.
+  `tests/ui/test_visual_pass.py` sweeps the width with the search closed
+  and open.
+  The header bar has the same shape:
   `.bar-actions` never shrinks and its buttons never wrap, `#sourceTabs`
   keeps `SOURCE_TABS_MIN` (140px) and it is `#pageTabs` — which scrolls —
   that shrinks (`flex: 0 1 auto`, 60px floor). A pressed segment in a
