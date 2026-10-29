@@ -2513,6 +2513,9 @@ textarea:focus { border-color: var(--accent); outline: none; }
 }
 .confirm-input:focus { border-color: var(--accent); outline: none; }
 .confirm-actions { display: flex; justify-content: flex-end; gap: 8px; }
+/* A tick box under the message (confirmDialog's `check`); .check-row
+   lines it up with its label. */
+.confirm-check { font-size: 13px; cursor: pointer; }
 .btn.danger { background: var(--danger-bg); border-color: var(--danger-border); color: var(--danger); }
 .btn.danger:hover { border-color: var(--danger); }
 /* A dialog's main action: the button that does what the dialog is for
@@ -4079,6 +4082,9 @@ html.remote .row.selected:hover { background: var(--row-selected); }
 }
 .case-gone-title { font-weight: 600; font-size: 15px; margin-bottom: 6px; }
 .case-gone-card p { margin: 0 0 10px; }
+/* The same cover while the server restarts (awaitRestart in connection.js):
+   expected and on its way back, so the accent rather than danger. */
+.restart-card { border-color: var(--accent); }
 
 /* Running as administrator (maybeWarnElevated in static/js/importer.js).
    Bottom left, clear of the toast and the connection banner (centre) and

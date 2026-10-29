@@ -507,8 +507,12 @@ on.
 
 Shows the installed version, with **Check for updates** and, when there is a
 newer release, **Install update**. Nothing is checked until you press the
-button. See [Updating](Installation.md#updating) for what an update keeps,
-the command-line updater, airgapped updates and rollback.
+button. The new version runs once Winnow restarts: the confirmation has a
+**Restart Winnow when it’s installed** box, ticked, and if you untick it,
+**Restart now** appears beside the buttons once the update is in. Either way
+Winnow comes back on the same case and every open window reloads by itself.
+See [Updating](Installation.md#updating) for what an update keeps, how the
+restart works, the command-line updater, airgapped updates and rollback.
 
 ## Shut down
 

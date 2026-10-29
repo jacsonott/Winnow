@@ -2,7 +2,7 @@
 
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { applyBundle } from './bundles.js';
-import { PAGE_ID, closePresence } from './connection.js';
+import { PAGE_ID, awaitRestart, closePresence } from './connection.js';
 import { $, api, dragHas, el, post, setBusy, setCaseToken, switchCase, toast } from './core.js';
 import { pad2 } from './tsformat.js';
 import { loadPlugins, openImportModal, queueFiles } from './importer.js';
@@ -92,6 +92,30 @@ export async function shutdownWinnow() {
     el('div', null, 'The server has shut down. You can close this tab — start Winnow again with "python server.py".'),
   );
   document.body.replaceChildren(note);
+}
+
+/* Stop the server and start it again, so an update that just landed is
+   what runs (Settings → Updates). Unlike Shut down nothing is left
+   stopped: the server hands its port to the new process and reopens the
+   same case, and every window — this one, its pop-outs, any other —
+   reloads by itself when the new one answers (awaitRestart). So other
+   windows need no warning here; work still running does, since a restart
+   interrupts it exactly as Shut down would. Resolves false if the analyst
+   kept it running; throws the server's refusal (a version that won't
+   start, a Winnow started some other way) for the caller to show. */
+export async function restartWinnow() {
+  const busy = inFlightWork();
+  if (busy.length) {
+    const go = await confirmDialog(
+      `Restart Winnow now?\n\n\u26a0 Still running: ${busy.join(', ')}. Restarting now interrupts `
+      + `${busy.length === 1 ? 'it' : 'them'} — anything already committed is saved, but unfinished `
+      + 'work is not.',
+      { okLabel: 'Restart anyway', cancelLabel: 'Not now', danger: true });
+    if (!go) return false;
+  }
+  const { boot } = await post('/api/restart', {});
+  awaitRestart(boot);
+  return true;
 }
 
 /* Windows other than this one with a presence stream open, or null when
