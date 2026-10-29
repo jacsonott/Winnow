@@ -8,9 +8,12 @@ app as it is today.
     python3 scripts/screenshots.py --only triage    # the Pages site's banner GIF
     python3 scripts/screenshots.py --only feature-sql-pane   # one feature's
                                                     # still and recording
+    python3 scripts/screenshots.py --only splash    # the launch animation,
+                                                    # for the manual's page on the name
 
-The README's pictures go to docs/screenshots/, which ships in the release
-zip because the README does. The rest are the Pages site's alone and go to
+The README's and the manual's pictures go to docs/screenshots/, which ships
+in the release zip because the README and docs/wiki/ do. The rest are the
+Pages site's alone and go to
 docs/site/media/, which doesn't ship (.gitattributes): the recordings are
 megabytes an analyst pulling the zip over a slow link has no use for.
 
@@ -50,11 +53,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "docs" / "screenshots"
 SITE_MEDIA = ROOT / "docs" / "site" / "media"
-README_SHOTS = {"grid", "value-picker", "timeline", "pivot"}
+SHIPPED_SHOTS = {"grid", "value-picker", "timeline", "pivot", "splash"}
 
 
 def dest_for(name: str, ext: str) -> Path:
-    return (OUT if name in README_SHOTS else SITE_MEDIA) / f"{name}.{ext}"
+    return (OUT if name in SHIPPED_SHOTS else SITE_MEDIA) / f"{name}.{ext}"
 
 # The EvtxECmd header set, verbatim from winnow/defaults/headers.json. If that
 # file's column list changes, this must change with it or the saved filters
@@ -1016,9 +1019,59 @@ def record_gif(browser, name: str, a, ids):
     ctx.close()
 
 
+# The launch animation caught mid-winnow, for the manual's page on the name
+# (docs/wiki/What-is-winnowing.md): the grain has landed in the wordmark and
+# the chaff is still blowing off to the right. It needs a window of its own,
+# since FIRST_RUN turns the animation off for everything else, and the two
+# things that move it are pinned so that a changed picture means the
+# animation changed: Math.random is seeded (mulberry32), and the page runs on
+# Playwright's clock, paused and stepped rather than left to run, so the
+# frame it stops on is the same however slow the machine taking it is. The
+# app behind the overlay is held back too, its requests left unanswered
+# until the shot is taken: it draws from Math.random as well (op tokens), at
+# whatever moments its responses happen to arrive, which put the chaff
+# somewhere different on every run.
+SPLASH_SIZE = (1200, 700)
+SPLASH_AT_MS = 4400     # after the first frame: the wordmark whole, the chaff mid-air
+SPLASH_HEIGHT = 380     # the tagline comes later; below the wordmark is empty
+SPLASH_RUN = (
+    "(() => { let a = 1234567;"
+    " Math.random = () => { a = (a + 0x6D2B79F5) | 0;"
+    " let t = Math.imul(a ^ (a >>> 15), 1 | a);"
+    " t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;"
+    " return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; })();"
+    "localStorage.setItem('winnow.remotePrompt', 'seen');"
+    "localStorage.setItem('winnow.appearance',"
+    " JSON.stringify({ splash: 'always', pagesMenu: false, filterUi: 'row' }));"
+)
+
+
+def shoot_splash(browser, a):
+    w, h = SPLASH_SIZE
+    ctx = browser.new_context(viewport={"width": w, "height": h}, device_scale_factor=2)
+    ctx.add_init_script(SPLASH_RUN)
+    pg = ctx.new_page()
+    held = []
+    pg.route("**/api/**", lambda route: held.append(route))
+    epoch = 1_700_000_000_000
+    pg.clock.install(time=epoch)
+    pg.clock.pause_at(epoch + 1000)
+    pg.goto(f"http://127.0.0.1:{a.port}/")
+    pg.wait_for_function("() => { const s = document.getElementById('splash');"
+                         " return s && !s.hidden; }", polling=100, timeout=60_000)
+    pg.clock.run_for(SPLASH_AT_MS)
+    dest = dest_for("splash", "png")
+    pg.screenshot(path=str(dest), clip={"x": 0, "y": 0, "width": w, "height": SPLASH_HEIGHT})
+    print(f"  {dest.relative_to(ROOT)}  ({dest.stat().st_size // 1024} KB)")
+    for route in held:
+        route.abort()
+    ctx.close()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--only", action="append", choices=sorted({*SHOTS, *GIFS}), default=None)
+    ap.add_argument("--only", action="append", choices=sorted({*SHOTS, *GIFS, "splash"}),
+                    default=None)
     ap.add_argument("--port", type=int, default=8791)
     ap.add_argument("--keep", action="store_true", help="leave the demo case on disk")
     ap.add_argument("--width", type=int, default=1680)
@@ -1041,10 +1094,12 @@ def main() -> int:
     SITE_MEDIA.mkdir(parents=True, exist_ok=True)
     ids = build_case(case, work)
     proc = serve(case, a.port)
-    wanted = a.only or [*sorted(GIFS), *sorted(SHOTS)]
+    wanted = a.only or ["splash", *sorted(GIFS), *sorted(SHOTS)]
     try:
         with sync_playwright() as p:
             b = p.chromium.launch()
+            if "splash" in wanted:
+                shoot_splash(b, a)
             # The GIFs first, each in a window of its own: the pivot still
             # turns a plugin on for the whole server, which would put its
             # tab in the recording, and the recording takes its tag back

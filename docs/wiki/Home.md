@@ -2,7 +2,8 @@
 
 Winnow is a local viewer for the very large CSV and log exports DFIR triage
 produces: filter a table down, tag the rows that matter, and read the
-findings back across the case.
+findings back across the case. The name comes from sorting grain from
+chaff; [What is winnowing?](What-is-winnowing.md) explains it.
 
 ## Your first triage
 
@@ -33,6 +34,8 @@ With an EvtxECmd export as the example:
 
 **Getting set up**
 
+- [What is winnowing?](What-is-winnowing.md): where the name comes from,
+  and what it has to do with triage.
 - [Installation](Installation.md): install, launch, update, uninstall.
 - [Cases and importing](Cases-and-importing.md): case files and every
   import format.
