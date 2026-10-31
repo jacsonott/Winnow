@@ -1623,6 +1623,48 @@ def _nul_unescape(m: re.Match) -> str:
     return _NUL_ESC if m.group()[1] == _NUL_ESC else "\0"
 
 
+# What 3.11 changed in csv's WRITER, beside the reader change above: it
+# writes a NUL, and it quotes a field holding a bare CR whatever the line
+# terminator. 3.10's writer refuses the first ("need to escape, but no
+# escapechar set") and leaves the second unquoted.
+_CSV_WRITES_ANY_CELL = sys.version_info >= (3, 11)
+
+
+class _CsvWriter:
+    """csv.writer(buf, lineterminator="\n") for the exports, writing every
+    cell as 3.11+ does on every Python.
+
+    On 3.10 two cells went wrong. A NUL stopped the export at its row, so
+    the analyst got a file cut short mid-download. A bare CR — a cell the
+    formula guard even names, and ordinary in Windows text — was written
+    unquoted, so every spreadsheet and CSV reader, Winnow's included, split
+    the row in two there. 3.10's writer quotes a field holding any
+    character of the line terminator, so it writes with "\r\n" and the
+    terminator is put back to "\n"; a NUL goes through as _csv_rows's
+    escape and is undone in the text written, and csv treats neither escape
+    character specially. The result is 3.11's text, byte for byte."""
+
+    def __init__(self, buf: io.StringIO):
+        self.buf = buf
+        self.w = csv.writer(buf, lineterminator="\n")
+        self.row = io.StringIO()
+        self.w310 = csv.writer(self.row, lineterminator="\r\n")
+
+    def writerow(self, row) -> None:
+        if _CSV_WRITES_ANY_CELL:
+            self.w.writerow(row)
+            return
+        nul = any(isinstance(c, str) and ("\0" in c or _NUL_ESC in c) for c in row)
+        if nul:
+            row = [c.replace(_NUL_ESC, _NUL_ESC * 2).replace("\0", _NUL_ESC + _NUL_MARK)
+                   if isinstance(c, str) else c for c in row]
+        self.row.seek(0)
+        self.row.truncate()
+        self.w310.writerow(row)
+        text = self.row.getvalue()[:-2] + "\n"
+        self.buf.write(_NUL_UNESCAPE.sub(_nul_unescape, text) if nul else text)
+
+
 def _csv_rows(lines: Iterable[str], delimiter: str, *, escape_nul: bool | None = None):
     """`(reader, rows)`: a csv.reader over `lines`, and what to iterate for
     its rows — the reader itself wherever csv reads NUL. The reader is
@@ -1955,6 +1997,18 @@ def _json_text_deep(value: Any) -> str:
 # the six characters of the escape the file had: exactly what was in the
 # evidence, and still valid inside JSON text. See structparse.utf8_text.
 _utf8_text = structparse.utf8_text
+
+
+def _kept_error(e: Exception, total: int) -> Exception:
+    """A reader's failure part-way through, saying how many rows it kept
+    (ingest_csv's message), so the analyst can tell the table in the list
+    is partial. With nothing kept the error is the reader's own: the table
+    is dropped, and there is nothing to add."""
+    if not total:
+        return e
+    error = ValueError(f"{e} — import stopped there; the {total:,} rows before it were kept")
+    error.__cause__ = e
+    return error
 
 
 def _lenient_text_factory(undecodable: list[int] | None = None):
@@ -4512,10 +4566,38 @@ class Store:
             while len(self._op_cancelled) > 512:  # one-shot ids; keep it bounded
                 self._op_cancelled.pop()
             conn = self._op_conns.get(token)
-            if conn is not None:
-                conn.interrupt()
-                return True
-        return False
+            if conn is None:
+                return False
+            conn.interrupt()
+        threading.Thread(target=self._interrupt_until_released, args=(token, conn),
+                         name="winnow-cancel", daemon=True).start()
+        return True
+
+    # How often a cancel that has not landed yet is sent again.
+    CANCEL_RESEND_S = 0.02
+
+    def _interrupt_until_released(self, token: str, conn) -> None:
+        """Keeps interrupting `conn` for as long as `token` holds it.
+
+        sqlite3_interrupt stops only a statement already running: SQLite
+        clears the flag when a statement starts with none active, so a
+        cancel landing between two of a block's statements (the build's
+        quick CREATE TABLE and its long INSERT, say) was forgotten and the
+        long one ran to the end. That was a cancel chip that did nothing,
+        and a test that timed out on loaded Windows runners waiting for
+        one. Sent again every CANCEL_RESEND_S until the block lets go of
+        the connection, under _op_lock and only while the token is still
+        registered to it, so by _interruptible's discipline it can only
+        ever stop that block's own statements."""
+        while True:
+            time.sleep(self.CANCEL_RESEND_S)
+            with self._op_lock:
+                if self._op_conns.get(token) is not conn:
+                    return
+                try:
+                    conn.interrupt()
+                except Exception:  # noqa: BLE001 — a connection closed under us: nothing left to stop
+                    return
 
     @contextlib.contextmanager
     def _interruptible(self, token: str | None, conn: sqlite3.Connection):
@@ -4526,11 +4608,11 @@ class Store:
         writer caller enters this block while *holding* self.lock and
         unregisters before releasing it, so the only statements that can be
         running on the writer connection while its token is registered are
-        the block's own. interrupt() aborts running statements only; a
-        cancel arriving in the gap between two statements is a no-op (the
-        flag clears when the statement count hits zero), which surfaces as
-        "the cancel didn't land — click again", never as a mis-aimed kill
-        of someone else's write. Reader-pool callers pass their checked-out
+        the block's own. interrupt() aborts running statements only (the
+        flag clears when a statement starts with none active), so a cancel
+        arriving in the gap between two statements is sent again until the
+        block lets go (_interrupt_until_released) — never a mis-aimed kill
+        of someone else's write, since it stops once the token is gone. Reader-pool callers pass their checked-out
         reader (and stack this innermost): an interrupted reader raises out
         of _reader(), which already closes — not repools — a connection
         that died mid-statement."""
@@ -5298,6 +5380,19 @@ class Store:
             self.db.execute("UPDATE sources SET row_count=? WHERE id=?", (total, source_id))
         return total
 
+    def _commit_parsed_batch(self, insert_sql: str, batch: list, source_id: int, total: int) -> int:
+        """The rows a reader parsed before it failed, committed: the
+        failure is the row after them, and losing them made "keep what
+        committed" quietly mean "lose up to a batch of good rows". Best
+        effort, as in ingest_csv: if the commit is what failed, this fails
+        too and what committed before still stands. Returns the new
+        total."""
+        if batch:
+            with contextlib.suppress(Exception):
+                total = self._commit_ingest_batch(insert_sql, batch, source_id, total)
+                batch.clear()
+        return total
+
     def preview_csv_text(
         self, text: str, delimiter: str | None = None, has_header: bool = True,
         max_rows: int = 50, name: str | None = None
@@ -5457,7 +5552,6 @@ class Store:
                 return str(v)
 
             select_cols = ",".join(q(c) for c in src_colnames)
-            src_cursor = ro.execute(f"SELECT {select_cols} FROM {q(table_name)}")
 
             sample: list[list[str]] = []
             total = 0
@@ -5465,6 +5559,11 @@ class Store:
             error: Exception | None = None
             with self._ingest_synchronous_off():
                 try:
+                    # Inside the try: before 3.11, execute() steps to the
+                    # first row and decodes it, so a value the text factory
+                    # rejects there raises HERE, and outside the try it left
+                    # the empty table behind.
+                    src_cursor = ro.execute(f"SELECT {select_cols} FROM {q(table_name)}")
                     while True:
                         rows = src_cursor.fetchmany(BATCH)
                         if not rows:
@@ -5484,7 +5583,9 @@ class Store:
                     self.drop_source(source_id)
                     raise
                 except Exception as e:
-                    error = e
+                    # Nothing pending to save: fetchmany returns none of a
+                    # batch it failed part-way through.
+                    error = _kept_error(e, total)
         finally:
             ro.close()
             cleanup()
@@ -5561,9 +5662,9 @@ class Store:
         total = 0
         t0 = time.time()
         error: Exception | None = None
+        batch: list[tuple] = []
         with self._ingest_synchronous_off():
             try:
-                batch: list[tuple] = []
                 for row in plasoread.iter_plaso_rows(path):
                     batch.append(tuple(row))
                     if len(batch) >= BATCH:
@@ -5582,13 +5683,18 @@ class Store:
                 self.drop_source(source_id)
                 raise
             except Exception as e:
-                error = e
+                # A record that won't decode keeps the events before it,
+                # pending batch included, as ingest_csv does.
+                total = self._commit_parsed_batch(insert, batch, source_id, total)
+                error = _kept_error(e, total)
 
         colmeta = [{"name": c, "type": t} for c, t in zip(cols, plasoread.PLASO_COLUMN_TYPES)]
         with self.lock, self.db:
             self.db.execute("UPDATE sources SET columns=? WHERE id=?", (json.dumps(colmeta), source_id))
 
         if error is not None:
+            if total == 0:
+                self.drop_source(source_id)   # same no-husk rule as ingest_csv
             raise error
 
         if total:
@@ -5638,9 +5744,12 @@ class Store:
         workbooks put titles and blank rows above it); the table is sized
         to the wider of that header and the sheet's declared width, so
         data extending past the named headers lands in col_N columns
-        instead of being cut. Rows *shorter* than the header are the
-        normal Excel shape (trailing empties simply aren't stored) and
-        pad silently; only rows wider than the table count as ragged.
+        instead of being cut — and widens as it goes for a row wider
+        still, since a sheet that declares no size shows its width only a
+        row at a time. Rows *shorter* than the header are the normal Excel
+        shape (trailing empties simply aren't stored) and pad silently.
+        No cell is ever cut, so `ragged_rows` is always 0 here; it stays
+        in the result for the shape every import returns.
         Date-styled cells arrive as ISO text rather than the raw
         day-serial — an unconditional conversion, called out in the sheet
         picker, not an analyst toggle like SQLite's WebKit-epoch chips,
@@ -5684,10 +5793,26 @@ class Store:
             with self._ingest_synchronous_off():
                 try:
                     for raw in rows_iter:
-                        if len(raw) != ncols:
-                            if len(raw) > ncols:
-                                ragged += 1
-                            raw = (raw + [""] * ncols)[:ncols]
+                        if len(raw) > ncols:
+                            # Wider than the table. A sheet that declares no
+                            # size (many writers leave <dimension> out) only
+                            # shows its width a row at a time, and cutting
+                            # the cells off loses evidence the header never
+                            # named; the table widens instead, the rows
+                            # before reading the new columns as empty.
+                            wider = sanitize_columns([c.strip() for c in header] + [""] * (len(raw) - len(header)))
+                            with self.lock, self.db:
+                                for c in wider[ncols:]:
+                                    self.db.execute(f"ALTER TABLE {q(dest_table)} ADD COLUMN {q(c)} TEXT DEFAULT ''")
+                            pad = [""] * (len(wider) - ncols)
+                            batch = [b + tuple(pad) for b in batch]
+                            for r in sample:
+                                r.extend(pad)
+                            cols, ncols = wider, len(wider)
+                            insert = (f"INSERT INTO {q(dest_table)} ({','.join(q(c) for c in cols)}) "
+                                      f"VALUES ({','.join('?' * ncols)})")
+                        elif len(raw) < ncols:
+                            raw = raw + [""] * (ncols - len(raw))
                         batch.append(tuple(raw))
                         if len(sample) < SAMPLE_ROWS:
                             sample.append(raw)
@@ -5708,7 +5833,11 @@ class Store:
                     self.drop_source(source_id)
                     raise
                 except Exception as e:
-                    error = e
+                    # A workbook that breaks part-way (a corrupt or cut-off
+                    # sheet member) keeps what was read, as ingest_csv does:
+                    # the rows of the pending batch parsed fine.
+                    total = self._commit_parsed_batch(insert, batch, source_id, total)
+                    error = _kept_error(e, total)
         finally:
             rows_iter.close()
 
@@ -5718,6 +5847,8 @@ class Store:
             self.db.execute("UPDATE sources SET columns=? WHERE id=?", (json.dumps(colmeta), source_id))
 
         if error is not None:
+            if total == 0:
+                self.drop_source(source_id)   # same no-husk rule as ingest_csv
             raise error
 
         if total:
@@ -11765,6 +11896,15 @@ class Store:
         if op in (">", ">=", "<", "<="):
             if val == "":
                 return "", []
+            # "(numeric)", as the filter builder labels these: on a number
+            # column always, and on any other column but a datetime one when
+            # the value is a number. Type inference calls a column text
+            # when one sampled cell is "-" or "n/a", and compared as text
+            # "100" > "60" is false, so `Bytes > 60` lost every row of three
+            # digits while saying it compared numbers. A datetime column
+            # compares its ISO text, which orders as time does.
+            if not numeric and colnames[col] != "datetime" and NUM_RE.match(str(val).strip()):
+                numeric, val = True, str(val).strip()
             lhs = _numeric_expr(c) if numeric else c
             return f"{lhs} {op} ?", [float(val) if numeric else val]
         if op == "empty":
@@ -17542,7 +17682,7 @@ class Store:
 
             tagnames = {r["id"]: r["name"] for r in ro.execute("SELECT id, name FROM tag_defs")}
             buf = io.StringIO()
-            w = csv.writer(buf, lineterminator="\n")
+            w = _CsvWriter(buf)
             w.writerow(_export_header(cols, _csv_safe))
             self._renew_snapshot(ro)
             yield buf.getvalue()
@@ -17591,7 +17731,7 @@ class Store:
 
             tagnames = {r["id"]: r["name"] for r in ro.execute("SELECT id, name FROM tag_defs")}
             buf = io.StringIO()
-            w = csv.writer(buf, lineterminator="\n")
+            w = _CsvWriter(buf)
             w.writerow(_export_header(cols, _csv_safe))
             self._renew_snapshot(ro)
             yield buf.getvalue()
@@ -17669,7 +17809,7 @@ class Store:
 
             tagnames = {r["id"]: r["name"] for r in ro.execute("SELECT id, name FROM tag_defs")}
             buf = io.StringIO()
-            w = csv.writer(buf, lineterminator="\n")
+            w = _CsvWriter(buf)
             head = _export_header(cols, _csv_safe)
             if member_names is not None:
                 head.insert(1, "Table")
@@ -19232,7 +19372,7 @@ class Store:
 
         def gen():
             buf = io.StringIO()
-            w = csv.writer(buf, lineterminator="\n")
+            w = _CsvWriter(buf)
             w.writerow([_csv_safe(c) for c in cols])
             n = 0
             for row in rows:

@@ -579,6 +579,15 @@ see [docs/notes/README.md](README.md) for the whole set.
   *source* (the Timeline, latest hits, `{{all:…}}`): a case can hold 500
   tables without a merge in sight. tests/test_merge_compound_limit.py
   drives each one over a merge of 510 W3C logs.
+- **Every CSV export writes through `_CsvWriter`, never a bare
+  `csv.writer`.** Python 3.10's writer (the README's minimum) refuses a NUL
+  and leaves a field holding a bare CR unquoted. The first cut an export
+  off at that row, mid-download; the second split the row in two for
+  whoever read the file, Winnow's own import included. `_CsvWriter` writes
+  3.11's text on 3.10 too: it writes with a `"\r\n"` terminator, so 3.10
+  quotes a CR, and puts `"\n"` back, and a NUL goes through `_csv_rows`'s
+  escape. tests/test_csv_round_trip.py imports, exports and re-imports the
+  awkward cells, and forces the 3.10 path on every CI Python.
 - **A `_reader()` block is one read transaction, and so is a SQL pane
   query.** A statement whose schema changed between its prepare and its
   step is re-prepared, up to 50 times, and in autocommit each try reads
@@ -1509,8 +1518,17 @@ see [docs/notes/README.md](README.md) for the whole set.
   discipline making `interrupt()` safe on the shared writer: a writer op
   registers while *holding* `self.lock` and unregisters before releasing
   it, so the only interruptible statements under a token are that op's
-  own; a cancel between statements is a missed cancel ("click again"),
-  never a mis-aimed kill. Reader ops (group_summary) stack
+  own. **A cancel between two statements used to be lost**: SQLite
+  clears the interrupt flag when a statement starts with none active, so
+  one landing between a build's CREATE TABLE and its long INSERT did
+  nothing, and the INSERT ran to the end (a cancel chip that ignored the
+  click; `test_the_chip_cancel_token_reaches_the_job` timing out on
+  Windows runners). cancel_op now resends the interrupt every
+  `CANCEL_RESEND_S` while the token still holds the connection
+  (`_interrupt_until_released`), under `_op_lock`, so it stops the
+  moment the op lets go and still never hits anyone else's statement.
+  `test_a_cancel_between_two_statements_still_stops_the_next` sends the
+  cancel at exactly that point. Reader ops (group_summary) stack
   `_interruptible` innermost so the interrupt becomes `OpCancelled` before
   `_dropped_view_is_expired` can misread it, and `_reader()` closes — not
   repools — the interrupted connection. **Builds evict the previous view

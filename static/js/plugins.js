@@ -121,6 +121,7 @@ export function openInstallDialog(onDone) {
     fileLabel.append(fileInput);
     const folderLabel = el('label', 'btn', 'Pick a plugin folder…');
     const folderInput = el('input');
+    folderInput.type = 'file';
     // Folder picker: every file inside arrives with its path relative to
     // the picked folder (webkitRelativePath), which is exactly what the
     // install route's `paths` field wants.

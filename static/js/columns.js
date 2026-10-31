@@ -6,6 +6,7 @@ import { columnMenuItems, opLabel } from './derived.js';
 import { columnFilterChips, openValuePicker, pickerTreeNode, removeColumnFilter, valueFilterEnabled } from './filters.js';
 import { render, setCellRange } from './grid.js';
 import { renderGroupStrip } from './grouping.js';
+import { histogramFollowColumns } from './histogram.js';
 import { S, clearCellSelection, gridRowCount, selClear, selSetAll, selSnapshot } from './state.js';
 import { baseColumns, columnMeta } from './tsformat.js';
 import { anchoredPanel, contextMenu } from './ui.js';
@@ -555,13 +556,21 @@ export function renderHead() {
       // filter in it is the row this replaced, rebuilt one column at a
       // time. What the filter says then is the chip's job. Under the
       // classic row there is nothing to put away.
+      //
+      // Both build at once, so the typing's debounce is called off first,
+      // as the search box's Enter does. Left armed, it built the same view
+      // a second time 220 ms later, and when that build started during a
+      // table switch it built the table with its filters cleared and landed
+      // over the view the switch had just put back (see supersedeBuild).
       if (e.key === 'Escape') {
+        rebuildSoon.cancel();
         inp.value = ''; S.filters[name] = ''; inp.classList.remove('active');
         closeColumnFilter(name);
         rebuildView();
       }
       if (e.key === 'Enter') {
         e.preventDefault();
+        rebuildSoon.cancel();
         closeColumnFilter(name);
         rebuildView();
         $('body').focus();
@@ -593,6 +602,9 @@ export function renderHead() {
   // table — which is the thing the bar exists to stop drawing.
   filt.hidden = !classicFilterRow() && !S.filterOpen.length;
   renderFilterBar();
+  // The histogram charts only columns that are shown, and nothing else
+  // tells it one was just hidden.
+  histogramFollowColumns();
 
   // The active cell, put back on the column it was on if that column
   // survived this repaint. The rectangle is NOT restored: its far corner

@@ -31,6 +31,7 @@
    no fetch. Its look too, under class names of its own (.tl-ov-*): the
    histogram's tests, and anything else that finds that strip's parts by
    class, would find this one's as well. */
+import { calendarRules, drawCalendarRules } from './charts.js';
 import { $, ROW_H, api, el } from './core.js';
 import { rScroll, vScroll } from './grid.js';
 import { S } from './state.js';
@@ -49,6 +50,7 @@ let brush = null;   // {x0, x1} while a drag is under way
 let down = null;    // where the mouse went down on the canvas, until it comes up
 let seq = 0;
 let marksKey = '';
+let rules = null;   // the day/week rules last painted (calendarRules)
 let followRaf = null;
 
 /* ------------------------------------------------------------ prefs */
@@ -310,6 +312,14 @@ function span(o) {
   return { t0: o.start, t1: o.start + (last + 1) * o.width };
 }
 
+/* The day or week rules as last painted — {unit: 'day' | 'week' | null,
+   times: [epoch…]} — or null with no chart up. For tests/ui, which
+   cannot read a dashed line's meaning off the canvas. */
+export function timelineOverviewRules() {
+  if (!rules || !S.timeline.overview) return null;
+  return { unit: rules.unit, times: [...rules.times] };
+}
+
 /* Where a time sits on the strip, in CSS pixels from the canvas's left
    edge — also what tests/ui read the bars' places from. Null with no
    chart up. */
@@ -379,16 +389,11 @@ export function paintTimelineOverview() {
 
   const ticks = axisTicks(s, w);
   // Midnights as faint rules when the bars are finer than a day, so a
-  // night reads as one.
-  if (o.width < 86400) {
-    ctx.strokeStyle = t.line2;
-    ctx.setLineDash([2, 3]);
-    for (let d = Math.ceil(s.t0 / 86400) * 86400; d < s.t1; d += 86400) {
-      const x = Math.round(xOf(d)) + 0.5;
-      ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, bottom); ctx.stroke();
-    }
-    ctx.setLineDash([]);
-  }
+  // night reads as one; the start of each week once they are not, or
+  // the days are too close to tell apart. Shared with the histogram
+  // strip over the grid (charts.js calendarRules).
+  rules = calendarRules(s.t0, s.t1, o.width, (w - 2 * PAD) / (s.t1 - s.t0));
+  drawCalendarRules(ctx, rules.times, xOf, top, bottom, t.line2);
 
   // The lines on screen, lit behind the bars (over them it would tint the
   // colours the split is read by), and as a thumb in the lane above.

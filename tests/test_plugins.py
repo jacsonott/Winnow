@@ -1203,6 +1203,131 @@ def test_mft_already_fixed_up_extraction(example_registry, tmp_path):
     assert by_entry[50]["FullPath"] == ".\\" + long_name
 
 
+def _paths_of(example_registry, tmp_path, records):
+    p = tmp_path / "hard.mft"
+    p.write_bytes(b"".join(records))
+    return {r["EntryNumber"]: r["FullPath"] for r in _mft_rows(example_registry, p)}
+
+
+ROOT = mft_record(5, 5, [_si(), _fn(5, 5, ".", namespace=3)], is_dir=True)
+
+
+def test_mft_a_reused_parent_entry_is_an_orphan_not_the_new_tenants_path(example_registry, tmp_path):
+    """A deleted file's parent entry can be reused for an unrelated
+    directory. Its $FILE_NAME still names the old (entry, sequence), so the
+    sequence numbers disagree, and stitching on the new tenant's path would
+    put the file somewhere it never was. Checked at the first level and at
+    a grandparent, which is a different branch of the walk."""
+    paths = _paths_of(example_registry, tmp_path, [
+        ROOT,
+        mft_record(60, 2, [_si(), _fn(5, 5, "NewTenant", namespace=3)], is_dir=True),   # 60 was reused: seq 1 -> 2
+        mft_record(61, 1, [_si(), _fn(60, 1, "OldDir", namespace=3)], is_dir=True, in_use=False),
+        mft_record(50, 1, [_si(), _fn(60, 1, "old.doc")], in_use=False),     # parent 60, seq 1: the old tenant
+        mft_record(51, 1, [_si(), _fn(61, 1, "deeper.doc")], in_use=False),  # 61 is fine; 61's parent is not
+        mft_record(52, 1, [_si(), _fn(60, 2, "live.txt")]),                  # the new tenant's own file
+    ])
+    assert paths[50] == ".\\<orphan>\\old.doc"
+    assert paths[51] == ".\\<orphan>\\OldDir\\deeper.doc"
+    assert paths[61] == ".\\<orphan>\\OldDir"
+    assert paths[52] == ".\\NewTenant\\live.txt"
+    assert not any("NewTenant" in p for e, p in paths.items() if e in (50, 51, 61))
+
+
+def test_mft_a_parent_loop_ends_as_a_cycle_instead_of_hanging(example_registry, tmp_path):
+    """Corruption (or a crafted volume) can make directories each other's
+    parents, or one its own. The walk has to stop and say so; following
+    the references would never reach the root."""
+    paths = _paths_of(example_registry, tmp_path, [
+        ROOT,
+        mft_record(70, 1, [_si(), _fn(71, 1, "A", namespace=3)], is_dir=True),
+        mft_record(71, 1, [_si(), _fn(70, 1, "B", namespace=3)], is_dir=True),
+        mft_record(72, 1, [_si(), _fn(70, 1, "inside.txt")]),
+        mft_record(73, 1, [_si(), _fn(73, 1, "Self", namespace=3)], is_dir=True),
+        mft_record(74, 1, [_si(), _fn(73, 1, "under-self.txt")]),
+        mft_record(75, 1, [_si(), _fn(5, 5, "fine.txt")]),
+    ])
+    for e, leaf in ((70, "A"), (71, "B"), (72, "inside.txt"), (73, "Self"), (74, "under-self.txt")):
+        assert paths[e].startswith(".\\<cycle>\\") and paths[e].endswith("\\" + leaf), (e, paths[e])
+    assert paths[75] == ".\\fine.txt"           # the loop didn't spill onto anything else
+
+
+def usn_v3(ts: int, name: str, *, entry=100, seq=1, parent=5, parent_seq=5, high=0,
+           usn=4096, reason=0x100 | 0x80000000, fattr=0x20, source=0) -> bytes:
+    """USN_RECORD_V3: 128-bit file references (ReFS, newer NTFS), so a
+    76-byte header and the name after it. NTFS zero-extends the classic
+    reference into the low quadword; `high` fills the upper one, as ReFS
+    may."""
+    nb = name.encode("utf-16-le")
+    length = (76 + len(nb) + 7) & ~7
+    buf = bytearray(length)
+    struct.pack_into("<IHH", buf, 0, length, 3, 0)
+    struct.pack_into("<QQQQQQIIIIHH", buf, 8,
+                     entry | (seq << 48), high, parent | (parent_seq << 48), high,
+                     usn, ts, reason, source, 0, fattr, len(nb), 76)
+    buf[76:76 + len(nb)] = nb
+    return bytes(buf)
+
+
+def usn_v4(*, entry=100, extents=1) -> bytes:
+    """USN_RECORD_V4: range tracking. No timestamp and no name, 56 bytes of
+    header and 16 per extent."""
+    length = 56 + 16 * extents
+    buf = bytearray(length)
+    struct.pack_into("<IHH", buf, 0, length, 4, 0)
+    struct.pack_into("<QQQQ", buf, 8, entry, 0, 5, 0)
+    struct.pack_into("<QIIIHH", buf, 40, 7777, 0x1, 0, 0, extents, 16)
+    return bytes(buf)
+
+
+def _usn_rows(example_registry, tmp_path, blob):
+    j = tmp_path / "hard.usn"
+    j.write_bytes(blob)
+    out = example_registry.get_format("mft-usn.usn").parse(str(j), {})
+    return [dict(zip(out["columns"], r)) for r in out["rows"]]
+
+
+def test_usn_v3_records_split_their_128_bit_references(example_registry, tmp_path):
+    t = ft(datetime(2024, 8, 1, 9, 15, 0, 250000))
+    rows = _usn_rows(example_registry, tmp_path, (
+        usn_v3(t, "refs.dll", entry=123_456, seq=9, parent=777, parent_seq=3, usn=5000)
+        + usn_v2(t, "after.txt", entry=8, usn=5100)
+        + usn_v3(t, "high.bin", entry=42, seq=1, high=0xDEAD_BEEF, usn=5200)))
+    assert [r["FileName"] for r in rows] == ["refs.dll", "after.txt", "high.bin"]
+    v3 = rows[0]
+    assert v3["Timestamp"] == "2024-08-01 09:15:00.250000"
+    assert (v3["EntryNumber"], v3["SequenceNumber"]) == (123_456, 9)
+    assert (v3["ParentEntryNumber"], v3["ParentSequenceNumber"]) == (777, 3)
+    assert v3["USN"] == 5000 and v3["Extension"] == "dll" and v3["Reason"] == "FILE_CREATE|CLOSE"
+    assert (rows[2]["EntryNumber"], rows[2]["SequenceNumber"]) == (42, 1)
+
+
+def test_usn_v4_records_are_stepped_over_by_their_length(example_registry, tmp_path):
+    """A V4 record has nothing to make a row of; what matters is that the
+    parser skips exactly its length and reads the record after it, rather
+    than carving through it 8 bytes at a time. Carving would read its
+    extent list as if it might hold records, so one here holds bytes that
+    do look like one: stepping over the V4 never sees them."""
+    t = ft(datetime(2024, 8, 2))
+    phantom = usn_v2(t, "phantom.txt", usn=99)
+    v4 = bytearray(usn_v4(extents=(len(phantom) + 15) // 16))
+    v4[56:56 + len(phantom)] = phantom
+    rows = _usn_rows(example_registry, tmp_path, (
+        usn_v2(t, "one.txt", usn=1) + usn_v4(extents=1) + bytes(v4) + usn_v2(t, "two.txt", usn=2)))
+    assert [r["FileName"] for r in rows] == ["one.txt", "two.txt"]
+
+
+@pytest.mark.parametrize("make", [usn_v2, usn_v3], ids=["v2", "v3"])
+def test_usn_a_name_running_past_its_record_is_skipped(example_registry, tmp_path, make):
+    """A torn record whose name length points past its own end: reading it
+    would take the next record's bytes as the file's name."""
+    t = ft(datetime(2024, 8, 3))
+    torn = bytearray(make(t, "torn.txt", usn=1))
+    name_len_at = 56 if make is usn_v2 else 72
+    struct.pack_into("<H", torn, name_len_at, len(torn))     # longer than the whole record
+    rows = _usn_rows(example_registry, tmp_path, make(t, "before.txt") + bytes(torn) + make(t, "after.txt"))
+    assert [r["FileName"] for r in rows] == ["before.txt", "after.txt"]
+
+
 def test_mft_end_to_end_through_the_api(client, store, example_registry, mft_file, monkeypatch):
     import server
 
@@ -2573,6 +2698,62 @@ def test_pivot_over_a_merge_with_mismatched_columns(pivot_client, store, write_c
     per_channel = {r[0]: r[1] for r in out["sets"][1]["rows"]}
     assert "Channel" not in per_channel
     assert per_channel[None] == 2
+
+
+def _pivot_values(client, source_id, column, **body):
+    r = client.post("/api/plugin/pivot/values", json={"source_id": source_id, "column": column, **body})
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def test_pivot_values_list_each_value_once_most_common_first(pivot_client):
+    """The Filters area's checkbox list. A blank and a non-number are values
+    an analyst can tick like any other, so they are listed, counted."""
+    client, source_id = pivot_client
+    out = _pivot_values(client, source_id, "User")
+    counts = [v["count"] for v in out["values"]]
+    assert counts == sorted(counts, reverse=True)
+    assert {v["value"]: v["count"] for v in out["values"]} == {"alice": 3, "bob": 1, "carol": 1}
+    assert out["truncated"] is False
+    by_value = {v["value"]: v["count"] for v in _pivot_values(client, source_id, "Bytes")["values"]}
+    assert by_value == {"100": 1, "200": 1, "": 1, "N/A": 1, "40": 1}
+
+
+def test_pivot_values_stop_at_the_limit_and_say_so(pivot_client):
+    client, source_id = pivot_client
+    out = _pivot_values(client, source_id, "User", limit=2)
+    assert out["values"][0] == {"value": "alice", "count": 3}
+    assert len(out["values"]) == 2 and out["truncated"] is True
+    # Exactly as many values as the limit is not cut off.
+    assert _pivot_values(client, source_id, "User", limit=3)["truncated"] is False
+
+
+def test_pivot_values_refuse_a_column_the_table_does_not_have(pivot_client):
+    client, source_id = pivot_client
+    bad = client.post("/api/plugin/pivot/values", json={"source_id": source_id, "column": "Nope"})
+    assert bad.status_code == 400 and "Nope" in bad.json()["detail"]
+
+
+def test_pivot_values_over_a_merge_count_every_member(pivot_client, store, write_csv):
+    """Invariant #9. A member without the column reads it as blank, which
+    is what its rows group under in the pivot itself."""
+    client, source_id = pivot_client
+    other = store.ingest_csv(write_csv([["Host", "User"], ["SRV3", "alice"], ["SRV3", "dave"]],
+                                       "pvm.csv"), name="pvm", build_fts=False)["id"]
+    mid = store.create_merge("pivvalues", [source_id, other])["id"]
+    users = {v["value"]: v["count"] for v in _pivot_values(client, mid, "User")["values"]}
+    assert users == {"alice": 4, "bob": 1, "carol": 1, "dave": 1}
+    channels = {v["value"]: v["count"] for v in _pivot_values(client, mid, "Channel")["values"]}
+    assert channels == {"Security": 3, "System": 2, None: 2}
+
+
+def test_pivot_values_of_a_derived_column_are_its_values(pivot_client, store):
+    """Not the column's name repeated: the derived sidecar is joined."""
+    client, source_id = pivot_client
+    res = store.add_derived_column(source_id, "UserFirst", "User", "regex_extract", {"pattern": r"^(\w)"})
+    store.wait_for_ingest_job(res["job_id"], timeout=30)
+    out = _pivot_values(client, source_id, "UserFirst")
+    assert {v["value"]: v["count"] for v in out["values"]} == {"a": 3, "b": 1, "c": 1}
 
 
 # ============================================================ first_last plugin

@@ -335,6 +335,166 @@ def test_a_dev_sync_names_the_branch_it_downloads(install, tmp_path, monkeypatch
     assert "Downloading main" not in out
 
 
+class ReleaseCli:
+    """update.py with no --dev and no --from: the path every analyst with
+    network takes. GitHub is answered here — the release lookup through
+    updater's own fetch, the download through updater.download's opener
+    seam — so the CLI, check_for_update and download all run for real."""
+
+    def __init__(self, install, tmp_path, monkeypatch, capsys):
+        import update as update_cli
+        self.cli, self.install, self.capsys = update_cli, install, capsys
+        self.release = None
+        self.fetched = []         # the archive URLs downloaded
+        self.archive = _make_release(tmp_path / "served.zip", "1.1.0", _v2_files())
+        self.download_error = None
+        monkeypatch.setattr(update_cli, "HERE", install)
+        # The version the CLI reports comes from this install, not the repo
+        # the suite runs in.
+        monkeypatch.setattr(updater, "HERE", install)
+        monkeypatch.setattr(updater, "_fetch_json", self._fetch_json)
+        real = updater.download
+        monkeypatch.setattr(updater, "download", lambda url, dest: real(url, dest, _open=self._open))
+
+    def publish(self, version, notes=""):
+        self.release = {"tag_name": f"v{version}", "body": notes,
+                        "zipball_url": f"https://example.invalid/zipball/v{version}",
+                        "published_at": "2026-10-01T00:00:00Z"}
+
+    def _fetch_json(self, url, timeout):
+        assert url == updater.RELEASES_API
+        if isinstance(self.release, Exception):
+            raise self.release
+        return self.release
+
+    def _open(self, url, timeout):
+        import io
+        self.fetched.append(url)
+        if self.download_error:
+            raise self.download_error
+        return io.BytesIO(self.archive.read_bytes())
+
+    def run(self, *argv):
+        rc = self.cli.main(list(argv))
+        out = self.capsys.readouterr()
+        return rc, out.out, out.err
+
+    def untouched(self):
+        return all((self.install / rel).read_text(encoding="utf-8") == text for rel, text in SHIPPED.items())
+
+
+@pytest.fixture
+def release_cli(install, tmp_path, monkeypatch, capsys):
+    return ReleaseCli(install, tmp_path, monkeypatch, capsys)
+
+
+def test_the_cli_check_says_what_is_out_and_downloads_nothing(release_cli):
+    notes = "\n".join(f"- change {i}" for i in range(1, 26))
+    release_cli.publish("1.1.0", notes)
+    rc, out, _ = release_cli.run("--check")
+    assert rc == 0
+    assert "Winnow 1.1.0 is available (you have 1.0.0)." in out
+    # The notes, indented, and only the first twenty lines of them.
+    assert "  - change 20" in out and "change 21" not in out
+    assert "Run `python update.py` to install it." in out
+    assert release_cli.fetched == [] and release_cli.untouched()
+
+
+def test_the_cli_on_the_latest_release_says_so_and_stops(release_cli, monkeypatch):
+    release_cli.publish("1.0.0")
+    monkeypatch.setattr("builtins.input", lambda *_: pytest.fail("asked to apply with nothing to apply"))
+    rc, out, _ = release_cli.run()
+    assert rc == 0
+    assert "Winnow 1.0.0 is up to date (latest release is 1.0.0)." in out
+    assert release_cli.fetched == [] and release_cli.untouched()
+
+
+def test_download_only_then_from_is_the_airgap_round_trip(release_cli, tmp_path):
+    """--download-only names the file and the command to run on the
+    analysis box; that command, run, installs it."""
+    release_cli.publish("1.1.0")
+    usb = tmp_path / "usb"
+    usb.mkdir()
+    rc, out, _ = release_cli.run("--download-only", "--dest", str(usb))
+    assert rc == 0
+    assert release_cli.fetched == ["https://example.invalid/zipball/v1.1.0"]
+    carried = usb / "winnow-1.1.0.zip"
+    assert carried.read_bytes() == release_cli.archive.read_bytes()
+    assert [p.name for p in usb.iterdir()] == ["winnow-1.1.0.zip"], "a .part was left beside it"
+    assert "On the target machine: python update.py --from winnow-1.1.0.zip" in out
+    assert release_cli.untouched()
+
+    release_cli.release = OSError("no network on the analysis box")
+    rc, out, _ = release_cli.run("--from", str(carried), "-y")
+    assert rc == 0, out
+    assert "Updated 1.0.0 -> 1.1.0." in out
+    assert updater.installed_version(release_cli.install) == "1.1.0"
+
+
+def test_the_cli_shows_the_plan_and_applies_only_on_yes(release_cli, tmp_path, monkeypatch):
+    state = _seed_user_state(release_cli.install)
+    release_cli.publish("1.1.0")
+    answers = iter(["n", "y"])
+    monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+
+    rc, out, _ = release_cli.run("--dest", str(tmp_path))
+    assert rc == 1
+    assert "This update will:" in out and "version:  1.0.0 -> 1.1.0" in out
+    assert "Cancelled — nothing was changed." in out
+    assert release_cli.untouched()
+
+    rc, out, _ = release_cli.run("--dest", str(tmp_path))
+    assert rc == 0, out
+    assert "Updated 1.0.0 -> 1.1.0." in out
+    assert "Undo with: python update.py --rollback" in out
+    assert updater.installed_version(release_cli.install) == "1.1.0"
+    for rel, text in state.items():
+        assert (release_cli.install / rel).read_text(encoding="utf-8") == text, f"{rel} was modified"
+
+
+def test_the_cli_dry_run_downloads_and_plans_but_changes_nothing(release_cli, tmp_path, monkeypatch):
+    release_cli.publish("1.1.0")
+    monkeypatch.setattr("builtins.input", lambda *_: pytest.fail("a dry run asked to apply"))
+    rc, out, _ = release_cli.run("--dry-run", "--dest", str(tmp_path))
+    assert rc == 0
+    assert "added   : 1 (xlsxread.py)" in out
+    assert "--dry-run: nothing was changed." in out
+    assert release_cli.untouched()
+
+
+@pytest.mark.parametrize("failure, says", [
+    ("offline", "--from"),
+    ("no releases", "No releases have been published"),
+    ("download", "Download failed"),
+])
+def test_the_cli_reports_a_failed_update_as_an_error(release_cli, tmp_path, failure, says):
+    """Exit 2 and one line on stderr, never a traceback; nothing changed
+    and no half-downloaded file left to be mistaken for a release."""
+    import urllib.error
+    release_cli.publish("1.1.0")
+    if failure == "offline":
+        release_cli.release = OSError("Network is unreachable")
+    elif failure == "no releases":
+        release_cli.release = urllib.error.HTTPError(updater.RELEASES_API, 404, "Not Found", {}, None)
+    else:
+        release_cli.download_error = ConnectionResetError("connection reset")
+    rc, out, err = release_cli.run("-y", "--dest", str(tmp_path / "dl"))
+    assert rc == 2
+    assert err.startswith("error: ") and says in err
+    assert release_cli.untouched()
+    assert not list(tmp_path.glob("dl/*"))
+
+
+def test_the_cli_refuses_dev_and_from_together(release_cli):
+    """Two different sources. --from with --check or --download-only is
+    test_the_cli_refuses_from_with_a_network_only_flag, below."""
+    release_cli.publish("1.1.0")
+    with pytest.raises(SystemExit) as stop:
+        release_cli.run("--dev", "--from", "x.zip")
+    assert stop.value.code == 2
+    assert release_cli.untouched()
+
+
 def test_a_main_sync_is_recorded_as_such(install, tmp_path):
     """A box synced to main is running code no release was cut from —
     worth being able to tell after the fact."""
@@ -961,3 +1121,158 @@ def test_apply_route_reports_the_restart_requirement(store, monkeypatch):
     # The server is still running the OLD code — saying otherwise would be a lie.
     assert body["restart_required"] is True
     assert body["version"] == "9.9.9"
+
+
+# ------------------------------------------------- update.py, end to end
+
+# The airgap path is the one that has to work when the UI does not:
+# `update.py --from <zip>` on the analyst's machine, then `--rollback` if
+# the new version turns out bad. The tests above drive updater.py; these
+# drive the command an analyst actually types, and read what it tells them.
+
+def test_the_cli_applies_an_archive_and_says_how_to_undo_it(install, tmp_path, monkeypatch, capsys):
+    import update as update_cli
+    monkeypatch.setattr(update_cli, "HERE", install)
+    archive = _make_release(tmp_path / "v2.zip", "1.1.0", _v2_files())
+
+    assert update_cli.main(["--from", str(archive), "-y"]) == 0
+
+    out = capsys.readouterr().out
+    assert "Updated 1.0.0 -> 1.1.0." in out
+    assert "python update.py --rollback" in out
+    assert (install / "server.py").read_text(encoding="utf-8") == "print('server v2')\n"
+    assert updater.installed_version(install) == "1.1.0"
+
+
+def test_the_cli_rolls_back_what_it_applied(install, tmp_path, monkeypatch, capsys):
+    import update as update_cli
+    monkeypatch.setattr(update_cli, "HERE", install)
+    archive = _make_release(tmp_path / "v2.zip", "1.1.0", _v2_files())
+    assert update_cli.main(["--from", str(archive), "-y"]) == 0
+    capsys.readouterr()
+
+    assert update_cli.main(["--rollback"]) == 0
+
+    assert "Rolled back to 1.0.0" in capsys.readouterr().out
+    for rel, text in SHIPPED.items():
+        assert (install / rel).read_text(encoding="utf-8") == text
+
+
+def test_the_cli_dry_run_of_an_archive_changes_nothing(install, tmp_path, monkeypatch, capsys):
+    import update as update_cli
+    monkeypatch.setattr(update_cli, "HERE", install)
+    archive = _make_release(tmp_path / "v2.zip", "1.1.0", _v2_files())
+
+    assert update_cli.main(["--from", str(archive), "--dry-run"]) == 0
+
+    assert "nothing was changed" in capsys.readouterr().out
+    for rel, text in SHIPPED.items():
+        assert (install / rel).read_text(encoding="utf-8") == text
+    assert not (install / updater.BACKUP_DIR).exists()
+
+
+def test_the_cli_answers_n_by_changing_nothing(install, tmp_path, monkeypatch, capsys):
+    import update as update_cli
+    monkeypatch.setattr(update_cli, "HERE", install)
+    archive = _make_release(tmp_path / "v2.zip", "1.1.0", _v2_files())
+    monkeypatch.setattr("builtins.input", lambda *a: "n")
+
+    assert update_cli.main(["--from", str(archive)]) == 1
+
+    assert "nothing was changed" in capsys.readouterr().out
+    assert updater.installed_version(install) == "1.0.0"
+
+
+def test_the_cli_reports_an_unusable_archive_as_an_error_not_a_traceback(install, tmp_path, monkeypatch, capsys):
+    """An UpdateError is the analyst's problem to fix (a wrong file), so
+    it is one line on stderr and exit code 2, with nothing installed."""
+    import update as update_cli
+    monkeypatch.setattr(update_cli, "HERE", install)
+    not_winnow = tmp_path / "photos.zip"
+    with zipfile.ZipFile(not_winnow, "w") as zf:
+        zf.writestr("holiday/beach.jpg", "jpeg")
+
+    assert update_cli.main(["--from", str(not_winnow), "-y"]) == 2
+
+    assert capsys.readouterr().err.startswith("error: ")
+    assert updater.installed_version(install) == "1.0.0"
+
+
+@pytest.mark.parametrize("extra", [["--check"], ["--download-only"]])
+def test_the_cli_refuses_from_with_a_network_only_flag(install, tmp_path, monkeypatch, extra):
+    import update as update_cli
+    monkeypatch.setattr(update_cli, "HERE", install)
+    archive = _make_release(tmp_path / "v2.zip", "1.1.0", _v2_files())
+    with pytest.raises(SystemExit) as exc:
+        update_cli.main(["--from", str(archive), *extra])
+    assert exc.value.code == 2
+    assert updater.installed_version(install) == "1.0.0"
+
+
+# --------------------------------------------------------------- download
+
+class _Response:
+    """What urlopen hands back, as far as download() reads it: a context
+    manager that is also a file, which can be told to fail part-way."""
+
+    def __init__(self, chunks, fail_with=None):
+        self.chunks, self.fail_with = list(chunks), fail_with
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self, n=-1):
+        if self.chunks:
+            return self.chunks.pop(0)
+        if self.fail_with is not None:
+            raise self.fail_with
+        return b""
+
+
+def test_download_lands_the_archive_and_leaves_no_part_file(tmp_path):
+    dest = tmp_path / "out" / "winnow-1.1.0.zip"
+    got = updater.download("https://example.invalid/w.zip", dest,
+                           _open=lambda u, t: _Response([b"PK\x03\x04", b"rest"]))
+    assert got == dest
+    assert dest.read_bytes() == b"PK\x03\x04rest"
+    assert [p.name for p in dest.parent.iterdir()] == [dest.name]
+
+
+def test_download_into_a_directory_names_the_file_itself(tmp_path):
+    got = updater.download("https://example.invalid/w.zip", tmp_path,
+                           _open=lambda u, t: _Response([b"PK"]))
+    assert got == tmp_path / "winnow-update.zip"
+
+
+@pytest.mark.parametrize("failure", [ConnectionResetError("reset by peer"), TimeoutError("timed out")])
+def test_a_download_cut_off_part_way_leaves_nothing_that_looks_applicable(tmp_path, failure):
+    """download()'s promise: it writes beside the target and renames on
+    success, so a dropped connection can't leave a half-file at `dest`
+    that --from would then try to apply — and no .part litter either."""
+    dest = tmp_path / "winnow-1.1.0.zip"
+    with pytest.raises(UpdateError, match="Download failed"):
+        updater.download("https://example.invalid/w.zip", dest,
+                         _open=lambda u, t: _Response([b"PK\x03\x04half"], fail_with=failure))
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_ctrl_c_mid_download_leaves_no_part_file_and_still_interrupts(tmp_path):
+    dest = tmp_path / "winnow-1.1.0.zip"
+    with pytest.raises(KeyboardInterrupt):
+        updater.download("https://example.invalid/w.zip", dest,
+                         _open=lambda u, t: _Response([b"PK"], fail_with=KeyboardInterrupt()))
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_failed_download_keeps_an_earlier_complete_one(tmp_path):
+    """A retry that fails must not cost the analyst the archive they
+    already have: the old file is only replaced by a complete new one."""
+    dest = tmp_path / "winnow-1.1.0.zip"
+    dest.write_bytes(b"PK complete")
+    with pytest.raises(UpdateError):
+        updater.download("https://example.invalid/w.zip", dest,
+                         _open=lambda u, t: _Response([b"PK"], fail_with=ConnectionResetError()))
+    assert dest.read_bytes() == b"PK complete"

@@ -25,7 +25,7 @@ To filter from a cell, select it and press `f` to filter its column to that valu
 | `=4624` | cells exactly equal to the value | Case-sensitive |
 | `!=4624` | cells not equal to the value | Case-sensitive; empty cells match too |
 | `^C:\Users` | cells starting with the text | Ignores case for A–Z only |
-| `>1000` `>=1000` `<1000` `<=1000` | greater than, at least, less than, at most | Numeric on number columns only (see below) |
+| `>1000` `>=1000` `<1000` `<=1000` | greater than, at least, less than, at most | Numeric when the value is a number (see below) |
 | `/psexe(c\|svc)/` | a regular expression | Python syntax; ignores case in every script |
 | `""` or `''` | empty cells | |
 | `*` | cells with any value | |
@@ -61,7 +61,7 @@ Equals (`=`), not-equals (`!=`) and lists (`a|b|c`) compare the exact text, case
 
 When a table is imported, Winnow decides each column's type from its first 500 rows. A column is a number column if every non-empty value in that sample is a plain number such as `-12` or `3.5`. It is a datetime column if at least 80% of the sampled values look like dates. Every other column is text. A [derived column](Derived-columns.md) that extracts, decodes, combines or looks up values follows the same number rule, over all of its values rather than a sample, once it finishes building: a regex capture of byte counts is a number column. You can see each column's type in the table menu (`C`, or right-click a tab and choose **Columns…**).
 
-The comparison filters (`>`, `>=`, `<`, `<=`) compare numbers only on number columns. On a text column they compare text, character by character, so `>1000` counts `30` and `N/A` as greater than `1000`. On a number column, a cell that isn't a number (such as `N/A` or a blank) never matches a comparison, and typing something that isn't a number after the operator shows a "Filter error" message.
+The comparison filters (`>`, `>=`, `<`, `<=`) compare numbers when the value after the operator is a number, on any column except a datetime one. That includes a text column of numbers that is text only because a few cells say `-` or `N/A`: `>1000` there keeps `2048` and leaves out `30`. A cell that isn't a number (such as `N/A`, `-` or a blank) never matches a comparison. On a datetime column they compare the text, which puts timestamps such as `2024-01-05 13:22:01` in time order. A value that isn't a number compares text, character by character, so on a text column `>m` keeps the values that come after `m` alphabetically; on a number column it shows a "Filter error" message instead.
 
 When a filter can't run, such as a regular expression with a syntax error, Winnow shows a "Filter error" message that names the problem and keeps the rows you had.
 
@@ -181,7 +181,9 @@ The same switch is in Settings, under **Filter & search syntax**.
 
 ## The histogram
 
-Click **Histogram** or press `h` to show a bar chart above the grid of when the rows in the current view happened. Choose which datetime column to chart from its list. The line beside it gives the row count, the bucket size and the tallest bar. Winnow picks a bucket size, from one second up to a year, that gives bars a few pixels wide across the strip, so narrowing the timeframe gives finer buckets. Hover a bar to see its time range and row count.
+Click **Histogram** or press `h` to show a bar chart above the grid of when the rows in the current view happened. Choose which datetime column to chart from its list. Only the columns shown in the grid are in that list: a column you have hidden is left out, and if you hide the column being charted, the histogram switches to another one straight away. Show your chosen column again and the histogram goes back to it. The line beside it gives the row count, the bucket size and the tallest bar. Winnow picks a bucket size, from one second up to a year, that gives bars a few pixels wide across the strip, so narrowing the timeframe gives finer buckets. Hover a bar to see its time range and row count.
+
+Dashed lines behind the bars mark the days or the weeks, as on the [Timeline's overview](Timeline-search-and-watchlist.md#the-overview). While the bars are shorter than a day, a line marks each midnight. Once they are a day or longer, or the days are too close together to tell apart, a line marks the start of each week (Monday) instead, and when even the weeks are too close, there are none. Under the chart, each line is labeled with its date in ISO form, such as **2026-03-11**, where there is room between the start and end times. Like every time on the chart, they are in UTC. Hover a line to see the day it marks.
 
 Three buttons color the bars, one at a time; click the pressed one again to go back to plain bars. In each, a row counts once, so the bars stay as tall as the plain ones.
 
@@ -195,11 +197,11 @@ Drag across the bars to set the timeframe filter to that range on the charted co
 
 The histogram also shows where you are in the table. A mark along the top of the chart covers the time span of the rows on screen and moves as you scroll, and a line through the bars marks the selected row. When the rows on screen are not in time order, as when the table is sorted by a process ID, they are spread across the chart, so each one gets a short tick of its own instead. Hover a mark to see the times it stands for.
 
-If the table has no datetime column, the histogram says so. You can make one from a text timestamp; see [Derived columns](Derived-columns.md).
+If the table has no datetime column, the histogram says so. You can make one from a text timestamp; see [Derived columns](Derived-columns.md). If it has datetime columns but every one is hidden, the histogram says "Every datetime column in this table is hidden — show one from the table menu's Columns list to chart it." See [Showing and hiding columns](Working-with-tables.md#showing-and-hiding-columns).
 
 ## The search box
 
-The search box looks for text anywhere in a row. Click the magnifier, or press `/` or `Ctrl+F`, to open it. It has three modes:
+The search box looks for text anywhere in a row. Click the magnifier at the right end of the toolbar, or press `/` or `Ctrl+F`, to open it. In a narrow window, when the toolbar runs onto more than one line, the search moves down but stays at the right edge, with its mode buttons beside it. It has three modes:
 
 | Mode | How it matches |
 | --- | --- |

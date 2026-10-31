@@ -200,3 +200,179 @@ def test_a_replace_load_leaves_a_table_it_could_not_apply_to_as_it_was(store, ca
         (nh_b, "checked by hand")]
     assert res["sources_restored"] == 1
     assert any("noheader.csv" in w and "as they were" in w for w in res["warnings"])
+
+
+# ---------------------------------------------------------------- each reader
+#
+# One per reader the session can name. The CSV, JSON and SQLite readers are
+# above; IIS and key=value are in test_iis_logs.py and test_kv_logs.py.
+
+def _tagged_rows(store):
+    """{table name: [cells of each tagged row, in rid order]} — the rows
+    the tags ended up on, compared by content, since the two cases number
+    their tables independently."""
+    out = {}
+    for src in store.list_sources():
+        rids = [r[0] for r in store.db.execute(
+            "SELECT rid FROM row_tags WHERE source_id=? ORDER BY rid", (src["id"],))]
+        out[src["name"]] = [tuple(store.db.execute(
+            f"SELECT * FROM {src['table_name']} WHERE rid=?", (rid,)).fetchone())[1:] for rid in rids]
+    return out
+
+
+def _without_reader(session):
+    """The session as a build from before the reader was recorded saved it."""
+    for s in session["sources"]:
+        s["source"].pop("ingest", None)
+    return session
+
+
+def test_a_csv_comes_back_with_the_delimiter_and_types_it_was_imported_with(store, case_b, tmp_path):
+    """The analyst picked ';' for a file the sniffer splits on ',', and kept
+    the Pid column as text. A default read gives other columns."""
+    path = tmp_path / "hosts.csv"
+    path.write_text("Host,Domain;Pid\nWKS1,corp;4\nWKS2,corp;8\nWKS3,corp;12\n", encoding="utf-8")
+    sid = store.ingest_csv(str(path), delimiter=";", column_types=["text", "text"], build_fts=False)["id"]
+    session = _tagged_session(store, sid, [2])
+
+    res = case_b.import_case_session(session)
+    assert res["sources_reimported"] == 1 and res["warnings"] == []
+    [src] = case_b.list_sources()
+    assert [(c["name"], c["type"]) for c in src["columns"]] == [("Host,Domain", "text"), ("Pid", "text")]
+    assert _tagged_rows(case_b) == {src["name"]: [("WKS2,corp", "8")]}
+
+
+LOG_LINES = [
+    "Host,User,Action",                                     # reads as a header to the CSV reader
+    "Mar 14 08:00:01 wks1 sshd[311]: Accepted password for alice, port 22",
+    "Mar 14 08:00:09 wks1 sudo: alice : TTY=pts/0 ; COMMAND=/bin/sh",
+    "Mar 14 08:00:15 wks1 sshd[311]: Disconnected from user alice",
+]
+
+
+@pytest.mark.parametrize("recorded", [True, False], ids=["recorded", "guessed"])
+def test_a_text_log_comes_back_one_line_to_a_row(store, case_b, tmp_path, recorded):
+    """Nothing split and no line taken for a header — what the CSV reader
+    would do to this file, which would move every tag one row. A session
+    from before the reader was recorded guesses text for a .log."""
+    path = tmp_path / "auth.log"
+    path.write_text("\n".join(LOG_LINES) + "\n", encoding="utf-8")
+    sid = store.ingest_text(str(path), build_fts=False)["id"]
+    session = _tagged_session(store, sid, [3])
+    if not recorded:
+        _without_reader(session)
+
+    res = case_b.import_case_session(session)
+    assert res["sources_reimported"] == 1 and res["warnings"] == []
+    [src] = case_b.list_sources()
+    assert [c["name"] for c in src["columns"]] == [store_mod.TEXT_COLUMN]
+    assert _tagged_rows(case_b) == {src["name"]: [(LOG_LINES[2],)]}
+
+
+@pytest.fixture
+def workbook(tmp_path):
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    wb.remove(wb.active)
+    for title, rows in {
+        "Events": [["When", "Image"], ["2026-03-14 08:00:00", "svchost.exe"],
+                   ["2026-03-14 08:01:00", "evil.exe"], ["2026-03-14 08:02:00", "calc.exe"]],
+        "Logons": [["User", "Type"], ["alice", 10], ["bob", 3]],
+    }.items():
+        ws = wb.create_sheet(title)
+        for r in rows:
+            ws.append(r)
+    path = tmp_path / "triage.xlsx"
+    wb.save(path)
+    return str(path)
+
+
+def test_each_sheet_of_a_workbook_comes_back_from_its_own_sheet(store, case_b, workbook):
+    """Every sheet of a workbook shares the file's hash, so the sheet is the
+    only thing that says which rows a session's tags are for."""
+    events = store.ingest_xlsx_sheet(workbook, "Events", build_fts=False)["id"]
+    logons = store.ingest_xlsx_sheet(workbook, "Logons", build_fts=False)["id"]
+    tag = store.upsert_tag(None, "Malware", "#ff0000", None)["id"]
+    store.set_tags(events, [2], tag, True)
+    store.set_tags(logons, [1], tag, True)
+    session = store.export_case_session()
+
+    res = case_b.import_case_session(session)
+    assert res["sources_reimported"] == 2 and res["warnings"] == []
+    assert _tagged_rows(case_b) == {"triage.Events": [("2026-03-14 08:01:00", "evil.exe")],
+                                    "triage.Logons": [("alice", "10")]}
+
+
+def test_a_workbook_from_an_old_session_is_not_guessed_at(store, case_b, workbook):
+    """Which sheet isn't recorded, and a workbook has several: nothing is
+    read, and the warning says to import it by hand."""
+    sid = store.ingest_xlsx_sheet(workbook, "Events", build_fts=False)["id"]
+    session = _without_reader(_tagged_session(store, sid, [2]))
+
+    res = case_b.import_case_session(session)
+    assert res["sources_reimported"] == 0 and case_b.list_sources() == []
+    assert len(res["warnings"]) == 1 and "no record of how it was read" in res["warnings"][0]
+
+
+@pytest.mark.parametrize("recorded", [True, False], ids=["recorded", "guessed"])
+@pytest.mark.parametrize("era", ["old", "new"])
+def test_a_plaso_file_comes_back_as_its_timeline(store, case_b, tmp_path, era, recorded):
+    from test_plaso_import import make_new_plaso, make_old_plaso
+
+    path = tmp_path / "case.plaso"
+    (make_old_plaso if era == "old" else make_new_plaso)(str(path))
+    sid = store.ingest_plaso(str(path), build_fts=False)["id"]
+    session = _tagged_session(store, sid, [1])
+    want = _tagged_rows(store)
+    if not recorded:
+        _without_reader(session)
+
+    res = case_b.import_case_session(session)
+    assert res["sources_reimported"] == 1 and res["warnings"] == []
+    assert _tagged_rows(case_b) == want
+
+
+def test_a_session_that_names_no_file_re_imports_nothing(store, case_b, write_csv):
+    path = write_csv([["proc"], ["evil.exe"], ["benign.exe"]], "ev.csv")
+    sid = store.ingest_csv(path, build_fts=False)["id"]
+    session = _tagged_session(store, sid, [1])
+    session["sources"][0]["source"].pop("path")
+
+    res = case_b.import_case_session(session)
+    assert res["sources_reimported"] == 0 and res["tags_applied"] == 0
+    assert case_b.list_sources() == []
+    assert res["warnings"] == ["'ev.csv' isn't in this case and the session doesn't say which file it came "
+                               "from — skipped"]
+
+
+def test_a_file_gone_from_its_path_is_skipped_and_named(store, case_b, write_csv):
+    path = write_csv([["proc"], ["evil.exe"], ["benign.exe"]], "ev.csv")
+    sid = store.ingest_csv(path, build_fts=False)["id"]
+    session = _tagged_session(store, sid, [1])
+    os.remove(path)
+
+    res = case_b.import_case_session(session)
+    assert res["sources_reimported"] == 0 and case_b.list_sources() == []
+    assert res["warnings"] == [f"'ev.csv' isn't in this case and its original file wasn't found at {path} "
+                               "— skipped"]
+
+
+def test_a_file_that_changes_while_it_is_read_is_removed_again(store, case_b, write_csv, monkeypatch):
+    """The file is checked against the session before it is read; if it is
+    replaced between the two, the copy that was read is not the session's
+    evidence, and is dropped rather than tagged."""
+    path = write_csv([["proc"], ["evil.exe"], ["benign.exe"]], "ev.csv")
+    sid = store.ingest_csv(path, build_fts=False)["id"]
+    session = _tagged_session(store, sid, [1])
+    real = case_b.ingest_csv
+
+    def replaced_first(p, *a, **k):
+        write_csv([["proc"], ["benign.exe"], ["evil.exe"]], "ev.csv")
+        return real(p, *a, **k)
+    monkeypatch.setattr(case_b, "ingest_csv", replaced_first)
+
+    res = case_b.import_case_session(session)
+    assert res["sources_reimported"] == 0 and res["tags_applied"] == 0
+    assert case_b.list_sources() == []
+    assert res["warnings"] == ["'ev.csv' changed on disk while it was being re-imported — removed again"]

@@ -171,6 +171,12 @@ see [docs/notes/README.md](README.md) for the whole set.
   name collision is a 409 the frontend confirms into `overwrite=true`,
   and an install whose *load* then fails still keeps the files and
   reports the error (same standing as a hand-copied broken plugin).
+  The folder picker needs `type = 'file'` as well as `webkitdirectory`:
+  `el('input')` makes a text box, `webkitdirectory` on a text box is
+  accepted silently, and clicking its label then opens no picker at
+  all. The move into the manager dropped the type and the folder button
+  did nothing for a month; tests/ui/test_plugin_install_dialog.py clicks
+  both buttons and waits for the picker each one opens.
   Seven extension points on PluginAPI now (docs/writing-plugins.md §1);
   these three came first, and the rest of this entry is about them:
   `register_ingest_format` parses a file into columns + a row iterable

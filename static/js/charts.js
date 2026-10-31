@@ -15,6 +15,10 @@
      drawHistogram(canvas, { buckets, colors, brush? })
        buckets: [[key, [c0, c1, ...]], ...] sorted by key; one stacked bar
        per bucket, one segment per series index, colored by colors[i].
+
+   And the day/week rules the two time strips (histogram.js,
+   timelineoverview.js) draw behind their bars: calendarRules picks
+   them, drawCalendarRules paints them on a context the caller owns.
 */
 
 const cssVar = (n, fallback) =>
@@ -50,9 +54,9 @@ export function drawBars(canvas, spec) {
   if (!rows.length) return { boxes: [] };
   const valKey = spec.value || 'n', labKey = spec.label || 'value';
   const accent = cssVar('--accent', '#cfa057');
-  const line = cssVar('--line-2', '#333a35');
-  const dim = cssVar('--dim', '#848d80');
-  const text = cssVar('--text', '#c3c8be');
+  const line = cssVar('--line-2', '#383838');
+  const dim = cssVar('--dim', '#8a8a8a');
+  const text = cssVar('--text', '#c4c4c4');
   const max = spec.max || Math.max(1, ...rows.map((r) => +r[valKey] || 0));
   const boxes = [];
   ctx.font = `11px ${cssVar('--mono', 'monospace')}`;
@@ -118,13 +122,58 @@ export function drawHistogram(canvas, spec) {
     row.forEach((v, k) => {
       if (!v) return;
       const bh = ((+v || 0) / max) * (h - 6);
-      ctx.fillStyle = colors[k] || cssVar('--dim', '#848d80');
+      ctx.fillStyle = colors[k] || cssVar('--dim', '#8a8a8a');
       ctx.globalAlpha = inBrush ? 1 : 0.3;
       ctx.fillRect(i * bw + 1, y - bh, Math.max(1, bw - 2), bh);
       y -= bh;
     });
   });
   ctx.globalAlpha = 1;
+}
+
+/* Calendar rules for a time axis: a faint dashed line at each midnight,
+   or at the start of each week once a bar is a day or more or the days
+   are packed too tight to tell apart, or none once the weeks are too.
+   The histogram strip over the grid and the Timeline's overview strip
+   both draw them, so a night or a week reads the same way on either.
+
+   UTC, as both strips' axes are: their bars are UTC epochs and every
+   label on them is UTC. A week starts on Monday, ISO 8601's week.
+
+   `bucket` is the bar width in seconds: a rule at every bar says nothing
+   the bars do not, so days need bars finer than a day and weeks bars
+   finer than a week. `pxPerSec` is the axis's scale; a unit is drawn
+   only when its rules land at least RULE_MIN_PX apart. Returns
+   {unit: 'day' | 'week' | null, times: [epoch…]}, the rules strictly
+   inside (t0, t1): one on the axis's very edge marks nothing. */
+export const RULE_MIN_PX = 8;
+const DAY_S = 86400;
+const WEEK_S = 7 * DAY_S;
+const MONDAY_S = 4 * DAY_S;   // 1970-01-05, the first Monday after the epoch
+export function calendarRules(t0, t1, bucket, pxPerSec) {
+  const pick = [['day', DAY_S, 0], ['week', WEEK_S, MONDAY_S]]
+    .find(([, len]) => bucket < len && len * pxPerSec >= RULE_MIN_PX);
+  if (!pick || !(t1 > t0)) return { unit: null, times: [] };
+  const [unit, len, offset] = pick;
+  const times = [];
+  for (let t = Math.floor((t0 - offset) / len) * len + offset + len; t < t1; t += len) times.push(t);
+  return { unit, times };
+}
+
+/* The rules calendarRules picked, drawn as the Timeline's overview strip
+   has always drawn its midnights: dashed, in the color given (--line-2
+   on both strips). The caller paints them before the bars, so they show
+   in the gaps and across a quiet stretch and never tint a bar. */
+export function drawCalendarRules(ctx, times, xOf, top, bottom, color) {
+  if (!times.length) return;
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.setLineDash([2, 3]);
+  for (const t of times) {
+    const x = Math.round(xOf(t)) + 0.5;
+    ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, bottom); ctx.stroke();
+  }
+  ctx.restore();
 }
 
 /* Map a horizontal-bar click back to its row, using the boxes drawBars

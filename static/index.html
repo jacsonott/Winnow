@@ -126,18 +126,23 @@ try {
   <button class="btn ghost" id="btnTimeRange" aria-pressed="false">⏱ Timeframe</button>
   <button class="btn ghost" id="btnFilters" aria-haspopup="true" aria-expanded="false" aria-pressed="false">Filters ▾</button>
   <button class="btn ghost" id="btnReset">Clear filters</button>
-  <!-- The tooltip and the placeholder below both name the key that opens the box, and
+  <!-- One toolbar item for the search, whichever state it is in — the icon, or the box and
+       its Contains/Regex/Advanced — so that when the toolbar wraps, the box and its modes
+       move down together and stay at the right edge instead of splitting across two lines.
+       The tooltip and the placeholder below both name the key that opens the box, and
        both are rewritten from the keymap by syncSearchKeyCopy (filters.js) at startup and
        on every rebinding — what is in the markup is only what shows before that runs. -->
-  <button class="btn ghost search-icon-btn" id="btnSearchToggle" title="Search" aria-label="Search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4.2-4.2"/></svg></button>
-  <div class="search-wrap" id="searchWrap" hidden>
-    <input id="search" type="search" placeholder="All columns" autocomplete="off" spellcheck="false">
-    <span class="hint" id="searchMode">substring</span>
-  </div>
-  <div class="search-mode-toggle" id="searchModeToggle" hidden>
-    <button class="btn ghost" data-mode="contains" aria-pressed="true" title="Substring match. Ignores case for A–Z only — use Regex to ignore case in other scripts (Cyrillic, accented letters)">Contains</button>
-    <button class="btn ghost" data-mode="regex" title="Regular expression (Python syntax). Ignores case in every script">Regex</button>
-    <button class="btn ghost" data-mode="advanced">Advanced</button>
+  <div class="search-group">
+    <button class="btn ghost search-icon-btn" id="btnSearchToggle" title="Search" aria-label="Search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4.2-4.2"/></svg></button>
+    <div class="search-wrap" id="searchWrap" hidden>
+      <input id="search" type="search" placeholder="All columns" autocomplete="off" spellcheck="false">
+      <span class="hint" id="searchMode">substring</span>
+    </div>
+    <div class="search-mode-toggle" id="searchModeToggle" hidden>
+      <button class="btn ghost" data-mode="contains" aria-pressed="true" title="Substring match. Ignores case for A–Z only — use Regex to ignore case in other scripts (Cyrillic, accented letters)">Contains</button>
+      <button class="btn ghost" data-mode="regex" title="Regular expression (Python syntax). Ignores case in every script">Regex</button>
+      <button class="btn ghost" data-mode="advanced">Advanced</button>
+    </div>
   </div>
   <div id="advancedSearchBar" class="advanced-search-bar" hidden></div>
 </section>
@@ -417,6 +422,9 @@ Markdown: # headings, - bullets, **bold**, `code`, tables. Link ▾ points at a 
 <!-- Shown when another window switches this Winnow to a different case
      (caseGone in static/js/connection.js). -->
 <div id="caseGone" class="case-gone" role="alertdialog" aria-modal="true" aria-labelledby="caseGoneTitle" hidden></div>
+<!-- Shown while Winnow's server restarts after an update (awaitRestart in
+     static/js/connection.js). -->
+<div id="restarting" class="case-gone" role="alertdialog" aria-modal="true" aria-labelledby="restartingTitle" aria-live="polite" hidden></div>
 <!-- Shown when Winnow runs as administrator on Windows, which stops files
      being dragged in (maybeWarnElevated in static/js/importer.js). -->
 <div id="elevNotice" class="elev-notice" role="status" hidden></div>

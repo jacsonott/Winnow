@@ -78,6 +78,28 @@ extracted column is an ordinary derived column everywhere, that discovery
 only ever offers paths that actually extract, and that a batch is
 all-or-nothing (a name collision in the fifth spec must not leave four
 columns behind).
+`test_ingest_contracts.py` holds every reader (CSV, text, JSON, IIS,
+key=value, XLSX, Plaso, SQLite) to the three promises ingest_csv set,
+since each carries its own copy of the code that keeps them: every row
+lands in order across batches (BATCH is shrunk so a 30-row fixture spans
+five), a cancel leaves no table, and a failure raised from the reader
+part-way keeps what was read, says how many, and leaves no empty table
+when nothing was. Adding a reader means adding it to `READERS` there.
+`test_group_export.py` holds the export of an expanded small group (its
+own code path, `group_virtual`) to the rows the grid pages for it and,
+byte for byte, to the same rows exported through a filter or a
+materialised group. `test_merge_advanced_search.py` is Advanced search's
+merge case (invariant 9), with members indexed, not, and mixed.
+`test_wiki_shortcuts.py` holds the shortcut table in
+docs/wiki/Settings-and-shortcuts.md to keymap.js's `DEFAULT_KEYMAP` and
+`ACTION_LABELS`, read with esprima, so a relabelled action or a new
+default key fails the backend job instead of leaving the manual
+describing an older build (the table menu's label had drifted when it
+was added). `test_updater.py` drives `update.py` itself as well as
+updater.py: `--from` then `--rollback` as an analyst types them, the
+answers to a refused or unusable archive, and `download()`'s promise
+that a cut-off or Ctrl+C'd download leaves nothing at the target that
+`--from` could later apply.
 `test_derived.py` covers the column lifecycle and, more importantly, the
 integration choices that are easy to reverse by accident: the
 virtual-root EXPLAIN plan (invariant #2), that derived values are *not*
@@ -97,6 +119,52 @@ the fast-path regexes and `_parse_line_slow` and requires one answer: the
 fast paths are only a speed-up if they never disagree, and a disagreement
 shows up nowhere else. `test_esxi_log_scan.py` covers the same plugin's
 folder scan, continuation folding and syslog year.
+`test_site_palette.py` holds the Pages site and Harvest to the same
+colors: every value docs/site/assets/site.css copies from a Harvest token
+(the ones commented `/* dark --panel */` and so on) must still equal that
+token in static/style.css, and Harvest dark's greys must have no hue. The
+site took the green cast out of Harvest's greys before the app did, and
+the two drifted apart until the app read as green next to its own
+website.
+
+In the browser, `tests/ui/test_default_keys.py` presses every binding in
+`DEFAULT_KEYMAP`. Its first test swaps each `ACTION_HANDLERS` entry for a
+recorder and checks every key reaches its own action and no other. It reads
+the keymap from the page, so a key added later is pressed without anyone
+adding it, and nothing the keys would do happens. The rest press, for real,
+the keys whose handlers have no button or menu entry (PageDown/PageUp, `0`,
+`q` `w` `[` `]`, `f` `F`, the backtick, `x`, `L`, `Q`, `.`) and assert what
+changes on screen. `test_plugin_install_dialog.py` drives Install a
+plugin… through its two picker buttons and answers the install route itself
+(a real install writes into the shared server's plugins folder, and nothing
+takes a plugin back out). A routed request carries a file part's name but
+not its bytes, so it asserts names and paths, not contents.
+`test_row_action_menu.py` runs a plugin row action from the row menu (one
+row, a range, a merge, `open_url`, a refusal) against a routed dispatch.
+`test_detail_malformed_xml_ui.py` covers the detail pane's fallback for XML
+that won't parse, through `renderDetailContent`: reflowed, highlighted,
+nothing lost, no path offered, and the value never built as markup.
+`test_popout.py` brings a pop-out back as a tab (and keeps what was typed
+out there), and opens a pop-out with no case, and one of a page the case
+doesn't have, through `window.open('')` so the window may close itself.
+
+`test_csv_round_trip.py` ingests a file of awkward cells, exports it over
+`/api/export` and ingests the export: everything comes back except the
+formula guard's apostrophe. Its last test forces `_CsvWriter`'s Python 3.10
+path on every Python and, on 3.11+, checks it against what `csv` writes.
+`test_firstlast_filters.py` runs each of First/Last's filter operators and
+the grid's equivalent condition on the same table and on a merge, and
+compares the counts per group, because the plugin compiles its own WHERE.
+Its table has both '' and NULL, and a number column with a blank and a
+non-number in it. `test_session_reimport.py` re-imports a table from a
+session for every reader the session can name (IIS and key=value are in
+their own files), with and without the reader recorded, and covers a
+session with no path, a file gone from its path, and a file replaced while
+it was read. Beside the `--from` tests above, `test_updater.py`'s
+`ReleaseCli` runs `update.py` on the release path, with GitHub answered
+through updater's own seams: `--check`, up to date, `--download-only`
+then `--from` (the airgap trip), the apply prompt, `--dry-run`, and each
+failure as exit 2.
 
 ## Things that bite
 
@@ -106,6 +174,16 @@ folder scan, continuation folding and syslog year.
   passes against the broken implementation — it can grab the lock in the
   window before the sweep ever takes it. If you write another concurrency
   test here, check it actually fails against the shape it's meant to catch.
+
+- **A browser test that only fails on a loaded runner may be a real race
+  in the app.** test_view_state.py's scroll wait timed out now and then
+  in CI for days and was waved through as pre-existing. It was a
+  product bug: a second, stray view build landing over the restored one
+  (see "Coming back to a table" in [ui.md](ui.md)). Before loosening a
+  wait, reproduce the failure: run the test on repeat with every core
+  busy (`python3 -c "while True: pass" &`, one per core), which turned
+  a rare CI failure into roughly one run in eight, and record what each
+  build and landing did in a `window` array to read back on failure.
 
 - **`pytest … | tail` reports tail's exit status, not pytest's.** A
   pipeline's status is its last command's, so `pytest -q | tail -5 && git
@@ -139,6 +217,19 @@ folder scan, continuation folding and syslog year.
   gesture under test, and let the `api` fixture raise on a non-2xx
   answer rather than catching it: a cleanup call that 404'd and was
   swallowed is how that issue went unnoticed.
+
+- **A debounced save outlives the test that made it.** A module-scoped
+  page lives across tests, so a write the app puts off (tabState's
+  half-second debounce, a note's autosave) goes out in whichever test is
+  running by then. Start fresh in test_firstlast_state.py leaves one,
+  since the empty sheet it puts back saves itself as nothing, and the
+  read-failure test after it wrote its row through the API before
+  reloading. Depending on how long the tests between took, that save
+  landed over the row or in the test's own watch for writes, failing
+  the shard on develop now and then. Write the server-side state a test
+  depends on after the reload, which kills a timer still waiting. And a
+  check that a debounced write did NOT happen waits past the debounce:
+  a fast round trip can end before it, so the check looks too early.
 
 - **A click that lands while its target is being re-rendered fires
   nothing.** Not a refusal: the click hits a node that is being replaced,

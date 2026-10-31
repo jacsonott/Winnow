@@ -31,7 +31,7 @@ import { compactCaseFile, countCell, mergesUsing, openTablesManager, plural, rem
 import { loadTags, refreshTagCounts, renderTagRibbon } from './tags.js';
 import { openTableMenu, tableMenuSeg, tableMenuStat, timeframeAcrossTables, updateFiltersButton, updateTimeRangeButton } from './timeframe.js';
 import { confirmDialog, contextMenu, dropdownMenu, modal, promptDialog, sectionPanes } from './ui.js';
-import { dropPendingSelection, pendingViewStatsText, rebuildView, syncNoRows, writeStatsLine } from './view.js';
+import { dropPendingSelection, pendingViewStatsText, rebuildView, supersedeBuild, syncNoRows, writeStatsLine } from './view.js';
 import { inPopout, isPoppedOut, openPageTabMenu, popOut, sendToMain, showPopout } from './popout.js';
 
 /* --------------------------------------------------------------- sources */
@@ -653,7 +653,7 @@ export function renderPageTabs() {
   }
   if (pagesAsMenu) {
     const open = pageTabsSorted().filter((t) => !pageTabClosed(t.key));
-    const current = open.find((t) => t.key === S.activeTab);
+    const current = open.find((t) => t.key === currentPageKey());
     const btn = el('button', 'tab tab-sql pages-menu-btn');
     btn.id = 'pagesMenuBtn';
     btn.append(el('span', 'pages-menu-label', current ? current.label : 'Pages'), el('span', 'caret', '\u25be'));
@@ -666,13 +666,28 @@ export function renderPageTabs() {
     // analyst is looking at rather than the ones the strip last painted.
     // A page's badge goes on that page's ROW — the button itself is
     // labelled with whichever page is up and owns none of these numbers.
+    // Each row keeps its tab's right-click (Open in its own window, Close
+    // this tab — popout.js) and its ⧉ mark: with the tabs collapsed, this
+    // list is the only place a page is named.
     btn.onclick = () => dropdownMenu(btn, open.map((t) => {
       const badge = t.key === 'watchlist' ? watchlistBadge() : null;
+      const out = isPoppedOut(t.key);
       return {
-        label: t.label, checked: t.key === S.activeTab, onclick: t.show,
+        label: t.label, checked: t.key === currentPageKey(), onclick: t.show,
         badge: badge ? badge.text : null, title: badge ? badge.title : t.title,
+        note: out ? '\u29C9' : null,
+        oncontextmenu: (e) => openPageTabMenu(e, t.key),
       };
     }));
+    // The button stands in for whichever page is up, so its right-click is
+    // that page's tab's. With no page up there is no one tab it means: it
+    // opens the list, whose rows have the menu.
+    btn.oncontextmenu = (e) => {
+      const cur = open.find((t) => t.key === currentPageKey());
+      if (cur) { openPageTabMenu(e, cur.key); return; }
+      e.preventDefault();
+      btn.onclick();
+    };
     nodes.push(btn);
   }
   strip.replaceChildren(...nodes);
@@ -689,16 +704,21 @@ export function renderPageTabs() {
    just stops being what's on screen. The sidebar re-render lives here for
    the same reason renderTabs() ends with one — every caller has, by
    definition, just changed what's active. */
+/* The page tab key of what's showing. A showing board sets activeTab to
+   the plain 'dashboard' (dashboard.js owns that) — its pinned tab, keyed
+   'dashboard:<id>', matches on the id. */
+function currentPageKey() {
+  return S.activeTab === 'dashboard' && S.dashboardId != null ? 'dashboard:' + S.dashboardId : S.activeTab;
+}
+
 export function syncTabSelection() {
-  // A showing board sets activeTab to the plain 'dashboard' (dashboard.js
-  // owns that) — its pinned tab, keyed 'dashboard:<id>', matches on the id.
-  const dashKey = S.activeTab === 'dashboard' && S.dashboardId != null ? 'dashboard:' + S.dashboardId : null;
+  const key = currentPageKey();
   document.querySelectorAll('#pageTabs .tab').forEach((t) =>
-    t.setAttribute('aria-selected', String(t.dataset.pageKey === S.activeTab || (dashKey != null && t.dataset.pageKey === dashKey))));
+    t.setAttribute('aria-selected', String(t.dataset.pageKey === key)));
   const pm = $('pagesMenuBtn');
   if (pm) {
     // The collapsed button stands in for whichever page is up.
-    const cur = pageTabsSorted().find((t) => t.key === S.activeTab);
+    const cur = pageTabsSorted().find((t) => t.key === key);
     pm.setAttribute('aria-selected', String(!!cur));
     // By class, not firstChild: the new-hit dot is a sibling that comes
     // and goes, and writing the label into it would blank the marker.
@@ -1067,6 +1087,8 @@ export async function openSource(id, { skipBuild = false } = {}) {
     // source_id included: refreshTagCounts compares it against S.sourceId
     // and returns early without it, so the tag ribbon silently kept showing
     // whole-table counts beside a filtered view for as long as it lasted.
+    // A build still running for this table would land over it otherwise.
+    supersedeBuild();
     S.view = { view_id: cached.view_id, row_count: cached.row_count,
                elapsed_ms: cached.elapsed_ms, source_id: id };
     clearPageCache();
