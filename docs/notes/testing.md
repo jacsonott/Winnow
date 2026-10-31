@@ -154,6 +154,25 @@ through updater's own seams: `--check`, up to date, `--download-only`
 then `--from` (the airgap trip), the apply prompt, `--dry-run`, and each
 failure as exit 2.
 
+The smaller UI paths that had never run in a browser have one file each.
+`test_derived_unparsed_and_path_ui.py`: a derived column's "Show N
+unparsed rows" (and an extracted field's "rows without this field") opens
+exactly the failures, on a merge from every member, and "Change the field
+path…" recomputes the column in place. `test_settings_density_cap.py`:
+Row density through Settings keeps the top row in place, grouped or not,
+and the autofit width limit clamps what is typed and stores "No limit" as
+0. `test_saved_filters_rows.py` adds Rename… and Edit… on a saved filter.
+`test_dashboard_manage_ui.py`: renaming a board from the sidebar or its
+title, deleting it from the sidebar's ✕ (the next board, or the grid when
+it was the last), and Save as profile…, which carries variable
+definitions and never their values. `test_home_drop.py`: files dropped on
+a case row go into that case and nowhere else, dropped off the rows they
+start a quick look; each on its own server, since both switch the case.
+`test_pivot_export_filter.py`: the pivot's Copy and CSV (formula guard
+included) and its field filter. `test_firstlast_copy.py`: Copy result,
+including the card it waits on when the analyst has left the tab, held
+at `job/start` so the answer lands while the tab is hidden.
+
 ## Things that bite
 
 - A note on the lock-scope test in `test_search.py`: it asserts *structurally*
@@ -228,6 +247,17 @@ failure as exit 2.
   seen, inside `page.expect_response`, and assert on that response.
   `_click_add` in tests/ui/test_plugin_dashboard_offered.py is the
   pattern.
+
+- **Polling a server that is starting on a listener it was handed can
+  time out rather than be refused.** The socket is listening the whole
+  time, so a request connects at once and waits in the backlog until the
+  new process serves; a start slower than the request's timeout raises
+  `TimeoutError`, which is neither a `URLError` nor a `ConnectionError`.
+  test_restart.py's Windows-style relaunch caught only those two, and
+  failed when a Windows runner took more than two seconds to start
+  (#495's CI). A poll for "up yet?" treats a timeout as "not yet". A
+  child that sleeps in a `sitecustomize.py` on its `PYTHONPATH` makes a
+  slow start on demand.
 
 - **`wait_for_function` does not await its predicate.** One that returns
   `fetch(…).then(…)` hands back a Promise, which is truthy, so the wait
