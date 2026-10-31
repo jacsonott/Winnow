@@ -1,7 +1,8 @@
 /* Profiles — "how I analyze this kind of case": the plugins a case of this
    kind needs, the boards it opens with, a starter watchlist, and the
    variables the case must carry. Managed from the M menu here, and picked
-   by name from the new-case dialog's Profile select (home.js).
+   from the side list of the new-case dialog (home.js), which describes
+   each one with summaryOf below.
 
    Two things this module is deliberate about, both because applying a
    profile CHANGES THE OPEN CASE and used to say nothing first:
@@ -30,8 +31,8 @@ export async function listBundles() {
 
 /* Apply a profile to the open case. `parts` is the subset of
    plugins/boards/watchlist/variables the analyst agreed to — omitted
-   means all four, which is what the new-case dialog's Profile select
-   sends and what apply meant before the sheet existed. */
+   means all four, which is what the new-case dialog sends and what apply
+   meant before the sheet existed. */
 export async function applyBundle(bundle, parts = null) {
   const res = await post(`/api/plugin_bundles/${bundle.id}/apply`, parts ? { parts } : {});
   await loadPlugins();
@@ -92,7 +93,7 @@ function countWidgets(bd) {
   return boardsOf(bd).reduce((n, b) => n + b.widgets.length, 0);
 }
 
-function summaryOf(bd) {
+export function summaryOf(bd) {
   /* The one line under a profile's name in the list. Counts, not names:
      the names are one click away in the pane beside it, and the list's
      job is to let an analyst tell five profiles apart at a glance. */

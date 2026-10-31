@@ -250,6 +250,15 @@ def install(writer: Writer | None = None) -> Writer | None:
     return writer
 
 
+def drain(timeout: float = EXIT_GRACE_S) -> bool:
+    """Give the console `timeout` seconds to take what is queued, as
+    interpreter exit does (_at_exit), for a process that is about to
+    replace itself instead: os.execve runs no atexit hooks, and the
+    writer thread goes with the old program. False if it is still stalled."""
+    w = _writer
+    return w is None or w.drain(timeout)
+
+
 def _at_exit() -> None:
     w = _writer
     if w is None or w.drain(EXIT_GRACE_S):

@@ -325,3 +325,32 @@ def test_the_row_count_reads_rows_the_way_openpyxl_does(tmp_path):
     assert _rows_iter_rows_counts(str(out)) == 6
     sheet, = xlsxread.workbook_sheets(str(out))
     assert sheet["row_count"] == 5 and sheet["columns"] == ["Head"]
+
+
+@pytest.mark.parametrize("declared", [True, False], ids=["declared size", "no declared size"])
+def test_no_cell_past_the_header_is_cut(store, write_xlsx, tmp_path, monkeypatch, declared):
+    """Data wider than the header lands in col_N columns, short rows pad,
+    and nothing is counted ragged because nothing was cut. A sheet with no
+    <dimension> used to be sized to its header alone, so the cells past it
+    were cut and only the ragged count said so."""
+    rows = [["When", "Host"],
+            ["t1", "h1"],
+            ["t2", "h2", "extra", "more"],      # wider than the header
+            ["t3"],                             # shorter
+            ["t4", "h4", "x", "y", "widest"]]   # wider again, after rows have committed
+    path = write_xlsx({"Log": rows}) if declared else _without_declared_size(tmp_path, rows)
+    from winnow import store as store_mod
+    monkeypatch.setattr(store_mod, "BATCH", 2)   # so the table widens with rows already committed
+    rec = store.ingest_xlsx_sheet(path, "Log", build_fts=False)
+    assert [c["name"] for c in rec["columns"]] == ["When", "Host", "col_3", "col_4", "col_5"]
+    assert rec["ragged_rows"] == 0
+    v = store.build_view(rec["id"], {"source_id": rec["id"]})
+    assert [r["cells"] for r in store.fetch_rows(v["view_id"], 0, 10)["rows"]] == [
+        ["t1", "h1", "", "", ""],
+        ["t2", "h2", "extra", "more", ""],
+        ["t3", "", "", "", ""],
+        ["t4", "h4", "x", "y", "widest"],
+    ]
+    filt = store.build_view(rec["id"], {"source_id": rec["id"],
+                                        "filters": [{"column": "col_5", "op": "equals", "value": "widest"}]})
+    assert filt["row_count"] == 1

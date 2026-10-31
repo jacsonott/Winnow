@@ -44,7 +44,7 @@ compare them; **Done** takes you back to Settings.
 
 | Skin | Description as shown |
 | --- | --- |
-| Harvest | Grain and chaff — wheat gold on deep green-black, parchment in light. The default. |
+| Harvest | Grain and chaff — wheat gold on neutral charcoal, parchment in light. The default. |
 | Panel | The older look — cooler greys, amber accent. |
 | Phosphor | Retro CRT terminal — glow, monospace chrome. |
 | Blueprint | Bold borders, hard offset shadows. |
@@ -117,7 +117,9 @@ opens that column's box. See [Filtering and searching](Filtering-and-searching.m
 Off by default. On, the page tabs (SQL, Timeline, Notes, Watchlist and any
 plugin tabs) collapse into one **Pages ▾** button, giving the table tabs the
 width; while a page is showing, the button carries that page's name. The
-pages and their counts then live in that button's menu.
+pages and their counts then live in that button's menu. Right-clicking a
+page in it gives the menu its tab had, **Open in its own window** included
+(see [Working with tables](Working-with-tables.md#opening-a-page-in-its-own-window)).
 
 ### Autofit column width limit
 
@@ -199,7 +201,7 @@ once, with all its keys.
 | Copy the unique values of the cursor's column — from the selected rows, else the whole view | `Ctrl+Shift+U`, `Meta+Shift+U` |
 | Open Tables manager | `t` |
 | Show/hide the table sidebar | `` ` `` |
-| Open the table menu (columns, value dropdowns) — also right-click a tab → Columns… | `C` |
+| Open the table menu (columns, value dropdowns, layout, name & merge) — also right-click a tab → Columns… | `C` |
 | Search all tables | `s` |
 | Open/close the detail pane | `d` |
 | Drop all grouping, restore column order | `x` |
@@ -505,8 +507,12 @@ on.
 
 Shows the installed version, with **Check for updates** and, when there is a
 newer release, **Install update**. Nothing is checked until you press the
-button. See [Updating](Installation.md#updating) for what an update keeps,
-the command-line updater, airgapped updates and rollback.
+button. The new version runs once Winnow restarts: the confirmation has a
+**Restart Winnow when it’s installed** box, ticked, and if you untick it,
+**Restart now** appears beside the buttons once the update is in. Either way
+Winnow comes back on the same case and every open window reloads by itself.
+See [Updating](Installation.md#updating) for what an update keeps, how the
+restart works, the command-line updater, airgapped updates and rollback.
 
 ## Shut down
 

@@ -218,9 +218,21 @@ export function _spawnDialog(build) {
   });
 }
 
+/* `opts.check` ({ label, checked }) adds one tick box under the message
+   for a choice that goes with the yes; the answer stays a boolean and the
+   box's state is written back to `opts.check.checked`. */
 export function confirmDialog(message, opts = {}) {
   const build = (card, close) => {
     card.append(el('p', 'confirm-message', message));
+    if (opts.check) {
+      const row = el('label', 'check-row confirm-check');
+      const box = el('input');
+      box.type = 'checkbox';
+      box.checked = !!opts.check.checked;
+      box.onchange = () => { opts.check.checked = box.checked; };
+      row.append(box, el('span', null, opts.check.label));
+      card.append(row);
+    }
     const acts = el('div', 'confirm-actions');
     const cancelBtn = el('button', 'btn ghost', opts.cancelLabel || 'Cancel');
     cancelBtn.onclick = () => close(false);
@@ -788,9 +800,11 @@ function commitPin(id, on) {
    `keepOpen` (repaint the menu in place instead of
    closing it, so toggling three tags is three clicks), `submenu` (an array,
    or a function for one that repaints — opens a flyout beside the item on
-   hover or click; `key` names it when two siblings share a label), and
+   hover or click; `key` names it when two siblings share a label),
    `pinId` (a stable id; the analyst may pin the item to the top of a menu
-   opened with pins). '-' is a separator and {header} a section label.
+   opened with pins), and `oncontextmenu` (a right-click on the item —
+   for a list that stands in for tabs with menus of their own, as the
+   collapsed Pages ▾ does). '-' is a separator and {header} a section label.
    `ctx` is the root menu's {pins, repaint}; `depth` 0 is the root. */
 export function menuItemNode(item, ctx = null, depth = 0) {
   // menu-item-flex, not plain .menu-item: the ✓/swatch/hint slots need a
@@ -828,6 +842,7 @@ export function menuItemNode(item, ctx = null, depth = 0) {
   }
   b.disabled = !!item.disabled;
   if (item.title) b.title = item.title;
+  if (item.oncontextmenu) b.oncontextmenu = (e) => item.oncontextmenu(e);
   if (item.submenu) {
     const open = () => openSubmenu(b, depth);
     BTN.set(b, { item, key: `${depth}:${item.key != null ? item.key : item.label}`, ctx, open });

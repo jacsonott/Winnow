@@ -30,13 +30,16 @@ POPPED = "document.documentElement.hasAttribute('data-popout') && !document.getE
 
 
 @contextlib.contextmanager
-def popped_out(page, key="timeline", tab="#tabTimeline"):
-    """Pop a page out from its tab's menu. Yields the pop-out, checked for
-    uncaught errors like `page` is, and closed on the way out if the test
-    didn't — then waits for the main window to have the page back, so the
-    next test starts from a main window with nothing out."""
-    page.click(tab, button="right")
-    page.wait_for_selector(".menu:not(.menu-sub)")
+def popped_out(page, key="timeline", tab="#tabTimeline", open_menu=None):
+    """Pop a page out from its tab's menu (or whatever `open_menu` right-
+    clicks to get that menu). Yields the pop-out, checked for uncaught
+    errors like `page` is, and closed on the way out if the test didn't —
+    then waits for the main window to have the page back, so the next test
+    starts from a main window with nothing out."""
+    if open_menu:
+        open_menu()
+    else:
+        page.click(tab, button="right")
     with page.expect_popup() as info:
         page.locator(".menu:not(.menu-sub) .menu-item", has_text="Open in its own window").click()
     pop = info.value
@@ -108,6 +111,152 @@ def test_closing_the_pop_out_gives_the_page_back(page):
         pop.close()
         page.wait_for_selector("#timelineview:not([hidden])")
         assert not page.evaluate("() => __winnow.isPoppedOut('timeline')")
+
+
+@pytest.fixture
+def pages_dropdown(page):
+    """Settings → Pages as a dropdown, for this test only."""
+    def _set(on):
+        page.evaluate("""(on) => { __winnow.S.appearance.pagesMenu = on;
+          __winnow.renderPageTabs(); __winnow.applyPageTabsSize(); }""", on)
+    _set(True)
+    page.wait_for_selector("#pagesMenuBtn")
+    try:
+        yield
+    finally:
+        _set(False)
+
+
+def _right_click_in_pages_list(page, label):
+    page.click("#pagesMenuBtn")
+    page.locator(".menu:not(.menu-sub) .menu-item", has_text=label).click(button="right")
+    page.wait_for_selector(".menu:not(.menu-sub) .menu-item:has-text('Close this tab')")
+
+
+def test_with_pages_as_a_dropdown_a_page_pops_out_from_its_row(page, pages_dropdown):
+    """With the tabs collapsed into Pages ▾ there was no tab left to
+    right-click, so "Open in its own window" was nowhere but the
+    sidebar's ⧉. The page's row in the list carries the tab's menu."""
+    with popped_out(page, open_menu=lambda: _right_click_in_pages_list(page, "Timeline")) as pop:
+        pop.wait_for_selector("#timelineview:not([hidden])")
+        page.wait_for_function("() => __winnow.isPoppedOut('timeline')")
+        # The row says where the page is, as its tab would, and its menu
+        # offers the window rather than a second one.
+        page.click("#pagesMenuBtn")
+        row = page.locator(".menu:not(.menu-sub) .menu-item", has_text="Timeline")
+        assert row.locator(".menu-item-note").inner_text() == "\u29c9"
+        row.click(button="right")
+        page.wait_for_selector(".menu:not(.menu-sub) .menu-item:has-text('Bring it back as a tab')")
+        assert page.locator(".menu .menu-item", has_text="Open in its own window").count() == 0
+        page.keyboard.press("Escape")
+
+
+def test_with_pages_as_a_dropdown_the_button_has_the_showing_pages_menu(page, pages_dropdown):
+    """The button carries the name of the page that is up, so a right-click
+    on it means that page. With no page up it names none, and opens the
+    list instead."""
+    page.evaluate("() => __winnow.showGridTab()")
+    page.wait_for_function("() => document.getElementById('pagesMenuBtn').textContent.includes('Pages')")
+    page.click("#pagesMenuBtn", button="right")
+    page.wait_for_selector(".menu:not(.menu-sub) .menu-item:has-text('Timeline')")
+    assert page.locator(".menu .menu-item", has_text="Open in its own window").count() == 0
+    page.keyboard.press("Escape")
+
+    page.evaluate("() => __winnow.showTimelineTab()")
+    page.wait_for_function("() => document.getElementById('pagesMenuBtn').textContent.includes('Timeline')")
+    with popped_out(page, open_menu=lambda: page.click("#pagesMenuBtn", button="right")) as pop:
+        pop.wait_for_selector("#timelineview:not([hidden])")
+
+
+def test_bring_it_back_as_a_tab_from_the_tab_menu(page):
+    """The tab's own menu, where the page went out from. The pop-out puts
+    itself away; the main window, still on the table, drops the tab's mark,
+    and the page shows itself there when asked for."""
+    with popped_out(page) as pop:
+        page.wait_for_function("() => __winnow.isPoppedOut('timeline')")
+        page.click("#tabTimeline", button="right")
+        with pop.expect_event("close"):
+            page.locator(".menu:not(.menu-sub) .menu-item", has_text="Bring it back as a tab").click()
+        page.wait_for_function("() => !__winnow.isPoppedOut('timeline')")
+        assert not page.locator("#tabTimeline").evaluate("(b) => b.classList.contains('tab-popped')")
+        page.click("#tabTimeline")
+        page.wait_for_selector("#timelineview:not([hidden])")
+        assert page.locator("#popoutPlaceholder").is_hidden()
+
+
+def test_bring_it_back_as_a_tab_saves_what_was_typed_out_there_first(page, api):
+    """The placeholder's button, on the SQL pane: a query typed in the
+    pop-out and still inside the editor's autosave delay is the case the
+    order of dock() is for. The pop-out saves, then says it is going, then
+    goes, and the main window mounts the pane from what was saved."""
+    before = {t["id"]: t["sql"] for t in api("/api/sql_tabs")}
+    typed = "SELECT 'typed in the pop-out' AS probe"
+    page.click("#tabSql")
+    page.wait_for_selector("#sqlText")
+    try:
+        with popped_out(page, key="sql", tab="#tabSql") as pop:
+            pop.wait_for_selector("#sqlText")
+            page.click("#tabSql")
+            page.wait_for_selector("#popoutPlaceholder:not([hidden])")
+            pop.fill("#sqlText", typed)
+            with pop.expect_event("close"):
+                page.locator("#popoutPlaceholder .btn", has_text="Bring it back as a tab").click()
+            page.wait_for_selector("#sqlText:visible")
+            page.wait_for_function("(t) => document.getElementById('sqlText').value === t", arg=typed)
+            assert page.locator("#popoutPlaceholder").is_hidden()
+    finally:
+        for t in api("/api/sql_tabs"):
+            if t["id"] not in before:
+                api(f"/api/sql_tabs/{t['id']}", "DELETE")
+            elif t["sql"] != before[t["id"]]:
+                api(f"/api/sql_tabs/{t['id']}", "PUT", {"sql": before[t["id"]]})
+        page.evaluate("() => __winnow.showGridTab()")
+
+
+def _bare_pop_out(page, server, key, route=None):
+    """A pop-out pointed at by hand, for the owner `wtest`: no main window
+    answers to that, so nothing here reaches the shared page. Opened blank
+    by the page's script and pointed at the pop-out afterwards, as popOut
+    does, because a browser lets a window close itself only if a script
+    opened it."""
+    with page.expect_popup() as info:
+        page.evaluate("() => { window.open('', 'winnow-bare-popout', 'popup=yes'); }")
+    pg = info.value
+    errors: list[str] = []
+    pg.on("pageerror", lambda e: errors.append(str(e)))
+    if route:
+        pg.route(*route)
+    pg.goto(f"{server.rstrip('/')}/?popout={key}&owner=wtest")
+    pg.wait_for_selector("#popoutPlaceholder:not([hidden]) .popout-card")
+    return pg, errors
+
+
+def test_a_pop_out_with_no_case_open_says_so(page, server):
+    """The main window closed the case, or the server came back without
+    one: the window says what happened instead of booting into a home
+    screen nobody can use from there."""
+    no_case = ("**/api/case/current",
+               lambda r: r.fulfill(status=200, content_type="application/json",
+                                   body='{"open": false, "case_token": null}'))
+    pg, errors = _bare_pop_out(page, server, "timeline", route=no_case)
+    assert pg.locator(".popout-card-title").inner_text() == "Winnow has no case open"
+    assert pg.locator("#home").is_hidden()
+    with pg.expect_event("close"):
+        pg.locator(".popout-card .btn", has_text="Close this window").click()
+    assert not errors, "uncaught JS errors in the pop-out: " + " | ".join(errors)
+
+
+def test_a_pop_out_of_a_page_this_case_does_not_have_says_so(page, server):
+    """A board of the case just left, a plugin since switched off."""
+    pg, errors = _bare_pop_out(page, server, "dashboard:987654")
+    try:
+        assert pg.locator(".popout-card-title").inner_text() == "This page isn\u2019t in this case"
+        case_name = page.evaluate("() => fetch('/api/case/current').then((r) => r.json()).then((c) => c.name)")
+        assert case_name in pg.locator(".popout-card").inner_text()
+        assert pg.locator("#popoutBar").is_hidden()
+    finally:
+        pg.close()
+    assert not errors, "uncaught JS errors in the pop-out: " + " | ".join(errors)
 
 
 def test_a_tag_written_in_either_window_shows_in_the_other(page, api, tag_written):

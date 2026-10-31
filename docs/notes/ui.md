@@ -104,7 +104,21 @@ see [docs/notes/README.md](README.md) for the whole set.
   `nowrap` too), and **the toolbar itself `flex-wrap`s**, so once even
   that isn't enough (the search box open on a laptop) the stats and
   buttons move to a second line as a whole instead of the ribbon folding
-  into a one-chip column. The header bar has the same shape:
+  into a one-chip column. **What wraps keeps to its side.** `.toolbar` is
+  `justify-content: flex-end`: on a line the spacer is on, the spacer
+  takes all the slack and nothing moves, and every line below it — the
+  right-hand side spilling over — hugs the right edge. Before, those lines
+  started at the left, so the search jumped from one side of the toolbar
+  to the other as the window narrowed. The group strip's
+  `margin-right: auto` holds it at the left when it ends up alone on the
+  first line (the ribbon wrapped below it). The magnifier, the box and its
+  Contains/Regex/Advanced are one item, `.search-group`, so the box and its
+  modes move down together instead of splitting across two lines; the
+  group wraps inside itself only once the two side by side are wider than
+  the toolbar. `#advancedSearchBar` stays outside it.
+  `tests/ui/test_visual_pass.py` sweeps the width with the search closed
+  and open.
+  The header bar has the same shape:
   `.bar-actions` never shrinks and its buttons never wrap, `#sourceTabs`
   keeps `SOURCE_TABS_MIN` (140px) and it is `#pageTabs` — which scrolls —
   that shrinks (`flex: 0 1 auto`, 60px floor). A pressed segment in a
@@ -340,6 +354,26 @@ see [docs/notes/README.md](README.md) for the whole set.
   `view` and read when `view` is missing); the plugin's
   `winnow.panels['table-histogram.histogram']` is migrated to `open`
   once and deleted.
+- **The strip charts only the datetime columns the grid shows**
+  (histogram.js `chartableColumns`: `datetimeColumns()` less
+  `S.layout[n].hidden`; a column grouped on is not hidden and stays). A
+  hidden column is one the analyst has put away, and a chart of it
+  described the rows by a time nobody on screen could see. Two things
+  make it hold. **Hiding is not a view change**, so nothing used to tell
+  the strip: `renderHead` (columns.js) calls `histogramFollowColumns()`
+  on every repaint of the header — every hide, show, reorder and pin,
+  and a derived column coming or going — which re-picks and asks at once
+  when the charted column changed. It does nothing unless
+  `S.view.source_id === S.sourceId`: mid table switch `S.columns` is
+  already the new table's while `S.view` is still the old one's, and an
+  ask then would name the new table's column to the old view (a 400);
+  the switch's own view change re-picks instead. **The analyst's pick
+  wins whenever it is shown** (`pickColumn`): the `column` pref used to
+  win only once the column charted now was gone, so hiding the pick and
+  showing it again left the chart on the column it had moved to. With
+  every datetime column hidden the empty state says so ("Every datetime
+  column in this table is hidden — …"), not "No datetime column".
+  tests/ui/test_histogram_hidden_columns.py.
 - **The strip's color-by views — Tags, Value, Groups — are one pref,
   one pressed at a time** (histogram.js `histogramView`; the store side
   is in store.md). Five things to know before touching them. **Value
@@ -402,6 +436,36 @@ see [docs/notes/README.md](README.md) for the whole set.
   it. **Times outside the chart's span are dropped, not clamped**: between
   a rebuild and the strip's next answer the rows are the new view's and
   the axis is the old one's. tests/ui/test_histogram_position.py.
+- **The strip marks the days, or the weeks** (charts.js `calendarRules`
+  / `drawCalendarRules`, drawn from `paintChart`). A dashed `--line-2`
+  rule at each midnight while the bars are finer than a day, at each
+  Monday's midnight once they are not, none once the bars are a week;
+  the Timeline overview strip draws the same rules through the same two
+  functions, so the two cannot drift. Four things to know before
+  touching it. **The unit follows the bar width first and the pixels
+  second**: a rule per bar says nothing the bars do not, so days need
+  bars under a day and weeks bars under a week, and a unit whose rules
+  would land under `RULE_MIN_PX` (8) apart drops to the next — hour bars
+  over two months give weeks, not a midnight every 6px. **UTC, Monday**:
+  the bars are UTC epochs and every label on the strip is UTC, so a
+  local midnight would sit mid-bar; the week is ISO 8601's.
+  `calendarRules` floors from 1970-01-05 (the first Monday after the
+  epoch) rather than truncating, so a span before 1970 — FILETIME zero,
+  a bad clock — still lands on midnights and Mondays. **Behind the
+  bars, as the Timeline's were**: they show in the gaps and across a
+  quiet stretch and never tint a bar the color split is read by; on a
+  week of day bars a Monday rule is mostly under Monday's bar, which is
+  why each one's date is also written under the axis — `YYYY-MM-DD`,
+  the ISO form of the start and end labels beside it — where it fits
+  clear of them and of its neighbors; the middle timestamp the axis used to carry
+  is drawn only when no rule got a label. **Strictly inside the span**:
+  a rule on the axis's very edge marks nothing, so a span that starts
+  at midnight does not rule its own left edge (the Timeline strip did,
+  before it shared these). `histogramRules()` / `timelineOverviewRules()`
+  say what was last painted, for tests/ui, which cannot read a dashed
+  line's meaning off the canvas. The hover names the day a rule marks.
+  tests/ui/test_histogram_calendar_rules.py,
+  tests/ui/test_timeline_overview_strip.py.
 - There's no separate "preset" concept anymore — a preset is just a saved
   filter (`workspace.SavedFilters`, cross-case) whose `col_names` happens to
   match (exactly, or "similar" per the same Jaccard/subset heuristic the old
@@ -1355,6 +1419,24 @@ see [docs/notes/README.md](README.md) for the whole set.
   click is still the release path; `tests/ui/test_updates_panel.py`
   answers every `/api/updates/*` call in the browser, because the real
   dev apply would overwrite the checkout the suite runs from.
+- **Settings → Updates restarts into what it installed, and every
+  window follows.** When `/api/version` says `can_restart`, both install
+  confirms (release and the develop sync) carry a ticked "Restart Winnow
+  when it’s installed" box — `confirmDialog`'s `check` option, which keeps
+  the boolean answer and writes the box's state back into the object it
+  was given — and **Restart now** stays beside the buttons after an install
+  that didn't restart, or whose restart was refused (the refusal's text,
+  e.g. a package to `pip install`, goes in the status line). The restart
+  itself is `restartWinnow` in home.js, beside `shutdownWinnow`: it warns
+  about `inFlightWork()` as Shut down does but not about other windows,
+  because they come back. `awaitRestart` (connection.js) covers the page
+  with `#restarting` (the `.case-gone` cover, accent border) and polls
+  `/api/version` until `boot` changes, then reloads; the presence stream's
+  `restart` event brings every other window, pop-outs included, to the
+  same place. While it waits, the lost-connection banner is held off
+  (`show()` returns), since the server being away is expected. After 90s
+  it says Winnow hasn't come back and how to start it or roll back, and
+  keeps polling. Server side: docs/notes/server.md.
 - **`S.keymap` must hold its own key arrays, not `DEFAULT_KEYMAP`'s.**
   The settings UI's "+ key"/"✕" handlers splice and push those arrays in
   place, so the old shallow `{...DEFAULT_KEYMAP}` handed them the
@@ -1733,6 +1815,48 @@ see [docs/notes/README.md](README.md) for the whole set.
   tests/ui/test_sessions_panel.py, test_saved_filters_rows.py,
   test_case_variables_ui.py, test_import_ux.py, test_export_all_xlsx_ui.py,
   test_quicklook_copy_targets.py, test_stack.py.
+- **+ New case is the frame too, with the profiles as the side list**
+  (`openNewCaseModal` in home.js, `.nc-*` in style.css; also the quick
+  look's Save as a case). It was the last form drawn the old way: captioned
+  boxes down the card and the profile a `<select>` of names. The side list
+  is None, the shipped profiles, then Your profiles, each hinted with the
+  manager's `summaryOf`; the pane is the case's fields on top and, under
+  them, the chosen profile's description and the values it asks for.
+  Decisions:
+  - **A profile is a kind of case, so it is the side list**, as the
+    template list is in a "new document" dialog; the case's own fields
+    are the same on every profile. They are built once (`caseBox`) and
+    moved into whichever pane `sectionPanes` builds, so a switch keeps
+    what was typed. The variables are not: they belong to a profile, so
+    each pane draws its own from `variablePromptFields` (the values
+    prompt's own fields, which the profile builder previews), and what
+    was typed into them is kept by NAME in `typed`. Two profiles asking
+    for `engagement` share the one value, and choosing None and back
+    restores it.
+  - **The profiles are read before the dialog draws**, so the side list
+    is whole on its first frame; a failed read leaves None. The function
+    is async now for that, which is why tests `await` it through
+    `page.evaluate`.
+  - **Browse… is still a snapshot and a re-open** (modal() replaces the
+    card), now carrying the chosen profile's id (`state.profile`, the
+    section id) and `typed`.
+  - **Kept to the fields.** The first cut read as too chatty: a stats
+    row, a sentence for each thing the profile would do (its plugins by
+    name, its board, its watchlist), a heading and a help line over the
+    values, a note under the path, and a status line beside a button that
+    named the case and the profile. Every one of them repeated something
+    already on screen, mostly the side list's hint. What stays is the
+    profile's own description, two lines at most (`.nc-about`, the rest on
+    hover), and its value fields; None adds nothing under the case.
+    test_new_case_dialog.py pins the absence, so the sentences don't drift
+    back one at a time.
+  - **One main button, Create case / Save case**, never disabled: a click
+    on a case that still needs a value says so in a toast, outlines the
+    boxes (`.invalid`) and focuses the first, as the old Create did. Enter
+    in Name, the path or a variable box is the same click; not in Group,
+    where Enter picks one of the groups its datalist offers.
+  tests/ui/test_new_case_dialog.py, test_case_variables_ui.py,
+  test_home_fixes.py, test_quicklook_banner.py.
 - **A header set's default layout seeds a table once, so it needs its
   own way onto the rest** (the table menu's Layout section with the
   default chosen; columns.js `applyDefaultLayout` is the same as a
@@ -2651,7 +2775,7 @@ see [docs/notes/README.md](README.md) for the whole set.
 
 - **The widget editor's preview is live, and an answer belongs to a QUESTION, not to a request** (dashboard.js `openWidgetEditor`: `runPreview`, `changed`, `shown`/`asking`). The editor is in the builders' shape now — the question on the left (Data from, What to show, Table, the recipe's picks, Advanced — the SQL, Title), how it looks on the right (Render as chips, Sub-label, a Width segmented control, Run every time and the cost line) above a `.dash-card.dash-preview` that runs the same `draft()` Save stores, `PREVIEW_DELAY_MS` (500) after the last edit, with no Preview button. Things that bite. **Stale answers are dropped by comparing the answer's `questionOf` with the CURRENT draft's**, not by a sequence number bumped per edit: an edit that only changes the look (render, title, sub-label, width) does not ask again — `changed()` repaints the answer already on the card at once — so a counter bumped by that edit would discard the in-flight answer that is still right, and nothing would ever ask for it again. `asking` dedupes the one question already out (edit away and back inside the pause and the answer still paints when it lands). **There is no cancel**: `/api/dashboard/widget/preview` is a sync route with no `op_token`, so a half-typed runaway (a cross join before its WHERE) runs to the end on a server thread; the client only refuses to paint it. Making it stoppable is the SQL pane's recipe — an async route through `_run_pane_query` and an `AbortController` on the fetch — and has not been done. **The preview names no board and no widget**, so the server files nothing and an unsaved draft never replaces the number the board's card is showing (tests/ui/test_widget_editor_preview.py reads the case file's cache back after an Escape). **"Is this dialog still open?" is `b.isConnected && !#modal.hidden`**: Escape hides the modal and leaves its body in the document until the next `modal()` replaces it, so `isConnected` alone says yes to a timer that fires after the dialog closed. The first run is a `setTimeout(…, 0)` for the same reason in reverse — `modal()` unhides only after the builder returns. **A draft that cannot run says why and asks nothing** (`whyNot`: no query, a template whose column the table cannot offer, header sets still loading, a signals card with no cells); an empty answer says what the board will do with it (fold into the empty-cards line, via `emptyStateOf`/`emptyReason`) rather than drawing a box the board never shows. **Run now runs the SAVED widget**, so it repaints the preview only when the draft still asks the saved question. **Names**: `WIDGET_SOURCES` / `WIDGET_RENDERS` (dashwidgets.js) map the stored values to what the editor shows ("A query", "Signals card"; "Number", "Key / value", "Yes / no chips"…); the stored values never change, a source this version has no name for is kept as an extra option rather than becoming "A query" on Save, and an unknown render stays the widget's render with no chip pressed. **Title moved to the bottom of the left pane**, so `#modal .confirm-input` first is the recipe's Value box now — tests select the title by `.dash-title-input`, Render as by `.dash-kinds [data-render]` and Width by `.dash-width [data-span]`. Save widget is `oneAtATime` (it awaits `persist()` before closing, and a double-click pushed the widget twice). tests/ui/test_widget_editor_preview.py.
 
-- **Profiles: a two-pane manager, and a sheet in front of Apply** (bundles.js; `WS.plugin_bundles`, `/api/plugin_bundles/*`). A profile is a kind of case — plugins, boards, a starter watchlist, variable definitions — and the list this replaced was one ellipsised row per profile, with the shipped description pushing Apply and Copy off the end of it. The manager (M) is `.pm` : profiles left with a one-line count summary, the whole selected profile right — every plugin, every board with EVERY widget's render kind and whether it is `live`, the watchlist, the variables. Sections carry `data-sec` (plugins/board/watchlist/variables) because a board section is headed with the board's NAME and "Watchlist" is also the start of a widget title on the shipped board. **The sheet is the point.** Apply sets an explicit on/off override for every installed plugin (so everything not in the profile is turned OFF), upserts boards BY NAME, seeds indicators and starts a scan, and said none of it first. `GET /api/plugin_bundles/{id}/plan` counts each of those against the OPEN CASE — which plugins go on and off and how many stay off, what each board replaces and by how many widgets, which indicators are new and how many tables seeding them scans (`Store.watchlist_scan_sources`, the scan's own predicate, so the number cannot disagree with the scan), which variables are required and unset (a required one with a declared DEFAULT is not among them: the apply creates the row carrying the default, so nothing prompts for it) — and `POST .../apply` takes `parts` from `APPLY_PARTS`, so a board can be taken without the watchlist. The plugins part stays ticked even when the case's set already matches the profile, because applying writes an explicit override per installed plugin and that write is what pins the case against a later machine-wide toggle. **No body still means all four parts**: the new-case dialog's Profile select and every script predate the sheet. **"You have edited this board" is answered by `origin`**, which the profile apply now stamps `profile:<name>` — any hand edit clears it (`set_dashboard_widgets`), a board stamped by this profile is its own untouched copy and worth no warning, and a plugin offering a board of the same name still asks, because a profile stamp is not a plugin stamp. A board applied before the stamp existed reads as edited, which errs toward warning. **Which profiles this case has had applied** is a `profiles_applied` case setting (a name → timestamp map) — the badge cannot be inferred from a board of the same name, which the analyst may have built by hand. **One profile exports as one file** (`winnow-profile/1`, `{format, profile}`) the way saved filters already do, minus the id and the `shipped` flag; a SHIPPED profile exports as a copy that records its ancestry. Import REFUSES a key it does not understand rather than dropping it, and refuses a KNOWN key holding the wrong kind of value for the same reason (`PluginBundles.IMPORT_SHAPE`; `save` is permissive by design, so `"plugins": "lateral_movement"` would store one plugin per letter and a string `dashboard` would reach the manager as a board whose widgets cannot be iterated). It never upserts by name either — a file from outside must not overwrite an afternoon's work, so a taken name is suffixed `(imported)`, from a base trimmed to leave room for the suffix, since a 100-character name plus a suffix truncates back to itself and the search for a free name never ends. **Lineage**: a copy records `from_profile`/`from_version` (written by "Copy to edit" and carried through every later edit, since a content comparison would lose the thread on the first edit), `profiles.json` carries a per-profile `version`, `list()` answers `update_available` when the shipped one is newer, and the manager shows one line offering the diff. Taking it is `POST .../take_update`: always a button, never a merge — an analyst's copy and a revised shipped profile can disagree about any part of a board, and a three-way merge of SQL widgets produces a board neither of them wrote. tests/test_profile_export.py and tests/ui/test_profile_manager.py.
+- **Profiles: a two-pane manager, and a sheet in front of Apply** (bundles.js; `WS.plugin_bundles`, `/api/plugin_bundles/*`). A profile is a kind of case — plugins, boards, a starter watchlist, variable definitions — and the list this replaced was one ellipsised row per profile, with the shipped description pushing Apply and Copy off the end of it. The manager (M) is `.pm` : profiles left with a one-line count summary, the whole selected profile right — every plugin, every board with EVERY widget's render kind and whether it is `live`, the watchlist, the variables. Sections carry `data-sec` (plugins/board/watchlist/variables) because a board section is headed with the board's NAME and "Watchlist" is also the start of a widget title on the shipped board. **The sheet is the point.** Apply sets an explicit on/off override for every installed plugin (so everything not in the profile is turned OFF), upserts boards BY NAME, seeds indicators and starts a scan, and said none of it first. `GET /api/plugin_bundles/{id}/plan` counts each of those against the OPEN CASE — which plugins go on and off and how many stay off, what each board replaces and by how many widgets, which indicators are new and how many tables seeding them scans (`Store.watchlist_scan_sources`, the scan's own predicate, so the number cannot disagree with the scan), which variables are required and unset (a required one with a declared DEFAULT is not among them: the apply creates the row carrying the default, so nothing prompts for it) — and `POST .../apply` takes `parts` from `APPLY_PARTS`, so a board can be taken without the watchlist. The plugins part stays ticked even when the case's set already matches the profile, because applying writes an explicit override per installed plugin and that write is what pins the case against a later machine-wide toggle. **No body still means all four parts**: the new-case dialog's profile list and every script predate the sheet. **"You have edited this board" is answered by `origin`**, which the profile apply now stamps `profile:<name>` — any hand edit clears it (`set_dashboard_widgets`), a board stamped by this profile is its own untouched copy and worth no warning, and a plugin offering a board of the same name still asks, because a profile stamp is not a plugin stamp. A board applied before the stamp existed reads as edited, which errs toward warning. **Which profiles this case has had applied** is a `profiles_applied` case setting (a name → timestamp map) — the badge cannot be inferred from a board of the same name, which the analyst may have built by hand. **One profile exports as one file** (`winnow-profile/1`, `{format, profile}`) the way saved filters already do, minus the id and the `shipped` flag; a SHIPPED profile exports as a copy that records its ancestry. Import REFUSES a key it does not understand rather than dropping it, and refuses a KNOWN key holding the wrong kind of value for the same reason (`PluginBundles.IMPORT_SHAPE`; `save` is permissive by design, so `"plugins": "lateral_movement"` would store one plugin per letter and a string `dashboard` would reach the manager as a board whose widgets cannot be iterated). It never upserts by name either — a file from outside must not overwrite an afternoon's work, so a taken name is suffixed `(imported)`, from a base trimmed to leave room for the suffix, since a 100-character name plus a suffix truncates back to itself and the search for a free name never ends. **Lineage**: a copy records `from_profile`/`from_version` (written by "Copy to edit" and carried through every later edit, since a content comparison would lose the thread on the first edit), `profiles.json` carries a per-profile `version`, `list()` answers `update_available` when the shipped one is newer, and the manager shows one line offering the diff. Taking it is `POST .../take_update`: always a button, never a merge — an analyst's copy and a revised shipped profile can disagree about any part of a board, and a three-way merge of SQL widgets produces a board neither of them wrote. tests/test_profile_export.py and tests/ui/test_profile_manager.py.
 
 - **The profile builder is the builders' two panes, and its Save waits
   for its lists** (profilebuilder.js, `.pb-*`). It was one column of three

@@ -1,17 +1,17 @@
 /* The Pages site in the app's Harvest skin (static/style.css): gold on
    neutral greys in dark, gold on parchment in light. The values are
    Harvest's own tokens; where a token is named, it's the one copied.
-   Harvest's dark greys have a green cast, which in the app sits behind a
-   grid of data but over a page of prose reads as green, so the site's
-   are those greys at the same lightness with the cast taken out: "dark
-   --panel, neutral" is #141816 made #161616. */
+   Harvest's dark greys used to have a green cast, which over a page of
+   prose read as green, so the site took the cast out first; the app has
+   since followed, and its dark greys are now these exact values.
+   tests/test_site_palette.py holds the two together. */
 
 :root {
   /* The header and tabs are Harvest's dark panel in both schemes, so the
      brand mark's gold reads the same way on either. */
-  --md-primary-fg-color: #1d1d1d;          /* dark --panel-2, neutral */
-  --md-primary-fg-color--light: #2a2a2a;   /* dark --line, neutral */
-  --md-primary-fg-color--dark: #161616;    /* dark --panel, neutral */
+  --md-primary-fg-color: #1d1d1d;          /* dark --panel-2 */
+  --md-primary-fg-color--light: #2a2a2a;   /* dark --line */
+  --md-primary-fg-color--dark: #161616;    /* dark --panel */
   --md-primary-bg-color: #e3dfd2;
   --md-primary-bg-color--light: #e3dfd2b3;
 }
@@ -34,12 +34,12 @@
   --md-default-fg-color--light: hsla(0, 0%, 90%, .56);
   --md-default-fg-color--lighter: hsla(0, 0%, 90%, .32);
   --md-default-fg-color--lightest: hsla(0, 0%, 90%, .12);
-  --md-default-bg-color: #161616;          /* dark --panel, neutral */
+  --md-default-bg-color: #161616;          /* dark --panel */
   --md-default-bg-color--light: #1616168a;
   --md-default-bg-color--lighter: #16161642;
   --md-default-bg-color--lightest: #16161612;
   --md-code-fg-color: hsla(0, 0%, 86%, .82);
-  --md-code-bg-color: #1d1d1d;             /* dark --panel-2, neutral */
+  --md-code-bg-color: #1d1d1d;             /* dark --panel-2 */
   --md-code-bg-color--light: #1d1d1de6;
   --md-code-bg-color--lighter: #1d1d1d8a;
   --md-typeset-kbd-color: hsla(0, 0%, 90%, .12);
@@ -51,7 +51,7 @@
   --md-accent-fg-color--transparent: #cfa0571a;
   --md-typeset-a-color: #cfa057;
   --md-typeset-mark-color: #cfa05740;
-  --md-footer-bg-color: #111111;           /* dark --ink, neutral */
+  --md-footer-bg-color: #111111;           /* dark --ink */
   --md-footer-bg-color--dark: #0c0c0c;
 }
 
