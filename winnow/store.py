@@ -11951,20 +11951,6 @@ class Store:
             return [f for c in node.get("children", []) for f in Store._raw_fragments(c)]
         return []
 
-    @staticmethod
-    def _tree_has_raw(node: dict | None) -> bool:
-        """True if any node in the filter tree is a raw-SQL fragment. Raw
-        nodes assume a single table_name for their EXPLAIN QUERY PLAN
-        validation, so they're rejected for merges rather than extended to
-        dry-run per member."""
-        if not node:
-            return False
-        if node.get("type") == "raw":
-            return True
-        if node.get("type") == "group":
-            return any(Store._tree_has_raw(c) for c in node.get("children", []))
-        return False
-
     def _index_table_for(self, src: dict, column: str, table_name: str | None = None,
                          member_id: int | None = None) -> str:
         """Which physical table an auto-created index for this column
