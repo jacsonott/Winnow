@@ -442,3 +442,90 @@ def test_a_fresh_pass_or_a_delete_the_server_refuses_says_why(page):
         page.unroute("**/api/case_sessions/kept")
         _cleanup(page)
         page.keyboard.press("Escape")
+
+
+def _session_menu(page, name, item):
+    page.locator(".sessions-row", has_text=name).locator("[data-role=more]").click()
+    page.locator(".menu .menu-item", has_text=item).click()
+
+
+def _answer_prompt(page, text):
+    page.wait_for_selector(".confirm-overlay input")
+    page.locator(".confirm-overlay input").fill(text)
+    page.locator(".confirm-card .btn", has_text="OK").first.click()
+    page.wait_for_selector(".confirm-overlay", state="detached")
+
+
+def _compare_sides(page):
+    sels = page.locator(".sessions-compare-top select")
+    return sels.first.input_value(), sels.nth(1).input_value()
+
+
+def test_a_session_s_name_and_its_menu_both_compare_it_with_current_work(page):
+    """The name is the one click that changes nothing, and opens the
+    question a saved session is usually opened with. Not the newest
+    session here, so the sides are the one clicked, not the default."""
+    _cleanup(page)
+    try:
+        _save(page, "before")
+        _save(page, "newest")
+        _tag_rows(page, [0, 1])
+        _open(page)
+        page.locator(".sessions-row", has_text="before").locator("[data-role=name]").click()
+        page.wait_for_selector(".sessions-diff-row")
+        assert _compare_sides(page) == ("before", "__live__")
+        assert page.locator(".sessions-diff-row").first.locator(".diff-n-added").inner_text() == "2"
+
+        page.locator(".side-rail-item[data-section=saved]").click()
+        _session_menu(page, "newest", "Compare with current work")
+        page.wait_for_function("""() => document.querySelector('.sessions-compare-top select').value === 'newest'
+          && document.querySelector('.sessions-diff-row')""")
+        assert _compare_sides(page) == ("newest", "__live__")
+    finally:
+        _cleanup(page)
+        page.keyboard.press("Escape")
+
+
+def test_renaming_a_session_renames_it_where_it_is_compared_too(page):
+    """A comparison open on the session follows it to its new name. Were
+    it dropped, the sides would fall back to the newest session, which
+    here is the other one."""
+    _cleanup(page)
+    try:
+        _save(page, "draft")
+        _save(page, "other")
+        _open(page)
+        page.locator(".sessions-row", has_text="draft").locator("[data-role=name]").click()
+        page.wait_for_function("() => document.querySelector('.sessions-compare-top select').value === 'draft'")
+
+        page.locator(".side-rail-item[data-section=saved]").click()
+        _session_menu(page, "draft", "Rename…")
+        _answer_prompt(page, "  final  ")
+        page.wait_for_selector(".sessions-row:has-text('final')")
+        names = page.locator(".sessions-row [data-role=name]").all_inner_texts()
+        assert sorted(names) == ["final", "other"]
+        assert sorted(s["name"] for s in page.evaluate(
+            "() => fetch('/api/case_sessions').then((r) => r.json()).then((d) => d.sessions)")) == ["final", "other"]
+
+        page.locator(".side-rail-item[data-section=compare]").click()
+        page.wait_for_function("() => document.querySelector('.sessions-compare-top select').value === 'final'")
+        assert _compare_sides(page) == ("final", "__live__")
+    finally:
+        _cleanup(page)
+        page.keyboard.press("Escape")
+
+
+def test_renaming_onto_a_taken_name_is_refused_and_says_why(page):
+    _cleanup(page)
+    try:
+        _save(page, "mine")
+        _save(page, "taken")
+        _open(page)
+        page.wait_for_selector(".sessions-row:has-text('mine')")
+        _session_menu(page, "mine", "Rename…")
+        _answer_prompt(page, "taken")
+        _toast(page, "A session named 'taken' already exists")
+        assert sorted(page.locator(".sessions-row [data-role=name]").all_inner_texts()) == ["mine", "taken"]
+    finally:
+        _cleanup(page)
+        page.keyboard.press("Escape")

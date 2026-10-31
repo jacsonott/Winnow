@@ -335,6 +335,166 @@ def test_a_dev_sync_names_the_branch_it_downloads(install, tmp_path, monkeypatch
     assert "Downloading main" not in out
 
 
+class ReleaseCli:
+    """update.py with no --dev and no --from: the path every analyst with
+    network takes. GitHub is answered here — the release lookup through
+    updater's own fetch, the download through updater.download's opener
+    seam — so the CLI, check_for_update and download all run for real."""
+
+    def __init__(self, install, tmp_path, monkeypatch, capsys):
+        import update as update_cli
+        self.cli, self.install, self.capsys = update_cli, install, capsys
+        self.release = None
+        self.fetched = []         # the archive URLs downloaded
+        self.archive = _make_release(tmp_path / "served.zip", "1.1.0", _v2_files())
+        self.download_error = None
+        monkeypatch.setattr(update_cli, "HERE", install)
+        # The version the CLI reports comes from this install, not the repo
+        # the suite runs in.
+        monkeypatch.setattr(updater, "HERE", install)
+        monkeypatch.setattr(updater, "_fetch_json", self._fetch_json)
+        real = updater.download
+        monkeypatch.setattr(updater, "download", lambda url, dest: real(url, dest, _open=self._open))
+
+    def publish(self, version, notes=""):
+        self.release = {"tag_name": f"v{version}", "body": notes,
+                        "zipball_url": f"https://example.invalid/zipball/v{version}",
+                        "published_at": "2026-10-01T00:00:00Z"}
+
+    def _fetch_json(self, url, timeout):
+        assert url == updater.RELEASES_API
+        if isinstance(self.release, Exception):
+            raise self.release
+        return self.release
+
+    def _open(self, url, timeout):
+        import io
+        self.fetched.append(url)
+        if self.download_error:
+            raise self.download_error
+        return io.BytesIO(self.archive.read_bytes())
+
+    def run(self, *argv):
+        rc = self.cli.main(list(argv))
+        out = self.capsys.readouterr()
+        return rc, out.out, out.err
+
+    def untouched(self):
+        return all((self.install / rel).read_text(encoding="utf-8") == text for rel, text in SHIPPED.items())
+
+
+@pytest.fixture
+def release_cli(install, tmp_path, monkeypatch, capsys):
+    return ReleaseCli(install, tmp_path, monkeypatch, capsys)
+
+
+def test_the_cli_check_says_what_is_out_and_downloads_nothing(release_cli):
+    notes = "\n".join(f"- change {i}" for i in range(1, 26))
+    release_cli.publish("1.1.0", notes)
+    rc, out, _ = release_cli.run("--check")
+    assert rc == 0
+    assert "Winnow 1.1.0 is available (you have 1.0.0)." in out
+    # The notes, indented, and only the first twenty lines of them.
+    assert "  - change 20" in out and "change 21" not in out
+    assert "Run `python update.py` to install it." in out
+    assert release_cli.fetched == [] and release_cli.untouched()
+
+
+def test_the_cli_on_the_latest_release_says_so_and_stops(release_cli, monkeypatch):
+    release_cli.publish("1.0.0")
+    monkeypatch.setattr("builtins.input", lambda *_: pytest.fail("asked to apply with nothing to apply"))
+    rc, out, _ = release_cli.run()
+    assert rc == 0
+    assert "Winnow 1.0.0 is up to date (latest release is 1.0.0)." in out
+    assert release_cli.fetched == [] and release_cli.untouched()
+
+
+def test_download_only_then_from_is_the_airgap_round_trip(release_cli, tmp_path):
+    """--download-only names the file and the command to run on the
+    analysis box; that command, run, installs it."""
+    release_cli.publish("1.1.0")
+    usb = tmp_path / "usb"
+    usb.mkdir()
+    rc, out, _ = release_cli.run("--download-only", "--dest", str(usb))
+    assert rc == 0
+    assert release_cli.fetched == ["https://example.invalid/zipball/v1.1.0"]
+    carried = usb / "winnow-1.1.0.zip"
+    assert carried.read_bytes() == release_cli.archive.read_bytes()
+    assert [p.name for p in usb.iterdir()] == ["winnow-1.1.0.zip"], "a .part was left beside it"
+    assert "On the target machine: python update.py --from winnow-1.1.0.zip" in out
+    assert release_cli.untouched()
+
+    release_cli.release = OSError("no network on the analysis box")
+    rc, out, _ = release_cli.run("--from", str(carried), "-y")
+    assert rc == 0, out
+    assert "Updated 1.0.0 -> 1.1.0." in out
+    assert updater.installed_version(release_cli.install) == "1.1.0"
+
+
+def test_the_cli_shows_the_plan_and_applies_only_on_yes(release_cli, tmp_path, monkeypatch):
+    state = _seed_user_state(release_cli.install)
+    release_cli.publish("1.1.0")
+    answers = iter(["n", "y"])
+    monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+
+    rc, out, _ = release_cli.run("--dest", str(tmp_path))
+    assert rc == 1
+    assert "This update will:" in out and "version:  1.0.0 -> 1.1.0" in out
+    assert "Cancelled — nothing was changed." in out
+    assert release_cli.untouched()
+
+    rc, out, _ = release_cli.run("--dest", str(tmp_path))
+    assert rc == 0, out
+    assert "Updated 1.0.0 -> 1.1.0." in out
+    assert "Undo with: python update.py --rollback" in out
+    assert updater.installed_version(release_cli.install) == "1.1.0"
+    for rel, text in state.items():
+        assert (release_cli.install / rel).read_text(encoding="utf-8") == text, f"{rel} was modified"
+
+
+def test_the_cli_dry_run_downloads_and_plans_but_changes_nothing(release_cli, tmp_path, monkeypatch):
+    release_cli.publish("1.1.0")
+    monkeypatch.setattr("builtins.input", lambda *_: pytest.fail("a dry run asked to apply"))
+    rc, out, _ = release_cli.run("--dry-run", "--dest", str(tmp_path))
+    assert rc == 0
+    assert "added   : 1 (xlsxread.py)" in out
+    assert "--dry-run: nothing was changed." in out
+    assert release_cli.untouched()
+
+
+@pytest.mark.parametrize("failure, says", [
+    ("offline", "--from"),
+    ("no releases", "No releases have been published"),
+    ("download", "Download failed"),
+])
+def test_the_cli_reports_a_failed_update_as_an_error(release_cli, tmp_path, failure, says):
+    """Exit 2 and one line on stderr, never a traceback; nothing changed
+    and no half-downloaded file left to be mistaken for a release."""
+    import urllib.error
+    release_cli.publish("1.1.0")
+    if failure == "offline":
+        release_cli.release = OSError("Network is unreachable")
+    elif failure == "no releases":
+        release_cli.release = urllib.error.HTTPError(updater.RELEASES_API, 404, "Not Found", {}, None)
+    else:
+        release_cli.download_error = ConnectionResetError("connection reset")
+    rc, out, err = release_cli.run("-y", "--dest", str(tmp_path / "dl"))
+    assert rc == 2
+    assert err.startswith("error: ") and says in err
+    assert release_cli.untouched()
+    assert not list(tmp_path.glob("dl/*"))
+
+
+@pytest.mark.parametrize("argv", [["--from", "x.zip", "--check"], ["--from", "x.zip", "--download-only"],
+                                  ["--dev", "--from", "x.zip"]])
+def test_the_cli_refuses_options_that_contradict_each_other(release_cli, argv):
+    release_cli.publish("1.1.0")
+    with pytest.raises(SystemExit) as stop:
+        release_cli.run(*argv)
+    assert stop.value.code == 2
+    assert release_cli.untouched()
+
+
 def test_a_main_sync_is_recorded_as_such(install, tmp_path):
     """A box synced to main is running code no release was cut from —
     worth being able to tell after the fact."""

@@ -579,6 +579,15 @@ see [docs/notes/README.md](README.md) for the whole set.
   *source* (the Timeline, latest hits, `{{all:…}}`): a case can hold 500
   tables without a merge in sight. tests/test_merge_compound_limit.py
   drives each one over a merge of 510 W3C logs.
+- **Every CSV export writes through `_CsvWriter`, never a bare
+  `csv.writer`.** Python 3.10's writer (the README's minimum) refuses a NUL
+  and leaves a field holding a bare CR unquoted. The first cut an export
+  off at that row, mid-download; the second split the row in two for
+  whoever read the file, Winnow's own import included. `_CsvWriter` writes
+  3.11's text on 3.10 too: it writes with a `"\r\n"` terminator, so 3.10
+  quotes a CR, and puts `"\n"` back, and a NUL goes through `_csv_rows`'s
+  escape. tests/test_csv_round_trip.py imports, exports and re-imports the
+  awkward cells, and forces the 3.10 path on every CI Python.
 - **A `_reader()` block is one read transaction, and so is a SQL pane
   query.** A statement whose schema changed between its prepare and its
   step is re-prepared, up to 50 times, and in autocommit each try reads

@@ -1623,6 +1623,48 @@ def _nul_unescape(m: re.Match) -> str:
     return _NUL_ESC if m.group()[1] == _NUL_ESC else "\0"
 
 
+# What 3.11 changed in csv's WRITER, beside the reader change above: it
+# writes a NUL, and it quotes a field holding a bare CR whatever the line
+# terminator. 3.10's writer refuses the first ("need to escape, but no
+# escapechar set") and leaves the second unquoted.
+_CSV_WRITES_ANY_CELL = sys.version_info >= (3, 11)
+
+
+class _CsvWriter:
+    """csv.writer(buf, lineterminator="\n") for the exports, writing every
+    cell as 3.11+ does on every Python.
+
+    On 3.10 two cells went wrong. A NUL stopped the export at its row, so
+    the analyst got a file cut short mid-download. A bare CR — a cell the
+    formula guard even names, and ordinary in Windows text — was written
+    unquoted, so every spreadsheet and CSV reader, Winnow's included, split
+    the row in two there. 3.10's writer quotes a field holding any
+    character of the line terminator, so it writes with "\r\n" and the
+    terminator is put back to "\n"; a NUL goes through as _csv_rows's
+    escape and is undone in the text written, and csv treats neither escape
+    character specially. The result is 3.11's text, byte for byte."""
+
+    def __init__(self, buf: io.StringIO):
+        self.buf = buf
+        self.w = csv.writer(buf, lineterminator="\n")
+        self.row = io.StringIO()
+        self.w310 = csv.writer(self.row, lineterminator="\r\n")
+
+    def writerow(self, row) -> None:
+        if _CSV_WRITES_ANY_CELL:
+            self.w.writerow(row)
+            return
+        nul = any(isinstance(c, str) and ("\0" in c or _NUL_ESC in c) for c in row)
+        if nul:
+            row = [c.replace(_NUL_ESC, _NUL_ESC * 2).replace("\0", _NUL_ESC + _NUL_MARK)
+                   if isinstance(c, str) else c for c in row]
+        self.row.seek(0)
+        self.row.truncate()
+        self.w310.writerow(row)
+        text = self.row.getvalue()[:-2] + "\n"
+        self.buf.write(_NUL_UNESCAPE.sub(_nul_unescape, text) if nul else text)
+
+
 def _csv_rows(lines: Iterable[str], delimiter: str, *, escape_nul: bool | None = None):
     """`(reader, rows)`: a csv.reader over `lines`, and what to iterate for
     its rows — the reader itself wherever csv reads NUL. The reader is
@@ -11765,6 +11807,15 @@ class Store:
         if op in (">", ">=", "<", "<="):
             if val == "":
                 return "", []
+            # "(numeric)", as the filter builder labels these: on a number
+            # column always, and on any other column but a datetime one when
+            # the value is a number. Type inference calls a column text
+            # when one sampled cell is "-" or "n/a", and compared as text
+            # "100" > "60" is false, so `Bytes > 60` lost every row of three
+            # digits while saying it compared numbers. A datetime column
+            # compares its ISO text, which orders as time does.
+            if not numeric and colnames[col] != "datetime" and NUM_RE.match(str(val).strip()):
+                numeric, val = True, str(val).strip()
             lhs = _numeric_expr(c) if numeric else c
             return f"{lhs} {op} ?", [float(val) if numeric else val]
         if op == "empty":
@@ -17542,7 +17593,7 @@ class Store:
 
             tagnames = {r["id"]: r["name"] for r in ro.execute("SELECT id, name FROM tag_defs")}
             buf = io.StringIO()
-            w = csv.writer(buf, lineterminator="\n")
+            w = _CsvWriter(buf)
             w.writerow(_export_header(cols, _csv_safe))
             self._renew_snapshot(ro)
             yield buf.getvalue()
@@ -17591,7 +17642,7 @@ class Store:
 
             tagnames = {r["id"]: r["name"] for r in ro.execute("SELECT id, name FROM tag_defs")}
             buf = io.StringIO()
-            w = csv.writer(buf, lineterminator="\n")
+            w = _CsvWriter(buf)
             w.writerow(_export_header(cols, _csv_safe))
             self._renew_snapshot(ro)
             yield buf.getvalue()
@@ -17669,7 +17720,7 @@ class Store:
 
             tagnames = {r["id"]: r["name"] for r in ro.execute("SELECT id, name FROM tag_defs")}
             buf = io.StringIO()
-            w = csv.writer(buf, lineterminator="\n")
+            w = _CsvWriter(buf)
             head = _export_header(cols, _csv_safe)
             if member_names is not None:
                 head.insert(1, "Table")
@@ -19232,7 +19283,7 @@ class Store:
 
         def gen():
             buf = io.StringIO()
-            w = csv.writer(buf, lineterminator="\n")
+            w = _CsvWriter(buf)
             w.writerow([_csv_safe(c) for c in cols])
             n = 0
             for row in rows:

@@ -139,6 +139,34 @@ def test_numeric_filter_and_sort_null_not_zero(store, write_csv):
     assert set(ordered[:2]) == {"N/A", ""}
 
 
+def test_a_number_compares_as_a_number_on_a_column_typed_text(store, write_csv):
+    """The builder labels > and < "(numeric)". A column is typed text when
+    one sampled cell is "-" or "n/a", and these compared text there:
+    `Bytes > 60` dropped 100 and 200 ("1" < "6") and kept "n/a". A value
+    that isn't a number still compares as text, and a datetime column
+    compares its ISO text whatever the value."""
+    path = write_csv([["Bytes", "Name", "When"],
+                      ["100", "alpha", "2026-03-14 08:00:00"],
+                      ["n/a", "bravo", "2026-03-15 08:00:00"],
+                      ["70", "charlie", "2026-03-16 08:00:00"],
+                      ["-", "delta", "2026-03-17 08:00:00"],
+                      ["200", "echo", "2026-03-18 08:00:00"],
+                      ["9", "foxtrot", ""]])
+    rec = store.ingest_csv(path, name="mixed.csv", build_fts=False)
+    types = {c["name"]: c["type"] for c in rec["columns"]}
+    assert (types["Bytes"], types["Name"], types["When"]) == ("text", "text", "datetime")
+
+    def kept(column, op, value):
+        spec = {"source_id": rec["id"], "filters": [{"column": column, "op": op, "value": value}], "sort": []}
+        view = store.build_view(rec["id"], spec)
+        return sorted(c[1] for c in _cells(store, view["view_id"]))
+
+    assert kept("Bytes", ">", "60") == ["alpha", "charlie", "echo"]
+    assert kept("Bytes", "<=", " 70 ") == ["charlie", "foxtrot"]
+    assert kept("Name", ">", "charlie") == ["delta", "echo", "foxtrot"]
+    assert kept("When", ">=", "2026-03-17") == ["delta", "echo"]
+
+
 def test_column_names_needing_quoting(store, write_csv):
     path = write_csv([
         ['Has "Quote"', "Has Space"],
