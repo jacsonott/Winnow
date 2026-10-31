@@ -44,14 +44,14 @@ compare them; **Done** takes you back to Settings.
 
 | Skin | Description as shown |
 | --- | --- |
-| Harvest | Grain and chaff — wheat gold on neutral charcoal, parchment in light. The default. |
+| Harvest | Grain and chaff — wheat gold on neutral charcoal, parchment in light. |
 | Panel | The older look — cooler greys, amber accent. |
 | Phosphor | Retro CRT terminal — glow, monospace chrome. |
 | Blueprint | Bold borders, hard offset shadows. |
 | Studio | Rounded, soft shadows, calm motion. |
 | Jenna's theme | Timeline Explorer in its Office 2016 Black skin — flat, square, Segoe UI, amber on cool grey. |
 
-Every skin has a dark and a light form. Jenna's theme is the only one that
+Harvest is the default. Every skin has a dark and a light form. Jenna's theme is the only one that
 also redraws the grid itself (ruled cells, a closed box) rather than just
 recolouring it, and the only one without striped rows by default.
 
