@@ -129,3 +129,40 @@ def test_api_cancel_lands_mid_build(client, slow_source):
     t.join(30)
     assert not t.is_alive()
     assert result["resp"].status_code == 499
+
+
+# Seconds of pure VM work with no UDF in it, so nothing but an interrupt
+# can stop it early.
+LONG_SQL = ("WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 30000000) "
+            "SELECT count(*) FROM c")
+
+
+def test_a_cancel_between_two_statements_still_stops_the_next(store):
+    """sqlite3_interrupt only stops a statement already running, and SQLite
+    clears it when the next one starts. A cancel that landed between a
+    build's quick CREATE TABLE and its long INSERT was forgotten, and the
+    build ran to the end: the required check that waited 30 s for that
+    cancel failed on loaded Windows runners. Here the cancel is sent at
+    exactly that point, deterministically: after one statement, before the
+    long one."""
+    t0 = time.monotonic()
+    with pytest.raises(OpCancelled):
+        with store.lock, store._interruptible("tok-gap", store.db):
+            store.db.execute("SELECT 1").fetchone()
+            assert store.cancel_op("tok-gap") is True     # nothing running: the interrupt alone is lost
+            store.db.execute(LONG_SQL).fetchone()
+    assert time.monotonic() - t0 < 5
+    # The block let go, so nothing is still interrupting the connection.
+    time.sleep(store.CANCEL_RESEND_S * 5)
+    assert store.db.execute("SELECT count(*) FROM sources").fetchone() is not None
+
+
+def test_a_resent_cancel_stops_once_the_operation_is_over(store):
+    """The resend is bounded by the block: once the token no longer holds
+    the connection it stops, so the next statement on it (someone else's
+    write, on the writer connection) runs."""
+    with store.lock, store._interruptible("tok-done", store.db):
+        store.cancel_op("tok-done")
+    time.sleep(store.CANCEL_RESEND_S * 5)
+    with store.lock:
+        assert store.db.execute(LONG_SQL.replace("30000000", "300000")).fetchone()[0] == 300000
