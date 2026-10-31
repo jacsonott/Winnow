@@ -85,6 +85,13 @@ searchable, that merge eligibility is unaffected, and both cancel
 semantics (driven through the backfill's own cancel hook, so the
 cancellation point is deterministic rather than a race — same technique
 as `test_ingest_jobs.py`).
+`test_site_palette.py` holds the Pages site and Harvest to the same
+colors: every value docs/site/assets/site.css copies from a Harvest token
+(the ones commented `/* dark --panel */` and so on) must still equal that
+token in static/style.css, and Harvest dark's greys must have no hue. The
+site took the green cast out of Harvest's greys before the app did, and
+the two drifted apart until the app read as green next to its own
+website.
 
 ## Things that bite
 
