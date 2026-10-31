@@ -5482,7 +5482,6 @@ class Store:
                 return str(v)
 
             select_cols = ",".join(q(c) for c in src_colnames)
-            src_cursor = ro.execute(f"SELECT {select_cols} FROM {q(table_name)}")
 
             sample: list[list[str]] = []
             total = 0
@@ -5490,6 +5489,11 @@ class Store:
             error: Exception | None = None
             with self._ingest_synchronous_off():
                 try:
+                    # Inside the try: before 3.11, execute() steps to the
+                    # first row and decodes it, so a value the text factory
+                    # rejects there raises HERE, and outside the try it left
+                    # the empty table behind.
+                    src_cursor = ro.execute(f"SELECT {select_cols} FROM {q(table_name)}")
                     while True:
                         rows = src_cursor.fetchmany(BATCH)
                         if not rows:
