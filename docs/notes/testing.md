@@ -78,6 +78,16 @@ extracted column is an ordinary derived column everywhere, that discovery
 only ever offers paths that actually extract, and that a batch is
 all-or-nothing (a name collision in the fifth spec must not leave four
 columns behind).
+`test_wiki_shortcuts.py` holds the shortcut table in
+docs/wiki/Settings-and-shortcuts.md to keymap.js's `DEFAULT_KEYMAP` and
+`ACTION_LABELS`, read with esprima, so a relabelled action or a new
+default key fails the backend job instead of leaving the manual
+describing an older build (the table menu's label had drifted when it
+was added). `test_updater.py` drives `update.py` itself as well as
+updater.py: `--from` then `--rollback` as an analyst types them, the
+answers to a refused or unusable archive, and `download()`'s promise
+that a cut-off or Ctrl+C'd download leaves nothing at the target that
+`--from` could later apply.
 `test_derived.py` covers the column lifecycle and, more importantly, the
 integration choices that are easy to reverse by accident: the
 virtual-root EXPLAIN plan (invariant #2), that derived values are *not*
