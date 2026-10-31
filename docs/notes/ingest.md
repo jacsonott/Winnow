@@ -27,7 +27,11 @@ see [docs/notes/README.md](README.md) for the whole set.
   default factory raised "Could not decode to UTF-8" mid-read, and the
   batch it was in plus every row after it were gone. And a table that
   fails before its first batch commits is dropped rather than left with
-  0 rows, which is indistinguishable from a real empty import. The
+  0 rows, which is indistinguishable from a real empty import. That
+  includes a failure on the very first row, which on Python 3.10 is
+  raised by the SELECT's `execute()` rather than the first `fetchmany`
+  (before 3.11, `execute()` steps to the first row and decodes it), so
+  the `execute()` sits inside the try that drops the table too. The
   preview reads each table on its own: one this SQLite can't read (a
   virtual table whose module it lacks — Thunderbird's message index)
   comes back with an `error` and `row_count: null`, shown but not
