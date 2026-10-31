@@ -151,8 +151,14 @@ def test_a_number_put_in_a_cell_is_stored_as_text(store, write_csv):
         store.db.execute(f'UPDATE "{table}" SET "A" = ?, "B" = ? WHERE rid = 1', (0.1 + 0.2, 7))
         store.db.execute(f'UPDATE "drv_{sid}" SET "D" = ? WHERE rid = 1', (1e20,))
         assert tuple(store.db.execute(f'SELECT typeof("A"), typeof("B") FROM "{table}"').fetchone()) == ("text", "text")
+        # The text SQLite made of each number, which is what the page owes:
+        # how many digits a REAL becomes is SQLite's, and 3.53 writes 0.1 +
+        # 0.2 in full where older versions wrote 0.3.
+        stored = list(store.db.execute(f'SELECT t."A", t."B", d."D" FROM "{table}" t '
+                                       f'JOIN "drv_{sid}" d USING (rid) WHERE rid = 1').fetchone())
+    assert stored[0] in ("0.3", "0.30000000000000004") and stored[1:] == ["7", "1.0e+20"]
     page = _same(store, store.build_view(sid, {"source_id": sid})["view_id"])
-    assert page["rows"][0]["cells"] == ["0.3", "7", "1.0e+20"]
+    assert page["rows"][0]["cells"] == stored
 
 
 def test_a_blob_fails_as_it_always_did(store, write_csv):
