@@ -5670,9 +5670,12 @@ class Store:
         workbooks put titles and blank rows above it); the table is sized
         to the wider of that header and the sheet's declared width, so
         data extending past the named headers lands in col_N columns
-        instead of being cut. Rows *shorter* than the header are the
-        normal Excel shape (trailing empties simply aren't stored) and
-        pad silently; only rows wider than the table count as ragged.
+        instead of being cut — and widens as it goes for a row wider
+        still, since a sheet that declares no size shows its width only a
+        row at a time. Rows *shorter* than the header are the normal Excel
+        shape (trailing empties simply aren't stored) and pad silently.
+        No cell is ever cut, so `ragged_rows` is always 0 here; it stays
+        in the result for the shape every import returns.
         Date-styled cells arrive as ISO text rather than the raw
         day-serial — an unconditional conversion, called out in the sheet
         picker, not an analyst toggle like SQLite's WebKit-epoch chips,
@@ -5716,10 +5719,26 @@ class Store:
             with self._ingest_synchronous_off():
                 try:
                     for raw in rows_iter:
-                        if len(raw) != ncols:
-                            if len(raw) > ncols:
-                                ragged += 1
-                            raw = (raw + [""] * ncols)[:ncols]
+                        if len(raw) > ncols:
+                            # Wider than the table. A sheet that declares no
+                            # size (many writers leave <dimension> out) only
+                            # shows its width a row at a time, and cutting
+                            # the cells off loses evidence the header never
+                            # named; the table widens instead, the rows
+                            # before reading the new columns as empty.
+                            wider = sanitize_columns([c.strip() for c in header] + [""] * (len(raw) - len(header)))
+                            with self.lock, self.db:
+                                for c in wider[ncols:]:
+                                    self.db.execute(f"ALTER TABLE {q(dest_table)} ADD COLUMN {q(c)} TEXT DEFAULT ''")
+                            pad = [""] * (len(wider) - ncols)
+                            batch = [b + tuple(pad) for b in batch]
+                            for r in sample:
+                                r.extend(pad)
+                            cols, ncols = wider, len(wider)
+                            insert = (f"INSERT INTO {q(dest_table)} ({','.join(q(c) for c in cols)}) "
+                                      f"VALUES ({','.join('?' * ncols)})")
+                        elif len(raw) < ncols:
+                            raw = raw + [""] * (ncols - len(raw))
                         batch.append(tuple(raw))
                         if len(sample) < SAMPLE_ROWS:
                             sample.append(raw)
