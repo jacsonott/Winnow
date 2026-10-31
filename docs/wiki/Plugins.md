@@ -487,7 +487,8 @@ The shipped **KAPE triage** profile turns this plugin on.
 
 Reads VMware ESXi support bundles and UAC Linux collections into one shared
 layout: Timestamp, Log, Severity, Component, PID, CPU, User, SourceIP,
-Message. It adds one import format, **ESXi / Linux host log**, which
+Message, plus columns for whatever else a file's lines carry. It adds one
+import format, **ESXi / Linux host log**, which
 recognises hostd, vmkernel, auth, shell, vobd, vpxa, syslog, rhttpproxy,
 esxupdate, vmksummary, fdm, sudo, messages and secure logs (rotated copies
 included) by name. The **Log type** option is `auto` by default; set it to
@@ -501,10 +502,49 @@ and a [key=value log](Cases-and-importing.md#fortigate-and-other-fortinet-logs)
 such as FortiGate's, known by its first line. Switch the plugin off for
 cases where other `.log` files should import some other way.
 
-Syslog-style lines carry no year; the plugin works one out so they sort and
-filter as real dates. Import the whole bundle as an archive or folder and
-every log becomes a table with the same columns, which is what lets a board
-count across all of them.
+Each line is read for what it says it holds, the way an
+[IIS log](Cases-and-importing.md#iis-web-server-logs) is, and checked line by
+line rather than per file, since one `syslog.log` can mix shapes. It reads
+ESXi 5.x through 8.x (including 7.0 U2 and later's `In(166) Hostd[pid]:`
+lines) and Linux syslog: the classic `Jan  5 10:00:01 host app[pid]:`, the
+RFC 3339 stamps rsyslog writes, and RFC 5424.
+
+| Column | What it holds |
+| --- | --- |
+| `Timestamp` | The line's time as `YYYY-MM-DD HH:MM:SS`, with microseconds when the line has a fraction. A stamp with an offset is converted to UTC; ESXi's stamps are UTC already. Every log in a bundle uses this one form, so a sort or a merge puts them in time order. |
+| `Timestamp (as logged)` | The stamp exactly as written. Only in a file where some stamp had its year worked out (syslog's `Jan  5` has none) or an offset applied. A stamp that isn't a real time, such as `Feb 29` in a year without one, leaves `Timestamp` empty and stays here. |
+| `Severity` | `info`, `warning`, `error` and so on, from the severity word, ESXi 8's `In`/`Wa`/`Er`, or a syslog priority. |
+| `Component` | The program that logged the line (`Hostd`, `sshd`). For vmkernel, the kernel module (`NFS`, `ScsiDeviceIO`). |
+| `PID` | The process ID. For vmkernel, the world ID, which is what ESXi calls the same number. |
+| `CPU` | vmkernel's `cpuN`. |
+| `User` | The `user=` in hostd's Originator block, shell.log's `[root]:`, sudo and su, sshd's `for bob from`, or `root@10.1.2.3` in hostd and vobd. |
+| `SourceIP` | The peer in rhttpproxy's connection pair (not the host's own address), sshd's `from … port` (IPv6 too), or the first address that isn't loopback in an auth, syslog or vobd line. |
+| `Host` | The hostname a Linux syslog line names. |
+| `Facility` | The syslog facility from a priority (`In(166)` is `local4`). |
+| `Thread` | ESXi 5.x hostd's thread ID (`[6CBE7B90 info …]`). |
+| `sub`, `opID`, `sid`, … | Each key of hostd's and vpxa's `[Originator@6876 …]` block, named as logged. The `opID` in vmkernel's `cpu3:2097729 opID=…)` lands in the same column, so one filter follows a vCenter task from hostd into the kernel. RFC 5424 structured data is read the same way. |
+| `MSGID` | RFC 5424's message ID. |
+| `EventType` | A vobd event ID such as `esx.audit.ssh.enabled`. |
+| `Message` | Everything else on the line. |
+
+`Log` (the log type) and the columns from `Severity` to `SourceIP` are in
+every table, as are `Timestamp` and `Message`; the rest appear only in a file
+that has them, so a hostd log gets `sub` and `opID` and a plain log gets
+none of them. A line with no timestamp after one with a timestamp (a stack
+trace, a wrapped message) joins that row's `Message`, and so does ESXi 8's
+`-->` continuation line, up to 64 KB a row.
+
+The file is read the way IIS logs are: a Windows-1252 byte is that
+character, a carriage return inside a line stays part of that line, and a
+run of NUL bytes, which a host leaves when it loses power mid-write, is
+skipped, and **Case ▾ → Log…** notes how many lines had one. A log the host
+is still writing imports as it was when the import started.
+
+Tables imported with an earlier version of the plugin keep the shape they
+were imported with; import the logs again for the new columns and
+timestamps. Import the whole bundle as an archive or folder and every log
+becomes a table with the shared columns, which is what lets a board count
+across all of them.
 
 It also offers a board, **ESXi / Linux host overview** (log lines, log
 types, failed SSH logins, top source IPs, activity over time), under

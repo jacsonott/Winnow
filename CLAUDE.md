@@ -333,7 +333,10 @@ examples/plugins/  Committed example plugins covering every extension point
                     NTFS $MFT/$J parsing (ingest formats, stdlib-only).
                     esxi_logs: an ESXi support bundle or UAC Linux
                     collection read into one shared column schema
-                    (register_ingest_format), plus the reference
+                    (register_ingest_format) — line by line the way
+                    iisread reads IIS logs, which it imports: per-file
+                    columns for whatever else a file's lines carry,
+                    one canonical Timestamp, two passes — plus the reference
                     register_dashboard board, offered on its own under
                     Dashboards ▸ Library. The shipped "ESXi / UAC triage"
                     profile is a separate thing in defaults/profiles.json:

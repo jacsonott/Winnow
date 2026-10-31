@@ -607,8 +607,10 @@ folder import's default file types leave `.log` out. Turn the **esxi_logs**
 plugin on first: creating the case with the **ESXi / UAC triage** profile
 does it and adds that profile's dashboard, or switch it on in
 **Settings → Plugins**. It claims `.log` and the ESXi log names, parses them
-into one schema and adds a `.log` chip to folder import. Without it, turn on
-**other text files** to bring the logs in as raw text.
+into one schema, with columns of their own for whatever else a file's lines
+carry (hostd's `opID`, a Linux host name; see
+[Plugins](Plugins.md#esxi_logs)), and adds a `.log` chip to folder import.
+Without it, turn on **other text files** to bring the logs in as raw text.
 
 ### Folders and KAPE output
 

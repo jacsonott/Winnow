@@ -107,6 +107,18 @@ searchable, that merge eligibility is unaffected, and both cancel
 semantics (driven through the backfill's own cancel hook, so the
 cancellation point is deterministic rather than a race — same technique
 as `test_ingest_jobs.py`).
+`test_esxi_log_shapes.py` covers the esxi_logs plugin's parser one line
+shape at a time (ESXi 5.x to 8.x hostd, vmkernel, vobd, shell, rhttpproxy,
+Linux RFC 3164, RFC 3339 and RFC 5424), its iisread-style column rules (the
+union of Originator keys, a key that names a fixed column suffixed,
+columns only where a file has them), that its canonical timestamps sort in
+time order, and the file handling it shares with iisread (NUL gaps, a `\r`
+that can't forge a row, Windows-1252, a live file). Its load-bearing test
+puts every combination of stamp, header and body it knows through both
+the fast-path regexes and `_parse_line_slow` and requires one answer: the
+fast paths are only a speed-up if they never disagree, and a disagreement
+shows up nowhere else. `test_esxi_log_scan.py` covers the same plugin's
+folder scan, continuation folding and syslog year.
 `test_site_palette.py` holds the Pages site and Harvest to the same
 colors: every value docs/site/assets/site.css copies from a Harvest token
 (the ones commented `/* dark --panel */` and so on) must still equal that
