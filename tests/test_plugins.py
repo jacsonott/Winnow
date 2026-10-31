@@ -2700,6 +2700,62 @@ def test_pivot_over_a_merge_with_mismatched_columns(pivot_client, store, write_c
     assert per_channel[None] == 2
 
 
+def _pivot_values(client, source_id, column, **body):
+    r = client.post("/api/plugin/pivot/values", json={"source_id": source_id, "column": column, **body})
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def test_pivot_values_list_each_value_once_most_common_first(pivot_client):
+    """The Filters area's checkbox list. A blank and a non-number are values
+    an analyst can tick like any other, so they are listed, counted."""
+    client, source_id = pivot_client
+    out = _pivot_values(client, source_id, "User")
+    counts = [v["count"] for v in out["values"]]
+    assert counts == sorted(counts, reverse=True)
+    assert {v["value"]: v["count"] for v in out["values"]} == {"alice": 3, "bob": 1, "carol": 1}
+    assert out["truncated"] is False
+    by_value = {v["value"]: v["count"] for v in _pivot_values(client, source_id, "Bytes")["values"]}
+    assert by_value == {"100": 1, "200": 1, "": 1, "N/A": 1, "40": 1}
+
+
+def test_pivot_values_stop_at_the_limit_and_say_so(pivot_client):
+    client, source_id = pivot_client
+    out = _pivot_values(client, source_id, "User", limit=2)
+    assert out["values"][0] == {"value": "alice", "count": 3}
+    assert len(out["values"]) == 2 and out["truncated"] is True
+    # Exactly as many values as the limit is not cut off.
+    assert _pivot_values(client, source_id, "User", limit=3)["truncated"] is False
+
+
+def test_pivot_values_refuse_a_column_the_table_does_not_have(pivot_client):
+    client, source_id = pivot_client
+    bad = client.post("/api/plugin/pivot/values", json={"source_id": source_id, "column": "Nope"})
+    assert bad.status_code == 400 and "Nope" in bad.json()["detail"]
+
+
+def test_pivot_values_over_a_merge_count_every_member(pivot_client, store, write_csv):
+    """Invariant #9. A member without the column reads it as blank, which
+    is what its rows group under in the pivot itself."""
+    client, source_id = pivot_client
+    other = store.ingest_csv(write_csv([["Host", "User"], ["SRV3", "alice"], ["SRV3", "dave"]],
+                                       "pvm.csv"), name="pvm", build_fts=False)["id"]
+    mid = store.create_merge("pivvalues", [source_id, other])["id"]
+    users = {v["value"]: v["count"] for v in _pivot_values(client, mid, "User")["values"]}
+    assert users == {"alice": 4, "bob": 1, "carol": 1, "dave": 1}
+    channels = {v["value"]: v["count"] for v in _pivot_values(client, mid, "Channel")["values"]}
+    assert channels == {"Security": 3, "System": 2, None: 2}
+
+
+def test_pivot_values_of_a_derived_column_are_its_values(pivot_client, store):
+    """Not the column's name repeated: the derived sidecar is joined."""
+    client, source_id = pivot_client
+    res = store.add_derived_column(source_id, "UserFirst", "User", "regex_extract", {"pattern": r"^(\w)"})
+    store.wait_for_ingest_job(res["job_id"], timeout=30)
+    out = _pivot_values(client, source_id, "UserFirst")
+    assert {v["value"]: v["count"] for v in out["values"]} == {"a": 3, "b": 1, "c": 1}
+
+
 # ============================================================ first_last plugin
 
 FL_ROWS = [

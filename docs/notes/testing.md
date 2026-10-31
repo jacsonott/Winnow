@@ -115,6 +115,45 @@ site took the green cast out of Harvest's greys before the app did, and
 the two drifted apart until the app read as green next to its own
 website.
 
+In the browser, `tests/ui/test_default_keys.py` presses every binding in
+`DEFAULT_KEYMAP`. Its first test swaps each `ACTION_HANDLERS` entry for a
+recorder and checks every key reaches its own action and no other. It reads
+the keymap from the page, so a key added later is pressed without anyone
+adding it, and nothing the keys would do happens. The rest press, for real,
+the keys whose handlers have no button or menu entry (PageDown/PageUp, `0`,
+`q` `w` `[` `]`, `f` `F`, the backtick, `x`, `L`, `Q`, `.`) and assert what
+changes on screen. `test_plugin_install_dialog.py` drives Install a
+plugin… through its two picker buttons and answers the install route itself
+(a real install writes into the shared server's plugins folder, and nothing
+takes a plugin back out). A routed request carries a file part's name but
+not its bytes, so it asserts names and paths, not contents.
+`test_row_action_menu.py` runs a plugin row action from the row menu (one
+row, a range, a merge, `open_url`, a refusal) against a routed dispatch.
+`test_detail_malformed_xml_ui.py` covers the detail pane's fallback for XML
+that won't parse, through `renderDetailContent`: reflowed, highlighted,
+nothing lost, no path offered, and the value never built as markup.
+`test_popout.py` brings a pop-out back as a tab (and keeps what was typed
+out there), and opens a pop-out with no case, and one of a page the case
+doesn't have, through `window.open('')` so the window may close itself.
+
+`test_csv_round_trip.py` ingests a file of awkward cells, exports it over
+`/api/export` and ingests the export: everything comes back except the
+formula guard's apostrophe. Its last test forces `_CsvWriter`'s Python 3.10
+path on every Python and, on 3.11+, checks it against what `csv` writes.
+`test_firstlast_filters.py` runs each of First/Last's filter operators and
+the grid's equivalent condition on the same table and on a merge, and
+compares the counts per group, because the plugin compiles its own WHERE.
+Its table has both '' and NULL, and a number column with a blank and a
+non-number in it. `test_session_reimport.py` re-imports a table from a
+session for every reader the session can name (IIS and key=value are in
+their own files), with and without the reader recorded, and covers a
+session with no path, a file gone from its path, and a file replaced while
+it was read. Beside the `--from` tests above, `test_updater.py`'s
+`ReleaseCli` runs `update.py` on the release path, with GitHub answered
+through updater's own seams: `--check`, up to date, `--download-only`
+then `--from` (the airgap trip), the apply prompt, `--dry-run`, and each
+failure as exit 2.
+
 ## Things that bite
 
 - A note on the lock-scope test in `test_search.py`: it asserts *structurally*

@@ -168,6 +168,97 @@ def test_with_pages_as_a_dropdown_the_button_has_the_showing_pages_menu(page, pa
         pop.wait_for_selector("#timelineview:not([hidden])")
 
 
+def test_bring_it_back_as_a_tab_from_the_tab_menu(page):
+    """The tab's own menu, where the page went out from. The pop-out puts
+    itself away; the main window, still on the table, drops the tab's mark,
+    and the page shows itself there when asked for."""
+    with popped_out(page) as pop:
+        page.wait_for_function("() => __winnow.isPoppedOut('timeline')")
+        page.click("#tabTimeline", button="right")
+        with pop.expect_event("close"):
+            page.locator(".menu:not(.menu-sub) .menu-item", has_text="Bring it back as a tab").click()
+        page.wait_for_function("() => !__winnow.isPoppedOut('timeline')")
+        assert not page.locator("#tabTimeline").evaluate("(b) => b.classList.contains('tab-popped')")
+        page.click("#tabTimeline")
+        page.wait_for_selector("#timelineview:not([hidden])")
+        assert page.locator("#popoutPlaceholder").is_hidden()
+
+
+def test_bring_it_back_as_a_tab_saves_what_was_typed_out_there_first(page, api):
+    """The placeholder's button, on the SQL pane: a query typed in the
+    pop-out and still inside the editor's autosave delay is the case the
+    order of dock() is for. The pop-out saves, then says it is going, then
+    goes, and the main window mounts the pane from what was saved."""
+    before = {t["id"]: t["sql"] for t in api("/api/sql_tabs")}
+    typed = "SELECT 'typed in the pop-out' AS probe"
+    page.click("#tabSql")
+    page.wait_for_selector("#sqlText")
+    try:
+        with popped_out(page, key="sql", tab="#tabSql") as pop:
+            pop.wait_for_selector("#sqlText")
+            page.click("#tabSql")
+            page.wait_for_selector("#popoutPlaceholder:not([hidden])")
+            pop.fill("#sqlText", typed)
+            with pop.expect_event("close"):
+                page.locator("#popoutPlaceholder .btn", has_text="Bring it back as a tab").click()
+            page.wait_for_selector("#sqlText:visible")
+            page.wait_for_function("(t) => document.getElementById('sqlText').value === t", arg=typed)
+            assert page.locator("#popoutPlaceholder").is_hidden()
+    finally:
+        for t in api("/api/sql_tabs"):
+            if t["id"] not in before:
+                api(f"/api/sql_tabs/{t['id']}", "DELETE")
+            elif t["sql"] != before[t["id"]]:
+                api(f"/api/sql_tabs/{t['id']}", "PUT", {"sql": before[t["id"]]})
+        page.evaluate("() => __winnow.showGridTab()")
+
+
+def _bare_pop_out(page, server, key, route=None):
+    """A pop-out pointed at by hand, for the owner `wtest`: no main window
+    answers to that, so nothing here reaches the shared page. Opened blank
+    by the page's script and pointed at the pop-out afterwards, as popOut
+    does, because a browser lets a window close itself only if a script
+    opened it."""
+    with page.expect_popup() as info:
+        page.evaluate("() => { window.open('', 'winnow-bare-popout', 'popup=yes'); }")
+    pg = info.value
+    errors: list[str] = []
+    pg.on("pageerror", lambda e: errors.append(str(e)))
+    if route:
+        pg.route(*route)
+    pg.goto(f"{server.rstrip('/')}/?popout={key}&owner=wtest")
+    pg.wait_for_selector("#popoutPlaceholder:not([hidden]) .popout-card")
+    return pg, errors
+
+
+def test_a_pop_out_with_no_case_open_says_so(page, server):
+    """The main window closed the case, or the server came back without
+    one: the window says what happened instead of booting into a home
+    screen nobody can use from there."""
+    no_case = ("**/api/case/current",
+               lambda r: r.fulfill(status=200, content_type="application/json",
+                                   body='{"open": false, "case_token": null}'))
+    pg, errors = _bare_pop_out(page, server, "timeline", route=no_case)
+    assert pg.locator(".popout-card-title").inner_text() == "Winnow has no case open"
+    assert pg.locator("#home").is_hidden()
+    with pg.expect_event("close"):
+        pg.locator(".popout-card .btn", has_text="Close this window").click()
+    assert not errors, "uncaught JS errors in the pop-out: " + " | ".join(errors)
+
+
+def test_a_pop_out_of_a_page_this_case_does_not_have_says_so(page, server):
+    """A board of the case just left, a plugin since switched off."""
+    pg, errors = _bare_pop_out(page, server, "dashboard:987654")
+    try:
+        assert pg.locator(".popout-card-title").inner_text() == "This page isn\u2019t in this case"
+        case_name = page.evaluate("() => fetch('/api/case/current').then((r) => r.json()).then((c) => c.name)")
+        assert case_name in pg.locator(".popout-card").inner_text()
+        assert pg.locator("#popoutBar").is_hidden()
+    finally:
+        pg.close()
+    assert not errors, "uncaught JS errors in the pop-out: " + " | ".join(errors)
+
+
 def test_a_tag_written_in_either_window_shows_in_the_other(page, api, tag_written):
     rows = page.locator("#body .row")
     pair = page.evaluate("() => [__winnow.rowAt(2).source_id, __winnow.rowAt(2).rid]")
