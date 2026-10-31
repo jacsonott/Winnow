@@ -468,12 +468,12 @@ see [docs/notes/README.md](README.md) for the whole set.
   `NOT` (an exclusion, No tags), where the row-value `IN` the pivot note
   above warns about does not.
 
-- **lateral_movement's event builder previews through the graph's own
-  SQL.** `preview` and `edges` both build on `_prepare`, so "273 rows
-  match, 12 links" in the builder is the row set Build turns into edges
-  (a test holds `hops` to the edges' summed `n`); a preview with its own
-  WHERE would drift the first time the noise list changed. Four more
-  things the builder depends on:
+- **lateral_movement's event builder previews through the feed's own
+  SQL.** `preview` and `feed` both build on `_prepare` and `_grouped`, so
+  "273 rows match, 12 links" in the builder is the row set the views
+  draw (a test holds the preview's `hops` to the feed's drawn plus
+  untimed rows); a preview with its own WHERE would drift the first time
+  the noise list changed. Four more things the builder depends on:
   - **An event's NAME is its identity in the tab.** A tick is keyed
     `source_id::name`, so a saved event named like a shipped one ticked
     and unticked with it. The builder refuses a taken name
@@ -493,6 +493,61 @@ see [docs/notes/README.md](README.md) for the whole set.
     `/user/` matched the SID in `UserId` before `UserName`. `st.picked`
     is what keeps a table switch from rewriting an edited event's columns
     while it is only being previewed elsewhere.
+
+- **lateral_movement v3 is one feed and five views over it** (Chain over
+  time, Host matrix, By account, Pivot, Path), replacing v2's force
+  graph and its `edges` route. What bites:
+  - **Hosts fold before anything is counted.** `fold_host` strips the
+    field prefix, the bracketed address, UNC slashes and the domain, and
+    maps an address to the name rows write beside it, across every
+    selection (`address_names`), so a flow export's bare addresses land
+    on the event log's names. v2 drew each spelling as its own node: a
+    host that received a logon and then made one was two unconnected
+    dots. `_Folder` folds each distinct spelling once; per row, it was
+    most of the feed's time (4.1s of a 250k-row feed, 1.6s after).
+  - **`_grouped` groups by position.** A GROUP BY name resolves to a
+    table column before the result's alias, so a table with a column
+    called `u` merged two accounts into one hop
+    (`test_lateral_movement_feed_groups_by_position`).
+  - **No time column, no hop.** Every view is ordered by time, so a row
+    with no minute is counted in `per[k].untimed` and drawn nowhere; the
+    builder says so before the event is saved.
+  - **A hop with no account backs up a named one.** A flow row on the
+    same two hosts within a minute (`LINEUP`) of a logon is the same
+    movement seen twice: it adds to that hop's `also` instead of drawing
+    a link of its own, or every logon in a case with netflow would draw
+    twice.
+  - **Hosts and accounts are numbered per mount**, not per feed
+    (`hostId`/`userId`), so a pivot, a crown jewel or an account filter
+    survives the feed being read again; tabState saves NAMES, which is
+    what survives a reload.
+  - **`compute()` is cached by `computeKey`, the switches by
+    `computeBase`'s key.** At 250k hops the switches alone are ~0.5s, and
+    a view switch or a histogram drag ran them again every frame. Anything
+    new `compute()` reads has to join the key, or a view shows the last
+    answer.
+  - **The canvas views are one sticky canvas over a spacer** as tall as
+    what is drawn (`canvasFor`), drawn a screen at a time: a canvas a
+    thousand lanes tall passes the browser's size limit. Measure text on
+    the separate `measure()` context; sizing the visible canvas to
+    measure shrank the spacer and threw the scroll position away.
+  - **What is under the pointer is rebuilt with every redraw**, so hover
+    compares links by `linkKey` and pivot edges by their hop, never by
+    object identity (a hover that never matched redrew on every mouse
+    move).
+  - **Menus at a point are `winnow.dropdownMenu` on a zero-size fixed
+    anchor**: the plugin context has no contextMenu. "Open its rows"
+    passes `openFiltered` an `in` with a LIST of every spelling the feed
+    saw in that column, plus the event's own conditions, with `not_in`
+    expanded into one `not_equals` per value (the filter tree has no
+    `not_in`).
+  - **`scheduleFetch` marks the tab busy when the read is scheduled**,
+    not when it starts: the "Added ..." note after a save waits for a
+    feed that holds the new event, and a repaint inside the debounce
+    reported it from the old feed.
+  - `tests/ui/test_lateral_movement.py` right-clicks hosts through
+    `canvas.lmHosts` (name → where its label is drawn, for every label on
+    screen; the matrix lists its slanted column labels too).
 
 - **A plugin's menu is the app's menu** (`winnow.dropdownMenu`, plugin
   API 13 / context `apiVersion` 7). Pivot's and First/Last's
@@ -582,19 +637,21 @@ see [docs/notes/README.md](README.md) for the whole set.
   ordinary `{{header_set:Name}}` placeholder binds to the FIRST matching
   source, which would silently ignore every other log. So the store grew a
   sibling: `{{all:header_set:Name}}` expands to a parenthesised
-  `SELECT * FROM src_a UNION ALL SELECT * FROM src_b …` over every matching
-  source (schemas identical by construction, so the union lines up by
-  position), and the dashboard slices it back apart on the plugin's `Log`
+  `SELECT <set's columns> FROM src_a UNION ALL …` over every matching
+  source (named, not `*`: since 2.0.0 the plugin's tables share the nine
+  columns but not the rest, see below), and the dashboard slices it back
+  apart on the plugin's `Log`
   column ('hostd'/'auth'/'shell'/…, set from the filename's stem, with
   the ` (N)` that archive expansion gives a clashing name taken off first,
   so `messages (2)` is still syslog). A profile still
   can't create a merge, and this isn't one — it's a read-time union, so it
   needs no new object in the case file and picks up rotated logs imported
-  later with no re-wiring. The plugin parses two line shapes per line, not
-  per file (ESXi ISO and year-less Linux syslog both appear in one
-  syslog.log), and folds timestamp-less continuation lines onto the
-  previous row rather than emitting orphans. Folding collects the lines
-  and joins once, and stops at `FOLD_MAX_CHARS` (64 Ki). The format
+  later with no re-wiring. The plugin detects the line shape per line,
+  not per file (ESXi ISO and year-less Linux syslog both appear in one
+  syslog.log), and folds timestamp-less continuation lines — and ESXi
+  7.0 U2+'s `-->` lines, which repeat the full prefix, when app and pid
+  match — onto the previous row rather than emitting orphans. Folding
+  collects the lines and joins once, and stops at `FOLD_MAX_CHARS` (64 Ki). The format
   claims every .log, so a dated header over a 100k-line dump is a real
   input, and repeated `message + " " + line` took minutes over it to build
   one 9 MB cell. Past the cap, lines are rows of their own, as they are
@@ -606,11 +663,59 @@ see [docs/notes/README.md](README.md) for the whole set.
   timeparse's `syslog_bsd` op does (a year added at each Dec→Jan wrap,
   in file order), but anchors at the other end, because a parser can't
   ask for the first line's year. The last stamp belongs to the year of
-  the file's mtime, or the year before if that day is still to come. That
-  costs one extra read, only for a file that has a year-less stamp. The
-  output is naive ISO, since syslog doesn't say its zone. An upload's
+  the file's mtime, or the year before if that day is still to come. The
+  wraps and the last stamp are counted in the first pass, which reads the
+  whole file anyway. The
+  output is naive, since syslog doesn't say its zone. An upload's
   spool carries the upload time as its mtime (browsers don't send it),
   so only an import by path gets the file's real one.
+- **esxi_logs reads a line the way iisread reads one (2.0.0).** It used
+  to read two shapes and keep the rest as Message: on ESXi 7.0 U2+
+  (`In(166) Hostd[pid]:`) it found neither severity nor app, hostd's
+  `[Originator@6876 sub= opID= user=]` was Message text, vmkernel's
+  world and opID were thrown away, a Linux hostname came out as the app,
+  and timestamps were left as logged, so a merged bundle sorted ESXi's
+  `…T…Z` and syslog's stamps apart (text order) and an offset was never
+  applied. What iisread established and the plugin now follows:
+  **the line names its fields, and nothing it names is dropped.** The
+  Originator block is RFC 5424 structured data and is read as W3C's
+  `#Fields:` are — every key any line carries is a column, the union in
+  first-seen order, matched case-insensitively (`opID`/`opid` are one
+  column, spelled as first seen), `user` going to the shared User. A key
+  that a fixed column already names (`Message=`, `Log=`) is suffixed
+  `_1` by the plugin itself, so the fixed column keeps its name rather
+  than losing it to `sanitize_columns`. Columns beyond the shared nine
+  (`Timestamp (as logged)`, Host, Facility, Thread, the keys, MSGID,
+  EventType) exist only in a table whose file has one, which is why the
+  `{{all:…}}` union names its columns. **Timestamp is timeparse's
+  canonical shape**, `YYYY-MM-DD HH:MM:SS[.ffffff]`: the grid sorts a
+  text column by its text, and only one shape across every table makes
+  text order time order. An offset is converted to UTC (datetime only
+  for a non-zero offset; the common `Z` case is sliced), a stamp that
+  isn't a date after conversion is "" rather than a guess, and
+  `Timestamp (as logged)` (IIS NCSA's name) appears when any stamp in the
+  file had its year inferred, its zone applied, or couldn't be read.
+  **Two passes, as iisread**: pass one (`plan`) works out the columns
+  and counts the lines; pass two (`rows`) islices to that count, so a
+  live log's new lines can't need an unplanned column, and an unplanned
+  value raises `iisread.FileChanged`. Keeping pass one's records instead
+  was measured at ~1.3 KB each, too much for a multi-GB vmkernel.log.
+  The file is opened as iisread opens one — `sniff_text_encoding` with
+  `TEXT_DECODE_ERRORS`, `newline="\n"` (a `\r` in an sshd username is
+  that line's text, not a forged row; universal newlines split there),
+  and `iisread.logical_lines` for NUL runs, with the same wlog warning.
+  **Speed**: the general path, `_parse_line_slow`, is a chain of regexes
+  with Python between them, and was 2.5× the old parser's time on 400k
+  lines. `_FAST_APP`/`_FAST_VMK` read the shapes nearly every line of a
+  bundle has with one regex each, built so they can't backtrack into an
+  answer the general path wouldn't give (the lookaheads after each
+  optional part), and `test_esxi_log_shapes.py` holds the two to the same
+  answer over every combination of stamp, header and body it knows. A
+  change to the general path needs the same change there, or the shape
+  taken out of the fast regex. Other measured costs: `ipaddress` is
+  ~10 µs a call, so a dotted quad is checked by hand and only IPv6 goes
+  through it; a key's column is cached by its spelling; the canonical
+  stamp is built in pass two only.
 
 - **A plugin's dashboard is offered, not applied** (`register_dashboard`,
   API 8). It appears under Dashboards ▸ Library beside the machine-wide

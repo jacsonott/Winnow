@@ -1,8 +1,8 @@
 """The lateral-movement tab, mounted for real: enable the plugin, import
-a logon table, open the tab, and confirm a shipped KAPE default binds to
-the table and Build draws a graph. This is the class of bug a UI test
-exists for — a plugin whose module throws on mount ships past every
-backend test as a blank tab."""
+a logon table, open the tab, and confirm the shipped KAPE defaults bind
+to the table and the views draw what they record. This is the class of
+bug a UI test exists for — a plugin whose module throws on mount ships
+past every backend test as a blank tab."""
 
 from __future__ import annotations
 
@@ -47,8 +47,27 @@ LOGONS = _EVTX_COLS + "\n" + "\n".join([
     _evtx_row(3, "2026-03-15 10:00:00", 4624, "DC01", "alice", "10.0.0.5", "LogonType 10"),
 ]) + "\n"
 
+# The tab mounts after the click that opens it: until then there is no status to read.
+STATUS = "(document.querySelector('.lm-status')?.textContent || '')"
 
-def test_lateral_movement_tab_mounts_binds_defaults_and_builds(own_page, tmp_path, server_post, server_call):
+
+def _status_has(pg, text):
+    pg.wait_for_function(f"(t) => {STATUS}.includes(t)", arg=text, timeout=15_000)
+
+
+def _right_click_host(pg, name):
+    """A host on the canvas, by where the view says it drew it
+    (canvas.lmHosts: name -> {x, y} for every host label on screen)."""
+    pg.wait_for_function(
+        "(n) => { const c = document.querySelector('.lm-stage canvas'); return !!(c && c.lmHosts && c.lmHosts[n]); }",
+        arg=name, timeout=10_000)
+    at = pg.evaluate("(n) => document.querySelector('.lm-stage canvas').lmHosts[n]", name)
+    box = pg.locator(".lm-stage canvas").bounding_box()
+    pg.mouse.click(box["x"] + at["x"], box["y"] + at["y"], button="right")
+
+
+def test_lateral_movement_tab_draws_binds_defaults_and_defines_events(own_page, tmp_path, server_post,
+                                                                       server_call):
     server_post("/api/plugins/toggle", {"fs_name": "lateral_movement", "scope": "on_all"})
     # The event types this test saves are machine-level plugin storage, so
     # they outlive the case; what was saved before goes back afterwards.
@@ -59,7 +78,6 @@ def test_lateral_movement_tab_mounts_binds_defaults_and_builds(own_page, tmp_pat
 
     try:
         with own_page(viewport=(1300, 850)) as pg:
-            # Wait for the logon import to land, then activate the plugin tab.
             _wait_for_source(pg, "logons.csv")
             # The toggle happened server-side out of band; a real Settings
             # toggle calls this, so the test does too.
@@ -68,38 +86,55 @@ def test_lateral_movement_tab_mounts_binds_defaults_and_builds(own_page, tmp_pat
                                  timeout=10_000)
             pg.locator(".tab-plugin", has_text="Lateral movement").click()
 
-            # A shipped default binds to the logon table → its checkbox appears.
-            pg.wait_for_selector(".lm-event", timeout=10_000)
-            labels = pg.locator(".lm-event-name").all_inner_texts()
-            assert any("4624" in l for l in labels), labels
+            # Opened on a case for the first time, it ticks every shipped
+            # event that binds to a table and draws them, rather than
+            # waiting on an empty panel. Three logons: two sources into
+            # DC01, three (hosts, account) links.
+            _status_has(pg, "3 hosts · 3 links · 3 rows")
+            assert pg.locator(".lm-seg button[data-mode=chain]").get_attribute("aria-selected") == "true"
 
-            # Tick the first bound event and build.
-            pg.locator(".lm-events .lm-event input[type=checkbox]").first.check()
-            pg.locator("button", has_text="Build graph").click()
-            pg.wait_for_function(
-                "() => document.querySelector('.lm-legend') && document.querySelector('.lm-legend').style.display !== 'none'",
-                timeout=10_000)
-            assert "host" in pg.locator(".lm-bar .note-status").inner_text().lower()
-
-            # The event panel collapses (it can be tall), and the header keeps
-            # a selection summary so state is still visible when hidden.
-            assert not pg.evaluate("() => document.querySelector('.lm-events').hidden")
-            pg.locator(".lm-caret").click()
-            pg.wait_for_function("() => document.querySelector('.lm-events').hidden")
-            assert "selected" in pg.locator(".lm-panel-summary").inner_text()
+            # The event panel starts closed once something is on; its head
+            # says what is.
+            assert pg.evaluate("() => document.querySelector('.lm-events').hidden")
+            assert "6 of 6 on" in pg.locator(".lm-panel-summary").inner_text()
             pg.locator(".lm-caret").click()
             pg.wait_for_function("() => !document.querySelector('.lm-events').hidden")
+            logon = pg.locator(".lm-events .lm-event", has_text="4624")
+            assert "3 rows" in logon.inner_text()
+
+            # Unticking an event reads the feed again without it.
+            logon.locator("input").uncheck()
+            pg.wait_for_function("() => (document.querySelector('.lm-empty') || {}).textContent?.includes('draw no hops')",
+                                 timeout=15_000)
+            assert "5 of 6 on" in pg.locator(".lm-panel-summary").inner_text()
+            logon.locator("input").check()
+            _status_has(pg, "3 links")
+
+            # By account lists each account the hops carry.
+            pg.locator(".lm-seg button[data-mode=accounts]").click()
+            pg.wait_for_selector(".lm-acct tbody tr")
+            accounts = pg.evaluate("() => [...document.querySelectorAll('.lm-acct tbody tr')].map((r) => r.dataset.account)")
+            assert sorted(accounts) == ["ALICE", "BOB"]
+
+            # A host's right-click is the way into a pivot: where its
+            # access came from, and where it went next.
+            pg.locator(".lm-seg button[data-mode=matrix]").click()
+            _right_click_host(pg, "DC01")
+            pg.locator(".menu", has_text="Pivot from DC01").locator("text=Pivot from DC01").click()
+            _status_has(pg, "3 hosts within three hops of DC01")
+            assert "Pivot: DC01" in pg.locator(".lm-seg button[data-mode=pivot]").inner_text()
 
             # A new movement type can be defined right from the panel. The
             # builder reads one table's columns and guesses each role from
             # them: UserName for the user, not the SID in UserId, which the
-            # old union-of-every-table guess picked.
+            # old union-of-every-table guess picked. The acting account is
+            # never guessed: a wrong one would invent credential switches.
             before = pg.locator(".lm-events .lm-event").count()
             pg.locator("button", has_text="+ New event type").click()
             pg.wait_for_selector("#modal:not([hidden]) .lm-eb")
             role = lambda r: pg.locator(f"#modal select[data-role='{r}']").input_value()
-            assert (role("src_col"), role("dst_col"), role("label_col"), role("time_col")) == (
-                "RemoteHost", "Computer", "UserName", "TimeCreated")
+            assert (role("src_col"), role("dst_col"), role("label_col"), role("actor_col"), role("time_col")) == (
+                "RemoteHost", "Computer", "UserName", "", "TimeCreated")
 
             # The preview counts what the event finds in that table before it
             # is saved: all three logons, two links, three hosts.
@@ -119,7 +154,7 @@ def test_lateral_movement_tab_mounts_binds_defaults_and_builds(own_page, tmp_pat
             # saved event sharing a shipped one's name ticked and unticked
             # together with it.
             name = pg.locator("#lmEbName")
-            name.fill(labels[0])
+            name.fill(pg.locator(".lm-event-name").first.inner_text())
             assert pg.locator("#modal .lm-eb-save").is_disabled()
             assert "already the name" in pg.locator("#modal .lm-eb-hint").inner_text()
             name.fill("My custom hop")
@@ -128,6 +163,10 @@ def test_lateral_movement_tab_mounts_binds_defaults_and_builds(own_page, tmp_pat
                 "(n) => document.querySelectorAll('.lm-events .lm-event').length > n", arg=before)
             mine = pg.locator(".lm-events .lm-event", has_text="My custom hop")
             assert mine.locator("input").is_checked(), "a new event is ticked where it binds"
+            # and the panel says what it added once the feed has it
+            pg.wait_for_function(
+                "() => document.querySelector('.lm-panel-summary').textContent.includes('Added \"My custom hop\": 2 rows')",
+                timeout=15_000)
 
             # Events… edits it in the same builder, name and all, and the
             # tick follows the rename. It opens on Yours, where a name is

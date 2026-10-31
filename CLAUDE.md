@@ -333,13 +333,19 @@ examples/plugins/  Committed example plugins covering every extension point
                     NTFS $MFT/$J parsing (ingest formats, stdlib-only).
                     esxi_logs: an ESXi support bundle or UAC Linux
                     collection read into one shared column schema
-                    (register_ingest_format), plus the reference
+                    (register_ingest_format) — line by line the way
+                    iisread reads IIS logs, which it imports: per-file
+                    columns for whatever else a file's lines carry,
+                    one canonical Timestamp, two passes — plus the reference
                     register_dashboard board, offered on its own under
                     Dashboards ▸ Library. The shipped "ESXi / UAC triage"
                     profile is a separate thing in defaults/profiles.json:
                     it carries its own wider board and turns this plugin on.
-                    lateral_movement: a pinned graph tab (register_tab +
-                    register_api + a canvas ES module, offline).
+                    lateral_movement: a pinned tab following movement
+                    between hosts — chain over time, host matrix, by
+                    account, pivot, path — from one feed route
+                    (register_tab + register_api + a canvas ES module,
+                    offline).
                     first_last: a tab that writes a TABLE back
                     (register_tab + register_api) — the bounds of each
                     group of events go through ingest_rows, so the result

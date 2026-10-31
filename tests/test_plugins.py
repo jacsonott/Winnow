@@ -1372,94 +1372,228 @@ def _sel(source_id, **kw):
     return {"source_id": source_id, "src_col": "SourceHost", "dst_col": "DestHost", **kw}
 
 
-def test_lateral_movement_edges(lateral_client):
-    client, source_id = lateral_client
-    r = client.post("/api/plugin/lateral_movement/edges", json={
-        "selections": [_sel(source_id, label_col="User")],
-    })
+def _feed(client, *selections, time=None):
+    body = {"selections": list(selections)}
+    if time:
+        body["time"] = time
+    r = client.post("/api/plugin/lateral_movement/feed", json=body)
     assert r.status_code == 200, r.text
-    out = r.json()
+    return r.json()
+
+
+def _hops(out):
+    """The feed's hops with their names put back: {(k, src, dst, account,
+    minute): rows}."""
+    H, U = out["hosts"], out["users"]
+    return {(k, H[s], H[d], U[u], t): n for k, s, d, u, t, n in out["hops"]}
+
+
+def _epoch(text):
+    return int(datetime.fromisoformat(text + "+00:00").timestamp())
+
+
+TIMED_ROWS = [
+    ["SourceHost", "DestHost", "User", "When"],
+    ["WS1", "SRV1", "alice", "2026-03-14 08:00:00"],
+    ["WS1", "SRV1", "bob", "2026-03-14 08:30:00"],
+    ["WS2", "SRV1", "alice", "2026-03-15 09:00:00"],
+]
+
+
+@pytest.fixture
+def timed_client(client, store, write_csv, example_registry, monkeypatch):
+    import server
+    monkeypatch.setattr(server, "PLUGINS", example_registry)
+    rec = store.ingest_csv(write_csv(TIMED_ROWS, "timed.csv"), name="timed")
+    return client, rec["id"]
+
+
+def test_lateral_movement_feed(timed_client):
+    """One answer every view reads: hosts and accounts as lists, each hop
+    pointing into them, to the minute, minutes counted from the first."""
+    client, sid = timed_client
+    out = _feed(client, _sel(sid, label_col="User", time_col="When"))
     assert out["truncated"] is False
-    # k tags the selection; no time_col here, so t is None.
-    assert out["edges"] == [
-        {"k": 0, "src": "WS1", "dst": "SRV1", "t": None, "n": 2, "labels": 2},
-        {"k": 0, "src": "WS2", "dst": "SRV1", "t": None, "n": 1, "labels": 1},
-    ]
+    assert out["t0"] == _epoch("2026-03-14 08:00:00")
+    assert out["span"] == 25 * 60 + 1
+    assert out["hosts"] == ["SRV1", "WS1", "WS2"]
+    assert out["users"] == ["", "ALICE", "BOB"]   # "" is a hop with no account
+    assert _hops(out) == {
+        (0, "WS1", "SRV1", "ALICE", 0): 1,
+        (0, "WS1", "SRV1", "BOB", 30): 1,
+        (0, "WS2", "SRV1", "ALICE", 25 * 60): 1,
+    }
+    assert [h[4] for h in out["hops"]] == sorted(h[4] for h in out["hops"])
+    assert out["per"] == [{"rows": 3, "drawn": 3, "empty": 0, "self": 0, "untimed": 0}]
+    assert out["explicit"] == [] and out["sessions"] == []
+    # how each host is written, for tooltips and "Open its rows"
+    H = out["hosts"]
+    assert out["spellings"][str(H.index("WS1"))] == [[0, 0, "WS1", 2]]
+    assert out["spellings"][str(H.index("SRV1"))] == [[0, 1, "SRV1", 3]]
+    assert out["account_spellings"][str(out["users"].index("ALICE"))] == [[0, "alice", 2]]
 
 
-def test_lateral_movement_multiple_selections_carry_their_index(lateral_client):
-    """Two events out of one table land on one graph, each edge tagged with
-    the selection (k) that produced it — that's how the UI colors them."""
+def test_lateral_movement_feed_counts_what_it_cannot_place(lateral_client):
+    """Every view is ordered by time: an event with no time column draws
+    nothing, and says how many rows that was rather than drawing them at
+    an invented minute. Empty, '-' and self endpoints never get that far."""
     client, source_id = lateral_client
-    r = client.post("/api/plugin/lateral_movement/edges", json={
-        "selections": [
-            _sel(source_id),
-            _sel(source_id, conditions=[{"column": "User", "op": "equals", "value": "alice"}]),
-        ],
-    })
-    assert r.status_code == 200, r.text
-    edges = r.json()["edges"]
-    assert {e["k"] for e in edges} == {0, 1}
-    # selection 1 is alice-only: WS1->SRV1 once, WS2->SRV1 once.
-    k1 = {(e["src"], e["dst"]): e["n"] for e in edges if e["k"] == 1}
-    assert k1 == {("WS1", "SRV1"): 1, ("WS2", "SRV1"): 1}
+    out = _feed(client, _sel(source_id, label_col="User"))
+    assert out["hops"] == [] and out["hosts"] == []
+    assert out["per"] == [{"rows": 3, "drawn": 0, "empty": 0, "self": 0, "untimed": 3}]
 
 
-def test_lateral_movement_conditions_filter(lateral_client):
-    client, source_id = lateral_client
-    r = client.post("/api/plugin/lateral_movement/edges", json={
-        "selections": [_sel(source_id, conditions=[
-            {"column": "User", "op": "in", "value": "bob,carol"}])],
-    })
-    assert r.status_code == 200, r.text
-    # only bob's WS1->SRV1 survives (carol's row is a filtered '-' source)
-    assert r.json()["edges"] == [
-        {"k": 0, "src": "WS1", "dst": "SRV1", "t": None, "n": 1, "labels": None}]
+def test_lateral_movement_multiple_selections_carry_their_index(timed_client):
+    """Two events out of one table come back in one feed, each hop tagged
+    with the selection (k) that produced it — that's how the tab colours
+    them."""
+    client, sid = timed_client
+    out = _feed(client, _sel(sid, time_col="When"),
+                _sel(sid, label_col="User", time_col="When",
+                     conditions=[{"column": "User", "op": "equals", "value": "alice"}]))
+    hops = _hops(out)
+    assert {k for (k, *_rest) in hops} == {0, 1}
+    assert {key: n for key, n in hops.items() if key[0] == 1} == {
+        (1, "WS1", "SRV1", "ALICE", 0): 1, (1, "WS2", "SRV1", "ALICE", 25 * 60): 1}
+    assert [p["drawn"] for p in out["per"]] == [3, 2]
+
+
+def test_lateral_movement_conditions_filter(timed_client):
+    client, sid = timed_client
+    out = _feed(client, _sel(sid, label_col="User", time_col="When", conditions=[
+        {"column": "User", "op": "in", "value": "bob,carol"}]))
+    assert _hops(out) == {(0, "WS1", "SRV1", "BOB", 0): 1}
 
 
 def test_lateral_movement_validation(lateral_client):
     client, source_id = lateral_client
-    r = client.post("/api/plugin/lateral_movement/edges", json={"selections": []})
-    assert r.status_code == 400 and "at least one" in r.json()["detail"].lower()
-    r = client.post("/api/plugin/lateral_movement/edges", json={
-        "selections": [_sel(source_id, dst_col="Nope")]})
-    assert r.status_code == 400 and "Nope" in r.json()["detail"]
-    r = client.post("/api/plugin/lateral_movement/edges", json={
-        "selections": [_sel(-1)]})
+
+    def refused(body):
+        r = client.post("/api/plugin/lateral_movement/feed", json=body)
+        assert r.status_code == 400, r.text
+        return r.json()["detail"]
+
+    assert "at least one" in refused({"selections": []}).lower()
+    assert "Nope" in refused({"selections": [_sel(source_id, dst_col="Nope")]})
+    assert "Nope" in refused({"selections": [_sel(source_id, actor_col="Nope")]})
     # "table", not "source": the message reaches the analyst through the
     # plugin's error toast, so it uses the word the rest of the UI uses.
-    assert r.status_code == 400 and "no table" in r.json()["detail"].lower()
-    r = client.post("/api/plugin/lateral_movement/edges", json={
-        "selections": [_sel(source_id, dst_col="SourceHost")]})
-    assert r.status_code == 400
+    assert "no table" in refused({"selections": [_sel(-1)]}).lower()
+    refused({"selections": [_sel(source_id, dst_col="SourceHost")]})
+    refused({"selections": [_sel(source_id)] * 21})
+    # a session rule names a column the table has, and what opens one
+    refused({"selections": [_sel(source_id, session={"column": "Nope", "open": ["1"], "close": ["2"]})]})
+    refused({"selections": [_sel(source_id, session={"column": "User", "open": [], "close": ["bob"]})]})
 
 
-def test_lateral_movement_edges_over_a_merge(lateral_client, store, write_csv):
-    """Invariant #9: edge counts aggregate across every member of a merge."""
-    client, source_id = lateral_client
-    src = store.get_source(source_id)
-    header = [c["name"] for c in src["columns"] if not c.get("derived")]
-    row = {c: "" for c in header}
-    row.update({"SourceHost": "WKS1", "DestHost": "SRV1"})
-    other = store.ingest_csv(write_csv([header, [row[c] for c in header]], "lm2.csv"),
-                             name="lm2", build_fts=False)["id"]
-    mid = store.create_merge("lmmerge", [source_id, other])["id"]
-
-    def n_for(sid):
-        r = client.post("/api/plugin/lateral_movement/edges", json={
-            "selections": [{"source_id": sid, "src_col": "SourceHost", "dst_col": "DestHost"}]})
-        assert r.status_code == 200, r.text
-        return {(e["src"], e["dst"]): e["n"] for e in r.json()["edges"]}
-
-    single = n_for(source_id)
-    merged = n_for(mid)
-    assert merged[("WKS1", "SRV1")] == single.get(("WKS1", "SRV1"), 0) + 1
+def test_lateral_movement_feed_over_a_merge(timed_client, store, write_csv):
+    """Invariant #9: the feed reads every member of a merge."""
+    client, sid = timed_client
+    other = store.ingest_csv(write_csv([TIMED_ROWS[0], ["WKS1", "SRV1", "dave", "2026-03-14 10:00:00"]],
+                                       "lm2.csv"), name="lm2", build_fts=False)["id"]
+    mid = store.create_merge("lmmerge", [sid, other])["id"]
+    single = _feed(client, _sel(sid, label_col="User", time_col="When"))
+    merged = _feed(client, _sel(mid, label_col="User", time_col="When"))
+    assert merged["per"][0]["drawn"] == single["per"][0]["drawn"] + 1
+    assert _hops(merged)[(0, "WKS1", "SRV1", "DAVE", 120)] == 1
 
 
-def test_lateral_movement_preview_counts_what_a_graph_would_draw(lateral_client):
+def test_lateral_movement_feed_folds_each_host_to_one_name(client, store, write_csv, example_registry,
+                                                           monkeypatch):
+    """One machine is written several ways across an export, and a flow
+    table only ever writes its address: they all fold to one host, across
+    selections, or a logon into a host and a logon out of it draw as two
+    unconnected hosts."""
+    import server
+    monkeypatch.setattr(server, "PLUGINS", example_registry)
+    logons = store.ingest_csv(write_csv([
+        ["RemoteHost", "Computer", "UserName", "When"],
+        ["WS1 (10.0.0.5)", "SRV1.corp.local", "CORP\\alice", "2026-03-14 08:00:00"],
+        ["- (10.0.0.5)", "srv1", "Target: corp\\ALICE", "2026-03-14 08:05:00"],
+        ["SRV1", "\\\\DC1", "alice", "2026-03-14 08:10:00"],
+    ], "logons.csv"), name="logons")["id"]
+    flows = store.ingest_csv(write_csv([
+        ["src_ip", "dst_ip", "ts"],
+        ["10.0.0.5", "10.0.0.9", "2026-03-14 08:01:00"],
+        ["10.0.0.5", "127.0.0.1", "2026-03-14 08:02:00"],   # loopback names no host: never read
+    ], "flows.csv"), name="flows")["id"]
+    out = _feed(client,
+                {"source_id": logons, "src_col": "RemoteHost", "dst_col": "Computer",
+                 "label_col": "UserName", "time_col": "When"},
+                {"source_id": flows, "src_col": "src_ip", "dst_col": "dst_ip", "time_col": "ts"})
+    assert out["ipmap"] == {"10.0.0.5": "WS1"}
+    assert out["hosts"] == ["10.0.0.9", "DC1", "SRV1", "WS1"]
+    assert _hops(out) == {
+        (0, "WS1", "SRV1", "CORP\\ALICE", 0): 1,
+        (1, "WS1", "10.0.0.9", "", 1): 1,
+        (0, "WS1", "SRV1", "CORP\\ALICE", 5): 1,
+        (0, "SRV1", "DC1", "ALICE", 10): 1,
+    }
+    assert out["per"][1] == {"rows": 1, "drawn": 1, "empty": 0, "self": 0, "untimed": 0}
+    ws1 = out["spellings"][str(out["hosts"].index("WS1"))]
+    assert sorted(raw for (_k, _role, raw, _n) in ws1) == ["- (10.0.0.5)", "10.0.0.5", "WS1 (10.0.0.5)"]
+
+
+def test_lateral_movement_feed_states_explicit_credentials(client, store, write_csv, example_registry,
+                                                           monkeypatch):
+    """An event with an acting account (a 4648) says who used whose
+    credentials; a row where the two are the same account, or the acting
+    one is '-', says nothing."""
+    import server
+    monkeypatch.setattr(server, "PLUGINS", example_registry)
+    sid = store.ingest_csv(write_csv([
+        ["Src", "Dst", "Target", "Actor", "When"],
+        ["JUMP", "DC1", "adm", "helpdesk", "2026-03-14 08:00:00"],
+        ["JUMP", "DC1", "adm", "adm", "2026-03-14 08:01:00"],
+        ["JUMP", "FS1", "adm", "-", "2026-03-14 08:02:00"],
+    ], "4648.csv"), name="explicit")["id"]
+    out = _feed(client, {"source_id": sid, "src_col": "Src", "dst_col": "Dst", "label_col": "Target",
+                         "actor_col": "Actor", "time_col": "When"})
+    H, U = out["hosts"], out["users"]
+    assert "HELPDESK" in U        # an account that only ever acted is still named
+    assert out["explicit"] == [[0, H.index("JUMP"), H.index("DC1"), U.index("HELPDESK"), U.index("ADM"), 0]]
+
+
+def test_lateral_movement_feed_pairs_sessions(client, store, write_csv, example_registry, monkeypatch):
+    """A session rule (RDP: 21 or 25 opens, 24 closes) pairs rows into
+    sessions; a second logon on a session still open ends the first with
+    no close logged, and one never closed stays open."""
+    import server
+    monkeypatch.setattr(server, "PLUGINS", example_registry)
+    rows = [["Src", "Dst", "User", "EventId", "When"]]
+    for eid, when in (("21", "08:00"), ("24", "09:00"), ("21", "10:00"), ("25", "10:10"), ("21", "10:30")):
+        rows.append(["WS1", "SRV1", "alice", eid, f"2026-03-14 {when}:00"])
+    sid = store.ingest_csv(write_csv(rows, "rdp.csv"), name="rdp")["id"]
+    out = _feed(client, {"source_id": sid, "src_col": "Src", "dst_col": "Dst", "label_col": "User",
+                         "time_col": "When",
+                         "session": {"column": "EventId", "open": ["21", "25"], "close": ["24"]}})
+    H, U = out["hosts"], out["users"]
+    s, d, u = H.index("WS1"), H.index("SRV1"), U.index("ALICE")
+    assert out["sessions"] == [[0, s, d, u, 0, 60], [0, s, d, u, 120, None], [0, s, d, u, 150, None]]
+    # every row is a hop as well
+    assert out["per"][0]["drawn"] == 5
+
+
+def test_lateral_movement_feed_groups_by_position(client, store, write_csv, example_registry, monkeypatch):
+    """The feed's SQL names its outputs u, m, n and the rest. A GROUP BY
+    on those names resolves to a table column of the same name first, so
+    a table with a column called u grouped two accounts into one hop."""
+    import server
+    monkeypatch.setattr(server, "PLUGINS", example_registry)
+    sid = store.ingest_csv(write_csv([
+        ["src", "dst", "User", "u", "m", "When"],
+        ["WS1", "SRV1", "alice", "same", "x", "2026-03-14 08:00:00"],
+        ["WS1", "SRV1", "bob", "same", "x", "2026-03-14 08:00:00"],
+    ], "named.csv"), name="named")["id"]
+    out = _feed(client, {"source_id": sid, "src_col": "src", "dst_col": "dst", "label_col": "User",
+                         "time_col": "When"})
+    assert _hops(out) == {(0, "WS1", "SRV1", "ALICE", 0): 1, (0, "WS1", "SRV1", "BOB", 0): 1}
+
+
+def test_lateral_movement_preview_counts_what_the_views_would_draw(lateral_client):
     """The event builder's preview: rows the conditions match, then the
     links and hosts those rows draw once empty, '-' and self endpoints
-    drop out — the same rows Build would turn into edges."""
+    drop out — the same rows the feed turns into hops."""
     client, source_id = lateral_client
     r = client.post("/api/plugin/lateral_movement/preview", json={
         "selection": _sel(source_id, label_col="User")})
@@ -1468,18 +1602,44 @@ def test_lateral_movement_preview_counts_what_a_graph_would_draw(lateral_client)
     assert out["matched"] == 5          # every row; no conditions
     assert out["hops"] == 3             # the self-loop and the '-' source draw nothing
     assert (out["links"], out["hosts"]) == (2, 3)
-    assert out["top"] == [{"src": "WS1", "dst": "SRV1", "n": 2, "labels": 2},
-                          {"src": "WS2", "dst": "SRV1", "n": 1, "labels": 1}]
+    assert out["top"] == [
+        {"src": "WS1", "dst": "SRV1", "raw_src": "WS1", "raw_dst": "SRV1", "n": 2, "labels": 2},
+        {"src": "WS2", "dst": "SRV1", "raw_src": "WS2", "raw_dst": "SRV1", "n": 1, "labels": 1}]
     assert out["first"] is None and out["links_capped"] is False
+    assert (out["untimed"], out["bare"], out["drawn"]) == (3, 0, [])
 
     sel = _sel(source_id, conditions=[{"column": "User", "op": "equals", "value": "alice"}])
     out = client.post("/api/plugin/lateral_movement/preview", json={"selection": sel}).json()
     assert (out["matched"], out["hops"]) == (3, 2)   # alice's self-loop matches, draws nothing
-    edges = client.post("/api/plugin/lateral_movement/edges", json={"selections": [sel]}).json()["edges"]
-    assert out["hops"] == sum(e["n"] for e in edges)
+    per = _feed(client, sel)["per"][0]
+    assert out["hops"] == per["drawn"] + per["untimed"]
+    assert out["bare"] == 2                           # no user column: no account on any hop
 
 
-def test_lateral_movement_preview_refuses_what_build_would(lateral_client):
+def test_lateral_movement_preview_folds_with_the_tabs_addresses(client, store, write_csv,
+                                                                example_registry, monkeypatch):
+    """A flow export writes only addresses. The tab passes the address map
+    of what it already draws, so the preview names the hosts the way the
+    views will once the event is saved, and says which stayed addresses."""
+    import server
+    monkeypatch.setattr(server, "PLUGINS", example_registry)
+    sid = store.ingest_csv(write_csv([
+        ["src_ip", "dst_ip", "ts"],
+        ["10.0.0.5", "10.0.0.9", "2026-03-14 08:01:00"],
+    ], "flows.csv"), name="flows")["id"]
+    r = client.post("/api/plugin/lateral_movement/preview", json={
+        "selection": {"source_id": sid, "src_col": "src_ip", "dst_col": "dst_ip", "time_col": "ts"},
+        "ipmap": {"10.0.0.5": "WS1"}})
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["folded"] == [["10.0.0.5", "WS1"]]
+    assert out["addresses"] == ["10.0.0.9"]
+    assert out["bare"] == 1
+    assert out["drawn"] == [["WS1", "10.0.0.9", "", _epoch("2026-03-14 08:01:00") // 60, 1]]
+    assert out["top"][0]["src"] == "WS1" and out["top"][0]["raw_src"] == "10.0.0.5"
+
+
+def test_lateral_movement_preview_refuses_what_the_feed_would(lateral_client):
     client, source_id = lateral_client
     for sel in (_sel(source_id, dst_col="SourceHost"),
                 _sel(source_id, dst_col="Nope"),
@@ -1529,39 +1689,12 @@ def test_lateral_movement_tab_asset(lateral_client):
     assert r.status_code == 200 and "export default" in r.text
 
 
-TIMED_ROWS = [
-    ["SourceHost", "DestHost", "User", "When"],
-    ["WS1", "SRV1", "alice", "2026-03-14 08:00:00"],
-    ["WS1", "SRV1", "bob", "2026-03-14 08:30:00"],
-    ["WS2", "SRV1", "alice", "2026-03-15 09:00:00"],
-]
-
-
-@pytest.fixture
-def timed_client(client, store, write_csv, example_registry, monkeypatch):
-    import server
-    monkeypatch.setattr(server, "PLUGINS", example_registry)
-    rec = store.ingest_csv(write_csv(TIMED_ROWS, "timed.csv"), name="timed")
-    return client, rec["id"]
-
-
-def test_lateral_movement_time_bucketing_and_filter(timed_client):
+def test_lateral_movement_case_timeframe_cuts_the_feed(timed_client):
     client, sid = timed_client
-    sel = {"source_id": sid, "src_col": "SourceHost", "dst_col": "DestHost",
-           "time_col": "When", "label_col": "User"}
-    # Full range: every edge carries a bucket key, chosen from the span.
-    r = client.post("/api/plugin/lateral_movement/edges", json={"selections": [sel]})
-    assert r.status_code == 200, r.text
-    out = r.json()
-    assert out["bucket"] in ("minute", "hour", "day")
-    assert all(e["t"] for e in out["edges"])
-
-    # The case timeframe passes straight through and cuts the 15th.
-    r = client.post("/api/plugin/lateral_movement/edges", json={
-        "selections": [sel], "time": {"start": "2026-03-14 00:00:00", "end": "2026-03-14 23:59:59"}})
-    assert r.status_code == 200, r.text
-    edges = r.json()["edges"]
-    assert {(e["src"], e["dst"]) for e in edges} == {("WS1", "SRV1")}
+    out = _feed(client, _sel(sid, label_col="User", time_col="When"),
+                time={"start": "2026-03-14 00:00:00", "end": "2026-03-14 23:59:59"})
+    assert {(s, d) for (_k, s, d, _u, _t) in _hops(out)} == {("WS1", "SRV1")}
+    assert out["per"][0]["drawn"] == 2
 
 
 @pytest.mark.parametrize("start,end", [
@@ -1573,19 +1706,17 @@ def test_lateral_movement_time_bucketing_and_filter(timed_client):
 def test_lateral_movement_timeframe_matches_the_grid_in_any_spelling(timed_client, start, end):
     """The bounds were compared to TS_NORMALIZE(col) verbatim, while the
     core normalises both sides — so any spelling the Timeframe dialog
-    accepts other than the canonical one cut the graph to a different row
+    accepts other than the canonical one cut the tab to a different row
     set from the grid (US dates: nothing at all) under "timeframe
-    applied". The graph's rows must be the grid's rows."""
+    applied". The tab's rows must be the grid's rows."""
     client, sid = timed_client
     time = {"start": start, "end": end}
     view = client.post("/api/view", json={"source_id": sid, "time_range": {
         "enabled": True, "column": "When", **time}})
     assert view.status_code == 200, view.text
-    r = client.post("/api/plugin/lateral_movement/edges", json={"selections": [
-        {"source_id": sid, "src_col": "SourceHost", "dst_col": "DestHost", "time_col": "When"}],
-        "time": time})
-    assert r.status_code == 200, r.text
-    assert sum(e["n"] for e in r.json()["edges"]) == view.json()["row_count"]
+    out = _feed(client, _sel(sid, time_col="When"), time=time)
+    assert out["per"][0]["drawn"] == view.json()["row_count"]
+    assert sum(h[5] for h in out["hops"]) == view.json()["row_count"]
 
 
 def test_lateral_movement_defaults_ship_tied_to_a_header_set(lateral_client):
@@ -1605,6 +1736,15 @@ def test_lateral_movement_defaults_ship_tied_to_a_header_set(lateral_client):
     assert "Event logs (EvtxECmd)" in body["header_sets"]
     evtx = body["header_sets"]["Event logs (EvtxECmd)"]
     assert "EventId" in evtx and "RemoteHost" in evtx
+    # What the views read meaning from: failed attempts, the acting
+    # account of an explicit-credential logon, and RDP sessions.
+    by = {d["name"]: d for d in shipped}
+    assert any(d.get("fails") for n, d in by.items() if "4625" in n)
+    assert any(d.get("actor_col") for n, d in by.items() if "4648" in n)
+    assert any(d.get("session") for d in shipped)
+    for d in shipped:
+        for col in (d.get("actor_col"), (d.get("session") or {}).get("column")):
+            assert col is None or col in evtx, (d["name"], col)
 
 
 def test_lateral_movement_saved_defs_persist_machine_side(lateral_client):
@@ -1623,15 +1763,21 @@ def test_lateral_movement_saved_defs_persist_machine_side(lateral_client):
     # A malformed definition is refused as a 400, not stored.
     bad = client.post("/api/plugin/lateral_movement/defs", json={"saved": [{"name": "x"}]})
     assert bad.status_code == 400
+    # So is a session rule that opens nothing.
+    bad = client.post("/api/plugin/lateral_movement/defs", json={"saved": [
+        {**mine, "session": {"column": "EventId", "open": [], "close": ["24"]}}]})
+    assert bad.status_code == 400
     # A definition bound to a header set that doesn't exist is refused —
     # it would otherwise never appear on any table, silently.
     ghost = client.post("/api/plugin/lateral_movement/defs", json={"saved": [
         {"name": "Ghost", "src_col": "a", "dst_col": "b", "header_set": "No such set"}]})
     assert ghost.status_code == 400 and "header set" in ghost.json()["detail"].lower()
-    # A valid header set is accepted.
+    # A valid header set is accepted, with what the views read meaning from.
     ok = client.post("/api/plugin/lateral_movement/defs", json={"saved": [
-        {"name": "Real", "src_col": "a", "dst_col": "b", "header_set": "Event logs (EvtxECmd)"}]})
-    assert ok.status_code == 200
+        {"name": "Real", "src_col": "a", "dst_col": "b", "header_set": "Event logs (EvtxECmd)",
+         "actor_col": "c", "fails": True, "session": {"column": "d", "open": ["1"], "close": ["2"]}}]})
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["saved"][0]["session"]["open"] == ["1"]
 
 
 # ================================================== claude_assistant plugin
