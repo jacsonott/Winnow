@@ -208,7 +208,7 @@ def restore_plugin_overrides(server, server_post):
 # that tests restoring does its own saving inside that window.
 @pytest.fixture(autouse=True, scope="module")
 def clean_plugin_tab_state(server_post):
-    keys = ("tab:first-last.firstlast", "tab:pivot-table.pivot")
+    keys = ("tab:first-last.firstlast", "tab:pivot-table.pivot", "tab:lateral-movement.graph")
     for key in keys:
         server_post("/api/plugin_state", {"key": key, "payload": None})
     yield

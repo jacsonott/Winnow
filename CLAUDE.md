@@ -338,8 +338,11 @@ examples/plugins/  Committed example plugins covering every extension point
                     Dashboards ▸ Library. The shipped "ESXi / UAC triage"
                     profile is a separate thing in defaults/profiles.json:
                     it carries its own wider board and turns this plugin on.
-                    lateral_movement: a pinned graph tab (register_tab +
-                    register_api + a canvas ES module, offline).
+                    lateral_movement: a pinned tab following movement
+                    between hosts — chain over time, host matrix, by
+                    account, pivot, path — from one feed route
+                    (register_tab + register_api + a canvas ES module,
+                    offline).
                     first_last: a tab that writes a TABLE back
                     (register_tab + register_api) — the bounds of each
                     group of events go through ingest_rows, so the result

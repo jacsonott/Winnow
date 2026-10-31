@@ -67,7 +67,7 @@ The shipped examples map onto these:
 | Example | Demonstrates |
 | --- | --- |
 | [`mft_usn/`](../examples/plugins/mft_usn/) | Ingest formats — two of them, with options, streaming parsers, extension *and* bare-filename matching |
-| [`lateral_movement/`](../examples/plugins/lateral_movement/) | A tab + routes — canvas UI, case queries, theming, definitions kept in `req.storage`, a builder that previews as it is edited, and the **Events…** dialog built with `winnow.sectionPanes` |
+| [`lateral_movement/`](../examples/plugins/lateral_movement/) | A tab + routes — canvas views drawn a screen at a time, case queries, theming, the app's menus at the pointer, state kept with the case (`winnow.tabState`), definitions kept in `req.storage`, a builder that previews as it is edited, and the **Events…** dialog built with `winnow.sectionPanes` |
 | [`claude_assistant/`](../examples/plugins/claude_assistant/) | A tab + a route that calls an external service, with credentials and dependencies — and a **page panel**, the SQL Copilot, that inserts and runs the queries it writes |
 | [`top_values/`](../examples/plugins/top_values/) | A toolbar panel with no backend — following the grid with `onViewChange`, reading the current view through the app's own `/api/group_summary` |
 | [`first_last/`](../examples/plugins/first_last/) | A tab that writes a TABLE back — `ingest_rows` output an analyst browses, tags and exports like any other source — and does its long work on a thread of its own, polled from the tab, with `winnow.notify` when a result lands elsewhere |
@@ -221,7 +221,7 @@ authoring confusion:
 | --- | --- | --- |
 | Ingest format id | display name | `mft-usn.mft` |
 | Tab id | display name | `lateral-movement.graph` |
-| API route URL | **filesystem** name | `/api/plugin/lateral_movement/edges` |
+| API route URL | **filesystem** name | `/api/plugin/lateral_movement/feed` |
 | Asset URL | **filesystem** name | `/plugin_assets/lateral_movement/ui/tab.js` |
 
 You rarely need to write either by hand: the frontend gets both from
@@ -1575,8 +1575,10 @@ A tab's JS can be driven in a real browser. `tests/ui/` runs pytest
 against a live uvicorn and a real Chromium under Playwright, and the
 bundled examples are tested exactly that way: `test_lateral_movement.py`
 turns the plugin on through `/api/plugins/toggle`, calls
-`__winnow.loadPlugins()`, opens the tab and drives the graph that
-`lateral_movement/ui/tab.js` draws, and the pivot and first_last tabs get
+`__winnow.loadPlugins()`, opens the tab and drives the views that
+`lateral_movement/ui/tab.js` draws (right-clicking a host on the canvas
+through a `canvas.lmHosts` map of where each label is), and the pivot and
+first_last tabs get
 the same treatment. Copy one of those modules — mark it `pytest.mark.ui`,
 enable your plugin, reload the plugin set, then talk to your own DOM. The
 suite skips itself where playwright or a browser is missing, so a machine
