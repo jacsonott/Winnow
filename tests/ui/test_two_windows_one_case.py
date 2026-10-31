@@ -69,7 +69,11 @@ def test_a_window_left_on_the_old_case_cannot_tag_the_new_one(own_page, own_serv
         assert other.locator("#caseGone").is_hidden()
 
         left.click("#caseGone button")
-        left.wait_for_function("() => document.getElementById('brandLabel').textContent === 'bravo'")
+        # The button reloads the window, and mid-reload there is no
+        # #brandLabel: a predicate that reads it bare throws, which ends the
+        # wait as a failure instead of letting it poll on (seen on a loaded
+        # runner). `?.` keeps it waiting for the page that comes back.
+        left.wait_for_function("() => document.getElementById('brandLabel')?.textContent === 'bravo'")
         assert left.locator("#caseGone").is_hidden()
 
 

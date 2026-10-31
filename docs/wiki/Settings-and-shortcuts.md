@@ -44,7 +44,7 @@ compare them; **Done** takes you back to Settings.
 
 | Skin | Description as shown |
 | --- | --- |
-| Harvest | Grain and chaff — wheat gold on deep green-black, parchment in light. The default. |
+| Harvest | Grain and chaff — wheat gold on neutral charcoal, parchment in light. The default. |
 | Panel | The older look — cooler greys, amber accent. |
 | Phosphor | Retro CRT terminal — glow, monospace chrome. |
 | Blueprint | Bold borders, hard offset shadows. |
@@ -201,7 +201,7 @@ once, with all its keys.
 | Copy the unique values of the cursor's column — from the selected rows, else the whole view | `Ctrl+Shift+U`, `Meta+Shift+U` |
 | Open Tables manager | `t` |
 | Show/hide the table sidebar | `` ` `` |
-| Open the table menu (columns, value dropdowns) — also right-click a tab → Columns… | `C` |
+| Open the table menu (columns, value dropdowns, layout, name & merge) — also right-click a tab → Columns… | `C` |
 | Search all tables | `s` |
 | Open/close the detail pane | `d` |
 | Drop all grouping, restore column order | `x` |

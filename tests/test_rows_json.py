@@ -140,9 +140,16 @@ def test_groups_both_ways(store, awkward):
 
 def test_a_number_put_in_a_cell_is_stored_as_text(store, write_csv):
     """Why SQLite's JSON is trusted with the cells: the one value it writes
-    differently from json.dumps is a REAL (15 significant digits), and a
-    cell can never hold one. Every column a page reads is declared TEXT,
-    so even a number written straight into one is stored as its text."""
+    differently from json.dumps is a REAL, and a cell can never hold one.
+    Every column a page reads is declared TEXT, so even a number written
+    straight into one is stored as its text, and the page carries that
+    text as it is stored.
+
+    The expected cells are read back from the table rather than spelled
+    out: how many digits SQLite gives a REAL it converts to TEXT depends
+    on its version (15 significant digits, "0.3", on the SQLite CI's
+    Pythons use; 17, "0.30000000000000004", on SQLite 3.53), and either
+    way the page has to show what the table holds."""
     sid = store.ingest_csv(write_csv([["A", "B"], ["x", "y"]], "n.csv"), name="n", build_fts=False)["id"]
     table = store.get_source(sid)["table_name"]
     res = store.add_derived_column(sid, "D", "A", "regex_extract", {"pattern": "(x)"})
@@ -151,12 +158,10 @@ def test_a_number_put_in_a_cell_is_stored_as_text(store, write_csv):
         store.db.execute(f'UPDATE "{table}" SET "A" = ?, "B" = ? WHERE rid = 1', (0.1 + 0.2, 7))
         store.db.execute(f'UPDATE "drv_{sid}" SET "D" = ? WHERE rid = 1', (1e20,))
         assert tuple(store.db.execute(f'SELECT typeof("A"), typeof("B") FROM "{table}"').fetchone()) == ("text", "text")
-        # The text SQLite made of each number, which is what the page owes:
-        # how many digits a REAL becomes is SQLite's, and 3.53 writes 0.1 +
-        # 0.2 in full where older versions wrote 0.3.
-        stored = list(store.db.execute(f'SELECT t."A", t."B", d."D" FROM "{table}" t '
-                                       f'JOIN "drv_{sid}" d USING (rid) WHERE rid = 1').fetchone())
-    assert stored[0] in ("0.3", "0.30000000000000004") and stored[1:] == ["7", "1.0e+20"]
+        stored = [*store.db.execute(f'SELECT "A", "B" FROM "{table}" WHERE rid = 1').fetchone(),
+                  store.db.execute(f'SELECT "D" FROM "drv_{sid}" WHERE rid = 1').fetchone()[0]]
+    assert all(isinstance(v, str) for v in stored), stored
+    assert stored[0] in ("0.3", "0.30000000000000004") and stored[1:] == ["7", "1.0e+20"], stored
     page = _same(store, store.build_view(sid, {"source_id": sid})["view_id"])
     assert page["rows"][0]["cells"] == stored
 
