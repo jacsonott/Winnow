@@ -284,7 +284,12 @@ def test_the_windows_way_starts_a_new_process_and_waits_for_it(tmp_path, monkeyp
             try:
                 v = new.get("/api/version", timeout=2)
                 break
-            except (urllib.error.URLError, ConnectionError):
+            # The listener is open the whole time (handed over, never
+            # closed), so a request connects at once and waits in its
+            # backlog until the new process starts serving. A start slower
+            # than the timeout is a read timeout, not a refusal, and means
+            # the same "not up yet" (a Windows runner took longer, #495).
+            except (urllib.error.URLError, ConnectionError, TimeoutError):
                 assert "code" not in result, f"the new process exited ({result})"
                 assert time.monotonic() < deadline, "the new process never answered"
                 time.sleep(0.2)
