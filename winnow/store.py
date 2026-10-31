@@ -11807,6 +11807,15 @@ class Store:
         if op in (">", ">=", "<", "<="):
             if val == "":
                 return "", []
+            # "(numeric)", as the filter builder labels these: on a number
+            # column always, and on any other column but a datetime one when
+            # the value is a number. Type inference calls a column text
+            # when one sampled cell is "-" or "n/a", and compared as text
+            # "100" > "60" is false, so `Bytes > 60` lost every row of three
+            # digits while saying it compared numbers. A datetime column
+            # compares its ISO text, which orders as time does.
+            if not numeric and colnames[col] != "datetime" and NUM_RE.match(str(val).strip()):
+                numeric, val = True, str(val).strip()
             lhs = _numeric_expr(c) if numeric else c
             return f"{lhs} {op} ?", [float(val) if numeric else val]
         if op == "empty":
