@@ -95,7 +95,12 @@ docs/wiki/Settings-and-shortcuts.md to keymap.js's `DEFAULT_KEYMAP` and
 `ACTION_LABELS`, read with esprima, so a relabelled action or a new
 default key fails the backend job instead of leaving the manual
 describing an older build (the table menu's label had drifted when it
-was added). `test_updater.py` drives `update.py` itself as well as
+was added). The same file holds the page's Fixed keys tables to
+`FIXED_KEYS`, group by group and row by row, matched on the keys each row
+names: Settings had been missing the Timeline's R / r, which the manual
+already listed. `test_wiki_skins.py` does the same for the skin table, the
+order and each description against settings.js's `STYLES` (the manual
+had added "The default." to Harvest's card text). `test_updater.py` drives `update.py` itself as well as
 updater.py: `--from` then `--rollback` as an analyst types them, the
 answers to a refused or unusable archive, and `download()`'s promise
 that a cut-off or Ctrl+C'd download leaves nothing at the target that
@@ -126,6 +131,16 @@ token in static/style.css, and Harvest dark's greys must have no hue. The
 site took the green cast out of Harvest's greys before the app did, and
 the two drifted apart until the app read as green next to its own
 website.
+`test_plugin_registration_errors.py` gives each refusal in
+register_ingest_format, register_tab, register_row_action and
+register_toolbar_panel the plugin that earns it, and checks the exact
+message Settings → Plugins shows. Each plugin registers one of every kind
+first, so every case also proves the rollback: a register() that fails
+keeps nothing. `test_case_open_failure.py` opens a case that will not open
+while another is open. The open case must stay open and answer, and the
+failed Store must give back its case lock, heartbeat thread, connection
+and views file. Before that, the second try at the same file was refused
+as "in use" by this same Winnow (docs/notes/store.md).
 
 In the browser, `tests/ui/test_default_keys.py` presses every binding in
 `DEFAULT_KEYMAP`. Its first test swaps each `ACTION_HANDLERS` entry for a
@@ -147,6 +162,14 @@ nothing lost, no path offered, and the value never built as markup.
 `test_popout.py` brings a pop-out back as a tab (and keeps what was typed
 out there), and opens a pop-out with no case, and one of a page the case
 doesn't have, through `window.open('')` so the window may close itself.
+`test_skin_contrast.py` takes the WCAG contrast ratio of text on its
+background in every skin and theme, resolved in the page (tokens can be
+`color-mix()` or carry alpha). `--text` is held to 4.5:1 on every surface
+a row or panel can have. The other pairs (`--dim`, a button's label on the
+accent, danger, diff and SQL colors) are held to floors today's skins
+meet, some of them below AA in light themes, so a skin can't get less
+readable without a test noticing. The accent as text and the tag colors
+are not held yet, because Phosphor light's accent is 1.3:1 on its panel.
 
 `test_csv_round_trip.py` ingests a file of awkward cells, exports it over
 `/api/export` and ingests the export: everything comes back except the
