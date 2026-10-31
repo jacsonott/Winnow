@@ -144,9 +144,11 @@ def test_on_a_merge_each_row_is_posted_with_the_table_it_lives_in(page, row_menu
     server_post("/api/ingest/jobs/path", {"path": str(b)})
     ids, merge = {}, None
     try:
-        page.wait_for_function("""async () => { await __winnow.loadSources();
-            return __winnow.S.sources.filter((s) => /^ra_[ab]\\.csv$/.test(s.name)).length === 2; }""",
-                               timeout=15_000)
+        # Polled from Python: a promise returned to wait_for_function is
+        # truthy at once, so it would not wait for the imports at all.
+        until(page, lambda: page.evaluate("""() => __winnow.loadSources().then(() => __winnow.S.sources
+            .filter((s) => /^ra_[ab]\\.csv$/.test(s.name)).length)""") == 2,
+              "both tables imported", timeout=15)
         ids = page.evaluate("""() => Object.fromEntries(__winnow.S.sources
             .filter((s) => /^ra_[ab]\\.csv$/.test(s.name)).map((s) => [s.name, s.id]))""")
         merge = server_post("/api/merges", {"name": "row-action-merge", "source_ids": [ids["ra_a.csv"], ids["ra_b.csv"]]})
