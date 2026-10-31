@@ -78,6 +78,18 @@ extracted column is an ordinary derived column everywhere, that discovery
 only ever offers paths that actually extract, and that a batch is
 all-or-nothing (a name collision in the fifth spec must not leave four
 columns behind).
+`test_ingest_contracts.py` holds every reader (CSV, text, JSON, IIS,
+key=value, XLSX, Plaso, SQLite) to the three promises ingest_csv set,
+since each carries its own copy of the code that keeps them: every row
+lands in order across batches (BATCH is shrunk so a 30-row fixture spans
+five), a cancel leaves no table, and a failure raised from the reader
+part-way keeps what was read, says how many, and leaves no empty table
+when nothing was. Adding a reader means adding it to `READERS` there.
+`test_group_export.py` holds the export of an expanded small group (its
+own code path, `group_virtual`) to the rows the grid pages for it and,
+byte for byte, to the same rows exported through a filter or a
+materialised group. `test_merge_advanced_search.py` is Advanced search's
+merge case (invariant 9), with members indexed, not, and mixed.
 `test_derived.py` covers the column lifecycle and, more importantly, the
 integration choices that are easy to reverse by accident: the
 virtual-root EXPLAIN plan (invariant #2), that derived values are *not*
