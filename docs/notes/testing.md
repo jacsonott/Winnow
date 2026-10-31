@@ -86,6 +86,19 @@ semantics (driven through the backfill's own cancel hook, so the
 cancellation point is deterministic rather than a race — same technique
 as `test_ingest_jobs.py`).
 
+In the browser, `tests/ui/test_default_keys.py` presses every binding in
+`DEFAULT_KEYMAP`. Its first test swaps each `ACTION_HANDLERS` entry for a
+recorder and checks every key reaches its own action and no other. It reads
+the keymap from the page, so a key added later is pressed without anyone
+adding it, and nothing the keys would do happens. The rest press, for real,
+the keys whose handlers have no button or menu entry (PageDown/PageUp, `0`,
+`q` `w` `[` `]`, `f` `F`, the backtick, `x`, `L`, `Q`, `.`) and assert what
+changes on screen. `test_plugin_install_dialog.py` drives Install a
+plugin… through its two picker buttons and answers the install route itself
+(a real install writes into the shared server's plugins folder, and nothing
+takes a plugin back out). A routed request carries a file part's name but
+not its bytes, so it asserts names and paths, not contents.
+
 ## Things that bite
 
 - A note on the lock-scope test in `test_search.py`: it asserts *structurally*
