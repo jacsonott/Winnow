@@ -54,9 +54,9 @@ export function drawBars(canvas, spec) {
   if (!rows.length) return { boxes: [] };
   const valKey = spec.value || 'n', labKey = spec.label || 'value';
   const accent = cssVar('--accent', '#cfa057');
-  const line = cssVar('--line-2', '#333a35');
-  const dim = cssVar('--dim', '#848d80');
-  const text = cssVar('--text', '#c3c8be');
+  const line = cssVar('--line-2', '#383838');
+  const dim = cssVar('--dim', '#8a8a8a');
+  const text = cssVar('--text', '#c4c4c4');
   const max = spec.max || Math.max(1, ...rows.map((r) => +r[valKey] || 0));
   const boxes = [];
   ctx.font = `11px ${cssVar('--mono', 'monospace')}`;
@@ -122,7 +122,7 @@ export function drawHistogram(canvas, spec) {
     row.forEach((v, k) => {
       if (!v) return;
       const bh = ((+v || 0) / max) * (h - 6);
-      ctx.fillStyle = colors[k] || cssVar('--dim', '#848d80');
+      ctx.fillStyle = colors[k] || cssVar('--dim', '#8a8a8a');
       ctx.globalAlpha = inBrush ? 1 : 0.3;
       ctx.fillRect(i * bw + 1, y - bh, Math.max(1, bw - 2), bh);
       y -= bh;

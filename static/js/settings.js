@@ -42,7 +42,7 @@ export const APPEARANCE_KEY = 'winnow.appearance';
 export const STYLES = {
   // Harvest first because it is the default — the list is a menu, and the
   // one you are on should be the one you read first.
-  harvest:   { label: 'Harvest',   desc: 'Grain and chaff — wheat gold on deep green-black, parchment in light.', stripes: true, defaultAccent: '#cfa057', preview: ['#0f1211', '#cfa057'] },
+  harvest:   { label: 'Harvest',   desc: 'Grain and chaff — wheat gold on neutral charcoal, parchment in light.', stripes: true, defaultAccent: '#cfa057', preview: ['#111111', '#cfa057'] },
   panel:     { label: 'Panel',     desc: 'The older look — cooler greys, amber accent.', stripes: true, defaultAccent: '#d2a04a', preview: ['#13161a', '#d2a04a'] },
   phosphor:  { label: 'Phosphor',  desc: 'Retro CRT terminal — glow, monospace chrome.', stripes: true, defaultAccent: '#39e881', preview: ['#060907', '#39e881'] },
   blueprint: { label: 'Blueprint', desc: 'Bold borders, hard offset shadows.', stripes: true, defaultAccent: '#ff6a1a', preview: ['#0c0d10', '#ff6a1a'] },

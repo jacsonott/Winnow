@@ -44,7 +44,7 @@ compare them; **Done** takes you back to Settings.
 
 | Skin | Description as shown |
 | --- | --- |
-| Harvest | Grain and chaff — wheat gold on deep green-black, parchment in light. The default. |
+| Harvest | Grain and chaff — wheat gold on neutral charcoal, parchment in light. The default. |
 | Panel | The older look — cooler greys, amber accent. |
 | Phosphor | Retro CRT terminal — glow, monospace chrome. |
 | Blueprint | Bold borders, hard offset shadows. |
