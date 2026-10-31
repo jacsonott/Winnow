@@ -1957,6 +1957,18 @@ def _json_text_deep(value: Any) -> str:
 _utf8_text = structparse.utf8_text
 
 
+def _kept_error(e: Exception, total: int) -> Exception:
+    """A reader's failure part-way through, saying how many rows it kept
+    (ingest_csv's message), so the analyst can tell the table in the list
+    is partial. With nothing kept the error is the reader's own: the table
+    is dropped, and there is nothing to add."""
+    if not total:
+        return e
+    error = ValueError(f"{e} — import stopped there; the {total:,} rows before it were kept")
+    error.__cause__ = e
+    return error
+
+
 def _lenient_text_factory(undecodable: list[int] | None = None):
     """sqlite3 text_factory for an EXTERNAL database's TEXT values. The
     default decodes strictly, and one stored value that isn't UTF-8 (a
@@ -5298,6 +5310,19 @@ class Store:
             self.db.execute("UPDATE sources SET row_count=? WHERE id=?", (total, source_id))
         return total
 
+    def _commit_parsed_batch(self, insert_sql: str, batch: list, source_id: int, total: int) -> int:
+        """The rows a reader parsed before it failed, committed: the
+        failure is the row after them, and losing them made "keep what
+        committed" quietly mean "lose up to a batch of good rows". Best
+        effort, as in ingest_csv: if the commit is what failed, this fails
+        too and what committed before still stands. Returns the new
+        total."""
+        if batch:
+            with contextlib.suppress(Exception):
+                total = self._commit_ingest_batch(insert_sql, batch, source_id, total)
+                batch.clear()
+        return total
+
     def preview_csv_text(
         self, text: str, delimiter: str | None = None, has_header: bool = True,
         max_rows: int = 50, name: str | None = None
@@ -5484,7 +5509,9 @@ class Store:
                     self.drop_source(source_id)
                     raise
                 except Exception as e:
-                    error = e
+                    # Nothing pending to save: fetchmany returns none of a
+                    # batch it failed part-way through.
+                    error = _kept_error(e, total)
         finally:
             ro.close()
             cleanup()
@@ -5561,9 +5588,9 @@ class Store:
         total = 0
         t0 = time.time()
         error: Exception | None = None
+        batch: list[tuple] = []
         with self._ingest_synchronous_off():
             try:
-                batch: list[tuple] = []
                 for row in plasoread.iter_plaso_rows(path):
                     batch.append(tuple(row))
                     if len(batch) >= BATCH:
@@ -5582,13 +5609,18 @@ class Store:
                 self.drop_source(source_id)
                 raise
             except Exception as e:
-                error = e
+                # A record that won't decode keeps the events before it,
+                # pending batch included, as ingest_csv does.
+                total = self._commit_parsed_batch(insert, batch, source_id, total)
+                error = _kept_error(e, total)
 
         colmeta = [{"name": c, "type": t} for c, t in zip(cols, plasoread.PLASO_COLUMN_TYPES)]
         with self.lock, self.db:
             self.db.execute("UPDATE sources SET columns=? WHERE id=?", (json.dumps(colmeta), source_id))
 
         if error is not None:
+            if total == 0:
+                self.drop_source(source_id)   # same no-husk rule as ingest_csv
             raise error
 
         if total:
@@ -5708,7 +5740,11 @@ class Store:
                     self.drop_source(source_id)
                     raise
                 except Exception as e:
-                    error = e
+                    # A workbook that breaks part-way (a corrupt or cut-off
+                    # sheet member) keeps what was read, as ingest_csv does:
+                    # the rows of the pending batch parsed fine.
+                    total = self._commit_parsed_batch(insert, batch, source_id, total)
+                    error = _kept_error(e, total)
         finally:
             rows_iter.close()
 
@@ -5718,6 +5754,8 @@ class Store:
             self.db.execute("UPDATE sources SET columns=? WHERE id=?", (json.dumps(colmeta), source_id))
 
         if error is not None:
+            if total == 0:
+                self.drop_source(source_id)   # same no-husk rule as ingest_csv
             raise error
 
         if total:
