@@ -271,6 +271,15 @@ at `job/start` so the answer lands while the tab is hidden.
   child that sleeps in a `sitecustomize.py` on its `PYTHONPATH` makes a
   slow start on demand.
 
+- **A toast can be gone before the next frame.** `wait_for_function`
+  looks once a frame, and the app replaces toasts freely: after "Change
+  the field path…" the "Recomputing" toast lasted 12ms before the jobs
+  poll announced the derive that had already finished, so a wait on the
+  toast's text passed locally and failed in CI. Where another toast can
+  follow, record them with a MutationObserver before the gesture and wait
+  on the record (`RECORD_TOASTS` in
+  tests/ui/test_derived_unparsed_and_path_ui.py).
+
 - **`wait_for_function` does not await its predicate.** One that returns
   `fetch(…).then(…)` hands back a Promise, which is truthy, so the wait
   returns at once and the test races what it meant to wait for.

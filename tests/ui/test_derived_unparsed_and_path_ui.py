@@ -68,6 +68,22 @@ def _menu_item(page, col, starts):
     return match[0]
 
 
+# Every toast shown from now on, in order. A toast can be replaced before
+# the next frame, and wait_for_function looks once a frame: "Recomputing"
+# is followed 12ms later by the jobs poll's "rows read" for a derive that
+# finished at once, so a wait on the toast's current text missed it in CI.
+RECORD_TOASTS = """() => {
+  window.__toasts = [];
+  new MutationObserver((records) => {
+    for (const r of records) for (const n of r.addedNodes) window.__toasts.push(n.textContent);
+  }).observe(document.getElementById('toast'), { childList: true, subtree: true });
+}"""
+
+
+def _toasted(page, text):
+    page.wait_for_function("(t) => window.__toasts.some((s) => s.includes(t))", arg=text)
+
+
 def _column(page, col):
     """Every value of `col` the view holds, in view order."""
     return page.evaluate("""(col) => {
@@ -105,6 +121,7 @@ def test_show_unparsed_rows_opens_exactly_the_rows_that_failed(page, api, tmp_pa
     _wait_ready(api, [sid])
     _open(page, sid, "WhenParsed")
 
+    page.evaluate(RECORD_TOASTS)
     label = _menu_item(page, "WhenParsed", "Show ")
     assert label == "Show 2 unparsed rows"
     page.locator(".menu .menu-item", has_text=label).click()
@@ -114,8 +131,7 @@ def test_show_unparsed_rows_opens_exactly_the_rows_that_failed(page, api, tmp_pa
     # the filter tree, not a hidden state of the table.
     tree = page.evaluate("() => __winnow.S.filterTree")
     assert [c["type"] for c in tree["children"]] == ["raw"]
-    page.wait_for_function("""() => (document.getElementById('toast').textContent || '')
-                              .includes('Showing rows where "WhenParsed" could not be parsed')""")
+    _toasted(page, 'Showing rows where "WhenParsed" could not be parsed')
 
 
 def test_an_extracted_field_offers_the_rows_without_it(page, api, tmp_path, home):
@@ -175,10 +191,10 @@ def test_changing_the_field_path_recomputes_the_column_in_place(page, api, tmp_p
     _open(page, sid, "Who")
     order = page.evaluate("() => __winnow.visibleCols()")
 
+    page.evaluate(RECORD_TOASTS)
     _menu_item(page, "Who", "Change the field path")
     _change_path(page, "Who", "$.host", want_current="$.user")
-    page.wait_for_function("""() => (document.getElementById('toast').textContent || '')
-                              .includes('Recomputing "Who"')""")
+    _toasted(page, 'Recomputing "Who"')
     _wait_ready(api, [sid])
     [d] = _defs(api, sid)
     assert (d["name"], d["params"]) == ("Who", {"path": "$.host"})
@@ -228,10 +244,10 @@ def test_changing_the_field_path_on_a_merge_changes_every_member(page, api, tmp_
     _wait_ready(api, [a, b])
     _open(page, mid, "Who")
 
+    page.evaluate(RECORD_TOASTS)
     _menu_item(page, "Who", "Change the field path")
     _change_path(page, "Who", "$.host", want_current="$.user")
-    page.wait_for_function("""() => (document.getElementById('toast').textContent || '')
-                              .includes('Recomputing "Who"')""")
+    _toasted(page, 'Recomputing "Who"')
     _wait_ready(api, [a, b])
     for sid in (a, b):
         assert [d["params"] for d in _defs(api, sid)] == [{"path": "$.host"}], sid
