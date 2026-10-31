@@ -415,10 +415,12 @@ static/style.css   Token-driven theming: 6 styles (panel/phosphor/blueprint/
                     both the look and the scoping.
                     tests/ui/test_skin_tokens.py holds every skin to the
                     same token list in both themes.
-                    Harvest's dark is the loading screen's own palette
-                    verbatim — green-cast greys, not brown; a warm-grey
-                    version read as muddy against the gold, because a warm
-                    accent on warm greys leaves nothing to separate.
+                    Harvest's dark greys are neutral, the exact values the
+                    Pages site uses (docs/site/assets/site.css), so a
+                    change to one belongs in both; tests/test_site_palette.py
+                    fails otherwise. Not green-cast (what it had before;
+                    it read as green) and not brown (a warm grey under a
+                    warm accent leaves nothing to separate).
                     on <html>, plus a user accent color. See the file's own
                     header comment for the token contract before adding
                     hardcoded colors.

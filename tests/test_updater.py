@@ -961,3 +961,158 @@ def test_apply_route_reports_the_restart_requirement(store, monkeypatch):
     # The server is still running the OLD code — saying otherwise would be a lie.
     assert body["restart_required"] is True
     assert body["version"] == "9.9.9"
+
+
+# ------------------------------------------------- update.py, end to end
+
+# The airgap path is the one that has to work when the UI does not:
+# `update.py --from <zip>` on the analyst's machine, then `--rollback` if
+# the new version turns out bad. The tests above drive updater.py; these
+# drive the command an analyst actually types, and read what it tells them.
+
+def test_the_cli_applies_an_archive_and_says_how_to_undo_it(install, tmp_path, monkeypatch, capsys):
+    import update as update_cli
+    monkeypatch.setattr(update_cli, "HERE", install)
+    archive = _make_release(tmp_path / "v2.zip", "1.1.0", _v2_files())
+
+    assert update_cli.main(["--from", str(archive), "-y"]) == 0
+
+    out = capsys.readouterr().out
+    assert "Updated 1.0.0 -> 1.1.0." in out
+    assert "python update.py --rollback" in out
+    assert (install / "server.py").read_text(encoding="utf-8") == "print('server v2')\n"
+    assert updater.installed_version(install) == "1.1.0"
+
+
+def test_the_cli_rolls_back_what_it_applied(install, tmp_path, monkeypatch, capsys):
+    import update as update_cli
+    monkeypatch.setattr(update_cli, "HERE", install)
+    archive = _make_release(tmp_path / "v2.zip", "1.1.0", _v2_files())
+    assert update_cli.main(["--from", str(archive), "-y"]) == 0
+    capsys.readouterr()
+
+    assert update_cli.main(["--rollback"]) == 0
+
+    assert "Rolled back to 1.0.0" in capsys.readouterr().out
+    for rel, text in SHIPPED.items():
+        assert (install / rel).read_text(encoding="utf-8") == text
+
+
+def test_the_cli_dry_run_of_an_archive_changes_nothing(install, tmp_path, monkeypatch, capsys):
+    import update as update_cli
+    monkeypatch.setattr(update_cli, "HERE", install)
+    archive = _make_release(tmp_path / "v2.zip", "1.1.0", _v2_files())
+
+    assert update_cli.main(["--from", str(archive), "--dry-run"]) == 0
+
+    assert "nothing was changed" in capsys.readouterr().out
+    for rel, text in SHIPPED.items():
+        assert (install / rel).read_text(encoding="utf-8") == text
+    assert not (install / updater.BACKUP_DIR).exists()
+
+
+def test_the_cli_answers_n_by_changing_nothing(install, tmp_path, monkeypatch, capsys):
+    import update as update_cli
+    monkeypatch.setattr(update_cli, "HERE", install)
+    archive = _make_release(tmp_path / "v2.zip", "1.1.0", _v2_files())
+    monkeypatch.setattr("builtins.input", lambda *a: "n")
+
+    assert update_cli.main(["--from", str(archive)]) == 1
+
+    assert "nothing was changed" in capsys.readouterr().out
+    assert updater.installed_version(install) == "1.0.0"
+
+
+def test_the_cli_reports_an_unusable_archive_as_an_error_not_a_traceback(install, tmp_path, monkeypatch, capsys):
+    """An UpdateError is the analyst's problem to fix (a wrong file), so
+    it is one line on stderr and exit code 2, with nothing installed."""
+    import update as update_cli
+    monkeypatch.setattr(update_cli, "HERE", install)
+    not_winnow = tmp_path / "photos.zip"
+    with zipfile.ZipFile(not_winnow, "w") as zf:
+        zf.writestr("holiday/beach.jpg", "jpeg")
+
+    assert update_cli.main(["--from", str(not_winnow), "-y"]) == 2
+
+    assert capsys.readouterr().err.startswith("error: ")
+    assert updater.installed_version(install) == "1.0.0"
+
+
+@pytest.mark.parametrize("extra", [["--check"], ["--download-only"]])
+def test_the_cli_refuses_from_with_a_network_only_flag(install, tmp_path, monkeypatch, extra):
+    import update as update_cli
+    monkeypatch.setattr(update_cli, "HERE", install)
+    archive = _make_release(tmp_path / "v2.zip", "1.1.0", _v2_files())
+    with pytest.raises(SystemExit) as exc:
+        update_cli.main(["--from", str(archive), *extra])
+    assert exc.value.code == 2
+    assert updater.installed_version(install) == "1.0.0"
+
+
+# --------------------------------------------------------------- download
+
+class _Response:
+    """What urlopen hands back, as far as download() reads it: a context
+    manager that is also a file, which can be told to fail part-way."""
+
+    def __init__(self, chunks, fail_with=None):
+        self.chunks, self.fail_with = list(chunks), fail_with
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self, n=-1):
+        if self.chunks:
+            return self.chunks.pop(0)
+        if self.fail_with is not None:
+            raise self.fail_with
+        return b""
+
+
+def test_download_lands_the_archive_and_leaves_no_part_file(tmp_path):
+    dest = tmp_path / "out" / "winnow-1.1.0.zip"
+    got = updater.download("https://example.invalid/w.zip", dest,
+                           _open=lambda u, t: _Response([b"PK\x03\x04", b"rest"]))
+    assert got == dest
+    assert dest.read_bytes() == b"PK\x03\x04rest"
+    assert [p.name for p in dest.parent.iterdir()] == [dest.name]
+
+
+def test_download_into_a_directory_names_the_file_itself(tmp_path):
+    got = updater.download("https://example.invalid/w.zip", tmp_path,
+                           _open=lambda u, t: _Response([b"PK"]))
+    assert got == tmp_path / "winnow-update.zip"
+
+
+@pytest.mark.parametrize("failure", [ConnectionResetError("reset by peer"), TimeoutError("timed out")])
+def test_a_download_cut_off_part_way_leaves_nothing_that_looks_applicable(tmp_path, failure):
+    """download()'s promise: it writes beside the target and renames on
+    success, so a dropped connection can't leave a half-file at `dest`
+    that --from would then try to apply — and no .part litter either."""
+    dest = tmp_path / "winnow-1.1.0.zip"
+    with pytest.raises(UpdateError, match="Download failed"):
+        updater.download("https://example.invalid/w.zip", dest,
+                         _open=lambda u, t: _Response([b"PK\x03\x04half"], fail_with=failure))
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_ctrl_c_mid_download_leaves_no_part_file_and_still_interrupts(tmp_path):
+    dest = tmp_path / "winnow-1.1.0.zip"
+    with pytest.raises(KeyboardInterrupt):
+        updater.download("https://example.invalid/w.zip", dest,
+                         _open=lambda u, t: _Response([b"PK"], fail_with=KeyboardInterrupt()))
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_failed_download_keeps_an_earlier_complete_one(tmp_path):
+    """A retry that fails must not cost the analyst the archive they
+    already have: the old file is only replaced by a complete new one."""
+    dest = tmp_path / "winnow-1.1.0.zip"
+    dest.write_bytes(b"PK complete")
+    with pytest.raises(UpdateError):
+        updater.download("https://example.invalid/w.zip", dest,
+                         _open=lambda u, t: _Response([b"PK"], fail_with=ConnectionResetError()))
+    assert dest.read_bytes() == b"PK complete"

@@ -4524,10 +4524,38 @@ class Store:
             while len(self._op_cancelled) > 512:  # one-shot ids; keep it bounded
                 self._op_cancelled.pop()
             conn = self._op_conns.get(token)
-            if conn is not None:
-                conn.interrupt()
-                return True
-        return False
+            if conn is None:
+                return False
+            conn.interrupt()
+        threading.Thread(target=self._interrupt_until_released, args=(token, conn),
+                         name="winnow-cancel", daemon=True).start()
+        return True
+
+    # How often a cancel that has not landed yet is sent again.
+    CANCEL_RESEND_S = 0.02
+
+    def _interrupt_until_released(self, token: str, conn) -> None:
+        """Keeps interrupting `conn` for as long as `token` holds it.
+
+        sqlite3_interrupt stops only a statement already running: SQLite
+        clears the flag when a statement starts with none active, so a
+        cancel landing between two of a block's statements (the build's
+        quick CREATE TABLE and its long INSERT, say) was forgotten and the
+        long one ran to the end. That was a cancel chip that did nothing,
+        and a test that timed out on loaded Windows runners waiting for
+        one. Sent again every CANCEL_RESEND_S until the block lets go of
+        the connection, under _op_lock and only while the token is still
+        registered to it, so by _interruptible's discipline it can only
+        ever stop that block's own statements."""
+        while True:
+            time.sleep(self.CANCEL_RESEND_S)
+            with self._op_lock:
+                if self._op_conns.get(token) is not conn:
+                    return
+                try:
+                    conn.interrupt()
+                except Exception:  # noqa: BLE001 — a connection closed under us: nothing left to stop
+                    return
 
     @contextlib.contextmanager
     def _interruptible(self, token: str | None, conn: sqlite3.Connection):
@@ -4538,11 +4566,11 @@ class Store:
         writer caller enters this block while *holding* self.lock and
         unregisters before releasing it, so the only statements that can be
         running on the writer connection while its token is registered are
-        the block's own. interrupt() aborts running statements only; a
-        cancel arriving in the gap between two statements is a no-op (the
-        flag clears when the statement count hits zero), which surfaces as
-        "the cancel didn't land — click again", never as a mis-aimed kill
-        of someone else's write. Reader-pool callers pass their checked-out
+        the block's own. interrupt() aborts running statements only (the
+        flag clears when a statement starts with none active), so a cancel
+        arriving in the gap between two statements is sent again until the
+        block lets go (_interrupt_until_released) — never a mis-aimed kill
+        of someone else's write, since it stops once the token is gone. Reader-pool callers pass their checked-out
         reader (and stack this innermost): an interrupted reader raises out
         of _reader(), which already closes — not repools — a connection
         that died mid-statement."""
