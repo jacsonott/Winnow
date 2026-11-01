@@ -604,7 +604,11 @@ class Copied:
             if time.monotonic() >= deadline:
                 pytest.fail("nothing reached the clipboard")
             self.page.wait_for_timeout(25)
-        self.text = text
+        # Windows keeps clipboard text with CRLF line ends and readText
+        # hands them back that way. The app wrote LF, and that is what the
+        # tests are about (the nightly's Windows run split rows on "\n" and
+        # found a "\r" on every one).
+        self.text = text.replace("\r\n", "\n")
 
 
 @pytest.fixture
