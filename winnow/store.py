@@ -2956,6 +2956,48 @@ class Store:
     FTS_BUILD_CONCURRENCY = 2  # trigram builds are CPU/writer-bound; more just thrash
 
     def __init__(self, path: str, default_tags: list[tuple] | None = None):
+        try:
+            self._construct(path, default_tags)
+        except BaseException:
+            self._abandon_construction()
+            raise
+
+    def _abandon_construction(self) -> None:
+        """Give back what a Store that failed to open had already taken.
+
+        Opening takes three things before it reads the case's schema: the
+        writer connection, the views file (mkstemp'd and flocked) and the
+        case lock, whose heartbeat thread holds a reference to the lock
+        and so keeps the half-built Store alive. A case file that fails
+        past that point (a file with a case's three tables and not its
+        columns fails META_SCHEMA) left all three behind for the life of
+        the process: the file read as open in this very Winnow, so trying
+        it again answered "in use" by itself, and every attempt stranded
+        another views file the startup sweep could not take while the
+        process lived. close() can't do this: it reads state that is set
+        further down, which a failed open never reached."""
+        db = getattr(self, "db", None)
+        if db is not None:
+            for conn in getattr(self, "_reader_pool", []):
+                with contextlib.suppress(sqlite3.Error):
+                    conn.close()
+            with contextlib.suppress(sqlite3.Error):
+                db.close()
+        if getattr(self, "_views_fd", None) is not None:
+            with contextlib.suppress(OSError):
+                os.close(self._views_fd)
+            self._views_fd = None
+        views = getattr(self, "_views_path", None)
+        if views:
+            for suffix in VIEWS_DB_SUFFIXES:
+                with contextlib.suppress(OSError):
+                    os.remove(views + suffix)
+        lock = getattr(self, "_case_lock", None)
+        if lock is not None:
+            lock.release()
+        self.closed = True
+
+    def _construct(self, path: str, default_tags: list[tuple] | None) -> None:
         self.path = path
         self._default_tags = default_tags or DEFAULT_TAGS
         self.lock = threading.RLock()
@@ -3022,9 +3064,10 @@ class Store:
         self.db.execute("PRAGMA v.journal_mode=WAL")
         self.db.execute("PRAGMA v.synchronous=OFF")
         # "This case is open" marker for a *second* Winnow to probe — see
-        # _CaseLock. Taken after the database is open so a failed open can't
-        # strand one, and never fatal: `held` False just means nothing will
-        # warn the next process.
+        # _CaseLock. Taken after the database is open, and a failure past
+        # here gives it back (_abandon_construction), so a failed open
+        # can't strand one. Never fatal: `held` False just means nothing
+        # will warn the next process.
         self._case_lock = _CaseLock(self.path)
         self._case_lock.acquire()
         # Public because server.py has to distinguish "STORE points at this
@@ -11950,20 +11993,6 @@ class Store:
         if node.get("type") == "group":
             return [f for c in node.get("children", []) for f in Store._raw_fragments(c)]
         return []
-
-    @staticmethod
-    def _tree_has_raw(node: dict | None) -> bool:
-        """True if any node in the filter tree is a raw-SQL fragment. Raw
-        nodes assume a single table_name for their EXPLAIN QUERY PLAN
-        validation, so they're rejected for merges rather than extended to
-        dry-run per member."""
-        if not node:
-            return False
-        if node.get("type") == "raw":
-            return True
-        if node.get("type") == "group":
-            return any(Store._tree_has_raw(c) for c in node.get("children", []))
-        return False
 
     def _index_table_for(self, src: dict, column: str, table_name: str | None = None,
                          member_id: int | None = None) -> str:

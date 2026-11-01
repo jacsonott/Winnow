@@ -102,3 +102,76 @@ def test_the_reader_sees_through_the_awkward_cells():
     assert page["Show/hide the table sidebar"] == {"`"}
     assert "Ctrl+Shift+U" in page[next(a for a in page if a.startswith("Copy the unique values"))]
     assert page["Filter the column under the cursor"] == set()
+
+
+# ------------------------------------------------------------ fixed keys
+#
+# The same page's "Fixed keys" tables against FIXED_KEYS, the list Settings
+# shows under them. keymap.js's comment asks for a new fixed key to get a
+# line in both places in the same change, and the Timeline's R / r had gone
+# into the page and not into Settings. The page words each row for
+# reading, so the descriptions are its own; what has to agree is the
+# groups, their order, the rows in each, and which keys each row names.
+
+# Words the page's key cells use around the keys ("Shift + an arrow",
+# "(⌘+Shift on a Mac)") that are not keys.
+_KEY_FILLER = {"a", "an", "or", "on", "Mac"}
+# The page spells out what Settings abbreviates.
+_KEY_SYNONYMS = {"PageUp": "PgUp", "PageDown": "PgDn"}
+
+
+def _fixed_keys_app() -> list[tuple[str, list[str]]]:
+    src = KEYMAP_JS.read_text(encoding="utf-8")
+    start = src.index("export const FIXED_KEYS = [")
+    end = src.index("\n];", start) + 3
+    body = src[start + len("export const FIXED_KEYS = "):end].rstrip(";")
+    arr = esprima.parseScript(f"x = {body};").body[0].expression.right
+    return [(g.elements[0].value, [r.elements[0].value for r in g.elements[1].elements])
+            for g in arr.elements]
+
+
+def _fixed_keys_page() -> list[tuple[str, list[str]]]:
+    text = PAGE.read_text(encoding="utf-8")
+    assert "### Fixed keys" in text, "the Fixed keys section moved — update this test"
+    section = text.split("### Fixed keys", 1)[1].split("\n### ", 1)[0]
+    groups = []
+    for m in re.finditer(r"\*\*(.+?)\*\*\n\n\| (?:Key|Gesture) \| What it does \|\n\| --- \| --- \|\n"
+                         r"((?:\|.*\|\n?)+)", section):
+        keys = []
+        for line in m.group(2).strip().splitlines():
+            row = re.fullmatch(r"\| (.+?) \| (.+) \|", line.strip())
+            assert row, f"not a table row: {line!r}"
+            keys.append(row.group(1))
+        groups.append((m.group(1), keys))
+    return groups
+
+
+def _key_tokens(cell: str) -> set[str]:
+    """The keys a cell names, however it spells them: `Ctrl/⌘ + C` and
+    `` `Ctrl+C` / `⌘+C` `` are both {Ctrl, ⌘, C}."""
+    words = re.findall(r"[A-Za-z]+|\d|[↑↓←→⌘]", cell.replace("`", ""))
+    return {_KEY_SYNONYMS.get(w, w) for w in words} - _KEY_FILLER
+
+
+def test_the_fixed_keys_are_in_the_same_groups_in_the_same_order():
+    assert [g for g, _ in _fixed_keys_page()] == [g for g, _ in _fixed_keys_app()]
+
+
+def test_each_fixed_keys_group_has_the_rows_settings_shows():
+    page = dict(_fixed_keys_page())
+    for group, app_keys in _fixed_keys_app():
+        page_keys = page[group]
+        assert len(page_keys) == len(app_keys), (
+            f"{group}: Settings lists {len(app_keys)} keys, {PAGE.name} {len(page_keys)}:\n"
+            f"  Settings: {app_keys}\n  page: {page_keys}")
+        for app_cell, page_cell in zip(app_keys, page_keys):
+            assert _key_tokens(app_cell) == _key_tokens(page_cell), (group, app_cell, page_cell)
+
+
+def test_the_key_reader_sees_the_keys_and_not_the_words():
+    """Guards _key_tokens from passing by reading the same nothing on both
+    sides."""
+    assert _key_tokens("Ctrl/⌘ + Shift + arrow") == _key_tokens("`Ctrl+Shift` + arrow (`⌘+Shift` on a Mac)") \
+        == {"Ctrl", "⌘", "Shift", "arrow"}
+    assert _key_tokens("Shift + arrow, PgUp, PgDn") == {"Shift", "arrow", "PgUp", "PgDn"}
+    assert _key_tokens("Ctrl/⌘-click a row") != _key_tokens("Ctrl/⌘-click a cell")

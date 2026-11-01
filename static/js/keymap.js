@@ -464,6 +464,7 @@ export const FIXED_KEYS = [
     ['Enter', 'Open the selected line’s row in its table'],
     ['Double-click a line', 'Open its row in its table (a single click selects it)'],
     ['Esc', 'Let go of the selected line'],
+    ['R / r', 'Set the Timeline’s timeframe, and turn it off and on again — the table pages’ timeframe keys, acting on the Timeline’s own'],
   ]],
   ['Menus and dialogs', [
     ['↑ / ↓', 'Move through a menu’s items (from outside it, step in at the first or last)'],

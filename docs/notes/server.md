@@ -115,6 +115,16 @@ see [docs/notes/README.md](README.md) for the whole set.
   holder until its Store lets go. And the registry entry only goes once
   the file has: on Windows a file something still holds can't be
   removed, and dropping the entry anyway hid a case still on disk.
+  **A Store that fails to open gives the lock back.** The lock is taken
+  early in construction, before the schema is read, so a file that passes
+  `is_winnow_case_file` (it has the three table names) and then fails on
+  its columns raised with the lock still held, and the heartbeat thread
+  kept the half-built Store, its connection and its views file alive for
+  the life of the process. The next try at that file got 409 naming this
+  very Winnow as the holder. `Store.__init__` now wraps construction and
+  `_abandon_construction` releases whatever had been taken; anything added
+  to construction that holds a resource goes in that cleanup too
+  (tests/test_case_open_failure.py).
 - **A Winnow binds its port before it does anything else, and its window
   waits for its own pid.** main() used to open the case, import `--open`
   files and start the browser thread, and only then have uvicorn bind;
