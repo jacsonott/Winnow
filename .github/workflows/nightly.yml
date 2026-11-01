@@ -224,11 +224,13 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
+      # A zip unpacked by Python, not `git archive | tar`: Git for
+      # Windows' tar reads the colon in D:\a\_temp as a remote host.
       - name: unpack the archive an analyst downloads
         shell: bash
         run: |
-          mkdir "$RUNNER_TEMP/winnow"
-          git archive --format=tar HEAD | tar -x -C "$RUNNER_TEMP/winnow"
+          git archive --format=zip -o "$RUNNER_TEMP/winnow.zip" HEAD
+          python -c "import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" "$RUNNER_TEMP/winnow.zip" "$RUNNER_TEMP/winnow"
       - name: pip install -r requirements.txt, as the README says
         shell: bash
         run: python -m pip install --no-cache-dir -r "$RUNNER_TEMP/winnow/requirements.txt"
