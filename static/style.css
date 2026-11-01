@@ -9,6 +9,12 @@
    regardless of specificity, so the user's choice always wins over a
    style's suggested default).
 
+   A light half's --accent is darker than its dark half's, on purpose. The
+   accent is text in places (sort arrows, the selected tab, an active
+   filter's mark) and carries --accent-fg on a primary button, and a color
+   bright enough to glow on a dark panel washes out on a light one.
+   tests/ui/test_skin_contrast.py measures both in every skin.
+
    Token names were kept stable across this rewrite wherever app.js sets
    inline styles referencing them directly (--ink, --panel, --line, --text,
    --dim, --mono) — grep static/app.js for "var--" before renaming any of
@@ -130,7 +136,7 @@ html[data-style="panel"][data-theme="dark"] {
 html[data-style="panel"][data-theme="light"] {
   --ink: #eef0f3; --panel: #ffffff; --panel-2: #f2f4f7; --panel-3: #e7eaee;
   --line: #d8dce2; --line-2: #c3c9d1; --text: #1b222b; --dim: #667085;
-  --accent: #b8843a; --accent-dim: #8a6c33; --accent-fg: #ffffff;
+  --accent: #976c30; --accent-dim: #8a6c33; --accent-fg: #ffffff;
   --sel: #dce8f2; --sel-line: #6fa0c4;
   --row-even: #f7f8fa; --row-hover: #eef1f5; --row-selected: #d9e6f0; --cell-selected-bg: #cfe0ee;
   --border-hairline: #e1e4e9; --text-faint: #aab1bd;
@@ -167,10 +173,14 @@ html[data-style="phosphor"][data-theme="dark"] {
   --glow: 0 0 6px color-mix(in srgb, var(--accent) 65%, transparent);
 }
 html[data-style="phosphor"][data-theme="light"] {
-  /* "paper terminal" — an amber printout, not a generic light gray */
+  /* "paper terminal" — an amber printout, not a generic light gray.
+     The accent is printer's green, not the dark half's phosphor: that
+     green is the color of the glow, and as text on this paper (sort
+     arrows, the selected tab, active filters) it measured 1.3:1. The
+     label on it is light for the same reason. */
   --ink: #f3ecd8; --panel: #ede4cb; --panel-2: #e6dabb; --panel-3: #ddceaa;
   --line: #cabb92; --line-2: #b3a179; --text: #2a2110; --dim: #7a6c48;
-  --accent: #39e881; --accent-dim: #1f8a4c; --accent-fg: #05130a;
+  --accent: #166b39; --accent-dim: #1f8a4c; --accent-fg: #fffdf5;
   --sel: #e6d9b0; --sel-line: #b3a179;
   --row-even: #efe7d0; --row-hover: #e9ddc0; --row-selected: #ddd0a0; --cell-selected-bg: #d4c48a;
   --border-hairline: #ddcda3; --text-faint: #a3936a;
@@ -234,12 +244,13 @@ html[data-style="jenna"][data-theme="dark"] {
 }
 html[data-style="jenna"][data-theme="light"] {
   /* The light counterpart, kept in the dark half's character rather than
-     copied from Office's Colorful: the same amber accent, and a selection
+     copied from Office's Colorful: the same amber accent (a step deeper,
+     so the white label on a primary button reads), and a selection
      that is a quiet step of grey rather than the blue wash a light Office
      skin would use. The two halves should read as one theme. */
   --ink: #f1f1f1; --panel: #ffffff; --panel-2: #f3f3f3; --panel-3: #e6e6e6;
   --line: #e0e0e0; --line-2: #c4c4c4; --text: #1e1e1e; --dim: #6b6b6b;
-  --accent: #b5802f; --accent-dim: #8a6124; --accent-fg: #ffffff;
+  --accent: #996c28; --accent-dim: #8a6124; --accent-fg: #ffffff;
   --sel: #ededf0; --sel-line: #c4c4c4;
   --row-even: #f8f8f8; --row-hover: #f2f2f4; --row-selected: #e4e4e6; --cell-selected-bg: #d8d8dc;
   --border-hairline: #ededed; --text-faint: #a6a6a6;
@@ -359,7 +370,7 @@ html[data-style="harvest"][data-theme="dark"] {
 html[data-style="harvest"][data-theme="light"] {
   --ink: #f7f4ec; --panel: #fdfbf4; --panel-2: #efeade; --panel-3: #e6e0cf;
   --line: #ded8c8; --line-2: #cbc3ad; --text: #33302a; --dim: #7d766b;
-  --accent: #a8792d; --accent-dim: #8a6420; --accent-fg: #fdfbf4;
+  --accent: #946b28; --accent-dim: #8a6420; --accent-fg: #fdfbf4;
   --sel: #f0e9d6; --sel-line: #a8792d;
   --row-even: #f9f6ee; --row-hover: #f3eee0; --row-selected: #f0e9d6; --cell-selected-bg: #e7ddc3;
   --border-hairline: #ece7d9; --text-faint: #b2a996;
@@ -389,7 +400,7 @@ html[data-style="studio"][data-theme="dark"] {
 html[data-style="studio"][data-theme="light"] {
   --ink: #f6f6fb; --panel: #ffffff; --panel-2: #f0f0f7; --panel-3: #e9e9f3;
   --line: #e2e2ee; --line-2: #d1d1e2; --text: #1d1e2a; --dim: #6f7288;
-  --accent: #7c6cf6; --accent-dim: #5f4fd6; --accent-fg: #ffffff;
+  --accent: #6d5bf5; --accent-dim: #5f4fd6; --accent-fg: #ffffff;
   --sel: #ece9fd; --sel-line: #7c6cf6;
   --row-even: #f9f9fc; --row-hover: #f2f1fa; --row-selected: #e7e3fc; --cell-selected-bg: #ddd7fb;
   --border-hairline: #ececf5; --text-faint: #b6b8c8;

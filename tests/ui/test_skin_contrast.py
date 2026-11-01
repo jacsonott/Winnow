@@ -8,21 +8,30 @@ every test would stay green. This resolves each pair in the live document
 what it comes to), lays a translucent background over the page's --ink the
 way it is painted, and takes the WCAG contrast ratio.
 
-The floors are of two kinds. Body text (--text, on every surface a row or
-panel can have) is held to WCAG AA's 4.5:1, which every skin meets with
-room to spare. The other pairs are held to where the skins are today,
-which is below AA in some light themes: --dim's secondary text, a primary
-button's label (--accent-fg on --accent), error, diff and SQL-highlight
-colors. Those floors stop a skin getting worse; raising them is a palette
-change, not a test change. The accent used as text (sort arrows, an active
-filter's mark) and the default tag colors as swatches are not held here:
-Phosphor's light accent is 1.3:1 on its panel, and that wants a design
-decision before it wants a floor.
+Body text (--text, on every surface a row or panel can have) is held to
+WCAG AA's 4.5:1, which every skin meets with room to spare. So is a primary
+button's label (--accent-fg on --accent) in the light themes, which were
+3.3 to 3.9:1 until their accents were darkened a step. The accent as text
+(sort arrows, the selected tab, an active filter's mark) is held to 4:1 in
+the dark themes and 2.4:1 in the light ones: Phosphor light's was 1.3:1
+before its green was changed, and Blueprint light's orange, which nobody
+has decided about yet, is what sets the 2.4. The other pairs are held to
+where the skins are today, some below AA in light themes: --dim's
+secondary text, danger, diff and SQL-highlight colors. Those floors stop a
+skin getting worse; raising them is a palette change, not a test change.
+
+The default tags are measured too, because one color serves every skin, as
+a row stripe and as a pressed tag chip's text: it has to sit between the
+darkest panel and the lightest. Suspicious is held to 3:1 everywhere, the
+most one color can manage on both (its old orange was 2.0:1 on the light
+skins); TA and Benign to where they are today.
 """
 
 from __future__ import annotations
 
 import pytest
+
+from winnow.store import DEFAULT_TAGS
 
 pytestmark = pytest.mark.ui
 
@@ -31,11 +40,13 @@ BODY_SURFACES = ["--ink", "--panel", "--panel-2", "--panel-3", "--row-even", "--
                  "--row-selected", "--cell-selected-bg", "--sel"]
 
 # (foreground, background, painted over, floor). "Painted over" is the
-# surface a translucent background sits on, when it is not --ink.
+# surface a translucent background sits on, when it is not --ink. A floor
+# is one number, or one per theme.
 PAIRS = (
     [("--text", bg, None, AA_TEXT) for bg in BODY_SURFACES]
     + [("--dim", bg, None, 3.5) for bg in ("--ink", "--panel", "--panel-2")]
-    + [("--accent-fg", "--accent", None, 3.0),
+    + [("--accent", bg, None, {"dark": 4.0, "light": 2.4}) for bg in ("--ink", "--panel", "--panel-2")]
+    + [("--accent-fg", "--accent", None, {"dark": 3.0, "light": AA_TEXT}),
        ("--danger", "--danger-bg", "--panel", 3.0),
        ("--diff-a", "--diff-a-bg", "--panel", 3.0),
        ("--diff-b", "--diff-b-bg", "--panel", 3.0),
@@ -45,12 +56,18 @@ PAIRS = (
        ("--col-type", "--panel", None, 3.0)]
 )
 
+# A tag's color is a literal, the same in every skin. Each default tag's
+# floor, on the surfaces a stripe and a chip sit on.
+TAG_FLOORS = {"TA": 2.3, "Suspicious": 3.0, "Benign": 2.8}
+TAG_SURFACES = ["--ink", "--panel", "--panel-2", "--row-even"]
+TAG_PAIRS = tuple((color, bg, None, TAG_FLOORS[name]) for name, color, _ in DEFAULT_TAGS for bg in TAG_SURFACES)
+
 RATIOS = r"""(pairs) => {
   const probe = document.createElement('div');
   document.body.append(probe);
   const rgba = (token) => {
     probe.style.color = '';
-    probe.style.color = `var(${token})`;
+    probe.style.color = token.startsWith('#') ? token : `var(${token})`;
     const m = getComputedStyle(probe).color.match(/[\d.]+/g).map(Number);
     return [m[0], m[1], m[2], m.length > 3 ? m[3] : 1];
   };
@@ -80,20 +97,26 @@ def skins(page):
         page.evaluate("() => { __winnow.applyStyle('harvest'); __winnow.applyThemeMode('dark'); }")
 
 
-def _ratios(page, style, theme):
-    page.evaluate("([s, t]) => { __winnow.applyStyle(s); __winnow.applyThemeMode(t); }", [style, theme])
-    got = page.evaluate(RATIOS, [[fg, bg, base] for fg, bg, base, _ in PAIRS])
-    return {(fg, bg): ratio for (fg, bg, _, _), ratio in zip(PAIRS, got)}
+def _below_floor(page, skins, pairs):
+    low = {}
+    for style, theme in skins:
+        page.evaluate("([s, t]) => { __winnow.applyStyle(s); __winnow.applyThemeMode(t); }", [style, theme])
+        got = page.evaluate(RATIOS, [[fg, bg, base] for fg, bg, base, _ in pairs])
+        for (fg, bg, _, floor), ratio in zip(pairs, got):
+            floor = floor[theme] if isinstance(floor, dict) else floor
+            if ratio < floor:
+                low[f"{style}/{theme}: {fg} on {bg}"] = f"{ratio:.2f} < {floor}"
+    return low
 
 
 def test_every_skin_keeps_its_text_readable(page, skins):
-    low = {}
-    for style, theme in skins:
-        ratios = _ratios(page, style, theme)
-        for fg, bg, _, floor in PAIRS:
-            if ratios[(fg, bg)] < floor:
-                low[f"{style}/{theme}: {fg} on {bg}"] = f"{ratios[(fg, bg)]:.2f} < {floor}"
-    assert low == {}, low
+    assert _below_floor(page, skins, PAIRS) == {}
+
+
+def test_the_default_tags_read_on_every_skin(page, skins):
+    assert sorted(TAG_FLOORS) == sorted(name for name, _, _ in DEFAULT_TAGS), \
+        "a default tag with no floor here"
+    assert _below_floor(page, skins, TAG_PAIRS) == {}
 
 
 def test_the_measure_tells_light_from_dark(page, skins):
