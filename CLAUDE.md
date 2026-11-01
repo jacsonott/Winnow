@@ -490,10 +490,12 @@ straight into a case, unchanged — that's the documented smoke-test flow below.
    `C:\Windows\Temp`), and `sweep_orphan_views()` runs at startup to
    collect whatever a *hard* kill still left behind. The sweep can delete
    another process's file only because each Store holds an exclusive
-   `flock` on its own for its whole life (`Store.__init__` keeps the
-   mkstemp fd open for exactly this), so a live second Winnow is never
-   swept — if you change how that file is created or named, keep the lock
-   and the `winnow-views-` prefix.
+   `flock` for its whole life on a `-lock` sidecar beside its own
+   (`claim_views_file` keeps that fd open for exactly this), so a live
+   second Winnow is never swept — if you change how that file is created
+   or named, keep the lock and the `winnow-views-` prefix. The lock is
+   never on the database itself: on macOS a flock there blocks SQLite's
+   own locks, and no case opens (docs/notes/store.md).
 
 4. **One writer connection guarded by `Store.lock`; reads go through the
    `Store._reader()` pool.** Everything that mutates — ingest, view
