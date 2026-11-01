@@ -14,7 +14,12 @@ import sqlite3
 import pytest
 
 from winnow import store as store_module
-from winnow.store import VIEWS_PREFIX, VIEWS_SUFFIX, Store, sweep_orphan_views
+
+try:
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None
+from winnow.store import VIEWS_LOCK_SUFFIX, VIEWS_PREFIX, VIEWS_SUFFIX, Store, sweep_orphan_views
 
 
 def _columns(store, source_id):
@@ -228,6 +233,52 @@ def test_sweep_takes_the_dead_and_keeps_the_live_in_one_pass(views_in, case_path
         store.close()
 
 
+def test_the_lock_is_beside_the_views_db_never_on_it(views_in, case_path):
+    """What stopped every case opening on macOS. There, flock() and the
+    fcntl() locks SQLite takes share one lock table, so an exclusive flock
+    on the views database made SQLite's own first lock on it fail, and
+    ATTACH answered "database is locked". Linux keeps the two apart, so
+    the failure itself can only happen on a Mac (the nightly runs this
+    suite there); what any platform can check is where the lock sits. It
+    is held on the -lock sidecar, and the database is a different file."""
+    store = Store(case_path)
+    views = store._views_path
+    try:
+        assert store._views_fd is not None, "this filesystem took no lock"
+        held = os.fstat(store._views_fd).st_ino
+        assert held == os.stat(views + VIEWS_LOCK_SUFFIX).st_ino
+        assert held != os.stat(views).st_ino
+        if fcntl is not None:
+            assert not _can_flock(views + VIEWS_LOCK_SUFFIX)
+    finally:
+        store.close()
+    assert not os.path.exists(views + VIEWS_LOCK_SUFFIX), "close() left the sidecar"
+
+
+def test_sweep_removes_an_abandoned_views_db_with_its_lock(views_in):
+    base = _abandoned(views_in)
+    (views_in / (base.name + VIEWS_LOCK_SUFFIX)).write_bytes(b"")
+    assert sweep_orphan_views()["removed"] == 4
+    assert os.listdir(views_in) == []
+
+
+@pytest.mark.skipif(fcntl is None, reason="no flock on this platform")
+def test_sweep_probes_a_lock_whose_db_is_gone(views_in):
+    """A lock with no database is a dead owner's leftover, or a live Store
+    in the moment between making the two (the lock comes first), so the
+    sweep takes it only when nothing holds it."""
+    dead = views_in / f"{VIEWS_PREFIX}dead{VIEWS_SUFFIX}{VIEWS_LOCK_SUFFIX}"
+    dead.write_bytes(b"")
+    live = views_in / f"{VIEWS_PREFIX}live{VIEWS_SUFFIX}{VIEWS_LOCK_SUFFIX}"
+    fd = os.open(live, os.O_RDWR | os.O_CREAT)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert sweep_orphan_views()["removed"] == 1
+        assert not dead.exists() and live.exists()
+    finally:
+        os.close(fd)
+
+
 def test_sweep_ignores_files_that_are_not_ours(views_in):
     keep = views_in / "case.db"
     keep.write_bytes(b"not a views database")
@@ -263,6 +314,17 @@ def test_a_file_close_could_not_remove_is_collected_by_the_next_sweep(
     assert os.path.exists(views_path)
     assert sweep_orphan_views()["removed"] >= 1
     assert not os.path.exists(views_path)
+
+
+def _can_flock(path) -> bool:
+    fd = os.open(path, os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
 
 
 def _raise_oserror(*_args, **_kwargs):

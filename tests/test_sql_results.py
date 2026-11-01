@@ -28,7 +28,7 @@ from openpyxl import load_workbook
 
 from winnow import sqlresults
 from winnow.sqlresults import ResultExpired, SqlResults
-from winnow.store import VIEWS_PREFIX, OpCancelled, sweep_orphan_views
+from winnow.store import VIEWS_DB_SUFFIXES, VIEWS_LOCK_SUFFIX, VIEWS_PREFIX, OpCancelled, sweep_orphan_views
 
 
 def _count(n, extra=""):
@@ -288,6 +288,19 @@ def test_the_scratch_file_is_swept_like_a_views_file(store):
     assert os.path.basename(path).startswith(VIEWS_PREFIX)
     sweep_orphan_views()
     assert os.path.exists(path), "the sweep took a live Store's results"
+
+
+def test_the_scratch_files_lock_is_beside_it_never_on_it(store):
+    """As the views database's (test_maintenance.py): on macOS a flock on
+    the database blocks SQLite's own locks on it, and the pane's first run
+    failed with "database is locked"."""
+    store.run_sql_result(_count(3))
+    path, fd = store.sql_results.path, store.sql_results._fd
+    assert fd is not None, "this filesystem took no lock"
+    assert os.fstat(fd).st_ino == os.stat(path + VIEWS_LOCK_SUFFIX).st_ino != os.stat(path).st_ino
+    store.sql_results.close()
+    left = [s for s in VIEWS_DB_SUFFIXES + (VIEWS_LOCK_SUFFIX,) if os.path.exists(path + s)]
+    assert left == [], "close() left files behind"
 
 
 def test_no_scratch_file_until_the_pane_is_used(store):
