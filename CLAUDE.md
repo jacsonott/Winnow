@@ -746,7 +746,13 @@ six browser jobs, and two backend on each of Python 3.10 (the minimum the
 README promises), 3.12 and the newest release (3.14), plus Windows and a
 `shipped archive` job: `git archive` output, installed from
 requirements.txt alone on 3.10 and started by tests/smoke_server.py, which
-is what an analyst actually downloads. The checks the branch ruleset requires are
+is what an analyst actually downloads. What is too slow or too seldom-changing
+for every PR is in .github/workflows/nightly.yml: macOS, one Windows browser
+shard a night, last release's updater taking develop and rolling it back
+(tests/nightly_upgrade.py), the README screenshots, a report-only flake hunt
+under load, and on Sundays a fresh install on every OS. Scheduled workflows
+run from main, so it runs on schedule only once a release carries it there;
+every job checks out develop. The checks the branch ruleset requires are
 the two roll-up jobs at the bottom of ci.yml, not the shards, so N can
 change without touching the ruleset. One consequence for `tests/ui`: each
 shard starts its own server, so any module can be the first thing a cold

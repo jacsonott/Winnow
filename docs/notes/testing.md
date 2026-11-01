@@ -219,6 +219,14 @@ runs it on `git archive` output installed from requirements.txt alone, so
 a runtime import of a dev-only package, or an app file marked
 export-ignore, fails there instead of on an analyst's machine. Run it by
 hand with `--root <unpacked archive> --python <its venv's python>`.
+`tests/nightly_upgrade.py` is the nightly workflow's other script: it
+installs the last release from its `git archive`, adds an analyst's state
+(a plugin folder, a case file, a session export, the workspace a first
+start writes), runs that install's own `update.py --from` on a zip of
+develop laid out like GitHub's, and checks every shipped file and every
+byte of that state, then does the same after `update.py --rollback`. Run it
+with `--from-ref v0.4.1` (any release tag); set `TMPDIR` to keep its
+folders out of a shared `/tmp`.
 
 ## Things that bite
 
