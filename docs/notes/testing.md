@@ -210,6 +210,16 @@ included) and its field filter. `test_firstlast_copy.py`: Copy result,
 including the card it waits on when the analyst has left the tab, held
 at `job/start` so the answer lands while the tab is hidden.
 
+`tests/smoke_server.py` is not a test module (no `test_` prefix, so pytest
+never collects it); CI runs it as a script. It starts `server.py --case
+--open` the way an analyst does and waits for the CSV's rows on
+`/api/sources` and for the page, `main.js` and `style.css` to be served.
+The Windows backend job runs it on the checkout; the `shipped archive` job
+runs it on `git archive` output installed from requirements.txt alone, so
+a runtime import of a dev-only package, or an app file marked
+export-ignore, fails there instead of on an analyst's machine. Run it by
+hand with `--root <unpacked archive> --python <its venv's python>`.
+
 ## Things that bite
 
 - A note on the lock-scope test in `test_search.py`: it asserts *structurally*

@@ -40,13 +40,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Twice: on 3.10, the oldest Python the README promises, and on 3.12.
-  # Running only 3.12 let three bugs ship that 3.12 does not have (a
-  # plugin table write that left the case refusing every write, CSVs with
-  # a NUL byte, deeply nested JSON), because sqlite3, csv and json each
-  # changed behaviour in 3.11 or 3.12. Raising the minimum means changing
-  # it here and wherever the docs state it (README.md, launch/README.md,
-  # docs/wiki/Installation.md) together.
+  # Three times: on 3.10, the oldest Python the README promises; on 3.12;
+  # and on the newest release, which is what an analyst who installs
+  # Python today gets. Running only 3.12 let three bugs ship that 3.12
+  # does not have (a plugin table write that left the case refusing every
+  # write, CSVs with a NUL byte, deeply nested JSON), because sqlite3, csv
+  # and json each changed behaviour in 3.11 or 3.12; the first 3.14 run
+  # found a fourth (zipfile.is_zipfile reading the central directory, so a
+  # damaged zip inside an archive was dropped without a word). Raising the
+  # minimum means changing it here and wherever the docs state it
+  # (README.md, launch/README.md, docs/wiki/Installation.md) together;
+  # when a newer Python is released, it replaces the last entry.
   tests:
     name: backend py${{ matrix.python }} ${{ matrix.shard }}/2
     runs-on: ubuntu-latest
@@ -60,19 +64,24 @@ jobs:
       # the shard that failed.
       fail-fast: false
       matrix:
-        python: ["3.10", "3.12"]
+        python: ["3.10", "3.12", "3.14"]
         # The shard count is spelled out in the --shard argument below
         # because strategy.job-total now counts the Pythons too. Change
         # the two together.
         shard: [1, 2]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
           cache: pip
           cache-dependency-path: requirements-dev.txt
       - run: pip install -r requirements-dev.txt
+      # The SQLite a run had is half of what it tested: Python links the one
+      # its build shipped with, it differs between runners and Pythons, and
+      # SQLite's own behaviour changes between versions (a REAL's text,
+      # test_rows_json.py says, or what the query planner picks).
+      - run: python -c "import sqlite3, sys; print('Python', sys.version.split()[0], 'SQLite', sqlite3.sqlite_version)"
       # Pyflakes over every .py in the repo (ruff.toml), ~50 ms. Once, not
       # per shard: the answer doesn't depend on the shard or the Python.
       - name: ruff check
@@ -101,48 +110,62 @@ jobs:
       matrix:
         shard: [1, 2]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: requirements-dev.txt
       - run: pip install -r requirements-dev.txt
+      - run: python -c "import sqlite3, sys; print('Python', sys.version.split()[0], 'SQLite', sqlite3.sqlite_version)"
       - run: pytest -q --ignore=tests/ui --shard ${{ matrix.shard }}/2
       # The suite's servers are started by tests/spawn.py, with their own
       # workspace. This one starts the way an analyst's does, from
       # server.py with a case and a CSV, and has to answer with the CSV's
-      # rows.
+      # rows and serve the page (tests/smoke_server.py).
       - name: smoke - server.py opens a case, answers, and stops
         if: ${{ matrix.shard == 1 && !cancelled() }}
-        shell: python
+        run: python tests/smoke_server.py
+
+  # What an analyst installs is not the checkout: it is `git archive`
+  # output (a release zip, or a branch zip for `update.py --dev`), with
+  # everything .gitattributes marks export-ignore left out, installed from
+  # requirements.txt alone. A runtime import of something only
+  # requirements-dev.txt brings, or a file the app needs marked
+  # export-ignore, passes every job above and breaks here. On 3.10, the
+  # oldest Python the README promises, so requirements.txt is held to
+  # installing there too.
+  archive:
+    name: shipped archive
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: build and unpack the archive
         run: |
-          import json, os, subprocess, sys, time, urllib.request
-          tmp = os.environ["RUNNER_TEMP"]
-          csv = os.path.join(tmp, "smoke.csv")
-          with open(csv, "w", encoding="utf-8") as f:
-              f.write("Timestamp,EventId\n" + "".join(f"2026-01-01 00:00:{i:02d},{4624 + i}\n" for i in range(10)))
-          server = subprocess.Popen([sys.executable, "server.py", "--no-browser", "--port", "8799",
-                                     "--case", os.path.join(tmp, "smoke.db-winnow"), "--open", csv])
-          try:
-              deadline = time.monotonic() + 90
-              while True:
-                  if server.poll() is not None:
-                      sys.exit(f"server.py exited with {server.returncode}")
-                  try:
-                      with urllib.request.urlopen("http://127.0.0.1:8799/api/sources", timeout=5) as r:
-                          sources = json.loads(r.read())
-                      if any(s.get("row_count") == 10 for s in sources):
-                          print("smoke OK:", [(s["name"], s["row_count"]) for s in sources])
-                          break
-                  except OSError:
-                      pass
-                  if time.monotonic() > deadline:
-                      sys.exit("server.py never listed smoke.csv's 10 rows on /api/sources")
-                  time.sleep(1)
-          finally:
-              server.terminate()
-              server.wait(timeout=30)
+          mkdir "$RUNNER_TEMP/winnow"
+          git archive --format=tar HEAD | tar -x -C "$RUNNER_TEMP/winnow"
+          # export-ignore is working in both directions: the app is
+          # there, and the development material is not.
+          for f in server.py update.py requirements.txt winnow/store.py static/index.html static/js/main.js; do
+            test -e "$RUNNER_TEMP/winnow/$f" || { echo "::error::the archive is missing $f"; exit 1; }
+          done
+          for f in tests CLAUDE.md requirements-dev.txt bench docs/site; do
+            test ! -e "$RUNNER_TEMP/winnow/$f" || { echo "::error::the archive ships $f"; exit 1; }
+          done
+      - name: install from requirements.txt alone
+        run: |
+          python -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install -q -r "$RUNNER_TEMP/winnow/requirements.txt"
+      # The smoke script is in tests/, which the archive leaves out, so it
+      # runs from the checkout and starts the archive's server.py.
+      - name: smoke - the archive opens a case, answers, and stops
+        run: python tests/smoke_server.py --root "$RUNNER_TEMP/winnow" --python "$RUNNER_TEMP/venv/bin/python"
 
   ui:
     name: browser ${{ matrix.shard }}/${{ strategy.job-total }}
@@ -153,8 +176,8 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4, 5, 6]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
@@ -180,7 +203,7 @@ jobs:
       # it on trace.playwright.dev (it is read in the browser, not uploaded).
       - name: upload traces of failing tests
         if: ${{ failure() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ui-traces-${{ matrix.shard }}
           path: test-results/traces/
@@ -193,13 +216,14 @@ jobs:
   # skipped, and a skipped required check counts as passing.
   backend-result:
     name: backend + frontend parse
-    needs: [tests, windows]
+    needs: [tests, windows, archive]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - run: test "${{ needs.tests.result }}" = success
       - run: test "${{ needs.windows.result }}" = success
+      - run: test "${{ needs.archive.result }}" = success
 
   ui-result:
     name: browser

@@ -132,7 +132,13 @@ see [docs/notes/README.md](README.md) for the whole set.
   whole); a tar whose stream ends early keeps every member before the
   cut; an inner archive that cannot even be opened stays in the tree
   unexpanded and is not retried; only an archive that yields NOTHING is
-  an ArchiveError (400). Disk-full stops the expansion rather than
+  an ArchiveError (400). "Is it a zip" is not `zipfile.is_zipfile` alone:
+  from Python 3.14 that reads the central directory as well as the end
+  record, so a zip whose directory is damaged is not a zip there, and an
+  inner one was left in the tree without a word while an outer one was
+  refused as "not a zip, tar or gzip archive". `_kind` also takes a first
+  local-file header (`PK\x03\x04`) as a zip, so opening it fails and is
+  reported as damage on every Python. Disk-full stops the expansion rather than
   failing every later member. **And nothing is overwritten**: two
   members with one name, or `messages` beside `messages.gz`, used to
   leave whichever came last — the attacker-activity copy gone without a
