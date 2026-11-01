@@ -229,6 +229,20 @@ at `job/start` so the answer lands while the tab is hidden.
   a rare CI failure into roughly one run in eight, and record what each
   build and landing did in a `window` array to read back on failure.
 
+- **Two imports queued together finish in either order**, so the tables'
+  ids come out in either order too. A test that compares sorted pairs of
+  `(source_id, rid)` against a list written in name order passes only
+  when the first-named file wins (test_row_action_menu.py did, about half
+  the time): sort the expected side as well, or key it by name.
+
+- **A click that closes its own window can raise after it worked.** The
+  window can be gone before Playwright hears the click land, and it
+  reports a closed target as an error. Wrap that click in
+  `expect_event("close")`, which is the real check, and swallow only a
+  "closed" error from the click itself (`_dock` in test_popout.py;
+  `test_a_pop_out_with_no_case_open_says_so` lacked it and failed now
+  and then).
+
 - **`pytest … | tail` reports tail's exit status, not pytest's.** A
   pipeline's status is its last command's, so `pytest -q | tail -5 && git
   commit …` commits on a red suite, and a script that gates on it passes

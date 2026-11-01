@@ -161,7 +161,9 @@ def test_on_a_merge_each_row_is_posted_with_the_table_it_lives_in(page, row_menu
         _run(page, row_menu, flyout, row=0, column="Host")
         until(page, lambda: sent, "the action to be posted")
         assert sent[0]["source_id"] == merge["id"]
-        assert sorted(map(tuple, sent[0]["pairs"])) == [(ids["ra_a.csv"], 1), (ids["ra_b.csv"], 1)]
+        # Both imports run at once and either can finish first, so either
+        # table can have the lower id: sort both sides.
+        assert sorted(map(tuple, sent[0]["pairs"])) == sorted([(ids["ra_a.csv"], 1), (ids["ra_b.csv"], 1)])
     finally:
         routes = ([f"/api/merges/{abs(int(merge['id']))}"] if merge else []) + [f"/api/source/{i}" for i in ids.values()]
         for route in routes:
