@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -90,6 +91,8 @@ def main() -> int:
             server.wait(timeout=30)
         except subprocess.TimeoutExpired:
             server.kill()
+            server.wait(timeout=30)
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 if __name__ == "__main__":
