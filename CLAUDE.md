@@ -743,7 +743,10 @@ takes `# noqa: F401`, as store.py's register-into-timeparse imports do.
 **CI runs each suite in shards.** `pytest --shard K/N` (tests/sharding.py)
 keeps whole files, dealt by test count, and ci.yml runs that as a matrix —
 six browser jobs, and two backend on each of Python 3.10 (the minimum the
-README promises) and 3.12. The checks the branch ruleset requires are
+README promises), 3.12 and the newest release (3.14), plus Windows and a
+`shipped archive` job: `git archive` output, installed from
+requirements.txt alone on 3.10 and started by tests/smoke_server.py, which
+is what an analyst actually downloads. The checks the branch ruleset requires are
 the two roll-up jobs at the bottom of ci.yml, not the shards, so N can
 change without touching the ruleset. One consequence for `tests/ui`: each
 shard starts its own server, so any module can be the first thing a cold

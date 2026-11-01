@@ -38,7 +38,7 @@ jobs:
     permissions:
       contents: write   # the wiki is <repo>.wiki.git, and this is what lets the token push to it
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: repo
 
