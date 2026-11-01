@@ -19,8 +19,8 @@
 [data-md-color-scheme="default"] {
   --md-default-bg-color: #fdfbf4;          /* light --panel */
   --md-code-bg-color: #efeade;             /* light --panel-2 */
-  --md-accent-fg-color: #a8792d;           /* light --accent */
-  --md-accent-fg-color--transparent: #a8792d1a;
+  --md-accent-fg-color: #946b28;           /* light --accent */
+  --md-accent-fg-color--transparent: #946b281a;
   /* --accent-dim for text: --accent itself is under 4.5:1 on parchment. */
   --md-typeset-a-color: #8a6420;
   --md-typeset-mark-color: #f0e9d6;        /* light --sel */
