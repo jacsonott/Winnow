@@ -216,9 +216,15 @@ export function renderTagRibbon() {
    the old default. Mid-tones, like the three defaults, since each one is
    both a row stripe and chip text on dark and light skins alike. */
 export const NEW_TAG_COLORS = [
-  '#c0392b', '#d68a2e', '#5d8a66', '#8e5cc2', '#2a9d8f',
+  '#c0392b', '#b8680c', '#5d8a66', '#8e5cc2', '#2a9d8f',
   '#c94f8a', '#b8962e', '#3b7dd8', '#8a6a4f',
 ];
+
+/* Colors the palette has replaced, and the entry that replaced each. A
+   case made before the change still has its Suspicious in the old orange,
+   and counted as its own color it would leave the new orange "free": the
+   next tag added would arrive in an orange that can't be told from it. */
+const REPLACED_TAG_COLORS = { '#d68a2e': '#b8680c' };
 
 /* What Add tag (Edit tags) and + tag (the template) create, given the
    tags already in that list: the first palette colour none of them has
@@ -231,7 +237,8 @@ export const NEW_TAG_COLORS = [
    Store.upsert_tag picks a free name too (any client, two windows); this
    is what the template, which never reaches it, relies on. */
 export function newTagDefaults(existing) {
-  const colors = existing.map((t) => (t.color || '').toLowerCase());
+  const colors = existing.map((t) => (t.color || '').toLowerCase())
+    .map((c) => REPLACED_TAG_COLORS[c] || c);
   const uses = (c) => colors.filter((x) => x === c).length;
   const color = NEW_TAG_COLORS.reduce((best, c) => (uses(c) < uses(best) ? c : best));
   const keys = new Set(existing.map((t) => t.hotkey));

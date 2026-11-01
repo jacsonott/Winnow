@@ -469,6 +469,26 @@ def test_tag_template_seeds_ta_first_and_migrates_only_untouched_legacy():
     assert [t["name"] for t in WS.tags.get()] == ["Clean", "Suspicious", "TA"]
 
 
+def test_tag_template_moves_an_untouched_seed_to_the_new_orange():
+    """Suspicious's orange was #d68a2e, 2.0:1 on the light skins. A
+    template still exactly as that seed wrote it was never edited, so it
+    takes the new one; a template the analyst changed in any way keeps
+    what they chose, the old orange included."""
+    from winnow.store import DEFAULT_TAGS
+
+    old = [{"name": "TA", "color": "#c0392b", "hotkey": "1"},
+           {"name": "Suspicious", "color": "#d68a2e", "hotkey": "2"},
+           {"name": "Benign", "color": "#5d8a66", "hotkey": "3"}]
+    WS.tags._save([dict(t) for t in old])
+    assert WS.tags.as_tuples() == list(DEFAULT_TAGS)
+    assert dict((n, c) for n, c, _ in DEFAULT_TAGS)["Suspicious"] != "#d68a2e"
+
+    edited = [dict(t) for t in old]
+    edited[2]["hotkey"] = "9"
+    WS.tags._save(edited)
+    assert WS.tags.get() == edited
+
+
 def test_saved_filters_normalize_cond_root_payloads_on_read():
     """A record whose filter_tree root is a bare condition (the v1 seeds,
     or an import from one) gets group-wrapped by list() and persisted, so

@@ -148,3 +148,15 @@ def test_past_nine_a_new_tag_has_no_key_and_reuses_the_least_used_colour(page):
     assert got["eleventh"]["color"] == palette[1]
     assert got["gap"] == {"name": "New tag", "color": palette[4], "hotkey": "5"}
     assert (got["third"], got["hole"], got["cased"]) == ("New tag 3", "New tag 2", "New tag")
+
+
+def test_a_case_with_the_old_orange_is_not_handed_the_new_one(page):
+    """Suspicious was #d68a2e until the palette darkened it. A case from
+    before still has it, and counting it as a color of its own left the new
+    orange free: the next tag added came in an orange beside an orange."""
+    got = page.evaluate("""() => {
+        const P = __winnow.NEW_TAG_COLORS;
+        return { palette: P, next: __winnow.newTagDefaults(
+            [{ color: P[0] }, { color: '#D68A2E' }, { color: P[2] }]).color };
+    }""")
+    assert got["next"] == got["palette"][3]
