@@ -210,6 +210,24 @@ included) and its field filter. `test_firstlast_copy.py`: Copy result,
 including the card it waits on when the analyst has left the tab, held
 at `job/start` so the answer lands while the tab is hidden.
 
+`tests/smoke_server.py` is not a test module (no `test_` prefix, so pytest
+never collects it); CI runs it as a script. It starts `server.py --case
+--open` the way an analyst does and waits for the CSV's rows on
+`/api/sources` and for the page, `main.js` and `style.css` to be served.
+The Windows backend job runs it on the checkout; the `shipped archive` job
+runs it on `git archive` output installed from requirements.txt alone, so
+a runtime import of a dev-only package, or an app file marked
+export-ignore, fails there instead of on an analyst's machine. Run it by
+hand with `--root <unpacked archive> --python <its venv's python>`.
+`tests/nightly_upgrade.py` is the nightly workflow's other script: it
+installs the last release from its `git archive`, adds an analyst's state
+(a plugin folder, a case file, a session export, the workspace a first
+start writes), runs that install's own `update.py --from` on a zip of
+develop laid out like GitHub's, and checks every shipped file and every
+byte of that state, then does the same after `update.py --rollback`. Run it
+with `--from-ref v0.4.1` (any release tag); set `TMPDIR` to keep its
+folders out of a shared `/tmp`.
+
 ## Things that bite
 
 - A note on the lock-scope test in `test_search.py`: it asserts *structurally*
@@ -310,3 +328,10 @@ at `job/start` so the answer lands while the tab is hidden.
   returns at once and the test races what it meant to wait for.
   tests/test_ui_test_hygiene.py fails on one; poll from Python with the
   `until` fixture instead, since `page.evaluate` does await.
+- **The clipboard on Windows reads back with CRLF line ends.** The app
+  writes `\n`; Chromium on Windows stores clipboard text with `\r\n`, and
+  `navigator.clipboard.readText()` returns it that way, so a test that
+  splits a copy on `"\n"` finds a `"\r"` on every row there and nowhere
+  else. The `copied` fixture folds `\r\n` back to `\n`, so assert on
+  `clip.text` and don't read the clipboard by hand. Only the nightly's
+  Windows browser job can see this one.

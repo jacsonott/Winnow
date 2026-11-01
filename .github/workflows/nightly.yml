@@ -1,0 +1,265 @@
+# What CI doesn't run on every pull request, because it is slow, costs
+# runner minutes nobody should wait on, or only changes when the world
+# does rather than when the code does. Every night against develop:
+#
+#   backend macos     the backend suite on macOS, which analysts use and
+#                     no other job runs on.
+#   browser windows   one shard of tests/ui on Windows, a different one
+#                     each night, so the whole suite has run there every
+#                     six nights. Where analysts run the UI; CI's browser
+#                     jobs are all Linux.
+#   upgrade           an install of the latest release updated to develop
+#                     by its OWN update.py, then rolled back, with the
+#                     analyst's state checked byte for byte
+#                     (tests/nightly_upgrade.py). The pairing every
+#                     analyst's next update is.
+#   screenshots       scripts/screenshots.py's README shots, so the script
+#                     can't rot between the releases that use it. The
+#                     images are kept as an artifact; a changed image is
+#                     the UI moving, not a failure.
+#   flake hunt        tests/ui with every core kept busy, report-only: a
+#                     test that only passes on an idle runner is the kind
+#                     that later fails a required check at random.
+#
+# And on Sundays (or "Run workflow" with fresh install ticked):
+#
+#   fresh install     the shipped archive installed the way an analyst does,
+#                     with no pip cache, on Linux, Windows and macOS and on
+#                     the oldest and newest Python: requirements.txt pins
+#                     almost nothing, so an upstream release can break a
+#                     new install in a week nobody pushed a commit.
+#
+# A scheduled run that fails opens an issue, or comments on the one that is
+# already open; the flake hunt never does.
+#
+# GitHub runs scheduled workflows from the DEFAULT branch, which is main,
+# and main only moves at a release. So this file starts running on schedule
+# once a release has carried it there, and every job checks out develop
+# explicitly rather than testing main's snapshot. Until then, a pull
+# request that touches this file or the scripts it runs runs it.
+name: Nightly
+
+on:
+  schedule:
+    - cron: "23 4 * * *"   # every night
+    - cron: "47 5 * * 0"   # Sundays, with the fresh install
+  workflow_dispatch:
+    inputs:
+      fresh_install:
+        description: "Also run the fresh install on every OS"
+        type: boolean
+        default: false
+  pull_request:
+    branches: [develop]
+    paths:
+      - ".github/workflows/nightly.yml"
+      - "tests/nightly_upgrade.py"
+      - "tests/smoke_server.py"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # develop for a scheduled or manual run; a pull request tests itself.
+  REF: ${{ github.event_name == 'pull_request' && github.sha || 'develop' }}
+
+jobs:
+  macos:
+    name: backend macos
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.REF }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - run: python -c "import sqlite3, sys; print('Python', sys.version.split()[0], 'SQLite', sqlite3.sqlite_version)"
+      - run: pytest -q --ignore=tests/ui
+
+  windows-browser:
+    name: browser windows
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.REF }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - run: playwright install --only-shell chromium
+      # Day of the year, so tonight's shard is tomorrow's neighbour and a
+      # failure names a shard anyone can rerun with --shard K/6.
+      - name: pick tonight's shard
+        shell: bash
+        run: echo "SHARD=$(( 10#$(date -u +%j) % 6 + 1 ))" >> "$GITHUB_ENV"
+      - run: pytest -q tests/ui --shard ${{ env.SHARD }}/6
+        env:
+          WINNOW_UI_REQUIRE_BROWSER: "1"
+          WINNOW_UI_TRACE_DIR: test-results/traces
+      - name: upload traces of failing tests
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-ui-traces
+          path: test-results/traces/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  upgrade:
+    name: upgrade from the last release
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.REF }}
+          fetch-depth: 0   # the release tags, and the commits they name on main
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: update the last release to this tree, then roll back
+        run: |
+          last=$(git tag --list 'v*' --sort=-v:refname | head -n 1)
+          test -n "$last" || { echo "::error::no release tag to upgrade from"; exit 1; }
+          echo "upgrading $last -> $(git rev-parse --short HEAD)"
+          python tests/nightly_upgrade.py --from-ref "$last" --to-ref HEAD
+
+  screenshots:
+    name: screenshots
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.REF }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - run: playwright install --with-deps --only-shell chromium
+      - run: python scripts/screenshots.py --only grid --only value-picker --only timeline --only pivot
+      - name: say which images moved
+        run: |
+          { echo "### README screenshots"; echo
+            if git diff --quiet -- docs/screenshots; then echo "None of the README's images changed."
+            else echo "These differ from the committed ones (the artifact has the new ones):"; echo
+                 git diff --name-only -- docs/screenshots | sed 's/^/- /'; fi
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: readme-screenshots
+          path: docs/screenshots/
+          retention-days: 14
+
+  flake-hunt:
+    name: flake hunt ${{ matrix.shard }}/6
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Report-only: its failures go to the run's summary and never fail the
+    # run or open an issue. A flake is worth fixing; it is not an outage.
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.REF }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - run: playwright install --with-deps --only-shell chromium
+      # Two busy loops per core for the whole run: a wait that holds on an
+      # idle runner and not on a loaded one is waiting on time, not on the
+      # thing it should (docs/notes/testing.md, "waits that don't wait").
+      - name: tests/ui under load
+        run: |
+          for _ in $(seq $(( $(nproc) * 2 ))); do (while :; do :; done) & done
+          set +e
+          pytest -q -rf tests/ui --shard ${{ matrix.shard }}/6 | tee pytest.out
+          status=${PIPESTATUS[0]}
+          kill $(jobs -p) 2>/dev/null
+          if [ "$status" -ne 0 ]; then
+            { echo "### Flaky under load, shard ${{ matrix.shard }}/6"; echo
+              grep '^FAILED' pytest.out | sed 's/^/- /'; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$status"
+        env:
+          WINNOW_UI_REQUIRE_BROWSER: "1"
+
+  fresh-install:
+    name: fresh install ${{ matrix.os }} py${{ matrix.python }}
+    if: ${{ github.event.schedule == '47 5 * * 0' || inputs.fresh_install || github.event_name == 'pull_request' }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.10", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.REF }}
+      # No pip cache, on purpose: an analyst's machine doesn't have one.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+      # A zip unpacked by Python, not `git archive | tar`: Git for
+      # Windows' tar reads the colon in D:\a\_temp as a remote host.
+      - name: unpack the archive an analyst downloads
+        shell: bash
+        run: |
+          git archive --format=zip -o "$RUNNER_TEMP/winnow.zip" HEAD
+          python -c "import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" "$RUNNER_TEMP/winnow.zip" "$RUNNER_TEMP/winnow"
+      - name: pip install -r requirements.txt, as the README says
+        shell: bash
+        run: python -m pip install --no-cache-dir -r "$RUNNER_TEMP/winnow/requirements.txt"
+      - run: python -m pip list
+      - name: smoke - the fresh install opens a case, answers, and stops
+        shell: bash
+        run: python tests/smoke_server.py --root "$RUNNER_TEMP/winnow"
+
+  report:
+    name: open an issue
+    needs: [macos, windows-browser, upgrade, screenshots, fresh-install]
+    if: ${{ failure() && github.event_name == 'schedule' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: open one, or add to the one already open
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          title="Nightly checks are failing"
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          failed=$(echo "$NEEDS" | jq -r 'to_entries[] | select(.value.result == "failure") | "- " + .key' )
+          body=$(printf 'The nightly run on develop failed: %s\n\nJobs that failed:\n%s\n' "$run_url" "$failed")
+          open=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$open" ]; then
+            gh issue comment "$open" --repo "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+          fi
