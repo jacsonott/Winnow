@@ -165,11 +165,13 @@ doesn't have, through `window.open('')` so the window may close itself.
 `test_skin_contrast.py` takes the WCAG contrast ratio of text on its
 background in every skin and theme, resolved in the page (tokens can be
 `color-mix()` or carry alpha). `--text` is held to 4.5:1 on every surface
-a row or panel can have. The other pairs (`--dim`, a button's label on the
-accent, danger, diff and SQL colors) are held to floors today's skins
-meet, some of them below AA in light themes, so a skin can't get less
-readable without a test noticing. The accent as text and the tag colors
-are not held yet, because Phosphor light's accent is 1.3:1 on its panel.
+a row or panel can have, and so is a primary button's label in the light
+themes. The accent as text is held to 4:1 dark and 2.4:1 light (Blueprint
+light's orange sets that; Phosphor light's green was 1.3:1), and each
+default tag color to a floor on the surfaces a stripe and a chip sit on,
+Suspicious's at 3:1. The other pairs (`--dim`, danger, diff and SQL
+colors) are held to floors today's skins meet, some of them below AA in
+light themes, so a skin can't get less readable without a test noticing.
 
 `test_csv_round_trip.py` ingests a file of awkward cells, exports it over
 `/api/export` and ingests the export: everything comes back except the
