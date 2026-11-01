@@ -64,7 +64,13 @@ epoch auto-ranging boundaries, hex-vs-decimal FILETIME, the syslog year
 rollover (including across a batch boundary and Feb 29 in a non-leap
 year), offset-to-UTC conversion — plus the guarantee that every parser's
 output is accepted by `_TS_ISO_RE`/`TS_NORMALIZE`/`DAY_BUCKET`, which is
-what makes derived columns need no new regexes on either side.
+what makes derived columns need no new regexes on either side. A mutation
+pass found three gaps the happy paths left: all twelve month names are now
+read by name through every month-name shape (March, May and August could
+have said any number), the parts a value leaves out (seconds, a fraction
+shorter than six digits, a bare date for the delta reader) are read as
+zero, and `detect()` is checked against registry order with samples where
+the two disagree.
 `test_tag_undo.py` covers the undo stack, and its load-bearing test is the
 one that tags an overlapping selection and asserts the *pre-existing*
 assignments survive the undo — a naive re-send-inverted implementation
@@ -72,7 +78,16 @@ passes every other test in that file and fails only that one.
 `test_structparse.py` covers the JSON/XML path syntaxes and extraction as
 pure functions (same shape as `test_timeparse.py`), including the round-trip
 property that makes paths safe to write into a column definition, the
-EVTX `[@Name='…']` predicate form, and the DOCTYPE refusal.
+EVTX `[@Name='…']` predicate form, and the DOCTYPE refusal. Discovery's
+two caps (`MAX_WALK_DEPTH`, `MAX_PATHS`) are tested at their boundaries, and
+a raw line break inside a JSON string is tested on a document longer than
+`LOOSE_MAX_CHARS`: a short one would be read by the loose parser anyway,
+so only a long one shows `json.loads(strict=False)` doing its job.
+`test_rxguard.py` holds the catastrophic-regex guard to a corpus of
+verdicts plus a named case per fallback rule. Atomic groups and possessive
+repeats (Python 3.11+) have cases of their own, skipped below 3.11 where
+neither compiles: the guard has to look inside both, for a blow-up and for
+the first character that tells alternatives apart.
 `test_derived_extract.py` covers the store-level integration: that an
 extracted column is an ordinary derived column everywhere, that discovery
 only ever offers paths that actually extract, and that a batch is

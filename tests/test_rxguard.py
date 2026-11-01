@@ -14,6 +14,8 @@ them."""
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 import rxguard_corpus
@@ -92,3 +94,31 @@ def test_a_body_too_big_to_search_is_judged_by_shape():
     assert regex_hazard(rf"(?:(?:{keywords})\s+,)+") is None
     assert rxguard_corpus.verdict(rf"(?:(?:{keywords})[a-z ]*\s+,)+") == "ambiguous"
     assert rxguard_corpus.verdict(rf"(?:(?:{keywords})\d+\d*,)+") == "ambiguous"
+
+
+# Python 3.11 added atomic groups and possessive repeats. Neither gives
+# back what it matched, so neither can be backtracked into from outside;
+# what is inside one still can, so the guard looks through them. Below
+# 3.11 neither pattern compiles, and the guard never sees one.
+needs_atomic = pytest.mark.skipif(sys.version_info < (3, 11), reason="atomic groups and possessive repeats are 3.11+")
+
+
+@needs_atomic
+@pytest.mark.parametrize("pattern, verdict", [
+    # A blow-up inside one is still a blow-up: each attempt at the group
+    # backtracks through (a+)+ before it fails.
+    (r"(?>(a+)+b)", "splits"),
+    (r"(?:(a+)+b)*+", "splits"),
+    (r"(?>a+b)", "ok"),
+    (r"(?:a+b)*+", "ok"),
+    # Alternatives are still told apart by the character they start with,
+    # seen through an atomic group or a possessive repeat, nullable or not.
+    (r"(x)(?:(?(1)y|z)(?:(?>a)|b),)+$", "ok"),
+    (r"(x)(?:(?(1)y|z)(?:(?>a)|a),)+$", "alternatives"),
+    (r"(x)(?:(?(1)y|z)(?:a++|b),)+$", "ok"),
+    (r"(x)(?:(?(1)y|z)(?:a++|a),)+$", "alternatives"),
+    (r"(x)(?:(?(1)y|z)(?:(?>b?)a|c),)+$", "ok"),
+    (r"(x)(?:(?(1)y|z)(?:b?+a|c),)+$", "ok"),
+])
+def test_the_guard_looks_inside_atomic_groups_and_possessive_repeats(pattern, verdict):
+    assert rxguard_corpus.verdict(pattern) == verdict, regex_hazard(pattern)

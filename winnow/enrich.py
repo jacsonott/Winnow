@@ -133,6 +133,5 @@ timeparse.register_op({
     "value_type": "text",
     "derived_kind": "text",
     "family": "lookup",
-    "stateful": True,
     "hidden_from_detect": True,
 })
