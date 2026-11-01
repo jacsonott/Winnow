@@ -24,7 +24,7 @@ pytestmark = pytest.mark.ui
 TOKENS = [
     "--ink", "--panel", "--panel-2", "--panel-3",
     "--line", "--line-2", "--text", "--dim",
-    "--accent", "--accent-dim", "--accent-fg",
+    "--accent", "--accent-dim", "--accent-fg", "--accent-fill",
     "--sel", "--sel-line",
     "--row-even", "--row-hover", "--row-selected", "--cell-selected-bg",
     "--border-hairline", "--text-faint",

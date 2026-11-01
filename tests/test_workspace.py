@@ -489,6 +489,26 @@ def test_tag_template_moves_an_untouched_seed_to_the_new_orange():
     assert WS.tags.get() == edited
 
 
+def test_tag_template_moves_an_untouched_seed_to_the_new_red():
+    """TA's red was #c0392b, 2.3:1 on Jenna dark. A template still exactly
+    as the seed before it wrote it (the new orange, the old red) takes the
+    new red; one the analyst recolored keeps its color."""
+    from winnow.store import DEFAULT_TAGS
+
+    old = [{"name": "TA", "color": "#c0392b", "hotkey": "1"},
+           {"name": "Suspicious", "color": "#b8680c", "hotkey": "2"},
+           {"name": "Benign", "color": "#5d8a66", "hotkey": "3"}]
+    WS.tags._save([dict(t) for t in old])
+    assert WS.tags.as_tuples() == list(DEFAULT_TAGS)
+    assert dict((n, c) for n, c, _ in DEFAULT_TAGS)["TA"] != "#c0392b"
+
+    recolored = [dict(t) for t in old]
+    recolored[1]["color"] = "#d68a2e"
+    recolored[0]["color"] = "#c0392c"
+    WS.tags._save(recolored)
+    assert WS.tags.get() == recolored
+
+
 def test_saved_filters_normalize_cond_root_payloads_on_read():
     """A record whose filter_tree root is a bare condition (the v1 seeds,
     or an import from one) gets group-wrapped by list() and persisted, so

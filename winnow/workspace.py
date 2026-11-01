@@ -848,12 +848,18 @@ class TagTemplate:
     ]
     # Every seed DEFAULT_TAGS has written since, before the current one,
     # migrated on the same terms: TA first with the older, lighter orange
-    # (2026-08 to 2026-11).
+    # (2026-08 to 2026-11), then with the new orange and the older, darker
+    # red (2026-11).
     _EARLIER_SEEDS = [
         _LEGACY_SEED,
         [
             {"name": "TA", "color": "#c0392b", "hotkey": "1"},
             {"name": "Suspicious", "color": "#d68a2e", "hotkey": "2"},
+            {"name": "Benign", "color": "#5d8a66", "hotkey": "3"},
+        ],
+        [
+            {"name": "TA", "color": "#c0392b", "hotkey": "1"},
+            {"name": "Suspicious", "color": "#b8680c", "hotkey": "2"},
             {"name": "Benign", "color": "#5d8a66", "hotkey": "3"},
         ],
     ]

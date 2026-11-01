@@ -4,16 +4,26 @@
    Every color/shape/motion value below is a CSS custom property, resolved
    by two attributes on <html>: data-style (panel | phosphor | blueprint |
    studio) and data-theme (dark | light). app.js's appearance module sets
-   both, plus an inline --accent/--accent-fg override for the user's chosen
-   accent color (inline styles beat the attribute-selector blocks below,
-   regardless of specificity, so the user's choice always wins over a
-   style's suggested default).
+   both, plus an inline --accent/--accent-fill/--accent-fg override for the
+   user's chosen accent color (inline styles beat the attribute-selector
+   blocks below, regardless of specificity, so the user's choice always
+   wins over a style's suggested default).
 
    A light half's --accent is darker than its dark half's, on purpose. The
    accent is text in places (sort arrows, the selected tab, an active
    filter's mark) and carries --accent-fg on a primary button, and a color
    bright enough to glow on a dark panel washes out on a light one.
    tests/ui/test_skin_contrast.py measures both in every skin.
+
+   --accent is the accent as text and marks; --accent-fill is the accent as
+   a surface, under --accent-fg (a primary button, a solid tab or header, a
+   badge, a progress bar). In most skins one color does both and the fill
+   is var(--accent). Two skins need two: Blueprint light's safety orange is
+   its look as a fill under dark ink but 2.4:1 as text on parchment, so its
+   text is a burnt orange; Studio dark's lavender could not carry a white
+   label at 4.5:1 and still read at 4.5:1 as text on its panels, so its
+   fill is a step darker than its text. Anything painted UNDER --accent-fg
+   takes --accent-fill; everything else takes --accent.
 
    Token names were kept stable across this rewrite wherever app.js sets
    inline styles referencing them directly (--ink, --panel, --line, --text,
@@ -117,7 +127,7 @@ select:disabled { color: var(--text-faint); }
 html[data-style="panel"][data-theme="dark"] {
   --ink: #13161a; --panel: #191d23; --panel-2: #20252c; --panel-3: #262c34;
   --line: #2b323b; --line-2: #39424e; --text: #d6dbe2; --dim: #808b99;
-  --accent: #d2a04a; --accent-dim: #8a6c33; --accent-fg: #14181d;
+  --accent: #d2a04a; --accent-dim: #8a6c33; --accent-fg: #14181d; --accent-fill: var(--accent);
   --sel: #1f2f3d; --sel-line: #3d6180;
   --row-even: #161a1f; --row-hover: #1d232a; --row-selected: #223142; --cell-selected-bg: #2a3f52;
   --border-hairline: #1b1f24; --text-faint: #333a43;
@@ -136,7 +146,7 @@ html[data-style="panel"][data-theme="dark"] {
 html[data-style="panel"][data-theme="light"] {
   --ink: #eef0f3; --panel: #ffffff; --panel-2: #f2f4f7; --panel-3: #e7eaee;
   --line: #d8dce2; --line-2: #c3c9d1; --text: #1b222b; --dim: #667085;
-  --accent: #976c30; --accent-dim: #8a6c33; --accent-fg: #ffffff;
+  --accent: #976c30; --accent-dim: #8a6c33; --accent-fg: #ffffff; --accent-fill: var(--accent);
   --sel: #dce8f2; --sel-line: #6fa0c4;
   --row-even: #f7f8fa; --row-hover: #eef1f5; --row-selected: #d9e6f0; --cell-selected-bg: #cfe0ee;
   --border-hairline: #e1e4e9; --text-faint: #aab1bd;
@@ -157,7 +167,7 @@ html[data-style="panel"][data-theme="light"] {
 html[data-style="phosphor"][data-theme="dark"] {
   --ink: #060907; --panel: #0a100c; --panel-2: #0e1712; --panel-3: #142019;
   --line: #1c2b21; --line-2: #27402f; --text: #cdf5dc; --dim: #5f8f74;
-  --accent: #39e881; --accent-dim: #1f8a4c; --accent-fg: #05130a;
+  --accent: #39e881; --accent-dim: #1f8a4c; --accent-fg: #05130a; --accent-fill: var(--accent);
   --sel: #10241a; --sel-line: #2c5b3e;
   --row-even: #08110c; --row-hover: #0f1a13; --row-selected: #123420; --cell-selected-bg: #17462b;
   --border-hairline: #0e1712; --text-faint: #3c5b4a;
@@ -180,7 +190,7 @@ html[data-style="phosphor"][data-theme="light"] {
      label on it is light for the same reason. */
   --ink: #f3ecd8; --panel: #ede4cb; --panel-2: #e6dabb; --panel-3: #ddceaa;
   --line: #cabb92; --line-2: #b3a179; --text: #2a2110; --dim: #7a6c48;
-  --accent: #166b39; --accent-dim: #1f8a4c; --accent-fg: #fffdf5;
+  --accent: #166b39; --accent-dim: #1f8a4c; --accent-fg: #fffdf5; --accent-fill: var(--accent);
   --sel: #e6d9b0; --sel-line: #b3a179;
   --row-even: #efe7d0; --row-hover: #e9ddc0; --row-selected: #ddd0a0; --cell-selected-bg: #d4c48a;
   --border-hairline: #ddcda3; --text-faint: #a3936a;
@@ -224,7 +234,7 @@ html[data-style="phosphor"][data-theme="light"] {
 html[data-style="jenna"][data-theme="dark"] {
   --ink: #1e1e1e; --panel: #2d2d30; --panel-2: #333337; --panel-3: #3f3f46;
   --line: #3f3f46; --line-2: #54545a; --text: #d4d4d4; --dim: #969696;
-  --accent: #d7a35e; --accent-dim: #a87c42; --accent-fg: #1e1e1e;
+  --accent: #d7a35e; --accent-dim: #a87c42; --accent-fg: #1e1e1e; --accent-fill: var(--accent);
   --sel: #3f3f46; --sel-line: #54545a;
   /* Jenna defaults to no stripes (STYLES.jenna.stripes) because the skin
      it reconstructs has none. This is the colour the rows take if the
@@ -250,7 +260,7 @@ html[data-style="jenna"][data-theme="light"] {
      skin would use. The two halves should read as one theme. */
   --ink: #f1f1f1; --panel: #ffffff; --panel-2: #f3f3f3; --panel-3: #e6e6e6;
   --line: #e0e0e0; --line-2: #c4c4c4; --text: #1e1e1e; --dim: #6b6b6b;
-  --accent: #996c28; --accent-dim: #8a6124; --accent-fg: #ffffff;
+  --accent: #996c28; --accent-dim: #8a6124; --accent-fg: #ffffff; --accent-fill: var(--accent);
   --sel: #ededf0; --sel-line: #c4c4c4;
   --row-even: #f8f8f8; --row-hover: #f2f2f4; --row-selected: #e4e4e6; --cell-selected-bg: #d8d8dc;
   --border-hairline: #ededed; --text-faint: #a6a6a6;
@@ -269,7 +279,7 @@ html[data-style="jenna"][data-theme="light"] {
 html[data-style="blueprint"][data-theme="dark"] {
   --ink: #0c0d10; --panel: #131519; --panel-2: #191c22; --panel-3: #20242c;
   --line: #33383f; --line-2: #4a515b; --text: #f2f3f5; --dim: #8b93a0;
-  --accent: #ff6a1a; --accent-dim: #c9530f; --accent-fg: #16110b;
+  --accent: #ff6a1a; --accent-dim: #c9530f; --accent-fg: #16110b; --accent-fill: var(--accent);
   --sel: #23180f; --sel-line: #ff6a1a;
   --row-even: #16181d; --row-hover: #1b1e24; --row-selected: #22262d; --cell-selected-bg: #2a2e36;
   --border-hairline: #33383f; --text-faint: #565c66;
@@ -285,7 +295,7 @@ html[data-style="blueprint"][data-theme="dark"] {
 html[data-style="blueprint"][data-theme="light"] {
   --ink: #f7f5ef; --panel: #ffffff; --panel-2: #efece2; --panel-3: #e6e1d2;
   --line: #1c1c1c; --line-2: #1c1c1c; --text: #16140f; --dim: #5c584c;
-  --accent: #ff6a1a; --accent-dim: #c9530f; --accent-fg: #16110b;
+  --accent: #b3470e; --accent-dim: #c9530f; --accent-fg: #16110b; --accent-fill: #ff6a1a;
   --sel: #ffe4d1; --sel-line: #ff6a1a;
   --row-even: #f1eee4; --row-hover: #eae6d8; --row-selected: #ffdcc2; --cell-selected-bg: #ffcda3;
   --border-hairline: #1c1c1c; --text-faint: #9a9484;
@@ -342,7 +352,7 @@ html[data-style="blueprint"][data-theme="light"] {
 html[data-style="harvest"][data-theme="dark"] {
   --ink: #111111; --panel: #161616; --panel-2: #1d1d1d; --panel-3: #262626;
   --line: #2a2a2a; --line-2: #383838; --text: #c4c4c4; --dim: #8a8a8a;
-  --accent: #cfa057; --accent-dim: #8c7038; --accent-fg: #111111;
+  --accent: #cfa057; --accent-dim: #8c7038; --accent-fg: #111111; --accent-fill: var(--accent);
   /* Selection is the GRAIN, not the field: washes of the accent over the
      background, so a highlighted row reads as bronze. The neutrals stay
      in the panels, lines and dim text — putting a grey in the highlight
@@ -370,7 +380,7 @@ html[data-style="harvest"][data-theme="dark"] {
 html[data-style="harvest"][data-theme="light"] {
   --ink: #f7f4ec; --panel: #fdfbf4; --panel-2: #efeade; --panel-3: #e6e0cf;
   --line: #ded8c8; --line-2: #cbc3ad; --text: #33302a; --dim: #7d766b;
-  --accent: #946b28; --accent-dim: #8a6420; --accent-fg: #fdfbf4;
+  --accent: #946b28; --accent-dim: #8a6420; --accent-fg: #fdfbf4; --accent-fill: var(--accent);
   --sel: #f0e9d6; --sel-line: #a8792d;
   --row-even: #f9f6ee; --row-hover: #f3eee0; --row-selected: #f0e9d6; --cell-selected-bg: #e7ddc3;
   --border-hairline: #ece7d9; --text-faint: #b2a996;
@@ -385,7 +395,7 @@ html[data-style="harvest"][data-theme="light"] {
 html[data-style="studio"][data-theme="dark"] {
   --ink: #111219; --panel: #16171f; --panel-2: #1c1e28; --panel-3: #232532;
   --line: #2a2c38; --line-2: #383a4a; --text: #e7e8ee; --dim: #8b8da0;
-  --accent: #7c6cf6; --accent-dim: #5f4fd6; --accent-fg: #ffffff;
+  --accent: #8576f7; --accent-dim: #5f4fd6; --accent-fg: #ffffff; --accent-fill: #6d5bf5;
   --sel: #221f3a; --sel-line: #7c6cf6;
   --row-even: #15161d; --row-hover: #1b1c26; --row-selected: #23213a; --cell-selected-bg: #2a2748;
   --border-hairline: #23252f; --text-faint: #4a4c5c;
@@ -400,7 +410,7 @@ html[data-style="studio"][data-theme="dark"] {
 html[data-style="studio"][data-theme="light"] {
   --ink: #f6f6fb; --panel: #ffffff; --panel-2: #f0f0f7; --panel-3: #e9e9f3;
   --line: #e2e2ee; --line-2: #d1d1e2; --text: #1d1e2a; --dim: #6f7288;
-  --accent: #6d5bf5; --accent-dim: #5f4fd6; --accent-fg: #ffffff;
+  --accent: #6d5bf5; --accent-dim: #5f4fd6; --accent-fg: #ffffff; --accent-fill: var(--accent);
   --sel: #ece9fd; --sel-line: #7c6cf6;
   --row-even: #f9f9fc; --row-hover: #f2f1fa; --row-selected: #e7e3fc; --cell-selected-bg: #ddd7fb;
   --border-hairline: #ececf5; --text-faint: #b6b8c8;
@@ -486,7 +496,7 @@ html[data-stripes="off"][data-style][data-theme] { --row-even: var(--ink); }
   height: 3px; margin-top: 6px; border-radius: 2px; overflow: hidden;
   background: var(--line-2);
 }
-.job-bar-fill { height: 100%; background: var(--accent); transition: width .3s var(--ease); }
+.job-bar-fill { height: 100%; background: var(--accent-fill); transition: width .3s var(--ease); }
 .job-bar.indeterminate .job-bar-fill {
   width: 40%;
   animation: job-slide 1.2s var(--ease) infinite;
@@ -503,7 +513,7 @@ html[data-stripes="off"][data-style][data-theme] { --row-even: var(--ink); }
   background: var(--accent-dim); color: var(--text); border: var(--border-w) solid var(--accent);
   border-radius: var(--radius-sm); padding: 3px 9px; font: inherit; font-size: 11px; cursor: pointer;
 }
-.job-action:hover { background: var(--accent); }
+.job-action:hover { background: var(--accent-fill); }
 
 /* The panel's Clear all header. Sticky at the top of the scroller, and
    opaque, because the panel itself has no background — a transparent
@@ -532,7 +542,7 @@ html[data-stripes="off"][data-style][data-theme] { --row-even: var(--ink); }
   border-radius: var(--radius-sm); padding: 3px 9px; font: inherit; font-size: 11px;
   cursor: pointer;
 }
-.jobs-clear-btn:hover { background: var(--accent); }
+.jobs-clear-btn:hover { background: var(--accent-fill); }
 
 #app {
   height: 100%;
@@ -632,7 +642,7 @@ input::placeholder { text-overflow: ellipsis; }
 .brand:hover { color: var(--text); }
 #brandLabel { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mark {
-  width: 3px; height: 15px; background: var(--accent);
+  width: 3px; height: 15px; background: var(--accent-fill);
   box-shadow: 6px 0 0 -1px var(--accent-dim), 12px 0 0 -2px var(--line-2);
 }
 
@@ -675,7 +685,7 @@ input::placeholder { text-overflow: ellipsis; }
   background: var(--line-2);
   transition: background var(--transition-fast) var(--ease);
 }
-.tab-split:hover::after, .tab-split.dragging::after { background: var(--accent); }
+.tab-split:hover::after, .tab-split.dragging::after { background: var(--accent-fill); }
 .tab {
   display: flex; align-items: center; gap: 8px;
   padding: 0 14px; border: 0; border-right: 1px solid var(--line);
@@ -951,7 +961,7 @@ section.page-with-panels { flex-direction: row; }
    the number has the expanded strip, which is now the default. */
 .pages-news-dot {
   flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%;
-  background: var(--accent); margin-left: 2px;
+  background: var(--accent-fill); margin-left: 2px;
 }
 
 .search-wrap { position: relative; display: flex; align-items: center; }
@@ -2120,7 +2130,7 @@ textarea:focus { border-color: var(--accent); outline: none; }
    last times after; "fold" on the first line of a run opened again. */
 .timeline-row .tl-col-body > .tl-fold {
   flex: 0 0 auto; font: 600 10.5px var(--mono); line-height: 16px; padding: 0 6px; border-radius: 9px;
-  cursor: pointer; color: var(--accent-fg); background: var(--accent); border: 0; overflow: visible;
+  cursor: pointer; color: var(--accent-fg); background: var(--accent-fill); border: 0; overflow: visible;
 }
 .timeline-row .tl-col-body > .tl-fold:hover { filter: brightness(1.1); }
 .timeline-row .tl-col-body > .tl-fold.open {
@@ -2255,7 +2265,7 @@ textarea:focus { border-color: var(--accent); outline: none; }
 /* Its place in the Body, filled so it reads on the tinted chip in every skin. */
 .tlc-ord {
   font-weight: 600; font-size: 10px; line-height: 1.4; min-width: 1.5em; text-align: center; padding: 0 3px;
-  border-radius: 8px; background: var(--accent); color: var(--accent-fg); font-variant-numeric: tabular-nums;
+  border-radius: 8px; background: var(--accent-fill); color: var(--accent-fg); font-variant-numeric: tabular-nums;
 }
 .tlc-prev { display: grid; gap: 6px; }
 .tlc-prev-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
@@ -2501,8 +2511,8 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .dp-day:hover { background: var(--panel-2); }
 .dp-day.other { color: var(--dim); opacity: .45; }
 .dp-day.today { box-shadow: inset 0 0 0 1px var(--accent-dim); }
-.dp-day.selected { background: var(--accent); color: var(--accent-fg); font-weight: 600; }
-.dp-day.selected:hover { background: var(--accent); }
+.dp-day.selected { background: var(--accent-fill); color: var(--accent-fg); font-weight: 600; }
+.dp-day.selected:hover { background: var(--accent-fill); }
 .dp-foot { display: flex; gap: 6px; margin-top: 8px; align-items: center; }
 .dp-time { flex: 0 0 auto; width: 74px; background: var(--ink); color: var(--text);
   border: 1px solid var(--line-2); border-radius: var(--radius-sm);
@@ -2561,7 +2571,7 @@ textarea:focus { border-color: var(--accent); outline: none; }
    lateral builders' accent fill (.btn.mb-create) without their spacing,
    so every dialog marks its main action the same way and Cancel beside it
    stays plain. One per dialog — two accent buttons is no main action. */
-.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); font-weight: 600; }
+.btn.primary { background: var(--accent-fill); border-color: var(--accent-fill); color: var(--accent-fg); font-weight: 600; }
 .btn.primary:disabled { background: var(--panel-3); border-color: var(--line-2); color: var(--dim); cursor: not-allowed; }
 .modal-head {
   display: flex; align-items: center; justify-content: space-between;
@@ -3216,7 +3226,7 @@ textarea:focus { border-color: var(--accent); outline: none; }
   background: var(--accent-dim); color: var(--text); border: var(--border-w) solid var(--accent);
   border-radius: var(--radius-sm); padding: 3px 9px; font: inherit; font-size: 11px; cursor: pointer;
 }
-.toast-action:hover { background: var(--accent); }
+.toast-action:hover { background: var(--accent-fill); }
 
 /* Add/re-derive datetime column modal (openDerivedColumnModal). */
 .derived-row { display: flex; align-items: center; gap: 10px; margin: 8px 0; }
@@ -3850,7 +3860,7 @@ button.tables-num:hover { text-decoration: underline; color: var(--text); }
 }
 .stack-fill {
   flex: 0 0 auto; height: min(64%, 26px); min-width: 2px;
-  background: var(--accent); opacity: .78; border-radius: 0 2px 2px 0;
+  background: var(--accent-fill); opacity: .78; border-radius: 0 2px 2px 0;
 }
 .stack-row:hover .stack-fill, .stack-bar-btn:focus-visible .stack-fill { opacity: 1; }
 .stack-count { flex: 0 0 auto; margin-left: 7px; font-family: var(--mono); font-size: 11px; color: var(--text); white-space: nowrap; }
@@ -3935,7 +3945,7 @@ html[data-style="phosphor"] .row.selected { box-shadow: inset 3px 0 0 var(--acce
    hairline rule, never a glow or an offset shadow — the flatness is the
    half of the resemblance that is not colour. */
 html[data-style="jenna"] .tab[aria-selected="true"] {
-  background: var(--accent); color: var(--accent-fg); border-color: var(--accent);
+  background: var(--accent-fill); color: var(--accent-fg); border-color: var(--accent-fill);
 }
 html[data-style="jenna"] .btn:hover { background: var(--panel-3); }
 html[data-style="jenna"] .row.selected { box-shadow: inset 2px 0 0 var(--accent); }
@@ -3999,11 +4009,11 @@ html[data-style="blueprint"] .btn:active, html[data-style="blueprint"] .tag-chip
    Saved filters it was a column of offset boxes, one per filter. */
 html[data-style="blueprint"] .btn.row-more:not(:hover):not([aria-expanded="true"]) { box-shadow: none; }
 html[data-style="blueprint"] .tab[aria-selected="true"] {
-  background: var(--accent); color: var(--accent-fg); box-shadow: 1px 1px 0 var(--shadow-hard-c); transform: translate(1px,1px);
+  background: var(--accent-fill); color: var(--accent-fg); box-shadow: 1px 1px 0 var(--shadow-hard-c); transform: translate(1px,1px);
 }
 html[data-style="blueprint"] .row.selected { box-shadow: inset 5px 0 0 0 var(--accent); }
 html[data-style="blueprint"] .detail-head, html[data-style="blueprint"] .sql-head, html[data-style="blueprint"] .modal-head {
-  background: var(--accent); color: var(--accent-fg); text-transform: uppercase; font-weight: 700;
+  background: var(--accent-fill); color: var(--accent-fg); text-transform: uppercase; font-weight: 700;
 }
 /* Blueprint sets its headers as solid accent bars, which is right for the
    two that are labels — but the SQL pane's is a sentence with `code` in
@@ -4419,7 +4429,7 @@ html.remote .row.selected:hover { background: var(--row-selected); }
   color: var(--dim); font-size: 11px; }
 .wl-count { flex: 0 0 auto; min-width: 2.2em; text-align: center; color: var(--dim);
   font-family: var(--mono); font-size: 11px; padding: 1px 5px; border-radius: 8px; }
-.wl-count.hot { color: var(--bg); background: var(--accent); font-weight: 600; }
+.wl-count.hot { color: var(--bg); background: var(--accent-fill); font-weight: 600; }
 .wl-count.scanning { color: var(--dim); letter-spacing: .1em; }
 /* The count cell when the answer is a state, not a number. "0" said both
    "read every table, it isn't here" and "nothing has looked yet"; those
@@ -4514,7 +4524,7 @@ html.remote .row.selected:hover { background: var(--row-selected); }
    gets .pages-news-dot instead. */
 .tab-badge {
   display: inline-block; min-width: 16px; padding: 0 5px; margin-left: 6px;
-  border-radius: 9px; background: var(--accent); color: var(--accent-fg);
+  border-radius: 9px; background: var(--accent-fill); color: var(--accent-fg);
   font: 600 10px var(--mono); line-height: 16px; text-align: center; vertical-align: middle;
 }
 .menu-item .tab-badge { margin-left: 8px; }
@@ -4538,7 +4548,7 @@ html.remote .row.selected:hover { background: var(--row-selected); }
 .dash-live-note { display: inline-flex; align-items: center; gap: 5px; font-size: 11px;
   color: var(--dim); white-space: nowrap; }
 .dash-dot, .dash-live-dot { width: 6px; height: 6px; border-radius: 50%;
-  background: var(--accent); display: inline-block; flex: 0 0 auto; }
+  background: var(--accent-fill); display: inline-block; flex: 0 0 auto; }
 .dash-mark { margin: 0 4px 8px; font: 9px var(--mono); color: var(--dim); flex: 0 0 auto; }
 .dash-mark.stale { color: var(--danger); }
 /* The last re-run of this card did not come back. The number it is
@@ -4997,7 +5007,7 @@ html.remote .row.selected:hover { background: var(--row-selected); }
 }
 .mb-field input:focus { border-color: var(--accent); outline: none; }
 .mb-hint { font-size: 12px; color: var(--danger); min-height: 1em; }
-.btn.mb-create { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); font-weight: 600; padding: 6px 14px; margin-bottom: 1.2em; }
+.btn.mb-create { background: var(--accent-fill); border-color: var(--accent-fill); color: var(--accent-fg); font-weight: 600; padding: 6px 14px; margin-bottom: 1.2em; }
 .btn.mb-create:disabled { background: var(--panel-3); border-color: var(--line-2); color: var(--dim); cursor: not-allowed; }
 .mb-check { display: flex; gap: 8px; align-items: center; font-size: 12px; color: var(--dim); grid-column: 1 / -1; }
 .mb-check b { color: var(--text); font-weight: 500; }

@@ -165,13 +165,17 @@ doesn't have, through `window.open('')` so the window may close itself.
 `test_skin_contrast.py` takes the WCAG contrast ratio of text on its
 background in every skin and theme, resolved in the page (tokens can be
 `color-mix()` or carry alpha). `--text` is held to 4.5:1 on every surface
-a row or panel can have, and so is a primary button's label in the light
-themes. The accent as text is held to 4:1 dark and 2.4:1 light (Blueprint
-light's orange sets that; Phosphor light's green was 1.3:1), and each
-default tag color to a floor on the surfaces a stripe and a chip sit on,
-Suspicious's at 3:1. The other pairs (`--dim`, danger, diff and SQL
-colors) are held to floors today's skins meet, some of them below AA in
-light themes, so a skin can't get less readable without a test noticing.
+a row or panel can have, and so is a filled accent's label (`--accent-fg`
+on `--accent-fill`) in every skin. The accent as text is held to 4.5:1
+dark and 3.9:1 light (Blueprint light's orange was 2.4:1 and Phosphor
+light's green 1.3:1), and each default tag color to a floor on the
+surfaces a stripe and a chip sit on, TA's and Suspicious's at 3:1. The
+other pairs (`--dim`, a pressed toggle's label on `--accent-dim`, danger,
+diff and SQL colors) are held to floors today's skins meet, some of them
+below AA, so a skin can't get less readable without a test noticing. One
+check there reads `style.css` instead of the page: no rule paints a solid
+`--accent` background, since a label on it would sit on a color the
+ratios never measure in the two skins whose fill is not their text color.
 
 `test_csv_round_trip.py` ingests a file of awkward cells, exports it over
 `/api/export` and ingests the export: everything comes back except the

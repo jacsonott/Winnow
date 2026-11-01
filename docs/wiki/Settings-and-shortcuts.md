@@ -62,10 +62,14 @@ or dark setting and switches when it does. Dark is the default.
 
 ### Accent color
 
-Six preset swatches and a custom colour picker. Until you pick one, each
-skin uses its own accent, with a separate shade for its light theme. Once you
-pick a colour yourself, it stays when you change skin; Settings has no button
-to go back to the skin's own accent.
+Six preset swatches and a custom color picker. Until you pick one, each
+skin uses its own accent, with a separate shade for its light theme. Two of
+them also use one shade for buttons and other filled shapes and another for
+text in the accent: Blueprint's light theme keeps its bright orange buttons
+with burnt-orange text, and Studio's dark theme has a deeper purple under
+white button labels than in its text. Once you pick a color yourself, it is
+used for both, and it stays when you change skin; Settings has no button to
+go back to the skin's own accent.
 
 ### Row density and striped rows
 

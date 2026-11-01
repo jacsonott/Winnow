@@ -216,15 +216,16 @@ export function renderTagRibbon() {
    the old default. Mid-tones, like the three defaults, since each one is
    both a row stripe and chip text on dark and light skins alike. */
 export const NEW_TAG_COLORS = [
-  '#c0392b', '#b8680c', '#5d8a66', '#8e5cc2', '#2a9d8f',
+  '#dc4837', '#b8680c', '#5d8a66', '#8e5cc2', '#2a9d8f',
   '#c94f8a', '#b8962e', '#3b7dd8', '#8a6a4f',
 ];
 
 /* Colors the palette has replaced, and the entry that replaced each. A
-   case made before the change still has its Suspicious in the old orange,
-   and counted as its own color it would leave the new orange "free": the
-   next tag added would arrive in an orange that can't be told from it. */
-const REPLACED_TAG_COLORS = { '#d68a2e': '#b8680c' };
+   case made before the change still has its Suspicious in the old orange
+   (or its TA in the old red), and counted as its own color it would leave
+   the new one "free": the next tag added would arrive in an orange that
+   can't be told from it. */
+const REPLACED_TAG_COLORS = { '#d68a2e': '#b8680c', '#c0392b': '#dc4837' };
 
 /* What Add tag (Edit tags) and + tag (the template) create, given the
    tags already in that list: the first palette colour none of them has
