@@ -116,9 +116,11 @@ def test_a_second_add_settles_the_first_scans_row_and_leaves_none_running(page):
     server widened the new job to its scope) or, had it already finished,
     as done — rather than staying a running row whose Cancel reaches a job
     the server no longer has. The polls are held so the first scan cannot
-    land on its own before the second Add; the first start's answer is
+    land on its own before the second Add, and BOTH starts' answers are
     read as still running so the two scans overlap on the client whatever
-    the server's timing."""
+    the server's timing. The start answers with a snapshot taken after the
+    scan's thread is started, and on a loaded runner a scan of 40 rows can
+    finish first: the second answer said done, and no row was running."""
     _clear_watchlist(page)
     page.locator("#tabWatchlist").click()
     page.wait_for_selector("#watchlistview:not([hidden])")
@@ -131,7 +133,7 @@ def test_a_second_add_settles_the_first_scans_row_and_leaves_none_running(page):
         body["status"] = "running"
         route.fulfill(response=resp, json=body)
 
-    page.route(START, still_running, times=1)
+    page.route(START, still_running, times=2)
     try:
         page.locator("#wlValue").fill("H1")
         page.locator("#wlAdd").click()
