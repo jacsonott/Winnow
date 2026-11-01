@@ -150,7 +150,25 @@ see [docs/notes/README.md](README.md) for the whole set.
   colors they were made with; the template migrates only an untouched
   seed (`TagTemplate._EARLIER_SEEDS`), and `newTagDefaults` counts the old
   orange as the new one, or the next tag added arrived in an orange beside
-  an orange. `tests/ui/test_skin_contrast.py` holds both.
+  an orange. TA's old `#c0392b` was 2.3:1 on Jenna dark's panels, the
+  lightest dark ones; `#dc4837` is 3:1 everywhere and migrates the same way.
+  `tests/ui/test_skin_contrast.py` holds both.
+
+- **`--accent` is the accent as text; `--accent-fill` is the accent as a
+  surface under `--accent-fg`.** One color can't always do both. Blueprint
+  light's safety orange is the skin's look as a button, under dark ink at
+  6.6:1, but 2.4:1 as text on its parchment; Studio dark's lavender needs
+  to be lighter than white-at-4.5:1 allows to read at 4.5:1 as text on its
+  panels. So those two skins carry a fill of their own (Blueprint light
+  keeps `#ff6a1a`, its text is `#b3470e`; Studio dark's fill is `#6d5bf5`,
+  its text `#8576f7`), and every other skin sets `--accent-fill:
+  var(--accent)`. The rule for new CSS: a solid background in the accent
+  is `--accent-fill`, and so is the border that goes with it; text, marks,
+  rules and `color-mix()` tints stay on `--accent`. A custom accent
+  (`paintAccent`) writes both, so a split skin doesn't keep its own fill
+  under the analyst's color. JavaScript that reads `--accent` to draw
+  (charts, the histogram, the splash) gets the text tone, which is the one
+  that reads on the panels it draws on.
 
 - The **timeframe filter** (`S.timeRange`, `static/js/timeframe.js`, `time_range` on
   `ViewSpec`, compiled in `_compile_where` via the registered SQL function
