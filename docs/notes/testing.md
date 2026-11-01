@@ -243,6 +243,14 @@ at `job/start` so the answer lands while the tab is hidden.
   `test_a_pop_out_with_no_case_open_says_so` lacked it and failed now
   and then).
 
+- **Home shows the case list it already has, then refreshes it.** The
+  Home button paints the rows from the last fetch at once and replaces
+  them when `/api/cases` answers, so rows are on screen before they are
+  current. Waiting for `.home-row` waits for the old ones. Wait on
+  `__winnow.S.cases` saying what the test needs (the case just left is
+  `open`) before opening a row's menu (test_home_screen.py's delete test
+  missed that note on a loaded runner).
+
 - **`pytest … | tail` reports tail's exit status, not pytest's.** A
   pipeline's status is its last command's, so `pytest -q | tail -5 && git
   commit …` commits on a red suite, and a script that gates on it passes

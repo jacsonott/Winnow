@@ -291,7 +291,11 @@ def test_the_case_just_left_can_be_deleted_from_the_list(own_page, tmp_path):
             row("Left behind").locator(".home-name").click()
             pg.wait_for_selector("#app:not([hidden])")
             pg.click("#btnHome")
-            pg.wait_for_selector("#home:not([hidden]) .home-row")
+            # Home paints the list it already has, from before the case was
+            # opened, and the refresh that knows it is open lands after. A
+            # menu opened on the old row asks without the note below (the
+            # flake hunt's loaded runner got there first).
+            pg.wait_for_function("() => __winnow.S.cases.some((c) => c.name === 'Left behind' && c.open)")
 
             row("Left behind").locator(".tables-more").click()
             pg.locator(".menu .menu-item", has_text="Delete case file…").click()
