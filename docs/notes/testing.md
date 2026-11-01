@@ -251,6 +251,13 @@ at `job/start` so the answer lands while the tab is hidden.
   `open`) before opening a row's menu (test_home_screen.py's delete test
   missed that note on a loaded runner).
 
+- **A job's start answer can already say it is done.** The watchlist
+  scan's start route starts the worker thread and then snapshots the job,
+  so on a busy machine a small scan finishes in between and the answer
+  reads `done`. A test that needs a scan still running when the answer
+  lands rewrites the status on every start it relies on, not only the
+  first (test_watchlist_immediate_add.py's second Add).
+
 - **`pytest … | tail` reports tail's exit status, not pytest's.** A
   pipeline's status is its last command's, so `pytest -q | tail -5 && git
   commit …` commits on a red suite, and a script that gates on it passes
