@@ -1210,6 +1210,23 @@ see [docs/notes/README.md](README.md) for the whole set.
   `fold_leftover_wal` when the home screen lists the case — through a
   read-write connection's own last close, never by deleting files: a
   `-wal` can hold the only copy of committed rows.
+- **Never flock a file SQLite opens.** The views database and the SQL
+  pane's scratch file each carry a lock that tells `sweep_orphan_views`
+  their owner is alive, and it sits on a `-lock` sidecar beside the
+  database (`claim_views_file`), never on the database. On macOS, flock()
+  and the fcntl() locks SQLite takes share one lock table, and two locks
+  taken through different open files conflict even inside one process:
+  with the flock on the database, SQLite's own first lock on it failed,
+  `ATTACH ... AS v` raised "database is locked", and no case opened on a
+  Mac at all, from August 2026 until the nightly's macOS fresh install
+  found it on its first run. Linux keeps flock and fcntl apart, so every
+  Linux test passed throughout; tests/test_maintenance.py can only check
+  where the lock sits, and the macOS run of the backend suite is what
+  checks that it works. The sidecar is made and locked before the
+  database exists, so a sweep never finds a database without its lock;
+  the sweep still probes the database itself when there is no sidecar,
+  which is a file from a Winnow before this. The case's own "in use"
+  marker (`_CaseLock`) was always a separate file, for its own reasons.
 - **compact's sizes are `main + -wal` on both sides, measured before any
   checkpoint**, which is what makes `reclaimed_bytes` honest without
   depending on a checkpoint succeeding. A checkpoint that can't complete

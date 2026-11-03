@@ -29,7 +29,11 @@ than re-testing logic the `Store`-level tests already cover directly.
 else only ever grows: the auto-created column indexes (listing/dropping),
 `compact()`, and `sweep_orphan_views()` — whose load-bearing test is that a
 *live* Store's views database survives a sweep, since that's the assumption
-that makes deleting another process's file safe at all. `test_ingest_jobs.py` covers the
+that makes deleting another process's file safe at all. Beside it, the
+test that the lock is on the `-lock` sidecar and not the database: on
+macOS a flock on the database stopped every case opening, which no Linux
+run can reproduce, so on Linux the test can only check where the lock
+sits (docs/notes/store.md). `test_ingest_jobs.py` covers the
 background ingest jobs (lifecycle, byte-progress, the queued-cancel path,
 cancel-drops-the-partial-source — driven through `ingest_csv`'s own
 `cancel` hook so the cancellation point is deterministic, not a race —
@@ -64,7 +68,13 @@ epoch auto-ranging boundaries, hex-vs-decimal FILETIME, the syslog year
 rollover (including across a batch boundary and Feb 29 in a non-leap
 year), offset-to-UTC conversion — plus the guarantee that every parser's
 output is accepted by `_TS_ISO_RE`/`TS_NORMALIZE`/`DAY_BUCKET`, which is
-what makes derived columns need no new regexes on either side.
+what makes derived columns need no new regexes on either side. A mutation
+pass found three gaps the happy paths left: all twelve month names are now
+read by name through every month-name shape (March, May and August could
+have said any number), the parts a value leaves out (seconds, a fraction
+shorter than six digits, a bare date for the delta reader) are read as
+zero, and `detect()` is checked against registry order with samples where
+the two disagree.
 `test_tag_undo.py` covers the undo stack, and its load-bearing test is the
 one that tags an overlapping selection and asserts the *pre-existing*
 assignments survive the undo — a naive re-send-inverted implementation
@@ -72,7 +82,16 @@ passes every other test in that file and fails only that one.
 `test_structparse.py` covers the JSON/XML path syntaxes and extraction as
 pure functions (same shape as `test_timeparse.py`), including the round-trip
 property that makes paths safe to write into a column definition, the
-EVTX `[@Name='…']` predicate form, and the DOCTYPE refusal.
+EVTX `[@Name='…']` predicate form, and the DOCTYPE refusal. Discovery's
+two caps (`MAX_WALK_DEPTH`, `MAX_PATHS`) are tested at their boundaries, and
+a raw line break inside a JSON string is tested on a document longer than
+`LOOSE_MAX_CHARS`: a short one would be read by the loose parser anyway,
+so only a long one shows `json.loads(strict=False)` doing its job.
+`test_rxguard.py` holds the catastrophic-regex guard to a corpus of
+verdicts plus a named case per fallback rule. Atomic groups and possessive
+repeats (Python 3.11+) have cases of their own, skipped below 3.11 where
+neither compiles: the guard has to look inside both, for a blow-up and for
+the first character that tells alternatives apart.
 `test_derived_extract.py` covers the store-level integration: that an
 extracted column is an ordinary derived column everywhere, that discovery
 only ever offers paths that actually extract, and that a batch is
@@ -165,13 +184,17 @@ doesn't have, through `window.open('')` so the window may close itself.
 `test_skin_contrast.py` takes the WCAG contrast ratio of text on its
 background in every skin and theme, resolved in the page (tokens can be
 `color-mix()` or carry alpha). `--text` is held to 4.5:1 on every surface
-a row or panel can have, and so is a primary button's label in the light
-themes. The accent as text is held to 4:1 dark and 2.4:1 light (Blueprint
-light's orange sets that; Phosphor light's green was 1.3:1), and each
-default tag color to a floor on the surfaces a stripe and a chip sit on,
-Suspicious's at 3:1. The other pairs (`--dim`, danger, diff and SQL
-colors) are held to floors today's skins meet, some of them below AA in
-light themes, so a skin can't get less readable without a test noticing.
+a row or panel can have, and so is a filled accent's label (`--accent-fg`
+on `--accent-fill`) in every skin. The accent as text is held to 4.5:1
+dark and 3.9:1 light (Blueprint light's orange was 2.4:1 and Phosphor
+light's green 1.3:1), and each default tag color to a floor on the
+surfaces a stripe and a chip sit on, TA's and Suspicious's at 3:1. The
+other pairs (`--dim`, a pressed toggle's label on `--accent-dim`, danger,
+diff and SQL colors) are held to floors today's skins meet, some of them
+below AA, so a skin can't get less readable without a test noticing. One
+check there reads `style.css` instead of the page: no rule paints a solid
+`--accent` background, since a label on it would sit on a color the
+ratios never measure in the two skins whose fill is not their text color.
 
 `test_csv_round_trip.py` ingests a file of awkward cells, exports it over
 `/api/export` and ingests the export: everything comes back except the
@@ -246,6 +269,35 @@ folders out of a shared `/tmp`.
   busy (`python3 -c "while True: pass" &`, one per core), which turned
   a rare CI failure into roughly one run in eight, and record what each
   build and landing did in a `window` array to read back on failure.
+
+- **Two imports queued together finish in either order**, so the tables'
+  ids come out in either order too. A test that compares sorted pairs of
+  `(source_id, rid)` against a list written in name order passes only
+  when the first-named file wins (test_row_action_menu.py did, about half
+  the time): sort the expected side as well, or key it by name.
+
+- **A click that closes its own window can raise after it worked.** The
+  window can be gone before Playwright hears the click land, and it
+  reports a closed target as an error. Wrap that click in
+  `expect_event("close")`, which is the real check, and swallow only a
+  "closed" error from the click itself (`_dock` in test_popout.py;
+  `test_a_pop_out_with_no_case_open_says_so` lacked it and failed now
+  and then).
+
+- **Home shows the case list it already has, then refreshes it.** The
+  Home button paints the rows from the last fetch at once and replaces
+  them when `/api/cases` answers, so rows are on screen before they are
+  current. Waiting for `.home-row` waits for the old ones. Wait on
+  `__winnow.S.cases` saying what the test needs (the case just left is
+  `open`) before opening a row's menu (test_home_screen.py's delete test
+  missed that note on a loaded runner).
+
+- **A job's start answer can already say it is done.** The watchlist
+  scan's start route starts the worker thread and then snapshots the job,
+  so on a busy machine a small scan finishes in between and the answer
+  reads `done`. A test that needs a scan still running when the answer
+  lands rewrites the status on every start it relies on, not only the
+  first (test_watchlist_immediate_add.py's second Add).
 
 - **`pytest … | tail` reports tail's exit status, not pytest's.** A
   pipeline's status is its last command's, so `pytest -q | tail -5 && git

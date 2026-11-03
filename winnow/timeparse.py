@@ -273,7 +273,6 @@ def register_op(op: dict) -> None:
         pair = op["parse_pair"]
         op["parse_multi"] = lambda vals, params, state: pair(vals[0], vals[1], params)
     op["multi_input"] = op["parse_multi"] is not None
-    op.setdefault("stateful", False)
     op.setdefault("value_type", "datetime")
     op.setdefault("hidden_from_detect", False)
     op.setdefault("params", [])
@@ -557,7 +556,6 @@ register_op({
         "name": "unit", "label": "Unit", "type": "select",
         "options": ["auto", "s", "ms", "us", "ns"], "default": "auto",
     }],
-    "subsecond": True,
     "parse": _parse_unix,
 })
 
@@ -607,7 +605,6 @@ register_op({
     "id": "windows_filetime",
     "label": "Windows FILETIME",
     "description": "100-nanosecond ticks since 1601-01-01 UTC ($MFT, registry, AD attributes). Accepts decimal, 0x-prefixed hex, or bare hex containing a letter.",
-    "subsecond": True,
     "parse": _parse_filetime,
 })
 
@@ -643,7 +640,6 @@ register_op({
     "id": "webkit_epoch",
     "label": "WebKit/Chrome epoch",
     "description": "Microseconds since 1601-01-01 UTC — Chromium History/Cookies/Downloads timestamps.",
-    "subsecond": True,
     "parse": _parse_webkit,
 })
 
@@ -694,8 +690,6 @@ register_op({
          "required": True, "min": 1970, "max": 2100, "detect_default": "current_year"},
         _UTC_OFFSET_PARAM,
     ],
-    "subsecond": False,
-    "stateful": True,
     "parse": _parse_syslog,
 })
 
@@ -733,7 +727,6 @@ register_op({
     "label": "ISO 8601",
     "description": "YYYY-MM-DDThh:mm:ss with optional fraction (. or ,) and offset. Z/UTC/±HH:MM/±HH values are converted to UTC; values without an offset are kept as written; a zone that can't be converted (EST, Europe/Paris) doesn't parse.",
     "params": [_UTC_OFFSET_PARAM],
-    "subsecond": True,
     "parse": _parse_iso,
 })
 
@@ -763,7 +756,6 @@ register_op({
     "label": "dd Mmm yyyy hh:mm:ss",
     "description": "e.g. \"05 Jan 2024 13:22:01\" (also 5-Jan-2024). English month abbreviations. A trailing offset (+0200, GMT) is converted to UTC.",
     "params": [_UTC_OFFSET_PARAM],
-    "subsecond": False,
     "parse": _parse_dd_mmm,
 })
 
@@ -797,7 +789,6 @@ register_op({
     "description": "e.g. \"Jul 28th 2026 01:02:22\" or \"July 28, 2026 1:02 PM\". English month names, abbreviated or in full; "
                    "the day may carry 1st/2nd/3rd/th. Optional AM/PM. A trailing offset (+0200, UTC) is converted to UTC.",
     "params": [_UTC_OFFSET_PARAM],
-    "subsecond": True,
     "parse": _parse_mmm_dd,
 })
 
@@ -823,7 +814,6 @@ register_op({
     "label": "Compact YYYYMMDDhhmmss",
     "description": "14-digit run-together timestamps (e.g. 20240105132201), common in tool exports and filenames.",
     "params": [_UTC_OFFSET_PARAM],
-    "subsecond": False,
     "parse": _parse_compact,
 })
 
@@ -874,7 +864,6 @@ register_op({
     "id": "mac_absolute",
     "label": "Mac absolute (Cocoa) time",
     "description": "Seconds since 2001-01-01 UTC (macOS/iOS plists, sqlite stores); negative for dates before 2001. Overlaps the unix-seconds range — check the preview to pick the right one.",
-    "subsecond": True,
     "parse": _parse_mac,
     "detect": _success_rate_detect({"parse": _parse_mac_for_detect}),
 })
@@ -915,7 +904,6 @@ register_op({
     "label": "Excel serial date",
     "description": "Days since 1899-12-30, fraction of a day = time of day (spreadsheet exports).",
     "params": [_UTC_OFFSET_PARAM],
-    "subsecond": False,
     "parse": _parse_excel,
     "detect": _success_rate_detect({"parse": _parse_excel_for_detect}),
 })
@@ -939,7 +927,6 @@ register_op({
     "id": "dotnet_ticks",
     "label": ".NET ticks",
     "description": "100-nanosecond ticks since 0001-01-01 (DateTime.Ticks, some log frameworks). Overlaps the nanosecond-epoch range — check the preview.",
-    "subsecond": True,
     "parse": _parse_dotnet,
 })
 
@@ -974,7 +961,6 @@ register_op({
     "label": "Apache access log",
     "description": "dd/Mmm/yyyy:hh:mm:ss +zzzz (Common Log Format, with or without the surrounding brackets). Offset-bearing values are converted to UTC.",
     "params": [_UTC_OFFSET_PARAM],
-    "subsecond": False,
     "parse": _parse_clf,
 })
 
@@ -1103,7 +1089,6 @@ register_op({
     "description": "Mon, 02 Jan 2006 15:04:05 -0700 (email headers, HTTP dates). Offset-bearing values are converted to UTC; "
                    "a zone abbreviation RFC 2822 does not define (CET, IST, …) is a parse failure, not a guess.",
     "params": [_UTC_OFFSET_PARAM],
-    "subsecond": False,
     "parse": _parse_rfc2822,
 })
 
@@ -1133,7 +1118,6 @@ register_op({
     "label": "US MM/DD/YYYY hh:mm:ss",
     "description": "US-style dates with optional AM/PM (Timeline Explorer / EZTools exports). A trailing offset (-0500, UTC) is converted to UTC.",
     "params": [_UTC_OFFSET_PARAM],
-    "subsecond": False,
     "parse": _parse_us,
 })
 
@@ -1189,7 +1173,6 @@ register_op({
         "name": "other_column", "label": "Subtract column", "type": "column", "required": True,
         "help": "The start time; the derived value is this column's time minus that column's.",
     }],
-    "subsecond": True,
     "value_type": "number",
     "derived_kind": "duration",
     "hidden_from_detect": True,

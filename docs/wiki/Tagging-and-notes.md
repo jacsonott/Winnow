@@ -16,7 +16,7 @@ They come from the default tag template, which you edit under **⚙ Settings →
 
 A case that has no tags at all when it is opened gets the template again, so deleting every tag does not leave a case permanently tagless.
 
-Each tag has one color in every skin, so the three are mid-tones that read on dark and light panels alike. The orange is deeper than it used to be, because the old one was hard to see on the light skins. A case made with the old orange keeps it; to change it, pick a new color for **Suspicious** in **Edit tags**. A default tag template you never changed moves to the new orange by itself, and one you changed keeps what you chose.
+Each tag has one color in every skin, so the three are mid-tones that read on dark and light panels alike. The orange is deeper than it used to be, because the old one was hard to see on the light skins, and the red is a step lighter, because the old one was hard to see on Jenna's dark theme. A case made with an old color keeps it; to change it, pick a new color for the tag in **Edit tags**. A default tag template you never changed moves to the new colors by itself, and one you changed keeps what you chose.
 
 ## Editing tags
 

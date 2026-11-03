@@ -9,25 +9,32 @@ what it comes to), lays a translucent background over the page's --ink the
 way it is painted, and takes the WCAG contrast ratio.
 
 Body text (--text, on every surface a row or panel can have) is held to
-WCAG AA's 4.5:1, which every skin meets with room to spare. So is a primary
-button's label (--accent-fg on --accent) in the light themes, which were
-3.3 to 3.9:1 until their accents were darkened a step. The accent as text
-(sort arrows, the selected tab, an active filter's mark) is held to 4:1 in
-the dark themes and 2.4:1 in the light ones: Phosphor light's was 1.3:1
-before its green was changed, and Blueprint light's orange, which nobody
-has decided about yet, is what sets the 2.4. The other pairs are held to
-where the skins are today, some below AA in light themes: --dim's
-secondary text, danger, diff and SQL-highlight colors. Those floors stop a
-skin getting worse; raising them is a palette change, not a test change.
+WCAG AA's 4.5:1, which every skin meets with room to spare. So is a filled
+accent's label (--accent-fg on --accent-fill), in every skin: the light
+themes were 3.3 to 3.9:1 until their accents were darkened a step, and
+Studio dark's white on lavender was 3.9:1 until its fill was split from its
+text. The accent as text (sort arrows, the selected tab, an active filter's
+mark) is held to 4.5:1 in the dark themes and 3.9:1 in the light ones:
+Phosphor light's was 1.3:1 before its green was changed, and Blueprint
+light's 2.4:1 before its text became a burnt orange beside its
+safety-orange fill. The other pairs are held to where the skins are today,
+some below AA: --dim's secondary text, a pressed toggle's label
+(--accent-fg on --accent-dim, 3.6:1 in Panel dark), danger, diff and
+SQL-highlight colors. Those floors stop a skin getting worse; raising them
+is a palette change, not a test change.
 
 The default tags are measured too, because one color serves every skin, as
 a row stripe and as a pressed tag chip's text: it has to sit between the
-darkest panel and the lightest. Suspicious is held to 3:1 everywhere, the
-most one color can manage on both (its old orange was 2.0:1 on the light
-skins); TA and Benign to where they are today.
+darkest panel and the lightest. TA and Suspicious are held to 3:1
+everywhere, the most one color can manage on both (TA's old red was 2.3:1
+on Jenna dark, Suspicious's old orange 2.0:1 on the light skins); Benign
+to where it is today.
 """
 
 from __future__ import annotations
+
+import re
+from pathlib import Path
 
 import pytest
 
@@ -45,8 +52,9 @@ BODY_SURFACES = ["--ink", "--panel", "--panel-2", "--panel-3", "--row-even", "--
 PAIRS = (
     [("--text", bg, None, AA_TEXT) for bg in BODY_SURFACES]
     + [("--dim", bg, None, 3.5) for bg in ("--ink", "--panel", "--panel-2")]
-    + [("--accent", bg, None, {"dark": 4.0, "light": 2.4}) for bg in ("--ink", "--panel", "--panel-2")]
-    + [("--accent-fg", "--accent", None, {"dark": 3.0, "light": AA_TEXT}),
+    + [("--accent", bg, None, {"dark": AA_TEXT, "light": 3.9}) for bg in ("--ink", "--panel", "--panel-2")]
+    + [("--accent-fg", "--accent-fill", None, AA_TEXT),
+       ("--accent-fg", "--accent-dim", None, 3.6),
        ("--danger", "--danger-bg", "--panel", 3.0),
        ("--diff-a", "--diff-a-bg", "--panel", 3.0),
        ("--diff-b", "--diff-b-bg", "--panel", 3.0),
@@ -58,7 +66,7 @@ PAIRS = (
 
 # A tag's color is a literal, the same in every skin. Each default tag's
 # floor, on the surfaces a stripe and a chip sit on.
-TAG_FLOORS = {"TA": 2.3, "Suspicious": 3.0, "Benign": 2.8}
+TAG_FLOORS = {"TA": 3.0, "Suspicious": 3.0, "Benign": 2.8}
 TAG_SURFACES = ["--ink", "--panel", "--panel-2", "--row-even"]
 TAG_PAIRS = tuple((color, bg, None, TAG_FLOORS[name]) for name, color, _ in DEFAULT_TAGS for bg in TAG_SURFACES)
 
@@ -130,3 +138,20 @@ def test_the_measure_tells_light_from_dark(page, skins):
         page.evaluate("() => { const s = document.documentElement.style;"
                       " s.removeProperty('--zz-a'); s.removeProperty('--zz-b'); }")
     assert round(same, 2) == 1.0 and round(full, 1) == 21.0
+
+
+STYLE_CSS = Path(__file__).resolve().parents[2] / "static" / "style.css"
+
+
+def test_solid_accent_fills_take_the_fill_token():
+    """--accent-fg is measured against --accent-fill, and in the two skins
+    that split them (Blueprint light, Studio dark) plain --accent is a
+    different color. A rule that paints a solid --accent background would
+    put the label on a color nothing here measures: Blueprint light's
+    burnt-orange text tone under dark ink is 3.4:1, where the fill it
+    should be on is 6.6:1. Tints (color-mix of the accent) carry --text
+    and are not fills."""
+    css = re.sub(r"/\*.*?\*/", "", STYLE_CSS.read_text(encoding="utf-8"), flags=re.S)
+    solid = re.compile(r"background(?:-color)?\s*:\s*var\(--accent\)\s*(?:;|!|$)")
+    wrong = [sel.strip() for sel, body in re.findall(r"([^{}]+)\{([^{}]*)\}", css) if solid.search(body)]
+    assert not wrong, wrong

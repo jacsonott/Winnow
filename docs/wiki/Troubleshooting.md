@@ -23,6 +23,16 @@ python -m pip install -r requirements.txt
 
 See [Installation](Installation.md) for the requirements.
 
+### "database is locked" as soon as a case opens (macOS)
+
+On a Mac, Winnow 0.4.1 and every release before it stop the moment a case
+opens, with a traceback ending in `sqlite3.OperationalError: database is
+locked`, even when nothing else has the case open. Those versions locked
+their own scratch file in a way that macOS, unlike Linux and Windows,
+also holds against SQLite. The release after 0.4.1 fixes it. Update with
+`python update.py`, which works without the server running (see
+[Updating](Installation.md#updating)).
+
 ### "Port 8777 is in use … so this one is on 8778"
 
 Not an error. Another Winnow (or another program) already has port 8777,
@@ -375,7 +385,8 @@ Winnow keeps backups of the last three versions it replaced, in
 
 While a case is open, Winnow keeps its views in a scratch file named
 `winnow-views-…` in `/dev/shm` on Linux, or the system temp folder
-elsewhere. A clean shutdown deletes it. After a crash or a forced kill it
+elsewhere, with a `-lock` file beside it that says the file is in use. A
+clean shutdown deletes both. After a crash or a forced kill it
 stays behind, and the next Winnow to start deletes it, printing `Cleaned
 up N orphaned temp file(s) from previous runs`. A file belonging to a
 Winnow that is still running is never touched.

@@ -246,14 +246,21 @@ function announceAppearance() {
 
    So the inline value is written only when the analyst picked a colour
    themselves. Otherwise the skin's own per-theme accent is left to win,
-   which is what those values are for. */
+   which is what those values are for.
+
+   A picked colour is the fill as well as the text (--accent-fill), so the
+   two skins that split them (Blueprint light, Studio dark; see style.css's
+   header) don't keep their own fill under the analyst's colour, and
+   contrastFg's label is measured against the colour it sits on. */
 export function paintAccent() {
   const root = document.documentElement;
   if (S.appearance.accentCustomized) {
     root.style.setProperty('--accent', S.appearance.accent);
+    root.style.setProperty('--accent-fill', S.appearance.accent);
     root.style.setProperty('--accent-fg', contrastFg(S.appearance.accent));
   } else {
     root.style.removeProperty('--accent');
+    root.style.removeProperty('--accent-fill');
     root.style.removeProperty('--accent-fg');
   }
   announceAppearance();
