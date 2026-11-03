@@ -241,8 +241,15 @@ def test_a_pop_out_with_no_case_open_says_so(page, server):
     pg, errors = _bare_pop_out(page, server, "timeline", route=no_case)
     assert pg.locator(".popout-card-title").inner_text() == "Winnow has no case open"
     assert pg.locator("#home").is_hidden()
+    # The button closes the window it is in, which can happen before
+    # Playwright hears the click land (see _dock): that error is the click
+    # having worked, and expect_event is what checks the window closed.
     with pg.expect_event("close"):
-        pg.locator(".popout-card .btn", has_text="Close this window").click()
+        try:
+            pg.locator(".popout-card .btn", has_text="Close this window").click()
+        except PlaywrightError as e:
+            if "closed" not in str(e):
+                raise
     assert not errors, "uncaught JS errors in the pop-out: " + " | ".join(errors)
 
 
