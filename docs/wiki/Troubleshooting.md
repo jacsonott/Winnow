@@ -29,7 +29,7 @@ On a Mac, Winnow 0.4.1 and every release before it stop the moment a case
 opens, with a traceback ending in `sqlite3.OperationalError: database is
 locked`, even when nothing else has the case open. Those versions locked
 their own scratch file in a way that macOS, unlike Linux and Windows,
-also holds against SQLite. The release after 0.4.1 fixes it. Update with
+also holds against SQLite. Winnow 0.4.2 fixes it. Update with
 `python update.py`, which works without the server running (see
 [Updating](Installation.md#updating)).
 
