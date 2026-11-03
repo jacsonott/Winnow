@@ -2443,6 +2443,8 @@ class _JobRegistry:
 VIEWS_PREFIX = "winnow-views-"
 VIEWS_SUFFIX = ".db"
 VIEWS_DB_SUFFIXES = ("", "-wal", "-shm")  # the three files a WAL database is
+# Beside each one, the file its owner's lock is on (claim_views_file).
+VIEWS_LOCK_SUFFIX = "-lock"
 
 
 def _preferred_views_dir() -> str | None:
@@ -2472,10 +2474,73 @@ def _views_dirs() -> list[str]:
     return dirs
 
 
+def claim_views_file(prefix: str = VIEWS_PREFIX, directory: str | None = None) -> tuple[str, int | None]:
+    """Name a new scratch database and take the lock that says it is in
+    use. Returns `(path, fd)`: the database's path, not yet opened, and the
+    descriptor that holds the lock for as long as it stays open (None when
+    the filesystem would not lock it). release_views_file undoes it.
+
+    The lock is on a sidecar, `<path>-lock`, never on the database itself.
+    On macOS, flock() and the fcntl() locks SQLite takes share one lock
+    table, and locks taken through two different open files conflict even
+    inside one process. With the flock on the database, SQLite's own first
+    lock on it failed, `ATTACH` answered "database is locked", and no case
+    opened on a Mac at all. Linux keeps the two kinds apart, which is why
+    nothing but a macOS run could see it (the nightly's fresh install did,
+    on its first run). The sidecar is made and locked BEFORE the database
+    exists, so a sweep can never find the database without its lock.
+
+    On Windows there is no flock, and the descriptor is kept open anyway:
+    Windows will not delete a file a process has open, which gives the
+    sweep the same answer."""
+    lock_suffix = VIEWS_SUFFIX + VIEWS_LOCK_SUFFIX
+    while True:
+        fd, lock = tempfile.mkstemp(prefix=prefix, suffix=lock_suffix, dir=directory)
+        held: int | None = fd
+        if fcntl is not None:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                # A filesystem without flock. The sweep's probe fails there
+                # the same way and keeps the file, so the degraded mode is
+                # "never swept", not "swept while in use".
+                os.close(fd)
+                held = None
+        path = lock[: -len(VIEWS_LOCK_SUFFIX)]
+        try:
+            os.close(os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600))
+        except FileExistsError:
+            # mkstemp vouched for the sidecar's name, not the database's.
+            release_views_file(None, held, lock_path=lock)
+            continue
+        except BaseException:
+            release_views_file(None, held, lock_path=lock)
+            raise
+        return path, held
+
+
+def release_views_file(path: str | None, fd: int | None, *, lock_path: str | None = None) -> None:
+    """Undo claim_views_file, never raising. The lock goes first, so a
+    file that cannot be removed (Windows, while a reader still has it open)
+    is left unlocked for the next start's sweep, then the database's files,
+    then the sidecar."""
+    if fd is not None:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+    paths = [path + suffix for suffix in VIEWS_DB_SUFFIXES + (VIEWS_LOCK_SUFFIX,)] if path else []
+    if lock_path:  # a sidecar whose database was never made
+        paths.append(lock_path)
+    for p in paths:
+        with contextlib.suppress(OSError):
+            os.remove(p)
+
+
 def _views_file_is_orphaned(path: str) -> bool:
-    """Whether no live Store still owns `path`. Every Store holds an
-    exclusive flock on its own views file for its entire life
-    (Store.__init__), so a file this can lock has no owner left.
+    """Whether no live Store still owns the views file whose lock is
+    `path`: its `-lock` sidecar, or for a file from before the sidecar
+    (claim_views_file), the database itself. A Store holds an exclusive
+    flock on that for its entire life, so a file this can lock has no
+    owner left.
 
     Fail-safe in both directions, which is what makes it usable against a
     file another process might be mid-query on: an unreadable candidate, or
@@ -2525,13 +2590,16 @@ def sweep_orphan_views() -> dict:
         except OSError:
             continue  # tempdir unreadable or gone — nothing to sweep, not an error
         for name in entries:
-            # -wal/-shm are removed with the .db they belong to, below.
+            # -wal/-shm/-lock are removed with the .db they belong to, below.
             if not (name.startswith(VIEWS_PREFIX) and name.endswith(VIEWS_SUFFIX)):
                 continue
             base = os.path.join(d, name)
-            if not _views_file_is_orphaned(base):
+            # The lock is on the sidecar. A .db without one was made by a
+            # Winnow from before it, which locked the database itself.
+            lock = base + VIEWS_LOCK_SUFFIX
+            if not _views_file_is_orphaned(lock if os.path.exists(lock) else base):
                 continue
-            for suffix in VIEWS_DB_SUFFIXES:
+            for suffix in VIEWS_DB_SUFFIXES + (VIEWS_LOCK_SUFFIX,):
                 path = base + suffix
                 try:
                     size = os.path.getsize(path)
@@ -2544,13 +2612,24 @@ def sweep_orphan_views() -> dict:
                 removed += 1
                 bytes_freed += size
         for name in entries:
-            # A -wal/-shm whose .db is already gone. Only a dead owner can
-            # leave that shape (close() removes the .db first, and a live
-            # Store always has its .db), so there's nothing to probe.
-            if not name.startswith(VIEWS_PREFIX) or not name.endswith(("-wal", "-shm")):
+            if not name.startswith(VIEWS_PREFIX):
                 continue
             path = os.path.join(d, name)
-            if os.path.exists(path[:-4]):  # both suffixes are 4 chars
+            if name.endswith(("-wal", "-shm")):
+                # A -wal/-shm whose .db is already gone. Only a dead owner
+                # can leave that shape (close() removes the .db first, and
+                # a live Store has its .db before either exists), so
+                # there's nothing to probe.
+                if os.path.exists(path[:-4]):  # both suffixes are 4 chars
+                    continue
+            elif name.endswith(VIEWS_SUFFIX + VIEWS_LOCK_SUFFIX):
+                # A lock whose .db is gone: a close() that couldn't remove
+                # it, or an owner killed between making the two. A live
+                # Store passes through that shape too, for the moment
+                # between them, so this one is probed.
+                if os.path.exists(path[: -len(VIEWS_LOCK_SUFFIX)]) or not _views_file_is_orphaned(path):
+                    continue
+            else:
                 continue
             try:
                 size = os.path.getsize(path)
@@ -2988,15 +3067,10 @@ class Store:
                     conn.close()
             with contextlib.suppress(sqlite3.Error):
                 db.close()
-        if getattr(self, "_views_fd", None) is not None:
-            with contextlib.suppress(OSError):
-                os.close(self._views_fd)
-            self._views_fd = None
         views = getattr(self, "_views_path", None)
         if views:
-            for suffix in VIEWS_DB_SUFFIXES:
-                with contextlib.suppress(OSError):
-                    os.remove(views + suffix)
+            release_views_file(views, getattr(self, "_views_fd", None))
+            self._views_fd = None
         lock = getattr(self, "_case_lock", None)
         if lock is not None:
             lock.release()
@@ -3040,27 +3114,18 @@ class Store:
         # documents why OFF is off-limits. On macOS/Windows there's no
         # tmpfs path, so the tempdir file leans on synchronous=OFF plus the
         # OS page cache alone.
-        fd, self._views_path = tempfile.mkstemp(
-            suffix=VIEWS_SUFFIX, prefix=VIEWS_PREFIX, dir=_preferred_views_dir()
-        )
-        # The mkstemp fd is kept open and flocked for this Store's whole
-        # life rather than closed straight away: it's the liveness signal
-        # sweep_orphan_views() probes, so the startup janitor in a *second*
-        # Winnow process can tell this file apart from one a killed process
-        # abandoned. If the lock can't be taken (a filesystem without flock;
-        # Windows, where fcntl doesn't exist at all) the fd is just closed —
-        # the sweep's own probe fails the same way and errs toward keeping
-        # the file, so the degraded mode is "not swept", never "swept while
-        # in use". See _views_file_is_orphaned.
+        # The lock taken with it is held for this Store's whole life: it's
+        # the liveness signal sweep_orphan_views() probes, so the startup
+        # janitor in a *second* Winnow process can tell this file apart
+        # from one a killed process abandoned. It sits on a `-lock` sidecar,
+        # never on the database: on macOS a flock on the database blocks
+        # SQLite's own locks on it (claim_views_file has the story). If
+        # the lock can't be taken (a filesystem without flock) the sweep's
+        # probe fails the same way and errs toward keeping the file, so the
+        # degraded mode is "not swept", never "swept while in use". See
+        # _views_file_is_orphaned.
         self._views_fd: int | None = None
-        if fcntl is not None:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                self._views_fd = fd
-            except OSError:
-                os.close(fd)
-        else:  # pragma: no cover - Windows
-            os.close(fd)
+        self._views_path, self._views_fd = claim_views_file(directory=_preferred_views_dir())
         # Bound, not pasted in: the tempdir is the analyst's profile on
         # Windows, and C:\Users\O'Brien\... would end the string literal.
         self.db.execute("ATTACH DATABASE ? AS v", (self._views_path,))
@@ -4430,23 +4495,17 @@ class Store:
                     with contextlib.suppress(sqlite3.Error):
                         self._checkpoint_truncate(0, folded_is_enough=True)
             self.db.close()
-        # Release the flock (see __init__) before unlinking, so that if the
-        # remove below is the one that fails, what's left behind is an
-        # unlocked file the next process's sweep_orphan_views can collect.
-        if self._views_fd is not None:
-            with contextlib.suppress(OSError):
-                os.close(self._views_fd)
-            self._views_fd = None
+        # release_views_file lets go of the lock (see _construct) before
+        # unlinking, so that if a remove is the one that fails, what's left
+        # behind is an unlocked file the next process's sweep_orphan_views
+        # can collect.
         # A reader still checked out by an in-flight request holds the
         # unlinked file open — fine on POSIX (the pages stay readable until
         # its close), and on Windows the remove just fails and is skipped,
         # leaving a stray temp file rather than an error. Either way it's no
         # longer permanent: the sweep at the next server start takes it.
-        for suffix in VIEWS_DB_SUFFIXES:
-            try:
-                os.remove(self._views_path + suffix)
-            except OSError:
-                pass
+        release_views_file(self._views_path, self._views_fd)
+        self._views_fd = None
         self._case_lock.release()
         self.closed = True
         return folded

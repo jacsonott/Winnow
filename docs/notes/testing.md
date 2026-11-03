@@ -29,7 +29,11 @@ than re-testing logic the `Store`-level tests already cover directly.
 else only ever grows: the auto-created column indexes (listing/dropping),
 `compact()`, and `sweep_orphan_views()` — whose load-bearing test is that a
 *live* Store's views database survives a sweep, since that's the assumption
-that makes deleting another process's file safe at all. `test_ingest_jobs.py` covers the
+that makes deleting another process's file safe at all. Beside it, the
+test that the lock is on the `-lock` sidecar and not the database: on
+macOS a flock on the database stopped every case opening, which no Linux
+run can reproduce, so on Linux the test can only check where the lock
+sits (docs/notes/store.md). `test_ingest_jobs.py` covers the
 background ingest jobs (lifecycle, byte-progress, the queued-cancel path,
 cancel-drops-the-partial-source — driven through `ingest_csv`'s own
 `cancel` hook so the cancellation point is deterministic, not a race —
