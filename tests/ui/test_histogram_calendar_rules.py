@@ -34,6 +34,13 @@ def _epoch(d: datetime.datetime) -> int:
     return int(d.replace(tzinfo=UTC).timestamp())
 
 
+def _utc(t: float) -> datetime.datetime:
+    """fromtimestamp(t, UTC), by arithmetic. Windows' fromtimestamp raises
+    OSError for a time before 1970, and this file charts across the epoch
+    on purpose (the nightly's Windows run found it)."""
+    return datetime.datetime(1970, 1, 1, tzinfo=UTC) + datetime.timedelta(seconds=t)
+
+
 @contextlib.contextmanager
 def _charted(page, server_post, tmp_path, name, stamps):
     """A table of one When column holding `stamps`, open, with the
@@ -134,7 +141,7 @@ def test_weeks_are_marked_once_the_bars_are_a_day(page, server_post, tmp_path):
         assert page.evaluate("() => __winnow.histogramData().bucket_seconds") == DAY
         rules = page.evaluate("() => __winnow.histogramRules()")
         assert rules["unit"] == "week", rules
-        when = [datetime.datetime.fromtimestamp(t, UTC) for t in rules["times"]]
+        when = [_utc(t) for t in rules["times"]]
         assert all(d.weekday() == 0 and d.time() == datetime.time(0) for d in when), when
         assert when[0].date() == datetime.date(2026, 1, 12), when
         assert all(b - a == datetime.timedelta(days=7) for a, b in zip(when, when[1:])), when
@@ -143,7 +150,7 @@ def test_weeks_are_marked_once_the_bars_are_a_day(page, server_post, tmp_path):
         assert rules["labels"], rules
         for label in rules["labels"]:
             assert label["t"] in rules["times"], rules
-            assert label["text"] == f"{datetime.datetime.fromtimestamp(label['t'], UTC):%Y-%m-%d}", rules
+            assert label["text"] == f"{_utc(label['t']):%Y-%m-%d}", rules
 
 
 def test_the_scale_decides_day_week_or_nothing(page):
@@ -171,6 +178,6 @@ def test_the_scale_decides_day_week_or_nothing(page):
     assert days["unit"] == "day" and days["times"][0] == _epoch(datetime.datetime(1969, 12, 21)), days
     assert 0 in days["times"], days
     weeks = rules(t0, t1, DAY, 2)
-    assert [datetime.datetime.fromtimestamp(t, UTC).date() for t in weeks["times"]] == [
+    assert [_utc(t).date() for t in weeks["times"]] == [
         datetime.date(1969, 12, 22), datetime.date(1969, 12, 29), datetime.date(1970, 1, 5),
         datetime.date(1970, 1, 12), datetime.date(1970, 1, 19)], weeks
