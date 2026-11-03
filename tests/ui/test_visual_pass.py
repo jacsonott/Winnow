@@ -65,6 +65,45 @@ def test_toolbar_buttons_never_fold_into_two_lines(page):
         page.keyboard.press("Escape")
 
 
+_TOOLBAR_SEARCH = """(sel) => {
+  const bar = document.getElementById('toolbar'), cs = getComputedStyle(bar);
+  const b = bar.getBoundingClientRect(), r = (e) => e.getBoundingClientRect();
+  const search = [...document.querySelectorAll(sel)].filter((e) => !e.hidden).map(r);
+  return {
+    left: b.left + parseFloat(cs.paddingLeft), right: b.right - parseFloat(cs.paddingRight),
+    strip: r(document.getElementById('groupStrip')),
+    search: search.map((s) => ({ left: s.left, right: s.right, top: s.top })),
+  };
+}"""
+
+
+def test_the_search_keeps_to_the_right_edge_when_the_toolbar_wraps(page):
+    """Narrowing the window wraps the toolbar, and the search — its last
+    item — used to start the new line at the LEFT edge: it jumped from one
+    side of the toolbar to the other. It keeps to the right edge now, the
+    box and its Contains/Regex/Advanced moving down together, and the group
+    strip keeps to the left. Swept rather than at one width, since where
+    the toolbar wraps depends on the case's tags and the tables open."""
+    wrapped = []
+    for state in ("icon", "box"):
+        if state == "box":
+            page.keyboard.press("/")
+            page.wait_for_selector("#searchWrap:not([hidden])")
+        sel = "#btnSearchToggle" if state == "icon" else "#searchWrap, #searchModeToggle"
+        for width in range(1500, 760, -40):
+            page.set_viewport_size({"width": width, "height": 700})
+            page.wait_for_timeout(60)
+            m = page.evaluate(_TOOLBAR_SEARCH, sel)
+            last = m["search"][-1]
+            assert abs(last["right"] - m["right"]) <= 1, (state, width, m)
+            assert abs(m["strip"]["left"] - m["left"]) <= 1, (state, width, m)
+            if state == "box" and m["right"] - m["left"] >= m["search"][1]["right"] - m["search"][0]["left"]:
+                assert abs(m["search"][0]["top"] - m["search"][1]["top"]) <= 2, ("box and modes split", width, m)
+            if last["top"] > m["strip"]["bottom"]:
+                wrapped.append((state, width))
+    assert {s for s, _ in wrapped} == {"icon", "box"}, f"the search never wrapped: {wrapped}"
+
+
 def test_sql_run_button_shares_the_row_with_the_others(page):
     page.locator("#tabSql").click()
     page.wait_for_selector("#sqlview:not([hidden])")

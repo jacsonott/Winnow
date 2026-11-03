@@ -29,7 +29,11 @@ than re-testing logic the `Store`-level tests already cover directly.
 else only ever grows: the auto-created column indexes (listing/dropping),
 `compact()`, and `sweep_orphan_views()` — whose load-bearing test is that a
 *live* Store's views database survives a sweep, since that's the assumption
-that makes deleting another process's file safe at all. `test_ingest_jobs.py` covers the
+that makes deleting another process's file safe at all. Beside it, the
+test that the lock is on the `-lock` sidecar and not the database: on
+macOS a flock on the database stopped every case opening, which no Linux
+run can reproduce, so on Linux the test can only check where the lock
+sits (docs/notes/store.md). `test_ingest_jobs.py` covers the
 background ingest jobs (lifecycle, byte-progress, the queued-cancel path,
 cancel-drops-the-partial-source — driven through `ingest_csv`'s own
 `cancel` hook so the cancellation point is deterministic, not a race —
@@ -64,7 +68,13 @@ epoch auto-ranging boundaries, hex-vs-decimal FILETIME, the syslog year
 rollover (including across a batch boundary and Feb 29 in a non-leap
 year), offset-to-UTC conversion — plus the guarantee that every parser's
 output is accepted by `_TS_ISO_RE`/`TS_NORMALIZE`/`DAY_BUCKET`, which is
-what makes derived columns need no new regexes on either side.
+what makes derived columns need no new regexes on either side. A mutation
+pass found three gaps the happy paths left: all twelve month names are now
+read by name through every month-name shape (March, May and August could
+have said any number), the parts a value leaves out (seconds, a fraction
+shorter than six digits, a bare date for the delta reader) are read as
+zero, and `detect()` is checked against registry order with samples where
+the two disagree.
 `test_tag_undo.py` covers the undo stack, and its load-bearing test is the
 one that tags an overlapping selection and asserts the *pre-existing*
 assignments survive the undo — a naive re-send-inverted implementation
@@ -72,12 +82,48 @@ passes every other test in that file and fails only that one.
 `test_structparse.py` covers the JSON/XML path syntaxes and extraction as
 pure functions (same shape as `test_timeparse.py`), including the round-trip
 property that makes paths safe to write into a column definition, the
-EVTX `[@Name='…']` predicate form, and the DOCTYPE refusal.
+EVTX `[@Name='…']` predicate form, and the DOCTYPE refusal. Discovery's
+two caps (`MAX_WALK_DEPTH`, `MAX_PATHS`) are tested at their boundaries, and
+a raw line break inside a JSON string is tested on a document longer than
+`LOOSE_MAX_CHARS`: a short one would be read by the loose parser anyway,
+so only a long one shows `json.loads(strict=False)` doing its job.
+`test_rxguard.py` holds the catastrophic-regex guard to a corpus of
+verdicts plus a named case per fallback rule. Atomic groups and possessive
+repeats (Python 3.11+) have cases of their own, skipped below 3.11 where
+neither compiles: the guard has to look inside both, for a blow-up and for
+the first character that tells alternatives apart.
 `test_derived_extract.py` covers the store-level integration: that an
 extracted column is an ordinary derived column everywhere, that discovery
 only ever offers paths that actually extract, and that a batch is
 all-or-nothing (a name collision in the fifth spec must not leave four
 columns behind).
+`test_ingest_contracts.py` holds every reader (CSV, text, JSON, IIS,
+key=value, XLSX, Plaso, SQLite) to the three promises ingest_csv set,
+since each carries its own copy of the code that keeps them: every row
+lands in order across batches (BATCH is shrunk so a 30-row fixture spans
+five), a cancel leaves no table, and a failure raised from the reader
+part-way keeps what was read, says how many, and leaves no empty table
+when nothing was. Adding a reader means adding it to `READERS` there.
+`test_group_export.py` holds the export of an expanded small group (its
+own code path, `group_virtual`) to the rows the grid pages for it and,
+byte for byte, to the same rows exported through a filter or a
+materialised group. `test_merge_advanced_search.py` is Advanced search's
+merge case (invariant 9), with members indexed, not, and mixed.
+`test_wiki_shortcuts.py` holds the shortcut table in
+docs/wiki/Settings-and-shortcuts.md to keymap.js's `DEFAULT_KEYMAP` and
+`ACTION_LABELS`, read with esprima, so a relabelled action or a new
+default key fails the backend job instead of leaving the manual
+describing an older build (the table menu's label had drifted when it
+was added). The same file holds the page's Fixed keys tables to
+`FIXED_KEYS`, group by group and row by row, matched on the keys each row
+names: Settings had been missing the Timeline's R / r, which the manual
+already listed. `test_wiki_skins.py` does the same for the skin table, the
+order and each description against settings.js's `STYLES` (the manual
+had added "The default." to Harvest's card text). `test_updater.py` drives `update.py` itself as well as
+updater.py: `--from` then `--rollback` as an analyst types them, the
+answers to a refused or unusable archive, and `download()`'s promise
+that a cut-off or Ctrl+C'd download leaves nothing at the target that
+`--from` could later apply.
 `test_derived.py` covers the column lifecycle and, more importantly, the
 integration choices that are easy to reverse by accident: the
 virtual-root EXPLAIN plan (invariant #2), that derived values are *not*
@@ -85,6 +131,125 @@ searchable, that merge eligibility is unaffected, and both cancel
 semantics (driven through the backfill's own cancel hook, so the
 cancellation point is deterministic rather than a race — same technique
 as `test_ingest_jobs.py`).
+`test_esxi_log_shapes.py` covers the esxi_logs plugin's parser one line
+shape at a time (ESXi 5.x to 8.x hostd, vmkernel, vobd, shell, rhttpproxy,
+Linux RFC 3164, RFC 3339 and RFC 5424), its iisread-style column rules (the
+union of Originator keys, a key that names a fixed column suffixed,
+columns only where a file has them), that its canonical timestamps sort in
+time order, and the file handling it shares with iisread (NUL gaps, a `\r`
+that can't forge a row, Windows-1252, a live file). Its load-bearing test
+puts every combination of stamp, header and body it knows through both
+the fast-path regexes and `_parse_line_slow` and requires one answer: the
+fast paths are only a speed-up if they never disagree, and a disagreement
+shows up nowhere else. `test_esxi_log_scan.py` covers the same plugin's
+folder scan, continuation folding and syslog year.
+`test_site_palette.py` holds the Pages site and Harvest to the same
+colors: every value docs/site/assets/site.css copies from a Harvest token
+(the ones commented `/* dark --panel */` and so on) must still equal that
+token in static/style.css, and Harvest dark's greys must have no hue. The
+site took the green cast out of Harvest's greys before the app did, and
+the two drifted apart until the app read as green next to its own
+website.
+`test_plugin_registration_errors.py` gives each refusal in
+register_ingest_format, register_tab, register_row_action and
+register_toolbar_panel the plugin that earns it, and checks the exact
+message Settings → Plugins shows. Each plugin registers one of every kind
+first, so every case also proves the rollback: a register() that fails
+keeps nothing. `test_case_open_failure.py` opens a case that will not open
+while another is open. The open case must stay open and answer, and the
+failed Store must give back its case lock, heartbeat thread, connection
+and views file. Before that, the second try at the same file was refused
+as "in use" by this same Winnow (docs/notes/store.md).
+
+In the browser, `tests/ui/test_default_keys.py` presses every binding in
+`DEFAULT_KEYMAP`. Its first test swaps each `ACTION_HANDLERS` entry for a
+recorder and checks every key reaches its own action and no other. It reads
+the keymap from the page, so a key added later is pressed without anyone
+adding it, and nothing the keys would do happens. The rest press, for real,
+the keys whose handlers have no button or menu entry (PageDown/PageUp, `0`,
+`q` `w` `[` `]`, `f` `F`, the backtick, `x`, `L`, `Q`, `.`) and assert what
+changes on screen. `test_plugin_install_dialog.py` drives Install a
+plugin… through its two picker buttons and answers the install route itself
+(a real install writes into the shared server's plugins folder, and nothing
+takes a plugin back out). A routed request carries a file part's name but
+not its bytes, so it asserts names and paths, not contents.
+`test_row_action_menu.py` runs a plugin row action from the row menu (one
+row, a range, a merge, `open_url`, a refusal) against a routed dispatch.
+`test_detail_malformed_xml_ui.py` covers the detail pane's fallback for XML
+that won't parse, through `renderDetailContent`: reflowed, highlighted,
+nothing lost, no path offered, and the value never built as markup.
+`test_popout.py` brings a pop-out back as a tab (and keeps what was typed
+out there), and opens a pop-out with no case, and one of a page the case
+doesn't have, through `window.open('')` so the window may close itself.
+`test_skin_contrast.py` takes the WCAG contrast ratio of text on its
+background in every skin and theme, resolved in the page (tokens can be
+`color-mix()` or carry alpha). `--text` is held to 4.5:1 on every surface
+a row or panel can have, and so is a filled accent's label (`--accent-fg`
+on `--accent-fill`) in every skin. The accent as text is held to 4.5:1
+dark and 3.9:1 light (Blueprint light's orange was 2.4:1 and Phosphor
+light's green 1.3:1), and each default tag color to a floor on the
+surfaces a stripe and a chip sit on, TA's and Suspicious's at 3:1. The
+other pairs (`--dim`, a pressed toggle's label on `--accent-dim`, danger,
+diff and SQL colors) are held to floors today's skins meet, some of them
+below AA, so a skin can't get less readable without a test noticing. One
+check there reads `style.css` instead of the page: no rule paints a solid
+`--accent` background, since a label on it would sit on a color the
+ratios never measure in the two skins whose fill is not their text color.
+
+`test_csv_round_trip.py` ingests a file of awkward cells, exports it over
+`/api/export` and ingests the export: everything comes back except the
+formula guard's apostrophe. Its last test forces `_CsvWriter`'s Python 3.10
+path on every Python and, on 3.11+, checks it against what `csv` writes.
+`test_firstlast_filters.py` runs each of First/Last's filter operators and
+the grid's equivalent condition on the same table and on a merge, and
+compares the counts per group, because the plugin compiles its own WHERE.
+Its table has both '' and NULL, and a number column with a blank and a
+non-number in it. `test_session_reimport.py` re-imports a table from a
+session for every reader the session can name (IIS and key=value are in
+their own files), with and without the reader recorded, and covers a
+session with no path, a file gone from its path, and a file replaced while
+it was read. Beside the `--from` tests above, `test_updater.py`'s
+`ReleaseCli` runs `update.py` on the release path, with GitHub answered
+through updater's own seams: `--check`, up to date, `--download-only`
+then `--from` (the airgap trip), the apply prompt, `--dry-run`, and each
+failure as exit 2.
+
+The smaller UI paths that had never run in a browser have one file each.
+`test_derived_unparsed_and_path_ui.py`: a derived column's "Show N
+unparsed rows" (and an extracted field's "rows without this field") opens
+exactly the failures, on a merge from every member, and "Change the field
+path…" recomputes the column in place. `test_settings_density_cap.py`:
+Row density through Settings keeps the top row in place, grouped or not,
+and the autofit width limit clamps what is typed and stores "No limit" as
+0. `test_saved_filters_rows.py` adds Rename… and Edit… on a saved filter.
+`test_dashboard_manage_ui.py`: renaming a board from the sidebar or its
+title, deleting it from the sidebar's ✕ (the next board, or the grid when
+it was the last), and Save as profile…, which carries variable
+definitions and never their values. `test_home_drop.py`: files dropped on
+a case row go into that case and nowhere else, dropped off the rows they
+start a quick look; each on its own server, since both switch the case.
+`test_pivot_export_filter.py`: the pivot's Copy and CSV (formula guard
+included) and its field filter. `test_firstlast_copy.py`: Copy result,
+including the card it waits on when the analyst has left the tab, held
+at `job/start` so the answer lands while the tab is hidden.
+
+`tests/smoke_server.py` is not a test module (no `test_` prefix, so pytest
+never collects it); CI runs it as a script. It starts `server.py --case
+--open` the way an analyst does and waits for the CSV's rows on
+`/api/sources` and for the page, `main.js` and `style.css` to be served.
+The Windows backend job runs it on the checkout; the `shipped archive` job
+runs it on `git archive` output installed from requirements.txt alone, so
+a runtime import of a dev-only package, or an app file marked
+export-ignore, fails there instead of on an analyst's machine. Run it by
+hand with `--root <unpacked archive> --python <its venv's python>`.
+`tests/nightly_upgrade.py` is the nightly workflow's other script: it
+installs the last release from its `git archive`, adds an analyst's state
+(a plugin folder, a case file, a session export, the workspace a first
+start writes), runs that install's own `update.py --from` on a zip of
+develop laid out like GitHub's, and checks every shipped file and every
+byte of that state, then does the same after `update.py --rollback`. Run it
+with `--from-ref v0.4.1` (any release tag); set `TMPDIR` to keep its
+folders out of a shared `/tmp`.
 
 ## Things that bite
 
@@ -104,6 +269,35 @@ as `test_ingest_jobs.py`).
   busy (`python3 -c "while True: pass" &`, one per core), which turned
   a rare CI failure into roughly one run in eight, and record what each
   build and landing did in a `window` array to read back on failure.
+
+- **Two imports queued together finish in either order**, so the tables'
+  ids come out in either order too. A test that compares sorted pairs of
+  `(source_id, rid)` against a list written in name order passes only
+  when the first-named file wins (test_row_action_menu.py did, about half
+  the time): sort the expected side as well, or key it by name.
+
+- **A click that closes its own window can raise after it worked.** The
+  window can be gone before Playwright hears the click land, and it
+  reports a closed target as an error. Wrap that click in
+  `expect_event("close")`, which is the real check, and swallow only a
+  "closed" error from the click itself (`_dock` in test_popout.py;
+  `test_a_pop_out_with_no_case_open_says_so` lacked it and failed now
+  and then).
+
+- **Home shows the case list it already has, then refreshes it.** The
+  Home button paints the rows from the last fetch at once and replaces
+  them when `/api/cases` answers, so rows are on screen before they are
+  current. Waiting for `.home-row` waits for the old ones. Wait on
+  `__winnow.S.cases` saying what the test needs (the case just left is
+  `open`) before opening a row's menu (test_home_screen.py's delete test
+  missed that note on a loaded runner).
+
+- **A job's start answer can already say it is done.** The watchlist
+  scan's start route starts the worker thread and then snapshots the job,
+  so on a busy machine a small scan finishes in between and the answer
+  reads `done`. A test that needs a scan still running when the answer
+  lands rewrites the status on every start it relies on, not only the
+  first (test_watchlist_immediate_add.py's second Add).
 
 - **`pytest … | tail` reports tail's exit status, not pytest's.** A
   pipeline's status is its last command's, so `pytest -q | tail -5 && git
@@ -161,8 +355,40 @@ as `test_ingest_jobs.py`).
   `_click_add` in tests/ui/test_plugin_dashboard_offered.py is the
   pattern.
 
+- **Polling a server that is starting on a listener it was handed can
+  time out rather than be refused.** The socket is listening the whole
+  time, so a request connects at once and waits in the backlog until the
+  new process serves; a start slower than the request's timeout raises
+  `TimeoutError`, which is neither a `URLError` nor a `ConnectionError`.
+  test_restart.py's Windows-style relaunch caught only those two, and
+  failed when a Windows runner took more than two seconds to start
+  (#495's CI). A poll for "up yet?" treats a timeout as "not yet". A
+  child that sleeps in a `sitecustomize.py` on its `PYTHONPATH` makes a
+  slow start on demand.
+
+- **A toast can be gone before the next frame.** `wait_for_function`
+  looks once a frame, and the app replaces toasts freely: after "Change
+  the field path…" the "Recomputing" toast lasted 12ms before the jobs
+  poll announced the derive that had already finished, so a wait on the
+  toast's text passed locally and failed in CI. Where another toast can
+  follow, record them with a MutationObserver before the gesture and wait
+  on the record (`RECORD_TOASTS` in
+  tests/ui/test_derived_unparsed_and_path_ui.py).
+
 - **`wait_for_function` does not await its predicate.** One that returns
   `fetch(…).then(…)` hands back a Promise, which is truthy, so the wait
   returns at once and the test races what it meant to wait for.
   tests/test_ui_test_hygiene.py fails on one; poll from Python with the
   `until` fixture instead, since `page.evaluate` does await.
+- **The clipboard on Windows reads back with CRLF line ends.** The app
+  writes `\n`; Chromium on Windows stores clipboard text with `\r\n`, and
+  `navigator.clipboard.readText()` returns it that way, so a test that
+  splits a copy on `"\n"` finds a `"\r"` on every row there and nowhere
+  else. The `copied` fixture folds `\r\n` back to `\n`, so assert on
+  `clip.text` and don't read the clipboard by hand. Only the nightly's
+  Windows browser job can see this one.
+- **A sleep is a lower bound, not a measurement.** macOS coalesces
+  timers: on the nightly's macOS runner `time.sleep(0.02)` measured 87ms.
+  A test about what a timed window *includes* drives a fake
+  `time.perf_counter` instead (test_bench_harness.py's hooks test), and
+  one that has to wait for real bounds the wait from below only.

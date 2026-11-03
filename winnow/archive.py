@@ -131,8 +131,17 @@ def _kind(path: str) -> str | None:
         except _DAMAGE:
             pass
         with open(path, "rb") as f:
-            if f.read(2) == b"\x1f\x8b":
-                return "gz"
+            head = f.read(4)
+        if head[:2] == b"\x1f\x8b":
+            return "gz"
+        # Python 3.14's is_zipfile reads the central directory as well as
+        # the end record, so a zip whose directory is damaged stopped being
+        # a zip there: an inner one stayed in the tree unreported, and an
+        # outer one was refused as "not a zip, tar or gzip archive". Its
+        # first local header still says what it is; opening it then fails,
+        # and that is reported as damage, as on every earlier Python.
+        if head == b"PK\x03\x04":
+            return "zip"
     except OSError:
         return None
     return None

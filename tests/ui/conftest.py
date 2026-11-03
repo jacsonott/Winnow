@@ -208,7 +208,7 @@ def restore_plugin_overrides(server, server_post):
 # that tests restoring does its own saving inside that window.
 @pytest.fixture(autouse=True, scope="module")
 def clean_plugin_tab_state(server_post):
-    keys = ("tab:first-last.firstlast", "tab:pivot-table.pivot")
+    keys = ("tab:first-last.firstlast", "tab:pivot-table.pivot", "tab:lateral-movement.graph")
     for key in keys:
         server_post("/api/plugin_state", {"key": key, "payload": None})
     yield
@@ -604,7 +604,11 @@ class Copied:
             if time.monotonic() >= deadline:
                 pytest.fail("nothing reached the clipboard")
             self.page.wait_for_timeout(25)
-        self.text = text
+        # Windows keeps clipboard text with CRLF line ends and readText
+        # hands them back that way. The app wrote LF, and that is what the
+        # tests are about (the nightly's Windows run split rows on "\n" and
+        # found a "\r" on every one).
+        self.text = text.replace("\r\n", "\n")
 
 
 @pytest.fixture

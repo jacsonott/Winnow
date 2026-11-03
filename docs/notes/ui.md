@@ -104,7 +104,21 @@ see [docs/notes/README.md](README.md) for the whole set.
   `nowrap` too), and **the toolbar itself `flex-wrap`s**, so once even
   that isn't enough (the search box open on a laptop) the stats and
   buttons move to a second line as a whole instead of the ribbon folding
-  into a one-chip column. The header bar has the same shape:
+  into a one-chip column. **What wraps keeps to its side.** `.toolbar` is
+  `justify-content: flex-end`: on a line the spacer is on, the spacer
+  takes all the slack and nothing moves, and every line below it — the
+  right-hand side spilling over — hugs the right edge. Before, those lines
+  started at the left, so the search jumped from one side of the toolbar
+  to the other as the window narrowed. The group strip's
+  `margin-right: auto` holds it at the left when it ends up alone on the
+  first line (the ribbon wrapped below it). The magnifier, the box and its
+  Contains/Regex/Advanced are one item, `.search-group`, so the box and its
+  modes move down together instead of splitting across two lines; the
+  group wraps inside itself only once the two side by side are wider than
+  the toolbar. `#advancedSearchBar` stays outside it.
+  `tests/ui/test_visual_pass.py` sweeps the width with the search closed
+  and open.
+  The header bar has the same shape:
   `.bar-actions` never shrinks and its buttons never wrap, `#sourceTabs`
   keeps `SOURCE_TABS_MIN` (140px) and it is `#pageTabs` — which scrolls —
   that shrinks (`flex: 0 1 auto`, 60px floor). A pressed segment in a
@@ -112,13 +126,49 @@ see [docs/notes/README.md](README.md) for the whole set.
   dialog's Paste/Advanced) is the builders' tint — 16% accent over a
   transparent unpressed row, `--text` on it — and not accent text, which
   is what failed: accent on the dim accent fill measured 1.4–2.7:1 across
-  the skins, and accent on the panel fails in Phosphor light. It was the
+  the skins, and accent on the panel failed in Phosphor light. It was the
   filled accent for a while, which read but outshouted each dialog's one
   `.btn.primary`. The unpressed buttons have to be transparent for the
   tint to show: on `--panel-2` it sat 3.7 ΔE from them in Harvest light.
   Toolbar toggles (`.btn[aria-pressed]`) keep the accent-dim fill.
   `tests/ui/test_visual_pass.py` measures text contrast and the
   pressed/unpressed gap in every skin and theme.
+- **A light half's accent is darker than its dark half's, and a tag color
+  sits between the two.** The accent is text in places (sort arrows, the
+  selected tab, an active filter's mark) and carries `--accent-fg` on
+  `.btn.primary`. Phosphor light kept the dark half's glowing green, 1.3:1
+  as text on its paper, and Panel, Harvest, Jenna and Studio light had
+  white labels at 3.3–3.9:1 on theirs; each light accent is now a step
+  deeper (Phosphor's a printer's green, its label light). Dark labels
+  would have read on the old golds, but `--accent-fg` is also the label of
+  every pressed `.btn` on `--accent-dim`, where dark measured 3.0–3.6
+  against white's 4.9–5.5, so the accent moved instead. A tag's color is
+  one literal for every skin, a row stripe and a pressed chip's text
+  (`renderTagRibbon` sets it inline), so it has to sit between the
+  darkest panel and the lightest: 3:1 on both is the most one color gets.
+  Suspicious's old `#d68a2e` was 2.0:1 on the light skins. Cases keep the
+  colors they were made with; the template migrates only an untouched
+  seed (`TagTemplate._EARLIER_SEEDS`), and `newTagDefaults` counts the old
+  orange as the new one, or the next tag added arrived in an orange beside
+  an orange. TA's old `#c0392b` was 2.3:1 on Jenna dark's panels, the
+  lightest dark ones; `#dc4837` is 3:1 everywhere and migrates the same way.
+  `tests/ui/test_skin_contrast.py` holds both.
+
+- **`--accent` is the accent as text; `--accent-fill` is the accent as a
+  surface under `--accent-fg`.** One color can't always do both. Blueprint
+  light's safety orange is the skin's look as a button, under dark ink at
+  6.6:1, but 2.4:1 as text on its parchment; Studio dark's lavender needs
+  to be lighter than white-at-4.5:1 allows to read at 4.5:1 as text on its
+  panels. So those two skins carry a fill of their own (Blueprint light
+  keeps `#ff6a1a`, its text is `#b3470e`; Studio dark's fill is `#6d5bf5`,
+  its text `#8576f7`), and every other skin sets `--accent-fill:
+  var(--accent)`. The rule for new CSS: a solid background in the accent
+  is `--accent-fill`, and so is the border that goes with it; text, marks,
+  rules and `color-mix()` tints stay on `--accent`. A custom accent
+  (`paintAccent`) writes both, so a split skin doesn't keep its own fill
+  under the analyst's color. JavaScript that reads `--accent` to draw
+  (charts, the histogram, the splash) gets the text tone, which is the one
+  that reads on the panels it draws on.
 
 - The **timeframe filter** (`S.timeRange`, `static/js/timeframe.js`, `time_range` on
   `ViewSpec`, compiled in `_compile_where` via the registered SQL function

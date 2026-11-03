@@ -435,8 +435,9 @@ declared size; the import reads every row there is. `.xlsm` imports the same way
   `FALSE`.
 - A formula imports as its last saved result — empty for a workbook written
   by a tool and never saved in Excel.
-- Short rows are normal in Excel and pad silently; only rows wider than the
-  table count as ragged.
+- Short rows are normal in Excel and pad silently. A row wider than every
+  row before it adds `col_N` columns as it arrives, so no cell is cut, even
+  in a workbook that doesn't declare its size.
 
 Folder import skips SQLite files and workbooks, since which tables or sheets
 to take is a choice per file.
@@ -606,8 +607,10 @@ folder import's default file types leave `.log` out. Turn the **esxi_logs**
 plugin on first: creating the case with the **ESXi / UAC triage** profile
 does it and adds that profile's dashboard, or switch it on in
 **Settings → Plugins**. It claims `.log` and the ESXi log names, parses them
-into one schema and adds a `.log` chip to folder import. Without it, turn on
-**other text files** to bring the logs in as raw text.
+into one schema, with columns of their own for whatever else a file's lines
+carry (hostd's `opID`, a Linux host name; see
+[Plugins](Plugins.md#esxi_logs)), and adds a `.log` chip to folder import.
+Without it, turn on **other text files** to bring the logs in as raw text.
 
 ### Folders and KAPE output
 

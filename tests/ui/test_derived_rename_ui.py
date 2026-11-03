@@ -110,7 +110,13 @@ def test_z_after_a_rename_puts_the_filter_back_on_the_renamed_column(page, api, 
         page.wait_for_selector(".confirm-input")
         page.locator(".confirm-input").fill("DrAccount")
         page.locator(".confirm-card .btn", has_text="Rename").click()
-        page.wait_for_selector('.hcell[data-col="DrAccount"]')
+        # The rename's toast is the last thing it does, after re-opening
+        # the table. The new header shows earlier, and between two of the
+        # re-open's awaits nothing is busy either, so a z pressed then was
+        # undone by the re-open still under way: 3 rows, and the rename's
+        # toast over the undo's (one run in four with every core busy).
+        page.wait_for_function("""() => (document.getElementById('toast')?.textContent || '')
+                                  .includes('Renamed "DrUser" to "DrAccount"')""")
         page.wait_for_function("(id) => __winnow.S.view.source_id === id && __winnow.busyCount === 0", arg=sid)
         with view_rebuilt(page):
             page.locator("#body").focus()

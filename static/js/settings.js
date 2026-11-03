@@ -42,7 +42,7 @@ export const APPEARANCE_KEY = 'winnow.appearance';
 export const STYLES = {
   // Harvest first because it is the default — the list is a menu, and the
   // one you are on should be the one you read first.
-  harvest:   { label: 'Harvest',   desc: 'Grain and chaff — wheat gold on deep green-black, parchment in light.', stripes: true, defaultAccent: '#cfa057', preview: ['#0f1211', '#cfa057'] },
+  harvest:   { label: 'Harvest',   desc: 'Grain and chaff — wheat gold on neutral charcoal, parchment in light.', stripes: true, defaultAccent: '#cfa057', preview: ['#111111', '#cfa057'] },
   panel:     { label: 'Panel',     desc: 'The older look — cooler greys, amber accent.', stripes: true, defaultAccent: '#d2a04a', preview: ['#13161a', '#d2a04a'] },
   phosphor:  { label: 'Phosphor',  desc: 'Retro CRT terminal — glow, monospace chrome.', stripes: true, defaultAccent: '#39e881', preview: ['#060907', '#39e881'] },
   blueprint: { label: 'Blueprint', desc: 'Bold borders, hard offset shadows.', stripes: true, defaultAccent: '#ff6a1a', preview: ['#0c0d10', '#ff6a1a'] },
@@ -246,14 +246,21 @@ function announceAppearance() {
 
    So the inline value is written only when the analyst picked a colour
    themselves. Otherwise the skin's own per-theme accent is left to win,
-   which is what those values are for. */
+   which is what those values are for.
+
+   A picked colour is the fill as well as the text (--accent-fill), so the
+   two skins that split them (Blueprint light, Studio dark; see style.css's
+   header) don't keep their own fill under the analyst's colour, and
+   contrastFg's label is measured against the colour it sits on. */
 export function paintAccent() {
   const root = document.documentElement;
   if (S.appearance.accentCustomized) {
     root.style.setProperty('--accent', S.appearance.accent);
+    root.style.setProperty('--accent-fill', S.appearance.accent);
     root.style.setProperty('--accent-fg', contrastFg(S.appearance.accent));
   } else {
     root.style.removeProperty('--accent');
+    root.style.removeProperty('--accent-fill');
     root.style.removeProperty('--accent-fg');
   }
   announceAppearance();

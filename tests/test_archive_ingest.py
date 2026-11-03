@@ -354,6 +354,18 @@ def test_a_later_inner_archive_still_expands_after_a_broken_one(tmp_path):
     assert [sk["path"] for sk in rep["skipped"]] == ["a/broken.zip"]
 
 
+def test_a_damaged_zip_is_called_damaged_not_something_else(tmp_path):
+    """Python 3.14's is_zipfile checks the central directory too, so a zip
+    with a damaged one was refused there as "not a zip, tar or gzip
+    archive", which sends an analyst looking for the wrong problem. It is
+    a zip that could not be expanded, on every Python."""
+    broken = tmp_path / "evidence.zip"
+    _write_zip(broken, {"x.log": "x\n"})
+    broken.write_bytes(broken.read_bytes().replace(b"PK\x01\x02", b"XX\x01\x02"))
+    with pytest.raises(archive.ArchiveError, match="Could not expand evidence.zip"):
+        archive.expand_archive(str(broken))
+
+
 @pytest.mark.filterwarnings("ignore:Duplicate name")
 def test_duplicate_member_names_both_survive(tmp_path):
     z = tmp_path / "dup.zip"

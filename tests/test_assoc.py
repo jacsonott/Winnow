@@ -307,7 +307,11 @@ def test_desktop_exec_reads_back_as_the_launch_command(lin, tmp_path, monkeypatc
     assert _read_exec(exec_value) == assoc.launch_command() + ["%F"]
 
 
-@pytest.mark.skipif(not __import__("shutil").which("gio"), reason="needs GLib's gio launcher")
+# Linux only, not just "gio is installed": Homebrew puts gio on a Mac, but
+# GLib there launches no .desktop entries, so nothing ran and the test
+# failed on the nightly's macOS job. assoc.py leaves macOS out anyway.
+@pytest.mark.skipif(not __import__("sys").platform.startswith("linux") or not __import__("shutil").which("gio"),
+                    reason="needs GLib's gio launcher on Linux")
 def test_gio_launches_the_entry_from_an_awkward_install(lin, tmp_path, monkeypatch):
     """The same thing through a real desktop launcher, where there is one:
     GLib's `gio launch`, which is what a GNOME file manager uses."""
