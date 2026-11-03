@@ -34,19 +34,30 @@ class _FakeEnv:
         self._metrics = {}
 
 
-def test_before_and_after_hooks_are_not_timed():
+def test_before_and_after_hooks_are_not_timed(monkeypatch):
     # The whole reason a benchmark returns a callable instead of just being
     # one: an ingest benchmark's fresh-database setup must not land inside
     # the number it reports.
-    calls = []
+    #
+    # Against a clock that moves only when a step says it took time. Real
+    # sleeps put the OS's timer slack inside the bound: on the nightly's
+    # macOS runner a 20ms sleep measured 87ms, past the 45ms the test
+    # allowed, with no hook timed at all.
+    calls, now = [], [0.0]
+    monkeypatch.setattr(time, "perf_counter", lambda: now[0])
+
+    def took(step, seconds):
+        calls.append(step)
+        now[0] += seconds
+
     spec = Timed(
-        run=lambda: (calls.append("run"), time.sleep(0.02)),
-        before=lambda: (calls.append("before"), time.sleep(0.05)),
-        after=lambda: (calls.append("after"), time.sleep(0.05)),
+        run=lambda: took("run", 0.02),
+        before=lambda: took("before", 0.05),
+        after=lambda: took("after", 0.05),
     )
     elapsed = _measure_once(spec)
     assert calls == ["before", "run", "after"]
-    assert 0.015 < elapsed < 0.045  # the run(), not the 120ms of hooks
+    assert elapsed == pytest.approx(0.02)  # the run(), not the 100ms of hooks
 
 
 def test_run_benchmark_records_stats_and_samples():

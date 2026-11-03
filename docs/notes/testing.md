@@ -387,3 +387,8 @@ folders out of a shared `/tmp`.
   else. The `copied` fixture folds `\r\n` back to `\n`, so assert on
   `clip.text` and don't read the clipboard by hand. Only the nightly's
   Windows browser job can see this one.
+- **A sleep is a lower bound, not a measurement.** macOS coalesces
+  timers: on the nightly's macOS runner `time.sleep(0.02)` measured 87ms.
+  A test about what a timed window *includes* drives a fake
+  `time.perf_counter` instead (test_bench_harness.py's hooks test), and
+  one that has to wait for real bounds the wait from below only.
