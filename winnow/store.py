@@ -235,9 +235,15 @@ MAX_SCAN_RESULTS = 5000
 # TA first: triage reaches for "this is the adversary" far more often than
 # "this is fine", so the most-used tag sits on hotkey 1 under the left hand.
 # Order here is display order everywhere tags render (ribbon, menus, undo).
+# One color serves every skin, dark and light, as a row stripe and as the
+# text of a pressed tag chip, so each has to sit between the darkest and the
+# lightest panels. Suspicious was #d68a2e until 2026-11, 2.0:1 on the light
+# skins; #b8680c is the same hue at 3:1 on all of them, the most one color
+# can manage on both (tests/ui/test_skin_contrast.py). TA was #c0392b, 2.3:1
+# on Jenna dark's panels; #dc4837 is the same red a step lighter, at 3:1.
 DEFAULT_TAGS = [
-    ("TA", "#c0392b", "1"),
-    ("Suspicious", "#d68a2e", "2"),
+    ("TA", "#dc4837", "1"),
+    ("Suspicious", "#b8680c", "2"),
     ("Benign", "#5d8a66", "3"),
 ]
 
@@ -1623,6 +1629,48 @@ def _nul_unescape(m: re.Match) -> str:
     return _NUL_ESC if m.group()[1] == _NUL_ESC else "\0"
 
 
+# What 3.11 changed in csv's WRITER, beside the reader change above: it
+# writes a NUL, and it quotes a field holding a bare CR whatever the line
+# terminator. 3.10's writer refuses the first ("need to escape, but no
+# escapechar set") and leaves the second unquoted.
+_CSV_WRITES_ANY_CELL = sys.version_info >= (3, 11)
+
+
+class _CsvWriter:
+    """csv.writer(buf, lineterminator="\n") for the exports, writing every
+    cell as 3.11+ does on every Python.
+
+    On 3.10 two cells went wrong. A NUL stopped the export at its row, so
+    the analyst got a file cut short mid-download. A bare CR — a cell the
+    formula guard even names, and ordinary in Windows text — was written
+    unquoted, so every spreadsheet and CSV reader, Winnow's included, split
+    the row in two there. 3.10's writer quotes a field holding any
+    character of the line terminator, so it writes with "\r\n" and the
+    terminator is put back to "\n"; a NUL goes through as _csv_rows's
+    escape and is undone in the text written, and csv treats neither escape
+    character specially. The result is 3.11's text, byte for byte."""
+
+    def __init__(self, buf: io.StringIO):
+        self.buf = buf
+        self.w = csv.writer(buf, lineterminator="\n")
+        self.row = io.StringIO()
+        self.w310 = csv.writer(self.row, lineterminator="\r\n")
+
+    def writerow(self, row) -> None:
+        if _CSV_WRITES_ANY_CELL:
+            self.w.writerow(row)
+            return
+        nul = any(isinstance(c, str) and ("\0" in c or _NUL_ESC in c) for c in row)
+        if nul:
+            row = [c.replace(_NUL_ESC, _NUL_ESC * 2).replace("\0", _NUL_ESC + _NUL_MARK)
+                   if isinstance(c, str) else c for c in row]
+        self.row.seek(0)
+        self.row.truncate()
+        self.w310.writerow(row)
+        text = self.row.getvalue()[:-2] + "\n"
+        self.buf.write(_NUL_UNESCAPE.sub(_nul_unescape, text) if nul else text)
+
+
 def _csv_rows(lines: Iterable[str], delimiter: str, *, escape_nul: bool | None = None):
     """`(reader, rows)`: a csv.reader over `lines`, and what to iterate for
     its rows — the reader itself wherever csv reads NUL. The reader is
@@ -1955,6 +2003,18 @@ def _json_text_deep(value: Any) -> str:
 # the six characters of the escape the file had: exactly what was in the
 # evidence, and still valid inside JSON text. See structparse.utf8_text.
 _utf8_text = structparse.utf8_text
+
+
+def _kept_error(e: Exception, total: int) -> Exception:
+    """A reader's failure part-way through, saying how many rows it kept
+    (ingest_csv's message), so the analyst can tell the table in the list
+    is partial. With nothing kept the error is the reader's own: the table
+    is dropped, and there is nothing to add."""
+    if not total:
+        return e
+    error = ValueError(f"{e} — import stopped there; the {total:,} rows before it were kept")
+    error.__cause__ = e
+    return error
 
 
 def _lenient_text_factory(undecodable: list[int] | None = None):
@@ -2384,6 +2444,8 @@ class _JobRegistry:
 VIEWS_PREFIX = "winnow-views-"
 VIEWS_SUFFIX = ".db"
 VIEWS_DB_SUFFIXES = ("", "-wal", "-shm")  # the three files a WAL database is
+# Beside each one, the file its owner's lock is on (claim_views_file).
+VIEWS_LOCK_SUFFIX = "-lock"
 
 
 def _preferred_views_dir() -> str | None:
@@ -2413,10 +2475,73 @@ def _views_dirs() -> list[str]:
     return dirs
 
 
+def claim_views_file(prefix: str = VIEWS_PREFIX, directory: str | None = None) -> tuple[str, int | None]:
+    """Name a new scratch database and take the lock that says it is in
+    use. Returns `(path, fd)`: the database's path, not yet opened, and the
+    descriptor that holds the lock for as long as it stays open (None when
+    the filesystem would not lock it). release_views_file undoes it.
+
+    The lock is on a sidecar, `<path>-lock`, never on the database itself.
+    On macOS, flock() and the fcntl() locks SQLite takes share one lock
+    table, and locks taken through two different open files conflict even
+    inside one process. With the flock on the database, SQLite's own first
+    lock on it failed, `ATTACH` answered "database is locked", and no case
+    opened on a Mac at all. Linux keeps the two kinds apart, which is why
+    nothing but a macOS run could see it (the nightly's fresh install did,
+    on its first run). The sidecar is made and locked BEFORE the database
+    exists, so a sweep can never find the database without its lock.
+
+    On Windows there is no flock, and the descriptor is kept open anyway:
+    Windows will not delete a file a process has open, which gives the
+    sweep the same answer."""
+    lock_suffix = VIEWS_SUFFIX + VIEWS_LOCK_SUFFIX
+    while True:
+        fd, lock = tempfile.mkstemp(prefix=prefix, suffix=lock_suffix, dir=directory)
+        held: int | None = fd
+        if fcntl is not None:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                # A filesystem without flock. The sweep's probe fails there
+                # the same way and keeps the file, so the degraded mode is
+                # "never swept", not "swept while in use".
+                os.close(fd)
+                held = None
+        path = lock[: -len(VIEWS_LOCK_SUFFIX)]
+        try:
+            os.close(os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600))
+        except FileExistsError:
+            # mkstemp vouched for the sidecar's name, not the database's.
+            release_views_file(None, held, lock_path=lock)
+            continue
+        except BaseException:
+            release_views_file(None, held, lock_path=lock)
+            raise
+        return path, held
+
+
+def release_views_file(path: str | None, fd: int | None, *, lock_path: str | None = None) -> None:
+    """Undo claim_views_file, never raising. The lock goes first, so a
+    file that cannot be removed (Windows, while a reader still has it open)
+    is left unlocked for the next start's sweep, then the database's files,
+    then the sidecar."""
+    if fd is not None:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+    paths = [path + suffix for suffix in VIEWS_DB_SUFFIXES + (VIEWS_LOCK_SUFFIX,)] if path else []
+    if lock_path:  # a sidecar whose database was never made
+        paths.append(lock_path)
+    for p in paths:
+        with contextlib.suppress(OSError):
+            os.remove(p)
+
+
 def _views_file_is_orphaned(path: str) -> bool:
-    """Whether no live Store still owns `path`. Every Store holds an
-    exclusive flock on its own views file for its entire life
-    (Store.__init__), so a file this can lock has no owner left.
+    """Whether no live Store still owns the views file whose lock is
+    `path`: its `-lock` sidecar, or for a file from before the sidecar
+    (claim_views_file), the database itself. A Store holds an exclusive
+    flock on that for its entire life, so a file this can lock has no
+    owner left.
 
     Fail-safe in both directions, which is what makes it usable against a
     file another process might be mid-query on: an unreadable candidate, or
@@ -2466,13 +2591,16 @@ def sweep_orphan_views() -> dict:
         except OSError:
             continue  # tempdir unreadable or gone — nothing to sweep, not an error
         for name in entries:
-            # -wal/-shm are removed with the .db they belong to, below.
+            # -wal/-shm/-lock are removed with the .db they belong to, below.
             if not (name.startswith(VIEWS_PREFIX) and name.endswith(VIEWS_SUFFIX)):
                 continue
             base = os.path.join(d, name)
-            if not _views_file_is_orphaned(base):
+            # The lock is on the sidecar. A .db without one was made by a
+            # Winnow from before it, which locked the database itself.
+            lock = base + VIEWS_LOCK_SUFFIX
+            if not _views_file_is_orphaned(lock if os.path.exists(lock) else base):
                 continue
-            for suffix in VIEWS_DB_SUFFIXES:
+            for suffix in VIEWS_DB_SUFFIXES + (VIEWS_LOCK_SUFFIX,):
                 path = base + suffix
                 try:
                     size = os.path.getsize(path)
@@ -2485,13 +2613,24 @@ def sweep_orphan_views() -> dict:
                 removed += 1
                 bytes_freed += size
         for name in entries:
-            # A -wal/-shm whose .db is already gone. Only a dead owner can
-            # leave that shape (close() removes the .db first, and a live
-            # Store always has its .db), so there's nothing to probe.
-            if not name.startswith(VIEWS_PREFIX) or not name.endswith(("-wal", "-shm")):
+            if not name.startswith(VIEWS_PREFIX):
                 continue
             path = os.path.join(d, name)
-            if os.path.exists(path[:-4]):  # both suffixes are 4 chars
+            if name.endswith(("-wal", "-shm")):
+                # A -wal/-shm whose .db is already gone. Only a dead owner
+                # can leave that shape (close() removes the .db first, and
+                # a live Store has its .db before either exists), so
+                # there's nothing to probe.
+                if os.path.exists(path[:-4]):  # both suffixes are 4 chars
+                    continue
+            elif name.endswith(VIEWS_SUFFIX + VIEWS_LOCK_SUFFIX):
+                # A lock whose .db is gone: a close() that couldn't remove
+                # it, or an owner killed between making the two. A live
+                # Store passes through that shape too, for the moment
+                # between them, so this one is probed.
+                if os.path.exists(path[: -len(VIEWS_LOCK_SUFFIX)]) or not _views_file_is_orphaned(path):
+                    continue
+            else:
                 continue
             try:
                 size = os.path.getsize(path)
@@ -2902,6 +3041,43 @@ class Store:
     FTS_BUILD_CONCURRENCY = 2  # trigram builds are CPU/writer-bound; more just thrash
 
     def __init__(self, path: str, default_tags: list[tuple] | None = None):
+        try:
+            self._construct(path, default_tags)
+        except BaseException:
+            self._abandon_construction()
+            raise
+
+    def _abandon_construction(self) -> None:
+        """Give back what a Store that failed to open had already taken.
+
+        Opening takes three things before it reads the case's schema: the
+        writer connection, the views file (mkstemp'd and flocked) and the
+        case lock, whose heartbeat thread holds a reference to the lock
+        and so keeps the half-built Store alive. A case file that fails
+        past that point (a file with a case's three tables and not its
+        columns fails META_SCHEMA) left all three behind for the life of
+        the process: the file read as open in this very Winnow, so trying
+        it again answered "in use" by itself, and every attempt stranded
+        another views file the startup sweep could not take while the
+        process lived. close() can't do this: it reads state that is set
+        further down, which a failed open never reached."""
+        db = getattr(self, "db", None)
+        if db is not None:
+            for conn in getattr(self, "_reader_pool", []):
+                with contextlib.suppress(sqlite3.Error):
+                    conn.close()
+            with contextlib.suppress(sqlite3.Error):
+                db.close()
+        views = getattr(self, "_views_path", None)
+        if views:
+            release_views_file(views, getattr(self, "_views_fd", None))
+            self._views_fd = None
+        lock = getattr(self, "_case_lock", None)
+        if lock is not None:
+            lock.release()
+        self.closed = True
+
+    def _construct(self, path: str, default_tags: list[tuple] | None) -> None:
         self.path = path
         self._default_tags = default_tags or DEFAULT_TAGS
         self.lock = threading.RLock()
@@ -2939,27 +3115,18 @@ class Store:
         # documents why OFF is off-limits. On macOS/Windows there's no
         # tmpfs path, so the tempdir file leans on synchronous=OFF plus the
         # OS page cache alone.
-        fd, self._views_path = tempfile.mkstemp(
-            suffix=VIEWS_SUFFIX, prefix=VIEWS_PREFIX, dir=_preferred_views_dir()
-        )
-        # The mkstemp fd is kept open and flocked for this Store's whole
-        # life rather than closed straight away: it's the liveness signal
-        # sweep_orphan_views() probes, so the startup janitor in a *second*
-        # Winnow process can tell this file apart from one a killed process
-        # abandoned. If the lock can't be taken (a filesystem without flock;
-        # Windows, where fcntl doesn't exist at all) the fd is just closed —
-        # the sweep's own probe fails the same way and errs toward keeping
-        # the file, so the degraded mode is "not swept", never "swept while
-        # in use". See _views_file_is_orphaned.
+        # The lock taken with it is held for this Store's whole life: it's
+        # the liveness signal sweep_orphan_views() probes, so the startup
+        # janitor in a *second* Winnow process can tell this file apart
+        # from one a killed process abandoned. It sits on a `-lock` sidecar,
+        # never on the database: on macOS a flock on the database blocks
+        # SQLite's own locks on it (claim_views_file has the story). If
+        # the lock can't be taken (a filesystem without flock) the sweep's
+        # probe fails the same way and errs toward keeping the file, so the
+        # degraded mode is "not swept", never "swept while in use". See
+        # _views_file_is_orphaned.
         self._views_fd: int | None = None
-        if fcntl is not None:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                self._views_fd = fd
-            except OSError:
-                os.close(fd)
-        else:  # pragma: no cover - Windows
-            os.close(fd)
+        self._views_path, self._views_fd = claim_views_file(directory=_preferred_views_dir())
         # Bound, not pasted in: the tempdir is the analyst's profile on
         # Windows, and C:\Users\O'Brien\... would end the string literal.
         self.db.execute("ATTACH DATABASE ? AS v", (self._views_path,))
@@ -2968,9 +3135,10 @@ class Store:
         self.db.execute("PRAGMA v.journal_mode=WAL")
         self.db.execute("PRAGMA v.synchronous=OFF")
         # "This case is open" marker for a *second* Winnow to probe — see
-        # _CaseLock. Taken after the database is open so a failed open can't
-        # strand one, and never fatal: `held` False just means nothing will
-        # warn the next process.
+        # _CaseLock. Taken after the database is open, and a failure past
+        # here gives it back (_abandon_construction), so a failed open
+        # can't strand one. Never fatal: `held` False just means nothing
+        # will warn the next process.
         self._case_lock = _CaseLock(self.path)
         self._case_lock.acquire()
         # Public because server.py has to distinguish "STORE points at this
@@ -4328,23 +4496,17 @@ class Store:
                     with contextlib.suppress(sqlite3.Error):
                         self._checkpoint_truncate(0, folded_is_enough=True)
             self.db.close()
-        # Release the flock (see __init__) before unlinking, so that if the
-        # remove below is the one that fails, what's left behind is an
-        # unlocked file the next process's sweep_orphan_views can collect.
-        if self._views_fd is not None:
-            with contextlib.suppress(OSError):
-                os.close(self._views_fd)
-            self._views_fd = None
+        # release_views_file lets go of the lock (see _construct) before
+        # unlinking, so that if a remove is the one that fails, what's left
+        # behind is an unlocked file the next process's sweep_orphan_views
+        # can collect.
         # A reader still checked out by an in-flight request holds the
         # unlinked file open — fine on POSIX (the pages stay readable until
         # its close), and on Windows the remove just fails and is skipped,
         # leaving a stray temp file rather than an error. Either way it's no
         # longer permanent: the sweep at the next server start takes it.
-        for suffix in VIEWS_DB_SUFFIXES:
-            try:
-                os.remove(self._views_path + suffix)
-            except OSError:
-                pass
+        release_views_file(self._views_path, self._views_fd)
+        self._views_fd = None
         self._case_lock.release()
         self.closed = True
         return folded
@@ -4512,10 +4674,38 @@ class Store:
             while len(self._op_cancelled) > 512:  # one-shot ids; keep it bounded
                 self._op_cancelled.pop()
             conn = self._op_conns.get(token)
-            if conn is not None:
-                conn.interrupt()
-                return True
-        return False
+            if conn is None:
+                return False
+            conn.interrupt()
+        threading.Thread(target=self._interrupt_until_released, args=(token, conn),
+                         name="winnow-cancel", daemon=True).start()
+        return True
+
+    # How often a cancel that has not landed yet is sent again.
+    CANCEL_RESEND_S = 0.02
+
+    def _interrupt_until_released(self, token: str, conn) -> None:
+        """Keeps interrupting `conn` for as long as `token` holds it.
+
+        sqlite3_interrupt stops only a statement already running: SQLite
+        clears the flag when a statement starts with none active, so a
+        cancel landing between two of a block's statements (the build's
+        quick CREATE TABLE and its long INSERT, say) was forgotten and the
+        long one ran to the end. That was a cancel chip that did nothing,
+        and a test that timed out on loaded Windows runners waiting for
+        one. Sent again every CANCEL_RESEND_S until the block lets go of
+        the connection, under _op_lock and only while the token is still
+        registered to it, so by _interruptible's discipline it can only
+        ever stop that block's own statements."""
+        while True:
+            time.sleep(self.CANCEL_RESEND_S)
+            with self._op_lock:
+                if self._op_conns.get(token) is not conn:
+                    return
+                try:
+                    conn.interrupt()
+                except Exception:  # noqa: BLE001 — a connection closed under us: nothing left to stop
+                    return
 
     @contextlib.contextmanager
     def _interruptible(self, token: str | None, conn: sqlite3.Connection):
@@ -4526,11 +4716,11 @@ class Store:
         writer caller enters this block while *holding* self.lock and
         unregisters before releasing it, so the only statements that can be
         running on the writer connection while its token is registered are
-        the block's own. interrupt() aborts running statements only; a
-        cancel arriving in the gap between two statements is a no-op (the
-        flag clears when the statement count hits zero), which surfaces as
-        "the cancel didn't land — click again", never as a mis-aimed kill
-        of someone else's write. Reader-pool callers pass their checked-out
+        the block's own. interrupt() aborts running statements only (the
+        flag clears when a statement starts with none active), so a cancel
+        arriving in the gap between two statements is sent again until the
+        block lets go (_interrupt_until_released) — never a mis-aimed kill
+        of someone else's write, since it stops once the token is gone. Reader-pool callers pass their checked-out
         reader (and stack this innermost): an interrupted reader raises out
         of _reader(), which already closes — not repools — a connection
         that died mid-statement."""
@@ -5298,6 +5488,19 @@ class Store:
             self.db.execute("UPDATE sources SET row_count=? WHERE id=?", (total, source_id))
         return total
 
+    def _commit_parsed_batch(self, insert_sql: str, batch: list, source_id: int, total: int) -> int:
+        """The rows a reader parsed before it failed, committed: the
+        failure is the row after them, and losing them made "keep what
+        committed" quietly mean "lose up to a batch of good rows". Best
+        effort, as in ingest_csv: if the commit is what failed, this fails
+        too and what committed before still stands. Returns the new
+        total."""
+        if batch:
+            with contextlib.suppress(Exception):
+                total = self._commit_ingest_batch(insert_sql, batch, source_id, total)
+                batch.clear()
+        return total
+
     def preview_csv_text(
         self, text: str, delimiter: str | None = None, has_header: bool = True,
         max_rows: int = 50, name: str | None = None
@@ -5457,7 +5660,6 @@ class Store:
                 return str(v)
 
             select_cols = ",".join(q(c) for c in src_colnames)
-            src_cursor = ro.execute(f"SELECT {select_cols} FROM {q(table_name)}")
 
             sample: list[list[str]] = []
             total = 0
@@ -5465,6 +5667,11 @@ class Store:
             error: Exception | None = None
             with self._ingest_synchronous_off():
                 try:
+                    # Inside the try: before 3.11, execute() steps to the
+                    # first row and decodes it, so a value the text factory
+                    # rejects there raises HERE, and outside the try it left
+                    # the empty table behind.
+                    src_cursor = ro.execute(f"SELECT {select_cols} FROM {q(table_name)}")
                     while True:
                         rows = src_cursor.fetchmany(BATCH)
                         if not rows:
@@ -5484,7 +5691,9 @@ class Store:
                     self.drop_source(source_id)
                     raise
                 except Exception as e:
-                    error = e
+                    # Nothing pending to save: fetchmany returns none of a
+                    # batch it failed part-way through.
+                    error = _kept_error(e, total)
         finally:
             ro.close()
             cleanup()
@@ -5561,9 +5770,9 @@ class Store:
         total = 0
         t0 = time.time()
         error: Exception | None = None
+        batch: list[tuple] = []
         with self._ingest_synchronous_off():
             try:
-                batch: list[tuple] = []
                 for row in plasoread.iter_plaso_rows(path):
                     batch.append(tuple(row))
                     if len(batch) >= BATCH:
@@ -5582,13 +5791,18 @@ class Store:
                 self.drop_source(source_id)
                 raise
             except Exception as e:
-                error = e
+                # A record that won't decode keeps the events before it,
+                # pending batch included, as ingest_csv does.
+                total = self._commit_parsed_batch(insert, batch, source_id, total)
+                error = _kept_error(e, total)
 
         colmeta = [{"name": c, "type": t} for c, t in zip(cols, plasoread.PLASO_COLUMN_TYPES)]
         with self.lock, self.db:
             self.db.execute("UPDATE sources SET columns=? WHERE id=?", (json.dumps(colmeta), source_id))
 
         if error is not None:
+            if total == 0:
+                self.drop_source(source_id)   # same no-husk rule as ingest_csv
             raise error
 
         if total:
@@ -5638,9 +5852,12 @@ class Store:
         workbooks put titles and blank rows above it); the table is sized
         to the wider of that header and the sheet's declared width, so
         data extending past the named headers lands in col_N columns
-        instead of being cut. Rows *shorter* than the header are the
-        normal Excel shape (trailing empties simply aren't stored) and
-        pad silently; only rows wider than the table count as ragged.
+        instead of being cut — and widens as it goes for a row wider
+        still, since a sheet that declares no size shows its width only a
+        row at a time. Rows *shorter* than the header are the normal Excel
+        shape (trailing empties simply aren't stored) and pad silently.
+        No cell is ever cut, so `ragged_rows` is always 0 here; it stays
+        in the result for the shape every import returns.
         Date-styled cells arrive as ISO text rather than the raw
         day-serial — an unconditional conversion, called out in the sheet
         picker, not an analyst toggle like SQLite's WebKit-epoch chips,
@@ -5684,10 +5901,26 @@ class Store:
             with self._ingest_synchronous_off():
                 try:
                     for raw in rows_iter:
-                        if len(raw) != ncols:
-                            if len(raw) > ncols:
-                                ragged += 1
-                            raw = (raw + [""] * ncols)[:ncols]
+                        if len(raw) > ncols:
+                            # Wider than the table. A sheet that declares no
+                            # size (many writers leave <dimension> out) only
+                            # shows its width a row at a time, and cutting
+                            # the cells off loses evidence the header never
+                            # named; the table widens instead, the rows
+                            # before reading the new columns as empty.
+                            wider = sanitize_columns([c.strip() for c in header] + [""] * (len(raw) - len(header)))
+                            with self.lock, self.db:
+                                for c in wider[ncols:]:
+                                    self.db.execute(f"ALTER TABLE {q(dest_table)} ADD COLUMN {q(c)} TEXT DEFAULT ''")
+                            pad = [""] * (len(wider) - ncols)
+                            batch = [b + tuple(pad) for b in batch]
+                            for r in sample:
+                                r.extend(pad)
+                            cols, ncols = wider, len(wider)
+                            insert = (f"INSERT INTO {q(dest_table)} ({','.join(q(c) for c in cols)}) "
+                                      f"VALUES ({','.join('?' * ncols)})")
+                        elif len(raw) < ncols:
+                            raw = raw + [""] * (ncols - len(raw))
                         batch.append(tuple(raw))
                         if len(sample) < SAMPLE_ROWS:
                             sample.append(raw)
@@ -5708,7 +5941,11 @@ class Store:
                     self.drop_source(source_id)
                     raise
                 except Exception as e:
-                    error = e
+                    # A workbook that breaks part-way (a corrupt or cut-off
+                    # sheet member) keeps what was read, as ingest_csv does:
+                    # the rows of the pending batch parsed fine.
+                    total = self._commit_parsed_batch(insert, batch, source_id, total)
+                    error = _kept_error(e, total)
         finally:
             rows_iter.close()
 
@@ -5718,6 +5955,8 @@ class Store:
             self.db.execute("UPDATE sources SET columns=? WHERE id=?", (json.dumps(colmeta), source_id))
 
         if error is not None:
+            if total == 0:
+                self.drop_source(source_id)   # same no-husk rule as ingest_csv
             raise error
 
         if total:
@@ -11765,6 +12004,15 @@ class Store:
         if op in (">", ">=", "<", "<="):
             if val == "":
                 return "", []
+            # "(numeric)", as the filter builder labels these: on a number
+            # column always, and on any other column but a datetime one when
+            # the value is a number. Type inference calls a column text
+            # when one sampled cell is "-" or "n/a", and compared as text
+            # "100" > "60" is false, so `Bytes > 60` lost every row of three
+            # digits while saying it compared numbers. A datetime column
+            # compares its ISO text, which orders as time does.
+            if not numeric and colnames[col] != "datetime" and NUM_RE.match(str(val).strip()):
+                numeric, val = True, str(val).strip()
             lhs = _numeric_expr(c) if numeric else c
             return f"{lhs} {op} ?", [float(val) if numeric else val]
         if op == "empty":
@@ -11810,20 +12058,6 @@ class Store:
         if node.get("type") == "group":
             return [f for c in node.get("children", []) for f in Store._raw_fragments(c)]
         return []
-
-    @staticmethod
-    def _tree_has_raw(node: dict | None) -> bool:
-        """True if any node in the filter tree is a raw-SQL fragment. Raw
-        nodes assume a single table_name for their EXPLAIN QUERY PLAN
-        validation, so they're rejected for merges rather than extended to
-        dry-run per member."""
-        if not node:
-            return False
-        if node.get("type") == "raw":
-            return True
-        if node.get("type") == "group":
-            return any(Store._tree_has_raw(c) for c in node.get("children", []))
-        return False
 
     def _index_table_for(self, src: dict, column: str, table_name: str | None = None,
                          member_id: int | None = None) -> str:
@@ -17542,7 +17776,7 @@ class Store:
 
             tagnames = {r["id"]: r["name"] for r in ro.execute("SELECT id, name FROM tag_defs")}
             buf = io.StringIO()
-            w = csv.writer(buf, lineterminator="\n")
+            w = _CsvWriter(buf)
             w.writerow(_export_header(cols, _csv_safe))
             self._renew_snapshot(ro)
             yield buf.getvalue()
@@ -17591,7 +17825,7 @@ class Store:
 
             tagnames = {r["id"]: r["name"] for r in ro.execute("SELECT id, name FROM tag_defs")}
             buf = io.StringIO()
-            w = csv.writer(buf, lineterminator="\n")
+            w = _CsvWriter(buf)
             w.writerow(_export_header(cols, _csv_safe))
             self._renew_snapshot(ro)
             yield buf.getvalue()
@@ -17669,7 +17903,7 @@ class Store:
 
             tagnames = {r["id"]: r["name"] for r in ro.execute("SELECT id, name FROM tag_defs")}
             buf = io.StringIO()
-            w = csv.writer(buf, lineterminator="\n")
+            w = _CsvWriter(buf)
             head = _export_header(cols, _csv_safe)
             if member_names is not None:
                 head.insert(1, "Table")
@@ -19232,7 +19466,7 @@ class Store:
 
         def gen():
             buf = io.StringIO()
-            w = csv.writer(buf, lineterminator="\n")
+            w = _CsvWriter(buf)
             w.writerow([_csv_safe(c) for c in cols])
             n = 0
             for row in rows:

@@ -189,6 +189,18 @@ def test_oversized_documents_are_refused():
     assert sp.load_json(big) is None
 
 
+def test_a_raw_line_break_in_a_long_document_is_still_json():
+    """Exporters write a multi-line message (EVTX's RenderedDescription)
+    into a JSON string with its line breaks and tabs left raw, which the
+    RFC forbids. Short documents would still be read by the loose parser
+    behind json.loads, so only one past its length shows the strict
+    reader letting them through."""
+    message = "An account was successfully logged on.\r\n\tSubject:\t" + "x" * sp.LOOSE_MAX_CHARS
+    raw = '{"EventID": 4624, "Message": "' + message + '"}'
+    assert len(raw) > sp.LOOSE_MAX_CHARS and sp.load_loose(raw) is None
+    assert sp.load_json(raw) == {"EventID": 4624, "Message": message}
+
+
 def test_malformed_xml_is_none():
     assert sp._extract_xml("<a><b></a>", {"path": "a/b"}, {}) is None
     assert sp._extract_xml("not xml", {"path": "a"}, {}) is None
@@ -212,6 +224,41 @@ def test_discover_paths_reports_coverage():
     assert found["$.b"]["count"] == 1 and found["$.b"]["coverage"] == 0.5
     # Best-covered first, so the columns worth making are at the top.
     assert sp.discover_paths(rows, "json")[0]["path"] == "$.a"
+
+
+def _nested_json(depth):
+    doc = "leaf"
+    for _ in range(depth):
+        doc = {"k": doc}
+    return doc
+
+
+def _nested_xml(depth):
+    return "<r>" + "<k>" * (depth - 1) + "leaf" + "</k>" * (depth - 1) + "</r>"
+
+
+def test_discovery_stops_walking_at_its_depth_cap():
+    """MAX_WALK_DEPTH keeps a pathologically deep document from turning
+    "show me what's in here" into a hang: a field at the cap is offered,
+    one a level past it is not."""
+    deepest = sp.MAX_WALK_DEPTH
+    assert [sp.format_json_path(p) for p, _ in sp.json_leaf_paths(_nested_json(deepest))] == ["$" + ".k" * deepest]
+    assert sp.json_leaf_paths(_nested_json(deepest + 1)) == []
+    # XML counts from the root element, which is depth 0.
+    assert len(sp.xml_leaf_paths(sp.load_xml(_nested_xml(deepest + 1)))) == 1
+    assert sp.xml_leaf_paths(sp.load_xml(_nested_xml(deepest + 2))) == []
+
+
+def test_discovery_reports_at_most_its_path_cap():
+    """MAX_PATHS is the other guard: a map keyed by GUID with thousands of
+    entries is offered as its first 400 fields, per document and across a
+    sample whose rows each bring fields of their own."""
+    wide = {f"f{i:03d}": i for i in range(sp.MAX_PATHS + 100)}
+    assert len(sp.json_leaf_paths(wide)) == sp.MAX_PATHS
+    xml = "<r>" + "".join(f"<f{i:03d}>{i}</f{i:03d}>" for i in range(sp.MAX_PATHS + 100)) + "</r>"
+    assert len(sp.xml_leaf_paths(sp.load_xml(xml))) == sp.MAX_PATHS
+    rows = [json.dumps({f"r{r}_{i:03d}": i for i in range(300)}) for r in range(3)]
+    assert len(sp.discover_paths(rows, "json")) == sp.MAX_PATHS
 
 
 def test_discover_paths_names_evtx_data_elements_after_their_name_attribute():

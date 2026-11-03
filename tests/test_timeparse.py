@@ -8,6 +8,8 @@ work with zero new regex twins to hand-sync against app.js)."""
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import pytest
 
 from winnow import timeparse
@@ -166,6 +168,33 @@ def test_iso_rejects_bad_dates_and_bare_dates():
     assert parse("iso8601", "5 Jan 2024") is None
 
 
+@pytest.mark.parametrize("value, want", [
+    # Minute precision: the seconds were never written, so they are zero.
+    ("2024-01-05T13:22", "2024-01-05 13:22:00"),
+    ("2024-01-05 13:22Z", "2024-01-05 13:22:00"),
+    # A fraction shorter than microseconds is that many tenths, not that
+    # many microseconds; one longer is cut, not rounded.
+    ("2024-01-05T13:22:01.5", "2024-01-05 13:22:01.500000"),
+    ("2024-01-05T13:22:01.05", "2024-01-05 13:22:01.050000"),
+    ("2024-01-05T13:22:01.1234567", "2024-01-05 13:22:01.123456"),
+])
+def test_iso_reads_what_was_left_out_as_zero(value, want):
+    assert parse("iso8601", value) == want
+
+
+@pytest.mark.parametrize("value, want", [
+    ("2024-01-05", datetime(2024, 1, 5)),
+    ("2024-01-05 13:22", datetime(2024, 1, 5, 13, 22)),
+    ("2024-01-05T13:22:01.5", datetime(2024, 1, 5, 13, 22, 1, 500000)),
+    ("2024-01-05 13:22:01.123456789", datetime(2024, 1, 5, 13, 22, 1, 123456)),
+    ("1/5/2024 1:22 PM", datetime(2024, 1, 5, 13, 22)),
+])
+def test_lenient_parse_reads_what_was_left_out_as_zero(value, want):
+    """The delta columns' reader. A part a value leaves out is zero, the
+    same as the derived column that produced it would have written."""
+    assert timeparse.parse_datetime_lenient(value) == want
+
+
 # ----------------------------------------------------------- other text shapes
 
 def test_dd_mmm_yyyy():
@@ -224,6 +253,23 @@ def test_detect_offers_mmm_dd_yyyy_first_for_ordinal_dates():
     got = timeparse.detect(["Jul 28th 2026 01:02:22", "Aug 1st 2026 10:00:00", "Aug 2nd 2026 9:15 PM"])
     assert got[0]["op_id"] == "mmm_dd_yyyy"
     assert got[0]["confidence"] == 1.0
+
+
+MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July",
+               "August", "September", "October", "November", "December"]
+
+
+@pytest.mark.parametrize("number, name", list(enumerate(MONTH_NAMES, 1)))
+def test_every_month_name_is_its_own_month(number, name):
+    """One table serves every month-name shape, and nothing else checks
+    that each of its twelve entries says the right number: the tests above
+    use the handful of months their bugs were found in."""
+    want = f"2026-{number:02d}-09 10:11:12"
+    assert parse("mmm_dd_yyyy", f"{name} 9th 2026 10:11:12") == want
+    assert parse("mmm_dd_yyyy", f"{name[:3]} 9 2026 10:11:12") == want
+    assert parse("dd_mmm_yyyy", f"09 {name[:3]} 2026 10:11:12") == want
+    assert parse("apache_clf", f"09/{name[:3]}/2026:10:11:12 +0000") == want
+    assert parse("syslog_bsd", f"{name[:3]}  9 10:11:12", {"base_year": 2026}) == want
 
 
 def test_compact_ymd():
@@ -376,6 +422,17 @@ def test_detect_ranks_by_success_rate_registry_order_breaks_ties():
     # ties, and registry order puts unix first).
     assert ids[0] == "unix_epoch"
     assert got[0]["confidence"] == 1.0
+
+
+def test_detect_puts_the_best_guess_first_whatever_the_registry_order():
+    """Two ISO values and an epoch: ISO reads two of three, the epoch ops
+    one. unix_epoch is registered before iso8601, so a list left in
+    registry order would offer the weaker guess first."""
+    got = timeparse.detect(["2024-01-05T13:22:01", "2024-01-05 13:22:01", "1704460921"])
+    assert got[0]["op_id"] == "iso8601"
+    confidences = [r["confidence"] for r in got]
+    assert confidences == sorted(confidences, reverse=True)
+    assert len(set(confidences)) > 1
 
 
 def test_detect_syslog_uses_provisional_year():

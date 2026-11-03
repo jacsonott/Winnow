@@ -194,8 +194,8 @@ description is read from its source, not by running it). Seven examples
 ship switched off: **pivot** (Excel's PivotTable over any table),
 **first_last** (collapse events into per-group session bookends),
 **mft_usn** (raw NTFS `$MFT`/`$J` in pure Python, no EZTools),
-**lateral_movement** (logon, RDP and share-access pairs as an offline
-graph), **esxi_logs** (ESXi and UAC host logs into one schema),
+**lateral_movement** (logons, RDP and share access followed host to
+host in time order, by account, with credential switches and paths), **esxi_logs** (ESXi and UAC host logs into one schema),
 **top_values** (a toolbar panel of a column's commonest values), and
 **claude_assistant** (a Claude chat tab and a SQL Copilot that see the
 case's *schema* — table and column names, row counts — never row data; it

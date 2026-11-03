@@ -44,14 +44,14 @@ compare them; **Done** takes you back to Settings.
 
 | Skin | Description as shown |
 | --- | --- |
-| Harvest | Grain and chaff — wheat gold on deep green-black, parchment in light. The default. |
+| Harvest | Grain and chaff — wheat gold on neutral charcoal, parchment in light. |
 | Panel | The older look — cooler greys, amber accent. |
 | Phosphor | Retro CRT terminal — glow, monospace chrome. |
 | Blueprint | Bold borders, hard offset shadows. |
 | Studio | Rounded, soft shadows, calm motion. |
 | Jenna's theme | Timeline Explorer in its Office 2016 Black skin — flat, square, Segoe UI, amber on cool grey. |
 
-Every skin has a dark and a light form. Jenna's theme is the only one that
+Harvest is the default. Every skin has a dark and a light form. Jenna's theme is the only one that
 also redraws the grid itself (ruled cells, a closed box) rather than just
 recolouring it, and the only one without striped rows by default.
 
@@ -62,10 +62,14 @@ or dark setting and switches when it does. Dark is the default.
 
 ### Accent color
 
-Six preset swatches and a custom colour picker. Until you pick one, each
-skin uses its own accent, with a separate shade for its light theme. Once you
-pick a colour yourself, it stays when you change skin; Settings has no button
-to go back to the skin's own accent.
+Six preset swatches and a custom color picker. Until you pick one, each
+skin uses its own accent, with a separate shade for its light theme. Two of
+them also use one shade for buttons and other filled shapes and another for
+text in the accent: Blueprint's light theme keeps its bright orange buttons
+with burnt-orange text, and Studio's dark theme has a deeper purple under
+white button labels than in its text. Once you pick a color yourself, it is
+used for both, and it stays when you change skin; Settings has no button to
+go back to the skin's own accent.
 
 ### Row density and striped rows
 
@@ -201,7 +205,7 @@ once, with all its keys.
 | Copy the unique values of the cursor's column — from the selected rows, else the whole view | `Ctrl+Shift+U`, `Meta+Shift+U` |
 | Open Tables manager | `t` |
 | Show/hide the table sidebar | `` ` `` |
-| Open the table menu (columns, value dropdowns) — also right-click a tab → Columns… | `C` |
+| Open the table menu (columns, value dropdowns, layout, name & merge) — also right-click a tab → Columns… | `C` |
 | Search all tables | `s` |
 | Open/close the detail pane | `d` |
 | Drop all grouping, restore column order | `x` |

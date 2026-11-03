@@ -27,7 +27,11 @@ see [docs/notes/README.md](README.md) for the whole set.
   default factory raised "Could not decode to UTF-8" mid-read, and the
   batch it was in plus every row after it were gone. And a table that
   fails before its first batch commits is dropped rather than left with
-  0 rows, which is indistinguishable from a real empty import. The
+  0 rows, which is indistinguishable from a real empty import. That
+  includes a failure on the very first row, which on Python 3.10 is
+  raised by the SELECT's `execute()` rather than the first `fetchmany`
+  (before 3.11, `execute()` steps to the first row and decodes it), so
+  the `execute()` sits inside the try that drops the table too. The
   preview reads each table on its own: one this SQLite can't read (a
   virtual table whose module it lacks — Thunderbird's message index)
   comes back with an `error` and `row_count: null`, shown but not
@@ -128,7 +132,13 @@ see [docs/notes/README.md](README.md) for the whole set.
   whole); a tar whose stream ends early keeps every member before the
   cut; an inner archive that cannot even be opened stays in the tree
   unexpanded and is not retried; only an archive that yields NOTHING is
-  an ArchiveError (400). Disk-full stops the expansion rather than
+  an ArchiveError (400). "Is it a zip" is not `zipfile.is_zipfile` alone:
+  from Python 3.14 that reads the central directory as well as the end
+  record, so a zip whose directory is damaged is not a zip there, and an
+  inner one was left in the tree without a word while an outer one was
+  refused as "not a zip, tar or gzip archive". `_kind` also takes a first
+  local-file header (`PK\x03\x04`) as a zip, so opening it fails and is
+  reported as damage on every Python. Disk-full stops the expansion rather than
   failing every later member. **And nothing is overwritten**: two
   members with one name, or `messages` beside `messages.gz`, used to
   leave whichever came last — the attacker-activity copy gone without a

@@ -19,7 +19,7 @@ What this module owns, and what it leaves to Store:
   sessions never open the SQL pane), in the platform tempdir rather than
   /dev/shm where the views database lives: views are (pos, rid) pairs,
   a result is every cell of every row, and on Linux /dev/shm is RAM.
-  Named under the views prefix and flock'd for the Store's life, so
+  Named under the views prefix and locked for the Store's life, so
   store.sweep_orphan_views collects one a killed process stranded with
   no new janitor; deleted in close(). auto_vacuum=INCREMENTAL, so a
   released result gives its pages back rather than leaving the file at
@@ -51,23 +51,15 @@ import os
 import secrets
 import shutil
 import sqlite3
-import tempfile
 import threading
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
-try:  # POSIX only — see store._views_file_is_orphaned
-    import fcntl
-except ImportError:  # pragma: no cover - Windows
-    fcntl = None  # type: ignore[assignment]
-
 # Must start with store.VIEWS_PREFIX (tests/test_sql_results.py pins it):
-# that prefix and the flock are the whole of how sweep_orphan_views tells
-# an abandoned scratch file from a live one.
+# that prefix and the lock store.claim_views_file takes are the whole of
+# how sweep_orphan_views tells an abandoned scratch file from a live one.
 FILE_PREFIX = "winnow-views-sqlres-"
-FILE_SUFFIX = ".db"
-FILE_SUFFIXES = ("", "-wal", "-shm")
 
 
 class ResultExpired(Exception):
@@ -261,18 +253,13 @@ class SqlResults:
             raise ResultExpired("The case is closing")
         if self._db is not None:
             return self._db
-        fd, path = tempfile.mkstemp(prefix=FILE_PREFIX, suffix=FILE_SUFFIX, dir=self._dir)
-        # Held for the Store's life, like the views file's: the sweep's
-        # liveness probe. Unlockable (no flock, Windows) just means "never
-        # swept while open", which is the safe direction.
-        if fcntl is not None:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                self._fd = fd
-            except OSError:
-                os.close(fd)
-        else:  # pragma: no cover - Windows
-            os.close(fd)
+        # Named and locked the way the views file is, by the same helper:
+        # the lock is the sweep's liveness probe, held for the Store's life
+        # on a `-lock` sidecar (on macOS a flock on the database itself
+        # blocks SQLite's own locks; store.claim_views_file). Store
+        # imports this module, so the import waits until it's needed.
+        from .store import claim_views_file
+        path, self._fd = claim_views_file(FILE_PREFIX, self._dir)
         db = sqlite3.connect(path, check_same_thread=False)
         # Before any table exists, or it can't be switched on.
         db.execute("PRAGMA auto_vacuum=INCREMENTAL")
@@ -317,14 +304,10 @@ class SqlResults:
                 with contextlib.suppress(sqlite3.Error):
                     self._db.close()
                 self._db = None
-            if self._fd is not None:
-                with contextlib.suppress(OSError):
-                    os.close(self._fd)
-                self._fd = None
             if self._path:
-                for suffix in FILE_SUFFIXES:
-                    with contextlib.suppress(OSError):
-                        os.remove(self._path + suffix)
+                from .store import release_views_file
+                release_views_file(self._path, self._fd)
+            self._fd = None
 
     # ------------------------------------------------------------ results
 

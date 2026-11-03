@@ -83,6 +83,22 @@ def test_a_custom_accent_still_wins(own_page):
         assert accent.lower() == "#39e881"
 
 
+def test_a_custom_accent_is_the_fill_too_where_the_skin_splits_them(own_page):
+    """Blueprint light fills buttons with its own safety orange and writes
+    accent text in a burnt one. An analyst's color has to replace both, or
+    their green text sits beside orange buttons."""
+    seed = '{ "accent": "#39e881", "accentCustomized": true, "style": "blueprint", "themeMode": "light", "splash": false }'
+    with _home(own_page, seed) as pg:
+        got = pg.evaluate("""() => { const cs = getComputedStyle(document.documentElement);
+            return [cs.getPropertyValue('--accent').trim(), cs.getPropertyValue('--accent-fill').trim()]; }""")
+        assert [v.lower() for v in got] == ["#39e881", "#39e881"]
+        # And back to the skin's own pair once the analyst lets it go.
+        got = pg.evaluate("""() => { __winnow.S.appearance.accentCustomized = false; __winnow.paintAccent();
+            const cs = getComputedStyle(document.documentElement);
+            return [cs.getPropertyValue('--accent').trim(), cs.getPropertyValue('--accent-fill').trim()]; }""")
+        assert got[0].lower() != got[1].lower(), got
+
+
 def test_harvest_is_the_default_look(own_page):
     with _home(own_page, '{ "splash": false }') as pg:
         assert pg.evaluate("() => document.documentElement.getAttribute('data-style')") == "harvest"

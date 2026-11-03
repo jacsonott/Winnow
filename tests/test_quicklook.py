@@ -187,6 +187,42 @@ def test_save_as_to_another_drive_copies_then_deletes(client, tmp_path, monkeypa
     server.STORE.close()
 
 
+def test_a_cross_drive_save_as_whose_copy_fails_leaves_the_case_where_it_was(client, tmp_path, monkeypatch):
+    """The other half of the copy-then-delete above: a copy that dies
+    part-way (the other drive fills up, a USB stick is pulled) must leave
+    no half-written case at the destination, the quick look still where
+    it was, and that case open again with its rows — the analyst's import
+    is the only copy there is."""
+    import errno
+    import shutil
+    server, c = client
+    old_path = _quicklook(server, c, tmp_path)
+    real_replace = os.replace
+
+    def cross_device(src, dst):
+        if src == old_path:
+            raise OSError(errno.EXDEV, "Invalid cross-device link")
+        return real_replace(src, dst)
+
+    def copy_dies_part_way(src, dst, **kw):
+        with open(dst, "wb") as f:
+            f.write(b"SQLite format 3\x00 and then the stick was pulled")
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(server.os, "replace", cross_device)
+    monkeypatch.setattr(shutil, "copy2", copy_dies_part_way)
+    dest = tmp_path / "other-drive" / "case.db-winnow"
+    res = c.post("/api/case/save_as", json={"name": "Moved", "path": str(dest)}, headers=HEADERS)
+
+    assert res.status_code == 400, res.text
+    assert "Could not move the case file" in res.json()["detail"]
+    assert not dest.exists(), "a half-copied case was left at the destination"
+    assert os.path.isfile(old_path)
+    assert server.STORE.path == old_path and not server.STORE.closed
+    assert server.STORE.list_sources()[0]["row_count"] == 2
+    server.STORE.close()
+
+
 def test_save_as_over_a_stale_listing_takes_the_new_name(client, tmp_path):
     """A case deleted outside Winnow stays listed under its path; saving a
     quick look to that path must list it under the name just typed, not

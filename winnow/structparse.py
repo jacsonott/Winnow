@@ -939,7 +939,6 @@ timeparse.register_op({
     "value_type": "text",
     "derived_kind": "text",
     "family": "extract",
-    "stateful": True,  # the parsed path is cached in `state` across the batch
     "hidden_from_detect": True,
 })
 
@@ -953,7 +952,6 @@ timeparse.register_op({
     "value_type": "text",
     "derived_kind": "text",
     "family": "extract",
-    "stateful": True,
     "hidden_from_detect": True,
 })
 
@@ -1083,7 +1081,6 @@ timeparse.register_op({
     "value_type": "text",
     "derived_kind": "text",
     "family": "extract",
-    "stateful": True,  # the compiled pattern is cached in `state` across the batch
     "hidden_from_detect": True,
 })
 
