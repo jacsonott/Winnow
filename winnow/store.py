@@ -239,9 +239,10 @@ MAX_SCAN_RESULTS = 5000
 # text of a pressed tag chip, so each has to sit between the darkest and the
 # lightest panels. Suspicious was #d68a2e until 2026-11, 2.0:1 on the light
 # skins; #b8680c is the same hue at 3:1 on all of them, the most one color
-# can manage on both (tests/ui/test_skin_contrast.py).
+# can manage on both (tests/ui/test_skin_contrast.py). TA was #c0392b, 2.3:1
+# on Jenna dark's panels; #dc4837 is the same red a step lighter, at 3:1.
 DEFAULT_TAGS = [
-    ("TA", "#c0392b", "1"),
+    ("TA", "#dc4837", "1"),
     ("Suspicious", "#b8680c", "2"),
     ("Benign", "#5d8a66", "3"),
 ]
