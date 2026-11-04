@@ -37,6 +37,14 @@ def _build(fx, source_id: int, spec: dict, items: int) -> Timed:
         v = held.pop("v", None)
         if v:
             fx.store.close_view(v["view_id"])
+        # A merge keeps its unfiltered view for the next identical build;
+        # let it go, so every repetition times a build (merges.py's
+        # many.sorted_again times the reuse). getattr: `--vs-ref` runs
+        # this file against revisions from before the views were kept.
+        forget = getattr(fx.store, "_forget_merge_views", None)
+        if forget is not None and source_id < 0:
+            with fx.store.lock, fx.store.db:
+                forget(source_id)
 
     return Timed(run, after=after, items=items)
 

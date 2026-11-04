@@ -72,7 +72,7 @@ treat that benchmark's delta with suspicion, and re-run before believing it.
 
 ## What's measured
 
-99 benchmarks across `bench/suites/`, one module per area. Some deliberate
+110 benchmarks across `bench/suites/`, one module per area. Some deliberate
 pairings, where the *gap between two numbers* is the real measurement:
 
 | pair | what the gap means |
@@ -83,6 +83,7 @@ pairings, where the *gap between two numbers* is the real measurement:
 | `views/filter.equals_indexed` vs `.equals_unindexed` | what the lazy column index is buying |
 | `grouping/summary.covers_source` vs `.via_view_join` | the direct-aggregate fast path |
 | `api/rows.page` vs `paging/fetch_rows.head` | routing + pydantic + JSON serialisation cost |
+| `merges/many.*` vs `merges/one_table.*` | what a merge of 60 small tables costs over the same rows as one table; the gap is the per-member cost |
 
 `footprint/` is metrics, not timings: source-table bytes, FTS index bytes,
 column index bytes, and the case-file-to-CSV ratio. It's in the suite because

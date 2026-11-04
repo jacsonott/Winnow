@@ -24,7 +24,11 @@ def _ingest(store, write_csv, rows, name, column_types=None):
 
 
 def _merge_build_sql(store, mid, spec):
-    """The SELECT build_view materialises the merge with."""
+    """The SELECT build_view materialises the merge with. Any unfiltered
+    view kept from an earlier build is let go first, or the build would be
+    that table again and run no SELECT at all."""
+    with store.lock, store.db:
+        store._forget_merge_views(mid)
     seen = []
     store.db.set_trace_callback(seen.append)
     try:
@@ -152,3 +156,115 @@ def test_filtered_merge_view_keeps_the_sort(store, write_csv):
             if "b" in _ascii_lower(dict(zip(A[0] if k[0] == a else B[0],
                                             (A if k[0] == a else B)[k[1]]))["User"])]
     assert got == want
+
+
+def _v_tables(store):
+    return {r[0] for r in store.db.execute("SELECT name FROM v.sqlite_master WHERE type='table'")
+            if r[0].startswith("view_")}
+
+
+def _inserts(store, fn):
+    """fn's result, and how many view tables it wrote."""
+    seen = []
+    store.db.set_trace_callback(seen.append)
+    try:
+        out = fn()
+    finally:
+        store.db.set_trace_callback(None)
+    return out, sum(1 for s in seen if s.startswith("INSERT INTO v."))
+
+
+def _hosts(store, write_csv, n=3, rows=40):
+    ids = []
+    for k in range(n):
+        data = [["When", "Host", "Payload"]]
+        data += [[f"2024-01-0{(i % 9) + 1} 10:{i % 60:02d}:00", f"H{k}", f"p{i}"] for i in range(rows)]
+        ids.append(_ingest(store, write_csv, data, f"m{k}"))
+    return store.create_merge("hosts", ids)["id"], ids
+
+
+SORTED = {"filters": [], "sort": [{"column": "When", "dir": "asc"}]}
+FILTERED = {"filters": [{"column": "Host", "op": "equals", "value": "H1"}], "sort": [{"column": "When", "dir": "asc"}]}
+
+
+def _keys(store, v):
+    return [(r["source_id"], r["rid"]) for r in store.fetch_rows(v["view_id"], 0, 10_000)["rows"]]
+
+
+@pytest.mark.parametrize("spec", [SORTED, {"filters": [], "sort": []},
+                                  {"filters": [], "sort": [{"column": "Host", "dir": "desc"}]}])
+def test_clearing_filters_on_a_merge_reuses_its_unfiltered_view(store, write_csv, spec):
+    """A single table's unfiltered view is an index walk, or no table at
+    all; a merge's is every member's rows merged into order and written
+    again, each time the filters are cleared. The second time it is the
+    table the first built — same rows, same order, nothing written."""
+    mid, _ = _hosts(store, write_csv)
+    first, wrote = _inserts(store, lambda: store.build_view(mid, {"source_id": mid, **spec}))
+    want = _keys(store, first)
+    assert wrote == 1 and len(want) == 120
+    filtered = store.build_view(mid, {"source_id": mid, **FILTERED})
+    assert first["view_id"] in _v_tables(store)   # kept while the filter is on
+    again, wrote = _inserts(store, lambda: store.build_view(mid, {"source_id": mid, **spec}))
+    assert wrote == 0
+    assert again["view_id"] == first["view_id"] and again["row_count"] == 120
+    assert _keys(store, again) == want
+    # The filtered view went the usual way; only the kept one is left.
+    assert filtered["view_id"] not in _v_tables(store)
+    assert _v_tables(store) == {again["view_id"]}
+
+
+def test_a_reused_merge_view_tags_groups_and_survives_its_children(store, write_csv):
+    mid, ids = _hosts(store, write_csv)
+    v = store.build_view(mid, {"source_id": mid, **SORTED})
+    store.build_view(mid, {"source_id": mid, **FILTERED})
+    v = store.build_view(mid, {"source_id": mid, **SORTED})
+    tag = store.list_tags()[0]["id"]
+    assert store.tag_view(v["view_id"], tag, True)["changed"] == 120
+    group = store.expand_group(v["view_id"], "Host", "H2")
+    assert group["row_count"] == 40
+    store.close_view(group["view_id"])
+    assert store.fetch_rows(v["view_id"], 0, 3)["rows"][0]["tags"] == [tag]
+    # Evicted with its group by the next build, and still there to reuse.
+    store.build_view(mid, {"source_id": mid, **FILTERED})
+    v2 = store.build_view(mid, {"source_id": mid, **SORTED})
+    assert v2["view_id"] == v["view_id"]
+    assert sum(1 for r in store.fetch_rows(v2["view_id"], 0, 200)["rows"] if r["tags"] == [tag]) == 120
+
+
+def test_a_kept_merge_view_is_not_reused_once_the_merge_changes(store, write_csv):
+    mid, ids = _hosts(store, write_csv)
+    first = store.build_view(mid, {"source_id": mid, **SORTED})
+    store.update_merge(-mid, source_ids=ids[:2])
+    assert first["view_id"] not in _v_tables(store)
+    v, wrote = _inserts(store, lambda: store.build_view(mid, {"source_id": mid, **SORTED}))
+    assert wrote == 1 and v["row_count"] == 80
+    assert {k[0] for k in _keys(store, v)} == set(ids[:2])
+    store.delete_merge(-mid)
+    assert _v_tables(store) == set()
+
+
+def test_at_most_two_unfiltered_views_are_kept_per_merge(store, write_csv):
+    mid, _ = _hosts(store, write_csv)
+    views = [store.build_view(mid, {"source_id": mid, "filters": [], "sort": [{"column": c, "dir": "asc"}]})
+             for c in ("When", "Host", "Payload")]
+    # The live one and the one before it; the oldest is gone.
+    assert _v_tables(store) == {views[1]["view_id"], views[2]["view_id"]}
+    _, wrote = _inserts(store, lambda: store.build_view(
+        mid, {"source_id": mid, "filters": [], "sort": [{"column": "Host", "dir": "asc"}]}))
+    assert wrote == 0
+    _, wrote = _inserts(store, lambda: store.build_view(
+        mid, {"source_id": mid, "filters": [], "sort": [{"column": "When", "dir": "asc"}]}))
+    assert wrote == 1
+
+
+def test_a_merge_sorted_on_a_derived_column_is_built_each_time(store, write_csv):
+    """Its values are the analyst's, rewritten by a re-derive under the
+    same SELECT, so the order a kept view holds could be stale."""
+    mid, _ = _hosts(store, write_csv)
+    res = store.add_derived_column(mid, "Num", "Payload", "regex_extract", {"pattern": r"p(\d+)"})
+    for jid in res["job_ids"]:
+        store.wait_for_ingest_job(jid, timeout=30)
+    spec = {"source_id": mid, "filters": [], "sort": [{"column": "Num", "dir": "asc"}]}
+    store.build_view(mid, spec)
+    _, wrote = _inserts(store, lambda: store.build_view(mid, spec))
+    assert wrote == 1

@@ -1465,7 +1465,8 @@ def _ascii_fold(name: str) -> str:
     return name.translate(_ASCII_FOLD)
 
 
-def _member_column(member_src: dict, column: dict) -> str | None:
+def _member_column(member_src: dict, column: dict,
+                   keys: dict[str, tuple[str, bool]] | None = None) -> str | None:
     """The member's own name for one of a merge's columns (matched by
     _col_key), or None when it has none. A file column and a derived one
     are never the same column, whatever their names: _merge_columns
@@ -1477,11 +1478,69 @@ def _member_column(member_src: dict, column: dict) -> str | None:
     rename on the merge refuses that name). Before this, the member was
     read as its bare table and every build of the merge failed with
     "no such column"."""
-    key = _col_key(column["name"])
-    for c in member_src["columns"]:
-        if _col_key(c["name"]) == key:
-            return c["name"] if bool(c.get("derived")) == bool(column.get("derived")) else None
-    return None
+    hit = (_member_keys(member_src) if keys is None else keys).get(_col_key(column["name"]))
+    if hit is None:
+        return None
+    return hit[0] if hit[1] == bool(column.get("derived")) else None
+
+
+def _member_keys(member_src: dict) -> dict[str, tuple[str, bool]]:
+    """_member_column_keys for a src dict. Build it once per member and
+    hand it to _member_column as `keys` in any loop over a merge's
+    columns."""
+    return _member_column_keys(tuple((c["name"], bool(c.get("derived"))) for c in member_src["columns"]))
+
+
+@functools.lru_cache(maxsize=4096)
+def _member_column_keys(columns: tuple[tuple[str, bool], ...]) -> dict[str, tuple[str, bool]]:
+    """_member_column's lookup table for one member's columns: _col_key ->
+    (name, derived), the FIRST column of each key winning, as the linear
+    scan it replaces returned. That scan ran once per merge column per
+    member, so every read of a merge folded members x columns^2 names —
+    most of a 60-member merge's page fetch (40 ms of Python for 200 rows)
+    and a third of its view build. Keyed by the column list itself, so a
+    renamed or derived column is a new entry, never a stale answer.
+    Treat the dict as read-only: it is shared between callers."""
+    out: dict[str, tuple[str, bool]] = {}
+    for name, derived in columns:
+        out.setdefault(_col_key(name), (name, derived))
+    return out
+
+
+@functools.lru_cache(maxsize=4096)
+def _member_projection_cached(merge_cols: tuple[tuple[str, bool, bool], ...],
+                              member_cols: tuple[tuple[str, bool], ...],
+                              label: str) -> tuple[str, ...] | None:
+    """Store._member_projection's work, on hashable copies of what it
+    reads: (name, derived, source_column) per merge column, (name,
+    derived) per member column, and the member's label."""
+    keys = _member_column_keys(member_cols)
+    exprs: list[str] = []
+    plain = True
+    used: set[str] = set()
+    for name, derived, source_column in merge_cols:
+        if source_column:
+            exprs.append(f"{_sql_text_literal(label)} AS {q(name)}")
+            plain = False
+            continue
+        hit = keys.get(_col_key(name))
+        actual = hit[0] if hit is not None and hit[1] == derived else None
+        if actual is None:
+            exprs.append(f"NULL AS {q(name)}")
+            plain = False
+        elif actual == name:
+            exprs.append(q(name))
+        else:
+            exprs.append(f"{q(actual)} AS {q(name)}")
+            if not _sqlite_same_ident(actual, name):
+                plain = False
+        used.add(_col_key(name))
+    if plain:
+        return None
+    for name, derived in member_cols:
+        if not derived and _col_key(name) not in used:
+            exprs.append(q(name))
+    return tuple(exprs)
 
 
 def _rename_in_layout(payload: dict, olds: set[str], new: str, new_is_live: bool = False) -> bool:
@@ -1727,6 +1786,7 @@ def _first_nonblank_row(reader: Iterable[list[str]]) -> list[str]:
     raise ValueError("File is empty")
 
 
+@functools.lru_cache(maxsize=65536)
 def _col_key(name: str) -> str:
     """A column's identity across a merge's members: its name, ignoring
     ASCII case — "EventId" in one export and "EventID" in another are one
@@ -2338,6 +2398,19 @@ class _ScanGroup:
 
     def stopped(self) -> bool:
         return self.cancelled or self.gave_up
+
+
+class _ScanGroups:
+    """Several _ScanGroups registered under one op_token (a parallel scan
+    over a merge's members, one group per member so that one can give up
+    without the others): a cancel reaches every one."""
+
+    def __init__(self, groups: list[_ScanGroup]) -> None:
+        self.groups = groups
+
+    def interrupt(self) -> None:
+        for g in self.groups:
+            g.interrupt()
 
 
 def _union_scope(a: list[int] | None, b: list[int] | None) -> list[int] | None:
@@ -3249,6 +3322,10 @@ class Store:
         # describes a table it does not own.
         self._view_seq_lock = threading.Lock()
         self._views: dict[str, dict] = {}
+        # Unfiltered merge views kept for reuse (_keep_merge_view):
+        # (merge id, SELECT, params, member row counts) -> (view table,
+        # row count), newest last. Under self.lock, like _views' tables.
+        self._merge_view_cache: dict[tuple, tuple[str, int]] = {}
         # time_histogram's bucket width per (view, column, max_buckets), so
         # a re-ask about the same view aggregates by bucket rather than by
         # second (see there). A hint, checked on every use, so its own lock
@@ -7483,7 +7560,7 @@ class Store:
             if not row:
                 raise KeyError(f"No merge {merge_id}")
             member_ids = json.loads(row["source_ids"])
-            members = [self._source_lite_on(conn, sid) for sid in member_ids]
+            members = self._members_lite_on(conn, member_ids)
             return {
                 "id": source_id,
                 "name": row["name"],
@@ -7637,8 +7714,9 @@ class Store:
 
     @staticmethod
     def _member_missing_columns(columns: list[dict], member: dict) -> list[str]:
+        keys = _member_keys(member)
         return [c["name"] for c in columns
-                if not c.get("source_column") and _member_column(member, c) is None]
+                if not c.get("source_column") and _member_column(member, c, keys) is None]
 
     @staticmethod
     def _member_projection(merge_src: dict, msrc: dict) -> list[str] | None:
@@ -7657,33 +7735,18 @@ class Store:
 
         A member's derived column is not its copy of a file column another
         member has under the same name (_member_column): that member lacks
-        the merge's column like any other, and reads it as NULL."""
-        exprs: list[str] = []
-        plain = True
-        used: set[str] = set()
-        for c in merge_src["columns"]:
-            name = c["name"]
-            if c.get("source_column"):
-                exprs.append(f"{_sql_text_literal(msrc.get('nickname') or msrc['name'])} AS {q(name)}")
-                plain = False
-                continue
-            actual = _member_column(msrc, c)
-            if actual is None:
-                exprs.append(f"NULL AS {q(name)}")
-                plain = False
-            elif actual == name:
-                exprs.append(q(name))
-            else:
-                exprs.append(f"{q(actual)} AS {q(name)}")
-                if not _sqlite_same_ident(actual, name):
-                    plain = False
-            used.add(_col_key(name))
-        if plain:
-            return None
-        for c in msrc["columns"]:
-            if not c.get("derived") and _col_key(c["name"]) not in used:
-                exprs.append(q(c["name"]))
-        return exprs
+        the merge's column like any other, and reads it as NULL.
+
+        Memoized on everything the answer reads (the merge's columns, the
+        member's columns and label): one view build on a merge asks it
+        several times per member, and computing it is a pass over every
+        merge column per member."""
+        got = _member_projection_cached(
+            tuple((c["name"], bool(c.get("derived")), bool(c.get("source_column")))
+                  for c in merge_src["columns"]),
+            tuple((c["name"], bool(c.get("derived"))) for c in msrc["columns"]),
+            msrc.get("nickname") or msrc["name"])
+        return None if got is None else list(got)
 
     def _member_read_src(self, merge_src: dict, msrc: dict) -> dict:
         """The src dict a merge member's own WHERE (filters, search, tags,
@@ -7697,12 +7760,13 @@ class Store:
         if self._member_projection(merge_src, msrc) is None:
             return {**msrc, "merge_id": merge_src["id"]}
         rename = {_col_key(c["name"]): c for c in merge_src["columns"] if not c.get("source_column")}
+        keys = _member_keys(msrc)
         columns = []
         for c in msrc["columns"]:
             mc = rename.get(_col_key(c["name"]))
             if mc is None:
                 columns.append(c)
-            elif _member_column(msrc, mc) is not None:
+            elif _member_column(msrc, mc, keys) is not None:
                 columns.append({**c, "name": mc["name"]})
             # Otherwise a derived column under the name of the merge's file
             # column, which is not the member's copy of it (_member_column):
@@ -7767,11 +7831,40 @@ class Store:
         if source_id > 0:
             src = self._source_lite_on(conn, source_id)
             return [{"source_id": source_id, "table_name": src["table_name"]}]
-        merge = self._source_lite_on(conn, source_id)
+        row = conn.execute("SELECT source_ids FROM merges WHERE id=?", (-source_id,)).fetchone()
+        if not row:
+            raise KeyError(f"No merge {-source_id}")
+        member_ids = json.loads(row["source_ids"])
+        return [{"source_id": sid, "table_name": msrc["table_name"], "src": msrc}
+                for sid, msrc in zip(member_ids, self._members_lite_on(conn, member_ids))]
+
+    def _members_lite_on(self, conn: sqlite3.Connection, member_ids: list[int]) -> list[dict]:
+        """_source_lite_on for each of a merge's members, in order, in two
+        queries rather than two per member: every read of a merge resolves
+        its members, most of them more than once, and on a 60-member merge
+        the 120 lookups were a few milliseconds a time. A member that is
+        gone is the same KeyError _source_lite_on raises."""
+        if not _HAS_JSON_EACH or len(member_ids) < 2:
+            return [self._source_lite_on(conn, sid) for sid in member_ids]
+        ids = json.dumps([int(i) for i in member_ids])
+        rows = {r["id"]: r for r in conn.execute(
+            "SELECT * FROM sources WHERE id IN (SELECT value FROM json_each(?))", (ids,))}
+        derived: dict[int, list[sqlite3.Row]] = {}
+        for dr in conn.execute(
+            "SELECT * FROM derived_columns WHERE source_id IN (SELECT value FROM json_each(?)) "
+            "ORDER BY source_id, id", (ids,)
+        ):
+            derived.setdefault(dr["source_id"], []).append(dr)
         out = []
-        for sid in merge["member_source_ids"]:
-            msrc = self._source_lite_on(conn, sid)
-            out.append({"source_id": sid, "table_name": msrc["table_name"], "src": msrc})
+        for sid in member_ids:
+            row = rows.get(sid)
+            if row is None:
+                raise KeyError(f"No table {sid}")
+            d = self._src_dict(row)
+            for dr in derived.get(sid, ()):
+                d["columns"].append(self._derived_col_entry(dr))
+                d["has_derived"] = True
+            out.append(d)
         return out
 
     def _merge_name_taken(self, name: str, exclude_id: int | None = None) -> bool:
@@ -7854,6 +7947,7 @@ class Store:
                 (new_name, json.dumps(ids), mode, 1 if src_col else 0, merge_id),
             )
             self._evict_root_views(-merge_id)
+            self._forget_merge_views(-merge_id)
         self._maxlen_cache.pop(-merge_id, None)
         return self.get_source(-merge_id)
 
@@ -7929,6 +8023,7 @@ class Store:
             # Its views too, for drop_source's reason: a window still
             # holding one would otherwise page and tag a merge nobody has.
             self._evict_views_of(-merge_id)
+            self._forget_merge_views(-merge_id)
 
     def merges_using(self, source_id: int) -> list[dict]:
         """The merges this table is a member of, as {id, name}.
@@ -9805,6 +9900,7 @@ class Store:
             for s in (spec.get("sort") or [])
         )
 
+        cache_key = None
         if src.get("is_merge"):
             for frag in self._raw_fragments(spec.get("filter_tree")):
                 self.validate_where_fragment(source_id, frag)
@@ -9815,11 +9911,16 @@ class Store:
             filtered = False
             params: list[Any] = []
             with self._build_batch():   # one batch for every member's index builds
+                reads = []
                 for m in self._resolve_members(source_id):
+                    read_src = self._member_read_src(src, m["src"])
+                    reads.append((m, read_src, self._member_from(
+                        src, m, uses=[c["name"] for c in self._base_cols(read_src)])))
+                found = self._merge_contains_found(spec, reads)
+                for m, read_src, scan_from in reads:
                     msrc = m["src"]
-                    read_src = self._member_read_src(src, msrc)
-                    scan_from = self._member_from(src, m, uses=[c["name"] for c in self._base_cols(read_src)])
-                    where, p = self._compile_where(m["source_id"], read_src, spec, colnames, scan_from=scan_from)
+                    where, p = self._compile_where(m["source_id"], read_src, spec, colnames,
+                                                   scan_from=scan_from, contains_found=found)
                     for col in sort_cols:
                         self._ensure_sort_index_building(
                             m["source_id"], col,
@@ -9863,6 +9964,17 @@ class Store:
                 select = (f"SELECT {sid_col}, rid FROM ({union_sql} {merge_order})" if keys
                           else f"{union_sql} {merge_order}")
             sql = f"INSERT INTO v.{q(vid)}(source_id, rid) {select}"
+            # An unfiltered merge view is the same rows in the same order
+            # for as long as the SELECT and the members' rows are: member
+            # tables never change after import (invariant #1), so the
+            # SELECT text, its parameters and each member's row count
+            # name it exactly. Except a sort on a derived column, whose
+            # values a re-derive rewrites under the same text.
+            derived_names = {c["name"] for c in src["columns"] if c.get("derived")}
+            if not filtered and not hold and not any(
+                    s.get("column") in derived_names for s in (spec.get("sort") or [])):
+                cache_key = (source_id, select, tuple(params),
+                             tuple((m["source_id"], m["src"]["row_count"]) for m, _, _ in reads))
         else:
             table = src["table_name"]
             where, params = self._compile_where(source_id, src, spec, colnames, scan_from=q(table))
@@ -9904,16 +10016,27 @@ class Store:
                 # therefore every pos — is fully determined, not sorter-
                 # dependent.) cursor.rowcount then gives the view's row count
                 # without re-scanning the table we just wrote.
-                self.db.execute(f"CREATE TABLE v.{q(vid)} (pos INTEGER PRIMARY KEY, source_id INTEGER, rid INTEGER)")
-                n = self.db.execute(sql, params).rowcount
-                # Evicted *after* the new view is built, not before (it used to
-                # be first): the whole block is one transaction, so a cancelled
-                # (interrupted) build rolls back to a world where the previous
-                # view still exists — the frontend keeps its rows instead of
-                # every open handle 409ing. The new view's handle isn't in
-                # self._views yet, so the eviction loop can't touch it. A held
-                # build evicts only an earlier pending view (see the docstring).
-                self._evict_root_views(source_id, pending_only=hold)
+                hit = self._merge_view_cache.get(cache_key) if cache_key else None
+                if hit is not None:
+                    # Built before and kept (_keep_merge_view): this build
+                    # is that table again, under its own id.
+                    vid, n = hit
+                    del self._merge_view_cache[cache_key]
+                    self._merge_view_cache[cache_key] = hit   # newest last
+                    self._evict_root_views(source_id)
+                else:
+                    self.db.execute(f"CREATE TABLE v.{q(vid)} (pos INTEGER PRIMARY KEY, source_id INTEGER, rid INTEGER)")
+                    n = self.db.execute(sql, params).rowcount
+                    # Evicted *after* the new view is built, not before (it used to
+                    # be first): the whole block is one transaction, so a cancelled
+                    # (interrupted) build rolls back to a world where the previous
+                    # view still exists — the frontend keeps its rows instead of
+                    # every open handle 409ing. The new view's handle isn't in
+                    # self._views yet, so the eviction loop can't touch it. A held
+                    # build evicts only an earlier pending view (see the docstring).
+                    self._evict_root_views(source_id, pending_only=hold)
+                    if cache_key:
+                        self._keep_merge_view(cache_key, vid, n)
 
             # Registered after the commit (a rolled-back build never gets a
             # handle) but BEFORE the writer lock is released. Registering
@@ -10041,7 +10164,7 @@ class Store:
         handle = self._views.pop(vid, None)
         if not handle:
             return
-        if handle.get("kind") not in ("group_virtual", "root_virtual"):
+        if handle.get("kind") not in ("group_virtual", "root_virtual") and not self._merge_view_kept(vid):
             self.db.execute(f"DROP TABLE IF EXISTS v.{q(vid)}")
         # Tables a view keeps beside its own (a folded Timeline's rows).
         for extra in handle.get("tables", ()):
@@ -10049,6 +10172,45 @@ class Store:
         for child_vid, child in list(self._views.items()):
             if child.get("parent_view_id") == vid:
                 self._evict_view_and_children(child_vid)
+
+    # How many unfiltered views of one merge _keep_merge_view keeps: the
+    # one on screen and the one before it (a sort flipped back and forth).
+    MERGE_VIEW_CACHE_PER_SOURCE = 2
+
+    def _keep_merge_view(self, key: tuple, vid: str, row_count: int) -> None:
+        """Keeps the table an unfiltered merge view was just built into, so
+        the next build of the same view (Clear filters, coming back to the
+        tab, a sort flipped back) is that table again rather than the same
+        rows merged and written once more. A single table's unfiltered view
+        is close to free (an index walk, or none at all under invariant
+        #2's carve-out); a merge's is every member's rows merged into
+        order: 140 ms for 300k rows over 60 members, against 50 ms for the
+        same rows imported as one table, and it grows with the rows.
+
+        Only the views db holds them, so they die with the process like any
+        view. At most MERGE_VIEW_CACHE_PER_SOURCE per merge, newest last;
+        one that falls out is dropped unless a live handle still pages it,
+        in which case its eviction drops it. Caller holds self.lock inside
+        the build's transaction."""
+        self._merge_view_cache[key] = (vid, row_count)
+        mine = [k for k in self._merge_view_cache if k[0] == key[0]]
+        for old in mine[:-self.MERGE_VIEW_CACHE_PER_SOURCE]:
+            old_vid, _ = self._merge_view_cache.pop(old)
+            if old_vid not in self._views:
+                self.db.execute(f"DROP TABLE IF EXISTS v.{q(old_vid)}")
+
+    def _merge_view_kept(self, vid: str) -> bool:
+        return any(v == vid for v, _ in self._merge_view_cache.values())
+
+    def _forget_merge_views(self, source_id: int) -> None:
+        """Drops every table _keep_merge_view kept for this merge, for a
+        merge deleted or edited (its member list is in the key, but the
+        tables would outlive it). Caller holds self.lock inside a
+        transaction."""
+        for key in [k for k in self._merge_view_cache if k[0] == source_id]:
+            vid, _ = self._merge_view_cache.pop(key)
+            if vid not in self._views:
+                self.db.execute(f"DROP TABLE IF EXISTS v.{q(vid)}")
 
     def close_view(self, view_id: str) -> None:
         """Explicit free for a group sub-view (called on UI collapse) rather
@@ -12228,26 +12390,82 @@ class Store:
         Cancellable under `token` like the build: the threads are
         registered together (_ScanGroup) and each stops at its next poll.
         One thread's error stops the others and is raised as the build's."""
-        rows = int(src.get("row_count") or 0)
-        n = PARALLEL_SCAN_THREADS
-        if n < 2 or rows < PARALLEL_SCAN_MIN_ROWS or not _HAS_JSON_EACH:
-            return None
-        scan, scan_params = _contains_scan(cols, term)
-        query = None if src.get("has_fts") else _trigram_match_query(term)
-        indexed_to = self._fts_partial_point(src) if query is not None else None
-        start = indexed_to or 1
-        group = _ScanGroup()
-        per_range = max(1, PARALLEL_SCAN_MAX_RIDS // n)
+        return self._parallel_contains_many([(src, frm, cols)], term, token)[0]
 
-        def run(sql: str, args: list, index: bool = False) -> str | None:
+    def _parallel_contains_many(self, jobs: list[tuple[dict, str, list[str]]], term: str,
+                                token: str | None) -> list[tuple[str, list] | None]:
+        """_parallel_contains for several tables at once — (src, frm, cols)
+        per job, an answer (or None) per job, in order: a merge's members,
+        whose scans share one pool of PARALLEL_SCAN_THREADS connections.
+
+        Asked one member at a time, a merge of many small tables never
+        scanned in parallel at all: each member was under
+        PARALLEL_SCAN_MIN_ROWS, so its scan ran inside the build, one
+        member after the next on one core, where the same rows imported as
+        one table were split four ways. 60 members of 5k rows searched in
+        1.6 s against 0.5 s for the combined file. The threshold is on the
+        rows of every job together, and the work is cut into ranges of
+        about a thread's share of them: a small member is one range, a big
+        one several, and a table alone is split into exactly
+        PARALLEL_SCAN_THREADS as before.
+
+        A job that finds more than its share of PARALLEL_SCAN_MAX_RIDS
+        gives up alone — its answer is None, so the build scans that member
+        the usual way — and the other jobs keep what they found."""
+        rows = [int(src.get("row_count") or 0) for src, _, _ in jobs]
+        total = sum(rows)
+        n = PARALLEL_SCAN_THREADS
+        if not jobs or n < 2 or total < PARALLEL_SCAN_MIN_ROWS or not _HAS_JSON_EACH:
+            return [None] * len(jobs)
+        alone = len(jobs) == 1
+        query = _trigram_match_query(term)
+        groups = [_ScanGroup() for _ in jobs]
+        share = -(-total // n)   # a thread's share of the rows
+        tasks: list[tuple[int, str, list, bool, int]] = []
+        starts: list[int] = []
+        for j, ((src, frm, cols), nrows) in enumerate(zip(jobs, rows)):
+            scan, scan_params = _contains_scan(cols, term)
+            indexed_to = None if src.get("has_fts") or query is None else self._fts_partial_point(src)
+            start = indexed_to or 1
+            starts.append(start)
+
+            def budget(span: int) -> int:
+                # Alone, every range may carry an even split of the cap, as
+                # it always could; beside other jobs, a range's share of the
+                # cap follows its share of the rows.
+                if alone:
+                    return max(1, PARALLEL_SCAN_MAX_RIDS // n)
+                return max(1, PARALLEL_SCAN_MAX_RIDS * max(span, 1) // max(total, 1))
+
+            if indexed_to:
+                fts = q(self._fts_shape(self._own_src(src))[0])
+                tasks.append((j, f"SELECT rid FROM {frm} WHERE rid IN "
+                                 f"(SELECT rowid FROM {fts} WHERE {fts} MATCH ? AND rowid < ?) AND {scan}",
+                              [query, start, *scan_params], True, budget(start - 1)))
+            left = max(nrows - start + 1, 1)
+            k = n if alone else max(1, -(-left // share))
+            step = -(-left // k)
+            for i in range(k):
+                lo = start + i * step
+                if i == k - 1:
+                    tasks.append((j, f"SELECT rid FROM {frm} WHERE rid >= ? AND {scan}",
+                                  [lo, *scan_params], False, budget(left - i * step)))
+                else:
+                    tasks.append((j, f"SELECT rid FROM {frm} WHERE rid >= ? AND rid < ? AND {scan}",
+                                  [lo, lo + step, *scan_params], False, budget(step)))
+
+        def run(j: int, sql: str, args: list, index: bool, limit: int) -> str | None:
             """One connection's share, as the inside of a JSON array (""
-            for none), or None once the parallel scan has given up.
+            for none), or None once job j's parallel scan has given up.
 
             Gathered by SQLite (json_group_array), one row back, rather
             than fetched a row at a time: each fetch takes the GIL, and four
             threads taking it per row ran a term on 870k rows of a 2M-row
             table at 25 s, where the single scan takes 5. The LIMIT stops a
             range that has too many."""
+            group = groups[j]
+            if group.gave_up and not group.cancelled:
+                return None   # an earlier range of this job had too many
             try:
                 with self._reader() as conn:
                     conn.set_progress_handler(group.stopped, PARALLEL_SCAN_POLL_OPS)
@@ -12259,49 +12477,39 @@ class Store:
                             # holds every rid below `start`. A build started
                             # over since (a fresh build drops the table)
                             # holds fewer, and its rows would be missed.
-                            if (self._fts_partial_point(src, conn) or 0) < start:
+                            if (self._fts_partial_point(jobs[j][0], conn) or 0) < starts[j]:
                                 group.give_up()
                                 return None
                         count, found = conn.execute(
                             f"SELECT count(*), json_group_array(rid) FROM ({sql} LIMIT ?)",
-                            [*args, per_range + 1]).fetchone()
+                            [*args, limit + 1]).fetchone()
                     finally:
                         conn.set_progress_handler(None, 0)
             except sqlite3.OperationalError:
                 if group.gave_up and not group.cancelled:
-                    return None   # stopped by another thread giving up, not an error
-                group.give_up()
+                    return None   # stopped by its job giving up, not an error
+                for g in groups:
+                    g.give_up()
                 raise
             except BaseException:
-                group.give_up()
+                for g in groups:
+                    g.give_up()
                 raise
-            if count > per_range:
+            if count > limit:
                 group.give_up()
                 return None
             return found[1:-1]
 
-        tasks: list[tuple] = []
-        if indexed_to:
-            fts = q(self._fts_shape(self._own_src(src))[0])
-            tasks.append((f"SELECT rid FROM {frm} WHERE rid IN "
-                          f"(SELECT rowid FROM {fts} WHERE {fts} MATCH ? AND rowid < ?) AND {scan}",
-                          [query, start, *scan_params], True))
-        step = -(-max(rows - start + 1, 1) // n)
-        for i in range(n):
-            lo = start + i * step
-            if i == n - 1:
-                tasks.append((f"SELECT rid FROM {frm} WHERE rid >= ? AND {scan}", [lo, *scan_params]))
-            else:
-                tasks.append((f"SELECT rid FROM {frm} WHERE rid >= ? AND rid < ? AND {scan}",
-                              [lo, lo + step, *scan_params]))
-
-        with self._interruptible(token, group):
-            with concurrent.futures.ThreadPoolExecutor(len(tasks), thread_name_prefix="winnow-scan") as pool:
-                futures = [pool.submit(run, *t) for t in tasks]
-            parts = [f.result() for f in futures]
-        if any(p is None for p in parts):
-            return None
-        return "rid IN (SELECT value FROM json_each(?))", ["[" + ",".join(p for p in parts if p) + "]"]
+        with self._interruptible(token, _ScanGroups(groups)):
+            workers = len(tasks) if alone else min(len(tasks), n)
+            with concurrent.futures.ThreadPoolExecutor(workers, thread_name_prefix="winnow-scan") as pool:
+                futures = [(t[0], pool.submit(run, *t)) for t in tasks]
+            parts: list[list[str | None]] = [[] for _ in jobs]
+            for j, f in futures:
+                parts[j].append(f.result())
+        return [None if groups[j].gave_up or any(p is None for p in ps)
+                else ("rid IN (SELECT value FROM json_each(?))", ["[" + ",".join(p for p in ps if p) + "]"])
+                for j, ps in enumerate(parts)]
 
     def _own_src(self, src: dict) -> dict:
         """The source's own src dict, for a merge member's renamed copy
@@ -12335,13 +12543,41 @@ class Store:
         with self._reader() as c:
             return read(c)
 
+    def _merge_contains_found(self, spec: dict, reads: list[tuple[dict, dict, str]]
+                              ) -> dict[int, tuple[str, list] | None] | None:
+        """For a merge's build_view: the parallel scan of a Contains search,
+        run over every member that needs one (no index yet, or a term too
+        short for it) in one pool, keyed by member id for _compile_where's
+        `contains_found`. None when the spec has no Contains search.
+        `reads` is (member, its read src, the FROM it is scanned through)
+        per member, as build_view resolves them."""
+        search = (spec.get("search") or "").strip()
+        if not search or spec.get("search_mode", "contains") in ("regex", "advanced"):
+            return None
+        short = _trigram_match_query(search) is None
+        jobs, ids = [], []
+        for m, read_src, scan_from in reads:
+            cols = [c["name"] for c in self._base_cols(read_src)]
+            if cols and (short or not read_src["has_fts"]):
+                jobs.append((read_src, scan_from, cols))
+                ids.append(m["source_id"])
+        if not jobs:
+            return None
+        return dict(zip(ids, self._parallel_contains_many(jobs, search, spec.get("op_token"))))
+
     def _compile_where(self, source_id, src, spec, colnames, *,
-                       scan_from: str | None = None) -> tuple[str, list]:
+                       scan_from: str | None = None,
+                       contains_found: dict[int, tuple[str, list] | None] | None = None) -> tuple[str, list]:
         """`scan_from`: the FROM text this WHERE will read the rows through,
         passed by build_view alone. With it, a Contains search the index
         can't narrow is answered here, by a parallel scan, and compiles to
         the rids it found (_parallel_contains). Without it (spec_sql) the
-        search compiles to the scan itself, as SQL that stands on its own."""
+        search compiles to the scan itself, as SQL that stands on its own.
+
+        `contains_found`: that parallel scan's answers already in hand, by
+        source id — a merge scans every member's share in one pool before
+        compiling any of them (_merge_contains_found). A member it holds
+        None for (its scan gave up) compiles to the scan itself."""
         clauses: list[str] = []
         params: list[Any] = []
 
@@ -12398,7 +12634,10 @@ class Store:
             cols = [c["name"] for c in self._base_cols(src)]
             found = None
             if scan_from is not None and (fts_ident is None or _trigram_match_query(search) is None):
-                found = self._parallel_contains(src, scan_from, cols, search, spec.get("op_token"))
+                if contains_found is not None and source_id in contains_found:
+                    found = contains_found[source_id]
+                else:
+                    found = self._parallel_contains(src, scan_from, cols, search, spec.get("op_token"))
             clause, p = found or _contains_clause(cols, search, fts_ident)
             clauses.append(clause)
             params.extend(p)
@@ -12789,8 +13028,11 @@ class Store:
             tags: dict[tuple[int, int], list[int]] = {}
             notes: dict[tuple[int, int], str] = {}
             sel = _cells_json_sql(cols) if as_json else ", ".join(q(c) for c in cols)
+            # The window's members in one lookup, not one per member: a
+            # sorted merge's window holds rows of most of its members.
+            member_srcs = dict(zip(by_source, self._members_lite_on(ro, list(by_source))))
             for sid, rids in by_source.items():
-                member_src = self._source_lite_on(ro, sid)
+                member_src = member_srcs[sid]
                 ph = ",".join("?" * len(rids))
                 for row in ro.execute(
                     f"SELECT rid, {sel} FROM {self._member_rows_from(src, member_src)} WHERE rid IN ({ph})", rids
@@ -13287,13 +13529,25 @@ class Store:
                     self._ensure_column_index_building(
                         m["source_id"], column, self._index_table_for(src, column, m["table_name"], m["source_id"])
                     )
-            union_sql = union_all(
-                f"SELECT {q(column)} AS val FROM {self._member_from(src, m, uses=(column,))}" for m in members
-            )
-            rows = ro.execute(
-                f"SELECT val, count(*) AS n FROM ({union_sql}) GROUP BY 1 ORDER BY n DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
+            if src.get("is_merge"):
+                # Counted per member, then the counts summed: each member's
+                # GROUP BY walks its own column index (the one asked for
+                # above) with no sort, and only one row per distinct value
+                # per member reaches the outer GROUP BY. Grouping the bare
+                # union instead pushed every row of every member through
+                # one temp B-tree — 87 ms on a 60-member, 300k-row merge
+                # against 16 ms for the same rows as one table.
+                union_sql = union_all(
+                    f"SELECT {q(column)} AS val, count(*) AS n "
+                    f"FROM {self._member_from(src, m, uses=(column,))} GROUP BY 1" for m in members
+                )
+                sql = f"SELECT val, sum(n) AS n FROM ({union_sql}) GROUP BY 1 ORDER BY n DESC LIMIT ?"
+            else:
+                union_sql = union_all(
+                    f"SELECT {q(column)} AS val FROM {self._member_from(src, m, uses=(column,))}" for m in members
+                )
+                sql = f"SELECT val, count(*) AS n FROM ({union_sql}) GROUP BY 1 ORDER BY n DESC LIMIT ?"
+            rows = ro.execute(sql, (limit,)).fetchall()
         return [{"value": r["val"], "count": r["n"]} for r in rows]
 
     def column_max_lengths(self, source_id: int, columns: list[str] | None = None) -> dict[str, int]:
@@ -17913,6 +18167,7 @@ class Store:
             buf.seek(0), buf.truncate(0)
 
             last_pos = 0
+            member_from: dict[int, str] = {}
             while True:
                 chunk = ro.execute(
                     f"SELECT pos, source_id, rid FROM v.{q(view_id)} WHERE pos > ? ORDER BY pos LIMIT 5000",
@@ -17941,10 +18196,14 @@ class Store:
                         rids = [r for r in rids if r in tagged_set]
                         if not rids:
                             continue
-                    member_src = self._source_lite_on(ro, sid)
+                    if sid not in member_from:
+                        # Once per member for the whole export, not once per
+                        # member per 5,000-row chunk: `sel` is fixed above, so
+                        # the FROM each member is read through is too.
+                        member_from[sid] = self._member_rows_from(src, self._source_lite_on(ro, sid))
                     ph = ",".join("?" * len(rids))
                     for row in ro.execute(
-                        f"SELECT rid, {sel} FROM {self._member_rows_from(src, member_src)} WHERE rid IN ({ph})", rids
+                        f"SELECT rid, {sel} FROM {member_from[sid]} WHERE rid IN ({ph})", rids
                     ):
                         cellmap[(sid, row["rid"])] = tuple(row[c] for c in cols)
                     for rid, tid in ro.execute(
@@ -18746,10 +19005,12 @@ class Store:
         positional, so a member lacking a column pads it with NULL, and the
         source column is the member's label. Public: the bundled plugins
         build their merge scopes with it."""
+        keys = _member_keys(member_src)
+
         def _cell(c: dict) -> str:
             if c.get("source_column"):
                 return f"{_sql_text_literal(member_src.get('nickname') or member_src['name'])} AS {q(c['name'])}"
-            actual = _member_column(member_src, c)
+            actual = _member_column(member_src, c, keys)
             if actual is None:
                 return f"NULL AS {q(c['name'])}"
             return f"{self._col_ref(member_src, actual, 's', 'd')} AS {q(c['name'])}"
