@@ -460,7 +460,6 @@ export default function mount(container, winnow) {
     ['values', 'Values', 'What each cell measures'],
   ];
   const zoneBodies = {};
-  const dropLines = {};   // each area's slot line — see "Where a drop lands"
   // The grid's own .tag-ribbon / .tag-chip classes, so the chips look as
   // they do on the ribbon in every skin and theme with no CSS of ours.
   const tagRibbon = el('div', 'tag-ribbon');
@@ -501,99 +500,21 @@ export default function mount(container, winnow) {
       e.dataTransfer.setData('text/plain', payload.name);
       node.style.opacity = '.4';
     });
-    // A drop outside every area, or Escape, ends here with no drop event:
-    // the cue it left on the last area it crossed goes with it.
-    node.addEventListener('dragend', () => { dragging = null; node.style.opacity = ''; clearDropCues(); });
-  }
-
-  /* Where a drop lands is read from the pointer, and shown before the
-     release. An area used to take a drop as "add it at the end", and a
-     drop back into the area the chip came from as nothing at all — so the
-     order of Rows (which field nests in which), of Values (which column
-     comes first) and of Columns could only be changed by removing fields
-     and adding them back in the new order, which for a value also threw
-     away its Sum or Average. Analysts called reordering difficult; it was
-     not possible. Now the slot between two chips the pointer is nearest
-     to is where the field goes, from anywhere: the list, another area, or
-     this one.
-
-     The slot is between chips by their vertical midpoints, and an accent
-     line stands in the gap while the pointer is over the area. The line
-     is absolutely placed on the area's box, outside the chip list
-     renderFields rebuilds, so it moves no chip — a placeholder that took
-     up room would shift the very midpoints the slot is measured against,
-     and the slot would flicker between two answers under a still pointer.
-     A drop the pointer is not inside the area for — a synthetic drop with
-     no coordinates, which is what the tests send — is the old "at the
-     end", so a field added that way still lands where it always did. */
-
-  function chipNodes(zone) {
-    return [...zoneBodies[zone].children].filter((n) => n.dataset.field != null);
-  }
-
-  function slotAt(box, zone, e) {
-    const r = box.getBoundingClientRect();
-    if (e.clientY < r.top || e.clientY > r.bottom || e.clientX < r.left || e.clientX > r.right) return null;
-    const nodes = chipNodes(zone);
-    for (let i = 0; i < nodes.length; i++) {
-      const c = nodes[i].getBoundingClientRect();
-      if (e.clientY < c.top + c.height / 2) return i;
-    }
-    return nodes.length;
-  }
-
-  // Whether dropping the field being dragged at `slot` would change nothing:
-  // a chip let go just above or just below itself.
-  const slotIsNoop = (zone, slot) => slot == null
-    || (dragging && dragging.from === zone && (slot === dragging.index || slot === dragging.index + 1));
-
-  function showDropLine(box, zone, slot) {
-    const line = dropLines[zone];
-    const nodes = chipNodes(zone);
-    if (slotIsNoop(zone, slot) || !nodes.length) { line.hidden = true; return; }
-    const top = (n) => n.getBoundingClientRect().top;
-    const bottom = (n) => n.getBoundingClientRect().bottom;
-    const y = slot === 0 ? top(nodes[0]) - 2
-      : slot >= nodes.length ? bottom(nodes[nodes.length - 1]) + 2
-        : (bottom(nodes[slot - 1]) + top(nodes[slot])) / 2;
-    line.style.top = `${Math.round(y - box.getBoundingClientRect().top - 1)}px`;
-    line.hidden = false;
-  }
-
-  function clearDropCues() {
-    for (const [zone] of ZONES) {
-      if (dropLines[zone]) dropLines[zone].hidden = true;
-      zoneBodies[zone].parentNode.style.borderColor = '';
-    }
+    node.addEventListener('dragend', () => { dragging = null; node.style.opacity = ''; });
   }
 
   function wireDropTarget(box, zone) {
-    box.style.position = 'relative';
-    const line = el('div', 'pv-drop-line');
-    line.hidden = true;
-    line.style.cssText = 'position:absolute;left:5px;right:5px;height:2px;border-radius:1px;'
-      + 'background:var(--accent);pointer-events:none';
-    box.append(line);
-    dropLines[zone] = line;
     box.addEventListener('dragover', (e) => {
       if (!dragging) return;
       e.preventDefault();
       e.dataTransfer.dropEffect = 'move';
       box.style.borderColor = 'var(--accent)';
-      showDropLine(box, zone, slotAt(box, zone, e));
     });
-    box.addEventListener('dragleave', (e) => {
-      // Crossing from one chip to the next inside the area is a dragleave
-      // too; only leaving the area takes its cue down.
-      if (e.relatedTarget && box.contains(e.relatedTarget)) return;
-      box.style.borderColor = '';
-      line.hidden = true;
-    });
+    box.addEventListener('dragleave', () => { box.style.borderColor = ''; });
     box.addEventListener('drop', (e) => {
       e.preventDefault();
-      const at = slotAt(box, zone, e);
-      clearDropCues();
-      if (dragging) addField(dragging, zone, at);
+      box.style.borderColor = '';
+      if (dragging) addField(dragging, zone);
       dragging = null;
     });
   }
@@ -601,64 +522,29 @@ export default function mount(container, winnow) {
   /* A field can be in Rows or Columns once — a second copy would produce a
      grouping key that repeats itself. Values are the exception: "Count of X"
      and "Average of X" are two different measures of the same field, which
-     is exactly what Excel allows.
-
-     `at` is the slot to put it in (0 = first); null means at the end, which
-     is what the Place in menu and a drop with no pointer position ask for.
-     A field dropped into the area it is already in moves to that slot —
-     the chip's own area, or the list's copy of a field Rows already has. */
-  function addField(payload, zone, at = null) {
+     is exactly what Excel allows. */
+  function addField(payload, zone) {
     const { from, name, index } = payload;
-    if (from === zone) {
-      if (at != null) arrange(zone, index, at);
-      return;
-    }
+    if (from === zone) return;              // reordering within a zone isn't a move
     if (from !== 'list') removeAt(from, index);
-    const put = (list, item) => list.splice(at == null ? list.length : Math.min(at, list.length), 0, item);
 
     if (zone === 'values') {
-      put(state.values, { column: name, agg: defaultAgg(name) });
+      state.values.push({ column: name, agg: defaultAgg(name) });
     } else if (zone === 'filters') {
-      const have = state.filters.findIndex((f) => f.column === name);
-      if (have < 0) put(state.filters, { column: name, op: 'in', values: [], value: '' });
-      else if (at != null) { arrange(zone, have, at); return; }
+      if (!state.filters.some((f) => f.column === name)) {
+        state.filters.push({ column: name, op: 'in', values: [], value: '' });
+      }
     } else {
       const list = state[zone];
-      const have = list.indexOf(name);
+      if (!list.includes(name)) list.push(name);
       // The same field in Rows and Columns is a cross-tab against itself:
       // every off-diagonal cell is empty. Excel just moves it.
       const other = zone === 'rows' ? 'cols' : 'rows';
       state[other] = state[other].filter((c) => c !== name);
-      if (have < 0) put(list, name);
-      else if (at != null && from === 'list') { arrange(zone, have, at); return; }
     }
     state.sort = null;
     renderFields();
     scheduleRefresh();
-  }
-
-  /* Moves the chip at `from` in an area to slot `to` — a slot counted
-     before the move, so `to` is where the line was drawn: 0 is above the
-     first chip, length is below the last. Returns whether anything moved.
-
-     The sort a value header click applied survives a reorder that leaves
-     it meaning the same thing: in Values it follows its measure to the
-     new index, and in Rows it is untouched, since each level is sorted by
-     the same column either way. In Columns it names a column of the
-     cross-tab by its key tuple, in the old field order, so it goes back
-     to key order rather than land on a different column. */
-  function arrange(zone, from, to) {
-    const list = state[zone];
-    const dest = to > from ? to - 1 : to;
-    if (from < 0 || from >= list.length || dest === from || dest < 0 || dest >= list.length) return false;
-    const sortedBy = zone === 'values' && state.sort ? list[state.sort.measure] : null;
-    const [item] = list.splice(from, 1);
-    list.splice(dest, 0, item);
-    if (sortedBy) state.sort.measure = list.indexOf(sortedBy);
-    else if (zone === 'cols') state.sort = null;
-    renderFields();
-    scheduleRefresh();
-    return true;
   }
 
   function removeAt(zone, index) {
@@ -732,7 +618,6 @@ export default function mount(container, winnow) {
           : zone === 'filters' ? filterChip(entry, i)
             : chip(entry, { onRemove: () => { removeAt(zone, i); renderFields(); scheduleRefresh(); } });
         wireDragSource(node, { from: zone, name: entry.column || entry, index: i });
-        wireArrange(node, zone, i);
         list.append(node);
       });
       if (!state[zone].length) {
@@ -743,147 +628,14 @@ export default function mount(container, winnow) {
     }
   }
 
-  /* Every chip in an area carries a handle: ⠿, the grip the dashboard
-     cards and the Saved filters rows already use, so the chip reads as
-     something that moves. Drag works from the handle or anywhere else on
-     the chip, as it always did. Clicking the handle (or right-clicking the
-     chip) opens the chip's menu — Move up, Move down, the other areas,
-     Remove — which is Excel's field menu, and the way to reorder without
-     a drag: on a trackpad, from the keyboard, or when the area is long.
-
-     A menu rather than ▲/▼ buttons on every chip: a value chip already
-     holds its name, its aggregation picker and ✕ in a 268px rail, and two
-     more buttons left a field name four or five letters wide.
-
-     From the keyboard the handle is the chip's tab stop: Enter or Space
-     opens the menu, and Alt+↑ / Alt+↓ move the chip one place without it.
-     A move redraws the area, so the focus is put back on the moved chip's
-     handle (a redraw restores none by itself), and the handle's label says
-     where the chip now is — "Host, 1 of 2 in Rows" — which is what a
-     screen reader reads on that focus. Alt+↑/↓ is left alone on the
-     aggregation picker, where it is the platform's open-the-list key. */
-  const areaLabel = (zone) => ZONES.find(([id]) => id === zone)[1];
-  const chipLabel = (zone, entry) => (zone === 'values' ? measureLabel(entry)
-    : zone === 'filters' ? entry.column : entry);
-
-  function wireArrange(node, zone, i) {
-    const n = state[zone].length;
-    const what = chipLabel(zone, state[zone][i]);
-    const grip = el('span', 'pv-grip', '⠿');
-    grip.tabIndex = 0;
-    grip.setAttribute('role', 'button');
-    grip.setAttribute('aria-haspopup', 'menu');
-    grip.setAttribute('aria-label', `${what}, ${i + 1} of ${n} in ${areaLabel(zone)}`);
-    grip.title = n > 1
-      ? 'Drag to reorder, or to another area · click for Move up, Move down and more · Alt+↑ / Alt+↓ moves it'
-      : 'Drag to another area · click to move or remove it';
-    // Narrow on purpose: on a value chip the room comes out of the field's
-    // name, beside its aggregation picker (see valueChip).
-    grip.style.cssText = 'flex:0 0 auto;width:8px;margin:0 -1px 0 -3px;text-align:center;'
-      + 'color:var(--dim);font-size:13px;line-height:1;cursor:grab;user-select:none';
-    grip.onclick = (e) => { e.stopPropagation(); chipMenu(grip, zone, i); };
-    node.insertBefore(grip, node.firstChild);
-    node.addEventListener('contextmenu', (e) => { e.preventDefault(); chipMenu(grip, zone, i); });
-    node.addEventListener('keydown', (e) => {
-      if (e.target.tagName === 'SELECT') return;
-      if (e.target === grip && (e.key === 'Enter' || e.key === ' ')) {
-        e.preventDefault();   // Space would scroll the rail
-        e.stopPropagation();
-        if (!e.repeat) chipMenu(grip, zone, i, { fromKey: true });
-        return;
-      }
-      if (!e.altKey || e.ctrlKey || e.metaKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return;
-      e.preventDefault();
-      e.stopPropagation();
-      const to = e.key === 'ArrowUp' ? i - 1 : i + 2;
-      if (arrange(zone, i, to)) focusGrip(zone, e.key === 'ArrowUp' ? i - 1 : i + 1);
-    });
-  }
-
-  function focusGrip(zone, i) {
-    if (!document.getElementById('modal').hidden) return;
-    const nodes = chipNodes(zone);
-    const node = nodes[Math.max(0, Math.min(i, nodes.length - 1))];
-    const grip = node && node.querySelector('.pv-grip');
-    // The last chip of an area removed from the keyboard: the field list's
-    // search is the nearest thing to go on from, rather than <body>.
-    if (!grip) { fieldSearch.focus(); return; }
-    grip.focus();
-    // The chip it moved, marked for a moment so the eye can follow it: a
-    // move by menu or key has no drag to watch.
-    node.animate?.([{ borderColor: 'var(--accent)' }, { borderColor: 'var(--line)' }],
-      { duration: 700, easing: 'ease-out' });
-  }
-
-  /* The chip's own menu, built when it opens. Excel's field menu, in the
-     app's words: the moves first (only when the area has more than one
-     field), then the other areas — each doing exactly what dropping the
-     chip there does (addField), greyed with why where that would be a
-     no-op — then Remove. Move to the top / bottom only appear where they
-     do something Move up / Move down doesn't. */
-  function chipMenu(anchor, zone, i, { fromKey = false } = {}) {
-    const list = state[zone];
-    const n = list.length;
-    const entry = list[i];
-    if (entry == null) return;
-    const name = zone === 'values' || zone === 'filters' ? entry.column : entry;
-    const moved = (to, at) => () => { if (arrange(zone, i, to) && fromKey) focusGrip(zone, at); };
-    const items = [{ header: chipLabel(zone, entry), literal: true }];
-    if (n > 1) {
-      items.push(
-        { label: 'Move up', onclick: moved(i - 1, i - 1), ...(i === 0 ? { disabled: true, desc: 'Already first' } : {}) },
-        { label: 'Move down', onclick: moved(i + 2, i + 1), ...(i === n - 1 ? { disabled: true, desc: 'Already last' } : {}) },
-      );
-      if (i >= 2) items.push({ label: 'Move to the top', onclick: moved(0, 0) });
-      if (i <= n - 3) items.push({ label: 'Move to the bottom', onclick: moved(n, n - 1) });
-      items.push('-');
-    }
-    for (const [id, label, hint] of ZONES) {
-      if (id === zone) continue;
-      const item = {
-        label: `Move to ${label}`,
-        title: hint,
-        onclick: () => {
-          addField({ from: zone, name, index: i }, id);
-          if (!fromKey) return;
-          const at = id === 'filters' ? state.filters.findIndex((f) => f.column === name)
-            : id === 'values' ? state.values.length - 1 : state[id].indexOf(name);
-          focusGrip(id, at);
-        },
-      };
-      if (id === 'filters' && state.filters.some((f) => f.column === name)) {
-        Object.assign(item, { disabled: true, desc: 'Already there' });
-      } else if ((id === 'rows' || id === 'cols') && list !== state[id === 'rows' ? 'cols' : 'rows']) {
-        const other = id === 'rows' ? 'cols' : 'rows';
-        if (state[id].includes(name)) Object.assign(item, { disabled: true, desc: 'Already there' });
-        else if (state[other].includes(name)) item.desc = `Moves it out of ${areaLabel(other)}`;
-      }
-      items.push(item);
-    }
-    items.push('-', {
-      label: 'Remove',
-      onclick: () => {
-        removeAt(zone, i);
-        renderFields();
-        scheduleRefresh();
-        if (fromKey) focusGrip(zone, i);
-      },
-    });
-    winnow.dropdownMenu(anchor, items);
-  }
-
   function valueChip(measure, i) {
     const c = chip('', {
       onRemove: () => { removeAt('values', i); renderFields(); scheduleRefresh(); },
       title: `${measure.column} — ${aggLabel(measure.agg)}`,
     });
     const sel = el('select');
-    // As wide as the aggregation it shows, not as wide as its widest
-    // option: "Count" in a box sized for "Distinct count" took 40px from
-    // the field's name, which the ⠿ handle now needs some of. A browser
-    // without field-sizing keeps the old width.
     sel.style.cssText = 'background:var(--ink);color:var(--text);border:1px solid var(--line-2);'
-      + 'font:inherit;font-size:11px;padding:1px 3px;field-sizing:content;min-width:62px;max-width:110px';
+      + 'font:inherit;font-size:11px;padding:1px 3px;max-width:110px';
     for (const a of state.meta.aggregations) {
       const o = el('option', null, a.label);
       o.value = a.id;

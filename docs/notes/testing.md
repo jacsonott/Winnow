@@ -229,10 +229,7 @@ definitions and never their values. `test_home_drop.py`: files dropped on
 a case row go into that case and nowhere else, dropped off the rows they
 start a quick look; each on its own server, since both switch the case.
 `test_pivot_export_filter.py`: the pivot's Copy and CSV (formula guard
-included) and its field filter. `test_pivot_reorder.py`: reordering the
-pivot's areas with a real pointer drag (the slot line, drops between
-chips), the ⠿ handle's menu and Alt+↑/↓; its drags end on two small moves
-because the emulated drag sends dragover a move behind the pointer. `test_firstlast_copy.py`: Copy result,
+included) and its field filter. `test_firstlast_copy.py`: Copy result,
 including the card it waits on when the analyst has left the tab, held
 at `job/start` so the answer lands while the tab is hidden.
 
