@@ -89,6 +89,8 @@ In a narrow window the sections go across the top instead.
 
 In the table menu's **Columns** list, untick a column to hide it and tick it to show it again. **Filter columns…** finds a column by name in a wide table. **Show all** brings every hidden column back. **Hide empty columns** hides every column that has no value in the first 2,000 rows of the current view, so a column whose values only appear further down can be hidden by it.
 
+**All** and **Shown**, beside **Filter columns…**, choose what the list holds. **All** lists every column, ticked or not. **Shown** lists only the ticked columns, the ones the grid shows, which helps on a wide table where you have hidden most of the columns and want to reorder, pin or untick the rest. The hidden columns stay in the table and are only left out of the list. Under the list, a line such as "26 hidden columns not listed" says how many are left out, and **List all columns** beside it switches back to **All**. If you type a name that only hidden columns match, that line counts them ("2 hidden columns match …") so you can list them and tick the one you want. A column you untick while **Shown** is picked stays in the list until you type in the filter box, switch, or reopen the menu, so a misclick can be ticked straight back. The choice is remembered in this browser and applies to every table.
+
 A hidden datetime column is also left out of the [histogram](Filtering-and-searching.md#the-histogram)'s column list, so the histogram only charts columns you can see.
 
 **Hide empty rows** is a toggle in the same place. It drops rows in which every column is empty, such as blank lines in a raw text import. It counts as a filter: the row count follows it, and it is remembered for the table.
