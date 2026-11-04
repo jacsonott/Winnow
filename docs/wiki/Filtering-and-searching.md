@@ -95,6 +95,7 @@ Right-click a column header and choose **Stack values (rarest first)…** to see
 - Click a bar to filter the grid to that value. Right-click a bar, or click its **⋯**, for **Filter to this value**, **Exclude this value** and **Copy value**.
 - Point at a bar, or move to it with the arrow keys, and the line under the chart gives its value, its rows and its share. `Enter` filters to it.
 - **Filter values…** narrows the chart to the values that contain what you type. Each bar keeps its length.
+- Blank cells are counted too, as an **(empty)** bar. Clicking it filters the grid to the rows with nothing in that column.
 - The table's other columns are down the left, with their type or the filter on them: click one to stack it instead. **Find a column…** searches them, and ☆ pins a column you stack often.
 
 A few values get broad bars; a long tail gets thinner ones and scrolls. Stack counts up to 1,000 values and draws 500 at a time. When there are more, the line under the chart says so: filter the grid, or the values, to reach the rest.

@@ -84,6 +84,40 @@ def test_bars_are_drawn_to_one_scale_that_ends_at_the_largest(page):
         page.unroute(SUMMARY)
 
 
+def test_a_blank_value_is_one_bar_not_a_cover_over_the_dialog(page):
+    """A column with blank cells (a sparse IP column: most event types
+    carry no address) stacks to an "(empty)" bar beside its values. That
+    bar's label once took the grid's whole-grid "No table open" cover
+    style, an opaque box over the nearest positioned ancestor, which here
+    is the dialog: the Stack dialog showed nothing but "(empty)" in the
+    middle of a blank screen.
+
+    Stubbed, since every column in the shared fixture is filled in. Both
+    blanks a table can hold, NULL and '', are separate groups."""
+    groups = [{"value": "10.0.0.7", "count": 2}, {"value": "192.168.1.20", "count": 9},
+              {"value": "", "count": 40}, {"value": None, "count": 149}]
+    page.route(SUMMARY, lambda route: route.fulfill(
+        status=200, content_type="application/json", body=json.dumps({"groups": groups})))
+    try:
+        _open_stack(page, "Host")
+        # Every bar's label is the topmost thing where it is drawn, and
+        # stays inside its own row.
+        rows = page.evaluate("""() => [...document.querySelectorAll('#modal .stack-row')].map((r) => {
+          const label = r.querySelector('.stack-label'), b = label.getBoundingClientRect(), rb = r.getBoundingClientRect();
+          const hit = document.elementFromPoint(b.left + 4, b.top + b.height / 2);
+          return { value: r.dataset.value, onTop: !!hit && r.contains(hit),
+                   inside: b.top >= rb.top - 1 && b.bottom <= rb.bottom + 1 && b.right <= rb.right + 1 };
+        })""")
+        assert [r["value"] for r in rows] == ["10.0.0.7", "192.168.1.20", "(empty)", "(empty)"], rows
+        assert all(r["onTop"] and r["inside"] for r in rows), rows
+        # The dialog around the bars is still on screen.
+        assert page.evaluate("""() => { const t = document.getElementById('modalTitle').getBoundingClientRect();
+          return document.getElementById('modalTitle').contains(document.elementFromPoint(t.left + 4, t.top + t.height / 2)); }""")
+    finally:
+        _close(page)
+        page.unroute(SUMMARY)
+
+
 def test_a_few_values_draw_broad_bars_and_a_long_tail_scrolls(page):
     """Five values share the chart's height out as five broad bars, not five
     slivers in the corner of a box; two hundred stay readable and scroll.
