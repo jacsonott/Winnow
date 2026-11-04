@@ -237,6 +237,8 @@ A merge shows ⛓ before its name and works like any other table: filtering, sea
 - Flattening a JSON or XML column isn't available on a merge.
 - The watchlist and **Search all** look at the member tables rather than the merge, so their hits name the original tables. See [Timeline, Search all and the Watchlist](Timeline-search-and-watchlist.md).
 
+There is no need to join files outside Winnow to get speed: a merge of many tables filters, searches, groups and scrolls about as fast as the same rows imported as one file. Each table keeps its own search index, and until a table's index is ready a search scans it on every core along with the rest. The one step that costs more is putting the rows in a new order, because every table's rows have to be interleaved: on a million rows across 60 tables, the first sorted view can take a second or so, where one table takes a fraction of that. Once a merge has been shown in an order, clearing the filters brings that order back straight away.
+
 To delete a merge, right-click it and choose **Remove…**, or use **Remove…** in its **⋯** menu in the Tables manager. Its tables are not affected.
 
 ## Saving a view as a table

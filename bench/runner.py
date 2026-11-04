@@ -22,9 +22,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # Groups run in this order regardless of import order, so two runs on the
 # same machine hit the same benchmarks in the same sequence — page cache
 # and SQLite's own cache state are part of what's being measured, and
-# reshuffling the order changes the numbers.
+# reshuffling the order changes the numbers. "merges" comes after
+# "footprint" because it adds its own tables to the case, and footprint
+# measures the case file.
 GROUP_ORDER = ["ingest", "views", "paging", "search", "grouping", "tagging",
-               "timeline", "export", "sql", "meta", "api", "footprint"]
+               "timeline", "export", "sql", "meta", "api", "footprint", "merges"]
 
 
 class Env:

@@ -624,6 +624,62 @@ see [docs/notes/README.md](README.md) for the whole set.
   `_QueuedBuild` per build, alive until the worker has done that one, so
   `wait_for_column_index`, `list_column_indexes`' "building" and the
   dedup read them as they read the thread they replace.
+- **A merge of many tables has to cost about what the same rows imported
+  as one file cost.** Analysts compared the two (60 hosts' EvtxECmd
+  output merged in Winnow against the files joined outside it and
+  imported once) and found the merge several times slower at everything.
+  Measured on that shape, 60 members and 300k rows (1.2M at the large
+  size), develop before the fix: searches 4x, the default sorted view 4x,
+  the Values list 8x, an indexed equals filter 280x, grouping 500x+, a
+  page of rows 25x. Five causes, each a per-member cost nothing else had:
+  - *Column matching per member, per call.* `_member_column` scanned the
+    member's columns for every merge column (`_col_key` on each), and
+    `_member_projection` ran it for every column of every member, several
+    times per build — members × columns² case folds per read, most of a
+    page fetch's 50 ms. `_member_column_keys` is the member's lookup table
+    once (lru-cached on the column list itself) and
+    `_member_projection_cached` memoizes the projection on everything it
+    reads; pass `keys` to `_member_column` in any new loop over columns.
+  - *A search scanned one member at a time on one core.* Each member was
+    under `PARALLEL_SCAN_MIN_ROWS`, so none got the parallel scan a
+    single table of the same rows gets. `_merge_contains_found` scans
+    every member that needs it in one pool (`_parallel_contains_many`):
+    ranges of about a thread's share of all the rows, a small member one
+    range, and a member over its share of `PARALLEL_SCAN_MAX_RIDS` hands
+    back alone.
+  - *The Values list grouped the bare union*, so every row of every
+    member went through one temp B-tree. `column_values` on a merge
+    counts per member (each member's column index, no sort) and sums.
+  - *Members were looked up one query at a time*, two per member, more
+    than once per read. `_members_lite_on` is two queries for all of them.
+  - *Clear filters rebuilt the merge's order every time.* A single
+    table's unfiltered view is an index walk or no table at all; a
+    merge's is every member's rows merged (`MERGE (UNION ALL)`) and
+    written, about 2.5x the single table even at best — SQLite's merge of
+    60 streams is the cost, and neither a balanced tree of compounds nor
+    the sorter with `PRAGMA threads` beat it. So `_keep_merge_view` keeps
+    the table an unfiltered merge view was built into, keyed by the
+    SELECT text, its parameters and each member's row count (member
+    tables never change, invariant #1), and the next identical build is
+    that table again under its own id. Two per merge; never for a sort on
+    a derived column (a re-derive rewrites its values under the same
+    text), a held build, or a filtered one. Eviction skips a kept table
+    (`_merge_view_kept`); `update_merge` and `delete_merge` drop them
+    (`_forget_merge_views`). A test that wants the build's SQL has to let
+    them go first, as `_merge_build_sql` in test_merge_view_build.py does.
+  After, at 1.2M rows: searches 0.9–1.1x, the Values list 1.3x, a page
+  of rows 7–10 ms (was 60–68), filtered and grouped reads in tens of
+  ms, export 1.2x. The first sorted build is still 3x (time) to 8x
+  (text), the merge of 60 index streams above, and Clear filters after
+  it is faster than a single table's rebuild. Still open: an unsorted,
+  unfiltered merge view reads every member's whole table to number its
+  rows (1.1 s at 1.2M). Its rows and their order follow from the member
+  row counts alone, so it could be generated without reading a row, but
+  the app opens a table sorted by its first timestamp, so it is rarely
+  the view anyone sees.
+  The comparison script and its numbers are in the project's
+  benchmarks/2026-11-04-merge-many folder; rerun it before and after any
+  change to a per-member loop.
 - **A regex is checked before it runs, and some are refused**
   (`_compiled_regex`, called by the regex filter op, regex search mode,
   any `REGEXP '…'` literal in a raw fragment or the SQL pane
