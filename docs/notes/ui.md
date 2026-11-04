@@ -1839,6 +1839,19 @@ see [docs/notes/README.md](README.md) for the whole set.
     into ACME", "Export 1,204 rows (.csv)", "Add 2 files"). The copy is
     guarded by `oneAtATime`, as the old per-row button was
     (test_double_click_submits_once.py).
+  - **Export's Current view picks a format on a row of its own**
+    (`VIEW_EXPORT_FORMATS` in sources.js, mirroring store.py's by key),
+    under the counts rather than as more side-list entries: the format
+    changes how the view is written, not what is exported. The choice is
+    remembered in `localStorage` (`winnow.exportFormat`) and every place
+    that names the format follows it: the main button's extension, the
+    side list's hint (a `sections:changed` event repaints it), the note
+    describing the format, and the column list (Tags "as a list" in JSON,
+    and a table column whose name collides shows the deduplicated key the
+    file really has, `uniqueKeys` mirroring the server's `_unique_keys`).
+    A merge lists its Table column too, which the list had always left
+    out. Markdown and HTML past `REPORT_FORMAT_ROWS` get a warning note,
+    not a refusal. tests/ui/test_export_view_formats_ui.py.
   - **Comparing runs as the sides change**; `runCompare` clears the last
     answer before asking, so a pane never shows one comparison's counts
     under the other's names. The heads are A/B, as the gutter marks are,

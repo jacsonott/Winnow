@@ -1917,17 +1917,63 @@ async function landOnFilters(filters, tree, { clearTimeframe = false } = {}) {
   await recenterOnRow(anchor);
 }
 
+/* What the current view exports to, in the order the Export dialog offers
+   them: the server's VIEW_EXPORT_FORMATS (store.py), by key. `about` is
+   the pane's line on the chosen one; `tags` is what the file's Tags column
+   holds in it. */
+export const VIEW_EXPORT_FORMATS = [
+  { key: 'csv', label: 'CSV', ext: 'csv', title: 'Comma-separated values', tags: 'its tags, separated by “; ”',
+    about: 'Comma-separated, UTF-8. Opens in any spreadsheet, and imports back into Winnow.' },
+  { key: 'tsv', label: 'TSV', ext: 'tsv', title: 'Tab-separated values', tags: 'its tags, separated by “; ”',
+    about: 'Tab-separated, UTF-8. A cell holding a tab or a line break is quoted, the way Excel writes one.' },
+  { key: 'xlsx', label: 'Excel', ext: 'xlsx', title: 'An Excel workbook', tags: 'its tags, separated by “; ”',
+    about: 'One worksheet named after the table, continued on “Name (2)” past Excel’s 1,048,575 rows. '
+      + 'The workbook is written whole before it downloads, so a big one takes a moment.' },
+  { key: 'jsonl', label: 'JSON Lines', ext: 'jsonl', title: 'One JSON object per line', tags: 'its tags, as a list', json: true,
+    about: 'One JSON object per row, a row to a line, for jq, scripts and log platforms. Every value exactly as the case holds it.' },
+  { key: 'json', label: 'JSON', ext: 'json', title: 'One JSON array', tags: 'its tags, as a list', json: true,
+    about: 'The same objects as JSON Lines, in a single array. Every value exactly as the case holds it.' },
+  { key: 'md', label: 'Markdown', ext: 'md', title: 'A Markdown table', tags: 'its tags, separated by “; ”', report: true,
+    about: 'A table to paste into a report, a ticket or a wiki. Characters Markdown would turn into formatting are escaped, so values read as they are.' },
+  { key: 'html', label: 'HTML', ext: 'html', title: 'A web page', tags: 'its tags, in their colors', report: true,
+    about: 'A page that opens in any browser: the table, its tags in their colors, and what narrows the view. No scripts and nothing fetched, so it is safe to attach to a report.' },
+];
+const EXPORT_FORMAT_KEY = 'winnow.exportFormat';   // localStorage: the format last exported to
+// Past this many rows Markdown and HTML still export, with a warning: they
+// are report formats, and a page of a million rows is one nothing opens.
+export const REPORT_FORMAT_ROWS = 10000;
+
+/* Names made unique the way the server writes JSON keys (_unique_keys):
+   a repeat, compared without case, gets _1, _2… — so the list shows the
+   key a table's own Note column really gets. */
+function uniqueKeys(names) {
+  const used = new Set();
+  return names.map((name) => {
+    let key = name;
+    for (let n = 1; used.has(key.toLowerCase()); n++) key = `${name}_${n}`;
+    used.add(key.toLowerCase());
+    return key;
+  });
+}
+
 /* Export, in the table menu's frame: what can be exported down a side
    list — the view on screen, then the whole case as a workbook, tagged
    rows or every row — each with its size under its name; the chosen one
    on the right says what goes in the file, and the one main button on
    the foot exports it, saying how much. It was two paragraphs, each over
-   a row of two buttons. */
+   a row of two buttons. The view picks its format too (VIEW_EXPORT_FORMATS),
+   remembered from one export to the next. */
 export function openExportModal(section = null) {
   const real = () => (S.sources || []).filter((s) => !s.is_merge && !s.error);
   const sum = (k) => real().reduce((n, s) => n + (s[k] || 0), 0);
   const src = S.sources.find((s) => s.id === S.sourceId);
   let viewTagged = false;
+  let viewFormat = 'csv';
+  try {
+    const kept = localStorage.getItem(EXPORT_FORMAT_KEY);
+    if (VIEW_EXPORT_FORMATS.some((f) => f.key === kept)) viewFormat = kept;
+  } catch { /* private mode: CSV */ }
+  const format = () => VIEW_EXPORT_FORMATS.find((f) => f.key === viewFormat);
   let plan = null;   // /api/export/all_xlsx/plan, for the every-row pane
   modal('Export', (b) => {
     const go = (url) => { window.location = caseUrl(url); $('modal').hidden = true; };
@@ -1936,15 +1982,23 @@ export function openExportModal(section = null) {
     const setMain = (label, fn, disabled = false) => { main.textContent = label; main.disabled = disabled; run = fn; };
     main.onclick = () => run && run();
 
-    /* The view: what narrows it said in a line, then the file's columns
-       as a list, in the grid's order — the three Winnow adds first, and
-       a hidden column left out, as the export leaves it. */
+    /* The view: its format, what narrows it said in a line, then the
+       file's columns as a list, in the grid's order — the ones Winnow adds
+       first, and a hidden column left out, as the export leaves it. */
     function buildViewPane(pane) {
       const stats = el('div', 'mb-stats');
       const summary = el('div', 'mb-summary');
       const seg = tableMenuSeg([['all', 'Every row', 'Every row the view shows'], ['tagged', 'Tagged rows only', 'Only the rows of the view that carry a tag']],
         () => (viewTagged ? 'tagged' : 'all'), (key) => { viewTagged = key === 'tagged'; seg.paint(); paint(); });
       summary.append(stats, seg.seg);
+      const formats = tableMenuSeg(VIEW_EXPORT_FORMATS.map((f) => [f.key, f.label, f.title]), () => viewFormat, (key) => {
+        viewFormat = key;
+        try { localStorage.setItem(EXPORT_FORMAT_KEY, key); } catch { /* not remembered, still chosen */ }
+        formats.paint(); paint();
+        pane.dispatchEvent(new Event('sections:changed'));   // the rail's hint names the format
+      }, 'export-formats');
+      const formatRow = el('div', 'export-format');
+      formatRow.append(el('span', 'export-format-label', 'Format'), formats.seg);
       const notes = el('ul', 'mb-notes');
       const box = el('div', 'side-preview tm-cols-box tables-box export-box');
       const head = el('div', 'tables-head export-cols-head');
@@ -1954,7 +2008,7 @@ export function openExportModal(section = null) {
       scroller.append(list);
       const foot = el('div', 'side-preview-foot');
       box.append(head, scroller, foot);
-      pane.append(summary, notes, box);
+      pane.append(summary, formatRow, notes, box);
 
       function applied() {
         const out = [];
@@ -1967,30 +2021,51 @@ export function openExportModal(section = null) {
         if ((S.tagFilter || []).length) out.push(plural(S.tagFilter.length, 'tag') + ' filtered');
         return out;
       }
+      /* What narrows the view and how it is sorted, as one clause — the
+         pane's note, and the line the HTML page prints under its title. */
+      function narrowing() {
+        const narrowed = applied();
+        const sort = (S.sort || []).map((x) => `${x.column} ${x.dir === 'desc' ? '↓' : '↑'}`).join(', ');
+        return (narrowed.length ? `narrowed by ${narrowed.join(' · ')}` : 'nothing narrows it, so every row of the table')
+          + (sort ? `, sorted by ${sort}.` : ', in its stored order.');
+      }
       const colRow = (name, holds, added) => {
         const r = el('div', 'tables-row export-col-row' + (added ? ' added' : ''));
         r.append(el('span', 'tables-name static', name), el('span', 'tables-sub', holds));
         return r;
       };
       function paint() {
+        const f = format();
         const rows = S.view ? S.view.row_count : 0;
+        const merge = !!(src && src.is_merge);
         const shown = S.columns.filter((c) => !(S.layout[c.name] || {}).hidden);
         const hidden = S.columns.length - shown.length;
+        const added = [['Line', 'the row’s line in the source'], ...(merge ? [['Table', 'the table the row came from']] : []),
+          ['Tags', f.tags], ['Note', f.json ? 'its note, or null' : 'its note']];
+        // JSON keys are unique where a header need not be: a table's own
+        // Note column is Note_1 in the file, and the list says so.
+        const names = f.json ? uniqueKeys([...added.map((a) => a[0]), ...shown.map((c) => c.name)]).slice(added.length) : shown.map((c) => c.name);
         stats.replaceChildren(tableMenuStat(rows, 'rows in the view'), tableMenuStat(src ? src.row_count : 0, 'in the table'),
-          tableMenuStat(shown.length + 3, 'columns'));
-        const narrowed = applied();
-        const sort = (S.sort || []).map((x) => `${x.column} ${x.dir === 'desc' ? '↓' : '↑'}`).join(', ');
-        notes.replaceChildren(el('li', 'mb-note', 'What you are looking at now, as CSV: '
-          + (narrowed.length ? `narrowed by ${narrowed.join(' · ')}` : 'nothing narrows it, so every row of the table')
-          + (sort ? `, sorted by ${sort}.` : ', in its stored order.')));
-        list.replaceChildren(colRow('Line', 'the row’s line in the source', true), colRow('Tags', 'its tags, comma-separated', true),
-          colRow('Note', 'its note', true), ...shown.map((c) => colRow(c.name, c.derived ? `derived from ${c.derived_from}` : (c.type || 'text'))));
+          tableMenuStat(shown.length + added.length, 'columns'));
+        const lines = [el('li', 'mb-note', `What you are looking at now, as ${f.label}: ${narrowing()}`), el('li', 'mb-note', f.about)];
+        if (f.report && !viewTagged && rows > REPORT_FORMAT_ROWS) {
+          lines.push(el('li', 'mb-note warn', `${rows.toLocaleString()} rows is a lot for ${f.label}: a file that size is slow to open, `
+            + 'or won’t open at all. Narrow the view first, or choose CSV, Excel or JSON Lines.'));
+        }
+        notes.replaceChildren(...lines);
+        list.replaceChildren(...added.map(([name, holds]) => colRow(name, holds, true)),
+          ...shown.map((c, i) => colRow(names[i], c.derived ? `derived from ${c.derived_from}` : (c.type || 'text'))));
         foot.replaceChildren(el('p', 'fb-help', hidden
           ? `${plural(hidden, 'hidden column')} left out. Show ${hidden === 1 ? 'it' : 'them'} in the grid to export ${hidden === 1 ? 'it' : 'them'}.`
           : 'The grid’s order, as you arranged it.'));
-        if (!S.view) setMain('Export the view (.csv)', null, true);
-        else if (viewTagged) setMain('Export tagged rows (.csv)', () => go(`/api/export?view_id=${S.view.view_id}&tagged_only=true`));
-        else setMain(`Export ${rows.toLocaleString()} rows (.csv)`, () => go(`/api/export?view_id=${S.view.view_id}`));
+        const url = () => {
+          const about = narrowing();
+          return `/api/export?view_id=${encodeURIComponent(S.view.view_id)}&format=${f.key}${viewTagged ? '&tagged_only=true' : ''}`
+            + (f.key === 'html' ? `&about=${encodeURIComponent(about[0].toUpperCase() + about.slice(1))}` : '');
+        };
+        if (!S.view) setMain(`Export the view (.${f.ext})`, null, true);
+        else if (viewTagged) setMain(`Export tagged rows (.${f.ext})`, () => go(url()));
+        else setMain(`Export ${rows.toLocaleString()} rows (.${f.ext})`, () => go(url()));
       }
       paint();
       return { update: paint };
@@ -2060,7 +2135,7 @@ export function openExportModal(section = null) {
     const frame = sectionPanes({
       sections: [
         { id: 'view', group: 'This table', title: 'Current view', build: buildViewPane,
-          hint: () => (S.view ? `${S.view.row_count.toLocaleString()} rows · .csv` : 'No table open') },
+          hint: () => (S.view ? `${S.view.row_count.toLocaleString()} rows · .${format().ext}` : 'No table open') },
         { id: 'tagged', group: 'Whole case', title: 'Tagged rows', build: buildCasePane(true),
           hint: () => `${sum('tagged_row_count').toLocaleString()} rows · .xlsx` },
         { id: 'all', group: 'Whole case', title: 'Every row', build: buildCasePane(false),

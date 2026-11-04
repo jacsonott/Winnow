@@ -588,6 +588,23 @@ see [docs/notes/README.md](README.md) for the whole set.
   quotes a CR, and puts `"\n"` back, and a NUL goes through `_csv_rows`'s
   escape. tests/test_csv_round_trip.py imports, exports and re-imports the
   awkward cells, and forces the 3.10 path on every CI Python.
+- **The current view's export formats share one reader.**
+  `_export_view_rows` picks the shape (root_virtual, group_virtual,
+  materialised) and yields a meta dict, then batches of `(Line, table or
+  None, [tags], note, cells)`; a writer per format (`_VIEW_TEXT_WRITERS`,
+  and `export_view_xlsx` for the workbook) only decides how a value is
+  written down. Before, the three readers each wrote CSV inline, so a
+  second format would have meant three more copies of the paging, the
+  tag/note lookups and the merge's Table column, free to drift apart. The
+  CSV writer's output is byte for byte what it was (test_group_export.py
+  and test_csv_round_trip.py hold it). Two things a new format has to keep:
+  `_export_text` closes the rows generator in a `finally`, which hands the
+  pooled reader back the moment a download is abandoned; and the formula
+  guard belongs to the formats a spreadsheet opens (CSV, TSV, Excel) and
+  no others: JSON, Markdown and HTML are read by people and programs, and
+  an apostrophe there is a changed value. Markdown and HTML make control
+  characters visible (`\x07`, as `_xlsx_safe` does) because neither can
+  show them; JSON escapes them itself. tests/test_export_formats.py.
 - **A `_reader()` block is one read transaction, and so is a SQL pane
   query.** A statement whose schema changed between its prepare and its
   step is re-prepared, up to 50 times, and in autocommit each try reads

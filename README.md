@@ -148,10 +148,11 @@ Notes and dashboards.
   case, start a fresh pass without losing the first, compare two passes
   row by row, or hand a session file to another analyst who has the same
   evidence imported.
-- **Export** — the current view or just its tagged rows as CSV, and every
-  tagged row or every row of the whole case as XLSX, one worksheet per
-  table. Cells that would run as spreadsheet formulas are neutralised in
-  the export; the stored value is untouched.
+- **Export** — the current view or just its tagged rows as CSV, TSV,
+  Excel, JSON Lines, JSON, a Markdown table or a standalone HTML page,
+  and every tagged row or every row of the whole case as XLSX, one
+  worksheet per table. Cells that would run as spreadsheet formulas are
+  neutralised in the spreadsheet formats; the stored value is untouched.
 - **A read-only SQL pane** for when a filter has done all it can. Each
   table is a `src_N` view carrying your derived columns, tags and notes,
   and results can be tagged, copied, exported to CSV or Excel, or saved as

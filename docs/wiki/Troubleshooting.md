@@ -314,7 +314,8 @@ machine, not yours. Files you drag onto an open case upload normally.
 A worksheet holds 1,048,575 rows of data plus its header. A bigger table
 continues on sheets named `Name (2)`, `Name (3)` and so on, and every row is
 exported. **Case ▾ → Export… → Every row** asks before it starts when this
-will happen. The CSV exports have no row limit. Details, along with how
+will happen; **Current view** as Excel continues the same way. The CSV,
+TSV, JSON and other text exports have no row limit. Details, along with how
 long cells and sheet names are handled, are in [Sessions and
 export](Sessions-and-export.md).
 
@@ -392,7 +393,7 @@ up N orphaned temp file(s) from previous runs`. A file belonging to a
 Winnow that is still running is never touched.
 
 Two other kinds of temp file can be left by a crash and are not cleaned up
-automatically: `winnow-export-….xlsx` (an **Every row** export in
+automatically: `winnow-export-….xlsx` (an Excel export in
 progress) and `winnow-upload-…` folders (a file being uploaded for
 import), both in the system temp folder. They are safe to delete when no
 Winnow is running.

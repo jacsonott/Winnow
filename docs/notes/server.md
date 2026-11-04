@@ -375,6 +375,20 @@ see [docs/notes/README.md](README.md) for the whole set.
   nickname or name): `Line` is a rid within one member, so without it two
   rows of a merge both read "Line 1" with nothing saying where either is.
   A single table's export keeps the old header.
+- **`GET /api/export` takes `format`** (`VIEW_EXPORT_FORMATS` in store.py:
+  csv, tsv, xlsx, jsonl, json, md, html; CSV when it is left out, which
+  is every caller from before there was a choice). The file name defaults
+  to `timeline-export.<ext>`. Six formats stream; xlsx is written to a temp
+  file and sent with `FileResponse`, like the whole-case workbooks, because
+  a workbook can't be sent before it is finished. The log line counts ROWS
+  (the store fills `stats["rows"]` as batches go out): counting newlines
+  was wrong for every format but CSV, and for CSV too once a cell held a
+  line break. `about` is the dialog's sentence on what narrows the view;
+  only the HTML page prints it, escaped and capped. The HTML page is sent
+  as an attachment like every download, holds no script, and takes a tag
+  colour into its style attribute only if it is a hex colour: a colour
+  arrives in a received session as easily as a name, and
+  `red; background:url(…)` would make the page fetch a URL when opened.
 - **The SQL pane's results are held server-side** (`winnow/sqlresults.py`,
   `POST /api/sql/run` and the `/api/sql/result/{id}/…` routes). The pane
   has no row cap, and "every row" as one JSON response was every row in

@@ -25,6 +25,7 @@ import fnmatch
 import functools
 import getpass
 import hashlib
+import html as _html
 import io
 import itertools
 import json
@@ -61,6 +62,7 @@ from . import plasoread
 from . import rxguard
 from . import xlsxread
 from . import log as wlog
+from .version import VERSION
 from .paths import sqlite_header_is_wal, sqlite_peek_uri, sqlite_ro_uri, sqlite_rw_uri
 from .sqlresults import SqlResults, js_str as _sql_js_str, pane_cell_json, pane_cell_text  # noqa: F401 — server.py imports pane_cell_json from here
 
@@ -1709,11 +1711,11 @@ class _CsvWriter:
     escape and is undone in the text written, and csv treats neither escape
     character specially. The result is 3.11's text, byte for byte."""
 
-    def __init__(self, buf: io.StringIO):
+    def __init__(self, buf: io.StringIO, delimiter: str = ","):
         self.buf = buf
-        self.w = csv.writer(buf, lineterminator="\n")
+        self.w = csv.writer(buf, lineterminator="\n", delimiter=delimiter)
         self.row = io.StringIO()
-        self.w310 = csv.writer(self.row, lineterminator="\r\n")
+        self.w310 = csv.writer(self.row, lineterminator="\r\n", delimiter=delimiter)
 
     def writerow(self, row) -> None:
         if _CSV_WRITES_ANY_CELL:
@@ -17954,16 +17956,99 @@ class Store:
     # --------------------------------------------------------------- exporting
 
     def export_view_csv(self, view_id: str, tagged_only: bool = False):
-        """Validates the view eagerly, then returns a generator for the CSV
+        """The view as CSV text chunks — export_view's first format, kept
+        under its own name because it was the only one for so long."""
+        return self.export_view(view_id, "csv", tagged_only)
+
+    def export_view(self, view_id: str, fmt: str = "csv", tagged_only: bool = False, *,
+                    about: str = "", stats: dict | None = None):
+        """The view as text chunks in one of VIEW_EXPORT_FORMATS' streamed
+        formats (every one but xlsx, which export_view_xlsx writes to a
+        file). Validates the view eagerly, then returns a generator for the
         body. Splitting this out matters: a generator function's body
         (including a KeyError check) doesn't run until first iterated, which
         would happen inside StreamingResponse — too late for the route's
-        try/except to turn it into a 409."""
+        try/except to turn it into a 409.
+
+        `about` is a line saying what narrows the view, which only the HTML
+        page prints (the client knows how to say it; the server would have
+        to reverse-engineer it from the spec). `stats`, when given, counts
+        the rows written into stats["rows"] as they go, for the route's log
+        line — counting newlines miscounts every format but CSV, and CSV
+        too once a cell holds a line break."""
+        writer = _VIEW_TEXT_WRITERS.get(fmt)
+        if writer is None:
+            raise ValueError(f"Unknown export format {fmt!r}")
+        rows = self._export_view_rows(view_id, tagged_only)
+        return self._export_text(rows, writer, about, stats)
+
+    def export_view_xlsx(self, view_id: str, path: str, tagged_only: bool = False) -> dict:
+        """The view as a workbook saved to `path`: one worksheet named after
+        the table, continued on "Name (2)"… past Excel's row cap the way
+        the whole-case workbooks are (_xlsx_write_sheets). Same rows, same
+        order and same columns as the CSV; cells through _xlsx_safe. A
+        workbook can't be streamed before it is finished, so the route
+        sends the file once this returns. Returns {"rows", "sheets"}."""
+        rows = self._export_view_rows(view_id, tagged_only)
+        try:
+            meta = next(rows)
+            merge = meta["merge"]
+            header = _export_header(meta["columns"], _xlsx_safe)
+            if merge:
+                header.insert(1, "Table")
+
+            def cells():
+                for batch in rows:
+                    for rid, table, tags, note, values in batch:
+                        yield [rid, *([_xlsx_safe(table)] if merge else []),
+                               _xlsx_safe("; ".join(tags)), _xlsx_safe(note or ""),
+                               *[_xlsx_safe(pane_cell_json(v)) for v in values]]
+
+            wb = Workbook(write_only=True)
+            sheets, n = _xlsx_write_sheets(wb, set(), meta["name"], header, cells())
+            wb.save(path)
+        finally:
+            rows.close()
+        return {"rows": n, "sheets": sheets}
+
+    def _export_text(self, rows, writer_cls, about: str, stats: dict | None):
+        """Drive one text writer over the rows _export_view_rows yields:
+        its head once the columns are known, a chunk per batch, its tail.
+        The rows generator is closed on the way out however this ends — an
+        abandoned download included — which hands its pooled reader back
+        at once rather than whenever the garbage collector gets to it."""
+        try:
+            meta = next(rows)
+            w = writer_cls(meta, about)
+            head = w.head()
+            if head:
+                yield head
+            for batch in rows:
+                if stats is not None:
+                    stats["rows"] = stats.get("rows", 0) + len(batch)
+                chunk = w.rows(batch)
+                if chunk:
+                    yield chunk
+            tail = w.tail()
+            if tail:
+                yield tail
+        finally:
+            rows.close()
+
+    def _export_view_rows(self, view_id: str, tagged_only: bool):
+        """Validate the view eagerly, then return the generator for its
+        export shape. Every shape yields the same things: first a meta dict
+        (`columns` in the analyst's layout, `merge` — whether rows carry
+        their member table's name —, `name` for a sheet or a page title,
+        `tag_colors` by tag name, `tagged_only`), then batches of
+        (Line, table name or None, [tag names], note or None, cell values)
+        in the view's order. What a format does with them is the writer's
+        business, so the three ways of reading a view are written once."""
         handle = self._views.get(view_id)
         if not handle:
             raise ViewExpired("View expired — rebuild it")
-        # Covers all three export shapes at once, and eagerly: the body
-        # below is a generator, so an error raised inside it would surface
+        # Covers all three export shapes at once, and eagerly: the bodies
+        # below are generators, so an error raised inside one would surface
         # from StreamingResponse rather than from the route's try/except.
         # On a pooled reader, never _source_lite — that takes the writer
         # lock, and an export must not block behind a build (invariant #4;
@@ -17971,10 +18056,26 @@ class Store:
         with self._reader() as ro:
             self._require_columns(self._source_lite_on(ro, handle["source_id"]))
         if handle.get("kind") == "group_virtual":
-            return self._export_virtual_group_csv_rows(handle, tagged_only)
+            return self._export_virtual_group_rows(handle, tagged_only)
         if handle.get("kind") == "root_virtual":
-            return self._export_virtual_root_csv_rows(handle, tagged_only)
-        return self._export_view_csv_rows(view_id, handle, tagged_only)
+            return self._export_virtual_root_rows(handle, tagged_only)
+        return self._export_materialized_rows(view_id, handle, tagged_only)
+
+    @staticmethod
+    def _export_meta(src: dict, cols: list[str], colors: dict, *, merge: bool, tagged_only: bool) -> dict:
+        return {"columns": cols, "merge": merge, "name": src.get("nickname") or src["name"],
+                "tag_colors": colors, "tagged_only": tagged_only}
+
+    @staticmethod
+    def _export_tag_defs(conn: sqlite3.Connection) -> tuple[dict, dict]:
+        """Tag names by id, and each name's colour (the first tag to carry
+        a name, should two share one) for the formats that draw tags."""
+        names: dict[int, str] = {}
+        colors: dict[str, str] = {}
+        for r in conn.execute("SELECT id, name, color FROM tag_defs ORDER BY id"):
+            names[r["id"]] = r["name"]
+            colors.setdefault(r["name"], r["color"])
+        return names, colors
 
     def _export_columns(self, conn: sqlite3.Connection, src: dict) -> list[str]:
         """The columns an export should emit: the analyst's saved layout —
@@ -18015,7 +18116,7 @@ class Store:
         visible = [n for n in ordered if not (per_col.get(n) or {}).get("hidden")]
         return visible or all_names
 
-    def _export_virtual_group_csv_rows(self, handle: dict, tagged_only: bool):
+    def _export_virtual_group_rows(self, handle: dict, tagged_only: bool):
         member = handle["members"][0]
         sid = member["source_id"]
         with self._reader() as ro, self._dropped_view_is_expired():
@@ -18028,13 +18129,9 @@ class Store:
             where_sql, where_params = self._virtual_group_where(handle, ro)
             sel = ", ".join(q(c) for c in cols)
 
-            tagnames = {r["id"]: r["name"] for r in ro.execute("SELECT id, name FROM tag_defs")}
-            buf = io.StringIO()
-            w = _CsvWriter(buf)
-            w.writerow(_export_header(cols, _csv_safe))
+            tagnames, colors = self._export_tag_defs(ro)
             self._renew_snapshot(ro)
-            yield buf.getvalue()
-            buf.seek(0), buf.truncate(0)
+            yield self._export_meta(src, cols, colors, merge=False, tagged_only=tagged_only)
 
             rows = ro.execute(
                 f"SELECT rid, {sel} FROM {self._member_from(src, member)} WHERE {where_sql} ORDER BY rid",
@@ -18054,19 +18151,18 @@ class Store:
                 ):
                     nmap[rid] = note
 
-        for r in rows:
-            if tagged_only and r["rid"] not in tmap:
-                continue
-            w.writerow([r["rid"], _csv_safe("; ".join(tmap.get(r["rid"], []))), _csv_safe(nmap.get(r["rid"], "")), *[_csv_safe(r[c]) for c in cols]])
-            yield buf.getvalue()
-            buf.seek(0), buf.truncate(0)
+        # r[1:]: the cells, in `cols` order, after the rid the SELECT leads with.
+        out = [(r[0], None, tmap.get(r[0], []), nmap.get(r[0]), r[1:])
+               for r in rows if not (tagged_only and r[0] not in tmap)]
+        for at in range(0, len(out), 5000):
+            yield out[at: at + 5000]
 
-    def _export_virtual_root_csv_rows(self, handle: dict, tagged_only: bool):
+    def _export_virtual_root_rows(self, handle: dict, tagged_only: bool):
         """Streams the whole source table in rid order, chunked the same
-        keyset way _export_view_csv_rows pages v.view_N (`rid > ?` here
+        keyset way _export_materialized_rows pages v.view_N (`rid > ?` here
         instead of `pos > ?`) — a root_virtual view can be the entire
         source, potentially millions of rows, unlike the small bounded
-        group _export_virtual_group_csv_rows fetches in one shot. Runs
+        group _export_virtual_group_rows fetches in one shot. Runs
         entirely on one checked-out _reader() connection, held across
         yields (safe — see _reader's docstring; an abandoned generator's
         GeneratorExit closes it), so a multi-minute export never touches
@@ -18077,13 +18173,9 @@ class Store:
             cols = self._export_columns(ro, src)
             sel = ", ".join(q(c) for c in cols)
 
-            tagnames = {r["id"]: r["name"] for r in ro.execute("SELECT id, name FROM tag_defs")}
-            buf = io.StringIO()
-            w = _CsvWriter(buf)
-            w.writerow(_export_header(cols, _csv_safe))
+            tagnames, colors = self._export_tag_defs(ro)
             self._renew_snapshot(ro)
-            yield buf.getvalue()
-            buf.seek(0), buf.truncate(0)
+            yield self._export_meta(src, cols, colors, merge=False, tagged_only=tagged_only)
 
             last_rid = 0
             while True:
@@ -18098,14 +18190,6 @@ class Store:
                 ph = ",".join("?" * len(rids))
                 tmap: dict[int, list[str]] = {}
                 nmap: dict[int, str] = {}
-                if tagged_only:
-                    tagged_set = {
-                        row[0] for row in ro.execute(
-                            f"SELECT DISTINCT rid FROM row_tags WHERE source_id=? AND rid IN ({ph})", [sid, *rids]
-                        )
-                    }
-                else:
-                    tagged_set = None
                 for rid, tid in ro.execute(
                     f"SELECT rid, tag_id FROM row_tags WHERE source_id=? AND rid IN ({ph})", [sid, *rids]
                 ):
@@ -18115,16 +18199,13 @@ class Store:
                 ):
                     nmap[rid] = note
 
-                for r in chunk:
-                    if tagged_only and r["rid"] not in tagged_set:
-                        continue
-                    w.writerow([r["rid"], _csv_safe("; ".join(tmap.get(r["rid"], []))), _csv_safe(nmap.get(r["rid"], "")),
-                               *[_csv_safe(r[c]) for c in cols]])
+                batch = [(r[0], None, tmap.get(r[0], []), nmap.get(r[0]), r[1:])
+                         for r in chunk if not (tagged_only and r[0] not in tmap)]
                 self._renew_snapshot(ro)
-                yield buf.getvalue()
-                buf.seek(0), buf.truncate(0)
+                if batch:
+                    yield batch
 
-    def _export_view_csv_rows(self, view_id: str, handle: dict, tagged_only: bool):
+    def _export_materialized_rows(self, view_id: str, handle: dict, tagged_only: bool):
         """Streams chunks of v.view_N grouped by each row's own source_id —
         same per-member resolution pattern as fetch_rows, so this works for
         merged views without a single cross-table JOIN.
@@ -18155,16 +18236,9 @@ class Store:
                         f"SELECT id, name, nickname FROM sources WHERE id IN ({','.join('?' * len(ids))})",
                         ids)}
 
-            tagnames = {r["id"]: r["name"] for r in ro.execute("SELECT id, name FROM tag_defs")}
-            buf = io.StringIO()
-            w = _CsvWriter(buf)
-            head = _export_header(cols, _csv_safe)
-            if member_names is not None:
-                head.insert(1, "Table")
-            w.writerow(head)
+            tagnames, colors = self._export_tag_defs(ro)
             self._renew_snapshot(ro)
-            yield buf.getvalue()
-            buf.seek(0), buf.truncate(0)
+            yield self._export_meta(src, cols, colors, merge=member_names is not None, tagged_only=tagged_only)
 
             last_pos = 0
             member_from: dict[int, str] = {}
@@ -18205,7 +18279,7 @@ class Store:
                     for row in ro.execute(
                         f"SELECT rid, {sel} FROM {member_from[sid]} WHERE rid IN ({ph})", rids
                     ):
-                        cellmap[(sid, row["rid"])] = tuple(row[c] for c in cols)
+                        cellmap[(sid, row[0])] = row[1:]
                     for rid, tid in ro.execute(
                         f"SELECT rid, tag_id FROM row_tags WHERE source_id=? AND rid IN ({ph})", [sid, *rids]
                     ):
@@ -18215,28 +18289,28 @@ class Store:
                     ):
                         nmap[(sid, rid)] = note
 
+                batch = []
                 for r in chunk:
                     key = (r["source_id"], r["rid"])
                     if key not in cellmap:
                         continue  # tagged_only filtered this row out
-                    w.writerow([
+                    batch.append((
                         r["rid"],
-                        *([_csv_safe(member_names.get(r["source_id"], f"table {r['source_id']}"))]
-                          if member_names is not None else []),
-                        _csv_safe("; ".join(tmap.get(key, []))),
-                        _csv_safe(nmap.get(key, "")),
-                        *[_csv_safe(v) for v in cellmap[key]],
-                    ])
+                        member_names.get(r["source_id"], f"table {r['source_id']}") if member_names is not None else None,
+                        tmap.get(key, []),
+                        nmap.get(key),
+                        cellmap[key],
+                    ))
                 self._renew_snapshot(ro)
-                yield buf.getvalue()
-                buf.seek(0), buf.truncate(0)
+                if batch:
+                    yield batch
 
     def export_tagged_xlsx(self) -> io.BytesIO:
         """One worksheet per real source that has at least one tagged row —
         merges are skipped since their rows already belong to a real source
         sheet, and sources with zero tagged rows are skipped so the workbook
         doesn't fill up with empty tabs. No view/filter/sort involved (only
-        "tagged or not"), so unlike _export_view_csv_rows this doesn't need
+        "tagged or not"), so unlike _export_materialized_rows this doesn't need
         v.view_N at all — just row_tags per source_id. Reads run on a
         _reader() connection checked out per source, so a big multi-sheet
         export never touches self.lock.
@@ -19852,6 +19926,302 @@ def _export_header(cols: list[str], safe) -> list:
     column called =HYPERLINK(...) was a live link in the hand-over
     workbook's first row while every cell under it was neutralised."""
     return ["Line", "Tags", "Note", *[safe(c) for c in cols]]
+
+
+# What the current view exports to (Case ▾ → Export… → Current view), in
+# the order the dialog offers them: format -> (name in the log, media type,
+# file extension). Every one carries the same rows in the same order with
+# the same columns — Line, Table on a merge, Tags, Note, then the layout's
+# visible columns; they differ only in how a value is written down. The
+# three a spreadsheet opens get the formula guard; JSON, Markdown and HTML
+# keep each value exactly as the case holds it, since nothing reading them
+# evaluates a cell.
+VIEW_EXPORT_FORMATS = {
+    "csv": ("CSV", "text/csv", "csv"),
+    "tsv": ("TSV", "text/tab-separated-values", "tsv"),
+    "xlsx": ("Excel", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "xlsx"),
+    "jsonl": ("JSON Lines", "application/x-ndjson", "jsonl"),
+    "json": ("JSON", "application/json", "json"),
+    "md": ("Markdown", "text/markdown", "md"),
+    "html": ("HTML", "text/html", "html"),
+}
+
+
+def _visible_controls(s: str) -> str:
+    """The control characters XML (and so a worksheet or a web page) cannot
+    show, written as \\x07-style escapes, as _xlsx_safe writes them."""
+    return _XLSX_ILLEGAL.sub(lambda m: "\\x%02x" % ord(m.group()), s)
+
+
+class _CsvViewExport:
+    """The view as CSV: every text cell, the header and the Tags column
+    through the formula guard (_csv_safe), written by _CsvWriter. The
+    byte-for-byte format the export had before it had any others."""
+
+    delimiter = ","
+
+    def __init__(self, meta: dict, about: str = ""):
+        self.merge = meta["merge"]
+        self.cols = meta["columns"]
+        self.buf = io.StringIO()
+        self.w = _CsvWriter(self.buf, self.delimiter)
+
+    def _take(self) -> str:
+        text = self.buf.getvalue()
+        self.buf.seek(0), self.buf.truncate(0)
+        return text
+
+    def head(self) -> str:
+        head = _export_header(self.cols, _csv_safe)
+        if self.merge:
+            head.insert(1, "Table")
+        self.w.writerow(head)
+        return self._take()
+
+    def rows(self, batch: list) -> str:
+        for rid, table, tags, note, values in batch:
+            self.w.writerow([rid, *([_csv_safe(table)] if self.merge else []),
+                             _csv_safe("; ".join(tags)), _csv_safe(note or ""),
+                             *map(_csv_safe, values)])
+        return self._take()
+
+    def tail(self) -> str:
+        return ""
+
+
+class _TsvViewExport(_CsvViewExport):
+    """CSV's rules with a tab between cells. A cell holding a tab, a quote
+    or a line break is quoted, as Excel writes "Text (Tab delimited)" and
+    as Winnow's own import reads it back; the formula guard still applies,
+    since a .tsv opens in a spreadsheet as readily as a .csv."""
+
+    delimiter = "\t"
+
+
+def _unique_keys(names: list[str]) -> list[str]:
+    """Names made unique the way import dedups a header (sanitize_columns):
+    a repeat, compared without case, gets _1, _2… So a table with a Note
+    column of its own exports it as Note_1 beside Winnow's Note — the name
+    it would get if the CSV were imported back."""
+    out: list[str] = []
+    used: set[str] = set()
+    for name in names:
+        key, n = name, 0
+        while key.lower() in used:
+            n += 1
+            key = f"{name}_{n}"
+        used.add(key.lower())
+        out.append(key)
+    return out
+
+
+class _JsonLinesViewExport:
+    """One JSON object per row, one row per line: Line (a number), Table on
+    a merge, Tags (a list of names), Note (null for none), then each
+    visible column under its own name. Values exactly as the case holds
+    them — no formula guard, no escaping beyond JSON's own — except what
+    JSON cannot carry, which pane_cell_json writes as text."""
+
+    def __init__(self, meta: dict, about: str = ""):
+        self.merge = meta["merge"]
+        fixed = ["Line", *(["Table"] if self.merge else []), "Tags", "Note"]
+        self.keys = _unique_keys([*fixed, *meta["columns"]])[len(fixed):]
+
+    def _obj(self, row: tuple) -> str:
+        rid, table, tags, note, values = row
+        obj: dict[str, Any] = {"Line": rid}
+        if self.merge:
+            obj["Table"] = table
+        obj["Tags"] = list(tags)
+        obj["Note"] = note or None
+        obj.update(zip(self.keys, map(pane_cell_json, values)))
+        return json.dumps(obj, ensure_ascii=False)
+
+    def head(self) -> str:
+        return ""
+
+    def rows(self, batch: list) -> str:
+        return "".join(self._obj(r) + "\n" for r in batch)
+
+    def tail(self) -> str:
+        return ""
+
+
+class _JsonViewExport(_JsonLinesViewExport):
+    """The same objects as JSON Lines, as one array — for the tools that
+    want a single JSON document. Still streamed: the brackets and commas
+    are written around the rows rather than the rows collected first."""
+
+    def __init__(self, meta: dict, about: str = ""):
+        super().__init__(meta, about)
+        self.first = True
+
+    def head(self) -> str:
+        return "["
+
+    def rows(self, batch: list) -> str:
+        out = []
+        for r in batch:
+            out.append(("\n" if self.first else ",\n") + self._obj(r))
+            self.first = False
+        return "".join(out)
+
+    def tail(self) -> str:
+        return "]\n" if self.first else "\n]\n"
+
+
+# Markdown: a backslash only where it would otherwise escape the character
+# after it (any ASCII punctuation), so C:\Windows\System32 reads as itself
+# in the file; and every character that would turn evidence text into
+# formatting, a link, an HTML tag, math or a cell boundary.
+_MD_ESCAPE = re.compile(r"\\(?=[!-/:-@\[-`{-~])|[`*_\[\]<>|~&$]")
+_MD_BREAK = re.compile(r"\r\n|\r|\n")
+
+
+def _md_cell(v) -> str:
+    """One value as the text of a Markdown table cell that renders as the
+    value: punctuation escaped (_MD_ESCAPE), line breaks as <br> (a cell
+    is one line), control characters as visible escapes."""
+    if v is None:
+        return ""
+    s = v if isinstance(v, str) else str(pane_cell_json(v))
+    s = _MD_ESCAPE.sub(lambda m: "\\" + m.group(), _visible_controls(s))
+    return _MD_BREAK.sub("<br>", s)
+
+
+class _MarkdownViewExport:
+    """A GitHub-flavored Markdown table, to paste into a report, a ticket
+    or a wiki. The table and nothing else: what is pasted is what renders."""
+
+    def __init__(self, meta: dict, about: str = ""):
+        self.merge = meta["merge"]
+        self.names = ["Line", *(["Table"] if self.merge else []), "Tags", "Note", *meta["columns"]]
+
+    def head(self) -> str:
+        return ("| " + " | ".join(_md_cell(n) for n in self.names) + " |\n"
+                + "| ---: | " + " | ".join(["---"] * (len(self.names) - 1)) + " |\n")
+
+    def rows(self, batch: list) -> str:
+        out = []
+        for rid, table, tags, note, values in batch:
+            cells = [str(rid), *([_md_cell(table)] if self.merge else []),
+                     _md_cell("; ".join(tags)), _md_cell(note), *map(_md_cell, values)]
+            out.append("| " + " | ".join(cells) + " |\n")
+        return "".join(out)
+
+    def tail(self) -> str:
+        return ""
+
+
+def _html_text(v) -> str:
+    if v is None:
+        return ""
+    s = v if isinstance(v, str) else str(pane_cell_json(v))
+    return _html.escape(_visible_controls(s), quote=True)
+
+
+# A tag colour goes into a style attribute, and a tag (its colour included)
+# can arrive in a session someone else sent: anything but a hex colour is
+# dropped, or `red; background:url(https://…)` would make the page fetch a
+# URL the moment it is opened — on a machine that may be airgapped for a
+# reason.
+_HTML_COLOR = re.compile(r"#[0-9A-Fa-f]{3,8}")
+
+# The page's own look: no script, no web font, nothing fetched — it has to
+# open the same on an airgapped machine as anywhere else. Light, dark (by
+# the viewer's setting) and print.
+_HTML_STYLE = (
+    ":root{color-scheme:light dark;--bg:#fff;--fg:#1f2328;--dim:#59636e;--line:#d1d9e0;"
+    "--head:#f6f8fa;--zebra:#f9fafb}"
+    "@media (prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--dim:#9198a1;"
+    "--line:#3d444d;--head:#151b23;--zebra:#10151c}}"
+    "@media print{:root{color-scheme:light;--bg:#fff;--fg:#000;--dim:#444;--line:#bbb;"
+    "--head:#eee;--zebra:#fff}th{position:static}tr{break-inside:avoid}}"
+    "body{margin:24px;background:var(--bg);color:var(--fg);"
+    "font:13px/1.45 system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}"
+    "header{margin-bottom:16px}h1{font-size:18px;margin:0 0 4px}"
+    ".meta{margin:0;color:var(--dim)}.about{margin:6px 0 0}.foot{margin-top:12px}"
+    "table{border-collapse:collapse;font:12px/1.4 ui-monospace,SFMono-Regular,Consolas,"
+    "'Liberation Mono',monospace}"
+    "th,td{border:1px solid var(--line);padding:3px 8px;text-align:left;vertical-align:top;"
+    "white-space:pre-wrap;overflow-wrap:anywhere}"
+    "th{position:sticky;top:0;background:var(--head);font-weight:600;white-space:nowrap}"
+    "tbody tr:nth-child(even){background:var(--zebra)}td.n{text-align:right;color:var(--dim)}"
+    # A chip's border would make a tagged row taller than its neighbours:
+    # its line box is the cell's less the two border pixels.
+    ".tag{display:inline-block;padding:0 6px;line-height:calc(1.4em - 2px);"
+    "border:1px solid var(--c,var(--line));border-radius:3px;"
+    "background:color-mix(in srgb,var(--c,transparent) 18%,transparent);white-space:nowrap}"
+)
+
+
+class _HtmlViewExport:
+    """A web page that stands on its own: the table's name, which rows
+    these are and when they were exported, the line saying what narrows
+    the view (`about`, from the dialog), then the table with each tag in
+    its colour and the row count under it. Every value is escaped; the
+    page holds no script and loads nothing, so it opens, prints and
+    attaches to a report anywhere."""
+
+    def __init__(self, meta: dict, about: str = ""):
+        self.meta = meta
+        self.about = " ".join((about or "").split())[:2000]
+        self.n = 0
+
+    def head(self) -> str:
+        m = self.meta
+        names = ["Line", *(["Table"] if m["merge"] else []), "Tags", "Note", *m["columns"]]
+        title = _html_text(m["name"])
+        which = "Tagged rows of the view" if m["tagged_only"] else "Every row of the view"
+        when = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+        about = f'<p class="about">{_html_text(self.about)}</p>\n' if self.about else ""
+        return (
+            '<!DOCTYPE html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n'
+            '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+            f'<meta name="generator" content="Winnow {_html.escape(VERSION)}">\n'
+            f"<title>{title}</title>\n<style>{_HTML_STYLE}</style>\n</head>\n<body>\n<header>\n"
+            f"<h1>{title}</h1>\n"
+            f'<p class="meta">{which} · exported {when} from Winnow {_html.escape(VERSION)}</p>\n'
+            f"{about}</header>\n<table>\n"
+            "<thead><tr>" + "".join(f"<th>{_html_text(n)}</th>" for n in names) + "</tr></thead>\n<tbody>\n"
+        )
+
+    def _tags(self, tags: list[str]) -> str:
+        colors = self.meta["tag_colors"]
+        out = []
+        for t in tags:
+            c = colors.get(t) or ""
+            style = f' style="--c:{c}"' if _HTML_COLOR.fullmatch(c) else ""
+            out.append(f'<span class="tag"{style}>{_html_text(t)}</span>')
+        return " ".join(out)
+
+    def rows(self, batch: list) -> str:
+        merge = self.meta["merge"]
+        out = []
+        for rid, table, tags, note, values in batch:
+            out.append(
+                f'<tr><td class="n">{rid}</td>'
+                + (f"<td>{_html_text(table)}</td>" if merge else "")
+                + f"<td>{self._tags(tags)}</td><td>{_html_text(note)}</td>"
+                + "".join(f"<td>{_html_text(v)}</td>" for v in values)
+                + "</tr>\n")
+        self.n += len(batch)
+        return "".join(out)
+
+    def tail(self) -> str:
+        return (f'</tbody>\n</table>\n<p class="meta foot">{self.n:,} row{"" if self.n == 1 else "s"}</p>\n'
+                "</body>\n</html>\n")
+
+
+# The streamed formats' writers; xlsx is Store.export_view_xlsx, to a file.
+_VIEW_TEXT_WRITERS = {
+    "csv": _CsvViewExport,
+    "tsv": _TsvViewExport,
+    "jsonl": _JsonLinesViewExport,
+    "json": _JsonViewExport,
+    "md": _MarkdownViewExport,
+    "html": _HtmlViewExport,
+}
 
 
 def _esc_like(s: str) -> str:

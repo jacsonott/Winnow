@@ -3810,6 +3810,12 @@ button.tables-num:hover { text-decoration: underline; color: var(--text); }
 .cs-vars-add .cs-var-in:first-child { flex: 0 0 170px; }
 /* Export (openExportModal, sources.js). */
 .export-pane .mb-summary .mb-seg button { font-size: 11.5px; padding: 3px 10px; }
+/* The view's format: a caps label, then one segment per format. Wraps
+   under the label rather than pushing the dialog wider. */
+.export-format { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px; margin-bottom: 10px; }
+.export-format-label { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--dim); }
+.export-format .mb-seg { flex-wrap: wrap; }
+.export-format .mb-seg button { font-size: 11.5px; padding: 3px 10px; }
 .export-head, .export-row { grid-template-columns: minmax(0, 1fr) 80px 56px; }
 .export-head .tables-name-h, .export-cols-head .tables-name-h { grid-column: auto; }
 .export-cols-head, .export-col-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }

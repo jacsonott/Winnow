@@ -107,7 +107,18 @@ when nothing was. Adding a reader means adding it to `READERS` there.
 `test_group_export.py` holds the export of an expanded small group (its
 own code path, `group_virtual`) to the rows the grid pages for it and,
 byte for byte, to the same rows exported through a filter or a
-materialised group. `test_merge_advanced_search.py` is Advanced search's
+materialised group. `test_export_formats.py` reads every format the
+current view exports to (TSV, Excel, JSON Lines, JSON, Markdown, HTML)
+back into rows and holds it, cell for cell, to the CSV of the same
+filtered, sorted view, tagged-only too, through all three view readers
+(root_virtual, group_virtual, materialised) and on a merge; then what each
+format does with a value: the formula guard on exactly CSV, TSV and Excel,
+JSON's deduplicated keys (a table's own Note is Note_1), Markdown's
+escaping, HTML's escaping and its refusal of a tag colour that isn't hex,
+and the route's media types, file names, 400/409 and log row counts.
+`tests/ui/test_export_view_formats_ui.py` presses each format's button on
+a filtered, reverse-sorted table and reads the download.
+`test_merge_advanced_search.py` is Advanced search's
 merge case (invariant 9), with members indexed, not, and mixed.
 `test_wiki_shortcuts.py` holds the shortcut table in
 docs/wiki/Settings-and-shortcuts.md to keymap.js's `DEFAULT_KEYMAP` and
