@@ -924,6 +924,7 @@ function stashViewState() {
     groupSort: S.groupSort,
     groupSortDir: S.groupSortDir,
     hideEmptyRows: S.hideEmptyRows,
+    hideDuplicateRows: S.hideDuplicateRows,
     timeRange: { ...S.timeRange },
     scroll: $('body').scrollTop,
   });
@@ -970,6 +971,7 @@ export async function openSource(id, { skipBuild = false } = {}) {
   S.sort = [];
   S.tagFilter = [];
   S.hideEmptyRows = false;
+  S.hideDuplicateRows = false;
   // Per table only when the analyst asked for that; otherwise the case-wide
   // range rides along untouched. Only on a real switch: every refresh idiom
   // re-enters here for the table already open, and that must not drop a
@@ -1011,6 +1013,7 @@ export async function openSource(id, { skipBuild = false } = {}) {
   // (which is keyed by header set, not row count) has no business carrying it.
   S.valueFilterMode = saved.value_filters || 'auto';
   S.hideEmptyRows = !!saved.hide_empty_rows;   // same per-source reasoning; the stash below wins if we're coming back
+  S.hideDuplicateRows = !!saved.hide_duplicate_rows;   // likewise
   // The no-layout seed is the BASE columns only: a derived column is placed
   // by the loop below, next to its input, rather than trailing the list
   // in creation order.
@@ -1046,6 +1049,7 @@ export async function openSource(id, { skipBuild = false } = {}) {
     S.sort = stash.sort.map((x) => ({ ...x }));
     S.tagFilter = [...stash.tagFilter];
     if (stash.hideEmptyRows !== undefined) S.hideEmptyRows = stash.hideEmptyRows;
+    if (stash.hideDuplicateRows !== undefined) S.hideDuplicateRows = stash.hideDuplicateRows;
     $('search').value = S.searchMode === 'advanced' ? '' : S.search;
     document.querySelectorAll('#searchModeToggle button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.mode === S.searchMode)));
     if (S.searchMode === 'advanced') renderAdvancedChips();

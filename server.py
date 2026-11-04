@@ -821,6 +821,7 @@ class ViewSpec(BaseModel):
     tags: list = []
     time_range: dict | None = None  # {enabled, column, start, end} — see _compile_where; survives filter/preset changes
     hide_empty_rows: bool = False   # the table menu's toggle — rows with every column NULL/'' are dropped; see _compile_where
+    dedupe_columns: list[str] = []  # "Hide duplicate rows": one row per set matching in all of these (the visible columns) — see Store._dedupe_columns
     op_token: str | None = None  # client-generated cancel handle — see Store.cancel_op
 
 

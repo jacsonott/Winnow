@@ -252,7 +252,7 @@ into the file, and the button at the bottom exports it, saying how much.
 
 | Section | Format | What it contains | File name |
 | --- | --- | --- | --- |
-| **Current view** | CSV | Every row of the open table's view, with its filters, sort, search and timeframe applied, in that order. **Tagged rows only** limits it to the rows with at least one tag | `timeline-export.csv` |
+| **Current view** | CSV | Every row of the open table's view, with its filters, sort, search and timeframe applied, in that order, and without the rows [Hide duplicate rows](Working-with-tables.md#hiding-duplicate-rows) hides. **Tagged rows only** limits it to the rows with at least one tag | `timeline-export.csv` |
 | **Tagged rows** | Excel | Every tagged row in the case, one worksheet per table that has any | `tagged-export.xlsx` |
 | **Every row** | Excel | Every row of every table, one worksheet per table | `all-tables.xlsx` |
 

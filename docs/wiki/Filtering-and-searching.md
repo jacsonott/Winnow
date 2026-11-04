@@ -4,7 +4,7 @@ Filtering is how a table of two million rows becomes the forty that matter. Winn
 
 ## How filters combine
 
-Every filter you set narrows the rows left by the others. Column filters, the filter builder, the search box, the tag filter, the timeframe and **Hide empty rows** are all applied together (AND). The line beside the toolbar shows how many rows are left, for example `58 of 400 rows`.
+Every filter you set narrows the rows left by the others. Column filters, the filter builder, the search box, the tag filter, the timeframe and **Hide empty rows** are all applied together (AND). [Hide duplicate rows](Working-with-tables.md#hiding-duplicate-rows) comes after them and keeps one of each set of identical rows that are left. The line beside the toolbar shows how many rows are left, for example `58 of 400 rows`.
 
 If nothing is left, the grid shows **No rows match** with a **Clear filters** button.
 
@@ -235,7 +235,7 @@ The tag chips above the grid also filter. Click a tag to show only rows carrying
 
 ## Clearing filters
 
-**Clear filters** in the toolbar, or `c`, removes the column filters, the filter builder's conditions, the search, the tag filter and any grouping. It keeps the timeframe, the sort and **Hide empty rows**. If the row under the cursor is still there afterwards, it stays selected, so you see it in context. Grouping cleared this way can be brought back with `X`.
+**Clear filters** in the toolbar, or `c`, removes the column filters, the filter builder's conditions, the search, the tag filter and any grouping. It keeps the timeframe, the sort, **Hide empty rows** and **Hide duplicate rows**. If the row under the cursor is still there afterwards, it stays selected, so you see it in context. Grouping cleared this way can be brought back with `X`.
 
 **Reset view** in the table menu does the same and also restores the table's default sort.
 
@@ -243,7 +243,7 @@ To remove only the timeframe, use **Clear** in the timeframe dialog or **Clear t
 
 ## Undoing a filter change
 
-Press `z` to undo the last filter change on the table you are looking at. Press it again to keep stepping back through earlier ones. It covers the column filters, the value picker, the filter builder, the search box, the tag filter and the timeframe, so one press also brings back the filters and search that **Clear filters** removed. Grouping comes back with `X`, as before. A word typed into a filter box or the search box comes back as one step, not a letter at a time. The sort, grouping and **Hide empty rows** are left as they are.
+Press `z` to undo the last filter change on the table you are looking at. Press it again to keep stepping back through earlier ones. It covers the column filters, the value picker, the filter builder, the search box, the tag filter and the timeframe, so one press also brings back the filters and search that **Clear filters** removed. Grouping comes back with `X`, as before. A word typed into a filter box or the search box comes back as one step, not a letter at a time. The sort, grouping, **Hide empty rows** and **Hide duplicate rows** are left as they are.
 
 Each table keeps its own list, so `z` never changes another table's filters. The list is gone once the tab is closed or another case is opened. Undoing a tag is a different key, `Ctrl+Z`; see [Tagging and notes](Tagging-and-notes.md#undo).
 

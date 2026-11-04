@@ -76,7 +76,7 @@ Filtering, grouping or opening the value picker on a column builds a small filte
 
 Press `C` to open the table menu, or right-click a tab or a table in the sidebar and choose **Columns…**. Its sections are listed down the left, each with a line saying what is set in it, and the one you pick fills the right. Up and Down move between them. Along the bottom, under every section, are **Tables manager…**, **Reset view** (clears filters, search, tag filter and grouping and restores the default sort; the column layout and the timeframe stay) and **Close this tab**.
 
-- **Show, hide & order**: show, hide, pin and reorder columns (see below), plus **Add derived column…** (see [Derived columns](Derived-columns.md)).
+- **Show, hide & order**: show, hide, pin and reorder columns (see below), **Hide empty rows** and **Hide duplicate rows**, plus **Add derived column…** (see [Derived columns](Derived-columns.md)).
 - **Value dropdowns**: when the ▾ value picker appears on this table's filter boxes, for the table and for each column (see [Filtering and searching](Filtering-and-searching.md#the-value-picker)).
 - **Layout**: put the default layout for these columns, or another table's layout, on this table, and save this table's layout as the default (see [Layouts](#layouts)).
 - **Name & merge**: how many rows, columns, tagged rows and notes the table has, where it was imported from, its nickname, the name of its set of columns, and its merges. The two names are saved when you press Enter or leave the box; Escape takes back what you typed. **Merge with other tables…** (on a merge, **Edit merge…**; see [Merging tables](#merging-tables)) sits beside the tables that share columns with this one, best fit first.
@@ -92,6 +92,20 @@ In the table menu's **Columns** list, untick a column to hide it and tick it to 
 A hidden datetime column is also left out of the [histogram](Filtering-and-searching.md#the-histogram)'s column list, so the histogram only charts columns you can see.
 
 **Hide empty rows** is a toggle in the same place. It drops rows in which every column is empty, such as blank lines in a raw text import. It counts as a filter: the row count follows it, and it is remembered for the table.
+
+### Hiding duplicate rows
+
+**Hide duplicate rows**, beside **Hide empty rows** in the table menu and also in **Filters ▾**, shows one row for each set of rows that are identical in every visible column. It is for logs collected twice, overlapping exports and repeated lines in a raw text import.
+
+- Only the columns you can see are compared. Hidden columns are ignored, so to collapse copies that differ only in a column such as **SourceFile**, or a merge's **From table** column, hide that column. Hiding or showing a column while the toggle is on changes which rows count as duplicates, and the grid updates. A column you have grouped by is still compared.
+- Two values match when their text is exactly the same, case included, as with the `=` filter. An empty cell matches any other empty cell.
+- The row kept from each set is the first by **Line**, whatever the sort. In a merge it is the row from the table listed first in the merge, then the first by Line.
+- Duplicates are looked for among the rows your other filters, search, tag filter and timeframe leave.
+- It is remembered for the table, and the line beside the toolbar says **duplicates hidden** while it is on. **Clear filters** and **Reset view** leave it on.
+
+Everything that reads the view sees only the rows kept: the row count, grouping, the histogram, **Stack values**, **This view** in the value picker, tagging the whole view and **Current view** exports. Tags and notes on the hidden copies stay where they are. Nothing is deleted. To keep the deduplicated rows as a table of their own, turn the toggle on and use [Saving a view as a table](#saving-a-view-as-a-table).
+
+On a table of a million rows or more, turning it on takes a few seconds, because every row has to be compared.
 
 Each column's type (text, number or datetime) is shown after its name, in a colour of its own so the two don't run together, with "derived" after a derived column. When the menu is too narrow for a long name, the name is shortened with "…" so every row's buttons stay in view; hover the row to see it in full.
 

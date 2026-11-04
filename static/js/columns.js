@@ -10,7 +10,7 @@ import { histogramFollowColumns } from './histogram.js';
 import { S, clearCellSelection, gridRowCount, selClear, selSetAll, selSnapshot } from './state.js';
 import { baseColumns, columnMeta } from './tsformat.js';
 import { anchoredPanel, contextMenu } from './ui.js';
-import { rebuildSoon, rebuildView } from './view.js';
+import { rebuildSoon, rebuildView, syncDuplicateRows } from './view.js';
 
 /* ---------------------------------------------------------------- header */
 
@@ -737,11 +737,20 @@ export function saveLayoutNow() {
   if (!S.sourceId) return Promise.resolve();
   return post('/api/layout', {
     source_id: S.sourceId,
-    payload: { columns: S.layout, order: S.order, sort: S.sort, value_filters: S.valueFilterMode, hide_empty_rows: S.hideEmptyRows },
+    payload: { columns: S.layout, order: S.order, sort: S.sort, value_filters: S.valueFilterMode,
+               hide_empty_rows: S.hideEmptyRows, hide_duplicate_rows: S.hideDuplicateRows },
   }).catch(() => {});
 }
 
-export const saveLayout = debounce(saveLayoutNow, 400);
+const saveLayoutSoon = debounce(saveLayoutNow, 400);
+
+/* Every layout change ends here, which makes it the one place a hidden or
+   shown column can reach "Hide duplicate rows" (it compares the visible
+   columns — syncDuplicateRows decides whether that changed). */
+export function saveLayout() {
+  saveLayoutSoon();
+  syncDuplicateRows();
+}
 
 /* Saves the current column order/visibility/timestamp-format as the
    cross-case default for this exact header set (workspace/column_layouts.json,

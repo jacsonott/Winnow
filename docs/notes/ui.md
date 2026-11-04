@@ -1975,6 +1975,28 @@ see [docs/notes/README.md](README.md) for the whole set.
   table in the layout payload (`hide_empty_rows`, beside
   `value_filters`) and in the per-tab stash. "Reset view"/`clearAllFilters`
   leave it alone, like the value-filter default.
+- **"Hide duplicate rows" follows the visible columns, so the layout can
+  rebuild the view.** `S.hideDuplicateRows` is plumbed exactly like
+  `S.hideEmptyRows` (layout payload `hide_duplicate_rows`, the per-tab
+  stash, the background-search snapshot), but what it sends is a column
+  list: `duplicateRowColumns()` in filters.js, every column the layout
+  doesn't hide, in `S.columns` (source) order. Source order rather than
+  `S.order` so dragging a column is not a different spec, and so not a
+  rebuild; a grouped column still counts, since `hidden` is never set on
+  it and a duplicate across two of its groups would leave a group count
+  wrong. Hiding or showing a column IS a different spec, and the places
+  that do it (the Columns list, Show all, Hide empty columns, a layout
+  applied) all end in `saveLayout()` — which is why saveLayout is a
+  wrapper now: it schedules the debounced save and calls
+  `syncDuplicateRows()` (view.js), which rebuilds only when the toggle is
+  on and the list differs from the one the view was built with, read off
+  the in-flight build's key or else `S.viewCache`'s. Debounced 150 ms so a
+  run of ticks is one GROUP BY over a big table, not one per tick. The
+  toolbar's stats line says "duplicates hidden" while it's on (Hide empty
+  rows doesn't): a count short by every repeat of every event reads as a
+  forgotten filter otherwise. The toggle itself is `toggleDuplicateRows()`
+  in timeframe.js, shared by the Columns pane button, Filters ▾ and the
+  keymap action (no default key). tests/ui/test_hide_duplicate_rows_ui.py.
 - **`clearAllFilters(seed)`** — Shift+F ("filter to this value and drop the
   rest") is that reset plus one filter, so it goes through the same
   function rather than a second implementation that would forget the
