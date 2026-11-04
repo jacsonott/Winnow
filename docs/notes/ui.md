@@ -1714,6 +1714,35 @@ see [docs/notes/README.md](README.md) for the whole set.
   Columns borrow the merge builder's vocabulary (`.mb-stats`, `.mb-seg`,
   `.mb-notes`, `.mb-field`) rather than adding their own.
   tests/ui/test_table_menu_sections.py, test_table_menu_strip.py.
+- **The Columns pane's All / Shown switch leaves hidden columns out of
+  the list, never out of `S.order`** (`.tm-cols-seg`, `columnsListMode`
+  in timeframe.js). Asked for because a KAPE table with most of its
+  columns put away lists mostly unticked rows, the few the grid shows
+  scattered through them. Decisions:
+  - **The rows are `hidden`, not removed**, the same way the filter box
+    hides rows (`applyFilter` does both), so the drag order still runs
+    over the whole of `S.order` and a drop between two listed rows lands
+    where the list shows it, with the hidden columns between them kept in
+    place. test_columns_list_shown_only.py drags under Shown and checks
+    every column is still in the order.
+  - **What is left out is worked out on a name typed or the switch
+    flipped, never on a box unticked.** A row unticked under Shown stays
+    where it is until the list is next filtered or the menu reopens.
+    Hiding it at once moved every row under the pointer up one and made a
+    misclick a trip to All and a hunt for the column.
+  - **The way back is always on screen**: `.collist-more` under the list
+    counts what Shown leaves out, and with a name typed, the hidden
+    columns that match it ("2 hidden columns match …"), so a search for a
+    column that is put away says where it went rather than finding
+    nothing. Its **List all columns** switches to All and keeps the name.
+    With nothing listed above it, `.alone` drops its rule.
+  - **A per-browser preference, one for every table**: `winnow.tableMenu`
+    `{columnsList}` in localStorage, like `winnow.histogram`, never the
+    layout or the case file. It is how the analyst reads the menu, not a
+    fact about one table, and on a table with every column shown it
+    changes nothing. All is the default, so nobody who never touches it
+    sees a different menu. The test checks it does not reach
+    `/api/layout`.
 - **The Tables manager is the same two panes, sharing the frame**
   (`sectionPanes` in ui.js, which `openTableMenu` builds on too;
   `TABLES_MANAGER_SECTIONS` in tables.js). Its sections are case-wide

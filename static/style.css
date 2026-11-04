@@ -3509,6 +3509,17 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .table-menu-pane .tm-cols-top .collist-search { flex: 1 1 auto; width: auto; min-width: 0; margin: 0; }
 .tm-cols-count { flex: 0 0 auto; font-size: 12px; color: var(--dim); }
 .table-menu-pane .tm-cols-top .side-search { flex: 1 1 auto; min-width: 0; }
+/* All / Shown, in the Tables manager's top-row size (.list-pane .mb-seg). */
+.table-menu-pane .tm-cols-seg { flex: 0 0 auto; }
+.table-menu-pane .tm-cols-seg button { font-size: 11px; padding: 3px 10px; }
+/* Under the list while Shown leaves columns out: a dim count and the way
+   back to them, set apart from the rows above by a rule. */
+.collist-more {
+  display: flex; align-items: center; gap: 10px; margin-top: 6px; padding: 8px 4px 4px;
+  border-top: var(--border-w) solid var(--line); font-size: 12px; color: var(--dim);
+}
+.collist-more.alone { margin-top: 0; padding-top: 4px; border-top: 0; }
+.collist-more-text { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* The list is the part that takes the room that is left, and scrolls. */
 .table-menu-pane .tm-cols-box { flex: 1 1 0; min-height: 0; margin-top: 8px; }
 .tm-cols-box .side-preview-rows { padding: 4px; }
@@ -3592,6 +3603,8 @@ textarea:focus { border-color: var(--accent); outline: none; }
   .table-menu .side-rail { border-right: 0; padding: 0 0 6px; border-bottom: 1px solid var(--line); }
   .table-menu .side-rail-list { flex: 0 0 auto; flex-direction: row; flex-wrap: wrap; gap: 2px; overflow: visible; }
   .table-menu .side-rail-group, .table-menu .side-rail-hint { display: none; }
+  .table-menu-pane .tm-cols-top { flex-wrap: wrap; row-gap: 6px; }
+  .table-menu-pane .tm-cols-top .collist-search { flex-basis: 100%; }
 }
 
 /* A list in two panes: the Tables manager (openTablesManager, in
