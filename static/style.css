@@ -3509,6 +3509,17 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .table-menu-pane .tm-cols-top .collist-search { flex: 1 1 auto; width: auto; min-width: 0; margin: 0; }
 .tm-cols-count { flex: 0 0 auto; font-size: 12px; color: var(--dim); }
 .table-menu-pane .tm-cols-top .side-search { flex: 1 1 auto; min-width: 0; }
+/* All / Shown, in the Tables manager's top-row size (.list-pane .mb-seg). */
+.table-menu-pane .tm-cols-seg { flex: 0 0 auto; }
+.table-menu-pane .tm-cols-seg button { font-size: 11px; padding: 3px 10px; }
+/* Under the list while Shown leaves columns out: a dim count and the way
+   back to them, set apart from the rows above by a rule. */
+.collist-more {
+  display: flex; align-items: center; gap: 10px; margin-top: 6px; padding: 8px 4px 4px;
+  border-top: var(--border-w) solid var(--line); font-size: 12px; color: var(--dim);
+}
+.collist-more.alone { margin-top: 0; padding-top: 4px; border-top: 0; }
+.collist-more-text { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* The list is the part that takes the room that is left, and scrolls. */
 .table-menu-pane .tm-cols-box { flex: 1 1 0; min-height: 0; margin-top: 8px; }
 .tm-cols-box .side-preview-rows { padding: 4px; }
@@ -3592,6 +3603,8 @@ textarea:focus { border-color: var(--accent); outline: none; }
   .table-menu .side-rail { border-right: 0; padding: 0 0 6px; border-bottom: 1px solid var(--line); }
   .table-menu .side-rail-list { flex: 0 0 auto; flex-direction: row; flex-wrap: wrap; gap: 2px; overflow: visible; }
   .table-menu .side-rail-group, .table-menu .side-rail-hint { display: none; }
+  .table-menu-pane .tm-cols-top { flex-wrap: wrap; row-gap: 6px; }
+  .table-menu-pane .tm-cols-top .collist-search { flex-basis: 100%; }
 }
 
 /* A list in two panes: the Tables manager (openTablesManager, in
@@ -3810,11 +3823,28 @@ button.tables-num:hover { text-decoration: underline; color: var(--text); }
 .cs-vars-add .cs-var-in:first-child { flex: 0 0 170px; }
 /* Export (openExportModal, sources.js). */
 .export-pane .mb-summary .mb-seg button { font-size: 11.5px; padding: 3px 10px; }
+/* The view's format: a caps label, then one segment per format. Wraps
+   under the label rather than pushing the dialog wider. */
+.export-format { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px; margin-bottom: 10px; }
+.export-format-label { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--dim); }
+.export-format .mb-seg { flex-wrap: wrap; }
+.export-format .mb-seg button { font-size: 11.5px; padding: 3px 10px; }
 .export-head, .export-row { grid-template-columns: minmax(0, 1fr) 80px 56px; }
 .export-head .tables-name-h, .export-cols-head .tables-name-h { grid-column: auto; }
-.export-cols-head, .export-col-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+/* The view's columns: a tick, the name in the file, what it holds, ⤒ ⤓.
+   An unticked row is dimmed by .tables-row:not(.open); a dragged one is
+   faded and the drop line drawn the Columns pane's way (.collist-row). */
+.export-cols-head, .export-col-row { grid-template-columns: 16px minmax(0, 1fr) minmax(0, 1fr) auto; }
+.export-col-row { cursor: grab; }
 .export-col-row .tables-name { font-family: var(--mono); font-size: 11.5px; color: var(--text); }
 .export-col-row.added .tables-name { color: var(--accent); }
+.export-col-row.dragging { opacity: .4; }
+.export-col-row.drop-before { box-shadow: inset 0 2px 0 var(--accent); }
+.export-col-row.drop-after { box-shadow: inset 0 -2px 0 var(--accent); }
+.export-col-moves { display: flex; gap: 2px; }
+.export-col-row:hover .collist-move, .export-col-row:focus-within .collist-move { opacity: 1; }
+.export-cols-top { margin-bottom: 8px; }
+.export-cols-top .export-cols-tool { flex: 0 0 auto; font-size: 11.5px; padding: 3px 9px; }
 .export-row:not(.open) .tables-name { color: var(--dim); }
 /* Stack (openStack, stack.js): the chart is the dialog. One grid for the
    head and every bar — the value gutter (measured to the longest value,

@@ -57,7 +57,7 @@ from winnow.sqlresults import ResultExpired, TooBig
 from winnow.store import (CASE_SUFFIX, DEFAULT_IMPORT_EXTENSIONS, PLASO_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, MissingTable, OpCancelled, RecordGone, Store, ViewExpired,
                    case_lock_path, decode_text_sample, describe_case_lock, fold_leftover_wal, is_winnow_case_file,
                    looks_like_kv_log, probe_case_lock, q, sniff_text_encoding, sweep_orphan_views)
-from winnow.store import case_session_document_problem, pane_cell_json, session_document_problem
+from winnow.store import VIEW_EXPORT_FORMATS, case_session_document_problem, pane_cell_json, session_document_problem
 
 HERE = paths.INSTALL_ROOT  # static/, plugins/, examples/plugins/ all hang off the install root
 
@@ -6243,43 +6243,106 @@ def api_view_save_as_table(body: SaveViewAsTable):
 
 
 @app.get("/api/export")
-def api_export(view_id: str, tagged_only: bool = False, filename: str = "timeline-export.csv"):
+def api_export(view_id: str, tagged_only: bool = False, filename: str = "",
+               fmt: str = Query("csv", alias="format"), about: str = "", columns: str = ""):
+    """The current view as a file, in any of VIEW_EXPORT_FORMATS (CSV when
+    the client names none, which is every caller from before there was a
+    choice). Everything but xlsx streams: the download starts at once and
+    grows as rows are written. A workbook can't be sent before it is
+    finished, so xlsx is written to a temp file the response streams and
+    then deletes (export_all_xlsx's shape). `about` is the dialog's line
+    saying what narrows the view; only the HTML page prints it.
+
+    `columns`, when given, is a JSON list of the file's columns in order
+    as the dialog chose them — "w:line"/"w:table"/"w:tags"/"w:note" for
+    Winnow's own, "c:<name>" for the table's (Store._export_plan). Absent
+    is the layout's, as it always was. A list that names a column the
+    table doesn't have is a 400 rather than a file quietly missing it."""
+    if fmt not in VIEW_EXPORT_FORMATS:
+        raise HTTPException(400, f"Unknown export format {fmt!r}: one of {', '.join(VIEW_EXPORT_FORMATS)}")
+    label, media_type, ext = VIEW_EXPORT_FORMATS[fmt]
+    picked = None
+    if columns:
+        try:
+            picked = json.loads(columns)
+        except ValueError:
+            picked = None
+        if not isinstance(picked, list):
+            raise HTTPException(400, "columns must be a JSON list of column names")
+    filename = filename or f"timeline-export.{ext}"
+    what = f"{label} {'tagged rows of ' if tagged_only else ''}view {view_id}"
+    if picked is not None:
+        what += f" ({len(picked)} column{'' if len(picked) == 1 else 's'})"
+    if fmt == "xlsx":
+        return _export_view_xlsx(view_id, tagged_only, filename, what, media_type, picked)
+    stats = {"rows": 0}
     try:
-        gen = store().export_view_csv(view_id, tagged_only)
+        gen = store().export_view(view_id, fmt, tagged_only, about=about, stats=stats, columns=picked)
     except KeyError as e:
         raise HTTPException(409, str(e))
-    what = f"CSV {'tagged rows of ' if tagged_only else ''}view {view_id}"
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
     def logged():
         # Counted as it streams: the row count isn't known up front, and
         # an aborted download (browser closed) is worth a line too. A
         # failure mid-stream can't reach the catch-all handler (headers
         # are already out), so it is recorded here or nowhere.
-        rows, nbytes, t0 = 0, 0, time.time()
+        nbytes, t0 = 0, time.time()
         wlog.record("info", f"Export started: {what} → {filename}")
         try:
             for chunk in gen:
-                if isinstance(chunk, str):
-                    rows += chunk.count("\n")
-                    nbytes += len(chunk.encode("utf-8"))
-                else:
-                    rows += chunk.count(b"\n")
-                    nbytes += len(chunk)
+                nbytes += len(chunk.encode("utf-8")) if isinstance(chunk, str) else len(chunk)
                 yield chunk
         except GeneratorExit:
-            wlog.record("warn", f"Export aborted: {what} after {rows:,} lines, {nbytes:,} bytes")
+            wlog.record("warn", f"Export aborted: {what} after {stats['rows']:,} rows, {nbytes:,} bytes")
             raise
         except Exception as e:  # noqa: BLE001 — the download is already truncated; say why
-            wlog.record("error", f"Export failed: {what} after {rows:,} lines — {type(e).__name__}: {e}")
+            wlog.record("error", f"Export failed: {what} after {stats['rows']:,} rows — {type(e).__name__}: {e}")
             raise
-        wlog.record("info", f"Export finished: {what} — {max(rows - 1, 0):,} rows, {nbytes:,} bytes "
+        wlog.record("info", f"Export finished: {what} — {stats['rows']:,} rows, {nbytes:,} bytes "
                             f"in {time.time() - t0:.1f}s")
 
     return StreamingResponse(
         logged(),
-        media_type="text/csv",
+        media_type=media_type,
         headers=_attachment(filename),
     )
+
+
+def _export_view_xlsx(view_id: str, tagged_only: bool, filename: str, what: str, media_type: str,
+                      columns: list | None = None):
+    """The view as a workbook (api_export's xlsx): written whole to a temp
+    file first, then sent and deleted. Runs in the threadpool with the
+    route, so a big one doesn't block the app — the dialog says it can
+    take a while, since nothing downloads until it is done."""
+    from starlette.background import BackgroundTask
+    t0 = time.time()
+    wlog.record("info", f"Export started: {what} → {filename}")
+    fd, path = tempfile.mkstemp(suffix=".xlsx", prefix="winnow-export-")
+    os.close(fd)
+    try:
+        stats = store().export_view_xlsx(view_id, path, tagged_only, columns=columns)
+    except KeyError as e:
+        wlog.record("warn", f"Export failed: {what} — {e.args[0] if e.args else 'view expired'}")
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+        raise HTTPException(409, str(e))
+    except ValueError as e:
+        wlog.record("warn", f"Export failed: {what} — {e}")
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+        raise HTTPException(400, str(e))
+    except BaseException:
+        wlog.record("error", f"Export failed: {what}")
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+        raise
+    wlog.record("info", f"Export finished: {what} — {stats['rows']:,} rows on "
+                        f"{stats['sheets']} sheet{'s' if stats['sheets'] != 1 else ''}, "
+                        f"{os.path.getsize(path):,} bytes in {time.time() - t0:.1f}s")
+    return FileResponse(path, media_type=media_type, headers=_attachment(filename),
+                        background=BackgroundTask(os.unlink, path))
 
 
 @app.get("/api/export/tagged_xlsx")

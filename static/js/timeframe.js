@@ -748,6 +748,25 @@ export function openSavedFiltersModal({ returnTo = null, section = null, rearm =
   }, { wide: true, tall: true, focus: (b) => b.querySelector('.sf-pane .side-search') });
 }
 
+/* Which columns the Columns pane lists: every one ('all'), or only the
+   ones the grid shows ('shown'). A per-browser preference of how the menu
+   reads, like winnow.histogram and winnow.notes — localStorage, never the
+   layout or the case file — and one setting for every table rather than
+   one per table: an analyst who works from the shown columns of a
+   300-column KAPE table works that way on the next table too. */
+export const TABLE_MENU_KEY = 'winnow.tableMenu';
+
+export function columnsListMode() {
+  try { return (JSON.parse(localStorage.getItem(TABLE_MENU_KEY) || '{}') || {}).columnsList === 'shown' ? 'shown' : 'all'; }
+  catch { return 'all'; }
+}
+
+function saveColumnsListMode(mode) {
+  let cur = {};
+  try { cur = JSON.parse(localStorage.getItem(TABLE_MENU_KEY) || '{}') || {}; } catch { /* start fresh */ }
+  try { localStorage.setItem(TABLE_MENU_KEY, JSON.stringify({ ...cur, columnsList: mode })); } catch { /* private mode */ }
+}
+
 /* The Columns pane of the table menu. `refresh` repaints the pane after a
    bulk action ("Show all"/"Hide empty") — the per-column checkboxes
    repaint the grid directly and don't need it. Anything that changes what
@@ -769,8 +788,17 @@ export function buildColumnsPanel(container, refresh = () => openTableMenu()) {
   search.placeholder = 'Filter columns…';
   search.autocomplete = 'off';
   search.setAttribute('aria-label', 'Filter columns');
+  // All / Shown: on a wide table with most columns put away, the list is
+  // mostly unticked rows and the few the grid shows are scattered through
+  // it. Shown leaves the unticked ones out of the list (not the table).
+  let mode = columnsListMode();
+  const listSeg = tableMenuSeg([
+    ['all', 'All', 'List every column, ticked or not'],
+    ['shown', 'Shown', 'List only the columns the grid shows — the unticked ones are left out of this list until you pick All'],
+  ], () => mode, (key) => setMode(key), 'tm-cols-seg');
+  listSeg.seg.setAttribute('aria-label', 'Columns to list');
   const count = el('span', 'tm-cols-count');
-  top.append(search, count);
+  top.append(search, listSeg.seg, count);
   container.append(top);
   // The list is the one part of the pane that takes what is left and
   // scrolls, the way the derive dialog's settings and the folder import's
@@ -778,16 +806,49 @@ export function buildColumnsPanel(container, refresh = () => openTableMenu()) {
   const box = el('div', 'side-preview tm-cols-box');
   const scroller = el('div', 'side-preview-rows');
   const list = el('div', 'collist');
-  scroller.append(list);
+  // Under the list while Shown leaves columns out: how many, and the way
+  // back to them. With a name typed, it counts the hidden ones that match,
+  // so a search for a column that is put away says where it went rather
+  // than finding nothing.
+  const more = el('div', 'collist-more');
+  const moreText = el('span', 'collist-more-text');
+  const listAll = el('button', 'btn ghost mb-small', 'List all columns');
+  listAll.type = 'button';
+  listAll.onclick = () => { setMode('all'); listSeg.buttons[0].focus(); };
+  more.append(moreText, listAll);
+  more.hidden = true;
+  scroller.append(list, more);
   const foot = el('div', 'side-preview-foot');
   foot.append(el('p', 'fb-help', 'Drag a row, or a column header in the grid, to reorder. ⤒ ⤓ send one straight to an end.'));
   box.append(scroller, foot);
   const rows = new Map();
-  const applySearch = () => {
+  // What is left out is worked out here, on a name typed or the switch
+  // flipped — never on a box unticked. A row unticked under Shown stays
+  // where it is until the list is next filtered or the menu reopens, so a
+  // misclick is one click back rather than a hunt through All.
+  const applyFilter = () => {
     const q = search.value.trim().toLowerCase();
-    for (const [name, row] of rows) row.hidden = !!q && !name.toLowerCase().includes(q);
+    let left = 0, listedNow = 0;
+    for (const [name, row] of rows) {
+      const match = !q || name.toLowerCase().includes(q);
+      const out = mode === 'shown' && !!(S.layout[name] || {}).hidden;
+      row.hidden = !match || out;
+      if (match && out) left++;
+      if (!row.hidden) listedNow++;
+    }
+    more.hidden = !left;
+    more.classList.toggle('alone', !listedNow);   // no rows above it to rule off
+    moreText.textContent = q
+      ? `${plural(left, 'hidden column')} ${left === 1 ? 'matches' : 'match'} “${search.value.trim()}”`
+      : `${plural(left, 'hidden column')} not listed`;
   };
-  search.oninput = applySearch;
+  const setMode = (key) => {
+    mode = key;
+    saveColumnsListMode(key);
+    listSeg.paint();
+    applyFilter();
+  };
+  search.oninput = applyFilter;
   // A column grouped on is in the group strip, not the grid, so it is left
   // out here as it is from the header (visibleCols). It is still in S.order
   // — the drag order below runs over that — and is listed again on Ungroup.
@@ -799,6 +860,7 @@ export function buildColumnsPanel(container, refresh = () => openTableMenu()) {
   paintCount();
   listed.forEach((name) => {
     const row = el('div', 'collist-row');
+    row.dataset.col = name;
     rows.set(name, row);
     const lab = el('label');
     const cb = el('input');
@@ -899,6 +961,7 @@ export function buildColumnsPanel(container, refresh = () => openTableMenu()) {
     });
     list.append(row);
   });
+  applyFilter();
   container.append(box);
   const acts = el('div', 'row-actions');
   const addDerived = el('button', 'btn ghost', 'Add derived column…');

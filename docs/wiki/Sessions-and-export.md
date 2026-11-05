@@ -6,8 +6,9 @@ inside the case file, so they travel with it. You use them to keep a
 checkpoint before changing direction, to start a second pass over the same
 evidence without losing the first, to hand your work to another analyst,
 and to compare two passes row by row. Exports are the other way work
-leaves Winnow: CSV and Excel files of what you are looking at, of your
-findings, or of the whole case.
+leaves Winnow: files of what you are looking at (as CSV, TSV, Excel, JSON
+Lines, JSON, Markdown or HTML), and Excel workbooks of your findings or of
+the whole case.
 
 Everything here starts from the **Case ▾** button on the app bar:
 **Case ▾ → Sessions…** and **Case ▾ → Export…**.
@@ -252,23 +253,111 @@ into the file, and the button at the bottom exports it, saying how much.
 
 | Section | Format | What it contains | File name |
 | --- | --- | --- | --- |
-| **Current view** | CSV | Every row of the open table's view, with its filters, sort, search and timeframe applied, in that order, and without the rows [Hide duplicate rows](Working-with-tables.md#hiding-duplicate-rows) hides. **Tagged rows only** limits it to the rows with at least one tag | `timeline-export.csv` |
+| **Current view** | Your choice of CSV, TSV, Excel, JSON Lines, JSON, Markdown or HTML (see [Formats for the current view](#formats-for-the-current-view)) | Every row of the open table's view, with its filters, sort, search and timeframe applied, in that order, and without the rows [Hide duplicate rows](Working-with-tables.md#hiding-duplicate-rows) hides. **Tagged rows only** limits it to the rows with at least one tag | `timeline-export.csv`, `.tsv`, `.xlsx`, `.jsonl`, `.json`, `.md` or `.html` |
 | **Tagged rows** | Excel | Every tagged row in the case, one worksheet per table that has any | `tagged-export.xlsx` |
 | **Every row** | Excel | Every row of every table, one worksheet per table | `all-tables.xlsx` |
 
-**Current view** says what narrows the view and how it is sorted, and lists
-the file's columns in order. It exports only while a table is open. The two
-workbook exports ignore filters entirely and list rows in Line order; each
-lists its worksheets with the rows each gets. With nothing tagged in the
-case, **Tagged rows** has nothing to export and its button is off.
+**Current view** has a **Format** row of buttons under its row counts.
+It says what narrows the view and how it is sorted, describes the chosen
+format, and lists the file's columns in order, where you can choose which
+go in the file and move them (see
+[Choosing the columns](#choosing-the-columns)). It exports only while a
+table is open. The two workbook exports ignore filters entirely and list
+rows in Line order; each lists its worksheets with the rows each gets.
+With nothing tagged in the case, **Tagged rows** has nothing to export and
+its button is off.
+
+### Formats for the current view
+
+Pick the format on the **Format** row, and the button at the bottom names
+it: **Export 2,400 rows (.xlsx)**, for example. The format you exported
+to last is the one chosen the next time you open the dialog. Every format
+holds the same rows in the same order, with the same columns: the ones
+ticked in the column list, in its order.
+
+| Format | Button | What you get | Use it for |
+| --- | --- | --- | --- |
+| CSV | **CSV** | Comma-separated text, UTF-8. | Any spreadsheet, other tools, or importing back into Winnow. |
+| TSV | **TSV** | Tab-separated text, UTF-8. A cell that holds a tab, a quote or a line break is put in quotes, the way Excel writes a tab-delimited file. | Tools that want tabs rather than commas. |
+| Excel | **Excel** | A workbook with one worksheet named after the table. | Handing the view to someone who works in Excel. |
+| JSON Lines | **JSON Lines** | One JSON object per row, one row per line. | `jq`, scripts, and loading into a log platform. |
+| JSON | **JSON** | The same objects as JSON Lines, in a single array. | Tools that want one JSON document. |
+| Markdown | **Markdown** | A table in GitHub-flavored Markdown. | Pasting into a report, a ticket or a wiki. |
+| HTML | **HTML** | A web page with the table on it. | Opening in a browser, printing, or attaching to a report. |
+
+Some details of each:
+
+- **CSV, TSV and Excel** get the [formula protection](#formula-protection)
+  described below. Excel also keeps to [Excel's limits](#excels-limits): a
+  view of more than 1,048,575 rows continues on sheets named `Name (2)`,
+  `Name (3)` and so on.
+- **JSON Lines and JSON** write each row as an object: `Line` (a number),
+  `Table` (on a merge), `Tags` (a list of tag names, `[]` for none),
+  `Note` (`null` for none), then each column under its own name. Values
+  are written exactly as the case holds them, with no apostrophes added.
+  If a table has a column with the same name as one of these, such as its
+  own `Note` column, the table's column is written as `Note_1`, the name it
+  would get if you imported a CSV export back into Winnow. That holds
+  wherever you put either column; leave Winnow's **Note** out and the
+  table's is plain `Note` again. The dialog's column list shows the name
+  each one gets.
+- **Markdown** is the table and nothing else, so what you paste is what
+  renders. Characters Markdown would turn into formatting (`*`, `_`, `` ` ``,
+  `|`, `<` and others) are escaped with a backslash, so a command line
+  reads exactly as it is. A line break in a cell is written as `<br>`.
+  Backslashes in paths such as `C:\Windows\System32` are left alone.
+- **HTML** is one file that opens in any browser. At the top it shows the
+  table's name, whether these are every row or the tagged rows, when it
+  was exported, and the dialog's line saying what narrows the view and how
+  it is sorted. Under that are the table, with each tag in its color, and
+  the row count. The page follows the viewer's light or dark setting and
+  prints on white. It has no scripts and loads nothing from the network,
+  and every value is escaped, so evidence text can't act as markup.
+- In **Markdown and HTML**, control characters show as escapes such as
+  `\x07`, as they do in Excel. JSON keeps them, escaped the way JSON does.
+
+Markdown and HTML suit a report-sized set of rows. Above 10,000 rows the
+dialog warns that the file may be too big to open comfortably, and suggests
+narrowing the view or choosing CSV, Excel or JSON Lines. It still exports
+if you go ahead.
+
+### Choosing the columns
+
+The column list under **Current view** is the file's columns, top to
+bottom. It starts the way the grid has them: **Line**, **Tags** and
+**Note** first (and **Table** on a merge), then the table's columns in
+the order you arranged them, each ticked, except a column hidden in the
+grid, which is unticked and says "hidden in the grid".
+
+- **Untick a column** to leave it out of the file, or tick a hidden one to
+  put it in. That includes **Line**, **Tags** and **Note**.
+- **Drag a row** to move the column. **⤒** and **⤓** at the end of a row
+  send it to the start or the end of the file, and with a row's tick box
+  focused, **Alt+↑** and **Alt+↓** move it one place.
+- **Filter columns…** above the list narrows it to the columns whose names
+  match. **All** and **None** tick or untick every column the list is
+  showing, so filtering for `Payload` and pressing **None** leaves out all
+  the PayloadData columns at once.
+- **Reset to the grid** starts again from the grid's columns and order.
+
+The **columns** count at the top and the line under the list follow what
+you choose. With nothing ticked, the button reads **Choose a column to
+export** and is off.
+
+Your choice is for this export only. The grid's columns, their order and
+what is hidden stay as they are. It lasts while the dialog is open, so you
+can change the format without choosing again; the next time you open the
+dialog, it starts from the grid again.
 
 ### What an export contains
 
 Every export starts with three columns: **Line** (the row's number in its
 table, as the grid's Line column shows it), **Tags** (tag names separated
-by `; `) and **Note**. The table's columns follow in the order you
-arranged them, and columns you have hidden are left out. Visible derived
-columns are included. The CSV is UTF-8.
+by `; `; a list in JSON, colored labels in HTML) and **Note**. The table's
+columns follow in the order you arranged them, and columns you have hidden
+are left out. Visible derived columns are included. The text formats are
+UTF-8. For **Current view**, that is where the column list starts, and
+the file has the columns you leave ticked, in the order you leave them.
 
 Exporting a merged view adds a **Table** column after **Line**, naming the
 member table each row came from; without it, two rows could both read
@@ -282,24 +371,29 @@ appear there.
 A cell that starts with `=`, `+`, `-`, `@`, a tab or a carriage return
 could run as a formula when the file is opened in Excel or another
 spreadsheet. Evidence text such as command lines and file names is
-attacker-controlled, so every export puts an apostrophe in front of such a
-value: `=HYPERLINK(...)` is written as `'=HYPERLINK(...)`. Column names,
-tag names and notes get the same treatment. Only the exported copy
-changes; the value in the case is untouched.
+attacker-controlled, so every CSV, TSV and Excel export puts an apostrophe
+in front of such a value: `=HYPERLINK(...)` is written as
+`'=HYPERLINK(...)`. Column names, tag names and notes get the same
+treatment. Only the exported copy changes; the value in the case is
+untouched.
+
+JSON, Markdown and HTML exports aren't opened as spreadsheets, so they
+keep every value exactly as it is, with no apostrophe.
 
 Expect this on negative numbers too. Imported values are stored as text,
 so `-20` exports as `'-20`.
 
 ### Excel's limits
 
-The workbook exports keep inside what Excel can open:
+The workbook exports, including **Current view** as Excel, keep inside
+what Excel can open:
 
 - **Rows per sheet.** A worksheet holds 1,048,576 rows including the
   header, so 1,048,575 rows of data. A table with more continues on sheets
   named `Name (2)`, `Name (3)` and so on, with the header repeated, and
   every row is exported. **Every row** checks first and asks
-  before starting when a table is over the limit; the tagged export
-  continues the same way without asking.
+  before starting when a table is over the limit; the tagged export and
+  **Current view** continue the same way without asking.
 - **Sheet names.** A sheet is named after its table, cut to 31 characters,
   with `\ / ? * [ ] :` and control characters replaced by `_` and
   apostrophes trimmed from the ends. Two tables whose names collide get
@@ -313,16 +407,18 @@ The workbook exports keep inside what Excel can open:
   visible escapes such as `\x07` instead of being dropped. Tabs and line
   breaks stay as they are.
 
-The CSV exports have no row limit and keep values whole.
+The CSV, TSV, JSON Lines, JSON, Markdown and HTML exports have no row
+limit and keep values whole.
 
 ### Large exports
 
-The CSV exports stream: the download starts at once and grows as rows are
-written. **Every row** writes the whole workbook first and
-then downloads it, so on a big case nothing seems to happen for a while.
-**Case ▾ → Log…** records when each export started and finished, its size
-and how long it took, and notes a CSV download that was cut off.
-Winnow doesn't shut itself down while a download is still in progress.
+Every **Current view** format except Excel streams: the download starts at
+once and grows as rows are written. An Excel file, whether **Current view**
+or **Every row**, is written whole first and then downloads, so on a big
+view or case nothing seems to happen for a while. **Case ▾ → Log…** records
+when each export started and finished, how many rows it wrote, its size and
+how long it took, and notes a download that was cut off. Winnow doesn't
+shut itself down while a download is still in progress.
 
 ### Other things you can export
 
