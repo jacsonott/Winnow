@@ -485,6 +485,8 @@ see [docs/notes/README.md](README.md) for the whole set.
   non-empty, which is what keeps an otherwise unfiltered view off the
   `root_virtual` carve-out — appended to the SQL text after that gate it
   would silently take the virtual path with every position wrong.
+  (`dedupe_columns`, "Hide duplicate rows", does NOT land there, and so
+  closes that gate itself — see its own entry below.)
   This matters a lot more for a **merge**: `build_view` compiles the filter
   once per member and `UNION ALL`s the results (see `_resolve_members`), so
   an unindexed sargable filter is a full scan repeated across every member,
@@ -496,6 +498,45 @@ see [docs/notes/README.md](README.md) for the whole set.
   rather than the raw column name, since a column name is arbitrary CSV-
   header text and this sidesteps identifier-safety entirely rather than
   leaning on `q()` for a human-readable name nobody needs to read.
+- **"Hide duplicate rows" is built in `build_view`, not `_compile_where`.**
+  `spec.dedupe_columns` (the client sends the visible columns, in source
+  order) keeps one row per set matching in all of them: a GROUP BY over
+  those columns, after the filters, keeping the lowest rid. It cannot be
+  a WHERE clause per member, because on a merge two copies of one event
+  can sit in two members and no member's WHERE sees the other. So both
+  branches of `build_view`, and `spec_sql`, carry it themselves, and the
+  virtual-root gate checks `not dedupe` on its own:
+  - **Single table:** `rid IN (SELECT MIN(rid) FROM ... WHERE <filters>
+    GROUP BY <columns>)` and the usual ORDER BY outside. The filters run
+    once, inside the GROUP BY. Measured on the 1.2M-row fixture: ~1.1–1.7 s
+    on five low-cardinality columns, 2–3.5 s on all ten (where nothing is
+    a duplicate and every rid goes through the IN list), against 0.15 s for
+    the same sort without it; the box was noisy, so treat those as ranges.
+    A `ROW_NUMBER() OVER (PARTITION BY ...)` shape measured about twice as
+    slow, and carrying the sort keys out as bare columns of the GROUP BY
+    (the merge's shape) was no faster.
+  - **Merge:** every member's branch adds a rank, `member index ×
+    DEDUPE_MEMBER_STRIDE + rid`, and its dedupe columns; one GROUP BY over
+    the whole union keeps `MIN(rank)`, and SQLite's min() rule (in an
+    aggregate with a single `min()`, a bare column comes from the row
+    holding the minimum) brings that row's member id, rid and sort keys
+    out with it. The rank is also the ORDER BY's last term: the GROUP BY
+    hands rows over in key order, so without it two kept rows that tie
+    on every sort key and on rid came out in group order, not member
+    order (the other two shapes keep member order). The rank's alias is
+    `_free_alias`'d past every column name, like the member id's.
+  - **NULL and '' are one value** (`IFNULL(col, '')` in the key): a
+    merge reads a column a member lacks as NULL while another member has
+    '', and both are an empty cell to the analyst.
+  - **Never cached as an unfiltered merge view** (`not dedupe` in the
+    `_merge_view_cache` condition): the cache key is the SELECT text, and
+    a dedupe on a derived column changes under the same text when it is
+    re-derived. Everything downstream (`group_summary`, the histogram's
+    rows key, exports, `tag_view`, `save_view_as_source`) reads `v.view_N`
+    and needed nothing; `_grouping_covers_whole_source` compares row
+    counts, so a deduplicated view with fewer rows is correctly not
+    "every row".
+  `tests/test_hide_duplicate_rows.py`.
 - **Some columns are indexed at import, by shape** (`_build_import_indexes`,
   from a header set's `indexes` in defaults/headers.json: EventId for
   EvtxECmd). Not for the first filter's sake but for the planner's: once

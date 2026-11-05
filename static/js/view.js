@@ -210,7 +210,11 @@ export function supersedeBuild() {
 export function statsLine(v) {
   const src = S.sources.find((s) => s.id === S.sourceId);
   const total = src ? src.row_count : v.row_count;
-  return `<b>${v.row_count.toLocaleString()}</b> of ${total.toLocaleString()} rows · ${v.elapsed_ms} ms`;
+  // Said in the line itself, unlike Hide empty rows: a count that is short
+  // by every repeat of every event looks like a filter the analyst forgot,
+  // and the toggle that explains it lives two clicks away in the table menu.
+  const dupes = S.hideDuplicateRows ? ' · duplicates hidden' : '';
+  return `<b>${v.row_count.toLocaleString()}</b> of ${total.toLocaleString()} rows${dupes} · ${v.elapsed_ms} ms`;
 }
 
 /* The one writer of the landed-view stats line, so the sentence reads the
@@ -370,6 +374,7 @@ function viewStateSnapshot() {
     tagFilter: [...S.tagFilter],
     timeRange: { ...S.timeRange },
     hideEmptyRows: S.hideEmptyRows,
+    hideDuplicateRows: S.hideDuplicateRows,
   };
 }
 
@@ -384,6 +389,7 @@ function restoreViewState(st) {
   S.tagFilter = [...st.tagFilter];
   S.timeRange = { ...st.timeRange };
   S.hideEmptyRows = st.hideEmptyRows;
+  S.hideDuplicateRows = st.hideDuplicateRows;
 }
 
 /* Every piece of chrome that paints from the state above. */
@@ -986,3 +992,19 @@ export async function rebuildView({ keepScroll = true, keepRow = true, detachAft
 }
 
 export const rebuildSoon = debounce(() => rebuildView(), 220);
+
+/* "Hide duplicate rows" compares the visible columns, so hiding or
+   showing one is a different view: saveLayout calls this after every
+   layout change, and it rebuilds only when the toggle is on and the
+   compared columns differ from the ones the view was built (or is being
+   built) with — a resize, a pin or a drag compares the same columns and
+   costs nothing. Debounced so a run of ticks in the Columns list is one
+   rebuild, which on a big table is a GROUP BY over every row. */
+export const syncDuplicateRows = debounce(() => {
+  if (!S.sourceId || !S.view || S.view.source_id !== S.sourceId) return;
+  const key = inflight && inflight.sourceId === S.sourceId ? inflight.key : (S.viewCache.get(S.sourceId) || {}).key;
+  if (!key) return;
+  let built;
+  try { built = JSON.stringify(JSON.parse(key).dedupe_columns || []); } catch { return; }
+  if (built !== JSON.stringify(currentSpec().dedupe_columns)) rebuildView();
+}, 150);

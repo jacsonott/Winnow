@@ -21,7 +21,7 @@ import { activateTabSlot, clearAllFilters, setSidebarVisible } from './sources.j
 import { S, clearCellSelection, selClear, selCount, selSetAll, selSnapshot } from './state.js';
 import { openTablesManager } from './tables.js';
 import { applyTag, applyTagToView, undoLastTagChange } from './tags.js';
-import { doJumpTs, openJumpTsModal, openTableMenu, openTimeRangeModal, toggleTimeRange } from './timeframe.js';
+import { doJumpTs, openJumpTsModal, openTableMenu, openTimeRangeModal, toggleDuplicateRows, toggleTimeRange } from './timeframe.js';
 import { clearTimelineSelection, timelineKey } from './timeline.js';
 import { tagTimelineLine } from './timelinepane.js';
 import { inPopout } from './popout.js';
@@ -90,6 +90,10 @@ export const DEFAULT_KEYMAP = {
   // dispatcher's fixed chord), and tags are evidence while filters are
   // only where the analyst is looking — two undo stacks, two keys.
   undoFilterChange: ['z'],
+  // No default key: on a big table it is a GROUP BY over every row, not
+  // something a stray keypress should start. It is a click away in
+  // Filters ▾ and the table menu, and bindable in Settings.
+  toggleDuplicateRows: [],
   // Ctrl+A, like everywhere else. The typing guard above the dispatcher
   // keeps it native inside inputs; grouped mode no-ops (the header
   // checkbox is disabled there for the same reason).
@@ -141,6 +145,7 @@ export const ACTION_LABELS = {
   filterBySelectedCellOnly: "Filter by selected cell's value, dropping every other filter",
   clearFilters: 'Clear all filters, search and tag filter',
   undoFilterChange: 'Undo the last filter change (press again to keep stepping back)',
+  toggleDuplicateRows: 'Hide duplicate rows on/off (rows that match in every visible column)',
   selectAllRows: 'Select every row in the current view (same as the header checkbox)',
   copyUniqueValues: "Copy the unique values of the cursor's column — from the selected rows, else the whole view",
   openTables: 'Open Tables manager',
@@ -561,6 +566,7 @@ export const ACTION_HANDLERS = {
   filterBySelectedCellOnly: () => filterBySelectedCell({ only: true }),
   clearFilters: () => clearAllFilters(),
   undoFilterChange: () => undoFilterChange(),
+  toggleDuplicateRows: () => toggleDuplicateRows(),
   openTables: () => openTablesManager(),
   toggleSidebar: () => setSidebarVisible($('sidebar').hidden),
   openTableMenu: () => openTableMenu(),

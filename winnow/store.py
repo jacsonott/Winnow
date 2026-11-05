@@ -9902,6 +9902,13 @@ class Store:
             for s in (spec.get("sort") or [])
         )
 
+        # "Hide duplicate rows" (the table menu): after the filters, one
+        # row per set of rows that match in every one of these columns —
+        # the first by Line (a merge: by member, then Line). Applied here
+        # rather than in _compile_where because a merge's duplicates can
+        # sit in different members, which no per-member WHERE can see.
+        dedupe = self._dedupe_columns(spec, colnames)
+
         cache_key = None
         if src.get("is_merge"):
             for frag in self._raw_fragments(spec.get("filter_tree")):
@@ -9943,7 +9950,28 @@ class Store:
             # the sort: clearing the filters on a 500k-row, five-member
             # merge read all 739 MB of its tables, each time, where a
             # single table reads its sort index.
-            if filtered:
+            if dedupe:
+                # Duplicates across members are still duplicates, so the
+                # comparison runs over the whole union: each member adds a
+                # rank (member order, then rid) and its dedupe columns,
+                # one GROUP BY keeps the lowest rank of each set, and
+                # SQLite's min() rule — a bare column in an aggregate with
+                # a single min() comes from the row that holds the minimum
+                # — carries that row's id, rid and sort keys out with it.
+                need = dict.fromkeys(s.get("column") for s in (spec.get("sort") or [])
+                                     if s.get("column") in colnames)
+                rank = q(self._free_alias(colnames, "dedupe_rank", self._member_id_alias(colnames)))
+                stride = self.DEDUPE_MEMBER_STRIDE
+                cols = "".join(f", {q(c)}" for c in dict.fromkeys([*need, *dedupe]))
+                ranked = union_all(f"SELECT {mid} AS {sid_col}, rid, {i * stride} + rid AS {rank}{cols}{rest}"
+                                   for i, (mid, rest) in enumerate(parts))
+                keep = (f"SELECT MIN({rank}) AS {rank}, {sid_col}, rid{''.join(f', {q(c)}' for c in need)} "
+                        f"FROM ({ranked}) GROUP BY {self._dedupe_key(dedupe)}")
+                # The rank last: rows tying on every key and on rid keep
+                # member order, as the other two shapes keep it — the
+                # GROUP BY hands them over in key order, not union order.
+                select = f"SELECT {sid_col}, rid FROM ({keep}) {order}, {rank}"
+            elif filtered:
                 # Filtered: one sort over what the members matched, as
                 # before. The compound's own ORDER BY (below) would have
                 # SQLite walk each member's sort index and look every row
@@ -9973,7 +10001,7 @@ class Store:
             # name it exactly. Except a sort on a derived column, whose
             # values a re-derive rewrites under the same text.
             derived_names = {c["name"] for c in src["columns"] if c.get("derived")}
-            if not filtered and not hold and not any(
+            if not filtered and not dedupe and not hold and not any(
                     s.get("column") in derived_names for s in (spec.get("sort") or [])):
                 cache_key = (source_id, select, tuple(params),
                              tuple((m["source_id"], m["src"]["row_count"]) for m, _, _ in reads))
@@ -9988,15 +10016,26 @@ class Store:
                     source_id, col,
                     self._derived_table(source_id) if col in derived_names else table,
                 )
-            if not where and not has_sort:
+            if not where and not has_sort and not dedupe:
                 return self._build_virtual_root_view(source_id, src, hold=hold)
             vid = self._next_view_id()
-            sql = (
-                f"INSERT INTO v.{q(vid)}(source_id, rid) "
-                f"SELECT {int(source_id)}, rid FROM {self._from_clause(src)}"
-                + (f" WHERE {where}" if where else "")
-                + f" {order}"
-            )
+            if dedupe:
+                # The filters run once, inside the GROUP BY that picks the
+                # lowest rid of each set; the outer read only looks those
+                # rids up and sorts them.
+                keep = (f"SELECT MIN(rid) FROM {self._from_clause(src)}"
+                        + (f" WHERE {where}" if where else "")
+                        + f" GROUP BY {self._dedupe_key(dedupe)}")
+                sql = (f"INSERT INTO v.{q(vid)}(source_id, rid) "
+                       f"SELECT {int(source_id)}, rid FROM {self._from_clause(src)} "
+                       f"WHERE rid IN ({keep}) {order}")
+            else:
+                sql = (
+                    f"INSERT INTO v.{q(vid)}(source_id, rid) "
+                    f"SELECT {int(source_id)}, rid FROM {self._from_clause(src)}"
+                    + (f" WHERE {where}" if where else "")
+                    + f" {order}"
+                )
         t0 = time.time()
         # `yield_others`: this build is for the table the analyst is
         # looking at now, so a build for a DIFFERENT table holding the
@@ -12768,6 +12807,50 @@ class Store:
         return alias
 
     @staticmethod
+    def _dedupe_columns(spec, colnames) -> list[str]:
+        """"Hide duplicate rows": the columns two rows are compared on —
+        `spec.dedupe_columns`, which the client fills with the columns the
+        grid shows (hidden ones are left out on purpose, so hiding
+        SourceFile or the From table column lets copies of one event from
+        two files collapse). [] means the toggle is off.
+
+        Names the table doesn't have are dropped rather than refused: the
+        list is the client's picture of the layout, and a column removed
+        since (a derived column deleted in another window) is not the
+        analyst's mistake. Kept in the order given, once each; the
+        comparison doesn't depend on order, and the client sends source
+        order so reordering columns doesn't count as a change."""
+        want = spec.get("dedupe_columns") or []
+        return [c for c in dict.fromkeys(want) if isinstance(c, str) and c in colnames]
+
+    @staticmethod
+    def _dedupe_key(columns: list[str]) -> str:
+        """The GROUP BY that makes two rows duplicates: the same text in
+        every compared column, case and all (the `=` filter's exact match).
+        Empty is one value: NULL and '' both show as an empty cell — a
+        merge reads a column a member lacks as NULL, and a ragged row's
+        missing cells are NULL — so they compare equal here as they do in
+        the empty filter and Hide empty rows."""
+        return ", ".join(f"IFNULL({q(c)}, '')" for c in columns)
+
+    @staticmethod
+    def _free_alias(colnames, base: str, *also: str) -> str:
+        """A result-column name no column of the table (and none of `also`)
+        is spelled as, under SQLite's ASCII case folding — `base` with
+        underscores prepended until it is free, as _member_id_alias does."""
+        taken = {_ascii_fold(c) for c in colnames} | {_ascii_fold(a) for a in also}
+        alias = base
+        while _ascii_fold(alias) in taken:
+            alias = "_" + alias
+        return alias
+
+    # A merge's dedupe keeps the row first in member order, then by Line:
+    # member index × this + rid, one integer MIN() can pick. Past any rid
+    # (2^40 rows is far beyond what SQLite will hold in one table) and
+    # small enough that thousands of members stay inside 63 bits.
+    DEDUPE_MEMBER_STRIDE = 1 << 40
+
+    @staticmethod
     def _compile_order(spec, colnames) -> str:
         sort = spec.get("sort") or []
         parts = []
@@ -12893,15 +12976,19 @@ class Store:
         src = self._source_lite(source_id)
         colnames = {c["name"]: c["type"] for c in src["columns"]}
         order = self._compile_order(spec, colnames)
+        dedupe = self._dedupe_columns(spec, colnames)
         if src.get("is_merge"):
             for frag in self._raw_fragments(spec.get("filter_tree")):
                 self.validate_where_fragment(source_id, frag)
             collist = ", ".join(q(c) for c in colnames)
             sid_col = q(self._member_id_alias(colnames))
+            # build_view's dedupe shape, spelled out: a rank per member
+            # (member order, then rid) and one GROUP BY over the union.
+            rank = q(self._free_alias(colnames, "dedupe_rank", self._member_id_alias(colnames)))
             branches = []
             params: list[Any] = []
             with self._build_batch():
-                for m in self._resolve_members(source_id):
+                for i, m in enumerate(self._resolve_members(source_id)):
                     msrc = m["src"]
                     where, p = self._compile_where(m["source_id"], self._member_read_src(src, msrc), spec, colnames)
                     # The pane's own src_<id> name, projected when the member
@@ -12910,18 +12997,29 @@ class Store:
                     exprs = self._member_projection(src, msrc)
                     from_sql = (q(m["table_name"]) if exprs is None
                                 else f"(SELECT rid, {', '.join(exprs)} FROM {q(m['table_name'])})")
+                    ranked = f", {i * self.DEDUPE_MEMBER_STRIDE} + rid AS {rank}" if dedupe else ""
                     branches.append(
-                        f"SELECT {int(m['source_id'])} AS {sid_col}, rid, {collist}\n"
+                        f"SELECT {int(m['source_id'])} AS {sid_col}, rid{ranked}, {collist}\n"
                         f"FROM {from_sql}"
                         + (f"\nWHERE {where}" if where else "")
                     )
                     params.extend(p)
-            sql = union_all(branches, "\nUNION ALL\n") + f"\n{order}"
+            sql = union_all(branches, "\nUNION ALL\n")
+            if dedupe:
+                sql = (f"SELECT {sid_col}, rid, {collist} FROM (\n"
+                       f"SELECT MIN({rank}) AS {rank}, {sid_col}, rid, {collist} FROM (\n{sql}\n)\n"
+                       f"GROUP BY {self._dedupe_key(dedupe)}\n)")
+            sql += f"\n{order}" + (f", {rank}" if dedupe else "")
         else:
             where, params = self._compile_where(source_id, src, spec, colnames)
             collist = ", ".join(q(c) for c in colnames)
-            sql = f"SELECT rid, {collist}\nFROM {q(src['table_name'])}"
-            if where:
+            table = q(src["table_name"])
+            sql = f"SELECT rid, {collist}\nFROM {table}"
+            if dedupe:
+                sql += (f"\nWHERE rid IN (\n  SELECT MIN(rid) FROM {table}"
+                        + (f" WHERE {where}" if where else "")
+                        + f"\n  GROUP BY {self._dedupe_key(dedupe)}\n)")
+            elif where:
                 sql += f"\nWHERE {where}"
             sql += f"\n{order}"
         return self._inline_sql_params(sql, params)

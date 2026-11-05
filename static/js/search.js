@@ -10,7 +10,7 @@ import { openSettings } from './settings.js';
 import { clearViewNarrowing, loadSources, sourceGlyph, sourceLabel } from './sources.js';
 import { S, dashboardCreatorMode } from './state.js';
 import { saveCurrentViewAsTable } from './subset.js';
-import { openSavedFiltersModal, openTimeRangeModal } from './timeframe.js';
+import { DUPLICATE_ROWS_TITLE, openSavedFiltersModal, openTimeRangeModal, toggleDuplicateRows } from './timeframe.js';
 import { markModalAction, confirmDialog, currentModalAction, dropdownMenu, modal } from './ui.js';
 import { rebuildView } from './view.js';
 import { runScan } from './watchlist.js';
@@ -827,6 +827,12 @@ $('btnFilters').onclick = () => dropdownMenu($('btnFilters'), () => {
     { label: 'Save this view as a table…',
       title: 'Every row this view shows — unchecked rows included — becomes a new table in the case, badged as a subset of this one; tags and notes stay here',
       onclick: () => saveCurrentViewAsTable() },
+    // Also in the table menu's Columns pane, beside Hide empty rows; here
+    // too because "remove the duplicates" is a narrowing, and this is the
+    // menu the analyst opens to narrow. Save this view as a table, just
+    // above, then keeps the deduplicated rows as a table of their own.
+    { label: 'Hide duplicate rows', checked: !!S.hideDuplicateRows, title: DUPLICATE_ROWS_TITLE,
+      onclick: () => toggleDuplicateRows() },
   ];
   if (dashboardCreatorMode() && S.sourceId != null && S.sourceId >= 0) {
     items.push({ label: 'Add to dashboard: count of this view',

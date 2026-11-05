@@ -994,8 +994,34 @@ export function buildColumnsPanel(container, refresh = () => openTableMenu()) {
     saveLayout();
     await rebuildView({ keepScroll: false });
   };
-  acts.append(all, none, hideRows);
+  // The same kind of toggle, over the columns this list shows: a row
+  // whose every visible value repeats an earlier row's (by Line) is
+  // dropped, so unticking a column here is how it stops counting.
+  const hideDupes = el('button', 'btn ghost', 'Hide duplicate rows');
+  hideDupes.title = DUPLICATE_ROWS_TITLE;
+  const paintHideDupes = () => hideDupes.setAttribute('aria-pressed', String(!!S.hideDuplicateRows));
+  paintHideDupes();
+  hideDupes.onclick = async () => {
+    await toggleDuplicateRows();
+    paintHideDupes();
+    changed();
+  };
+  acts.append(all, none, hideRows, hideDupes);
   container.append(acts);
+}
+
+/* "Hide duplicate rows", from wherever it is asked for: the table menu's
+   Columns pane, Filters ▾ and the keymap all land here. A view predicate
+   the server applies (currentSpec's dedupe_columns), remembered per table
+   in the layout like Hide empty rows. */
+export const DUPLICATE_ROWS_TITLE = 'Show one row for each set of rows that match in every visible column — the first by Line. '
+  + 'Hidden columns are not compared: hide one (SourceFile, say) to collapse copies that differ only there';
+
+export async function toggleDuplicateRows() {
+  if (!S.sourceId) return;
+  S.hideDuplicateRows = !S.hideDuplicateRows;
+  saveLayout();
+  await rebuildView({ keepScroll: false });
 }
 
 /* A figure over a dim caps label, the merge builder's (.mb-stat). */
@@ -1474,7 +1500,8 @@ function columnsHint() {
   const listed = S.order.filter((n) => !S.groupByCols.includes(n));
   const shown = listed.filter((n) => !(S.layout[n] || {}).hidden).length;
   const pinned = listed.filter((n) => isPinned(n)).length;
-  return `${shown} of ${listed.length} shown` + (pinned ? ` · ${pinned} pinned` : '');
+  return `${shown} of ${listed.length} shown` + (pinned ? ` · ${pinned} pinned` : '')
+    + (S.hideDuplicateRows ? ' · duplicates hidden' : '');
 }
 
 function valueFilterHint() {
