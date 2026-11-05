@@ -259,7 +259,9 @@ into the file, and the button at the bottom exports it, saying how much.
 
 **Current view** has a **Format** row of buttons under its row counts.
 It says what narrows the view and how it is sorted, describes the chosen
-format, and lists the file's columns in order. It exports only while a
+format, and lists the file's columns in order, where you can choose which
+go in the file and move them (see
+[Choosing the columns](#choosing-the-columns)). It exports only while a
 table is open. The two workbook exports ignore filters entirely and list
 rows in Line order; each lists its worksheets with the rows each gets.
 With nothing tagged in the case, **Tagged rows** has nothing to export and
@@ -270,7 +272,8 @@ its button is off.
 Pick the format on the **Format** row, and the button at the bottom names
 it: **Export 2,400 rows (.xlsx)**, for example. The format you exported
 to last is the one chosen the next time you open the dialog. Every format
-holds the same rows in the same order, with the same columns.
+holds the same rows in the same order, with the same columns: the ones
+ticked in the column list, in its order.
 
 | Format | Button | What you get | Use it for |
 | --- | --- | --- | --- |
@@ -294,8 +297,10 @@ Some details of each:
   are written exactly as the case holds them, with no apostrophes added.
   If a table has a column with the same name as one of these, such as its
   own `Note` column, the table's column is written as `Note_1`, the name it
-  would get if you imported a CSV export back into Winnow. The dialog's
-  column list shows that name.
+  would get if you imported a CSV export back into Winnow. That holds
+  wherever you put either column; leave Winnow's **Note** out and the
+  table's is plain `Note` again. The dialog's column list shows the name
+  each one gets.
 - **Markdown** is the table and nothing else, so what you paste is what
   renders. Characters Markdown would turn into formatting (`*`, `_`, `` ` ``,
   `|`, `<` and others) are escaped with a backslash, so a command line
@@ -316,6 +321,34 @@ dialog warns that the file may be too big to open comfortably, and suggests
 narrowing the view or choosing CSV, Excel or JSON Lines. It still exports
 if you go ahead.
 
+### Choosing the columns
+
+The column list under **Current view** is the file's columns, top to
+bottom. It starts the way the grid has them: **Line**, **Tags** and
+**Note** first (and **Table** on a merge), then the table's columns in
+the order you arranged them, each ticked, except a column hidden in the
+grid, which is unticked and says "hidden in the grid".
+
+- **Untick a column** to leave it out of the file, or tick a hidden one to
+  put it in. That includes **Line**, **Tags** and **Note**.
+- **Drag a row** to move the column. **⤒** and **⤓** at the end of a row
+  send it to the start or the end of the file, and with a row's tick box
+  focused, **Alt+↑** and **Alt+↓** move it one place.
+- **Filter columns…** above the list narrows it to the columns whose names
+  match. **All** and **None** tick or untick every column the list is
+  showing, so filtering for `Payload` and pressing **None** leaves out all
+  the PayloadData columns at once.
+- **Reset to the grid** starts again from the grid's columns and order.
+
+The **columns** count at the top and the line under the list follow what
+you choose. With nothing ticked, the button reads **Choose a column to
+export** and is off.
+
+Your choice is for this export only. The grid's columns, their order and
+what is hidden stay as they are. It lasts while the dialog is open, so you
+can change the format without choosing again; the next time you open the
+dialog, it starts from the grid again.
+
 ### What an export contains
 
 Every export starts with three columns: **Line** (the row's number in its
@@ -323,7 +356,8 @@ table, as the grid's Line column shows it), **Tags** (tag names separated
 by `; `; a list in JSON, colored labels in HTML) and **Note**. The table's
 columns follow in the order you arranged them, and columns you have hidden
 are left out. Visible derived columns are included. The text formats are
-UTF-8.
+UTF-8. For **Current view**, that is where the column list starts, and
+the file has the columns you leave ticked, in the order you leave them.
 
 Exporting a merged view adds a **Table** column after **Line**, naming the
 member table each row came from; without it, two rows could both read

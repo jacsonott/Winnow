@@ -3818,9 +3818,20 @@ button.tables-num:hover { text-decoration: underline; color: var(--text); }
 .export-format .mb-seg button { font-size: 11.5px; padding: 3px 10px; }
 .export-head, .export-row { grid-template-columns: minmax(0, 1fr) 80px 56px; }
 .export-head .tables-name-h, .export-cols-head .tables-name-h { grid-column: auto; }
-.export-cols-head, .export-col-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+/* The view's columns: a tick, the name in the file, what it holds, ⤒ ⤓.
+   An unticked row is dimmed by .tables-row:not(.open); a dragged one is
+   faded and the drop line drawn the Columns pane's way (.collist-row). */
+.export-cols-head, .export-col-row { grid-template-columns: 16px minmax(0, 1fr) minmax(0, 1fr) auto; }
+.export-col-row { cursor: grab; }
 .export-col-row .tables-name { font-family: var(--mono); font-size: 11.5px; color: var(--text); }
 .export-col-row.added .tables-name { color: var(--accent); }
+.export-col-row.dragging { opacity: .4; }
+.export-col-row.drop-before { box-shadow: inset 0 2px 0 var(--accent); }
+.export-col-row.drop-after { box-shadow: inset 0 -2px 0 var(--accent); }
+.export-col-moves { display: flex; gap: 2px; }
+.export-col-row:hover .collist-move, .export-col-row:focus-within .collist-move { opacity: 1; }
+.export-cols-top { margin-bottom: 8px; }
+.export-cols-top .export-cols-tool { flex: 0 0 auto; font-size: 11.5px; padding: 3px 9px; }
 .export-row:not(.open) .tables-name { color: var(--dim); }
 /* Stack (openStack, stack.js): the chart is the dialog. One grid for the
    head and every bar — the value gutter (measured to the longest value,

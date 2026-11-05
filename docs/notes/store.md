@@ -605,6 +605,22 @@ see [docs/notes/README.md](README.md) for the whole set.
   an apostrophe there is a changed value. Markdown and HTML make control
   characters visible (`\x07`, as `_xlsx_safe` does) because neither can
   show them; JSON escapes them itself. tests/test_export_formats.py.
+- **An export's columns are a plan, and the writers only arrange.**
+  `_export_plan` turns the dialog's list into `(kind, name)` pairs —
+  `line`/`table`/`tags`/`note` for Winnow's, `col` for the table's —
+  validated eagerly in `_export_view_rows` (a ValueError there is the
+  route's 400; inside the generator it would be a truncated download).
+  The prefix (`w:`/`c:`) is not decoration: a table can have its own
+  `Note` or `Line`. `None` is the layout's plan, which is what every
+  caller before the dialog chose columns gets. The readers select only
+  the plan's own columns (`_export_select`, just `rid` when there are
+  none) and still yield `(Line, table, tags, note, cells)`; each writer
+  formats those five and `_export_arranger` puts them in the file's
+  order, so the header and the rows go through the same function and
+  can't disagree. The arranger's fast path for the default plan builds
+  the list directly, as the writers did before; the general path costs
+  one tuple and an index per cell. JSON keys are made unique with
+  Winnow's claimed first, wherever the plan puts them.
 - **A `_reader()` block is one read transaction, and so is a SQL pane
   query.** A statement whose schema changed between its prepare and its
   step is re-prepared, up to 50 times, and in autocommit each try reads

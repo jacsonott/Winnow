@@ -17961,7 +17961,7 @@ class Store:
         return self.export_view(view_id, "csv", tagged_only)
 
     def export_view(self, view_id: str, fmt: str = "csv", tagged_only: bool = False, *,
-                    about: str = "", stats: dict | None = None):
+                    about: str = "", stats: dict | None = None, columns: list[str] | None = None):
         """The view as text chunks in one of VIEW_EXPORT_FORMATS' streamed
         formats (every one but xlsx, which export_view_xlsx writes to a
         file). Validates the view eagerly, then returns a generator for the
@@ -17975,34 +17975,34 @@ class Store:
         to reverse-engineer it from the spec). `stats`, when given, counts
         the rows written into stats["rows"] as they go, for the route's log
         line — counting newlines miscounts every format but CSV, and CSV
-        too once a cell holds a line break."""
+        too once a cell holds a line break. `columns` is the file's columns
+        in order, as the Export dialog chose them (_export_plan); None is
+        the layout's."""
         writer = _VIEW_TEXT_WRITERS.get(fmt)
         if writer is None:
             raise ValueError(f"Unknown export format {fmt!r}")
-        rows = self._export_view_rows(view_id, tagged_only)
+        rows = self._export_view_rows(view_id, tagged_only, columns)
         return self._export_text(rows, writer, about, stats)
 
-    def export_view_xlsx(self, view_id: str, path: str, tagged_only: bool = False) -> dict:
+    def export_view_xlsx(self, view_id: str, path: str, tagged_only: bool = False, *,
+                         columns: list[str] | None = None) -> dict:
         """The view as a workbook saved to `path`: one worksheet named after
         the table, continued on "Name (2)"… past Excel's row cap the way
         the whole-case workbooks are (_xlsx_write_sheets). Same rows, same
         order and same columns as the CSV; cells through _xlsx_safe. A
         workbook can't be streamed before it is finished, so the route
         sends the file once this returns. Returns {"rows", "sheets"}."""
-        rows = self._export_view_rows(view_id, tagged_only)
+        rows = self._export_view_rows(view_id, tagged_only, columns)
         try:
             meta = next(rows)
-            merge = meta["merge"]
-            header = _export_header(meta["columns"], _xlsx_safe)
-            if merge:
-                header.insert(1, "Table")
+            arrange = _export_arranger(meta)
+            header = arrange("Line", "Table", "Tags", "Note", map(_xlsx_safe, meta["columns"]))
 
             def cells():
                 for batch in rows:
                     for rid, table, tags, note, values in batch:
-                        yield [rid, *([_xlsx_safe(table)] if merge else []),
-                               _xlsx_safe("; ".join(tags)), _xlsx_safe(note or ""),
-                               *[_xlsx_safe(pane_cell_json(v)) for v in values]]
+                        yield arrange(rid, _xlsx_safe(table), _xlsx_safe("; ".join(tags)), _xlsx_safe(note or ""),
+                                      [_xlsx_safe(pane_cell_json(v)) for v in values])
 
             wb = Workbook(write_only=True)
             sheets, n = _xlsx_write_sheets(wb, set(), meta["name"], header, cells())
@@ -18035,15 +18035,18 @@ class Store:
         finally:
             rows.close()
 
-    def _export_view_rows(self, view_id: str, tagged_only: bool):
-        """Validate the view eagerly, then return the generator for its
-        export shape. Every shape yields the same things: first a meta dict
-        (`columns` in the analyst's layout, `merge` — whether rows carry
-        their member table's name —, `name` for a sheet or a page title,
-        `tag_colors` by tag name, `tagged_only`), then batches of
-        (Line, table name or None, [tag names], note or None, cell values)
-        in the view's order. What a format does with them is the writer's
-        business, so the three ways of reading a view are written once."""
+    def _export_view_rows(self, view_id: str, tagged_only: bool, columns: list[str] | None = None):
+        """Validate the view and the columns asked for eagerly, then return
+        the generator for its export shape. Every shape yields the same
+        things: first a meta dict (`fields`, the file's columns in order —
+        _export_plan —, `columns`, the table's own among them in that
+        order, `merge` — whether rows carry their member table's name —,
+        `name` for a sheet or a page title, `tag_colors` by tag name,
+        `tagged_only`), then batches of (Line, table name or None,
+        [tag names], note or None, the `columns`' cells) in the view's
+        order. What a format does with them is the writer's business
+        (_export_arranger puts them in the file's order), so the three ways
+        of reading a view are written once."""
         handle = self._views.get(view_id)
         if not handle:
             raise ViewExpired("View expired — rebuild it")
@@ -18054,17 +18057,58 @@ class Store:
         # lock, and an export must not block behind a build (invariant #4;
         # test_concurrency.py fails the moment it does).
         with self._reader() as ro:
-            self._require_columns(self._source_lite_on(ro, handle["source_id"]))
+            src = self._source_lite_on(ro, handle["source_id"])
+            self._require_columns(src)
+            plan = self._export_plan(ro, src, columns)
         if handle.get("kind") == "group_virtual":
-            return self._export_virtual_group_rows(handle, tagged_only)
+            return self._export_virtual_group_rows(handle, tagged_only, plan)
         if handle.get("kind") == "root_virtual":
-            return self._export_virtual_root_rows(handle, tagged_only)
-        return self._export_materialized_rows(view_id, handle, tagged_only)
+            return self._export_virtual_root_rows(handle, tagged_only, plan)
+        return self._export_materialized_rows(view_id, handle, tagged_only, plan)
+
+    def _export_plan(self, conn: sqlite3.Connection, src: dict, columns: list[str] | None) -> list[tuple]:
+        """The file's columns in order, as (kind, name): kind "line",
+        "table", "tags" or "note" for the ones Winnow adds (name None), or
+        "col" for one of the table's own.
+
+        `columns` None is what an export always was: Line, Table on a
+        merge, Tags, Note, then the layout's visible columns in its order
+        (_export_columns). Otherwise it is the Export dialog's list, which
+        can leave any of those out, take a hidden column in, and put them
+        in any order: each entry "w:line", "w:table", "w:tags" or "w:note"
+        for one of Winnow's, "c:<name>" for one of the table's — prefixed,
+        because a table can have a Note or a Line of its own. A name the
+        table doesn't have (a derived column deleted while the dialog was
+        open), Table on a table that isn't a merge, a repeat or an empty
+        list is a ValueError — the route's 400 — never a guess."""
+        merge = bool(src.get("is_merge"))
+        if columns is None:
+            return [("line", None), *([("table", None)] if merge else []), ("tags", None), ("note", None),
+                    *(("col", n) for n in self._export_columns(conn, src))]
+        known = {c["name"] for c in src["columns"]}
+        plan: list[tuple] = []
+        seen: set[str] = set()
+        for entry in columns:
+            if not isinstance(entry, str):
+                raise ValueError("Export columns are names")
+            kind, _, name = entry.partition(":")
+            if entry in seen:
+                raise ValueError(f"Column {name!r} is in the export twice")
+            seen.add(entry)
+            if kind == "w" and (name in ("line", "tags", "note") or (name == "table" and merge)):
+                plan.append((name, None))
+            elif kind == "c" and name in known:
+                plan.append(("col", name))
+            else:
+                raise ValueError(f"No column {name!r} to export — reopen the Export dialog")
+        if not plan:
+            raise ValueError("Choose at least one column to export")
+        return plan
 
     @staticmethod
-    def _export_meta(src: dict, cols: list[str], colors: dict, *, merge: bool, tagged_only: bool) -> dict:
-        return {"columns": cols, "merge": merge, "name": src.get("nickname") or src["name"],
-                "tag_colors": colors, "tagged_only": tagged_only}
+    def _export_meta(src: dict, plan: list[tuple], colors: dict, *, merge: bool, tagged_only: bool) -> dict:
+        return {"fields": plan, "columns": [n for kind, n in plan if kind == "col"], "merge": merge,
+                "name": src.get("nickname") or src["name"], "tag_colors": colors, "tagged_only": tagged_only}
 
     @staticmethod
     def _export_tag_defs(conn: sqlite3.Connection) -> tuple[dict, dict]:
@@ -18116,25 +18160,24 @@ class Store:
         visible = [n for n in ordered if not (per_col.get(n) or {}).get("hidden")]
         return visible or all_names
 
-    def _export_virtual_group_rows(self, handle: dict, tagged_only: bool):
+    def _export_virtual_group_rows(self, handle: dict, tagged_only: bool, plan: list[tuple]):
         member = handle["members"][0]
         sid = member["source_id"]
         with self._reader() as ro, self._dropped_view_is_expired():
             src = self._source_lite_on(ro, sid)
-            # The analyst's layout, like every other export path. This one
+            # The plan's columns, like every other export path. This one
             # used raw storage order, so the same rows exported from an
             # expanded group carried columns they had taken off screen,
             # while exporting them from a filtered parent did not.
-            cols = self._export_columns(ro, src)
             where_sql, where_params = self._virtual_group_where(handle, ro)
-            sel = ", ".join(q(c) for c in cols)
+            sel = _export_select(plan)
 
             tagnames, colors = self._export_tag_defs(ro)
             self._renew_snapshot(ro)
-            yield self._export_meta(src, cols, colors, merge=False, tagged_only=tagged_only)
+            yield self._export_meta(src, plan, colors, merge=False, tagged_only=tagged_only)
 
             rows = ro.execute(
-                f"SELECT rid, {sel} FROM {self._member_from(src, member)} WHERE {where_sql} ORDER BY rid",
+                f"SELECT {sel} FROM {self._member_from(src, member)} WHERE {where_sql} ORDER BY rid",
                 where_params,
             ).fetchall()
             rids = [r["rid"] for r in rows]
@@ -18151,13 +18194,13 @@ class Store:
                 ):
                     nmap[rid] = note
 
-        # r[1:]: the cells, in `cols` order, after the rid the SELECT leads with.
+        # r[1:]: the cells, in the plan's order, after the rid the SELECT leads with.
         out = [(r[0], None, tmap.get(r[0], []), nmap.get(r[0]), r[1:])
                for r in rows if not (tagged_only and r[0] not in tmap)]
         for at in range(0, len(out), 5000):
             yield out[at: at + 5000]
 
-    def _export_virtual_root_rows(self, handle: dict, tagged_only: bool):
+    def _export_virtual_root_rows(self, handle: dict, tagged_only: bool, plan: list[tuple]):
         """Streams the whole source table in rid order, chunked the same
         keyset way _export_materialized_rows pages v.view_N (`rid > ?` here
         instead of `pos > ?`) — a root_virtual view can be the entire
@@ -18170,17 +18213,16 @@ class Store:
         sid = handle["source_id"]
         with self._reader() as ro, self._dropped_view_is_expired():
             src = self._source_lite_on(ro, sid)
-            cols = self._export_columns(ro, src)
-            sel = ", ".join(q(c) for c in cols)
+            sel = _export_select(plan)
 
             tagnames, colors = self._export_tag_defs(ro)
             self._renew_snapshot(ro)
-            yield self._export_meta(src, cols, colors, merge=False, tagged_only=tagged_only)
+            yield self._export_meta(src, plan, colors, merge=False, tagged_only=tagged_only)
 
             last_rid = 0
             while True:
                 chunk = ro.execute(
-                    f"SELECT rid, {sel} FROM {self._from_clause(src)} WHERE rid > ? ORDER BY rid LIMIT 5000",
+                    f"SELECT {sel} FROM {self._from_clause(src)} WHERE rid > ? ORDER BY rid LIMIT 5000",
                     (last_rid,),
                 ).fetchall()
                 if not chunk:
@@ -18205,7 +18247,7 @@ class Store:
                 if batch:
                     yield batch
 
-    def _export_materialized_rows(self, view_id: str, handle: dict, tagged_only: bool):
+    def _export_materialized_rows(self, view_id: str, handle: dict, tagged_only: bool, plan: list[tuple]):
         """Streams chunks of v.view_N grouped by each row's own source_id —
         same per-member resolution pattern as fetch_rows, so this works for
         merged views without a single cross-table JOIN.
@@ -18221,8 +18263,7 @@ class Store:
         """
         with self._reader() as ro, self._dropped_view_is_expired():
             src = self._source_lite_on(ro, handle["source_id"])
-            cols = self._export_columns(ro, src)
-            sel = ", ".join(q(c) for c in cols)
+            sel = _export_select(plan)
             # A merge's rows come from several tables, and Line is the rid
             # within ONE of them — so without saying which, two rows read
             # "Line 1" and nothing in the file tells the reader where either
@@ -18238,7 +18279,7 @@ class Store:
 
             tagnames, colors = self._export_tag_defs(ro)
             self._renew_snapshot(ro)
-            yield self._export_meta(src, cols, colors, merge=member_names is not None, tagged_only=tagged_only)
+            yield self._export_meta(src, plan, colors, merge=member_names is not None, tagged_only=tagged_only)
 
             last_pos = 0
             member_from: dict[int, str] = {}
@@ -18277,7 +18318,7 @@ class Store:
                         member_from[sid] = self._member_rows_from(src, self._source_lite_on(ro, sid))
                     ph = ",".join("?" * len(rids))
                     for row in ro.execute(
-                        f"SELECT rid, {sel} FROM {member_from[sid]} WHERE rid IN ({ph})", rids
+                        f"SELECT {sel} FROM {member_from[sid]} WHERE rid IN ({ph})", rids
                     ):
                         cellmap[(sid, row[0])] = row[1:]
                     for rid, tid in ro.execute(
@@ -19932,10 +19973,11 @@ def _export_header(cols: list[str], safe) -> list:
 # the order the dialog offers them: format -> (name in the log, media type,
 # file extension). Every one carries the same rows in the same order with
 # the same columns — Line, Table on a merge, Tags, Note, then the layout's
-# visible columns; they differ only in how a value is written down. The
-# three a spreadsheet opens get the formula guard; JSON, Markdown and HTML
-# keep each value exactly as the case holds it, since nothing reading them
-# evaluates a cell.
+# visible columns, unless the dialog chose others (Store._export_plan);
+# they differ only in how a value is written down. The three a spreadsheet
+# opens get the formula guard; JSON, Markdown and HTML keep each value
+# exactly as the case holds it, since nothing reading them evaluates a
+# cell.
 VIEW_EXPORT_FORMATS = {
     "csv": ("CSV", "text/csv", "csv"),
     "tsv": ("TSV", "text/tab-separated-values", "tsv"),
@@ -19945,6 +19987,44 @@ VIEW_EXPORT_FORMATS = {
     "md": ("Markdown", "text/markdown", "md"),
     "html": ("HTML", "text/html", "html"),
 }
+
+
+def _export_select(plan: list[tuple]) -> str:
+    """The select list a view export reads: rid, then the plan's own
+    columns in the order the file wants them — just rid when the file
+    holds none of the table's (Line, Tags and Note alone is a fair ask)."""
+    return ", ".join(["rid", *(q(n) for kind, n in plan if kind == "col")])
+
+
+# Where each of Winnow's columns sits in the row an arranger is handed:
+# (Line, Table, Tags, Note, then the table's columns).
+_EXPORT_SLOT = {"line": 0, "table": 1, "tags": 2, "note": 3}
+
+
+def _export_arranger(meta: dict):
+    """A function (line, table, tags, note, values) -> the row's cells in
+    the file's order (meta["fields"]), each already written the way the
+    format writes it. Called with the header names it gives the header,
+    so the header and the rows can't disagree.
+
+    The plan every export had before the dialog could choose columns —
+    Line, Table on a merge, Tags, Note, then the columns as read — gets a
+    function that builds the list directly, as each writer used to, so an
+    export nobody rearranged costs what it always did."""
+    merge = meta["merge"]
+    fields = meta["fields"]
+    default = [("line", None), *([("table", None)] if merge else []), ("tags", None), ("note", None)]
+    if fields[:len(default)] == default and all(kind == "col" for kind, _ in fields[len(default):]):
+        if merge:
+            return lambda line, table, tags, note, values: [line, table, tags, note, *values]
+        return lambda line, table, tags, note, values: [line, tags, note, *values]
+    at = iter(range(4, 4 + len(fields)))
+    slots = [_EXPORT_SLOT[kind] if kind != "col" else next(at) for kind, _ in fields]
+
+    def arrange(line, table, tags, note, values):
+        row = (line, table, tags, note, *values)
+        return [row[i] for i in slots]
+    return arrange
 
 
 def _visible_controls(s: str) -> str:
@@ -19961,8 +20041,8 @@ class _CsvViewExport:
     delimiter = ","
 
     def __init__(self, meta: dict, about: str = ""):
-        self.merge = meta["merge"]
         self.cols = meta["columns"]
+        self.arrange = _export_arranger(meta)
         self.buf = io.StringIO()
         self.w = _CsvWriter(self.buf, self.delimiter)
 
@@ -19972,17 +20052,15 @@ class _CsvViewExport:
         return text
 
     def head(self) -> str:
-        head = _export_header(self.cols, _csv_safe)
-        if self.merge:
-            head.insert(1, "Table")
-        self.w.writerow(head)
+        # Column names through the guard too (_export_header's reason).
+        self.w.writerow(self.arrange("Line", "Table", "Tags", "Note", map(_csv_safe, self.cols)))
         return self._take()
 
     def rows(self, batch: list) -> str:
+        arrange, w = self.arrange, self.w
         for rid, table, tags, note, values in batch:
-            self.w.writerow([rid, *([_csv_safe(table)] if self.merge else []),
-                             _csv_safe("; ".join(tags)), _csv_safe(note or ""),
-                             *map(_csv_safe, values)])
+            w.writerow(arrange(rid, _csv_safe(table), _csv_safe("; ".join(tags)), _csv_safe(note or ""),
+                               map(_csv_safe, values)))
         return self._take()
 
     def tail(self) -> str:
@@ -20018,24 +20096,27 @@ def _unique_keys(names: list[str]) -> list[str]:
 class _JsonLinesViewExport:
     """One JSON object per row, one row per line: Line (a number), Table on
     a merge, Tags (a list of names), Note (null for none), then each
-    visible column under its own name. Values exactly as the case holds
-    them — no formula guard, no escaping beyond JSON's own — except what
-    JSON cannot carry, which pane_cell_json writes as text."""
+    visible column under its own name — or the columns the dialog chose,
+    in its order. Values exactly as the case holds them — no formula
+    guard, no escaping beyond JSON's own — except what JSON cannot carry,
+    which pane_cell_json writes as text."""
 
     def __init__(self, meta: dict, about: str = ""):
-        self.merge = meta["merge"]
-        fixed = ["Line", *(["Table"] if self.merge else []), "Tags", "Note"]
-        self.keys = _unique_keys([*fixed, *meta["columns"]])[len(fixed):]
+        self.arrange = _export_arranger(meta)
+        # Winnow's keys are made unique first, wherever the plan puts them:
+        # a table's own Note is Note_1 whether it comes before Winnow's or
+        # after it.
+        fixed = {kind: name for kind, name in (("line", "Line"), ("table", "Table"), ("tags", "Tags"), ("note", "Note"))
+                 if any(k == kind for k, _ in meta["fields"])}
+        keys = _unique_keys([*fixed.values(), *meta["columns"]])
+        named = dict(zip(fixed, keys))
+        self.keys = self.arrange(named.get("line"), named.get("table"), named.get("tags"), named.get("note"),
+                                 keys[len(fixed):])
 
     def _obj(self, row: tuple) -> str:
         rid, table, tags, note, values = row
-        obj: dict[str, Any] = {"Line": rid}
-        if self.merge:
-            obj["Table"] = table
-        obj["Tags"] = list(tags)
-        obj["Note"] = note or None
-        obj.update(zip(self.keys, map(pane_cell_json, values)))
-        return json.dumps(obj, ensure_ascii=False)
+        cells = self.arrange(rid, table, list(tags), note or None, map(pane_cell_json, values))
+        return json.dumps(dict(zip(self.keys, cells)), ensure_ascii=False)
 
     def head(self) -> str:
         return ""
@@ -20094,18 +20175,20 @@ class _MarkdownViewExport:
     or a wiki. The table and nothing else: what is pasted is what renders."""
 
     def __init__(self, meta: dict, about: str = ""):
-        self.merge = meta["merge"]
-        self.names = ["Line", *(["Table"] if self.merge else []), "Tags", "Note", *meta["columns"]]
+        self.arrange = _export_arranger(meta)
+        self.names = self.arrange("Line", "Table", "Tags", "Note", meta["columns"])
+        # Line right-aligned, as a number column is, wherever it sits.
+        self.align = self.arrange("---:", "---", "---", "---", ["---"] * len(meta["columns"]))
 
     def head(self) -> str:
         return ("| " + " | ".join(_md_cell(n) for n in self.names) + " |\n"
-                + "| ---: | " + " | ".join(["---"] * (len(self.names) - 1)) + " |\n")
+                + "| " + " | ".join(self.align) + " |\n")
 
     def rows(self, batch: list) -> str:
+        arrange = self.arrange
         out = []
         for rid, table, tags, note, values in batch:
-            cells = [str(rid), *([_md_cell(table)] if self.merge else []),
-                     _md_cell("; ".join(tags)), _md_cell(note), *map(_md_cell, values)]
+            cells = arrange(str(rid), _md_cell(table), _md_cell("; ".join(tags)), _md_cell(note), map(_md_cell, values))
             out.append("| " + " | ".join(cells) + " |\n")
         return "".join(out)
 
@@ -20165,12 +20248,13 @@ class _HtmlViewExport:
 
     def __init__(self, meta: dict, about: str = ""):
         self.meta = meta
+        self.arrange = _export_arranger(meta)
         self.about = " ".join((about or "").split())[:2000]
         self.n = 0
 
     def head(self) -> str:
         m = self.meta
-        names = ["Line", *(["Table"] if m["merge"] else []), "Tags", "Note", *m["columns"]]
+        names = self.arrange("Line", "Table", "Tags", "Note", m["columns"])
         title = _html_text(m["name"])
         which = "Tagged rows of the view" if m["tagged_only"] else "Every row of the view"
         when = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
@@ -20196,15 +20280,13 @@ class _HtmlViewExport:
         return " ".join(out)
 
     def rows(self, batch: list) -> str:
-        merge = self.meta["merge"]
+        arrange = self.arrange
         out = []
         for rid, table, tags, note, values in batch:
-            out.append(
-                f'<tr><td class="n">{rid}</td>'
-                + (f"<td>{_html_text(table)}</td>" if merge else "")
-                + f"<td>{self._tags(tags)}</td><td>{_html_text(note)}</td>"
-                + "".join(f"<td>{_html_text(v)}</td>" for v in values)
-                + "</tr>\n")
+            cells = arrange(f'<td class="n">{rid}</td>', f"<td>{_html_text(table)}</td>",
+                            f"<td>{self._tags(tags)}</td>", f"<td>{_html_text(note)}</td>",
+                            [f"<td>{_html_text(v)}</td>" for v in values])
+            out.append("<tr>" + "".join(cells) + "</tr>\n")
         self.n += len(batch)
         return "".join(out)
 

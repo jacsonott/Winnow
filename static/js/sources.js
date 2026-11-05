@@ -27,7 +27,7 @@ import { dashDrag, loadDashboards, renderDashboardsInto, showDashboard } from '.
 import { openCaseSettings } from './settings.js';
 import { openLog } from './errlog.js';
 import { S, clearCellSelection, selClear, selCount, selFirst, specKey } from './state.js';
-import { compactCaseFile, countCell, mergesUsing, openTablesManager, plural, removeRefusal, removeSource } from './tables.js';
+import { compactCaseFile, countCell, keepingFocus, mergesUsing, openTablesManager, plural, removeRefusal, removeSource } from './tables.js';
 import { loadTags, refreshTagCounts, renderTagRibbon } from './tags.js';
 import { openTableMenu, tableMenuSeg, tableMenuStat, timeframeAcrossTables, updateFiltersButton, updateTimeRangeButton } from './timeframe.js';
 import { confirmDialog, contextMenu, dropdownMenu, modal, promptDialog, sectionPanes } from './ui.js';
@@ -1943,6 +1943,12 @@ const EXPORT_FORMAT_KEY = 'winnow.exportFormat';   // localStorage: the format l
 // are report formats, and a page of a million rows is one nothing opens.
 export const REPORT_FORMAT_ROWS = 10000;
 
+const WINNOW_EXPORT_COLUMNS = { 'w:line': 'Line', 'w:table': 'Table', 'w:tags': 'Tags', 'w:note': 'Note' };
+/* An export column's name in the file: Winnow's own by name, the table's
+   as they are ("c:Host" is Host). */
+const colLabel = (key) => WINNOW_EXPORT_COLUMNS[key] || key.slice(2);
+const sameColumns = (a, b) => a.length === b.length && a.every((c, i) => c.key === b[i].key && c.on === b[i].on);
+
 /* Names made unique the way the server writes JSON keys (_unique_keys):
    a repeat, compared without case, gets _1, _2… — so the list shows the
    key a table's own Note column really gets. */
@@ -1962,7 +1968,8 @@ function uniqueKeys(names) {
    on the right says what goes in the file, and the one main button on
    the foot exports it, saying how much. It was two paragraphs, each over
    a row of two buttons. The view picks its format too (VIEW_EXPORT_FORMATS),
-   remembered from one export to the next. */
+   remembered from one export to the next, and its columns: which go in
+   the file and in what order, starting from the grid's. */
 export function openExportModal(section = null) {
   const real = () => (S.sources || []).filter((s) => !s.is_merge && !s.error);
   const sum = (k) => real().reduce((n, s) => n + (s[k] || 0), 0);
@@ -1974,6 +1981,18 @@ export function openExportModal(section = null) {
     if (VIEW_EXPORT_FORMATS.some((f) => f.key === kept)) viewFormat = kept;
   } catch { /* private mode: CSV */ }
   const format = () => VIEW_EXPORT_FORMATS.find((f) => f.key === viewFormat);
+  // The view's file, column by column in its order: { key, on } with key
+  // "w:line", "w:table", "w:tags", "w:note" for the ones Winnow adds and
+  // "c:<name>" for the table's — the names /api/export's `columns` takes.
+  // Seeded from the grid: its order (S.order), a hidden column unticked.
+  const gridColumns = () => {
+    const names = S.columns.map((c) => c.name);
+    const order = [...S.order.filter((n) => names.includes(n)), ...names.filter((n) => !S.order.includes(n))];
+    return [{ key: 'w:line', on: true }, ...(src && src.is_merge ? [{ key: 'w:table', on: true }] : []),
+      { key: 'w:tags', on: true }, { key: 'w:note', on: true },
+      ...order.map((n) => ({ key: 'c:' + n, on: !(S.layout[n] || {}).hidden }))];
+  };
+  let fileCols = gridColumns();
   let plan = null;   // /api/export/all_xlsx/plan, for the every-row pane
   modal('Export', (b) => {
     const go = (url) => { window.location = caseUrl(url); $('modal').hidden = true; };
@@ -1983,8 +2002,12 @@ export function openExportModal(section = null) {
     main.onclick = () => run && run();
 
     /* The view: its format, what narrows it said in a line, then the
-       file's columns as a list, in the grid's order — the ones Winnow adds
-       first, and a hidden column left out, as the export leaves it. */
+       file's columns as a list — the ones Winnow adds first, then the
+       grid's in its order, a hidden one unticked. Ticking chooses what
+       goes in the file and dragging (or ⤒ ⤓, or Alt+↑ ↓) where, Winnow's
+       own included; only this export, the grid stays as it is. The
+       choice lasts while the dialog is open, across formats, and starts
+       from the grid again the next time. */
     function buildViewPane(pane) {
       const stats = el('div', 'mb-stats');
       const summary = el('div', 'mb-summary');
@@ -2000,15 +2023,43 @@ export function openExportModal(section = null) {
       const formatRow = el('div', 'export-format');
       formatRow.append(el('span', 'export-format-label', 'Format'), formats.seg);
       const notes = el('ul', 'mb-notes');
+      const top = el('div', 'tm-cols-top export-cols-top');
+      const search = el('input', 'side-search');
+      search.type = 'search';
+      search.placeholder = 'Filter columns…';
+      search.autocomplete = 'off';
+      search.setAttribute('aria-label', 'Filter the file’s columns');
+      const count = el('span', 'tm-cols-count');
+      const tool = (label, title, fn) => {
+        const b = el('button', 'btn ghost export-cols-tool', label);
+        b.type = 'button';
+        b.title = title;
+        b.onclick = fn;
+        return b;
+      };
+      // All and None act on the rows the filter shows, so "Payload" then
+      // None takes every PayloadData column out in two moves.
+      const showing = () => fileCols.filter((c) => matches(c));
+      const allBtn = tool('All', 'Put every column the list shows in the file', () => { for (const c of showing()) c.on = true; paint(); });
+      const noneBtn = tool('None', 'Leave every column the list shows out of the file', () => { for (const c of showing()) c.on = false; paint(); });
+      const resetBtn = tool('Reset to the grid', 'Start again from the grid: its columns, in its order, the hidden ones left out',
+        () => { fileCols = gridColumns(); paint(); });
+      top.append(search, count, allBtn, noneBtn, resetBtn);
       const box = el('div', 'side-preview tm-cols-box tables-box export-box');
       const head = el('div', 'tables-head export-cols-head');
-      head.append(el('span', 'tables-name-h', 'Column in the file'), el('span', null, 'Holds'));
+      head.append(el('span'), el('span', 'tables-name-h', 'Column in the file'), el('span', null, 'Holds'), el('span'));
       const scroller = el('div', 'side-preview-rows');
-      const list = el('div', 'tables-list');
+      const list = el('div', 'tables-list export-cols');
       scroller.append(list);
       const foot = el('div', 'side-preview-foot');
       box.append(head, scroller, foot);
-      pane.append(summary, formatRow, notes, box);
+      pane.append(summary, formatRow, notes, top, box);
+
+      const matches = (c) => {
+        const q = search.value.trim().toLowerCase();
+        return !q || colLabel(c.key).toLowerCase().includes(q);
+      };
+      search.oninput = () => paint();
 
       function applied() {
         const out = [];
@@ -2029,41 +2080,106 @@ export function openExportModal(section = null) {
         return (narrowed.length ? `narrowed by ${narrowed.join(' · ')}` : 'nothing narrows it, so every row of the table')
           + (sort ? `, sorted by ${sort}.` : ', in its stored order.');
       }
-      const colRow = (name, holds, added) => {
-        const r = el('div', 'tables-row export-col-row' + (added ? ' added' : ''));
-        r.append(el('span', 'tables-name static', name), el('span', 'tables-sub', holds));
-        return r;
+      const move = (key, to) => {
+        const at = fileCols.findIndex((c) => c.key === key);
+        const [c] = fileCols.splice(at, 1);
+        fileCols.splice(Math.max(0, Math.min(fileCols.length, to === 'top' ? 0 : to === 'bottom' ? fileCols.length : at + to)), 0, c);
+        paint();
       };
+      function colRow(c, name, holds) {
+        const added = c.key.startsWith('w:');
+        const r = el('label', 'tables-row export-col-row' + (added ? ' added' : '') + (c.on ? ' open' : ''));
+        r.dataset.id = c.key;
+        r.hidden = !matches(c);
+        const cb = el('input');
+        cb.type = 'checkbox';
+        cb.checked = c.on;
+        cb.dataset.role = 'pick';
+        cb.setAttribute('aria-label', `Put ${colLabel(c.key)} in the file`);
+        cb.onchange = () => { c.on = cb.checked; paint(); };
+        // One step with the keyboard, which a drag can't be.
+        cb.onkeydown = (e) => {
+          if (!e.altKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return;
+          e.preventDefault();
+          move(c.key, e.key === 'ArrowUp' ? -1 : 1);
+        };
+        const moves = el('span', 'export-col-moves');
+        const up = el('button', 'btn ghost collist-move', '⤒');
+        up.type = 'button';
+        up.dataset.role = 'top';
+        up.title = `Move ${colLabel(c.key)} to the start of the file`;
+        up.onclick = (e) => { e.preventDefault(); move(c.key, 'top'); };
+        const down = el('button', 'btn ghost collist-move', '⤓');
+        down.type = 'button';
+        down.dataset.role = 'bottom';
+        down.title = `Move ${colLabel(c.key)} to the end of the file`;
+        down.onclick = (e) => { e.preventDefault(); move(c.key, 'bottom'); };
+        moves.append(up, down);
+        r.append(cb, el('span', 'tables-name static', name), el('span', 'tables-sub', holds), moves);
+        wireDragReorder(r, c.key, {
+          containerSelector: '.export-cols', rowSelector: '.export-col-row', horizontal: false,
+          currentIds: () => fileCols.map((x) => x.key),
+          onReorder: (keys) => {
+            const byKey = new Map(fileCols.map((x) => [x.key, x]));
+            fileCols = keys.map((k) => byKey.get(k));
+            paint();
+          },
+        });
+        return r;
+      }
       function paint() {
         const f = format();
         const rows = S.view ? S.view.row_count : 0;
-        const merge = !!(src && src.is_merge);
-        const shown = S.columns.filter((c) => !(S.layout[c.name] || {}).hidden);
-        const hidden = S.columns.length - shown.length;
-        const added = [['Line', 'the row’s line in the source'], ...(merge ? [['Table', 'the table the row came from']] : []),
-          ['Tags', f.tags], ['Note', f.json ? 'its note, or null' : 'its note']];
-        // JSON keys are unique where a header need not be: a table's own
-        // Note column is Note_1 in the file, and the list says so.
-        const names = f.json ? uniqueKeys([...added.map((a) => a[0]), ...shown.map((c) => c.name)]).slice(added.length) : shown.map((c) => c.name);
+        const meta = new Map(S.columns.map((c) => [c.name, c]));
+        // A column gone since the dialog opened (a derived one deleted) is
+        // dropped, one added appears at the end, unticked.
+        fileCols = fileCols.filter((c) => c.key.startsWith('w:') || meta.has(c.key.slice(2)));
+        for (const c of S.columns) if (!fileCols.some((x) => x.key === 'c:' + c.name)) fileCols.push({ key: 'c:' + c.name, on: false });
+        const chosen = fileCols.filter((c) => c.on);
+        const winnowHolds = { 'w:line': 'the row’s line in the source', 'w:table': 'the table the row came from',
+          'w:tags': f.tags, 'w:note': f.json ? 'its note, or null' : 'its note' };
+        // JSON keys are unique where a header need not be: Winnow's own
+        // are claimed first, so a table's own Note column is Note_1 in the
+        // file wherever it sits, and the list says so (the server's
+        // _JsonLinesViewExport does the same).
+        const keyOf = new Map();
+        if (f.json) {
+          const fixed = ['w:line', 'w:table', 'w:tags', 'w:note'].filter((k) => chosen.some((c) => c.key === k));
+          const tableCols = chosen.filter((c) => c.key.startsWith('c:')).map((c) => c.key);
+          const keys = uniqueKeys([...fixed, ...tableCols].map(colLabel));
+          [...fixed, ...tableCols].forEach((k, i) => keyOf.set(k, keys[i]));
+        }
         stats.replaceChildren(tableMenuStat(rows, 'rows in the view'), tableMenuStat(src ? src.row_count : 0, 'in the table'),
-          tableMenuStat(shown.length + added.length, 'columns'));
+          tableMenuStat(chosen.length, chosen.length === 1 ? 'column' : 'columns'));
         const lines = [el('li', 'mb-note', `What you are looking at now, as ${f.label}: ${narrowing()}`), el('li', 'mb-note', f.about)];
         if (f.report && !viewTagged && rows > REPORT_FORMAT_ROWS) {
           lines.push(el('li', 'mb-note warn', `${rows.toLocaleString()} rows is a lot for ${f.label}: a file that size is slow to open, `
             + 'or won’t open at all. Narrow the view first, or choose CSV, Excel or JSON Lines.'));
         }
         notes.replaceChildren(...lines);
-        list.replaceChildren(...added.map(([name, holds]) => colRow(name, holds, true)),
-          ...shown.map((c, i) => colRow(names[i], c.derived ? `derived from ${c.derived_from}` : (c.type || 'text'))));
-        foot.replaceChildren(el('p', 'fb-help', hidden
-          ? `${plural(hidden, 'hidden column')} left out. Show ${hidden === 1 ? 'it' : 'them'} in the grid to export ${hidden === 1 ? 'it' : 'them'}.`
-          : 'The grid’s order, as you arranged it.'));
+        keepingFocus(list, () => list.replaceChildren(...fileCols.map((c) => {
+          if (c.key.startsWith('w:')) return colRow(c, keyOf.get(c.key) || colLabel(c.key), winnowHolds[c.key]);
+          const m = meta.get(c.key.slice(2));
+          const hidden = (S.layout[m.name] || {}).hidden;
+          const holds = (m.derived ? `derived from ${m.derived_from}` : (m.type || 'text')) + (hidden ? ' · hidden in the grid' : '');
+          return colRow(c, keyOf.get(c.key) || m.name, holds);
+        })));
+        const listed = fileCols.filter(matches).length;
+        count.textContent = listed < fileCols.length ? `${listed} of ${fileCols.length} listed`
+          : `${chosen.length} of ${fileCols.length} in the file`;
+        const asGrid = sameColumns(fileCols, gridColumns());
+        resetBtn.disabled = asGrid;
+        foot.replaceChildren(el('p', 'fb-help', asGrid
+          ? 'As the grid has them. Untick a column to leave it out; drag a row, or use ⤒ ⤓ or Alt+↑ ↓, to move it.'
+          : 'Chosen for this export only: the grid stays as it is, and the next export starts from it again.'));
         const url = () => {
           const about = narrowing();
           return `/api/export?view_id=${encodeURIComponent(S.view.view_id)}&format=${f.key}${viewTagged ? '&tagged_only=true' : ''}`
+            + `&columns=${encodeURIComponent(JSON.stringify(chosen.map((c) => c.key)))}`
             + (f.key === 'html' ? `&about=${encodeURIComponent(about[0].toUpperCase() + about.slice(1))}` : '');
         };
         if (!S.view) setMain(`Export the view (.${f.ext})`, null, true);
+        else if (!chosen.length) setMain('Choose a column to export', null, true);
         else if (viewTagged) setMain(`Export tagged rows (.${f.ext})`, () => go(url()));
         else setMain(`Export ${rows.toLocaleString()} rows (.${f.ext})`, () => go(url()));
       }

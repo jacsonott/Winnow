@@ -150,7 +150,8 @@ Notes and dashboards.
   evidence imported.
 - **Export** — the current view or just its tagged rows as CSV, TSV,
   Excel, JSON Lines, JSON, a Markdown table or a standalone HTML page,
-  and every tagged row or every row of the whole case as XLSX, one
+  with the columns you tick in the order you put them, and every tagged
+  row or every row of the whole case as XLSX, one
   worksheet per table. Cells that would run as spreadsheet formulas are
   neutralised in the spreadsheet formats; the stored value is untouched.
 - **A read-only SQL pane** for when a filter has done all it can. Each

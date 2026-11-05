@@ -319,6 +319,15 @@ TSV, JSON and other text exports have no row limit. Details, along with how
 long cells and sheet names are handled, are in [Sessions and
 export](Sessions-and-export.md).
 
+### A column is missing from an export
+
+The workbook exports (**Tagged rows** and **Every row**) and a **Current
+view** export that starts from the grid leave out the columns hidden in
+the grid. For the current view, tick the column in the Export dialog's
+column list to put it in the file without showing it in the grid; the
+list also shows which columns are unticked and why. See
+[Choosing the columns](Sessions-and-export.md#choosing-the-columns).
+
 ### A session load skipped a table
 
 After **Load**, a message names each table the session couldn't place:

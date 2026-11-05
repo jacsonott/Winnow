@@ -6243,26 +6243,44 @@ def api_view_save_as_table(body: SaveViewAsTable):
 
 @app.get("/api/export")
 def api_export(view_id: str, tagged_only: bool = False, filename: str = "",
-               fmt: str = Query("csv", alias="format"), about: str = ""):
+               fmt: str = Query("csv", alias="format"), about: str = "", columns: str = ""):
     """The current view as a file, in any of VIEW_EXPORT_FORMATS (CSV when
     the client names none, which is every caller from before there was a
     choice). Everything but xlsx streams: the download starts at once and
     grows as rows are written. A workbook can't be sent before it is
     finished, so xlsx is written to a temp file the response streams and
     then deletes (export_all_xlsx's shape). `about` is the dialog's line
-    saying what narrows the view; only the HTML page prints it."""
+    saying what narrows the view; only the HTML page prints it.
+
+    `columns`, when given, is a JSON list of the file's columns in order
+    as the dialog chose them — "w:line"/"w:table"/"w:tags"/"w:note" for
+    Winnow's own, "c:<name>" for the table's (Store._export_plan). Absent
+    is the layout's, as it always was. A list that names a column the
+    table doesn't have is a 400 rather than a file quietly missing it."""
     if fmt not in VIEW_EXPORT_FORMATS:
         raise HTTPException(400, f"Unknown export format {fmt!r}: one of {', '.join(VIEW_EXPORT_FORMATS)}")
     label, media_type, ext = VIEW_EXPORT_FORMATS[fmt]
+    picked = None
+    if columns:
+        try:
+            picked = json.loads(columns)
+        except ValueError:
+            picked = None
+        if not isinstance(picked, list):
+            raise HTTPException(400, "columns must be a JSON list of column names")
     filename = filename or f"timeline-export.{ext}"
     what = f"{label} {'tagged rows of ' if tagged_only else ''}view {view_id}"
+    if picked is not None:
+        what += f" ({len(picked)} column{'' if len(picked) == 1 else 's'})"
     if fmt == "xlsx":
-        return _export_view_xlsx(view_id, tagged_only, filename, what, media_type)
+        return _export_view_xlsx(view_id, tagged_only, filename, what, media_type, picked)
     stats = {"rows": 0}
     try:
-        gen = store().export_view(view_id, fmt, tagged_only, about=about, stats=stats)
+        gen = store().export_view(view_id, fmt, tagged_only, about=about, stats=stats, columns=picked)
     except KeyError as e:
         raise HTTPException(409, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
     def logged():
         # Counted as it streams: the row count isn't known up front, and
@@ -6291,7 +6309,8 @@ def api_export(view_id: str, tagged_only: bool = False, filename: str = "",
     )
 
 
-def _export_view_xlsx(view_id: str, tagged_only: bool, filename: str, what: str, media_type: str):
+def _export_view_xlsx(view_id: str, tagged_only: bool, filename: str, what: str, media_type: str,
+                      columns: list | None = None):
     """The view as a workbook (api_export's xlsx): written whole to a temp
     file first, then sent and deleted. Runs in the threadpool with the
     route, so a big one doesn't block the app — the dialog says it can
@@ -6302,12 +6321,17 @@ def _export_view_xlsx(view_id: str, tagged_only: bool, filename: str, what: str,
     fd, path = tempfile.mkstemp(suffix=".xlsx", prefix="winnow-export-")
     os.close(fd)
     try:
-        stats = store().export_view_xlsx(view_id, path, tagged_only)
+        stats = store().export_view_xlsx(view_id, path, tagged_only, columns=columns)
     except KeyError as e:
         wlog.record("warn", f"Export failed: {what} — {e.args[0] if e.args else 'view expired'}")
         with contextlib.suppress(OSError):
             os.unlink(path)
         raise HTTPException(409, str(e))
+    except ValueError as e:
+        wlog.record("warn", f"Export failed: {what} — {e}")
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+        raise HTTPException(400, str(e))
     except BaseException:
         wlog.record("error", f"Export failed: {what}")
         with contextlib.suppress(OSError):

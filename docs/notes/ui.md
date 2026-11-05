@@ -1852,6 +1852,23 @@ see [docs/notes/README.md](README.md) for the whole set.
     A merge lists its Table column too, which the list had always left
     out. Markdown and HTML past `REPORT_FORMAT_ROWS` get a warning note,
     not a refusal. tests/ui/test_export_view_formats_ui.py.
+  - **The Current view's column list is the file's columns, and choosing
+    there never touches the grid.** `fileCols` (`{ key, on }`, keys
+    `w:line`… and `c:<name>`, the strings `/api/export`'s `columns` takes)
+    lives in `openExportModal`'s closure, seeded by `gridColumns()` from
+    `S.order` and `S.layout` — NOT `S.columns`, which is storage order;
+    the list used to show that while the file came out in the layout's
+    order. It survives a change of format and a switch between panes, and
+    a reopened dialog starts from the grid again: a choice remembered per
+    table would need rules for every column the grid hid or added since,
+    and "the grid, then this export's changes" needs none. The dialog
+    always sends the whole list, even untouched, so the file is what the
+    list showed even while a layout save is still in its debounce. Rows
+    reorder through `wireDragReorder` (the tab strip's), ⤒ ⤓ and Alt+↑ ↓
+    on the tick box; every change repaints through `keepingFocus`, so the
+    moved row keeps focus. All and None act on the rows the filter shows.
+    The URL holds the list: uvicorn (h11) took a 70,000-character query
+    in testing, so a KAPE-wide table is nowhere near a limit.
   - **Comparing runs as the sides change**; `runCompare` clears the last
     answer before asking, so a pane never shows one comparison's counts
     under the other's names. The heads are A/B, as the gutter marks are,

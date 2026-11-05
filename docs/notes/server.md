@@ -389,6 +389,10 @@ see [docs/notes/README.md](README.md) for the whole set.
   colour into its style attribute only if it is a hex colour: a colour
   arrives in a received session as easily as a name, and
   `red; background:url(…)` would make the page fetch a URL when opened.
+  `columns` is the dialog's column list as JSON (`["c:Host", "w:tags",
+  …]`, see store.md); left out, the layout's columns as always. Anything
+  that isn't a JSON list, and any name the table doesn't have, is a 400,
+  for xlsx too, before a byte is written.
 - **The SQL pane's results are held server-side** (`winnow/sqlresults.py`,
   `POST /api/sql/run` and the `/api/sql/result/{id}/…` routes). The pane
   has no row cap, and "every row" as one JSON response was every row in

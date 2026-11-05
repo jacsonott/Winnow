@@ -11,6 +11,11 @@ disagree, and a writer that dropped a column, put a tag on the wrong row
 or lost a line break would hand an analyst a different answer depending
 on which button they pressed.
 
+The Export dialog can also choose the file's columns — leave any out,
+Winnow's own included, take a hidden one in, put them in any order — and
+every format has to honor that choice the same way, the JSON keys and the
+Markdown alignment following each column to wherever it was put.
+
 The other half is what each format does with a value. The three a
 spreadsheet opens (CSV, TSV, Excel) put the formula guard's apostrophe in
 front of =, +, -, @; JSON, Markdown and HTML keep every value exactly, and
@@ -45,7 +50,7 @@ def _md_unescape(cell: str) -> str:
 
 def _md_rows(text: str) -> list[list[str]]:
     lines = text.splitlines()
-    assert re.fullmatch(r"\| ---: (\| --- )*\|", lines[1]), lines[1]
+    assert re.fullmatch(r"\|( ---:? \|)+", lines[1]), lines[1]
     out = []
     for line in [lines[0], *lines[2:]]:
         assert line.startswith("| ") and line.endswith(" |"), line
@@ -120,7 +125,7 @@ def _read(store, view_id, fmt, tmp_path, tagged_only=False, **kw) -> list[list[s
     read back into the CSV's shape so they can be compared cell for cell."""
     if fmt == "xlsx":
         path = tmp_path / "v.xlsx"
-        store.export_view_xlsx(view_id, str(path), tagged_only)
+        store.export_view_xlsx(view_id, str(path), tagged_only, columns=kw.get("columns"))
         wb = load_workbook(path)
         rows = [r for ws in wb.worksheets for r in ws.iter_rows(values_only=True)]
         return [["" if v is None else str(v) for v in r] for r in rows]
@@ -373,3 +378,104 @@ def test_the_log_counts_rows_not_lines(store, client, case):
     for fmt, (label, _, _) in VIEW_EXPORT_FORMATS.items():
         line = next(m for m in done if m.startswith(f"Export finished: {label} view {vid}"))
         assert " — 4 rows" in line, line
+
+
+# --------------------------------------------------------- chosen columns
+
+# Size first, Winnow's Tags, a column the layout hides, Host, Line last;
+# both Notes left out.
+CHOSEN = ["c:Size", "w:tags", "c:Secret", "c:Host", "w:line"]
+CHOSEN_ROWS = [["Size", "Tags", "Secret", "Host", "Line"],
+               ["", "", "hide me", "WKSTN-5", "5"],
+               ["1e3", "", "hide me", "WKSTN-4", "4"],
+               ["7", "Keep; @odd", "hide me", "WKSTN-3", "3"],
+               ["12", "Keep", "hide me", "WKSTN-1", "1"]]
+
+
+@pytest.mark.parametrize("fmt", list(VIEW_EXPORT_FORMATS))
+def test_every_format_takes_the_columns_chosen_in_their_order(store, case, tmp_path, fmt):
+    assert _read(store, _view(store, case), fmt, tmp_path, columns=CHOSEN) == CHOSEN_ROWS
+
+
+def test_line_keeps_its_number_look_wherever_it_is_put(store, case):
+    vid = _view(store, case)
+    md = "".join(store.export_view(vid, "md", columns=CHOSEN)).splitlines()
+    assert md[1] == "| --- | --- | --- | --- | ---: |"
+    page = "".join(store.export_view(vid, "html", columns=CHOSEN))
+    assert '<td>WKSTN-5</td><td class="n">5</td></tr>' in page
+    objs = json.loads("".join(store.export_view(vid, "json", columns=CHOSEN)))
+    assert objs[0] == {"Size": "", "Tags": [], "Secret": "hide me", "Host": "WKSTN-5", "Line": 5}
+
+
+def test_the_table_s_own_note_is_note_1_only_beside_winnow_s(store, case):
+    vid = _view(store, case)
+    both = json.loads("".join(store.export_view(vid, "json", columns=["c:Note", "w:note", "c:Host"])))
+    assert list(both[-1]) == ["Note_1", "Note", "Host"]
+    assert both[-1]["Note_1"] == "own note" and both[-1]["Note"] == "=not a formula"
+    alone = json.loads("".join(store.export_view(vid, "json", columns=["c:Note", "c:Host"])))
+    assert alone[-1] == {"Note": "own note", "Host": "WKSTN-1"}
+
+
+@pytest.mark.parametrize("kind", ["root_virtual", "group_virtual", "materialized"])
+def test_a_file_of_winnow_s_columns_alone_reads_no_table_column(store, case, tmp_path, kind):
+    """Line and Note and nothing of the table's: the select list is rid
+    alone, on each of the three ways a view is read."""
+    if kind == "root_virtual":
+        vid = store.build_view(case, {})["view_id"]
+    elif kind == "group_virtual":
+        vid = store.expand_group(store.build_view(case, {})["view_id"], "Note", "")["view_id"]
+    else:
+        vid = _view(store, case)
+    assert store._views[vid]["kind"] == {"materialized": "root"}.get(kind, kind)
+    rows = _read(store, vid, "csv", tmp_path, columns=["w:note", "w:line"])
+    want = {"root_virtual": ["1", "2", "3", "4", "5"], "group_virtual": ["2", "3", "5"],
+            "materialized": ["5", "4", "3", "1"]}[kind]
+    assert rows[0] == ["Note", "Line"]
+    assert [r[1] for r in rows[1:]] == want
+    notes = {r[1]: r[0] for r in rows[1:]}
+    if "4" in notes:
+        assert notes["4"] == 'saw "this"\nsecond line'
+    assert notes.get("1", "'=not a formula") == "'=not a formula"
+
+
+def test_a_merge_s_chosen_columns_resolve_through_each_member(store, write_csv, tmp_path):
+    a = store.ingest_csv(write_csv([["user", "host"], ["alice", "A1"], ["bob", "A2"]], name="a.csv"),
+                         name="hostA.csv", build_fts=False)["id"]
+    b = store.ingest_csv(write_csv([["user", "host"], ["carol", "B1"]], name="b.csv"), name="hostB.csv",
+                         build_fts=False)["id"]
+    mid = store.create_merge("M", [a, b])["id"]
+    vid = store.build_view(mid, {"sort": [{"column": "user", "dir": "desc"}]})["view_id"]
+    for fmt in VIEW_EXPORT_FORMATS:
+        rows = _read(store, vid, fmt, tmp_path, columns=["c:host", "w:table", "c:user"])
+        assert rows == [["host", "Table", "user"], ["B1", "hostB.csv", "carol"], ["A2", "hostA.csv", "bob"],
+                        ["A1", "hostA.csv", "alice"]], fmt
+    # A single table has no Table column to choose.
+    with pytest.raises(ValueError):
+        store.export_view(store.build_view(a, {})["view_id"], "csv", columns=["w:table", "c:user"])
+
+
+@pytest.mark.parametrize("columns", [[], ["c:Nope"], ["c:Host", "c:Host"], ["w:rid"], ["Host"], [1]])
+def test_a_column_list_that_cannot_be_honored_is_refused(store, case, tmp_path, columns):
+    vid = _view(store, case)
+    with pytest.raises(ValueError):
+        store.export_view(vid, "csv", columns=columns)
+    with pytest.raises(ValueError):
+        store.export_view_xlsx(vid, str(tmp_path / "x.xlsx"), columns=columns)
+
+
+def test_the_route_takes_the_columns_as_a_json_list(store, client, case):
+    from winnow import log as wlog
+    vid = _view(store, case)
+    r = client.get("/api/export", params={"view_id": vid, "columns": json.dumps(CHOSEN)})
+    assert r.status_code == 200
+    assert list(csv.reader(io.StringIO(r.text))) == CHOSEN_ROWS
+    x = client.get("/api/export", params={"view_id": vid, "format": "xlsx", "columns": json.dumps(CHOSEN)})
+    ws = load_workbook(io.BytesIO(x.content)).active
+    assert [["" if v is None else str(v) for v in row] for row in ws.iter_rows(values_only=True)] == CHOSEN_ROWS
+    done = [e["message"] for e in wlog.entries() if e["message"].startswith("Export finished")]
+    assert any(f"view {vid} (5 columns)" in m for m in done)
+    for bad in ('["c:Nope"]', "[]", "Host", '{"c": "Host"}'):
+        for fmt in ("csv", "xlsx"):
+            r = client.get("/api/export", params={"view_id": vid, "format": fmt, "columns": bad})
+            assert r.status_code == 400, (bad, fmt)
+    assert "Nope" in client.get("/api/export", params={"view_id": vid, "columns": '["c:Nope"]'}).json()["detail"]

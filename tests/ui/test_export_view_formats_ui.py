@@ -9,6 +9,12 @@ choice is remembered, so the next export starts on the format the analyst
 last used, and the button, the side list and the column list all say
 which format that is.
 
+The column list is also where the file's columns are chosen: ticked or
+not, in any order, Winnow's own included, a column hidden in the grid
+taken in. What has to hold is that the file is the list — what was
+ticked, in the order it was left — in whatever format, and that choosing
+for an export changes nothing in the grid.
+
 A table of its own, deleted again at the end of each test.
 """
 
@@ -121,9 +127,102 @@ def test_the_format_is_remembered_and_described(page, table):
     page.locator("#modal .export-formats button[data-key=jsonl]").click()
     notes = page.locator("#modal .export-pane .mb-notes").inner_text()
     assert "as JSON Lines:" in notes and "exactly as the case holds it" in notes
-    assert page.locator("#modal .export-col-row", has_text="Tags").inner_text().endswith("its tags, as a list")
+    assert page.locator("#modal .export-col-row[data-id='w:tags'] .tables-sub").inner_text() == "its tags, as a list"
     page.keyboard.press("Escape")
     page.wait_for_selector("#modal", state="hidden")
     _open_export(page)
     assert page.locator(pressed).get_attribute("data-key") == "jsonl"
     assert page.locator("#modal .table-menu-foot .btn.primary").inner_text() == "Export 2 rows (.jsonl)"
+
+
+@pytest.fixture
+def wide(api, tmp_path):
+    """Three columns, User hidden in the grid's saved layout."""
+    f = tmp_path / "excols.csv"
+    f.write_text("Host,CommandLine,User\n" + "".join(f'"{h}","{c}","u{i}"\n' for i, (h, c) in enumerate(ROWS, 1)),
+                 encoding="utf-8")
+    sid = api("/api/ingest/path", "POST", {"path": str(f), "name": f.name, "build_fts": False})["id"]
+    try:
+        api("/api/layout", "POST", {"source_id": sid, "payload": {"order": ["Host", "CommandLine", "User"],
+                                                                  "columns": {"User": {"hidden": True}}}})
+        yield sid
+    finally:
+        api(f"/api/source/{sid}", "DELETE")
+
+
+def _listed(page):
+    """The list as it reads: each row's key, and whether it is ticked."""
+    return page.eval_on_selector_all(
+        "#modal .export-col-row",
+        "rs => rs.map((r) => [r.dataset.id, r.querySelector('input[type=checkbox]').checked])")
+
+
+GRID = [["w:line", True], ["w:tags", True], ["w:note", True], ["c:Host", True], ["c:CommandLine", True],
+        ["c:User", False]]
+
+
+def test_the_file_holds_the_columns_ticked_in_the_order_left(page, wide):
+    _open_filtered(page, wide)
+    layout_before = page.evaluate("() => JSON.stringify([__winnow.S.order, __winnow.S.layout])")
+    _open_export(page)
+    assert _listed(page) == GRID, "starts as the grid has it, the hidden column unticked"
+    assert page.locator("#modal .export-col-row[data-id='c:User'] .tables-sub").inner_text() == "text · hidden in the grid"
+    row = lambda key: page.locator(f"#modal .export-col-row[data-id='{key}']")  # noqa: E731
+    row("w:line").locator("input").uncheck()
+    row("w:note").locator("input").uncheck()
+    row("c:User").locator("input").check()
+    # The top half of Host's row: User lands before it.
+    row("c:User").drag_to(row("c:Host"), target_position={"x": 40, "y": 3})
+    page.wait_for_function("() => document.querySelectorAll('#modal .export-col-row')[3].dataset.id === 'c:User'")
+    row("c:CommandLine").hover()
+    row("c:CommandLine").locator("[data-role=top]").click()
+    assert _listed(page) == [["c:CommandLine", True], ["w:line", False], ["w:tags", True], ["w:note", False],
+                             ["c:User", True], ["c:Host", True]]
+    btn = page.locator("#modal .table-menu-foot .btn.primary")
+    with page.expect_download(timeout=15_000) as dl:
+        btn.click()
+    text = Path(dl.value.path()).read_text(encoding="utf-8")
+    assert list(csv.reader(io.StringIO(text))) == [
+        ["CommandLine", "Tags", "User", "Host"],
+        ["net user | findstr <x>", "", "u3", "WKSTN-3"],
+        ["'=cmd|' /C calc'!A1", "", "u1", "WKSTN-1"]]
+
+    # The grid is as it was; the next export starts from it again.
+    assert page.evaluate("() => JSON.stringify([__winnow.S.order, __winnow.S.layout])") == layout_before
+    _open_export(page)
+    assert _listed(page) == GRID
+    assert page.locator("#modal .export-cols-tool", has_text="Reset to the grid").is_disabled()
+
+
+def test_a_choice_holds_across_formats_and_reset_brings_the_grid_back(page, wide):
+    _open_filtered(page, wide)
+    _open_export(page)
+    page.locator("#modal .export-format .export-formats button[data-key=csv]").click()
+    tools = lambda label: page.locator("#modal .export-cols-tool", has_text=label)  # noqa: E731
+    btn = page.locator("#modal .table-menu-foot .btn.primary")
+    tools("None").click()
+    assert btn.is_disabled() and btn.inner_text() == "Choose a column to export"
+    # All and None act on what the filter lists.
+    page.locator("#modal .export-cols-top .side-search").fill("o")
+    assert [k for k, _ in _listed(page) if page.locator(f"#modal .export-col-row[data-id='{k}']").is_visible()] == \
+        ["w:note", "c:Host", "c:CommandLine"]
+    tools("All").click()
+    page.locator("#modal .export-cols-top .side-search").fill("")
+    picked = [["w:line", False], ["w:tags", False], ["w:note", True], ["c:Host", True], ["c:CommandLine", True],
+              ["c:User", False]]
+    assert _listed(page) == picked
+    page.locator("#modal .export-formats button[data-key=jsonl]").click()
+    assert _listed(page) == picked, "the choice survives a change of format"
+    with page.expect_download(timeout=15_000) as dl:
+        btn.click()
+    objs = [json.loads(x) for x in Path(dl.value.path()).read_text(encoding="utf-8").splitlines()]
+    assert [list(o) for o in objs] == [["Note", "Host", "CommandLine"]] * 2
+    assert [o["Host"] for o in objs] == ["WKSTN-3", "WKSTN-1"]
+    _open_export(page)
+    tools("None").click()
+    assert not tools("Reset to the grid").is_disabled()
+    tools("Reset to the grid").click()
+    assert _listed(page) == GRID
+    assert btn.inner_text() == "Export 2 rows (.jsonl)"
+    page.keyboard.press("Escape")
+    page.wait_for_selector("#modal", state="hidden")

@@ -116,8 +116,13 @@ format does with a value: the formula guard on exactly CSV, TSV and Excel,
 JSON's deduplicated keys (a table's own Note is Note_1), Markdown's
 escaping, HTML's escaping and its refusal of a tag colour that isn't hex,
 and the route's media types, file names, 400/409 and log row counts.
+The same file holds every format to a chosen column list (a hidden column
+in, both Notes out, Line last), on a merge, on a file of Winnow's columns
+alone through all three readers, and refuses a list it can't honor.
 `tests/ui/test_export_view_formats_ui.py` presses each format's button on
-a filtered, reverse-sorted table and reads the download.
+a filtered, reverse-sorted table and reads the download; then unticks,
+ticks, drags and ⤒s in the column list and reads that back, and checks
+the grid's layout is untouched and the next dialog starts from it.
 `test_merge_advanced_search.py` is Advanced search's
 merge case (invariant 9), with members indexed, not, and mixed.
 `test_wiki_shortcuts.py` holds the shortcut table in
