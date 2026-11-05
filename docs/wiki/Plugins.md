@@ -218,24 +218,6 @@ click a field — or Tab to it and press Enter — and pick an area from the
 Escape closes). An area the field is already in is greyed out with
 "Already there", and **Columns** or **Rows** says "Moves it out of Rows"
 (or Columns) when picking it would take the field out of the other one.
-
-The order of the fields in an area is part of the pivot: the first field
-in **Rows** is the outer grouping and the next one nests inside it,
-**Columns** stack their headers the same way, and **Values** read left to
-right in their order. To change it, drag a chip by its ⠿ handle (or
-anywhere on it) and let go where the line shows, above, between or below
-the other chips. A field dragged in from the list or from another area
-lands where you let go too, rather than at the end. Click ⠿, or
-right-click the chip, for its menu: **Move up**, **Move down**, **Move to
-the top** and **Move to the bottom** (in an area of three or more),
-**Move to** each of the other areas, and **Remove**. From the keyboard,
-Tab to the handle and press Enter for that menu, or press `Alt+↑` /
-`Alt+↓` to move the chip one place; the focus stays on the chip you
-moved. A value keeps its aggregation when it moves, and a sort set by
-clicking a value's header stays on that value. Reordering **Columns**
-puts the rows back in their own order, because the column the sort was
-on is no longer the same column.
-
 Values can be **Count**, **Distinct count**, **Sum**,
 **Average**, **Min** or **Max**; Count counts non-empty cells, and Sum and
 Average ignore text that isn't a number. Filters use `is any of`,
