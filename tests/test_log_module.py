@@ -133,7 +133,7 @@ def test_an_export_that_fails_mid_stream_is_an_error_entry(store, client, tmp_pa
     def boom(*a, **k):
         yield "A,B\n"
         raise RuntimeError("disk full")
-    monkeypatch.setattr(store, "export_view_csv", boom)
+    monkeypatch.setattr(store, "export_view", boom)
     try:
         client.get(f"/api/export?view_id={view['view_id']}")
     except RuntimeError:
