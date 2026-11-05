@@ -47,13 +47,15 @@ def parallel(store, monkeypatch):
     monkeypatch.setattr(store_mod, "PARALLEL_SCAN_MIN_ROWS", 0)
     monkeypatch.setattr(store_mod, "PARALLEL_SCAN_THREADS", 4)
     calls: list = []
-    real = store_mod.Store._parallel_contains
+    real = store_mod.Store._parallel_contains_many
 
-    def spy(self, *a, **k):
-        out = real(self, *a, **k)
-        calls.append(out)
+    def spy(self, jobs, *a, **k):
+        # One entry per table scanned: a table alone is one job, a merge's
+        # members are one job each in a single call.
+        out = real(self, jobs, *a, **k)
+        calls.extend(out)
         return out
-    monkeypatch.setattr(store_mod.Store, "_parallel_contains", spy)
+    monkeypatch.setattr(store_mod.Store, "_parallel_contains_many", spy)
     return calls
 
 
@@ -65,7 +67,7 @@ def _view_cells(store, source_id, spec):
 def _single(monkeypatch, fn):
     """fn's answer from the single scan, the way a small table gets it."""
     with monkeypatch.context() as m:
-        m.setattr(store_mod.Store, "_parallel_contains", lambda self, *a, **k: None)
+        m.setattr(store_mod.Store, "_parallel_contains_many", lambda self, jobs, *a, **k: [None] * len(jobs))
         return fn()
 
 
@@ -119,6 +121,59 @@ def test_a_merge_whose_member_spells_a_column_differently(store, write_csv, para
         assert got == _single(monkeypatch, lambda: _view_cells(store, mid, spec)), term
         assert got
     assert len(parallel) == 6 and all(c is not None for c in parallel)
+
+
+def _small_members(store, write_csv, n: int = 6, rows: int = 300) -> tuple[int, list[int]]:
+    data = _rows(rows * n)
+    ids = [store.ingest_csv(write_csv([HEADER, *data[1 + k * rows:1 + (k + 1) * rows]], f"m{k}.csv"),
+                            name=f"m{k}", build_fts=False)["id"] for k in range(n)]
+    return store.create_merge("hosts", ids)["id"], ids
+
+
+def test_a_merge_of_small_members_is_scanned_in_parallel(store, write_csv, parallel, monkeypatch):
+    """Each member is under the threshold and the merge is over it. Asked
+    one member at a time, none qualified, and 60 small tables searched on
+    one core where the same rows as one table searched on four."""
+    monkeypatch.setattr(store_mod, "PARALLEL_SCAN_MIN_ROWS", 1000)
+    mid, ids = _small_members(store, write_csv)
+    for extra in SPECS:
+        for term in ("beacon", "HOST-3", "Админ", "zzqqxx"):
+            parallel.clear()
+            spec = {"search": term, "search_mode": "contains", **extra}
+            got = _view_cells(store, mid, spec)
+            assert len(parallel) == len(ids) and all(c is not None for c in parallel), (term, extra)
+            assert got == _single(monkeypatch, lambda: _view_cells(store, mid, spec)), (term, extra)
+
+
+def test_a_merge_member_over_its_share_hands_back_alone(store, write_csv, parallel, monkeypatch):
+    """The cap is shared by the rows each member holds. A member finding
+    more than its share is scanned the usual way; the others keep what
+    their parallel scan found, rather than every member scanning twice."""
+    noisy = [HEADER] + [[f"HOST-{i}", "u", "beacon out", "C:\\x"] for i in range(300)]
+    quiet = [HEADER] + [[f"HOST-{i}", "u", "beacon out" if i == 77 else "ok", "C:\\x"] for i in range(300)]
+    a = store.ingest_csv(write_csv(noisy, "a.csv"), name="a", build_fts=False)["id"]
+    b = store.ingest_csv(write_csv(quiet, "b.csv"), name="b", build_fts=False)["id"]
+    mid = store.create_merge("m", [a, b])["id"]
+    # 600 rows on 4 threads: ranges of 150, each allowed 100 * 150 / 600 = 25.
+    monkeypatch.setattr(store_mod, "PARALLEL_SCAN_MAX_RIDS", 100)
+    spec = {"search": "beacon", "search_mode": "contains"}
+    got = _view_cells(store, mid, spec)
+    assert parallel[0] is None and parallel[1] is not None
+    assert len(got) == 301
+    assert got == _single(monkeypatch, lambda: _view_cells(store, mid, spec))
+
+
+def test_a_cancel_stops_a_merge_scan(store, write_csv, held_scan):
+    started, release, rows_read = held_scan
+    mid, _ = _small_members(store, write_csv)
+    t, out = _build_in_thread(store, mid, {"source_id": mid, "filters": [], "sort": [], "op_token": "tok-m",
+                                           "search": "beacon", "search_mode": "contains"})
+    assert started.wait(10)
+    assert store.cancel_op("tok-m")
+    release.set()
+    t.join(30)
+    assert isinstance(out.get("error"), OpCancelled)
+    assert len(rows_read) < 50
 
 
 def test_spec_sql_still_renders_the_scan_itself(store, write_csv, parallel):

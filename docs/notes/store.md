@@ -485,6 +485,8 @@ see [docs/notes/README.md](README.md) for the whole set.
   non-empty, which is what keeps an otherwise unfiltered view off the
   `root_virtual` carve-out — appended to the SQL text after that gate it
   would silently take the virtual path with every position wrong.
+  (`dedupe_columns`, "Hide duplicate rows", does NOT land there, and so
+  closes that gate itself — see its own entry below.)
   This matters a lot more for a **merge**: `build_view` compiles the filter
   once per member and `UNION ALL`s the results (see `_resolve_members`), so
   an unindexed sargable filter is a full scan repeated across every member,
@@ -496,6 +498,45 @@ see [docs/notes/README.md](README.md) for the whole set.
   rather than the raw column name, since a column name is arbitrary CSV-
   header text and this sidesteps identifier-safety entirely rather than
   leaning on `q()` for a human-readable name nobody needs to read.
+- **"Hide duplicate rows" is built in `build_view`, not `_compile_where`.**
+  `spec.dedupe_columns` (the client sends the visible columns, in source
+  order) keeps one row per set matching in all of them: a GROUP BY over
+  those columns, after the filters, keeping the lowest rid. It cannot be
+  a WHERE clause per member, because on a merge two copies of one event
+  can sit in two members and no member's WHERE sees the other. So both
+  branches of `build_view`, and `spec_sql`, carry it themselves, and the
+  virtual-root gate checks `not dedupe` on its own:
+  - **Single table:** `rid IN (SELECT MIN(rid) FROM ... WHERE <filters>
+    GROUP BY <columns>)` and the usual ORDER BY outside. The filters run
+    once, inside the GROUP BY. Measured on the 1.2M-row fixture: ~1.1–1.7 s
+    on five low-cardinality columns, 2–3.5 s on all ten (where nothing is
+    a duplicate and every rid goes through the IN list), against 0.15 s for
+    the same sort without it; the box was noisy, so treat those as ranges.
+    A `ROW_NUMBER() OVER (PARTITION BY ...)` shape measured about twice as
+    slow, and carrying the sort keys out as bare columns of the GROUP BY
+    (the merge's shape) was no faster.
+  - **Merge:** every member's branch adds a rank, `member index ×
+    DEDUPE_MEMBER_STRIDE + rid`, and its dedupe columns; one GROUP BY over
+    the whole union keeps `MIN(rank)`, and SQLite's min() rule (in an
+    aggregate with a single `min()`, a bare column comes from the row
+    holding the minimum) brings that row's member id, rid and sort keys
+    out with it. The rank is also the ORDER BY's last term: the GROUP BY
+    hands rows over in key order, so without it two kept rows that tie
+    on every sort key and on rid came out in group order, not member
+    order (the other two shapes keep member order). The rank's alias is
+    `_free_alias`'d past every column name, like the member id's.
+  - **NULL and '' are one value** (`IFNULL(col, '')` in the key): a
+    merge reads a column a member lacks as NULL while another member has
+    '', and both are an empty cell to the analyst.
+  - **Never cached as an unfiltered merge view** (`not dedupe` in the
+    `_merge_view_cache` condition): the cache key is the SELECT text, and
+    a dedupe on a derived column changes under the same text when it is
+    re-derived. Everything downstream (`group_summary`, the histogram's
+    rows key, exports, `tag_view`, `save_view_as_source`) reads `v.view_N`
+    and needed nothing; `_grouping_covers_whole_source` compares row
+    counts, so a deduplicated view with fewer rows is correctly not
+    "every row".
+  `tests/test_hide_duplicate_rows.py`.
 - **Some columns are indexed at import, by shape** (`_build_import_indexes`,
   from a header set's `indexes` in defaults/headers.json: EventId for
   EvtxECmd). Not for the first filter's sake but for the planner's: once
@@ -588,6 +629,39 @@ see [docs/notes/README.md](README.md) for the whole set.
   quotes a CR, and puts `"\n"` back, and a NUL goes through `_csv_rows`'s
   escape. tests/test_csv_round_trip.py imports, exports and re-imports the
   awkward cells, and forces the 3.10 path on every CI Python.
+- **The current view's export formats share one reader.**
+  `_export_view_rows` picks the shape (root_virtual, group_virtual,
+  materialised) and yields a meta dict, then batches of `(Line, table or
+  None, [tags], note, cells)`; a writer per format (`_VIEW_TEXT_WRITERS`,
+  and `export_view_xlsx` for the workbook) only decides how a value is
+  written down. Before, the three readers each wrote CSV inline, so a
+  second format would have meant three more copies of the paging, the
+  tag/note lookups and the merge's Table column, free to drift apart. The
+  CSV writer's output is byte for byte what it was (test_group_export.py
+  and test_csv_round_trip.py hold it). Two things a new format has to keep:
+  `_export_text` closes the rows generator in a `finally`, which hands the
+  pooled reader back the moment a download is abandoned; and the formula
+  guard belongs to the formats a spreadsheet opens (CSV, TSV, Excel) and
+  no others: JSON, Markdown and HTML are read by people and programs, and
+  an apostrophe there is a changed value. Markdown and HTML make control
+  characters visible (`\x07`, as `_xlsx_safe` does) because neither can
+  show them; JSON escapes them itself. tests/test_export_formats.py.
+- **An export's columns are a plan, and the writers only arrange.**
+  `_export_plan` turns the dialog's list into `(kind, name)` pairs —
+  `line`/`table`/`tags`/`note` for Winnow's, `col` for the table's —
+  validated eagerly in `_export_view_rows` (a ValueError there is the
+  route's 400; inside the generator it would be a truncated download).
+  The prefix (`w:`/`c:`) is not decoration: a table can have its own
+  `Note` or `Line`. `None` is the layout's plan, which is what every
+  caller before the dialog chose columns gets. The readers select only
+  the plan's own columns (`_export_select`, just `rid` when there are
+  none) and still yield `(Line, table, tags, note, cells)`; each writer
+  formats those five and `_export_arranger` puts them in the file's
+  order, so the header and the rows go through the same function and
+  can't disagree. The arranger's fast path for the default plan builds
+  the list directly, as the writers did before; the general path costs
+  one tuple and an index per cell. JSON keys are made unique with
+  Winnow's claimed first, wherever the plan puts them.
 - **A `_reader()` block is one read transaction, and so is a SQL pane
   query.** A statement whose schema changed between its prepare and its
   step is re-prepared, up to 50 times, and in autocommit each try reads
@@ -624,6 +698,62 @@ see [docs/notes/README.md](README.md) for the whole set.
   `_QueuedBuild` per build, alive until the worker has done that one, so
   `wait_for_column_index`, `list_column_indexes`' "building" and the
   dedup read them as they read the thread they replace.
+- **A merge of many tables has to cost about what the same rows imported
+  as one file cost.** Analysts compared the two (60 hosts' EvtxECmd
+  output merged in Winnow against the files joined outside it and
+  imported once) and found the merge several times slower at everything.
+  Measured on that shape, 60 members and 300k rows (1.2M at the large
+  size), develop before the fix: searches 4x, the default sorted view 4x,
+  the Values list 8x, an indexed equals filter 280x, grouping 500x+, a
+  page of rows 25x. Five causes, each a per-member cost nothing else had:
+  - *Column matching per member, per call.* `_member_column` scanned the
+    member's columns for every merge column (`_col_key` on each), and
+    `_member_projection` ran it for every column of every member, several
+    times per build — members × columns² case folds per read, most of a
+    page fetch's 50 ms. `_member_column_keys` is the member's lookup table
+    once (lru-cached on the column list itself) and
+    `_member_projection_cached` memoizes the projection on everything it
+    reads; pass `keys` to `_member_column` in any new loop over columns.
+  - *A search scanned one member at a time on one core.* Each member was
+    under `PARALLEL_SCAN_MIN_ROWS`, so none got the parallel scan a
+    single table of the same rows gets. `_merge_contains_found` scans
+    every member that needs it in one pool (`_parallel_contains_many`):
+    ranges of about a thread's share of all the rows, a small member one
+    range, and a member over its share of `PARALLEL_SCAN_MAX_RIDS` hands
+    back alone.
+  - *The Values list grouped the bare union*, so every row of every
+    member went through one temp B-tree. `column_values` on a merge
+    counts per member (each member's column index, no sort) and sums.
+  - *Members were looked up one query at a time*, two per member, more
+    than once per read. `_members_lite_on` is two queries for all of them.
+  - *Clear filters rebuilt the merge's order every time.* A single
+    table's unfiltered view is an index walk or no table at all; a
+    merge's is every member's rows merged (`MERGE (UNION ALL)`) and
+    written, about 2.5x the single table even at best — SQLite's merge of
+    60 streams is the cost, and neither a balanced tree of compounds nor
+    the sorter with `PRAGMA threads` beat it. So `_keep_merge_view` keeps
+    the table an unfiltered merge view was built into, keyed by the
+    SELECT text, its parameters and each member's row count (member
+    tables never change, invariant #1), and the next identical build is
+    that table again under its own id. Two per merge; never for a sort on
+    a derived column (a re-derive rewrites its values under the same
+    text), a held build, or a filtered one. Eviction skips a kept table
+    (`_merge_view_kept`); `update_merge` and `delete_merge` drop them
+    (`_forget_merge_views`). A test that wants the build's SQL has to let
+    them go first, as `_merge_build_sql` in test_merge_view_build.py does.
+  After, at 1.2M rows: searches 0.9–1.1x, the Values list 1.3x, a page
+  of rows 7–10 ms (was 60–68), filtered and grouped reads in tens of
+  ms, export 1.2x. The first sorted build is still 3x (time) to 8x
+  (text), the merge of 60 index streams above, and Clear filters after
+  it is faster than a single table's rebuild. Still open: an unsorted,
+  unfiltered merge view reads every member's whole table to number its
+  rows (1.1 s at 1.2M). Its rows and their order follow from the member
+  row counts alone, so it could be generated without reading a row, but
+  the app opens a table sorted by its first timestamp, so it is rarely
+  the view anyone sees.
+  The comparison script and its numbers are in the project's
+  benchmarks/2026-11-04-merge-many folder; rerun it before and after any
+  change to a per-member loop.
 - **A regex is checked before it runs, and some are refused**
   (`_compiled_regex`, called by the regex filter op, regex search mode,
   any `REGEXP '…'` literal in a raw fragment or the SQL pane

@@ -29,6 +29,7 @@ export const S = {
   order: [],            // column names in display order
   valueFilterMode: 'auto', // 'auto' (on under VALUE_FILTER_AUTO_MAX rows) | 'on' | 'off' — this table's value-picker default, per-column overrides live in S.layout
   hideEmptyRows: false, // the table menu's "Hide empty rows" — a per-table view preference, saved in the layout like valueFilterMode
+  hideDuplicateRows: false, // "Hide duplicate rows" — one row per set matching in every visible column; per table, in the layout like hideEmptyRows
   filters: nameMap(),   // name -> raw filter text — a nameMap too, for the same reason
   filterOpen: [],       // column names whose filter box is revealed under the filter bar — transient, per table, never persisted
   sort: [],             // [{column, dir}]

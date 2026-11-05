@@ -183,6 +183,19 @@ export async function removeColumnFilter(column) {
   await rebuildView();
 }
 
+/* "Hide duplicate rows" compares the columns the grid shows: [] when the
+   toggle is off, otherwise every column not hidden in the layout — a
+   grouped column included, since it is still on screen in the group
+   strip and a duplicate across two of its groups would leave a count
+   wrong. In the table's own column order rather than S.order, so
+   dragging a column somewhere else is not a different comparison (and
+   not a rebuild); hiding or showing one is, and saveLayout rebuilds for
+   it (syncDuplicateRows). */
+export function duplicateRowColumns() {
+  if (!S.hideDuplicateRows) return [];
+  return S.columns.map((c) => c.name).filter((n) => !(S.layout[n] || {}).hidden);
+}
+
 export function currentSpec() {
   const filters = [];
   for (const [column, raw] of Object.entries(S.filters)) {
@@ -205,6 +218,7 @@ export function currentSpec() {
     tags: S.tagFilter,
     time_range: S.timeRange,
     hide_empty_rows: !!S.hideEmptyRows,
+    dedupe_columns: duplicateRowColumns(),
   };
 }
 

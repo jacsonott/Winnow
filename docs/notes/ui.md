@@ -1714,6 +1714,35 @@ see [docs/notes/README.md](README.md) for the whole set.
   Columns borrow the merge builder's vocabulary (`.mb-stats`, `.mb-seg`,
   `.mb-notes`, `.mb-field`) rather than adding their own.
   tests/ui/test_table_menu_sections.py, test_table_menu_strip.py.
+- **The Columns pane's All / Shown switch leaves hidden columns out of
+  the list, never out of `S.order`** (`.tm-cols-seg`, `columnsListMode`
+  in timeframe.js). Asked for because a KAPE table with most of its
+  columns put away lists mostly unticked rows, the few the grid shows
+  scattered through them. Decisions:
+  - **The rows are `hidden`, not removed**, the same way the filter box
+    hides rows (`applyFilter` does both), so the drag order still runs
+    over the whole of `S.order` and a drop between two listed rows lands
+    where the list shows it, with the hidden columns between them kept in
+    place. test_columns_list_shown_only.py drags under Shown and checks
+    every column is still in the order.
+  - **What is left out is worked out on a name typed or the switch
+    flipped, never on a box unticked.** A row unticked under Shown stays
+    where it is until the list is next filtered or the menu reopens.
+    Hiding it at once moved every row under the pointer up one and made a
+    misclick a trip to All and a hunt for the column.
+  - **The way back is always on screen**: `.collist-more` under the list
+    counts what Shown leaves out, and with a name typed, the hidden
+    columns that match it ("2 hidden columns match …"), so a search for a
+    column that is put away says where it went rather than finding
+    nothing. Its **List all columns** switches to All and keeps the name.
+    With nothing listed above it, `.alone` drops its rule.
+  - **A per-browser preference, one for every table**: `winnow.tableMenu`
+    `{columnsList}` in localStorage, like `winnow.histogram`, never the
+    layout or the case file. It is how the analyst reads the menu, not a
+    fact about one table, and on a table with every column shown it
+    changes nothing. All is the default, so nobody who never touches it
+    sees a different menu. The test checks it does not reach
+    `/api/layout`.
 - **The Tables manager is the same two panes, sharing the frame**
   (`sectionPanes` in ui.js, which `openTableMenu` builds on too;
   `TABLES_MANAGER_SECTIONS` in tables.js). Its sections are case-wide
@@ -1839,6 +1868,36 @@ see [docs/notes/README.md](README.md) for the whole set.
     into ACME", "Export 1,204 rows (.csv)", "Add 2 files"). The copy is
     guarded by `oneAtATime`, as the old per-row button was
     (test_double_click_submits_once.py).
+  - **Export's Current view picks a format on a row of its own**
+    (`VIEW_EXPORT_FORMATS` in sources.js, mirroring store.py's by key),
+    under the counts rather than as more side-list entries: the format
+    changes how the view is written, not what is exported. The choice is
+    remembered in `localStorage` (`winnow.exportFormat`) and every place
+    that names the format follows it: the main button's extension, the
+    side list's hint (a `sections:changed` event repaints it), the note
+    describing the format, and the column list (Tags "as a list" in JSON,
+    and a table column whose name collides shows the deduplicated key the
+    file really has, `uniqueKeys` mirroring the server's `_unique_keys`).
+    A merge lists its Table column too, which the list had always left
+    out. Markdown and HTML past `REPORT_FORMAT_ROWS` get a warning note,
+    not a refusal. tests/ui/test_export_view_formats_ui.py.
+  - **The Current view's column list is the file's columns, and choosing
+    there never touches the grid.** `fileCols` (`{ key, on }`, keys
+    `w:line`… and `c:<name>`, the strings `/api/export`'s `columns` takes)
+    lives in `openExportModal`'s closure, seeded by `gridColumns()` from
+    `S.order` and `S.layout` — NOT `S.columns`, which is storage order;
+    the list used to show that while the file came out in the layout's
+    order. It survives a change of format and a switch between panes, and
+    a reopened dialog starts from the grid again: a choice remembered per
+    table would need rules for every column the grid hid or added since,
+    and "the grid, then this export's changes" needs none. The dialog
+    always sends the whole list, even untouched, so the file is what the
+    list showed even while a layout save is still in its debounce. Rows
+    reorder through `wireDragReorder` (the tab strip's), ⤒ ⤓ and Alt+↑ ↓
+    on the tick box; every change repaints through `keepingFocus`, so the
+    moved row keeps focus. All and None act on the rows the filter shows.
+    The URL holds the list: uvicorn (h11) took a 70,000-character query
+    in testing, so a KAPE-wide table is nowhere near a limit.
   - **Comparing runs as the sides change**; `runCompare` clears the last
     answer before asking, so a pane never shows one comparison's counts
     under the other's names. The heads are A/B, as the gutter marks are,
@@ -1975,6 +2034,28 @@ see [docs/notes/README.md](README.md) for the whole set.
   table in the layout payload (`hide_empty_rows`, beside
   `value_filters`) and in the per-tab stash. "Reset view"/`clearAllFilters`
   leave it alone, like the value-filter default.
+- **"Hide duplicate rows" follows the visible columns, so the layout can
+  rebuild the view.** `S.hideDuplicateRows` is plumbed exactly like
+  `S.hideEmptyRows` (layout payload `hide_duplicate_rows`, the per-tab
+  stash, the background-search snapshot), but what it sends is a column
+  list: `duplicateRowColumns()` in filters.js, every column the layout
+  doesn't hide, in `S.columns` (source) order. Source order rather than
+  `S.order` so dragging a column is not a different spec, and so not a
+  rebuild; a grouped column still counts, since `hidden` is never set on
+  it and a duplicate across two of its groups would leave a group count
+  wrong. Hiding or showing a column IS a different spec, and the places
+  that do it (the Columns list, Show all, Hide empty columns, a layout
+  applied) all end in `saveLayout()` — which is why saveLayout is a
+  wrapper now: it schedules the debounced save and calls
+  `syncDuplicateRows()` (view.js), which rebuilds only when the toggle is
+  on and the list differs from the one the view was built with, read off
+  the in-flight build's key or else `S.viewCache`'s. Debounced 150 ms so a
+  run of ticks is one GROUP BY over a big table, not one per tick. The
+  toolbar's stats line says "duplicates hidden" while it's on (Hide empty
+  rows doesn't): a count short by every repeat of every event reads as a
+  forgotten filter otherwise. The toggle itself is `toggleDuplicateRows()`
+  in timeframe.js, shared by the Columns pane button, Filters ▾ and the
+  keymap action (no default key). tests/ui/test_hide_duplicate_rows_ui.py.
 - **`clearAllFilters(seed)`** — Shift+F ("filter to this value and drop the
   rest") is that reset plus one filter, so it goes through the same
   function rather than a second implementation that would forget the
@@ -2477,7 +2558,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   would change along with it and see no difference at the next build.
   `tests/ui/test_undo_filter_change.py`.
 
-- **Stack view** (stack.js) — the column-header menu's "Stack values (rarest first)…" opens a chart of the current view's distinct values by count (via group_summary, order=count, up to 1,000 values), one bar per value, click-to-filter. Least-frequency-of-occurrence triage. **The chart is the dialog**: the table's columns down a side list (`sideRail`, pinnable) and the bars taking the rest of an `xwide`, tall modal. It used to be a canvas drawn with charts.js in a box sized to its bars, which read as too small. Decisions: **the bars are DOM elements, not canvas bars**, so each is focusable (ArrowUp/Down walk them, Enter filters), carries its full value in its title, takes the row menu (Filter to / Exclude / Copy value) and scrolls; **one scale for the column**, ending at the largest count with gridlines on the nearest 1-2-5 step (`scaleStep`, so 412 gets 0…400 by 100 and the longest bar spans the track — rounding the axis up to 600 wasted a third of it), kept when Filter values… narrows the bars; **the row height shares the chart's height out** (`size`: between 26 and 44px), so five values are five broad bars and a long tail scrolls; the value gutter is measured in the chart's face, at most two fifths of it. The foot says when the count or the drawing (500 bars) was cut short. tests/ui/test_stack.py. See docs/design/analysis-suite.md.
+- **Stack view** (stack.js) — the column-header menu's "Stack values (rarest first)…" opens a chart of the current view's distinct values by count (via group_summary, order=count, up to 1,000 values), one bar per value, click-to-filter. Least-frequency-of-occurrence triage. **The chart is the dialog**: the table's columns down a side list (`sideRail`, pinnable) and the bars taking the rest of an `xwide`, tall modal. It used to be a canvas drawn with charts.js in a box sized to its bars, which read as too small. Decisions: **the bars are DOM elements, not canvas bars**, so each is focusable (ArrowUp/Down walk them, Enter filters), carries its full value in its title, takes the row menu (Filter to / Exclude / Copy value) and scrolls; **one scale for the column**, ending at the largest count with gridlines on the nearest 1-2-5 step (`scaleStep`, so 412 gets 0…400 by 100 and the longest bar spans the track — rounding the axis up to 600 wasted a third of it), kept when Filter values… narrows the bars; **the row height shares the chart's height out** (`size`: between 26 and 44px), so five values are five broad bars and a long tail scrolls; the value gutter is measured in the chart's face, at most two fifths of it. The foot says when the count or the drawing (500 bars) was cut short. **A blank value's label is `.stack-label.blank`, never `.empty`**: until the rule was scoped to `.grid > .empty`, a bare `.empty` was the grid's opaque "No table open" cover (absolute, inset 0, z-index 6), so the "(empty)" bar's label covered the whole dialog and Stack showed nothing but "(empty)" on a blank screen. It surfaced on sparse columns such as an IP address that most event types leave blank; a column with no blank cells never drew the bar, which is why the suite missed it. tests/ui/test_stack.py. See docs/design/analysis-suite.md.
 
 - **Case notes tab** (notes.js) — a free-form Markdown scratchpad for the investigation narrative, stored in the case file (Store.case_notes) so it travels with the .db — distinct from the per-row notes, which the page now LISTS below the split (see below). The editor and a live preview sit side by side (`#notesSplit`, a flex row inside `.page-main`) split by a draggable divider; Edit / Split / Preview collapse one pane or the other through `data-mode` on the row, and the stylesheet does the hiding. Debounced autosave, a tiny dependency-free Markdown renderer (airgap). Page tabs now route visibility through sql.js's showMainView(id)/MAIN_VIEWS registry so adding a tab is a one-place edit. See docs/design/analysis-suite.md. Things that bite here:
   - **The mode never persists, the layout does** (`winnow.notes = { split, rows }` — the divider ratio as a ratio of the row, and whether the row-note strip is open; per browser, like `winnow.sidebar`, and written only when the analyst drags or toggles, never on a visit that touched nothing): Notes always opens in Split, and `showNotesTab` re-applies both *synchronously before* `await ensureNotesLoaded()` — the page is already showing by then, so applying them after the fetch paints the markup's 50/50 default and then jumps. A remembered preview-only mode would also hide the editor from Playwright's `fill()` in tests/ui/test_case_notes.py after its reload.

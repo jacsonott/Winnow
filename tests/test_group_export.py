@@ -3,7 +3,7 @@
 A small group of a table that holds every row (unfiltered, or only
 sorted) is never materialised: it is paged, tagged and exported straight
 off the source table (`group_virtual`), and its export has its own code,
-`Store._export_virtual_group_csv_rows`. Until these tests only its header
+`Store._export_virtual_group_rows`. Until these tests only its header
 line had ever run (test_silent_wrong_answers.py), so a wrong row, a tag on
 the wrong line or a note dropped there would have reached a report with
 every test green.
