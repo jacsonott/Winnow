@@ -578,6 +578,54 @@ see [docs/notes/README.md](README.md) for the whole set.
     (First/Last's `fl-ac` owns its keys on purpose); not for a menu.
   `tests/ui/test_field_place_menu.py` pins all of it against both tabs.
 
+- **Pivot's areas reorder, and the drop slot is read from the pointer.**
+  `addField` used to open with `if (from === zone) return` and always
+  `push`, so a chip let go in its own area did nothing and a field
+  dropped anywhere went to the end. Swapping two Rows fields meant
+  removing both and adding them back, and a value lost its aggregation on
+  the way. Analysts reported reordering as difficult; it was impossible.
+  Now `slotAt` takes the slot from the chips' vertical midpoints and
+  `addField(payload, zone, at)` / `arrange(zone, from, to)` put the field
+  there. Things to keep:
+  - **The slot line moves nothing.** `.pv-drop-line` is absolutely
+    placed on the area's box, outside the list `renderFields` rebuilds. A
+    placeholder that took up room would shift the midpoints the slot is
+    measured against, and the slot would flicker under a still pointer.
+    It is hidden for a slot just above or below the dragged chip itself
+    (a drop there changes nothing), and every area's cue is cleared on
+    `dragend`, since a drop outside every area sends no `drop`.
+  - **No pointer inside the box means "at the end".** The pivot tests
+    drag with synthetic `DragEvent`s that carry no coordinates (clientY
+    0), and they build Rows by adding fields in order. `slotAt` returns
+    null for a point outside the box, and null appends, so those drops
+    still land where they always did.
+  - **The sort is kept when it still means the same thing.** In Values,
+    `state.sort.measure` is an index; `arrange` follows the measure
+    object to its new index. In Rows the sort is untouched (each level is
+    sorted by the same column either way). In Columns `colVals` is a key
+    tuple in the old field order, so a Columns reorder resets to key
+    order rather than land on a different column.
+  - **A menu on the handle, not ▲/▼ on every chip.** A value chip already
+    holds a name, the aggregation `<select>` and ✕ in the 268px rail; two
+    more buttons left four or five letters of name. Even the 8px handle
+    cost the README screenshot's "RecordNumber" its last letters, so the
+    `<select>` is `field-sizing: content` now (min 62px, max 110px): as
+    wide as "Count", not as wide as "Distinct count", its widest option,
+    which handed the name back about 40px. A browser without
+    field-sizing keeps the old fixed width. The ⠿
+    handle (a `span role=button`, not a `<button>`: a button inside a
+    draggable chip doesn't start the drag in every browser) opens the
+    chip's menu on click, Enter or Space, and a right-click on the chip
+    opens it too. Alt+↑/↓ moves the chip one place from the keyboard —
+    not on the `<select>`, where Alt+↓ is the platform's open-the-list
+    key — and `focusGrip` puts the focus back on the moved chip, whose
+    `aria-label` ("Host, 2 of 3 in Rows") then announces where it went.
+  - **Playwright's emulated drag delivers dragover a move behind.** A real
+    browser also fires dragover on a timer, so it catches up by itself;
+    the emulated one doesn't. `tests/ui/test_pivot_reorder.py` ends each
+    drag on two one-pixel moves at the spot (`_hover`) and polls the line
+    (`_line_when`) rather than reading it once.
+
 - **Plugin enablement is two-layer, and the defaults point opposite ways.**
   Machine level (workspace/plugins.json): installed plugins are on unless
   in the `disabled` list; bundled examples (examples/plugins/, always in
