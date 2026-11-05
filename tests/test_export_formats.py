@@ -369,12 +369,17 @@ def test_the_route_refuses_an_unknown_format_and_an_expired_view(store, client, 
 
 def test_the_log_counts_rows_not_lines(store, client, case):
     """A note and a cell both hold a line break; counting newlines said
-    more rows than went out, and for JSON or HTML said nothing useful."""
+    more rows than went out, and for JSON or HTML said nothing useful.
+
+    Only lines logged after the mark: the log is one ring for the whole
+    process, and an earlier test's export of its own view_1 reads the same
+    up to the row count."""
     from winnow import log as wlog
     vid = _view(store, case)
+    mark = wlog.seq()
     for fmt in VIEW_EXPORT_FORMATS:
         client.get("/api/export", params={"view_id": vid, "format": fmt})
-    done = [e["message"] for e in wlog.entries() if e["message"].startswith("Export finished")]
+    done = [e["message"] for e in wlog.entries() if e["seq"] > mark and e["message"].startswith("Export finished")]
     for fmt, (label, _, _) in VIEW_EXPORT_FORMATS.items():
         line = next(m for m in done if m.startswith(f"Export finished: {label} view {vid}"))
         assert " — 4 rows" in line, line
@@ -466,13 +471,14 @@ def test_a_column_list_that_cannot_be_honored_is_refused(store, case, tmp_path, 
 def test_the_route_takes_the_columns_as_a_json_list(store, client, case):
     from winnow import log as wlog
     vid = _view(store, case)
+    mark = wlog.seq()   # this test's lines only (test_the_log_counts_rows_not_lines)
     r = client.get("/api/export", params={"view_id": vid, "columns": json.dumps(CHOSEN)})
     assert r.status_code == 200
     assert list(csv.reader(io.StringIO(r.text))) == CHOSEN_ROWS
     x = client.get("/api/export", params={"view_id": vid, "format": "xlsx", "columns": json.dumps(CHOSEN)})
     ws = load_workbook(io.BytesIO(x.content)).active
     assert [["" if v is None else str(v) for v in row] for row in ws.iter_rows(values_only=True)] == CHOSEN_ROWS
-    done = [e["message"] for e in wlog.entries() if e["message"].startswith("Export finished")]
+    done = [e["message"] for e in wlog.entries() if e["seq"] > mark and e["message"].startswith("Export finished")]
     assert any(f"view {vid} (5 columns)" in m for m in done)
     for bad in ('["c:Nope"]', "[]", "Host", '{"c": "Host"}'):
         for fmt in ("csv", "xlsx"):
