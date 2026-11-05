@@ -128,7 +128,10 @@ export function openStack(column) {
       go.dataset.role = 'bar';
       go.title = `${shown(g.value)}\n${g.count.toLocaleString()} rows — click to filter ${state.column} to it`;
       go.setAttribute('aria-label', say(g));
-      const label = el('span', 'stack-label' + (g.value == null || g.value === '' ? ' empty' : ''), shown(g.value));
+      // `blank`, not `empty`: a bare .empty was the grid's whole-grid
+      // "No table open" cover, so an "(empty)" bar's label covered the
+      // dialog with it.
+      const label = el('span', 'stack-label' + (g.value == null || g.value === '' ? ' blank' : ''), shown(g.value));
       const track = el('span', 'stack-track');
       const fill = el('span', 'stack-fill' + (g.count === 1 ? ' once' : ''));
       fill.style.width = `${(g.count / scaleMax) * 100}%`;

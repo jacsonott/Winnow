@@ -18,6 +18,16 @@ Then pick the **Pivot** page tab.
   keyboard) and pick an area from the small **Place in** menu under it.
   An area the field is already in is greyed out ("Already there"), and
   Rows/Columns say when picking one moves the field out of the other.
+- **Reorder by dragging, by menu or by key.** A drop lands where the
+  pointer is, with a line showing the slot before you let go, so a chip
+  dragged within its own area moves there and a field dragged in from
+  elsewhere lands between the chips it was dropped between. Every chip
+  has a ⠿ handle: click it (or right-click the chip) for Excel's field
+  menu, Move up / Move down / Move to the top / Move to the bottom /
+  Move to another area / Remove, or focus it and press Alt+↑ / Alt+↓.
+  The order is the pivot's: Rows nest outer to inner, Columns stack
+  their headers, Values read left to right. A moved value keeps its
+  aggregation, and a header sort follows the value it was on.
 - **Nested rows and columns.** Several fields in Rows nest, with a subtotal
   after each group; several in Columns produce stacked column headers.
 - **Aggregations**: Count, Distinct count, Sum, Average, Min, Max. One
@@ -120,5 +130,7 @@ Backend tests live with Winnow's own suite, in `tests/test_plugins.py`
 (`-k pivot`); the tab itself is driven by `tests/ui/test_pivot_tags.py`
 (the tag chips), `tests/ui/test_pivot_state.py` (the saved pivots),
 `tests/ui/test_pivot_refresh.py` (the table kept, dimmed, while the next
-one is worked out) and `tests/ui/test_field_place_menu.py` (the **Place
-in** menu, shared with First/Last).
+one is worked out), `tests/ui/test_pivot_reorder.py` (reordering the
+areas: drop slots, the handle's menu, Alt+↑/↓) and
+`tests/ui/test_field_place_menu.py` (the **Place in** menu, shared with
+First/Last).

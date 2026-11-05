@@ -107,7 +107,23 @@ when nothing was. Adding a reader means adding it to `READERS` there.
 `test_group_export.py` holds the export of an expanded small group (its
 own code path, `group_virtual`) to the rows the grid pages for it and,
 byte for byte, to the same rows exported through a filter or a
-materialised group. `test_merge_advanced_search.py` is Advanced search's
+materialised group. `test_export_formats.py` reads every format the
+current view exports to (TSV, Excel, JSON Lines, JSON, Markdown, HTML)
+back into rows and holds it, cell for cell, to the CSV of the same
+filtered, sorted view, tagged-only too, through all three view readers
+(root_virtual, group_virtual, materialised) and on a merge; then what each
+format does with a value: the formula guard on exactly CSV, TSV and Excel,
+JSON's deduplicated keys (a table's own Note is Note_1), Markdown's
+escaping, HTML's escaping and its refusal of a tag colour that isn't hex,
+and the route's media types, file names, 400/409 and log row counts.
+The same file holds every format to a chosen column list (a hidden column
+in, both Notes out, Line last), on a merge, on a file of Winnow's columns
+alone through all three readers, and refuses a list it can't honor.
+`tests/ui/test_export_view_formats_ui.py` presses each format's button on
+a filtered, reverse-sorted table and reads the download; then unticks,
+ticks, drags and ⤒s in the column list and reads that back, and checks
+the grid's layout is untouched and the next dialog starts from it.
+`test_merge_advanced_search.py` is Advanced search's
 merge case (invariant 9), with members indexed, not, and mixed.
 `test_wiki_shortcuts.py` holds the shortcut table in
 docs/wiki/Settings-and-shortcuts.md to keymap.js's `DEFAULT_KEYMAP` and
@@ -229,7 +245,10 @@ definitions and never their values. `test_home_drop.py`: files dropped on
 a case row go into that case and nowhere else, dropped off the rows they
 start a quick look; each on its own server, since both switch the case.
 `test_pivot_export_filter.py`: the pivot's Copy and CSV (formula guard
-included) and its field filter. `test_firstlast_copy.py`: Copy result,
+included) and its field filter. `test_pivot_reorder.py`: reordering the
+pivot's areas with a real pointer drag (the slot line, drops between
+chips), the ⠿ handle's menu and Alt+↑/↓; its drags end on two small moves
+because the emulated drag sends dragover a move behind the pointer. `test_firstlast_copy.py`: Copy result,
 including the card it waits on when the analyst has left the tab, held
 at `job/start` so the answer lands while the tab is hidden.
 

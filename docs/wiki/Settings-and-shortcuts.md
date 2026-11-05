@@ -201,6 +201,7 @@ once, with all its keys.
 | Filter by selected cell's value, dropping every other filter | `F` |
 | Clear all filters, search and tag filter | `c` |
 | Undo the last filter change (press again to keep stepping back) | `z` |
+| Hide duplicate rows on/off (rows that match in every visible column) | none |
 | Select every row in the current view (same as the header checkbox) | `Ctrl+a` |
 | Copy the unique values of the cursor's column — from the selected rows, else the whole view | `Ctrl+Shift+U`, `Meta+Shift+U` |
 | Open Tables manager | `t` |

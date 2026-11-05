@@ -677,14 +677,15 @@ def tag_written():
 @pytest.fixture
 def layout_saved(page, api, until):
     """Wait for the open table's layout (widths, pins, hidden columns,
-    order, hide-empty-rows) to reach the server. saveLayout waits 400 ms
-    for the changes to stop before it posts, so a test that reopens or
-    reloads straight after one reads back the layout from before it, and
-    a cleanup that ends without waiting leaves its save to land in the
-    middle of the next test."""
+    order, hide empty rows, hide duplicate rows) to reach the server.
+    saveLayout waits 400 ms for the changes to stop before it posts, so a
+    test that reopens or reloads straight after one reads back the layout
+    from before it, and a cleanup that ends without waiting leaves its save
+    to land in the middle of the next test."""
     def _wait():
         sid, want = page.evaluate("""() => [__winnow.S.sourceId, JSON.stringify({ columns: __winnow.S.layout,
-          order: __winnow.S.order, hide_empty_rows: __winnow.S.hideEmptyRows })]""")
+          order: __winnow.S.order, hide_empty_rows: __winnow.S.hideEmptyRows,
+          hide_duplicate_rows: __winnow.S.hideDuplicateRows })]""")
         want = json.loads(want)
 
         def landed():

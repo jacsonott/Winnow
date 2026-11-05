@@ -76,7 +76,7 @@ Filtering, grouping or opening the value picker on a column builds a small filte
 
 Press `C` to open the table menu, or right-click a tab or a table in the sidebar and choose **Columns…**. Its sections are listed down the left, each with a line saying what is set in it, and the one you pick fills the right. Up and Down move between them. Along the bottom, under every section, are **Tables manager…**, **Reset view** (clears filters, search, tag filter and grouping and restores the default sort; the column layout and the timeframe stay) and **Close this tab**.
 
-- **Show, hide & order**: show, hide, pin and reorder columns (see below), plus **Add derived column…** (see [Derived columns](Derived-columns.md)).
+- **Show, hide & order**: show, hide, pin and reorder columns (see below), **Hide empty rows** and **Hide duplicate rows**, plus **Add derived column…** (see [Derived columns](Derived-columns.md)).
 - **Value dropdowns**: when the ▾ value picker appears on this table's filter boxes, for the table and for each column (see [Filtering and searching](Filtering-and-searching.md#the-value-picker)).
 - **Layout**: put the default layout for these columns, or another table's layout, on this table, and save this table's layout as the default (see [Layouts](#layouts)).
 - **Name & merge**: how many rows, columns, tagged rows and notes the table has, where it was imported from, its nickname, the name of its set of columns, and its merges. The two names are saved when you press Enter or leave the box; Escape takes back what you typed. **Merge with other tables…** (on a merge, **Edit merge…**; see [Merging tables](#merging-tables)) sits beside the tables that share columns with this one, best fit first.
@@ -89,9 +89,25 @@ In a narrow window the sections go across the top instead.
 
 In the table menu's **Columns** list, untick a column to hide it and tick it to show it again. **Filter columns…** finds a column by name in a wide table. **Show all** brings every hidden column back. **Hide empty columns** hides every column that has no value in the first 2,000 rows of the current view, so a column whose values only appear further down can be hidden by it.
 
+**All** and **Shown**, beside **Filter columns…**, choose what the list holds. **All** lists every column, ticked or not. **Shown** lists only the ticked columns, the ones the grid shows, which helps on a wide table where you have hidden most of the columns and want to reorder, pin or untick the rest. The hidden columns stay in the table and are only left out of the list. Under the list, a line such as "26 hidden columns not listed" says how many are left out, and **List all columns** beside it switches back to **All**. If you type a name that only hidden columns match, that line counts them ("2 hidden columns match …") so you can list them and tick the one you want. A column you untick while **Shown** is picked stays in the list until you type in the filter box, switch, or reopen the menu, so a misclick can be ticked straight back. The choice is remembered in this browser and applies to every table.
+
 A hidden datetime column is also left out of the [histogram](Filtering-and-searching.md#the-histogram)'s column list, so the histogram only charts columns you can see.
 
 **Hide empty rows** is a toggle in the same place. It drops rows in which every column is empty, such as blank lines in a raw text import. It counts as a filter: the row count follows it, and it is remembered for the table.
+
+### Hiding duplicate rows
+
+**Hide duplicate rows**, beside **Hide empty rows** in the table menu and also in **Filters ▾**, shows one row for each set of rows that are identical in every visible column. It is for logs collected twice, overlapping exports and repeated lines in a raw text import.
+
+- Only the columns you can see are compared. Hidden columns are ignored, so to collapse copies that differ only in a column such as **SourceFile**, or a merge's **From table** column, hide that column. Hiding or showing a column while the toggle is on changes which rows count as duplicates, and the grid updates. A column you have grouped by is still compared.
+- Two values match when their text is exactly the same, case included, as with the `=` filter. An empty cell matches any other empty cell.
+- The row kept from each set is the first by **Line**, whatever the sort. In a merge it is the row from the table listed first in the merge, then the first by Line.
+- Duplicates are looked for among the rows your other filters, search, tag filter and timeframe leave.
+- It is remembered for the table, and the line beside the toolbar says **duplicates hidden** while it is on. **Clear filters** and **Reset view** leave it on.
+
+Everything that reads the view sees only the rows kept: the row count, grouping, the histogram, **Stack values**, **This view** in the value picker, tagging the whole view and **Current view** exports. Tags and notes on the hidden copies stay where they are. Nothing is deleted. To keep the deduplicated rows as a table of their own, turn the toggle on and use [Saving a view as a table](#saving-a-view-as-a-table).
+
+On a table of a million rows or more, turning it on takes a few seconds, because every row has to be compared.
 
 Each column's type (text, number or datetime) is shown after its name, in a colour of its own so the two don't run together, with "derived" after a derived column. When the menu is too narrow for a long name, the name is shortened with "…" so every row's buttons stay in view; hover the row to see it in full.
 
@@ -236,6 +252,8 @@ A merge shows ⛓ before its name and works like any other table: filtering, sea
 - A merge can't be added to a dashboard.
 - Flattening a JSON or XML column isn't available on a merge.
 - The watchlist and **Search all** look at the member tables rather than the merge, so their hits name the original tables. See [Timeline, Search all and the Watchlist](Timeline-search-and-watchlist.md).
+
+There is no need to join files outside Winnow to get speed: a merge of many tables filters, searches, groups and scrolls about as fast as the same rows imported as one file. Each table keeps its own search index, and until a table's index is ready a search scans it on every core along with the rest. The one step that costs more is putting the rows in a new order, because every table's rows have to be interleaved: on a million rows across 60 tables, the first sorted view can take a second or so, where one table takes a fraction of that. Once a merge has been shown in an order, clearing the filters brings that order back straight away.
 
 To delete a merge, right-click it and choose **Remove…**, or use **Remove…** in its **⋯** menu in the Tables manager. Its tables are not affected.
 
