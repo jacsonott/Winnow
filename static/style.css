@@ -1700,7 +1700,12 @@ section.page-with-panels { flex-direction: row; }
   }
 }
 
-.empty {
+/* The grid's own covers, #empty ("No table open") and #noRows. Scoped to
+   the grid's children rather than any .empty: the rule is an opaque
+   cover over the nearest positioned box, so `empty` as a class anywhere
+   else turns whatever holds it into a blank screen. It did in the Stack
+   dialog, whose "(empty)" bar's label covered the whole dialog. */
+.grid > .empty {
   position: absolute; inset: 0; display: grid; place-content: center;
   gap: 6px; text-align: center; color: var(--dim); background: var(--ink);
   /* Above the sticky .grid-head (3) and the .rail (4) — with the header
@@ -1708,10 +1713,10 @@ section.page-with-panels { flex-direction: row; }
      this whole-grid cover. */
   z-index: 6;
 }
-.empty.no-rows { inset: auto 0; top: 42%; background: transparent; pointer-events: none; z-index: 2; }
-.empty.no-rows .btn { pointer-events: auto; }
+.grid > .empty.no-rows { inset: auto 0; top: 42%; background: transparent; pointer-events: none; z-index: 2; }
+.grid > .empty.no-rows .btn { pointer-events: auto; }
 .empty-title { color: var(--text); font-size: 15px; margin: 0; }
-.empty p { margin: 0; }
+.grid > .empty p { margin: 0; }
 code { font-family: var(--mono); color: var(--accent); background: var(--panel); padding: 1px 5px; }
 
 /* --------------------------------------------------------------- detail */
@@ -1929,11 +1934,12 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .sql-result td.sql-gap { padding: 0; border: 0; }
 .sql-error { color: var(--danger); font-family: var(--mono); font-size: 12px; padding: 6px 0; }
 
-/* The results area with nothing run in it yet. Deliberately NOT `.empty`,
-   which is `position: absolute; inset: 0` over the grid's positioned
-   viewport — dropped in here it would cover the result pane instead of
+/* The results area with nothing run in it yet. Deliberately NOT the
+   grid's `.empty` cover, which is `position: absolute; inset: 0` over the
+   grid's positioned viewport — it would cover the result pane instead of
    scrolling out of it, and .sql-result has no positioning of its own to
-   anchor to. `align-content: start` rather than centring: the editor above
+   anchor to (the rule is scoped to `.grid > .empty` now, for the same
+   trap in the Stack dialog). `align-content: start` rather than centring: the editor above
    is resizable, and a vertically centred block would drift every time the
    analyst dragged it. */
 .sql-empty {
@@ -3880,7 +3886,7 @@ button.tables-num:hover { text-decoration: underline; color: var(--text); }
 }
 .stack-bar-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .stack-label { font: var(--stack-face); color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.stack-label.empty { font-family: inherit; font-style: italic; color: var(--dim); }
+.stack-label.blank { font-family: inherit; font-style: italic; color: var(--dim); }
 /* The gridlines are the track's background, one every --stack-grid of its
    content box; the padding is the room the count takes past a full bar. */
 .stack-track {
