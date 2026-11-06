@@ -247,8 +247,8 @@ line per row* and so on. **Filter queued files…** narrows a long queue, and
 | Part | What it holds |
 | --- | --- |
 | **File** | Its name, the folder it is in, its size, and *read in place* (added from this machine) or *uploaded when it imports*. |
-| **Read as** | Only for a file that can be read more than one way: **Delimited**, **One line per row** or **Key=value** for delimited and other text; **JSON** or **One line per row**; **IIS log**, **Delimited** or **One line per row**; **Key=value**, **Delimited** or **One line per row** for a [key=value log](#fortigate-and-other-fortinet-logs); a plugin's format or **One line per row** for an uploaded file a plugin claims. |
-| Settings | The reader's own: **Delimiter** and **Header**, JSON's **Nested objects**, an IIS log's **Format**, a plugin format's options. Plaso files, key=value logs and archives have none. |
+| **Read as** | Only for a file that can be read more than one way: **Delimited**, **One line per row** or **Key=value** for delimited and other text; **JSON** or **One line per row**; **IIS log**, **Delimited** or **One line per row**; **Key=value**, **Delimited** or **One line per row** for a [key=value log](#fortigate-and-other-fortinet-logs); **Login records** or **One line per row** for [Linux login records](#linux-login-records-wtmp-btmp-utmp); a plugin's format or **One line per row** for an uploaded file a plugin claims. |
+| Settings | The reader's own: **Delimiter** and **Header**, JSON's **Nested objects**, an IIS log's **Format**, a plugin format's options. Plaso files, login records, key=value logs and archives have none. |
 | **Preview** | The first 50 rows as they will import, a type picker in each column's heading where the type can be set, and a line under it saying what was detected. A SQLite file or workbook lists its **Tables** or **Sheets** here instead, to tick. |
 
 A setting is kept as you change it, and choosing another file keeps it, so
@@ -268,6 +268,9 @@ A file headed for the raw-text reader that looks binary (a NUL in its first
 8 KB; a UTF-16 byte-order mark is exempt) is dropped from the queue with
 *Skipped N binary files (not text)*, so an `.exe` or `.evtx` picked by
 mistake is never uploaded. Added by path, it fails when its import starts.
+The one exception is a binary file that holds
+[Linux login records](#linux-login-records-wtmp-btmp-utmp) under another
+name, which is queued as login records instead.
 
 ### From the command line
 
@@ -294,6 +297,7 @@ SQLite, Excel, Plaso and the rest. Other options are in
 | [Plaso](#plaso-storage-files) | `.plaso` | One timeline table. |
 | [IIS web server logs](#iis-web-server-logs) | named `u_ex…`, `ex…`, `nc…`, `in….log` | One table, columns from the log's own `#Fields:` lines. |
 | [FortiGate and other key=value logs](#fortigate-and-other-fortinet-logs) | `.log`, `.txt`, no extension…, recognised by the first line | One table, a column per key. |
+| [Linux login records](#linux-login-records-wtmp-btmp-utmp) | named `wtmp`, `btmp`, `utmp`, `wtmp.1`, `btmp-20240501`…, or recognized by their records | One table, a row per login record. |
 | [Archives](#archives) | `.zip` `.tar` `.tgz` `.gz` `.tbz2` `.txz` `.bz2` `.xz` | A folder, then folder import. |
 | [Any other text](#plain-text-and-log-files) | `.log`, `.1`, no extension… | One row per line. |
 | [Plugin formats](#plugin-formats) | raw `$MFT` and `$J`, ESXi and UAC logs | Whatever the plugin parses. |
@@ -563,6 +567,68 @@ a key=value log whose first line didn't say so. As with an IIS log, a run of
 zero bytes from a power cut is a gap between rows, and a log still being
 written imports in place.
 
+### Linux login records (wtmp, btmp, utmp)
+
+Linux keeps its login history in three binary files that share one format:
+
+| File | Holds | Read on the host by |
+| --- | --- | --- |
+| `wtmp` (`/var/log/wtmp`) | Every login and logout, boot, shutdown, runlevel change and clock change. | `last` |
+| `btmp` (`/var/log/btmp`) | Failed logins. | `lastb` |
+| `utmp` (`/run/utmp`) | Who was logged in when it was copied. | `who` |
+
+Winnow recognizes them by name: `wtmp`, `btmp` and `utmp`, the rotated copies
+logrotate leaves (`wtmp.1`, `btmp-20240501`, `wtmp.1.old`), and a second copy
+an archive expansion renamed (`wtmp (2)`). A gzipped rotation such as
+`btmp.1.gz` is an [archive](#archives): it expands, and the file inside is
+recognized. A copy saved under another name (`evidence.bin`) is recognized by
+its records rather than skipped as binary. The queue says *Login records ·
+wtmp* under its name. Newer distributions' `wtmp.db` (wtmpdb) is a SQLite
+database, and imports as [one](#sqlite-databases).
+
+**Every record is a row**, in file order, so row N is record N:
+
+| Column | Holds |
+| --- | --- |
+| `Timestamp (UTC)` | When the record was written, to the microsecond. |
+| `Type` | `USER_PROCESS` (a login), `DEAD_PROCESS` (a logout), `BOOT_TIME`, `RUN_LVL` (a runlevel change or shutdown), `LOGIN_PROCESS` (a login prompt; in btmp, a failed login, which is how sshd and `login` both write them), `INIT_PROCESS`, `NEW_TIME` and `OLD_TIME` (a clock change), `ACCOUNTING` or `EMPTY`. |
+| `User` | The user name. In btmp, whatever was typed at the login prompt, which is sometimes a password typed there by mistake. |
+| `Terminal` | `pts/0`, `tty1`, `ssh:notty`; `~` on boot and runlevel records. |
+| `Host` | The remote host as logged; the kernel version on a boot record. |
+| `IP address` | The remote address the record stores in binary, IPv4 or IPv6. |
+| `PID`, `ID`, `Session` | The login's process ID, its terminal suffix or inittab ID, and its session ID. |
+| `Exit status`, `Termination status` | How the process ended, where a record says. |
+| `Offset` | Where the record starts in the file, in bytes, for finding it in a hex editor. |
+
+Bytes in a user name that aren't UTF-8 are kept as `\xNN` escapes instead of
+being replaced, since whoever tried to log in chose them. A time that can't
+be a date is kept as its raw numbers. On the
+[Timeline](Timeline-search-and-watchlist.md), a tagged record reads as its
+type, then user, terminal and host: *USER_PROCESS root · pts/0 · from
+203.0.113.9*.
+
+**The record layout is read off the file.** A record is 384 bytes on x86,
+x86-64, 32-bit ARM, RISC-V and ppc64le, and 400 bytes on 64-bit ARM and
+s390x, in the byte order of the machine that wrote it. Read with the wrong
+one, every record after the first is garbage. Winnow tries all four and keeps
+the one under which the first records read as login records; the line under
+the preview and the table's hover text say which. A crash can cut the last
+record short: that partial record is left out, and the preview and the
+import toast say how many bytes. An empty `btmp` imports as an empty table.
+
+The pane previews the first 50 records, and there is nothing to set.
+**Read as** → **One line per row** is for a file named `wtmp` that turns out
+to be text, such as saved `last` output.
+
+The [SQL pane](SQL-pane.md) answers the usual questions. Failed logins by
+source, from a btmp table:
+
+```sql
+SELECT "IP address", "User", COUNT(*) AS tries,
+       MIN("Timestamp (UTC)") AS first, MAX("Timestamp (UTC)") AS last
+FROM src_3 GROUP BY 1, 2 ORDER BY tries DESC;
+```
+
 ### Plain text and log files
 
 A file no other reader claims — `hostd.log`, `auth.log.1`, an extensionless
@@ -623,13 +689,16 @@ right. It stays the same size whatever you pick or the scan finds.
 2. Pick a profile on the left, or stay on **Custom (not saved)** to set
    things up yourself. A profile fills in everything below it.
 3. Pick **File types**. `.csv`, `.tsv`, `.tab`, `.txt`, `.psv`, `.json`, `.jsonl`,
-   `.ndjson`, `.plaso`, **IIS logs** and any extension an enabled plugin claims
+   `.ndjson`, `.plaso`, **IIS logs**, **wtmp/btmp/utmp** and any extension an enabled plugin claims
    are on; **other text files** (off) adds every other non-binary file as raw
    text. **IIS logs** picks up [IIS web server logs](#iis-web-server-logs) by
    name, and a file named like one is read as one however it got in. A
    [FortiGate log](#fortigate-and-other-fortinet-logs) the file types let in
    is read as one: a `.txt`, or a `.log` once **other text files**, or a
-   plugin that claims `.log`, is on.
+   plugin that claims `.log`, is on. **wtmp/btmp/utmp** (on) picks up
+   [Linux login records](#linux-login-records-wtmp-btmp-utmp) by name; with
+   **other text files** on, a binary file holding login records under another
+   name is read as one instead of excluded as `binary`.
    **Include subfolders** (on) walks the tree.
 4. Narrow with **Patterns**: **Include** and **Exclude**, one glob per line,
    case-insensitive. A pattern containing `/` matches the path from the
@@ -638,10 +707,10 @@ right. It stays the same size whatever you pick or the scan finds.
    narrow what the file types let through.
 5. Check the **Preview**, which updates as you type. **Will import** lists
    the matches with a box per file; **Excluded** lists the rest with each
-   reason (`extension`, `IIS logs not selected`, `no include pattern matched`,
+   reason (`extension`, `IIS logs not selected`, `wtmp/btmp/utmp not selected`, `no include pattern matched`,
    `excluded by pattern: …`, `binary`, `unreadable`, `not a regular file`).
-   A profile saved before **IIS logs** existed leaves them out until you tick
-   it and **Update profile**.
+   A profile saved before **IIS logs** or **wtmp/btmp/utmp** existed leaves
+   those files out until you tick the chip and **Update profile**.
    The line under the list counts them.
 6. **Import checked (N)**.
 
@@ -682,8 +751,9 @@ ESXi support-bundle and UAC Linux host logs. A claimed file shows the
 format's name in the queue, and its options, if it has any, in the file's
 pane. Built-in extensions always win, so no plugin can take over `.csv` or
 `.json`, and neither do built-in names: **esxi_logs** claims `.log`, but an
-[IIS log](#iis-web-server-logs) is still read as one, and so is a
-[FortiGate log](#fortigate-and-other-fortinet-logs). Plugin
+[IIS log](#iis-web-server-logs) is still read as one, and so are a
+[FortiGate log](#fortigate-and-other-fortinet-logs) and a
+[wtmp or btmp](#linux-login-records-wtmp-btmp-utmp). Plugin
 imports don't run as background jobs: they show an *Importing …* notice, not
 a progress row, and can't be cancelled. See [Plugins](Plugins.md).
 
@@ -708,6 +778,7 @@ case don't matter):
 | RECmd (batch) | Registry (RECmd batch) |
 | SrumECmd | SRUM — app resource use, network usage |
 | esxi_logs plugin | ESXi / Linux host logs |
+| Winnow's own readers | IIS web logs (W3C, NCSA, IIS native), Linux login records (wtmp/btmp/utmp) |
 
 Recognition gets you:
 
@@ -741,8 +812,8 @@ right — the same panel that shows search-index builds.
 
 **Clear all** dismisses every finished row and leaves running work alone.
 Reloading the page mid-import picks the jobs back up. Progress counts bytes
-for delimited and raw text, records for JSON, and rows for SQLite, Excel and
-Plaso.
+for delimited and raw text, records for JSON and login records, and rows for
+SQLite, Excel and Plaso.
 
 **Cancelling drops the table entirely**, so a half-imported table never sits
 in the list looking complete; a SQLite or Excel job keeps the tables it had
@@ -758,6 +829,7 @@ A finished import's toast says *name: N rows imported*, plus any of:
 | *N rows with very long multi-line fields — check for a stray quote…* | A possible unbalanced quote. |
 | *N unreadable records skipped* | Broken JSON Lines. |
 | *N records with two values for one key — the later kept as &lt;key&gt;_1* | JSON key clashes. |
+| *the last N bytes were not a whole login record and were left out* | A wtmp or btmp whose last record a crash cut short. |
 | *not UTF-8 — read as Windows-1252* | The whole file was Windows-1252. |
 | *N bytes not valid UTF-8, read as Windows-1252* | Stray bytes in a UTF-8 file. |
 | *N text values were not valid UTF-8 (shown with �)* | SQLite text with bad bytes. |

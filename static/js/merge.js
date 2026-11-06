@@ -608,9 +608,69 @@ export function iisLogFormat(filename) {
   return IIS_FORMAT_OF[(m[1] || m[3]).toLowerCase()];
 }
 
+/* Linux login records — wtmp, btmp, utmp — recognized by name: mirrors
+   winnow/utmpread.py's log_kind. What logrotate leaves (wtmp.1,
+   btmp-20240501, wtmp.1.old) and an archive expansion's " (2)" count;
+   wtmpdb's wtmp.db is SQLite and stays the SQLite reader's. */
+const UTMP_LOG_NAME = /^([bwu]tmp)(?: \(\d+\))?(?:[.-](?:\d+|old))*(?: \(\d+\))?$/i;
+/* The folder-import chip that stands for them (store.UTMP_IMPORT_TYPE). */
+export const UTMP_IMPORT_TYPE = 'utmp';
+
+export function utmpFileKind(filename) {
+  const m = UTMP_LOG_NAME.exec(filename.split(/[\\/]/).pop());
+  return m ? m[1].toLowerCase() : null;
+}
+
+/* Login records under a name that doesn't say so (wtmp copied out as
+   evidence.bin): the twin of utmpread.looks_like, over the same first
+   8 KB. Some layout the whole file is a multiple of must read every
+   record in that head as a real login record: a type glibc defines (not
+   EMPTY), a PID under the kernel's limit, a time between 1980 and 2100
+   with fewer than a million microseconds, and the user, terminal and
+   host fields nothing but NULs after their text. 384-byte records keep
+   the session and time 32-bit; 400-byte ones (64-bit ARM, s390x) 64-bit. */
+const UTMP_LAYOUTS = [[384, true, false], [400, true, true], [384, false, false], [400, false, true]];
+const UTMP_PROBE_BYTES = 8192;
+
+function utmpFieldPadded(bytes, at, len) {
+  let i = at;
+  const end = at + len;
+  while (i < end && bytes[i] !== 0) i++;
+  for (; i < end; i++) if (bytes[i] !== 0) return false;
+  return true;
+}
+
+export function looksLikeUtmp(head, size) {
+  if (!head) return false;
+  const bytes = head.subarray(0, UTMP_PROBE_BYTES);
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  for (const [rec, little, wide] of UTMP_LAYOUTS) {
+    if (size < rec || size % rec) continue;
+    const n = Math.min(Math.floor(bytes.length / rec), 64);
+    let good = 0, bad = 0;
+    for (let k = 0; k < n; k++) {
+      const at = k * rec;
+      if (bytes.subarray(at, at + rec).every((b) => b === 0)) continue;
+      const type = view.getInt16(at, little);
+      const pid = view.getInt32(at + 4, little);
+      const sec = wide ? Number(view.getBigInt64(at + 344, little)) : view.getUint32(at + 340, little);
+      const usec = wide ? Number(view.getBigInt64(at + 352, little)) : view.getInt32(at + 344, little);
+      const ok = type >= 1 && type <= 9 && pid >= 0 && pid < 4194304
+        && sec >= 315532800 && sec < 4102444800 && usec >= 0 && usec < 1000000
+        && utmpFieldPadded(bytes, at + 8, 32) && utmpFieldPadded(bytes, at + 44, 32)
+        && utmpFieldPadded(bytes, at + 76, 256);
+      if (ok) good++; else bad++;
+    }
+    if (good && !bad) return true;
+  }
+  return false;
+}
+
 export function importKindFor(filename) {
-  // Before the extension checks: an IIS log's .log says nothing.
+  // Before the extension checks: an IIS log's .log says nothing, and a
+  // wtmp has no extension at all.
   if (iisLogFormat(filename)) return 'iis';
+  if (utmpFileKind(filename)) return 'utmp';
   if (SQLITE_IMPORT_EXTENSIONS.includes(extOf(filename))) return 'sqlite';
   if (XLSX_IMPORT_EXTENSIONS.includes(extOf(filename))) return 'xlsx';
   if (PLASO_IMPORT_EXTENSIONS.includes(extOf(filename))) return 'plaso';

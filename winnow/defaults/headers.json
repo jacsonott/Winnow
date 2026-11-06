@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 5,
   "nicknames": [
     {
       "name": "Event logs (EvtxECmd)",
@@ -1096,6 +1096,36 @@
         "labels": {
           "Service status code": "status",
           "Client IP address": "from"
+        }
+      }
+    },
+    {
+      "name": "Linux login records (wtmp/btmp/utmp)",
+      "columns": [
+        "Timestamp (UTC)",
+        "Type",
+        "User",
+        "Terminal",
+        "Host",
+        "IP address",
+        "PID",
+        "ID",
+        "Session",
+        "Exit status",
+        "Termination status",
+        "Offset"
+      ],
+      "summary": {
+        "lead": [
+          "Type"
+        ],
+        "details": [
+          "User",
+          "Terminal",
+          "Host"
+        ],
+        "labels": {
+          "Host": "from"
         }
       }
     }

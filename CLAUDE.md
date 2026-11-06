@@ -244,6 +244,16 @@ kvread.py          Key=value logs (FortiGate and the other Fortinet
                     passes, IIS's shared body), quotes off, date+time joined
                     into a timestamp. Stdlib only; imports iisread and
                     timeparse. See docs/notes/ingest.md.
+utmpread.py        Linux login records (wtmp, btmp, utmp) for import —
+                    glibc's struct utmp, fixed-size binary records with no
+                    header. The record size (384 or 400 bytes: 32- or 64-bit
+                    ut_tv) and byte order are read off the file's first
+                    records (detect), never assumed; recognized by name
+                    (log_kind, which every router asks before extensions,
+                    as IIS names are) and, renamed, by their records
+                    (looks_like). A row per record, EMPTY slots included,
+                    so rid is the record number. Stdlib only; imports
+                    nothing from the app. See docs/notes/ingest.md.
 defaults/          The defaults Winnow ships, as JSON rather than Python:
                     headers.json names the header sets common tools emit
                     (EvtxECmd, MFTECmd, Amcache, ...) and, per set, how to

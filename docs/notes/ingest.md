@@ -1,4 +1,4 @@
-# Ingest: CSV, raw text, JSON, SQLite, Excel, Plaso, IIS logs, key=value logs, archives, folders, drops, jobs
+# Ingest: CSV, raw text, JSON, SQLite, Excel, Plaso, IIS logs, key=value logs, login records, archives, folders, drops, jobs
 
 Every path that turns a file on disk into a `src_<id>` table, and the
 background-job machinery all of them run through. Invariant #1 (source
@@ -321,6 +321,59 @@ see [docs/notes/README.md](README.md) for the whole set.
   and session re-import (`_SESSION_READERS`, the ingest record's
   `column_types`) carry kind `kv`. tests/test_kv_logs.py,
   tests/ui/test_kv_queue.py.
+- **Linux login records (wtmp, btmp, utmp) are binary, and their layout
+  is read off their bytes** (`utmpread.detect`, `Store.ingest_utmp`, kind
+  `utmp`). The three share glibc's `struct utmp`: fixed-size records, no
+  header, no magic, no count. Two things vary by the machine that wrote
+  them, and a reader that assumes either reads every record after the
+  first as garbage: the byte order, and the record size —
+  `__WORDSIZE_TIME64_COMPAT32` in glibc's `bits/wordsize.h` keeps
+  `ut_session` and `ut_tv` 32-bit (384 bytes) on x86-64, ppc64, sparc64,
+  mips64, RISC-V and every 32-bit target, and lets them be a `long` and a
+  `struct timeval` (400 bytes) on 64-bit ARM and s390x. The offsets were
+  checked against gcc's `offsetof` for both forms, and the 384-byte one
+  against util-linux's `utmpdump -r` (which a test runs where it is
+  installed). `detect` scores all four layouts over the first 64 records
+  (a defined type, a PID under PID_MAX_LIMIT, a time in 1980–2100 with
+  sub-second microseconds) and keeps the best; `size` breaks a tie, and a
+  file with nothing to judge (empty, all-zero slots) gets the most common
+  layout that fits it. The 32-bit seconds are UNSIGNED, as glibc now
+  declares them (the 2038 fix).
+  **Recognized by name first** (`utmpread.log_kind`: `wtmp`, `btmp`,
+  `utmp`, logrotate's `.1`/`-20240501`/`.old` suffixes, an expansion's
+  ` (2)`), at every router IIS names are asked at — `_ingest_kind_for_path`,
+  `importKindFor` + `utmpFileKind` in merge.js (a twin of the regex),
+  `pluginFormatFor`, `_assoc_ingest`, the folder scan (its own chip,
+  `UTMP_IMPORT_TYPE`, on by default; a profile saved before it excludes
+  them as "wtmp/btmp/utmp not selected"), `_guess_session_reader`. Only a
+  digit-led or `.old` suffix counts, so wtmpdb's `wtmp.db` stays SQLite.
+  **Renamed, by their records** (`utmpread.looks_like`,
+  `store.looks_like_utmp`, `looksLikeUtmp` in merge.js over the same
+  8 KB): stricter than `detect` — the file a whole number of records,
+  every sampled record reading cleanly, EMPTY slots with leftovers and
+  bytes after a string's NUL counting against — and asked about the same
+  files a key=value log is (a name no reader claims), plus, in the folder
+  scan, a binary that got in by "other text files" before it is excluded
+  as `binary`. That is what keeps a renamed wtmp from being dropped by the
+  browser's binary skip (`queueFiles`) or by the scan.
+  **Every record is a row**, EMPTY slots included, so rid N is record N
+  and `Offset` is its byte offset. A tail shorter than a record (a write
+  cut off by a crash) is left out, never padded into a row that reads as
+  real: counted as `torn_bytes` in the result (it has to be named in the
+  job's result whitelist to reach the toast), the jobs toast and the log,
+  and kept with the layout in `origin_meta` (`{record_layout,
+  torn_bytes?}`), which the table's hover text reads. C strings are cut at
+  their first NUL and decoded as UTF-8 with `backslashreplace`, not the
+  cp1252 fallback text evidence gets: a btmp user name is bytes the remote
+  side sent, and `\xff` says so where `ÿ` would hide it. The layout is
+  recorded in the ingest record and a session re-import passes it back
+  (`layout=`), so the rows match even if detection changes. Previews read
+  the head only — the path route from disk, the upload route from the
+  1 MB head with the real `size` sent beside it. A zero-byte btmp imports
+  as an empty table; anything shorter than one record, or that reads
+  under no layout, is a ValueError naming why. headers.json (version 5)
+  gives the table a Timeline summary. tests/test_utmp_logs.py,
+  tests/ui/test_utmp_queue.py.
 
 - Ragged rows are padded/trimmed to the header width, never dropped, and
   counted — `ingest_csv`'s return dict has a `ragged_rows` count surfaced to
