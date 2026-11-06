@@ -157,7 +157,13 @@ def _ip(raw: bytes) -> str:
         return ""
     if not any(raw[4:]):
         return str(ipaddress.IPv4Address(raw[:4]))
-    return str(ipaddress.IPv6Address(raw))
+    v6 = ipaddress.IPv6Address(raw)
+    # An IPv4-mapped address is spelled by hand: str() gives
+    # ::ffff:203.0.113.9 from Python 3.13 on but ::ffff:cb00:7109 before,
+    # and one install would show the same record two ways.
+    if v6.ipv4_mapped is not None:
+        return f"::ffff:{v6.ipv4_mapped}"
+    return str(v6)
 
 
 def _timestamp(sec: int, usec: int) -> str:
