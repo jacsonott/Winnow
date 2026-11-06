@@ -60,6 +60,7 @@ from . import iisread
 from . import kvread
 from . import plasoread
 from . import rxguard
+from . import utmpread
 from . import xlsxread
 from . import log as wlog
 from .version import VERSION
@@ -227,6 +228,10 @@ PLASO_IMPORT_EXTENSIONS = {".plaso"}
 # has. In a folder scan's extension list this token stands for them the way
 # "*" stands for other text files: a chip of its own, on by default.
 IIS_IMPORT_TYPE = "iis"
+# Linux login records (wtmp, btmp, utmp and their rotations — utmpread.log_kind)
+# are recognized by name too, having no extension at all; this token is
+# their folder-scan chip, on by default like IIS_IMPORT_TYPE.
+UTMP_IMPORT_TYPE = "utmp"
 # scan_import_directory stops walking once matched+excluded together hit
 # this many entries — same "cap and say so" reasoning as
 # SEARCH_ALL_COUNT_CAP, guarding against an analyst accidentally pointing
@@ -278,7 +283,7 @@ CREATE TABLE IF NOT EXISTS sources (
     has_fts     INTEGER NOT NULL DEFAULT 0,
     nickname    TEXT,                   -- analyst display name; `name` stays the imported file's identity
     origin      TEXT,                   -- NULL = an imported file; 'sql' = saved from the SQL pane; 'subset' = saved from a view/selection
-    origin_meta TEXT,                   -- json, per origin: {sql} / {parent_source_id, parent_name, spec, ...} — see save_view_as_source; an imported file not read as plain UTF-8: {encoding, cp1252_bytes?} — see _encoding_report
+    origin_meta TEXT,                   -- json, per origin: {sql} / {parent_source_id, parent_name, spec, ...} — see save_view_as_source; an imported file not read as plain UTF-8: {encoding, cp1252_bytes?} — see _encoding_report; Linux login records: {record_layout, torn_bytes?} — see ingest_utmp
     ingest      TEXT                    -- json: how the file was read, {kind, ...options} — what a session re-imports with
 );
 CREATE TABLE IF NOT EXISTS tag_defs (
@@ -1257,6 +1262,21 @@ def looks_binary(path: str) -> bool:
 KV_PROBE_BYTES = 8192
 
 
+def looks_like_utmp(path: str) -> bool:
+    """Whether a file named nothing in particular holds Linux login
+    records (utmpread.looks_like) — wtmp copied out as evidence.bin. Asked
+    about the same files looks_like_kv_log is (a name no reader claims), so
+    a renamed wtmp is read as one instead of refused as binary. Reads the
+    first utmpread.PROBE_BYTES, the import queue's own probe size."""
+    try:
+        with open(path, "rb") as f:
+            size = os.fstat(f.fileno()).st_size
+            head = f.read(utmpread.PROBE_BYTES)
+    except OSError:
+        return False
+    return utmpread.looks_like(head, size)
+
+
 def looks_like_kv_log(path: str) -> bool:
     """Whether a text file's first line reads as a key=value log
     (kvread.looks_like) — how a FortiGate log, which has no name of its
@@ -1612,7 +1632,7 @@ def _ingest_record(kind: str, **options) -> str:
     a session names rows by rid, so the re-import has to produce the same
     rows in the same order, and the defaults do not (a headerless CSV
     gains a header and every rid slides by one). `kind` names a Store
-    reader: csv, text, json, sqlite, xlsx, plaso, iis, kv — or rows, for a table
+    reader: csv, text, json, sqlite, xlsx, plaso, iis, kv, utmp — or rows, for a table
     produced in-process (a plugin's parser, a SQL save), which nothing
     here can re-run."""
     return json.dumps({"kind": kind, **{k: v for k, v in options.items() if v is not None}})
@@ -5895,6 +5915,110 @@ class Store:
         rec["rows_per_sec"] = int(total / elapsed) if elapsed > 0 else 0
         return rec
 
+    def ingest_utmp(
+        self,
+        path: str,
+        name: str | None = None,
+        build_fts: bool = True,
+        progress=None,
+        cancel=None,
+        layout: str | None = None,
+    ) -> dict:
+        """Imports a Linux wtmp, btmp or utmp file as one table, a row per
+        record — utmpread.py has the format, and why the record layout is
+        read off the file's bytes. Same conventions as ingest_plaso: TEXT
+        columns, types declared rather than sampled, self.lock per BATCH,
+        cancel drops the partial source, the file never written to.
+
+        `layout` (a utmpread.LAYOUTS key) skips detection: a session
+        re-import passes the one the table was read with, so it reads the
+        same records even if detection changes in a later version. The
+        layout, and a torn tail's byte count, go in origin_meta (the
+        table's hover text says how its bytes were read) and the tail in
+        the result (`torn_bytes`, the jobs toast) and the log. A file of
+        zero bytes is a real, empty btmp: it imports as a table of no rows."""
+        name = name or os.path.basename(path)
+        if layout is not None and layout not in utmpread.LAYOUTS_BY_KEY:
+            raise ValueError(f"Unknown login record layout {layout!r}")
+        size = os.path.getsize(path)
+        with open(path, "rb") as fh:
+            head = fh.read(utmpread.SNIFF_BYTES)
+        lay = utmpread.LAYOUTS_BY_KEY[layout] if layout else utmpread.choose_layout(head, size, name)
+        file_hash = self._quick_hash(path)
+        total_rows = size // lay.size
+
+        cols = sanitize_columns(list(utmpread.COLUMNS))
+        source_id, table = self._create_source_shell(
+            name, cols, path=path, file_hash=file_hash,
+            ingest=_ingest_record("utmp", layout=lay.key))
+        insert = (f"INSERT INTO {q(table)} ({','.join(q(c) for c in cols)})"
+                  f" VALUES ({','.join('?' * len(cols))})")
+
+        stats: dict = {}
+        total = 0
+        t0 = time.time()
+        error: Exception | None = None
+        batch: list[tuple] = []
+        with self._ingest_synchronous_off():
+            try:
+                with open(path, "rb") as fh:
+                    for row in utmpread.iter_rows(fh, lay, stats):
+                        batch.append(tuple(row))
+                        if len(batch) >= BATCH:
+                            if cancel is not None and cancel():
+                                raise IngestCancelled(f"Import of {name} cancelled")
+                            total = self._commit_ingest_batch(insert, batch, source_id, total)
+                            batch = []
+                            if progress:
+                                progress(total, total, total_rows)
+                if batch:
+                    total = self._commit_ingest_batch(insert, batch, source_id, total)
+                if progress:
+                    progress(total, total, total_rows)
+            except IngestCancelled:
+                self.drop_source(source_id)
+                raise
+            except Exception as e:
+                total = self._commit_parsed_batch(insert, batch, source_id, total)
+                error = _kept_error(e, total)
+
+        torn = stats.get("torn_bytes", 0)
+        meta = {"record_layout": lay.label, **({"torn_bytes": torn} if torn else {})}
+        colmeta = [{"name": c, "type": t} for c, t in zip(cols, utmpread.COLUMN_TYPES)]
+        with self.lock, self.db:
+            self.db.execute("UPDATE sources SET columns=?, origin_meta=? WHERE id=?",
+                            (json.dumps(colmeta), json.dumps(meta), source_id))
+
+        if error is not None:
+            if total == 0:
+                self.drop_source(source_id)
+            raise error
+        if torn:
+            wlog.record("warn", f"{name}: the last {torn:,} byte{'s' if torn != 1 else ''} are not a whole "
+                                f"{lay.size}-byte login record (a write cut short) — left out")
+
+        if total:
+            self._build_import_indexes(source_id)
+        if build_fts and total:
+            self._ensure_fts_building(source_id)
+
+        elapsed = time.time() - t0
+        rec = self.get_source(source_id)
+        rec["elapsed_sec"] = round(elapsed, 2)
+        rec["rows_per_sec"] = int(total / elapsed) if elapsed > 0 else 0
+        rec["torn_bytes"] = torn
+        rec["record_layout"] = lay.key
+        return rec
+
+    @staticmethod
+    def preview_utmp_file(path: str, max_rows: int = 50) -> dict:
+        """The first records of a login-records file as ingest_utmp will
+        make them — read from the file's head, never the whole file."""
+        size = os.path.getsize(path)
+        with open(path, "rb") as fh:
+            head = fh.read(max(utmpread.SNIFF_BYTES, max_rows * utmpread.LAYOUTS[1].size))
+        return utmpread.preview(head, size, os.path.basename(path), max_rows=max_rows)
+
     def preview_xlsx_sheets(self, path: str) -> dict:
         """Read-only look at every data sheet in an Excel workbook, in the
         exact shape preview_sqlite_tables returns ({"tables": [...]}) so
@@ -6398,7 +6522,8 @@ class Store:
 
         A file is excluded for exactly one of: its extension isn't
         recognized ("extension"; "IIS logs not selected" for a file named
-        like an IIS log when `extensions` leaves out IIS_IMPORT_TYPE),
+        like an IIS log when `extensions` leaves out IIS_IMPORT_TYPE, and
+        "wtmp/btmp/utmp not selected" likewise for UTMP_IMPORT_TYPE),
         include_patterns is non-empty and nothing
         in it matched ("no include pattern matched"), a pattern in
         exclude_patterns matched ("excluded by pattern: <pattern>"), it
@@ -6435,13 +6560,15 @@ class Store:
         # IIS logs: admitted by name, on unless the list leaves the token
         # out (a profile saved before the chip existed does).
         iis_logs = extensions is None or IIS_IMPORT_TYPE in (e.lower() for e in extensions)
+        # Linux login records (wtmp, btmp, utmp): by name too, the same way.
+        utmp_logs = extensions is None or UTMP_IMPORT_TYPE in (e.lower() for e in extensions)
         # None means "the defaults"; an empty list means exactly that — the
         # analyst turned every chip off. `or` conflated the two, so a scan
         # with nothing selected matched the default set.
         exts = {
             (e if e.startswith(".") else "." + e).lower()
             for e in (DEFAULT_IMPORT_EXTENSIONS if extensions is None else extensions)
-            if e not in ("*", ".*") and e.lower() != IIS_IMPORT_TYPE
+            if e not in ("*", ".*") and e.lower() not in (IIS_IMPORT_TYPE, UTMP_IMPORT_TYPE)
         }
         includes = [p for p in (include_patterns or []) if p.strip()]
         excludes = [p for p in (exclude_patterns or []) if p.strip()]
@@ -6483,11 +6610,15 @@ class Store:
                 entry = {"path": fpath, "rel_path": rel, "size_bytes": st.st_size}
                 ext = os.path.splitext(fname)[1].lower()
                 is_iis = iisread.log_format(fname) is not None
+                is_utmp = utmpread.log_kind(fname) is not None
                 by_filename_pattern = any(fnmatch.fnmatch(fname.lower(), p.lower()) for p in fname_pats)
                 by_ext = ext in exts
-                unclaimed = not by_ext and not by_filename_pattern and not (is_iis and iis_logs)
+                unclaimed = (not by_ext and not by_filename_pattern and not (is_iis and iis_logs)
+                             and not (is_utmp and utmp_logs))
                 if unclaimed and not other_text:
-                    excluded.append({**entry, "reason": "IIS logs not selected" if is_iis else "extension"})
+                    reason = ("IIS logs not selected" if is_iis
+                              else "wtmp/btmp/utmp not selected" if is_utmp else "extension")
+                    excluded.append({**entry, "reason": reason})
                     continue
                 if includes and not any(self._import_pattern_matches(p, fname, rel) for p in includes):
                     excluded.append({**entry, "reason": "no include pattern matched"})
@@ -6499,9 +6630,14 @@ class Store:
                 # The binary probe reads the file, so it runs last: only a
                 # file the name gates let through gets opened — a tree of
                 # excluded build output is never sniffed.
-                if unclaimed and not is_iis and looks_binary(fpath):
-                    excluded.append({**entry, "reason": "binary"})
-                    continue
+                # A binary that got in as "other text" may be login records
+                # under another name (wtmp copied out as evidence.bin): its
+                # bytes are asked before it is turned away.
+                if unclaimed and not is_iis and not is_utmp and looks_binary(fpath):
+                    if not looks_like_utmp(fpath):
+                        excluded.append({**entry, "reason": "binary"})
+                        continue
+                    is_utmp = True
                 # kind routes the frontend's per-file import call: the two
                 # built-in parsers by their own extensions, everything else
                 # ("plugin") resolved client-side against the loaded plugin
@@ -6512,6 +6648,8 @@ class Store:
                 # recognition wins, as built-in extensions do.
                 if is_iis:
                     kind = "iis"
+                elif is_utmp:
+                    kind = "utmp"
                 elif ext in (".json", ".jsonl", ".ndjson"):
                     kind = "json"
                 elif ext in PLASO_IMPORT_EXTENSIONS:
@@ -6555,7 +6693,7 @@ class Store:
         sat behind with no progress, no way to tell "working" from
         "crashed", and a browser tab they couldn't use meanwhile.
 
-        `kind` is 'csv' | 'text' | 'json' | 'sqlite' | 'xlsx' | 'plaso' | 'iis' | 'kv'. For 'sqlite',
+        `kind` is 'csv' | 'text' | 'json' | 'sqlite' | 'xlsx' | 'plaso' | 'iis' | 'kv' | 'utmp'. For 'sqlite',
         options['tables'] is [{table, name?, timestamp_columns?}, ...] —
         one uploaded file, one job, N sources, so the file is spooled and
         read once rather than re-uploaded per table. `delete_after` removes
@@ -6597,7 +6735,7 @@ class Store:
         (add_derived_column, add_derived_columns, rederive_column) undo
         that definition on the refusal — a column whose only job was never
         started would otherwise be 'building' for good."""
-        if kind not in ("csv", "text", "json", "sqlite", "xlsx", "plaso", "iis", "kv", "derive"):
+        if kind not in ("csv", "text", "json", "sqlite", "xlsx", "plaso", "iis", "kv", "utmp", "derive"):
             raise ValueError(f"Unknown ingest kind: {kind}")
         try:
             size = os.path.getsize(path)
@@ -6737,6 +6875,11 @@ class Store:
                     progress=progress, cancel=cancel, log_format=opts.get("log_format"),
                     column_types=opts.get("column_types"),
                 )]
+            elif job["kind"] == "utmp":
+                results = [self.ingest_utmp(
+                    job["path"], name=job["name"], build_fts=opts.get("build_fts", True),
+                    progress=progress, cancel=cancel,
+                )]
             elif job["kind"] == "kv":
                 results = [self.ingest_kv(
                     job["path"], name=job["name"], build_fts=opts.get("build_fts", True),
@@ -6798,7 +6941,8 @@ class Store:
                     {k: r.get(k) for k in ("id", "name", "row_count", "elapsed_sec", "rows_per_sec",
                                            "ragged_rows", "suspect_quote_rows", "bad_records",
                                            "first_bad_line", "key_collisions", "encoding",
-                                           "cp1252_bytes", "undecodable_values")}
+                                           "cp1252_bytes", "undecodable_values",
+                                           "record_layout", "torn_bytes")}
                     for r in results
                 ]
             wlog.record("info", f"Import finished: {job['name']} ({job['kind']}) — "
@@ -17155,7 +17299,7 @@ class Store:
                 "so there is no file to re-import it from, and this case does not have it or a "
                 "copy of it")
 
-    _SESSION_READERS = ("csv", "text", "json", "sqlite", "xlsx", "plaso", "iis", "kv")
+    _SESSION_READERS = ("csv", "text", "json", "sqlite", "xlsx", "plaso", "iis", "kv", "utmp")
 
     def _reimport_session_source(self, s_meta: dict) -> tuple[int | None, str | None]:
         """(source_id, None) after re-importing a session source from its
@@ -17224,6 +17368,8 @@ class Store:
                                       column_types=how.get("column_types"))
             elif kind == "kv":
                 rec = self.ingest_kv(path, name=name, column_types=how.get("column_types"))
+            elif kind == "utmp":
+                rec = self.ingest_utmp(path, name=name, layout=how.get("layout"))
             else:
                 rec = self.ingest_plaso(path, name=name)
         except Exception as e:
@@ -17248,6 +17394,8 @@ class Store:
             return {"kind": "plaso"}
         if iisread.log_format(path):
             return {"kind": "iis"}
+        if utmpread.log_kind(path):
+            return {"kind": "utmp"}
         if ext in (".json", ".jsonl", ".ndjson"):
             return {"kind": "json"}
         return {"kind": "csv" if ext in DEFAULT_IMPORT_EXTENSIONS else "text"}

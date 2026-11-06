@@ -265,11 +265,15 @@ export async function pollJobs() {
       // SQLite TEXT that wasn't UTF-8: imported with U+FFFD in place of
       // the bytes, and said so rather than shown as if it were the text.
       const undecodable = (j.result || []).reduce((a, r) => a + (r.undecodable_values || 0), 0);
-      const warn = ragged || badRecs || suspect || clashes || cp1252 || recoded || undecodable;
+      // Login records: a tail too short for a whole record (a write cut
+      // off by a crash) is left out, never padded into a row.
+      const torn = (j.result || []).reduce((a, r) => a + (r.torn_bytes || 0), 0);
+      const warn = ragged || badRecs || suspect || clashes || cp1252 || recoded || undecodable || torn;
       toast(`${j.name}: ${total.toLocaleString()} rows imported`
         + (ragged ? ` · ${ragged.toLocaleString()} ragged rows padded/trimmed` : '')
         + (badRecs ? ` · ${badRecs.toLocaleString()} unreadable record${badRecs === 1 ? '' : 's'} skipped` : '')
         + (undecodable ? ` · ${undecodable.toLocaleString()} text value${undecodable === 1 ? ' was' : 's were'} not valid UTF-8 (shown with \ufffd)` : '')
+        + (torn ? ` · the last ${torn.toLocaleString()} byte${torn === 1 ? ' was' : 's were'} not a whole login record and ${torn === 1 ? 'was' : 'were'} left out` : '')
         // Many-newline fields are the signature of an unbalanced quote
         // swallowing the lines after it — a warning, not a verdict.
         + (suspect ? ` · ${suspect.toLocaleString()} row${suspect === 1 ? '' : 's'} with very long multi-line fields — check for a stray quote if the row count looks low` : '')

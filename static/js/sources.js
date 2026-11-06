@@ -123,6 +123,10 @@ export function sourceTitle(s, suffix) {
     else if (!s.origin && s.origin_meta && s.origin_meta.encoding === 'cp1252') parts.push('Not UTF-8 — read as Windows-1252');
     else if (!s.origin && s.origin_meta && s.origin_meta.cp1252_bytes) {
       parts.push(`${Number(s.origin_meta.cp1252_bytes).toLocaleString()} bytes not valid UTF-8 — read as Windows-1252`);
+    } else if (!s.origin && s.origin_meta && s.origin_meta.record_layout) {
+      // Login records: which of the four layouts the bytes were read as.
+      parts.push(`Login records — ${s.origin_meta.record_layout}`
+        + (s.origin_meta.torn_bytes ? `; the last ${Number(s.origin_meta.torn_bytes).toLocaleString()} bytes were not a whole record and were left out` : ''));
     }
     if (s.path) parts.push(s.path);
     if (s.imported_at) parts.push(`Imported ${s.imported_at.replace('T', ' ')}`);

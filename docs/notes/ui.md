@@ -1811,7 +1811,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   - **No intro line.** The empty queue's pane says what to drop and what
     imports; a full one has no line to spare.
   tests/ui/test_import_queue_ui.py, test_iis_queue.py,
-  test_xlsx_picker_ui.py, test_text_import_ui.py.
+  test_utmp_queue.py, test_xlsx_picker_ui.py, test_text_import_ui.py.
 - **The home screen's case list is the Tables manager's frame too**
   (`renderHome`, `homeSections`, `buildCasesPane` in home.js; `.home-*`
   in style.css). Sections down the side: Recent (opened in the last 30
