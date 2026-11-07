@@ -425,6 +425,26 @@ export function jobDoneDetail(j) {
   return `${(j.result || []).reduce((a, r) => a + (r.row_count || 0), 0).toLocaleString()} rows`;
 }
 
+/* The badge on a running job's row. A derive rides the import machinery
+   (Store.start_ingest_job, kind 'derive') for its progress, cancel and
+   this panel, but it fills in a column of a table already in the case:
+   it imports nothing. Every running row used to say IMPORTING, so adding
+   a derived column to a table read as a second copy of the table coming
+   in (#528). The phase is also the badge's class, so these two words
+   are the only ones a running job's badge can carry. */
+export function runningJobPhase(j) {
+  return j.kind === 'derive' ? 'deriving' : 'importing';
+}
+
+/* The queued summary's line, for the same reason: column builds and
+   imports share the two slots (Store.MAX_CONCURRENT_INGESTS), so a
+   column added while two big imports run waits here with them. */
+export function queuedJobsDetail(queued) {
+  const derives = queued.filter((j) => j.kind === 'derive').length;
+  if (!derives) return 'waiting to import';
+  return derives === queued.length ? 'waiting to derive' : 'waiting to import or derive';
+}
+
 export function renderJobsPanel() {
   const panel = $('jobsPanel');
   if (!panel) return;
@@ -466,7 +486,7 @@ export function renderJobsPanel() {
       ? `${j.name} — ${Math.min(j.tables_done + 1, j.tables_total)}/${j.tables_total}${j.current_table ? `: ${j.current_table}` : ''}`
       : j.name;
     panel.append(jobPanelRow({
-      label, phase: 'importing',
+      label, phase: runningJobPhase(j),
       pct: j.units_total ? j.units_done / j.units_total : 0,
       indeterminate: !j.units_total,
       detail: j.rows_done ? `${j.rows_done.toLocaleString()} rows` : '',
@@ -477,7 +497,7 @@ export function renderJobsPanel() {
   if (queued.length) {
     panel.append(jobPanelRow({
       label: `${queued.length} queued`, phase: 'queued', indeterminate: false,
-      detail: 'waiting to import',
+      detail: queuedJobsDetail(queued),
       // Cancel the whole waiting batch at once — the common "I didn't mean
       // to import that many" recovery.
       onCancel: () => Promise.allSettled(
