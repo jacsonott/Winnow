@@ -63,7 +63,7 @@ split, found by loading the app:
 | `state` | `S` and the `sel*` row-selection helpers |
 | `view` | building/rebuilding the materialized view |
 | `grid` | paging, prefetch, painting, cell-range selection |
-| `columns` `tsformat` `derived` | column layout/widths; timestamp parsing and display formats; derived and extracted columns |
+| `columns` `columndock` `tsformat` `derived` | column layout/widths; the column list pinned to the sidebar's foot (repainted from the layout by `renderHead`, see [ui.md](ui.md)); timestamp parsing and display formats; derived and extracted columns |
 | `filters` `filterbuilder` `savedfilters` `timeframe` `filterundo` | quick filters and the value picker; the guided tree; saved filters and nicknames; timeframe and jump-to-timestamp; undoing a filter change (`z`) |
 | `grouping` `tags` `rowmenu` `detail` | group-by; tagging and undo; the row right-click menu; the detail pane |
 | `sources` `importer` `merge` `tables` | sources/tabs/sidebar; every import path; the merge builder; the Tables manager |

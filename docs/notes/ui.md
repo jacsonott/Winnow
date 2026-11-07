@@ -635,6 +635,39 @@ see [docs/notes/README.md](README.md) for the whole set.
   but they drag differently now: a sidebar drag *files a table into a
   folder* (`wireTableDrag` + `wireFolderDrop`, its own `draggedTableId`),
   not reorders the strip.
+- **The column list pinned to the sidebar's foot** (`columndock.js`,
+  #527) is the table menu's Show, hide & order list kept on screen, and
+  it **holds no state of its own**. Its ticks, pins, ⤒ ⤓ and drops write
+  `S.layout`/`S.order` through the calls the table menu and the header
+  use (`setColumnHidden`, `togglePin`, `moveColumn`, `setColumnOrder`,
+  `showAllColumns` in columns.js), and it is repainted *from* that state
+  by `syncColumnDock`, which `renderHead` calls at its end. That is the
+  whole sync story: every layout change already ends in `renderHead`, so
+  a header drag, an Alt-click pin or a tick in the table menu shows in
+  the docked list without a second set of call sites. A list that only
+  its own controls updated would be stale the first time the analyst
+  used the header instead. `syncTabChrome` calls it too, because a page
+  tab changes what is on screen without touching the layout (the list
+  then says why it is empty rather than listing a table nobody can see).
+  Two things keep that repaint from undoing what the analyst is doing in
+  the list. It is in place when the table and its set of names are the
+  same (`dock.listedKey`): checkboxes and pins are repainted, rows are
+  re-appended only if the order changed (re-appending takes focus off a
+  control in the row), and the filter box and scroll position are left
+  alone. Only a different table, or a column added or removed, rebuilds
+  the rows, and even then the filter text stays. And a row unticked in
+  the list while **Shown** is picked stays listed (`dock.keepListed`)
+  until the filter or the switch next changes, the table menu's rule, so
+  the repaint that follows a tick cannot whisk the row away from under
+  the pointer. All / Shown is the table menu's own `winnow.tableMenu`
+  preference, deliberately one setting for both lists; whether the list
+  is pinned and its share of the sidebar (`columns`, `columnsRatio`) live
+  beside the sidebar's width in `winnow.sidebar`, which is why
+  `saveSidebarPrefs`/`loadSidebarPrefs` are exported. The height is a
+  ratio of the sidebar, not pixels: a fixed 400px list in a 500px window
+  would leave the table tree a sliver. Pinning it to a hidden sidebar
+  shows the sidebar, since a list pinned nowhere is a click that did
+  nothing (`tests/ui/test_column_dock.py`).
 - **Editing a saved filter** goes through the real grid, not a
   self-contained dialog: "Edit…" in a Saved filters row's ⋯ applies that
   filter (`applyPreset`) and *then* opens `openFilterBuilder(f)` with the
