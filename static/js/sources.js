@@ -1716,15 +1716,20 @@ export function setSidebarWidth(px) {
   return w;
 }
 
-function saveSidebarPrefs(patch) {
+/* Exported for the column list pinned to the sidebar's foot
+   (columndock.js), whose open flag and height share this key. */
+export function saveSidebarPrefs(patch) {
   let cur = {};
-  try { cur = JSON.parse(localStorage.getItem(SIDEBAR_KEY) || '{}'); } catch { /* start fresh */ }
-  localStorage.setItem(SIDEBAR_KEY, JSON.stringify({ ...cur, ...patch }));
+  try { cur = JSON.parse(localStorage.getItem(SIDEBAR_KEY) || '{}') || {}; } catch { /* start fresh */ }
+  try { localStorage.setItem(SIDEBAR_KEY, JSON.stringify({ ...cur, ...patch })); } catch { /* private mode */ }
+}
+
+export function loadSidebarPrefs() {
+  try { return JSON.parse(localStorage.getItem(SIDEBAR_KEY) || '{}') || {}; } catch { return {}; }
 }
 
 export function initSidebar() {
-  let prefs = {};
-  try { prefs = JSON.parse(localStorage.getItem(SIDEBAR_KEY) || '{}'); } catch { /* defaults below */ }
+  const prefs = loadSidebarPrefs();
   setSidebarWidth(prefs.width || SIDEBAR_W_DEFAULT);
   S.collapsedFolders = loadCollapsedFolders();
   // Collapsed by DEFAULT: a case should open showing the evidence, not a

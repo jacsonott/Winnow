@@ -7,6 +7,7 @@ import { columnFilterChips, openValuePicker, pickerTreeNode, removeColumnFilter,
 import { render, setCellRange } from './grid.js';
 import { renderGroupStrip } from './grouping.js';
 import { histogramFollowColumns } from './histogram.js';
+import { syncColumnDock } from './columndock.js';
 import { S, clearCellSelection, gridRowCount, selClear, selSetAll, selSnapshot } from './state.js';
 import { baseColumns, columnMeta } from './tsformat.js';
 import { anchoredPanel, contextMenu } from './ui.js';
@@ -96,6 +97,33 @@ export function togglePin(name) {
   render();
   saveLayout();
   return now;
+}
+
+/* Show or hide one column, from wherever the analyst ticked it: the
+   table menu's list and the one pinned to the sidebar. Same repaint and
+   save as every other layout change (saveLayout is also what tells Hide
+   duplicate rows that the compared columns changed). */
+export function setColumnHidden(name, hidden) {
+  S.layout[name] = { ...(S.layout[name] || {}), hidden: !!hidden };
+  renderHead();
+  render();
+  saveLayout();
+}
+
+/* Every column back on the grid — both lists' Show all. */
+export function showAllColumns() {
+  for (const n of S.order) S.layout[n] = { ...(S.layout[n] || {}), hidden: false };
+  renderHead();
+  render();
+  saveLayout();
+}
+
+/* A whole new order, from a dropped row in either list. */
+export function setColumnOrder(order) {
+  S.order = order;
+  renderHead();
+  render();
+  saveLayout();
 }
 
 /* Send a column to either end of the order. Drag covers every other
@@ -605,6 +633,9 @@ export function renderHead() {
   // The histogram charts only columns that are shown, and nothing else
   // tells it one was just hidden.
   histogramFollowColumns();
+  // Nor the column list pinned to the sidebar, which repaints from the
+  // same S.layout/S.order this just drew (a no-op when it is shut).
+  syncColumnDock();
 
   // The active cell, put back on the column it was on if that column
   // survived this repaint. The rectangle is NOT restored: its far corner

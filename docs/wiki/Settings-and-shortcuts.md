@@ -206,6 +206,7 @@ once, with all its keys.
 | Copy the unique values of the cursor's column — from the selected rows, else the whole view | `Ctrl+Shift+U`, `Meta+Shift+U` |
 | Open Tables manager | `t` |
 | Show/hide the table sidebar | `` ` `` |
+| Pin/unpin the open table's column list at the bottom of the sidebar | none |
 | Open the table menu (columns, value dropdowns, layout, name & merge) — also right-click a tab → Columns… | `C` |
 | Search all tables | `s` |
 | Open/close the detail pane | `d` |

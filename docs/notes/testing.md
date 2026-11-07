@@ -364,6 +364,17 @@ folders out of a shared `/tmp`.
   check that a debounced write did NOT happen waits past the debounce:
   a fast round trip can end before it, so the check looks too early.
 
+- **The shared context's seed runs on every navigation, reloads
+  included.** `FIRST_RUN_INIT` is an init script, so it writes
+  `winnow.sidebar` (`{ collapsed: false }`), `winnow.appearance` and
+  `winnow.remotePrompt` again each time the page loads. A test of a
+  preference stored under one of those keys that reloads to prove it was
+  remembered reads back the seed instead, and fails for a reason that
+  has nothing to do with the app. Carry the value over the reload in
+  sessionStorage and put it back with an init script added after the
+  seed (they run in the order they were added):
+  `_reload_keeping_sidebar` in tests/ui/test_column_dock.py.
+
 - **A click that lands while its target is being re-rendered fires
   nothing.** Not a refusal: the click hits a node that is being replaced,
   so no handler runs and no request goes out, and the test times out

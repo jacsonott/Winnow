@@ -2495,6 +2495,91 @@ textarea:focus { border-color: var(--accent); outline: none; }
    .drop-into above). */
 .sidebar-row.dragging { opacity: .4; }
 
+/* The column list pinned to the sidebar's foot (static/js/columndock.js,
+   #527): the table menu's Show, hide & order list, kept on screen beside
+   the grid. A flex child of .sidebar under .sidebar-list, so the table
+   tree above keeps whatever the list leaves it and scrolls on its own;
+   its share of the height is an inline flex-basis (setColumnDockRatio),
+   and the split above it moves that the way .sidebar-resize moves the
+   width. Rows are drawn to the sidebar's own scale (12px, 22px rows), not
+   the table menu's: the sidebar is 220px wide by default, and a row that
+   needs more than that to show a column name is the wrong row here. */
+.sidebar-coldock-btn { display: inline-flex; align-items: center; justify-content: center; padding: 4px 6px; }
+.sidebar-coldock-btn svg { width: 13px; height: 13px; fill: currentColor; display: block; }
+.sidebar-coldock-btn[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
+.coldock-split {
+  flex: 0 0 auto; height: 7px; margin: -3px 0; position: relative; z-index: 2;
+  cursor: row-resize; touch-action: none;
+}
+.coldock-split::before {
+  content: ""; position: absolute; left: 0; right: 0; top: 3px; height: 1px; background: var(--line);
+}
+.coldock-split:hover::after, .coldock-split.dragging::after {
+  content: ""; position: absolute; left: 0; right: 0; top: 2px; height: 3px; background: var(--accent-dim);
+}
+.coldock {
+  flex: 0 0 45%; min-height: 140px; max-height: calc(100% - 90px);
+  display: flex; flex-direction: column; overflow: hidden; padding: 4px;
+}
+.coldock-head {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 6px;
+  margin: 2px 2px 4px; padding: 3px 4px 3px 8px; border-radius: var(--radius-sm);
+  background: var(--panel-2); color: var(--text);
+  font-size: 10px; letter-spacing: .08em; text-transform: uppercase;
+}
+.coldock-title { flex: 0 0 auto; }
+.coldock-count {
+  flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--dim); text-transform: none; letter-spacing: 0; font-family: var(--mono); font-size: 10px;
+}
+.coldock-headbtn {
+  flex: 0 0 auto; background: none; border: 0; color: var(--dim); cursor: pointer;
+  font: inherit; font-size: 12px; line-height: 1; padding: 2px 4px; border-radius: var(--radius-sm);
+}
+.coldock-headbtn:hover, .coldock-headbtn:focus-visible { color: var(--accent); background: var(--ink); }
+.coldock-body { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 4px; }
+.coldock-top { flex: 0 0 auto; display: flex; gap: 4px; align-items: center; padding: 0 2px; }
+.coldock-search { width: auto; }
+.coldock-seg { flex: 0 0 auto; }
+.coldock-seg button { font-size: 10px; padding: 3px 6px; }
+.coldock-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 0 2px; }
+.coldock-list { display: flex; flex-direction: column; gap: 1px; }
+.coldock-row {
+  display: flex; align-items: center; gap: 2px; min-height: 22px;
+  border-radius: var(--radius-sm); font-size: 12px;
+}
+.coldock-row:hover { background-color: var(--panel-2); }
+.coldock-row.dragging { opacity: .4; }
+.coldock-row.drop-before { box-shadow: inset 0 2px 0 var(--accent); }
+.coldock-row.drop-after { box-shadow: inset 0 -2px 0 var(--accent); }
+.coldock-label {
+  flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 6px;
+  padding: 2px 4px; cursor: grab;
+}
+.coldock-label input { flex: 0 0 auto; margin: 0; cursor: pointer; }
+.coldock-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.coldock-row.off .coldock-name { color: var(--dim); }
+.coldock-derived { flex: 0 0 auto; color: var(--accent); font-style: italic; font-size: 11px; }
+/* A row's buttons only where they are wanted: under the pointer, on a
+   keyboard focus inside the row, and — for pin — wherever the column IS
+   pinned, since that is a fact about the column worth seeing at a glance. */
+.coldock-acts { flex: 0 0 auto; display: flex; gap: 1px; }
+.coldock-btn {
+  background: none; border: 0; color: var(--dim); cursor: pointer; font: inherit; font-size: 11px;
+  line-height: 1; padding: 3px 4px; border-radius: var(--radius-sm); visibility: hidden;
+}
+.coldock-row:hover .coldock-btn, .coldock-row:focus-within .coldock-btn,
+.coldock-row.pinned .coldock-pin { visibility: visible; }
+.coldock-btn:hover, .coldock-btn:focus-visible { color: var(--accent); background-color: var(--ink); }
+.coldock-row.pinned .coldock-pin { color: var(--accent); }
+.coldock-more { margin-top: 4px; padding: 6px 4px 2px; font-size: 11px; gap: 6px; }
+.coldock-foot {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 6px; padding: 4px 2px 0;
+  border-top: var(--border-w) solid var(--line);
+}
+.coldock-hint { flex: 1 1 auto; min-width: 0; color: var(--text-faint); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.coldock-empty { padding: 10px 8px; color: var(--dim); font-size: 12px; line-height: 1.45; }
+
 /* ---------------------------------------------------------------- modal */
 
 /* The calendar beside free-typed timestamp inputs — our own panel (an

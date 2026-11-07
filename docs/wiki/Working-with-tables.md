@@ -15,6 +15,7 @@ The sidebar has these sections:
 - **Open** lists the tables that have tabs, in tab order. Reorder them with ▲/▼ or by dragging, close one with ✕, or close them all with **close all**. Drag a table from further down onto this section to open it.
 - **All tables** lists every table, in folders if you use them. **open all** opens every closed table (it asks first when there are more than 12), and **tagged** opens the closed tables that have tagged rows.
 - **Pages** (SQL, Timeline, Notes, Watchlist) and **Dashboards** follow; see [SQL pane](SQL-pane.md), [Timeline, Search all and the Watchlist](Timeline-search-and-watchlist.md), [Tagging and notes](Tagging-and-notes.md) and [Dashboards](Dashboards.md).
+- **Columns**, at the bottom, is there when you pin the open table's column list to the sidebar with the column button (three bars) beside 🗀+. See [The column list in the sidebar](#the-column-list-in-the-sidebar).
 
 Hover over a table to see its nickname, the file it came from and when it was imported. Right-click it for the same menu as its tab. A ⛓ before a name marks a merge, and ⊂ marks a table saved from another table's rows.
 
@@ -76,7 +77,7 @@ Filtering, grouping or opening the value picker on a column builds a small filte
 
 Press `C` to open the table menu, or right-click a tab or a table in the sidebar and choose **Columns…**. Its sections are listed down the left, each with a line saying what is set in it, and the one you pick fills the right. Up and Down move between them. Along the bottom, under every section, are **Tables manager…**, **Reset view** (clears filters, search, tag filter and grouping and restores the default sort; the column layout and the timeframe stay) and **Close this tab**.
 
-- **Show, hide & order**: show, hide, pin and reorder columns (see below), **Hide empty rows** and **Hide duplicate rows**, plus **Add derived column…** (see [Derived columns](Derived-columns.md)).
+- **Show, hide & order**: show, hide, pin and reorder columns (see below), **Hide empty rows** and **Hide duplicate rows**, plus **Add derived column…** (see [Derived columns](Derived-columns.md)) and **Pin to sidebar**, which keeps this column list on screen (see [The column list in the sidebar](#the-column-list-in-the-sidebar)).
 - **Value dropdowns**: when the ▾ value picker appears on this table's filter boxes, for the table and for each column (see [Filtering and searching](Filtering-and-searching.md#the-value-picker)).
 - **Layout**: put the default layout for these columns, or another table's layout, on this table, and save this table's layout as the default (see [Layouts](#layouts)).
 - **Name & merge**: how many rows, columns, tagged rows and notes the table has, where it was imported from, its nickname, the name of its set of columns, and its merges. The two names are saved when you press Enter or leave the box; Escape takes back what you typed. **Merge with other tables…** (on a merge, **Edit merge…**; see [Merging tables](#merging-tables)) sits beside the tables that share columns with this one, best fit first.
@@ -92,6 +93,22 @@ In the table menu's **Columns** list, untick a column to hide it and tick it to 
 **All** and **Shown**, beside **Filter columns…**, choose what the list holds. **All** lists every column, ticked or not. **Shown** lists only the ticked columns, the ones the grid shows, which helps on a wide table where you have hidden most of the columns and want to reorder, pin or untick the rest. The hidden columns stay in the table and are only left out of the list. Under the list, a line such as "26 hidden columns not listed" says how many are left out, and **List all columns** beside it switches back to **All**. If you type a name that only hidden columns match, that line counts them ("2 hidden columns match …") so you can list them and tick the one you want. A column you untick while **Shown** is picked stays in the list until you type in the filter box, switch, or reopen the menu, so a misclick can be ticked straight back. The choice is remembered in this browser and applies to every table.
 
 A hidden datetime column is also left out of the [histogram](Filtering-and-searching.md#the-histogram)'s column list, so the histogram only charts columns you can see.
+
+### The column list in the sidebar
+
+To keep the column list on screen beside the grid instead of opening the table menu each time, pin it to the sidebar. Click the column button (three bars) at the top of the sidebar, beside 🗀+, or click **Pin to sidebar** under the table menu's **Columns** list, which closes the table menu and puts the list at the bottom of the sidebar. If the sidebar was hidden, pinning the list shows it. Pinning also has a shortcut with no key by default, which you can give one in [Settings and shortcuts](Settings-and-shortcuts.md).
+
+The pinned list always shows the columns of the table you are looking at, and changes when you switch tabs. On a page such as SQL or the Timeline it says that the columns appear when you go back to a table.
+
+- **Filter columns…** narrows the list to the columns whose names contain what you type. What you typed stays when you tick a column, pin one, move one or switch to another table.
+- Tick a column to show it in the grid and untick it to hide it. The count beside **Columns** says how many of the table's columns are shown, for example "12 of 27".
+- **All** and **Shown** work as they do in the table menu, and it is the same setting: picking one in either place changes both.
+- Drag a row up or down to reorder the columns. Pointing at a row shows **pin**, ⤒ and ⤓, which pin the column or send it to the start or end. A pinned column shows **pinned** all the time.
+- **Show all** at the bottom shows every column. **⋯** at the top opens the table menu, for value dropdowns, layouts and the rest. **✕** unpins the list.
+
+Changes made anywhere else, such as dragging a header, Alt-clicking it to pin it or unticking a column in the table menu, show in the pinned list at once. The list changes the table's layout just as the table menu does, so it is saved with the table and works the same on a merge.
+
+Drag the line between the table list and the column list to give either more of the sidebar, and double-click the line to reset it. Whether the list is pinned, and its height, are remembered in this browser.
 
 **Hide empty rows** is a toggle in the same place. It drops rows in which every column is empty, such as blank lines in a raw text import. It counts as a filter: the row count follows it, and it is remembered for the table.
 
