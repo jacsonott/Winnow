@@ -68,8 +68,9 @@ one row per distinct text with a re-run moved to the top and counted, a
 failed run's error kept without counts, the cap dropping the oldest run,
 ids never reused, surviving a reopen, and a case holding only history
 counting as work for the quick-look sweep; `tests/ui/test_sql_history_ui.py`
-holds the pane's half, including that a superseded run is not recorded
-and that opening an entry never overwrites a draft.
+holds the pane's half, including that a superseded run is not recorded,
+that opening an entry over a draft asks first (with the focus on the safe
+answer), and that "Open in a new tab" starts off and is remembered.
 `test_timeparse.py` covers every timestamp operation as pure functions —
 epoch auto-ranging boundaries, hex-vs-decimal FILETIME, the syslog year
 rollover (including across a batch boundary and Feb 29 in a non-leap

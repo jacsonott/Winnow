@@ -1981,6 +1981,10 @@ textarea:focus { border-color: var(--accent); outline: none; }
   font-size: 11px; color: var(--dim);
 }
 .sqlh-foot .btn { font-size: 11px; padding: 3px 8px; }
+/* "Open in a new tab" on the left; the count and Clear history… keep to
+   the right, where they were before it. */
+.sqlh-newtab { cursor: pointer; color: var(--text); }
+.sqlh-foot .sqlh-count { margin-left: auto; }
 
 /* --------------------------------------------------------- unified timeline */
 

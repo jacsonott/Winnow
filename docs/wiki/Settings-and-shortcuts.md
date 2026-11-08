@@ -286,7 +286,7 @@ keys**, below **Reset to defaults**, in the same groups as here.
 | `Shift`+click a row | Select every result row from the last one clicked to it. |
 | `Enter` | In **History ▾**'s **Find a query…** box: open the first query that matches. |
 | `Ctrl+Enter` / `⌘+Enter` | In **History ▾**: open the first match, or the query you have moved to with `↓`, and run it. |
-| `Ctrl`+click / `⌘`+click a query in **History ▾** | Open it in a new query tab. |
+| `Ctrl`+click / `⌘`+click a query in **History ▾** | Open it in a new query tab, whether or not **Open in a new tab** is ticked. |
 
 More on selecting and tagging results is in [SQL pane](SQL-pane.md), and on
 the history in [Query history](SQL-pane.md#query-history).

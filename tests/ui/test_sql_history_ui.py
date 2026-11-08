@@ -9,8 +9,11 @@ quietly make it lie or cost the analyst work:
   superseded (run again before it answered) is not, since nobody got an
   answer from it;
 * opening an entry never overwrites a draft: it replaces the editor's
-  text only when that text is blank, a starter, or itself in the history,
-  and otherwise opens a query tab of its own;
+  text without asking only when that text is blank, a starter, or itself
+  in the history, and otherwise asks, with a new tab offered beside
+  replacing it;
+* opening in a new tab is the analyst's choice: "Open in a new tab" (off
+  by default, remembered in this browser) or Ctrl/⌘+click;
 * the list is newest first, filters by every word typed, and Enter opens
   the first match.
 
@@ -28,6 +31,8 @@ pytestmark = pytest.mark.ui
 QUICK = "SELECT rid, Host FROM src_1 WHERE rid <= 7"
 # Never ends on its own; see test_sql_run_tokens.py.
 RUNAWAY = "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n) SELECT i FROM n"
+# The panel's "Open in a new tab" lives here (sqlhistory.js PREFS_KEY).
+PREFS_KEY = "winnow.sqlHistory"
 
 
 @pytest.fixture
@@ -35,6 +40,7 @@ def sql(page, api, open_sql):
     """The SQL pane with an empty history, its tabs and the active tab's
     text put back afterwards, and the history left empty."""
     api("/api/sql_history", "DELETE")
+    page.evaluate("(k) => localStorage.removeItem(k)", PREFS_KEY)
     open_sql(page)
     tabs_before = {t["id"] for t in api("/api/sql_tabs")}
     original = page.evaluate("() => [__winnow.S.sqlTabId, document.getElementById('sqlText').value]")
@@ -53,6 +59,7 @@ def sql(page, api, open_sql):
             if t["id"] not in tabs_before:
                 api(f"/api/sql_tabs/{t['id']}", "DELETE")
         api("/api/sql_history", "DELETE")
+        page.evaluate("(k) => localStorage.removeItem(k)", PREFS_KEY)
 
 
 def _set_editor(page, text):
@@ -70,6 +77,15 @@ def _open_history(page):
 
 def _entry(page, sql):
     return page.locator(".sql-history .sqlh-row").filter(has_text=sql.split("\n")[0])
+
+
+def _tabs(page):
+    return page.evaluate("() => __winnow.S.sqlTabs.length")
+
+
+def _saved(api, tab_id):
+    """What the case file holds for a query tab, not just the editor."""
+    return next(t for t in api("/api/sql_tabs") if t["id"] == tab_id)["sql"]
 
 
 def test_running_a_query_records_it_with_its_tab_and_row_count(sql, api, until):
@@ -218,22 +234,96 @@ def test_opening_an_entry_leaves_no_autocomplete_open(sql, api):
     assert page.locator(".sql-ac").count() == 0
 
 
-def test_opening_an_entry_never_overwrites_a_draft(sql, api):
-    page = sql
-    api("/api/sql_history", "POST", {"sql": "SELECT * FROM src_1 WHERE Host = 'H4'", "tab_name": "Host four"})
-    draft = "SELECT EventId FROM src_1 WHERE Host = 'H3' -- half written, never run"
-    _set_editor(page, draft)
-    drafted = page.evaluate("() => __winnow.S.sqlTabId")
-    before = page.evaluate("() => __winnow.S.sqlTabs.length")
+H4 = "SELECT * FROM src_1 WHERE Host = 'H4'"
+DRAFT = "SELECT EventId FROM src_1 WHERE Host = 'H3' -- half written, never run"
 
+
+def _asked(page):
+    page.wait_for_selector('.confirm-card:has-text("isn\'t in the history")')
+    return page.locator(".confirm-actions")
+
+
+def test_a_query_that_is_not_in_the_history_is_asked_about_before_it_is_replaced(sql, api, until):
+    """The current tab holds something nobody has run: replacing it would
+    lose it for good, so the analyst says which they want."""
+    page = sql
+    api("/api/sql_history", "POST", {"sql": H4, "tab_name": "Host four"})
+    _set_editor(page, DRAFT)
+    drafted = page.evaluate("() => __winnow.S.sqlTabId")
+    before = _tabs(page)
+
+    # Cancel: nothing moves.
     _open_history(page)
-    _entry(page, "Host = 'H4'").locator(".sqlh-item").click()
+    _entry(page, H4).locator(".sqlh-item").click()
+    _asked(page).get_by_role("button", name="Cancel").click()
+    page.wait_for_selector(".confirm-card", state="detached")
+    assert page.locator("#sqlText").input_value() == DRAFT
+    assert _tabs(page) == before
+
+    # Open in a new tab, which has the focus, so a stray Enter keeps the
+    # draft: it stays where it was typed, in the case file too.
+    _open_history(page)
+    _entry(page, H4).locator(".sqlh-item").click()
+    _asked(page)
+    page.wait_for_function("() => document.activeElement?.textContent === 'Open in a new tab'")
+    page.keyboard.press("Enter")
     page.wait_for_function("(n) => __winnow.S.sqlTabs.length === n + 1", arg=before)
-    assert page.locator("#sqlText").input_value() == "SELECT * FROM src_1 WHERE Host = 'H4'"
+    assert page.locator("#sqlText").input_value() == H4
     # Named for the tab it was run from, which is free in this case.
     assert page.evaluate("() => __winnow.activeSqlTab().name") == "Host four"
-    # The draft is where it was typed, in the case file too.
-    assert next(t for t in api("/api/sql_tabs") if t["id"] == drafted)["sql"] == draft
+    assert _saved(api, drafted) == DRAFT
+
+    # Replace it: in the draft's own tab, and no new one.
+    page.evaluate("(id) => __winnow.activateSqlTab(id)", drafted)
+    page.wait_for_function("(d) => document.getElementById('sqlText').value === d", arg=DRAFT)
+    _open_history(page)
+    _entry(page, H4).locator(".sqlh-item").click()
+    _asked(page).get_by_role("button", name="Replace it").click()
+    page.wait_for_function("(q) => document.getElementById('sqlText').value === q", arg=H4)
+    assert page.evaluate("() => __winnow.S.sqlTabId") == drafted
+    assert _tabs(page) == before + 1
+    until(page, lambda: _saved(api, drafted) == H4, "the replacement to be saved into the draft's tab")
+
+
+def test_open_in_a_new_tab_is_off_by_default_and_remembered(sql, api):
+    page = sql
+    a = "SELECT * FROM src_1 WHERE Host = 'H1'"
+    b = "SELECT * FROM src_1 WHERE Host = 'H2'"
+    api("/api/sql_history", "POST", {"sql": b})
+    api("/api/sql_history", "POST", {"sql": a})
+    _set_editor(page, a)     # in the history, so it could be replaced without asking
+    first = page.evaluate("() => __winnow.S.sqlTabId")
+    before = _tabs(page)
+
+    _open_history(page)
+    box = page.locator(".sqlh-newtab input")
+    assert not box.is_checked()
+    box.check()
+    _entry(page, b).locator(".sqlh-item").click()
+    page.wait_for_function("(n) => __winnow.S.sqlTabs.length === n + 1", arg=before)
+    assert page.locator("#sqlText").input_value() == b
+    assert _saved(api, first) == a
+
+    # Still ticked the next time the list opens.
+    _open_history(page)
+    assert page.locator(".sqlh-newtab input").is_checked()
+    # Unticked, a query opens in the current tab again.
+    page.locator(".sqlh-newtab input").uncheck()
+    assert page.evaluate("(k) => JSON.parse(localStorage.getItem(k)).newTab", PREFS_KEY) is False
+    _entry(page, a).locator(".sqlh-item").click()
+    page.wait_for_function("(q) => document.getElementById('sqlText').value === q", arg=a)
+    assert _tabs(page) == before + 1
+
+
+def test_ctrl_click_opens_a_new_tab_with_the_switch_off(sql, api):
+    page = sql
+    api("/api/sql_history", "POST", {"sql": H4})
+    _set_editor(page, "")    # empty: a plain click would fill this tab
+    before = _tabs(page)
+    _open_history(page)
+    _entry(page, H4).locator(".sqlh-item").click(modifiers=["ControlOrMeta"])
+    page.wait_for_function("(n) => __winnow.S.sqlTabs.length === n + 1", arg=before)
+    assert page.locator("#sqlText").input_value() == H4
 
 
 def test_run_opens_and_runs_it(sql, api, until):

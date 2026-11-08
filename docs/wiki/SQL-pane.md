@@ -92,15 +92,20 @@ answered is left out, and the run that replaced it is added instead.
 | Find a query | Type in **Find a query…**. Every word you type has to appear in the query or in its tab's name, in any order |
 | Open one in the editor | Click it, or press `Enter` in **Find a query…** to open the first match |
 | Open and run one | Click **Run** beside it, or press `Ctrl+⏎` (`⌘⏎` on a Mac) |
-| Open one in a new query tab | `Ctrl`+click it (`⌘`+click on a Mac) |
+| Open one in a new query tab | `Ctrl`+click it (`⌘`+click on a Mac). To open every query that way, tick **Open in a new tab** under the list |
 | Remove one | Click its **✕** |
 | Remove them all | Click **Clear history…**, then **Clear history**. Your query tabs are not affected |
 
-Opening a query never loses what is in the editor. It replaces the
-editor's text only when that text is empty, is a starter query, or is
-itself in the history. Otherwise the query opens in a new query tab, named
-after the tab it was run from if that name is free, and the pane says
-*Opened in a new query tab, so the query in "…" is kept*.
+A query you pick opens in the current query tab. Tick **Open in a new
+tab**, under the list, to open each one in a query tab of its own instead,
+named after the tab it was run from if that name is free. Winnow remembers
+the setting in this browser.
+
+Opening a query never loses what is in the editor without asking. The
+current tab's text is replaced straight away only when it is empty, is a
+starter query, or is itself in the history. Anything else, such as a query
+you are still writing, gets a question first: **Replace it**, **Open in a
+new tab**, or **Cancel**. **Open in a new tab** is the one `Enter` picks.
 
 The history is saved in the case file, like query tabs, so it is there
 when you reopen the case and it travels with the case file. A session

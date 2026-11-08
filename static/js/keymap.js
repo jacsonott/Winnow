@@ -471,7 +471,7 @@ export const FIXED_KEYS = [
     ['Shift-click a row', 'Select every result row from the last one clicked to it'],
     ['Enter', 'In History ▾’s Find a query… box: open the first query that matches'],
     ['Ctrl/⌘ + Enter', 'In History ▾: open the first match, or the query moved to with ↓, and run it'],
-    ['Ctrl/⌘-click a query in History ▾', 'Open it in a new query tab'],
+    ['Ctrl/⌘-click a query in History ▾', 'Open it in a new query tab, whether or not Open in a new tab is ticked'],
   ]],
   ['Timeline', [
     ['↓ / ↑, j / k, PgDn / PgUp, g / G', 'Move the selected line — the grid’s movement keys, so a rebinding above moves it too'],

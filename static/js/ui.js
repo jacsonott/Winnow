@@ -246,6 +246,33 @@ export function confirmDialog(message, opts = {}) {
   return _spawnDialog(build);
 }
 
+/* confirmDialog for a question with more than one way to go ahead:
+   `choices` is [{ label, value, primary?, danger? }], laid out after
+   Cancel in the order given. Resolves the chosen value, or null for
+   Cancel, Escape and the backdrop. `opts.focus` names the value whose
+   button takes focus (the first choice otherwise), so a stray Enter does
+   the safe thing. */
+export function choiceDialog(message, choices, opts = {}) {
+  const build = (card, close) => {
+    card.append(el('p', 'confirm-message', message));
+    const acts = el('div', 'confirm-actions');
+    const cancelBtn = el('button', 'btn ghost', opts.cancelLabel || 'Cancel');
+    cancelBtn.onclick = () => close(null);
+    acts.append(cancelBtn);
+    const buttons = choices.map((c) => {
+      const b = el('button', 'btn ' + (c.danger ? 'danger' : c.primary ? 'primary' : 'ghost'), c.label);
+      b.onclick = () => close(c.value);
+      acts.append(b);
+      return b;
+    });
+    card.append(acts);
+    const i = choices.findIndex((c) => c.value === opts.focus);
+    setTimeout(() => buttons[Math.max(i, 0)]?.focus(), 0);
+  };
+  build.cancelValue = null;
+  return _spawnDialog(build);
+}
+
 /* The window.alert() replacement — one button, resolves when it's read.
    Enter, Escape and the backdrop all count as "read": there is nothing to
    decide, so there is nothing to cancel. */

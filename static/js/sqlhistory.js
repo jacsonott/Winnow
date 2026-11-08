@@ -22,11 +22,29 @@ import { runSql } from './plugins.js';
 import { activeSqlTab, flushSqlTabSave, newSqlTab, sqlStarters } from './sql.js';
 import { sqlAcClose } from './sqlassist.js';
 import { S } from './state.js';
-import { anchoredPanel, confirmDialog } from './ui.js';
+import { anchoredPanel, choiceDialog, confirmDialog } from './ui.js';
 
 /* Store.SQL_HISTORY_LIMIT, for the footer's wording only; the server
    enforces it. */
 export const SQL_HISTORY_LIMIT = 500;
+
+/* The panel's own settings, per browser: whether a query picked from the
+   list opens in a query tab of its own (the footer's "Open in a new tab").
+   A way of working, not something about the evidence, so it is not in the
+   case file the way the history is. */
+const PREFS_KEY = 'winnow.sqlHistory';
+
+export function sqlHistoryPrefs() {
+  let stored = {};
+  try { stored = JSON.parse(localStorage.getItem(PREFS_KEY) || '{}') || {}; } catch { /* defaults */ }
+  return { newTab: false, ...stored };
+}
+
+export function saveSqlHistoryPrefs(patch) {
+  try {
+    localStorage.setItem(PREFS_KEY, JSON.stringify({ ...sqlHistoryPrefs(), ...patch }));
+  } catch { /* private mode: it holds for this panel only */ }
+}
 
 /* Called by runSql with a run that has landed in its tab: a result, or an
    error. Best-effort and not awaited, like the tab autosave: the result is
@@ -90,25 +108,41 @@ export function sqlHistoryMatches(entries, q) {
   });
 }
 
-/* Opening an entry must not cost the analyst a draft. This is
-   openStarter's rule (sql.js) with one more kind of text that is safe to
-   replace: a query that is itself in the history, because the list still
-   holds it. Anything else stays where it is, and the entry opens in a
-   query tab of its own, under the name of the tab it was run from when
-   that name is free. `newTab` (Ctrl/⌘+click) opens one regardless. */
+/* Opens an entry in a query tab of its own when `newTab` is set (the
+   footer's "Open in a new tab", or Ctrl/⌘+click), under the name of the
+   tab it was run from when that name is free; otherwise in the current
+   tab. Either way it must not cost the analyst a draft: the current tab's
+   text is replaced without asking only under openStarter's rule (sql.js)
+   plus one more kind of text, a query that is itself in the history,
+   because the list still holds it. Anything else is asked about first,
+   with a new tab offered beside replacing it. */
 export async function openSqlHistoryEntry(h, { run = false, newTab = false, history = [] } = {}) {
-  const cur = $('sqlText').value.trim();
-  const disposable = !cur
-    || sqlStarters().some((x) => x.sql.trim() === cur)
-    || history.some((x) => x.sql === cur);
-  if (newTab || !disposable || !activeSqlTab()) {
-    const kept = activeSqlTab();
+  const tab = activeSqlTab();
+  let fresh = newTab || !tab;
+  if (!fresh) {
+    const cur = $('sqlText').value.trim();
+    const disposable = !cur
+      || cur === h.sql
+      || sqlStarters().some((x) => x.sql.trim() === cur)
+      || history.some((x) => x.sql === cur);
+    if (!disposable) {
+      const pick = await choiceDialog(
+        `The query in "${tab.name}" isn't in the history, so replacing it would lose it.`,
+        [
+          { label: 'Replace it', value: 'replace', danger: true },
+          { label: 'Open in a new tab', value: 'new', primary: true },
+        ],
+        { focus: 'new' });
+      if (!pick) return;
+      fresh = pick === 'new';
+    }
+  }
+  if (fresh) {
     const taken = new Set(S.sqlTabs.map((t) => t.name));
     await newSqlTab(h.tab_name && !taken.has(h.tab_name) ? h.tab_name : null, h.sql);
     // newSqlTab says so itself when it can't make the tab, and leaves the
     // draft's tab in the editor — which Run must not then run.
     if ($('sqlText').value !== h.sql) return;
-    if (!newTab && kept) toast(`Opened in a new query tab, so the query in "${kept.name}" is kept`, 4000);
   } else {
     $('sqlText').value = h.sql;
     // Through the editor's own input handler, so the tab record, the
@@ -135,10 +169,21 @@ export function openSqlHistory(anchorEl = $('btnSqlHistory')) {
     search.setAttribute('aria-label', 'Find a query in the history');
     const list = el('div', 'vp-list sqlh-list');
     const foot = el('div', 'sqlh-foot');
+    // Built once, outside paint(), so a repaint (each letter typed in the
+    // search box) re-places the same box and open() reads what it says.
+    const newTabBox = el('input');
+    newTabBox.type = 'checkbox';
+    newTabBox.checked = sqlHistoryPrefs().newTab;
+    newTabBox.onchange = () => saveSqlHistoryPrefs({ newTab: newTabBox.checked });
+    const newTabRow = el('label', 'check-row sqlh-newtab');
+    newTabRow.title = 'Open each query you pick here in a query tab of its own, '
+      + 'instead of in the current tab. Remembered in this browser.';
+    newTabRow.append(newTabBox, el('span', null, 'Open in a new tab'));
 
-    const open = (h, opts) => {
+    // `ctrl` (Ctrl/⌘+click) opens a new tab whatever the box says.
+    const open = (h, { run = false, ctrl = false } = {}) => {
       close();
-      openSqlHistoryEntry(h, { ...opts, history: entries || [] })
+      openSqlHistoryEntry(h, { run, newTab: ctrl || newTabBox.checked, history: entries || [] })
         .catch((e) => toast('Could not open the query: ' + e.message));
     };
     const forget = async (h) => {
@@ -176,8 +221,8 @@ export function openSqlHistory(anchorEl = $('btnSqlHistory')) {
       // The query itself, so a click is never a surprise, and the exact
       // time the list rounds to "2 h ago".
       item.title = `${h.sql}\n\nLast run ${sqlHistoryStamp(h.ran_at)}${h.tab_name ? ` in ${h.tab_name}` : ''}`
-        + ` — click to open it, ${IS_MAC ? '⌘' : 'Ctrl+'}click for a new tab`;
-      item.onclick = (e) => open(h, { newTab: e.ctrlKey || e.metaKey });
+        + ` — click to open it, ${IS_MAC ? '⌘' : 'Ctrl+'}click to open it in a new tab`;
+      item.onclick = (e) => open(h, { ctrl: e.ctrlKey || e.metaKey });
       item.onkeydown = (e) => {
         if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); open(h, { run: true }); }
       };
@@ -211,7 +256,7 @@ export function openSqlHistory(anchorEl = $('btnSqlHistory')) {
       const clear = el('button', 'btn ghost sqlh-clear', 'Clear history…');
       clear.title = 'Delete every query in the history from the case file';
       clear.onclick = clearAll;
-      foot.append(count, clear);
+      foot.append(newTabRow, count, clear);
     };
 
     search.oninput = paint;

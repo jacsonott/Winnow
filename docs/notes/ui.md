@@ -1125,12 +1125,19 @@ see [docs/notes/README.md](README.md) for the whole set.
     computed from a zone-less local time on a desk in another zone is
     hours wrong. The panel shows `openedAgo` (home.js) and the exact
     local time in the tooltip.
-  - **Opening an entry never costs a draft** (`openSqlHistoryEntry`):
-    `openStarter`'s rule, plus one more kind of replaceable text, a query
-    that is itself in the history (the list still holds it). Anything
-    else opens in a new sub-tab, named after the tab the entry was run
-    from when no open tab has that name, with a toast saying where the
-    query went.
+  - **Where an entry opens is the analyst's call; losing a draft never
+    is** (`openSqlHistoryEntry`). It opens in the current tab unless the
+    footer's "Open in a new tab" is ticked (`winnow.sqlHistory` in
+    localStorage: a way of working, so per browser, not in the case
+    file) or the click held Ctrl/⌘. A new tab takes the name of the tab
+    the entry was run from when no open tab has it. In the current tab,
+    the text is replaced without asking only under `openStarter`'s rule
+    plus one more kind of replaceable text, a query that is itself in the
+    history (the list still holds it). Anything else gets
+    `choiceDialog` (ui.js): Cancel, Replace it, or Open in a new tab,
+    with the focus on the new tab so a stray Enter keeps the draft. It
+    used to open such an entry in a new tab without asking, which made a
+    new tab something that happened to the analyst rather than a choice.
   - **No client-side cache.** The panel reads `/api/sql_history` each
     time it opens: at most 500 short rows, and a pop-out running queries
     beside the main window would otherwise leave one of them showing a
