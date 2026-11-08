@@ -17,7 +17,6 @@ given (Store.HISTOGRAM_BUCKETS); it was never being given a smaller one.
 from __future__ import annotations
 
 import datetime
-import time
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -47,7 +46,7 @@ def _put_back(page, sid):
 
 
 @pytest.fixture
-def wide_table(page, tmp_path, server_post):
+def wide_table(page, tmp_path, imported):
     """Three days of events, so the bars are hours wide — the shared
     fixture spans three minutes, where every bucket is already seconds and
     the rounding never bit."""
@@ -59,26 +58,17 @@ def wide_table(page, tmp_path, server_post):
     f.write_text("\n".join(lines) + "\n")
     sid = None
     try:
-        server_post("/api/ingest/jobs/path", {"path": str(f), "name": "wide.csv", "kind": "csv"})
-        # Polled from Python: wait_for_function does not await a promise
-        # predicate, so the .then() form passes instantly and races the import
-        # (tests/test_ui_test_hygiene.py enforces this).
-        deadline = time.monotonic() + 25
-        while time.monotonic() < deadline:
-            names = page.evaluate(
-                "() => __winnow.loadSources().then(() => __winnow.S.sources.map((s) => s.name))")
-            if "wide.csv" in names:
-                break
-            time.sleep(0.25)
-        else:
-            raise AssertionError("wide.csv never appeared in S.sources")
-        sid = page.evaluate("() => __winnow.S.sources.find((s) => s.name === 'wide.csv').id")
+        # Until the import FINISHES, not until wide.csv is listed: it is
+        # listed with no columns while it imports, and a strip opened on that
+        # says "No datetime column" for good (the `imported` fixture). That,
+        # not the view below, is why the strip once never drew in one of four
+        # full local runs, and on the nightly's Windows runner.
+        sid = imported({"path": str(f), "name": "wide.csv", "kind": "csv"})[0]
+        page.evaluate("() => __winnow.loadSources()")
         page.evaluate("(id) => __winnow.openSource(id)", sid)
         # The view, not just the id: sourceId flips before the new table's
         # view and columns land, and a strip opened in between can ask about
-        # the wrong table. That is the likeliest reason the strip once never
-        # drew, in one of four full local runs. 720 rows is wide.csv's; the
-        # shared table has 200.
+        # the wrong table. 720 rows is wide.csv's; the shared table has 200.
         page.wait_for_function(
             "(id) => __winnow.S.sourceId === id && __winnow.S.view && __winnow.S.view.row_count === 720"
             " && __winnow.busyCount === 0", arg=sid)

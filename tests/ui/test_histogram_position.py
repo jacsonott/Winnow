@@ -16,7 +16,6 @@ marks, so a refactor of either side that drifts fails here.
 from __future__ import annotations
 
 import datetime
-import time
 
 import pytest
 
@@ -50,7 +49,7 @@ def _put_back(page, sid):
 
 
 @pytest.fixture
-def timed_table(page, tmp_path, server_post):
+def timed_table(page, tmp_path, imported):
     """Three days in time order, plus a Shuffle column whose order has
     nothing to do with time — sorting by it scatters the rows on screen
     across the whole chart."""
@@ -62,19 +61,10 @@ def timed_table(page, tmp_path, server_post):
     f.write_text("\n".join(lines) + "\n")
     sid = None
     try:
-        server_post("/api/ingest/jobs/path", {"path": str(f), "name": "position.csv", "kind": "csv"})
-        # Polled from Python: wait_for_function does not await a promise
-        # predicate (tests/test_ui_test_hygiene.py).
-        deadline = time.monotonic() + 25
-        while time.monotonic() < deadline:
-            names = page.evaluate(
-                "() => __winnow.loadSources().then(() => __winnow.S.sources.map((s) => s.name))")
-            if "position.csv" in names:
-                break
-            time.sleep(0.25)
-        else:
-            raise AssertionError("position.csv never appeared in S.sources")
-        sid = page.evaluate("() => __winnow.S.sources.find((s) => s.name === 'position.csv').id")
+        # Until the import finishes, not until position.csv is listed (the
+        # `imported` fixture says why).
+        sid = imported({"path": str(f), "name": "position.csv", "kind": "csv"})[0]
+        page.evaluate("() => __winnow.loadSources()")
         page.evaluate("(id) => __winnow.openSource(id)", sid)
         page.wait_for_function(
             "(id) => __winnow.S.sourceId === id && __winnow.S.view"

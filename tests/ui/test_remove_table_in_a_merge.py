@@ -13,30 +13,20 @@ added it to.
 
 from __future__ import annotations
 
-import time
-
 import pytest
 
 pytestmark = pytest.mark.ui
 
 
 @pytest.fixture
-def merged(page, server, server_post, tmp_path):
+def merged(page, server, imported, tmp_path):
     """A second table and a merge over it and the fixture table, torn down
     afterwards — the UI suite shares one case file."""
     f = tmp_path / "second.csv"
     f.write_text("Timestamp,EventId,Host,ExtremelyLongColumnHeaderName,CommandLine\n"
                  "2026-03-14 09:00:00,4624,H9,v,cmd.exe\n", encoding="utf-8")
-    server_post("/api/ingest/jobs/path", {"path": str(f), "name": "second.csv", "kind": "csv"})
-    deadline = time.monotonic() + 25
-    while time.monotonic() < deadline:
-        names = page.evaluate(
-            "() => __winnow.loadSources().then(() => __winnow.S.sources.map((s) => s.name))")
-        if "second.csv" in names:
-            break
-        time.sleep(0.25)
-    else:
-        pytest.fail("second.csv never appeared")
+    imported({"path": str(f), "name": "second.csv", "kind": "csv"})   # finished, not just listed
+    page.evaluate("() => __winnow.loadSources()")
     ids = page.evaluate("""() => __winnow.S.sources.filter((s) => !s.is_merge)
         .filter((s) => ['ui.csv', 'second.csv'].includes(s.name)).map((s) => s.id)""")
     merge = page.evaluate("""async (ids) => {

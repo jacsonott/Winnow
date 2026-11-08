@@ -121,7 +121,12 @@ fixtures skip, rather than fail, when Playwright or Chromium is missing.
 CI runs all three on every pull request into `develop` or `main`, split
 into parallel shards. A UI test should assert the symptom a user would
 see, not the shape of the fix, and must be deterministic: a flaky required
-check teaches everyone to re-run until green.
+check teaches everyone to re-run until green. Wait for what you assert on
+with the fixtures in `tests/ui/conftest.py` rather than by hand: an import
+through `imported` (a table is listed before its columns are written),
+the clipboard through `copied` or `clipboard` (on Windows it reads back
+with CRLF line ends). A nightly workflow runs one browser shard on Windows
+each night, which is where a test that only holds on Linux shows up.
 
 ## Performance
 
