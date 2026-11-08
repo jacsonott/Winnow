@@ -320,6 +320,14 @@ see [docs/notes/README.md](README.md) for the whole set.
     indistinguishable from a finished one in the grid); cancelling a
     *re-derive* keeps it and marks it `partial`, since that wasn't a
     request to delete the analyst's column.
+    Riding the import machinery is not the same as being an import in
+    the analyst's eyes, though: `renderJobsPanel` used to give every
+    running job an `importing` badge, so adding a column read as the
+    table coming in again (#528). The badge and the queued summary's
+    line now come from the job's `kind` (`runningJobPhase`,
+    `queuedJobsDetail` in jobs.js); anything new that rides this
+    machinery wants a word of its own there too, or it inherits
+    "importing" (`tests/ui/test_jobs_panel_derive_badge.py`).
   - **The grid on screen is refreshed when the backfill lands, by
     `derived.js`'s `refreshAfterDerive`, not by `loadSources`.** The
     modal re-opens the table straight after the POST, while the pass is
