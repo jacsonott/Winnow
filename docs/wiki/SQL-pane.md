@@ -52,9 +52,10 @@ VACUUM aren't allowed in the SQL pane*; the words only count as SQL, so
 `WHERE Host = 'pragma'` is fine. `WITH` (including `WITH RECURSIVE`) and
 `EXPLAIN QUERY PLAN` work.
 
-Your queries never write. The pane itself saves the text of your query tabs,
-and changes the case only when you ask it to: **Save as table…** adds a
-table, and tagging rows in a result tags them.
+Your queries never write. The pane itself saves the text of your query tabs
+and the [history](#query-history) of the queries you run, and changes the
+case only when you ask it to: **Save as table…** adds a table, and tagging
+rows in a result tags them.
 
 ## Query tabs
 
@@ -72,6 +73,40 @@ with the case file. A session file does not carry them.
 The last result of each tab stays on screen while the case is open, so
 switching tabs doesn't lose it. Results are not saved in the case file; run
 the query again after reopening the case.
+
+## Query history
+
+Every query the pane runs is kept in **History ▾**, newest first, so a
+query you have since edited or closed is still there. That includes the
+starter queries and queries a plugin such as SQL Copilot runs for you.
+
+Each entry shows the query (the first two lines of it; hover for all of
+it), the query tab it was run from, when, and how it went: *50 rows · 12
+ms*, *(stopped)* if you stopped it early, or the error it gave. A query
+you run again moves to the top with *run N times* rather than appearing
+twice. A query is added when it finishes; one you ran again before it
+answered is left out, and the run that replaced it is added instead.
+
+| To | Do this |
+| --- | --- |
+| Find a query | Type in **Find a query…**. Every word you type has to appear in the query or in its tab's name, in any order |
+| Open one in the editor | Click it, or press `Enter` in **Find a query…** to open the first match |
+| Open and run one | Click **Run** beside it, or press `Ctrl+⏎` (`⌘⏎` on a Mac) |
+| Open one in a new query tab | `Ctrl`+click it (`⌘`+click on a Mac) |
+| Remove one | Click its **✕** |
+| Remove them all | Click **Clear history…**, then **Clear history**. Your query tabs are not affected |
+
+Opening a query never loses what is in the editor. It replaces the
+editor's text only when that text is empty, is a starter query, or is
+itself in the history. Otherwise the query opens in a new query tab, named
+after the tab it was run from if that name is free, and the pane says
+*Opened in a new query tab, so the query in "…" is kept*.
+
+The history is saved in the case file, like query tabs, so it is there
+when you reopen the case and it travels with the case file. A session
+file does not carry it. A case keeps the 500 queries it ran most
+recently. Use **Clear history…** before handing a case to someone if you
+would rather they didn't see your working.
 
 ## Finding your tables
 

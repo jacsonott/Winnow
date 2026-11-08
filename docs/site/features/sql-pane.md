@@ -17,5 +17,8 @@ tags and notes.
   all of them.
 - Rows a result names can be tagged from the pane, and any result can be
   copied, exported to CSV or Excel, or saved as a table.
+- **History ▾** keeps every query you run in the case, newest first, so
+  the query behind a number is still there after you have edited it into
+  the next one. Find one by typing, then open it or run it again.
 
 **In the manual:** [SQL pane](../../wiki/SQL-pane.md)

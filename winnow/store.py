@@ -262,6 +262,16 @@ DEFAULT_TAGS = [
 # claims to describe.
 PLUGIN_UI_STATE_MAX_BYTES = 64 * 1024
 
+# The SQL pane's history (sql_history) keeps this many distinct queries,
+# the oldest run dropped first. Enough for a long day of iterating on a
+# case, and small enough that the list is one cheap scan and the panel
+# that filters it client-side never has to page.
+SQL_HISTORY_LIMIT = 500
+# What a history row keeps of a run's error and of its tab's name. An
+# error can quote a REGEXP pattern or a statement back at length; the
+# panel shows one line of it.
+SQL_HISTORY_TEXT_MAX = 1000
+
 META_SCHEMA = """
 -- sources, tag_defs, merges and sql_tabs are AUTOINCREMENT: an id they
 -- hand out is never handed out again. A plain INTEGER PRIMARY KEY gives
@@ -363,6 +373,34 @@ CREATE TABLE IF NOT EXISTS sql_tabs (
     name TEXT NOT NULL,
     sql  TEXT NOT NULL DEFAULT '',
     pos  INTEGER NOT NULL DEFAULT 0     -- left-to-right strip order; ties break by id
+);
+-- The SQL pane's query history: what the pane has run in this case, one
+-- row per distinct query text, newest run first. In the case file for the
+-- same reason as sql_tabs — "how did you get that number" is answered by
+-- the query, and the query is about this evidence — and because a tab's
+-- text is overwritten as it is edited, so the query that produced a
+-- finding an hour ago is otherwise gone.
+--
+-- A re-run DELETEs its row and INSERTs a new one carrying runs + 1, so id
+-- order is last-run order: the list is `ORDER BY id DESC` off the rowid,
+-- with no index (at the 64KB page size _tune sets, an index over a table
+-- this size costs more file than it saves — the derived_columns note
+-- below). AUTOINCREMENT so a re-run never lands on an id a stale list in
+-- another window still shows (its ✕ would then delete the wrong query).
+-- Capped at SQL_HISTORY_LIMIT rows, oldest dropped first
+-- (record_sql_history). ran_at is UTC with a Z: the case travels between
+-- analysts in different zones, and "5 min ago" has to mean the same thing
+-- on both desks.
+CREATE TABLE IF NOT EXISTS sql_history (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    sql        TEXT NOT NULL,      -- as run, minus surrounding whitespace; unique by construction
+    tab_name   TEXT,               -- the query tab it was last run from, as that tab was named then
+    ran_at     TEXT NOT NULL,      -- last run, 'YYYY-MM-DDTHH:MM:SSZ'
+    runs       INTEGER NOT NULL DEFAULT 1,
+    row_count  INTEGER,            -- the last run's: NULL when it failed
+    elapsed_ms INTEGER,
+    stopped    TEXT,               -- the last run's: 'cancelled' | 'disk' when it kept only some rows
+    error      TEXT                -- the last run's: NULL when it ran
 );
 -- What a plugin tab (or panel) had on screen, per mount: the sheets
 -- First/Last was showing, the fields a pivot had in its wells. In the case
@@ -14612,6 +14650,72 @@ class Store:
                 "UPDATE sql_tabs SET pos=? WHERE id=?", [(len(seq) + p, i) for p, i in enumerate(rest)],
             )
         return self.list_sql_tabs()
+
+    # ------------------------------------------------------ sql pane history
+
+    _SQL_HISTORY_COLS = "id, sql, tab_name, ran_at, runs, row_count, elapsed_ms, stopped, error"
+
+    def list_sql_history(self) -> list[dict]:
+        """Every query in the history, the most recently run first. At most
+        SQL_HISTORY_LIMIT rows, so the pane filters it client-side."""
+        with self._reader() as ro:
+            rows = ro.execute(
+                f"SELECT {self._SQL_HISTORY_COLS} FROM sql_history ORDER BY id DESC").fetchall()
+        return [dict(r) for r in rows]
+
+    def record_sql_history(self, sql: str, *, tab_name: str | None = None,
+                           row_count: int | None = None, elapsed_ms: int | None = None,
+                           stopped: str | None = None, error: str | None = None) -> dict | None:
+        """Note that the SQL pane ran `sql`, with how that run went. None
+        (nothing recorded) for a blank query.
+
+        One row per distinct text: running a query that is already in the
+        history moves it to the top with its count bumped, rather than
+        listing it again — the list is for finding a query, and the fifth
+        copy of the same one pushes four others out of view. The text is
+        compared after stripping surrounding whitespace, the only edit
+        that cannot change what a query means.
+
+        The pane records a run after it has settled (runSql), through its
+        own request, so a write that waits behind a long build_view on the
+        writer lock delays nothing but this row."""
+        text = (sql or "").strip()
+        if not text:
+            return None
+        def clip(v):
+            return None if v is None else str(v)[:SQL_HISTORY_TEXT_MAX]
+        ran_at = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        with self.lock, self.db:
+            old = self.db.execute("SELECT id, runs FROM sql_history WHERE sql=?", (text,)).fetchone()
+            if old is not None:
+                # Deleted and re-inserted, not updated: id order is the
+                # list's order (see META_SCHEMA).
+                self.db.execute("DELETE FROM sql_history WHERE id=?", (old["id"],))
+            cur = self.db.execute(
+                "INSERT INTO sql_history(sql, tab_name, ran_at, runs, row_count, elapsed_ms, stopped, error) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (text, clip(tab_name), ran_at, (old["runs"] + 1) if old is not None else 1,
+                 None if error else row_count, None if error else elapsed_ms,
+                 None if error else clip(stopped), clip(error)))
+            new_id = cur.lastrowid
+            # Past the cap, the oldest go. By rowid, which is run order.
+            self.db.execute(
+                "DELETE FROM sql_history WHERE id <= "
+                "(SELECT id FROM sql_history ORDER BY id DESC LIMIT 1 OFFSET ?)", (SQL_HISTORY_LIMIT,))
+            row = self.db.execute(
+                f"SELECT {self._SQL_HISTORY_COLS} FROM sql_history WHERE id=?", (new_id,)).fetchone()
+        return dict(row)
+
+    def delete_sql_history(self, entry_id: int) -> None:
+        """Forget one query. An id that is already gone (a stale list in
+        another window, a re-run that moved it) is not an error."""
+        with self.lock, self.db:
+            self.db.execute("DELETE FROM sql_history WHERE id=?", (entry_id,))
+
+    def clear_sql_history(self) -> int:
+        """Forget every query; answers how many there were."""
+        with self.lock, self.db:
+            return self.db.execute("DELETE FROM sql_history").rowcount
 
     # -------------------------------------------- plugin tab/panel UI state
 
