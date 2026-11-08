@@ -774,7 +774,8 @@ leads. Wait for what you assert on (`wait_for_selector`,
 `wait_for_function`) rather than looking once with `is_visible()` right
 after waiting on something else — test_firstlast_state.py had exactly that.
 The same goes for a fixed `wait_for_timeout` before an assert: conftest has
-waits for the usual signals (`until` for Python-side state, `painted`,
+waits for the usual signals (`until` for Python-side state, `imported` for
+an import to finish rather than its table to be listed, `painted`,
 `view_rebuilt`, `copied`, `tag_written` and the rest), and
 tests/test_ui_test_hygiene.py fails a fixed wait that goes straight into an
 assert unless a comment on it says why (a check that something did NOT

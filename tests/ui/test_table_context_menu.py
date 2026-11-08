@@ -14,8 +14,6 @@ no Remove for a table a merge is built on).
 
 from __future__ import annotations
 
-import time
-
 import pytest
 
 pytestmark = pytest.mark.ui
@@ -46,27 +44,17 @@ def _source(page, name):
 
 
 @pytest.fixture
-def extra(page, tmp_path):
+def extra(page, tmp_path, imported):
     """A second table of the fixture's shape, so closing or removing one
     never takes away the table every other module expects to find. Its
     merges and the table itself go again afterwards — the UI suite shares
     one case file."""
     f = tmp_path / EXTRA
     f.write_text(HEADER + "\n2026-03-15 09:00:00,4624,H9,v,cmd.exe\n", encoding="utf-8")
-    page.evaluate(
-        """([path, name]) => __winnow.post('/api/ingest/jobs/path',
-             { path, name, kind: 'csv' }).then(() => __winnow.startJobsPoll())""",
-        [str(f), EXTRA])
-    # Polled from Python: wait_for_function does not await a promise.
-    deadline = time.monotonic() + 25
-    while time.monotonic() < deadline:
-        names = page.evaluate(
-            "() => __winnow.loadSources(undefined, { navigate: false }).then(() => __winnow.S.sources.map((s) => s.name))")
-        if EXTRA in names:
-            break
-        time.sleep(0.25)
-    else:
-        pytest.fail(f"{EXTRA} never appeared")
+    # Finished, not just listed: a table removed while it still imports
+    # fails the import ("No table N") and leaves a half-made one behind.
+    imported({"path": str(f), "name": EXTRA, "kind": "csv"})
+    page.evaluate("() => __winnow.loadSources(undefined, { navigate: false })")
     page.evaluate("""(n) => (async () => {
         const s = __winnow.S.sources.find((x) => x.name === n);
         await __winnow.post('/api/source/' + s.id + '/open', { open: true });
