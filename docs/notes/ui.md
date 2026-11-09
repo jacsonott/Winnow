@@ -1093,6 +1093,63 @@ see [docs/notes/README.md](README.md) for the whole set.
   far" polls `/api/sql/run/progress` with it. A tab whose run is out shows
   that, not the result it is replacing.
   `tests/ui/test_sql_run_tokens.py`.
+- **The SQL pane keeps a query history** (History ▾; `sql_history`, a
+  per-case table; `record/list/delete/clear_sql_history`,
+  `/api/sql_history`; the panel is `static/js/sqlhistory.js`). It exists
+  because a query tab is a draft: its text autosaves as it is edited, so
+  the query behind a number found an hour ago has usually become the next
+  idea. In the **case file** for the reason `sql_tabs` is (the query is
+  analysis about this evidence), capped at `SQL_HISTORY_LIMIT` (500)
+  distinct queries. Things that bite:
+  - **Recorded by the pane, after the run has settled** (`recordSqlRun`,
+    called by `runSql` only past its `current()` check), not by
+    `/api/sql/run` as it answers. That check is the point: a superseded
+    run (run again, tab closed, case switched) is not one anybody got an
+    answer from, and the run that replaced it records itself. And the
+    write takes the writer lock, which a long `build_view` can hold for
+    seconds; in a request of its own it delays nothing but this row,
+    where in `/api/sql/run` it would hold back the result the analyst is
+    waiting on. Starters and a plugin's `winnow.sqlPage.run` go through
+    `runSql`, so they are recorded too; `/api/sql` (dashboards,
+    `winnow.api.sql`) is not the pane and is not recorded.
+  - **One row per distinct text, and a re-run is DELETE + INSERT, not
+    UPDATE**, so `id` order is last-run order and the list is `ORDER BY
+    id DESC` off the rowid with no index (the 64KB-page point the
+    `derived_columns` comment makes). Ordering by `ran_at` instead breaks
+    on two runs in the same second. `AUTOINCREMENT` from the table's
+    first day, so a stale list in another window can never ✕ a newer
+    query that took its id. Text is compared after `strip()` only;
+    anything else (case, a comment) can change what the query means.
+  - **`ran_at` is UTC with a `Z`**, unlike the case's other timestamps
+    (local, no zone). The case travels between analysts, and "5 min ago"
+    computed from a zone-less local time on a desk in another zone is
+    hours wrong. The panel shows `openedAgo` (home.js) and the exact
+    local time in the tooltip.
+  - **Where an entry opens is the analyst's call; losing a draft never
+    is** (`openSqlHistoryEntry`). It opens in the current tab unless the
+    analyst used its **New tab** button or held Ctrl/⌘ (a per-entry
+    button rather than a remembered switch, which is what was asked for:
+    the choice is made per query). A new tab takes the name of the tab
+    the entry was run from when no open tab has it. In the current tab,
+    the text is replaced without asking only under `openStarter`'s rule
+    plus one more kind of replaceable text, a query that is itself in the
+    history (the list still holds it). Anything else gets
+    `choiceDialog` (ui.js): Cancel, Replace it, or Open in a new tab,
+    with the focus on the new tab so a stray Enter keeps the draft. It
+    used to open such an entry in a new tab without asking, which made a
+    new tab something that happened to the analyst rather than a choice.
+  - **As wide as the SQL page** (`fitToPage`, after `anchoredPanel` has
+    placed it under the button at its 560px fallback): width and left
+    edge from the page, top left where it was. Widening can only make it
+    shorter (fewer queries wrap onto their second line), so the vertical
+    placement still fits. The page is `.page-main`, not `#sqlview`, so it
+    never reaches over a plugin's side panel. `.menu`'s 440px
+    `max-width` is lifted for it.
+  - **No client-side cache.** The panel reads `/api/sql_history` each
+    time it opens: at most 500 short rows, and a pop-out running queries
+    beside the main window would otherwise leave one of them showing a
+    stale list. Nothing to reset on a case switch for the same reason.
+  `tests/test_sql_history.py`, `tests/ui/test_sql_history_ui.py`.
 - **The 2026-08 navigation batch** — five smaller features, and the traps
   each one carries:
   - **"Open filter in SQL pane"** (`Store.spec_sql`, `POST /api/view/sql`,

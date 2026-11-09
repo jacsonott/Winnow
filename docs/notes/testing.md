@@ -63,6 +63,15 @@ model, fallbacks, the schema cache breakpoint — with no network). `test_sql_ta
 pane's sub-tabs, including that they actually survive closing and
 reopening the case file (the whole reason they live there rather than in
 `localStorage`) and that `reorder` keeps tabs it wasn't given.
+`test_sql_history.py` covers the SQL pane's query history the same way:
+one row per distinct text with a re-run moved to the top and counted, a
+failed run's error kept without counts, the cap dropping the oldest run,
+ids never reused, surviving a reopen, and a case holding only history
+counting as work for the quick-look sweep; `tests/ui/test_sql_history_ui.py`
+holds the pane's half, including that a superseded run is not recorded,
+that opening an entry over a draft asks first (with the focus on the safe
+answer), that an entry's New tab button opens it in a tab of its own, and
+that the panel spans the SQL page.
 `test_timeparse.py` covers every timestamp operation as pure functions —
 epoch auto-ranging boundaries, hex-vs-decimal FILETIME, the syslog year
 rollover (including across a batch boundary and Feb 29 in a non-leap

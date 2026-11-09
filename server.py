@@ -1047,7 +1047,7 @@ _WORK_TABLES = (
     "dashboards", "dashboard",                  # `dashboard` is the pre-rename single-row table
     "derived_columns", "filter_presets", "merges",
     "saved_views",                              # gone from new case files; an old one may still have rows
-    "source_folders", "watchlist", "sql_tabs",
+    "source_folders", "watchlist", "sql_tabs", "sql_history",
 )
 
 
@@ -6700,6 +6700,43 @@ def api_sql_tabs_delete(tab_id: int):
 @app.post("/api/sql_tabs/reorder")
 def api_sql_tabs_reorder(body: SqlTabReorder):
     return store().reorder_sql_tabs(body.ids)
+
+
+class SqlHistoryRecord(BaseModel):
+    """One settled run of the SQL pane, as runSql saw it land."""
+    sql: str
+    tab_name: str | None = None
+    row_count: int | None = None
+    elapsed_ms: int | None = None
+    stopped: str | None = None    # the result's own `stopped`: 'cancelled' | 'disk'
+    error: str | None = None
+
+
+@app.get("/api/sql_history")
+def api_sql_history_list():
+    return store().list_sql_history()
+
+
+@app.post("/api/sql_history")
+def api_sql_history_record(body: SqlHistoryRecord):
+    """Recorded by the pane after a run rather than by /api/sql/run as it
+    answers: the run's response is what the analyst is waiting on, and this
+    write takes the writer lock (Store.record_sql_history). Null for a
+    blank query, which is not recorded."""
+    return store().record_sql_history(
+        body.sql, tab_name=body.tab_name, row_count=body.row_count,
+        elapsed_ms=body.elapsed_ms, stopped=body.stopped, error=body.error)
+
+
+@app.delete("/api/sql_history/{entry_id}")
+def api_sql_history_delete(entry_id: int):
+    store().delete_sql_history(entry_id)
+    return {"ok": True}
+
+
+@app.delete("/api/sql_history")
+def api_sql_history_clear():
+    return {"cleared": store().clear_sql_history()}
 
 
 # A mount key is 'tab:'/'panel:'/'page:' plus the mount id (plugins.js
