@@ -28,24 +28,6 @@ import { anchoredPanel, choiceDialog, confirmDialog } from './ui.js';
    enforces it. */
 export const SQL_HISTORY_LIMIT = 500;
 
-/* The panel's own settings, per browser: whether a query picked from the
-   list opens in a query tab of its own (the footer's "Open in a new tab").
-   A way of working, not something about the evidence, so it is not in the
-   case file the way the history is. */
-const PREFS_KEY = 'winnow.sqlHistory';
-
-export function sqlHistoryPrefs() {
-  let stored = {};
-  try { stored = JSON.parse(localStorage.getItem(PREFS_KEY) || '{}') || {}; } catch { /* defaults */ }
-  return { newTab: false, ...stored };
-}
-
-export function saveSqlHistoryPrefs(patch) {
-  try {
-    localStorage.setItem(PREFS_KEY, JSON.stringify({ ...sqlHistoryPrefs(), ...patch }));
-  } catch { /* private mode: it holds for this panel only */ }
-}
-
 /* Called by runSql with a run that has landed in its tab: a result, or an
    error. Best-effort and not awaited, like the tab autosave: the result is
    already on screen, and a history entry that failed to write is not
@@ -108,10 +90,9 @@ export function sqlHistoryMatches(entries, q) {
   });
 }
 
-/* Opens an entry in a query tab of its own when `newTab` is set (the
-   footer's "Open in a new tab", or Ctrl/⌘+click), under the name of the
-   tab it was run from when that name is free; otherwise in the current
-   tab. Either way it must not cost the analyst a draft: the current tab's
+/* Opens an entry in a query tab of its own when `newTab` is set (its
+   New tab button, or Ctrl/⌘+click), under the name of the tab it was run
+   from when that name is free; otherwise in the current tab. Either way it must not cost the analyst a draft: the current tab's
    text is replaced without asking only under openStarter's rule (sql.js)
    plus one more kind of text, a query that is itself in the history,
    because the list still holds it. Anything else is asked about first,
@@ -160,7 +141,7 @@ export async function openSqlHistoryEntry(h, { run = false, newTab = false, hist
    runs it, the editor's own Run key; the arrow keys walk the entries
    (ui.js onMenuKeydown, which moves between .menu-item buttons). */
 export function openSqlHistory(anchorEl = $('btnSqlHistory')) {
-  return anchoredPanel(anchorEl, 'sql-history', (p, close) => {
+  const panel = anchoredPanel(anchorEl, 'sql-history', (p, close) => {
     let entries = null;   // null until the list arrives
     let failed = '';
     const search = el('input', 'vp-search sqlh-search');
@@ -169,21 +150,10 @@ export function openSqlHistory(anchorEl = $('btnSqlHistory')) {
     search.setAttribute('aria-label', 'Find a query in the history');
     const list = el('div', 'vp-list sqlh-list');
     const foot = el('div', 'sqlh-foot');
-    // Built once, outside paint(), so a repaint (each letter typed in the
-    // search box) re-places the same box and open() reads what it says.
-    const newTabBox = el('input');
-    newTabBox.type = 'checkbox';
-    newTabBox.checked = sqlHistoryPrefs().newTab;
-    newTabBox.onchange = () => saveSqlHistoryPrefs({ newTab: newTabBox.checked });
-    const newTabRow = el('label', 'check-row sqlh-newtab');
-    newTabRow.title = 'Open each query you pick here in a query tab of its own, '
-      + 'instead of in the current tab. Remembered in this browser.';
-    newTabRow.append(newTabBox, el('span', null, 'Open in a new tab'));
 
-    // `ctrl` (Ctrl/⌘+click) opens a new tab whatever the box says.
-    const open = (h, { run = false, ctrl = false } = {}) => {
+    const open = (h, opts) => {
       close();
-      openSqlHistoryEntry(h, { run, newTab: ctrl || newTabBox.checked, history: entries || [] })
+      openSqlHistoryEntry(h, { ...opts, history: entries || [] })
         .catch((e) => toast('Could not open the query: ' + e.message));
     };
     const forget = async (h) => {
@@ -222,10 +192,13 @@ export function openSqlHistory(anchorEl = $('btnSqlHistory')) {
       // time the list rounds to "2 h ago".
       item.title = `${h.sql}\n\nLast run ${sqlHistoryStamp(h.ran_at)}${h.tab_name ? ` in ${h.tab_name}` : ''}`
         + ` — click to open it, ${IS_MAC ? '⌘' : 'Ctrl+'}click to open it in a new tab`;
-      item.onclick = (e) => open(h, { ctrl: e.ctrlKey || e.metaKey });
+      item.onclick = (e) => open(h, { newTab: e.ctrlKey || e.metaKey });
       item.onkeydown = (e) => {
         if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); open(h, { run: true }); }
       };
+      const tab = el('button', 'menu-item-action sqlh-newtab', 'New tab');
+      tab.title = 'Open this query in a query tab of its own';
+      tab.onclick = (e) => { e.stopPropagation(); open(h, { newTab: true }); };
       const run = el('button', 'menu-item-action sqlh-run', 'Run');
       run.title = 'Open this query and run it';
       run.onclick = (e) => { e.stopPropagation(); open(h, { run: true }); };
@@ -233,7 +206,7 @@ export function openSqlHistory(anchorEl = $('btnSqlHistory')) {
       rm.title = 'Remove this query from the history';
       rm.setAttribute('aria-label', 'Remove this query from the history');
       rm.onclick = (e) => { e.stopPropagation(); forget(h); };
-      r.append(item, run, rm);
+      r.append(item, tab, run, rm);
       return r;
     };
 
@@ -256,7 +229,7 @@ export function openSqlHistory(anchorEl = $('btnSqlHistory')) {
       const clear = el('button', 'btn ghost sqlh-clear', 'Clear history…');
       clear.title = 'Delete every query in the history from the case file';
       clear.onclick = clearAll;
-      foot.append(newTabRow, count, clear);
+      foot.append(count, clear);
     };
 
     search.oninput = paint;
@@ -274,6 +247,24 @@ export function openSqlHistory(anchorEl = $('btnSqlHistory')) {
       .then(() => { if (p.isConnected) paint(); });
     setTimeout(() => search.focus(), 0);
   });
+  // anchoredPanel puts it under the button; this keeps it there but as
+  // wide as the page.
+  if (panel) fitToPage(panel);
+  return panel;
+}
+
+/* As wide as the SQL page (its main column, so not over a plugin's side
+   panel), less a margin each side, and lined up with it rather than with
+   the button. Widening can only make the panel shorter (fewer queries
+   wrap onto their second line), so where anchoredPanel put it vertically
+   still fits. */
+function fitToPage(p) {
+  const page = document.querySelector('#sqlview .page-main');
+  if (!page || !page.offsetWidth) return;
+  const r = page.getBoundingClientRect();
+  const m = 8;
+  p.style.width = `${Math.max(320, r.width - 2 * m)}px`;
+  p.style.left = `${Math.max(m, r.left + m)}px`;
 }
 
 /* DOM wiring for this module, called once by main.js. */

@@ -70,7 +70,8 @@ ids never reused, surviving a reopen, and a case holding only history
 counting as work for the quick-look sweep; `tests/ui/test_sql_history_ui.py`
 holds the pane's half, including that a superseded run is not recorded,
 that opening an entry over a draft asks first (with the focus on the safe
-answer), and that "Open in a new tab" starts off and is remembered.
+answer), that an entry's New tab button opens it in a tab of its own, and
+that the panel spans the SQL page.
 `test_timeparse.py` covers every timestamp operation as pure functions —
 epoch auto-ranging boundaries, hex-vs-decimal FILETIME, the syslog year
 rollover (including across a batch boundary and Feb 29 in a non-leap

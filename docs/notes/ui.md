@@ -1127,9 +1127,9 @@ see [docs/notes/README.md](README.md) for the whole set.
     local time in the tooltip.
   - **Where an entry opens is the analyst's call; losing a draft never
     is** (`openSqlHistoryEntry`). It opens in the current tab unless the
-    footer's "Open in a new tab" is ticked (`winnow.sqlHistory` in
-    localStorage: a way of working, so per browser, not in the case
-    file) or the click held Ctrl/⌘. A new tab takes the name of the tab
+    analyst used its **New tab** button or held Ctrl/⌘ (a per-entry
+    button rather than a remembered switch, which is what was asked for:
+    the choice is made per query). A new tab takes the name of the tab
     the entry was run from when no open tab has it. In the current tab,
     the text is replaced without asking only under `openStarter`'s rule
     plus one more kind of replaceable text, a query that is itself in the
@@ -1138,6 +1138,13 @@ see [docs/notes/README.md](README.md) for the whole set.
     with the focus on the new tab so a stray Enter keeps the draft. It
     used to open such an entry in a new tab without asking, which made a
     new tab something that happened to the analyst rather than a choice.
+  - **As wide as the SQL page** (`fitToPage`, after `anchoredPanel` has
+    placed it under the button at its 560px fallback): width and left
+    edge from the page, top left where it was. Widening can only make it
+    shorter (fewer queries wrap onto their second line), so the vertical
+    placement still fits. The page is `.page-main`, not `#sqlview`, so it
+    never reaches over a plugin's side panel. `.menu`'s 440px
+    `max-width` is lifted for it.
   - **No client-side cache.** The panel reads `/api/sql_history` each
     time it opens: at most 500 short rows, and a pop-out running queries
     beside the main window would otherwise leave one of them showing a

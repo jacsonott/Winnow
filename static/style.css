@@ -1954,12 +1954,14 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .sql-starter { font-family: var(--mono); font-size: 11px; border-radius: 999px; }
 
 /* History ▾ (static/js/sqlhistory.js): the value picker's search-and-list
-   frame, since it opens through the same anchoredPanel, but wider than a
-   menu's 440px cap — each entry is a query, and two lines of one at 440px
-   is barely a SELECT list. The query is mono and clamped to two lines
-   with its whitespace collapsed, so a long one costs one row like a short
-   one; its full text is the entry's tooltip. */
-.menu.sql-history { width: 560px; max-width: 92vw; padding: 8px; gap: 6px; }
+   frame, since it opens through the same anchoredPanel, but as wide as
+   the SQL page (fitToPage sets the width and lines it up with the page) —
+   each entry is a query, and two lines of one at a menu's 440px cap is
+   barely a SELECT list. 560px is only the fallback for a page it can't
+   measure. The query is mono and clamped to two lines with its whitespace
+   collapsed, so a long one costs one row like a short one; its full text
+   is the entry's tooltip. */
+.menu.sql-history { width: 560px; max-width: none; padding: 8px; gap: 6px; }
 .sql-history .vp-list { max-height: 52vh; }
 .sqlh-row + .sqlh-row { border-top: 1px solid var(--line); }
 /* .menu-item.sqlh-item, not .sqlh-item: .menu-item comes later in this
@@ -1981,10 +1983,6 @@ textarea:focus { border-color: var(--accent); outline: none; }
   font-size: 11px; color: var(--dim);
 }
 .sqlh-foot .btn { font-size: 11px; padding: 3px 8px; }
-/* "Open in a new tab" on the left; the count and Clear history… keep to
-   the right, where they were before it. */
-.sqlh-newtab { cursor: pointer; color: var(--text); }
-.sqlh-foot .sqlh-count { margin-left: auto; }
 
 /* --------------------------------------------------------- unified timeline */
 

@@ -77,7 +77,8 @@ the query again after reopening the case.
 ## Query history
 
 Every query the pane runs is kept in **History ▾**, newest first, so a
-query you have since edited or closed is still there. That includes the
+query you have since edited or closed is still there. The list opens
+across the width of the page. That includes the
 starter queries and queries a plugin such as SQL Copilot runs for you.
 
 Each entry shows the query (the first two lines of it; hover for all of
@@ -92,14 +93,13 @@ answered is left out, and the run that replaced it is added instead.
 | Find a query | Type in **Find a query…**. Every word you type has to appear in the query or in its tab's name, in any order |
 | Open one in the editor | Click it, or press `Enter` in **Find a query…** to open the first match |
 | Open and run one | Click **Run** beside it, or press `Ctrl+⏎` (`⌘⏎` on a Mac) |
-| Open one in a new query tab | `Ctrl`+click it (`⌘`+click on a Mac). To open every query that way, tick **Open in a new tab** under the list |
+| Open one in a new query tab | Click **New tab** beside it, or `Ctrl`+click it (`⌘`+click on a Mac) |
 | Remove one | Click its **✕** |
 | Remove them all | Click **Clear history…**, then **Clear history**. Your query tabs are not affected |
 
-A query you pick opens in the current query tab. Tick **Open in a new
-tab**, under the list, to open each one in a query tab of its own instead,
-named after the tab it was run from if that name is free. Winnow remembers
-the setting in this browser.
+Clicking a query opens it in the current query tab. **New tab** opens it
+in a query tab of its own instead, named after the tab it was run from if
+that name is free.
 
 Opening a query never loses what is in the editor without asking. The
 current tab's text is replaced straight away only when it is empty, is a

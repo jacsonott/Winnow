@@ -12,8 +12,9 @@ quietly make it lie or cost the analyst work:
   text without asking only when that text is blank, a starter, or itself
   in the history, and otherwise asks, with a new tab offered beside
   replacing it;
-* opening in a new tab is the analyst's choice: "Open in a new tab" (off
-  by default, remembered in this browser) or Ctrl/⌘+click;
+* opening in a new tab is the analyst's choice, per query: the entry's
+  New tab button, or Ctrl/⌘+click;
+* the panel is as wide as the SQL page;
 * the list is newest first, filters by every word typed, and Enter opens
   the first match.
 
@@ -31,8 +32,6 @@ pytestmark = pytest.mark.ui
 QUICK = "SELECT rid, Host FROM src_1 WHERE rid <= 7"
 # Never ends on its own; see test_sql_run_tokens.py.
 RUNAWAY = "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n) SELECT i FROM n"
-# The panel's "Open in a new tab" lives here (sqlhistory.js PREFS_KEY).
-PREFS_KEY = "winnow.sqlHistory"
 
 
 @pytest.fixture
@@ -40,7 +39,6 @@ def sql(page, api, open_sql):
     """The SQL pane with an empty history, its tabs and the active tab's
     text put back afterwards, and the history left empty."""
     api("/api/sql_history", "DELETE")
-    page.evaluate("(k) => localStorage.removeItem(k)", PREFS_KEY)
     open_sql(page)
     tabs_before = {t["id"] for t in api("/api/sql_tabs")}
     original = page.evaluate("() => [__winnow.S.sqlTabId, document.getElementById('sqlText').value]")
@@ -59,7 +57,6 @@ def sql(page, api, open_sql):
             if t["id"] not in tabs_before:
                 api(f"/api/sql_tabs/{t['id']}", "DELETE")
         api("/api/sql_history", "DELETE")
-        page.evaluate("(k) => localStorage.removeItem(k)", PREFS_KEY)
 
 
 def _set_editor(page, text):
@@ -285,37 +282,39 @@ def test_a_query_that_is_not_in_the_history_is_asked_about_before_it_is_replaced
     until(page, lambda: _saved(api, drafted) == H4, "the replacement to be saved into the draft's tab")
 
 
-def test_open_in_a_new_tab_is_off_by_default_and_remembered(sql, api):
+def test_new_tab_opens_an_entry_in_a_tab_of_its_own(sql, api):
     page = sql
     a = "SELECT * FROM src_1 WHERE Host = 'H1'"
     b = "SELECT * FROM src_1 WHERE Host = 'H2'"
-    api("/api/sql_history", "POST", {"sql": b})
+    api("/api/sql_history", "POST", {"sql": b, "tab_name": "Host two"})
     api("/api/sql_history", "POST", {"sql": a})
-    _set_editor(page, a)     # in the history, so it could be replaced without asking
+    _set_editor(page, a)     # in the history: a plain click would replace it in place
     first = page.evaluate("() => __winnow.S.sqlTabId")
     before = _tabs(page)
 
     _open_history(page)
-    box = page.locator(".sqlh-newtab input")
-    assert not box.is_checked()
-    box.check()
-    _entry(page, b).locator(".sqlh-item").click()
+    _entry(page, b).locator(".sqlh-newtab").click()
     page.wait_for_function("(n) => __winnow.S.sqlTabs.length === n + 1", arg=before)
     assert page.locator("#sqlText").input_value() == b
+    assert page.evaluate("() => __winnow.activeSqlTab().name") == "Host two"
     assert _saved(api, first) == a
 
-    # Still ticked the next time the list opens.
+
+def test_the_list_is_as_wide_as_the_sql_page(sql, api):
+    page = sql
+    api("/api/sql_history", "POST", {"sql": QUICK})
     _open_history(page)
-    assert page.locator(".sqlh-newtab input").is_checked()
-    # Unticked, a query opens in the current tab again.
-    page.locator(".sqlh-newtab input").uncheck()
-    assert page.evaluate("(k) => JSON.parse(localStorage.getItem(k)).newTab", PREFS_KEY) is False
-    _entry(page, a).locator(".sqlh-item").click()
-    page.wait_for_function("(q) => document.getElementById('sqlText').value === q", arg=a)
-    assert _tabs(page) == before + 1
+    box = page.evaluate("""() => {
+        const r = (el) => { const b = el.getBoundingClientRect(); return [b.left, b.right]; };
+        return { page: r(document.querySelector('#sqlview .page-main')),
+                 panel: r(document.querySelector('.sql-history')) };
+    }""")
+    (pl, pr), (ql, qr) = box["page"], box["panel"]
+    # Inside the page with its 8px margins, and no narrower than that.
+    assert pl <= ql <= pl + 10 and pr - 10 <= qr <= pr, box
 
 
-def test_ctrl_click_opens_a_new_tab_with_the_switch_off(sql, api):
+def test_ctrl_click_opens_a_new_tab(sql, api):
     page = sql
     api("/api/sql_history", "POST", {"sql": H4})
     _set_editor(page, "")    # empty: a plain click would fill this tab
