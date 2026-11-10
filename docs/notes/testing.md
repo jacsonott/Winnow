@@ -419,6 +419,24 @@ folders out of a shared `/tmp`.
   returns at once and the test races what it meant to wait for.
   tests/test_ui_test_hygiene.py fails on one; poll from Python with the
   `until` fixture instead, since `page.evaluate` does await.
+- **Playwright is pinned in requirements-dev.txt, because each release
+  brings its own Chromium.** It used to be unpinned, so CI took whatever
+  was newest. On 2026-11-10 that went from 1.64.1 (Chrome Headless Shell
+  156) to 1.65.0 (158) between two runs, and
+  `test_ctrl_f.py::test_the_placeholder_names_the_keys_without_clipping`
+  failed on app code that had passed the night before, on both release
+  PRs for 0.4.3 at once. Under 158 the search box's placeholder with its
+  keys (`All columns  —  / or Ctrl+f`) no longer fits in Contains mode:
+  the app's canvas measurement still said it did, so the hint was
+  clipped, and measuring it in the page instead (#544) only turned that
+  into the bare `All columns`, which the test also refuses. What changed
+  in 158 (the face `ui-monospace` resolves to, the hint's width, or the
+  fonts `playwright install --with-deps` brings) is not known yet;
+  CI's trace artifacts could not be fetched from the sandbox that
+  found it. A Playwright upgrade is a browser upgrade: make it in a PR
+  of its own, so a failure like this is that PR's and not whatever else
+  happened to run CI that day.
+
 - **The clipboard on Windows reads back with CRLF line ends.** The app
   writes `\n`; Chromium on Windows stores clipboard text with `\r\n`, and
   `navigator.clipboard.readText()` returns it that way, so a test that
