@@ -3808,6 +3808,19 @@ button.tables-name:not(:disabled):hover { text-decoration: underline; color: var
 .tables-num.tables-rows.some { color: color-mix(in srgb, var(--text) 62%, var(--dim)); }
 .tables-num.tables-tagged.some { color: var(--accent); }
 .tables-num.tables-notes.some { color: var(--text); }
+/* Every table has one more column than the lists that share .tables-row:
+   Imported, when each table came into the case, to the minute (the
+   seconds are on hover). Wider than the stamp, so Notes' dash beside
+   it doesn't read as part of the date. Scoped to its box so those lists,
+   the saved filters among them, keep the grid they were drawn for. */
+.tables-every .tables-head, .tables-every .tables-row { grid-template-columns: 16px minmax(0, 1fr) 70px 58px 50px 132px 26px; }
+.tables-head .tables-when-h { text-align: right; }
+.tables-when {
+  text-align: right; white-space: nowrap; overflow: hidden;
+  font-family: var(--mono); font-size: 11.5px; font-variant-numeric: tabular-nums;
+  color: color-mix(in srgb, var(--text) 62%, var(--dim));
+}
+.tables-when.none { color: var(--dim); }
 /* The ⋯ is faint until its row is under the pointer, as the Columns
    pane's controls are: fifty bright ⋯ were the loudest thing in the list. */
 .tables-row .tables-more { padding: 0 7px; font-size: 14px; line-height: 18px; opacity: .35; }
@@ -3846,7 +3859,8 @@ button.tables-name:not(:disabled):hover { text-decoration: underline; color: var
      columns of their own. The frame's own narrow rules are .list-panes'. */
   .tables-manager .tables-head, .tables-manager .tables-row { grid-template-columns: 16px minmax(0, 1fr) 62px 26px; }
   .tables-manager .tables-head .tables-sort[data-sort="tagged_row_count"], .tables-manager .tables-head .tables-sort[data-sort="note_count"],
-  .tables-manager .tables-row .tables-tagged, .tables-manager .tables-row .tables-notes { display: none; }
+  .tables-manager .tables-head .tables-sort[data-sort="imported_at"],
+  .tables-manager .tables-row .tables-tagged, .tables-manager .tables-row .tables-notes, .tables-manager .tables-row .tables-when { display: none; }
   .tables-indexes .tables-head, .tables-manager .tables-ix-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
   .tables-indexes .tables-head .tables-fi-h { display: none; }
   .tables-ix-row .tables-fi { grid-column: 1 / -1; }

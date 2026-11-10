@@ -34,6 +34,31 @@ export function indexStatusFor(s) {
   return { text: 'not indexed yet', cls: 'idle' };
 }
 
+/* A stored timestamp ("2026-11-10T14:32:07", the server's local time) as
+   a list column shows it: date and minute, no T. Shared with the Sessions
+   dialog's Saved column, so a table's Imported and a session's Saved read
+   the same; the seconds are on the cell's hover. */
+export function fmtWhen(iso) {
+  return (iso || '').replace('T', ' ').slice(0, 16);
+}
+
+/* What a table's time in the Imported column is the time of: a merge is
+   made and a saved table is saved, rather than imported from a file. */
+export function importedVerb(s) {
+  if (s && s.is_merge) return 'Made';
+  if (s && (s.origin === 'subset' || s.origin === 'sql')) return 'Saved';
+  return 'Imported';
+}
+
+/* The Imported cell: when the table came into the case, to the minute,
+   with the full time and what it was (imported, saved, made) on hover.
+   A dash, as the counts have, for a table with no time recorded. */
+export function importedCell(s) {
+  const c = el('span', 'tables-when' + (s.imported_at ? '' : ' none'), s.imported_at ? fmtWhen(s.imported_at) : '—');
+  if (s.imported_at) c.title = `${importedVerb(s)} ${s.imported_at.replace('T', ' ')}`;
+  return c;
+}
+
 export function fmtBytes(n) {
   if (n < 1024) return `${n} B`;
   const units = ['KB', 'MB', 'GB', 'TB'];
@@ -179,8 +204,16 @@ export function groupedTables(list) {
   }
   if (merges.length) groups.push({ key: 'merges', label: 'Merges', tables: merges });
   const by = tablesView.sort;
-  const cmp = by === 'name' ? (a, b) => sourceLabel(a).localeCompare(sourceLabel(b))
-    : (a, b) => ((b[by] || 0) - (a[by] || 0)) || sourceLabel(a).localeCompare(sourceLabel(b));
+  const byName = (a, b) => sourceLabel(a).localeCompare(sourceLabel(b));
+  // Imported is newest first. The stamps are ISO text in one format, so
+  // they order as strings; a table with none sorts last.
+  const newer = (a, b) => {
+    const x = a.imported_at || '', y = b.imported_at || '';
+    return x === y ? 0 : (x > y ? -1 : 1);
+  };
+  const cmp = by === 'name' ? byName
+    : by === 'imported_at' ? (a, b) => newer(a, b) || byName(a, b)
+      : (a, b) => ((b[by] || 0) - (a[by] || 0)) || byName(a, b);
   for (const g of groups) g.tables.sort(cmp);
   return groups.filter((g) => g.tables.length);
 }
@@ -236,18 +269,19 @@ export function buildTablesPane(pane) {
   top.append(search, groupBy.seg, count);
   pane.append(top);
 
-  const box = el('div', 'side-preview tm-cols-box tables-box');
+  const box = el('div', 'side-preview tm-cols-box tables-box tables-every');
   const head = el('div', 'tables-head');
-  const sortBtn = (key, label, cls) => {
+  const sortBtn = (key, label, cls, title = key === 'name' ? 'Sort by name' : `Most ${label.toLowerCase()} first`) => {
     const b = el('button', 'tables-sort ' + cls, label);
     b.type = 'button';
     b.dataset.sort = key;
-    b.title = key === 'name' ? 'Sort by name' : `Most ${label.toLowerCase()} first`;
+    b.title = title;
     b.onclick = () => { tablesView.sort = key; paint(); };
     return b;
   };
   head.append(sortBtn('name', 'Table', 'tables-name-h'), sortBtn('row_count', 'Rows', 'tables-num'),
     sortBtn('tagged_row_count', 'Tagged', 'tables-num'), sortBtn('note_count', 'Notes', 'tables-num'),
+    sortBtn('imported_at', 'Imported', 'tables-when-h', 'Most recently imported first'),
     el('span', 'tables-more-h'));
   const scroller = el('div', 'side-preview-rows');
   const list = el('div', 'tables-list');
@@ -311,6 +345,7 @@ export function buildTablesPane(pane) {
     r.append(tick, cell);
     if (s.error) r.append(el('span', 'tables-num'), el('span', 'tables-num'), el('span', 'tables-num'));
     else r.append(countCell(s.row_count, 'tables-rows'), countCell(s.tagged_row_count, 'tables-tagged'), countCell(s.note_count, 'tables-notes'));
+    r.append(importedCell(s));
     const more = el('button', 'btn ghost row-more tables-more', '⋯');
     more.dataset.role = 'more';
     more.title = 'Close, nickname, columns, merge, remove';
