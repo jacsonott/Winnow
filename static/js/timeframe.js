@@ -3,6 +3,7 @@ navigation that survive everything else being cleared.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { copiedColumns, copiedOrder, defaultLayoutResult, findDefaultLayout, isPinned, moveColumn, renderHead, replaceLayout, saveDefaultLayout, saveLayout, togglePin } from './columns.js';
+import { paintDockToggles, pinFromTableMenu } from './columndock.js';
 import { $, api, el, nameMap, post, toast } from './core.js';
 import { openDerivedColumnModal } from './derived.js';
 import { hasActiveFilterTree, openFilterBuilder } from './filterbuilder.js';
@@ -761,7 +762,7 @@ export function columnsListMode() {
   catch { return 'all'; }
 }
 
-function saveColumnsListMode(mode) {
+export function saveColumnsListMode(mode) {
   let cur = {};
   try { cur = JSON.parse(localStorage.getItem(TABLE_MENU_KEY) || '{}') || {}; } catch { /* start fresh */ }
   try { localStorage.setItem(TABLE_MENU_KEY, JSON.stringify({ ...cur, columnsList: mode })); } catch { /* private mode */ }
@@ -1006,8 +1007,15 @@ export function buildColumnsPanel(container, refresh = () => openTableMenu()) {
     paintHideDupes();
     changed();
   };
-  acts.append(all, none, hideRows, hideDupes);
+  // The same list, kept on screen: pinned to the foot of the sidebar
+  // (columndock.js), where it stays beside the grid as tables change.
+  const dockBtn = el('button', 'btn ghost tm-coldock-toggle');
+  dockBtn.type = 'button';
+  dockBtn.title = 'Keep this column list on screen at the bottom of the sidebar, for whichever table is open';
+  dockBtn.onclick = () => pinFromTableMenu();
+  acts.append(all, none, hideRows, hideDupes, dockBtn);
   container.append(acts);
+  paintDockToggles();
 }
 
 /* "Hide duplicate rows", from wherever it is asked for: the table menu's

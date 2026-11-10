@@ -207,18 +207,23 @@ def test_a_window_resized_mid_launch_gets_the_wordmark_laid_out_for_it(own_page,
 
 # Edge on Windows, as the app window reports itself. Winnow reads the
 # platform, so both are set; Playwright's user_agent alone leaves
-# navigator.platform saying Linux.
+# navigator.platform saying whatever the machine running the test is.
 WINDOWS_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36 Edg/141.0.0.0")
+# And Chrome on Linux, for the tests about everywhere else: left to the
+# machine, "off Windows" was only true off Windows, and the nightly's
+# Windows runner played the animation the test expects skipped.
+LINUX_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36")
 
 
 def _reduced_motion_ctx(own_page, appearance, windows=False):
+    platform = "Win32" if windows else "Linux x86_64"
     return own_page(seed="localStorage.setItem('winnow.remotePrompt', 'seen');"
                          f"localStorage.setItem('winnow.appearance', JSON.stringify({appearance}))",
-                    init=("Object.defineProperty(Navigator.prototype, 'platform', { get: () => 'Win32' })"
-                          if windows else ""),
+                    init=f"Object.defineProperty(Navigator.prototype, 'platform', {{ get: () => '{platform}' }})",
                     viewport=(1200, 800), goto=False, reduced_motion="reduce",
-                    **({"user_agent": WINDOWS_UA} if windows else {}))
+                    user_agent=WINDOWS_UA if windows else LINUX_UA)
 
 
 def _splash_box(pg):

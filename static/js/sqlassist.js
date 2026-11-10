@@ -161,6 +161,13 @@ let acWordStart = 0;
 
 export function sqlAcOpen() { return !!acEl; }
 
+/* For code that puts a whole query into the editor through its input
+   event (History ▾, sqlhistory.js): that event is what opens the dropdown
+   for the word before the caret, and a query ending in DESC would land
+   with a "DESC — keyword" suggestion open over the result, waiting to
+   take the next Enter. */
+export function sqlAcClose() { acHide(); }
+
 function acHide() {
   if (acEl) acEl.remove();
   acEl = null;

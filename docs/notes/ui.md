@@ -635,6 +635,39 @@ see [docs/notes/README.md](README.md) for the whole set.
   but they drag differently now: a sidebar drag *files a table into a
   folder* (`wireTableDrag` + `wireFolderDrop`, its own `draggedTableId`),
   not reorders the strip.
+- **The column list pinned to the sidebar's foot** (`columndock.js`,
+  #527) is the table menu's Show, hide & order list kept on screen, and
+  it **holds no state of its own**. Its ticks, pins, ⤒ ⤓ and drops write
+  `S.layout`/`S.order` through the calls the table menu and the header
+  use (`setColumnHidden`, `togglePin`, `moveColumn`, `setColumnOrder`,
+  `showAllColumns` in columns.js), and it is repainted *from* that state
+  by `syncColumnDock`, which `renderHead` calls at its end. That is the
+  whole sync story: every layout change already ends in `renderHead`, so
+  a header drag, an Alt-click pin or a tick in the table menu shows in
+  the docked list without a second set of call sites. A list that only
+  its own controls updated would be stale the first time the analyst
+  used the header instead. `syncTabChrome` calls it too, because a page
+  tab changes what is on screen without touching the layout (the list
+  then says why it is empty rather than listing a table nobody can see).
+  Two things keep that repaint from undoing what the analyst is doing in
+  the list. It is in place when the table and its set of names are the
+  same (`dock.listedKey`): checkboxes and pins are repainted, rows are
+  re-appended only if the order changed (re-appending takes focus off a
+  control in the row), and the filter box and scroll position are left
+  alone. Only a different table, or a column added or removed, rebuilds
+  the rows, and even then the filter text stays. And a row unticked in
+  the list while **Shown** is picked stays listed (`dock.keepListed`)
+  until the filter or the switch next changes, the table menu's rule, so
+  the repaint that follows a tick cannot whisk the row away from under
+  the pointer. All / Shown is the table menu's own `winnow.tableMenu`
+  preference, deliberately one setting for both lists; whether the list
+  is pinned and its share of the sidebar (`columns`, `columnsRatio`) live
+  beside the sidebar's width in `winnow.sidebar`, which is why
+  `saveSidebarPrefs`/`loadSidebarPrefs` are exported. The height is a
+  ratio of the sidebar, not pixels: a fixed 400px list in a 500px window
+  would leave the table tree a sliver. Pinning it to a hidden sidebar
+  shows the sidebar, since a list pinned nowhere is a click that did
+  nothing (`tests/ui/test_column_dock.py`).
 - **Editing a saved filter** goes through the real grid, not a
   self-contained dialog: "Edit…" in a Saved filters row's ⋯ applies that
   filter (`applyPreset`) and *then* opens `openFilterBuilder(f)` with the
@@ -1060,6 +1093,63 @@ see [docs/notes/README.md](README.md) for the whole set.
   far" polls `/api/sql/run/progress` with it. A tab whose run is out shows
   that, not the result it is replacing.
   `tests/ui/test_sql_run_tokens.py`.
+- **The SQL pane keeps a query history** (History ▾; `sql_history`, a
+  per-case table; `record/list/delete/clear_sql_history`,
+  `/api/sql_history`; the panel is `static/js/sqlhistory.js`). It exists
+  because a query tab is a draft: its text autosaves as it is edited, so
+  the query behind a number found an hour ago has usually become the next
+  idea. In the **case file** for the reason `sql_tabs` is (the query is
+  analysis about this evidence), capped at `SQL_HISTORY_LIMIT` (500)
+  distinct queries. Things that bite:
+  - **Recorded by the pane, after the run has settled** (`recordSqlRun`,
+    called by `runSql` only past its `current()` check), not by
+    `/api/sql/run` as it answers. That check is the point: a superseded
+    run (run again, tab closed, case switched) is not one anybody got an
+    answer from, and the run that replaced it records itself. And the
+    write takes the writer lock, which a long `build_view` can hold for
+    seconds; in a request of its own it delays nothing but this row,
+    where in `/api/sql/run` it would hold back the result the analyst is
+    waiting on. Starters and a plugin's `winnow.sqlPage.run` go through
+    `runSql`, so they are recorded too; `/api/sql` (dashboards,
+    `winnow.api.sql`) is not the pane and is not recorded.
+  - **One row per distinct text, and a re-run is DELETE + INSERT, not
+    UPDATE**, so `id` order is last-run order and the list is `ORDER BY
+    id DESC` off the rowid with no index (the 64KB-page point the
+    `derived_columns` comment makes). Ordering by `ran_at` instead breaks
+    on two runs in the same second. `AUTOINCREMENT` from the table's
+    first day, so a stale list in another window can never ✕ a newer
+    query that took its id. Text is compared after `strip()` only;
+    anything else (case, a comment) can change what the query means.
+  - **`ran_at` is UTC with a `Z`**, unlike the case's other timestamps
+    (local, no zone). The case travels between analysts, and "5 min ago"
+    computed from a zone-less local time on a desk in another zone is
+    hours wrong. The panel shows `openedAgo` (home.js) and the exact
+    local time in the tooltip.
+  - **Where an entry opens is the analyst's call; losing a draft never
+    is** (`openSqlHistoryEntry`). It opens in the current tab unless the
+    analyst used its **New tab** button or held Ctrl/⌘ (a per-entry
+    button rather than a remembered switch, which is what was asked for:
+    the choice is made per query). A new tab takes the name of the tab
+    the entry was run from when no open tab has it. In the current tab,
+    the text is replaced without asking only under `openStarter`'s rule
+    plus one more kind of replaceable text, a query that is itself in the
+    history (the list still holds it). Anything else gets
+    `choiceDialog` (ui.js): Cancel, Replace it, or Open in a new tab,
+    with the focus on the new tab so a stray Enter keeps the draft. It
+    used to open such an entry in a new tab without asking, which made a
+    new tab something that happened to the analyst rather than a choice.
+  - **As wide as the SQL page** (`fitToPage`, after `anchoredPanel` has
+    placed it under the button at its 560px fallback): width and left
+    edge from the page, top left where it was. Widening can only make it
+    shorter (fewer queries wrap onto their second line), so the vertical
+    placement still fits. The page is `.page-main`, not `#sqlview`, so it
+    never reaches over a plugin's side panel. `.menu`'s 440px
+    `max-width` is lifted for it.
+  - **No client-side cache.** The panel reads `/api/sql_history` each
+    time it opens: at most 500 short rows, and a pop-out running queries
+    beside the main window would otherwise leave one of them showing a
+    stale list. Nothing to reset on a case switch for the same reason.
+  `tests/test_sql_history.py`, `tests/ui/test_sql_history_ui.py`.
 - **The 2026-08 navigation batch** — five smaller features, and the traps
   each one carries:
   - **"Open filter in SQL pane"** (`Store.spec_sql`, `POST /api/view/sql`,
@@ -1811,7 +1901,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   - **No intro line.** The empty queue's pane says what to drop and what
     imports; a full one has no line to spare.
   tests/ui/test_import_queue_ui.py, test_iis_queue.py,
-  test_xlsx_picker_ui.py, test_text_import_ui.py.
+  test_utmp_queue.py, test_xlsx_picker_ui.py, test_text_import_ui.py.
 - **The home screen's case list is the Tables manager's frame too**
   (`renderHome`, `homeSections`, `buildCasesPane` in home.js; `.home-*`
   in style.css). Sections down the side: Recent (opened in the last 30

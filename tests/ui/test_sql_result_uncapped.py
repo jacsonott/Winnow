@@ -135,7 +135,7 @@ def test_columns_keep_their_width_while_scrolling(page, wheel_settled):
     assert after == pytest.approx(before, abs=1)
 
 
-def test_copy_takes_every_row(page):
+def test_copy_takes_every_row(page, clipboard):
     _run(page, _count(7_000))
     # The clipboard outlives the browser context, so whatever an earlier
     # test copied is still there: wait for it to CHANGE, not to be non-empty.
@@ -143,7 +143,7 @@ def test_copy_takes_every_row(page):
     page.locator(".sql-result-actions .btn", has_text="Copy").click()
     text = "-"
     for _ in range(50):   # polled with evaluate, which awaits — see test_ui_test_hygiene
-        text = page.evaluate("() => navigator.clipboard.readText()")
+        text = clipboard(page)
         if text != "-":
             break
         page.wait_for_timeout(100)

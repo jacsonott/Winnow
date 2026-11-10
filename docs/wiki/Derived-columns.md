@@ -126,9 +126,13 @@ The new column appears at once, right after the column it was derived
 from, and the tooltip on the ƒ beside its name says *building…* while
 Winnow works through the table. When the job finishes the values appear where you are, without
 switching tables; your scroll position and picked rows stay as they were.
-Progress shows in the jobs panel, the same place imports appear, and the ✕
-on that row cancels. Cancelling an add removes the column; you can add it
-again at any time.
+Progress shows in the jobs panel, the same place imports appear, on a row
+marked **deriving** (an import's row says **importing**), and the ✕ on
+that row cancels. Winnow builds columns and imports files two at a time
+between them, so a column can wait for a turn behind a large import; the
+jobs waiting are counted on a **queued** row, which says "waiting to
+derive" when they are all columns. Cancelling an add removes the column;
+you can add it again at any time.
 
 When the job finishes, a notice gives the number of rows read and, if any
 failed, how many values were not found. A row whose input was blank is not

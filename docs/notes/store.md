@@ -222,7 +222,9 @@ see [docs/notes/README.md](README.md) for the whole set.
   "source_id" sort by member — `_member_id_alias` picks a name no data
   column has.
 - **An id a case hands out is never handed out again.** `sources`,
-  `tag_defs`, `merges` and `sql_tabs` are `AUTOINCREMENT`. As plain
+  `tag_defs`, `merges` and `sql_tabs` are `AUTOINCREMENT` (and
+  `sql_history`, which was from its first day, so it needs no migration
+  and is not in `_ID_HIGH_WATER_SQL`). As plain
   `INTEGER PRIMARY KEY`s they gave a deleted newest row's id to the next
   insert, and every one of those ids outlives its row somewhere — a view
   handle or tag list in another window, an undo entry, an indicator's

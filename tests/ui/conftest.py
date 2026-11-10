@@ -184,6 +184,39 @@ def server_call(server):
     return _call
 
 
+@pytest.fixture(scope="session")
+def imported(server_post, server_call):
+    """Import a file into the shared case and wait for the import to
+    FINISH, then hand back the ids of the tables it made:
+
+        sid = imported({"path": str(f), "name": "wide.csv", "kind": "csv"})[0]
+        page.evaluate("() => __winnow.loadSources()")
+
+    Not "until the table's name is in S.sources", which is what a dozen
+    modules used to poll for. An import lists its table as it starts, with
+    no columns, and writes the typed columns as it ends (Store.ingest_csv),
+    so a table opened in between got S.columns = []: no datetime column for
+    the histogram strip, no header to right-click. That only happened on a
+    runner slow enough to lose the race, which is why it surfaced as the
+    nightly's Windows job and its flake hunt failing a different test each
+    night. The body is /api/ingest/jobs/path's."""
+    def _imported(body, timeout=30.0):
+        job = server_post("/api/ingest/jobs/path", body)
+        what = body.get("name") or body["path"]
+        deadline = time.monotonic() + timeout
+        while True:
+            now = next((j for j in server_call("/api/ingest/jobs")["jobs"]
+                        if j["job_id"] == job["job_id"]), None)
+            if now and now["status"] == "done":
+                return now["source_ids"]
+            if now and now["status"] in ("error", "cancelled"):
+                pytest.fail(f"importing {what}: {now['status']} ({now.get('error')})")
+            if time.monotonic() >= deadline:
+                pytest.fail(f"importing {what} did not finish in {timeout:g}s")
+            time.sleep(0.05)
+    return _imported
+
+
 @pytest.fixture
 def restore_plugin_overrides(server, server_post):
     """For a test that applies a profile: applying gives every plugin an
@@ -600,15 +633,31 @@ class Copied:
         if kind is not None:
             return
         deadline = time.monotonic() + self.timeout
-        while (text := self.page.evaluate("() => navigator.clipboard.readText()")) == self.MARK:
+        while (text := _read_clipboard(self.page)) == self.MARK:
             if time.monotonic() >= deadline:
                 pytest.fail("nothing reached the clipboard")
             self.page.wait_for_timeout(25)
-        # Windows keeps clipboard text with CRLF line ends and readText
-        # hands them back that way. The app wrote LF, and that is what the
-        # tests are about (the nightly's Windows run split rows on "\n" and
-        # found a "\r" on every one).
-        self.text = text.replace("\r\n", "\n")
+        self.text = text
+
+
+def _read_clipboard(page):
+    # Windows keeps clipboard text with CRLF line ends and readText hands
+    # them back that way. The app wrote LF, and that is what the tests are
+    # about (the nightly's Windows run split rows on "\n" and found a "\r"
+    # on every one, in every module that read the clipboard itself).
+    return page.evaluate("() => navigator.clipboard.readText()").replace("\r\n", "\n")
+
+
+@pytest.fixture
+def clipboard():
+    """What is on the clipboard now, as the app wrote it:
+
+        assert clipboard(page) == "Host\\nH2"
+
+    Read it through this (or `copied`) rather than with a bare
+    navigator.clipboard.readText(), which on Windows hands every line
+    back with a "\\r" the app never wrote."""
+    return _read_clipboard
 
 
 @pytest.fixture

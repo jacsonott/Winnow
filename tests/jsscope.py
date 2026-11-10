@@ -47,7 +47,7 @@ BROWSER_GLOBALS = {
     "window", "document", "console", "navigator", "location", "history", "screen",
     "localStorage", "sessionStorage", "fetch", "Headers", "Request", "Response",
     "FormData", "Blob", "File", "FileReader", "URL", "URLSearchParams", "AbortController", "BroadcastChannel",
-    "Uint8Array", "ArrayBuffer", "TextDecoder",
+    "Uint8Array", "ArrayBuffer", "DataView", "TextDecoder",
     "XMLHttpRequest", "WebSocket", "EventSource", "ClipboardItem", "DataTransfer",
     "setTimeout", "clearTimeout", "setInterval", "clearInterval",
     "requestAnimationFrame", "cancelAnimationFrame", "requestIdleCallback",

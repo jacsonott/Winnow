@@ -13,6 +13,7 @@ import { activeSqlTab, flushSqlTabSave, hideMainViews, loadSqlTabs, newSqlTab, s
 import { releaseSqlResults, setActiveSqlResult, sqlCopyResult, sqlDownloadCsv, sqlDownloadXlsx, sqlRefQuery, sqlResultUrl, sqlRowKey, sqlSelectedRows, sqlSortQuery, sqlTagsFor, tagChips, wireSqlAssist } from './sqlassist.js';
 import { moveCursor, rowsPaintY, spacerPx, vScroll } from './grid.js';
 import { loadCaseVariables } from './savedfilters.js';
+import { recordSqlRun } from './sqlhistory.js';
 import { S } from './state.js';
 import { alertDialog, closeModal, confirmDialog, dropdownMenu, modal, promptDialog, sectionPanes } from './ui.js';
 import { updateFiltersButton, updateTimeRangeButton } from './timeframe.js';
@@ -1549,6 +1550,10 @@ export async function runSql() {
   }
   S.sqlRuns.delete(tabId);
   S.sqlResults.set(tabId, r);
+  // Into the history (sqlhistory.js) — only here, past the superseded
+  // check: a run that was replaced is not one the analyst got an answer
+  // from, and the run that replaced it records itself. Not awaited.
+  recordSqlRun(tabId, sql, r);
   if (S.sqlTabId === tabId) {
     const out = $('sqlResult');
     if (r.error) {

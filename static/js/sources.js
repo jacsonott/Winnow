@@ -123,6 +123,10 @@ export function sourceTitle(s, suffix) {
     else if (!s.origin && s.origin_meta && s.origin_meta.encoding === 'cp1252') parts.push('Not UTF-8 — read as Windows-1252');
     else if (!s.origin && s.origin_meta && s.origin_meta.cp1252_bytes) {
       parts.push(`${Number(s.origin_meta.cp1252_bytes).toLocaleString()} bytes not valid UTF-8 — read as Windows-1252`);
+    } else if (!s.origin && s.origin_meta && s.origin_meta.record_layout) {
+      // Login records: which of the four layouts the bytes were read as.
+      parts.push(`Login records — ${s.origin_meta.record_layout}`
+        + (s.origin_meta.torn_bytes ? `; the last ${Number(s.origin_meta.torn_bytes).toLocaleString()} bytes were not a whole record and were left out` : ''));
     }
     if (s.path) parts.push(s.path);
     if (s.imported_at) parts.push(`Imported ${s.imported_at.replace('T', ' ')}`);
@@ -1712,15 +1716,20 @@ export function setSidebarWidth(px) {
   return w;
 }
 
-function saveSidebarPrefs(patch) {
+/* Exported for the column list pinned to the sidebar's foot
+   (columndock.js), whose open flag and height share this key. */
+export function saveSidebarPrefs(patch) {
   let cur = {};
-  try { cur = JSON.parse(localStorage.getItem(SIDEBAR_KEY) || '{}'); } catch { /* start fresh */ }
-  localStorage.setItem(SIDEBAR_KEY, JSON.stringify({ ...cur, ...patch }));
+  try { cur = JSON.parse(localStorage.getItem(SIDEBAR_KEY) || '{}') || {}; } catch { /* start fresh */ }
+  try { localStorage.setItem(SIDEBAR_KEY, JSON.stringify({ ...cur, ...patch })); } catch { /* private mode */ }
+}
+
+export function loadSidebarPrefs() {
+  try { return JSON.parse(localStorage.getItem(SIDEBAR_KEY) || '{}') || {}; } catch { return {}; }
 }
 
 export function initSidebar() {
-  let prefs = {};
-  try { prefs = JSON.parse(localStorage.getItem(SIDEBAR_KEY) || '{}'); } catch { /* defaults below */ }
+  const prefs = loadSidebarPrefs();
   setSidebarWidth(prefs.width || SIDEBAR_W_DEFAULT);
   S.collapsedFolders = loadCollapsedFolders();
   // Collapsed by DEFAULT: a case should open showing the evidence, not a

@@ -8,25 +8,12 @@ header set, and the analyst wants one host's tables out of that group."""
 
 from __future__ import annotations
 
-import time
-
 import pytest
 
 pytestmark = pytest.mark.ui
 
 HEADER = "TimeCreated,EventId,Computer,Payload"
 NAMES = ("fold_ws01_sec.csv", "fold_ws01_sys.csv", "fold_dc01_sec.csv")
-
-
-def _wait_for_sources(page, names, timeout=25.0):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        have = page.evaluate(
-            "() => __winnow.loadSources().then(() => __winnow.S.sources.map((s) => s.name))")
-        if all(n in have for n in names):
-            return
-        page.wait_for_timeout(250)
-    pytest.fail(f"{names} never all appeared in S.sources")
 
 
 def _listed(page):
@@ -44,13 +31,12 @@ def _close_builder(page):
     page.wait_for_selector("#modal[hidden]", state="attached")
 
 
-def test_folder_picker_narrows_the_list_to_one_folder_and_its_subfolders(page, api, tmp_path):
+def test_folder_picker_narrows_the_list_to_one_folder_and_its_subfolders(page, api, imported, tmp_path):
     for n in NAMES:
         f = tmp_path / n
         f.write_text(HEADER + f"\n2026-03-15 09:00:00,4624,{n[5:9].upper()},x\n", encoding="utf-8")
-        api("/api/ingest/jobs/path", "POST", {"path": str(f), "name": n, "kind": "csv"})
-    page.evaluate("() => __winnow.startJobsPoll()")
-    _wait_for_sources(page, NAMES)
+        imported({"path": str(f), "name": n, "kind": "csv"})   # finished, not just listed
+    page.evaluate("() => __winnow.loadSources()")
     ids = page.evaluate(
         "(ns) => Object.fromEntries(__winnow.S.sources.filter((s) => ns.includes(s.name)).map((s) => [s.name, s.id]))",
         list(NAMES))
