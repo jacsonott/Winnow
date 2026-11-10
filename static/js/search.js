@@ -790,6 +790,9 @@ export function syncSearchExpansion(forceExpand = false) {
 
 export function expandSearch() {
   syncSearchExpansion(true);
+  // While the box was hidden its hint padding and placeholder were sized
+  // from estimates (no layout); now it has a real width, size them again.
+  if (S.searchMode !== 'advanced') updateSearchHint();
   if (S.searchMode === 'advanced') {
     // When the term list is collapsed there's no input — focus the
     // summary chip instead (Enter/Space expands it from there).
