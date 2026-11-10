@@ -4,7 +4,6 @@ that is RecordNumber — and the format guess called that counter "Mac
 absolute (Cocoa) time" with 100% of its values parsing. It starts on the
 first column that looks like a timestamp now, and a counter gets no
 confident guess wherever it is picked."""
-import time
 
 import pytest
 
@@ -12,20 +11,14 @@ pytestmark = pytest.mark.ui
 
 
 @pytest.fixture
-def evtx_table(page, server_post, tmp_path):
+def evtx_table(page, imported, tmp_path):
     f = tmp_path / "evtx.csv"
     lines = ["RecordNumber,EventRecordId,EventId,TimeCreated,Computer"]
     for i in range(1, 61):
         lines.append(f"{i},{100000 + i},{[4624, 4625, 4688][i % 3]},2026-03-03 00:00:{i % 60:02d},DC01")
     f.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    server_post("/api/ingest/jobs/path", {"path": str(f), "name": "evtx.csv", "kind": "csv"})
-    deadline = time.monotonic() + 25
-    while time.monotonic() < deadline:
-        names = page.evaluate("() => __winnow.loadSources().then(() => __winnow.S.sources.map((s) => s.name))")
-        if "evtx.csv" in names:
-            break
-        time.sleep(0.25)
-    sid = page.evaluate("() => __winnow.S.sources.find((s) => s.name === 'evtx.csv').id")
+    sid = imported({"path": str(f), "name": "evtx.csv", "kind": "csv"})[0]   # finished, not just listed
+    page.evaluate("() => __winnow.loadSources()")
     page.evaluate("(id) => __winnow.openSource(id)", sid)
     page.wait_for_selector(".row")
     yield sid

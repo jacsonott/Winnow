@@ -3,6 +3,7 @@
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { recordTabVisit } from './tabhistory.js';
 import { renderFilterBar } from './columns.js';
+import { syncColumnDock } from './columndock.js';
 import { $, MOD_ENTER, api, debounce, el, post, toast } from './core.js';
 import { hideDetailPane } from './detail.js';
 import { render, renderTagToolbar } from './grid.js';
@@ -428,6 +429,7 @@ export function syncTabChrome() {
   syncDiffBanner();     // as does a session comparison's banner
   renderFilterBar();    // and the filter bar, which describes the grid's rows
   renderTagToolbar();   // and the "N selected" tagging bar
+  syncColumnDock();     // and the column list pinned to the sidebar, which lists the grid's columns
 }
 
 /* The mutually-exclusive main content views (grid / SQL / Timeline / and

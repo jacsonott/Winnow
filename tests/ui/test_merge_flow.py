@@ -5,34 +5,11 @@ test_merge_mismatched et al); this is the flow an analyst clicks through."""
 
 from __future__ import annotations
 
-import time
-
 import pytest
 
 pytestmark = pytest.mark.ui
 
 HEADER = "Timestamp,EventId,Host,ExtremelyLongColumnHeaderName,CommandLine"
-
-
-def _import_csv(page, path, name):
-    page.evaluate(
-        """([path, name]) => __winnow.post('/api/ingest/jobs/path',
-             { path, name, kind: 'csv' }).then(() => __winnow.startJobsPoll())""",
-        [str(path), name])
-
-
-def _wait_for_source(page, name, timeout=25.0):
-    """Polled from Python: page.wait_for_function does NOT await a promise
-    predicate, so `() => loadSources().then(...)` passed instantly and the
-    test raced the import — which is how this flaked on CI for months."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        names = page.evaluate(
-            "() => __winnow.loadSources().then(() => __winnow.S.sources.map((s) => s.name))")
-        if name in names:
-            return
-        time.sleep(0.25)
-    pytest.fail(f"{name} never appeared in S.sources")
 
 
 def _cleanup(page, merge_id, names, before):
@@ -51,7 +28,7 @@ def _cleanup(page, merge_id, names, before):
     page.wait_for_selector(".row")
 
 
-def test_merge_builder_merges_mismatched_tables_and_edits_in_place(page, tmp_path):
+def test_merge_builder_merges_mismatched_tables_and_edits_in_place(page, tmp_path, imported):
     """Imports its own three tables rather than leaning on the shared
     fixture: anything an earlier test does to that one (a derived column is
     enough) would change what the builder shows. merge_c has an extra
@@ -65,9 +42,10 @@ def test_merge_builder_merges_mismatched_tables_and_edits_in_place(page, tmp_pat
         f.write_text(HEADER + (",Extra" if extra else "")
                      + "\n2026-03-15 09:00:00,4624,H9,v,cmd.exe" + (",only-c" if extra else "") + "\n",
                      encoding="utf-8")
-        _import_csv(page, f, n)
-    for n in names:
-        _wait_for_source(page, n)
+        # Finished, not just listed: a table listed mid-import has no
+        # columns yet for the builder to line up (the `imported` fixture).
+        imported({"path": str(f), "name": n, "kind": "csv"})
+    page.evaluate("() => __winnow.loadSources()")
 
     merge_id = None
     try:

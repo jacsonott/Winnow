@@ -36,6 +36,7 @@ import * as splash from './splash.js';
 import * as sources from './sources.js';
 import * as view from './view.js';
 import * as columns from './columns.js';
+import * as columndock from './columndock.js';
 import * as tsformat from './tsformat.js';
 import * as derived from './derived.js';
 import * as grid from './grid.js';
@@ -55,6 +56,7 @@ import * as plugins from './plugins.js';
 import * as search from './search.js';
 import * as session from './session.js';
 import * as sql from './sql.js';
+import * as sqlhistory from './sqlhistory.js';
 import * as timeline from './timeline.js';
 import * as timelineoverview from './timelineoverview.js';
 import * as timelinepane from './timelinepane.js';
@@ -84,6 +86,7 @@ import { wireSearch } from './search.js';
 import { initAppearance, maybeOfferRemoteMode, wireSettings } from './settings.js';
 import { applyPageTabsSize, initSidebar, wireSidebarResize, loadPageTabPrefs, renderPageTabs, wireSources } from './sources.js';
 import { wireSql } from './sql.js';
+import { wireSqlHistory } from './sqlhistory.js';
 import { S } from './state.js';
 import { updateTimeRangeButton } from './timeframe.js';
 import { renderTimelineTimeRange, wireTimeline } from './timeline.js';
@@ -98,7 +101,7 @@ import { wireUi } from './ui.js';
    spread would freeze the value of a rebindable export like ROW_H at boot.
    Collision-free by construction — these names all shared one scope until
    the file was split. Not an API; nothing in the app reads it. */
-const NAMESPACES = { splash, core, connection, state, jobs, tabhistory, charts, stack, notes, watchlist, dashboard, dashwidgets, filters, filterundo, sources, view, columns, tsformat, derived, grid, grouping, tags, detail, ui, filterbuilder, savedfilters, timeframe, histogram, merge, multicase, importer, tables, plugins, search, session, sql, timeline, timelineoverview, timelinepane, rowmenu, subset, keymap, settings, bundles, profilebuilder, pluginmanager, userenv, home, errlog, popout };
+const NAMESPACES = { splash, core, connection, state, jobs, tabhistory, charts, stack, notes, watchlist, dashboard, dashwidgets, filters, filterundo, sources, view, columns, columndock, tsformat, derived, grid, grouping, tags, detail, ui, filterbuilder, savedfilters, timeframe, histogram, merge, multicase, importer, tables, plugins, search, session, sql, sqlhistory, timeline, timelineoverview, timelinepane, rowmenu, subset, keymap, settings, bundles, profilebuilder, pluginmanager, userenv, home, errlog, popout };
 window.__winnow = {};
 for (const ns of Object.values(NAMESPACES)) {
   for (const key of Object.keys(ns)) {
@@ -126,6 +129,7 @@ wireGrouping();
 wireDetail();
 wireUi();
 wireSql();
+wireSqlHistory();
 wirePlugins();
 wireHistogram();
 wireTimeline();
@@ -160,6 +164,10 @@ initAppearance();
 
 initSidebar();
 wireSidebarResize();
+// After initSidebar: the pinned column list shares its winnow.sidebar key
+// and lives inside the sidebar it shows.
+columndock.initColumnDock();
+columndock.wireColumnDock();
 
 wireFileDrop();
 

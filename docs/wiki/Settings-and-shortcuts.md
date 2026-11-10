@@ -206,6 +206,7 @@ once, with all its keys.
 | Copy the unique values of the cursor's column — from the selected rows, else the whole view | `Ctrl+Shift+U`, `Meta+Shift+U` |
 | Open Tables manager | `t` |
 | Show/hide the table sidebar | `` ` `` |
+| Pin/unpin the open table's column list at the bottom of the sidebar | none |
 | Open the table menu (columns, value dropdowns, layout, name & merge) — also right-click a tab → Columns… | `C` |
 | Search all tables | `s` |
 | Open/close the detail pane | `d` |
@@ -283,8 +284,12 @@ keys**, below **Reset to defaults**, in the same groups as here.
 | `Esc` | Clear the result selection. |
 | `Ctrl`+click / `⌘`+click a row | Add it to the result selection, or take it out. |
 | `Shift`+click a row | Select every result row from the last one clicked to it. |
+| `Enter` | In **History ▾**'s **Find a query…** box: open the first query that matches. |
+| `Ctrl+Enter` / `⌘+Enter` | In **History ▾**: open the first match, or the query you have moved to with `↓`, and run it. |
+| `Ctrl`+click / `⌘`+click a query in **History ▾** | Open it in a new query tab, as its **New tab** button does. |
 
-More on selecting and tagging results is in [SQL pane](SQL-pane.md).
+More on selecting and tagging results is in [SQL pane](SQL-pane.md), and on
+the history in [Query history](SQL-pane.md#query-history).
 
 **Timeline**
 

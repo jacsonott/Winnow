@@ -2,6 +2,7 @@
 
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { applyDefaultLayout, autofitAllColumnWidths, openColumnFilter, resetAllColumnWidths, saveDefaultLayout, visibleCols } from './columns.js';
+import { toggleColumnDock } from './columndock.js';
 import { openFilterBuilder } from './filterbuilder.js';
 import { undoFilterChange } from './filterundo.js';
 import { $, ROW_H } from './core.js';
@@ -105,6 +106,10 @@ export const DEFAULT_KEYMAP = {
   copyUniqueValues: ['Ctrl+U', 'Meta+U'],
   openTables: ['t'],
   toggleSidebar: ['`'],
+  // No default key: the free letters left are none of them a mnemonic for
+  // it, and it is a click away on the sidebar's head and in the table
+  // menu. Bindable in Settings like toggleDuplicateRows.
+  toggleColumnDock: [],
   openTableMenu: ['C'],
   openSearchAll: ['s'],
   toggleDetail: ['d'],
@@ -150,6 +155,7 @@ export const ACTION_LABELS = {
   copyUniqueValues: "Copy the unique values of the cursor's column — from the selected rows, else the whole view",
   openTables: 'Open Tables manager',
   toggleSidebar: 'Show/hide the table sidebar',
+  toggleColumnDock: "Pin/unpin the open table's column list at the bottom of the sidebar",
   openTableMenu: 'Open the table menu (columns, value dropdowns, layout, name & merge) — also right-click a tab → Columns…',
   openSearchAll: 'Search all tables',
   toggleDetail: 'Open/close the detail pane',
@@ -463,6 +469,9 @@ export const FIXED_KEYS = [
     ['Esc', 'Clear the result selection'],
     ['Ctrl/⌘-click a row', 'Add it to the result selection, or take it out'],
     ['Shift-click a row', 'Select every result row from the last one clicked to it'],
+    ['Enter', 'In History ▾’s Find a query… box: open the first query that matches'],
+    ['Ctrl/⌘ + Enter', 'In History ▾: open the first match, or the query moved to with ↓, and run it'],
+    ['Ctrl/⌘-click a query in History ▾', 'Open it in a new query tab, as its New tab button does'],
   ]],
   ['Timeline', [
     ['↓ / ↑, j / k, PgDn / PgUp, g / G', 'Move the selected line — the grid’s movement keys, so a rebinding above moves it too'],
@@ -569,6 +578,7 @@ export const ACTION_HANDLERS = {
   toggleDuplicateRows: () => toggleDuplicateRows(),
   openTables: () => openTablesManager(),
   toggleSidebar: () => setSidebarVisible($('sidebar').hidden),
+  toggleColumnDock: () => toggleColumnDock(),
   openTableMenu: () => openTableMenu(),
   toggleDetail: () => toggleDetailPane(),
   openSearchAll: () => openSearchAllModal(),

@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import contextlib
 import datetime
-import time
 
 import pytest
 
@@ -42,7 +41,7 @@ def _utc(t: float) -> datetime.datetime:
 
 
 @contextlib.contextmanager
-def _charted(page, server_post, tmp_path, name, stamps):
+def _charted(page, imported, tmp_path, name, stamps):
     """A table of one When column holding `stamps`, open, with the
     histogram strip charting it. The table is deleted and the strip closed
     on the way out, whether or not the setup got that far."""
@@ -50,19 +49,10 @@ def _charted(page, server_post, tmp_path, name, stamps):
     f.write_text("When,N\n" + "".join(f"{s:%Y-%m-%d %H:%M:%S},{i}\n" for i, s in enumerate(stamps)))
     sid = None
     try:
-        server_post("/api/ingest/jobs/path", {"path": str(f), "name": name, "kind": "csv"})
-        # Polled from Python: wait_for_function does not await a promise
-        # predicate (tests/test_ui_test_hygiene.py).
-        deadline = time.monotonic() + 25
-        while time.monotonic() < deadline:
-            names = page.evaluate(
-                "() => __winnow.loadSources().then(() => __winnow.S.sources.map((s) => s.name))")
-            if name in names:
-                break
-            time.sleep(0.25)
-        else:
-            raise AssertionError(f"{name} never appeared in S.sources")
-        sid = page.evaluate("(n) => __winnow.S.sources.find((s) => s.name === n).id", name)
+        # Until the import finishes, not until the table is listed (the
+        # `imported` fixture says why).
+        sid = imported({"path": str(f), "name": name, "kind": "csv"})[0]
+        page.evaluate("() => __winnow.loadSources()")
         page.evaluate("(id) => __winnow.openSource(id)", sid)
         page.wait_for_function(
             "([id, n]) => __winnow.S.sourceId === id && __winnow.S.view"
@@ -111,12 +101,12 @@ def _painted_in_column(page, epoch):
     }""", epoch)
 
 
-def test_midnights_are_marked_while_the_bars_are_finer_than_a_day(page, server_post, tmp_path):
+def test_midnights_are_marked_while_the_bars_are_finer_than_a_day(page, imported, tmp_path):
     """Three working days, 08:00 to 18:00, so each midnight falls in a
     night with no rows: the rule is the only thing painted there."""
     days = [datetime.datetime(2026, 2, 10) + datetime.timedelta(days=d) for d in range(3)]
     stamps = [day + datetime.timedelta(hours=8, minutes=5 * i) for day in days for i in range(121)]
-    with _charted(page, server_post, tmp_path, "rules_days.csv", stamps):
+    with _charted(page, imported, tmp_path, "rules_days.csv", stamps):
         assert page.evaluate("() => __winnow.histogramData().bucket_seconds") < DAY
         rules = page.evaluate("() => __winnow.histogramRules()")
         assert rules["unit"] == "day", rules
@@ -131,13 +121,13 @@ def test_midnights_are_marked_while_the_bars_are_finer_than_a_day(page, server_p
         assert _painted_in_column(page, _epoch(days[1]) + 5400) == 0
 
 
-def test_weeks_are_marked_once_the_bars_are_a_day(page, server_post, tmp_path):
+def test_weeks_are_marked_once_the_bars_are_a_day(page, imported, tmp_path):
     """Sixteen weeks from a Wednesday, a row every four hours: the bars
     are a day each, so a rule per midnight would be a rule per bar.
     Mondays instead, every one inside the span and no other day."""
     start = datetime.datetime(2026, 1, 7)
     stamps = [start + datetime.timedelta(hours=4 * i) for i in range(16 * 7 * 6)]
-    with _charted(page, server_post, tmp_path, "rules_weeks.csv", stamps):
+    with _charted(page, imported, tmp_path, "rules_weeks.csv", stamps):
         assert page.evaluate("() => __winnow.histogramData().bucket_seconds") == DAY
         rules = page.evaluate("() => __winnow.histogramRules()")
         assert rules["unit"] == "week", rules

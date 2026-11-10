@@ -18,7 +18,6 @@ which has no `src_N` of its own at all (invariant #9).
 from __future__ import annotations
 
 import re
-import time
 
 import pytest
 
@@ -197,7 +196,7 @@ def _ac_labels(page):
             page.locator(".sql-ac .menu-item span:first-child").all_text_contents()]
 
 
-def test_a_left_behind_table_comment_is_not_a_second_table(page, server_post, api, tmp_path, open_sql,
+def test_a_left_behind_table_comment_is_not_a_second_table(page, imported, api, tmp_path, open_sql,
                                                             until):
     """The comment on line one is there to survive the query being edited
     into something real — which means the everyday state of the editor is
@@ -211,23 +210,12 @@ def test_a_left_behind_table_comment_is_not_a_second_table(page, server_post, ap
     """
     csv = tmp_path / "gadgets.csv"
     csv.write_text("When,Gadget\n2026-04-01 00:00:00,widget\n2026-04-01 00:00:01,sprocket\n")
-    server_post("/api/ingest/jobs/path", {"path": str(csv)})
-    # Polled from Python, one awaited call at a time (the same reason
-    # test_merge_flow.py polls this way): wait_for_function does not await
-    # a promise, so that form both passed instantly AND left a loadSources
-    # per poll in flight — and a no-argument loadSources navigates, so
-    # whichever landed after the SQL page opened pulled the app back to
-    # the grid under it.
-    deadline = time.monotonic() + 25
-    while time.monotonic() < deadline:
-        names = page.evaluate(
-            "() => __winnow.loadSources().then(() => __winnow.S.sources.map((s) => s.name))")
-        if "gadgets.csv" in names:
-            break
-        time.sleep(0.25)
-    else:
-        pytest.fail("gadgets.csv never appeared in S.sources")
-    sid = page.evaluate("() => (__winnow.S.sources.find((s) => s.name === 'gadgets.csv') || {}).id")
+    # Until the import finishes (the `imported` fixture), then one awaited
+    # loadSources: a no-argument loadSources navigates, so one still in
+    # flight after the SQL page opened pulled the app back to the grid
+    # under it.
+    sid = imported({"path": str(csv)})[0]
+    page.evaluate("() => __winnow.loadSources()")
     try:
         open_sql(page)
         ta = page.locator("#sqlText")

@@ -58,8 +58,14 @@ try {
   <div class="sidebar-head">
     <input id="sidebarFilter" type="search" placeholder="Filter tables and pages…" autocomplete="off" spellcheck="false">
     <button id="btnNewFolder" class="sidebar-newfolder" title="New folder">🗀+</button>
+    <!-- Pins the open table's column list to the foot of this sidebar
+         (static/js/columndock.js); the table menu has the same toggle. -->
+    <button id="btnColDock" class="sidebar-newfolder sidebar-coldock-btn" aria-pressed="false" aria-label="Column list"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="2.5" width="3" height="11" rx=".5"/><rect x="6.5" y="2.5" width="3" height="11" rx=".5"/><rect x="11.5" y="2.5" width="3" height="11" rx=".5"/></svg></button>
   </div>
   <div id="sidebarList" class="sidebar-list"></div>
+  <div id="colDockSplit" class="coldock-split" role="separator" aria-orientation="horizontal" hidden
+       title="Drag to give the column list more or less of the sidebar · double-click to reset"></div>
+  <section id="colDock" class="coldock" aria-label="Columns" hidden></section>
   <div id="sidebarResize" class="sidebar-resize" title="Drag to resize · double-click to reset"></div>
 </aside>
 
@@ -232,6 +238,7 @@ try {
         <div>
           <button class="btn ghost" id="btnSqlSchema" title="Copy every table's definition (names, columns, types) to the clipboard — paste it into notes or an LLM">Copy schema</button>
           <button class="btn ghost" id="btnSqlTables" title="Every table's src_N name — click one to insert it at the cursor">Tables ▾</button>
+          <button class="btn ghost" id="btnSqlHistory" title="Every query run in this case, newest first — pick one to open it in the editor">History ▾</button>
           <button class="btn ghost" id="btnSqlWidget" title="Turn this query into a dashboard widget">To dashboard…</button>
           <span id="sqlPluginButtons" class="plugin-toolbar-buttons"></span>
           <button class="btn" id="btnRunSql" title="Ctrl+Enter or ⌘+Enter in the editor">Run</button>
@@ -440,7 +447,7 @@ Markdown: # headings, - bullets, **bold**, `code`, tables. Link ▾ points at a 
 <div class="jobs-panel" id="jobsPanel" hidden aria-live="polite"></div>
 <div class="tag-toolbar" id="tagToolbar" hidden></div>
 <div class="drop-overlay" id="dropOverlay" hidden aria-hidden="true">
-  <div class="drop-overlay-card">Drop to import — CSV/TSV, JSON, SQLite, Excel, Plaso, archives, or any log as text</div>
+  <div class="drop-overlay-card">Drop to import — CSV/TSV, JSON, SQLite, Excel, Plaso, wtmp/btmp, archives, or any log as text</div>
 </div>
 
 <!-- type="module" so the app can be split across static/js/*.js with real

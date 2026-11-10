@@ -63,6 +63,15 @@ model, fallbacks, the schema cache breakpoint — with no network). `test_sql_ta
 pane's sub-tabs, including that they actually survive closing and
 reopening the case file (the whole reason they live there rather than in
 `localStorage`) and that `reorder` keeps tabs it wasn't given.
+`test_sql_history.py` covers the SQL pane's query history the same way:
+one row per distinct text with a re-run moved to the top and counted, a
+failed run's error kept without counts, the cap dropping the oldest run,
+ids never reused, surviving a reopen, and a case holding only history
+counting as work for the quick-look sweep; `tests/ui/test_sql_history_ui.py`
+holds the pane's half, including that a superseded run is not recorded,
+that opening an entry over a draft asks first (with the focus on the safe
+answer), that an entry's New tab button opens it in a tab of its own, and
+that the panel spans the SQL page.
 `test_timeparse.py` covers every timestamp operation as pure functions —
 epoch auto-ranging boundaries, hex-vs-decimal FILETIME, the syslog year
 rollover (including across a batch boundary and Feb 29 in a non-leap
@@ -364,6 +373,17 @@ folders out of a shared `/tmp`.
   check that a debounced write did NOT happen waits past the debounce:
   a fast round trip can end before it, so the check looks too early.
 
+- **The shared context's seed runs on every navigation, reloads
+  included.** `FIRST_RUN_INIT` is an init script, so it writes
+  `winnow.sidebar` (`{ collapsed: false }`), `winnow.appearance` and
+  `winnow.remotePrompt` again each time the page loads. A test of a
+  preference stored under one of those keys that reloads to prove it was
+  remembered reads back the seed instead, and fails for a reason that
+  has nothing to do with the app. Carry the value over the reload in
+  sessionStorage and put it back with an init script added after the
+  seed (they run in the order they were added):
+  `_reload_keeping_sidebar` in tests/ui/test_column_dock.py.
+
 - **A click that lands while its target is being re-rendered fires
   nothing.** Not a refusal: the click hits a node that is being replaced,
   so no handler runs and no request goes out, and the test times out
@@ -399,13 +419,58 @@ folders out of a shared `/tmp`.
   returns at once and the test races what it meant to wait for.
   tests/test_ui_test_hygiene.py fails on one; poll from Python with the
   `until` fixture instead, since `page.evaluate` does await.
+- **Playwright is pinned in requirements-dev.txt, because each release
+  brings its own Chromium.** It used to be unpinned, so CI took whatever
+  was newest. On 2026-11-10 that went from 1.64.1 (Chrome Headless Shell
+  156) to 1.65.0 (158) between two runs, and
+  `test_ctrl_f.py::test_the_placeholder_names_the_keys_without_clipping`
+  failed on app code that had passed the night before, on both release
+  PRs for 0.4.3 at once. Under 158 the search box's placeholder with its
+  keys (`All columns  —  / or Ctrl+f`) no longer fits in Contains mode:
+  the app's canvas measurement still said it did, so the hint was
+  clipped, and measuring it in the page instead (#544) only turned that
+  into the bare `All columns`, which the test also refuses. What changed
+  in 158 (the face `ui-monospace` resolves to, the hint's width, or the
+  fonts `playwright install --with-deps` brings) is not known yet;
+  CI's trace artifacts could not be fetched from the sandbox that
+  found it. A Playwright upgrade is a browser upgrade: make it in a PR
+  of its own, so a failure like this is that PR's and not whatever else
+  happened to run CI that day.
+
 - **The clipboard on Windows reads back with CRLF line ends.** The app
   writes `\n`; Chromium on Windows stores clipboard text with `\r\n`, and
   `navigator.clipboard.readText()` returns it that way, so a test that
   splits a copy on `"\n"` finds a `"\r"` on every row there and nowhere
-  else. The `copied` fixture folds `\r\n` back to `\n`, so assert on
-  `clip.text` and don't read the clipboard by hand. Only the nightly's
-  Windows browser job can see this one.
+  else. The `copied` fixture folds `\r\n` back to `\n`, and so does the
+  `clipboard` fixture for a test that reads what is there now: assert on
+  `clip.text` or `clipboard(page)`, and don't read the clipboard by hand.
+  Only the nightly's Windows browser job can see this one, and it took
+  three nights to find every module that did (test_copy_unique_values.py,
+  test_sql_result_uncapped.py).
+- **An import lists its table before the table has columns.** The
+  background import inserts the `sources` row as it starts, with
+  `columns` = `[]`, and writes the typed columns as it ends
+  (`Store.ingest_csv`). A test that polled `loadSources()` until the name
+  appeared and then opened the table got `S.columns = []` whenever the
+  import was still running: the histogram strip said "No datetime column"
+  and never drew, there was no header to right-click, a merge had nothing
+  to line up, and a table removed in cleanup failed its own import ("No
+  table N"). Twelve modules waited that way; a fast runner always won the
+  race and the nightly's Windows job and flake hunt lost it a different
+  module each night. Import through the `imported` fixture, which waits
+  for the job to say `done` and returns the new tables' ids, then
+  `loadSources()`. To check a test against this, put a `time.sleep(2)` in
+  `ingest_csv` after the `sources` insert: every module that polled by
+  name failed with it, and passes with `imported`.
+- **A test about one platform has to say which.** The server and
+  Chromium both answer for the machine running the test, so an assertion
+  written on Linux is a Linux-only assertion. test_assoc_manual_help.py
+  expected the `xdg-mime` steps and failed on Windows, where the panel
+  rightly shows the Open With ones, and the splash test "off Windows"
+  emulated reduced motion but left `navigator.platform` to the machine, so
+  on Windows the animation played. Branch on `sys.platform` for what the
+  server decides, and pin `navigator.platform` and the user agent (as
+  test_splash.py's `_reduced_motion_ctx` does) for what the page decides.
 - **A sleep is a lower bound, not a measurement.** macOS coalesces
   timers: on the nightly's macOS runner `time.sleep(0.02)` measured 87ms.
   A test about what a timed window *includes* drives a fake
