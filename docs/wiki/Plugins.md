@@ -514,10 +514,12 @@ force one type.
 
 **With this plugin on, every `.log` file you import goes to it**, including
 logs from other systems; one it doesn't recognise is read as type `other`.
-Two kinds of `.log` are still read by Winnow itself: an
-[IIS log](Cases-and-importing.md#iis-web-server-logs), known by its name,
-and a [key=value log](Cases-and-importing.md#fortigate-and-other-fortinet-logs)
-such as FortiGate's, known by its first line. Switch the plugin off for
+Three kinds of `.log` are still read by Winnow itself: an
+[IIS log](Cases-and-importing.md#iis-web-server-logs), known by its name, a
+[key=value log](Cases-and-importing.md#fortigate-and-other-fortinet-logs)
+such as FortiGate's, and a
+[body file](Cases-and-importing.md#body-files-tsk-and-mactime), both known by
+their first line. Switch the plugin off for
 cases where other `.log` files should import some other way.
 
 Each line is read for what it says it holds, the way an
@@ -562,7 +564,10 @@ Tables imported with an earlier version of the plugin keep the shape they
 were imported with; import the logs again for the new columns and
 timestamps. Import the whole bundle as an archive or folder and every log
 becomes a table with the shared columns, which is what lets a board count
-across all of them.
+across all of them. A UAC collection's `bodyfile/bodyfile.txt` isn't a log
+and isn't this plugin's: Winnow reads it as a
+[body file](Cases-and-importing.md#body-files-tsk-and-mactime) whether the
+plugin is on or not.
 
 It also offers a board, **ESXi / Linux host overview** (log lines, log
 types, failed SSH logins, top source IPs, activity over time), under

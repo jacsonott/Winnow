@@ -51,13 +51,14 @@ from winnow import updater
 from winnow import userenv
 from winnow import version
 from winnow import archive
+from winnow import bodyread
 from winnow import iisread
 from winnow import utmpread
 from winnow import workspace as WS
 from winnow.sqlresults import ResultExpired, TooBig
 from winnow.store import (CASE_SUFFIX, DEFAULT_IMPORT_EXTENSIONS, PLASO_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, MissingTable, OpCancelled, RecordGone, Store, ViewExpired,
                    case_lock_path, decode_text_sample, describe_case_lock, fold_leftover_wal, is_winnow_case_file,
-                   looks_like_kv_log, looks_like_utmp, probe_case_lock, q, sniff_text_encoding,
+                   looks_like_bodyfile, looks_like_kv_log, looks_like_utmp, probe_case_lock, q, sniff_text_encoding,
                    sweep_orphan_views)
 from winnow.store import VIEW_EXPORT_FORMATS, case_session_document_problem, pane_cell_json, session_document_problem
 
@@ -1962,9 +1963,11 @@ def _assoc_ingest(path: str) -> dict:
     # reader's even when a plugin claims .log (esxi_logs does) — the import
     # queue's own rule (pluginFormatFor). So is a key=value log, recognised
     # by its first line (the queue asks /api/ingest/recognise first too),
-    # and a wtmp/btmp/utmp file, by its name or its records.
+    # a wtmp/btmp/utmp file, by its name or its records, and a body file,
+    # by its name or its first line.
     kind = _ingest_kind_for_path(path)
-    fmt = None if kind in ("iis", "kv", "utmp") else PLUGINS.format_for_filename(os.path.basename(path))
+    fmt = (None if kind in ("iis", "kv", "utmp", "bodyfile")
+           else PLUGINS.format_for_filename(os.path.basename(path)))
     if fmt is not None:
         # Synchronous, like every plugin ingest (no background job): the
         # source exists by the time this returns, so there is no job_id
@@ -2916,7 +2919,7 @@ async def api_ingest_preview(
     file: UploadFile = File(...),
     delimiter: str | None = Form(None),
     has_header: bool = Form(True),
-    kind: str = Form("csv"),   # "text": the raw-text importer's line-per-row preview; "iis", "kv", "utmp"
+    kind: str = Form("csv"),   # "text": the raw-text importer's line-per-row preview; "iis", "kv", "utmp", "bodyfile"
     log_format: str | None = Form(None),   # iis: w3c, ncsa or native; None reads the file's name
     size: int | None = Form(None),   # utmp: the whole file's size, since only its head is sent
 ):
@@ -2940,6 +2943,10 @@ async def api_ingest_preview(
         if kind == "kv":
             return {**await run_in_threadpool(
                 store().preview_kv_text, text, complete=len(raw) < PREVIEW_SAMPLE_BYTES),
+                "encoding": encoding}
+        if kind == "bodyfile":
+            return {**await run_in_threadpool(
+                store().preview_bodyfile_text, text, complete=len(raw) < PREVIEW_SAMPLE_BYTES),
                 "encoding": encoding}
         # The uploaded file's own name goes through: the delimiter is read
         # from the extension first (Store._sniff), and a preview that
@@ -3080,11 +3087,16 @@ def _ingest_kind_for_path(path: str) -> str:
     its first line is (looks_like_kv_log) — never one an extension or a
     name gives to another reader. Linux login records are recognized by
     name (wtmp, btmp.1 — utmpread.log_kind) and, renamed, by their records
-    (looks_like_utmp), asked about the same files as a key=value log."""
+    (looks_like_utmp), asked about the same files as a key=value log. A
+    body file likewise, by name (bodyfile, bodyfile.txt, *.body —
+    bodyread.name_says) and otherwise by its first line
+    (looks_like_bodyfile)."""
     if iisread.log_format(path):
         return "iis"
     if utmpread.log_kind(path):
         return "utmp"
+    if bodyread.name_says(path):
+        return "bodyfile"
     suffix = Path(path).suffix.lower()
     if suffix in SQLITE_IMPORT_EXTENSIONS:
         return "sqlite"
@@ -3098,6 +3110,8 @@ def _ingest_kind_for_path(path: str) -> str:
     if kind == "text" or suffix == ".txt":
         if looks_like_kv_log(path):
             return "kv"
+        if looks_like_bodyfile(path):
+            return "bodyfile"
         if looks_like_utmp(path):
             return "utmp"
     return kind
@@ -3209,7 +3223,7 @@ def api_ingest_preview_path(body: PreviewPath):
     try:
         if kind == "utmp":
             return store().preview_utmp_file(body.path)
-        if kind in ("csv", "text", "iis", "kv"):
+        if kind in ("csv", "text", "iis", "kv", "bodyfile"):
             # Same bounded sample the upload preview reads — never the file.
             with open(body.path, "rb") as f:
                 raw = f.read(PREVIEW_SAMPLE_BYTES)
@@ -3222,6 +3236,9 @@ def api_ingest_preview_path(body: PreviewPath):
                         "encoding": encoding}
             if kind == "kv":
                 return {**store().preview_kv_text(text, complete=len(raw) < PREVIEW_SAMPLE_BYTES),
+                        "encoding": encoding}
+            if kind == "bodyfile":
+                return {**store().preview_bodyfile_text(text, complete=len(raw) < PREVIEW_SAMPLE_BYTES),
                         "encoding": encoding}
             return {**store().preview_csv_text(text, delimiter=body.delimiter or None,
                                                has_header=body.has_header, name=body.path),
@@ -3244,19 +3261,25 @@ class RecognisePaths(BaseModel):
 def api_ingest_recognise(body: RecognisePaths):
     """What each file's content says it is, for the readers recognized by
     content rather than name: "kv" for a key=value log
-    (looks_like_kv_log), "utmp" for Linux login records under another name
-    (looks_like_utmp), else null. The import queue asks this as it queues
-    files added by path, the ones a name would leave as raw text, so the
-    queue says how a FortiGate log or a renamed wtmp will be read before
-    it imports — the browser reads an upload's first bytes itself. Reads
-    the first 8 KB of each; a path that isn't a regular file is null."""
+    (looks_like_kv_log), "bodyfile" for a body file under another name
+    (looks_like_bodyfile), "utmp" for Linux login records under another
+    name (looks_like_utmp), else null. The import queue asks this as it
+    queues files added by path, the ones a name would leave as raw text,
+    so the queue says how a FortiGate log, an fls listing or a renamed
+    wtmp will be read before it imports — the browser reads an upload's
+    first bytes itself. Reads the first 8 KB of each; a path that isn't a
+    regular file is null."""
     if len(body.paths) > BROWSE_LIST_CAP:
         raise HTTPException(400, f"At most {BROWSE_LIST_CAP} files at once")
 
     def kind_of(p: str) -> str | None:
         if not os.path.isfile(p):
             return None
-        return "kv" if looks_like_kv_log(p) else "utmp" if looks_like_utmp(p) else None
+        if looks_like_kv_log(p):
+            return "kv"
+        if looks_like_bodyfile(p):
+            return "bodyfile"
+        return "utmp" if looks_like_utmp(p) else None
     return {"kinds": [kind_of(p) for p in body.paths]}
 
 
@@ -3308,7 +3331,7 @@ def _ingest_job_options(kind: str, *, build_fts: bool, delimiter=None, has_heade
                 "column_types": column_types}
     if kind == "kv":
         return {**base, "build_fts": build_fts, "column_types": column_types}
-    if kind in ("plaso", "text", "utmp"):
+    if kind in ("plaso", "text", "utmp", "bodyfile"):
         return {**base, "build_fts": build_fts}   # one file, one table, no options
     return {**base, "build_fts": build_fts, "tables": tables or []}
 

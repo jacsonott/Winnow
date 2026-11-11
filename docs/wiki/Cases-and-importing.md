@@ -247,8 +247,8 @@ line per row* and so on. **Filter queued files…** narrows a long queue, and
 | Part | What it holds |
 | --- | --- |
 | **File** | Its name, the folder it is in, its size, and *read in place* (added from this machine) or *uploaded when it imports*. |
-| **Read as** | Only for a file that can be read more than one way: **Delimited**, **One line per row** or **Key=value** for delimited and other text; **JSON** or **One line per row**; **IIS log**, **Delimited** or **One line per row**; **Key=value**, **Delimited** or **One line per row** for a [key=value log](#fortigate-and-other-fortinet-logs); **Login records** or **One line per row** for [Linux login records](#linux-login-records-wtmp-btmp-utmp); a plugin's format or **One line per row** for an uploaded file a plugin claims. |
-| Settings | The reader's own: **Delimiter** and **Header**, JSON's **Nested objects**, an IIS log's **Format**, a plugin format's options. Plaso files, login records, key=value logs and archives have none. |
+| **Read as** | Only for a file that can be read more than one way: **Delimited**, **One line per row**, **Key=value** or **Body file** for delimited and other text; **JSON** or **One line per row**; **IIS log**, **Delimited** or **One line per row**; **Key=value**, **Delimited** or **One line per row** for a [key=value log](#fortigate-and-other-fortinet-logs); **Login records** or **One line per row** for [Linux login records](#linux-login-records-wtmp-btmp-utmp); **Body file**, **Delimited** or **One line per row** for a [body file](#body-files-tsk-and-mactime); a plugin's format or **One line per row** for an uploaded file a plugin claims. |
+| Settings | The reader's own: **Delimiter** and **Header**, JSON's **Nested objects**, an IIS log's **Format**, a plugin format's options. Plaso files, login records, body files, key=value logs and archives have none. |
 | **Preview** | The first 50 rows as they will import, a type picker in each column's heading where the type can be set, and a line under it saying what was detected. A SQLite file or workbook lists its **Tables** or **Sheets** here instead, to tick. |
 
 A setting is kept as you change it, and choosing another file keeps it, so
@@ -298,6 +298,7 @@ SQLite, Excel, Plaso and the rest. Other options are in
 | [IIS web server logs](#iis-web-server-logs) | named `u_ex…`, `ex…`, `nc…`, `in….log` | One table, columns from the log's own `#Fields:` lines. |
 | [FortiGate and other key=value logs](#fortigate-and-other-fortinet-logs) | `.log`, `.txt`, no extension…, recognised by the first line | One table, a column per key. |
 | [Linux login records](#linux-login-records-wtmp-btmp-utmp) | named `wtmp`, `btmp`, `utmp`, `wtmp.1`, `btmp-20240501`…, or recognized by their records | One table, a row per login record. |
+| [Body files (TSK and mactime)](#body-files-tsk-and-mactime) | named `bodyfile`, `bodyfile.txt`, `*.body`, or recognized by the first line | One table, a row per file, its four times in UTC. |
 | [Archives](#archives) | `.zip` `.tar` `.tgz` `.gz` `.tbz2` `.txz` `.bz2` `.xz` | A folder, then folder import. |
 | [Any other text](#plain-text-and-log-files) | `.log`, `.1`, no extension… | One row per line. |
 | [Plugin formats](#plugin-formats) | raw `$MFT` and `$J`, ESXi and UAC logs | Whatever the plugin parses. |
@@ -329,8 +330,9 @@ The line under the file's preview says what was found
 [raw text](#plain-text-and-log-files) instead. KAPE writes some delimited
 output as `.txt`, so `.txt` comes here by default; a `.txt` log wants
 **One line per row**, unless it is a
-[key=value log](#fortigate-and-other-fortinet-logs), which is recognised by
-its first line.
+[key=value log](#fortigate-and-other-fortinet-logs) or a
+[body file](#body-files-tsk-and-mactime), which are recognized by their first
+line.
 
 **Header.** **First row is headers** is on by default, and the first
 non-blank line is the header. Off, columns are named `col_1`, `col_2`… and
@@ -629,6 +631,79 @@ SELECT "IP address", "User", COUNT(*) AS tries,
 FROM src_3 GROUP BY 1, 2 ORDER BY tries DESC;
 ```
 
+### Body files (TSK and mactime)
+
+A body file lists a file system one entry to a line, with each file's
+times. The Sleuth Kit's `fls -m` and `ils -m` write one, `mactime` reads one
+to make a timeline, UAC collects one as
+`bodyfile/bodyfile.txt`, MFTECmd writes one with `--body`, and Volatility's
+timeliner and mftparser write one with `--output=body`. Every line has the
+same eleven fields, separated by `|`:
+
+```
+MD5|name|inode|mode_as_string|UID|GID|size|atime|mtime|ctime|crtime
+0|/etc/passwd|1835063|r/rrw-r--r--|0|0|2913|1714557598|1714473600|1714473700|1714000000
+```
+
+Winnow recognizes one by name: `bodyfile`, `bodyfile.txt` (UAC's name),
+anything ending in `.body`, and a second copy an archive expansion renamed
+(`bodyfile (2).txt`). Under any other name it is recognized by its **first
+line**, as a [key=value log](#fortigate-and-other-fortinet-logs) is: a
+`.txt`, a `.log` or an extensionless file whose first line is a body file
+line is read as one. A `.csv` is always delimited. The queue says *Body file
+· a row per file* under its name. You no longer need the **esxi_logs** plugin,
+or `mactime`, to read the body file in a UAC collection.
+
+**Every line is a row**, with these columns:
+
+| Column | Holds |
+| --- | --- |
+| `Modified (UTC)` | mtime: when the file's content last changed. |
+| `Accessed (UTC)` | atime: when it was last read, if the file system kept it (`noatime` and `relatime` mounts mostly don't). |
+| `Changed (UTC)` | ctime: when its inode changed (permissions, owner, a rename) on Linux; when its MFT entry changed on NTFS. |
+| `Born (UTC)` | crtime: when it was created, where the file system records it (ext4, XFS, NTFS, APFS). |
+| `Name` | The path, as the tool wrote it: `-> target` on a symlink, `(deleted)` on a deleted entry, `($FILE_NAME)` on an NTFS file name attribute. |
+| `Size` | In bytes. |
+| `Mode` | The permissions as written: `r/rrw-r--r--` from fls, `-rw-r--r--` from UAC. |
+| `UID`, `GID` | The owner and group IDs. |
+| `Inode` | The inode, or NTFS's `entry-type-id` (`102345-48-2`). |
+| `MD5` | The file's MD5 when the tool computed one, else `0`. |
+
+The four times lead the table in mactime's MACB order, so `Modified (UTC)`
+is the column the Timeframe filter, the Histogram and the Timeline start
+from. They are converted from seconds since 1970, which is UTC by
+definition, to the same `2024-05-01 09:59:58` form every other datetime
+column uses. A fraction of a second (UAC's `find` writes ten digits) is kept
+to the microsecond. A time of `0` means the file system didn't record it
+(ext3 has no creation time) and is left empty, as `mactime` leaves it off
+its timeline. A number too large or too small to be a date is kept as
+written.
+
+A file name can contain `|` on Linux, so the name is everything between
+the first field and the last nine, and a pipe in a name doesn't shift the
+columns after it. A line that isn't a body file line, such as an error fls
+wrote into its output, is kept whole in an `Unparsed line` column, which
+appears only when a file has such a line. The import toast counts them. The
+older TSK 2.x layout (sixteen fields, no creation time) is not read: its
+lines go to `Unparsed line` too, rather than landing one or two columns off.
+
+The pane previews the first 50 rows, and there is nothing to set.
+**Read as** → **Delimited** or **One line per row** reads the file as any
+other text file, and **Read as** → **Body file** reads any delimited or text
+file this way, for a body file whose first line didn't say so. On the
+[Timeline](Timeline-search-and-watchlist.md), a tagged entry reads as its
+name, then size, mode, UID and inode.
+
+Files modified in the hour around an incident, from a body file table, in
+the [SQL pane](SQL-pane.md):
+
+```sql
+SELECT "Modified (UTC)", "Name", "Size", "UID"
+FROM src_4
+WHERE "Modified (UTC)" BETWEEN '2024-05-01 09:30:00' AND '2024-05-01 10:30:00'
+ORDER BY 1;
+```
+
 ### Plain text and log files
 
 A file no other reader claims — `hostd.log`, `auth.log.1`, an extensionless
@@ -689,7 +764,7 @@ right. It stays the same size whatever you pick or the scan finds.
 2. Pick a profile on the left, or stay on **Custom (not saved)** to set
    things up yourself. A profile fills in everything below it.
 3. Pick **File types**. `.csv`, `.tsv`, `.tab`, `.txt`, `.psv`, `.json`, `.jsonl`,
-   `.ndjson`, `.plaso`, **IIS logs**, **wtmp/btmp/utmp** and any extension an enabled plugin claims
+   `.ndjson`, `.plaso`, **IIS logs**, **wtmp/btmp/utmp**, **body files** and any extension an enabled plugin claims
    are on; **other text files** (off) adds every other non-binary file as raw
    text. **IIS logs** picks up [IIS web server logs](#iis-web-server-logs) by
    name, and a file named like one is read as one however it got in. A
@@ -698,7 +773,10 @@ right. It stays the same size whatever you pick or the scan finds.
    plugin that claims `.log`, is on. **wtmp/btmp/utmp** (on) picks up
    [Linux login records](#linux-login-records-wtmp-btmp-utmp) by name; with
    **other text files** on, a binary file holding login records under another
-   name is read as one instead of excluded as `binary`.
+   name is read as one instead of excluded as `binary`. **body files** (on)
+   picks up [body files](#body-files-tsk-and-mactime) by name (`bodyfile`,
+   `bodyfile.txt`, `*.body`), and a `.txt`, or another file the file types
+   let in, whose first line is a body file line is read as one.
    **Include subfolders** (on) walks the tree.
 4. Narrow with **Patterns**: **Include** and **Exclude**, one glob per line,
    case-insensitive. A pattern containing `/` matches the path from the
@@ -707,9 +785,9 @@ right. It stays the same size whatever you pick or the scan finds.
    narrow what the file types let through.
 5. Check the **Preview**, which updates as you type. **Will import** lists
    the matches with a box per file; **Excluded** lists the rest with each
-   reason (`extension`, `IIS logs not selected`, `wtmp/btmp/utmp not selected`, `no include pattern matched`,
+   reason (`extension`, `IIS logs not selected`, `wtmp/btmp/utmp not selected`, `body files not selected`, `no include pattern matched`,
    `excluded by pattern: …`, `binary`, `unreadable`, `not a regular file`).
-   A profile saved before **IIS logs** or **wtmp/btmp/utmp** existed leaves
+   A profile saved before **IIS logs**, **wtmp/btmp/utmp** or **body files** existed leaves
    those files out until you tick the chip and **Update profile**.
    The line under the list counts them.
 6. **Import checked (N)**.
@@ -752,8 +830,9 @@ format's name in the queue, and its options, if it has any, in the file's
 pane. Built-in extensions always win, so no plugin can take over `.csv` or
 `.json`, and neither do built-in names: **esxi_logs** claims `.log`, but an
 [IIS log](#iis-web-server-logs) is still read as one, and so are a
-[FortiGate log](#fortigate-and-other-fortinet-logs) and a
-[wtmp or btmp](#linux-login-records-wtmp-btmp-utmp). Plugin
+[FortiGate log](#fortigate-and-other-fortinet-logs), a
+[wtmp or btmp](#linux-login-records-wtmp-btmp-utmp) and a
+[body file](#body-files-tsk-and-mactime). Plugin
 imports don't run as background jobs: they show an *Importing …* notice, not
 a progress row, and can't be cancelled. See [Plugins](Plugins.md).
 
@@ -778,7 +857,7 @@ case don't matter):
 | RECmd (batch) | Registry (RECmd batch) |
 | SrumECmd | SRUM — app resource use, network usage |
 | esxi_logs plugin | ESXi / Linux host logs |
-| Winnow's own readers | IIS web logs (W3C, NCSA, IIS native), Linux login records (wtmp/btmp/utmp) |
+| Winnow's own readers | IIS web logs (W3C, NCSA, IIS native), Linux login records (wtmp/btmp/utmp), Body files (TSK / mactime) |
 
 Recognition gets you:
 
@@ -830,6 +909,7 @@ A finished import's toast says *name: N rows imported*, plus any of:
 | *N unreadable records skipped* | Broken JSON Lines. |
 | *N records with two values for one key — the later kept as &lt;key&gt;_1* | JSON key clashes. |
 | *the last N bytes were not a whole login record and were left out* | A wtmp or btmp whose last record a crash cut short. |
+| *N lines were not a body file line, kept in Unparsed line* | Lines in a body file that aren't one, such as an error fls wrote into its output. |
 | *not UTF-8 — read as Windows-1252* | The whole file was Windows-1252. |
 | *N bytes not valid UTF-8, read as Windows-1252* | Stray bytes in a UTF-8 file. |
 | *N text values were not valid UTF-8 (shown with �)* | SQLite text with bad bytes. |

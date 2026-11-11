@@ -6,7 +6,7 @@ import { $, api, debounce, dragHas, el, post, toast } from './core.js';
 import { maybeOfferAssociation } from './assoc.js';
 import { openFolderBrowser } from './home.js';
 import { startJobsPoll, uploadWithProgress } from './jobs.js';
-import { ARCHIVE_IMPORT_EXTENSIONS, IIS_FORMAT_LABELS, IIS_IMPORT_TYPE, KV_PROBE_BYTES, PLASO_IMPORT_EXTENSIONS, RECOGNIZED_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, UTMP_IMPORT_TYPE, XLSX_IMPORT_EXTENSIONS, extOf, iisLogFormat, importKindFor, kvCandidate, looksLikeKvLog, looksLikeUtmp, utmpFileKind } from './merge.js';
+import { ARCHIVE_IMPORT_EXTENSIONS, BODYFILE_IMPORT_TYPE, IIS_FORMAT_LABELS, IIS_IMPORT_TYPE, KV_PROBE_BYTES, PLASO_IMPORT_EXTENSIONS, RECOGNIZED_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, UTMP_IMPORT_TYPE, XLSX_IMPORT_EXTENSIONS, bodyfileNamed, extOf, iisLogFormat, importKindFor, kvCandidate, looksLikeBodyfile, looksLikeKvLog, looksLikeUtmp, utmpFileKind } from './merge.js';
 import { renderPluginTabs, renderPluginPanelButtons } from './plugins.js';
 import { fmtBytes } from './tables.js';
 import { loadSources } from './sources.js';
@@ -49,13 +49,14 @@ export function globMatches(pattern, name) {
 /* The plugin format claiming this filename, or null. Built-in extensions
    win outright — a plugin claiming .csv doesn't hijack default routing; it
    stays reachable through the Plugins modal's explicit per-format picker.
-   So do built-in names: an IIS log is .log, which esxi_logs claims, and a
-   wtmp or btmp is the login-records reader's whatever a pattern says. */
+   So do built-in names: an IIS log is .log, which esxi_logs claims, a
+   wtmp or btmp is the login-records reader's whatever a pattern says, and
+   so is a bodyfile or *.body the body file reader's. */
 export function pluginFormatFor(filename) {
   const base = filename.split(/[\\/]/).pop();
   const ext = extOf(base);
   if (RECOGNIZED_IMPORT_EXTENSIONS.includes(ext) || SQLITE_IMPORT_EXTENSIONS.includes(ext) || XLSX_IMPORT_EXTENSIONS.includes(ext) || PLASO_IMPORT_EXTENSIONS.includes(ext) || ARCHIVE_IMPORT_EXTENSIONS.includes(ext)) return null;
-  if (iisLogFormat(base) || utmpFileKind(base)) return null;
+  if (iisLogFormat(base) || utmpFileKind(base) || bodyfileNamed(base)) return null;
   return S.pluginFormats.find((f) =>
     (ext && (f.extensions || []).includes(ext))
     || (f.filename_patterns || []).some((p) => globMatches(p, base))) || null;
@@ -128,6 +129,8 @@ export function queueItem(transport, name, fmt = pluginFormatFor(name), kind = i
     : kind === 'plaso' ? { ...transport, name, kind, configured: true }
     // So is a wtmp, btmp or utmp: its record layout is read off its bytes.
     : kind === 'utmp' ? { ...transport, name, kind, configured: true }
+    // And a body file: its eleven fields are fixed, its times always UTC.
+    : kind === 'bodyfile' ? { ...transport, name, kind, configured: true }
     // An IIS log names its own columns; the preview can still pick another
     // of the three formats (log_format, null = the name's) and set types.
     : kind === 'iis' ? { ...transport, name, kind, log_format: null, column_types: null, configured: false }
@@ -156,7 +159,7 @@ function headLooksBinary(head) {
   if (!head || utf16Bom(head)) return false;
   return head.subarray(0, BINARY_PROBE_BYTES).includes(0);
 }
-/* A file's first bytes as text, for looksLikeKvLog: UTF-16 by its BOM,
+/* A file's first bytes as text, for looksLikeKvLog and looksLikeBodyfile: UTF-16 by its BOM,
    else UTF-8 (a Windows-1252 byte the decoder can't read is not in the
    ASCII the first line is recognised by). */
 function headText(head) {
@@ -170,11 +173,14 @@ export async function queueFiles(files) {
   let bigNamed = null, bigCount = 0;
   const skipped = [];
   for (const f of [...files]) {
-    // A name nothing claims could be a key=value log, which only its first
-    // line says (looks_like_kv_log server-side reads the same bytes).
+    // A name nothing claims could be a key=value log or a body file, which
+    // only its first line says (looks_like_kv_log and looks_like_bodyfile
+    // server-side read the same bytes).
     const head = kvCandidate(f.name) ? await fileHead(f) : null;
-    let item = head && looksLikeKvLog(headText(head))
-      ? queueItem({ file: f }, f.name, null, 'kv') : queueItem({ file: f }, f.name);
+    const first = head ? headText(head) : '';
+    let item = head && looksLikeKvLog(first) ? queueItem({ file: f }, f.name, null, 'kv')
+      : head && looksLikeBodyfile(first) ? queueItem({ file: f }, f.name, null, 'bodyfile')
+      : queueItem({ file: f }, f.name);
     if (item.kind === 'text') {
       const bytes = head || await fileHead(f);
       if (headLooksBinary(bytes)) {
@@ -210,16 +216,16 @@ export async function queuePaths(entries) {
   // No extension gate any more: a name nothing else claims queues as raw
   // text (importKindFor). A binary file is refused by the importer itself,
   // as a job error — the server has the bytes, the browser doesn't. Which
-  // is also why the server is asked which of those are key=value logs
-  // (only the first line says) or login records under another name (only
-  // the records do). Asked once for the lot, and only when one could be;
+  // is also why the server is asked which of those are key=value logs or
+  // body files (only the first line says) or login records under another
+  // name (only the records do). Asked once for the lot, and only when one could be;
   // a failed ask leaves them as their names say.
   const ask = entries.filter((e) => kvCandidate(e.name));
   const byContent = new Map();
   if (ask.length) {
     try {
       const r = await post('/api/ingest/recognise', { paths: ask.map((e) => e.path) });
-      ask.forEach((e, i) => { if (r.kinds[i] === 'kv' || r.kinds[i] === 'utmp') byContent.set(e, r.kinds[i]); });
+      ask.forEach((e, i) => { if (['kv', 'bodyfile', 'utmp'].includes(r.kinds[i])) byContent.set(e, r.kinds[i]); });
     } catch { /* read as their names say */ }
   }
   for (const e of entries) {
@@ -315,6 +321,7 @@ export function queueHint(item) {
     case 'xlsx': return 'Excel · ' + (item.configured ? units(item.tables.length, 'sheet') : 'pick sheets');
     case 'plaso': return 'Plaso · one timeline table';
     case 'utmp': return `Login records · ${utmpFileKind(item.name) || 'wtmp/btmp/utmp'}`;
+    case 'bodyfile': return 'Body file · a row per file';
     case 'archive': return 'Archive · expands on import';
     default: return 'Delimited · ' + (item.delimiter ? delimName(item.delimiter).toLowerCase() : 'auto-detect')
       + (item.has_header === false ? ' · no header' : '');
@@ -462,7 +469,7 @@ export function buildEmptyQueuePane(pane) {
   box.append(
     el('div', 'import-empty-title', 'Drop files here'),
     el('p', 'fb-help', 'or anywhere on the window — or add them with the buttons below. “Add from this machine…” reads a file where it is, which is the fast way for anything large.'),
-    el('p', 'fb-help', 'CSV and other delimited text, JSON and JSON Lines, SQLite, Excel, Plaso, IIS logs, key=value logs such as FortiGate’s, Linux wtmp and btmp login records, and zip or tar archives each import their own way; any other text file imports one line per row.'));
+    el('p', 'fb-help', 'CSV and other delimited text, JSON and JSON Lines, SQLite, Excel, Plaso, IIS logs, key=value logs such as FortiGate’s, Linux wtmp and btmp login records, TSK body files, and zip or tar archives each import their own way; any other text file imports one line per row.'));
   pane.append(box);
 }
 
@@ -473,8 +480,11 @@ export function buildEmptyQueuePane(pane) {
    claims and gets wrong. Delimited and other text can be read as
    key=value pairs, for a key=value log whose first line didn't say so
    (only Fortinet's is recognised), and one that did can be read the other
-   two ways. Login records can be read one line per row, for a file named
-   wtmp that turns out to be text (`last` output saved under the name).
+   two ways. Delimited and other text can be read as a body file too, for
+   an fls listing whose first line didn't say so, and a body file can be
+   read the other two ways (its own pipes, or a line a row). Login records
+   can be read one line per row, for a file named wtmp that turns out to
+   be text (`last` output saved under the name).
    Kinds with no other reading (SQLite, Excel, Plaso, archives) have no
    switch. */
 export function readAsOptions(item) {
@@ -482,9 +492,11 @@ export function readAsOptions(item) {
   const delimited = ['csv', 'Delimited', 'Split into columns on a delimiter'];
   const lines = ['text', 'One line per row', 'Every line becomes one row in one column, nothing split'];
   const kv = ['kv', 'Key=value', 'A column per key, each line’s values under its own keys (FortiGate and other Fortinet logs)'];
+  const body = ['bodyfile', 'Body file', 'A row per file from an fls -m or mactime body file, its four times in UTC'];
   switch (base.kind) {
-    case 'csv': case 'text': return [delimited, lines, kv];
+    case 'csv': case 'text': return [delimited, lines, kv, body];
     case 'kv': return [kv, delimited, lines];
+    case 'bodyfile': return [body, delimited, lines];
     case 'json': return [['json', 'JSON', 'One row per record, its keys as columns'], lines];
     case 'iis': return [['iis', 'IIS log', 'Columns named by the log itself'], delimited, lines];
     case 'utmp': return [['utmp', 'Login records', 'Linux wtmp, btmp or utmp: a row per record'], lines];
@@ -508,6 +520,7 @@ export function switchKind(item, to) {
   else if (to === 'iis') Object.assign(item, reset, { kind: 'iis', configured: false });
   else if (to === 'kv') Object.assign(item, reset, { kind: 'kv', configured: false });
   else if (to === 'utmp') Object.assign(item, reset, { kind: 'utmp', configured: true });
+  else if (to === 'bodyfile') Object.assign(item, reset, { kind: 'bodyfile', configured: true });
   else if (to === 'json') Object.assign(item, reset, { kind: 'json', flatten_mode: 'none', flatten_depth: 1, configured: false });
   else if (to === 'plugin') {
     Object.assign(item, reset, { kind: 'plugin', format_id: item.queuedAs.format_id, options: item.queuedAs.options, configured: false });
@@ -562,6 +575,7 @@ export function buildQueueItemPane(pane, item, changed) {
   else if (item.kind === 'iis') buildIisSettings(ctx);
   else if (item.kind === 'kv') buildKvSettings(ctx);
   else if (item.kind === 'utmp') buildUtmpSettings(ctx);
+  else if (item.kind === 'bodyfile') buildBodyfileSettings(ctx);
   else if (UNIT_KINDS.includes(item.kind)) buildUnitSettings(ctx);
   else if (item.kind === 'plugin') buildPluginSettings(ctx);
   else buildFixedSettings(ctx);
@@ -756,6 +770,22 @@ export function buildUtmpSettings(ctx) {
     const total = res.record_count != null ? ` · ${res.record_count.toLocaleString()} record${res.record_count === 1 ? '' : 's'}` : '';
     const torn = res.torn_bytes ? ` · the last ${res.torn_bytes.toLocaleString()} bytes are not a whole record and will be left out` : '';
     ctx.footLine(`Login records · ${res.layout_label}${total} · first ${n}${torn}`, !!res.torn_bytes);
+  });
+}
+
+/* A body file: nothing to choose, since its eleven fields are fixed and
+   its times are seconds since 1970 in UTC, so the pane says what the
+   table will be and previews its first rows with their types. */
+export function buildBodyfileSettings(ctx) {
+  const { item } = ctx;
+  ctx.note('A body file lists a file system one entry to a line: The Sleuth Kit’s fls -m writes one, UAC collects one as bodyfile.txt, and mactime reads one to make a timeline. Each line becomes a row. Its four times are converted to UTC and lead the table in MACB order (Modified, Accessed, Changed, Born), so the Timeframe filter and the histogram start from the modification time. A time the file system didn’t record (0) is left empty. Any line that isn’t a body file line is kept whole in Unparsed line.');
+  previewRunner(ctx, () => fetchPreview(item, { kind: 'bodyfile' }), (res) => {
+    ctx.rows.replaceChildren(previewTable(res.columns, res.sample_rows, (i) => el('div', 'count', res.inferred_types[i])));
+    const n = res.sample_rows.length;
+    const odd = res.unparsed_lines
+      ? ` · ${res.unparsed_lines.toLocaleString()} line${res.unparsed_lines === 1 ? ' isn’t a body file line' : 's aren’t body file lines'} and will be kept in Unparsed line`
+      : '';
+    ctx.footLine(`Body file · first ${n} row${n === 1 ? '' : 's'}${odd}` + encodingNote(res), !!res.unparsed_lines);
   });
 }
 
@@ -1193,12 +1223,12 @@ export const CUSTOM_IMPORT = 'custom';
 export const IMPORT_GROUPS = ['Ad hoc', 'Profiles'];
 
 export const defaultImportExtensions = () =>
-  RECOGNIZED_IMPORT_EXTENSIONS.concat(PLASO_IMPORT_EXTENSIONS, [IIS_IMPORT_TYPE, UTMP_IMPORT_TYPE], pluginExtensions());
+  RECOGNIZED_IMPORT_EXTENSIONS.concat(PLASO_IMPORT_EXTENSIONS, [IIS_IMPORT_TYPE, UTMP_IMPORT_TYPE, BODYFILE_IMPORT_TYPE], pluginExtensions());
 
 /* How a folder-import file type reads on its chip and in a profile's
    search hint: the ones that aren't extensions get words. */
 export const importTypeLabel = (x) => (x === '*' ? 'other text files' : x === IIS_IMPORT_TYPE ? 'IIS logs'
-  : x === UTMP_IMPORT_TYPE ? 'wtmp/btmp/utmp' : x);
+  : x === UTMP_IMPORT_TYPE ? 'wtmp/btmp/utmp' : x === BODYFILE_IMPORT_TYPE ? 'body files' : x);
 
 export function importProfileEntries(profiles) {
   const entries = [{
@@ -1357,6 +1387,7 @@ export async function openDirectoryImportModal(state = {}) {
       if (ext === '*') chip.title = 'Any other file that is not binary, imported as raw text — one line per row';
       if (ext === IIS_IMPORT_TYPE) chip.title = 'IIS web server logs, recognised by name: u_ex…, ex…, nc…, in….log';
       if (ext === UTMP_IMPORT_TYPE) chip.title = 'Linux login records, recognized by name: wtmp, btmp, utmp and their rotations (wtmp.1, btmp-20240501)';
+      if (ext === BODYFILE_IMPORT_TYPE) chip.title = 'TSK / mactime body files, recognized by name: bodyfile, bodyfile.txt, *.body (one in a .txt under another name is recognized by its first line)';
       chip.onclick = () => {
         st.extensions = st.extensions.includes(ext)
           ? st.extensions.filter((e) => e !== ext)
@@ -1645,7 +1676,7 @@ export async function openDirectoryImportModal(state = {}) {
             });
             pluginOk++;
           } else {
-            await post('/api/ingest/jobs/path', { path: m.path, name: base, folder_path, kind: ['json', 'plaso', 'text', 'iis', 'kv', 'utmp'].includes(m.kind) ? m.kind : 'csv' });
+            await post('/api/ingest/jobs/path', { path: m.path, name: base, folder_path, kind: ['json', 'plaso', 'text', 'iis', 'kv', 'utmp', 'bodyfile'].includes(m.kind) ? m.kind : 'csv' });
           }
           ok++;
         } catch (e) {

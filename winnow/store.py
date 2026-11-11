@@ -58,6 +58,7 @@ from . import structparse  # noqa: F401 — registers the JSON/XML extraction op
 from . import timeparse
 from . import iisread
 from . import kvread
+from . import bodyread
 from . import plasoread
 from . import rxguard
 from . import utmpread
@@ -232,6 +233,11 @@ IIS_IMPORT_TYPE = "iis"
 # are recognized by name too, having no extension at all; this token is
 # their folder-scan chip, on by default like IIS_IMPORT_TYPE.
 UTMP_IMPORT_TYPE = "utmp"
+# Body files (TSK's fls -m, UAC's bodyfile.txt, *.body — bodyread.name_says)
+# by name as well, since `bodyfile` has no extension either; this token is
+# their chip, on by default. One under another name is recognized by its
+# first line (looks_like_bodyfile), as a key=value log is.
+BODYFILE_IMPORT_TYPE = "bodyfile"
 # scan_import_directory stops walking once matched+excluded together hit
 # this many entries — same "cap and say so" reasoning as
 # SEARCH_ALL_COUNT_CAP, guarding against an analyst accidentally pointing
@@ -1315,6 +1321,21 @@ def looks_like_utmp(path: str) -> bool:
     return utmpread.looks_like(head, size)
 
 
+def looks_like_bodyfile(path: str) -> bool:
+    """Whether a text file's first line is a body file line
+    (bodyread.looks_like): an fls -m listing saved as anything.txt, or
+    with no extension. Asked about the same files looks_like_kv_log is,
+    after it (a FortiGate line is never a body file line, or the other
+    way round), and decoded as the import would decode it."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(KV_PROBE_BYTES)
+    except OSError:
+        return False
+    text, _ = decode_text_sample(head, complete=len(head) < KV_PROBE_BYTES)
+    return bodyread.looks_like(text)
+
+
 def looks_like_kv_log(path: str) -> bool:
     """Whether a text file's first line reads as a key=value log
     (kvread.looks_like) — how a FortiGate log, which has no name of its
@@ -1670,7 +1691,7 @@ def _ingest_record(kind: str, **options) -> str:
     a session names rows by rid, so the re-import has to produce the same
     rows in the same order, and the defaults do not (a headerless CSV
     gains a header and every rid slides by one). `kind` names a Store
-    reader: csv, text, json, sqlite, xlsx, plaso, iis, kv, utmp — or rows, for a table
+    reader: csv, text, json, sqlite, xlsx, plaso, iis, kv, utmp, bodyfile — or rows, for a table
     produced in-process (a plugin's parser, a SQL save), which nothing
     here can re-run."""
     return json.dumps({"kind": kind, **{k: v for k, v in options.items() if v is not None}})
@@ -5419,6 +5440,32 @@ class Store:
             ingest=_ingest_record("kv", column_types=column_types or None),
             column_types=column_types, build_fts=build_fts, progress=progress, cancel=cancel)
 
+    def ingest_bodyfile(self, path: str, name: str | None = None, build_fts: bool = True,
+                        progress=None, cancel=None) -> dict:
+        """Import a body file (TSK's fls -m, UAC's bodyfile.txt, MFTECmd
+        --body) as one table, a row per line; bodyread.py has the format,
+        the column order and how the times are read. Nothing about the
+        file is checked first: a file recognized as one and a file the
+        analyst chose to read this way import alike, and a file with no
+        body file line in it at all is refused.
+
+        The columns are fixed, so there are no column types to pass: the
+        two passes of _ingest_planned_lines only decide whether the
+        Unparsed line column is needed. How many lines went there is
+        `unparsed_lines` in the result (the jobs toast) and in the log."""
+        name = name or os.path.basename(path)
+        rec = self._ingest_planned_lines(
+            path, name, bodyread.plan, bodyread.rows,
+            nothing=f"{name} has no body file lines in it (MD5|name|inode|mode|UID|GID|size|atime|mtime|ctime|crtime)",
+            ingest=_ingest_record("bodyfile"),
+            column_types=None, build_fts=build_fts, progress=progress, cancel=cancel)
+        if rec["unparsed_lines"]:
+            n = rec["unparsed_lines"]
+            wlog.record("warn", f"{name}: {n:,} line{'s were' if n != 1 else ' was'} not a body file line "
+                                f"(MD5|name|inode|mode|UID|GID|size|atime|mtime|ctime|crtime) and "
+                                f"{'were' if n != 1 else 'was'} kept whole in the {bodyread.UNPARSED} column")
+        return rec
+
     def _ingest_planned_lines(self, path: str, name: str, plan_of, rows_of, *, nothing: str,
                               ingest: str, column_types: dict[str, str] | None,
                               build_fts: bool, progress, cancel) -> dict:
@@ -5541,6 +5588,7 @@ class Store:
         rec["elapsed_sec"] = round(elapsed, 2)
         rec["rows_per_sec"] = int(total / elapsed) if elapsed > 0 else 0
         rec["ragged_rows"] = stats.get("ragged", 0)
+        rec["unparsed_lines"] = stats.get("unparsed", 0)
         rec["suspect_quote_rows"] = 0
         rec["encoding"], rec["cp1252_bytes"] = decoded["encoding"], decoded["cp1252_bytes"]
         return rec
@@ -5587,6 +5635,27 @@ class Store:
                  for i, t in enumerate(plan["types"])]
         return {"delimiter": None, "columns": sanitize_columns(plan["columns"]),
                 "sample_rows": sample, "inferred_types": types, "complete": complete}
+
+    @staticmethod
+    def preview_bodyfile_text(text: str, complete: bool = True, max_rows: int = 50) -> dict:
+        """The first rows of a body file as ingest_bodyfile would make them,
+        in preview_csv_text's shape. Unparsed line appears only when the
+        sample has a line that needs it. `complete` as preview_iis_text's."""
+        if not text:
+            raise ValueError("File is empty")
+        physical = text.split("\n")
+        if not complete and len(physical) > 1:
+            physical.pop()
+        lines = list(iisread.logical_lines(physical, {}))
+        plan = bodyread.plan(lines)
+        if not plan["columns"]:
+            raise ValueError("No body file lines (MD5|name|inode|mode|UID|GID|size|atime|mtime|ctime|crtime) "
+                             "in the start of this file")
+        stats: dict = {}
+        sample = list(itertools.islice(bodyread.rows(lines, plan, stats), max_rows))
+        return {"delimiter": None, "columns": sanitize_columns(plan["columns"]),
+                "sample_rows": sample, "inferred_types": list(plan["types"]),
+                "unparsed_lines": plan["unparsed"], "complete": complete}
 
     def _finish_source_columns(self, source_id: int, colmeta: list[dict], decoded: dict,
                                name: str) -> None:
@@ -6561,7 +6630,8 @@ class Store:
         A file is excluded for exactly one of: its extension isn't
         recognized ("extension"; "IIS logs not selected" for a file named
         like an IIS log when `extensions` leaves out IIS_IMPORT_TYPE, and
-        "wtmp/btmp/utmp not selected" likewise for UTMP_IMPORT_TYPE),
+        "wtmp/btmp/utmp not selected" likewise for UTMP_IMPORT_TYPE and
+        "body files not selected" for BODYFILE_IMPORT_TYPE),
         include_patterns is non-empty and nothing
         in it matched ("no include pattern matched"), a pattern in
         exclude_patterns matched ("excluded by pattern: <pattern>"), it
@@ -6600,13 +6670,15 @@ class Store:
         iis_logs = extensions is None or IIS_IMPORT_TYPE in (e.lower() for e in extensions)
         # Linux login records (wtmp, btmp, utmp): by name too, the same way.
         utmp_logs = extensions is None or UTMP_IMPORT_TYPE in (e.lower() for e in extensions)
+        # Body files named as one (bodyfile, bodyfile.txt, *.body): the same.
+        body_files = extensions is None or BODYFILE_IMPORT_TYPE in (e.lower() for e in extensions)
         # None means "the defaults"; an empty list means exactly that — the
         # analyst turned every chip off. `or` conflated the two, so a scan
         # with nothing selected matched the default set.
         exts = {
             (e if e.startswith(".") else "." + e).lower()
             for e in (DEFAULT_IMPORT_EXTENSIONS if extensions is None else extensions)
-            if e not in ("*", ".*") and e.lower() not in (IIS_IMPORT_TYPE, UTMP_IMPORT_TYPE)
+            if e not in ("*", ".*") and e.lower() not in (IIS_IMPORT_TYPE, UTMP_IMPORT_TYPE, BODYFILE_IMPORT_TYPE)
         }
         includes = [p for p in (include_patterns or []) if p.strip()]
         excludes = [p for p in (exclude_patterns or []) if p.strip()]
@@ -6649,13 +6721,15 @@ class Store:
                 ext = os.path.splitext(fname)[1].lower()
                 is_iis = iisread.log_format(fname) is not None
                 is_utmp = utmpread.log_kind(fname) is not None
+                is_body = bodyread.name_says(fname)
                 by_filename_pattern = any(fnmatch.fnmatch(fname.lower(), p.lower()) for p in fname_pats)
                 by_ext = ext in exts
                 unclaimed = (not by_ext and not by_filename_pattern and not (is_iis and iis_logs)
-                             and not (is_utmp and utmp_logs))
+                             and not (is_utmp and utmp_logs) and not (is_body and body_files))
                 if unclaimed and not other_text:
                     reason = ("IIS logs not selected" if is_iis
-                              else "wtmp/btmp/utmp not selected" if is_utmp else "extension")
+                              else "wtmp/btmp/utmp not selected" if is_utmp
+                              else "body files not selected" if is_body else "extension")
                     excluded.append({**entry, "reason": reason})
                     continue
                 if includes and not any(self._import_pattern_matches(p, fname, rel) for p in includes):
@@ -6671,7 +6745,7 @@ class Store:
                 # A binary that got in as "other text" may be login records
                 # under another name (wtmp copied out as evidence.bin): its
                 # bytes are asked before it is turned away.
-                if unclaimed and not is_iis and not is_utmp and looks_binary(fpath):
+                if unclaimed and not is_iis and not is_utmp and not is_body and looks_binary(fpath):
                     if not looks_like_utmp(fpath):
                         excluded.append({**entry, "reason": "binary"})
                         continue
@@ -6688,6 +6762,8 @@ class Store:
                     kind = "iis"
                 elif is_utmp:
                     kind = "utmp"
+                elif is_body:
+                    kind = "bodyfile"
                 elif ext in (".json", ".jsonl", ".ndjson"):
                     kind = "json"
                 elif ext in PLASO_IMPORT_EXTENSIONS:
@@ -6701,9 +6777,13 @@ class Store:
                 # A key=value log has no name of its own, so the file's
                 # first line is read — only for a file going in as text, a
                 # .txt or a plugin's, never on the name gates' account. It
-                # wins over the plugin's claim, as an IIS name does.
-                if (kind in ("text", "plugin") or (kind == "csv" and ext == ".txt")) and looks_like_kv_log(fpath):
-                    kind = "kv"
+                # wins over the plugin's claim, as an IIS name does. A body
+                # file under another name is asked about the same way.
+                if kind in ("text", "plugin") or (kind == "csv" and ext == ".txt"):
+                    if looks_like_kv_log(fpath):
+                        kind = "kv"
+                    elif looks_like_bodyfile(fpath):
+                        kind = "bodyfile"
                 matched.append({
                     **entry,
                     "kind": kind,
@@ -6731,7 +6811,7 @@ class Store:
         sat behind with no progress, no way to tell "working" from
         "crashed", and a browser tab they couldn't use meanwhile.
 
-        `kind` is 'csv' | 'text' | 'json' | 'sqlite' | 'xlsx' | 'plaso' | 'iis' | 'kv' | 'utmp'. For 'sqlite',
+        `kind` is 'csv' | 'text' | 'json' | 'sqlite' | 'xlsx' | 'plaso' | 'iis' | 'kv' | 'utmp' | 'bodyfile'. For 'sqlite',
         options['tables'] is [{table, name?, timestamp_columns?}, ...] —
         one uploaded file, one job, N sources, so the file is spooled and
         read once rather than re-uploaded per table. `delete_after` removes
@@ -6773,7 +6853,7 @@ class Store:
         (add_derived_column, add_derived_columns, rederive_column) undo
         that definition on the refusal — a column whose only job was never
         started would otherwise be 'building' for good."""
-        if kind not in ("csv", "text", "json", "sqlite", "xlsx", "plaso", "iis", "kv", "utmp", "derive"):
+        if kind not in ("csv", "text", "json", "sqlite", "xlsx", "plaso", "iis", "kv", "utmp", "bodyfile", "derive"):
             raise ValueError(f"Unknown ingest kind: {kind}")
         try:
             size = os.path.getsize(path)
@@ -6923,6 +7003,11 @@ class Store:
                     job["path"], name=job["name"], build_fts=opts.get("build_fts", True),
                     progress=progress, cancel=cancel, column_types=opts.get("column_types"),
                 )]
+            elif job["kind"] == "bodyfile":
+                results = [self.ingest_bodyfile(
+                    job["path"], name=job["name"], build_fts=opts.get("build_fts", True),
+                    progress=progress, cancel=cancel,
+                )]
             elif job["kind"] == "json":
                 results = [self.ingest_json(
                     job["path"], name=job["name"],
@@ -6980,7 +7065,7 @@ class Store:
                                            "ragged_rows", "suspect_quote_rows", "bad_records",
                                            "first_bad_line", "key_collisions", "encoding",
                                            "cp1252_bytes", "undecodable_values",
-                                           "record_layout", "torn_bytes")}
+                                           "record_layout", "torn_bytes", "unparsed_lines")}
                     for r in results
                 ]
             wlog.record("info", f"Import finished: {job['name']} ({job['kind']}) — "
@@ -17403,7 +17488,7 @@ class Store:
                 "so there is no file to re-import it from, and this case does not have it or a "
                 "copy of it")
 
-    _SESSION_READERS = ("csv", "text", "json", "sqlite", "xlsx", "plaso", "iis", "kv", "utmp")
+    _SESSION_READERS = ("csv", "text", "json", "sqlite", "xlsx", "plaso", "iis", "kv", "utmp", "bodyfile")
 
     def _reimport_session_source(self, s_meta: dict) -> tuple[int | None, str | None]:
         """(source_id, None) after re-importing a session source from its
@@ -17474,6 +17559,8 @@ class Store:
                 rec = self.ingest_kv(path, name=name, column_types=how.get("column_types"))
             elif kind == "utmp":
                 rec = self.ingest_utmp(path, name=name, layout=how.get("layout"))
+            elif kind == "bodyfile":
+                rec = self.ingest_bodyfile(path, name=name)
             else:
                 rec = self.ingest_plaso(path, name=name)
         except Exception as e:
@@ -17500,6 +17587,8 @@ class Store:
             return {"kind": "iis"}
         if utmpread.log_kind(path):
             return {"kind": "utmp"}
+        if bodyread.name_says(path):
+            return {"kind": "bodyfile"}
         if ext in (".json", ".jsonl", ".ndjson"):
             return {"kind": "json"}
         return {"kind": "csv" if ext in DEFAULT_IMPORT_EXTENSIONS else "text"}

@@ -666,11 +666,58 @@ export function looksLikeUtmp(head, size) {
   return false;
 }
 
+/* Body files (TSK's fls -m, UAC's bodyfile.txt, Volatility's
+   --output=body) by name: mirrors winnow/bodyread.py's name_says.
+   bodyfile, bodyfile.txt, anything.body, and an archive expansion's
+   second copy (bodyfile (2).txt). */
+const BODYFILE_NAME = /^(?:bodyfile(?: \(\d+\))?(?:\.txt)?|.+\.body)$/i;
+/* The folder-import chip that stands for them (store.BODYFILE_IMPORT_TYPE). */
+export const BODYFILE_IMPORT_TYPE = 'bodyfile';
+
+export function bodyfileNamed(filename) {
+  return BODYFILE_NAME.test(filename.split(/[\\/]/).pop());
+}
+
+/* A body file under any other name is recognized by its first line: the
+   twin of bodyread.looks_like and is_line. MD5|name|inode|mode|UID|GID|
+   size|atime|mtime|ctime|crtime — the MD5 hex (often just 0), the name
+   anything (a pipe included: the nine fields after it are the line's
+   last nine), the IDs, size and times numbers, a time "-" or empty when
+   unknown. A TSK 2.x line, whose sixteen fields would pass for 3.x's
+   one or two columns off, is not one (BODYFILE_TSK2). Asked about the
+   same files a key=value log is (kvCandidate). */
+const BODYFILE_HEX = /^[0-9A-Fa-f]*$/;
+const BODYFILE_T = '(?:-?\\d+(?:\\.\\d+)?|-|)';
+const BODYFILE_TAIL = new RegExp(`^[^|]*\\|[^|]*\\|-?\\d*\\|-?\\d*\\|-?\\d*\\|${BODYFILE_T}\\|${BODYFILE_T}\\|${BODYFILE_T}\\|${BODYFILE_T}$`);
+const BODYFILE_TSK2 = /^[0-9A-Fa-f]*\|[^|]*\|[^|]*\|[^|]*\|\d+\|[^|]*[-rwxsStT]{9}\|\d+(?:\|-?\d+){9}$/;
+
+export function isBodyfileLine(line) {
+  const p = line.indexOf('|');
+  if (p < 0) return false;
+  const md5 = line.slice(0, p);
+  if (md5 !== '0' && !BODYFILE_HEX.test(md5)) return false;
+  const rest = line.slice(p + 1);
+  const parts = rest.split('|');
+  if (parts.length < 10) return false;
+  const name = parts.slice(0, parts.length - 9).join('|');
+  if (!BODYFILE_TAIL.test(rest.slice(name.length + 1))) return false;
+  return !(name.includes('|') && BODYFILE_TSK2.test(line));
+}
+
+export function looksLikeBodyfile(text) {
+  for (const raw of text.split('\n', 64)) {
+    const line = raw.trim().replace(/^\ufeff/, '');
+    if (line) return isBodyfileLine(line);
+  }
+  return false;
+}
+
 export function importKindFor(filename) {
   // Before the extension checks: an IIS log's .log says nothing, and a
-  // wtmp has no extension at all.
+  // wtmp or a bodyfile has no extension at all.
   if (iisLogFormat(filename)) return 'iis';
   if (utmpFileKind(filename)) return 'utmp';
+  if (bodyfileNamed(filename)) return 'bodyfile';
   if (SQLITE_IMPORT_EXTENSIONS.includes(extOf(filename))) return 'sqlite';
   if (XLSX_IMPORT_EXTENSIONS.includes(extOf(filename))) return 'xlsx';
   if (PLASO_IMPORT_EXTENSIONS.includes(extOf(filename))) return 'plaso';

@@ -26,7 +26,7 @@ import sqlite3
 import pytest
 from openpyxl import Workbook
 
-from winnow import iisread, kvread, plasoread, store as store_mod, xlsxread
+from winnow import bodyread, iisread, kvread, plasoread, store as store_mod, xlsxread
 from winnow.store import IngestCancelled
 
 BATCH = 7
@@ -149,6 +149,13 @@ def _kv_make(tmp_path):
     return str(p)
 
 
+def _bodyfile_make(tmp_path):
+    p = tmp_path / "bodyfile.txt"
+    p.write_text("".join(f"0|/evidence/{mark(i)}.bin|{1000 + i}|r/rrw-r--r--|0|0|{i}|1714557598|1714473600|1714473600|0\n"
+                         for i in range(1, N + 1)), encoding="utf-8")
+    return str(p)
+
+
 def _xlsx_make(tmp_path):
     wb = Workbook()
     ws = wb.active
@@ -222,6 +229,8 @@ READERS = {
                 poison=lambda mp, k: _poison_rows(mp, iisread, "rows", k), keeps="parsed"),
     "kv": dict(make=_kv_make, ingest=lambda s, p, **kw: s.ingest_kv(p, **kw),
                poison=lambda mp, k: _poison_rows(mp, kvread, "rows", k), keeps="parsed"),
+    "bodyfile": dict(make=_bodyfile_make, ingest=lambda s, p, **kw: s.ingest_bodyfile(p, **kw),
+                     poison=lambda mp, k: _poison_rows(mp, bodyread, "rows", k), keeps="parsed"),
     "xlsx": dict(make=_xlsx_make, ingest=lambda s, p, **kw: s.ingest_xlsx_sheet(p, "Events", **kw),
                  poison=lambda mp, k: _poison_rows(mp, xlsxread, "sheet_reader", k), keeps="parsed"),
     "plaso": dict(make=_plaso_make, ingest=lambda s, p, **kw: s.ingest_plaso(p, **kw),
