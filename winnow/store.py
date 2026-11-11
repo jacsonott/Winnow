@@ -2278,45 +2278,129 @@ def _json_column_plan(keys: list[str]) -> tuple[list[str], Callable[[dict], list
     return sanitize_columns(kept + [JSON_OVERFLOW_COLUMN]), row_of
 
 
+JSON_LINES_EXTENSIONS = (".jsonl", ".ndjson")
+# How much of the start of any other JSON file _json_file_is_lines reads
+# to tell JSON Lines from one document — the encoding probe's size, so
+# the one read answers both. Records are rarely a fraction of this; a
+# first line longer than all of it is _json_lines_after_all's case.
+JSON_SHAPE_PROBE_BYTES = ENCODING_PROBE_BYTES
+# Non-blank lines of that head it tries to parse, at most.
+_JSON_SHAPE_PROBE_LINES = 20
+
+
+def _parses_alone(line: str) -> bool:
+    try:
+        _json_loads(line)
+    except ValueError:      # JSONDecodeError, including "nested too deeply"
+        return False
+    return True
+
+
+def _head_is_json_lines(text: str, complete: bool) -> bool:
+    """Whether `text`, the start of a file (all of it if `complete`), is
+    JSON Lines rather than one JSON document: its first line is a whole
+    JSON value with more after it, or two non-blank lines in a row each
+    are one. Neither can happen in a valid document — JSON values end
+    where they end, strings can't span lines, and two values in a row
+    need a comma between them — so this never takes a document json
+    would have read. The second rule is for a file whose first line is
+    broken (a write cut off, a header line some tool puts on top): it
+    reads as JSON Lines, and that line is counted as unreadable."""
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    cut = "" if complete else lines.pop()    # may end past the head
+    whole = [ln.strip() for ln in lines if ln.strip()][:_JSON_SHAPE_PROBE_LINES]
+    prev = False
+    for i, line in enumerate(whole):
+        ok = _parses_alone(line)
+        if ok and (prev or (i == 0 and (len(whole) > 1 or cut.strip()))):
+            return True
+        prev = ok
+    return False
+
+
+def _json_file_is_lines(path: str) -> bool:
+    """`.jsonl` and `.ndjson` are JSON Lines by name. A `.json` is asked
+    its first lines (_head_is_json_lines): plenty of tools write JSON
+    Lines under `.json` (Velociraptor, cloud audit-log exports, `jq -c`),
+    and read as one document those failed at line 2 with "Extra data"."""
+    if os.path.splitext(path)[1].lower() in JSON_LINES_EXTENSIONS:
+        return True
+    try:
+        with open(path, "rb") as f:
+            raw = f.read(JSON_SHAPE_PROBE_BYTES)
+            complete = len(raw) < JSON_SHAPE_PROBE_BYTES or not f.read(1)
+    except OSError:
+        return False
+    # errors="replace", not TEXT_DECODE_ERRORS: the cp1252 fallback count
+    # is the import's report of what it read, and this read is not it.
+    enc = _encoding_for_head(raw, complete)
+    text = codecs.getincrementaldecoder(enc)(errors="replace").decode(raw, final=complete)
+    return _head_is_json_lines(text, complete)
+
+
+def _json_lines_after_all(text: str, e: json.JSONDecodeError) -> bool:
+    """Whether a document that failed to parse is JSON Lines the head
+    probe couldn't see: its first value fills one line and the "extra
+    data" json stopped at starts on a later one — a first line longer
+    than JSON_SHAPE_PROBE_BYTES. A pretty-printed value followed by
+    another is not, and keeps json's own error."""
+    if e.msg != "Extra data":
+        return False
+    first = text[:e.pos].rstrip()
+    return "\n" in text[len(first):e.pos] and "\n" not in first.strip()
+
+
+def _iter_json_lines(lines: Iterable[str], bad: dict | None) -> Iterator[dict]:
+    for lineno, line in enumerate(lines, start=1):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = _json_loads(line)
+        except json.JSONDecodeError as e:
+            # Same philosophy as CSV's ragged rows: one broken line
+            # (a truncated write, a log rotation seam) must not cost
+            # the analyst the million good lines around it. Counted
+            # and reported, never silent — and if the CALLER passes
+            # no collector (bad=None), the old raise stands, with
+            # the FILE line number the analyst needs rather than
+            # json's useless "line 1" of the single line.
+            if bad is None:
+                raise ValueError(f"Line {lineno}: {e.msg}") from e
+            bad["count"] += 1
+            if bad["count"] == 1:
+                bad["first_line"], bad["first_error"] = lineno, e.msg
+            continue
+        yield obj if isinstance(obj, dict) else {"value": obj}
+
+
 def _iter_json_records(path: str, bad: dict | None = None) -> Iterable[dict]:
-    """Yields one dict per record. `.jsonl`/`.ndjson` (one JSON value per
-    line — the genuinely streamable shape, never loaded fully into memory)
-    vs a single `.json` document (a JSON array of records, a single record
-    object, or — tolerated rather than rejected — a bare scalar/array of
-    scalars, wrapped as {"value": ...} so it still lands as one column
-    instead of erroring out). A whole `.json` document has to be parsed in
-    one shot (no generic streaming parser in the standard library), so
-    unlike CSV/JSONL ingest, memory use scales with file size for that
-    shape — acceptable at the scale this tool already targets (CLAUDE.md's
-    "Known limits" already documents ingest as not built for huge files
-    without extra tooling)."""
-    ext = os.path.splitext(path)[1].lower()
-    if ext in (".jsonl", ".ndjson"):
+    """Yields one dict per record. JSON Lines (one JSON value per line —
+    the genuinely streamable shape, never loaded fully into memory: any
+    `.jsonl`/`.ndjson`, and a `.json` whose content is that shape, see
+    _json_file_is_lines) vs a single `.json` document (a JSON array of
+    records, a single record object, or — tolerated rather than rejected —
+    a bare scalar/array of scalars, wrapped as {"value": ...} so it still
+    lands as one column instead of erroring out). A whole `.json` document
+    has to be parsed in one shot (no generic streaming parser in the
+    standard library), so unlike CSV/JSONL ingest, memory use scales with
+    file size for that shape — acceptable at the scale this tool already
+    targets (CLAUDE.md's "Known limits" already documents ingest as not
+    built for huge files without extra tooling)."""
+    if _json_file_is_lines(path):
         with open(path, "r", encoding=sniff_text_encoding(path), errors=TEXT_DECODE_ERRORS) as f:
-            for lineno, line in enumerate(f, start=1):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = _json_loads(line)
-                except json.JSONDecodeError as e:
-                    # Same philosophy as CSV's ragged rows: one broken line
-                    # (a truncated write, a log rotation seam) must not cost
-                    # the analyst the million good lines around it. Counted
-                    # and reported, never silent — and if the CALLER passes
-                    # no collector (bad=None), the old raise stands, with
-                    # the FILE line number the analyst needs rather than
-                    # json's useless "line 1" of the single line.
-                    if bad is None:
-                        raise ValueError(f"Line {lineno}: {e.msg}") from e
-                    bad["count"] += 1
-                    if bad["count"] == 1:
-                        bad["first_line"], bad["first_error"] = lineno, e.msg
-                    continue
-                yield obj if isinstance(obj, dict) else {"value": obj}
+            yield from _iter_json_lines(f, bad)
         return
     with open(path, "r", encoding=sniff_text_encoding(path), errors=TEXT_DECODE_ERRORS) as f:
-        data = _json_load(f)
+        text = f.read()
+    try:
+        data = _json_loads(text)
+    except json.JSONDecodeError as e:
+        if not _json_lines_after_all(text, e):
+            raise
+        # Already read whole, so it is read from memory, not again from disk.
+        yield from _iter_json_lines(io.StringIO(text), bad)
+        return
     if isinstance(data, list):
         for obj in data:
             yield obj if isinstance(obj, dict) else {"value": obj}
@@ -10100,6 +10184,9 @@ class Store:
         # the first by Line (a merge: by member, then Line). Applied here
         # rather than in _compile_where because a merge's duplicates can
         # sit in different members, which no per-member WHERE can see.
+        # The tag filter comes after it, against the rows it kept, so
+        # _compile_where leaves it out (`tags=not dedupe`) and the dedupe
+        # branches below add it back (_compile_tag_filter says why).
         dedupe = self._dedupe_columns(spec, colnames)
 
         cache_key = None
@@ -10122,7 +10209,8 @@ class Store:
                 for m, read_src, scan_from in reads:
                     msrc = m["src"]
                     where, p = self._compile_where(m["source_id"], read_src, spec, colnames,
-                                                   scan_from=scan_from, contains_found=found)
+                                                   scan_from=scan_from, contains_found=found,
+                                                   tags=not dedupe)
                     for col in sort_cols:
                         self._ensure_sort_index_building(
                             m["source_id"], col,
@@ -10160,10 +10248,16 @@ class Store:
                                    for i, (mid, rest) in enumerate(parts))
                 keep = (f"SELECT MIN({rank}) AS {rank}, {sid_col}, rid{''.join(f', {q(c)}' for c in need)} "
                         f"FROM ({ranked}) GROUP BY {self._dedupe_key(dedupe)}")
+                # The tag filter, on the rows kept: they come from every
+                # member, so it is keyed on each row's own member id.
+                tagged, tag_params = self._compile_tag_filter(spec, row=(f"kept.{sid_col}", "kept.rid"))
+                params.extend(tag_params)
                 # The rank last: rows tying on every key and on rid keep
                 # member order, as the other two shapes keep it — the
                 # GROUP BY hands them over in key order, not union order.
-                select = f"SELECT {sid_col}, rid FROM ({keep}) {order}, {rank}"
+                select = (f"SELECT {sid_col}, rid FROM ({keep}) AS kept"
+                          + (f" WHERE {tagged}" if tagged else "")
+                          + f" {order}, {rank}")
             elif filtered:
                 # Filtered: one sort over what the members matched, as
                 # before. The compound's own ORDER BY (below) would have
@@ -10200,7 +10294,8 @@ class Store:
                              tuple((m["source_id"], m["src"]["row_count"]) for m, _, _ in reads))
         else:
             table = src["table_name"]
-            where, params = self._compile_where(source_id, src, spec, colnames, scan_from=q(table))
+            where, params = self._compile_where(source_id, src, spec, colnames, scan_from=q(table),
+                                                tags=not dedupe)
             derived_names = {c["name"] for c in src["columns"] if c.get("derived")}
             for col in sort_cols:
                 # A derived column's values live in the sidecar, so its sort
@@ -10215,13 +10310,15 @@ class Store:
             if dedupe:
                 # The filters run once, inside the GROUP BY that picks the
                 # lowest rid of each set; the outer read only looks those
-                # rids up and sorts them.
+                # rids up, tests the tag filter on them and sorts them.
                 keep = (f"SELECT MIN(rid) FROM {self._from_clause(src)}"
                         + (f" WHERE {where}" if where else "")
                         + f" GROUP BY {self._dedupe_key(dedupe)}")
+                tagged, tag_params = self._compile_tag_filter(spec, source_id)
+                params.extend(tag_params)
                 sql = (f"INSERT INTO v.{q(vid)}(source_id, rid) "
                        f"SELECT {int(source_id)}, rid FROM {self._from_clause(src)} "
-                       f"WHERE rid IN ({keep}) {order}")
+                       f"WHERE rid IN ({keep})" + (f" AND {tagged}" if tagged else "") + f" {order}")
             else:
                 sql = (
                     f"INSERT INTO v.{q(vid)}(source_id, rid) "
@@ -12871,7 +12968,8 @@ class Store:
 
     def _compile_where(self, source_id, src, spec, colnames, *,
                        scan_from: str | None = None,
-                       contains_found: dict[int, tuple[str, list] | None] | None = None) -> tuple[str, list]:
+                       contains_found: dict[int, tuple[str, list] | None] | None = None,
+                       tags: bool = True) -> tuple[str, list]:
         """`scan_from`: the FROM text this WHERE will read the rows through,
         passed by build_view alone. With it, a Contains search the index
         can't narrow is answered here, by a parallel scan, and compiles to
@@ -12881,7 +12979,12 @@ class Store:
         `contains_found`: that parallel scan's answers already in hand, by
         source id — a merge scans every member's share in one pool before
         compiling any of them (_merge_contains_found). A member it holds
-        None for (its scan gave up) compiles to the scan itself."""
+        None for (its scan gave up) compiles to the scan itself.
+
+        `tags=False` leaves the tag filter out, for a caller that applies
+        it itself, later: with Hide duplicate rows on, build_view and
+        spec_sql test it against the rows the dedupe kept
+        (_compile_tag_filter says why)."""
         clauses: list[str] = []
         params: list[Any] = []
 
@@ -12946,55 +13049,11 @@ class Store:
             clauses.append(clause)
             params.extend(p)
 
-        # The tag filter is a UNION of whatever it names: any of these tags,
-        # or untagged, or both. OR rather than AND because that is what the
-        # ribbon's chips mean — ticking Malware and Lateral movement asks
-        # for rows carrying either, the way ticking two values in the value
-        # picker does. (An intersection is expressible in the filter
-        # builder, which is where a query that needs one belongs.)
-        #
-        # It used to compare the whole list against ["__any__"] and
-        # ["__none__"] as exact matches, so a list holding a sentinel
-        # alongside ids fell through to the ids branch and dropped the
-        # sentinel silently. Each part is compiled on its own now and the
-        # parts are OR'd, which also makes "untagged, plus the ones I
-        # marked" a filter the ribbon can express.
-        #
-        # A "!<id>" entry is a tag filtered OUT (the chip's right-click
-        # menu), and it is the one part that is ANDed rather than OR'd:
-        # "Suspicious, but not the ones I marked Benign" has to drop a row
-        # carrying both, and a union with "not Benign" would bring back
-        # every untagged row instead. Exclusions ride in the same list
-        # rather than a field of their own so that everything that already
-        # carries, stashes or clears the tag filter — a table switch, a
-        # background search, Clear filters, a dashboard drill — carries
-        # them too without being told.
-        tag_filter = spec.get("tags") or []
-        excluded = [int(t[1:]) for t in tag_filter
-                    if isinstance(t, str) and t.startswith("!") and t[1:].isdecimal()]
-        if excluded:
-            clauses.append(
-                f"rid NOT IN (SELECT rid FROM row_tags WHERE source_id=? AND tag_id IN ({','.join('?' * len(excluded))}))"
-            )
-            params.append(source_id)
-            params.extend(excluded)
-        if tag_filter:
-            parts: list[str] = []
-            if "__any__" in tag_filter:
-                parts.append("rid IN (SELECT rid FROM row_tags WHERE source_id=?)")
-                params.append(source_id)
-            if "__none__" in tag_filter:
-                parts.append("rid NOT IN (SELECT rid FROM row_tags WHERE source_id=?)")
-                params.append(source_id)
-            ids = [int(t) for t in tag_filter if str(t).isdigit()]
-            if ids:
-                parts.append(
-                    f"rid IN (SELECT rid FROM row_tags WHERE source_id=? AND tag_id IN ({','.join('?' * len(ids))}))"
-                )
-                params.append(source_id)
-                params.extend(ids)
-            if parts:
-                clauses.append("(" + " OR ".join(parts) + ")")
+        if tags:
+            c, p = self._compile_tag_filter(spec, source_id)
+            if c:
+                clauses.append(c)
+                params.extend(p)
 
         time_range = spec.get("time_range")
         if time_range and time_range.get("enabled") and (time_range.get("start") or time_range.get("end")):
@@ -13053,6 +13112,87 @@ class Store:
             # their order, so the params still line up.
             clauses.append("(" + _sql_chain(parts, " OR ") + ")")
 
+        return " AND ".join(clauses), params
+
+    @staticmethod
+    def _compile_tag_filter(spec, source_id: int | None = None, *,
+                            row: tuple[str, str] | None = None) -> tuple[str, list]:
+        """The tag filter (`spec.tags`, the ribbon's chips) as one WHERE
+        clause, "" when there is none.
+
+        It is a UNION of whatever it names: any of these tags, or
+        untagged, or both. OR rather than AND because that is what the
+        ribbon's chips mean — ticking Malware and Lateral movement asks
+        for rows carrying either, the way ticking two values in the value
+        picker does. (An intersection is expressible in the filter
+        builder, which is where a query that needs one belongs.)
+
+        It used to compare the whole list against ["__any__"] and
+        ["__none__"] as exact matches, so a list holding a sentinel
+        alongside ids fell through to the ids branch and dropped the
+        sentinel silently. Each part is compiled on its own now and the
+        parts are OR'd, which also makes "untagged, plus the ones I
+        marked" a filter the ribbon can express.
+
+        A "!<id>" entry is a tag filtered OUT (the chip's right-click
+        menu), and it is the one part that is ANDed rather than OR'd:
+        "Suspicious, but not the ones I marked Benign" has to drop a row
+        carrying both, and a union with "not Benign" would bring back
+        every untagged row instead. Exclusions ride in the same list
+        rather than a field of their own so that everything that already
+        carries, stashes or clears the tag filter — a table switch, a
+        background search, Clear filters, a dashboard drill — carries
+        them too without being told.
+
+        Two shapes of the same test. By default, one source's rows:
+        `rid [NOT] IN (SELECT rid FROM row_tags WHERE source_id=?)`, an
+        uncorrelated list SQLite builds once. With `row` — the (source
+        id, rid) column references of rows from more than one source,
+        which is what a merge's dedupe hands back — a correlated
+        `[NOT] EXISTS` keyed on row_tags' primary key, since the rows no
+        longer share one source id to bind.
+
+        Why it is its own function: Hide duplicate rows applies it AFTER
+        the dedupe, to the row each set kept, not before it with the other
+        filters. Tags are not data — the analyst puts them on the row the
+        grid shows, which is the kept one, and the hidden copies stay as
+        they were. Tested before the dedupe, "No tags" (or a tag filtered
+        out) dropped the tagged row that was kept, and the untagged copy
+        under it became the first of its set and came back: tagging an
+        event and filtering to what is left showed that event again. After
+        the dedupe, a tag filter only ever narrows the deduplicated rows,
+        and agrees with the ribbon's counts, which are the view's."""
+        tag_filter = spec.get("tags") or []
+        if not tag_filter:
+            return "", []
+        params: list[Any] = []
+
+        def has(ids: list[int] | None, negate: bool) -> str:
+            only = f" AND {'rt.' if row else ''}tag_id IN ({','.join('?' * len(ids))})" if ids else ""
+            if row:
+                sid_ref, rid_ref = row
+                params.extend(ids or [])
+                return (f"{'NOT ' if negate else ''}EXISTS (SELECT 1 FROM row_tags rt "
+                        f"WHERE rt.source_id = {sid_ref} AND rt.rid = {rid_ref}{only})")
+            params.append(source_id)
+            params.extend(ids or [])
+            return f"rid {'NOT IN' if negate else 'IN'} (SELECT rid FROM row_tags WHERE source_id=?{only})"
+
+        clauses: list[str] = []
+        excluded = [int(t[1:]) for t in tag_filter
+                    if isinstance(t, str) and t.startswith("!") and t[1:].isdecimal()]
+        if excluded:
+            clauses.append(has(excluded, negate=True))
+        parts: list[str] = []
+        if "__any__" in tag_filter:
+            parts.append(has(None, negate=False))
+        if "__none__" in tag_filter:
+            parts.append(has(None, negate=True))
+        ids = [int(t) for t in tag_filter if str(t).isdigit()]
+        if ids:
+            parts.append(has(ids, negate=False))
+        if parts:
+            clauses.append("(" + " OR ".join(parts) + ")")
         return " AND ".join(clauses), params
 
     @staticmethod
@@ -13271,7 +13411,8 @@ class Store:
             with self._build_batch():
                 for i, m in enumerate(self._resolve_members(source_id)):
                     msrc = m["src"]
-                    where, p = self._compile_where(m["source_id"], self._member_read_src(src, msrc), spec, colnames)
+                    where, p = self._compile_where(m["source_id"], self._member_read_src(src, msrc), spec, colnames,
+                                                   tags=not dedupe)
                     # The pane's own src_<id> name, projected when the member
                     # doesn't carry the merge's columns as-is — run_sql's shadow
                     # view supplies any derived columns the projection names.
@@ -13287,9 +13428,12 @@ class Store:
                     params.extend(p)
             sql = union_all(branches, "\nUNION ALL\n")
             if dedupe:
+                tagged, tag_params = self._compile_tag_filter(spec, row=(f"kept.{sid_col}", "kept.rid"))
+                params.extend(tag_params)
                 sql = (f"SELECT {sid_col}, rid, {collist} FROM (\n"
                        f"SELECT MIN({rank}) AS {rank}, {sid_col}, rid, {collist} FROM (\n{sql}\n)\n"
-                       f"GROUP BY {self._dedupe_key(dedupe)}\n)")
+                       f"GROUP BY {self._dedupe_key(dedupe)}\n) AS kept"
+                       + (f"\nWHERE {tagged}" if tagged else ""))
             elif any(colnames.get(x.get("column")) == "number" or x.get("column") in by_time
                      for x in spec.get("sort") or []):
                 # A compound's ORDER BY may only name its own columns, and
@@ -13299,14 +13443,17 @@ class Store:
                 sql = f"SELECT * FROM (\n{sql}\n)"
             sql += f"\n{order}" + (f", {rank}" if dedupe else "")
         else:
-            where, params = self._compile_where(source_id, src, spec, colnames)
+            where, params = self._compile_where(source_id, src, spec, colnames, tags=not dedupe)
             collist = ", ".join(q(c) for c in colnames)
             table = q(src["table_name"])
             sql = f"SELECT rid, {collist}\nFROM {table}"
             if dedupe:
+                tagged, tag_params = self._compile_tag_filter(spec, source_id)
+                params.extend(tag_params)
                 sql += (f"\nWHERE rid IN (\n  SELECT MIN(rid) FROM {table}"
                         + (f" WHERE {where}" if where else "")
-                        + f"\n  GROUP BY {self._dedupe_key(dedupe)}\n)")
+                        + f"\n  GROUP BY {self._dedupe_key(dedupe)}\n)"
+                        + (f"\nAND {tagged}" if tagged else ""))
             elif where:
                 sql += f"\nWHERE {where}"
             sql += f"\n{order}"

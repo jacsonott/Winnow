@@ -4,7 +4,9 @@ which the client fills with the visible columns) — the first by Line, or
 on a merge the first by member order and then Line. Applied after the
 filters, on a standard table and a merge alike (invariant #9), through the
 /api/view route, and in the SQL the "open this filter as a query" action
-renders, so the SQL pane agrees with the grid.
+renders, so the SQL pane agrees with the grid. The tag filter is the one
+filter applied after it, to the rows it kept: a copy hidden under a tagged
+row must not come back under "No tags".
 """
 import csv
 import io
@@ -81,6 +83,84 @@ def test_filters_apply_first(store, write_csv):
     assert _rids(store, sid, dedupe_columns=NO_FILE, search="alpha") == [1]
     # And alongside Hide empty rows, which is a filter.
     assert _rids(store, sid, dedupe_columns=NO_FILE, hide_empty_rows=True) == [1, 3, 5, 6]
+
+
+def _tag(store, name):
+    return store.upsert_tag(None, name, "#c0392b", None)["id"]
+
+
+def test_the_tag_filter_looks_at_the_rows_kept(store, write_csv):
+    """The bug: tag the row kept from a set of copies, filter to No tags,
+    and the next copy came back — the tag filter ran with the other
+    filters, before the dedupe, so it dropped the tagged row and left an
+    untagged copy first in its set. It runs on the rows kept now."""
+    sid = _ingest(store, write_csv, ROWS, "a.csv")
+    assert _rids(store, sid, dedupe_columns=NO_FILE) == [1, 3, 5, 6]
+    seen = _tag(store, "Seen")
+    store.set_tags(sid, [1], seen, True)          # 2 and 4 are its hidden copies
+    assert _rids(store, sid, dedupe_columns=NO_FILE, tags=["__none__"]) == [3, 5, 6]
+    assert _rids(store, sid, dedupe_columns=NO_FILE, tags=[f"!{seen}"]) == [3, 5, 6]
+    assert _rids(store, sid, dedupe_columns=NO_FILE, tags=[str(seen)]) == [1]
+    assert _rids(store, sid, dedupe_columns=NO_FILE, tags=["__any__"]) == [1]
+    # "Untagged, plus Seen" is every row kept, and only those.
+    assert _rids(store, sid, dedupe_columns=NO_FILE, tags=["__none__", str(seen)]) == [1, 3, 5, 6]
+    # Off, the copies are rows like any other, as before.
+    assert _rids(store, sid, tags=["__none__"]) == [2, 3, 4, 5, 6, 7]
+
+
+def test_tags_on_a_hidden_copy_do_not_count(store, write_csv):
+    """The tags tested are the kept row's, the ones the grid shows on it.
+    A copy tagged while the copies were showing is hidden with them, and
+    its tag with it; the row kept is still untagged."""
+    sid = _ingest(store, write_csv, ROWS, "a.csv")
+    late = _tag(store, "Late")
+    store.set_tags(sid, [7], late, True)          # 7 is a hidden copy of 6
+    assert _rids(store, sid, dedupe_columns=NO_FILE, tags=[str(late)]) == []
+    assert _rids(store, sid, dedupe_columns=NO_FILE, tags=["__none__"]) == [1, 3, 5, 6]
+    # The ribbon counts the same rows the filter tests.
+    v = store.build_view(sid, _spec(sid, dedupe_columns=NO_FILE))
+    assert store.tag_counts_in_view(v["view_id"])["counts"] == {}
+
+
+def test_other_filters_still_apply_before_the_dedupe(store, write_csv):
+    """Only the tag filter moved. A column filter that drops the tagged
+    row leaves its copy first among the rows left, and that copy, being
+    untagged, passes No tags — the order is filters, dedupe, tags."""
+    sid = _ingest(store, write_csv, ROWS, "a.csv")
+    seen = _tag(store, "Seen")
+    store.set_tags(sid, [1, 6], seen, True)
+    only_f2 = [{"column": "SourceFile", "op": "equals", "value": "f2"}]
+    assert _rids(store, sid, dedupe_columns=NO_FILE, filters=only_f2, tags=["__none__"]) == [2, 7]
+    assert _rids(store, sid, dedupe_columns=NO_FILE, search="alpha", tags=["__none__"]) == []
+    # And a sort changes the order, not which rows pass.
+    assert _rids(store, sid, dedupe_columns=NO_FILE, tags=["__none__"],
+                 sort=[{"column": "Msg", "dir": "desc"}]) == [3, 5]
+
+
+def test_the_tag_filter_on_a_merge_looks_at_the_rows_kept(store, write_csv):
+    """A merge's kept rows come from every member, so the tag test is
+    keyed on each row's own member id: rid 2 tagged in one member is not
+    rid 2 of the other."""
+    a = _ingest(store, write_csv, ROWS, "a.csv")
+    b = _ingest(store, write_csv, ROWS_B, "b.csv")
+    mid = store.create_merge("both", [a, b])["id"]
+    kept = [(a, 1), (b, 2), (a, 3), (a, 5), (a, 6)]
+    assert _rids(store, mid, dedupe_columns=NO_FILE) == kept
+    seen = _tag(store, "Seen")
+    # (b, 1) and (a, 2), (a, 4) are hidden copies of (a, 1).
+    store.set_tags(a, [1], seen, True)
+    assert _rids(store, mid, dedupe_columns=NO_FILE, tags=["__none__"]) == [(b, 2), (a, 3), (a, 5), (a, 6)]
+    assert _rids(store, mid, dedupe_columns=NO_FILE, tags=[f"!{seen}"]) == [(b, 2), (a, 3), (a, 5), (a, 6)]
+    assert _rids(store, mid, dedupe_columns=NO_FILE, tags=[str(seen)]) == [(a, 1)]
+    # A tag on a hidden copy, (a, 2), is not one on (b, 2), which is kept.
+    late = _tag(store, "Late")
+    store.set_tags(a, [2], late, True)
+    assert _rids(store, mid, dedupe_columns=NO_FILE, tags=[str(late)]) == []
+    store.set_tags(b, [2], late, True)
+    assert _rids(store, mid, dedupe_columns=NO_FILE, tags=[str(late)]) == [(b, 2)]
+    assert _rids(store, mid, dedupe_columns=NO_FILE, tags=["__none__"]) == [(a, 3), (a, 5), (a, 6)]
+    assert _rids(store, mid, dedupe_columns=NO_FILE, tags=["__none__", str(late)],
+                 sort=[{"column": "When", "dir": "desc"}]) == [(b, 2), (a, 3), (a, 5), (a, 6)]
 
 
 def test_unknown_columns_are_ignored_and_none_left_is_off(store, write_csv):
@@ -184,3 +264,25 @@ def test_spec_sql_agrees_with_the_grid(store, write_csv):
                 assert [(r[sid_at], r[rid_at]) for r in got["rows"]] == want, (sid, extra)
             else:
                 assert [r[rid_at] for r in got["rows"]] == want, (sid, extra)
+
+
+def test_spec_sql_agrees_with_the_grid_under_a_tag_filter(store, write_csv):
+    """The SQL pane's query tests the tag filter where the grid does,
+    after the dedupe, on a table and on a merge."""
+    a = _ingest(store, write_csv, ROWS, "a.csv")
+    b = _ingest(store, write_csv, ROWS_B, "b.csv")
+    mid = store.create_merge("both", [a, b])["id"]
+    seen = _tag(store, "Seen")
+    store.set_tags(a, [1, 7], seen, True)
+    store.set_tags(b, [2], seen, True)
+    for sid in (a, mid):
+        for tags in (["__none__"], [f"!{seen}"], [str(seen)], ["__any__"], ["__none__", str(seen)]):
+            spec = _spec(sid, dedupe_columns=NO_FILE, tags=tags)
+            got = store.run_sql(store.spec_sql(sid, spec))
+            rid_at = got["columns"].index("rid")
+            want = _rids(store, sid, dedupe_columns=NO_FILE, tags=tags)
+            if sid < 0:
+                sid_at = got["columns"].index("source_id")
+                assert [(r[sid_at], r[rid_at]) for r in got["rows"]] == want, (sid, tags)
+            else:
+                assert [r[rid_at] for r in got["rows"]] == want, (sid, tags)

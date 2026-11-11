@@ -128,6 +128,90 @@ def test_preview_json_file_matches_ingest_columns_and_reports_record_count(store
     assert len(preview["sample_rows"]) == 3
 
 
+def test_json_lines_in_a_json_file_import_one_row_per_line(store, tmp_path, jsonl_file):
+    """Velociraptor, cloud audit-log exports and `jq -c` write JSON Lines
+    under a .json name. Read as one document by its extension, that
+    failed at line 2 with "Extra data", in the preview and the import
+    both. The content decides now, and the table is the .jsonl one."""
+    path = tmp_path / "events.json"
+    path.write_text("\n".join(json.dumps(r) for r in RECORDS) + "\n")
+    want = store.ingest_json(jsonl_file, flatten_mode="full", build_fts=False)
+    preview = store.preview_json_file(str(path), flatten_mode="full")
+    assert preview["record_count"] == 3
+    assert preview["columns"] == [c["name"] for c in want["columns"]]
+    rec = store.ingest_json(str(path), flatten_mode="full", build_fts=False)
+    assert rec["row_count"] == 3
+    assert _cells(store, rec) == _cells(store, want)
+
+
+@pytest.mark.parametrize("lines, first_bad", [
+    (['{"n": 1}', '{"n": 2', '{"n": 3}'], 2),      # a write cut off mid-file
+    (['{"n": 1', '{"n": 2}', '{"n": 3}'], 1),      # ... or at the very start
+    (['# exported by some tool', '{"n": 2}', '{"n": 3}'], 1),
+])
+def test_a_broken_line_in_json_lines_named_json_is_skipped_and_counted(store, tmp_path, lines, first_bad):
+    """JSON Lines under .json gets what a .jsonl gets: a broken line costs
+    that line, counted, not the file — even the first line, which the
+    shape check can't read."""
+    path = tmp_path / "events.json"
+    path.write_text("\n".join(lines) + "\n")
+    rec = store.ingest_json(str(path), build_fts=False)
+    assert rec["row_count"] == 2
+    assert rec["bad_records"] == 1
+    assert rec["first_bad_line"] == first_bad
+
+
+@pytest.mark.parametrize("text", [
+    json.dumps(RECORDS),                                   # one line
+    json.dumps(RECORDS, indent=2),                         # pretty-printed
+    json.dumps(RECORDS, indent="\t").replace("\n", "\r\n"),
+    "[\n" + ",\n".join(json.dumps(r) for r in RECORDS) + "\n]\n",   # a record a line, in an array
+    "\n\n" + json.dumps(RECORDS) + "\n\n",
+], ids=["compact", "indented", "tabs-crlf", "record-a-line", "blank-lines"])
+def test_a_json_document_still_reads_as_one_document(store, tmp_path, text):
+    """Whatever the layout, a document json reads is never taken for JSON
+    Lines — a record per line inside an array included."""
+    path = tmp_path / "doc.json"
+    path.write_text(text)
+    rec = store.ingest_json(str(path), flatten_mode="full", build_fts=False)
+    assert rec["row_count"] == 3
+    assert rec["bad_records"] == 0
+
+
+def test_a_single_object_on_one_line_is_still_one_row(store, tmp_path):
+    path = tmp_path / "one.json"
+    path.write_text(json.dumps({"a": 1, "b": [1, 2]}) + "\n\n")
+    rec = store.ingest_json(str(path), build_fts=False)
+    assert rec["row_count"] == 1
+    assert [c["name"] for c in rec["columns"]] == ["a", "b"]
+
+
+def test_json_lines_whose_first_line_outruns_the_probe(store, tmp_path, monkeypatch):
+    """The shape check reads the start of the file only. A first record
+    longer than all of it (a base64 blob) is found out when the document
+    read stops at line 2, and the file is read as lines after all."""
+    import winnow.store as store_mod
+
+    monkeypatch.setattr(store_mod, "JSON_SHAPE_PROBE_BYTES", 64)
+    path = tmp_path / "blob.json"
+    path.write_text(json.dumps({"id": 1, "blob": "A" * 500}) + "\n" + json.dumps({"id": 2, "blob": ""}) + "\n")
+    assert not store_mod._json_file_is_lines(str(path))
+    rec = store.ingest_json(str(path), build_fts=False)
+    assert rec["row_count"] == 2
+    assert _cells(store, rec)[1] == [("1", "A" * 500), ("2", "")]
+
+
+def test_pretty_printed_values_one_after_another_keep_jsons_error(store, tmp_path):
+    """Two indented objects back to back are neither a document nor JSON
+    Lines; reading them a line at a time would only report every line
+    unreadable, so json's own "Extra data" stands."""
+    path = tmp_path / "two.json"
+    path.write_text(json.dumps({"a": 1}, indent=2) + "\n" + json.dumps({"a": 2}, indent=2) + "\n")
+    with pytest.raises(ValueError, match="Extra data"):
+        store.ingest_json(str(path), build_fts=False)
+    assert store.list_sources() == []
+
+
 def test_pathologically_deep_json_ingests_instead_of_recursing_out(store, tmp_path):
     """A 2,000-level nested document used to walk _flatten_json off the
     interpreter stack (RecursionError). Full flatten now caps at 64

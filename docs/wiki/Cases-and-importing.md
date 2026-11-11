@@ -380,6 +380,12 @@ that isn't an object lands in a column called `value`. The import reads the
 file twice, once to find every column, so it is slower than a CSV of the
 same size.
 
+Plenty of tools write JSON Lines under a `.json` name (Velociraptor, cloud
+audit-log exports, `jq -c`), so a `.json` is read by what it holds, not its
+name: when its first lines are each a whole JSON value, it imports as JSON
+Lines, one row per line, and streams like a `.jsonl`. A document laid out
+one record per line inside `[ ]` is still one document.
+
 **Nested objects**, in the file's pane, chooses how nested objects become
 columns:
 
@@ -400,8 +406,9 @@ field out of a JSON cell later, use [derived columns](Derived-columns.md).
   `process.name_1`, and the preview and toast count the records affected.
 - Past 1,000 columns, the first 999 keys stay columns and the rest go, per
   record, into one `Other fields (JSON)` column.
-- A broken line in a `.jsonl` is skipped and counted (*N unreadable records
-  skipped*); a truncated `.json` document fails the import.
+- A broken line in JSON Lines, whatever the file is named, is skipped and
+  counted (*N unreadable records skipped*); a truncated `.json` document
+  fails the import.
 - The preview reads the whole file, so an uploaded `.json` is uploaded in
   full just to preview it, and past 32 MB the pane asks first. Add big ones
   with **Add from this machine…**.
