@@ -617,3 +617,21 @@ see [docs/notes/README.md](README.md) for the whole set.
   cell under it at its x and width, at either end and the middle, pinned,
   after a grow, and after the arrow keys walk into columns that were never
   built.
+
+- **▲ is ascending, and the arrow says so in words.** Every sort arrow in
+  the app points up for ascending (A to Z, smallest or earliest first) and
+  down for descending: the grid's headers and its Line label, the SQL
+  pane's result headers, the pivot's ▴/▾, the group strip's Sort button
+  and the file browser's column heads. That is how Excel, Windows Explorer
+  and most data grids draw it, and it has been Winnow's since the first
+  commit. Analysts still reported the arrows as "backwards", because the
+  opposite habit is real too (▼ read as "A at the top, growing downward";
+  GNOME's guidance said so until it was reported as the minority
+  convention). A glyph alone cannot settle which reading is meant, so each
+  arrow carries a `title` with the order in words: `sortArrowTitle` in
+  core.js for the grid and the SQL pane (it also names a column's place in
+  a multi-key sort), its own text for the Line label, the pivot and the
+  group strip. If the glyphs are ever flipped, flip them everywhere at
+  once, keep the words as they are, and update
+  `tests/ui/test_sort_arrow_direction.py`, which pins glyph, words and the
+  rows on screen together so that one of the three cannot move alone.

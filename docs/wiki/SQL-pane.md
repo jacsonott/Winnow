@@ -204,7 +204,9 @@ oldest results are let go, and the status line says *this result is no
 longer held — run the query again* if you scroll back into one.
 
 Click a column header to sort the whole result by that column; click again
-to reverse. Sorting doesn't run the query again. Numbers sort as numbers,
+to reverse. The header shows ▲ for ascending and ▼ for descending, as the
+table grid does, and hovering over the arrow says the order in words.
+Sorting doesn't run the query again. Numbers sort as numbers,
 including numbers stored as text, and NULLs come first.
 
 ### Tagging rows from a result

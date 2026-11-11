@@ -802,7 +802,8 @@ export function renderGroupStrip() {
     if (i < S.groupByCols.length - 1) strip.append(el('span', 'group-strip-arrow', '›'));
   });
   const sortBtn = el('button', 'btn ghost group-sort-btn', 'Sort: ' + groupSortLabel(S.groupSort, S.groupSortDir, true));
-  sortBtn.title = 'Change how groups at every level are sorted';
+  // The button shows the short form (an arrow); the title says it in words.
+  sortBtn.title = `Sorted by ${groupSortLabel(S.groupSort, S.groupSortDir).toLowerCase()}. Click to change how groups at every level are sorted`;
   sortBtn.onclick = () => dropdownMenu(sortBtn, GROUP_SORT_OPTIONS.map((o) => ({
     label: (o.by === S.groupSort && o.dir === S.groupSortDir ? '✓ ' : '   ') + groupSortLabel(o.by, o.dir),
     onclick: () => { S.groupSort = o.by; S.groupSortDir = o.dir; regroupAll(); },

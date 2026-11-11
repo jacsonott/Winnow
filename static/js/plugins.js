@@ -2,7 +2,7 @@
 
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { recordTabVisit } from './tabhistory.js';
-import { $, MOD_ENTER, OVERSCAN, api, el, post, setBusy, toast } from './core.js';
+import { $, MOD_ENTER, OVERSCAN, api, el, post, setBusy, sortArrowTitle, toast } from './core.js';
 import { clearAllFilters, loadSources, openSource, pageTabs, renderPageTabs, renderSidebar, reopenPageTab, syncTabSelection } from './sources.js';
 import { armOpCancel, closeNoticesOwnedBy, createNotice, opToken } from './jobs.js';
 import { ensureNotesLoaded, insertAtCursor, showNotesTab } from './notes.js';
@@ -1083,7 +1083,11 @@ export function sqlResultNodes(r) {
       th.title = 'Click to sort the result by this column';
       // The view's own Tags column shows chips, which run wider than its text.
       th.style.width = colW(colChars(i));
-      if (sort.idx === i) th.append(el('span', 'sort', sort.dir === 1 ? ' ▲' : ' ▼'));
+      if (sort.idx === i) {
+        const arrow = el('span', 'sort', sort.dir === 1 ? ' ▲' : ' ▼');
+        arrow.title = sortArrowTitle(sort.dir === 1 ? 'asc' : 'desc');
+        th.append(arrow);
+      }
       th.onclick = () => {
         sort.dir = sort.idx === i ? -sort.dir : 1;
         sort.idx = i;

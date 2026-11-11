@@ -1405,7 +1405,12 @@ export default function mount(container, winnow) {
       // save here would be a write of bytes identical to the stored ones.
       render();
     };
-    if (isSortedBy(mi, colVals)) th.textContent = (th.textContent || '') + (state.sort.dir === -1 ? ' ▾' : ' ▴');
+    if (isSortedBy(mi, colVals)) {
+      th.textContent = (th.textContent || '') + (state.sort.dir === -1 ? ' ▾' : ' ▴');
+      th.title = state.sort.dir === -1
+        ? 'Sorted descending: largest first. Click for smallest first'
+        : 'Sorted ascending: smallest first. Click to go back to the rows’ own order';
+    }
   }
 
   function buildHead(cols, measures) {

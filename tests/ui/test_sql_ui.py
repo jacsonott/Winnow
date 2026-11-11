@@ -98,8 +98,15 @@ def test_results_sort_by_clicking_headers_and_show_tags(page, open_sql):
     first = "() => document.querySelectorAll('#sqlResult tr')[1]?.querySelectorAll('td')[1]?.textContent"
     page.locator("#sqlResult th", has_text="EventId").click()
     page.wait_for_function(f"({first})() === '1'")   # EventId cycles 4624/4625/4688/1
+    # The arrow over the smallest-first rows is ▲, and says so in words
+    # (test_sort_arrow_direction.py has why the words are there).
+    arrow = page.locator("#sqlResult th", has_text="EventId").locator(".sort")
+    assert arrow.inner_text().strip() == "▲"
+    assert arrow.get_attribute("title") == "Sorted ascending: A to Z, smallest or earliest first"
     page.locator("#sqlResult th", has_text="EventId").click()
     page.wait_for_function(f"({first})() === '4688'")
+    assert arrow.inner_text().strip() == "▼"
+    assert arrow.get_attribute("title") == "Sorted descending: Z to A, largest or latest first"
 
     # cleanup: untag
     page.evaluate("() => __winnow.showGridTab()")

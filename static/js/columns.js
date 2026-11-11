@@ -1,7 +1,7 @@
 /* Column layout: header rendering, drag-to-reorder, widths and autofit.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
-import { $, AUTOFIT_MAX_W_DEFAULT, GUTTER_W, api, debounce, el, nameMap, post, toast, toastAction } from './core.js';
+import { $, AUTOFIT_MAX_W_DEFAULT, GUTTER_W, api, debounce, el, nameMap, post, sortArrowTitle, toast, toastAction } from './core.js';
 import { columnMenuItems, opLabel } from './derived.js';
 import { columnFilterChips, openValuePicker, pickerTreeNode, removeColumnFilter, valueFilterEnabled } from './filters.js';
 import { render, setCellRange } from './grid.js';
@@ -431,8 +431,13 @@ export function renderHead() {
   // rid-ascending default), so that state shows the ▲.
   const lineLabel = el('span', 'label line-sort', 'Line');
   const lineDesc = S.sort.length === 1 && S.sort[0].column === '__line__' && S.sort[0].dir === 'desc';
-  if (!S.sort.length) lineLabel.append(el('span', 'sort', '▲'));
-  else if (lineDesc) lineLabel.append(el('span', 'sort', '▼'));
+  const lineArrow = (glyph, title) => {
+    const a = el('span', 'sort', glyph);
+    a.title = title;
+    return a;
+  };
+  if (!S.sort.length) lineLabel.append(lineArrow('▲', 'In original line order: the file’s first line at the top'));
+  else if (lineDesc) lineLabel.append(lineArrow('▼', 'In reverse line order: the file’s last line at the top'));
   lineLabel.title = 'Sort by original line order — click again for reverse';
   lineLabel.style.cursor = 'pointer';
   lineLabel.onclick = () => {
@@ -468,7 +473,10 @@ export function renderHead() {
     h.append(el('span', 'label', name));
     const si = S.sort.findIndex((s) => s.column === name);
     if (si >= 0) {
-      h.append(el('span', 'sort', (S.sort[si].dir === 'asc' ? '▲' : '▼') + (S.sort.length > 1 ? si + 1 : '')));
+      const { dir } = S.sort[si];
+      const arrow = el('span', 'sort', (dir === 'asc' ? '▲' : '▼') + (S.sort.length > 1 ? si + 1 : ''));
+      arrow.title = sortArrowTitle(dir, si + 1, S.sort.length);
+      h.append(arrow);
     }
     const colMetaEntry = columnMeta(name);
     if (colMetaEntry && colMetaEntry.derived) {

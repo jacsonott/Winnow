@@ -3,7 +3,7 @@
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { applyBundle, listBundles, summaryOf } from './bundles.js';
 import { PAGE_ID, awaitRestart, closePresence } from './connection.js';
-import { $, api, dragHas, el, post, setBusy, setCaseToken, switchCase, toast } from './core.js';
+import { $, api, dragHas, el, post, setBusy, setCaseToken, sortArrowTitle, switchCase, toast } from './core.js';
 import { pad2 } from './tsformat.js';
 import { loadPlugins, openImportModal, queueFiles } from './importer.js';
 import { inFlightWork, startJobsPoll } from './jobs.js';
@@ -648,6 +648,7 @@ export function openFolderBrowser(startPath, onSelect, onCancel, { mode = 'folde
         const on = filesMode && s.dataset.sort === sort.by;
         s.setAttribute('aria-pressed', String(on));
         s.dataset.dir = on ? sort.dir : '';
+        s.title = on ? sortArrowTitle(sort.dir) : `Sort by ${s.textContent.toLowerCase()}`;
       }
       // Built off-DOM: up to 2×BROWSE_LIST_CAP rows appended one at a time
       // into a live scroll container re-layouts on every append.

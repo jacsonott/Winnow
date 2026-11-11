@@ -159,9 +159,9 @@ From the default, the imported columns take the saved order, visibility, widths,
 
 ## Sorting
 
-Click a header to sort by that column, ascending; click again for descending. Shift-click another header to add it as a second sort key, or to flip its direction. With several sort keys, the ▲/▼ on each header carries its position in the order.
+Click a header to sort by that column, ascending; click again for descending. A sorted column's header shows ▲ for ascending (A to Z, smallest or earliest first) and ▼ for descending, the same way round as Excel and Windows Explorer. Hover over the arrow to see the order in words, for example *Sorted ascending: A to Z, smallest or earliest first*. Shift-click another header to add it as a second sort key, or to flip its direction. With several sort keys, the ▲/▼ on each header carries its position in the order, and its hover text says which key it is, for example *Sort key 2 of 3*.
 
-A table opens sorted by its first datetime column, ascending, if it has one. Click **Line** above the row numbers to go back to the original file order, and click it again for reverse file order.
+A table opens sorted by its first datetime column, ascending, if it has one. Click **Line** above the row numbers to go back to the original file order (▲, the file's first line at the top), and click it again for reverse file order (▼).
 
 How a column sorts depends on its type:
 
@@ -234,7 +234,7 @@ Grouping collapses a table into one heading per distinct value, with a row count
 - Drag another header into the strip to group within each group. The levels read left to right, separated by ›. Drag them to change their order, and ✕ removes one, putting its column back in the grid where it was.
 - While you drag a header or a level over the strip, a dashed placeholder shows where it will land, and the other levels move aside to make room. Let go anywhere in the strip, including just outside its border, and it lands there. A header dropped between two levels is inserted at that point rather than added at the end.
 - **+ Tag** adds a level that groups by tag: one group per tag plus one for untagged rows. A row with two tags appears under both, so these counts can add up to more than the view.
-- **Sort:** orders the groups at every level: **Count — most first** (the default), **Count — fewest first**, **Value — low to high** or **Value — high to low**.
+- **Sort:** orders the groups at every level: **Count — most first** (the default), **Count — fewest first**, **Value — low to high** or **Value — high to low**. The button shows the choice in short, with ↑ for ascending and ↓ for descending (**Sort: Count ↓**), and hovering over it shows the full name.
 - A datetime column groups by calendar day rather than by exact timestamp.
 - Each level shows at most 1,000 groups. When there are more, Winnow says it is showing the top ones.
 - With the histogram's **Groups** view on, the first few groups' headings get a colored swatch matching their bars in the histogram. See [The histogram](Filtering-and-searching.md#the-histogram).

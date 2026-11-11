@@ -244,6 +244,10 @@ Average ignore text that isn't a number. Filters use `is any of`,
 `is any of` and `is none of`, **(blank)** is an empty cell, whether the
 file had an empty value there or the row was too short to have one.
 
+Click a value's header to sort the rows by it, largest first (▾); click
+again for smallest first (▴), and a third time to put the rows back in
+their own order. Hovering over a sorted header says which order it is in.
+
 The top of **Filters** carries the case's tags as chips, and they work as
 the tag ribbon above the grid does (see [Tagging and notes](Tagging-and-notes.md)):
 click a tag to count only the rows carrying it, click a second one to add

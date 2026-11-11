@@ -79,6 +79,18 @@ export const el = (tag, cls, txt) => {
   return n;
 };
 
+/* A sort arrow's hover label: the order it stands for, in words. ▲ is
+   ascending and ▼ descending everywhere in Winnow (the way Excel, Windows
+   Explorer and most data grids draw them), but the opposite habit exists
+   too (▼ read as "A at the top, growing downward"), and analysts used to
+   it reported the arrows as backwards. The words settle it either way.
+   `key`/`of` place one column in a multi-column sort. */
+export function sortArrowTitle(dir, key = 1, of = 1) {
+  const how = dir === 'asc' ? 'ascending: A to Z, smallest or earliest first'
+    : 'descending: Z to A, largest or latest first';
+  return of > 1 ? `Sort key ${key} of ${of}, ${how}` : `Sorted ${how}`;
+}
+
 /* ------------------------------------------------------------------ net */
 
 /* Every non-GET call carries this header — it's what the server's CSRF
