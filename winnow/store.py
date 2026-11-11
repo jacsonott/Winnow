@@ -2278,45 +2278,129 @@ def _json_column_plan(keys: list[str]) -> tuple[list[str], Callable[[dict], list
     return sanitize_columns(kept + [JSON_OVERFLOW_COLUMN]), row_of
 
 
+JSON_LINES_EXTENSIONS = (".jsonl", ".ndjson")
+# How much of the start of any other JSON file _json_file_is_lines reads
+# to tell JSON Lines from one document — the encoding probe's size, so
+# the one read answers both. Records are rarely a fraction of this; a
+# first line longer than all of it is _json_lines_after_all's case.
+JSON_SHAPE_PROBE_BYTES = ENCODING_PROBE_BYTES
+# Non-blank lines of that head it tries to parse, at most.
+_JSON_SHAPE_PROBE_LINES = 20
+
+
+def _parses_alone(line: str) -> bool:
+    try:
+        _json_loads(line)
+    except ValueError:      # JSONDecodeError, including "nested too deeply"
+        return False
+    return True
+
+
+def _head_is_json_lines(text: str, complete: bool) -> bool:
+    """Whether `text`, the start of a file (all of it if `complete`), is
+    JSON Lines rather than one JSON document: its first line is a whole
+    JSON value with more after it, or two non-blank lines in a row each
+    are one. Neither can happen in a valid document — JSON values end
+    where they end, strings can't span lines, and two values in a row
+    need a comma between them — so this never takes a document json
+    would have read. The second rule is for a file whose first line is
+    broken (a write cut off, a header line some tool puts on top): it
+    reads as JSON Lines, and that line is counted as unreadable."""
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    cut = "" if complete else lines.pop()    # may end past the head
+    whole = [ln.strip() for ln in lines if ln.strip()][:_JSON_SHAPE_PROBE_LINES]
+    prev = False
+    for i, line in enumerate(whole):
+        ok = _parses_alone(line)
+        if ok and (prev or (i == 0 and (len(whole) > 1 or cut.strip()))):
+            return True
+        prev = ok
+    return False
+
+
+def _json_file_is_lines(path: str) -> bool:
+    """`.jsonl` and `.ndjson` are JSON Lines by name. A `.json` is asked
+    its first lines (_head_is_json_lines): plenty of tools write JSON
+    Lines under `.json` (Velociraptor, cloud audit-log exports, `jq -c`),
+    and read as one document those failed at line 2 with "Extra data"."""
+    if os.path.splitext(path)[1].lower() in JSON_LINES_EXTENSIONS:
+        return True
+    try:
+        with open(path, "rb") as f:
+            raw = f.read(JSON_SHAPE_PROBE_BYTES)
+            complete = len(raw) < JSON_SHAPE_PROBE_BYTES or not f.read(1)
+    except OSError:
+        return False
+    # errors="replace", not TEXT_DECODE_ERRORS: the cp1252 fallback count
+    # is the import's report of what it read, and this read is not it.
+    enc = _encoding_for_head(raw, complete)
+    text = codecs.getincrementaldecoder(enc)(errors="replace").decode(raw, final=complete)
+    return _head_is_json_lines(text, complete)
+
+
+def _json_lines_after_all(text: str, e: json.JSONDecodeError) -> bool:
+    """Whether a document that failed to parse is JSON Lines the head
+    probe couldn't see: its first value fills one line and the "extra
+    data" json stopped at starts on a later one — a first line longer
+    than JSON_SHAPE_PROBE_BYTES. A pretty-printed value followed by
+    another is not, and keeps json's own error."""
+    if e.msg != "Extra data":
+        return False
+    first = text[:e.pos].rstrip()
+    return "\n" in text[len(first):e.pos] and "\n" not in first.strip()
+
+
+def _iter_json_lines(lines: Iterable[str], bad: dict | None) -> Iterator[dict]:
+    for lineno, line in enumerate(lines, start=1):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = _json_loads(line)
+        except json.JSONDecodeError as e:
+            # Same philosophy as CSV's ragged rows: one broken line
+            # (a truncated write, a log rotation seam) must not cost
+            # the analyst the million good lines around it. Counted
+            # and reported, never silent — and if the CALLER passes
+            # no collector (bad=None), the old raise stands, with
+            # the FILE line number the analyst needs rather than
+            # json's useless "line 1" of the single line.
+            if bad is None:
+                raise ValueError(f"Line {lineno}: {e.msg}") from e
+            bad["count"] += 1
+            if bad["count"] == 1:
+                bad["first_line"], bad["first_error"] = lineno, e.msg
+            continue
+        yield obj if isinstance(obj, dict) else {"value": obj}
+
+
 def _iter_json_records(path: str, bad: dict | None = None) -> Iterable[dict]:
-    """Yields one dict per record. `.jsonl`/`.ndjson` (one JSON value per
-    line — the genuinely streamable shape, never loaded fully into memory)
-    vs a single `.json` document (a JSON array of records, a single record
-    object, or — tolerated rather than rejected — a bare scalar/array of
-    scalars, wrapped as {"value": ...} so it still lands as one column
-    instead of erroring out). A whole `.json` document has to be parsed in
-    one shot (no generic streaming parser in the standard library), so
-    unlike CSV/JSONL ingest, memory use scales with file size for that
-    shape — acceptable at the scale this tool already targets (CLAUDE.md's
-    "Known limits" already documents ingest as not built for huge files
-    without extra tooling)."""
-    ext = os.path.splitext(path)[1].lower()
-    if ext in (".jsonl", ".ndjson"):
+    """Yields one dict per record. JSON Lines (one JSON value per line —
+    the genuinely streamable shape, never loaded fully into memory: any
+    `.jsonl`/`.ndjson`, and a `.json` whose content is that shape, see
+    _json_file_is_lines) vs a single `.json` document (a JSON array of
+    records, a single record object, or — tolerated rather than rejected —
+    a bare scalar/array of scalars, wrapped as {"value": ...} so it still
+    lands as one column instead of erroring out). A whole `.json` document
+    has to be parsed in one shot (no generic streaming parser in the
+    standard library), so unlike CSV/JSONL ingest, memory use scales with
+    file size for that shape — acceptable at the scale this tool already
+    targets (CLAUDE.md's "Known limits" already documents ingest as not
+    built for huge files without extra tooling)."""
+    if _json_file_is_lines(path):
         with open(path, "r", encoding=sniff_text_encoding(path), errors=TEXT_DECODE_ERRORS) as f:
-            for lineno, line in enumerate(f, start=1):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = _json_loads(line)
-                except json.JSONDecodeError as e:
-                    # Same philosophy as CSV's ragged rows: one broken line
-                    # (a truncated write, a log rotation seam) must not cost
-                    # the analyst the million good lines around it. Counted
-                    # and reported, never silent — and if the CALLER passes
-                    # no collector (bad=None), the old raise stands, with
-                    # the FILE line number the analyst needs rather than
-                    # json's useless "line 1" of the single line.
-                    if bad is None:
-                        raise ValueError(f"Line {lineno}: {e.msg}") from e
-                    bad["count"] += 1
-                    if bad["count"] == 1:
-                        bad["first_line"], bad["first_error"] = lineno, e.msg
-                    continue
-                yield obj if isinstance(obj, dict) else {"value": obj}
+            yield from _iter_json_lines(f, bad)
         return
     with open(path, "r", encoding=sniff_text_encoding(path), errors=TEXT_DECODE_ERRORS) as f:
-        data = _json_load(f)
+        text = f.read()
+    try:
+        data = _json_loads(text)
+    except json.JSONDecodeError as e:
+        if not _json_lines_after_all(text, e):
+            raise
+        # Already read whole, so it is read from memory, not again from disk.
+        yield from _iter_json_lines(io.StringIO(text), bad)
+        return
     if isinstance(data, list):
         for obj in data:
             yield obj if isinstance(obj, dict) else {"value": obj}

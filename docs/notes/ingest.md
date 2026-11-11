@@ -188,6 +188,29 @@ see [docs/notes/README.md](README.md) for the whole set.
   line (each pass); a single `.json` document has to be `json.load()`ed
   whole (no generic streaming parser in the standard library) — memory use
   scales with file size for that shape specifically.
+  **A `.json` is read by its content, not its name** (`_json_file_is_lines`):
+  Velociraptor, cloud audit-log exports and `jq -c` all write JSON Lines
+  as `.json`, and read as one document those failed at line 2 with
+  "Extra data". The first `JSON_SHAPE_PROBE_BYTES` (the encoding probe's
+  1 MiB) decide: JSON Lines when the first non-blank line is a whole
+  JSON value with more after it, or two non-blank lines in a row each
+  are one (`_head_is_json_lines`). Neither can happen in a document json
+  would accept — values end where they end, strings can't span lines,
+  and two values in a row need a comma — so the check never takes a
+  valid document away from the document reader; that is the property to
+  keep if it is ever loosened (a fuzz over pretty-printed random
+  documents flagged none). The second rule is what lets a file whose
+  FIRST line is broken (a cut-off write, a tool's header line) still
+  read as lines, with that line counted bad. A first line longer than
+  the whole probe can't be judged from it, so the document read catches
+  it instead: json's "Extra data" after a value that sat on one line,
+  with the extra starting on a later line, re-reads the text already in
+  memory as lines (`_json_lines_after_all`). Pretty-printed values back
+  to back also stop at "Extra data" but keep that error — line by line
+  they would only be every line unreadable. `.jsonl`/`.ndjson` are
+  never asked: lines by name, as before. The probe decodes with
+  `errors="replace"`, not `TEXT_DECODE_ERRORS`, because the cp1252
+  fallback count is the import's report of what it read.
   **The column set is capped at `JSON_MAX_COLUMNS` (1,000).** SQLite
   refuses a table past 2,000 columns, and ONE record with more keys than
   that (attacker-chosen HTTP header names, an environment dump) failed
