@@ -17,7 +17,9 @@
    hidden from the header, pinned with Alt-click or reordered by dragging
    a header shows here without a second set of call sites to keep in
    step. syncTabChrome calls it too, for the page tabs, which change what
-   is on screen without touching the layout.
+   is on screen without touching the layout, and so does loadSources when
+   no table is left to open (the last tab closed, the open table removed,
+   a case with nothing open), which never reaches renderHead.
 
    Whether it is open, and how much of the sidebar it takes, are
    per-browser preferences in winnow.sidebar, beside the sidebar's own
@@ -283,7 +285,9 @@ export function syncColumnDock() {
   const available = dockAvailable();
   dock.body.hidden = !available;
   dock.empty.hidden = available;
-  dock.empty.textContent = S.activeTab === 'grid'
+  // "Go back to a table" only when there is one to go back to: with the
+  // last tab closed or removed, a page tab has none behind it either.
+  dock.empty.textContent = S.activeTab === 'grid' || S.sourceId == null
     ? 'Open a table to list its columns here.'
     : 'The columns of the table you are looking at are listed here. Go back to a table to see them.';
   if (!available) { dock.count.textContent = ''; return; }
