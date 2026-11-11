@@ -752,6 +752,42 @@ see [docs/notes/README.md](README.md) for the whole set.
   the name would show a table the import then would not build.
   tests/test_tsv_delimiter.py.
 
+- **A typed delimiter longer than one character is split as written, not
+  by csv** (`check_delimiter`, `_LiteralRows`, `_delimited_rows`). The
+  import window's **Custom** (and folder import's *Split other text on*)
+  takes any text, for the log no reader claims whose fields are set off
+  by `" | "`, `" - "` or `"::"`. csv takes exactly one character, so one
+  character still goes to csv — quotes group a field, which is what makes
+  a space work on an access log's `"GET / HTTP/1.1"` — and anything
+  longer goes to `_LiteralRows`, which is three deliberate differences:
+
+  - **Quotes are ordinary characters.** A log line carries a lone `"`
+    routinely (a failed password for `"admin`), and in csv that opens a
+    field that swallows every line up to the next quote (see the
+    unbalanced-quote entry below). A literal split can't do that.
+  - **A line ends at `\n` alone**, as raw text's does (`_text_line`; the
+    file is opened with `newline="\n"` when the delimiter is longer than
+    one character, `""` otherwise). A `\r` in a logged value forged a row
+    in raw text once; a log split on a delimiter is the same evidence.
+  - **A longer line keeps its extra fields in its last column** (`fit`,
+    told the width once the header or first row is read, then
+    `str.split(delim, width - 1)`). csv's ragged rows are trimmed to the
+    first row's width, and a log's last field — the message — is exactly
+    the one that holds the delimiter by accident, so trimming would cut
+    evidence off. A shorter line is padded and counted ragged, as csv's.
+
+  Both `ingest_csv` and `preview_csv_text` go through `_delimited_rows`,
+  so the preview is the table the import builds. A delimiter neither
+  reader could split on is refused in words before anything is made —
+  empty, holding a line break (csv refuses those, and a line is what's
+  being split), the double quote alone (csv's quote character), and NUL
+  or the two noncharacters `_csv_rows` uses to carry NULs past 3.10's
+  parser. The job routes check it in `_ingest_job_options`, so a bad one
+  is a 400 the window shows rather than a job that starts and fails.
+  `sources.ingest` records the delimiter used, so a session re-import
+  splits the same way. tests/test_custom_delimiter.py,
+  tests/ui/test_custom_delimiter_ui.py.
+
 - **UTF-16 is a routine input, not an edge case.** Windows PowerShell
   5.1's `Out-File`/`>` write UTF-16LE by default. Decoded as
   utf-8-sig-with-replacement, the header becomes NUL-riddled garbage and

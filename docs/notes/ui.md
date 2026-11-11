@@ -1912,8 +1912,22 @@ see [docs/notes/README.md](README.md) for the whole set.
     filter, as in Import a folder, not a fixed set of sections.
   - **No intro line.** The empty queue's pane says what to drop and what
     imports; a full one has no line to spare.
+  - **Custom is a mode, not a value** (`delim_mode`, `custom_text` on the
+    queue item; `delimKey` reads them). Which button is pressed can't be
+    worked out from `delimiter` alone: typing `,` into the box would light
+    Comma and hide the box under the caret. The box is hidden with
+    `visibility`, not taken out, so choosing Custom doesn't move the
+    preview. It starts from what the file is split on now (the last
+    preview's `delimiter`), so a detected pipe is two keystrokes from
+    `" | "`. Spaces show as ␣ and tabs as ⇥ in the hint and the foot line
+    (`showDelim`), because `" | "` and `"|"` look alike in a box.
+  - **One line per row has a door to columns**: *Split each line on a
+    delimiter…* switches to Delimited on Custom with the box focused and
+    the header off, since a log rarely has one. The Read as switch to
+    Delimited keeps its old defaults (auto-detect, header on).
   tests/ui/test_import_queue_ui.py, test_iis_queue.py,
-  test_utmp_queue.py, test_xlsx_picker_ui.py, test_text_import_ui.py.
+  test_utmp_queue.py, test_xlsx_picker_ui.py, test_text_import_ui.py,
+  test_custom_delimiter_ui.py.
 - **The home screen's case list is the Tables manager's frame too**
   (`renderHome`, `homeSections`, `buildCasesPane` in home.js; `.home-*`
   in style.css). Sections down the side: Recent (opened in the last 30

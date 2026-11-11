@@ -3518,6 +3518,11 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .import-subfolders { display: flex; align-items: center; gap: 6px; margin: -2px 0 8px 160px; font-size: 12px; color: var(--text); cursor: pointer; }
 .import-types { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; gap: 4px; }
 .import-types .btn { font-family: var(--mono); font-size: 11px; padding: 3px 8px; }
+/* How the * type's files are split, under the types it belongs to. */
+.derived-row.import-text-split { margin: -2px 0 8px; }
+.import-text-split input.import-delim-custom { flex: 0 1 200px; min-width: 90px; padding: 3px 6px; font-family: var(--mono); font-size: 12px; }
+.import-text-split.off .derived-row-label, .import-text-split.off .import-check { color: var(--dim); }
+.import-text-split .import-check:has(input:disabled) { color: var(--dim); cursor: default; }
 .derived-row.import-top { align-items: flex-start; }
 .import-top > .derived-row-label { padding-top: 4px; }
 .import-patterns { flex: 1; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; }
@@ -3573,6 +3578,9 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .import-pane .mb-seg button { font-size: 11.5px; padding: 3px 10px; }
 .import-check { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text); cursor: pointer; }
 .import-pane .derived-row input.import-depth { flex: 0 0 64px; padding: 3px 6px; }
+/* The Custom delimiter box: monospace, so " | " shows its spaces. */
+.import-pane .derived-row input.import-delim-custom { flex: 0 1 170px; min-width: 90px; padding: 3px 6px; font-family: var(--mono); font-size: 12px; }
+.import-pane .btn.import-split { font-size: 11.5px; padding: 3px 10px; }
 .import-note { margin: 2px 0 4px; line-height: 1.45; }
 .import-settings > .import-note:only-child { margin: 0; }
 .import-preview-aside { margin-left: auto; font-size: 11px; color: var(--dim); }
