@@ -248,7 +248,7 @@ line per row* and so on. **Filter queued files…** narrows a long queue, and
 | --- | --- |
 | **File** | Its name, the folder it is in, its size, and *read in place* (added from this machine) or *uploaded when it imports*. |
 | **Read as** | Only for a file that can be read more than one way: **Delimited**, **One line per row** or **Key=value** for delimited and other text; **JSON** or **One line per row**; **IIS log**, **Delimited** or **One line per row**; **Key=value**, **Delimited** or **One line per row** for a [key=value log](#fortigate-and-other-fortinet-logs); **Login records** or **One line per row** for [Linux login records](#linux-login-records-wtmp-btmp-utmp); a plugin's format or **One line per row** for an uploaded file a plugin claims. |
-| Settings | The reader's own: **Delimiter** and **Header**, JSON's **Nested objects**, an IIS log's **Format**, a plugin format's options. Plaso files, login records, key=value logs and archives have none. |
+| Settings | The reader's own: **Delimiter** (with **Custom** for one you type) and **Header**, JSON's **Nested objects**, an IIS log's **Format**, a plugin format's options. A file read one line per row has **Split each line on a delimiter…**. Plaso files, login records, key=value logs and archives have none. |
 | **Preview** | The first 50 rows as they will import, a type picker in each column's heading where the type can be set, and a line under it saying what was detected. A SQLite file or workbook lists its **Tables** or **Sheets** here instead, to tick. |
 
 A setting is kept as you change it, and choosing another file keeps it, so
@@ -325,12 +325,36 @@ tab first, if it is on every sampled line, then comma, semicolon or pipe.
 The line under the file's preview says what was found
 (*Comma-delimited (detected) · 12 columns · first 50 rows*), and
 **Delimiter** overrides it (**Auto-detect**, **Comma**, **Tab**,
-**Semicolon**, **Pipe**). **Read as** → **One line per row** reads the file as
+**Semicolon**, **Pipe**, **Space**, **Custom**). **Read as** → **One line per row** reads the file as
 [raw text](#plain-text-and-log-files) instead. KAPE writes some delimited
 output as `.txt`, so `.txt` comes here by default; a `.txt` log wants
 **One line per row**, unless it is a
-[key=value log](#fortigate-and-other-fortinet-logs), which is recognised by
+[key=value log](#fortigate-and-other-fortinet-logs), which is recognized by
 its first line.
+
+**Custom delimiter.** **Custom** splits on whatever you type in the box beside
+it: a caret, two colons, a pipe with a space on each side, a dash with a space
+on each side. Below, `␣` stands for a space, as it does in the Import window:
+the line under the preview shows spaces as `␣` and tabs as `⇥`, because
+`␣|␣` and `|` look alike in a box. The box starts with what the file is split
+on now, so a detected pipe becomes `␣|␣` by typing a space on each side, and
+it keeps what you typed if you try a preset and come back.
+
+- **One character** splits the way the presets do: a field in double quotes is
+  one field, delimiters and all. That is what makes **Space** work on a web
+  access log, where `"GET /index.html HTTP/1.1"` stays in one column.
+- **More than one character** splits each line exactly where the text appears
+  (*Split on ␣|␣ as written, quotes not special*). A double quote is an
+  ordinary character, so a stray one in a log line can't run into the lines
+  after it. A line with more fields than the first keeps the rest in its last
+  column, delimiters included, rather than losing them: split on `␣|␣` under a
+  three-field first line, `08:14:11␣|␣WARN␣|␣failed␣|␣attempt 2` has
+  `failed␣|␣attempt 2` as its last field. A line with fewer fields is padded
+  with empty cells, as in any delimited file.
+
+A delimiter can't be empty, hold a line break or a NUL character, or be a
+double quote on its own (that marks quoted fields); the preview says so in
+red, and the file can't import with it.
 
 **Header.** **First row is headers** is on by default, and the first
 non-blank line is the header. Off, columns are named `col_1`, `col_2`… and
@@ -639,6 +663,19 @@ so a carriage return inside a logged value can't fake an extra row. Binary
 files are refused. **Read as** → **One line per row**, in the pane of any
 file that has a **Read as**, forces that file into this reader.
 
+**Splitting a log into columns.** When the log's fields are set off by
+something, such as the pipes in `2026-11-02 08:14:03 | INFO | auth | session opened`,
+choose **Split each line on a delimiter…** in its pane. The file is read as
+[delimited text](#csv-tsv-and-other-delimited-text) with **Custom** chosen,
+the box to type in ready, and **First row is headers** off, since a log
+rarely has one. Type the delimiter (a space, a pipe and a space here) and the
+preview splits as you type; the columns are named `col_1`, `col_2`… unless
+you turn the header on. Any delimiter you can type works, including ones
+longer than one character (see
+[Custom delimiter](#csv-tsv-and-other-delimited-text)).
+In [folder import](#folders-and-kape-output), **Split other text on** does
+the same for every file the **other text files** type brings in.
+
 ### Archives
 
 `.zip`, `.tar`, `.tgz`/`.tar.gz`, `.tbz2`/`.tar.bz2` and `.txz`/`.tar.xz`
@@ -700,6 +737,11 @@ right. It stays the same size whatever you pick or the scan finds.
    **other text files** on, a binary file holding login records under another
    name is read as one instead of excluded as `binary`.
    **Include subfolders** (on) walks the tree.
+   **Split other text on** is how the **other text files** type's files are
+   read: blank, one line per row; with a delimiter typed, split on it as the
+   Import window's [Custom delimiter](#csv-tsv-and-other-delimited-text)
+   does, with **First row is headers** off unless you tick it. It is off
+   while **other text files** is, and it doesn't change which files match.
 4. Narrow with **Patterns**: **Include** and **Exclude**, one glob per line,
    case-insensitive. A pattern containing `/` matches the path from the
    chosen folder (`RegistryHives/*`); one without matches the file name
@@ -723,9 +765,9 @@ SQLite files and workbooks are never picked up and archives in the folder are
 not expanded; import those on their own. The scan stops at 5,000 files and
 says so.
 
-**Profiles.** **Save as profile…** stores the file types, patterns and
-subfolder choice under a name, for every case on this machine, and lists it
-under **Profiles**. With a profile chosen, **Update profile** saves your
+**Profiles.** **Save as profile…** stores the file types, patterns,
+subfolder choice and how other text files are split under a name, for every
+case on this machine, and lists it under **Profiles**. With a profile chosen, **Update profile** saves your
 changes to it and **Delete profile** removes it; what it held stays on
 screen under **Custom (not saved)**.
 

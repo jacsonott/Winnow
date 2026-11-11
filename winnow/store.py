@@ -1833,6 +1833,81 @@ def _csv_rows(lines: Iterable[str], delimiter: str, *, escape_nul: bool | None =
     return reader, rows()
 
 
+def check_delimiter(delimiter: str | None) -> None:
+    """Refuse a delimiter no import could split on, with words the
+    import window can show. None is fine (it asks for a sniff).
+
+    Any other text is a delimiter: one character goes to the csv reader
+    the presets use, more than one to _LiteralRows. What's refused can't
+    work either way — a line break (a line is what a delimiter splits,
+    and csv refuses one too), the double quote alone (it's the quote
+    character, and csv refuses that pair as well), and NUL and the two
+    noncharacters _csv_rows uses to carry NULs past 3.10's parser, which
+    a delimiter holding one would scramble."""
+    if delimiter is None:
+        return
+    if not isinstance(delimiter, str) or delimiter == "":
+        raise ValueError("The delimiter is empty: type the character or characters to split on")
+    if "\n" in delimiter or "\r" in delimiter:
+        raise ValueError("A delimiter can't hold a line break: each line is what it splits")
+    if delimiter == '"':
+        raise ValueError('The double quote (") marks quoted fields, so it can\'t be the delimiter on its own')
+    if any(c in delimiter for c in ("\0", _NUL_ESC, _NUL_MARK)):
+        raise ValueError("A delimiter can't hold a NUL character")
+
+
+class _LiteralRows:
+    r"""Rows from lines split on a delimiter longer than one character
+    (" | ", "||", " :: "), which the csv module can't take — it wants
+    exactly one character. The line is split as written: quotes are not
+    special, so a stray " in a log line can't swallow the lines after it
+    the way it can in csv (docs/notes/ingest.md). A line ends at \n and
+    nowhere else, as in raw text (_text_line, and the file is opened with
+    newline="\n"), so a \r inside a logged value can't forge a row.
+
+    Once the table's width is known (`fit`, from the header or first
+    row), a longer line is split that many times and no more: what's left
+    stays in the last column with its delimiters, rather than being cut
+    off the way csv's ragged rows are trimmed. A log's message is the
+    last field and the one that holds the delimiter by accident.
+
+    `line_num` counts lines read, as csv.reader's does."""
+
+    def __init__(self, lines: Iterable[str], delimiter: str):
+        self._lines = iter(lines)
+        self._delimiter = delimiter
+        self._maxsplit = -1
+        self.line_num = 0
+
+    def fit(self, ncols: int) -> None:
+        self._maxsplit = max(ncols - 1, 0)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self) -> list[str]:
+        line = next(self._lines)
+        self.line_num += 1
+        return _text_line(line).split(self._delimiter, self._maxsplit)
+
+
+def _delimited_rows(lines: Iterable[str], delimiter: str):
+    """`(reader, rows)` for any delimiter: _csv_rows for one character,
+    _LiteralRows for more. The reader is returned for its line_num, and
+    for `fit` when it has one."""
+    if len(delimiter) == 1:
+        return _csv_rows(lines, delimiter)
+    reader = _LiteralRows(lines, delimiter)
+    return reader, reader
+
+
+def _fit_rows(reader, ncols: int) -> None:
+    """Tell a _LiteralRows reader the table's width once it is known; a
+    csv reader has nothing to be told."""
+    if isinstance(reader, _LiteralRows):
+        reader.fit(ncols)
+
+
 def _first_nonblank_row(reader: Iterable[list[str]]) -> list[str]:
     """The first row with anything in it — the header, or (without one)
     the row that fixes the table's width. Leading blank rows are skipped:
@@ -5062,14 +5137,19 @@ class Store:
         succeeded before it.
         """
         name = name or os.path.basename(path)
+        check_delimiter(delimiter)
         size = os.path.getsize(path)
         file_hash = self._quick_hash(path)
 
         # 1 MB read buffer: the default 8 KB means a 20 GB file is ~2.5M
-        # read() syscalls before the csv layer even sees a byte.
+        # read() syscalls before the csv layer even sees a byte. A
+        # delimiter of more than one character splits lines as written
+        # (_LiteralRows), and a line there ends at \n alone, as raw text's
+        # does; csv wants newline="" and finds its own line ends.
+        literal = delimiter is not None and len(delimiter) > 1
         encoding = sniff_text_encoding(path)
         fh = open(path, "r", encoding=encoding, errors=TEXT_DECODE_ERRORS,
-                  newline="", buffering=1 << 20)
+                  newline="\n" if literal else "", buffering=1 << 20)
         head = fh.read(SNIFF_HEAD_CHARS)
         fh.seek(0)
         fallback0 = _cp1252_fallback_count()   # after the seek: the head is read twice
@@ -5078,7 +5158,7 @@ class Store:
             # override and may carry no extension at all, and the
             # extension is the whole point here.
             delimiter = self._sniff(head, path)
-        reader, rows = _csv_rows(fh, delimiter)
+        reader, rows = _delimited_rows(fh, delimiter)
 
         # Everything up to the row loop's own try/finally closes the file
         # on the way out too — a failure here used to leak the handle.
@@ -5092,6 +5172,7 @@ class Store:
                 ncols = len(first_row)
                 cols = sanitize_columns([None] * ncols)
                 leftover_row = first_row  # not a header — it's the first data row
+            _fit_rows(reader, ncols)
 
             with self.lock, self.db:
                 cur = self.db.execute(
@@ -5648,9 +5729,12 @@ class Store:
         `name` is the file's name, and it has to be passed: the preview and
         the ingest must reach the same delimiter or the analyst agrees to
         one table and gets another."""
+        check_delimiter(delimiter)
         if delimiter is None:
             delimiter = self._sniff(text[:SNIFF_HEAD_CHARS], name)
-        _, rows = _csv_rows(io.StringIO(text), delimiter)
+        # StringIO's lines end at \n alone, which is what _LiteralRows
+        # wants; csv finds its own line ends either way.
+        reader, rows = _delimited_rows(io.StringIO(text), delimiter)
         first_row = _first_nonblank_row(rows)
         if has_header:
             cols = sanitize_columns(first_row)
@@ -5660,6 +5744,7 @@ class Store:
             ncols = len(first_row)
             cols = sanitize_columns([None] * ncols)
             leftover_row = first_row
+        _fit_rows(reader, ncols)
 
         sample: list[list[str]] = []
         for row in itertools.chain([leftover_row] if leftover_row is not None else [], rows):
