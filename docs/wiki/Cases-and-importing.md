@@ -307,8 +307,10 @@ binary. Run EVTX through EvtxECmd first; save an `.xls` as `.xlsx` in Excel.
 
 Every column is stored as text. Winnow guesses a type for each from its
 first 500 rows — text, number or datetime: number columns sort numerically,
-and datetime columns are the ones the Timeframe filter, Histogram and
-Timeline use. The type is fixed at import (the delimited-text preview can
+datetime columns sort chronologically and are the ones the Timeframe
+filter, Histogram and Timeline use. A column is recognized as datetime when
+its values look like `2024-01-05 13:22:01`, `1/5/2024 1:22:01 PM` or
+`Jan 5 2024 13:22:01`. The type is fixed at import (the delimited-text preview can
 change it); to get a real datetime out of an epoch or other encoded value,
 add a [derived column](Derived-columns.md).
 

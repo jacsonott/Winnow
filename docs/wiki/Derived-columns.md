@@ -145,8 +145,11 @@ exactly those rows.
 
 Every timestamp operation writes the same shape: `YYYY-MM-DD HH:MM:SS`,
 with a six-digit fraction (`.ffffff`) when the source carries sub-second
-precision. That is what makes the column sort correctly as text and line
-up with every other datetime column in the case. How it is *displayed* is
+precision. That is what makes the column sort correctly as text, from an
+index, and line up with every other datetime column in the case. A column
+the import already recognized as datetime (US-style `1/5/2024 1:22:01 PM`,
+for one) sorts chronologically without one; deriving it is still worth it
+for a very large table you sort often, since an ISO column sorts faster. How it is *displayed* is
 a separate choice: right-click the header to pick a display format, or set
 the default in [Settings](Settings-and-shortcuts.md).
 

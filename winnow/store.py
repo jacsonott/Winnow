@@ -3553,6 +3553,9 @@ class Store:
         self._histogram_widths: dict[tuple, int] = {}
         # _column_is_date_led's answers, (source_id, column) -> bool.
         self._date_led: dict[tuple[int, str], bool] = {}
+        # _text_sorts_by_time's answers, (source_id, column) -> bool. Same
+        # reasoning: a source table's values never change after import.
+        self._text_sorts_by_time_cache: dict[tuple[int, str], bool] = {}
         self._histogram_widths_lock = threading.Lock()
         # time_histogram's answers by the ROWS a view holds rather than by
         # view id, so a sort or a filter cleared back to the whole table
@@ -4062,12 +4065,18 @@ class Store:
         first sort with no index sorts every row while the index builds
         beside it, for the writer lock: 5.6 s on that EvtxECmd table, 11 to
         14 s on a 4.3M-row MFTECmd one, against 0.8 s once it exists. On
-        the EvtxECmd table it costs 2.4 s of import."""
+        the EvtxECmd table it costs 2.4 s of import. A first datetime
+        column whose text is not in time order (US dates, month names)
+        gets none, since its sort is by time and no index serves that
+        (_text_sorts_by_time)."""
         src = self._source_lite(source_id)
         table = src["table_name"]
         wanted = [(col, "filter") for col in self._shape_index_columns(src)]
         when = next((c["name"] for c in self._base_cols(src) if c["type"] == "datetime"), None)
-        if when is not None:
+        # Not for a column whose text is not in time order (a US date): it
+        # sorts by time through an expression (_sort_keys), which no index
+        # serves, so the index would be import time spent for nothing.
+        if when is not None and self._text_sorts_by_time(src, when):
             wanted.append((when, "sort"))
         for col, purpose in wanted:
             col = self._table_spelling(table, col)
@@ -10234,15 +10243,17 @@ class Store:
         lock before it has a handle to mint."""
         src = self._source_lite(source_id)
         colnames = {c["name"]: c["type"] for c in src["columns"]}
-        order = self._compile_order(spec, colnames)
-        # Only non-numeric sort columns: _compile_order emits a plain
-        # `col COLLATE NOCASE` for those, which a background index can
-        # serve; a numeric sort goes through _numeric_expr, a functional
-        # expression a plain index can't match (see
-        # _ensure_sort_index_building).
+        by_time = self._time_sort_columns(src, spec, colnames)
+        order = self._compile_order(spec, colnames, by_time)
+        # Only the sort columns _compile_order emits as a plain
+        # `col COLLATE NOCASE`, which a background index can serve. A
+        # numeric sort goes through _numeric_expr and a timestamp sorted by
+        # time through ts_normalize_sql, functional expressions a plain
+        # index can't match (see _ensure_sort_index_building).
         sort_cols = [
             s.get("column") for s in (spec.get("sort") or [])
             if s.get("column") in colnames and colnames[s.get("column")] != "number"
+            and s.get("column") not in by_time
         ]
         # __line__ asc IS the virtual root's order, so it deliberately does
         # NOT count as a sort (keeps the no-materialize fast path); only the
@@ -10350,7 +10361,7 @@ class Store:
                 # rule), so the INSERT still assigns pos in sorted order.
                 # With no sort keys (rid order, or the Line column) the
                 # compound is already (member id, rid) and goes in as is.
-                keys, merge_order = self._compile_merge_order(spec, colnames)
+                keys, merge_order = self._compile_merge_order(spec, colnames, by_time)
                 union_sql = union("".join(f", {k}" for k in keys))
                 select = (f"SELECT {sid_col}, rid FROM ({union_sql} {merge_order})" if keys
                           else f"{union_sql} {merge_order}")
@@ -11184,6 +11195,70 @@ class Store:
             cache[key] = odd is None
         return cache[key]
 
+    # Rows read from each end of a table by _text_sorts_by_time.
+    _TIME_SORT_SAMPLE = 256
+
+    def _time_sort_columns(self, src: dict, spec: dict, colnames: dict) -> frozenset[str]:
+        """The datetime columns in `spec`'s sort that must sort by time
+        rather than by their text (_sort_keys), because some table they
+        are read from stores them in a shape whose text order is not time
+        order: a US date, a month name. "11/3/2026" sorted as text lands
+        before "12/1/2025", which is what a recognized timestamp column
+        did before this, however its display format was set.
+
+        A derived datetime column is canonical ISO by construction
+        (timeparse), so it never needs it. On a merge each member is
+        judged on its own copy of the column, and one member that needs
+        it sorts the whole merge by time, since a single ORDER BY orders
+        every member's rows against each other."""
+        wanted = [s.get("column") for s in (spec.get("sort") or [])
+                  if colnames.get(s.get("column")) == "datetime"
+                  and not self._is_derived(src, s.get("column"))]
+        if not wanted:
+            return frozenset()
+        if not src.get("is_merge"):
+            return frozenset(c for c in wanted if not self._text_sorts_by_time(src, c))
+        by_col = {c["name"]: c for c in src["columns"]}
+        out = set()
+        for m in self._resolve_members(src["id"]):
+            msrc, keys = m["src"], _member_keys(m["src"])
+            for col in wanted:
+                own = _member_column(msrc, by_col[col], keys)
+                if (col not in out and own is not None and not self._is_derived(msrc, own)
+                        and not self._text_sorts_by_time(msrc, own)):
+                    out.add(col)
+        return frozenset(out)
+
+    def _text_sorts_by_time(self, src: dict, column: str) -> bool:
+        """Whether a real table's datetime column holds text that already
+        sorts in time order: every value starts with a YYYY-MM-DD date
+        (_DATE_LED_GLOB), the ISO shape EvtxECmd, MFTECmd and most tools
+        write. Those keep sorting as text, which the COLLATE NOCASE index
+        the first datetime column gets at import serves, so the common
+        case costs nothing new.
+
+        Judged on the first and last _TIME_SORT_SAMPLE rows rather than
+        every row, so the answer costs two short reads by rid instead of a
+        scan of a column that may have millions of values (the column's
+        datetime type was itself inferred from a sample at import). Both
+        ends, so a file built by appending one export to another is still
+        caught. A column that holds ISO at both ends and a US date in the
+        middle sorts as text, as every datetime column did before. Cached
+        per table and column for the Store's life, as _column_is_date_led
+        is: a source table's values never change after import."""
+        key = (src["id"], column)
+        cache = self._text_sorts_by_time_cache
+        if key not in cache:
+            ref, table, n = q(column), q(src["table_name"]), self._TIME_SORT_SAMPLE
+            with self._reader() as ro:
+                odd = ro.execute(
+                    f"SELECT 1 FROM (SELECT * FROM (SELECT {ref} AS v FROM {table} ORDER BY rid LIMIT {n}) "
+                    f"UNION ALL SELECT * FROM (SELECT {ref} AS v FROM {table} ORDER BY rid DESC LIMIT {n})) "
+                    f"WHERE v IS NOT NULL AND v != '' AND NOT (v GLOB ?) LIMIT 1",
+                    (self._DATE_LED_GLOB,)).fetchone()
+            cache[key] = odd is None
+        return cache[key]
+
     def _timeline_context_branch(self, src: dict, p: dict, context: list[str], tag_clause: str,
                                  tag_ids: list[int] | None) -> tuple[str, list]:
         """One table's rows in the window `context` = [start, end) that are
@@ -11723,6 +11798,12 @@ class Store:
                 )
             elif colnames[column] == "number":
                 order_sql = f"{_numeric_expr('val')} {dir_sql}"
+            elif (colnames[column] == "datetime" and not is_datetime
+                  and self._time_sort_columns(src, {"sort": [{"column": column}]}, colnames)):
+                # Stored values (not day buckets) in a shape whose text is
+                # not time order: in time order, as the grid sorts them
+                # (_sort_keys) — "Copy unique values" promises it.
+                order_sql = f"{ts_normalize_sql('val')} {dir_sql}, val COLLATE NOCASE {dir_sql}"
             else:
                 order_sql = f"val COLLATE NOCASE {dir_sql}"
         else:
@@ -13258,7 +13339,26 @@ class Store:
     DEDUPE_MEMBER_STRIDE = 1 << 40
 
     @staticmethod
-    def _compile_order(spec, colnames) -> str:
+    def _sort_keys(col: str, colnames: dict, by_time: frozenset | set = frozenset()) -> list[str]:
+        """The ORDER BY keys one sort column becomes, before its direction.
+
+        A number sorts through _numeric_expr. A timestamp in `by_time`
+        (_time_sort_columns: one whose stored text is not in time order,
+        such as "11/3/2026 9:05:00 PM") sorts by its normalized
+        "YYYY-MM-DD HH:MM:SS" first, then by its raw text, which orders the
+        rows that share a second by their fraction ("…:00.25 PM" before
+        "…:00.5 PM") and the values that don't parse among themselves.
+        Those have no normalized value, so they sort to one edge, as a
+        number column's non-numbers do. Everything else, ISO timestamps
+        included, sorts as text, which a COLLATE NOCASE index can serve."""
+        if colnames[col] == "number":
+            return [_numeric_expr(q(col))]
+        if col in by_time:
+            return [ts_normalize_sql(q(col)), f"{q(col)} COLLATE NOCASE"]
+        return [f"{q(col)} COLLATE NOCASE"]
+
+    @staticmethod
+    def _compile_order(spec, colnames, by_time: frozenset | set = frozenset()) -> str:
         sort = spec.get("sort") or []
         parts = []
         for s in sort:
@@ -13273,15 +13373,12 @@ class Store:
                 continue
             if col not in colnames:
                 continue
-            if colnames[col] == "number":
-                parts.append(f"{_numeric_expr(q(col))} {direction}")
-            else:
-                parts.append(f"{q(col)} COLLATE NOCASE {direction}")
+            parts += [f"{k} {direction}" for k in Store._sort_keys(col, colnames, by_time)]
         parts.append("rid ASC")
         return "ORDER BY " + ", ".join(parts)
 
     @staticmethod
-    def _compile_merge_order(spec, colnames) -> tuple[list[str], str]:
+    def _compile_merge_order(spec, colnames, by_time: frozenset | set = frozenset()) -> tuple[list[str], str]:
         """_compile_order for a merge's UNION ALL, which build_view sorts as
         a compound rather than as a subquery (see the comment there).
         Returns the sort keys each member SELECTs after `<member id>, rid`,
@@ -13300,8 +13397,9 @@ class Store:
                 continue
             if col not in colnames:
                 continue
-            keys.append(_numeric_expr(q(col)) if colnames[col] == "number" else f"{q(col)} COLLATE NOCASE")
-            terms.append(f"{len(keys) + 2} {direction}")
+            for k in Store._sort_keys(col, colnames, by_time):
+                keys.append(k)
+                terms.append(f"{len(keys) + 2} {direction}")
         terms += ["2 ASC", "1 ASC"]
         return keys, "ORDER BY " + ", ".join(terms)
 
@@ -13382,7 +13480,8 @@ class Store:
         joining now."""
         src = self._source_lite(source_id)
         colnames = {c["name"]: c["type"] for c in src["columns"]}
-        order = self._compile_order(spec, colnames)
+        by_time = self._time_sort_columns(src, spec, colnames)
+        order = self._compile_order(spec, colnames, by_time)
         dedupe = self._dedupe_columns(spec, colnames)
         if src.get("is_merge"):
             for frag in self._raw_fragments(spec.get("filter_tree")):
@@ -13420,6 +13519,13 @@ class Store:
                        f"SELECT MIN({rank}) AS {rank}, {sid_col}, rid, {collist} FROM (\n{sql}\n)\n"
                        f"GROUP BY {self._dedupe_key(dedupe)}\n) AS kept"
                        + (f"\nWHERE {tagged}" if tagged else ""))
+            elif any(colnames.get(x.get("column")) == "number" or x.get("column") in by_time
+                     for x in spec.get("sort") or []):
+                # A compound's ORDER BY may only name its own columns, and
+                # a number or a timestamp sorted by time sorts by an
+                # expression (_sort_keys): "1st ORDER BY term does not
+                # match any column". Sorting the union from outside lets it.
+                sql = f"SELECT * FROM (\n{sql}\n)"
             sql += f"\n{order}" + (f", {rank}" if dedupe else "")
         else:
             where, params = self._compile_where(source_id, src, spec, colnames, tags=not dedupe)

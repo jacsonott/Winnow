@@ -25,6 +25,13 @@ search-all's per-term breakdown, session import's tag-remap-by-name, CSV
 formula-injection prefixing not touching the stored value, and so on. `test_api_routes.py` covers the HTTP
 layer itself (the CSRF header gate, request parsing, 400-vs-500) rather
 than re-testing logic the `Store`-level tests already cover directly.
+`test_timestamp_sort.py` holds a recognized datetime column to time order
+in each shape the import types as datetime (US dates, month names), to
+the order its derived twin sorts in, and across a merge of an ISO table
+and a US one, filtered and not and in the merge's SQL pane query; and
+holds an ISO column to the plain text
+sort its import index serves, since that is the fast path the change
+must not cost.
 `test_maintenance.py` covers the things that only exist because everything
 else only ever grows: the auto-created column indexes (listing/dropping),
 `compact()`, and `sweep_orphan_views()` — whose load-bearing test is that a
