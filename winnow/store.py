@@ -10173,6 +10173,9 @@ class Store:
         # the first by Line (a merge: by member, then Line). Applied here
         # rather than in _compile_where because a merge's duplicates can
         # sit in different members, which no per-member WHERE can see.
+        # The tag filter comes after it, against the rows it kept, so
+        # _compile_where leaves it out (`tags=not dedupe`) and the dedupe
+        # branches below add it back (_compile_tag_filter says why).
         dedupe = self._dedupe_columns(spec, colnames)
 
         cache_key = None
@@ -10195,7 +10198,8 @@ class Store:
                 for m, read_src, scan_from in reads:
                     msrc = m["src"]
                     where, p = self._compile_where(m["source_id"], read_src, spec, colnames,
-                                                   scan_from=scan_from, contains_found=found)
+                                                   scan_from=scan_from, contains_found=found,
+                                                   tags=not dedupe)
                     for col in sort_cols:
                         self._ensure_sort_index_building(
                             m["source_id"], col,
@@ -10233,10 +10237,16 @@ class Store:
                                    for i, (mid, rest) in enumerate(parts))
                 keep = (f"SELECT MIN({rank}) AS {rank}, {sid_col}, rid{''.join(f', {q(c)}' for c in need)} "
                         f"FROM ({ranked}) GROUP BY {self._dedupe_key(dedupe)}")
+                # The tag filter, on the rows kept: they come from every
+                # member, so it is keyed on each row's own member id.
+                tagged, tag_params = self._compile_tag_filter(spec, row=(f"kept.{sid_col}", "kept.rid"))
+                params.extend(tag_params)
                 # The rank last: rows tying on every key and on rid keep
                 # member order, as the other two shapes keep it — the
                 # GROUP BY hands them over in key order, not union order.
-                select = f"SELECT {sid_col}, rid FROM ({keep}) {order}, {rank}"
+                select = (f"SELECT {sid_col}, rid FROM ({keep}) AS kept"
+                          + (f" WHERE {tagged}" if tagged else "")
+                          + f" {order}, {rank}")
             elif filtered:
                 # Filtered: one sort over what the members matched, as
                 # before. The compound's own ORDER BY (below) would have
@@ -10273,7 +10283,8 @@ class Store:
                              tuple((m["source_id"], m["src"]["row_count"]) for m, _, _ in reads))
         else:
             table = src["table_name"]
-            where, params = self._compile_where(source_id, src, spec, colnames, scan_from=q(table))
+            where, params = self._compile_where(source_id, src, spec, colnames, scan_from=q(table),
+                                                tags=not dedupe)
             derived_names = {c["name"] for c in src["columns"] if c.get("derived")}
             for col in sort_cols:
                 # A derived column's values live in the sidecar, so its sort
@@ -10288,13 +10299,15 @@ class Store:
             if dedupe:
                 # The filters run once, inside the GROUP BY that picks the
                 # lowest rid of each set; the outer read only looks those
-                # rids up and sorts them.
+                # rids up, tests the tag filter on them and sorts them.
                 keep = (f"SELECT MIN(rid) FROM {self._from_clause(src)}"
                         + (f" WHERE {where}" if where else "")
                         + f" GROUP BY {self._dedupe_key(dedupe)}")
+                tagged, tag_params = self._compile_tag_filter(spec, source_id)
+                params.extend(tag_params)
                 sql = (f"INSERT INTO v.{q(vid)}(source_id, rid) "
                        f"SELECT {int(source_id)}, rid FROM {self._from_clause(src)} "
-                       f"WHERE rid IN ({keep}) {order}")
+                       f"WHERE rid IN ({keep})" + (f" AND {tagged}" if tagged else "") + f" {order}")
             else:
                 sql = (
                     f"INSERT INTO v.{q(vid)}(source_id, rid) "
@@ -12874,7 +12887,8 @@ class Store:
 
     def _compile_where(self, source_id, src, spec, colnames, *,
                        scan_from: str | None = None,
-                       contains_found: dict[int, tuple[str, list] | None] | None = None) -> tuple[str, list]:
+                       contains_found: dict[int, tuple[str, list] | None] | None = None,
+                       tags: bool = True) -> tuple[str, list]:
         """`scan_from`: the FROM text this WHERE will read the rows through,
         passed by build_view alone. With it, a Contains search the index
         can't narrow is answered here, by a parallel scan, and compiles to
@@ -12884,7 +12898,12 @@ class Store:
         `contains_found`: that parallel scan's answers already in hand, by
         source id — a merge scans every member's share in one pool before
         compiling any of them (_merge_contains_found). A member it holds
-        None for (its scan gave up) compiles to the scan itself."""
+        None for (its scan gave up) compiles to the scan itself.
+
+        `tags=False` leaves the tag filter out, for a caller that applies
+        it itself, later: with Hide duplicate rows on, build_view and
+        spec_sql test it against the rows the dedupe kept
+        (_compile_tag_filter says why)."""
         clauses: list[str] = []
         params: list[Any] = []
 
@@ -12949,55 +12968,11 @@ class Store:
             clauses.append(clause)
             params.extend(p)
 
-        # The tag filter is a UNION of whatever it names: any of these tags,
-        # or untagged, or both. OR rather than AND because that is what the
-        # ribbon's chips mean — ticking Malware and Lateral movement asks
-        # for rows carrying either, the way ticking two values in the value
-        # picker does. (An intersection is expressible in the filter
-        # builder, which is where a query that needs one belongs.)
-        #
-        # It used to compare the whole list against ["__any__"] and
-        # ["__none__"] as exact matches, so a list holding a sentinel
-        # alongside ids fell through to the ids branch and dropped the
-        # sentinel silently. Each part is compiled on its own now and the
-        # parts are OR'd, which also makes "untagged, plus the ones I
-        # marked" a filter the ribbon can express.
-        #
-        # A "!<id>" entry is a tag filtered OUT (the chip's right-click
-        # menu), and it is the one part that is ANDed rather than OR'd:
-        # "Suspicious, but not the ones I marked Benign" has to drop a row
-        # carrying both, and a union with "not Benign" would bring back
-        # every untagged row instead. Exclusions ride in the same list
-        # rather than a field of their own so that everything that already
-        # carries, stashes or clears the tag filter — a table switch, a
-        # background search, Clear filters, a dashboard drill — carries
-        # them too without being told.
-        tag_filter = spec.get("tags") or []
-        excluded = [int(t[1:]) for t in tag_filter
-                    if isinstance(t, str) and t.startswith("!") and t[1:].isdecimal()]
-        if excluded:
-            clauses.append(
-                f"rid NOT IN (SELECT rid FROM row_tags WHERE source_id=? AND tag_id IN ({','.join('?' * len(excluded))}))"
-            )
-            params.append(source_id)
-            params.extend(excluded)
-        if tag_filter:
-            parts: list[str] = []
-            if "__any__" in tag_filter:
-                parts.append("rid IN (SELECT rid FROM row_tags WHERE source_id=?)")
-                params.append(source_id)
-            if "__none__" in tag_filter:
-                parts.append("rid NOT IN (SELECT rid FROM row_tags WHERE source_id=?)")
-                params.append(source_id)
-            ids = [int(t) for t in tag_filter if str(t).isdigit()]
-            if ids:
-                parts.append(
-                    f"rid IN (SELECT rid FROM row_tags WHERE source_id=? AND tag_id IN ({','.join('?' * len(ids))}))"
-                )
-                params.append(source_id)
-                params.extend(ids)
-            if parts:
-                clauses.append("(" + " OR ".join(parts) + ")")
+        if tags:
+            c, p = self._compile_tag_filter(spec, source_id)
+            if c:
+                clauses.append(c)
+                params.extend(p)
 
         time_range = spec.get("time_range")
         if time_range and time_range.get("enabled") and (time_range.get("start") or time_range.get("end")):
@@ -13056,6 +13031,87 @@ class Store:
             # their order, so the params still line up.
             clauses.append("(" + _sql_chain(parts, " OR ") + ")")
 
+        return " AND ".join(clauses), params
+
+    @staticmethod
+    def _compile_tag_filter(spec, source_id: int | None = None, *,
+                            row: tuple[str, str] | None = None) -> tuple[str, list]:
+        """The tag filter (`spec.tags`, the ribbon's chips) as one WHERE
+        clause, "" when there is none.
+
+        It is a UNION of whatever it names: any of these tags, or
+        untagged, or both. OR rather than AND because that is what the
+        ribbon's chips mean — ticking Malware and Lateral movement asks
+        for rows carrying either, the way ticking two values in the value
+        picker does. (An intersection is expressible in the filter
+        builder, which is where a query that needs one belongs.)
+
+        It used to compare the whole list against ["__any__"] and
+        ["__none__"] as exact matches, so a list holding a sentinel
+        alongside ids fell through to the ids branch and dropped the
+        sentinel silently. Each part is compiled on its own now and the
+        parts are OR'd, which also makes "untagged, plus the ones I
+        marked" a filter the ribbon can express.
+
+        A "!<id>" entry is a tag filtered OUT (the chip's right-click
+        menu), and it is the one part that is ANDed rather than OR'd:
+        "Suspicious, but not the ones I marked Benign" has to drop a row
+        carrying both, and a union with "not Benign" would bring back
+        every untagged row instead. Exclusions ride in the same list
+        rather than a field of their own so that everything that already
+        carries, stashes or clears the tag filter — a table switch, a
+        background search, Clear filters, a dashboard drill — carries
+        them too without being told.
+
+        Two shapes of the same test. By default, one source's rows:
+        `rid [NOT] IN (SELECT rid FROM row_tags WHERE source_id=?)`, an
+        uncorrelated list SQLite builds once. With `row` — the (source
+        id, rid) column references of rows from more than one source,
+        which is what a merge's dedupe hands back — a correlated
+        `[NOT] EXISTS` keyed on row_tags' primary key, since the rows no
+        longer share one source id to bind.
+
+        Why it is its own function: Hide duplicate rows applies it AFTER
+        the dedupe, to the row each set kept, not before it with the other
+        filters. Tags are not data — the analyst puts them on the row the
+        grid shows, which is the kept one, and the hidden copies stay as
+        they were. Tested before the dedupe, "No tags" (or a tag filtered
+        out) dropped the tagged row that was kept, and the untagged copy
+        under it became the first of its set and came back: tagging an
+        event and filtering to what is left showed that event again. After
+        the dedupe, a tag filter only ever narrows the deduplicated rows,
+        and agrees with the ribbon's counts, which are the view's."""
+        tag_filter = spec.get("tags") or []
+        if not tag_filter:
+            return "", []
+        params: list[Any] = []
+
+        def has(ids: list[int] | None, negate: bool) -> str:
+            only = f" AND {'rt.' if row else ''}tag_id IN ({','.join('?' * len(ids))})" if ids else ""
+            if row:
+                sid_ref, rid_ref = row
+                params.extend(ids or [])
+                return (f"{'NOT ' if negate else ''}EXISTS (SELECT 1 FROM row_tags rt "
+                        f"WHERE rt.source_id = {sid_ref} AND rt.rid = {rid_ref}{only})")
+            params.append(source_id)
+            params.extend(ids or [])
+            return f"rid {'NOT IN' if negate else 'IN'} (SELECT rid FROM row_tags WHERE source_id=?{only})"
+
+        clauses: list[str] = []
+        excluded = [int(t[1:]) for t in tag_filter
+                    if isinstance(t, str) and t.startswith("!") and t[1:].isdecimal()]
+        if excluded:
+            clauses.append(has(excluded, negate=True))
+        parts: list[str] = []
+        if "__any__" in tag_filter:
+            parts.append(has(None, negate=False))
+        if "__none__" in tag_filter:
+            parts.append(has(None, negate=True))
+        ids = [int(t) for t in tag_filter if str(t).isdigit()]
+        if ids:
+            parts.append(has(ids, negate=False))
+        if parts:
+            clauses.append("(" + " OR ".join(parts) + ")")
         return " AND ".join(clauses), params
 
     @staticmethod
@@ -13256,7 +13312,8 @@ class Store:
             with self._build_batch():
                 for i, m in enumerate(self._resolve_members(source_id)):
                     msrc = m["src"]
-                    where, p = self._compile_where(m["source_id"], self._member_read_src(src, msrc), spec, colnames)
+                    where, p = self._compile_where(m["source_id"], self._member_read_src(src, msrc), spec, colnames,
+                                                   tags=not dedupe)
                     # The pane's own src_<id> name, projected when the member
                     # doesn't carry the merge's columns as-is — run_sql's shadow
                     # view supplies any derived columns the projection names.
@@ -13272,19 +13329,25 @@ class Store:
                     params.extend(p)
             sql = union_all(branches, "\nUNION ALL\n")
             if dedupe:
+                tagged, tag_params = self._compile_tag_filter(spec, row=(f"kept.{sid_col}", "kept.rid"))
+                params.extend(tag_params)
                 sql = (f"SELECT {sid_col}, rid, {collist} FROM (\n"
                        f"SELECT MIN({rank}) AS {rank}, {sid_col}, rid, {collist} FROM (\n{sql}\n)\n"
-                       f"GROUP BY {self._dedupe_key(dedupe)}\n)")
+                       f"GROUP BY {self._dedupe_key(dedupe)}\n) AS kept"
+                       + (f"\nWHERE {tagged}" if tagged else ""))
             sql += f"\n{order}" + (f", {rank}" if dedupe else "")
         else:
-            where, params = self._compile_where(source_id, src, spec, colnames)
+            where, params = self._compile_where(source_id, src, spec, colnames, tags=not dedupe)
             collist = ", ".join(q(c) for c in colnames)
             table = q(src["table_name"])
             sql = f"SELECT rid, {collist}\nFROM {table}"
             if dedupe:
+                tagged, tag_params = self._compile_tag_filter(spec, source_id)
+                params.extend(tag_params)
                 sql += (f"\nWHERE rid IN (\n  SELECT MIN(rid) FROM {table}"
                         + (f" WHERE {where}" if where else "")
-                        + f"\n  GROUP BY {self._dedupe_key(dedupe)}\n)")
+                        + f"\n  GROUP BY {self._dedupe_key(dedupe)}\n)"
+                        + (f"\nAND {tagged}" if tagged else ""))
             elif where:
                 sql += f"\nWHERE {where}"
             sql += f"\n{order}"

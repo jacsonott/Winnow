@@ -4,7 +4,7 @@ Filtering is how a table of two million rows becomes the forty that matter. Winn
 
 ## How filters combine
 
-Every filter you set narrows the rows left by the others. Column filters, the filter builder, the search box, the tag filter, the timeframe and **Hide empty rows** are all applied together (AND). [Hide duplicate rows](Working-with-tables.md#hiding-duplicate-rows) comes after them and keeps one of each set of identical rows that are left. The line beside the toolbar shows how many rows are left, for example `58 of 400 rows`.
+Every filter you set narrows the rows left by the others. Column filters, the filter builder, the search box, the tag filter, the timeframe and **Hide empty rows** are all applied together (AND). [Hide duplicate rows](Working-with-tables.md#hiding-duplicate-rows) comes after them and keeps one of each set of identical rows that are left. While it is on, the tag filter is the exception: it is applied last, to the rows kept, so a copy hidden under a tagged row does not come back under **No tags**. The line beside the toolbar shows how many rows are left, for example `58 of 400 rows`.
 
 If nothing is left, the grid shows **No rows match** with a **Clear filters** button.
 

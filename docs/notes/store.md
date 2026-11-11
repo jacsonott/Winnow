@@ -530,6 +530,29 @@ see [docs/notes/README.md](README.md) for the whole set.
   - **NULL and '' are one value** (`IFNULL(col, '')` in the key): a
     merge reads a column a member lacks as NULL while another member has
     '', and both are an empty cell to the analyst.
+  - **The tag filter is applied after it, to the rows kept** — the one
+    filter that is. `_compile_where(tags=not dedupe)` leaves it out and
+    the dedupe branches add `_compile_tag_filter` back on the outside: on
+    a single table the same uncorrelated `rid [NOT] IN (SELECT rid FROM
+    row_tags WHERE source_id=?)` beside the `rid IN (keep)`; on a merge a
+    correlated `[NOT] EXISTS` on row_tags' primary key against
+    `kept.<member id>, kept.rid`, since the kept rows come from every
+    member and no single source id can be bound. Why: tags are not data,
+    the analyst puts them on the row the grid shows. With the tag filter
+    inside the GROUP BY's WHERE, "No tags" (or an excluded tag) dropped
+    the tagged row kept from a set before the dedupe ran, the next copy
+    became the set's first, and the event the analyst had just tagged
+    came back as untagged — every one of them, after tagging the whole
+    view. Applied after, a tag filter only ever narrows the deduplicated
+    rows and agrees with the ribbon (`tag_counts_in_view` counts the
+    view). The price: a tag on a *hidden* copy doesn't count (a copy
+    tagged while duplicates showed, under an untagged first copy, is
+    not found by its tag with the toggle on), and a tag filter no longer
+    shrinks the GROUP BY, so a narrow one ("tag = X") costs what the
+    dedupe alone does — measured 0.11 s → 0.52 s on 400k rows, the same
+    0.58 s as no tag filter. Everything else (column filters, search,
+    timeframe, Hide empty rows) still runs first: those test data, and a
+    filter on a hidden column is meant to find the copy that matches.
   - **Never cached as an unfiltered merge view** (`not dedupe` in the
     `_merge_view_cache` condition): the cache key is the SELECT text, and
     a dedupe on a derived column changes under the same text when it is

@@ -119,7 +119,8 @@ Drag the line between the table list and the column list to give either more of 
 - Only the columns you can see are compared. Hidden columns are ignored, so to collapse copies that differ only in a column such as **SourceFile**, or a merge's **From table** column, hide that column. Hiding or showing a column while the toggle is on changes which rows count as duplicates, and the grid updates. A column you have grouped by is still compared.
 - Two values match when their text is exactly the same, case included, as with the `=` filter. An empty cell matches any other empty cell.
 - The row kept from each set is the first by **Line**, whatever the sort. In a merge it is the row from the table listed first in the merge, then the first by Line.
-- Duplicates are looked for among the rows your other filters, search, tag filter and timeframe leave.
+- Duplicates are looked for among the rows your other filters, search and timeframe leave.
+- The tag filter then looks at the rows that are kept, which are the rows you see and tag. So once you tag a row, its hidden copies stay hidden under **No tags** or a tag you exclude, and a tag filter only ever narrows what is on screen. Tags on a hidden copy don't count: if you tagged a copy while duplicates were showing, turn the toggle off to find it under that tag.
 - It is remembered for the table, and the line beside the toolbar says **duplicates hidden** while it is on. **Clear filters** and **Reset view** leave it on.
 
 Everything that reads the view sees only the rows kept: the row count, grouping, the histogram, **Stack values**, **This view** in the value picker, tagging the whole view and **Current view** exports. Tags and notes on the hidden copies stay where they are. Nothing is deleted. To keep the deduplicated rows as a table of their own, turn the toggle on and use [Saving a view as a table](#saving-a-view-as-a-table).
