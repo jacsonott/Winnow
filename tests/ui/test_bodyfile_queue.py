@@ -22,6 +22,8 @@ UAC = ("0|/home/alice/.bash_history|2621455|-rw-------|1000|1000|5532"
 PIPES = "0|/tmp/a|b|c|1835300|r/rrw-r--r--|0|0|10|1714557598|1714557598|1714557598|0"
 TSK2 = "0|/etc/passwd|2049|1835063|33188|-/-rw-r--r--|1|0|0|0|2913|1714557598|1714473600|1714473700|4096|8"
 BODY = "\n".join([PASSWD, NTFS, UAC, PIPES]) + "\n"
+HEADER = "MD5|name|inode|mode_as_string|UID|GID|size|atime|mtime|ctime|crtime"
+OWN_HEADER = "md5|file|st_ino|st_ls|st_uid|st_gid|st_size|st_atime|st_mtime|st_ctime|st_crtime"
 
 # One list through both sides: the server's rule and its merge.js twin
 # must agree on every one, the ones that aren't body files included.
@@ -31,7 +33,11 @@ TEXTS = [
     "0|/x|1|r/r---------|0|0|0|-|-|-|-", "0|/x|||||||||", "|/x|1|r|0|0|0|1|1|1|1",
     "0|/x|1|r/r---------|0|0|0|-86400|1|1|1",
     "", "\n\n", TSK2,
-    "MD5|name|inode|mode_as_string|UID|GID|size|atime|mtime|ctime|crtime\n" + PASSWD,
+    HEADER + "\n" + PASSWD, "\ufeff" + HEADER + "\r\n\r\n" + PASSWD, OWN_HEADER + "\n" + PASSWD,
+    HEADER, HEADER + "\nfls: error\n" + PASSWD, HEADER + "\n" + HEADER + "\n" + PASSWD,
+    "MD5|name|inode|mode|UID|GID|size|atime|mtime|ctime\n" + PASSWD,
+    "MD5|name|inode|mode|UID|GID|size|1|mtime|ctime|crtime\n" + PASSWD,
+    "path|name|inode|mode|UID|GID|size|atime|mtime|ctime|crtime\n" + PASSWD,
     "Date,Size,Type,Mode,UID,GID,Meta,File Name\nWed May 01 2024 09:59:58,2913,.a..,r/rrw-r--r--,0,0,1835063,/etc/passwd",
     "a|b|c\n1|2|3", "0|/x|1|r|0|0|big|1|1|1|1", "0|/x|1|r|0|0|1|yesterday|1|1|1",
     "zz|/x|1|r|0|0|1|1|1|1|1", "0|/x|1|r|0|0|1|1|1|1", "0|/x|1|r|0|0|1|1e9|1|1|1",
@@ -147,6 +153,24 @@ def test_an_uploaded_body_file_is_recognized_from_its_head(page):
         page.wait_for_function("() => __winnow.S.sources.some((s) => s.name === 'host1-fls.txt' && s.row_count === 4 && s.columns.length)", timeout=20_000)
     finally:
         page.evaluate(DROP, ["host1-fls.txt"])
+
+
+def test_a_body_file_with_a_header_line_keeps_its_headers(page):
+    """A header line above the first file is recognized as the start of a
+    body file, and its names are the table's headers, not a row."""
+    try:
+        page.evaluate("""async (text) => {
+          __winnow.S.importQueue = [];
+          await __winnow.queueFiles([new File([text], 'listing.txt')]);
+          __winnow.openImportModal();
+        }""", OWN_HEADER + "\n" + BODY)
+        page.wait_for_selector("#modal:not([hidden]) .import-pane .preview-tbl")
+        assert page.evaluate("() => __winnow.S.importQueue[0].kind") == "bodyfile"
+        _heads_are(page, OWN_HEADER.split("|"))
+        foot = page.locator("#modalBody .import-preview .side-preview-foot").inner_text()
+        assert foot.startswith("Body file · first 4 rows") and "isn’t a body file line" not in foot
+    finally:
+        page.evaluate(DROP, ["listing.txt"])
 
 
 def test_delimited_text_can_be_read_as_a_body_file(page):

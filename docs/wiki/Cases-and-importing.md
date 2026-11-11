@@ -650,34 +650,44 @@ anything ending in `.body`, and a second copy an archive expansion renamed
 (`bodyfile (2).txt`). Under any other name it is recognized by its **first
 line**, as a [key=value log](#fortigate-and-other-fortinet-logs) is: a
 `.txt`, a `.log` or an extensionless file whose first line is a body file
-line is read as one. A `.csv` is always delimited. The queue says *Body file
-· a row per file* under its name. You no longer need the **esxi_logs** plugin,
+line is read as one. A file whose first line is a header line
+(`MD5|name|inode|...|crtime`) is recognized by the line under it. A `.csv`
+is always delimited. The queue says *Body file · a row per file* under its
+name. You no longer need the **esxi_logs** plugin,
 or `mactime`, to read the body file in a UAC collection.
 
-**Every line is a row**, with these columns:
+**Every line is a row**, under the body file's own headers: TSK's names for
+the eleven fields, in the order the file has them.
 
 | Column | Holds |
 | --- | --- |
-| `Modified (UTC)` | mtime: when the file's content last changed. |
-| `Accessed (UTC)` | atime: when it was last read, if the file system kept it (`noatime` and `relatime` mounts mostly don't). |
-| `Changed (UTC)` | ctime: when its inode changed (permissions, owner, a rename) on Linux; when its MFT entry changed on NTFS. |
-| `Born (UTC)` | crtime: when it was created, where the file system records it (ext4, XFS, NTFS, APFS). |
-| `Name` | The path, as the tool wrote it: `-> target` on a symlink, `(deleted)` on a deleted entry, `($FILE_NAME)` on an NTFS file name attribute. |
-| `Size` | In bytes. |
-| `Mode` | The permissions as written: `r/rrw-r--r--` from fls, `-rw-r--r--` from UAC. |
-| `UID`, `GID` | The owner and group IDs. |
-| `Inode` | The inode, or NTFS's `entry-type-id` (`102345-48-2`). |
 | `MD5` | The file's MD5 when the tool computed one, else `0`. |
+| `name` | The path, as the tool wrote it: `-> target` on a symlink, `(deleted)` on a deleted entry, `($FILE_NAME)` on an NTFS file name attribute. |
+| `inode` | The inode, or NTFS's `entry-type-id` (`102345-48-2`). |
+| `mode_as_string` | The permissions as written: `r/rrw-r--r--` from fls, `-rw-r--r--` from UAC. |
+| `UID`, `GID` | The owner and group IDs. |
+| `size` | In bytes. |
+| `atime` | When it was last read, if the file system kept it (`noatime` and `relatime` mounts mostly don't). |
+| `mtime` | When the file's content last changed. |
+| `ctime` | When its inode changed (permissions, owner, a rename) on Linux; when its MFT entry changed on NTFS. |
+| `crtime` | When it was created, where the file system records it (ext4, XFS, NTFS, APFS). |
 
-The four times lead the table in mactime's MACB order, so `Modified (UTC)`
-is the column the Timeframe filter, the Histogram and the Timeline start
-from. They are converted from seconds since 1970, which is UTC by
+Some tools write a header line above the first file. Its names are the
+table's headers, so a tool that writes `md5|file|st_ino|...` keeps those
+names, and the header line is not a row. A copy of it further down, where
+body files were joined with `cat`, is skipped too.
+
+The four times are converted from seconds since 1970, which is UTC by
 definition, to the same `2024-05-01 09:59:58` form every other datetime
 column uses. A fraction of a second (UAC's `find` writes ten digits) is kept
 to the microsecond. A time of `0` means the file system didn't record it
 (ext3 has no creation time) and is left empty, as `mactime` leaves it off
 its timeline. A number too large or too small to be a date is kept as
-written.
+written. `atime` is the first of them, so the table opens sorted by it, and
+it is the one the Timeframe filter, the Histogram and the Timeline start
+from. To work from `mtime` instead, click its header to sort by it, and
+choose it as the Timeframe filter's **Column**, in the Histogram's list, or
+as the Timeline's **Timestamp column**.
 
 A file name can contain `|` on Linux, so the name is everything between
 the first field and the last nine, and a pipe in a name doesn't shift the
@@ -698,9 +708,9 @@ Files modified in the hour around an incident, from a body file table, in
 the [SQL pane](SQL-pane.md):
 
 ```sql
-SELECT "Modified (UTC)", "Name", "Size", "UID"
+SELECT mtime, name, size, UID
 FROM src_4
-WHERE "Modified (UTC)" BETWEEN '2024-05-01 09:30:00' AND '2024-05-01 10:30:00'
+WHERE mtime BETWEEN '2024-05-01 09:30:00' AND '2024-05-01 10:30:00'
 ORDER BY 1;
 ```
 

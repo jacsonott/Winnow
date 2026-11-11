@@ -1132,32 +1132,32 @@
     {
       "name": "Body files (TSK / mactime)",
       "columns": [
-        "Modified (UTC)",
-        "Accessed (UTC)",
-        "Changed (UTC)",
-        "Born (UTC)",
-        "Name",
-        "Size",
-        "Mode",
+        "MD5",
+        "name",
+        "inode",
+        "mode_as_string",
         "UID",
         "GID",
-        "Inode",
-        "MD5"
+        "size",
+        "atime",
+        "mtime",
+        "ctime",
+        "crtime"
       ],
       "summary": {
         "lead": [
-          "Name"
+          "name"
         ],
         "details": [
-          "Size",
-          "Mode",
+          "size",
+          "mode_as_string",
           "UID",
-          "Inode"
+          "inode"
         ],
         "labels": {
-          "Size": "size",
+          "size": "size",
           "UID": "uid",
-          "Inode": "inode"
+          "inode": "inode"
         }
       }
     }

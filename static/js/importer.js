@@ -778,7 +778,7 @@ export function buildUtmpSettings(ctx) {
    table will be and previews its first rows with their types. */
 export function buildBodyfileSettings(ctx) {
   const { item } = ctx;
-  ctx.note('A body file lists a file system one entry to a line: The Sleuth Kit’s fls -m writes one, UAC collects one as bodyfile.txt, and mactime reads one to make a timeline. Each line becomes a row. Its four times are converted to UTC and lead the table in MACB order (Modified, Accessed, Changed, Born), so the Timeframe filter and the histogram start from the modification time. A time the file system didn’t record (0) is left empty. Any line that isn’t a body file line is kept whole in Unparsed line.');
+  ctx.note('A body file lists a file system one entry to a line: The Sleuth Kit’s fls -m writes one, UAC collects one as bodyfile.txt, and mactime reads one to make a timeline. Each line becomes a row, under the body file’s own headers (MD5, name, inode, mode_as_string, UID, GID, size, atime, mtime, ctime, crtime), or under the names in the file’s header line when it starts with one. The four times are converted from epoch seconds to UTC, and a time the file system didn’t record (0) is left empty. Any line that isn’t a body file line is kept whole in Unparsed line.');
   previewRunner(ctx, () => fetchPreview(item, { kind: 'bodyfile' }), (res) => {
     ctx.rows.replaceChildren(previewTable(res.columns, res.sample_rows, (i) => el('div', 'count', res.inferred_types[i])));
     const n = res.sample_rows.length;

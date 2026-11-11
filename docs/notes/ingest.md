@@ -400,12 +400,24 @@ see [docs/notes/README.md](README.md) for the whole set.
   the 2.x mode string and link count into the name and every later field
   one or two columns off, and all of them are numbers that pass 3.x's
   checks; it is only asked about a line whose name already holds a pipe.
-  **Columns are fixed** (no `column_types` anywhere): the four times
-  first in MACB order — `Modified (UTC)`, `Accessed (UTC)`,
-  `Changed (UTC)`, `Born (UTC)` — so the first datetime column, which
-  the Timeframe filter, histogram and Timeline default to, is mtime and
-  not atime, then the rest in the file's order; Size, UID and GID are
-  numbers, Inode text (NTFS `entry-type-id`). Times are epoch seconds,
+  **Columns are the body file's own headers** (no `column_types`
+  anywhere): TSK's names for the eleven fields, in the file's order
+  (`MD5|name|inode|mode_as_string|UID|GID|size|atime|mtime|ctime|crtime`).
+  The first version renamed them (`Modified (UTC)`, `Name`, …) and put
+  the times first in MACB order so mtime would be the first datetime
+  column; that was reported as the reader "not retaining the headers", so
+  the names and order are the file's, and atime is what the Timeframe
+  filter, histogram and Timeline default to until mtime is picked. **A
+  header line** (`bodyread.header_names`: eleven names, the first naming
+  the hash, none a number, so no file's line passes for one; merge.js's
+  `isBodyfileHeader`) as the first line names the columns — a tool's own
+  `md5|file|st_ino|…` keeps its words — and is no row; `plan` returns it
+  as `header` and `rows` skips it and any copy of it (body files joined
+  with `cat`). `looks_like` reads past it to the line under it, so a
+  header alone, or over a line that isn't one, is not a body file.
+  Before this, a header line was an `Unparsed line` row and kept the
+  file from being recognized by content at all. size, UID and GID are
+  numbers, inode text (NTFS `entry-type-id`). Times are epoch seconds,
   converted with `time.gmtime` (datetime below 1970 and past the year
   3000, where Windows' gmtime stops) and a per-import cache, since a
   disk's files share a few install and update times; a fraction (UAC's
@@ -420,7 +432,8 @@ see [docs/notes/README.md](README.md) for the whole set.
   refused. Read through `_ingest_planned_lines`, so the encoding sniff,
   NUL gaps, CRLF and the live-file second pass are IIS's. headers.json
   (version 6) has the set "Body files (TSK / mactime)" for a Timeline
-  summary (Name, then size, mode, UID, inode). The esxi_logs plugin never
+  summary (name, then size, mode_as_string, UID, inode), matched on
+  TSK's names, so a file whose header line uses other names gets none. The esxi_logs plugin never
   read body files and still doesn't; a UAC collection's
   `bodyfile.txt` is this reader's whether the plugin is on or not.
   tests/test_bodyfile.py, tests/ui/test_bodyfile_queue.py.

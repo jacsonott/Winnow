@@ -259,11 +259,13 @@ bodyread.py        Body files (TSK 3.x, what fls -m writes and mactime
                     not the esxi_logs plugin's. Recognized by name
                     (name_says: bodyfile, bodyfile.txt, *.body) and,
                     under another name, by the first line (looks_like),
-                    the way a key=value log is. A row per line, the four
-                    epoch times first in MACB order as UTC text, then the
-                    file's fields; the name may hold "|", so it is split
-                    from both ends, and a TSK 2.x line is refused rather
-                    than read one column off. Stdlib only; imports iisread.
+                    the way a key=value log is. A row per line under the
+                    body file's own headers (TSK's field names in the
+                    file's order, or the file's header line when it has
+                    one, which is no row), the four epoch times as UTC
+                    text; the name may hold "|", so it is split from both
+                    ends, and a TSK 2.x line is refused rather than read
+                    one column off. Stdlib only; imports iisread.
                     See docs/notes/ingest.md.
 defaults/          The defaults Winnow ships, as JSON rather than Python:
                     headers.json names the header sets common tools emit

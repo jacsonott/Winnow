@@ -4,7 +4,9 @@ TSK's fls -m writes and mactime reads, which UAC collects as
 bodyfile.txt. Recognized by name (bodyfile, bodyfile.txt, *.body) and by
 the first line wherever a file's type is decided (the server's router,
 the folder scan, Open With, the recognize route, session re-import), and
-read into one table, a row per line, with the four times in UTC.
+read into one table, a row per line, under the body file's own headers
+(TSK's names, or the file's header line when it has one), with the four
+times in UTC.
 
 The load-bearing tests are the pipe in a name and the TSK 2.x line. A
 reader that splits on every pipe passes every test made of ordinary
@@ -44,6 +46,11 @@ TSK2 = "0|/etc/passwd|2049|1835063|33188|-/-rw-r--r--|1|0|0|0|2913|1714557598|17
 
 BODY = [PASSWD, NTFS, DELETED, UAC, LINK, VOL, PIPES]
 
+# The header line some tools write above the first file, in TSK's words,
+# and one in a tool's own.
+HEADER = "MD5|name|inode|mode_as_string|UID|GID|size|atime|mtime|ctime|crtime"
+OWN_HEADER = "md5|file|st_ino|st_ls|st_uid|st_gid|st_size|st_atime|st_mtime|st_ctime|st_crtime"
+
 
 def _write(tmp_path, name, lines, *, raw=None, encoding="utf-8", newline="\n"):
     p = tmp_path / name
@@ -71,6 +78,9 @@ def _rows(store, rec):
     "\n\n  " + PASSWD,                             # blank lines first
     "\ufeff" + PASSWD,                             # a BOM
     PASSWD + "\r\n" + NTFS,                        # CRLF
+    HEADER + "\n" + PASSWD,                         # a header line first
+    "\ufeff" + HEADER + "\r\n\r\n" + PASSWD,         # …after a BOM, before a blank line
+    OWN_HEADER + "\n" + PASSWD,                     # a header with names of its own
 ])
 def test_body_file_lines_are_recognized(line):
     assert bodyread.looks_like(line)
@@ -78,7 +88,12 @@ def test_body_file_lines_are_recognized(line):
 
 @pytest.mark.parametrize("text", [
     "", "\n\n",
-    "MD5|name|inode|mode_as_string|UID|GID|size|atime|mtime|ctime|crtime\n" + PASSWD,   # a header first
+    HEADER, HEADER + "\n",                                # a header and nothing under it
+    HEADER + "\nfls: error\n" + PASSWD,                   # a header, then something else
+    HEADER + "\n" + HEADER + "\n" + PASSWD,               # two headers
+    "MD5|name|inode|mode|UID|GID|size|atime|mtime|ctime\n" + PASSWD,   # ten names
+    "MD5|name|inode|mode|UID|GID|size|1|mtime|ctime|crtime\n" + PASSWD,  # a number for a name
+    "path|name|inode|mode|UID|GID|size|atime|mtime|ctime|crtime\n" + PASSWD,  # no hash first
     "Date,Size,Type,Mode,UID,GID,Meta,File Name\n"                                    # mactime's CSV
     "Wed May 01 2024 09:59:58,2913,.a..,r/rrw-r--r--,0,0,1835063,/etc/passwd",
     "a|b|c\n1|2|3",                                       # a pipe-delimited table
@@ -117,27 +132,25 @@ def test_other_names_are_not(name):
 # --------------------------------------------------------- the fields
 
 def test_each_field_lands_in_its_column():
-    assert bodyread.COLUMNS == [
-        "Modified (UTC)", "Accessed (UTC)", "Changed (UTC)", "Born (UTC)",
-        "Name", "Size", "Mode", "UID", "GID", "Inode", "MD5"]
+    """The body file's own headers, in its own order: TSK's names for the
+    eleven fields, which are what a header line says when a file has one."""
+    assert bodyread.COLUMNS == HEADER.split("|")
     row = dict(zip(bodyread.COLUMNS, bodyread.split_line(PASSWD)))
-    # The times in MACB order: the file's atime, mtime, ctime, crtime are
-    # its 8th to 11th fields, so mtime (the 9th) leads.
     assert row == {
-        "Modified (UTC)": "2024-04-30 10:40:00", "Accessed (UTC)": "2024-05-01 09:59:58",
-        "Changed (UTC)": "2024-04-30 10:41:40", "Born (UTC)": "2024-04-24 23:06:40",
-        "Name": "/etc/passwd", "Size": "2913", "Mode": "r/rrw-r--r--", "UID": "0", "GID": "0",
-        "Inode": "1835063", "MD5": "0"}
+        "MD5": "0", "name": "/etc/passwd", "inode": "1835063", "mode_as_string": "r/rrw-r--r--",
+        "UID": "0", "GID": "0", "size": "2913",
+        "atime": "2024-05-01 09:59:58", "mtime": "2024-04-30 10:40:00",
+        "ctime": "2024-04-30 10:41:40", "crtime": "2024-04-24 23:06:40"}
     ntfs = dict(zip(bodyread.COLUMNS, bodyread.split_line(NTFS)))
-    assert ntfs["Inode"] == "102345-48-2" and ntfs["Name"].endswith("evil.exe ($FILE_NAME)")
+    assert ntfs["inode"] == "102345-48-2" and ntfs["name"].endswith("evil.exe ($FILE_NAME)")
     link = dict(zip(bodyread.COLUMNS, bodyread.split_line(LINK)))
-    assert link["MD5"] == "d41d8cd98f00b204e9800998ecf8427e" and link["Name"] == "/bin/sh -> dash"
+    assert link["MD5"] == "d41d8cd98f00b204e9800998ecf8427e" and link["name"] == "/bin/sh -> dash"
 
 
 def test_a_name_can_hold_a_pipe():
     row = dict(zip(bodyread.COLUMNS, bodyread.split_line(PIPES)))
-    assert row["Name"] == "/tmp/a|b|c"
-    assert (row["Inode"], row["Mode"], row["Size"]) == ("1835300", "r/rrw-r--r--", "10")
+    assert row["name"] == "/tmp/a|b|c"
+    assert (row["inode"], row["mode_as_string"], row["size"]) == ("1835300", "r/rrw-r--r--", "10")
 
 
 def test_a_tsk2_line_is_not_read_one_column_off():
@@ -176,13 +189,13 @@ def test_a_body_file_imports_a_row_per_line(store, tmp_path):
     assert rec["row_count"] == len(BODY) and rec["unparsed_lines"] == 0
     assert [(c["name"], c["type"]) for c in rec["columns"]] == list(zip(bodyread.COLUMNS, bodyread.COLUMN_TYPES))
     rows = _rows(store, rec)
-    assert [r["Name"] for r in rows] == [
+    assert [r["name"] for r in rows] == [
         "/etc/passwd", NTFS.split("|")[1], "/tmp/.x (deleted)", "/home/alice/.bash_history",
         "/bin/sh -> dash", VOL.split("|")[1], "/tmp/a|b|c"]
     deleted, uac = rows[2], rows[3]
-    assert [deleted[c] for c in bodyread.COLUMNS[:4]] == ["", "", "", ""]
-    assert (uac["Modified (UTC)"], uac["Accessed (UTC)"], uac["Changed (UTC)"], uac["Born (UTC)"]) == (
-        "2024-04-30 10:40:00.999999", "2024-05-01 09:59:58.123456", "2024-04-30 10:40:00.000000", "")
+    assert [deleted[c] for c in ("atime", "mtime", "ctime", "crtime")] == ["", "", "", ""]
+    assert (uac["atime"], uac["mtime"], uac["ctime"], uac["crtime"]) == (
+        "2024-05-01 09:59:58.123456", "2024-04-30 10:40:00.999999", "2024-04-30 10:40:00.000000", "")
     assert store.get_source(rec["id"])["ingest"] == {"kind": "bodyfile"}
 
 
@@ -201,7 +214,7 @@ def test_lines_that_are_not_body_lines_are_kept_whole(store, tmp_path, monkeypat
     assert rec["unparsed_lines"] == 2
     rows = _rows(store, rec)
     assert [r["Unparsed line"] for r in rows] == ["", "fls: error reading inode 12", TSK2, ""]
-    assert rows[1]["Name"] == "" and rows[3]["Name"].endswith("($FILE_NAME)")
+    assert rows[1]["name"] == "" and rows[3]["name"].endswith("($FILE_NAME)")
     assert any(level == "warn" and "2 lines were not a body file line" in msg for level, msg in logged)
     # A file with none gets no such column.
     clean = store.ingest_bodyfile(_write(tmp_path, "clean.body", [PASSWD]), build_fts=False)
@@ -212,12 +225,45 @@ def test_crlf_bom_and_ansi_files_read_as_written(store, tmp_path):
     rec = store.ingest_bodyfile(_write(tmp_path, "crlf.body", [PASSWD, NTFS], encoding="utf-8-sig", newline="\r\n"),
                                 build_fts=False)
     rows = _rows(store, rec)
-    assert rec["unparsed_lines"] == 0 and rows[0]["MD5"] == "0" and rows[1]["Born (UTC)"] == "2024-05-01 09:59:58"
+    assert rec["unparsed_lines"] == 0 and rows[0]["MD5"] == "0" and rows[1]["crtime"] == "2024-05-01 09:59:58"
     # A name in Windows-1252 (an image mounted on Windows, a collector that
     # wrote ANSI) is a character, not U+FFFD.
     raw = "0|/srv/caf\u00e9.txt|12|r/rrw-r--r--|0|0|1|1714557598|1714557598|1714557598|0\n".encode("cp1252")
     rec = store.ingest_bodyfile(_write(tmp_path, "ansi.body", None, raw=raw), build_fts=False)
-    assert _rows(store, rec)[0]["Name"] == "/srv/caf\u00e9.txt"
+    assert _rows(store, rec)[0]["name"] == "/srv/caf\u00e9.txt"
+
+
+def test_a_header_line_names_the_columns_and_is_no_row(store, tmp_path):
+    """A header line above the first file is the table's headers, not a
+    row and not an Unparsed line; a header in a tool's own words keeps
+    those words; and a copy of it further down (body files joined with
+    cat) is skipped as the first one was."""
+    rec = store.ingest_bodyfile(_write(tmp_path, "with-header.body", [HEADER] + BODY), build_fts=False)
+    assert [c["name"] for c in rec["columns"]] == bodyread.COLUMNS
+    assert rec["row_count"] == len(BODY) and rec["unparsed_lines"] == 0
+    assert _rows(store, rec)[0]["name"] == "/etc/passwd"
+
+    rec = store.ingest_bodyfile(_write(tmp_path, "own.body", [OWN_HEADER, PASSWD, OWN_HEADER, NTFS]),
+                                build_fts=False)
+    assert [(c["name"], c["type"]) for c in rec["columns"]] == list(zip(OWN_HEADER.split("|"), bodyread.COLUMN_TYPES))
+    assert rec["row_count"] == 2 and rec["unparsed_lines"] == 0
+    assert [r["st_mtime"] for r in _rows(store, rec)] == ["2024-04-30 10:40:00", "2024-05-01 09:59:58"]
+
+    # Only the first line is a header: one further down that isn't a copy
+    # of it is a line like any other, kept whole.
+    rec = store.ingest_bodyfile(_write(tmp_path, "late.body", [PASSWD, HEADER]), build_fts=False)
+    assert [c["name"] for c in rec["columns"]] == bodyread.COLUMNS + ["Unparsed line"]
+    assert rec["unparsed_lines"] == 1 and _rows(store, rec)[1]["Unparsed line"] == HEADER
+
+    # A header with no file under it is still no body file.
+    with pytest.raises(ValueError, match="no body file lines"):
+        store.ingest_bodyfile(_write(tmp_path, "only.body", [HEADER]))
+
+    # The preview reads it the same way, and so does the router.
+    body = Store.preview_bodyfile_text(OWN_HEADER + "\n" + PASSWD + "\n")
+    assert body["columns"] == OWN_HEADER.split("|") and len(body["sample_rows"]) == 1
+    import server
+    assert server._ingest_kind_for_path(_write(tmp_path, "fls-with-header.txt", [HEADER, PASSWD])) == "bodyfile"
 
 
 def test_a_file_with_no_body_lines_is_refused(store, tmp_path):
@@ -349,7 +395,7 @@ def test_the_jobs_routes_import_a_body_file(client, store, tmp_path):
     done = store.wait_for_ingest_job(r.json()["job_id"], timeout=30)
     assert done["status"] == "done", done
     src = store.get_source(done["source_ids"][0])
-    assert src["name"] == "host1.body" and src["columns"][0]["name"] == "Modified (UTC)"
+    assert src["name"] == "host1.body" and src["columns"][0]["name"] == "MD5"
 
 
 def test_the_previews_read_a_body_file(client, tmp_path, monkeypatch):
@@ -358,7 +404,7 @@ def test_the_previews_read_a_body_file(client, tmp_path, monkeypatch):
     p = _write(tmp_path, "fls.txt", BODY)
     body = client.post("/api/ingest/preview/path", json={"path": p}).json()   # kind from the first line
     assert body["columns"] == bodyread.COLUMNS and len(body["sample_rows"]) == len(BODY)
-    assert body["sample_rows"][0][4] == "/etc/passwd"
+    assert body["sample_rows"][0][1] == "/etc/passwd"
     # Read as Body file: any text file, asked for by kind.
     other = _write(tmp_path, "renamed.csv", BODY)
     assert client.post("/api/ingest/preview/path",
@@ -401,7 +447,7 @@ def test_a_session_reimports_a_body_file_as_one(store, tmp_path):
         src = other.list_sources()[0]
         assert src["ingest"] == {"kind": "bodyfile"}
         rid = other.db.execute("SELECT rid FROM row_tags WHERE source_id=?", (src["id"],)).fetchone()[0]
-        name = other.db.execute(f'SELECT "Name" FROM {src["table_name"]} WHERE rid=?', (rid,)).fetchone()[0]
+        name = other.db.execute(f'SELECT "name" FROM {src["table_name"]} WHERE rid=?', (rid,)).fetchone()[0]
         assert name.endswith("evil.exe ($FILE_NAME)")
     finally:
         other.close()

@@ -13,19 +13,19 @@ Stdlib only. Imports iisread for FileChanged and nothing else from the
 app: store.py reads the file with iisread's logical lines and hands them
 here.
 
-**One row per line: the fields as columns, the four times converted.**
-The columns are
+**One row per line, under the body file's own headers.** The columns are
+the format's eleven fields, named and ordered as TSK documents them (and
+as the header line some tools write above the first file says them):
 
-    Modified (UTC)  Accessed (UTC)  Changed (UTC)  Born (UTC)
-    Name  Size  Mode  UID  GID  Inode  MD5
+    MD5  name  inode  mode_as_string  UID  GID  size  atime  mtime  ctime  crtime
 
-The times lead, in mactime's MACB order, so the first datetime column
-(the one the Timeframe filter, the histogram and the Timeline reach for)
-is the modification time rather than atime, which noatime and relatime
-mounts barely keep. Changed is ctime: the inode's change time on a Unix
-file system, the MFT entry's on NTFS. Born is crtime. The other fields
-keep the file's own order. Size, UID and GID are numbers; Inode stays text,
-since NTFS writes it as entry-type-id (`1234-128-1`).
+A file that starts with a header line of its own (`MD5|name|...|crtime`,
+or the same eleven fields under other names: `header_names`) keeps those
+names instead, and the header is not a row. UID, GID and size are numbers,
+and the four times are datetimes; inode stays text, since NTFS writes it as
+entry-type-id (`1234-128-1`). atime is the first time column, so it is
+the one the Timeframe filter, the histogram and the Timeline start from
+until another is picked; the order is the file's, not mactime's MACB.
 
 **Times are seconds since 1970, UTC.** TSK writes whole seconds; `find
 -printf %T@` (one of the ways UAC builds its body file) writes a ten-digit
@@ -50,15 +50,18 @@ The TSK 2.x layout (sixteen fields: device, the mode as a number and as a
 string, link count, rdev and block counts, and no crtime) is one of those
 lines. Read as 3.x, its fields would land one or two columns off, and
 every one of them is a number that passes for the field it lands in, so a
-line in that shape is refused (`_TSK2`) rather than misread.
+line in that shape is refused (`_TSK2`) rather than misread. The header
+line is the one line that is neither: as the first line it names the
+columns, and a copy of it further down (body files joined with `cat`) is
+skipped.
 
 **Recognized by name and by content.** `name_says` takes `bodyfile`,
 UAC's `bodyfile.txt` and anything ending in `.body`, the names the tools
 above leave (and an archive expansion's second copy, `bodyfile (2).txt`).
-`looks_like` reads the first non-blank line and asks whether it parses,
-for a body file under any other name. Like kvread.looks_like, it is only
-asked about a file no reader claims by name (store.looks_like_bodyfile's
-callers). merge.js has the twins of both for the import queue
+`looks_like` reads the first non-blank line (past a header line, the one
+after it) and asks whether it parses, for a body file under any other
+name. Like kvread.looks_like, it is only asked about a file no reader
+claims by name (store.looks_like_bodyfile's callers). merge.js has the twins of both for the import queue
 (tests/ui/test_bodyfile_queue.py holds the two sides to one list).
 """
 
@@ -72,15 +75,17 @@ from typing import Iterable, Iterator
 from .iisread import FileChanged
 
 __all__ = ["COLUMNS", "COLUMN_TYPES", "UNPARSED", "name_says", "looks_like",
-           "is_line", "split_line", "epoch_text", "plan", "rows"]
+           "is_line", "header_names", "split_line", "epoch_text", "plan", "rows"]
 
+# TSK's own names for the fields, in the file's order (the body file page of
+# the TSK wiki, and the header line tools that write one use).
 COLUMNS = [
-    "Modified (UTC)", "Accessed (UTC)", "Changed (UTC)", "Born (UTC)",
-    "Name", "Size", "Mode", "UID", "GID", "Inode", "MD5",
+    "MD5", "name", "inode", "mode_as_string", "UID", "GID", "size",
+    "atime", "mtime", "ctime", "crtime",
 ]
 COLUMN_TYPES = [
+    "text", "text", "text", "text", "number", "number", "number",
     "datetime", "datetime", "datetime", "datetime",
-    "text", "number", "text", "number", "number", "text", "text",
 ]
 UNPARSED = "Unparsed line"
 
@@ -103,6 +108,14 @@ _TAIL = re.compile(rf"[^|]*\|[^|]*\|-?\d*\|-?\d*\|-?\d*\|{_T}\|{_T}\|{_T}\|{_T}"
 # about a line that read as 3.x with a pipe in its name, which is where a
 # 2.x line's extra fields end up. Kept in step with BODYFILE_TSK2 in merge.js.
 _TSK2 = re.compile(r"[0-9A-Fa-f]*\|[^|]*\|[^|]*\|[^|]*\|\d+\|[^|]*[-rwxsStT]{9}\|\d+(?:\|-?\d+){9}", re.A)
+
+# A header line: eleven names, pipe-separated, the first naming the hash
+# (MD5, md5, Hash). A name is a word that may hold spaces, dots, slashes,
+# dashes and brackets (`crtime`, `mode_as_string`, `Born (UTC)`), never a
+# number, so no file's line passes for one. Kept in step with
+# BODYFILE_HEADER in merge.js.
+_HEADER_NAME = re.compile(r"[A-Za-z_][\w .()/-]*", re.A)
+_HEADER_HASH = re.compile(r"md5|hash", re.I)
 
 _EPOCH = datetime(1970, 1, 1)
 # time.gmtime is the fast path, up to the year 3000 that Windows' C
@@ -141,13 +154,31 @@ def is_line(line: str) -> bool:
     return _fields(line) is not None
 
 
+def header_names(line: str) -> list[str] | None:
+    """The eleven column names a body file's header line gives
+    (`MD5|name|inode|mode_as_string|UID|GID|size|atime|mtime|ctime|crtime`),
+    or None for any other line."""
+    names = [n.strip() for n in line.lstrip("\ufeff").split("|")]
+    if len(names) != len(COLUMNS) or not _HEADER_HASH.search(names[0]):
+        return None
+    if not all(_HEADER_NAME.fullmatch(n) for n in names):
+        return None
+    return names
+
+
 def looks_like(text: str) -> bool:
     """Whether the first non-blank line of `text` (the start of a file,
-    decoded) is a body file line."""
+    decoded) is a body file line, or a body file header line with one
+    under it."""
+    header = False
     for line in text.split("\n", 64)[:64]:
-        line = line.strip().lstrip("﻿")
-        if line:
-            return is_line(line)
+        line = line.strip().lstrip("\ufeff")
+        if not line:
+            continue
+        if not header and header_names(line) is not None:
+            header = True
+            continue
+        return is_line(line)
     return False
 
 
@@ -193,51 +224,63 @@ def split_line(line: str, times: dict | None = None) -> list[str] | None:
     f = _fields(line)
     if f is None:
         return None
-    md5, name, inode, mode, uid, gid, size, atime, mtime, ctime, crtime = f
     if times is None:
-        return [epoch_text(mtime), epoch_text(atime), epoch_text(ctime), epoch_text(crtime),
-                name, size, mode, uid, gid, inode, md5]
-    out = []
-    for v in (mtime, atime, ctime, crtime):
+        return f[:7] + [epoch_text(v) for v in f[7:]]
+    out = f[:7]
+    for v in f[7:]:
         t = times.get(v)
         if t is None:
             if len(times) >= _TIME_CACHE:
                 times.clear()
             t = times[v] = epoch_text(v)
         out.append(t)
-    out += (name, size, mode, uid, gid, inode, md5)
     return out
 
 
 def plan(lines: Iterable[str]) -> dict:
-    """Pass one (store._ingest_planned_lines): the columns are fixed, so
-    all this pass decides is whether the file needs the Unparsed line
-    column, and whether it holds a body file line at all. A file with none
-    plans no columns, which the store refuses with a clear error."""
+    """Pass one (store._ingest_planned_lines): the columns are the
+    format's eleven, under the names the file's header line gives when its
+    first line is one (`header`, the line itself, which pass two skips),
+    else COLUMNS. All the rest of this pass decides is whether the file
+    needs the Unparsed line column, and whether it holds a body file line
+    at all. A file with none plans no columns, which the store refuses
+    with a clear error."""
     good = bad = 0
+    header = names = None
     for line in lines:
+        if header is None and not good and not bad:
+            names = header_names(line)
+            if names is not None:
+                header = line
+                continue
         if is_line(line):
             good += 1
-        else:
+        elif line != header:
             bad += 1
     if not good:
-        return {"columns": [], "types": [], "unparsed": bad}
+        return {"columns": [], "types": [], "unparsed": bad, "header": header}
+    columns = names or list(COLUMNS)
     if bad:
-        return {"columns": COLUMNS + [UNPARSED], "types": COLUMN_TYPES + ["text"], "unparsed": bad}
-    return {"columns": list(COLUMNS), "types": list(COLUMN_TYPES), "unparsed": 0}
+        return {"columns": columns + [UNPARSED], "types": COLUMN_TYPES + ["text"], "unparsed": bad,
+                "header": header}
+    return {"columns": columns, "types": list(COLUMN_TYPES), "unparsed": 0, "header": header}
 
 
 def rows(lines: Iterable[str], plan: dict, stats: dict) -> Iterator[list[str]]:
-    """Pass two: a row per line, aligned to `plan`'s columns. A line that
-    isn't a body file line is the Unparsed line column's, counted in
+    """Pass two: a row per line, aligned to `plan`'s columns. The header
+    line pass one found (and any copy of it) is no row. A line that isn't
+    a body file line is the Unparsed line column's, counted in
     `stats["unparsed"]`. One showing up in a file pass one found none in
     means the file changed between the passes (see iisread.FileChanged)."""
-    keep = UNPARSED in plan["columns"]
+    keep = len(plan["columns"]) > len(COLUMNS)
+    header = plan.get("header")
     blank = [""] * len(COLUMNS)
     times: dict[str, str] = {}
     for line in lines:
         values = split_line(line, times)
         if values is None:
+            if header is not None and line == header:
+                continue
             if not keep:
                 raise FileChanged()
             stats["unparsed"] = stats.get("unparsed", 0) + 1

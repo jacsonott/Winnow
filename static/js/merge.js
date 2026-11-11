@@ -704,10 +704,22 @@ export function isBodyfileLine(line) {
   return !(name.includes('|') && BODYFILE_TSK2.test(line));
 }
 
+/* A header line above the first file (MD5|name|...|crtime, or the same
+   eleven under other names): the twin of bodyread.header_names. The file
+   is a body file when the line after it is one. */
+const BODYFILE_HEADER_NAME = /^[A-Za-z_][\w .()/-]*$/;
+export function isBodyfileHeader(line) {
+  const names = line.replace(/^\ufeff/, '').split('|').map((n) => n.trim());
+  return names.length === 11 && /md5|hash/i.test(names[0]) && names.every((n) => BODYFILE_HEADER_NAME.test(n));
+}
+
 export function looksLikeBodyfile(text) {
+  let header = false;
   for (const raw of text.split('\n', 64)) {
     const line = raw.trim().replace(/^\ufeff/, '');
-    if (line) return isBodyfileLine(line);
+    if (!line) continue;
+    if (!header && isBodyfileHeader(line)) { header = true; continue; }
+    return isBodyfileLine(line);
   }
   return false;
 }
