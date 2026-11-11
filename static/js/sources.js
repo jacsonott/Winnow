@@ -4,6 +4,7 @@ in the case.
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { recordTabVisit } from './tabhistory.js';
 import { findDefaultLayout, placeUnorderedColumns, renderHead, saveLayout } from './columns.js';
+import { syncColumnDock } from './columndock.js';
 import { $, ROW_H, api, caseUrl, el, nameMap, pageCaseToken, post, toast } from './core.js';
 import { derivedOps, renameColumnIn } from './derived.js';
 import { hideDetailPane, syncRowOpenHint } from './detail.js';
@@ -860,6 +861,11 @@ export async function loadSources(select, { navigate = true, openOpts = undefine
     // kept charting the table that just went (or the previous case's)
     // until another table opened.
     refreshHistogram();
+    // Nor the column list pinned to the sidebar, which renderHead
+    // repaints: it went on listing the closed or removed table's columns
+    // (or the previous case's) until another table opened. With
+    // S.sourceId null it says to open one instead.
+    syncColumnDock();
   }
 }
 

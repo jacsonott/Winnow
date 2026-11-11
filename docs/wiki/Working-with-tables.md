@@ -98,7 +98,7 @@ A hidden datetime column is also left out of the [histogram](Filtering-and-searc
 
 To keep the column list on screen beside the grid instead of opening the table menu each time, pin it to the sidebar. Click the column button (three bars) at the top of the sidebar, beside 🗀+, or click **Pin to sidebar** under the table menu's **Columns** list, which closes the table menu and puts the list at the bottom of the sidebar. If the sidebar was hidden, pinning the list shows it. Pinning also has a shortcut with no key by default, which you can give one in [Settings and shortcuts](Settings-and-shortcuts.md).
 
-The pinned list always shows the columns of the table you are looking at, and changes when you switch tabs. On a page such as SQL or the Timeline it says that the columns appear when you go back to a table.
+The pinned list always shows the columns of the table you are looking at, and changes when you switch tabs. On a page such as SQL or the Timeline it says that the columns appear when you go back to a table. When no table is open, because you closed the last tab, closed every tab, removed the table you were looking at or opened a case with no tables open, it says **Open a table to list its columns here.** and lists the next table you open.
 
 - **Filter columns…** narrows the list to the columns whose names contain what you type. What you typed stays when you tick a column, pin one, move one or switch to another table.
 - Tick a column to show it in the grid and untick it to hide it. The count beside **Columns** says how many of the table's columns are shown, for example "12 of 27".

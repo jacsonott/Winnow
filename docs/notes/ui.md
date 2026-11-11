@@ -649,6 +649,18 @@ see [docs/notes/README.md](README.md) for the whole set.
   used the header instead. `syncTabChrome` calls it too, because a page
   tab changes what is on screen without touching the layout (the list
   then says why it is empty rather than listing a table nobody can see).
+  So does `loadSources`'s no-table branch, and that call is the one that
+  is easy to lose: closing the last tab, **close all**, removing the
+  table on screen and opening a case with nothing open all end there,
+  with `S.sourceId` nulled and **no `renderHead`**, so for its first
+  release the list went on listing the table that had gone (or the
+  previous case's) until another table opened. Closing a tab with
+  another still open never showed it, because `openSource` for the tab
+  that takes its place does reach `renderHead`. The group strip and the
+  histogram are called from the same branch for the same reason; anything
+  else that follows "the table on screen" belongs there too
+  (`tests/ui/test_column_dock.py`'s three "takes its columns with it"
+  tests).
   Two things keep that repaint from undoing what the analyst is doing in
   the list. It is in place when the table and its set of names are the
   same (`dock.listedKey`): checkboxes and pins are repainted, rows are
