@@ -2634,6 +2634,20 @@ see [docs/notes/README.md](README.md) for the whole set.
   clipped mid-chord is worse than a terse one. The tooltip has no width
   limit and always names them.
 
+  It is measured by laying the text out in a hidden span in the box's own
+  font, not with a canvas's `measureText`. A canvas resolves the font list
+  by its own rules and keeps its previous font, silently, when it rejects
+  the one it is given, so it can measure a face the box doesn't paint.
+  The two disagreed when CI's Playwright went from 1.64 to 1.65 (Chromium
+  156 to 158): the canvas passed a hint the box then clipped, and
+  test_ctrl_f.py, which measures the same way the span does, failed on
+  identical app code. Two smaller gaps went with it: while the box is
+  hidden its width is estimated from the CSS width, which is border-box,
+  so the borders come off as well as the padding (clientWidth leaves them
+  out); and `expandSearch` calls `updateSearchHint` once the box is open,
+  so the padding and the placeholder are sized again from real layout
+  rather than the estimates made while it was hidden.
+
 - **The 2026-08 left-hand keybind pass** is additive on purpose: q/w beside
   [/] for saved-filter cycling (the highest-traffic key in a triage pass,
   moved under the resting left hand), a/A beside T/R for the timeframe, and

@@ -746,8 +746,17 @@ export function updateSearchHint() {
    text against what is left and fall back to the bare "All columns"
    rather than let it clip mid-chord — a hint that names half a key is
    worse than one that names none. The tooltip has no width limit and
-   always names them. */
-let placeholderMetrics = null;
+   always names them.
+
+   Measured by laying the text out in a hidden span in the box's own
+   font, not with a canvas's measureText. A canvas resolves the font
+   list by its own rules, and keeps its previous font without a word
+   when it rejects the one it is given, so it can measure a different
+   face from the one the box paints. Under CI's Chromium 158 (Playwright
+   1.65) the canvas passed a hint that the box then clipped, and
+   tests/ui/test_ctrl_f.py, which lays the text out the same way this
+   does, caught it. */
+let placeholderProbe = null;
 
 export function syncSearchKeyCopy() {
   const keys = (S.keymap.focusSearch || []).filter(Boolean);
@@ -756,15 +765,29 @@ export function syncSearchKeyCopy() {
   const box = $('search');
   const withKeys = `All columns  —  ${spelled}`;
   const cs = getComputedStyle(box);
-  placeholderMetrics = placeholderMetrics || document.createElement('canvas').getContext('2d');
-  placeholderMetrics.font = `${cs.fontSize} ${cs.fontFamily}`;
+  if (!placeholderProbe) {
+    placeholderProbe = document.createElement('span');
+    placeholderProbe.setAttribute('aria-hidden', 'true');
+    placeholderProbe.style.cssText = 'position:absolute;left:-10000px;top:0;visibility:hidden;white-space:pre;pointer-events:none';
+  }
+  const probe = placeholderProbe;
+  probe.style.fontFamily = cs.fontFamily;
+  probe.style.fontSize = cs.fontSize;
+  probe.style.fontWeight = cs.fontWeight;
+  probe.style.fontStyle = cs.fontStyle;
+  probe.style.letterSpacing = cs.letterSpacing;
+  probe.textContent = withKeys;
+  document.body.append(probe);
+  const width = probe.getBoundingClientRect().width;
+  probe.remove();
   // clientWidth is 0 while the wrap is hidden — the CSS width is what the
-  // box will be when it opens, and it is border-box, so the padding is
-  // already inside it.
-  const room = (box.clientWidth || parseFloat(cs.width) || 320)
+  // box will be when it opens. It is border-box, so the padding is inside
+  // it, and so are the borders, which clientWidth leaves out: take them
+  // off too, or the estimate has two pixels the open box doesn't.
+  const room = (box.clientWidth
+      || ((parseFloat(cs.width) || 320) - parseFloat(cs.borderLeftWidth || 0) - parseFloat(cs.borderRightWidth || 0)))
     - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
-  box.placeholder = spelled && placeholderMetrics.measureText(withKeys).width <= room
-    ? withKeys : 'All columns';
+  box.placeholder = spelled && width <= room ? withKeys : 'All columns';
 }
 
 /* Generic multi-term AND/OR/NOT chip editor — shared by the toolbar's
