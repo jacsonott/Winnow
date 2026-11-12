@@ -1,4 +1,4 @@
-# Ingest: CSV, raw text, JSON, SQLite, Excel, Plaso, IIS logs, key=value logs, login records, archives, folders, drops, jobs
+# Ingest: CSV, raw text, JSON, SQLite, Excel, Plaso, IIS logs, key=value logs, login records, body files, archives, folders, drops, jobs
 
 Every path that turns a file on disk into a `src_<id>` table, and the
 background-job machinery all of them run through. Invariant #1 (source
@@ -397,6 +397,69 @@ see [docs/notes/README.md](README.md) for the whole set.
   under no layout, is a ValueError naming why. headers.json (version 5)
   gives the table a Timeline summary. tests/test_utmp_logs.py,
   tests/ui/test_utmp_queue.py.
+- **Body files (TSK 3.x / mactime) are a core reader, not a plugin's**
+  (`bodyread.py`, `Store.ingest_bodyfile`, kind `bodyfile`). The format is
+  `MD5|name|inode|mode|UID|GID|size|atime|mtime|ctime|crtime`, written by
+  `fls -m`, UAC (`bodyfile/bodyfile.txt`), MFTECmd `--body` and
+  Volatility `--output=body`. It used to have no reader at all: a
+  `bodyfile.txt` was sniffed as pipe-delimited with `/etc/passwd`'s line
+  for a header and its times left as epoch integers. **Recognized by name
+  first** (`bodyread.name_says`: `bodyfile`, `bodyfile.txt`, `*.body`, an
+  expansion's ` (2)`; not `bodyfile.gz`, which is an archive, nor
+  `bodyfile.csv`, which may well be mactime's CSV) at every router a wtmp
+  name is asked at, with its own folder-scan chip
+  (`BODYFILE_IMPORT_TYPE`, on by default, "body files not selected" when
+  a saved profile leaves it out). **Under another name, by the first
+  line** (`bodyread.looks_like`, `store.looks_like_bodyfile`,
+  `looksLikeBodyfile` in merge.js), asked about the same files a
+  key=value log is and right after it, `/api/ingest/recognise` included.
+  **The name may hold `|`** (Linux allows it), so the line is split as
+  MD5 = first field, the nine after the name = the last nine
+  (`rsplit("|", 9)`), name = the rest; a fixed split shifts every field
+  after it. One regex with the name as `(.*)` did the same job at 5.6 µs
+  a line, from backtracking over every name, against 1.5 µs split;
+  a whole-disk body file is millions of lines. **A TSK 2.x line is
+  refused, not misread** (`_TSK2`): its sixteen fields read as 3.x put
+  the 2.x mode string and link count into the name and every later field
+  one or two columns off, and all of them are numbers that pass 3.x's
+  checks; it is only asked about a line whose name already holds a pipe.
+  **Columns are the body file's own headers** (no `column_types`
+  anywhere): TSK's names for the eleven fields, in the file's order
+  (`MD5|name|inode|mode_as_string|UID|GID|size|atime|mtime|ctime|crtime`).
+  The first version renamed them (`Modified (UTC)`, `Name`, …) and put
+  the times first in MACB order so mtime would be the first datetime
+  column; that was reported as the reader "not retaining the headers", so
+  the names and order are the file's, and atime is what the Timeframe
+  filter, histogram and Timeline default to until mtime is picked. **A
+  header line** (`bodyread.header_names`: eleven names, the first naming
+  the hash, none a number, so no file's line passes for one; merge.js's
+  `isBodyfileHeader`) as the first line names the columns — a tool's own
+  `md5|file|st_ino|…` keeps its words — and is no row; `plan` returns it
+  as `header` and `rows` skips it and any copy of it (body files joined
+  with `cat`). `looks_like` reads past it to the line under it, so a
+  header alone, or over a line that isn't one, is not a body file.
+  Before this, a header line was an `Unparsed line` row and kept the
+  file from being recognized by content at all. size, UID and GID are
+  numbers, inode text (NTFS `entry-type-id`). Times are epoch seconds,
+  converted with `time.gmtime` (datetime below 1970 and past the year
+  3000, where Windows' gmtime stops) and a per-import cache, since a
+  disk's files share a few install and update times; a fraction (UAC's
+  `find -printf %T@` writes ten digits) is truncated to six, never
+  rounded into the next second, and `.000000` is kept as a tell. `0`,
+  `-` and empty are "not recorded" and stay empty, as mactime leaves
+  them off; a number no datetime can hold is kept as written. A line
+  that isn't one goes whole to `Unparsed line` (a column only a file
+  that needs it gets; `plan` reads every line to know), counted as
+  `unparsed_lines` in the result — in the job result whitelist, the
+  jobs toast and the log — and a file with no body line at all is
+  refused. Read through `_ingest_planned_lines`, so the encoding sniff,
+  NUL gaps, CRLF and the live-file second pass are IIS's. headers.json
+  (version 6) has the set "Body files (TSK / mactime)" for a Timeline
+  summary (name, then size, mode_as_string, UID, inode), matched on
+  TSK's names, so a file whose header line uses other names gets none. The esxi_logs plugin never
+  read body files and still doesn't; a UAC collection's
+  `bodyfile.txt` is this reader's whether the plugin is on or not.
+  tests/test_bodyfile.py, tests/ui/test_bodyfile_queue.py.
 
 - Ragged rows are padded/trimmed to the header width, never dropped, and
   counted — `ingest_csv`'s return dict has a `ragged_rows` count surfaced to

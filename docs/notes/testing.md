@@ -114,7 +114,7 @@ only ever offers paths that actually extract, and that a batch is
 all-or-nothing (a name collision in the fifth spec must not leave four
 columns behind).
 `test_ingest_contracts.py` holds every reader (CSV, text, JSON, IIS,
-key=value, XLSX, Plaso, SQLite) to the three promises ingest_csv set,
+key=value, body file, XLSX, Plaso, SQLite) to the three promises ingest_csv set,
 since each carries its own copy of the code that keeps them: every row
 lands in order across batches (BATCH is shrunk so a 30-row fixture spans
 five), a cancel leaves no table, and a failure raised from the reader
@@ -237,8 +237,8 @@ the grid's equivalent condition on the same table and on a merge, and
 compares the counts per group, because the plugin compiles its own WHERE.
 Its table has both '' and NULL, and a number column with a blank and a
 non-number in it. `test_session_reimport.py` re-imports a table from a
-session for every reader the session can name (IIS and key=value are in
-their own files), with and without the reader recorded, and covers a
+session for every reader the session can name (IIS, key=value, login
+records and body files are in their own files), with and without the reader recorded, and covers a
 session with no path, a file gone from its path, and a file replaced while
 it was read. Beside the `--from` tests above, `test_updater.py`'s
 `ReleaseCli` runs `update.py` on the release path, with GitHub answered

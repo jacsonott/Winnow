@@ -122,9 +122,10 @@ Notes and dashboards.
 - **Most things triage produces** — CSV and TSV with any delimiter, JSON
   and JSON Lines, SQLite databases (a browser `History`, say), Excel
   `.xlsx`/`.xlsm`, `.plaso` timelines, Linux `wtmp`/`btmp`/`utmp` login
-  records (either record size and byte order), and any log file as raw
-  text, one line per row, or split into columns on a delimiter you type
-  (two colons, a pipe with spaces around it, a single space). Archives (`.zip`, `.tar`, `.tgz` and friends,
+  records (either record size and byte order), TSK/mactime body files
+  (`fls -m`, UAC's `bodyfile.txt`) with their times in UTC, and any log
+  file as raw text, one line per row, or split into columns on a delimiter
+  you type (two colons, a pipe with spaces around it, a single space). Archives (`.zip`, `.tar`, `.tgz` and friends,
   nested ones included) expand into a new folder, leaving the archive
   untouched, and folder import takes a whole KAPE output in one go.
 - **Real datetime columns** — derive a sortable column from Unix epochs,

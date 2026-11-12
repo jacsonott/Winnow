@@ -1,5 +1,5 @@
 {
-  "version": 5,
+  "version": 6,
   "nicknames": [
     {
       "name": "Event logs (EvtxECmd)",
@@ -1126,6 +1126,38 @@
         ],
         "labels": {
           "Host": "from"
+        }
+      }
+    },
+    {
+      "name": "Body files (TSK / mactime)",
+      "columns": [
+        "MD5",
+        "name",
+        "inode",
+        "mode_as_string",
+        "UID",
+        "GID",
+        "size",
+        "atime",
+        "mtime",
+        "ctime",
+        "crtime"
+      ],
+      "summary": {
+        "lead": [
+          "name"
+        ],
+        "details": [
+          "size",
+          "mode_as_string",
+          "UID",
+          "inode"
+        ],
+        "labels": {
+          "size": "size",
+          "UID": "uid",
+          "inode": "inode"
         }
       }
     }
