@@ -133,6 +133,47 @@ def test_a_column_head_sorts(page, second):
     page.keyboard.press("Escape")
 
 
+def test_imported_says_when_each_table_came_in_and_sorts_newest_first(page, imported, server_call, tmp_path):
+    late_name = "zz-tm-late.csv"
+    ui = _src(page, "ui.csv")
+    # Imported at least a second after ui.csv (the stamps are to the
+    # second, and a tie falls back to the name order), and named to sort
+    # AFTER it by name, so newest first is a different order from the
+    # default rather than the same one twice.
+    while time.strftime("%Y-%m-%dT%H:%M:%S") <= ui["imported_at"]:
+        time.sleep(0.05)
+    path = tmp_path / late_name
+    path.write_text("Host,Value\nH1,1\n", encoding="utf-8")
+    late_id = imported({"path": str(path), "name": late_name, "kind": "csv", "build_fts": False})[0]
+    try:
+        page.evaluate("() => __winnow.loadSources()")
+        _open(page)
+        page.locator(".tables-sort[data-sort='name']").click()
+        stamp = _src(page, late_name)["imported_at"].replace("T", " ")
+        cell = _row(page, late_name).locator(".tables-when")
+        # To the minute in the list; to the second, and what kind of time
+        # it is, on hover.
+        assert cell.inner_text() == stamp[:16], (cell.inner_text(), stamp)
+        assert cell.get_attribute("title") == f"Imported {stamp}"
+        # The whole stamp fits its column, under its own heading.
+        assert cell.evaluate("(n) => n.scrollWidth <= n.clientWidth")
+        head = page.locator(".tables-head .tables-sort[data-sort='imported_at']")
+        assert head.text_content() == "Imported"
+        hb, cb = head.bounding_box(), cell.bounding_box()
+        assert abs((hb["x"] + hb["width"]) - (cb["x"] + cb["width"])) <= 2, (hb, cb)
+
+        order = lambda: [n.inner_text() for n in page.locator("#modal .tables-list .tables-name").all()]
+        assert order().index("ui.csv") < order().index(late_name)   # by name
+        head.click()
+        assert head.get_attribute("aria-pressed") == "true"
+        assert order().index(late_name) < order().index("ui.csv")   # newest first
+    finally:
+        page.locator(".tables-sort[data-sort='name']").click()
+        server_call(f"/api/source/{late_id}", "DELETE")
+        page.evaluate("() => __winnow.loadSources()")
+    page.keyboard.press("Escape")
+
+
 def test_the_poll_keeps_a_typed_filter_and_the_focus(page, api, second):
     uid = _src(page, "ui.csv")["id"]
     _open(page)

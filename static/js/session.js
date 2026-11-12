@@ -17,15 +17,11 @@ import { $, api, caseUrl, el, post, setBusy, toast } from './core.js';
 import { diffMarkNode } from './grid.js';
 import { loadSources, openSource, replaceFilters } from './sources.js';
 import { S } from './state.js';
-import { countCell, keepingFocus, plural } from './tables.js';
+import { countCell, fmtWhen, keepingFocus, plural } from './tables.js';
 import { tableMenuField, tableMenuStat } from './timeframe.js';
 import { confirmDialog, contextMenu, dropdownMenu, modal, promptDialog, sectionPanes } from './ui.js';
 
 const LIVE = '__live__';
-
-function fmtWhen(iso) {
-  return (iso || '').replace('T', ' ').slice(0, 16);
-}
 
 /* The Sessions dialog, in the Tables manager's frame: the case's saved
    sessions and the comparison down a side list, the chosen one on the

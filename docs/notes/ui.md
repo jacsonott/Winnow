@@ -1873,6 +1873,20 @@ see [docs/notes/README.md](README.md) for the whole set.
   case file stays in the Case menu (case upkeep, not table upkeep).
   `tablesView` keeps the filter, grouping and sort for the page, so they
   survive a trip into the table menu and back.
+  **Imported** is `sources.imported_at`, which every ingest path and
+  `_create_source_shell` already stamped (a merge's is `merges.created_at`,
+  surfaced under the same key): `time.strftime` local time, to the second,
+  no offset, taken when the import STARTS, since the row is written
+  before the file is read. The list shows it to the minute (`fmtWhen`,
+  which the Sessions dialog's Saved column shares) and the cell's title
+  gives the second and says Imported, Saved or Made (`importedVerb`).
+  Its sort compares the ISO text, newest first, with no time last, and,
+  like every sort here, orders tables within their group. The column has
+  a grid of its own (`.tables-every`) rather than widening `.tables-head`/
+  `.tables-row`'s: the saved-filters list (`sf-head`) draws on that base
+  grid, and an extra track there would shift its columns. It is wider
+  than the stamp so Notes' dash beside it doesn't read as part of the
+  date, and drops out in a narrow window with Tagged and Notes.
   tests/ui/test_tables_manager_panes.py, test_tables_density.py.
 - **The Import dialog is the side-list frame too** (`openImportModal`
   in importer.js, `.import-*` in style.css). The queue is the rail: a
