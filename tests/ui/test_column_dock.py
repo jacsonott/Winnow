@@ -13,6 +13,9 @@ What has to hold, in the terms an analyst would notice it failing:
 * it never goes stale: a column hidden, pinned or moved from anywhere
   else (the header, Alt-click, the table menu) shows in it at once, and
   a different table relists it;
+* a table that goes takes its columns with it: closing the last tab,
+  closing every tab or removing the table on screen leaves the list
+  saying to open a table, not listing the one that went;
 * a filter typed into it survives the ticks, pins and drops it is there
   to make, and a table switch;
 * it stays pinned across a reload, and its ✕ unpins it for good;
@@ -191,6 +194,109 @@ def test_another_table_relists_it_and_a_page_tab_says_why_it_is_empty(page, layo
         page.evaluate("(id) => __winnow.openSource(id)", home)
         api(f"/api/source/{other}", "DELETE")
         page.evaluate("() => __winnow.loadSources()")
+
+
+@pytest.fixture
+def tabs_restored(page):
+    """Gives back the tabs that were open, and the table that was on
+    screen, after a test that closes them. Which tables have a tab is the
+    shared case's state too, and the next test expects its table there.
+    Yields that table's id."""
+    page.wait_for_function("() => !!__winnow.S.view && __winnow.S.columns.length > 0")
+    home = page.evaluate("() => __winnow.S.sourceId")
+    was_open = page.evaluate("() => __winnow.S.sources.filter((s) => s.is_open).map((s) => s.id)")
+    yield home
+    page.evaluate("""([ids, home]) => (async () => {
+      const now = await __winnow.api('/api/sources');
+      const shut = now.filter((s) => ids.includes(s.id) && !s.is_open).map((s) => s.id);
+      if (shut.length) await __winnow.post('/api/tabs/open', { source_ids: shut });
+      await __winnow.loadSources(home);
+    })()""", [was_open, home])
+    page.wait_for_function("(id) => __winnow.S.sourceId === id && !!__winnow.S.view", arg=home, timeout=30_000)
+
+
+def _import_small(api, tmp_path, name, text):
+    f = tmp_path / name
+    f.write_text(text, encoding="utf-8")
+    return api("/api/ingest/path", "POST", {"path": str(f), "name": name, "build_fts": False})["id"]
+
+
+def _only_these_open(page, ids, show):
+    """Exactly these tables have tabs, and `show` is on screen."""
+    page.evaluate("""([ids, show]) => (async () => {
+      await __winnow.post('/api/tabs/close_all', {});
+      await __winnow.post('/api/tabs/open', { source_ids: ids });
+      await __winnow.loadSources(show);
+    })()""", [ids, show])
+    page.wait_for_function("(id) => __winnow.S.sourceId === id && !!__winnow.S.view", arg=show)
+
+
+def _says_open_a_table(page):
+    page.wait_for_selector(f"{DOCK} .coldock-empty:not([hidden])")
+    assert page.locator(f"{DOCK} .coldock-body").is_hidden()
+    assert page.locator(f"{DOCK} .coldock-empty").inner_text() == "Open a table to list its columns here."
+    assert page.locator(f"{DOCK} .coldock-count").inner_text() == ""
+
+
+def test_closing_the_last_tab_takes_its_columns_with_it(page, api, tabs_restored, tmp_path):
+    """Closing a tab moved the list on to the tab that took its place, but
+    closing the LAST one left it listing the closed table's columns beside
+    a grid that said to open a table, until another table opened."""
+    home = tabs_restored
+    other = _import_small(api, tmp_path, "dock_close.csv", "When,Who,What\n2026-03-14 09:00:00,alice,logon\n")
+    try:
+        _only_these_open(page, [home, other], other)
+        _pin_dock(page)
+        assert _listed(page) == ["When", "Who", "What"]
+        # Another tab left: the list moves to it.
+        page.locator(f'#sourceTabs .tab[data-id="{other}"] .x').click()
+        page.wait_for_function("(id) => __winnow.S.sourceId === id", arg=home)
+        page.wait_for_selector(f'{ROWS}[data-col="Host"]')
+        assert _listed(page) == page.evaluate("() => [...__winnow.S.order]")
+        # None left: it says so, rather than listing the table just closed.
+        page.locator(f'#sourceTabs .tab[data-id="{home}"] .x').click()
+        _says_open_a_table(page)
+        assert not page.locator(f'{ROWS}[data-col="Host"]').is_visible()
+        # A page tab has no table behind it now either, so the list does not
+        # send the analyst "back" to one.
+        page.click("#tabTimeline")
+        page.wait_for_function("() => __winnow.S.activeTab === 'timeline'")
+        _says_open_a_table(page)
+        # And a table opened from the sidebar is listed again.
+        page.locator("#sidebarList .sidebar-row:not(.sidebar-openrow)", has_text="dock_close.csv") \
+            .locator(".menu-item").first.click()
+        page.wait_for_function(
+            "() => [...document.querySelectorAll('#colDock .coldock-row')].map((r) => r.dataset.col).join() === 'When,Who,What'")
+        assert page.locator(f"{DOCK} .coldock-body").is_visible()
+        assert page.locator(f"{DOCK} .coldock-count").inner_text() == "3 of 3"
+    finally:
+        api(f"/api/source/{other}", "DELETE")
+
+
+def test_close_all_takes_the_columns_with_it(page, tabs_restored):
+    _pin_dock(page)
+    page.evaluate("() => __winnow.closeAllTabs()")
+    page.wait_for_function("() => __winnow.S.sourceId === null")
+    _says_open_a_table(page)
+
+
+def test_removing_the_table_on_screen_takes_its_columns_with_it(page, api, tabs_restored, tmp_path):
+    other = _import_small(api, tmp_path, "dock_remove.csv", "RmWhen,RmWho\n2026-03-14 09:00:00,bob\n")
+    try:
+        _only_these_open(page, [other], other)
+        _pin_dock(page)
+        assert _listed(page) == ["RmWhen", "RmWho"]
+        page.locator(f'#sourceTabs .tab[data-id="{other}"]').click(button="right")
+        menu = page.locator(".menu:not(.menu-sub)")
+        menu.wait_for()
+        menu.locator(".menu-item", has=page.locator(".menu-item-text", has_text="Remove…")).click()
+        page.locator(".confirm-overlay .btn.danger", has_text="Remove").click()
+        page.wait_for_function("(id) => !__winnow.S.sources.some((s) => s.id === id)", arg=other)
+        _says_open_a_table(page)
+        assert not page.locator(f'{ROWS}[data-col="RmWho"]').is_visible()
+    finally:
+        if any(s["id"] == other for s in api("/api/sources")):
+            api(f"/api/source/{other}", "DELETE")
 
 
 def test_it_stays_pinned_across_a_reload_and_the_x_unpins_it(page, layout_restored):

@@ -926,7 +926,12 @@ class ImportProfiles:
     def upsert(
         self, profile_id: int | None, name: str, extensions: list[str] | None,
         include_patterns: list[str], exclude_patterns: list[str], recursive: bool,
+        text_delimiter: str | None = None, text_has_header: bool = False,
     ) -> dict:
+        """`text_delimiter` is what the "other text files" type's files
+        are split on (None: one line per row), and `text_has_header`
+        whether their first row is a header then. A profile saved before
+        they existed has neither, which reads as one line per row."""
         with _LOCK:
             items = self._load()
             rec = next((p for p in items if p["id"] == profile_id), None) if profile_id else None
@@ -934,12 +939,14 @@ class ImportProfiles:
                 rec.update(
                     name=name, extensions=extensions, include_patterns=include_patterns,
                     exclude_patterns=exclude_patterns, recursive=recursive,
+                    text_delimiter=text_delimiter, text_has_header=text_has_header,
                 )
             else:
                 rec = {
                     "id": _next_id(items), "name": name, "extensions": extensions,
                     "include_patterns": include_patterns, "exclude_patterns": exclude_patterns,
-                    "recursive": recursive, "created_at": _now(),
+                    "recursive": recursive, "text_delimiter": text_delimiter,
+                    "text_has_header": text_has_header, "created_at": _now(),
                 }
                 items.append(rec)
             self._save(items)

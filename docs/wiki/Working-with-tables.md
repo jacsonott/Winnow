@@ -71,7 +71,7 @@ The tick on each row is whether the table is open as a tab: tick it to open the 
 
 **Indexes** shows both kinds of index a case builds on its own. A table's search index says **index ready**, **indexing…** or **not indexed**. Until it is ready, Contains and Advanced searches on that table scan every row instead: the results are the same, only slower (see [The search index and slow searches](Filtering-and-searching.md#the-search-index-and-slow-searches)). **Build** starts a table's search index now, in the background, rather than on the first search that needs it, and **Build *N* missing search indexes** does it for every table without one. If Winnow is running on a Python whose SQLite is older than 3.45, there is no search index, and the pane says so.
 
-Filtering, grouping or opening the value picker on a column builds a small filter index for that column in the background, and sorting by a column builds a sort index for it. Two are built as part of the import instead, so they are ready before the first click: a sort index on the table's first date and time column, which is usually the first thing a timeline is sorted by, and, for an EvtxECmd event log, a filter index on EventId, because the KAPE dashboard and lateral movement filter on it in nearly every query. Each adds a few seconds to the import of a large log and saves more than that the first time it is used. They are listed beside each table, and ✕ drops one if they take up too much space; **Drop all filter indexes** drops every one, after asking. Dropping one costs nothing but a slower first filter on that column next time.
+Filtering, grouping or opening the value picker on a column builds a small filter index for that column in the background, and sorting by a column builds a sort index for it. Two are built as part of the import instead, so they are ready before the first click: a sort index on the table's first date and time column, which is usually the first thing a timeline is sorted by (unless its dates are written US-style or with a month name, which sort by time rather than from an index), and, for an EvtxECmd event log, a filter index on EventId, because the KAPE dashboard and lateral movement filter on it in nearly every query. Each adds a few seconds to the import of a large log and saves more than that the first time it is used. They are listed beside each table, and ✕ drops one if they take up too much space; **Drop all filter indexes** drops every one, after asking. Dropping one costs nothing but a slower first filter on that column next time.
 
 ## The table menu
 
@@ -98,7 +98,7 @@ A hidden datetime column is also left out of the [histogram](Filtering-and-searc
 
 To keep the column list on screen beside the grid instead of opening the table menu each time, pin it to the sidebar. Click the column button (three bars) at the top of the sidebar, beside 🗀+, or click **Pin to sidebar** under the table menu's **Columns** list, which closes the table menu and puts the list at the bottom of the sidebar. If the sidebar was hidden, pinning the list shows it. Pinning also has a shortcut with no key by default, which you can give one in [Settings and shortcuts](Settings-and-shortcuts.md).
 
-The pinned list always shows the columns of the table you are looking at, and changes when you switch tabs. On a page such as SQL or the Timeline it says that the columns appear when you go back to a table.
+The pinned list always shows the columns of the table you are looking at, and changes when you switch tabs. On a page such as SQL or the Timeline it says that the columns appear when you go back to a table. When no table is open, because you closed the last tab, closed every tab, removed the table you were looking at or opened a case with no tables open, it says **Open a table to list its columns here.** and lists the next table you open.
 
 - **Filter columns…** narrows the list to the columns whose names contain what you type. What you typed stays when you tick a column, pin one, move one or switch to another table.
 - Tick a column to show it in the grid and untick it to hide it. The count beside **Columns** says how many of the table's columns are shown, for example "12 of 27".
@@ -119,7 +119,8 @@ Drag the line between the table list and the column list to give either more of 
 - Only the columns you can see are compared. Hidden columns are ignored, so to collapse copies that differ only in a column such as **SourceFile**, or a merge's **From table** column, hide that column. Hiding or showing a column while the toggle is on changes which rows count as duplicates, and the grid updates. A column you have grouped by is still compared.
 - Two values match when their text is exactly the same, case included, as with the `=` filter. An empty cell matches any other empty cell.
 - The row kept from each set is the first by **Line**, whatever the sort. In a merge it is the row from the table listed first in the merge, then the first by Line.
-- Duplicates are looked for among the rows your other filters, search, tag filter and timeframe leave.
+- Duplicates are looked for among the rows your other filters, search and timeframe leave.
+- The tag filter then looks at the rows that are kept, which are the rows you see and tag. So once you tag a row, its hidden copies stay hidden under **No tags** or a tag you exclude, and a tag filter only ever narrows what is on screen. Tags on a hidden copy don't count: if you tagged a copy while duplicates were showing, turn the toggle off to find it under that tag.
 - It is remembered for the table, and the line beside the toolbar says **duplicates hidden** while it is on. **Clear filters** and **Reset view** leave it on.
 
 Everything that reads the view sees only the rows kept: the row count, grouping, the histogram, **Stack values**, **This view** in the value picker, tagging the whole view and **Current view** exports. Tags and notes on the hidden copies stay where they are. Nothing is deleted. To keep the deduplicated rows as a table of their own, turn the toggle on and use [Saving a view as a table](#saving-a-view-as-a-table).
@@ -166,7 +167,9 @@ How a column sorts depends on its type:
 
 - Number columns sort by value. Cells that aren't numbers sort before every number in ascending order.
 - Text columns sort alphabetically, ignoring case for A–Z only.
-- Datetime columns sort as text. That is chronological for timestamps like `2024-01-05 13:22:01`, but not for US-style dates, which sort character by character: `1/13/2024` comes before `1/2/2024`. Make a derived datetime column from such a column to get a chronological sort; see [Derived columns](Derived-columns.md).
+- Datetime columns sort chronologically, whichever way the file wrote the time: `2024-01-05 13:22:01`, US-style `1/5/2024 1:22:01 PM`, or with a month name, `Jan 5 2024 13:22:01`. Changing a column's display format changes how it looks, not how it sorts. Rows in the same second are ordered by their fraction of a second. Cells that aren't timestamps (`N/A`, blank) sort before every timestamp in ascending order, as non-numbers do in a number column.
+
+    An ISO-style column (`2024-01-05 …`) sorts from an index, which stays fast on millions of rows. Any other shape is read and put in time order on every sort, which takes a couple of seconds per million rows; a filtered view only pays for the rows it shows. If you sort a very large US-dated table often, a [derived datetime column](Derived-columns.md) made from it sorts as fast as an ISO one.
 
 ## The detail pane
 

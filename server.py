@@ -57,7 +57,7 @@ from winnow import utmpread
 from winnow import workspace as WS
 from winnow.sqlresults import ResultExpired, TooBig
 from winnow.store import (CASE_SUFFIX, DEFAULT_IMPORT_EXTENSIONS, PLASO_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, XLSX_IMPORT_EXTENSIONS, MissingTable, OpCancelled, RecordGone, Store, ViewExpired,
-                   case_lock_path, decode_text_sample, describe_case_lock, fold_leftover_wal, is_winnow_case_file,
+                   case_lock_path, check_delimiter, decode_text_sample, describe_case_lock, fold_leftover_wal, is_winnow_case_file,
                    looks_like_bodyfile, looks_like_kv_log, looks_like_utmp, probe_case_lock, q, sniff_text_encoding,
                    sweep_orphan_views)
 from winnow.store import VIEW_EXPORT_FORMATS, case_session_document_problem, pane_cell_json, session_document_problem
@@ -915,6 +915,10 @@ class ImportProfileWrite(BaseModel):
     include_patterns: list[str] = []
     exclude_patterns: list[str] = []
     recursive: bool = True
+    # How the "other text files" type's files are split: None reads them
+    # one line per row (raw text), else they import delimited on this.
+    text_delimiter: str | None = None
+    text_has_header: bool = False
 
 
 class CaseOpen(BaseModel):
@@ -2828,9 +2832,14 @@ def api_import_profiles_list():
 
 @app.post("/api/import_profiles")
 def api_import_profiles_save(body: ImportProfileWrite):
+    try:
+        check_delimiter(body.text_delimiter or None)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     return WS.import_profiles.upsert(
         body.id, body.name, body.extensions, body.include_patterns,
         body.exclude_patterns, body.recursive,
+        text_delimiter=body.text_delimiter or None, text_has_header=body.text_has_header,
     )
 
 
@@ -3321,6 +3330,9 @@ def _ingest_job_options(kind: str, *, build_fts: bool, delimiter=None, has_heade
     # source under it when the ingest completes (directory import).
     base = {"folder_path": folder_path} if folder_path else {}
     if kind == "csv":
+        # Refused here, as a 400 the import window shows, rather than as a
+        # job that starts and fails on its first line.
+        check_delimiter(delimiter)
         return {**base, "build_fts": build_fts, "delimiter": delimiter,
                 "has_header": has_header, "column_types": column_types}
     if kind == "json":

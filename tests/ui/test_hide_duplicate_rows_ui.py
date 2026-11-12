@@ -87,3 +87,42 @@ def test_toggle_hides_repeats_and_follows_the_visible_columns(page, dupes, layou
     _rows(page, 5, on=False)
     assert "duplicates hidden" not in page.locator("#viewStats").inner_text()
     layout_saved()
+
+
+def test_no_tags_leaves_the_copies_of_a_tagged_row_hidden(page, dupes, api, layout_saved):
+    """The bug: tag the row kept from a set of copies, press No tags on the
+    ribbon, and its next copy came back as an untagged row. The tag filter
+    looks at the rows kept now, so what is left is the one set nobody has
+    tagged — and pressing Exclude on the tag leaves the same."""
+    _open(page, dupes)
+    page.evaluate("() => __winnow.openTableMenu()")
+    page.locator("#modalBody button", has_text="Hide duplicate rows").click()
+    _rows(page, 4)
+    # File hidden: rows 2 and 4 are copies of 1, and 5 of 3.
+    row = page.locator("#modalBody .collist-row", has=page.locator(".collist-name", has_text="File"))
+    row.locator("input[type=checkbox]").uncheck()
+    _rows(page, 2)
+    page.evaluate("() => __winnow.closeModal()")
+    tag = page.evaluate("() => __winnow.S.tags[0]")
+    api("/api/row_tags", "POST", {"source_id": dupes, "rids": [1], "tag_id": tag["id"], "on": True})
+    page.evaluate("() => __winnow.loadTags()")
+
+    def kept():
+        page.wait_for_function("() => __winnow.busyCount === 0 && !!__winnow.S.view")
+        return page.evaluate("""() => __winnow.api(`/api/rows?view_id=${__winnow.S.view.view_id}&start=0&count=10`)
+                                .then((r) => r.rows.map((x) => x.rid))""")
+    try:
+        page.locator("#tagRibbon .tag-chip", has_text="No tags").click()
+        page.wait_for_function("() => __winnow.S.tagFilter.includes('__none__') && __winnow.S.view.row_count === 1")
+        assert kept() == [3]
+        page.locator("#tagRibbon .tag-chip", has_text="No tags").click()
+        page.evaluate("(id) => __winnow.toggleTagExclusion(id)", tag["id"])
+        page.wait_for_function("(k) => __winnow.S.tagFilter.includes(k) && __winnow.S.view.row_count === 1",
+                               arg=f"!{tag['id']}")
+        assert kept() == [3]
+    finally:
+        page.evaluate("""() => { __winnow.S.tagFilter = []; __winnow.renderTagRibbon();
+          return __winnow.rebuildView({ keepScroll: false, keepRow: false }); }""")
+        api("/api/row_tags", "POST", {"source_id": dupes, "rids": [1], "tag_id": tag["id"], "on": False})
+        page.evaluate("() => __winnow.loadTags()")
+        layout_saved()

@@ -105,7 +105,7 @@ To hide a tag's rows instead, right-click its chip and choose **Exclude *tag***.
 | A tag excluded | Rows without that tag |
 | A tag, and another excluded | Rows with the first tag that do not also have the second |
 
-The tag filter combines with the column filters, search and timeframe. **Clear filters** (or `c`) clears it along with everything else. The other filter tools are on [Filtering and searching](Filtering-and-searching.md).
+The tag filter combines with the column filters, search and timeframe. With [Hide duplicate rows](Working-with-tables.md#hiding-duplicate-rows) on, it looks only at the rows that are kept, so the hidden copies of a row you tagged stay hidden under **No tags** too. **Clear filters** (or `c`) clears it along with everything else. The other filter tools are on [Filtering and searching](Filtering-and-searching.md).
 
 ## Undo
 

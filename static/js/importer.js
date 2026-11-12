@@ -302,9 +302,27 @@ export function fetchPreview(item, fields) {
 }
 
 export const DELIMITERS = [['auto', 'Auto-detect', null], ['comma', 'Comma', ','], ['tab', 'Tab', '\t'],
-                    ['semicolon', 'Semicolon', ';'], ['pipe', 'Pipe', '|']];
-export const delimKey = (d) => (DELIMITERS.find((x) => x[2] === d) || DELIMITERS[0])[0];
+                    ['semicolon', 'Semicolon', ';'], ['pipe', 'Pipe', '|'], ['space', 'Space', ' ']];
+/* Any other text to split on, typed beside the presets: one character
+   follows the presets' rules (quotes group a field), more than one splits
+   each line as written (store._LiteralRows). For a log no reader claims,
+   whose fields are set off by " | ", " - " or "::". */
+export const CUSTOM_DELIMITER = ['custom', 'Custom', 'Split on characters you type, such as “ | ” or “::”'];
+/* Which button is pressed: Custom once it was chosen, even while what is
+   typed matches a preset (typing "," must not jump to Comma under the
+   caret), and for a delimiter no preset has. */
+export const delimKey = (item) => {
+  if (item.delim_mode === 'custom') return 'custom';
+  const preset = DELIMITERS.find((x) => x[2] === (item.delimiter ?? null));
+  return preset ? preset[0] : 'custom';
+};
 export const delimName = (d) => (DELIMITERS.find((x) => x[2] === d) || ['', JSON.stringify(d)])[1];
+/* A delimiter as the pane and the queue show it: a space as ␣ and a tab
+   as ⇥, since " | " and "|" read the same otherwise. */
+export const showDelim = (d) => String(d).replace(/ /g, '\u2423').replace(/\t/g, '\u21e5');
+/* The delimiter in the queue's hint and the preview's foot line. */
+export const delimHint = (item) => (!item.delimiter ? 'auto-detect'
+  : delimKey(item) === 'custom' ? `custom ${showDelim(item.delimiter)}` : delimName(item.delimiter).toLowerCase());
 
 /* What the side list says under a file's name: how it will be read, as
    the section lists say what is set in a section. */
@@ -323,8 +341,7 @@ export function queueHint(item) {
     case 'utmp': return `Login records · ${utmpFileKind(item.name) || 'wtmp/btmp/utmp'}`;
     case 'bodyfile': return 'Body file · a row per file';
     case 'archive': return 'Archive · expands on import';
-    default: return 'Delimited · ' + (item.delimiter ? delimName(item.delimiter).toLowerCase() : 'auto-detect')
-      + (item.has_header === false ? ' · no header' : '');
+    default: return 'Delimited · ' + delimHint(item) + (item.has_header === false ? ' · no header' : '');
   }
 }
 
@@ -514,7 +531,8 @@ export function readAsOptions(item) {
 export function switchKind(item, to) {
   if (item.kind === to) return;
   if (!item.queuedAs) item.queuedAs = { kind: item.kind, format_id: item.format_id, options: item.options };
-  const reset = { delimiter: null, has_header: true, column_types: null, log_format: null, format_id: null, options: null };
+  const reset = { delimiter: null, delim_mode: null, custom_text: null, has_header: true, column_types: null,
+                  log_format: null, format_id: null, options: null };
   if (to === 'text') Object.assign(item, reset, { kind: 'text', has_header: false, configured: true });
   else if (to === 'csv') Object.assign(item, reset, { kind: 'csv', configured: true });
   else if (to === 'iis') Object.assign(item, reset, { kind: 'iis', configured: false });
@@ -542,14 +560,18 @@ export function buildQueueItemPane(pane, item, changed) {
   fileRow.classList.add('import-folder-row');
   pane.append(fileRow);
 
+  // The pane again from the top, for a change of reader.
+  const rebuild = () => {
+    pane.replaceChildren();
+    buildQueueItemPane(pane, item, changed);
+  };
   const opts = readAsOptions(item);
   if (opts) {
     const seg = tableMenuSeg(opts, () => item.kind, (key) => {
       if (key === item.kind) return;
       switchKind(item, key);
       changed();
-      pane.replaceChildren();
-      buildQueueItemPane(pane, item, changed);
+      rebuild();
     }, 'import-readas');
     pane.append(paneRow('Read as', seg.seg));
   }
@@ -567,7 +589,7 @@ export function buildQueueItemPane(pane, item, changed) {
     foot.replaceChildren(line);
   };
   const note = (text) => settings.append(el('p', 'fb-help import-note', text));
-  const ctx = { item, settings, previewHead, preview, rows, foot, footLine, note, changed };
+  const ctx = { item, pane, settings, previewHead, preview, rows, foot, footLine, note, changed, rebuild };
 
   if (item.kind === 'csv') buildDelimitedSettings(ctx);
   else if (item.kind === 'text') buildLinesSettings(ctx);
@@ -642,24 +664,64 @@ export const encodingNote = (res) => (res.encoding === 'cp1252' ? ' · not UTF-8
 
 export function buildDelimitedSettings(ctx) {
   const { item, settings } = ctx;
-  const delim = tableMenuSeg(DELIMITERS.map(([k, l]) => [k, l]), () => delimKey(item.delimiter), (key) => {
-    item.delimiter = (DELIMITERS.find((x) => x[0] === key) || DELIMITERS[0])[2];
+  let detected = null;   // what the last preview split on, to start Custom from
+  const delim = tableMenuSeg(DELIMITERS.map(([k, l]) => [k, l]).concat([CUSTOM_DELIMITER]), () => delimKey(item), (key) => {
+    if (key === 'custom') {
+      // Custom starts from what the file is split on now — the detected
+      // pipe becomes " | " with two keystrokes — and comes back with what
+      // was typed in it before.
+      if (item.custom_text == null) item.custom_text = item.delimiter ?? detected ?? '';
+      item.delim_mode = 'custom';
+      item.delimiter = item.custom_text || null;
+    } else {
+      item.delim_mode = null;
+      item.delimiter = (DELIMITERS.find((x) => x[0] === key) || DELIMITERS[0])[2];
+    }
     item.column_types = null;
     item.configured = true;
     delim.paint();
+    syncCustom(key === 'custom');
     ctx.changed();
     reload();
   }, 'import-delims');
+  const custom = el('input', 'import-delim-custom');
+  custom.type = 'text';
+  custom.spellcheck = false;
+  custom.autocomplete = 'off';
+  custom.placeholder = 'Type it, e.g.  |  or ::';
+  custom.setAttribute('aria-label', 'Custom delimiter');
+  custom.title = 'One character splits as the presets do, and quotes group a field. Longer text splits each line '
+    + 'exactly where it appears: quotes are ordinary characters, and a line with more fields than the first '
+    + 'keeps the rest in its last column.';
+  const reloadSoon = debounce(() => reload(), 250);
+  custom.oninput = () => {
+    item.custom_text = custom.value;
+    item.delimiter = custom.value || null;
+    item.column_types = null;
+    item.configured = true;
+    ctx.changed();
+    reloadSoon();
+  };
+  // Hidden rather than taken out, so the row keeps its height and the
+  // preview under it doesn't move when Custom is chosen.
+  function syncCustom(focus) {
+    const on = delimKey(item) === 'custom';
+    custom.style.visibility = on ? 'visible' : 'hidden';
+    if (on && custom.value !== (item.custom_text ?? item.delimiter ?? '')) custom.value = item.custom_text ?? item.delimiter ?? '';
+    if (on && focus) custom.focus();
+  }
+  syncCustom(false);
   const headerLabel = el('label', 'import-check');
   const headerCb = el('input');
   headerCb.type = 'checkbox';
   headerCb.checked = item.has_header !== false;
   headerCb.onchange = () => { item.has_header = headerCb.checked; item.column_types = null; item.configured = true; ctx.changed(); reload(); };
   headerLabel.append(headerCb, document.createTextNode(' First row is headers'));
-  settings.append(paneRow('Delimiter', delim.seg), paneRow('Header', headerLabel));
+  settings.append(paneRow('Delimiter', delim.seg, custom), paneRow('Header', headerLabel));
   ctx.previewHead.append(el('span', 'import-preview-aside', 'Set a column’s type in its heading'));
 
   const reload = previewRunner(ctx, () => fetchPreview(item, { kind: 'csv', delimiter: item.delimiter || null, has_header: item.has_header !== false }), (res) => {
+    detected = res.delimiter;
     if (!item.column_types || item.column_types.length !== res.columns.length) item.column_types = null;
     const types = item.column_types || res.inferred_types.slice();
     ctx.rows.replaceChildren(previewTable(res.columns, res.sample_rows, (i) => typeSelect(types[i], (ty) => {
@@ -669,13 +731,30 @@ export function buildDelimitedSettings(ctx) {
       ctx.changed();
     })));
     const n = res.sample_rows.length;
-    ctx.footLine(`${delimName(res.delimiter)}-delimited${item.delimiter ? '' : ' (detected)'} · ${res.columns.length} columns · first ${n} row${n === 1 ? '' : 's'}${encodingNote(res)}`);
+    const how = !item.delimiter ? `${delimName(res.delimiter)}-delimited (detected)`
+      : delimKey(item) !== 'custom' ? `${delimName(res.delimiter)}-delimited`
+      : `Split on ${showDelim(res.delimiter)}${res.delimiter.length > 1 ? ' as written, quotes not special' : ''}`;
+    ctx.footLine(`${how} · ${res.columns.length} columns · first ${n} row${n === 1 ? '' : 's'}${encodingNote(res)}`);
   });
 }
 
 export function buildLinesSettings(ctx) {
   const { item } = ctx;
   ctx.note('Every line becomes one row, in a single column. Nothing is split, and there is no header row.');
+  // The way to columns for a log no reader claims: Delimited, on Custom,
+  // with the box to type in focused. No header, since a log rarely has
+  // one; the Header box is right there for one that does.
+  const split = el('button', 'btn ghost import-split', 'Split each line on a delimiter…');
+  split.type = 'button';
+  split.title = 'Read this file as Delimited, split on characters you type';
+  split.onclick = () => {
+    switchKind(item, 'csv');
+    Object.assign(item, { delim_mode: 'custom', custom_text: '', delimiter: null, has_header: false });
+    ctx.changed();
+    ctx.rebuild();
+    ctx.pane.querySelector('.import-delim-custom')?.focus();
+  };
+  ctx.settings.append(paneRow('Columns', split));
   previewRunner(ctx, () => fetchPreview(item, { kind: 'text', has_header: false }), (res) => {
     ctx.rows.replaceChildren(previewTable(res.columns, res.sample_rows));
     const n = res.sample_rows.length;
@@ -1318,6 +1397,10 @@ export async function openDirectoryImportModal(state = {}) {
     extensions: state.extensions || defaultImportExtensions(),
     includeText: state.includeText || '',
     excludeText: state.excludeText || '',
+    // How "other text files" (the * type) are read: one line per row while
+    // this is blank, else split on it, as the Import window's Custom.
+    textDelimiter: state.textDelimiter || '',
+    textHeader: state.textHeader ?? false,
   };
   // Deleted from another window since the state was taken: the list has
   // no row for it, so start from Custom with what was set.
@@ -1353,6 +1436,8 @@ export async function openDirectoryImportModal(state = {}) {
       st.extensions = (p && p.extensions) || defaultImportExtensions();
       st.includeText = p ? (p.include_patterns || []).join('\n') : '';
       st.excludeText = p ? (p.exclude_patterns || []).join('\n') : '';
+      st.textDelimiter = (p && p.text_delimiter) || '';
+      st.textHeader = !!(p && p.text_has_header);
       side.sync();
       syncSettings();
       syncProfileButtons();
@@ -1393,9 +1478,39 @@ export async function openDirectoryImportModal(state = {}) {
           ? st.extensions.filter((e) => e !== ext)
           : [...st.extensions, ext];
         chip.setAttribute('aria-pressed', String(st.extensions.includes(ext)));
+        syncTextSplit();
         scheduleScan();
       };
       extRow.append(chip);
+    }
+
+    // How the * type's files are read: one line per row, or split on
+    // what's typed here. Nothing to scan again — it changes how a match
+    // imports, not which files match.
+    const textDelim = el('input', 'import-delim-custom');
+    textDelim.type = 'text';
+    textDelim.spellcheck = false;
+    textDelim.autocomplete = 'off';
+    textDelim.placeholder = 'Blank: one line per row';
+    textDelim.setAttribute('aria-label', 'Split other text files on');
+    textDelim.title = 'Split each line of the other text files on this, as the Import window’s Custom delimiter does. '
+      + 'One character follows CSV rules; longer text splits each line exactly where it appears.';
+    textDelim.oninput = () => { st.textDelimiter = textDelim.value; syncTextSplit(); };
+    const textHeadLabel = el('label', 'import-check');
+    const textHeadCb = el('input');
+    textHeadCb.type = 'checkbox';
+    textHeadCb.onchange = () => { st.textHeader = textHeadCb.checked; };
+    textHeadLabel.append(textHeadCb, document.createTextNode(' First row is headers'));
+    const textSplitRow = paneRow('Split other text on', textDelim, textHeadLabel);
+    textSplitRow.classList.add('import-text-split');
+    // Only the * type's files are read this way, so it's off while that
+    // type is; the header box waits for a delimiter.
+    function syncTextSplit() {
+      const on = st.extensions.includes('*');
+      textDelim.disabled = !on;
+      textSplitRow.classList.toggle('off', !on);
+      textSplitRow.title = on ? '' : 'Turn on other text files to set how they are split';
+      textHeadCb.disabled = !on || !st.textDelimiter;
     }
 
     const patternBox = (caption, placeholder, onText) => {
@@ -1422,7 +1537,7 @@ export async function openDirectoryImportModal(state = {}) {
     // Labels on the first line of what they label, which is two lines.
     typesRow.classList.add('import-top');
     patternRow.classList.add('import-top');
-    settingsBox.append(typesRow, recLabel, patternRow);
+    settingsBox.append(typesRow, recLabel, textSplitRow, patternRow);
 
     // What a profile holds, put on screen — after a pick, and once to start.
     function syncSettings() {
@@ -1430,6 +1545,9 @@ export async function openDirectoryImportModal(state = {}) {
       for (const chip of extRow.children) chip.setAttribute('aria-pressed', String(st.extensions.includes(chip.dataset.ext)));
       includeArea.value = st.includeText;
       excludeArea.value = st.excludeText;
+      textDelim.value = st.textDelimiter;
+      textHeadCb.checked = st.textHeader;
+      syncTextSplit();
     }
 
     /* The preview: the scan's two lists, one at a time, chosen beside the
@@ -1619,7 +1737,7 @@ export async function openDirectoryImportModal(state = {}) {
         rec = await post('/api/import_profiles', {
           id: st.profileId, name: name.trim(), extensions: st.extensions,
           include_patterns: patternLines(st.includeText), exclude_patterns: patternLines(st.excludeText),
-          recursive: st.recursive,
+          recursive: st.recursive, text_delimiter: st.textDelimiter || null, text_has_header: st.textHeader,
         });
       } catch (e) { toast('Could not save profile: ' + e.message, 4000); return; }
       toast(`Saved profile "${rec.name}"`);
@@ -1675,6 +1793,11 @@ export async function openDirectoryImportModal(state = {}) {
               path: m.path, name: base, folder_path, format_id: fmt.id, options: defaultPluginOptions(fmt),
             });
             pluginOk++;
+          } else if (m.kind === 'text' && st.textDelimiter) {
+            // An other-text file with a delimiter set: delimited, split on it.
+            await post('/api/ingest/jobs/path', {
+              path: m.path, name: base, folder_path, kind: 'csv', delimiter: st.textDelimiter, has_header: st.textHeader,
+            });
           } else {
             await post('/api/ingest/jobs/path', { path: m.path, name: base, folder_path, kind: ['json', 'plaso', 'text', 'iis', 'kv', 'utmp', 'bodyfile'].includes(m.kind) ? m.kind : 'csv' });
           }

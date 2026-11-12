@@ -161,6 +161,28 @@ def test_ingest_jsonl_route_via_extension(client):
     assert r.json()["row_count"] == 3
 
 
+def test_json_lines_uploaded_as_json_preview_and_import(client):
+    """JSON Lines named .json used to answer 400 "Extra data: line 2" from
+    both routes; the upload keeps the name's suffix, and the content
+    decides how it is read."""
+    raw = "".join(json.dumps({"id": i, "user": {"name": n}}) + "\n" for i, n in enumerate("abc")).encode()
+    r = client.post(
+        "/api/ingest/json/preview",
+        files={"file": ("events.json", io.BytesIO(raw), "application/json")},
+        data={"flatten_mode": "full"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["record_count"] == 3
+    assert r.json()["columns"] == ["id", "user.name"]
+    r = client.post(
+        "/api/ingest/json/upload",
+        files={"file": ("events.json", io.BytesIO(raw), "application/json")},
+        data={"flatten_mode": "full", "build_fts": "false"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["row_count"] == 3
+
+
 def test_browse_dir_lists_subdirectories(client, tmp_path):
     (tmp_path / "sub_b").mkdir()
     (tmp_path / "sub_a").mkdir()

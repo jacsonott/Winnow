@@ -1854,6 +1854,81 @@ def _csv_rows(lines: Iterable[str], delimiter: str, *, escape_nul: bool | None =
     return reader, rows()
 
 
+def check_delimiter(delimiter: str | None) -> None:
+    """Refuse a delimiter no import could split on, with words the
+    import window can show. None is fine (it asks for a sniff).
+
+    Any other text is a delimiter: one character goes to the csv reader
+    the presets use, more than one to _LiteralRows. What's refused can't
+    work either way — a line break (a line is what a delimiter splits,
+    and csv refuses one too), the double quote alone (it's the quote
+    character, and csv refuses that pair as well), and NUL and the two
+    noncharacters _csv_rows uses to carry NULs past 3.10's parser, which
+    a delimiter holding one would scramble."""
+    if delimiter is None:
+        return
+    if not isinstance(delimiter, str) or delimiter == "":
+        raise ValueError("The delimiter is empty: type the character or characters to split on")
+    if "\n" in delimiter or "\r" in delimiter:
+        raise ValueError("A delimiter can't hold a line break: each line is what it splits")
+    if delimiter == '"':
+        raise ValueError('The double quote (") marks quoted fields, so it can\'t be the delimiter on its own')
+    if any(c in delimiter for c in ("\0", _NUL_ESC, _NUL_MARK)):
+        raise ValueError("A delimiter can't hold a NUL character")
+
+
+class _LiteralRows:
+    r"""Rows from lines split on a delimiter longer than one character
+    (" | ", "||", " :: "), which the csv module can't take — it wants
+    exactly one character. The line is split as written: quotes are not
+    special, so a stray " in a log line can't swallow the lines after it
+    the way it can in csv (docs/notes/ingest.md). A line ends at \n and
+    nowhere else, as in raw text (_text_line, and the file is opened with
+    newline="\n"), so a \r inside a logged value can't forge a row.
+
+    Once the table's width is known (`fit`, from the header or first
+    row), a longer line is split that many times and no more: what's left
+    stays in the last column with its delimiters, rather than being cut
+    off the way csv's ragged rows are trimmed. A log's message is the
+    last field and the one that holds the delimiter by accident.
+
+    `line_num` counts lines read, as csv.reader's does."""
+
+    def __init__(self, lines: Iterable[str], delimiter: str):
+        self._lines = iter(lines)
+        self._delimiter = delimiter
+        self._maxsplit = -1
+        self.line_num = 0
+
+    def fit(self, ncols: int) -> None:
+        self._maxsplit = max(ncols - 1, 0)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self) -> list[str]:
+        line = next(self._lines)
+        self.line_num += 1
+        return _text_line(line).split(self._delimiter, self._maxsplit)
+
+
+def _delimited_rows(lines: Iterable[str], delimiter: str):
+    """`(reader, rows)` for any delimiter: _csv_rows for one character,
+    _LiteralRows for more. The reader is returned for its line_num, and
+    for `fit` when it has one."""
+    if len(delimiter) == 1:
+        return _csv_rows(lines, delimiter)
+    reader = _LiteralRows(lines, delimiter)
+    return reader, reader
+
+
+def _fit_rows(reader, ncols: int) -> None:
+    """Tell a _LiteralRows reader the table's width once it is known; a
+    csv reader has nothing to be told."""
+    if isinstance(reader, _LiteralRows):
+        reader.fit(ncols)
+
+
 def _first_nonblank_row(reader: Iterable[list[str]]) -> list[str]:
     """The first row with anything in it — the header, or (without one)
     the row that fixes the table's width. Leading blank rows are skipped:
@@ -2299,45 +2374,129 @@ def _json_column_plan(keys: list[str]) -> tuple[list[str], Callable[[dict], list
     return sanitize_columns(kept + [JSON_OVERFLOW_COLUMN]), row_of
 
 
+JSON_LINES_EXTENSIONS = (".jsonl", ".ndjson")
+# How much of the start of any other JSON file _json_file_is_lines reads
+# to tell JSON Lines from one document — the encoding probe's size, so
+# the one read answers both. Records are rarely a fraction of this; a
+# first line longer than all of it is _json_lines_after_all's case.
+JSON_SHAPE_PROBE_BYTES = ENCODING_PROBE_BYTES
+# Non-blank lines of that head it tries to parse, at most.
+_JSON_SHAPE_PROBE_LINES = 20
+
+
+def _parses_alone(line: str) -> bool:
+    try:
+        _json_loads(line)
+    except ValueError:      # JSONDecodeError, including "nested too deeply"
+        return False
+    return True
+
+
+def _head_is_json_lines(text: str, complete: bool) -> bool:
+    """Whether `text`, the start of a file (all of it if `complete`), is
+    JSON Lines rather than one JSON document: its first line is a whole
+    JSON value with more after it, or two non-blank lines in a row each
+    are one. Neither can happen in a valid document — JSON values end
+    where they end, strings can't span lines, and two values in a row
+    need a comma between them — so this never takes a document json
+    would have read. The second rule is for a file whose first line is
+    broken (a write cut off, a header line some tool puts on top): it
+    reads as JSON Lines, and that line is counted as unreadable."""
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    cut = "" if complete else lines.pop()    # may end past the head
+    whole = [ln.strip() for ln in lines if ln.strip()][:_JSON_SHAPE_PROBE_LINES]
+    prev = False
+    for i, line in enumerate(whole):
+        ok = _parses_alone(line)
+        if ok and (prev or (i == 0 and (len(whole) > 1 or cut.strip()))):
+            return True
+        prev = ok
+    return False
+
+
+def _json_file_is_lines(path: str) -> bool:
+    """`.jsonl` and `.ndjson` are JSON Lines by name. A `.json` is asked
+    its first lines (_head_is_json_lines): plenty of tools write JSON
+    Lines under `.json` (Velociraptor, cloud audit-log exports, `jq -c`),
+    and read as one document those failed at line 2 with "Extra data"."""
+    if os.path.splitext(path)[1].lower() in JSON_LINES_EXTENSIONS:
+        return True
+    try:
+        with open(path, "rb") as f:
+            raw = f.read(JSON_SHAPE_PROBE_BYTES)
+            complete = len(raw) < JSON_SHAPE_PROBE_BYTES or not f.read(1)
+    except OSError:
+        return False
+    # errors="replace", not TEXT_DECODE_ERRORS: the cp1252 fallback count
+    # is the import's report of what it read, and this read is not it.
+    enc = _encoding_for_head(raw, complete)
+    text = codecs.getincrementaldecoder(enc)(errors="replace").decode(raw, final=complete)
+    return _head_is_json_lines(text, complete)
+
+
+def _json_lines_after_all(text: str, e: json.JSONDecodeError) -> bool:
+    """Whether a document that failed to parse is JSON Lines the head
+    probe couldn't see: its first value fills one line and the "extra
+    data" json stopped at starts on a later one — a first line longer
+    than JSON_SHAPE_PROBE_BYTES. A pretty-printed value followed by
+    another is not, and keeps json's own error."""
+    if e.msg != "Extra data":
+        return False
+    first = text[:e.pos].rstrip()
+    return "\n" in text[len(first):e.pos] and "\n" not in first.strip()
+
+
+def _iter_json_lines(lines: Iterable[str], bad: dict | None) -> Iterator[dict]:
+    for lineno, line in enumerate(lines, start=1):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = _json_loads(line)
+        except json.JSONDecodeError as e:
+            # Same philosophy as CSV's ragged rows: one broken line
+            # (a truncated write, a log rotation seam) must not cost
+            # the analyst the million good lines around it. Counted
+            # and reported, never silent — and if the CALLER passes
+            # no collector (bad=None), the old raise stands, with
+            # the FILE line number the analyst needs rather than
+            # json's useless "line 1" of the single line.
+            if bad is None:
+                raise ValueError(f"Line {lineno}: {e.msg}") from e
+            bad["count"] += 1
+            if bad["count"] == 1:
+                bad["first_line"], bad["first_error"] = lineno, e.msg
+            continue
+        yield obj if isinstance(obj, dict) else {"value": obj}
+
+
 def _iter_json_records(path: str, bad: dict | None = None) -> Iterable[dict]:
-    """Yields one dict per record. `.jsonl`/`.ndjson` (one JSON value per
-    line — the genuinely streamable shape, never loaded fully into memory)
-    vs a single `.json` document (a JSON array of records, a single record
-    object, or — tolerated rather than rejected — a bare scalar/array of
-    scalars, wrapped as {"value": ...} so it still lands as one column
-    instead of erroring out). A whole `.json` document has to be parsed in
-    one shot (no generic streaming parser in the standard library), so
-    unlike CSV/JSONL ingest, memory use scales with file size for that
-    shape — acceptable at the scale this tool already targets (CLAUDE.md's
-    "Known limits" already documents ingest as not built for huge files
-    without extra tooling)."""
-    ext = os.path.splitext(path)[1].lower()
-    if ext in (".jsonl", ".ndjson"):
+    """Yields one dict per record. JSON Lines (one JSON value per line —
+    the genuinely streamable shape, never loaded fully into memory: any
+    `.jsonl`/`.ndjson`, and a `.json` whose content is that shape, see
+    _json_file_is_lines) vs a single `.json` document (a JSON array of
+    records, a single record object, or — tolerated rather than rejected —
+    a bare scalar/array of scalars, wrapped as {"value": ...} so it still
+    lands as one column instead of erroring out). A whole `.json` document
+    has to be parsed in one shot (no generic streaming parser in the
+    standard library), so unlike CSV/JSONL ingest, memory use scales with
+    file size for that shape — acceptable at the scale this tool already
+    targets (CLAUDE.md's "Known limits" already documents ingest as not
+    built for huge files without extra tooling)."""
+    if _json_file_is_lines(path):
         with open(path, "r", encoding=sniff_text_encoding(path), errors=TEXT_DECODE_ERRORS) as f:
-            for lineno, line in enumerate(f, start=1):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = _json_loads(line)
-                except json.JSONDecodeError as e:
-                    # Same philosophy as CSV's ragged rows: one broken line
-                    # (a truncated write, a log rotation seam) must not cost
-                    # the analyst the million good lines around it. Counted
-                    # and reported, never silent — and if the CALLER passes
-                    # no collector (bad=None), the old raise stands, with
-                    # the FILE line number the analyst needs rather than
-                    # json's useless "line 1" of the single line.
-                    if bad is None:
-                        raise ValueError(f"Line {lineno}: {e.msg}") from e
-                    bad["count"] += 1
-                    if bad["count"] == 1:
-                        bad["first_line"], bad["first_error"] = lineno, e.msg
-                    continue
-                yield obj if isinstance(obj, dict) else {"value": obj}
+            yield from _iter_json_lines(f, bad)
         return
     with open(path, "r", encoding=sniff_text_encoding(path), errors=TEXT_DECODE_ERRORS) as f:
-        data = _json_load(f)
+        text = f.read()
+    try:
+        data = _json_loads(text)
+    except json.JSONDecodeError as e:
+        if not _json_lines_after_all(text, e):
+            raise
+        # Already read whole, so it is read from memory, not again from disk.
+        yield from _iter_json_lines(io.StringIO(text), bad)
+        return
     if isinstance(data, list):
         for obj in data:
             yield obj if isinstance(obj, dict) else {"value": obj}
@@ -3415,6 +3574,9 @@ class Store:
         self._histogram_widths: dict[tuple, int] = {}
         # _column_is_date_led's answers, (source_id, column) -> bool.
         self._date_led: dict[tuple[int, str], bool] = {}
+        # _text_sorts_by_time's answers, (source_id, column) -> bool. Same
+        # reasoning: a source table's values never change after import.
+        self._text_sorts_by_time_cache: dict[tuple[int, str], bool] = {}
         self._histogram_widths_lock = threading.Lock()
         # time_histogram's answers by the ROWS a view holds rather than by
         # view id, so a sort or a filter cleared back to the whole table
@@ -3924,12 +4086,18 @@ class Store:
         first sort with no index sorts every row while the index builds
         beside it, for the writer lock: 5.6 s on that EvtxECmd table, 11 to
         14 s on a 4.3M-row MFTECmd one, against 0.8 s once it exists. On
-        the EvtxECmd table it costs 2.4 s of import."""
+        the EvtxECmd table it costs 2.4 s of import. A first datetime
+        column whose text is not in time order (US dates, month names)
+        gets none, since its sort is by time and no index serves that
+        (_text_sorts_by_time)."""
         src = self._source_lite(source_id)
         table = src["table_name"]
         wanted = [(col, "filter") for col in self._shape_index_columns(src)]
         when = next((c["name"] for c in self._base_cols(src) if c["type"] == "datetime"), None)
-        if when is not None:
+        # Not for a column whose text is not in time order (a US date): it
+        # sorts by time through an expression (_sort_keys), which no index
+        # serves, so the index would be import time spent for nothing.
+        if when is not None and self._text_sorts_by_time(src, when):
             wanted.append((when, "sort"))
         for col, purpose in wanted:
             col = self._table_spelling(table, col)
@@ -5083,14 +5251,19 @@ class Store:
         succeeded before it.
         """
         name = name or os.path.basename(path)
+        check_delimiter(delimiter)
         size = os.path.getsize(path)
         file_hash = self._quick_hash(path)
 
         # 1 MB read buffer: the default 8 KB means a 20 GB file is ~2.5M
-        # read() syscalls before the csv layer even sees a byte.
+        # read() syscalls before the csv layer even sees a byte. A
+        # delimiter of more than one character splits lines as written
+        # (_LiteralRows), and a line there ends at \n alone, as raw text's
+        # does; csv wants newline="" and finds its own line ends.
+        literal = delimiter is not None and len(delimiter) > 1
         encoding = sniff_text_encoding(path)
         fh = open(path, "r", encoding=encoding, errors=TEXT_DECODE_ERRORS,
-                  newline="", buffering=1 << 20)
+                  newline="\n" if literal else "", buffering=1 << 20)
         head = fh.read(SNIFF_HEAD_CHARS)
         fh.seek(0)
         fallback0 = _cp1252_fallback_count()   # after the seek: the head is read twice
@@ -5099,7 +5272,7 @@ class Store:
             # override and may carry no extension at all, and the
             # extension is the whole point here.
             delimiter = self._sniff(head, path)
-        reader, rows = _csv_rows(fh, delimiter)
+        reader, rows = _delimited_rows(fh, delimiter)
 
         # Everything up to the row loop's own try/finally closes the file
         # on the way out too — a failure here used to leak the handle.
@@ -5113,6 +5286,7 @@ class Store:
                 ncols = len(first_row)
                 cols = sanitize_columns([None] * ncols)
                 leftover_row = first_row  # not a header — it's the first data row
+            _fit_rows(reader, ncols)
 
             with self.lock, self.db:
                 cur = self.db.execute(
@@ -5717,9 +5891,12 @@ class Store:
         `name` is the file's name, and it has to be passed: the preview and
         the ingest must reach the same delimiter or the analyst agrees to
         one table and gets another."""
+        check_delimiter(delimiter)
         if delimiter is None:
             delimiter = self._sniff(text[:SNIFF_HEAD_CHARS], name)
-        _, rows = _csv_rows(io.StringIO(text), delimiter)
+        # StringIO's lines end at \n alone, which is what _LiteralRows
+        # wants; csv finds its own line ends either way.
+        reader, rows = _delimited_rows(io.StringIO(text), delimiter)
         first_row = _first_nonblank_row(rows)
         if has_header:
             cols = sanitize_columns(first_row)
@@ -5729,6 +5906,7 @@ class Store:
             ncols = len(first_row)
             cols = sanitize_columns([None] * ncols)
             leftover_row = first_row
+        _fit_rows(reader, ncols)
 
         sample: list[list[str]] = []
         for row in itertools.chain([leftover_row] if leftover_row is not None else [], rows):
@@ -10150,15 +10328,17 @@ class Store:
         lock before it has a handle to mint."""
         src = self._source_lite(source_id)
         colnames = {c["name"]: c["type"] for c in src["columns"]}
-        order = self._compile_order(spec, colnames)
-        # Only non-numeric sort columns: _compile_order emits a plain
-        # `col COLLATE NOCASE` for those, which a background index can
-        # serve; a numeric sort goes through _numeric_expr, a functional
-        # expression a plain index can't match (see
-        # _ensure_sort_index_building).
+        by_time = self._time_sort_columns(src, spec, colnames)
+        order = self._compile_order(spec, colnames, by_time)
+        # Only the sort columns _compile_order emits as a plain
+        # `col COLLATE NOCASE`, which a background index can serve. A
+        # numeric sort goes through _numeric_expr and a timestamp sorted by
+        # time through ts_normalize_sql, functional expressions a plain
+        # index can't match (see _ensure_sort_index_building).
         sort_cols = [
             s.get("column") for s in (spec.get("sort") or [])
             if s.get("column") in colnames and colnames[s.get("column")] != "number"
+            and s.get("column") not in by_time
         ]
         # __line__ asc IS the virtual root's order, so it deliberately does
         # NOT count as a sort (keeps the no-materialize fast path); only the
@@ -10174,6 +10354,9 @@ class Store:
         # the first by Line (a merge: by member, then Line). Applied here
         # rather than in _compile_where because a merge's duplicates can
         # sit in different members, which no per-member WHERE can see.
+        # The tag filter comes after it, against the rows it kept, so
+        # _compile_where leaves it out (`tags=not dedupe`) and the dedupe
+        # branches below add it back (_compile_tag_filter says why).
         dedupe = self._dedupe_columns(spec, colnames)
 
         cache_key = None
@@ -10196,7 +10379,8 @@ class Store:
                 for m, read_src, scan_from in reads:
                     msrc = m["src"]
                     where, p = self._compile_where(m["source_id"], read_src, spec, colnames,
-                                                   scan_from=scan_from, contains_found=found)
+                                                   scan_from=scan_from, contains_found=found,
+                                                   tags=not dedupe)
                     for col in sort_cols:
                         self._ensure_sort_index_building(
                             m["source_id"], col,
@@ -10234,10 +10418,16 @@ class Store:
                                    for i, (mid, rest) in enumerate(parts))
                 keep = (f"SELECT MIN({rank}) AS {rank}, {sid_col}, rid{''.join(f', {q(c)}' for c in need)} "
                         f"FROM ({ranked}) GROUP BY {self._dedupe_key(dedupe)}")
+                # The tag filter, on the rows kept: they come from every
+                # member, so it is keyed on each row's own member id.
+                tagged, tag_params = self._compile_tag_filter(spec, row=(f"kept.{sid_col}", "kept.rid"))
+                params.extend(tag_params)
                 # The rank last: rows tying on every key and on rid keep
                 # member order, as the other two shapes keep it — the
                 # GROUP BY hands them over in key order, not union order.
-                select = f"SELECT {sid_col}, rid FROM ({keep}) {order}, {rank}"
+                select = (f"SELECT {sid_col}, rid FROM ({keep}) AS kept"
+                          + (f" WHERE {tagged}" if tagged else "")
+                          + f" {order}, {rank}")
             elif filtered:
                 # Filtered: one sort over what the members matched, as
                 # before. The compound's own ORDER BY (below) would have
@@ -10256,7 +10446,7 @@ class Store:
                 # rule), so the INSERT still assigns pos in sorted order.
                 # With no sort keys (rid order, or the Line column) the
                 # compound is already (member id, rid) and goes in as is.
-                keys, merge_order = self._compile_merge_order(spec, colnames)
+                keys, merge_order = self._compile_merge_order(spec, colnames, by_time)
                 union_sql = union("".join(f", {k}" for k in keys))
                 select = (f"SELECT {sid_col}, rid FROM ({union_sql} {merge_order})" if keys
                           else f"{union_sql} {merge_order}")
@@ -10274,7 +10464,8 @@ class Store:
                              tuple((m["source_id"], m["src"]["row_count"]) for m, _, _ in reads))
         else:
             table = src["table_name"]
-            where, params = self._compile_where(source_id, src, spec, colnames, scan_from=q(table))
+            where, params = self._compile_where(source_id, src, spec, colnames, scan_from=q(table),
+                                                tags=not dedupe)
             derived_names = {c["name"] for c in src["columns"] if c.get("derived")}
             for col in sort_cols:
                 # A derived column's values live in the sidecar, so its sort
@@ -10289,13 +10480,15 @@ class Store:
             if dedupe:
                 # The filters run once, inside the GROUP BY that picks the
                 # lowest rid of each set; the outer read only looks those
-                # rids up and sorts them.
+                # rids up, tests the tag filter on them and sorts them.
                 keep = (f"SELECT MIN(rid) FROM {self._from_clause(src)}"
                         + (f" WHERE {where}" if where else "")
                         + f" GROUP BY {self._dedupe_key(dedupe)}")
+                tagged, tag_params = self._compile_tag_filter(spec, source_id)
+                params.extend(tag_params)
                 sql = (f"INSERT INTO v.{q(vid)}(source_id, rid) "
                        f"SELECT {int(source_id)}, rid FROM {self._from_clause(src)} "
-                       f"WHERE rid IN ({keep}) {order}")
+                       f"WHERE rid IN ({keep})" + (f" AND {tagged}" if tagged else "") + f" {order}")
             else:
                 sql = (
                     f"INSERT INTO v.{q(vid)}(source_id, rid) "
@@ -11087,6 +11280,70 @@ class Store:
             cache[key] = odd is None
         return cache[key]
 
+    # Rows read from each end of a table by _text_sorts_by_time.
+    _TIME_SORT_SAMPLE = 256
+
+    def _time_sort_columns(self, src: dict, spec: dict, colnames: dict) -> frozenset[str]:
+        """The datetime columns in `spec`'s sort that must sort by time
+        rather than by their text (_sort_keys), because some table they
+        are read from stores them in a shape whose text order is not time
+        order: a US date, a month name. "11/3/2026" sorted as text lands
+        before "12/1/2025", which is what a recognized timestamp column
+        did before this, however its display format was set.
+
+        A derived datetime column is canonical ISO by construction
+        (timeparse), so it never needs it. On a merge each member is
+        judged on its own copy of the column, and one member that needs
+        it sorts the whole merge by time, since a single ORDER BY orders
+        every member's rows against each other."""
+        wanted = [s.get("column") for s in (spec.get("sort") or [])
+                  if colnames.get(s.get("column")) == "datetime"
+                  and not self._is_derived(src, s.get("column"))]
+        if not wanted:
+            return frozenset()
+        if not src.get("is_merge"):
+            return frozenset(c for c in wanted if not self._text_sorts_by_time(src, c))
+        by_col = {c["name"]: c for c in src["columns"]}
+        out = set()
+        for m in self._resolve_members(src["id"]):
+            msrc, keys = m["src"], _member_keys(m["src"])
+            for col in wanted:
+                own = _member_column(msrc, by_col[col], keys)
+                if (col not in out and own is not None and not self._is_derived(msrc, own)
+                        and not self._text_sorts_by_time(msrc, own)):
+                    out.add(col)
+        return frozenset(out)
+
+    def _text_sorts_by_time(self, src: dict, column: str) -> bool:
+        """Whether a real table's datetime column holds text that already
+        sorts in time order: every value starts with a YYYY-MM-DD date
+        (_DATE_LED_GLOB), the ISO shape EvtxECmd, MFTECmd and most tools
+        write. Those keep sorting as text, which the COLLATE NOCASE index
+        the first datetime column gets at import serves, so the common
+        case costs nothing new.
+
+        Judged on the first and last _TIME_SORT_SAMPLE rows rather than
+        every row, so the answer costs two short reads by rid instead of a
+        scan of a column that may have millions of values (the column's
+        datetime type was itself inferred from a sample at import). Both
+        ends, so a file built by appending one export to another is still
+        caught. A column that holds ISO at both ends and a US date in the
+        middle sorts as text, as every datetime column did before. Cached
+        per table and column for the Store's life, as _column_is_date_led
+        is: a source table's values never change after import."""
+        key = (src["id"], column)
+        cache = self._text_sorts_by_time_cache
+        if key not in cache:
+            ref, table, n = q(column), q(src["table_name"]), self._TIME_SORT_SAMPLE
+            with self._reader() as ro:
+                odd = ro.execute(
+                    f"SELECT 1 FROM (SELECT * FROM (SELECT {ref} AS v FROM {table} ORDER BY rid LIMIT {n}) "
+                    f"UNION ALL SELECT * FROM (SELECT {ref} AS v FROM {table} ORDER BY rid DESC LIMIT {n})) "
+                    f"WHERE v IS NOT NULL AND v != '' AND NOT (v GLOB ?) LIMIT 1",
+                    (self._DATE_LED_GLOB,)).fetchone()
+            cache[key] = odd is None
+        return cache[key]
+
     def _timeline_context_branch(self, src: dict, p: dict, context: list[str], tag_clause: str,
                                  tag_ids: list[int] | None) -> tuple[str, list]:
         """One table's rows in the window `context` = [start, end) that are
@@ -11626,6 +11883,12 @@ class Store:
                 )
             elif colnames[column] == "number":
                 order_sql = f"{_numeric_expr('val')} {dir_sql}"
+            elif (colnames[column] == "datetime" and not is_datetime
+                  and self._time_sort_columns(src, {"sort": [{"column": column}]}, colnames)):
+                # Stored values (not day buckets) in a shape whose text is
+                # not time order: in time order, as the grid sorts them
+                # (_sort_keys) — "Copy unique values" promises it.
+                order_sql = f"{ts_normalize_sql('val')} {dir_sql}, val COLLATE NOCASE {dir_sql}"
             else:
                 order_sql = f"val COLLATE NOCASE {dir_sql}"
         else:
@@ -12875,7 +13138,8 @@ class Store:
 
     def _compile_where(self, source_id, src, spec, colnames, *,
                        scan_from: str | None = None,
-                       contains_found: dict[int, tuple[str, list] | None] | None = None) -> tuple[str, list]:
+                       contains_found: dict[int, tuple[str, list] | None] | None = None,
+                       tags: bool = True) -> tuple[str, list]:
         """`scan_from`: the FROM text this WHERE will read the rows through,
         passed by build_view alone. With it, a Contains search the index
         can't narrow is answered here, by a parallel scan, and compiles to
@@ -12885,7 +13149,12 @@ class Store:
         `contains_found`: that parallel scan's answers already in hand, by
         source id — a merge scans every member's share in one pool before
         compiling any of them (_merge_contains_found). A member it holds
-        None for (its scan gave up) compiles to the scan itself."""
+        None for (its scan gave up) compiles to the scan itself.
+
+        `tags=False` leaves the tag filter out, for a caller that applies
+        it itself, later: with Hide duplicate rows on, build_view and
+        spec_sql test it against the rows the dedupe kept
+        (_compile_tag_filter says why)."""
         clauses: list[str] = []
         params: list[Any] = []
 
@@ -12950,55 +13219,11 @@ class Store:
             clauses.append(clause)
             params.extend(p)
 
-        # The tag filter is a UNION of whatever it names: any of these tags,
-        # or untagged, or both. OR rather than AND because that is what the
-        # ribbon's chips mean — ticking Malware and Lateral movement asks
-        # for rows carrying either, the way ticking two values in the value
-        # picker does. (An intersection is expressible in the filter
-        # builder, which is where a query that needs one belongs.)
-        #
-        # It used to compare the whole list against ["__any__"] and
-        # ["__none__"] as exact matches, so a list holding a sentinel
-        # alongside ids fell through to the ids branch and dropped the
-        # sentinel silently. Each part is compiled on its own now and the
-        # parts are OR'd, which also makes "untagged, plus the ones I
-        # marked" a filter the ribbon can express.
-        #
-        # A "!<id>" entry is a tag filtered OUT (the chip's right-click
-        # menu), and it is the one part that is ANDed rather than OR'd:
-        # "Suspicious, but not the ones I marked Benign" has to drop a row
-        # carrying both, and a union with "not Benign" would bring back
-        # every untagged row instead. Exclusions ride in the same list
-        # rather than a field of their own so that everything that already
-        # carries, stashes or clears the tag filter — a table switch, a
-        # background search, Clear filters, a dashboard drill — carries
-        # them too without being told.
-        tag_filter = spec.get("tags") or []
-        excluded = [int(t[1:]) for t in tag_filter
-                    if isinstance(t, str) and t.startswith("!") and t[1:].isdecimal()]
-        if excluded:
-            clauses.append(
-                f"rid NOT IN (SELECT rid FROM row_tags WHERE source_id=? AND tag_id IN ({','.join('?' * len(excluded))}))"
-            )
-            params.append(source_id)
-            params.extend(excluded)
-        if tag_filter:
-            parts: list[str] = []
-            if "__any__" in tag_filter:
-                parts.append("rid IN (SELECT rid FROM row_tags WHERE source_id=?)")
-                params.append(source_id)
-            if "__none__" in tag_filter:
-                parts.append("rid NOT IN (SELECT rid FROM row_tags WHERE source_id=?)")
-                params.append(source_id)
-            ids = [int(t) for t in tag_filter if str(t).isdigit()]
-            if ids:
-                parts.append(
-                    f"rid IN (SELECT rid FROM row_tags WHERE source_id=? AND tag_id IN ({','.join('?' * len(ids))}))"
-                )
-                params.append(source_id)
-                params.extend(ids)
-            if parts:
-                clauses.append("(" + " OR ".join(parts) + ")")
+        if tags:
+            c, p = self._compile_tag_filter(spec, source_id)
+            if c:
+                clauses.append(c)
+                params.extend(p)
 
         time_range = spec.get("time_range")
         if time_range and time_range.get("enabled") and (time_range.get("start") or time_range.get("end")):
@@ -13060,6 +13285,87 @@ class Store:
         return " AND ".join(clauses), params
 
     @staticmethod
+    def _compile_tag_filter(spec, source_id: int | None = None, *,
+                            row: tuple[str, str] | None = None) -> tuple[str, list]:
+        """The tag filter (`spec.tags`, the ribbon's chips) as one WHERE
+        clause, "" when there is none.
+
+        It is a UNION of whatever it names: any of these tags, or
+        untagged, or both. OR rather than AND because that is what the
+        ribbon's chips mean — ticking Malware and Lateral movement asks
+        for rows carrying either, the way ticking two values in the value
+        picker does. (An intersection is expressible in the filter
+        builder, which is where a query that needs one belongs.)
+
+        It used to compare the whole list against ["__any__"] and
+        ["__none__"] as exact matches, so a list holding a sentinel
+        alongside ids fell through to the ids branch and dropped the
+        sentinel silently. Each part is compiled on its own now and the
+        parts are OR'd, which also makes "untagged, plus the ones I
+        marked" a filter the ribbon can express.
+
+        A "!<id>" entry is a tag filtered OUT (the chip's right-click
+        menu), and it is the one part that is ANDed rather than OR'd:
+        "Suspicious, but not the ones I marked Benign" has to drop a row
+        carrying both, and a union with "not Benign" would bring back
+        every untagged row instead. Exclusions ride in the same list
+        rather than a field of their own so that everything that already
+        carries, stashes or clears the tag filter — a table switch, a
+        background search, Clear filters, a dashboard drill — carries
+        them too without being told.
+
+        Two shapes of the same test. By default, one source's rows:
+        `rid [NOT] IN (SELECT rid FROM row_tags WHERE source_id=?)`, an
+        uncorrelated list SQLite builds once. With `row` — the (source
+        id, rid) column references of rows from more than one source,
+        which is what a merge's dedupe hands back — a correlated
+        `[NOT] EXISTS` keyed on row_tags' primary key, since the rows no
+        longer share one source id to bind.
+
+        Why it is its own function: Hide duplicate rows applies it AFTER
+        the dedupe, to the row each set kept, not before it with the other
+        filters. Tags are not data — the analyst puts them on the row the
+        grid shows, which is the kept one, and the hidden copies stay as
+        they were. Tested before the dedupe, "No tags" (or a tag filtered
+        out) dropped the tagged row that was kept, and the untagged copy
+        under it became the first of its set and came back: tagging an
+        event and filtering to what is left showed that event again. After
+        the dedupe, a tag filter only ever narrows the deduplicated rows,
+        and agrees with the ribbon's counts, which are the view's."""
+        tag_filter = spec.get("tags") or []
+        if not tag_filter:
+            return "", []
+        params: list[Any] = []
+
+        def has(ids: list[int] | None, negate: bool) -> str:
+            only = f" AND {'rt.' if row else ''}tag_id IN ({','.join('?' * len(ids))})" if ids else ""
+            if row:
+                sid_ref, rid_ref = row
+                params.extend(ids or [])
+                return (f"{'NOT ' if negate else ''}EXISTS (SELECT 1 FROM row_tags rt "
+                        f"WHERE rt.source_id = {sid_ref} AND rt.rid = {rid_ref}{only})")
+            params.append(source_id)
+            params.extend(ids or [])
+            return f"rid {'NOT IN' if negate else 'IN'} (SELECT rid FROM row_tags WHERE source_id=?{only})"
+
+        clauses: list[str] = []
+        excluded = [int(t[1:]) for t in tag_filter
+                    if isinstance(t, str) and t.startswith("!") and t[1:].isdecimal()]
+        if excluded:
+            clauses.append(has(excluded, negate=True))
+        parts: list[str] = []
+        if "__any__" in tag_filter:
+            parts.append(has(None, negate=False))
+        if "__none__" in tag_filter:
+            parts.append(has(None, negate=True))
+        ids = [int(t) for t in tag_filter if str(t).isdigit()]
+        if ids:
+            parts.append(has(ids, negate=False))
+        if parts:
+            clauses.append("(" + " OR ".join(parts) + ")")
+        return " AND ".join(clauses), params
+
+    @staticmethod
     def _member_id_alias(colnames) -> str:
         """What a merge's UNION calls the member id it projects beside the
         data columns: `source_id`, unless the file has a column of that
@@ -13118,7 +13424,26 @@ class Store:
     DEDUPE_MEMBER_STRIDE = 1 << 40
 
     @staticmethod
-    def _compile_order(spec, colnames) -> str:
+    def _sort_keys(col: str, colnames: dict, by_time: frozenset | set = frozenset()) -> list[str]:
+        """The ORDER BY keys one sort column becomes, before its direction.
+
+        A number sorts through _numeric_expr. A timestamp in `by_time`
+        (_time_sort_columns: one whose stored text is not in time order,
+        such as "11/3/2026 9:05:00 PM") sorts by its normalized
+        "YYYY-MM-DD HH:MM:SS" first, then by its raw text, which orders the
+        rows that share a second by their fraction ("…:00.25 PM" before
+        "…:00.5 PM") and the values that don't parse among themselves.
+        Those have no normalized value, so they sort to one edge, as a
+        number column's non-numbers do. Everything else, ISO timestamps
+        included, sorts as text, which a COLLATE NOCASE index can serve."""
+        if colnames[col] == "number":
+            return [_numeric_expr(q(col))]
+        if col in by_time:
+            return [ts_normalize_sql(q(col)), f"{q(col)} COLLATE NOCASE"]
+        return [f"{q(col)} COLLATE NOCASE"]
+
+    @staticmethod
+    def _compile_order(spec, colnames, by_time: frozenset | set = frozenset()) -> str:
         sort = spec.get("sort") or []
         parts = []
         for s in sort:
@@ -13133,15 +13458,12 @@ class Store:
                 continue
             if col not in colnames:
                 continue
-            if colnames[col] == "number":
-                parts.append(f"{_numeric_expr(q(col))} {direction}")
-            else:
-                parts.append(f"{q(col)} COLLATE NOCASE {direction}")
+            parts += [f"{k} {direction}" for k in Store._sort_keys(col, colnames, by_time)]
         parts.append("rid ASC")
         return "ORDER BY " + ", ".join(parts)
 
     @staticmethod
-    def _compile_merge_order(spec, colnames) -> tuple[list[str], str]:
+    def _compile_merge_order(spec, colnames, by_time: frozenset | set = frozenset()) -> tuple[list[str], str]:
         """_compile_order for a merge's UNION ALL, which build_view sorts as
         a compound rather than as a subquery (see the comment there).
         Returns the sort keys each member SELECTs after `<member id>, rid`,
@@ -13160,8 +13482,9 @@ class Store:
                 continue
             if col not in colnames:
                 continue
-            keys.append(_numeric_expr(q(col)) if colnames[col] == "number" else f"{q(col)} COLLATE NOCASE")
-            terms.append(f"{len(keys) + 2} {direction}")
+            for k in Store._sort_keys(col, colnames, by_time):
+                keys.append(k)
+                terms.append(f"{len(keys) + 2} {direction}")
         terms += ["2 ASC", "1 ASC"]
         return keys, "ORDER BY " + ", ".join(terms)
 
@@ -13242,7 +13565,8 @@ class Store:
         joining now."""
         src = self._source_lite(source_id)
         colnames = {c["name"]: c["type"] for c in src["columns"]}
-        order = self._compile_order(spec, colnames)
+        by_time = self._time_sort_columns(src, spec, colnames)
+        order = self._compile_order(spec, colnames, by_time)
         dedupe = self._dedupe_columns(spec, colnames)
         if src.get("is_merge"):
             for frag in self._raw_fragments(spec.get("filter_tree")):
@@ -13257,7 +13581,8 @@ class Store:
             with self._build_batch():
                 for i, m in enumerate(self._resolve_members(source_id)):
                     msrc = m["src"]
-                    where, p = self._compile_where(m["source_id"], self._member_read_src(src, msrc), spec, colnames)
+                    where, p = self._compile_where(m["source_id"], self._member_read_src(src, msrc), spec, colnames,
+                                                   tags=not dedupe)
                     # The pane's own src_<id> name, projected when the member
                     # doesn't carry the merge's columns as-is — run_sql's shadow
                     # view supplies any derived columns the projection names.
@@ -13273,19 +13598,32 @@ class Store:
                     params.extend(p)
             sql = union_all(branches, "\nUNION ALL\n")
             if dedupe:
+                tagged, tag_params = self._compile_tag_filter(spec, row=(f"kept.{sid_col}", "kept.rid"))
+                params.extend(tag_params)
                 sql = (f"SELECT {sid_col}, rid, {collist} FROM (\n"
                        f"SELECT MIN({rank}) AS {rank}, {sid_col}, rid, {collist} FROM (\n{sql}\n)\n"
-                       f"GROUP BY {self._dedupe_key(dedupe)}\n)")
+                       f"GROUP BY {self._dedupe_key(dedupe)}\n) AS kept"
+                       + (f"\nWHERE {tagged}" if tagged else ""))
+            elif any(colnames.get(x.get("column")) == "number" or x.get("column") in by_time
+                     for x in spec.get("sort") or []):
+                # A compound's ORDER BY may only name its own columns, and
+                # a number or a timestamp sorted by time sorts by an
+                # expression (_sort_keys): "1st ORDER BY term does not
+                # match any column". Sorting the union from outside lets it.
+                sql = f"SELECT * FROM (\n{sql}\n)"
             sql += f"\n{order}" + (f", {rank}" if dedupe else "")
         else:
-            where, params = self._compile_where(source_id, src, spec, colnames)
+            where, params = self._compile_where(source_id, src, spec, colnames, tags=not dedupe)
             collist = ", ".join(q(c) for c in colnames)
             table = q(src["table_name"])
             sql = f"SELECT rid, {collist}\nFROM {table}"
             if dedupe:
+                tagged, tag_params = self._compile_tag_filter(spec, source_id)
+                params.extend(tag_params)
                 sql += (f"\nWHERE rid IN (\n  SELECT MIN(rid) FROM {table}"
                         + (f" WHERE {where}" if where else "")
-                        + f"\n  GROUP BY {self._dedupe_key(dedupe)}\n)")
+                        + f"\n  GROUP BY {self._dedupe_key(dedupe)}\n)"
+                        + (f"\nAND {tagged}" if tagged else ""))
             elif where:
                 sql += f"\nWHERE {where}"
             sql += f"\n{order}"

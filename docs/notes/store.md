@@ -530,6 +530,29 @@ see [docs/notes/README.md](README.md) for the whole set.
   - **NULL and '' are one value** (`IFNULL(col, '')` in the key): a
     merge reads a column a member lacks as NULL while another member has
     '', and both are an empty cell to the analyst.
+  - **The tag filter is applied after it, to the rows kept** — the one
+    filter that is. `_compile_where(tags=not dedupe)` leaves it out and
+    the dedupe branches add `_compile_tag_filter` back on the outside: on
+    a single table the same uncorrelated `rid [NOT] IN (SELECT rid FROM
+    row_tags WHERE source_id=?)` beside the `rid IN (keep)`; on a merge a
+    correlated `[NOT] EXISTS` on row_tags' primary key against
+    `kept.<member id>, kept.rid`, since the kept rows come from every
+    member and no single source id can be bound. Why: tags are not data,
+    the analyst puts them on the row the grid shows. With the tag filter
+    inside the GROUP BY's WHERE, "No tags" (or an excluded tag) dropped
+    the tagged row kept from a set before the dedupe ran, the next copy
+    became the set's first, and the event the analyst had just tagged
+    came back as untagged — every one of them, after tagging the whole
+    view. Applied after, a tag filter only ever narrows the deduplicated
+    rows and agrees with the ribbon (`tag_counts_in_view` counts the
+    view). The price: a tag on a *hidden* copy doesn't count (a copy
+    tagged while duplicates showed, under an untagged first copy, is
+    not found by its tag with the toggle on), and a tag filter no longer
+    shrinks the GROUP BY, so a narrow one ("tag = X") costs what the
+    dedupe alone does — measured 0.11 s → 0.52 s on 400k rows, the same
+    0.58 s as no tag filter. Everything else (column filters, search,
+    timeframe, Hide empty rows) still runs first: those test data, and a
+    filter on a hidden column is meant to find the copy that matches.
   - **Never cached as an unfiltered merge view** (`not dedupe` in the
     `_merge_view_cache` condition): the cache key is the SELECT text, and
     a dedupe on a derived column changes under the same text when it is
@@ -562,7 +585,9 @@ see [docs/notes/README.md](README.md) for the whole set.
   11-14 s on 4.3M MFTECmd rows, against about 0.8 s with the index. It
   costs 2.4 s of import on the EvtxECmd table. Only the first: a table
   with several timestamps (MFT has eight) would pay for each, and the
-  others build on first use as before. `tests/test_shape_indexes.py`.
+  others build on first use as before. And only when its text is time
+  order (ISO): a US-dated column sorts through an expression no index
+  serves (see the datetime-sort entry below). `tests/test_shape_indexes.py`.
 - **A merge's view build selects only what it sorts on.** Each member's
   branch of the `UNION ALL` projects its member id, `rid` and the sort
   columns, never the merge's whole column list. It used to project every
@@ -873,6 +898,51 @@ see [docs/notes/README.md](README.md) for the whole set.
   out `NULL` instead — it sorts to one edge and drops out of `>`/`<` filters
   instead of quietly blending in as real data. Any new numeric comparison/sort
   should go through this helper, not a raw CAST.
+- **A datetime column whose text is not time order sorts by time, not by
+  its text** (`_time_sort_columns` → `_sort_keys`). It used to sort as
+  `col COLLATE NOCASE` whatever it held, so a US-dated table, which opens
+  sorted by that column, put `11/3/2026` before `12/1/2025`; changing the
+  display format changed nothing, and deriving a column (canonical ISO)
+  was the only way out. Such a column now sorts by
+  `ts_normalize_sql(col)`, then by its raw text: the text breaks ties
+  inside a second (fractions sit at the same offset in one format and
+  compare like decimals) and orders the values that don't parse, which
+  have a NULL key and so sort to one edge, as `_numeric_expr`'s NULLs do.
+  Every sort site goes through `_sort_keys` — `_compile_order` (single
+  table, the filtered and dedupe merge shapes, `spec_sql`),
+  `_compile_merge_order` (the unfiltered merge's compound) — so the SQL
+  pane's "open this filter" query orders exactly as the grid does. For a
+  merge that query is a `UNION ALL`, whose own ORDER BY may only name its
+  result columns ("1st ORDER BY term does not match any column"), so
+  `spec_sql` sorts the union from outside whenever a key is an
+  expression. A number sort had been failing there all along.
+  `group_summary`'s order-by-value on stored values (Copy unique values)
+  uses the same keys.
+  - **ISO columns are left on the text sort**, because that is already
+    time order and the import's COLLATE NOCASE index serves it: 1M ISO
+    rows sort in 0.08 s from the index, where the time key costs 2.3 s
+    (2.0 s of it TS_NORMALIZE, a Python call per row, so it is the same
+    cost for every non-ISO shape). The test is `_text_sorts_by_time`:
+    every value at both ends of the table (`_TIME_SORT_SAMPLE` rows by
+    rid each way) starts with a `YYYY-MM-DD` date. A sample, not
+    `_column_is_date_led`'s exact scan: that is a full read of a column
+    no index may cover yet, ahead of the first sort, when the column's
+    type was itself guessed from 500 rows. Both ends, so two exports
+    appended into one file are caught. Cached per (table, column) for
+    the Store's life, as `_date_led` is. A derived column is never asked
+    (canonical by construction).
+  - **A merge sorts by time if any member's copy needs it**: one ORDER BY
+    orders every member's rows against each other, so an ISO member and
+    a US member can only meet on the normalized key. Each member is
+    judged on its own column (`_member_column`), skipping members that
+    lack it or derive it.
+  - **No sort index for such a column.** build_view leaves time-sorted
+    columns out of `sort_cols`, and `_build_import_indexes` skips the
+    first datetime column's index when its text is not time order: no
+    index serves the expression, so it was import time spent for
+    nothing. A faster sort for big US-dated tables would need the key in
+    SQL (as ts_normalize_sql does for ISO) or materialised; neither is
+    done. `tests/test_timestamp_sort.py`.
 - Grouping (`group_summary`) buckets a `datetime` column by calendar day via
   a registered SQL function, `DAY_BUCKET(x)` (Python `_day_bucket`, same
   ISO/US shapes `DATE_RE` and `tsformat.js`'s `parseTimestamp` already recognize) —
