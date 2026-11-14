@@ -1810,8 +1810,18 @@ see [docs/notes/README.md](README.md) for the whole set.
   starts on the side list, not the filter box**: Up/Down/Home/End walk it
   from the first keystroke, and `C` still closes the menu it opened (a
   caret in a box would take the C as typing, test_modal_toggle.py). The
-  everyday actions (Tables manager, Reset view, Close this tab) are the
-  `.table-menu-foot` under every section. Under 640px the side list
+  everyday actions (Tables manager, Reset view) are the
+  `.table-menu-foot` under every section. **Close this tab is not one of
+  them any more**: it sat at the foot's right-hand end, the slot every
+  other dialog's `.table-menu-strip` gives Cancel or its main action
+  (`.table-menu-close`), under a label that starts like the dialog's own
+  Close, and analysts putting the menu away closed the tab instead,
+  losing its stashed filters, search and sort. It is a Tab field in Name &
+  merge now (`.tm-tab-row`, above Merge so a long merge list never pushes
+  it a scroll down), and the corner stays empty. No confirm: the tab's ✕
+  and the right-click Close this tab don't ask either, and a button in a
+  pane picked on purpose isn't hit by accident. Keep anything that loses
+  work out of that corner. Under 640px the side list
   becomes a wrapping row of tabs without groups or hints. The panes after
   Columns borrow the merge builder's vocabulary (`.mb-stats`, `.mb-seg`,
   `.mb-notes`, `.mb-field`) rather than adding their own.

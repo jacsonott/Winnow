@@ -103,7 +103,7 @@ def test_columns_opens_the_table_dialog_and_c_still_toggles_it(page):
     assert page.locator("#modalTitle").inner_text().upper().startswith("TABLE —")
     assert page.locator(".table-menu .side-rail-item").count() >= 3
     strip = page.locator("#modalBody .table-menu-strip button").all_inner_texts()
-    assert strip == ["Tables manager…", "Reset view", "Close this tab"], strip
+    assert strip == ["Tables manager…", "Reset view"], strip
     # Still the openTableMenu dialog, so its key closes it however it was opened.
     page.keyboard.press("C")
     page.wait_for_selector("#modal[hidden]", state="attached")
