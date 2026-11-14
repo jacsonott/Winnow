@@ -1434,6 +1434,22 @@ export function buildNamePanel(container, refresh) {
       el('small', null, `${alike.length === 1 ? 'Only this table has' : `${alike.length} tables have`} them. The name groups them in the merge builder, Saved filters and the Timeline.`)));
   }
 
+  // Closing the tab lives here, in a pane picked on purpose, rather than
+  // along the foot under every section: there it held the bottom-right
+  // corner, the slot every other dialog's foot gives Cancel or its main
+  // action, under a label that starts like the dialog's own Close, and it
+  // was being clicked to dismiss the menu. The tab's ✕ and its right-click
+  // Close this tab are still the quick ways. Above Merge, whose list can
+  // run long, so it is never a scroll down.
+  if (src.is_open) {
+    const close = el('button', 'btn ghost', 'Close this tab');
+    close.title = 'Stays in the case — reopen it from the sidebar';
+    close.onclick = async () => { $('modal').hidden = true; await closeTab(src); };
+    const row = el('div', 'tm-tab-row');
+    row.append(close, el('small', null, 'The table stays in the case, with its tags, notes and column layout; reopen it from the sidebar. Its filters, search and sort start over.'));
+    container.append(tableMenuField('Tab', row));
+  }
+
   const mergeBtn = el('button', 'btn ghost', merge ? 'Edit merge…' : 'Merge with other tables…');
   mergeBtn.title = merge
     ? 'Add or remove tables, or change which columns this merge keeps. Its layout stays.'
@@ -1472,12 +1488,13 @@ export function buildNamePanel(container, refresh) {
   container.append(tableMenuField('Merge', mergeHead, mergeList));
 }
 
-/* Along the foot of the table menu: the three things this menu is opened
-   FOR most of the time, under whichever section is showing. They sat last,
-   under the column list, until a two-hundred-column table put closing a
-   tab a long scroll away. */
+/* Along the foot of the table menu, under whichever section is showing:
+   the Tables manager and Reset view. They sat last, under the column list,
+   until a two-hundred-column table put them a long scroll away. Close this
+   tab was the third, until it moved to Name & merge (buildNamePanel says
+   why): the right-hand end of this strip is where a dialog's dismiss
+   button sits, so nothing that loses work goes there. */
 export function buildTableStripPanel(container) {
-  const src = S.sources.find((s) => s.id === S.sourceId);
   const strip = el('div', 'table-menu-strip');
   const tables = el('button', 'btn ghost', 'Tables manager…');
   tables.title = 'Every table in the case — indexes, row counts, dropping a table';
@@ -1492,12 +1509,6 @@ export function buildTableStripPanel(container) {
     await clearAllFilters();
   };
   strip.append(tables, reset);
-  if (src && src.is_open) {
-    const close = el('button', 'btn ghost table-menu-close', 'Close this tab');
-    close.title = 'Stays in the case — reopen it from the sidebar';
-    close.onclick = async () => { $('modal').hidden = true; await closeTab(src); };
-    strip.append(close);
-  }
   container.append(strip);
 }
 
