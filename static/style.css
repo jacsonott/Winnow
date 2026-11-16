@@ -2371,6 +2371,22 @@ textarea:focus { border-color: var(--accent); outline: none; }
 /* A note is dim text that is not a key: a plugin's name beside its action. */
 .menu-item-note { flex: 0 0 auto; color: var(--text-faint); font-size: 10px; }
 .menu-item-sub[aria-haspopup] { padding-right: 8px; }
+/* A text box with values to pick from (ui.js comboBox, never a
+   <datalist>, whose list the browser draws white on every skin). The
+   list is an ordinary .menu, so it wears each skin the way every menu
+   does; the ▾ sits inside the box's right edge, where a <select> keeps
+   its arrow. The wrapper takes the box's place in a flex row. */
+.combo { position: relative; display: flex; flex: 1 1 auto; min-width: 0; }
+.combo > input { flex: 1 1 auto; min-width: 0; padding-right: 24px; }
+.combo-caret {
+  position: absolute; top: 1px; right: 1px; bottom: 1px; width: 22px;
+  display: grid; place-items: center; padding: 0;
+  background: none; border: 0; color: var(--dim); font-size: 11px; cursor: pointer;
+}
+.combo-caret:hover, .combo.open .combo-caret { color: var(--text); }
+.combo-list { max-height: min(280px, 50vh); }
+.combo-option.current { color: var(--accent); }
+.combo-option.active { background: var(--panel-2); box-shadow: inset 2px 0 0 var(--accent); }
 /* Pinning: a ☆ on hover in a submenu, ✕ on a pinned row at the top, and a
    drop zone the root shows only while a pin is being dragged. */
 /* Dim at rest rather than hidden: the ☆ is how pinning gets discovered. */
