@@ -880,6 +880,7 @@ class IngestPath(BaseModel):
     build_fts: bool = True
     has_header: bool = True
     column_types: list[str] | None = None
+    folder_id: int | None = None   # the table folder to file the new table in (GET /api/folders); None = top level
 
 
 class IngestJsonPath(BaseModel):
@@ -888,6 +889,7 @@ class IngestJsonPath(BaseModel):
     flatten_mode: str = "none"
     flatten_depth: int = 0
     build_fts: bool = True
+    folder_id: int | None = None   # as IngestPath's
 
 
 class IngestPluginPath(BaseModel):
@@ -897,6 +899,7 @@ class IngestPluginPath(BaseModel):
     options: dict = {}      # values for the format's declared options
     build_fts: bool = True
     folder_path: str | None = None   # directory import: the on-disk subfolder to file this under
+    folder_id: int | None = None     # the table folder to file it in (folder_path nests beneath it)
 
 
 class DirectoryScan(BaseModel):
@@ -1218,7 +1221,8 @@ def _relaunch_argv(args: argparse.Namespace, case: str | None) -> list[str]:
     --case it started with, since the analyst may have opened another
     since), and no window, because the ones already open reload
     themselves. What a start DID rather than what it is stays behind:
-    --open and --assoc would import their files a second time, and --force
+    --open and --assoc would import their files a second time (--folder
+    only says where --open's go), and --force
     was for a lock this process has just let go of."""
     argv = [sys.executable, str(Path(__file__).resolve()),
             "--host", args.host, "--port", str(args.port), "--no-browser"]
@@ -2777,15 +2781,33 @@ def api_sources():
     return store().list_sources()
 
 
+def _check_import_folder(folder_id: int | None) -> None:
+    """Refuse an import into a table folder this case doesn't have, before
+    any of it runs: a stale id (deleted in another window, or from another
+    case) found out after the rows are in would leave the table somewhere
+    the analyst didn't ask for, with nothing on screen to say so."""
+    if folder_id is not None and not store().folder_exists(folder_id):
+        raise HTTPException(400, "That table folder no longer exists — choose another")
+
+
+def _file_imported(rec: dict, folder_id: int | None) -> dict:
+    """File a synchronous import's table in the folder it asked for — the
+    job routes' tables are filed by the job (Store.file_imported_sources)."""
+    if folder_id is not None:
+        rec["folder_id"] = store().file_imported_sources([rec["id"]], folder_id=folder_id)
+    return rec
+
+
 @app.post("/api/ingest/path")
 def api_ingest_path(body: IngestPath):
     if not os.path.isfile(body.path):
         raise HTTPException(400, f"No file at {body.path}")
+    _check_import_folder(body.folder_id)
     try:
-        return store().ingest_csv(
+        return _file_imported(store().ingest_csv(
             body.path, name=body.name, delimiter=body.delimiter, build_fts=body.build_fts,
             has_header=body.has_header, column_types=body.column_types,
-        )
+        ), body.folder_id)
     except Exception as e:  # surface the real parser error to the UI
         raise HTTPException(400, str(e))
 
@@ -2800,11 +2822,12 @@ def api_ingest_json_path(body: IngestJsonPath):
     that's already on disk through a multipart upload."""
     if not os.path.isfile(body.path):
         raise HTTPException(400, f"No file at {body.path}")
+    _check_import_folder(body.folder_id)
     try:
-        return store().ingest_json(
+        return _file_imported(store().ingest_json(
             body.path, name=body.name, flatten_mode=body.flatten_mode,
             flatten_depth=body.flatten_depth, build_fts=body.build_fts,
-        )
+        ), body.folder_id)
     except Exception as e:
         raise HTTPException(400, str(e))
 
@@ -2872,7 +2895,9 @@ async def api_ingest_upload(
     delimiter: str | None = Form(None),
     has_header: bool = Form(True),
     column_types: str | None = Form(None),  # JSON-encoded list[str], since multipart forms are flat
+    folder_id: int | None = Form(None),     # the table folder to file it in; None = top level
 ):
+    _check_import_folder(folder_id)
     spool_dir, tmp = _upload_spool(file.filename, "upload.csv")
     try:
         with open(tmp, "wb") as out:
@@ -2884,11 +2909,12 @@ async def api_ingest_upload(
         # (measured: /api/version took 2.4s mid-ingest). Sync `def` routes
         # get this from FastAPI for free; an `async def` route — which this
         # has to be, for `await file.read()` — must ask for it.
-        return await run_in_threadpool(
+        rec = await run_in_threadpool(
             _ingest_spooled, store().ingest_csv,
             tmp, name=os.path.basename(tmp), build_fts=build_fts, delimiter=delimiter or None,
             has_header=has_header, column_types=types,
         )
+        return await run_in_threadpool(_file_imported, rec, folder_id)
     except Exception as e:
         raise HTTPException(400, str(e))
     finally:
@@ -3321,14 +3347,22 @@ class IngestJobPath(BaseModel):
     # directory import: the file's on-disk subfolder, reproduced as a sidebar
     # folder the new table is filed under ("" / None leaves it ungrouped)
     folder_path: str | None = None
+    # the table folder the analyst chose to put the new tables in (an id
+    # from GET /api/folders; None = the top level). A directory import's
+    # folder_path is reproduced beneath it.
+    folder_id: int | None = None
 
 
 def _ingest_job_options(kind: str, *, build_fts: bool, delimiter=None, has_header=True,
                         column_types=None, log_format=None, flatten_mode="none",
-                        flatten_depth=0, tables=None, folder_path=None) -> dict:
-    # folder_path rides along on every kind — the job worker files each new
-    # source under it when the ingest completes (directory import).
+                        flatten_depth=0, tables=None, folder_path=None, folder_id=None) -> dict:
+    # folder_id and folder_path ride along on every kind — the job worker
+    # files each new source under them when the ingest completes
+    # (Store.file_imported_sources). The routes check folder_id first
+    # (_check_import_folder).
     base = {"folder_path": folder_path} if folder_path else {}
+    if folder_id is not None:
+        base["folder_id"] = folder_id
     if kind == "csv":
         # Refused here, as a 400 the import window shows, rather than as a
         # job that starts and fails on its first line.
@@ -3357,6 +3391,7 @@ def api_ingest_job_path(body: IngestJobPath):
         raise HTTPException(400, "A sqlite import needs its tables picked first")
     if kind == "xlsx" and not body.tables:
         raise HTTPException(400, "An Excel import needs its sheets picked first")
+    _check_import_folder(body.folder_id)
     try:
         return store().start_ingest_job(
             kind, body.path, name=body.name,
@@ -3365,7 +3400,7 @@ def api_ingest_job_path(body: IngestJobPath):
                 has_header=body.has_header, column_types=body.column_types,
                 log_format=body.log_format,
                 flatten_mode=body.flatten_mode, flatten_depth=body.flatten_depth,
-                tables=body.tables, folder_path=body.folder_path,
+                tables=body.tables, folder_path=body.folder_path, folder_id=body.folder_id,
             ),
         )
     except ValueError as e:
@@ -3385,6 +3420,7 @@ async def api_ingest_job_upload(
     flatten_mode: str = Form("none"),
     flatten_depth: int = Form(0),
     tables: str | None = Form(None),         # sqlite: JSON [{table, name?, timestamp_columns?}]
+    folder_id: int | None = Form(None),      # the table folder to file the tables in; None = top level
 ):
     """Upload-then-job: the HTTP transfer *is* this request (the browser
     gets transfer progress from its own XHR events), and the moment the
@@ -3398,6 +3434,9 @@ async def api_ingest_job_upload(
     mkstemp spool made those `tmp3z2vauq7.urls`. And every table records
     that name, not the spool's path, as where it came from
     (recorded_path): the spool is deleted when the job ends."""
+    # Before the spool copy rather than after it: a folder deleted in
+    # another window is refused without writing a second copy of the file.
+    _check_import_folder(folder_id)
     spool_dir, tmp = _upload_spool(file.filename, f"upload.{kind}")
     try:
         with open(tmp, "wb") as out:
@@ -3413,7 +3452,7 @@ async def api_ingest_job_upload(
                 kind, build_fts=build_fts, delimiter=delimiter or None,
                 has_header=has_header, column_types=types, log_format=log_format or None,
                 flatten_mode=flatten_mode, flatten_depth=flatten_depth,
-                tables=table_list,
+                tables=table_list, folder_id=folder_id,
             ),
         )
     except Exception as e:
@@ -4153,15 +4192,17 @@ def api_ingest_plugin_path(body: IngestPluginPath):
     parsing done by a plugin-registered format instead of a built-in."""
     if not os.path.isfile(body.path):
         raise HTTPException(400, f"No file at {body.path}")
+    _check_import_folder(body.folder_id)
     try:
         rec = _ingest_via_plugin(body.path, body.format_id, body.name, body.options, body.build_fts)
-        # Directory import files this table under the folder mirroring its
-        # on-disk path and brings it in closed (same as the job path — a
-        # folder import shouldn't open a tab per file).
+        # Filed in the chosen table folder and, for a directory import,
+        # under the folder mirroring its on-disk path beneath that — and
+        # then brought in closed, as the job path does (a folder import
+        # shouldn't open a tab per file).
+        if body.folder_id is not None or body.folder_path:
+            rec["folder_id"] = store().file_imported_sources(
+                [rec["id"]], folder_id=body.folder_id, folder_path=body.folder_path)
         if body.folder_path:
-            fid = store().ensure_folder_path(body.folder_path)
-            if fid is not None:
-                store().set_source_folder(rec["id"], fid)
             store().set_tab_open(rec["id"], False)
         return rec
     except Exception as e:  # surface the real parser error to the UI, same as the other ingest routes
@@ -4175,11 +4216,13 @@ async def api_ingest_plugin_upload(
     name: str | None = Form(None),
     options: str | None = Form(None),  # JSON-encoded dict, since multipart forms are flat
     build_fts: bool = Form(True),
+    folder_id: int | None = Form(None),  # the table folder to file it in; None = top level
 ):
     # Spooled under the upload's own name (see _upload_spool — a parser
     # may read meaning from it) and removed whichever way the import ends:
     # it used to stay, a full copy of every uploaded $MFT in the temp
     # folder, with the table's path pointing at it.
+    _check_import_folder(folder_id)
     spool_dir, tmp = _upload_spool(file.filename, "upload.bin")
     try:
         with open(tmp, "wb") as out:
@@ -4189,9 +4232,10 @@ async def api_ingest_plugin_upload(
         # A plugin parser is arbitrary Python — MFT parsing, an archive
         # walk — and ran on the loop until now, the same defect the plugin
         # ROUTE dispatcher had.
-        return await run_in_threadpool(
+        rec = await run_in_threadpool(
             _ingest_via_plugin, tmp, format_id, name or file.filename, opts, build_fts,
             os.path.basename(tmp))
+        return await run_in_threadpool(_file_imported, rec, folder_id)
     except Exception as e:
         raise HTTPException(400, str(e))
     finally:
@@ -7096,6 +7140,9 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Winnow")
     ap.add_argument("--case", default=None, help="SQLite case file (created if missing). Omit to land on the home screen.")
     ap.add_argument("--open", dest="open_files", nargs="*", default=[], help="CSVs to ingest at startup")
+    ap.add_argument("--folder", metavar="NAME", default=None,
+                    help="Put the --open tables in this table folder, created if the case has none by "
+                         "that name; a / nests (\"WS01/EventLogs\")")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--allow-host", action="append", default=[], metavar="NAME",
                     help="Extra Host header value to accept (a reverse proxy's "
@@ -7245,6 +7292,8 @@ def main() -> None:
             print(f"Importing {f} ...", flush=True)
             rec = STORE.ingest_csv(f, build_fts=not args.no_fts)
             print(f"  {rec['row_count']:,} rows in {rec['elapsed_sec']}s ({rec['rows_per_sec']:,}/s)")
+            if args.folder and STORE.file_imported_sources([rec["id"]], folder_path=args.folder) is not None:
+                print(f"  in table folder {args.folder}")
             if rec.get("ragged_rows"):
                 print(f"  {rec['ragged_rows']:,} row(s) had the wrong column count and were padded/trimmed to fit")
             if rec.get("suspect_quote_rows"):

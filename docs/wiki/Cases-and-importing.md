@@ -245,7 +245,10 @@ and the imports run in the background while you work (see
 Under each file's name the list says how it will be read: *Delimited ·
 auto-detect*, *JSON · nested kept as JSON*, *SQLite · 2 tables*, *Text · one
 line per row* and so on. **Filter queued files…** narrows a long queue, and
-**✕** takes a file off it. The chosen file's pane, from the top:
+**✕** takes a file off it. Under the list, **Table folder** is the sidebar
+folder every queued file's tables go in (see
+[Choosing a table folder](#choosing-a-table-folder)). The chosen file's pane,
+from the top:
 
 | Part | What it holds |
 | --- | --- |
@@ -266,6 +269,37 @@ preview reads. JSON, SQLite and Excel previews need the whole file, so over
 tables or a workbook's sheets are read once: choosing the file again shows
 the same list without sending it again. A file added from this machine
 previews in place at any size.
+
+### Choosing a table folder
+
+Imported tables go at the top of the sidebar's **All tables** list unless you
+choose a [folder](Working-with-tables.md#folders) for them. **Table folder**
+is under the queue in the Import window and under **Folder** in **Import a
+folder**:
+
+- **No folder (top level)**, the default, files nothing.
+- A folder from the sidebar, listed by its path (`WS01 / EventLogs`), files
+  every table the import makes in it: each file's table, every table picked
+  from a SQLite file and every sheet picked from a workbook.
+- **New folder…** asks for a name, makes the folder at the top level of the
+  sidebar and chooses it. The folder is made when you click **Create**, not
+  when the import starts, so it stays if you then close the window without
+  importing; delete it from the sidebar if you don't want it. In **Import a
+  folder** the name starts as the scanned folder's name.
+
+The choice is for one import. The Import window goes back to **No folder
+(top level)** once **Import N files** starts, and **Import a whole folder…**
+and an archive's expansion carry the choice into **Import a folder**. Tables
+filed this way still open as tabs, as other imports do, and a folder you had
+collapsed opens so you can see them.
+
+If the folder is deleted before you click import (from the sidebar or
+another window), nothing is imported: a message says *That table folder has
+been deleted. Choose another, or none.*, the queue stays as it was and the
+choice goes back to **No folder (top level)**. If it is deleted while the
+import runs, the tables go at the top level instead and the log says so. If
+the import is cancelled or fails part way through a SQLite file or workbook,
+the tables it finished are still filed in the folder.
 
 A file headed for the raw-text reader that looks binary (a NUL in its first
 8 KB; a UTF-16 byte-order mark is exempt) is dropped from the queue with
@@ -288,6 +322,17 @@ row counts and warnings to the terminal; without `--case` it creates
 delimited text, whatever its extension — use the Import window for JSON,
 SQLite, Excel, Plaso and the rest. Other options are in
 [Installation](Installation.md).
+
+`--folder` puts the `--open` tables in a
+[table folder](#choosing-a-table-folder), by name:
+
+```bash
+python server.py --case acme.db-winnow --open Security.csv System.csv --folder WS01/EventLogs
+```
+
+A folder the case already has is used (the name's case doesn't matter);
+otherwise it is made. A `/` nests, so `WS01/EventLogs` is an `EventLogs`
+folder inside `WS01`.
 
 ## Supported formats
 
@@ -859,7 +904,11 @@ right. It stays the same size whatever you pick or the scan finds.
 Each table is named after its file. Files in subfolders are filed in table
 folders mirroring the tree and arrive closed — open them from the sidebar —
 so a hundred files don't become a hundred tabs; files at the top level open
-as tabs. A file already imported from that path shows *already in case*
+as tabs. Choose a **Table folder** (see
+[Choosing a table folder](#choosing-a-table-folder)) and the files at the
+top level go in it, with the mirrored folders inside it: `DC01` for a KAPE
+output with `EventLogs` and `FileSystem` subfolders gives `DC01`,
+`DC01 / EventLogs` and `DC01 / FileSystem`. A file already imported from that path shows *already in case*
 and starts unticked. Plugin-claimed files use the plugin's default options.
 SQLite files and workbooks are never picked up and archives in the folder are
 not expanded; import those on their own. The scan stops at 5,000 files and

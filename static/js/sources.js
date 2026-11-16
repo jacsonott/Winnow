@@ -1411,6 +1411,20 @@ function rootDropZone() {
   return z;
 }
 
+/* Expand a folder and every folder above it, so the tables an import just
+   filed there show in the tree — an import into a folder the analyst had
+   collapsed would otherwise land out of sight. */
+export function revealFolder(id) {
+  const parentOf = new Map(S.folders.map((f) => [f.id, f.parent_id ?? null]));
+  const seen = new Set();
+  let changed = false;
+  for (let fid = id; fid != null && !seen.has(fid); fid = parentOf.get(fid) ?? null) {
+    seen.add(fid);
+    if (S.collapsedFolders.delete(fid)) changed = true;
+  }
+  if (changed) saveCollapsedFolders();
+}
+
 function toggleFolderCollapsed(id) {
   if (S.collapsedFolders.has(id)) S.collapsedFolders.delete(id);
   else S.collapsedFolders.add(id);

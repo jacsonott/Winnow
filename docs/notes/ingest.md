@@ -507,6 +507,36 @@ see [docs/notes/README.md](README.md) for the whole set.
   the focus and the arrow keys can walk it. Only Browse… still reopens it,
   because the folder browser borrows the modal — that round trip is what
   `state` carries.
+- **The table folder chosen at import is one `folder_id`, filed by
+  `Store.file_imported_sources`.** Every import route takes it — the job
+  routes (`/api/ingest/jobs/path`, `/jobs/upload`), the synchronous ones
+  (`/api/ingest/path`, `/json/path`, `/upload`) and the plugin ones — and
+  `_check_import_folder` refuses an id the case doesn't have *before*
+  anything is read (an upload route before its spool copy), so a folder
+  deleted in another window is a 400 the import window can show rather
+  than tables quietly landing somewhere else. The job carries it in its
+  options and the worker files the tables when they finish, with a
+  directory import's `folder_path` reproduced *beneath* it (the chain is
+  found or created under `folder_id`, not at the root). Filing is one
+  locked transaction that checks the folder still exists and falls back
+  to the top level (with a `warn` in the log) if it doesn't: a long
+  import can outlive the folder it was aimed at, and failing a job whose
+  rows are committed — or hanging the mirrored chain off a parent id no
+  longer in `source_folders`, where no sidebar ever shows it — are both
+  worse than a table at the top. For the same reason
+  `_file_job_results_quietly` never fails the job, and it runs on the
+  cancel and error paths too: the worker keeps `results` in the
+  function's own scope so a SQLite/Excel job's finished tables are filed
+  even when a later table fails or the job is cancelled. Only
+  `folder_path` closes the tabs (a subfolder's file in a directory
+  import); a chosen `folder_id` alone leaves them open, since the analyst
+  imported them to look at them. `--folder NAME` on the command line goes
+  through the same method by NAME (`folder_path`, find-or-create,
+  case-insensitive), since a shell has no ids. In the browser the choice
+  is `tableFolderPicker` in importer.js, shared by both windows; "New
+  folder…" makes the folder on Create, not at import, and both windows
+  re-fetch `/api/folders` just before importing (`tableFolderStillThere`)
+  so a deleted folder stops the import with the queue intact.
 - **Raw text is the catch-all importer, and it is a different reader.**
   `Store.ingest_text` (kind `text`): one row per physical line, the whole
   line in the one `Message` column (`TEXT_COLUMN`), no header, nothing

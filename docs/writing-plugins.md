@@ -2000,7 +2000,7 @@ What every API-route and row-action handler receives:
 | `GET /api/plugins` | Everything loaded: plugins, formats, tabs, row actions, dashboards, toolbar and page panels, directories, and this build's `api_version` |
 | `POST /api/plugins/toggle` | `{fs_name, scope}` — `scope` is `on_all` / `off_all` (Everywhere), `on_case` / `off_case` / `follow_case` (this case); persists and reloads. The older `{fs_name, enabled}` still means `on_all` / `off_all` |
 | `POST /api/plugins/install` | Multipart install; copies into `plugins/` |
-| `POST /api/ingest/plugin/path` | `{path, format_id, name?, options?}` — ingest by server path |
+| `POST /api/ingest/plugin/path` | `{path, format_id, name?, options?, folder_id?}` — ingest by server path; `folder_id` (from `GET /api/folders`) files the table in that table folder, and an unknown one is a 400 |
 | `POST /api/ingest/plugin/upload` | Multipart sibling of the above |
 | `GET /plugin_assets/<fs_name>/<path>` | A plugin's own files |
 | `* /api/plugin/<fs_name>/<route>` | A plugin's registered routes |
