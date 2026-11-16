@@ -191,6 +191,29 @@ def test_a_table_switched_off_is_left_out(store, write_csv):
     assert {r["source_id"] for r in _lines(store, v["view_id"])} == {evtx}
 
 
+def test_the_build_names_every_table_with_tagged_rows(store, write_csv):
+    """`tagged_tables` is what the tab lists its table chips from, so it
+    names a table switched off (its chip is how it goes back on) and one
+    whose tags are all switched off, and counts each table's tagged rows
+    under any tag. An untagged table, and a merge (whose tags are its
+    members'), are not on it."""
+    evtx, web, a, b = _case(store, write_csv)
+    quiet = store.ingest_csv(write_csv([["Timestamp", "What"], ["2026-01-05 08:00:00", "nothing"]],
+                                       name="quiet.csv"), name="quiet.csv", build_fts=False)["id"]
+    store.create_merge("both", [evtx, web])
+    assert store.build_timeline()["tagged_tables"] == {evtx: 4, web: 1}
+    off = store.build_timeline(exclude_sources=[web])
+    assert off["per_source"] == {evtx: 4}
+    assert off["tagged_tables"] == {evtx: 4, web: 1}
+    # web's one tagged row carries only b.
+    only_a = store.build_timeline(tag_ids=[a])
+    assert only_a["per_source"] == {evtx: 4}
+    assert only_a["tagged_tables"] == {evtx: 4, web: 1}
+    # A table tagged since the last build is named by the next one.
+    store.set_tags(quiet, [1], a, True)
+    assert store.build_timeline()["tagged_tables"] == {evtx: 4, web: 1, quiet: 1}
+
+
 def test_a_pre_1970_line_lands_on_its_own_bar(store, write_csv):
     """FILETIME zero, 1601: an epoch below zero. SQLite's integer division
     truncates toward zero, so a bar number worked out against an unfloored
@@ -216,6 +239,7 @@ def test_overview_routes(client, write_csv, store):
     evtx, web, a, b = _case(store, write_csv)
     v = client.post("/api/timeline", json={"tag_ids": [a, b], "exclude_sources": [web]}).json()
     assert v["row_count"] == 4
+    assert v["tagged_tables"] == {str(evtx): 4, str(web): 1}
     ov = client.get("/api/timeline_overview", params={"view_id": v["view_id"], "by": "sources"}).json()
     assert {k for bar in ov["buckets"] for k in bar["split"]} == {str(evtx)}
     assert client.get("/api/timeline_overview", params={"view_id": v["view_id"], "by": "hosts"}).status_code == 400

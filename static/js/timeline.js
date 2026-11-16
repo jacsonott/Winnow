@@ -150,6 +150,8 @@ export async function buildTimeline({ keepScroll = false } = {}) {
     setBusy(false);
   }
   if (reqId !== S.timeline.reqId) return; // a newer build superseded this one
+  await syncTimelineTables(v.tagged_tables);
+  if (reqId !== S.timeline.reqId) return;
   S.timeline.view = v;
   $('timelineSpacerY').style.height = spacerPx(v.row_count) + 'px';
   // The untagged rows around a finding are said by their own chip
@@ -161,7 +163,7 @@ export async function buildTimeline({ keepScroll = false } = {}) {
     + (lines < findings ? ` in <b>${lines.toLocaleString()}</b> line${lines === 1 ? '' : 's'}` : '');
   // Tables switched off on the overview strip hide in its Tables view, so
   // the count says it is short of them wherever the strip is.
-  const tagged = S.sources.filter((s) => s.tagged_row_count && !s.is_merge);
+  const tagged = timelineTables();
   const off = tagged.filter((s) => S.timeline.sourcesOff.has(s.id)).length;
   if (off) {
     const note = el('span', null, ` · ${tagged.length - off} of ${tagged.length} tables`);
@@ -187,6 +189,55 @@ export async function buildTimeline({ keepScroll = false } = {}) {
   renderTimelineRows();
   refreshTimelinePane();
   loadTimelineOverview();
+}
+
+/* The tables on the Timeline: every real table with tagged rows, switched
+   off or not — the build's own rule (Store.build_timeline leaves out a
+   merge, whose tags are its members', and a table that failed or is
+   still importing). One list for the overview's table chips, the "N of M
+   tables" in the header and the empty state's reason, so the three
+   cannot disagree with each other, and kept by syncTimelineTables so they
+   cannot disagree with the lines either. */
+export function timelineTables() {
+  return S.sources.filter((s) => !s.is_merge && !s.error && s.columns && s.tagged_row_count);
+}
+
+/* Which tables have tagged rows, as the build found them
+   (`tagged_tables`: source id → tagged rows), written onto S.sources.
+
+   S.sources' counts are only as new as the last loadSources, and tagging
+   lists no tables again: not a hotkey in the grid, a popout, the SQL
+   pane or a watchlist auto-tag. So a table first tagged after the case
+   opened put its lines on the Timeline while the overview's Tables view
+   had no chip for it — switch every table listed there off and its
+   findings were still showing, under "0 of 1 tables". The build reads
+   every table's count anyway, to pick the tables it unions; the list is
+   now read off that same answer.
+
+   A merge's count is its members' summed, as the server works it out. A
+   table the build knows and this page does not (imported from another
+   window) lists the tables again, without leaving this tab. */
+async function syncTimelineTables(tagged) {
+  if (!tagged) return;
+  let flipped = false;
+  const real = new Map();
+  for (const s of S.sources) {
+    if (s.is_merge) continue;
+    const n = tagged[s.id] || 0;
+    if (!n !== !s.tagged_row_count) flipped = true;
+    s.tagged_row_count = n;
+    real.set(s.id, n);
+  }
+  for (const m of S.sources) {
+    if (m.is_merge && m.member_source_ids) {
+      m.tagged_row_count = m.member_source_ids.reduce((sum, id) => sum + (real.get(id) || 0), 0);
+    }
+  }
+  // Tables with tagged rows take the palette's first colours (timelineKinds).
+  if (flipped) kindsKey = null;
+  if (Object.keys(tagged).some((id) => !real.has(Number(id)))) {
+    await loadSources(undefined, { navigate: false }).catch(() => {});
+  }
 }
 
 /* Where a rebuilt Timeline opens: on the line that was selected, when
@@ -251,7 +302,7 @@ function emptyReason() {
   if (S.tags.length && !on) return 'Every tag is switched off — turn one back on above to see its rows.';
   if (timelineTimeRangeOn()) return 'No tagged rows in this timeframe — ✕ on its chip above shows the whole Timeline again.';
   if (S.timeline.sourcesOff.size) {
-    const tagged = S.sources.filter((s) => s.tagged_row_count && !s.is_merge);
+    const tagged = timelineTables();
     if (tagged.length && tagged.every((s) => S.timeline.sourcesOff.has(s.id))) {
       return 'Every table is switched off — turn one back on in the overview\'s Tables view.';
     }

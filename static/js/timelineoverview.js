@@ -36,7 +36,7 @@ import { $, ROW_H, api, el } from './core.js';
 import { rScroll, vScroll } from './grid.js';
 import { S } from './state.js';
 import { buildTimeline, renderTimelineRows, selectTimelineLine, setTimelineTimeRange, timelineDayLabel,
-  timelineKinds, timelineRowAt, timelineTimeRangeOn } from './timeline.js';
+  timelineKinds, timelineRowAt, timelineTables, timelineTimeRangeOn } from './timeline.js';
 
 export const TIMELINE_OVERVIEW_KEY = 'winnow.timelineOverview';
 const HEIGHT = 76;
@@ -246,9 +246,9 @@ function renderLegend(by) {
   if (by === 'tables') {
     const kinds = timelineKinds();
     const per = (S.timeline.view && S.timeline.view.per_source) || {};
-    for (const s of S.sources) {
+    for (const s of timelineTables()) {
       const k = kinds.get(s.id);
-      if (!k || !s.tagged_row_count) continue;
+      if (!k) continue;
       const on = !S.timeline.sourcesOff.has(s.id);
       const chip = el('button', 'tag-chip tl-table-chip');
       chip.type = 'button';

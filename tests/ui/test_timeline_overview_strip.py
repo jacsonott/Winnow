@@ -197,6 +197,58 @@ def test_a_tables_chip_takes_that_table_off_the_timeline(page, two_hosts):
     assert chip.get_attribute("aria-pressed") == "true"
 
 
+def test_a_table_first_tagged_after_the_tables_were_listed_has_its_chip(page, two_hosts, api):
+    """The Tables view listed the tables the page last fetched with tagged
+    rows, and tagging fetches nothing: a table first tagged in its grid
+    had lines on the Timeline and no chip, so switching every table that
+    WAS listed off still showed its findings, under "0 of 1 tables". The
+    list now comes from the build, which knows every table it unioned."""
+    ws, dc = two_hosts["ws"], two_hosts["dc"]
+    # DC02 untagged when the page lists the case's tables...
+    for tag in two_hosts["tags"]:
+        api("/api/row_tags", "POST", {"pairs": [[dc, 1], [dc, 2]], "tag_id": tag, "on": False})
+    page.evaluate("() => __winnow.loadSources()")
+    page.wait_for_function("(id) => __winnow.S.sources.find((s) => s.id === id).tagged_row_count === 0", arg=dc)
+    # ...then tagged in its own grid, with a hotkey, which lists nothing again.
+    hotkey = page.evaluate("() => __winnow.S.tags.find((t) => String(t.hotkey) === '1').id")
+    page.evaluate("(id) => __winnow.openSource(id)", dc)
+    page.wait_for_function("(id) => __winnow.S.sourceId === id && __winnow.rowAt(0)", arg=dc)
+    page.locator(".row[data-pos='0'] .cell").nth(1).click()
+    page.keyboard.press("1")
+    page.wait_for_function("(id) => (__winnow.rowAt(0)?.tags || []).includes(id)", arg=hotkey)
+
+    _open_timeline(page, lines=62)
+    page.locator("#timelineOverview .tl-ov-views .btn", has_text="Tables").click()
+    page.wait_for_function("() => (__winnow.S.timeline.overview || {}).by === 'tables'")
+    chips = page.locator("#timelineOverview .tl-table-chip")
+    chip = chips.locator(f"xpath=self::*[@data-source-id='{dc}']")
+    chip.wait_for()
+    assert chip.evaluate("(c) => [...c.querySelectorAll('span:not(.swatch)')].map((s) => s.textContent)") \
+        == ["Event logs · DC02", "1"]
+    assert sorted(int(x) for x in chips.evaluate_all("(cs) => cs.map((c) => c.dataset.sourceId)")) \
+        == sorted([ws, dc])
+
+    # Every table listed switched off is every table off: nothing shows.
+    for sid, left in ((ws, 1), (dc, 0)):
+        chips.locator(f"xpath=self::*[@data-source-id='{sid}']").click()
+        page.wait_for_function("(n) => (__winnow.S.timeline.view || {}).row_count === n", arg=left,
+                               timeout=10_000)
+    assert "0 of 2 tables" in page.locator("#timelineStats").inner_text()
+    assert page.locator("#timelineEmpty").inner_text().startswith("Every table is switched off")
+
+
+def test_a_table_this_page_has_not_listed_is_listed_by_the_build(page, two_hosts):
+    """A table the build names and this page never listed (imported from
+    another window) has its chip too: the page lists the case's tables
+    again rather than leave its lines on the Timeline with no chip."""
+    dc = two_hosts["dc"]
+    page.evaluate("(id) => { __winnow.S.sources = __winnow.S.sources.filter((s) => s.id !== id); }", dc)
+    _open_timeline(page)
+    page.locator("#timelineOverview .tl-ov-views .btn", has_text="Tables").click()
+    page.locator(f"#timelineOverview .tl-table-chip[data-source-id='{dc}']").wait_for()
+    assert page.evaluate("(id) => __winnow.S.sources.some((s) => s.id === id)", dc)
+
+
 def test_the_strip_can_be_put_away_and_stays_away(page, two_hosts):
     _open_timeline(page)
     page.locator("#btnTimelineOverview").click()
