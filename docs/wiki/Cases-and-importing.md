@@ -44,8 +44,11 @@ the server until you open another one.
 
 **+ New case** opens a dialog with the profiles down the left and the case
 on the right. Give it a **Name**, an optional **Group** (an
-engagement name, say; it gets its own section on the home screen and is
-offered again as you type) and a **Case file path**. The path is filled in
+engagement name, say; it gets its own section on the home screen) and a
+**Case file path**. Clicking in **Group**, or its **▾**, lists the groups
+your cases already use; typing narrows the list, ↓ and Enter or a click
+take one, and Escape closes the list without closing the dialog. A name
+that isn't in the list starts a new group. The path is filled in
 from the name — `ACME Breach` becomes
 `<cases folder>/acme-breach.db-winnow` — until you edit it; **Browse…**
 picks another folder and **New folder…** makes one.
@@ -83,7 +86,7 @@ Each row's **⋯** button, or right-clicking the row, opens its menu:
 | Menu item | What it does |
 | --- | --- |
 | **Open** | Opens the case. |
-| **Edit name, group and notes…** | Changes the name, group and notes on this machine's list. The file keeps its name on disk. |
+| **Edit name, group and notes…** | Changes the name, group and notes on this machine's list. **Group** offers the groups already in use, as in **+ New case**. The file keeps its name on disk. |
 | **Copy case file path** | Copies the full path of the case file. |
 | **Remove from list…** | Forgets the case on this machine; the file is left untouched. |
 | **Delete case file…** | Permanently deletes the case file and everything in it. Going back to the case list leaves the last case open, so deleting that one closes it first; the confirmation says so. Refused for a case open in another Winnow. |

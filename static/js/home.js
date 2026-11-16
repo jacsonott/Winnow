@@ -28,7 +28,7 @@ import { loadCaseTags } from './tags.js';
 import { tableMenuStat, updateTimeRangeButton } from './timeframe.js';
 import { loadTimelineTemplates, renderTimelineTimeRange } from './timeline.js';
 import { flushTimelineNote, resetTimelinePane } from './timelinepane.js';
-import { confirmDialog, contextMenu, dropdownMenu, modal, oneAtATime, promptDialog, sectionPanes, sideRail } from './ui.js';
+import { comboBox, confirmDialog, contextMenu, dropdownMenu, modal, oneAtATime, promptDialog, sectionPanes, sideRail } from './ui.js';
 import { writeClipboardText } from './grouping.js';
 import { enterPopout, inPopout, ownPopoutCount, popoutWithoutCase } from './popout.js';
 
@@ -387,15 +387,14 @@ export function fieldInput(value) {
   return inp;
 }
 
-export function groupOptionsDatalist(id) {
-  const dl = el('datalist');
-  dl.id = id;
-  for (const g of new Set(S.cases.map((c) => c.group).filter(Boolean))) {
-    const opt = document.createElement('option');
-    opt.value = g;
-    dl.append(opt);
-  }
-  return dl;
+/* The case Group box: free text, with the groups already in use offered
+   in a list drawn in the skin (comboBox — it was a <datalist>, whose list
+   the browser draws white on every skin). Returns the wrapper to place
+   where the box would go. */
+export function groupCombo(input) {
+  input.classList.add('case-group-input');
+  return comboBox(input, () => S.cases.map((c) => c.group).filter(Boolean).sort((a, b) => a.localeCompare(b)),
+    { label: 'Groups' });
 }
 
 /* Browses the server machine's filesystem, one directory level at a time
@@ -766,7 +765,6 @@ export async function openNewCaseModal(state = {}) {
     const caseBox = el('div', 'nc-case');
     const nameInput = ncInput(state.name || '', 'e.g. ACME intrusion', 'nc-name');
     const groupInput = ncInput(state.group || '', 'Optional');
-    groupInput.setAttribute('list', 'home-new-case-groups');
     let chosenDir = state.chosenDir || S.casesDir || S.defaultCasesDir || 'cases';
     const pathInput = ncInput(state.path || joinPath(chosenDir, slugify(state.name || '') + CASE_EXT), '', 'mono nc-path');
     let pathTouched = state.pathTouched || false;
@@ -791,7 +789,7 @@ export async function openNewCaseModal(state = {}) {
     pathBox.append(pathInput, browseBtn);
     const pair = el('div', 'dlg-pair');
     pair.append(captioned('Name', nameInput),
-      captioned('Group', groupInput, groupOptionsDatalist('home-new-case-groups')));
+      captioned('Group', groupCombo(groupInput)));
     caseBox.append(pair, captioned('Case file path', pathBox));
 
     const varInputs = new Map();     // variable name -> input, for the chosen profile
@@ -1051,9 +1049,8 @@ export function openEditCaseModal(c) {
     b.append(el('label', 'field-label', 'Name'), nameRow);
 
     const groupInput = fieldInput(c.group || '');
-    groupInput.setAttribute('list', 'home-edit-case-groups');
     const groupRow = el('div', 'row-actions');
-    groupRow.append(groupInput, groupOptionsDatalist('home-edit-case-groups'));
+    groupRow.append(groupCombo(groupInput));
     b.append(el('label', 'field-label', 'Group'), groupRow);
 
     const notesArea = el('textarea');

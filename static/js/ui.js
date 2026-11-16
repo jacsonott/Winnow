@@ -1070,6 +1070,165 @@ export function dropdownMenu(anchorEl, items) {
   showMenu(items, anchorEl.getBoundingClientRect(), anchorEl);
 }
 
+/* A text box that offers values to pick from: what <datalist> is for,
+   drawn as one of the app's own menus instead. Never use a datalist for
+   this. Its list is not part of the page: Chromium draws it as its
+   autofill bubble, white with the OS font on every skin, and neither the
+   skin's tokens nor color-scheme reach it. The case Group box had one,
+   and on a dark skin it was the one white thing on screen.
+
+   The box stays free text. A value that is not in the list is still a
+   value; the list only saves retyping one that is. `options` is an array,
+   or a thunk read each time the list opens. Returns a wrapper (.combo)
+   holding the input and a ▾ button: put the wrapper where the input went.
+
+   Clicking in the box, the ▾, Down or Alt+Down open the whole list, with
+   the box's current value marked; typing narrows it to the values that
+   contain what is typed. Up and Down move through it, Enter takes the
+   highlighted value, and Escape closes the list and nothing else (the
+   dialog stays open). The list lives inside the wrapper, position:
+   fixed, so it goes away with the dialog whichever way the dialog goes. */
+let comboSeq = 0;
+export function comboBox(input, options, { label = 'Suggestions' } = {}) {
+  const wrap = el('span', 'combo');
+  const caret = el('button', 'combo-caret', '▾');
+  caret.type = 'button';
+  caret.tabIndex = -1;
+  caret.title = `Show ${label.toLowerCase()}`;
+  caret.setAttribute('aria-label', caret.title);
+  wrap.append(input, caret);
+  // Room for the ▾ comes from .combo > input; an inline padding (as
+  // home.js's fieldInput sets) would beat that rule.
+  input.style.paddingRight = '';
+  const listId = `comboList${++comboSeq}`;
+  input.setAttribute('role', 'combobox');
+  input.setAttribute('aria-autocomplete', 'list');
+  input.setAttribute('aria-expanded', 'false');
+  input.setAttribute('aria-controls', listId);
+  // The browser's own form history is the same white bubble.
+  input.autocomplete = 'off';
+
+  let list = null;
+  let shown = [];
+  let idx = -1;
+  const values = () => [...new Set((typeof options === 'function' ? options() : options) || [])].filter(Boolean);
+
+  function close() {
+    if (!list) return;
+    list.remove();
+    list = null;
+    shown = [];
+    idx = -1;
+    wrap.classList.remove('open');
+    input.setAttribute('aria-expanded', 'false');
+    input.removeAttribute('aria-activedescendant');
+    window.removeEventListener('resize', close);
+    document.removeEventListener('scroll', onScroll, true);
+    document.removeEventListener('winnow:modalclose', close);
+  }
+  // A scroll anywhere but the list itself moves the box out from under a
+  // list that is fixed to where the box was.
+  const onScroll = (e) => { if (list && e.target !== list) close(); };
+
+  // The events tell whoever else listens that the value changed; the
+  // list's own input listener sits this one out, or it would open again
+  // on the value just taken.
+  let choosing = false;
+  function choose(value) {
+    input.value = value;
+    close();
+    choosing = true;
+    try {
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    } finally { choosing = false; }
+  }
+
+  function paint() {
+    list.replaceChildren(...shown.map((v, i) => {
+      const opt = el('button', 'menu-item combo-option' + (i === idx ? ' active' : '')
+        + (v === input.value.trim() ? ' current' : ''), v);
+      opt.type = 'button';
+      opt.tabIndex = -1;
+      opt.id = `${listId}-${i}`;
+      opt.title = v;
+      opt.setAttribute('role', 'option');
+      opt.setAttribute('aria-selected', String(i === idx));
+      // mousedown, not click: a click would blur the box first, and the
+      // blur closes the list before the click lands.
+      opt.onmousedown = (e) => { e.preventDefault(); choose(v); };
+      return opt;
+    }));
+    if (idx >= 0) {
+      input.setAttribute('aria-activedescendant', `${listId}-${idx}`);
+      list.children[idx].scrollIntoView({ block: 'nearest' });
+    } else input.removeAttribute('aria-activedescendant');
+  }
+
+  // `all`: the whole list, as the ▾ or a click opens it. Otherwise the
+  // values containing what is typed, as typing narrows it.
+  function open({ all = false } = {}) {
+    if (!input.isConnected || input.disabled || input.readOnly) return;
+    const q = all ? '' : input.value.trim().toLowerCase();
+    const vs = values();
+    shown = q ? vs.filter((v) => v.toLowerCase().includes(q)) : vs;
+    if (!shown.length) { close(); return; }
+    idx = shown.indexOf(input.value.trim());
+    if (!list) {
+      closeMenu();
+      list = el('div', 'menu combo-list');
+      list.id = listId;
+      list.setAttribute('role', 'listbox');
+      list.setAttribute('aria-label', label);
+      wrap.append(list);
+      wrap.classList.add('open');
+      input.setAttribute('aria-expanded', 'true');
+      window.addEventListener('resize', close);
+      document.addEventListener('scroll', onScroll, true);
+      document.addEventListener('winnow:modalclose', close);
+    }
+    paint();
+    const r = wrap.getBoundingClientRect();
+    list.style.minWidth = `${Math.round(r.width)}px`;
+    placeFloating(list, r);
+  }
+
+  input.addEventListener('input', () => { if (!choosing) open(); });
+  input.addEventListener('click', () => { if (!list) open({ all: true }); });
+  input.addEventListener('blur', close);
+  input.addEventListener('keydown', (e) => {
+    if (e.isComposing) return;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      e.stopPropagation();
+      if (!list) { open({ all: true }); return; }
+      if (e.altKey) { if (e.key === 'ArrowUp') close(); return; }
+      const n = shown.length;
+      idx = e.key === 'ArrowDown' ? (idx + 1) % n : (idx <= 0 ? n - 1 : idx - 1);
+      paint();
+    } else if (e.key === 'Enter' && list && idx >= 0) {
+      e.preventDefault();
+      e.stopPropagation();
+      choose(shown[idx]);
+    } else if (e.key === 'Escape' && list) {
+      // preventDefault is what the document's Escape handler reads as
+      // "already handled", so the dialog under the list stays open.
+      e.preventDefault();
+      e.stopPropagation();
+      close();
+    } else if (e.key === 'Tab' || e.key === 'Enter') close();
+  });
+  // mousedown keeps the focus where it is, so the box never blurs (which
+  // would close the list) on the way to the click.
+  caret.addEventListener('mousedown', (e) => e.preventDefault());
+  caret.onclick = () => {
+    if (list) { close(); return; }
+    input.focus();
+    open({ all: true });
+  };
+  return wrap;
+}
+
 /* Right-click menus. `e` is the contextmenu event — its client coords are
    the anchor, and preventDefault() is the caller's job (some surfaces want
    the browser's own menu when the click misses anything actionable). */

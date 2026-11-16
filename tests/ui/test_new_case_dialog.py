@@ -89,7 +89,7 @@ def test_choosing_another_profile_keeps_what_was_typed(page, profile):
     _open(page)
     try:
         page.locator("#modalBody .nc-name").fill("Keep me")
-        page.locator("#modalBody .nc-case input[list]").fill("ACME IR")
+        page.locator("#modalBody .nc-case .case-group-input").fill("ACME IR")
         pid = profile["id"]
         page.locator(f"#modalBody .side-rail-item[data-section='{pid}']").click()
         page.locator("#modalBody input[data-var=engagement]").fill("ACME-26")
@@ -98,7 +98,7 @@ def test_choosing_another_profile_keeps_what_was_typed(page, profile):
         page.locator(f"#modalBody .side-rail-item[data-section='{pid}']").click()
         assert page.locator("#modalBody input[data-var=engagement]").input_value() == "ACME-26"
         assert page.locator("#modalBody .nc-name").input_value() == "Keep me"
-        assert page.locator("#modalBody .nc-case input[list]").input_value() == "ACME IR"
+        assert page.locator("#modalBody .nc-case .case-group-input").input_value() == "ACME IR"
         assert page.locator("#modalBody .nc-path").input_value().endswith("keep-me.db-winnow")
     finally:
         _close(page)

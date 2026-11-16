@@ -89,6 +89,23 @@ see [docs/notes/README.md](README.md) for the whole set.
   unthemed** (the widget editor did before this). Contextual rules
   (`.fb-cond select`, `.wl-add select`, …) still win where they set more.
 
+- **Never a `<datalist>`: a box with values to pick from is `comboBox`**
+  (ui.js). color-scheme reaches a `<select>`'s popup but not a datalist's:
+  Chromium draws that list as its autofill bubble, outside the page, white
+  with the OS font on every skin and in both themes, and no CSS touches
+  it. The case Group box (+ New case, Save as a case, Edit case) had one,
+  and on a dark skin its list of groups was the one white thing on screen.
+  `comboBox(input, options)` wraps the box (`.combo`, with a ▾ inside its
+  right edge) and draws the list as an ordinary `.menu`, so it wears each
+  skin as every menu does. The box stays free text. The list lives inside
+  the wrapper, `position: fixed`, so it goes with the dialog however the
+  dialog goes, and Escape on an open list is `preventDefault`ed, which the
+  document's Escape handler reads as already handled, so the dialog under
+  it stays. `autocomplete = 'off'` is set too, since the browser's form
+  history is the same white bubble. tests/ui/test_case_group_list.py
+  compares the open list's painted colors with the skin's tokens on every
+  skin in both themes.
+
 - **Bar buttons never wrap their label.** `.toolbar .btn`, `.sql-head .btn`,
   `.detail-head .btn`, `.dash-bar .btn` and `.wl-head .btn` are
   `white-space: nowrap; flex: 0 0 auto`. Under width pressure (tag counts,
@@ -2089,7 +2106,8 @@ see [docs/notes/README.md](README.md) for the whole set.
     on a case that still needs a value says so in a toast, outlines the
     boxes (`.invalid`) and focuses the first, as the old Create did. Enter
     in Name, the path or a variable box is the same click; not in Group,
-    where Enter picks one of the groups its datalist offers.
+    where Enter takes the group highlighted in its list (`comboBox`; it
+    was a datalist, see the theming rules at the top).
   tests/ui/test_new_case_dialog.py, test_case_variables_ui.py,
   test_home_fixes.py, test_quicklook_banner.py.
 - **A header set's default layout seeds a table once, so it needs its
