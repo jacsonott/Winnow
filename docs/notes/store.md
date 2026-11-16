@@ -93,6 +93,13 @@ see [docs/notes/README.md](README.md) for the whole set.
   as `ts_range`, a half-open `[start, end)` only the drag wrote; an
   analyst typing an end means that second included, as on the grid.
   Lines with no time are out while either end is set.
+  The answer's `tagged_tables` is every real table's tagged row count,
+  any tag, switched off or not, read in the pass that picks the tables
+  the build unions. It is what the tab lists its tables from (the table
+  chips, "N of M tables"): the page's own `S.sources` counts are only as
+  new as its last listing, and a table first tagged after that had lines
+  on the Timeline and no chip to switch it off (docs/notes/ui.md,
+  `syncTimelineTables`).
   `tests/test_timeline_overview.py`.
   **The rows around a finding** (`context`, a half-open `[start, end)`)
   add a branch per table with a timestamp, tagged or not, selecting its

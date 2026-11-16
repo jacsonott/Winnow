@@ -2763,7 +2763,30 @@ see [docs/notes/README.md](README.md) for the whole set.
     and its text is the kind alone (the host is a sibling `.tl-host`),
     which `tests/ui/test_timeline_config_builder.py` reads. The memo is
     keyed on `S.sources`, `S.timelineTemplates` and `S.headerNicknames`
-    by identity — each is replaced, never mutated, when it changes.
+    by identity — each is replaced, never mutated, when it changes, but
+    for the tagged counts (next entry), which drop the memo themselves.
+  - **Which tables are on it comes from the build, not from the counts
+    `S.sources` was listed with** (`timelineTables`,
+    `syncTimelineTables`). The overview's table chips, the header's
+    "N of M tables" and the empty state's "Every table is switched off"
+    all ask which tables have tagged rows, and they read
+    `tagged_row_count` off `S.sources`, which is only as new as the last
+    `loadSources`. No tagging path lists the tables again (a hotkey in
+    the grid, a popout, the SQL pane, a watchlist auto-tag), so a table
+    first tagged after the case opened had lines on the Timeline and no
+    chip: switching off every table that was listed still showed its
+    findings, under "0 of 1 tables". `build_timeline` reads every
+    table's count anyway, to pick the tables it unions, and returns them
+    (`tagged_tables`); `buildTimeline` writes them onto `S.sources` (a
+    merge's as its members' sum) before anything reads them, drops the
+    `timelineKinds` memo when a table gained or lost its tagged rows
+    (tagged tables take the palette's first colours), and lists the
+    tables again when the build names one this page never had (one
+    imported from another window). The three readers share
+    `timelineTables()`, the build's own rule (no merge, no failed or
+    still-importing table), so they cannot disagree with each other
+    either. `tests/ui/test_timeline_overview_strip.py` tags a table in
+    its grid after the listing.
   - **The gutter is the grid's**: a stripe per tag, ✎ for a note (the
     page now carries `note`), ⤢ to open. The tag dots it replaces sat in
     the Type column. The raw toggle shows on the line under the mouse or

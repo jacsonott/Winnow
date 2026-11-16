@@ -11009,6 +11009,17 @@ class Store:
         splits its bars by (timeline_overview). `per_source` in the result
         counts the lines from each table, for the strip's table chips.
 
+        `tagged_tables` is every real table's tagged row count (any tag,
+        switched off or not), read in the same pass that picks the tables
+        this build unions. The tab lists its tables from it (the strip's
+        table chips, "N of M tables", the empty state's reason) rather
+        than from the page's own source list, whose counts are only as new
+        as the last time it was fetched: a table first tagged after that
+        (a hotkey in the grid, a popout, the SQL pane, a watchlist
+        auto-tag) put its lines on the Timeline with no chip to switch it
+        off, so switching every listed table off still left its findings
+        showing.
+
         A source whose body would join more columns than SQLite's expression
         depth allows (_fit_body_cols — 495 at the default limit) keeps only
         the first that many, in body order, rather than failing. Each one
@@ -11032,9 +11043,12 @@ class Store:
         skip = {int(x) for x in exclude_sources or ()}
         if context is not None and (len(context) != 2 or not all(isinstance(x, str) and x for x in context)):
             raise ValueError("context must be [start, end]")
+        tagged_tables: dict[int, int] = {}
         for src in self.list_sources():
             source_id = src["id"]
             tagged = bool(src["tagged_row_count"])
+            if tagged:
+                tagged_tables[source_id] = src["tagged_row_count"]
             if source_id in skip or not (tagged or context) or src.get("error") or not src.get("columns"):
                 continue
             p = self._timeline_parts(src, configs.get(source_id, {}))
@@ -11144,7 +11158,7 @@ class Store:
                             "configs": configs, "rows_table": rows_table,
                             "tables": [rows_table] if rows_table else []}
         return {"view_id": vid, "row_count": n, "rows": rows, "body_trimmed": body_trimmed,
-                "per_source": per_source, "context_rows": context_rows}
+                "per_source": per_source, "context_rows": context_rows, "tagged_tables": tagged_tables}
 
     # The fewest lines in a row that fold into one.
     TIMELINE_FOLD_MIN = 3
