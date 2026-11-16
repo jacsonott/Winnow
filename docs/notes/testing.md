@@ -45,6 +45,12 @@ background ingest jobs (lifecycle, byte-progress, the queued-cancel path,
 cancel-drops-the-partial-source — driven through `ingest_csv`'s own
 `cancel` hook so the cancellation point is deterministic, not a race —
 multi-table sqlite jobs, spool deletion, close-with-running-job).
+`test_import_into_folder.py` covers choosing a table folder at import
+(`folder_id` on every route, `--folder`): its load-bearing tests are the
+stale id refused before anything is read (no job, no table), and the
+folder deleted mid-import leaving the import done and the mirrored
+subfolder at the top level rather than under a parent nothing lists;
+tests/ui/test_import_into_folder_ui.py drives both import windows.
 `test_cancel_op.py` covers cancellable builds, using a
 catastrophic-backtracking regex filter as a reliably-slow build to
 interrupt; its key regression assert is that the *previous* view still

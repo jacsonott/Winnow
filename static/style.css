@@ -3515,6 +3515,10 @@ textarea:focus { border-color: var(--accent); outline: none; }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .import-folder-path.unset { font-family: inherit; color: var(--dim); }
+/* The table folder the tables go in (tableFolderPicker), under the folder
+   they come from. As wide as a folder path needs, not the whole row. */
+.derived-row.import-into-row { margin-top: -2px; }
+.import-into-row .import-into-pick { flex: 0 1 320px; min-width: 0; padding: 4px 6px; text-overflow: ellipsis; }
 .import-subfolders { display: flex; align-items: center; gap: 6px; margin: -2px 0 8px 160px; font-size: 12px; color: var(--text); cursor: pointer; }
 .import-types { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; gap: 4px; }
 .import-types .btn { font-family: var(--mono); font-size: 11px; padding: 3px 8px; }
@@ -3566,6 +3570,12 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .side-panes.import-queue { grid-template-columns: 280px minmax(0, 1fr); }
 .import-queue .side-rail-label { font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .side-rail-hint.warn { color: var(--accent); }
+/* The Import window's table folder, at the foot of its queue: one choice
+   for every queued file, so it sits with the files rather than in one
+   file's pane. Captioned like the list's QUEUED above it. */
+.import-into { flex: 0 0 auto; display: flex; flex-direction: column; gap: 5px; padding-top: 8px; border-top: 1px solid var(--line); }
+.import-into-label { padding: 0 8px; font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--dim); }
+.import-into .import-into-pick { width: 100%; min-width: 0; font-size: 12px; padding: 4px 6px; text-overflow: ellipsis; }
 .import-pane { overflow: hidden; }
 .import-pane .derived-row { margin: 6px 0; }
 .import-pane > .derived-row:first-child { margin-top: 0; }
@@ -3619,7 +3629,12 @@ textarea:focus { border-color: var(--accent); outline: none; }
 /* A phone-narrow window: the queue goes on top as a short list of its
    own, and the pane gets the whole width under it. */
 @media (max-width: 640px) {
-  .side-panes.import-queue { grid-template-columns: minmax(0, 1fr); grid-template-rows: 150px minmax(0, 1fr); }
+  .side-panes.import-queue { grid-template-columns: minmax(0, 1fr); grid-template-rows: 190px minmax(0, 1fr); }
+  /* The table folder on one line under the list, which keeps the height
+     it had before the folder came, in the 40px added above. */
+  .import-into { flex-direction: row; align-items: center; gap: 10px; padding-top: 6px; }
+  .import-into-label { flex: 0 0 auto; }
+  .import-into .import-into-pick { flex: 1 1 auto; width: auto; }
   .import-queue .side-rail { border-right: 0; padding: 0 0 6px; border-bottom: 1px solid var(--line); }
   .import-pane .derived-row-label { flex-basis: 90px; }
   .import-file-dir { display: none; }

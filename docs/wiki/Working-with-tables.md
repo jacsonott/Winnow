@@ -51,6 +51,8 @@ Each page opens where its window was last, at the size you left it. The keys tha
 
 Folders are labels for keeping a large case tidy. Click 🗀+ at the top of the sidebar to create one, or ＋ on a folder to create a folder inside it. To put a table in a folder, drag it onto the folder, or click the 🗀 on its row and choose the folder (or **＋ New folder…**). **↥ Remove from folder** in the same menu, or dragging the table onto **drop here to remove from folder**, takes it back out.
 
+To file tables as you import them, choose the folder under **Table folder** in the Import window or in **Import a folder** (see [Choosing a table folder](Cases-and-importing.md#choosing-a-table-folder)).
+
 Click a folder's name to collapse or expand it, and double-click it to rename it. ▲/▼ reorder folders. ✕ deletes a folder: its tables and subfolders move up a level, and no table is deleted.
 
 ### Renaming a table

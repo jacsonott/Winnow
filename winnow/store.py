@@ -7091,6 +7091,11 @@ class Store:
 
     def _ingest_job_worker(self, job: dict) -> None:
         acquired = False
+        # The tables this job has made so far. A multi-table job (SQLite,
+        # Excel) appends one per table, so a cancel or a failure part way
+        # still knows which ones finished — they stay (see below), and they
+        # are filed where the import was asked to put them.
+        results: list[dict] = []
         try:
             self._ingest_sem.acquire()
             acquired = True
@@ -7195,7 +7200,6 @@ class Store:
                     progress=progress, cancel=cancel,
                 )]
             else:  # sqlite/xlsx: one job, N tables (sheets) out of the one spooled file
-                results = []
                 for i, t in enumerate(opts.get("tables") or []):
                     if job["cancelled"]:
                         raise IngestCancelled("cancelled between tables")
@@ -7221,18 +7225,20 @@ class Store:
             # fetches on that never shows the spool's path.
             if job["recorded_path"] is not None:
                 self.record_upload_path(job["path"], job["recorded_path"])
-            # Directory import: drop each new table into the folder that
-            # mirrors its on-disk path (created once, shared across the
-            # tree), and bring it in CLOSED — a folder import can be dozens
-            # of files, and opening a tab per file buries the working set.
-            # They're one click away in the folder tree. folder_path is ""
-            # for a file at the scan root, which stays open like a single
-            # import.
+            # The table folder the analyst chose in the import dialog
+            # (folder_id), and under it, for a directory import, the folder
+            # that mirrors the file's on-disk path (folder_path, created
+            # once and shared across the tree). See file_imported_sources.
+            self._file_job_results_quietly(job, results)
+            # A directory import brings a file from a subfolder in CLOSED —
+            # a folder import can be dozens of files, and opening a tab per
+            # file buries the working set. They're one click away in the
+            # folder tree. folder_path is "" for a file at the scan root,
+            # which stays open like a single import, and so does a table
+            # filed under a chosen folder: the analyst imported it to look
+            # at it.
             if opts.get("folder_path"):
-                fid = self.ensure_folder_path(opts["folder_path"])
                 for r in results:
-                    if fid is not None:
-                        self.set_source_folder(r["id"], fid)
                     self.set_tab_open(r["id"], False)
             with self._ingest_jobs_lock:
                 job["status"] = "done"
@@ -7251,8 +7257,10 @@ class Store:
                                 f" (table{'s' if len(job['source_ids']) != 1 else ''} "
                                 f"{', '.join(str(i) for i in job['source_ids'])})")
         except IngestCancelled:
-            # The tables a multi-table job finished before the cancel stay.
+            # The tables a multi-table job finished before the cancel stay,
+            # filed where the import was asked to put them.
             self._record_upload_path_quietly(job)
+            self._file_job_results_quietly(job, results)
             with self._ingest_jobs_lock:
                 job["status"] = "cancelled"
             wlog.record("info", f"{self._job_noun(job)} cancelled: {job['name']} ({job['kind']}) "
@@ -7260,6 +7268,7 @@ class Store:
         except Exception as e:  # noqa: BLE001 — surfaced to the UI as job.error
             # And so does what a failed one committed before the error.
             self._record_upload_path_quietly(job)
+            self._file_job_results_quietly(job, results)
             with self._ingest_jobs_lock:
                 job["status"] = "error"
                 job["error"] = str(e)
@@ -7301,6 +7310,21 @@ class Store:
         if job.get("recorded_path") is not None:
             with contextlib.suppress(sqlite3.Error):
                 self.record_upload_path(job["path"], job["recorded_path"])
+
+    def _file_job_results_quietly(self, job: dict, results: list[dict]) -> None:
+        """File a job's tables under the folder it was asked for. Never the
+        reason a job fails: by now the rows are in the case, and a table
+        left at the top of the sidebar is a drag away from where it
+        belongs, where an import reported as failed is one the analyst
+        runs again — and then has twice."""
+        opts = job.get("options") or {}
+        if not results or (opts.get("folder_id") is None and not opts.get("folder_path")):
+            return
+        try:
+            self.file_imported_sources([r["id"] for r in results], folder_id=opts.get("folder_id"),
+                                       folder_path=opts.get("folder_path"))
+        except Exception as e:  # noqa: BLE001 — logged; the import itself stands
+            wlog.record("warn", f"{job['name']}: imported, but not filed in its table folder ({e})")
 
     def _ingest_job_snapshot(self, job: dict) -> dict:
         keys = ("job_id", "kind", "name", "status", "rows_done", "units_done",
@@ -7746,44 +7770,89 @@ class Store:
                 return
             if not self._folder_exists(folder_id):
                 raise ValueError("That folder no longer exists")
-            if pos is None:
-                pos = (self.db.execute(
-                    "SELECT COALESCE(MAX(pos), -1) + 1 FROM source_folder_map WHERE folder_id=?",
-                    (folder_id,)).fetchone()[0])
-            self.db.execute(
-                "INSERT INTO source_folder_map(source_id, folder_id, pos) VALUES (?,?,?) "
-                "ON CONFLICT(source_id) DO UPDATE SET folder_id=excluded.folder_id, pos=excluded.pos",
-                (source_id, folder_id, pos))
+            self._file_source_locked(source_id, folder_id, pos)
+
+    def _file_source_locked(self, source_id: int, folder_id: int, pos: int | None = None) -> None:
+        # The caller holds self.lock inside a transaction, and has checked
+        # that folder_id exists.
+        if pos is None:
+            pos = (self.db.execute(
+                "SELECT COALESCE(MAX(pos), -1) + 1 FROM source_folder_map WHERE folder_id=?",
+                (folder_id,)).fetchone()[0])
+        self.db.execute(
+            "INSERT INTO source_folder_map(source_id, folder_id, pos) VALUES (?,?,?) "
+            "ON CONFLICT(source_id) DO UPDATE SET folder_id=excluded.folder_id, pos=excluded.pos",
+            (source_id, folder_id, pos))
+
+    def folder_exists(self, folder_id: int) -> bool:
+        """Whether this case has a table folder with this id — what an
+        import route asks before it starts a job that would file its tables
+        there, so a stale id is refused up front rather than noticed after
+        the rows are in."""
+        with self._reader() as ro:
+            return ro.execute("SELECT 1 FROM source_folders WHERE id=?", (folder_id,)).fetchone() is not None
 
     def ensure_folder_path(self, path: str, parent_id: int | None = None) -> int | None:
         """Find-or-create a nested folder chain from a posix path
         ("RegistryHives/Users"), returning the leaf folder's id. Empty path
-        (a file at the scan root) returns None — the caller leaves the
+        (a file at the scan root) returns parent_id — None leaves the
         source ungrouped. Reused across a directory import so a tree of
         files lands in one shared folder structure, not a folder per file."""
-        parts = [p.strip() for p in (path or "").replace("\\", "/").split("/")]
-        parts = [p for p in parts if p and p not in (".", "..")]
-        if not parts:
-            return parent_id
-        cur = parent_id
         # One transaction for the whole chain: two directory-import jobs
         # (MAX_CONCURRENT_INGESTS=2) that share a folder would otherwise both
         # miss the find and both insert a duplicate.
         with self.lock, self.db:
-            for part in parts:
-                row = self.db.execute(
-                    "SELECT id FROM source_folders WHERE parent_id IS ? AND name=? COLLATE NOCASE",
-                    (cur, part)).fetchone()
-                if row:
-                    cur = row["id"]
-                else:
-                    pos = (self.db.execute(
-                        "SELECT COALESCE(MAX(pos), -1) + 1 FROM source_folders WHERE parent_id IS ?",
-                        (cur,)).fetchone()[0])
-                    cur = self.db.execute(
-                        "INSERT INTO source_folders(name, parent_id, pos) VALUES (?,?,?)",
-                        (part, cur, pos)).lastrowid
+            return self._ensure_folder_path_locked(path, parent_id)
+
+    def _ensure_folder_path_locked(self, path: str, parent_id: int | None) -> int | None:
+        parts = [p.strip() for p in (path or "").replace("\\", "/").split("/")]
+        parts = [p for p in parts if p and p not in (".", "..")]
+        cur = parent_id
+        for part in parts:
+            row = self.db.execute(
+                "SELECT id FROM source_folders WHERE parent_id IS ? AND name=? COLLATE NOCASE",
+                (cur, part)).fetchone()
+            if row:
+                cur = row["id"]
+            else:
+                pos = (self.db.execute(
+                    "SELECT COALESCE(MAX(pos), -1) + 1 FROM source_folders WHERE parent_id IS ?",
+                    (cur,)).fetchone()[0])
+                cur = self.db.execute(
+                    "INSERT INTO source_folders(name, parent_id, pos) VALUES (?,?,?)",
+                    (part, cur, pos)).lastrowid
         return cur
+
+    def file_imported_sources(self, source_ids: Sequence[int], *, folder_id: int | None = None,
+                              folder_path: str | None = None) -> int | None:
+        """File the tables an import just made: under `folder_id`, the
+        table folder the analyst chose in the import dialog (None: the top
+        of the sidebar), and beneath that, for a directory import, the
+        folder chain `folder_path` mirrors from disk ("RegistryHives/Users",
+        found or created — ensure_folder_path). Returns the folder the
+        tables went into, or None when they stay at the top.
+
+        One transaction, under the lock, because the folder can be deleted
+        while a long import runs: checked and used in the same step, a
+        folder that is gone by the time the rows are in leaves the tables
+        at the top level — with a line in the log — rather than failing an
+        import whose rows are already committed, or hanging a mirrored
+        subfolder off a parent id that no longer exists, where nothing in
+        the sidebar would ever show it."""
+        ids = [int(i) for i in source_ids]
+        with self.lock, self.db:
+            parent = folder_id
+            if parent is not None and not self._folder_exists(parent):
+                wlog.record("warn", f"The table folder chosen for table{'s' if len(ids) != 1 else ''} "
+                                    f"{', '.join(str(i) for i in ids)} was deleted while it imported; "
+                                    "filed at the top level instead")
+                parent = None
+            fid = self._ensure_folder_path_locked(folder_path or "", parent)
+            if fid is None:
+                return None
+            for sid in ids:
+                self._file_source_locked(sid, fid)
+        return fid
 
     def list_sources(self) -> list[dict]:
         """Bulk per-source annotation (is_open / tagged_row_count /

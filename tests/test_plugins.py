@@ -343,6 +343,30 @@ def test_ingest_plugin_upload(plugin_client, store):
     assert rec["row_count"] == 3 and rec["name"] == "dropped.lines"
 
 
+def test_ingest_plugin_routes_file_into_the_chosen_folder(plugin_client, store, tmp_path):
+    """The table folder chosen in the import dialog (folder_id), with a
+    directory import's on-disk subfolder (folder_path) beneath it — the
+    job routes' rule, for the routes that ingest without a job."""
+    host = store.create_folder("WS01")
+    f = tmp_path / "notes.lines"
+    f.write_text("alpha\n")
+    r = plugin_client.post("/api/ingest/plugin/path", json={
+        "path": str(f), "format_id": "demo.lines", "folder_id": host["id"], "folder_path": "Logs"})
+    assert r.status_code == 200, r.text
+    sub = next(x for x in store.list_folders() if x["id"] == r.json()["folder_id"])
+    assert sub["name"] == "Logs" and sub["parent_id"] == host["id"]
+    r = plugin_client.post("/api/ingest/plugin/upload", files={"file": ("dropped.lines", b"one\n")},
+                           data={"format_id": "demo.lines", "folder_id": str(host["id"])})
+    assert r.status_code == 200, r.text
+    assert {s["name"]: s["folder_id"] for s in store.list_sources()} == {
+        "notes.lines": sub["id"], "dropped.lines": host["id"]}
+    store.delete_folder(sub["id"])
+    store.delete_folder(host["id"])
+    r = plugin_client.post("/api/ingest/plugin/path", json={
+        "path": str(f), "format_id": "demo.lines", "folder_id": host["id"]})
+    assert r.status_code == 400 and "folder no longer exists" in r.json()["detail"]
+
+
 def test_ingest_plugin_errors_are_400s(plugin_client, tmp_path):
     f = tmp_path / "x.boom"
     f.write_text("data")

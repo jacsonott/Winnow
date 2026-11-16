@@ -298,8 +298,10 @@ export async function openCaseNow(path, opts = {}, run = null) {
   S.tabOrder = [];
   // Another case's tab history points at ids that mean nothing here.
   clearTabHistory();
-  // Folder ids too: this case's collapsed folders are its own.
+  // Folder ids too: this case's collapsed folders are its own, and so is
+  // the folder the Import window was about to file into.
   S.collapsedFolders = loadCollapsedFolders();
+  S.importFolderId = null;
   // Unlike a tab switch within the *same* case (where the timeframe filter
   // deliberately survives — see clearAllFilters()/applyPreset()), a
   // different case is a different investigation; a timeframe pinned in

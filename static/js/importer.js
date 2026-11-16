@@ -9,7 +9,7 @@ import { startJobsPoll, uploadWithProgress } from './jobs.js';
 import { ARCHIVE_IMPORT_EXTENSIONS, BODYFILE_IMPORT_TYPE, IIS_FORMAT_LABELS, IIS_IMPORT_TYPE, KV_PROBE_BYTES, PLASO_IMPORT_EXTENSIONS, RECOGNIZED_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, UTMP_IMPORT_TYPE, XLSX_IMPORT_EXTENSIONS, bodyfileNamed, extOf, iisLogFormat, importKindFor, kvCandidate, looksLikeBodyfile, looksLikeKvLog, looksLikeUtmp, utmpFileKind } from './merge.js';
 import { renderPluginTabs, renderPluginPanelButtons } from './plugins.js';
 import { fmtBytes } from './tables.js';
-import { loadSources } from './sources.js';
+import { foldersFlattened, loadSources, renderSidebar, revealFolder } from './sources.js';
 import { S } from './state.js';
 import { tableMenuSeg } from './timeframe.js';
 import { confirmDialog, modal, oneAtATime, promptDialog, sideRail, sideRailMatch } from './ui.js';
@@ -345,6 +345,72 @@ export function queueHint(item) {
   }
 }
 
+/* Which table folder an import files its tables in: the sidebar's folders
+   by path, under "No folder (top level)", and "New folder…", which makes a
+   folder at the top level (as the sidebar's 🗀+ does) and chooses it. Made
+   there and then, not when the import starts, so it is in the sidebar as
+   soon as it is named and a second window sees the same folder.
+
+   One control for both import windows; `get`/`set` say where the choice
+   lives — S.importFolderId for the Import window's queue, which outlives
+   the dialog the way the queue does, and Import a folder's own state.
+   `suggest` is the name the new-folder prompt starts from (the scanned
+   folder's, there). A folder deleted while it was chosen falls back to
+   the top level on the next paint. */
+export const NEW_TABLE_FOLDER = 'new';
+
+export function tableFolderPicker(get, set, { suggest = () => '' } = {}) {
+  const pick = el('select', 'import-into-pick');
+  pick.setAttribute('aria-label', 'Table folder');
+  const shown = () => (get() == null ? '' : String(get()));
+  function paint() {
+    if (get() != null && !S.folders.some((f) => f.id === get())) set(null);
+    const opt = (value, label) => {
+      const o = el('option', null, label);
+      o.value = value;
+      pick.append(o);
+    };
+    pick.replaceChildren();
+    opt('', 'No folder (top level)');
+    for (const f of foldersFlattened()) opt(String(f.id), f.pathLabel);
+    opt(NEW_TABLE_FOLDER, 'New folder…');
+    pick.value = shown();
+    pick.title = pick.selectedOptions[0]?.textContent || '';
+  }
+  pick.onchange = async () => {
+    if (pick.value !== NEW_TABLE_FOLDER) {
+      set(pick.value ? Number(pick.value) : null);
+      pick.title = pick.selectedOptions[0]?.textContent || '';
+      return;
+    }
+    pick.value = shown();   // until there is a folder to show
+    const name = await promptDialog('New folder name:', suggest() || '', { okLabel: 'Create' });
+    if (!name || !name.trim()) return;
+    try {
+      const f = await post('/api/folders', { name: name.trim(), parent_id: null });
+      S.folders = await api('/api/folders');
+      renderSidebar();
+      set(f.id);
+    } catch (e) {
+      toast('Could not create folder: ' + e.message, 6000);
+    }
+    paint();
+  };
+  paint();
+  return { pick, paint };
+}
+
+/* Whether the chosen table folder is still there, asked of the server
+   just before an import starts: deleted in the sidebar, or in another
+   window, since the dialog opened, every file in the queue would be
+   refused one by one with the queue already gone. S.folders is brought up
+   to date on the way, so a repaint drops it. */
+export async function tableFolderStillThere(id) {
+  if (id == null) return true;
+  try { S.folders = await api('/api/folders'); } catch { return true; }  // the import's own answer will say
+  return S.folders.some((f) => f.id === id);
+}
+
 export function openImportModal() {
   modal('Import', (b) => {
     b.dataset.kind = 'import';
@@ -372,6 +438,18 @@ export function openImportModal() {
       },
     });
     side.search.placeholder = 'Filter queued files…';
+
+    // Where the tables go, under the files they come from: one choice for
+    // the whole queue, so it sits with the queue rather than in a file's
+    // pane.
+    const into = el('div', 'import-into');
+    const folderPick = tableFolderPicker(() => S.importFolderId, (id) => { S.importFolderId = id; });
+    folderPick.pick.id = 'importFolderPick';
+    const intoLabel = el('label', 'import-into-label', 'Table folder');
+    intoLabel.htmlFor = folderPick.pick.id;
+    into.title = 'The folder in the sidebar the imported tables go in';
+    into.append(intoLabel, folderPick.pick);
+    side.rail.append(into);
 
     const pane = el('div', 'side-pane import-pane');
     const panes = el('div', 'side-panes import-queue');
@@ -444,7 +522,7 @@ export function openImportModal() {
     addLabel.append(addInput);
     const folderBtn = el('button', 'btn ghost', 'Import a whole folder…');
     folderBtn.title = 'Scan a directory (e.g. KAPE output) against extension + glob patterns';
-    folderBtn.onclick = () => openDirectoryImportModal();
+    folderBtn.onclick = () => openDirectoryImportModal({ folderId: S.importFolderId });
     const importAll = el('button', 'btn primary table-menu-close');
     function syncImport() {
       const n = queue().length;
@@ -453,7 +531,7 @@ export function openImportModal() {
       const waiting = queue().filter(needsChoice).length;
       importAll.title = waiting ? `${waiting} file${waiting === 1 ? '' : 's'} still need${waiting === 1 ? 's' : ''} tables or sheets picked` : '';
     }
-    importAll.onclick = () => {
+    importAll.onclick = oneAtATime(importAll, async () => {
       if (!queue().length) return;
       const unpicked = queue().find(needsChoice);
       if (unpicked) {
@@ -464,12 +542,23 @@ export function openImportModal() {
         toast(`Pick which ${unpicked.kind === 'xlsx' ? 'sheets' : 'tables'} to import from ${unpicked.name} first`, 4500);
         return;
       }
+      const folderId = S.importFolderId;
+      if (!(await tableFolderStillThere(folderId))) {
+        folderPick.paint();
+        toast('That table folder has been deleted. Choose another, or none.', 6000);
+        return;
+      }
       const items = queue().slice();
       S.importQueue = [];
+      // Like the queue, the choice is for this import: the next files
+      // dropped in start at the top level again, rather than following
+      // these into a folder nobody chose for them.
+      S.importFolderId = null;
       importSel = null;
       $('modal').hidden = true;
-      importQueued(items);
-    };
+      if (folderId != null) revealFolder(folderId);
+      importQueued(items, folderId);
+    });
     foot.append(pathBtn, addLabel, folderBtn, importAll);
     b.append(foot);
 
@@ -1080,7 +1169,7 @@ export function buildFixedSettings(ctx) {
    disk, one spool at a time) behind this detached chain while the analyst
    keeps working; each upload resolves into a background ingest job the
    corner panel is already tracking. */
-export async function importQueued(queue) {
+export async function importQueued(queue, folderId = null) {
   // Plugin ingests are synchronous routes that create no background
   // job, so nothing announces the finished source — the jobs poll
   // only refreshes on a job transition. Counted here, refreshed after
@@ -1130,7 +1219,7 @@ export async function importQueued(queue) {
           toast(`Importing ${item.name}…`, 60000);
           await post('/api/ingest/plugin/path', {
             path: item.path, name: item.name, format_id: item.format_id,
-            options: item.options || {},
+            options: item.options || {}, folder_id: folderId,
           });
           pluginOk++;
         } else {
@@ -1143,6 +1232,7 @@ export async function importQueued(queue) {
             flatten_mode: item.flatten_mode || 'none',
             flatten_depth: item.flatten_depth || 0,
             tables: item.tables || null,
+            folder_id: folderId,
           });
           startJobsPoll();
         }
@@ -1153,6 +1243,7 @@ export async function importQueued(queue) {
     }
     const fd = new FormData();
     fd.append('file', item.file);
+    if (folderId != null) fd.append('folder_id', String(folderId));
     if (item.kind === 'plugin') {
       // jobs/upload's start_ingest_job knows csv/json/sqlite only —
       // plugin uploads have their own route, which parses via the
@@ -1197,7 +1288,7 @@ export async function importQueued(queue) {
   // roots are announced for a follow-up pass.
   if (expanded.length) {
     for (const r of expanded.slice(1)) toast(`Also expanded to ${r.root} — import it via Case → Import → folder`, 10000);
-    openDirectoryImportModal({ root: expanded[0].root });
+    openDirectoryImportModal({ root: expanded[0].root, folderId });
   }
 }
 
@@ -1401,6 +1492,9 @@ export async function openDirectoryImportModal(state = {}) {
     // this is blank, else split on it, as the Import window's Custom.
     textDelimiter: state.textDelimiter || '',
     textHeader: state.textHeader ?? false,
+    // The table folder the tables are filed in (null: the top level); a
+    // subfolder's files go in folders beneath it that mirror the tree.
+    folderId: state.folderId ?? null,
   };
   // Deleted from another window since the state was taken: the list has
   // no row for it, so start from Custom with what was set.
@@ -1454,6 +1548,16 @@ export async function openDirectoryImportModal(state = {}) {
     };
     const folderRow = paneRow('Folder', folderPath, browseBtn);
     folderRow.classList.add('import-folder-row');
+
+    // Where the tables go: the folder on disk above, the folder in the
+    // sidebar here. A new one is offered under the scanned folder's name —
+    // a host's triage output, usually, which is what the analyst files by.
+    const intoPick = tableFolderPicker(() => st.folderId, (id) => { st.folderId = id; }, {
+      suggest: () => (st.root || '').split(/[\\/]/).filter(Boolean).pop() || '',
+    });
+    const intoRow = paneRow('Table folder', intoPick.pick);
+    intoRow.classList.add('import-into-row');
+    intoRow.title = 'The folder in the sidebar the tables go in. Files in subfolders go in folders beneath it that mirror the tree.';
 
     const recLabel = el('label', 'import-subfolders');
     const recCb = el('input');
@@ -1574,7 +1678,7 @@ export async function openDirectoryImportModal(state = {}) {
     previewHead.append(listSeg);
 
     const pane = el('div', 'side-pane');
-    pane.append(folderRow, settingsBox, previewHead, previewBox);
+    pane.append(folderRow, intoRow, settingsBox, previewHead, previewBox);
     const panes = el('div', 'side-panes');
     panes.append(side.rail, pane);
     b.append(panes);
@@ -1766,6 +1870,12 @@ export async function openDirectoryImportModal(state = {}) {
     importBtn.onclick = oneAtATime(importBtn, async () => {
       const toImport = scanResult.matched.filter((_, i) => checked.has(i));
       if (!toImport.length) return;
+      const folder_id = st.folderId;
+      if (!(await tableFolderStillThere(folder_id))) {
+        intoPick.paint();
+        toast('That table folder has been deleted. Choose another, or none.', 6000);
+        return;
+      }
       // The files are already on the server's disk, so there's no upload
       // phase — each request just *starts* a background job (milliseconds
       // each; the semaphore in Store caps how many ingest at once) and the
@@ -1790,16 +1900,16 @@ export async function openDirectoryImportModal(state = {}) {
           if (fmt) {
             toast(`Importing ${m.rel_path}…`, 60000);
             await post('/api/ingest/plugin/path', {
-              path: m.path, name: base, folder_path, format_id: fmt.id, options: defaultPluginOptions(fmt),
+              path: m.path, name: base, folder_path, folder_id, format_id: fmt.id, options: defaultPluginOptions(fmt),
             });
             pluginOk++;
           } else if (m.kind === 'text' && st.textDelimiter) {
             // An other-text file with a delimiter set: delimited, split on it.
             await post('/api/ingest/jobs/path', {
-              path: m.path, name: base, folder_path, kind: 'csv', delimiter: st.textDelimiter, has_header: st.textHeader,
+              path: m.path, name: base, folder_path, folder_id, kind: 'csv', delimiter: st.textDelimiter, has_header: st.textHeader,
             });
           } else {
-            await post('/api/ingest/jobs/path', { path: m.path, name: base, folder_path, kind: ['json', 'plaso', 'text', 'iis', 'kv', 'utmp', 'bodyfile'].includes(m.kind) ? m.kind : 'csv' });
+            await post('/api/ingest/jobs/path', { path: m.path, name: base, folder_path, folder_id, kind: ['json', 'plaso', 'text', 'iis', 'kv', 'utmp', 'bodyfile'].includes(m.kind) ? m.kind : 'csv' });
           }
           ok++;
         } catch (e) {
@@ -1807,6 +1917,7 @@ export async function openDirectoryImportModal(state = {}) {
           toast(`Could not queue ${m.rel_path}: ` + e.message, 6000);
         }
       }
+      if (folder_id != null) revealFolder(folder_id);
       if (pluginOk) await loadSources(); // sync plugin imports don't announce themselves through a job
       startJobsPoll();
       $('modal').hidden = true;

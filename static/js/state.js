@@ -76,6 +76,7 @@ export const S = {
                          //   standing after a plain arrow? Only copy cares — see
                          //   handleCopyShortcut
   importQueue: [],       // [{file, kind: 'csv'|'json', configured, ...kind-specific settings}] — Import modal's file queue
+  importFolderId: null,  // the table folder the Import window files the queue in (null: the top level) — reset by each import
   groupByCols: [],         // ordered column names — [] for normal flat mode, nested grouping otherwise
   groupSort: 'count',      // 'count' | 'value' — how each level's groups are ordered
   groupSortDir: 'desc',    // 'asc' | 'desc' — direction within groupSort
