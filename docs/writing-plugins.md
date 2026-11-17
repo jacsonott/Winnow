@@ -73,6 +73,7 @@ The shipped examples map onto these:
 | [`first_last/`](../examples/plugins/first_last/) | A tab that writes a TABLE back — `ingest_rows` output an analyst browses, tags and exports like any other source — and does its long work on a thread of its own, polled from the tab, with `winnow.notify` when a result lands elsewhere |
 | [`pivot/`](../examples/plugins/pivot/) | A tab that aggregates a whole table — drag-and-drop rows/columns/values, the grid's tag chips compiled into its own query, and every subtotal level from one scan |
 | [`esxi_logs/`](../examples/plugins/esxi_logs/) | Ingest formats for a support bundle's ESXi/Linux logs, the profile that pairs them with a dashboard, and the reference `register_dashboard` board |
+| [`systemd_journal/`](../examples/plugins/systemd_journal/) | An ingest format that reads a binary format by its content rather than its name, three input forms landing in one column layout, a header set in `defaults/headers.json` that a `{{all:header_set:…}}` board spans, and damage reported through `winnow.log` rather than refused |
 
 ---
 

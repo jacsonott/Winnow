@@ -935,10 +935,14 @@ back. Pins stay in this browser, like the ones in the
 
 ### Plugin formats
 
-Two bundled plugins add formats; both ship switched off (**Settings →
+Three bundled plugins add formats; all three ship switched off (**Settings →
 Plugins**). **mft_usn** reads a raw NTFS `$MFT` and `$UsnJrnl:$J`, recognised
 by name (`$MFT`, `$J`, `*$UsnJrnl*`…), without EZTools. **esxi_logs** reads
-ESXi support-bundle and UAC Linux host logs. A claimed file shows the
+ESXi support-bundle and UAC Linux host logs. **systemd_journal** reads Linux
+journal files (`.journal`, `.journal~`) and `journalctl -o export` or
+`-o json` output, without `journalctl`; see
+[Plugins](Plugins.md#systemd_journal) for journalctl output saved as `.json`
+or `.txt`, which Winnow's own imports claim. A claimed file shows the
 format's name in the queue, and its options, if it has any, in the file's
 pane. Built-in extensions always win, so no plugin can take over `.csv` or
 `.json`, and neither do built-in names: **esxi_logs** claims `.log`, but an
@@ -970,6 +974,7 @@ case don't matter):
 | RECmd (batch) | Registry (RECmd batch) |
 | SrumECmd | SRUM — app resource use, network usage |
 | esxi_logs plugin | ESXi / Linux host logs |
+| systemd_journal plugin | systemd journal |
 | Winnow's own readers | IIS web logs (W3C, NCSA, IIS native), Linux login records (wtmp/btmp/utmp), Body files (TSK / mactime) |
 
 Recognition gets you:

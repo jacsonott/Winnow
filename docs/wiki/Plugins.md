@@ -2,7 +2,7 @@
 
 A plugin is a small Python extension that adds something Winnow doesn't do
 on its own: an import format for a raw artifact, a page tab with its own
-tool, a panel beside the grid, a dashboard. Seven ship with Winnow as
+tool, a panel beside the grid, a dashboard. Eight ship with Winnow as
 examples and are listed in the plugin manager ready to switch on; the rest
 are ones you or a colleague write. This page covers turning plugins on and
 off, installing one, what happens when one breaks, and what each bundled
@@ -203,6 +203,7 @@ place for a secret.
 | [mft_usn](#mft_usn) | mft-usn | Import formats for raw `$MFT` and `$J` |
 | [lateral_movement](#lateral_movement) | lateral-movement | A **Lateral movement** tab: movement between hosts over time, by account, with paths |
 | [esxi_logs](#esxi_logs) | esxi-logs | An import format for ESXi and Linux host logs, and a board |
+| [systemd_journal](#systemd_journal) | systemd-journal | An import format for Linux journal files and `journalctl` output, and a board |
 | [top_values](#top_values) | top-values | A **Top values** panel above the grid |
 | [claude_assistant](#claude_assistant) | claude-assistant | A **Claude** tab and a **Copilot** panel in the SQL pane. Uses the network |
 
@@ -575,6 +576,87 @@ types, failed SSH logins, top source IPs, activity over time), under
 the board to a case; click it there to add it. The shipped **ESXi / UAC
 triage** profile turns this plugin on and brings a wider 17-widget board;
 see [Dashboards](Dashboards.md#esxi--uac-triage).
+
+### systemd_journal
+
+Reads a Linux host's systemd journal with no `journalctl`, and no Linux,
+needed. It is pure Python, so it works on an airgapped machine. It adds one
+import format, **systemd journal**, which reads three kinds of file and
+tells them apart by what is in them, not by their names:
+
+| What | Where it comes from |
+| --- | --- |
+| Journal files | `/var/log/journal/<machine-id>/` (or `/run/log/journal/` on a host that keeps no journal on disk): `system.journal`, `user-1000.journal`, the archived `system@….journal`, and the `system@….journal~` journald leaves when it finds a file it can't trust after a crash or a full disk. Both layouts (regular, and the compact one systemd 252 and later writes), and fields compressed with XZ, LZ4 or zstd. |
+| `journalctl -o export` | The lossless stream `systemd-journal-remote` reads. Save it as a `.export` file, or see below for any other name. |
+| `journalctl -o json` | Also `-o json-pretty`, `-o json-seq` and `-o json-sse`. |
+
+journalctl's text output (the default `short`, `short-iso`, `verbose` and
+the rest) is not read by this plugin: it has already dropped fields, and
+the default one has no year. Import it as text, or ask whoever collected it
+for the journal files or `journalctl -o export`.
+
+**Importing.** Drag the journal files, or the whole journal folder, onto
+Winnow, or import a folder or archive (see
+[Cases and importing](Cases-and-importing.md)); `.journal`, `.journal~` and
+`.export` files go to this plugin. A JSON file is claimed by Winnow's own
+[JSON import](Cases-and-importing.md), and a `.txt` by its text import, so
+for journalctl output saved under one of those names, use the **Import
+files…** button beside **systemd journal** in the manager's **What it
+adds** section, which reads any file you pick with this plugin. Winnow's
+own JSON import reads `-o json` output too, but as the raw fields with
+timestamps as microsecond counts, not the columns below.
+
+Every table gets the same first six columns, read the way `journalctl`
+prints an entry, so tables from different forms and different files line
+up:
+
+| Column | What it holds |
+| --- | --- |
+| `Timestamp (UTC)` | When the entry was logged, as `YYYY-MM-DD HH:MM:SS.ffffff` in UTC. As journalctl shows it: the time the program says it logged the message (`_SOURCE_REALTIME_TIMESTAMP`) when the entry has one, otherwise when journald received it (`__REALTIME_TIMESTAMP`). |
+| `Hostname` | `_HOSTNAME`. |
+| `Identifier` | `SYSLOG_IDENTIFIER`, or `_COMM` when there is none: the name journalctl prints before the PID (`sshd`, `sudo`, `kernel`). |
+| `PID` | `_PID`, or `SYSLOG_PID` when there is none. |
+| `Priority` | `PRIORITY` by name: `emerg`, `alert`, `crit`, `err`, `warning`, `notice`, `info` or `debug`. A value outside 0 to 7 is kept as written. |
+| `Message` | `MESSAGE`. |
+| `_BOOT_ID`, `_SYSTEMD_UNIT`, `_CMDLINE`, … | A column per field the file's entries carry, named as logged (see `man systemd.journal-fields`). The fields an analyst reaches for first come first, in a fixed order (`_BOOT_ID`, `_SYSTEMD_UNIT`, `_TRANSPORT`, `_UID`, `_COMM`, `_EXE`, `_CMDLINE`…), and the rest follow alphabetically. `_BOOT_ID` is in every table. |
+| `__REALTIME_TIMESTAMP`, `__MONOTONIC_TIMESTAMP`, `__SEQNUM`, `__SEQNUM_ID`, `__CURSOR` | The entry's own metadata, as `journalctl -o export` writes it: microseconds since 1970, microseconds since boot, the sequence number and its ID, and the cursor. |
+| `Offset` | In a table read from a journal file, where the entry starts in the file, in bytes, for a hex editor. |
+
+`MESSAGE`, `_HOSTNAME` and `PRIORITY` get no columns of their own, since
+`Message`, `Hostname` and `Priority` hold them. Every other field keeps its
+column, including the ones the first six fall back on. A value that isn't
+UTF-8 keeps its other bytes as `\xNN`; a field an entry carries more than
+once keeps every value, one per line; and a value over 1 MiB (a core dump
+stored in the journal, usually) keeps its first 1 MiB and says it was cut.
+In JSON output, journalctl writes `null` for a value over 4096 bytes unless
+it was run with `--all`; that cell says so.
+
+**A damaged journal still reads.** Entries are found by walking the file
+from start to end rather than by following its indexes, so a journal cut
+short, a `.journal~`, or one with a damaged stretch gives every entry that
+is still there: a damaged stretch is skipped and reading carries on after
+it. A file journald still had open when it was collected (the live
+`system.journal` of a running host) reads too, including entries written
+after its header was last updated. **Case ▾ → Log…** says what happened:
+that the file was still open, how many entries its header counts against
+how many could be read, which bytes were skipped, where a cut-short copy
+ends, and when the file sets format flags from a newer systemd than the
+plugin knows.
+
+The rows of a journal file are in the order journald wrote them; sort by
+`Timestamp (UTC)` to put several files in time order, or
+[merge](Working-with-tables.md#merging-tables) them. A table is recognized as the
+**systemd journal** header set, so a tagged entry reads as its message,
+identifier, priority and host in the
+[Timeline](Timeline-search-and-watchlist.md).
+
+It also offers a board, **Linux journal overview**, under **Dashboards →
+Library** in the sidebar: how many entries, SSH logins accepted and failed,
+sudo commands, entries of priority `err` or worse, kernel messages, the
+boots oldest first, entries by priority and by identifier, and activity
+over time. It counts across every journal table in the case, and each
+number opens the entries it counted. Switching the plugin on doesn't add
+the board to a case; click it there to add it.
 
 ### top_values
 
