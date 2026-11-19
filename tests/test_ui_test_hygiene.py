@@ -114,6 +114,36 @@ def test_the_fixed_wait_check_sees_what_it_is_for():
     assert explained == []
 
 
+# A file's name taken in page JS by splitting its path on "/" alone.
+_SLASH_BASENAME = re.compile(r"""\.split\(\s*(['"])/\1\s*\)\s*\.(?:pop\(\s*\)|at\(\s*-1\s*\))""")
+
+
+def _slash_basenames(src: str) -> list[int]:
+    return [src[:m.start()].count("\n") + 1 for m in _SLASH_BASENAME.finditer(src)]
+
+
+@pytest.mark.parametrize("path", FILES, ids=lambda p: p.name)
+def test_no_file_name_from_splitting_a_path_on_slash(path):
+    """`str(tmp_path / "x.log")` has backslashes on Windows, so page JS
+    that names a file with `p.split('/').pop()` gets the whole path back
+    there and the right name everywhere else. test_custom_delimiter_ui.py
+    did that: its table was named after the full path, and it failed
+    every night the nightly's Windows browser job drew its shard, which no
+    Linux job could see. Take the name in Python (`p.name`) and hand the
+    page both."""
+    hits = _slash_basenames(path.read_text(encoding="utf-8"))
+    assert not hits, (
+        f"{path.name}: takes a file's name by splitting a path on '/' at line(s) {hits}, "
+        "which is the whole path on Windows. Pass the name from Python (Path.name)."
+    )
+
+
+def test_the_slash_basename_check_sees_what_it_is_for():
+    assert _slash_basenames("x\nnames = paths.map((p) => p.split('/').pop())\n") == [2]
+    assert _slash_basenames('p.split("/").at(-1)') == [1]
+    assert _slash_basenames("rel.split('/'); s.split(',').pop()") == []
+
+
 def test_module_basenames_are_unique_across_tests_and_ui():
     """pytest imports test modules by basename (no __init__.py here), so
     tests/test_x.py and tests/ui/test_x.py collide: the second one to be
