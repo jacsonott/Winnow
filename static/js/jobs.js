@@ -299,15 +299,22 @@ export async function pollJobs() {
       // Login records: a tail too short for a whole record (a write cut
       // off by a crash) is left out, never padded into a row.
       const torn = (j.result || []).reduce((a, r) => a + (r.torn_bytes || 0), 0);
-      // Body files: a line that isn't one is kept whole in Unparsed line.
+      // Body files: a line that isn't one is kept whole in Unparsed line;
+      // a secure log keeps a line with no syslog header whole in Message.
       const unparsed = (j.result || []).reduce((a, r) => a + (r.unparsed_lines || 0), 0);
+      const unparsedWhere = j.kind === 'secure' ? 'not a syslog line, kept whole in Message'
+        : 'not a body file line, kept in Unparsed line';
+      // A secure log's stamps carry no year: say which one the first line
+      // got from the file's date, since it is an inference.
+      const guessed = (j.result || []).find((r) => r.year_from === 'modified');
       const warn = ragged || badRecs || suspect || clashes || cp1252 || recoded || undecodable || torn || unparsed;
       toast(`${j.name}: ${total.toLocaleString()} rows imported`
         + (ragged ? ` · ${ragged.toLocaleString()} ragged rows padded/trimmed` : '')
         + (badRecs ? ` · ${badRecs.toLocaleString()} unreadable record${badRecs === 1 ? '' : 's'} skipped` : '')
         + (undecodable ? ` · ${undecodable.toLocaleString()} text value${undecodable === 1 ? ' was' : 's were'} not valid UTF-8 (shown with \ufffd)` : '')
         + (torn ? ` · the last ${torn.toLocaleString()} byte${torn === 1 ? ' was' : 's were'} not a whole login record and ${torn === 1 ? 'was' : 'were'} left out` : '')
-        + (unparsed ? ` · ${unparsed.toLocaleString()} line${unparsed === 1 ? ' was' : 's were'} not a body file line, kept in Unparsed line` : '')
+        + (unparsed ? ` · ${unparsed.toLocaleString()} line${unparsed === 1 ? ' was' : 's were'} ${unparsedWhere}` : '')
+        + (guessed ? ` · no year in its stamps, so the first line was dated ${guessed.syslog_year} from the file’s modified date` : '')
         // Many-newline fields are the signature of an unbalanced quote
         // swallowing the lines after it — a warning, not a verdict.
         + (suspect ? ` · ${suspect.toLocaleString()} row${suspect === 1 ? '' : 's'} with very long multi-line fields — check for a stray quote if the row count looks low` : '')

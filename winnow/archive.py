@@ -38,6 +38,12 @@ Untrusted-input rules, all enforced here rather than assumed:
 - **Nothing is overwritten.** Two members with one name, or ``messages``
   beside ``messages.gz``, would otherwise leave whichever came last; the
   later one takes ``name (2).ext`` and is reported under ``renamed``.
+- **Files keep their dates.** A tar member's modified time, a zip
+  member's (the local time zip records, read as this machine's) and, for a
+  bare ``.gz``, the time its header stores or else the ``.gz``'s own, are
+  put back on the extracted file. A tree of logs dated the moment it was
+  expanded loses the one date secure logs need: their stamps have no year,
+  and it is worked out from the file's (winnow/secureread.py).
 - **Names fit the OS they land on**: on Windows a ``:`` in a member name
   would write an NTFS alternate data stream of the file before it, and
   ``?*<>|"`` raise — so each path component is sanitised there
@@ -55,6 +61,7 @@ import lzma
 import os
 import shutil
 import tarfile
+import time
 import zipfile
 import zlib
 
@@ -258,7 +265,7 @@ def _safe_target(dest: str, member_name: str, budget: _Budget) -> str | None:
     return os.path.join(dest, _member_name_for_os(norm.replace(os.sep, "/"), windows=os.name == "nt"))
 
 
-def _copy_stream(src, dst_path: str, budget: _Budget, source: str) -> bool:
+def _copy_stream(src, dst_path: str, budget: _Budget, source: str, mtime=None) -> bool:
     """Copy with the byte budget enforced DURING the copy — a bomb's real
     size is discovered as it decompresses, not read from its headers.
 
@@ -266,7 +273,11 @@ def _copy_stream(src, dst_path: str, budget: _Budget, source: str) -> bool:
     the rename is reported), and never leaving part of one: a member whose
     data turns out corrupt halfway is removed before the error goes on to
     the caller, which skips it — a truncated file in the tree would import
-    as if it were whole."""
+    as if it were whole.
+
+    `mtime` is the member's modified time (epoch seconds), or a function
+    that returns it once the copy is done (a gzip header is only read as
+    the stream is): put on the copy, best-effort, when it is a real time."""
     wanted = dst_path
     dst_path = budget.free_path(dst_path)
     os.makedirs(os.path.dirname(dst_path), exist_ok=True)
@@ -287,6 +298,11 @@ def _copy_stream(src, dst_path: str, budget: _Budget, source: str) -> bool:
         with contextlib.suppress(OSError):
             os.unlink(dst_path)
         raise
+    if callable(mtime):
+        mtime = mtime()
+    if mtime:
+        with contextlib.suppress(OSError, OverflowError, ValueError, TypeError):
+            os.utime(dst_path, (mtime, mtime))
     if dst_path != wanted and len(budget.renamed) < 200:
         budget.renamed.append({"path": source, "as": budget.label(dst_path)})
     return True
@@ -309,7 +325,7 @@ def _expand_zip(path: str, dest: str, budget: _Budget) -> bool:
             label = budget.label(target)
             try:
                 with zf.open(info) as src:
-                    if not _copy_stream(src, target, budget, label):
+                    if not _copy_stream(src, target, budget, label, _zip_mtime(info)):
                         return False
             except _MEMBER_ERRORS as e:
                 _raise_if_disk_full(e)
@@ -351,7 +367,7 @@ def _expand_tar(path: str, dest: str, budget: _Budget) -> bool:
                     budget.skip(member.name, "unreadable tar member")
                     continue
                 with src:
-                    if not _copy_stream(src, target, budget, label):
+                    if not _copy_stream(src, target, budget, label, member.mtime):
                         return False
             except _MEMBER_ERRORS as e:
                 _raise_if_disk_full(e)
@@ -360,11 +376,35 @@ def _expand_tar(path: str, dest: str, budget: _Budget) -> bool:
             budget.files += 1
 
 
+def _zip_mtime(info: zipfile.ZipInfo) -> float | None:
+    """A zip member's modified time as epoch seconds. Zip records the local
+    time of the machine that made it, with no zone, so it is read as this
+    machine's: right to the day, which is what it is wanted for."""
+    try:
+        return time.mktime(tuple(info.date_time) + (0, 0, -1))
+    except (OverflowError, ValueError):
+        return None
+
+
+def _gz_mtime(path: str, src) -> float | None:
+    """A gzip stream's MTIME header (gzip sets it to the original's when it
+    compresses a file), else the .gz's own modified time: logrotate pipes
+    the log through gzip, which leaves MTIME 0, and writes the .gz when it
+    rotates, shortly after the last line."""
+    stored = getattr(src, "mtime", None)
+    if stored:
+        return stored
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return None
+
+
 def _expand_gz(path: str, dest_file: str, budget: _Budget) -> bool:
     label = budget.label(path)
     try:
         with gzip.open(path, "rb") as src:
-            ok = _copy_stream(src, dest_file, budget, label)
+            ok = _copy_stream(src, dest_file, budget, label, lambda: _gz_mtime(path, src))
     except _MEMBER_ERRORS as e:   # zlib.error is not an OSError — it used to escape
         _raise_if_disk_full(e)
         budget.fail(label, f"corrupt gzip stream: {e}")

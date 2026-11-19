@@ -253,8 +253,8 @@ from the top:
 | Part | What it holds |
 | --- | --- |
 | **File** | Its name, the folder it is in, its size, and *read in place* (added from this machine) or *uploaded when it imports*. |
-| **Read as** | Only for a file that can be read more than one way: **Delimited**, **One line per row**, **Key=value** or **Body file** for delimited and other text; **JSON** or **One line per row**; **IIS log**, **Delimited** or **One line per row**; **Key=value**, **Delimited** or **One line per row** for a [key=value log](#fortigate-and-other-fortinet-logs); **Login records** or **One line per row** for [Linux login records](#linux-login-records-wtmp-btmp-utmp); **Body file**, **Delimited** or **One line per row** for a [body file](#body-files-tsk-and-mactime); a plugin's format or **One line per row** for an uploaded file a plugin claims. |
-| Settings | The reader's own: **Delimiter** (with **Custom** for one you type) and **Header**, JSON's **Nested objects**, an IIS log's **Format**, a plugin format's options. A file read one line per row has **Split each line on a delimiter…**. Plaso files, login records, body files, key=value logs and archives have none. |
+| **Read as** | Only for a file that can be read more than one way: **Delimited**, **One line per row**, **Key=value** or **Body file** for delimited and other text; **JSON** or **One line per row**; **IIS log**, **Delimited** or **One line per row**; **Key=value**, **Delimited** or **One line per row** for a [key=value log](#fortigate-and-other-fortinet-logs); **Login records** or **One line per row** for [Linux login records](#linux-login-records-wtmp-btmp-utmp); **Body file**, **Delimited** or **One line per row** for a [body file](#body-files-tsk-and-mactime); **Secure log**, **Delimited** or **One line per row** for a [secure log or auth.log](#linux-secure-logs-and-authlog); a plugin's format or **One line per row** for an uploaded file a plugin claims, with **Secure log** between them when it is named like one. Delimited and other text can also be read as a **Secure log**. |
+| Settings | The reader's own: **Delimiter** (with **Custom** for one you type) and **Header**, JSON's **Nested objects**, an IIS log's **Format**, a secure log's **Year**, a plugin format's options. A file read one line per row has **Split each line on a delimiter…**. Plaso files, login records, body files, key=value logs and archives have none. |
 | **Preview** | The first 50 rows as they will import, a type picker in each column's heading where the type can be set, and a line under it saying what was detected. A SQLite file or workbook lists its **Tables** or **Sheets** here instead, to tick. |
 
 A setting is kept as you change it, and choosing another file keeps it, so
@@ -347,6 +347,7 @@ folder inside `WS01`.
 | [FortiGate and other key=value logs](#fortigate-and-other-fortinet-logs) | `.log`, `.txt`, no extension…, recognised by the first line | One table, a column per key. |
 | [Linux login records](#linux-login-records-wtmp-btmp-utmp) | named `wtmp`, `btmp`, `utmp`, `wtmp.1`, `btmp-20240501`…, or recognized by their records | One table, a row per login record. |
 | [Body files (TSK and mactime)](#body-files-tsk-and-mactime) | named `bodyfile`, `bodyfile.txt`, `*.body`, or recognized by the first line | One table, a row per file, its four times in UTC. |
+| [Linux secure logs and auth.log](#linux-secure-logs-and-authlog) | named `secure`, `auth.log`, `secure-20240505`, `auth.log.1`… | One table, a row per line, with the event, user, source IP and command read out. |
 | [Archives](#archives) | `.zip` `.tar` `.tgz` `.gz` `.tbz2` `.txz` `.bz2` `.xz` | A folder, then folder import. |
 | [Any other text](#plain-text-and-log-files) | `.log`, `.1`, no extension… | One row per line. |
 | [Plugin formats](#plugin-formats) | raw `$MFT` and `$J`, ESXi and UAC logs | Whatever the plugin parses. |
@@ -795,9 +796,112 @@ WHERE mtime BETWEEN '2024-05-01 09:30:00' AND '2024-05-01 10:30:00'
 ORDER BY 1;
 ```
 
+### Linux secure logs and auth.log
+
+Linux writes its authentication events to `/var/log/secure` on Red Hat,
+CentOS, Rocky, Alma, Fedora and Amazon Linux, and to `/var/log/auth.log` on
+Debian and Ubuntu. Both are syslog text, one line per event, from sshd,
+sudo, su, PAM, systemd-logind, useradd and the rest:
+
+```
+Nov 19 10:43:56 web01 sshd[2211]: Accepted publickey for alice from 203.0.113.7 port 50122 ssh2
+Nov 19 10:44:02 web01 sudo:    alice : TTY=pts/0 ; PWD=/home/alice ; USER=root ; COMMAND=/bin/bash
+```
+
+Winnow recognizes them by name: `secure` and `auth.log`, the rotated copies
+logrotate leaves (`secure-20240505`, `secure.1`, `auth.log.1`), and a second
+copy an archive expansion renamed (`secure (2)`, `auth (2).log`). A gzipped
+rotation such as `auth.log.2.gz` is an [archive](#archives): it expands, and
+the file inside is recognized. The queue says *Secure log · a row per line*
+under its name. Any other text file, such as `messages` or a secure log
+saved under another name, can be read as one with **Read as** →
+**Secure log**.
+
+**Every line is a row**, under the same columns whichever distribution
+wrote it, so the secure logs of a whole estate can be
+[merged](Working-with-tables.md#merging-tables) into one table:
+
+| Column | Holds |
+| --- | --- |
+| `Timestamp` | When the line was logged, as a datetime (see below). |
+| `Host` | The host name in the line. |
+| `Process` | The program that logged it: `sshd`, `sudo`, `su`, `systemd-logind`, `useradd`… |
+| `PID` | Its process ID, where the line has one. |
+| `Event` | What happened, read out of the message (the table below). Empty for a message Winnow doesn't recognize. |
+| `User` | The account the event is about: the one that logged in or failed to, ran sudo or su, or had a session opened. |
+| `Source IP`, `Source port` | Where an SSH connection came from, as logged. With sshd's `UseDNS` on, that can be a host name. |
+| `Auth method` | `password`, `publickey`, `keyboard-interactive/pam`… |
+| `Target user` | The account the event acted on: the one sudo ran a command as, su switched to, or useradd made. |
+| `TTY` | The terminal: `pts/0`, `ssh`, `tty1`. |
+| `Command` | The command sudo ran, in full. |
+| `Message` | Everything after the program's name, exactly as logged. Nothing is ever taken out of it. |
+| `Timestamp (as logged)` | The line's stamp exactly as written. |
+
+| Event | From |
+| --- | --- |
+| `SSH login`, `SSH login failed`, `SSH invalid user`, `SSH user not allowed`, `SSH too many failures` | sshd's `Accepted …`, `Failed …`, `Invalid user …`, `User … not allowed …`, `Too many authentication failures` and `maximum authentication attempts exceeded` lines. |
+| `SSH connection`, `SSH connection closed`, `SSH disconnected`, `SSH no identification`, `SSH negotiation failed`, `SSH bad banner` | sshd's connection lines, including the scanners that never get as far as a login. |
+| `SSH server started`, `SSH server stopped` | sshd starting and stopping. |
+| `sudo command`, `sudo wrong password`, `sudo refused` | sudo. |
+| `su`, `su failed` | su. |
+| `Session opened`, `Session closed`, `Authentication failure`, `Unknown user`, `Password changed`, `Account locked` | PAM, for any program. |
+| `New session`, `Session removed` | systemd-logind. |
+| `Console login`, `Console login failed` | `login` on a local terminal. |
+| `User created`, `User deleted`, `User changed`, `Group created`, `Group deleted`, `Group member added`, `Group member removed` | useradd, userdel, usermod, groupadd, groupdel, gpasswd and their kin. |
+
+sshd's `message repeated 3 times: [ Failed password for root … ]` is read
+as the line inside the brackets. These logs record text an attacker
+chose (an SSH user name is whatever the other side sent), so each message
+is read from sshd's own words at its end, and a user name made to look like
+`from 10.0.0.1 port 22` can't move the address into `Source IP`.
+
+**The year.** The traditional stamp, `Nov 19 10:43:56`, has no year and no
+time zone: it is the host's local time, and Winnow keeps it as such. The
+newer RFC 3339 stamp some Ubuntu and Debian releases write
+(`2024-04-25T10:12:01.123456+00:00`) has both, and is converted to UTC. For
+a traditional stamp, Winnow works the year out from the file's modified
+date: the last line was written shortly before the file was last saved, so
+it belongs to that year, or the year before when its date hasn't come round
+yet in that year. Each place the dates go from December back to January,
+the year goes up by one, so a log that runs over New Year has the right
+year on both sides of it. The pane shows the result beside **Year**: *of
+the first line · blank: 2025, from the file’s modified date (2026-01-05)*.
+Type the year of the first line there to set it instead, for a file whose
+modified date was lost when it was copied. A file added from this machine
+keeps its own date; an uploaded file sends the date the browser sees, and
+files inside an archive keep the dates the archive stored. The year the
+first line got is kept with the table, so reopening a saved session dates
+every line the same way. The import toast says when the year came from the
+file's date. A date that never happened, such as Feb 29 in a year without
+one, leaves `Timestamp` empty; `Timestamp (as logged)` still has it.
+
+A line with no syslog stamp at all is kept whole in `Message`, with the
+other columns empty, and the import toast counts them. A file with no
+syslog line in it is refused.
+
+**With the esxi_logs plugin on**, a file named `secure` or `auth.log` goes
+to the plugin, which reads it into the shared ESXi and Linux host layout
+the **ESXi / UAC triage** board counts from. **Read as** → **Secure log**
+reads it with Winnow's own reader instead.
+
+On the [Timeline](Timeline-search-and-watchlist.md), a tagged line reads as
+its event, then user, source IP, target user, command, process and host:
+*SSH login failed  oracle · from 198.51.100.4 · via sshd · web01*.
+
+Failed SSH logins by source, from a secure log table, in the
+[SQL pane](SQL-pane.md):
+
+```sql
+SELECT "Source IP", COUNT(*) AS tries, COUNT(DISTINCT "User") AS users,
+       MIN("Timestamp") AS first, MAX("Timestamp") AS last
+FROM src_5
+WHERE "Event" IN ('SSH login failed', 'SSH invalid user')
+GROUP BY 1 ORDER BY tries DESC;
+```
+
 ### Plain text and log files
 
-A file no other reader claims — `hostd.log`, `auth.log.1`, an extensionless
+A file no other reader claims — `hostd.log`, `messages.1`, an extensionless
 dump — imports as raw text: one row per line, the whole line in a single
 `Message` column, no header, nothing split. The row number is the line
 number: blank lines are kept as empty rows, and only a newline ends a line,
@@ -868,7 +972,7 @@ right. It stays the same size whatever you pick or the scan finds.
 2. Pick a profile on the left, or stay on **Custom (not saved)** to set
    things up yourself. A profile fills in everything below it.
 3. Pick **File types**. `.csv`, `.tsv`, `.tab`, `.txt`, `.psv`, `.json`, `.jsonl`,
-   `.ndjson`, `.plaso`, **IIS logs**, **wtmp/btmp/utmp**, **body files** and any extension an enabled plugin claims
+   `.ndjson`, `.plaso`, **IIS logs**, **wtmp/btmp/utmp**, **body files**, **secure logs** and any extension an enabled plugin claims
    are on; **other text files** (off) adds every other non-binary file as raw
    text. **IIS logs** picks up [IIS web server logs](#iis-web-server-logs) by
    name, and a file named like one is read as one however it got in. A
@@ -881,6 +985,10 @@ right. It stays the same size whatever you pick or the scan finds.
    picks up [body files](#body-files-tsk-and-mactime) by name (`bodyfile`,
    `bodyfile.txt`, `*.body`), and a `.txt`, or another file the file types
    let in, whose first line is a body file line is read as one.
+   **secure logs** (on) picks up
+   [Linux secure logs and auth.log](#linux-secure-logs-and-authlog) by
+   name (`secure`, `auth.log` and their rotations), unless an enabled plugin
+   claims them, as **esxi_logs** does.
    **Include subfolders** (on) walks the tree.
    **Split other text on** is how the **other text files** type's files are
    read: blank, one line per row; with a delimiter typed, split on it as the
@@ -894,9 +1002,9 @@ right. It stays the same size whatever you pick or the scan finds.
    narrow what the file types let through.
 5. Check the **Preview**, which updates as you type. **Will import** lists
    the matches with a box per file; **Excluded** lists the rest with each
-   reason (`extension`, `IIS logs not selected`, `wtmp/btmp/utmp not selected`, `body files not selected`, `no include pattern matched`,
+   reason (`extension`, `IIS logs not selected`, `wtmp/btmp/utmp not selected`, `body files not selected`, `secure logs not selected`, `no include pattern matched`,
    `excluded by pattern: …`, `binary`, `unreadable`, `not a regular file`).
-   A profile saved before **IIS logs**, **wtmp/btmp/utmp** or **body files** existed leaves
+   A profile saved before **IIS logs**, **wtmp/btmp/utmp**, **body files** or **secure logs** existed leaves
    those files out until you tick the chip and **Update profile**.
    The line under the list counts them.
 6. **Import checked (N)**.
@@ -945,7 +1053,10 @@ pane. Built-in extensions always win, so no plugin can take over `.csv` or
 [IIS log](#iis-web-server-logs) is still read as one, and so are a
 [FortiGate log](#fortigate-and-other-fortinet-logs), a
 [wtmp or btmp](#linux-login-records-wtmp-btmp-utmp) and a
-[body file](#body-files-tsk-and-mactime). Plugin
+[body file](#body-files-tsk-and-mactime). A
+[secure log or auth.log](#linux-secure-logs-and-authlog) is the exception:
+**esxi_logs** reads those into its own layout, and **Read as** →
+**Secure log** reads one with Winnow's reader instead. Plugin
 imports don't run as background jobs: they show an *Importing …* notice, not
 a progress row, and can't be cancelled. See [Plugins](Plugins.md).
 
@@ -970,7 +1081,7 @@ case don't matter):
 | RECmd (batch) | Registry (RECmd batch) |
 | SrumECmd | SRUM — app resource use, network usage |
 | esxi_logs plugin | ESXi / Linux host logs |
-| Winnow's own readers | IIS web logs (W3C, NCSA, IIS native), Linux login records (wtmp/btmp/utmp), Body files (TSK / mactime) |
+| Winnow's own readers | IIS web logs (W3C, NCSA, IIS native), Linux login records (wtmp/btmp/utmp), Body files (TSK / mactime), Linux secure / auth.log |
 
 Recognition gets you:
 
@@ -1047,6 +1158,8 @@ A finished import's toast says *name: N rows imported*, plus any of:
 | *N records with two values for one key — the later kept as &lt;key&gt;_1* | JSON key clashes. |
 | *the last N bytes were not a whole login record and were left out* | A wtmp or btmp whose last record a crash cut short. |
 | *N lines were not a body file line, kept in Unparsed line* | Lines in a body file that aren't one, such as an error fls wrote into its output. |
+| *N lines were not a syslog line, kept whole in Message* | Lines in a secure log or auth.log with no syslog stamp. |
+| *no year in its stamps, so the first line was dated 2025 from the file’s modified date* | A [secure log](#linux-secure-logs-and-authlog) whose year was worked out, not set. |
 | *not UTF-8 — read as Windows-1252* | The whole file was Windows-1252. |
 | *N bytes not valid UTF-8, read as Windows-1252* | Stray bytes in a UTF-8 file. |
 | *N text values were not valid UTF-8 (shown with �)* | SQLite text with bad bytes. |
@@ -1056,7 +1169,8 @@ New tables join the tab strip without moving you; turn on
 **Settings → Imports → Open new tables when an import finishes** to jump to
 the first table of each batch. A column that looks like an encoded timestamp
 brings a toast offering **Add datetime column**
-([Derived columns](Derived-columns.md)), and each new table is scanned
+([Derived columns](Derived-columns.md)), except a `Timestamp (as logged)`
+column beside a timestamp the reader already worked out, and each new table is scanned
 against the case's watchlist
 ([Timeline, Search all and the Watchlist](Timeline-search-and-watchlist.md)).
 

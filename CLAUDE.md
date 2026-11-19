@@ -276,6 +276,19 @@ bodyread.py        Body files (TSK 3.x, what fls -m writes and mactime
                     ends, and a TSK 2.x line is refused rather than read
                     one column off. Stdlib only; imports iisread.
                     See docs/notes/ingest.md.
+secureread.py      Linux secure logs and auth.log (/var/log/secure,
+                    /var/log/auth.log) for import — a core reader under
+                    fixed columns: the syslog header split, and sshd,
+                    sudo, su, PAM, logind and useradd messages read into
+                    Event, User, Source IP, Target user, Command and the
+                    rest, every pattern a fullmatch from sshd's own tail
+                    (user names are attacker-chosen). Recognized by name
+                    only (name_says) and, unlike the other built-in names,
+                    BELOW a plugin's claim, so esxi_logs keeps feeding the
+                    ESXi / UAC triage board. Year-less stamps are dated
+                    from the file's mtime (esxi_logs' rule), or a year the
+                    analyst sets, and the year is recorded with the table.
+                    Stdlib only; imports iisread. See docs/notes/ingest.md.
 defaults/          The defaults Winnow ships, as JSON rather than Python:
                     headers.json names the header sets common tools emit
                     (EvtxECmd, MFTECmd, Amcache, ...) and, per set, how to

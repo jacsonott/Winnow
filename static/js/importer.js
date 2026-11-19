@@ -6,7 +6,7 @@ import { $, api, debounce, dragHas, el, post, toast } from './core.js';
 import { maybeOfferAssociation } from './assoc.js';
 import { openFolderBrowser } from './home.js';
 import { DISK_FULL_STATUS, failureReason, startJobsPoll, uploadWithProgress } from './jobs.js';
-import { ARCHIVE_IMPORT_EXTENSIONS, BODYFILE_IMPORT_TYPE, IIS_FORMAT_LABELS, IIS_IMPORT_TYPE, KV_PROBE_BYTES, PLASO_IMPORT_EXTENSIONS, RECOGNIZED_IMPORT_EXTENSIONS, SQLITE_IMPORT_EXTENSIONS, UTMP_IMPORT_TYPE, XLSX_IMPORT_EXTENSIONS, bodyfileNamed, extOf, iisLogFormat, importKindFor, kvCandidate, looksLikeBodyfile, looksLikeKvLog, looksLikeUtmp, utmpFileKind } from './merge.js';
+import { ARCHIVE_IMPORT_EXTENSIONS, BODYFILE_IMPORT_TYPE, IIS_FORMAT_LABELS, IIS_IMPORT_TYPE, KV_PROBE_BYTES, PLASO_IMPORT_EXTENSIONS, RECOGNIZED_IMPORT_EXTENSIONS, SECURE_IMPORT_TYPE, SQLITE_IMPORT_EXTENSIONS, UTMP_IMPORT_TYPE, XLSX_IMPORT_EXTENSIONS, bodyfileNamed, extOf, iisLogFormat, importKindFor, kvCandidate, looksLikeBodyfile, looksLikeKvLog, looksLikeUtmp, secureLogNamed, utmpFileKind } from './merge.js';
 import { renderPluginTabs, renderPluginPanelButtons } from './plugins.js';
 import { fmtBytes } from './tables.js';
 import { foldersFlattened, loadSources, renderSidebar, revealFolder } from './sources.js';
@@ -51,7 +51,10 @@ export function globMatches(pattern, name) {
    stays reachable through the Plugins modal's explicit per-format picker.
    So do built-in names: an IIS log is .log, which esxi_logs claims, a
    wtmp or btmp is the login-records reader's whatever a pattern says, and
-   so is a bodyfile or *.body the body file reader's. */
+   so is a bodyfile or *.body the body file reader's. A secure log or
+   auth.log is the exception, on purpose: esxi_logs reads those for the
+   ESXi / UAC triage board, so a plugin's claim keeps them (the Read as
+   switch offers the built-in reader instead; secureread.py says why). */
 export function pluginFormatFor(filename) {
   const base = filename.split(/[\\/]/).pop();
   const ext = extOf(base);
@@ -131,6 +134,9 @@ export function queueItem(transport, name, fmt = pluginFormatFor(name), kind = i
     : kind === 'utmp' ? { ...transport, name, kind, configured: true }
     // And a body file: its eleven fields are fixed, its times always UTC.
     : kind === 'bodyfile' ? { ...transport, name, kind, configured: true }
+    // A secure log's columns are fixed too; the year of its first line,
+    // which a traditional stamp doesn't carry, is worked out unless set.
+    : kind === 'secure' ? { ...transport, name, kind, year: null, configured: true }
     // An IIS log names its own columns; the preview can still pick another
     // of the three formats (log_format, null = the name's) and set types.
     : kind === 'iis' ? { ...transport, name, kind, log_format: null, column_types: null, configured: false }
@@ -297,6 +303,9 @@ export function fetchPreview(item, fields) {
   // Login records: only the head goes up, so the server is told the size
   // (a whole number of records, or a torn tail).
   if (fields.kind === 'utmp') fd.append('size', String(item.file.size));
+  // A secure log: nor does a head carry the file's date, which the year of
+  // its first line is worked out from (a path preview reads it off the disk).
+  if (fields.kind === 'secure') fd.append('modified', String(item.file.lastModified / 1000));
   for (const [k, v] of Object.entries(fields)) if (v != null) fd.append(k, String(v));
   return api(url, { method: 'POST', body: fd });
 }
@@ -340,6 +349,7 @@ export function queueHint(item) {
     case 'plaso': return 'Plaso · one timeline table';
     case 'utmp': return `Login records · ${utmpFileKind(item.name) || 'wtmp/btmp/utmp'}`;
     case 'bodyfile': return 'Body file · a row per file';
+    case 'secure': return 'Secure log · ' + (item.year ? `first line in ${item.year}` : 'a row per line');
     case 'archive': return 'Archive · expands on import';
     default: return 'Delimited · ' + delimHint(item) + (item.has_header === false ? ' · no header' : '');
   }
@@ -575,7 +585,7 @@ export function buildEmptyQueuePane(pane) {
   box.append(
     el('div', 'import-empty-title', 'Drop files here'),
     el('p', 'fb-help', 'or anywhere on the window — or add them with the buttons below. “Add from this machine…” reads a file where it is, which is the fast way for anything large.'),
-    el('p', 'fb-help', 'CSV and other delimited text, JSON and JSON Lines, SQLite, Excel, Plaso, IIS logs, key=value logs such as FortiGate’s, Linux wtmp and btmp login records, TSK body files, and zip or tar archives each import their own way; any other text file imports one line per row.'));
+    el('p', 'fb-help', 'CSV and other delimited text, JSON and JSON Lines, SQLite, Excel, Plaso, IIS logs, key=value logs such as FortiGate’s, Linux wtmp and btmp login records, Linux secure logs and auth.log, TSK body files, and zip or tar archives each import their own way; any other text file imports one line per row.'));
   pane.append(box);
 }
 
@@ -590,7 +600,10 @@ export function buildEmptyQueuePane(pane) {
    an fls listing whose first line didn't say so, and a body file can be
    read the other two ways (its own pipes, or a line a row). Login records
    can be read one line per row, for a file named wtmp that turns out to
-   be text (`last` output saved under the name).
+   be text (`last` output saved under the name). Delimited and other text
+   can be read as a secure log, for messages or a copy saved under another
+   name, and a secure log or auth.log a plugin claims can be read by the
+   built-in reader instead.
    Kinds with no other reading (SQLite, Excel, Plaso, archives) have no
    switch. */
 export function readAsOptions(item) {
@@ -599,16 +612,24 @@ export function readAsOptions(item) {
   const lines = ['text', 'One line per row', 'Every line becomes one row in one column, nothing split'];
   const kv = ['kv', 'Key=value', 'A column per key, each line’s values under its own keys (FortiGate and other Fortinet logs)'];
   const body = ['bodyfile', 'Body file', 'A row per file from an fls -m or mactime body file, its four times in UTC'];
+  const secure = ['secure', 'Secure log', 'Linux /var/log/secure or auth.log: the syslog header split into columns, and the sshd, sudo, su and PAM events read out'];
   switch (base.kind) {
-    case 'csv': case 'text': return [delimited, lines, kv, body];
+    case 'csv': case 'text': return [delimited, lines, kv, body, secure];
     case 'kv': return [kv, delimited, lines];
     case 'bodyfile': return [body, delimited, lines];
+    case 'secure': return [secure, delimited, lines];
     case 'json': return [['json', 'JSON', 'One row per record, its keys as columns'], lines];
     case 'iis': return [['iis', 'IIS log', 'Columns named by the log itself'], delimited, lines];
     case 'utmp': return [['utmp', 'Login records', 'Linux wtmp, btmp or utmp: a row per record'], lines];
-    // A plugin-claimed upload only, as the queue row's "As text" was.
-    case 'plugin': return item.path ? null
-      : [['plugin', pluginFormatById(base.format_id)?.label || base.format_id, 'Read by the plugin that claims this file'], lines];
+    // A plugin-claimed upload only, as the queue row's "As text" was; and
+    // a secure log or auth.log, by either transport, can be read by the
+    // built-in reader its name would have had without the plugin.
+    case 'plugin': {
+      const plugin = ['plugin', pluginFormatById(base.format_id)?.label || base.format_id, 'Read by the plugin that claims this file'];
+      const own = secureLogNamed(item.name) ? [secure] : [];
+      if (item.path) return own.length ? [plugin, ...own] : null;
+      return [plugin, ...own, lines];
+    }
     default: return null;
   }
 }
@@ -621,13 +642,14 @@ export function switchKind(item, to) {
   if (item.kind === to) return;
   if (!item.queuedAs) item.queuedAs = { kind: item.kind, format_id: item.format_id, options: item.options };
   const reset = { delimiter: null, delim_mode: null, custom_text: null, has_header: true, column_types: null,
-                  log_format: null, format_id: null, options: null };
+                  log_format: null, format_id: null, options: null, year: null };
   if (to === 'text') Object.assign(item, reset, { kind: 'text', has_header: false, configured: true });
   else if (to === 'csv') Object.assign(item, reset, { kind: 'csv', configured: true });
   else if (to === 'iis') Object.assign(item, reset, { kind: 'iis', configured: false });
   else if (to === 'kv') Object.assign(item, reset, { kind: 'kv', configured: false });
   else if (to === 'utmp') Object.assign(item, reset, { kind: 'utmp', configured: true });
   else if (to === 'bodyfile') Object.assign(item, reset, { kind: 'bodyfile', configured: true });
+  else if (to === 'secure') Object.assign(item, reset, { kind: 'secure', configured: true });
   else if (to === 'json') Object.assign(item, reset, { kind: 'json', flatten_mode: 'none', flatten_depth: 1, configured: false });
   else if (to === 'plugin') {
     Object.assign(item, reset, { kind: 'plugin', format_id: item.queuedAs.format_id, options: item.queuedAs.options, configured: false });
@@ -687,6 +709,7 @@ export function buildQueueItemPane(pane, item, changed) {
   else if (item.kind === 'kv') buildKvSettings(ctx);
   else if (item.kind === 'utmp') buildUtmpSettings(ctx);
   else if (item.kind === 'bodyfile') buildBodyfileSettings(ctx);
+  else if (item.kind === 'secure') buildSecureSettings(ctx);
   else if (UNIT_KINDS.includes(item.kind)) buildUnitSettings(ctx);
   else if (item.kind === 'plugin') buildPluginSettings(ctx);
   else buildFixedSettings(ctx);
@@ -954,6 +977,48 @@ export function buildBodyfileSettings(ctx) {
       ? ` · ${res.unparsed_lines.toLocaleString()} line${res.unparsed_lines === 1 ? ' isn’t a body file line' : 's aren’t body file lines'} and will be kept in Unparsed line`
       : '';
     ctx.footLine(`Body file · first ${n} row${n === 1 ? '' : 's'}${odd}` + encodingNote(res), !!res.unparsed_lines);
+  });
+}
+
+/* A secure log or auth.log: the columns are fixed, so the one thing to
+   choose is the year of the first line, which a traditional syslog stamp
+   (Nov 19 10:43:56) doesn't carry. Left blank, the import works it out
+   from the file's modified date (secureread.first_year), and the preview
+   says which year that came to; from the head of the file alone, so for
+   a longer file the import may settle on another, and the foot says so. */
+export function buildSecureSettings(ctx) {
+  const { item, settings } = ctx;
+  ctx.note('A Linux authentication log: /var/log/secure on Red Hat, CentOS, Rocky and Fedora, /var/log/auth.log on Debian and Ubuntu. Each line becomes a row. The syslog header is split into Timestamp, Host, Process and PID, and what sshd, sudo, su, PAM and the account tools report is read out into Event, User, Source IP, Source port, Auth method, Target user, TTY and Command. Message keeps the rest of the line as logged, and Timestamp (as logged) the stamp as written.');
+  const yearInput = el('input', 'import-depth import-year');
+  yearInput.type = 'number';
+  yearInput.min = '1970';
+  yearInput.max = '2100';
+  yearInput.placeholder = 'auto';
+  yearInput.value = item.year ? String(item.year) : '';
+  yearInput.setAttribute('aria-label', 'Year of the first line');
+  const yearHint = el('span', 'import-file-how import-year-hint', 'of the first line');
+  settings.append(paneRow('Year', yearInput, yearHint));
+  yearInput.oninput = debounce(() => {
+    const y = parseInt(yearInput.value, 10);
+    const ok = y >= 1970 && y <= 2100;
+    if ((ok ? y : null) === item.year) return;
+    item.year = ok ? y : null;
+    ctx.changed();
+    reload();
+  }, 300);
+  const reload = previewRunner(ctx, () => fetchPreview(item, { kind: 'secure', year: item.year }), (res) => {
+    ctx.rows.replaceChildren(previewTable(res.columns, res.sample_rows, (i) => el('div', 'count', res.inferred_types[i])));
+    yearHint.textContent = res.year_from === 'set' ? 'of the first line, as set'
+      : res.year_from === 'modified'
+        ? `of the first line · blank: ${res.syslog_year}, from the file’s modified date`
+          + (res.modified ? ` (${new Date(res.modified * 1000).toISOString().slice(0, 10)})` : '')
+        : 'not needed: these stamps carry their year';
+    const n = res.sample_rows.length;
+    const odd = res.unparsed_lines
+      ? ` · ${res.unparsed_lines.toLocaleString()} line${res.unparsed_lines === 1 ? ' isn’t a syslog line' : 's aren’t syslog lines'} and will be kept whole in Message`
+      : '';
+    const guess = res.year_from === 'modified' && !res.complete ? ' · the year is worked out again from the whole file' : '';
+    ctx.footLine(`Secure log · first ${n} row${n === 1 ? '' : 's'}${odd}${guess}` + encodingNote(res), !!res.unparsed_lines);
   });
 }
 
@@ -1229,6 +1294,7 @@ export async function importQueued(queue, folderId = null) {
             has_header: item.has_header !== false,
             column_types: item.column_types || null,
             log_format: item.log_format || null,
+            year: item.year || null,
             flatten_mode: item.flatten_mode || 'none',
             flatten_depth: item.flatten_depth || 0,
             tables: item.tables || null,
@@ -1244,6 +1310,9 @@ export async function importQueued(queue, folderId = null) {
     const fd = new FormData();
     fd.append('file', item.file);
     if (folderId != null) fd.append('folder_id', String(folderId));
+    // The spool keeps the picked file's date rather than the upload's (a
+    // secure log's year is worked out from it, as for a file read in place).
+    fd.append('modified', String(item.file.lastModified / 1000));
     if (item.kind === 'plugin') {
       // jobs/upload's start_ingest_job knows csv/json/sqlite only —
       // plugin uploads have their own route, which parses via the
@@ -1267,6 +1336,7 @@ export async function importQueued(queue, folderId = null) {
     } else {
       if (item.delimiter) fd.append('delimiter', item.delimiter);
       if (item.log_format) fd.append('log_format', item.log_format);
+      if (item.year) fd.append('year', String(item.year));
       fd.append('has_header', item.has_header ? 'true' : 'false');
       if (item.column_types) fd.append('column_types', JSON.stringify(item.column_types));
     }
@@ -1393,12 +1463,13 @@ export const CUSTOM_IMPORT = 'custom';
 export const IMPORT_GROUPS = ['Ad hoc', 'Profiles'];
 
 export const defaultImportExtensions = () =>
-  RECOGNIZED_IMPORT_EXTENSIONS.concat(PLASO_IMPORT_EXTENSIONS, [IIS_IMPORT_TYPE, UTMP_IMPORT_TYPE, BODYFILE_IMPORT_TYPE], pluginExtensions());
+  RECOGNIZED_IMPORT_EXTENSIONS.concat(PLASO_IMPORT_EXTENSIONS, [IIS_IMPORT_TYPE, UTMP_IMPORT_TYPE, BODYFILE_IMPORT_TYPE, SECURE_IMPORT_TYPE], pluginExtensions());
 
 /* How a folder-import file type reads on its chip and in a profile's
    search hint: the ones that aren't extensions get words. */
 export const importTypeLabel = (x) => (x === '*' ? 'other text files' : x === IIS_IMPORT_TYPE ? 'IIS logs'
-  : x === UTMP_IMPORT_TYPE ? 'wtmp/btmp/utmp' : x === BODYFILE_IMPORT_TYPE ? 'body files' : x);
+  : x === UTMP_IMPORT_TYPE ? 'wtmp/btmp/utmp' : x === BODYFILE_IMPORT_TYPE ? 'body files'
+  : x === SECURE_IMPORT_TYPE ? 'secure logs' : x);
 
 export function importProfileEntries(profiles) {
   const entries = [{
@@ -1576,6 +1647,7 @@ export async function openDirectoryImportModal(state = {}) {
       if (ext === '*') chip.title = 'Any other file that is not binary, imported as raw text — one line per row';
       if (ext === IIS_IMPORT_TYPE) chip.title = 'IIS web server logs, recognised by name: u_ex…, ex…, nc…, in….log';
       if (ext === UTMP_IMPORT_TYPE) chip.title = 'Linux login records, recognized by name: wtmp, btmp, utmp and their rotations (wtmp.1, btmp-20240501)';
+      if (ext === SECURE_IMPORT_TYPE) chip.title = 'Linux authentication logs, recognized by name: secure, auth.log and their rotations (secure-20240505, auth.log.1). A plugin that claims them, such as esxi_logs, keeps them';
       if (ext === BODYFILE_IMPORT_TYPE) chip.title = 'TSK / mactime body files, recognized by name: bodyfile, bodyfile.txt, *.body (one in a .txt under another name is recognized by its first line)';
       chip.onclick = () => {
         st.extensions = st.extensions.includes(ext)
@@ -1909,7 +1981,7 @@ export async function openDirectoryImportModal(state = {}) {
               path: m.path, name: base, folder_path, folder_id, kind: 'csv', delimiter: st.textDelimiter, has_header: st.textHeader,
             });
           } else {
-            await post('/api/ingest/jobs/path', { path: m.path, name: base, folder_path, folder_id, kind: ['json', 'plaso', 'text', 'iis', 'kv', 'utmp', 'bodyfile'].includes(m.kind) ? m.kind : 'csv' });
+            await post('/api/ingest/jobs/path', { path: m.path, name: base, folder_path, folder_id, kind: ['json', 'plaso', 'text', 'iis', 'kv', 'utmp', 'bodyfile', 'secure'].includes(m.kind) ? m.kind : 'csv' });
           }
           ok++;
         } catch (e) {
