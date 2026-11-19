@@ -53,6 +53,7 @@ from winnow import version
 from winnow import archive
 from winnow import bodyread
 from winnow import iisread
+from winnow import secureread
 from winnow import utmpread
 from winnow import workspace as WS
 from winnow.sqlresults import ResultExpired, TooBig
@@ -1972,7 +1973,9 @@ def _assoc_ingest(path: str) -> dict:
     # queue's own rule (pluginFormatFor). So is a key=value log, recognised
     # by its first line (the queue asks /api/ingest/recognise first too),
     # a wtmp/btmp/utmp file, by its name or its records, and a body file,
-    # by its name or its first line.
+    # by its name or its first line. A secure log or auth.log is NOT one of
+    # them: its name ranks below a plugin's claim (secureread.py), so with
+    # esxi_logs on it is the plugin's here as it is in the queue.
     kind = _ingest_kind_for_path(path)
     fmt = (None if kind in ("iis", "kv", "utmp", "bodyfile")
            else PLUGINS.format_for_filename(os.path.basename(path)))
@@ -2954,9 +2957,11 @@ async def api_ingest_preview(
     file: UploadFile = File(...),
     delimiter: str | None = Form(None),
     has_header: bool = Form(True),
-    kind: str = Form("csv"),   # "text": the raw-text importer's line-per-row preview; "iis", "kv", "utmp", "bodyfile"
+    kind: str = Form("csv"),   # "text": the raw-text importer's line-per-row preview; "iis", "kv", "utmp", "bodyfile", "secure"
     log_format: str | None = Form(None),   # iis: w3c, ncsa or native; None reads the file's name
     size: int | None = Form(None),   # utmp: the whole file's size, since only its head is sent
+    year: int | None = Form(None),   # secure: the year of the first line, when the analyst set one
+    modified: float | None = Form(None),   # secure: the file's modified time (epoch seconds), which a head can't carry
 ):
     raw = await file.read(PREVIEW_SAMPLE_BYTES)  # bounded sample — full parse happens at real ingest time
     if kind == "utmp":
@@ -2982,6 +2987,11 @@ async def api_ingest_preview(
         if kind == "bodyfile":
             return {**await run_in_threadpool(
                 store().preview_bodyfile_text, text, complete=len(raw) < PREVIEW_SAMPLE_BYTES),
+                "encoding": encoding}
+        if kind == "secure":
+            return {**await run_in_threadpool(
+                functools.partial(store().preview_secure_text, text, complete=len(raw) < PREVIEW_SAMPLE_BYTES,
+                                  year=year, modified=modified)),
                 "encoding": encoding}
         # The uploaded file's own name goes through: the delimiter is read
         # from the extension first (Store._sniff), and a preview that
@@ -3125,13 +3135,18 @@ def _ingest_kind_for_path(path: str) -> str:
     (looks_like_utmp), asked about the same files as a key=value log. A
     body file likewise, by name (bodyfile, bodyfile.txt, *.body —
     bodyread.name_says) and otherwise by its first line
-    (looks_like_bodyfile)."""
+    (looks_like_bodyfile). A Linux authentication log by name only
+    (secure, auth.log and their rotations — secureread.name_says); the
+    callers that honour plugins ask them first, since that name ranks
+    below a plugin's claim."""
     if iisread.log_format(path):
         return "iis"
     if utmpread.log_kind(path):
         return "utmp"
     if bodyread.name_says(path):
         return "bodyfile"
+    if secureread.name_says(path):
+        return "secure"
     suffix = Path(path).suffix.lower()
     if suffix in SQLITE_IMPORT_EXTENSIONS:
         return "sqlite"
@@ -3245,6 +3260,8 @@ class PreviewPath(BaseModel):
     has_header: bool = True
     # iis: w3c, ncsa or native; None reads the file's name
     log_format: str | None = None
+    # secure: the year of the first line, when the analyst set one
+    year: int | None = None
     # json
     flatten_mode: str = "none"
     flatten_depth: int = 0
@@ -3258,7 +3275,7 @@ def api_ingest_preview_path(body: PreviewPath):
     try:
         if kind == "utmp":
             return store().preview_utmp_file(body.path)
-        if kind in ("csv", "text", "iis", "kv", "bodyfile"):
+        if kind in ("csv", "text", "iis", "kv", "bodyfile", "secure"):
             # Same bounded sample the upload preview reads — never the file.
             with open(body.path, "rb") as f:
                 raw = f.read(PREVIEW_SAMPLE_BYTES)
@@ -3274,6 +3291,10 @@ def api_ingest_preview_path(body: PreviewPath):
                         "encoding": encoding}
             if kind == "bodyfile":
                 return {**store().preview_bodyfile_text(text, complete=len(raw) < PREVIEW_SAMPLE_BYTES),
+                        "encoding": encoding}
+            if kind == "secure":
+                return {**store().preview_secure_text(text, complete=len(raw) < PREVIEW_SAMPLE_BYTES,
+                                                      year=body.year, modified=os.path.getmtime(body.path)),
                         "encoding": encoding}
             return {**store().preview_csv_text(text, delimiter=body.delimiter or None,
                                                has_header=body.has_header, name=body.path),
@@ -3339,6 +3360,8 @@ class IngestJobPath(BaseModel):
     column_types: list[str] | dict[str, str] | None = None
     # iis: w3c, ncsa or native; None reads the file's name
     log_format: str | None = None
+    # secure: the year of the first line; None works it out from the file's modified time
+    year: int | None = None
     # json options
     flatten_mode: str = "none"
     flatten_depth: int = 0
@@ -3355,7 +3378,8 @@ class IngestJobPath(BaseModel):
 
 def _ingest_job_options(kind: str, *, build_fts: bool, delimiter=None, has_header=True,
                         column_types=None, log_format=None, flatten_mode="none",
-                        flatten_depth=0, tables=None, folder_path=None, folder_id=None) -> dict:
+                        flatten_depth=0, tables=None, folder_path=None, folder_id=None,
+                        year=None) -> dict:
     # folder_id and folder_path ride along on every kind — the job worker
     # files each new source under them when the ingest completes
     # (Store.file_imported_sources). The routes check folder_id first
@@ -3377,6 +3401,11 @@ def _ingest_job_options(kind: str, *, build_fts: bool, delimiter=None, has_heade
                 "column_types": column_types}
     if kind == "kv":
         return {**base, "build_fts": build_fts, "column_types": column_types}
+    if kind == "secure":
+        # Refused here, as a 400 the import window shows, as a delimiter is.
+        if year is not None and not 1970 <= year <= 2100:
+            raise ValueError("The year of the first line must be between 1970 and 2100")
+        return {**base, "build_fts": build_fts, "year": year}
     if kind in ("plaso", "text", "utmp", "bodyfile"):
         return {**base, "build_fts": build_fts}   # one file, one table, no options
     return {**base, "build_fts": build_fts, "tables": tables or []}
@@ -3398,7 +3427,7 @@ def api_ingest_job_path(body: IngestJobPath):
             options=_ingest_job_options(
                 kind, build_fts=body.build_fts, delimiter=body.delimiter,
                 has_header=body.has_header, column_types=body.column_types,
-                log_format=body.log_format,
+                log_format=body.log_format, year=body.year,
                 flatten_mode=body.flatten_mode, flatten_depth=body.flatten_depth,
                 tables=body.tables, folder_path=body.folder_path, folder_id=body.folder_id,
             ),
@@ -3421,6 +3450,8 @@ async def api_ingest_job_upload(
     flatten_depth: int = Form(0),
     tables: str | None = Form(None),         # sqlite: JSON [{table, name?, timestamp_columns?}]
     folder_id: int | None = Form(None),      # the table folder to file the tables in; None = top level
+    year: int | None = Form(None),           # secure: the year of the first line; None reads the file's date
+    modified: float | None = Form(None),     # the picked file's modified time (epoch seconds): see below
 ):
     """Upload-then-job: the HTTP transfer *is* this request (the browser
     gets transfer progress from its own XHR events), and the moment the
@@ -3433,7 +3464,12 @@ async def api_ingest_job_upload(
     `History.urls`, `Book1.Sheet1`, as a path import names them; a
     mkstemp spool made those `tmp3z2vauq7.urls`. And every table records
     that name, not the spool's path, as where it came from
-    (recorded_path): the spool is deleted when the job ends."""
+    (recorded_path): the spool is deleted when the job ends.
+
+    `modified` is the browser's lastModified for the picked file, put on
+    the spool so it keeps the original's date rather than the upload's: a
+    secure log's year is worked out from it (secureread.first_year), as it
+    is for a file imported in place."""
     # Before the spool copy rather than after it: a folder deleted in
     # another window is refused without writing a second copy of the file.
     _check_import_folder(folder_id)
@@ -3442,6 +3478,9 @@ async def api_ingest_job_upload(
         with open(tmp, "wb") as out:
             while chunk := await file.read(4 << 20):
                 out.write(chunk)
+        if modified is not None and modified > 0:
+            with contextlib.suppress(OSError, OverflowError, ValueError):
+                os.utime(tmp, (modified, modified))
         table_list = json.loads(tables) if tables else None
         types = json.loads(column_types) if column_types else None
         return await run_in_threadpool(
@@ -3452,7 +3491,7 @@ async def api_ingest_job_upload(
                 kind, build_fts=build_fts, delimiter=delimiter or None,
                 has_header=has_header, column_types=types, log_format=log_format or None,
                 flatten_mode=flatten_mode, flatten_depth=flatten_depth,
-                tables=table_list, folder_id=folder_id,
+                tables=table_list, folder_id=folder_id, year=year,
             ),
         )
     except Exception as e:

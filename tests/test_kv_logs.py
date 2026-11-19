@@ -379,7 +379,7 @@ def test_folder_scan_reads_fortinet_logs_that_get_in(store, tmp_path):
     _write(root, "fortigate.log", [TRAFFIC])
     _write(root, "export.txt", [TRAFFIC])
     _write(root, "notes.txt", ["a,b", "1,2"])
-    _write(root, "auth.log", ["Oct 23 05:39:00 host sshd[1]: Accepted"])
+    _write(root, "sshd.log", ["Oct 23 05:39:00 host sshd[1]: Accepted"])
     _write(root, "forti.csv", [TRAFFIC])
 
     kinds = {m["rel_path"]: m["kind"] for m in store.scan_import_directory(str(root))["matched"]}
@@ -391,7 +391,7 @@ def test_folder_scan_reads_fortinet_logs_that_get_in(store, tmp_path):
     for exts in (["*"], [".log"]):
         kinds = {m["rel_path"]: m["kind"] for m in store.scan_import_directory(str(root), extensions=exts)["matched"]}
         assert kinds["fortigate.log"] == "kv", exts
-        assert kinds["auth.log"] == ("text" if exts == ["*"] else "plugin"), exts
+        assert kinds["sshd.log"] == ("text" if exts == ["*"] else "plugin"), exts
 
 
 def test_the_recognise_route_answers_per_path(client, tmp_path):

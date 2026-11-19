@@ -1,4 +1,4 @@
-# Ingest: CSV, raw text, JSON, SQLite, Excel, Plaso, IIS logs, key=value logs, login records, body files, archives, folders, drops, jobs
+# Ingest: CSV, raw text, JSON, SQLite, Excel, Plaso, IIS logs, key=value logs, login records, body files, secure logs, archives, folders, drops, jobs
 
 Every path that turns a file on disk into a `src_<id>` table, and the
 background-job machinery all of them run through. Invariant #1 (source
@@ -153,6 +153,14 @@ see [docs/notes/README.md](README.md) for the whole set.
   names (`aux.log` included) are rewritten with `_` — two that come
   out the same are kept apart by `free_path` like any other clash.
   Tested with the Windows rules forced, since the suite runs on POSIX.
+  **Every member keeps the date the archive stored** (`_copy_stream`'s
+  `mtime`: tar's `member.mtime`, zip's `date_time`, a gzip header's
+  MTIME, else the `.gz` file's own). Extraction used to stamp everything
+  "now", which nothing read until the secure log reader dated its
+  year-less stamps from the file's modified time: an auth.log from a
+  UAC tarball expanded in January dated its December lines a year late.
+  The date is set on the path the member actually landed at, which
+  `free_path` may have renamed. tests/test_archive_ingest.py.
 - Plaso ingest (`ingest_plaso`, plasoread.py) reads a `.plaso` storage
   file — a SQLite db of serialized attribute containers — as ONE flat
   timeline table, no plaso install involved. Both on-disk generations are
@@ -460,6 +468,63 @@ see [docs/notes/README.md](README.md) for the whole set.
   read body files and still doesn't; a UAC collection's
   `bodyfile.txt` is this reader's whether the plugin is on or not.
   tests/test_bodyfile.py, tests/ui/test_bodyfile_queue.py.
+- **Linux secure logs and auth.log are a core reader that ranks BELOW a
+  plugin's claim** (`secureread.py`, `Store.ingest_secure`, kind
+  `secure`). Recognized by name only (`secureread.name_says`: `secure`,
+  `auth.log`, logrotate's `-YYYYMMDD`, `.N`, `.old`, an expansion's
+  ` (2)`; `secureLogNamed` in merge.js is its twin and
+  tests/ui/test_secure_queue.py holds the two to one list), never by
+  content: a syslog line is what half of /var/log looks like, and
+  `messages` would read as a secure log that classifies nothing. Every
+  other built-in name (IIS, utmp, bodyfile, a kv first line) wins over
+  a plugin's extension claim; this one doesn't, deliberately. esxi_logs
+  claims `secure*`, `auth*` and every `.log`, and its shared schema is
+  what the shipped "ESXi / UAC triage" board counts SSH logins from;
+  taking those files off it when the plugin is on would empty that
+  board. So `_assoc_ingest` leaves `secure` out of the tuple of kinds
+  that skip plugin formats, the folder scan checks `by_ext or
+  by_filename_pattern` before `is_secure`, and `queueItem`'s
+  `pluginFormatFor` runs first. **Read as** is the way back: a plugin
+  item named like a secure log gets [plugin, secure] (an upload adds
+  text, as any plugin upload does), and csv/text get Secure log at the
+  end of their list. **Fixed columns** (`COLUMNS` + `COLUMN_TYPES`,
+  passed as `column_types`), so every secure log in a case merges and
+  matches one header set ("Linux secure / auth.log", headers.json
+  version 7). `classify` reads the message into Event, User, Source IP,
+  Source port, Auth method, Target user, TTY and Command; Message keeps
+  everything after the tag untouched. **Every pattern is a fullmatch
+  anchored on sshd's own words at the END of the line**, because the
+  user name in the middle is whatever the client sent: an
+  `Accepted … for x from 1.2.3.4 port 22 from 10.0.0.1 port 5 ssh2`
+  must put the real tail in Source IP, and tests/test_secure_log.py
+  has the attacker names. A line with no syslog stamp goes whole to
+  Message and is counted as `unparsed_lines`, toasted as "not a syslog
+  line, kept whole in Message" (jobs.js picks the wording by kind).
+  **The year.** BSD stamps have none. The rule is esxi_logs'
+  `_SyslogYears`, so the two readers agree on the same file: walk the
+  lines, count Dec→Jan wraps, and the LAST stamp is in the year of the
+  file's mtime, or the year before if it falls more than a day after
+  that mtime (`first_year`). The first line's year is the answer; an
+  analyst's `year` overrides it (the pane's **Year**, "of the first line",
+  1970–2100, validated in `_ingest_job_options` and `ingest_secure`).
+  `plan` returns it with `year_from` ("set" / "modified"), and the
+  ingest record is built from the PLAN (`_ingest_planned_lines` takes a
+  callable `ingest`), so a session re-import passes `year=` and dates
+  every line the same way however the file's mtime has moved since.
+  `_guess_session_reader` does not guess `secure`: a session with no
+  ingest record predates this reader, so its secure log was read as
+  text, and text is what reproduces its rows (and the rids its tags
+  name). **The mtime has to survive the
+  trip**: a path item reads the file's own; an upload's spool would be
+  "now", so the import window sends the browser's `lastModified` as a
+  `modified` form field (preview and job upload both) and the job route
+  `os.utime`s the spool with it; archives keep member dates (above).
+  RFC 3339 stamps (rsyslog's FileFormat, Ubuntu 23.10+) carry a year and
+  an offset and are converted to UTC; ESXi's own `auth.log` puts a
+  severity `In(38)` after the stamp and no host, which `split_line`
+  skips. Feb 29 in a non-leap year leaves Timestamp empty; "Timestamp
+  (as logged)" always keeps the raw stamp. tests/test_secure_log.py,
+  tests/ui/test_secure_queue.py.
 
 - Ragged rows are padded/trimmed to the header width, never dropped, and
   counted — `ingest_csv`'s return dict has a `ragged_rows` count surfaced to
@@ -551,7 +616,7 @@ see [docs/notes/README.md](README.md) for the whole set.
   the `\n` is a CRLF's and comes off; any other is the line's own text.
   The preview splits the same way. `_ingest_kind_for_path`
   (server) and `importKindFor` (client) send any name no built-in claims
-  here — `hostd.log`, `auth.log.1`, an extensionless dump — *after* plugin
+  here — `hostd.log`, `messages.1`, an extensionless dump — *after* plugin
   formats have had their say (`queueItem` / `_assoc_ingest` consult them
   first). `.txt` keeps the delimited path on purpose (KAPE emits
   delimited `.txt`); the CSV preview's **Lines** option forces any file
