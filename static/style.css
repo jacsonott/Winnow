@@ -484,7 +484,9 @@ html[data-stripes="off"][data-style][data-theme] { --row-even: var(--ink); }
 }
 .job-head { display: flex; align-items: center; gap: 8px; }
 .job-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.job-phase { color: var(--dim); text-transform: uppercase; font-size: 10px; letter-spacing: .06em; }
+/* Never wrapped: a two-word badge ("out of space", "upload failed") broken
+   over two lines beside the name reads as two badges. */
+.job-phase { flex: none; white-space: nowrap; color: var(--dim); text-transform: uppercase; font-size: 10px; letter-spacing: .06em; }
 .job-phase.error { color: var(--danger); }
 .job-phase.done { color: var(--str); }
 .job-x {

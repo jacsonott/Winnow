@@ -56,6 +56,7 @@ from . import combine  # noqa: F401 — registers the multi-column ops (coalesce
 from . import decode  # noqa: F401 — registers the decode ops (URL decode) the same way
 from . import structparse  # noqa: F401 — registers the JSON/XML extraction ops into timeparse.OPERATIONS
 from . import timeparse
+from . import diskspace
 from . import iisread
 from . import kvread
 from . import bodyread
@@ -2225,7 +2226,11 @@ def _kept_error(e: Exception, total: int) -> Exception:
     """A reader's failure part-way through, saying how many rows it kept
     (ingest_csv's message), so the analyst can tell the table in the list
     is partial. With nothing kept the error is the reader's own: the table
-    is dropped, and there is nothing to add."""
+    is dropped, and there is nothing to add. A full disk says so instead
+    (diskspace.stopped_error), kept rows and all."""
+    full = diskspace.stopped_error(e, total)
+    if full is not None:
+        return full
     if not total:
         return e
     error = ValueError(f"{e} — import stopped there; the {total:,} rows before it were kept")
@@ -3967,8 +3972,18 @@ class Store:
                     first = key not in self._fts_failures
                     self._fts_failures.add(key)
                 if first and not self._closing:
-                    wlog.record("warn", f"Search index for table {source_id} not built: {e} — "
-                                        "searches of it scan the table instead")
+                    if diskspace.is_disk_full(e):
+                        # An error, not a warning: the disk is full, and the
+                        # next thing the analyst saves will fail the same way.
+                        # The badge on Case ▾ is how they hear about it.
+                        where = diskspace.free_space(self.storage_places())
+                        wlog.record("error", f"Search index for table {source_id} not built: "
+                                             "out of disk space. " + (f"{where} " if where else "")
+                                             + "Searches of it scan the table instead until there is "
+                                             "room to build it.")
+                    else:
+                        wlog.record("warn", f"Search index for table {source_id} not built: {e} — "
+                                            "searches of it scan the table instead")
 
     def _is_fts_building(self, source_id: int) -> bool:
         with self._threads_lock:
@@ -4107,6 +4122,13 @@ class Store:
                 with self.lock, self.db:
                     self.db.execute(f"CREATE INDEX IF NOT EXISTS {q(name)} ON {q(table)}({q(col)}{collate})")
             except sqlite3.Error as e:
+                if diskspace.is_disk_full(e):
+                    # Every other index here would fail the same way, and
+                    # the rows are in: one line that says why, and stop.
+                    wlog.record("error", f"{src['name']}: imported, but out of disk space for its "
+                                         f"indexes, so filters and sorts on it scan the table. "
+                                         f"{diskspace.free_space(self.storage_places())}")
+                    return
                 does = "filters on it scan" if purpose == "filter" else "a first sort by it sorts"
                 wlog.record("warn", f"{src['name']}: no index on {col} ({e}) — {does} the table")
 
@@ -5390,12 +5412,17 @@ class Store:
                     with contextlib.suppress(Exception):
                         total = self._commit_ingest_batch(insert, batch, source_id, total)
                         batch.clear()
-                line = getattr(reader, "line_num", 0)
-                where = f"Line {line:,}: " if line else ""
-                kept = (f" — import stopped there; the {total:,} rows before it were kept"
-                        if total else "")
-                error = ValueError(f"{where}{e}{kept}")
-                error.__cause__ = e
+                # A full disk is not the line's fault: the reader is up to
+                # a batch past the commit that failed. Said as what it is
+                # (diskspace.stopped_error), with what was kept.
+                error = diskspace.stopped_error(e, total)
+                if error is None:
+                    line = getattr(reader, "line_num", 0)
+                    where = f"Line {line:,}: " if line else ""
+                    kept = (f" — import stopped there; the {total:,} rows before it were kept"
+                            if total else "")
+                    error = ValueError(f"{where}{e}{kept}")
+                    error.__cause__ = e
             finally:
                 fh.close()
 
@@ -5522,9 +5549,11 @@ class Store:
                     with contextlib.suppress(Exception):
                         total = self._commit_ingest_batch(insert, batch, source_id, total)
                         batch.clear()
-                kept = f" — import stopped there; the {total:,} lines before it were kept" if total else ""
-                error = ValueError(f"Line {total + 1:,}: {e}{kept}")
-                error.__cause__ = e
+                error = diskspace.stopped_error(e, total, "lines")   # as ingest_csv
+                if error is None:
+                    kept = f" — import stopped there; the {total:,} lines before it were kept" if total else ""
+                    error = ValueError(f"Line {total + 1:,}: {e}{kept}")
+                    error.__cause__ = e
             finally:
                 fh.close()
 
@@ -5732,9 +5761,11 @@ class Store:
                     with contextlib.suppress(Exception):
                         total = self._commit_ingest_batch(insert, batch, source_id, total)
                         batch.clear()
-                kept = f" — import stopped there; the {total:,} rows before it were kept" if total else ""
-                error = ValueError(f"Row {total + 1:,}: {e}{kept}")
-                error.__cause__ = e
+                error = diskspace.stopped_error(e, total)   # as ingest_csv
+                if error is None:
+                    kept = f" — import stopped there; the {total:,} rows before it were kept" if total else ""
+                    error = ValueError(f"Row {total + 1:,}: {e}{kept}")
+                    error.__cause__ = e
             finally:
                 fh.close()
 
@@ -6622,10 +6653,12 @@ class Store:
                     with contextlib.suppress(Exception):
                         total = self._commit_ingest_batch(insert, batch, source_id, total)
                         batch.clear()
-                kept = (f" — import stopped; the {total:,} records before the failure were kept"
-                        if total else "")
-                error = ValueError(f"{e}{kept}")
-                error.__cause__ = e
+                error = diskspace.stopped_error(e, total, "records")   # as ingest_csv
+                if error is None:
+                    kept = (f" — import stopped; the {total:,} records before the failure were kept"
+                            if total else "")
+                    error = ValueError(f"{e}{kept}")
+                    error.__cause__ = e
 
         types = [infer_type([r[i] for r in sample]) for i in range(ncols)] if sample else ["text"] * ncols
         colmeta = [{"name": c, "type": t} for c, t in zip(cols, types)]
@@ -6752,7 +6785,9 @@ class Store:
                     total = self._commit_ingest_batch(insert, batch, source_id, total)
                     batch.clear()
             except Exception as e:
-                error = e
+                # The parser's own error stays the parser's; a full disk
+                # says so, with what was kept (diskspace.stopped_error).
+                error = diskspace.stopped_error(e, total) or e
 
         types = [infer_type([r[i] for r in sample]) for i in range(ncols)] if sample else ["text"] * ncols
         if column_types:
@@ -7058,6 +7093,9 @@ class Store:
                 "source_ids": [],
                 "result": None,
                 "error": None,
+                # "disk_full" when the disk filling up is why it failed —
+                # the jobs panel's badge says so (jobs.js).
+                "error_kind": None,
                 "cancelled": False,
                 "started_at": time.time(),
                 "finished_at": None,
@@ -7269,12 +7307,23 @@ class Store:
             # And so does what a failed one committed before the error.
             self._record_upload_path_quietly(job)
             self._file_job_results_quietly(job, results)
+            # A full disk is said as one, with the free space on each drive
+            # an import writes to — "database or disk is full" against a
+            # line number was all an analyst got (diskspace's docstring).
+            full = diskspace.is_disk_full(e)
+            msg = self._disk_full_job_message(job, e, results) if full else str(e)
             with self._ingest_jobs_lock:
                 job["status"] = "error"
-                job["error"] = str(e)
+                job["error"] = msg
+                job["error_kind"] = "disk_full" if full else None
             # The toast this becomes is gone in seconds; this is the record.
-            wlog.record("error", f"{self._job_noun(job)} failed: {job['name']} ({job['kind']}) — "
-                                 f"{type(e).__name__}: {e}")
+            if full:
+                cause = diskspace.root_cause(e)
+                wlog.record("error", f"{self._job_noun(job)} failed: {job['name']} ({job['kind']}) — "
+                                     f"{msg} [{type(cause).__name__}: {cause}]")
+            else:
+                wlog.record("error", f"{self._job_noun(job)} failed: {job['name']} ({job['kind']}) — "
+                                     f"{type(e).__name__}: {e}")
         finally:
             with self._ingest_jobs_lock:
                 job["finished_at"] = time.time()
@@ -7326,10 +7375,42 @@ class Store:
         except Exception as e:  # noqa: BLE001 — logged; the import itself stands
             wlog.record("warn", f"{job['name']}: imported, but not filed in its table folder ({e})")
 
+    def storage_places(self, *, views: bool = False) -> list[tuple[str, str]]:
+        """The folders this case writes to, as (label, folder), for saying
+        where the room ran out (diskspace.free_space): the case file's
+        folder, and the temp folder — upload spools, and SQLite's own temp
+        files (temp_store=FILE), which an index build sorts through. With
+        `views`, the views database's folder too (/dev/shm on Linux; the
+        temp folder elsewhere, where it adds nothing)."""
+        places = [("the case", os.path.dirname(os.path.abspath(self.path))),
+                  ("the temp folder", tempfile.gettempdir())]
+        views_path = getattr(self, "_views_path", None)
+        if views and views_path:
+            places.append(("Winnow's scratch folder", os.path.dirname(views_path)))
+        return places
+
+    def _disk_full_job_message(self, job: dict, e: BaseException, results: list[dict]) -> str:
+        """job.error for a job the disk filling stopped. The reader that
+        stopped knows what it kept (a DiskFullError in the chain); a failure
+        outside one — a multi-table job between tables — did not get far
+        enough to keep anything of the table it was on."""
+        if job.get("kind") == "derive":
+            outcome, advice = "the column's values could not be written", "derive it again"
+        else:
+            found = diskspace.find_disk_full_error(e)
+            outcome, advice = ((found.outcome, found.advice) if found is not None
+                               else ("the import did not finish", "import the file again"))
+            if results:
+                n = len(results)
+                outcome += (f" (the {n} table{'s' if n != 1 else ''} it finished before that "
+                            f"{'were' if n != 1 else 'was'} kept)")
+        return diskspace.message(outcome, advice, self.storage_places())
+
     def _ingest_job_snapshot(self, job: dict) -> dict:
         keys = ("job_id", "kind", "name", "status", "rows_done", "units_done",
                 "units_total", "unit", "tables_done", "tables_total", "current_table",
-                "source_ids", "result", "error", "cancelled", "started_at", "finished_at")
+                "source_ids", "result", "error", "error_kind", "cancelled", "started_at",
+                "finished_at")
         with self._ingest_jobs_lock:
             return {k: job[k] for k in keys}
 

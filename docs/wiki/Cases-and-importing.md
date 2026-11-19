@@ -997,9 +997,11 @@ right — the same panel that shows search-index builds.
 | Row | Shows | ✕ |
 | --- | --- | --- |
 | uploading | A browser upload's transfer, in MB. | Cancels the upload. |
+| upload failed | An upload the server could not take, and why. It stays until you dismiss it. | Dismisses the row. |
 | importing | Progress and rows so far; a multi-table job reads `name — 2/5: table`. | Cancels the import. |
 | *N* queued | Imports waiting. Two run at once. | Cancels all of them. |
 | done, error, cancelled | The result. Finished rows clear after a few seconds; errors stay. | Dismisses the row. |
+| out of space | An upload or import the disk filling up stopped. See [The disk is full](#the-disk-is-full). It stays until you dismiss it. | Dismisses the row. |
 | indexing | A search index being built. | — |
 
 **Clear all** dismisses every finished row and leaves running work alone.
@@ -1010,8 +1012,31 @@ SQLite, Excel and Plaso.
 **Cancelling drops the table entirely**, so a half-imported table never sits
 in the list looking complete; a SQLite or Excel job keeps the tables it had
 finished. An import that fails with an error keeps what it read before the
-problem. Opening another case or shutting Winnow down cancels running
-imports.
+problem, and its table appears in the list with the rows it got. Opening
+another case or shutting Winnow down cancels running imports.
+
+### The disk is full
+
+An import needs room in two places: the drive the case file is on, which
+grows by about as much as the file you import (more with its search index),
+and the temp folder. **Upload from browser…** needs about twice the file's
+size in the temp folder while the file arrives, for the moment it is copied;
+**Add from this machine…** reads the file in place and needs none.
+
+When either fills up, the import stops and its row in the jobs panel says
+**out of space**, with a message that says what happened and where:
+
+> Out of disk space: the import stopped after 40,000 rows, which were kept as
+> a partial table. The drive holding the case (D:\Cases) has 0 B free; the one
+> holding the temp folder (C:\Users\you\AppData\Local\Temp) has 12.4 GB.
+> Free up space, then delete that table and import the file again.
+
+An upload that could not be received at all says *the file … could not be
+received, so nothing was imported*. The row stays until you dismiss it, the
+message is in **Case ▾ → Log…**, and the red badge on **Case ▾** lights. A
+table the import kept holds only the rows before the disk filled: delete it
+(**Remove…** in the table's menu) once there is room, and import the
+file again. See [Troubleshooting](Troubleshooting.md#an-import-fails-out-of-disk-space).
 
 A finished import's toast says *name: N rows imported*, plus any of:
 

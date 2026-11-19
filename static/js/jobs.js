@@ -96,7 +96,6 @@ export function uploadWithProgress(url, fd, name) {
       try { body = JSON.parse(xhr.responseText); } catch {}
       if (xhr.status >= 200 && xhr.status < 300) { startJobsPoll(); resolve(body); }
       else {
-        renderJobsPanel();
         const detail = body && body.detail;
         const err = new Error((typeof detail === 'string' ? detail : detail && detail.message) || xhr.statusText);
         err.status = xhr.status;
@@ -107,10 +106,16 @@ export function uploadWithProgress(url, fd, name) {
         if (caseRefused(err, sentCase) && err.aborted) {
           err.message = 'this window opened another case before it finished uploading, so it was not imported';
         }
+        failedUploadRow(name, err);
         reject(err);
       }
     };
-    xhr.onerror = () => { activeUploads.delete(id); renderJobsPanel(); reject(new Error('Upload failed — is the server still up?')); };
+    xhr.onerror = () => {
+      activeUploads.delete(id);
+      const err = new Error('Upload failed — is the server still up?');
+      failedUploadRow(name, err);
+      reject(err);
+    };
     xhr.onabort = () => {
       activeUploads.delete(id);
       renderJobsPanel();
@@ -124,6 +129,31 @@ export function uploadWithProgress(url, fd, name) {
   });
 }
 
+
+/* HTTP 507: the server ran out of disk space (server.py's full-disk
+   handlers), and its message says how much is left where. */
+export const DISK_FULL_STATUS = 507;
+
+/* How long a failure's toast stays up. A full disk gets longer than the
+   usual few seconds: its message names the drives and what to do, and the
+   analyst who started a big import has often looked away. */
+export function failureToastMs(diskFull, ms = 6000) {
+  return diskFull ? 15000 : ms;
+}
+
+/* A failed upload stays in the panel as an error row until dismissed, the
+   way a failed import job's row does. It used to leave only a toast, gone
+   in six seconds — and when the temp folder filled while the file was
+   still arriving, that toast said "There was an error parsing the body".
+   An analyst who looked away saw the upload row vanish and no table
+   arrive: an import that had failed silently. Not for a cancel, which is
+   the analyst's own doing and says so where they did it. */
+function failedUploadRow(name, err) {
+  const diskFull = err.status === DISK_FULL_STATUS;
+  createNotice('upload', { title: name, detail: err.message }).fail({
+    phase: diskFull ? 'out of space' : 'upload failed',
+  });
+}
 
 /* A short list of operations still running, for the shutdown guard — empty
    when the server is idle. Reads the same live state the corner panel does
@@ -247,7 +277,7 @@ export async function pollJobs() {
         toast(`${what}: ${(res.rows || 0).toLocaleString()} rows read`
           + (failed ? ` · ${failed.toLocaleString()} value${failed === 1 ? '' : 's'} not found` : ''), failed ? 6000 : 3000);
       } else if (j.status === 'error') {
-        toast(`Could not derive "${j.name}": ${j.error}`, 8000);
+        toast(`Could not derive "${j.name}": ${j.error}`, failureToastMs(j.error_kind === 'disk_full', 8000));
       }
       setTimeout(() => { dismissedJobs.add(j.job_id); renderJobsPanel(); }, 8000);
       continue;
@@ -294,7 +324,7 @@ export async function pollJobs() {
       // tab and the rail reflect it.
       scanWatchlistForSources(j.source_ids || []);
     } else if (j.status === 'error') {
-      toast(`Import failed for ${j.name}: ${j.error}`, 8000);
+      toast(`Import failed for ${j.name}: ${j.error}`, failureToastMs(j.error_kind === 'disk_full', 8000));
     } else {
       toast(`Import of ${j.name} cancelled`, 3000);
       setTimeout(() => { dismissedJobs.add(j.job_id); renderJobsPanel(); }, 8000);
@@ -313,7 +343,12 @@ export async function pollJobs() {
         // A derive that failed or was cancelled has changed the table too:
         // its column was removed, put back as it was, or marked failed
         // with its values cleared (Store._fail_derive_backfill).
-        || j.kind === 'derive')) {
+        || j.kind === 'derive'
+        // And an import that failed part way keeps the rows it committed
+        // as a table its message points at ("kept as a partial table") —
+        // which then did not appear until something else refreshed the
+        // list, long after the message had gone.
+        || j.status === 'error')) {
       // navigate:false — a finished import refreshes the tab strip, the
       // sidebar and the dashboards, but never takes the analyst somewhere
       // they didn't ask to go (see loadSources). The setting above is the
@@ -510,7 +545,10 @@ export function renderJobsPanel() {
   }
   for (const j of finished) {
     panel.append(jobPanelRow({
-      label: j.name, phase: j.status, done: true,
+      label: j.name, done: true,
+      // The badge says why when the disk filled: "error" over a message
+      // that starts "Out of disk space" buries the one thing to act on.
+      phase: j.error_kind === 'disk_full' ? 'out of space' : j.status, cls: j.status,
       detail: j.status === 'done' ? jobDoneDetail(j) : (j.error || ''),
       onDismiss: () => { dismissedJobs.add(j.job_id); renderJobsPanel(); },
     }));

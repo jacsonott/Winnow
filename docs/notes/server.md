@@ -265,6 +265,27 @@ see [docs/notes/README.md](README.md) for the whole set.
   `Store._require_columns` raises, and no open case is a 400 — nothing
   is broken, there's just no case yet. `tests/test_api_routes.py`'s
   last section pins each one through a client that doesn't re-raise.
+- **A full disk is a 507 that says so, from any route.** Two handlers
+  look for one in the exception's chain (`diskspace.is_disk_full`) and
+  answer `_disk_full_response`: the catch-all (`_unhandled_error_handler`,
+  which used to say "Internal error: database or disk is full") and one
+  on Starlette's `HTTPException`, which is the only way to reach an
+  upload whose temp folder filled while it was arriving — FastAPI turns
+  that into a 400 "There was an error parsing the body" before the route
+  runs, with the `OSError` in `__cause__` and nothing logged. The
+  HTTPException handler rewrites **only** a detail that is nothing but
+  an error it was raised over (`HTTPException(400, str(e))`, what the
+  upload routes and the sync imports do) or that parse failure. A route
+  that wrote a message of its own keeps it: save-as's "Could not move the
+  case file: …" (tests/test_quicklook.py) was being replaced with a
+  generic one until that rule went in. Everything else goes to FastAPI's
+  own `http_exception_handler` untouched. The message names the free space
+  per drive (`Store.storage_places`; the temp folder alone with no case
+  open), says what was kept when a reader stopped part way (a
+  `DiskFullError` in the chain), and gives an upload's size from its
+  Content-Length, because the free space is measured after the partial
+  copy was thrown away. Logged as an error so Case ▾ lights up. See
+  [ingest.md](ingest.md) for the import side; tests/test_disk_full.py.
 - **The background-search routes** — `POST /api/view/start`, `GET
   /api/view/job`, `POST /api/view/job/cancel`, `POST /api/view/adopt`
   (the search box's build, run as a job that builds a *held* view; see

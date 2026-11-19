@@ -148,6 +148,14 @@ console.py         Console output that cannot stall the server. main()
                     thread said it, the event loop included. See
                     docs/notes/server.md.
 store.py           All SQLite: ingest, view materialisation, tags, sessions, export.
+diskspace.py       A full disk, said as one. Recognizes it anywhere in an
+                    exception's chain (ENOSPC/EDQUOT, Windows' disk-full
+                    codes, SQLITE_FULL — never "disk I/O error"), and words
+                    the message the jobs panel, the 507 and the log give:
+                    what the import kept, the free space on each drive it
+                    writes to, what to do. Every reader's error wrapper asks
+                    stopped_error() first. Stdlib only, imports nothing from
+                    the app. See docs/notes/ingest.md and server.md.
 sqlresults.py      The SQL pane's results, held server-side: a run's rows
                     copied in batches into a scratch SQLite file in the
                     tempdir (the views prefix, flock and sweep), then

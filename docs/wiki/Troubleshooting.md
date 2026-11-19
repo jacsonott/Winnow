@@ -271,6 +271,28 @@ check for a stray quote if the row count looks low", or a file that was
 "not UTF-8 — read as Windows-1252". [Cases and
 importing](Cases-and-importing.md) explains each.
 
+### An import fails: "Out of disk space"
+
+The drive the case is on, or the one holding the temp folder, filled up
+while the import was running. The jobs panel's row says **out of space**,
+and the message names each drive and how much is free on it, emptiest
+first, so you know which one to clear. Then:
+
+1. Free some space on the drive it names: empty the Recycle Bin, move old
+   case files or exports elsewhere, or clear the temp folder.
+2. If the message says rows *were kept as a partial table*, remove that
+   table (**Remove…** in its menu). It holds only the rows read before the
+   disk filled.
+3. Import the file again. For a big file, **Add from this machine…** in
+   the Import window reads it in place, where **Upload from browser…**
+   first copies it to the temp folder (and needs about twice its size
+   there for a moment).
+
+A search index the disk stopped is reported the same way in **Case ▾ →
+Log…**: the table still works, and searches of it scan the table until
+there is room for the index. See
+[Cases and importing](Cases-and-importing.md#the-disk-is-full).
+
 ### Scrolling is slow over Remote Desktop
 
 Turn on **Settings → Remote session → Remote session mode**. It scrolls the

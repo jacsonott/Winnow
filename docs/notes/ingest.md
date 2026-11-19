@@ -786,6 +786,47 @@ see [docs/notes/README.md](README.md) for the whole set.
   in the table list reads as a real empty import. Pinned by
   tests/test_ingest_broken.py.
 
+- **A full disk is said as one, and it reaches the import as half a
+  dozen other errors** (`winnow/diskspace.py`). Reported from the field as
+  an import that "failed silently", and reproduced on a small tmpfs both
+  ways a full disk stops one:
+  - **The temp folder fills while a browser upload is still arriving.**
+    Starlette writes the form's file to a temp file *before the route
+    runs*, and FastAPI answers any failure there with a bare 400 "There
+    was an error parsing the body", the `OSError` only in `__cause__`,
+    and nothing logged. The page showed that in a six-second toast and
+    took the upload's row out of the jobs panel. An upload needs about
+    **twice** the file's size in the temp folder for a moment: Starlette's
+    copy, then the route's own copy into its spool (`_upload_spool`).
+  - **The case's drive fills mid-import.** The commit raises SQLite's
+    "database or disk is full", and the reader's wrapper prefixed it with
+    the line it had got to ("Line 40,001: …"), which is a batch past the
+    commit that failed and reads as if that line were the problem. The
+    partial table it kept was not even listed until something refreshed
+    the sidebar: the jobs poll only reloaded the list for a `done` job.
+
+  So every reader's error wrapper (`ingest_csv`, `ingest_text`,
+  `_ingest_planned_lines`, `ingest_json`, `ingest_rows` and `_kept_error`
+  for the rest) asks `diskspace.stopped_error(e, total)` first, which
+  returns a `DiskFullError` saying what was kept ("the import stopped
+  after 40,000 rows, which were kept as a partial table") or None for any
+  other error, so their own messages are untouched. The job worker turns
+  that into `job.error` with the free space on each drive the import
+  writes to (`Store.storage_places`: the case's folder and the temp
+  folder, emptiest first, named so the analyst knows which to clear) and
+  sets `job.error_kind = "disk_full"`, which the jobs panel's badge reads
+  ("out of space"). `is_disk_full` walks the exception chain (`__cause__`,
+  else `__context__` unless suppressed) and believes only ENOSPC/EDQUOT,
+  Windows' two disk-full codes and SQLITE_FULL — never "disk I/O error",
+  since telling an analyst to free space on a failing drive sends them
+  the wrong way. The search index and the import's own indexes fail the
+  same way after the rows are in: those log one **error** (the Case ▾
+  badge) rather than a warning per column. The HTTP half (the 507, and
+  which HTTPExceptions get rewritten) is in [server.md](server.md); a
+  failed upload keeping its row is `failedUploadRow` in jobs.js. Pinned by
+  tests/test_disk_full.py and tests/ui/test_disk_full_ui.py, against a
+  faked disk: CI cannot mount a filesystem small enough to fill.
+
 - **A source's row count is final before its columns are.** Each batch
   commits `sources.row_count` with its rows, so the count a source list
   reads grows while the file is read. The typed column list is the import's last write

@@ -45,6 +45,18 @@ background ingest jobs (lifecycle, byte-progress, the queued-cancel path,
 cancel-drops-the-partial-source — driven through `ingest_csv`'s own
 `cancel` hook so the cancellation point is deterministic, not a race —
 multi-table sqlite jobs, spool deletion, close-with-running-job).
+`test_disk_full.py` covers a full disk (winnow/diskspace.py): each
+reader's job saying "Out of disk space" with what it kept and the free
+space per drive, rather than a line number; the 507 for an upload whose
+temp folder filled while FastAPI was still parsing it (its load-bearing
+test: that one used to be a bare "There was an error parsing the body",
+logged nowhere); and that an HTTPException a route worded itself is left
+alone. The disk is faked — a commit raising SQLite's own SQLITE_FULL
+message, a write raising ENOSPC — because CI cannot mount a filesystem
+small enough to fill; the messages asserted are the ones a real full
+tmpfs produced. tests/ui/test_disk_full_ui.py holds the panel to keeping
+a failed upload's row, the "out of space" badge, and the sidebar listing
+the partial table a failed import kept.
 `test_import_into_folder.py` covers choosing a table folder at import
 (`folder_id` on every route, `--folder`): its load-bearing tests are the
 stale id refused before anything is read (no job, no table), and the
