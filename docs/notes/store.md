@@ -931,7 +931,9 @@ see [docs/notes/README.md](README.md) for the whole set.
     (2.0 s of it TS_NORMALIZE, a Python call per row, so it is the same
     cost for every non-ISO shape). The test is `_text_sorts_by_time`:
     every value at both ends of the table (`_TIME_SORT_SAMPLE` rows by
-    rid each way) starts with a `YYYY-MM-DD` date. A sample, not
+    rid each way) starts with a `YYYY-MM-DD` date and none has a
+    one-digit hour (`_ONE_DIGIT_HOUR_GLOB`: "2026-06-23 9:05:00" sorts
+    after "2026-06-23 10:00:00" as text). A sample, not
     `_column_is_date_led`'s exact scan: that is a full read of a column
     no index may cover yet, ahead of the first sort, when the column's
     type was itself guessed from 500 rows. Both ends, so two exports
