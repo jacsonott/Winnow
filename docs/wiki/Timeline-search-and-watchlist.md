@@ -1,6 +1,6 @@
 # Timeline, Search all and the Watchlist
 
-Three pages work across the whole case rather than one table. The **Timeline** reads your findings back: every tagged row from every table, in time order. **Search all** answers "where does this appear?" for a term or a pasted list of indicators, table by table. The **Watchlist** keeps a standing list of indicators that is checked against every table, including tables you import later, and can tag what it finds. All three cover closed tables as well as open ones.
+Three pages work across the whole case rather than one table. The **Timeline** reads your findings back: every tagged row from every table, in time order. **Search all** answers "where does this appear?" for a term or a pasted list of indicators, table by table. The **Watchlist** keeps a standing list of indicators that is checked against every table, including tables you import later, and can tag what it finds. All three cover closed tables as well as open ones. To ask the same questions of your other cases, see [Across cases](Across-cases.md).
 
 ## The Timeline
 

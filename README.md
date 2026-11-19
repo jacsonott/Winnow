@@ -110,6 +110,9 @@ Notes and dashboards.
 - **Watchlist** — case-level indicators scanned across every table,
   including ones you import later, with optional auto-tagging and a count
   on the tab when new hits land.
+- **Across cases** — the same questions of every case on your list: where
+  else these values landed, and every host's findings on one timeline. Tag
+  a hit in the case it belongs to, or open it there.
 - **Notes** — a Markdown scratchpad in the case file, with links to tables,
   SQL tabs and dashboards, and every row note listed under it.
 - **Dashboards** — boards of widgets; click a number and the table opens

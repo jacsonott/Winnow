@@ -39,6 +39,7 @@ from fastapi.responses import StreamingResponse, FileResponse, HTMLResponse, JSO
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from winnow import acrosscases
 from winnow import assoc as file_assoc
 from winnow import browser
 from winnow import console
@@ -1642,6 +1643,194 @@ async def api_multicase_timeline(body: MultiCaseBody):
     return await run_in_threadpool(
         multicase.timeline_across, paths, start=body.start, end=body.end,
         limit=min(body.limit, 20000), names=names)
+
+
+# ------------------------------------------------- across cases, redesigned
+#
+# The same questions, asked of the backend the open case uses
+# (winnow/acrosscases.py): every other case is a read-only VISITOR — a
+# Store opened read_only, no lock, nothing written — and every answer is a
+# list of Timeline lines carrying the case they live in. The one write is
+# /api/across/tag, which writes to the case that owns the row, and only
+# when no other Winnow has that case open. The /api/multicase routes above
+# stay until this replaces them (#228).
+
+ACROSS_SWEEPS = acrosscases.SweepJobs()
+
+
+class AcrossBody(BaseModel):
+    paths: list[str] = []          # case files; empty means every registered case
+    values: list[str] | None = None
+    sql: str | None = None
+    start: str = ""
+    end: str = ""
+    tags: list[str] | None = None  # tag NAMES (ids are per case)
+
+
+def _across_cases(paths: list[str]) -> tuple[list[str], dict[str, str], tuple | None]:
+    """The registered cases to read (all of them when none are named),
+    their names, and (path, Store) for the case this Winnow has open —
+    which is read through its own Store rather than visited, so it is
+    part of the answer and sees its own latest tags."""
+    known = {c["path"]: (c.get("name") or os.path.basename(c["path"])) for c in WS.cases.list()}
+    here = None
+    if STORE is not None and not STORE.closed:
+        # By the registry's spelling of it, when it has one, so the
+        # page's paths and this one compare equal.
+        spelled = next((p for p in known if _same_case_path(p, STORE.path)), None)
+        if spelled is None:
+            spelled = STORE.path
+            known[spelled] = os.path.splitext(os.path.basename(spelled))[0]
+        here = (spelled, STORE)
+    if paths:
+        unknown = [p for p in paths if p not in known]
+        if unknown:
+            raise HTTPException(400, f"Not a registered case: {unknown[0]}")
+        out = list(dict.fromkeys(paths))
+    else:
+        out = [p for p in known if os.path.isfile(p)]
+    return out, known, here
+
+
+@app.get("/api/across/cases")
+def api_across_cases():
+    """The registered cases, the open one marked, and which another
+    Winnow holds (read fine, but a tag there is refused)."""
+    here = STORE.path if STORE is not None and not STORE.closed else None
+    out = []
+    for c in WS.cases.list():
+        exists = os.path.isfile(c["path"])
+        is_here = bool(here) and _same_case_path(c["path"], here)
+        holder = probe_case_lock(c["path"]) if exists and not is_here else None
+        out.append({"path": c["path"], "name": c.get("name") or os.path.basename(c["path"]),
+                    "group": c.get("group") or "", "is_open": is_here, "exists": exists,
+                    "held_by": describe_case_lock(holder) if holder else None})
+    return {"cases": out}
+
+
+@app.post("/api/across/sweep")
+def api_across_sweep(body: AcrossBody):
+    """Where else: the Search-all sweep in every chosen case, as a
+    background job. Blank values mean this case's watchlist."""
+    paths, names, here = _across_cases(body.paths)
+    values = [v.strip() for v in (body.values or []) if str(v).strip()]
+    if not values:
+        if here is None:
+            raise HTTPException(400, "Give some values, or open a case with a watchlist")
+        values = [i["value"] for i in here[1].list_indicators()]
+    if not values:
+        raise HTTPException(400, "No values to look for — add some to the watchlist, or paste a list")
+    return ACROSS_SWEEPS.start(paths, list(dict.fromkeys(values)), names=names,
+                               configs_for=_resolve_timeline_configs, here=here)
+
+
+@app.get("/api/across/sweep/{job_id}")
+def api_across_sweep_poll(job_id: int):
+    job = ACROSS_SWEEPS.get(job_id)
+    if job is None:
+        raise HTTPException(404, "That sweep has been replaced by a newer one")
+    return job
+
+
+@app.post("/api/across/sweep/{job_id}/cancel")
+def api_across_sweep_cancel(job_id: int):
+    ACROSS_SWEEPS.cancel(job_id)
+    return {"ok": True}
+
+
+@app.post("/api/across/timeline")
+def api_across_timeline(body: AcrossBody):
+    """The findings of every chosen case on one Timeline."""
+    paths, names, here = _across_cases(body.paths)
+    try:
+        return acrosscases.timeline_across(paths, names=names, configs_for=_resolve_timeline_configs,
+                                           here=here, start=body.start, end=body.end,
+                                           tag_names=body.tags)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/across/sql")
+def api_across_sql(body: AcrossBody):
+    """One read-only SELECT across cases attached as c1, c2… (multicase's
+    query_across, the engine the old pane used), and its rows as lines
+    when they name rows."""
+    paths, names, here = _across_cases(body.paths)
+    try:
+        result = multicase.query_across(paths, body.sql or "", limit=5000, names=names)
+        result["lines"] = acrosscases.query_lines(result, body.sql or "", names=names,
+                                                  configs_for=_resolve_timeline_configs, here=here)
+    except (ValueError, multicase.NotACaseFile, acrosscases.NotVisitable) as e:
+        raise HTTPException(400, str(e))
+    except sqlite3.Error as e:
+        raise HTTPException(400, f"SQL error: {e}")
+    return result
+
+
+@app.post("/api/across/schema")
+def api_across_schema(body: AcrossBody):
+    paths, names, _here = _across_cases(body.paths)
+    try:
+        return {"schema": multicase.schema_across(paths, names)}
+    except (ValueError, multicase.NotACaseFile) as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/across/row")
+def api_across_row(path: str, source_id: int, rid: int):
+    """A line's row in full, with the tags its case offers."""
+    paths, _names, here = _across_cases([path])
+    try:
+        if here and _same_case_path(path, here[0]):
+            return acrosscases.row_detail(here[1], source_id, rid)
+        with acrosscases.visit(path) as st:
+            return acrosscases.row_detail(st, source_id, rid)
+    except acrosscases.NotVisitable as e:
+        raise HTTPException(400, str(e))
+
+
+class AcrossTag(BaseModel):
+    path: str
+    source_id: int
+    rid: int
+    tag_id: int
+    on: bool = True
+
+
+@app.post("/api/across/tag")
+def api_across_tag(body: AcrossTag):
+    """Tag a row in the case that owns it. The open case is tagged through
+    its own Store. Another case is opened for the one write — a whole
+    Store, so the write goes through _apply_tag_change like every tag
+    (invariant #7) and the case's lock is taken while it happens — and
+    closed again; under _CASE_SWITCH, so this server cannot open it a
+    second time meanwhile. A case another Winnow has open is refused with
+    who holds it (409 case_in_use): its tags are that Winnow's to write."""
+    _across_cases([body.path])
+    here = STORE if STORE is not None and not STORE.closed else None
+    if here is not None and _same_case_path(body.path, here.path):
+        here.set_tags(body.source_id, [body.rid], body.tag_id, body.on)
+        return acrosscases.row_detail(here, body.source_id, body.rid)
+    with _CASE_SWITCH:
+        holder = probe_case_lock(body.path)
+        if holder:
+            raise HTTPException(409, {"error": "case_in_use", "holder": holder,
+                                      "message": f"Open in another Winnow ({describe_case_lock(holder)}) "
+                                                 "— tag it there"})
+        try:
+            st = _open_store(body.path)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        try:
+            if not st._case_lock.held:
+                raise HTTPException(409, {"error": "case_in_use", "holder": None,
+                                          "message": "Another Winnow took this case just now — tag it there"})
+            if body.tag_id not in {t["id"] for t in st.list_tags()}:
+                raise HTTPException(404, "That tag is no longer in its case")
+            st.set_tags(body.source_id, [body.rid], body.tag_id, body.on)
+            return acrosscases.row_detail(st, body.source_id, body.rid)
+        finally:
+            st.close()
 
 
 @app.get("/api/version")
@@ -5823,7 +6012,7 @@ def api_timeline_templates_delete(template_id: int):
     return {"ok": True}
 
 
-def _resolve_timeline_configs() -> dict[int, dict]:
+def _resolve_timeline_configs(st: Store | None = None) -> dict[int, dict]:
     """Matches every real source currently in the case against workspace.
     timeline_templates by header set (order/case-independent, same
     convention every header-set-keyed workspace store uses), returning
@@ -5842,7 +6031,10 @@ def _resolve_timeline_configs() -> dict[int, dict]:
     templates = WS.timeline_templates.list()
     by_key = {tuple(t["col_names"]): t for t in templates}
     configs: dict[int, dict] = {}
-    for src in store().list_sources():
+    # `st` is another case read across cases (winnow/acrosscases.py): the
+    # templates are this machine's, kept per header set, so they say how
+    # an EvtxECmd table reads in every case, not only the open one.
+    for src in (st or store()).list_sources():
         base = tuple(sorted(c["name"].strip().lower() for c in src["columns"] if not c.get("derived")))
         tmpl = by_key.get(base) or by_key.get(
             tuple(sorted(c["name"].strip().lower() for c in src["columns"])))

@@ -3353,7 +3353,19 @@ def case_session_document_problem(doc: Any) -> str | None:
 class Store:
     FTS_BUILD_CONCURRENCY = 2  # trigram builds are CPU/writer-bound; more just thrash
 
-    def __init__(self, path: str, default_tags: list[tuple] | None = None):
+    def __init__(self, path: str, default_tags: list[tuple] | None = None, *,
+                 read_only: bool = False):
+        # read_only: a VISITOR — another case read through this same Store
+        # code while a different case stays the one this Winnow has open
+        # (winnow/acrosscases.py). The case file is opened read-only and
+        # nothing about it is touched: no case lock (the Winnow that owns
+        # it must not see it as busy), no schema migration, no default
+        # tags, no background index builds. Its views database is its own
+        # scratch file, as for any Store, so the Timeline and search code
+        # that materialize into `v` work unchanged. A write to the case
+        # file raises "attempt to write a readonly database" from SQLite
+        # itself rather than depending on every caller being careful.
+        self.read_only = bool(read_only)
         try:
             self._construct(path, default_tags)
         except BaseException:
@@ -3394,7 +3406,14 @@ class Store:
         self.path = path
         self._default_tags = default_tags or DEFAULT_TAGS
         self.lock = threading.RLock()
-        self.db = _no_dq_strings(sqlite3.connect(path, check_same_thread=False))
+        if self.read_only:
+            # sqlite_peek_uri, as every look at another case is: plain
+            # mode=ro leaves a -wal/-shm pair beside a closed case that a
+            # read-only connection can never remove (docs/notes/store.md).
+            self.db = _no_dq_strings(sqlite3.connect(sqlite_peek_uri(path), uri=True,
+                                                     check_same_thread=False))
+        else:
+            self.db = _no_dq_strings(sqlite3.connect(path, check_same_thread=False))
         self.db.row_factory = sqlite3.Row
         self.db.create_function("REGEXP", 2, _regexp, deterministic=True)
         self.db.create_function("DAY_BUCKET", 1, _day_bucket, deterministic=True)
@@ -3453,7 +3472,8 @@ class Store:
         # can't strand one. Never fatal: `held` False just means nothing
         # will warn the next process.
         self._case_lock = _CaseLock(self.path)
-        self._case_lock.acquire()
+        if not self.read_only:
+            self._case_lock.acquire()
         # Public because server.py has to distinguish "STORE points at this
         # case" from "STORE points at this case and can still answer" — the
         # module global outlives close() on both the case-switch path and
@@ -3474,6 +3494,28 @@ class Store:
         # -wal and removing it and the -shm (see close()).
         self._readers_out = 0
         self._readers_back = threading.Condition(self._reader_lock)
+        if self.read_only:
+            self._check_visitable()
+        else:
+            self._migrate_on_open()
+        self._init_runtime_state()
+
+    def _check_visitable(self) -> None:
+        """A visitor migrates nothing, so it reads only a case this version
+        could have written: one that has been opened by a current Winnow
+        since the columns the read paths name were added. Anything older
+        is refused by name rather than read wrong."""
+        tables = {r[0] for r in self.db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        missing = {"sources", "row_tags", "tag_defs", "derived_columns", "merges"} - tables
+        if missing:
+            raise ValueError(f"{os.path.basename(self.path)} is not a Winnow case this version can read "
+                             f"without opening it (no {', '.join(sorted(missing))})")
+        have = {r[1] for r in self.db.execute("PRAGMA table_info(sources)")}
+        if not {"nickname", "origin", "origin_meta", "ingest"} <= have:
+            raise ValueError(f"{os.path.basename(self.path)} was last opened by an older Winnow — "
+                             "open it here once to bring it up to date")
+
+    def _migrate_on_open(self) -> None:
         with self.db:
             # Detect *before* CREATE TABLE IF NOT EXISTS runs, so a case file
             # that predates open_tabs gets every existing source/merge
@@ -3551,6 +3593,8 @@ class Store:
         # Before _seed_tags, which is the first thing that can hand out an id.
         self._migrate_ids_never_reused()
         self._seed_tags()
+
+    def _init_runtime_state(self) -> None:
         self._view_seq = 0
         # Its own lock for the same reason _search_job_lock exists: handing
         # out a view id must not queue behind a multi-second build. `+=` on
@@ -3701,6 +3745,8 @@ class Store:
         self._op_preempted: set[str] = set()
         self._build_yields: dict[str, int] = {}
         self._build_waiting = 0   # builds for the open table queued on the writer
+        if self.read_only:
+            return
         self._downgrade_legacy_fts()
         self._type_unlooked_derived_columns()
 
@@ -3849,6 +3895,8 @@ class Store:
         queried through the trigram LIKE pushdown that version introduced,
         so on an older runtime it would cost disk and build time while
         every search still ran at fallback speed."""
+        if self.read_only:
+            return  # a visitor builds nothing in a case it only reads
         if sqlite3.sqlite_version_info < TRIGRAM_LIKE_MIN_SQLITE:
             return
         batch = getattr(self._batch, "builds", None)
@@ -3886,6 +3934,8 @@ class Store:
     def _start_fts_builds(self, source_ids: list[int]) -> None:
         """_ensure_fts_building for each of `source_ids`, built in turn by as
         many workers as may build at once (FTS_BUILD_CONCURRENCY)."""
+        if self.read_only:
+            return  # a visitor builds nothing in a case it only reads
         with self._threads_lock:
             todo = [sid for sid in dict.fromkeys(source_ids)
                     if not (sid in self._fts_threads and self._fts_threads[sid].is_alive())]
@@ -4037,6 +4087,8 @@ class Store:
         COUNT(DISTINCT rid) over row_tags, ~12ms on a heavily tagged source,
         and this is called on every filter compile and every group-by — once
         per member, so a merge multiplies it."""
+        if self.read_only:
+            return  # a visitor builds nothing in a case it only reads
         self._ensure_purpose_index_building(source_id, column, "filter", table_name)
 
     def _shape_index_columns(self, src: dict) -> list[str]:
@@ -4132,6 +4184,8 @@ class Store:
         collation) can match — same exclusion the filter index already
         documents, enforced by build_view filtering sort_cols to
         colnames[col] != 'number' before calling this."""
+        if self.read_only:
+            return  # a visitor builds nothing in a case it only reads
         self._ensure_purpose_index_building(source_id, column, "sort", table_name)
 
     def _table_spelling(self, table_name: str, column: str) -> str:
@@ -4166,6 +4220,8 @@ class Store:
 
     def _ensure_purpose_index_building(self, source_id: int, column: str, purpose: str,
                                         table_name: str | None = None) -> None:
+        if self.read_only:
+            return  # a visitor builds nothing in a case it only reads
         table_name = table_name or self._source_lite(source_id)["table_name"]
         batch = getattr(self._batch, "builds", None)
         if batch is not None:
@@ -4177,6 +4233,8 @@ class Store:
         """_ensure_purpose_index_building for each (source_id, column,
         purpose, table_name) in `wanted`: checked on one reader, built by
         one worker."""
+        if self.read_only:
+            return  # a visitor builds nothing in a case it only reads
         if not wanted:
             return
         todo = []
@@ -4850,8 +4908,8 @@ class Store:
         writer (a group_virtual WHERE can contain DAY_BUCKET(...); a raw
         filter fragment echoed into an export can contain REGEXP), so a
         query compiled against one connection never fails on the other."""
-        ro = _no_dq_strings(sqlite3.connect(sqlite_ro_uri(self.path), uri=True,
-                                            check_same_thread=False))
+        uri = sqlite_peek_uri(self.path) if self.read_only else sqlite_ro_uri(self.path)
+        ro = _no_dq_strings(sqlite3.connect(uri, uri=True, check_same_thread=False))
         ro.row_factory = sqlite3.Row
         ro.create_function("REGEXP", 2, _regexp, deterministic=True)
         ro.create_function("DAY_BUCKET", 1, _day_bucket, deterministic=True)
@@ -11228,6 +11286,57 @@ class Store:
                             "tables": [rows_table] if rows_table else []}
         return {"view_id": vid, "row_count": n, "rows": rows, "body_trimmed": body_trimmed,
                 "per_source": per_source, "context_rows": context_rows, "tagged_tables": tagged_tables}
+
+    def build_timeline_of_rows(self, configs: dict[int, dict] | None,
+                               pairs: Iterable[Iterable[int]]) -> dict:
+        """These rows, read as Timeline lines: a timeline view over exactly
+        `pairs` ([source_id, rid], real sources only), in the Timeline's
+        order, which fetch_timeline_rows then pages like any other — the
+        same timestamp, type, body, summary, tags and note the Timeline
+        would give each of them.
+
+        What lets a row found some other way (a search hit, a query result,
+        a row in another case — winnow/acrosscases.py) be shown as the line
+        the analyst already knows how to read, rather than as a fourth
+        shape of its own. Lives beside the Timeline's own view rather than
+        replacing it: kind "timeline" for fetch_timeline_rows' sake, but
+        it evicts nothing, and dies with the Store like any view.
+
+        Pairs naming a table this case doesn't have, or a merge, are left
+        out rather than failing the rest; a rid the table doesn't have
+        simply finds no row."""
+        configs = configs or {}
+        by_source: dict[int, list[int]] = {}
+        for sid, rid in pairs:
+            by_source.setdefault(int(sid), []).append(int(rid))
+        branches: list[str] = []
+        params: list[Any] = []
+        known = {s["id"]: s for s in self.list_sources()}
+        for sid, rids in by_source.items():
+            src = known.get(sid)
+            if src is None or src.get("error") or not src.get("columns"):
+                continue
+            p = self._timeline_parts(src, configs.get(sid, {}))
+            uses = [p["ts_col"]] if p["ts_col"] else []
+            branches.append(
+                f"SELECT {int(sid)} AS source_id, s.rid AS rid, {p['ts_expr']} AS ts "
+                f"FROM {self._from_clause(src, 's', uses)} "
+                f"WHERE s.rid IN ({','.join('?' * len(rids))})")
+            params.extend(rids)
+        vid = self._next_view_id()
+        n = 0
+        with self.lock, self.db:
+            self.db.execute(
+                f"CREATE TABLE v.{q(vid)} (pos INTEGER PRIMARY KEY, source_id INTEGER, rid INTEGER, "
+                f"ts TEXT, tag1 INTEGER, ctx INTEGER, n INTEGER NOT NULL DEFAULT 1, run_n INTEGER, ts_last TEXT)")
+            if branches:
+                n = self.db.execute(
+                    f"INSERT INTO v.{q(vid)}(source_id, rid, ts, ctx) "
+                    f"SELECT source_id, rid, ts, 0 FROM ({union_all(branches)}) "
+                    f"ORDER BY (ts IS NULL) ASC, ts ASC, source_id, rid", params).rowcount
+        self._views[vid] = {"view_id": vid, "kind": "timeline", "row_count": n, "rows": n,
+                            "configs": configs, "rows_table": None, "tables": []}
+        return {"view_id": vid, "row_count": n}
 
     # The fewest lines in a row that fold into one.
     TIMELINE_FOLD_MIN = 3

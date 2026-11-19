@@ -8,36 +8,41 @@ see [docs/notes/README.md](README.md) for the whole set.
 
 ---
 
-- **Across cases: one writable case, N read-only readers.**
-  `winnow/multicase.py` reads OTHER case files (`mode=ro`, no lock, no
-  views database, no heartbeat) while the open case keeps its exclusive
-  lock and its writer — so every invariant in CLAUDE.md holds unchanged
-  and a case another Winnow has open is still readable (verified: WAL
-  and all). Three things sit on it: an IOC sweep, a cross-case SELECT,
-  and a unified timeline.
-  Two constraints worth knowing. SQLite attaches at most **10**
-  databases (`MAX_ATTACHED`), and `v` already uses one — so the query
-  path caps at 8 cases and everything else opens one reader at a time,
-  which is why the sweep and timeline have no case limit. Two more that
-  each produced a confident wrong answer: the timeline orders and
-  windows by `TS_NORMALIZE`, like the case's own timeframe filter (raw
-  text put `1/5/2024` before `12/31/2023`), and every SOURCE gets the
-  whole `limit + 1`, merged as they arrive — reading each with "the
-  limit minus rows so far" let the first table spend it all on its
-  latest rows while reporting `truncated: False`. The sweep's values are
-  LIKE-escaped: `svc_backup` matched `svcXbackup`. And the routes
-  only read **registered** cases: a path arrives from the browser, and
-  the case list is the analyst's own statement of what they work on.
-  These views are read-only BY DESIGN, not pending work: tags and notes
-  live in the case that owns the row, so writing across cases means
-  opening those cases read-write and fighting the one-Winnow-per-case
-  lock. The supported move is "open it in its own case", which every row
-  offers.
-  **The header button is withdrawn** (September 2026) until the feature
-  is redesigned — three panes with three result shapes, and a sweep that
-  stops short of what an analyst does with a hit. Routes, `multicase.py`,
-  `multicase.js` and `tests/ui/test_multicase_ui.py` all stay;
-  `__winnow.openMultiCase()` still opens it.
+- **Across cases: the open case, plus other cases opened as visitors.**
+  `winnow/acrosscases.py` reads OTHER registered case files through
+  `Store(path, read_only=True)` (see the visitor entry in
+  [store.md](store.md)) while the open case keeps its exclusive lock and
+  its writer, so every invariant in CLAUDE.md holds and a case another
+  Winnow has open is still readable (WAL and all). Being a real Store is
+  the point of the redesign: the sweep is `_iter_search_all_sources`
+  (FTS when the case built one), Findings is each case's own
+  `build_timeline` with the shared header-set configs, and every answer
+  is a Timeline line (`fetch_timeline_rows`) plus the case, so the three
+  panes stopped having three result shapes. The open case is always
+  answered through its own Store, never a visitor, so a tag put on a
+  moment ago is in the answer. `/api/across/*` holds the routes; they
+  only take **registered** cases (a path arrives from the browser, and
+  the case list is the analyst's own statement of what they work on).
+  **A tag from here goes to the case that owns the row, and only when
+  that case is free.** `POST /api/across/tag` writes through the open
+  Store when the row is the open case's; for any other case it takes
+  `_CASE_SWITCH`, refuses with 409 `case_in_use` when
+  `probe_case_lock` finds a holder, opens a full Store for the one write
+  (`set_tags`, so invariant #7 holds), and closes it. It never writes a
+  case another Winnow has open: that Winnow's caches would not see it.
+  Such writes are not on the undo history, which is per Store.
+  Constraints carried over: SQLite attaches at most **10** databases
+  (`MAX_ATTACHED`) and `v` uses one, so **Query** (still
+  `multicase.query_across`) caps at 8 cases; the sweep and Findings open
+  one visitor at a time and have no case limit. Findings orders by
+  `TS_NORMALIZE` across cases (raw text put `1/5/2024` before
+  `12/31/2023`) and reads each case's first `limit + 1` lines, merged by
+  a heap, so `truncated` is honest.
+  `winnow/multicase.py`'s own LIKE sweep and timeline, `multicase.js`,
+  `/api/multicase/*` and `tests/ui/test_multicase_ui.py` are the OLD
+  backend, kept (and `__winnow.openMultiCase()` still opens it) until
+  the redesign is agreed; then they go, apart from `query_across` and
+  `schema_across`, which Query is built on.
 
 - **An `async def` route runs ON the event loop; a plain `def` route does
   not.** FastAPI threadpools sync handlers for you, so most of this file is

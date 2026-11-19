@@ -46,6 +46,8 @@ With an EvtxECmd export as the example:
 - [Tagging and notes](Tagging-and-notes.md): tags, keys, undo, notes.
 - [Timeline, Search all and the Watchlist](Timeline-search-and-watchlist.md):
   reading across every table.
+- [Across cases](Across-cases.md): where else values landed, and every
+  case's findings on one timeline.
 - [Derived columns](Derived-columns.md): timestamps from raw values, fields
   out of JSON and XML.
 

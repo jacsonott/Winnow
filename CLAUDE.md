@@ -282,6 +282,17 @@ defaults/          The defaults Winnow ships, as JSON rather than Python:
                     Add entries and bump the file's `version`; never edit an
                     existing header set in place, since files from older tool
                     releases still have to match it.
+acrosscases.py     Across cases on the single-case machinery: other
+                    registered cases opened as read-only visitor Stores
+                    (Store(path, read_only=True): no lock, no migration,
+                    no builds, nothing left beside the file), so the sweep
+                    is Search all's, Findings is each case's own Timeline,
+                    and every answer is a Timeline line plus its case. A
+                    tag goes to the case that owns the row, only when no
+                    other Winnow holds it. Replaces multicase.py's own
+                    sweep and timeline (still present until removed;
+                    its query_across stays as Query's engine). See
+                    docs/notes/server.md and store.md.
 workspace.py       Cross-case JSON state (case registry, saved filters, default
                     tag template) — human-readable files in workspace/, outside
                     any single case.db so they survive switching cases.

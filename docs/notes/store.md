@@ -1407,7 +1407,8 @@ see [docs/notes/README.md](README.md) for the whole set.
   connection never does either. Two things left a pair beside closed
   cases for good. A `mode=ro` look at a case nothing has open *creates*
   the pair (the home screen's case list, registration's
-  `is_winnow_case_file`, the watchlist's case picker, multicase), so
+  `is_winnow_case_file`, the watchlist's case picker, multicase, an
+  Across cases visitor), so
   every such look goes through `paths.sqlite_peek_uri`, which reads the
   file `immutable=1` when there is no `-wal` to read and plain `mode=ro`
   when there is. And `close()` with a reader still checked out wasn't the
@@ -1436,6 +1437,27 @@ see [docs/notes/README.md](README.md) for the whole set.
   the sweep still probes the database itself when there is no sidecar,
   which is a file from a Winnow before this. The case's own "in use"
   marker (`_CaseLock`) was always a separate file, for its own reasons.
+- **A `Store(path, read_only=True)` is a visitor, and it must not leave
+  a mark.** Across cases (`winnow/acrosscases.py`) reads other cases
+  through a real Store so the sweep, the Timeline and the line shape are
+  the same code as the open case's, but nothing an open Store does on
+  the way in is safe on someone else's case. A visitor connects through
+  `sqlite_peek_uri` (no `-wal`/`-shm` left behind, see above), never
+  acquires `_CaseLock` (a case another Winnow holds is still readable,
+  and a visitor must never be what makes the home screen say "in use"),
+  runs no migration and seeds no tags (`_migrate_on_open` is skipped;
+  `_check_visitable` refuses, with "open it here once", a case too old
+  for today's queries rather than reading it wrong), and starts no
+  background build: every `_ensure_*_building` and `_start_*_builds`
+  returns at once, so a visitor searches through whatever FTS the case
+  already has and LIKE otherwise. Its views database is its own scratch
+  file as usual, so `v.view_N` materialization (invariant #2) works.
+  SQLite refuses any write it attempts ("attempt to write a readonly
+  database"), which is the backstop, not the design: a write path that
+  reaches a visitor is a bug. `build_timeline_of_rows(configs, pairs)` is
+  the one Store method added for it: the Timeline's view shape over a
+  given list of `(source_id, rid)`, so a sweep's hits read as Timeline
+  lines; it evicts no other view.
 - **compact's sizes are `main + -wal` on both sides, measured before any
   checkpoint**, which is what makes `reclaimed_bytes` honest without
   depending on a checkpoint succeeding. A checkpoint that can't complete

@@ -274,6 +274,22 @@ because the emulated drag sends dragover a move behind the pointer. `test_firstl
 including the card it waits on when the analyst has left the tab, held
 at `job/start` so the answer lands while the tab is hidden.
 
+`test_acrosscases.py` covers Across cases: that a visitor Store leaves
+no lock, no `-wal`/`-shm` and no index behind and cannot write, reads a
+case another Winnow holds and refuses one too old to read; that lines
+carry the shipped summary and the configured type; the sweep's per-case,
+per-table and per-term counts, a case that can't be read not sinking the
+rest, and a new sweep replacing the running one; Findings interleaving
+cases with the gap measured across them, the window, `truncated` and the
+tag-name filter; which query results come back as lines; and the routes
+(registered cases only, `held_by`, the tag written into the owning case,
+refused while another Winnow holds it, and the open case answered
+through its own Store). `tests/ui/test_across_cases_ui.py` drives the
+dialog: the header button, a sweep's lines with case pills and matched
+values, a hit tagged in its own case and then listed on Findings, and a
+query read as lines and as a table. `test_multicase_ui.py` still covers
+the old dialog until it is removed.
+
 `tests/smoke_server.py` is not a test module (no `test_` prefix, so pytest
 never collects it); CI runs it as a script. It starts `server.py --case
 --open` the way an analyst does and waits for the CSV's rows on

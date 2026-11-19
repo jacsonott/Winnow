@@ -49,6 +49,7 @@ import * as savedfilters from './savedfilters.js';
 import * as timeframe from './timeframe.js';
 import * as histogram from './histogram.js';
 import * as merge from './merge.js';
+import * as across from './across.js';
 import * as multicase from './multicase.js';
 import * as importer from './importer.js';
 import * as tables from './tables.js';
@@ -101,7 +102,7 @@ import { wireUi } from './ui.js';
    spread would freeze the value of a rebindable export like ROW_H at boot.
    Collision-free by construction — these names all shared one scope until
    the file was split. Not an API; nothing in the app reads it. */
-const NAMESPACES = { splash, core, connection, state, jobs, tabhistory, charts, stack, notes, watchlist, dashboard, dashwidgets, filters, filterundo, sources, view, columns, columndock, tsformat, derived, grid, grouping, tags, detail, ui, filterbuilder, savedfilters, timeframe, histogram, merge, multicase, importer, tables, plugins, search, session, sql, sqlhistory, timeline, timelineoverview, timelinepane, rowmenu, subset, keymap, settings, bundles, profilebuilder, pluginmanager, userenv, home, errlog, popout };
+const NAMESPACES = { splash, core, connection, state, jobs, tabhistory, charts, stack, notes, watchlist, dashboard, dashwidgets, filters, filterundo, sources, view, columns, columndock, tsformat, derived, grid, grouping, tags, detail, ui, filterbuilder, savedfilters, timeframe, histogram, merge, across, multicase, importer, tables, plugins, search, session, sql, sqlhistory, timeline, timelineoverview, timelinepane, rowmenu, subset, keymap, settings, bundles, profilebuilder, pluginmanager, userenv, home, errlog, popout };
 window.__winnow = {};
 for (const ns of Object.values(NAMESPACES)) {
   for (const key of Object.keys(ns)) {
@@ -118,8 +119,10 @@ popout.wirePopout();
 // mouseup, where browsers fire their own history navigation from.
 window.addEventListener('mouseup', tabhistory.onMouseNav);
 
-// Across cases has no button for now: the modal is reachable as
-// __winnow.openMultiCase() (multicase.js says why), not from the header.
+// Across cases is back in the header, redesigned on the open case's own
+// backend (across.js). The withdrawn modal it replaces is still reachable
+// as __winnow.openMultiCase() until it is removed (#228).
+across.wireAcross();
 notes.wireNotes();
 session.wireSession();
 watchlist.wireWatchlist();
