@@ -460,6 +460,19 @@ folders out of a shared `/tmp`.
   Only the nightly's Windows browser job can see this one, and it took
   three nights to find every module that did (test_copy_unique_values.py,
   test_sql_result_uncapped.py).
+- **A path from `tmp_path` has backslashes on Windows.** There
+  `str(tmp_path / "custom-delim.log")` is `C:\Users\…\custom-delim.log`,
+  so page JS that names a file with `p.split('/').pop()` gets the whole
+  path back. test_custom_delimiter_ui.py queued its log that way: on
+  Windows the table was named after the full path, the wait for
+  `custom-delim.log` timed out, and the cleanup, which deletes by that
+  name, left the table behind for `case_left_as_found` to fail the
+  module's last test on. It failed both nights its shard ran on Windows
+  (2026-11-16 and 11-18, #556) and passed everywhere else. The app was
+  never wrong: importer.js splits on both separators. Take the name in
+  Python (`p.name`) and hand the page `{ path, name }`, as the other
+  import tests do; tests/test_ui_test_hygiene.py fails on
+  `split('/').pop()` in tests/ui.
 - **An import lists its table before the table has columns.** The
   background import inserts the `sources` row as it starts, with
   `columns` = `[]`, and writes the typed columns as it ends
