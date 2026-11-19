@@ -808,14 +808,21 @@ see [docs/notes/README.md](README.md) for the whole set.
   So every reader's error wrapper (`ingest_csv`, `ingest_text`,
   `_ingest_planned_lines`, `ingest_json`, `ingest_rows` and `_kept_error`
   for the rest) asks `diskspace.stopped_error(e, total)` first, which
-  returns a `DiskFullError` saying what was kept ("the import stopped
-  after 40,000 rows, which were kept as a partial table") or None for any
-  other error, so their own messages are untouched. The job worker turns
-  that into `job.error` with the free space on each drive the import
-  writes to (`Store.storage_places`: the case's folder and the temp
-  folder, emptiest first, named so the analyst knows which to clear) and
-  sets `job.error_kind = "disk_full"`, which the jobs panel's badge reads
-  ("out of space"). `is_disk_full` walks the exception chain (`__cause__`,
+  returns a `DiskFullError` saying what was kept ("40,000 rows were kept
+  as a partial table") or None for any other error, so their own messages
+  are untouched. The job worker says it at two lengths. `job.error` is
+  **one line**, `diskspace.brief`: the drive with the least room of those
+  the import writes to (`Store.storage_places`: the case's folder and the
+  temp folder; a drive letter on Windows, the mount point elsewhere) and
+  what was kept — "Out of disk space on D: (0 B free). 40,000 rows were
+  kept as a partial table." The log gets `diskspace.message`: every
+  drive with the folders on it, what to do, and the raw error. The first
+  version put the log's account in the panel row and the toast, and the
+  analyst who asked for it found it too chatty to read there; the toast
+  for a row that stays in the panel now says only "out of disk space"
+  (`failureReason` in jobs.js). The worker also sets `job.error_kind =
+  "disk_full"`, which the jobs panel's badge reads ("out of space").
+  `is_disk_full` walks the exception chain (`__cause__`,
   else `__context__` unless suppressed) and believes only ENOSPC/EDQUOT,
   Windows' two disk-full codes and SQLITE_FULL — never "disk I/O error",
   since telling an analyst to free space on a failing drive sends them

@@ -7,8 +7,11 @@ an error parsing the body" for six seconds, and no table arrived. An
 analyst who had looked away for those six seconds saw nothing at all.
 
 So a failed upload now leaves an error row behind, as a failed import job
-always has, and a full disk is named on the badge. The server's half (the
-507 and its message) is tests/test_disk_full.py; here the upload is
+always has, and a full disk is named on the badge, with one line under it
+(the drive, and what was kept) and a four-word toast — the first version
+put every drive and what to do in both, and that was too much to read in
+a corner. The server's half (the 507, its line, the log) is
+tests/test_disk_full.py; here the upload is
 answered by page.route with what that server sends, since filling the
 shared server's disk is not something a test can do to its neighbours."""
 
@@ -24,9 +27,7 @@ PANEL = "#jobsPanel:not([hidden])"
 # A finished row that failed: the same file's "uploading" or "indexing"
 # row can be in the panel beside it, carrying the same name.
 FAILED_ROW = f"{PANEL} .job-row:has(.job-phase.error)"
-MESSAGE = ("Out of disk space: the file (about 10.4 MB) could not be received, so nothing was "
-           "imported. The drive holding the temp folder (C:\\Users\\a\\AppData\\Local\\Temp) has "
-           "6.0 MB free. Free up space, then import it again.")
+MESSAGE = "Out of disk space on C: (6.0 MB free). The 10.4 MB file was not received."
 
 
 def _upload(req):
@@ -80,15 +81,15 @@ def test_an_upload_the_disk_could_not_hold_stays_in_the_panel(page, tmp_path, qu
     _pick_and_import(page, tmp_path, 507, MESSAGE)
     row = page.locator(FAILED_ROW, has_text="big.csv")
     row.wait_for()
-    # Named on the badge, in the error colour, with the server's whole
-    # message under it: which drive, how much is free, what to do.
+    # Named on the badge, in the error color, with the server's line
+    # under it: which drive, how much is free.
     badge = row.locator(".job-phase")
     assert badge.inner_text().lower() == "out of space"
     assert "error" in badge.get_attribute("class").split()
     assert row.locator(".job-detail").inner_text() == MESSAGE
-    # The toast says it too, and for longer than an ordinary failure's.
-    page.wait_for_function("(m) => document.getElementById('toast').textContent.includes(m)",
-                           arg="Upload failed for big.csv: Out of disk space")
+    # The toast says it in four words, and no more: the row has the rest.
+    page.wait_for_function("(m) => document.getElementById('toast').textContent === m",
+                           arg="Upload failed for big.csv: out of disk space")
     # Stays until it is dismissed — then goes.
     row.locator(".job-x[title=Dismiss]").click()
     page.wait_for_function("() => ![...document.querySelectorAll('#jobsPanel .job-row')]"
@@ -108,9 +109,7 @@ def test_any_failed_upload_leaves_a_row(page, tmp_path, quiet_panel):
 def test_an_import_job_the_disk_stopped_says_out_of_space(page, quiet_panel):
     """The job's own row, from the poll's record: error_kind names the
     cause, and the badge says it instead of a bare ERROR."""
-    msg = ("Out of disk space: the import stopped after 40,000 rows, which were kept as a "
-           "partial table. The drive holding the case (D:\\Cases) has 0 B free. Free up space, "
-           "then delete that table and import the file again.")
+    msg = "Out of disk space on D: (0 B free). 40,000 rows were kept as a partial table."
     page.evaluate("""(msg) => {
       __winnow.ingestJobs.push(
         { job_id: 991, name: 'evtx.csv', kind: 'csv', status: 'error', error: msg, error_kind: 'disk_full' },
@@ -141,8 +140,7 @@ def test_the_partial_table_a_failed_import_kept_appears(page, api, until, tmp_pa
         for j in body["jobs"]:
             if j["name"] == name:
                 j.update(status="error", error_kind="disk_full", source_ids=[], result=None,
-                         error="Out of disk space: the import stopped after 2 rows, which were kept "
-                               "as a partial table.")
+                         error="Out of disk space on D: (0 B free). 2 rows were kept as a partial table.")
         route.fulfill(response=resp, json=body)
 
     page.route("**/api/ingest/jobs", as_failed)

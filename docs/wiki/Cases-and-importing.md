@@ -1023,20 +1023,19 @@ and the temp folder. **Upload from browser…** needs about twice the file's
 size in the temp folder while the file arrives, for the moment it is copied;
 **Add from this machine…** reads the file in place and needs none.
 
-When either fills up, the import stops and its row in the jobs panel says
-**out of space**, with a message that says what happened and where:
+When either fills up, the import stops, a toast says *out of disk space*,
+and its row in the jobs panel says **out of space**, with one line under it
+naming the drive with the least room and what the import kept:
 
-> Out of disk space: the import stopped after 40,000 rows, which were kept as
-> a partial table. The drive holding the case (D:\Cases) has 0 B free; the one
-> holding the temp folder (C:\Users\you\AppData\Local\Temp) has 12.4 GB.
-> Free up space, then delete that table and import the file again.
+> Out of disk space on D: (0 B free). 40,000 rows were kept as a partial table.
 
-An upload that could not be received at all says *the file … could not be
-received, so nothing was imported*. The row stays until you dismiss it, the
-message is in **Case ▾ → Log…**, and the red badge on **Case ▾** lights. A
-table the import kept holds only the rows before the disk filled: delete it
-(**Remove…** in the table's menu) once there is room, and import the
-file again. See [Troubleshooting](Troubleshooting.md#an-import-fails-out-of-disk-space).
+An upload that could not be received at all says *The 2.1 GB file was not
+received*, with the temp folder's drive. The row stays until you dismiss it
+and the red badge on **Case ▾** lights. **Case ▾ → Log…** has the rest:
+every drive the import writes to, the folders on each and how much is free,
+and what to do. A table the import kept holds only the rows before the disk
+filled: delete it (**Remove…** in the table's menu) once there is room, and
+import the file again. See [Troubleshooting](Troubleshooting.md#an-import-fails-out-of-disk-space).
 
 A finished import's toast says *name: N rows imported*, plus any of:
 

@@ -12,7 +12,11 @@ written, both ways a full disk stops an import:
   it were kept", blaming a line of the file, and the partial table it
   left looked like any other.
 
-These pin what each now says. The disk is faked — a commit that raises
+These pin what each now says: one line where the analyst is looking (the
+job's row, the 507 a toast and a row come from), naming the drive with the
+least room and what was kept, and the whole account in the log. The first
+version put the whole account in the row and the toast, and the analyst
+who asked for it found it too much to read there. The disk is faked — a commit that raises
 SQLite's own SQLITE_FULL message, a write that raises ENOSPC — because a
 filesystem small enough to fill in a test is not something CI can mount;
 the messages are the ones a real full tmpfs produced."""
@@ -23,7 +27,9 @@ import errno
 import io
 import json
 import os
+import re
 import sqlite3
+import tempfile
 from collections import namedtuple
 
 import pytest
@@ -97,7 +103,7 @@ def _errors():
     _enospc(),
     OSError(getattr(errno, "EDQUOT", errno.ENOSPC), "Disk quota exceeded"),
     sqlite3.OperationalError(FULL),
-    diskspace.DiskFullError("nothing was imported", "import the file again"),
+    diskspace.DiskFullError(),
 ])
 def test_the_errors_a_full_disk_raises_are_recognised(exc):
     assert diskspace.is_disk_full(exc)
@@ -180,6 +186,34 @@ def test_a_folder_that_is_gone_is_measured_on_its_drive(tmp_path):
     assert said.startswith(f"The drive holding the case ({tmp_path / 'gone' / 'deeper'}) has ")
 
 
+def test_the_brief_line_names_only_the_emptiest_drive(monkeypatch, tmp_path):
+    case, temp = tmp_path / "case", tmp_path / "temp"
+    case.mkdir()
+    temp.mkdir()
+    free = {str(case): 0, str(temp): 13 * 1024 ** 3}
+    monkeypatch.setattr(diskspace.shutil, "disk_usage", lambda p: Usage(1, 1, free[str(p)]))
+    monkeypatch.setattr(diskspace, "_drive_key", lambda p: p)
+    monkeypatch.setattr(diskspace, "drive_name", lambda p: {str(case): "D:", str(temp): "C:"}[p])
+    places = [("the temp folder", str(temp)), ("the case", str(case))]
+    assert diskspace.brief("Nothing was imported", places) == "Out of disk space on D: (0 B free). Nothing was imported."
+    assert diskspace.brief(None, places) == "Out of disk space on D: (0 B free)."
+    assert diskspace.brief(None, []) == "Out of disk space."
+    # The log's account has both drives, and what to do.
+    assert diskspace.message("Nothing was imported", "import the file again", places) == (
+        f"Out of disk space. Nothing was imported. The drive holding the case ({case}) has 0 B free; "
+        f"the one holding the temp folder ({temp}) has 13.0 GB. Free up space, then import the file again.")
+
+
+def test_a_drive_is_named_the_way_the_analyst_knows_it(tmp_path):
+    """A drive letter on Windows; elsewhere the mount point, not the
+    folder, which on a deep case path said nothing about which disk."""
+    name = diskspace.drive_name(str(tmp_path / "not" / "there"))
+    if os.name == "nt":
+        assert name == os.path.splitdrive(str(tmp_path))[0]
+    else:
+        assert os.path.ismount(name) and str(tmp_path).startswith(name)
+
+
 @pytest.mark.parametrize("n, text", [
     (0, "0 B"), (512, "512 B"), (4096, "4.0 KB"), (int(37.2 * 1024 ** 2), "37.2 MB"),
     (int(1.4 * 1024 ** 3), "1.4 GB"), (250 * 1024 ** 3, "250 GB"),
@@ -200,20 +234,25 @@ def test_a_csv_job_the_disk_stops_says_so_and_what_it_kept(store, tmp_path, smal
     assert done["status"] == "error"
     assert done["error_kind"] == "disk_full"
     msg = done["error"]
-    assert msg.startswith("Out of disk space: the import stopped after 20 rows, "
-                          "which were kept as a partial table. ")
-    case_dir = os.path.dirname(os.path.abspath(store.path))
-    assert f"the case ({case_dir})" in msg
-    assert msg.endswith("Free up space, then delete that table and import the file again.")
+    # One line for the row: a drive, and what was kept.
+    assert msg.startswith("Out of disk space on ")
+    assert msg.endswith(" free). 20 rows were kept as a partial table.")
     # Not blamed on a line of the file: the reader was a batch past the
     # commit that failed.
     assert "Line " not in msg
+    assert "Free up space" not in msg and "the temp folder" not in msg
 
     src = store.list_sources()
     assert [s["row_count"] for s in src] == [20]
-    # The record, with SQLite's own words for whoever reads the log next.
-    assert any(m.startswith("Import failed: big.csv (csv) — Out of disk space")
-               and m.endswith(f"[OperationalError: {FULL}]") for m in _errors())
+    # The record has the rest: every folder and its drive, what to do, and
+    # SQLite's own words for whoever reads the log next.
+    case_dir = os.path.dirname(os.path.abspath(store.path))
+    logged = [m for m in _errors() if m.startswith(
+        "Import failed: big.csv (csv) — Out of disk space. 20 rows were kept as a partial table. ")]
+    assert len(logged) == 1
+    assert f"the case ({case_dir})" in logged[0]
+    assert logged[0].endswith("Free up space, then delete that table and import the file again. "
+                              f"[OperationalError: {FULL}]")
 
 
 def test_a_job_that_kept_nothing_leaves_no_table(store, tmp_path, small_batches, disk_fills):
@@ -221,8 +260,8 @@ def test_a_job_that_kept_nothing_leaves_no_table(store, tmp_path, small_batches,
     disk_fills(after=0)
     done = store.wait_for_ingest_job(store.start_ingest_job("csv", path)["job_id"], timeout=30)
     assert done["error_kind"] == "disk_full"
-    assert done["error"].startswith("Out of disk space: nothing was imported. ")
-    assert done["error"].endswith("Free up space, then import the file again.")
+    assert done["error"].startswith("Out of disk space on ")
+    assert done["error"].endswith(" free). Nothing was imported.")
     assert store.list_sources() == []
 
 
@@ -232,13 +271,12 @@ def test_a_json_job_counts_records(store, tmp_path, small_batches, disk_fills):
     disk_fills(after=1)
     done = store.wait_for_ingest_job(store.start_ingest_job("json", str(p))["job_id"], timeout=30)
     assert done["error_kind"] == "disk_full"
-    assert done["error"].startswith("Out of disk space: the import stopped after 10 records, "
-                                    "which were kept as a partial table.")
+    assert done["error"].endswith(" free). 10 records were kept as a partial table.")
 
 
 def test_a_sqlite_job_says_which_tables_it_finished(store, tmp_path, small_batches, monkeypatch):
     """A multi-table job: the first table lands, the disk fills on the
-    second. The message is the second table's, plus the first one kept."""
+    second. The message says both."""
     db = tmp_path / "evidence.sqlite"
     con = sqlite3.connect(db)
     for t in ("first", "second"):
@@ -260,9 +298,8 @@ def test_a_sqlite_job_says_which_tables_it_finished(store, tmp_path, small_batch
     job = store.start_ingest_job("sqlite", str(db), options={"tables": [{"table": "first"}, {"table": "second"}]})
     done = store.wait_for_ingest_job(job["job_id"], timeout=30)
     assert done["error_kind"] == "disk_full"
-    assert done["error"].startswith(
-        "Out of disk space: the import stopped after 10 rows, which were kept as a partial table "
-        "(the 1 table it finished before that was kept). ")
+    assert done["error"].endswith(
+        " free). The first table was imported, and 10 rows of the next were kept as a partial table.")
     assert sorted(s["row_count"] for s in store.list_sources()) == [10, 25]
 
 
@@ -352,14 +389,16 @@ def test_an_upload_the_temp_folder_cannot_hold_is_a_507_that_says_so(client, mon
                     files={"file": ("big.csv", io.BytesIO(b"a,b\n1,2\n" * 1000), "text/csv")})
     assert r.status_code == 507
     detail = r.json()["detail"]
-    assert detail.startswith("Out of disk space: the file (about ")
-    assert "could not be received, so nothing was imported." in detail
-    assert "The drive holding the " in detail and "the temp folder (" in detail
-    assert detail.endswith("Free up space, then import it again.")
-    assert "There was an error parsing the body" not in detail
+    # The temp folder's drive (the only place an upload is written), and
+    # the size, which the free space reads against.
+    temp_drive = diskspace.drive_name(tempfile.gettempdir())
+    assert re.fullmatch(rf"Out of disk space on {re.escape(temp_drive)} \(.+ free\)\. "
+                        r"The \d+\.\d KB file was not received\.", detail), detail
     # FastAPI's parse failure logged nothing at all.
-    assert any(m.startswith("POST /api/ingest/jobs/upload — Out of disk space")
-               and m.endswith("[OSError: [Errno 28] No space left on device]") for m in _errors())
+    logged = [m for m in _errors() if m.startswith("POST /api/ingest/jobs/upload — Out of disk space. The ")]
+    assert len(logged) == 1
+    assert "The drive holding the temp folder (" in logged[0]
+    assert logged[0].endswith("Free up space, then import it again. [OSError: [Errno 28] No space left on device]")
 
 
 def test_an_upload_whose_spool_copy_fills_the_disk(client, monkeypatch):
@@ -375,7 +414,7 @@ def test_an_upload_whose_spool_copy_fills_the_disk(client, monkeypatch):
     r = client.post("/api/ingest/jobs/upload", data={"kind": "csv"},
                     files={"file": ("big.csv", io.BytesIO(b"a,b\n1,2\n"), "text/csv")})
     assert r.status_code == 507
-    assert r.json()["detail"].startswith("Out of disk space: the file (about ")
+    assert re.search(r" free\)\. The \d+ B file was not received\.$", r.json()["detail"])
 
 
 def test_a_synchronous_import_keeps_the_readers_account(client, store, small_batches, disk_fills):
@@ -385,8 +424,7 @@ def test_a_synchronous_import_keeps_the_readers_account(client, store, small_bat
     body = "".join(f"r{i},x\n" for i in range(25))
     r = client.post("/api/ingest/upload", files={"file": ("big.csv", io.BytesIO(("a,b\n" + body).encode()), "text/csv")})
     assert r.status_code == 507
-    assert r.json()["detail"].startswith(
-        "Out of disk space: the import stopped after 10 rows, which were kept as a partial table. ")
+    assert r.json()["detail"].endswith(" free). 10 rows were kept as a partial table.")
 
 
 def test_any_route_that_hits_a_full_disk(client, store, monkeypatch):
@@ -404,7 +442,7 @@ def test_any_route_that_hits_a_full_disk(client, store, monkeypatch):
     loose = TestClient(server.app, headers=HEADERS, raise_server_exceptions=False)
     r = loose.get("/api/tags")
     assert r.status_code == 507
-    assert r.json()["detail"].startswith("Out of disk space: that could not be finished. ")
+    assert re.fullmatch(r"Out of disk space on .+ \(.+ free\)\.", r.json()["detail"])
 
 
 def test_other_http_errors_are_untouched(client, tmp_path):

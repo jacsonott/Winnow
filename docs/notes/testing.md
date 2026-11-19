@@ -46,8 +46,9 @@ cancel-drops-the-partial-source — driven through `ingest_csv`'s own
 `cancel` hook so the cancellation point is deterministic, not a race —
 multi-table sqlite jobs, spool deletion, close-with-running-job).
 `test_disk_full.py` covers a full disk (winnow/diskspace.py): each
-reader's job saying "Out of disk space" with what it kept and the free
-space per drive, rather than a line number; the 507 for an upload whose
+reader's job saying "Out of disk space" in one line (the emptiest drive
+and what it kept, rather than a line number) and logging the whole account
+(every drive, what to do, the raw error); the 507 for an upload whose
 temp folder filled while FastAPI was still parsing it (its load-bearing
 test: that one used to be a bare "There was an error parsing the body",
 logged nowhere); and that an HTTPException a route worded itself is left

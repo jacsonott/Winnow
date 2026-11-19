@@ -131,14 +131,15 @@ export function uploadWithProgress(url, fd, name) {
 
 
 /* HTTP 507: the server ran out of disk space (server.py's full-disk
-   handlers), and its message says how much is left where. */
+   handlers). Its message is one line: the drive and what was kept. */
 export const DISK_FULL_STATUS = 507;
 
-/* How long a failure's toast stays up. A full disk gets longer than the
-   usual few seconds: its message names the drives and what to do, and the
-   analyst who started a big import has often looked away. */
-export function failureToastMs(diskFull, ms = 6000) {
-  return diskFull ? 15000 : ms;
+/* What a failure's toast says after "Import failed for x: ", for an
+   import or upload whose row stays in the panel. A full disk is said in
+   four words there: the row beside it has the drive and what was kept,
+   and the same line twice was more than anyone reads in a corner. */
+export function failureReason(message, diskFull) {
+  return diskFull ? 'out of disk space' : message;
 }
 
 /* A failed upload stays in the panel as an error row until dismissed, the
@@ -277,7 +278,7 @@ export async function pollJobs() {
         toast(`${what}: ${(res.rows || 0).toLocaleString()} rows read`
           + (failed ? ` · ${failed.toLocaleString()} value${failed === 1 ? '' : 's'} not found` : ''), failed ? 6000 : 3000);
       } else if (j.status === 'error') {
-        toast(`Could not derive "${j.name}": ${j.error}`, failureToastMs(j.error_kind === 'disk_full', 8000));
+        toast(`Could not derive "${j.name}": ${j.error}`, 8000);
       }
       setTimeout(() => { dismissedJobs.add(j.job_id); renderJobsPanel(); }, 8000);
       continue;
@@ -324,7 +325,7 @@ export async function pollJobs() {
       // tab and the rail reflect it.
       scanWatchlistForSources(j.source_ids || []);
     } else if (j.status === 'error') {
-      toast(`Import failed for ${j.name}: ${j.error}`, failureToastMs(j.error_kind === 'disk_full', 8000));
+      toast(`Import failed for ${j.name}: ${failureReason(j.error, j.error_kind === 'disk_full')}`, 8000);
     } else {
       toast(`Import of ${j.name} cancelled`, 3000);
       setTimeout(() => { dismissedJobs.add(j.job_id); renderJobsPanel(); }, 8000);

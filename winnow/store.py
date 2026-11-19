@@ -7307,11 +7307,16 @@ class Store:
             # And so does what a failed one committed before the error.
             self._record_upload_path_quietly(job)
             self._file_job_results_quietly(job, results)
-            # A full disk is said as one, with the free space on each drive
-            # an import writes to — "database or disk is full" against a
-            # line number was all an analyst got (diskspace's docstring).
+            # A full disk is said as one — "database or disk is full"
+            # against a line number was all an analyst got (diskspace's
+            # docstring). The job's row gets one line, the log the rest.
             full = diskspace.is_disk_full(e)
-            msg = self._disk_full_job_message(job, e, results) if full else str(e)
+            if full:
+                outcome, advice = self._disk_full_outcome(job, e, results)
+                places = self.storage_places()
+                msg = diskspace.brief(outcome, places)
+            else:
+                msg = str(e)
             with self._ingest_jobs_lock:
                 job["status"] = "error"
                 job["error"] = msg
@@ -7320,7 +7325,8 @@ class Store:
             if full:
                 cause = diskspace.root_cause(e)
                 wlog.record("error", f"{self._job_noun(job)} failed: {job['name']} ({job['kind']}) — "
-                                     f"{msg} [{type(cause).__name__}: {cause}]")
+                                     f"{diskspace.message(outcome, advice, places)} "
+                                     f"[{type(cause).__name__}: {cause}]")
             else:
                 wlog.record("error", f"{self._job_noun(job)} failed: {job['name']} ({job['kind']}) — "
                                      f"{type(e).__name__}: {e}")
@@ -7389,22 +7395,28 @@ class Store:
             places.append(("Winnow's scratch folder", os.path.dirname(views_path)))
         return places
 
-    def _disk_full_job_message(self, job: dict, e: BaseException, results: list[dict]) -> str:
-        """job.error for a job the disk filling stopped. The reader that
-        stopped knows what it kept (a DiskFullError in the chain); a failure
-        outside one — a multi-table job between tables — did not get far
-        enough to keep anything of the table it was on."""
+    def _disk_full_outcome(self, job: dict, e: BaseException, results: list[dict]) -> tuple[str, str]:
+        """(what happened, what to do) for a job the disk filling stopped,
+        for diskspace.brief and .message. The reader that stopped knows
+        what it kept (a DiskFullError in the chain); a failure outside one
+        — a multi-table job between tables — did not get far enough to
+        keep anything of the table it was on."""
         if job.get("kind") == "derive":
-            outcome, advice = "the column's values could not be written", "derive it again"
+            return "The column was not built", "derive it again"
+        found = diskspace.find_disk_full_error(e)
+        if not results:
+            if found is not None:
+                return found.outcome, found.advice
+            return "The import did not finish", "import the file again"
+        n = len(results)
+        first = f"the first {n} tables were" if n != 1 else "the first table was"
+        if found is not None and found.kept:
+            outcome = (f"{first[0].upper()}{first[1:]} imported, and {found.kept:,} "
+                       f"{found.unit if found.kept != 1 else found.unit[:-1]} of the next "
+                       f"{'were' if found.kept != 1 else 'was'} kept as a partial table")
         else:
-            found = diskspace.find_disk_full_error(e)
-            outcome, advice = ((found.outcome, found.advice) if found is not None
-                               else ("the import did not finish", "import the file again"))
-            if results:
-                n = len(results)
-                outcome += (f" (the {n} table{'s' if n != 1 else ''} it finished before that "
-                            f"{'were' if n != 1 else 'was'} kept)")
-        return diskspace.message(outcome, advice, self.storage_places())
+            outcome = f"Only {first} imported"
+        return outcome, "delete the tables it kept and import the file again"
 
     def _ingest_job_snapshot(self, job: dict) -> dict:
         keys = ("job_id", "kind", "name", "status", "rows_done", "units_done",

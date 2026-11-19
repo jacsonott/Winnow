@@ -544,40 +544,47 @@ def api_log_client(body: ClientLogBody):
 # 507 Insufficient Storage, logged as an error so Case ▾ lights up: the
 # toast is gone in seconds and the disk is still full.
 
-def _disk_full_detail(request: Request, exc: BaseException) -> str:
+def _disk_full_account(request: Request, exc: BaseException) -> tuple[str | None, str, list[tuple[str, str]]]:
+    """(what happened, what to do, where it writes) for diskspace.brief
+    and .message."""
     found = diskspace.find_disk_full_error(exc)
     path = request.url.path
     importing = path.startswith("/api/ingest/")
-    if found is not None:                      # a reader that stopped, and knows what it kept
-        outcome, advice = found.outcome, found.advice
-    elif importing and path.endswith("/upload"):
-        # The size, because the free space is measured after the partial
-        # copy was thrown away: "6 MB free" reads as plenty until it sits
-        # beside the file that did not fit. Content-Length counts the
-        # form's few hundred bytes of framing too, hence "about".
+    if found is None and importing and path.endswith("/upload") and isinstance(diskspace.root_cause(exc), OSError):
+        # The file itself did not fit — an OSError, where a synchronous
+        # import's own writes fail in SQLite. The size, because the free space is measured after the partial
+        # copy was thrown away: "6.0 MB free" reads as plenty until it sits
+        # beside the file that did not fit. (Content-Length counts the
+        # form's few hundred bytes of framing too, which no size this
+        # rounds to shows.) Only the temp folder: the upload, and the spool
+        # it is copied to, are written nowhere else.
         try:
             size = int(request.headers.get("content-length") or 0)
         except ValueError:
             size = 0
-        what = f"the file (about {diskspace.format_size(size)})" if size else "the file"
-        outcome = f"{what} could not be received, so nothing was imported"
-        advice = "import it again"
+        what = f"The {diskspace.format_size(size)} file" if size else "The file"
+        return f"{what} was not received", "import it again", [("the temp folder", tempfile.gettempdir())]
+    if found is not None:                      # a reader that stopped, and knows what it kept
+        outcome, advice = found.outcome, found.advice
     elif importing:
-        outcome, advice = "the import did not finish", "import the file again"
+        outcome, advice = "The import did not finish", "import the file again"
     else:
-        outcome, advice = "that could not be finished", "try again"
+        outcome, advice = None, "try again"
     # An import writes to the case and the temp folder; anything else may
     # have been building a view, in the views database's folder too.
     places = (STORE.storage_places(views=not importing) if STORE is not None
               else [("the temp folder", tempfile.gettempdir())])
-    return diskspace.message(outcome, advice, places)
+    return outcome, advice, places
 
 
 def _disk_full_response(request: Request, exc: BaseException) -> JSONResponse:
-    detail = _disk_full_detail(request, exc)
+    # One line for the caller (the jobs panel's row, a toast); the drives
+    # and what to do go to the log.
+    outcome, advice, places = _disk_full_account(request, exc)
     cause = diskspace.root_cause(exc)
-    record_log("error", f"{request.method} {request.url.path} — {detail} [{type(cause).__name__}: {cause}]")
-    return JSONResponse({"detail": detail}, status_code=507)
+    record_log("error", f"{request.method} {request.url.path} — {diskspace.message(outcome, advice, places)} "
+                        f"[{type(cause).__name__}: {cause}]")
+    return JSONResponse({"detail": diskspace.brief(outcome, places)}, status_code=507)
 
 
 # FastAPI's answer to a form it could not parse, whatever the reason.

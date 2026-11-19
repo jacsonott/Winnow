@@ -12,10 +12,13 @@ seconds, or a partial table that looked complete; the report that started
 this module was "the import failed silently".
 
 So every place an import can fail asks is_disk_full() about the exception
-it caught, chain and all, and when the answer is yes says so with
-message(): what happened to the import, how much space is free on each
-drive Winnow writes to (with the folders, so the analyst knows which drive
-to clear), and what to do once there is room.
+it caught, chain and all, and when the answer is yes says so in two
+lengths. brief() is the one line the jobs panel and the 507 carry: the
+drive with the least room and what happened to the import ("Out of disk
+space on D: (0 B free). 40,000 rows were kept as a partial table.").
+message() is the log's: every drive Winnow writes to with the folders on
+it, and what to do once there is room. The first version put all of that
+in the panel and the toast, and it was too much to read in a corner.
 
 Stdlib only, imports nothing from the app.
 """
@@ -42,18 +45,35 @@ _FULL_WINERRORS = frozenset({39, 112})
 
 
 class DiskFullError(ValueError):
-    """An import that stopped because the disk filled, saying what it kept.
+    """An import reader that stopped because the disk filled, and how many
+    `unit`s (rows, lines, records) it had committed — which it keeps, as a
+    partial table. A ValueError, like every other import failure a reader
+    raises, so the routes that turn those into a 400 still do; the
+    handlers in server.py then find this in the chain and answer with
+    what it knows instead."""
 
-    `outcome` and `advice` are the two halves of the sentence message()
-    builds around the free-space report. A ValueError, like every other
-    import failure a reader raises, so the routes that turn those into a
-    400 still do — the handlers in server.py then find this in the chain
-    and answer with the full message instead."""
+    def __init__(self, kept: int = 0, unit: str = "rows"):
+        self.kept = kept
+        self.unit = unit
+        super().__init__(f"Out of disk space. {self.outcome}.")
 
-    def __init__(self, outcome: str, advice: str):
-        self.outcome = outcome
-        self.advice = advice
-        super().__init__(f"Out of disk space: {outcome}")
+    @property
+    def outcome(self) -> str:
+        if not self.kept:
+            return "Nothing was imported"
+        return f"{_count(self.kept, self.unit)} {_were(self.kept)} kept as a partial table"
+
+    @property
+    def advice(self) -> str:
+        return "delete that table and import the file again" if self.kept else "import the file again"
+
+
+def _count(n: int, unit: str) -> str:
+    return f"{n:,} {unit if n != 1 else unit[:-1]}"
+
+
+def _were(n: int) -> str:
+    return "were" if n != 1 else "was"
 
 
 def chain(exc: BaseException | None) -> Iterator[BaseException]:
@@ -124,14 +144,7 @@ def stopped_error(e: BaseException, total: int, unit: str = "rows") -> DiskFullE
     when a commit, up to a batch behind it, failed."""
     if not is_disk_full(e):
         return None
-    if total:
-        noun = unit if total != 1 else unit[:-1]
-        error = DiskFullError(
-            f"the import stopped after {total:,} {noun}, which {'were' if total != 1 else 'was'} "
-            "kept as a partial table",
-            "delete that table and import the file again")
-    else:
-        error = DiskFullError("nothing was imported", "import the file again")
+    error = DiskFullError(total, unit)
     error.__cause__ = e
     return error
 
@@ -176,12 +189,25 @@ def _and(items: list[str]) -> str:
     return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
 
 
-def free_space(places: list[tuple[str, str]]) -> str:
-    """One sentence on how much room is left, per drive, emptiest first:
-    "The drive holding the case (D:\\Cases) has 0 B free; the one holding
-    the temp folder (C:\\Users\\a\\AppData\\Local\\Temp) has 12.4 GB."
-    `places` is [(label, folder)]; places on one drive share a clause, and
-    a folder named twice is named once. Empty when no place can be measured."""
+def drive_name(path: str) -> str:
+    """What an analyst calls the drive `path` is on: its letter (or
+    \\\\server\\share) on Windows, its mount point elsewhere."""
+    path = _existing(path)
+    if os.name == "nt":
+        return os.path.splitdrive(path)[0] or path
+    while not os.path.ismount(path):
+        parent = os.path.dirname(path)
+        if parent == path:
+            break
+        path = parent
+    return path
+
+
+def _drives(places: list[tuple[str, str]]) -> list[dict]:
+    """The drives `places` ([(label, folder)]) are on, emptiest first:
+    {"free", "names" (each "label (folder)"), "probe" (a folder on it that
+    exists)}. A folder named twice is counted once; one that cannot be
+    measured is left out."""
     drives: dict = {}
     seen: set[str] = set()
     for label, folder in places:
@@ -196,24 +222,52 @@ def free_space(places: list[tuple[str, str]]) -> str:
             free = shutil.disk_usage(probe).free
         except OSError:
             continue
-        entry = drives.setdefault(_drive_key(probe), {"free": free, "names": []})
+        entry = drives.setdefault(_drive_key(probe), {"free": free, "names": [], "probe": probe})
         entry["free"] = min(entry["free"], free)
         entry["names"].append(f"{label} ({folder})")
+    return sorted(drives.values(), key=lambda d: d["free"])
+
+
+def free_space(places: list[tuple[str, str]]) -> str:
+    """One sentence on how much room is left, per drive, emptiest first:
+    "The drive holding the case (D:\\Cases) has 0 B free; the one holding
+    the temp folder (C:\\Users\\a\\AppData\\Local\\Temp) has 12.4 GB."
+    `places` is [(label, folder)]; places on one drive share a clause.
+    Empty when no place can be measured. For the log (message())."""
+    drives = _drives(places)
     if not drives:
         return ""
-    ordered = sorted(drives.values(), key=lambda d: d["free"])
-    first, rest = ordered[0], ordered[1:]
+    first, rest = drives[0], drives[1:]
     clauses = [f"The drive holding {_and(first['names'])} has {format_size(first['free'])} free"]
     clauses += [f"the one holding {_and(d['names'])} has {format_size(d['free'])}" for d in rest]
     return "; ".join(clauses) + "."
 
 
-def message(outcome: str, advice: str, places: list[tuple[str, str]]) -> str:
-    """The whole thing, as the jobs panel, the toast and the log say it:
+def brief(outcome: str | None, places: list[tuple[str, str]]) -> str:
+    """The one line the jobs panel, the 507 and a toast carry: the drive
+    with the least room of those `places` are on, and `outcome` (a
+    sentence, without its full stop) when there is one to tell.
 
-    Out of disk space: the import stopped after 40,000 rows, which were
-    kept as a partial table. The drive holding the case (D:\\Cases) has
-    0 B free. Free up space, then delete that table and import the file
-    again."""
+    Out of disk space on D: (0 B free). 40,000 rows were kept as a partial table.
+
+    One drive, the emptiest, because that is the one to clear; the others
+    and what to do once there is room are in the log (message())."""
+    drives = _drives(places)
+    head = "Out of disk space"
+    if drives:
+        head += f" on {drive_name(drives[0]['probe'])} ({format_size(drives[0]['free'])} free)"
+    return f"{head}." + (f" {outcome}." if outcome else "")
+
+
+def message(outcome: str | None, advice: str, places: list[tuple[str, str]]) -> str:
+    """The whole account, for the log, where whoever reads it next has the
+    time: what happened, the free space on every drive with the folders on
+    it, and what to do.
+
+    Out of disk space. 40,000 rows were kept as a partial table. The drive
+    holding the case (D:\\Cases) has 0 B free; the one holding the temp
+    folder (C:\\...\\Temp) has 12.4 GB. Free up space, then delete that
+    table and import the file again."""
     where = free_space(places)
-    return f"Out of disk space: {outcome}. " + (f"{where} " if where else "") + f"Free up space, then {advice}."
+    return ("Out of disk space." + (f" {outcome}." if outcome else "")
+            + (f" {where}" if where else "") + f" Free up space, then {advice}.")

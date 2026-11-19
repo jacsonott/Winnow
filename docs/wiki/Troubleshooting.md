@@ -275,8 +275,9 @@ importing](Cases-and-importing.md) explains each.
 
 The drive the case is on, or the one holding the temp folder, filled up
 while the import was running. The jobs panel's row says **out of space**,
-and the message names each drive and how much is free on it, emptiest
-first, so you know which one to clear. Then:
+and the line under it names the drive with the least room and how much is
+free on it, so you know which one to clear. **Case ▾ → Log…** lists every
+drive the import writes to, with the folders on each. Then:
 
 1. Free some space on the drive it names: empty the Recycle Bin, move old
    case files or exports elsewhere, or clear the temp folder.

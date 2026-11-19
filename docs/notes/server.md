@@ -279,12 +279,15 @@ see [docs/notes/README.md](README.md) for the whole set.
   that wrote a message of its own keeps it: save-as's "Could not move the
   case file: …" (tests/test_quicklook.py) was being replaced with a
   generic one until that rule went in. Everything else goes to FastAPI's
-  own `http_exception_handler` untouched. The message names the free space
-  per drive (`Store.storage_places`; the temp folder alone with no case
-  open), says what was kept when a reader stopped part way (a
-  `DiskFullError` in the chain), and gives an upload's size from its
-  Content-Length, because the free space is measured after the partial
-  copy was thrown away. Logged as an error so Case ▾ lights up. See
+  own `http_exception_handler` untouched. The 507's `detail` is one line
+  (`diskspace.brief`): the emptiest drive and its free space, and what was
+  kept when a reader stopped part way (a `DiskFullError` in the chain),
+  or an upload's size from its Content-Length, because the free space is
+  measured after the partial copy was thrown away. An upload that did not
+  fit (an `OSError`, not SQLite's) names the temp folder's drive only:
+  the upload and its spool are written nowhere else. Every drive
+  (`Store.storage_places`; the temp folder alone with no case open) and
+  what to do go to the log, as an error so Case ▾ lights up. See
   [ingest.md](ingest.md) for the import side; tests/test_disk_full.py.
 - **The background-search routes** — `POST /api/view/start`, `GET
   /api/view/job`, `POST /api/view/job/cancel`, `POST /api/view/adopt`
