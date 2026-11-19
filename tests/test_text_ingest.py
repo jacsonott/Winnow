@@ -129,7 +129,7 @@ def _tree(tmp_path):
     (root / "var" / "log").mkdir(parents=True)
     (root / "a.csv").write_text("h\n1\n")
     (root / "var" / "log" / "hostd.log").write_text("l1\nl2\n")
-    (root / "var" / "log" / "auth.log.1").write_text("l1\n")
+    (root / "var" / "log" / "messages.1").write_text("l1\n")
     (root / "noext").write_text("plain\n")
     (root / "tool.exe").write_bytes(b"MZ\x00\x00")
     return str(root)
@@ -139,7 +139,7 @@ def test_scan_default_still_excludes_unknown_extensions(store, tmp_path):
     r = store.scan_import_directory(_tree(tmp_path))
     assert {m["rel_path"] for m in r["matched"]} == {"a.csv"}
     reasons = {e["rel_path"]: e["reason"] for e in r["excluded"]}
-    assert reasons == {"var/log/hostd.log": "extension", "var/log/auth.log.1": "extension",
+    assert reasons == {"var/log/hostd.log": "extension", "var/log/messages.1": "extension",
                        "noext": "extension", "tool.exe": "extension"}
 
 
@@ -147,11 +147,11 @@ def test_scan_star_admits_other_text_files_as_text_kind(store, tmp_path):
     root = _tree(tmp_path)
     r = store.scan_import_directory(root, extensions=[".csv", "*"])
     kinds = {m["rel_path"]: m["kind"] for m in r["matched"]}
-    assert kinds == {"a.csv": "csv", "var/log/hostd.log": "text", "var/log/auth.log.1": "text", "noext": "text"}
+    assert kinds == {"a.csv": "csv", "var/log/hostd.log": "text", "var/log/messages.1": "text", "noext": "text"}
     assert {(e["rel_path"], e["reason"]) for e in r["excluded"]} == {("tool.exe", "binary")}
     # include/exclude patterns still apply to files admitted this way
     r2 = store.scan_import_directory(root, extensions=["*"], exclude_patterns=["*.1"])
-    assert "var/log/auth.log.1" not in {m["rel_path"] for m in r2["matched"]}
+    assert "var/log/messages.1" not in {m["rel_path"] for m in r2["matched"]}
 
 
 def test_scan_probes_for_binary_only_after_the_pattern_gates(store, tmp_path, monkeypatch):
@@ -229,7 +229,8 @@ def test_unknown_extension_routes_to_text(client, tmp_path):
     import server
 
     assert server._ingest_kind_for_path("/x/hostd.log") == "text"
-    assert server._ingest_kind_for_path("/x/auth.log.1") == "text"
+    assert server._ingest_kind_for_path("/x/messages.1") == "text"
+    assert server._ingest_kind_for_path("/x/auth.log.1") == "secure"   # by name: test_secure_log.py
     assert server._ingest_kind_for_path("/x/noext") == "text"
     assert server._ingest_kind_for_path("/x/notes.txt") == "csv"      # .txt keeps the delimited path
     assert server._ingest_kind_for_path("/x/a.csv") == "csv"

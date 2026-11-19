@@ -23,11 +23,14 @@ CUSTOM = "#modalBody .import-delims + input.import-delim-custom"
 
 
 def _queue(page, *paths):
-    page.evaluate("""async (paths) => {
+    # The name comes from pathlib, not from splitting the path in the page:
+    # on Windows str(path) has backslashes, and the whole path became the
+    # table's name (docs/notes/testing.md).
+    page.evaluate("""async (entries) => {
       __winnow.S.importQueue = [];
-      await __winnow.queuePaths(paths.map((p) => ({ path: p, name: p.split('/').pop() })));
+      await __winnow.queuePaths(entries);
       __winnow.openImportModal();
-    }""", [str(p) for p in paths])
+    }""", [{"path": str(p), "name": p.name} for p in paths])
     page.wait_for_selector("#modal:not([hidden]) .import-pane .preview-tbl")
 
 

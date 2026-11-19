@@ -187,7 +187,7 @@ def test_delimited_text_can_be_read_as_a_body_file(page):
         page.wait_for_selector("#modal:not([hidden]) .import-pane .preview-tbl")
         assert page.evaluate("() => __winnow.S.importQueue[0].kind") == "csv"
         assert page.locator("#modalBody .import-readas button").all_inner_texts() == [
-            "Delimited", "One line per row", "Key=value", "Body file"]
+            "Delimited", "One line per row", "Key=value", "Body file", "Secure log"]
         page.locator("#modalBody .import-readas button[data-key=bodyfile]").click()
         _heads_are(page, bodyread.COLUMNS + ["Unparsed line"])
         assert _hint(page, "fls-out.txt") == "Body file · a row per file"

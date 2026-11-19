@@ -8,6 +8,7 @@ import gzip
 import io
 import os
 import tarfile
+import time
 import zipfile
 
 import pytest
@@ -431,3 +432,39 @@ def test_upload_spools_privately_and_never_touches_a_same_named_temp_file(client
     assert victim.read_text() == "someone else's file in the temp folder"
     assert sorted(os.listdir(systmp)) == ["bundle.zip"]      # the private spool dir is gone
     assert os.path.basename(r.json()["root"]).startswith("bundle-extracted")
+
+
+def test_extracted_files_keep_their_dates(tmp_path):
+    """A secure log's stamps have no year, and it is worked out from the
+    file's modified date (winnow/secureread.py): a tree dated the moment
+    it was expanded would put a 2023 log in this year."""
+    data = b"Nov 14 22:13:20 web01 sshd[1]: Server listening on 0.0.0.0 port 22.\n"
+    gz = io.BytesIO()
+    with gzip.GzipFile(fileobj=gz, mode="wb", mtime=0) as g:   # as logrotate's pipe leaves it: MTIME 0
+        g.write(data)
+    stamped = io.BytesIO()
+    with gzip.GzipFile(fileobj=stamped, mode="wb", mtime=1_500_000_000) as g:
+        g.write(data)
+    tgz = tmp_path / "uac.tar.gz"
+    with tarfile.open(tgz, "w:gz") as tf:
+        for name, payload, mtime in (("var/log/secure", data, 1_700_000_000),
+                                     ("var/log/auth.log.2.gz", gz.getvalue(), 1_600_000_000),
+                                     ("var/log/auth.log.3.gz", stamped.getvalue(), 1_600_000_000)):
+            info = tarfile.TarInfo(name)
+            info.size, info.mtime = len(payload), mtime
+            tf.addfile(info, io.BytesIO(payload))
+    root = archive.expand_archive(str(tgz))["root"]
+    when = {os.path.relpath(os.path.join(d, f), root).replace(os.sep, "/"): int(os.path.getmtime(os.path.join(d, f)))
+            for d, _, fs in os.walk(root) for f in fs}
+    # The tar member's own; a gzip with no stored time gets its .gz's (the
+    # rotation); one with a stored time, that.
+    assert when == {"var/log/secure": 1_700_000_000, "var/log/auth.log.2": 1_600_000_000,
+                    "var/log/auth.log.3": 1_500_000_000}
+
+    z = tmp_path / "logs.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.writestr(zipfile.ZipInfo("secure", date_time=(2021, 3, 4, 5, 6, 8)), data)
+    root = archive.expand_archive(str(z))["root"]
+    got = os.path.getmtime(os.path.join(root, "secure"))
+    # Zip's time is local and zoneless, read as this machine's.
+    assert got == time.mktime((2021, 3, 4, 5, 6, 8, 0, 0, -1))

@@ -120,7 +120,7 @@ only ever offers paths that actually extract, and that a batch is
 all-or-nothing (a name collision in the fifth spec must not leave four
 columns behind).
 `test_ingest_contracts.py` holds every reader (CSV, text, JSON, IIS,
-key=value, body file, XLSX, Plaso, SQLite) to the three promises ingest_csv set,
+key=value, body file, secure log, XLSX, Plaso, SQLite) to the three promises ingest_csv set,
 since each carries its own copy of the code that keeps them: every row
 lands in order across batches (BATCH is shrunk so a 30-row fixture spans
 five), a cancel leaves no table, and a failure raised from the reader
@@ -181,6 +181,21 @@ the fast-path regexes and `_parse_line_slow` and requires one answer: the
 fast paths are only a speed-up if they never disagree, and a disagreement
 shows up nowhere else. `test_esxi_log_scan.py` covers the same plugin's
 folder scan, continuation folding and syslog year.
+`test_secure_log.py` covers the Linux secure / auth.log reader: the name
+rule, header splitting (no host, ESXi's severity, RFC 3339 offsets to
+UTC), `classify` one message shape at a time, and the year rule. Its
+load-bearing tests are the attacker-chosen user names (a name holding
+`from 10.0.0.1 port 22` must not move Source IP; sshd's tail decides)
+and the year: a log across New Year dated from the file's mtime, a year
+the analyst sets, and a session re-import that keeps the recorded year
+after the file's mtime has moved. It also pins the plugin precedence
+that sets this reader apart from the other built-in names: a folder scan
+and an open-with both hand `secure` to a plugin that claims it.
+`tests/ui/test_secure_queue.py` holds `secureLogNamed` to `name_says`
+over one list, then drives the queue: a path item and an upload previewed
+and imported in the year the pane shows (the upload dated from the
+browser's `lastModified`, not the spool), and **Read as** → **Secure log**
+on other text.
 `test_systemd_journal.py` covers the systemd_journal plugin. Its fixtures
 in `tests/data/journal/` were written by systemd's own tools, not by the
 reader under test: `make_fixtures.py` feeds a fixed set of entries to
@@ -475,6 +490,19 @@ folders out of a shared `/tmp`.
   Only the nightly's Windows browser job can see this one, and it took
   three nights to find every module that did (test_copy_unique_values.py,
   test_sql_result_uncapped.py).
+- **A path from `tmp_path` has backslashes on Windows.** There
+  `str(tmp_path / "custom-delim.log")` is `C:\Users\…\custom-delim.log`,
+  so page JS that names a file with `p.split('/').pop()` gets the whole
+  path back. test_custom_delimiter_ui.py queued its log that way: on
+  Windows the table was named after the full path, the wait for
+  `custom-delim.log` timed out, and the cleanup, which deletes by that
+  name, left the table behind for `case_left_as_found` to fail the
+  module's last test on. It failed both nights its shard ran on Windows
+  (2026-11-16 and 11-18, #556) and passed everywhere else. The app was
+  never wrong: importer.js splits on both separators. Take the name in
+  Python (`p.name`) and hand the page `{ path, name }`, as the other
+  import tests do; tests/test_ui_test_hygiene.py fails on
+  `split('/').pop()` in tests/ui.
 - **An import lists its table before the table has columns.** The
   background import inserts the `sources` row as it starts, with
   `columns` = `[]`, and writes the typed columns as it ends

@@ -520,7 +520,12 @@ Three kinds of `.log` are still read by Winnow itself: an
 [key=value log](Cases-and-importing.md#fortigate-and-other-fortinet-logs)
 such as FortiGate's, and a
 [body file](Cases-and-importing.md#body-files-tsk-and-mactime), both known by
-their first line. Switch the plugin off for
+their first line. Its own secure and auth logs go the other way: Winnow
+has a [reader for those](Cases-and-importing.md#linux-secure-logs-and-authlog)
+too, but with this plugin on a file named `secure` or `auth.log` still comes
+here, so the **ESXi / UAC triage** board keeps counting SSH logins from it;
+**Read as** → **Secure log** in the Import window reads one with Winnow's
+reader instead. Switch the plugin off for
 cases where other `.log` files should import some other way.
 
 Each line is read for what it says it holds, the way an
