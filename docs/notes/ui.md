@@ -1806,6 +1806,34 @@ see [docs/notes/README.md](README.md) for the whole set.
   1.4 s now, and nothing on a second fit. Fit-all asks for the visible
   columns only, so hidden ones cost nothing. No `columns` at all still
   measures every column.
+- **Autofit measures what a timestamp column SHOWS, not what it stores.**
+  Every timestamp format (`TS_FORMATS`) writes the values it reads at one
+  fixed length, `tsFormatLength` (every part zero-padded, the year always
+  four digits), and that can be longer than the file's own text:
+  "6/3/2026 1:02:03" is 16 characters and its `YYYY-MM-DD HH:MM:SS` form
+  19. Fitted to `max(length(...))` of the stored text, that column was
+  cut off at `2026-06-03 01:0…`, right where the seconds start, while As
+  stored showed them in full, which is how it was reported. So
+  `fetchColumnMaxLens` names each datetime column not shown As stored in
+  `reformatted=`, and for those `column_max_lengths` returns the longest
+  value that is NOT a timestamp instead (`untimed_length_sql`: what
+  TS_NORMALIZE cannot read, with GLOBs taking the ISO and US dates out of
+  Python; tests/test_histogram.py holds the two to one answer), the only
+  values such a column still shows as stored. The client takes the larger
+  of that and the format's length. Two more places follow the format: a
+  datetime column's default width (`colWidth`: 190px, or more when the
+  format needs it, which the microsecond one does), and a pick from the
+  header menu, which widens a column with a width of its own when the new
+  format no longer fits (`widenToShow`; never narrows, since a width the
+  analyst chose that still holds the values is theirs). A change of the
+  case's or the machine's format repaints the header with the rows for the
+  default widths but leaves widths of its own alone; `=` refits.
+  The cost is the GLOBs on an ISO or US column (1M rows: 146 and 173 ms,
+  against 75 and 65 for the plain length) and a TS_NORMALIZE per row on
+  anything else, which a column of month-name timestamps pays in full
+  (4.3 s); cached per column and per way of measuring like the plain
+  answer, so only the first fit pays.
+  tests/ui/test_timestamp_widths.py reads the painted cells.
 - **The table menu replaced the tab strip's `▦` column-chooser button**
   (`TABLE_MENU_SECTIONS`/`openTableMenu`: press `C`, or Columns… on a
   table's right-click menu or its ⋯ in the Tables manager). Same registry

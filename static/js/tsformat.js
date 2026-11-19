@@ -107,6 +107,27 @@ export function formatTimestamp(raw, fmt) {
   }
 }
 
+/* How many characters `fmt` writes for a value parseTimestamp reads. The
+   same for every value: each part is zero-padded to a fixed width and the
+   year is always the four digits all three shapes capture. null for 'raw'
+   (the stored text, whatever its length) and for anything formatTimestamp
+   passes through unchanged. Column widths are fitted to this, not to the
+   stored text: "6/3/2026 1:02:03" is 16 characters and its ISO form 19,
+   so a column fitted to the first cut the second off at the seconds. */
+export function tsFormatLength(fmt) {
+  if (!fmt || fmt === 'raw' || !Object.hasOwn(TS_FORMATS, fmt)) return null;
+  return formatTimestamp('2000-01-01 00:00:00', fmt).length;
+}
+
+/* tsFormatLength for the format column `name` is shown in, or null when
+   its values are shown as stored — displayCell's rules: a duration column
+   is not a timestamp whatever its type says. */
+export function shownTsLength(name) {
+  const c = columnMeta(name);
+  if (!c || c.derived_kind === 'duration' || c.type !== 'datetime') return null;
+  return tsFormatLength(tsFormatFor(name));
+}
+
 /* Four layers, most specific first: this column in this table, then this
    case, then the system-wide default, then 'iso'. Before derived columns
    existed the fallback was 'raw' — analysts who prefer that set it as

@@ -1106,6 +1106,35 @@ def ts_normalize_sql(expr: str) -> str:
             f"ELSE TS_NORMALIZE({expr}) END")
 
 
+# The value starts _TS_ISO_RE and _TS_US_RE read, as GLOBs: the ISO date
+# (the time after it is optional to the regex) and the US date with a one-
+# or two-digit month and day. A TEXT value one of these matches is one
+# TS_NORMALIZE reads, so SQLite can say so without a trip through Python
+# per row; anything else (a month name, padding, no timestamp at all)
+# still asks TS_NORMALIZE, so the two cannot disagree.
+_TS_READ_GLOBS = (
+    "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*",
+    *(f"{mo}/{d}/[0-9][0-9][0-9][0-9]*"
+      for mo in ("[0-9]", "[0-9][0-9]") for d in ("[0-9]", "[0-9][0-9]")),
+)
+
+
+def untimed_length_sql(expr: str) -> str:
+    """LENGTH(expr) for a value TS_NORMALIZE cannot read, NULL for one it
+    can. MAX() of it is the longest value a REFORMATTED datetime column
+    still shows as stored: tsformat.js's formatTimestamp writes every
+    value parseTimestamp (TS_NORMALIZE's client twin) reads at the
+    format's own fixed length, which the client knows, and leaves the
+    rest exactly as they are. Autofit needs the larger of the two; the
+    plain MAX(LENGTH()) measured the stored text instead, so a column of
+    "6/3/2026 1:02:03" was fitted to 16 characters and shown as
+    "2026-06-03 01:0…" (docs/notes/ui.md). `expr` appears several times;
+    pass a column reference."""
+    globs = " OR ".join(f"{expr} GLOB '{g}'" for g in _TS_READ_GLOBS)
+    return (f"CASE WHEN typeof({expr}) = 'text' AND ({globs}) THEN NULL "
+            f"WHEN TS_NORMALIZE({expr}) IS NULL THEN LENGTH({expr}) END")
+
+
 # The Timeline's summary line (see build_timeline). Both caps are about a
 # single row of a fixed-height list: a lead long enough to fill the cell on
 # its own pushes every detail off the right edge, where the analyst cannot
@@ -3592,7 +3621,7 @@ class Store:
         # changed. Scratch, not evidence — it lives in the views database
         # (invariant #3) and dies with the process, same as a view.
         self._undo: list[dict] = []
-        self._maxlen_cache: dict[int, tuple[tuple, dict[str, int]]] = {}
+        self._maxlen_cache: dict[int, tuple[tuple, dict[tuple[str, bool], int]]] = {}
         self._fts_threads: dict[int, _QueuedBuild] = {}
         self._fts_failures: set[tuple[int, str]] = set()   # logged once each (_build_fts_worker)
         self._index_threads: dict[tuple[int, str, str], _QueuedBuild] = {}
@@ -14338,10 +14367,20 @@ class Store:
             rows = ro.execute(sql, (limit,)).fetchall()
         return [{"value": r["val"], "count": r["n"]} for r in rows]
 
-    def column_max_lengths(self, source_id: int, columns: list[str] | None = None) -> dict[str, int]:
+    def column_max_lengths(self, source_id: int, columns: list[str] | None = None,
+                           reformatted: list[str] | None = None) -> dict[str, int]:
         """MAX(LENGTH(col)) per column, across all member tables — backs the
         UI's autofit-column-width shortcut. One sequential scan per member
         table, every asked column computed in a single pass.
+
+        `reformatted` names the datetime columns the grid shows in a
+        timestamp format rather than as stored. Each of those reports the
+        longest value that is NOT a timestamp instead (untimed_length_sql;
+        0 when every value is one), since those are the only values such a
+        column still shows as stored — the rest come out at the format's
+        fixed length, and the client adds that. Measured as stored, a
+        column of "6/3/2026 1:02:03" was fitted to 16 characters and the
+        19 of "2026-06-03 01:02:03" lost their seconds to the ellipsis.
 
         `columns` narrows it to the ones being fitted: double-clicking one
         column's edge used to measure every column of the table to answer
@@ -14371,10 +14410,15 @@ class Store:
             if columns is not None:
                 asked = set(columns)
                 cols = [c for c in cols if c in asked]
-            missing = [c for c in cols if c not in known]
+            # Cached per (column, how it was measured): one column can be
+            # asked both ways as the analyst switches its format.
+            untimed = set(reformatted or ())
+            wanted = [(c, c in untimed) for c in cols]
+            missing = [w for w in wanted if w not in known]
             if missing:
                 members = self._resolve_members_on(ro, source_id)
-                sel = ", ".join(f"MAX(LENGTH({q(c)}))" for c in missing)
+                sel = ", ".join(f"MAX({untimed_length_sql(q(c))})" if u else f"MAX(LENGTH({q(c)}))"
+                                for c, u in missing)
                 maxes = [0] * len(missing)
                 for m in members:
                     row = ro.execute(f"SELECT {sel} FROM {self._member_from(src, m)}").fetchone()
@@ -14383,7 +14427,7 @@ class Store:
                             maxes[i] = v
                 known.update(zip(missing, maxes))
                 self._maxlen_cache[source_id] = (key, known)
-        return {c: known[c] for c in cols}
+        return {c: known[w] for c, w in zip(cols, wanted)}
 
     # -------------------------------------------------------------------- tags
 

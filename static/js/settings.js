@@ -657,7 +657,9 @@ function buildCaseTsPane(pane) {
   async function pick(value) {
     try {
       S.caseSettings = await post('/api/case_settings', { ts_format: value });
-      render();
+      // The header too: a datetime column's default width follows its
+      // format (colWidth), and the header row is sized separately.
+      if (S.sourceId) renderHeadResized(); else render();
       toast('Case timestamp format saved');
     } catch (e) { toast('Could not save: ' + e.message, 5000); }
     paint();
@@ -1356,7 +1358,7 @@ export function openSettings(where) {
     tsSystemSel.onchange = async () => {
       try {
         S.appSettings = await post('/api/settings/app', { default_ts_format: tsSystemSel.value });
-        render();
+        if (S.sourceId) renderHeadResized(); else render();   // see the case format's pick
         toast('Default timestamp format saved');
       } catch (e) {
         toast('Could not save: ' + e.message, 5000);

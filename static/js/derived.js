@@ -3,7 +3,7 @@ own additions to a source's column set.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { openStack } from './stack.js';
-import { renderHead, saveLayout, saveLayoutNow } from './columns.js';
+import { renderHead, renderHeadResized, saveLayout, saveLayoutNow, widenToShow } from './columns.js';
 import { quickAddWidget } from './dashboard.js';
 import { tableOf, widgetFrom } from './dashwidgets.js';
 import { $, api, el, nameMap, post, setBusy, toast, toastAction } from './core.js';
@@ -90,8 +90,12 @@ export function columnMenuItems(name) {
              fallback was 'raw' — with a configurable default underneath,
              that would silently mean "inherit" instead of "as stored". */
           S.layout[name] = Object.assign({}, S.layout[name] || {}, { tsFormat: key });
-          render();
+          renderHeadResized();   // a default width follows the format (colWidth)
           saveLayout();
+          // A width fitted to the old format can be too narrow for the
+          // new one: "As stored" fitted, then YYYY-MM-DD HH:MM:SS, cut
+          // the seconds off a column of "6/3/2026 1:02:03".
+          widenToShow(name);
         },
       });
     }
