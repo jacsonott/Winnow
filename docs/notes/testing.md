@@ -120,7 +120,7 @@ only ever offers paths that actually extract, and that a batch is
 all-or-nothing (a name collision in the fifth spec must not leave four
 columns behind).
 `test_ingest_contracts.py` holds every reader (CSV, text, JSON, IIS,
-key=value, body file, XLSX, Plaso, SQLite) to the three promises ingest_csv set,
+key=value, body file, secure log, XLSX, Plaso, SQLite) to the three promises ingest_csv set,
 since each carries its own copy of the code that keeps them: every row
 lands in order across batches (BATCH is shrunk so a 30-row fixture spans
 five), a cancel leaves no table, and a failure raised from the reader
@@ -181,6 +181,21 @@ the fast-path regexes and `_parse_line_slow` and requires one answer: the
 fast paths are only a speed-up if they never disagree, and a disagreement
 shows up nowhere else. `test_esxi_log_scan.py` covers the same plugin's
 folder scan, continuation folding and syslog year.
+`test_secure_log.py` covers the Linux secure / auth.log reader: the name
+rule, header splitting (no host, ESXi's severity, RFC 3339 offsets to
+UTC), `classify` one message shape at a time, and the year rule. Its
+load-bearing tests are the attacker-chosen user names (a name holding
+`from 10.0.0.1 port 22` must not move Source IP; sshd's tail decides)
+and the year: a log across New Year dated from the file's mtime, a year
+the analyst sets, and a session re-import that keeps the recorded year
+after the file's mtime has moved. It also pins the plugin precedence
+that sets this reader apart from the other built-in names: a folder scan
+and an open-with both hand `secure` to a plugin that claims it.
+`tests/ui/test_secure_queue.py` holds `secureLogNamed` to `name_says`
+over one list, then drives the queue: a path item and an upload previewed
+and imported in the year the pane shows (the upload dated from the
+browser's `lastModified`, not the spool), and **Read as** → **Secure log**
+on other text.
 `test_site_palette.py` holds the Pages site and Harvest to the same
 colors: every value docs/site/assets/site.css copies from a Harvest token
 (the ones commented `/* dark --panel */` and so on) must still equal that

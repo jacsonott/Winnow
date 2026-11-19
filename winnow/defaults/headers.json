@@ -1,5 +1,5 @@
 {
-  "version": 6,
+  "version": 7,
   "nicknames": [
     {
       "name": "Event logs (EvtxECmd)",
@@ -1158,6 +1158,44 @@
           "size": "size",
           "UID": "uid",
           "inode": "inode"
+        }
+      }
+    },
+    {
+      "name": "Linux secure / auth.log",
+      "columns": [
+        "Timestamp",
+        "Host",
+        "Process",
+        "PID",
+        "Event",
+        "User",
+        "Source IP",
+        "Source port",
+        "Auth method",
+        "Target user",
+        "TTY",
+        "Command",
+        "Message",
+        "Timestamp (as logged)"
+      ],
+      "summary": {
+        "lead": [
+          "Event",
+          "Message"
+        ],
+        "details": [
+          "User",
+          "Source IP",
+          "Target user",
+          "Command",
+          "Process",
+          "Host"
+        ],
+        "labels": {
+          "Source IP": "from",
+          "Target user": "as",
+          "Process": "via"
         }
       }
     }
