@@ -108,7 +108,7 @@ def test_a_fortigate_log_by_path_previews_configures_and_imports(page, ui_csv):
         assert _type_select(page, "srcport").input_value() == "number"
         _type_select(page, "srcport").select_option("text")
         item = page.evaluate("() => __winnow.S.importQueue[0]")
-        assert item["kind"] == "kv" and item["column_types"]["srcport"] == "text"
+        assert item["kind"] == "kv" and item["column_types"] == {"srcport": "text"}   # only what was set
 
         page.locator("#modalBody .import-foot .btn.primary").click()
         page.wait_for_function("() => __winnow.S.sources.some((s) => s.name === 'fortigate.log' && s.row_count === 2 && s.columns.length)", timeout=20_000)

@@ -97,7 +97,7 @@ import threading
 import time
 import traceback
 
-from winnow.store import OpCancelled, q, union_all
+from winnow.store import NUM_RE, OpCancelled, q, union_all
 
 PLUGIN = {
     "name": "first-last",
@@ -237,8 +237,11 @@ def _esc_like(value):
     return str(value).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-NUM_RE_SQL = r"^-?\d+(\.\d+)?$"
-_NUM_RE = re.compile(NUM_RE_SQL)
+# The app's own test, not a copy of it: a column ingest typed as a number
+# has no value this would turn into NULL, so its bookends and totals see
+# every value the grid sorts by.
+NUM_RE_SQL = NUM_RE.pattern
+_NUM_RE = NUM_RE
 
 
 def _is_number_column(src, col):
