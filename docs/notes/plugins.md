@@ -383,8 +383,13 @@ see [docs/notes/README.md](README.md) for the whole set.
     and the base keeps that key as the partial; only the answer takes the
     value back off (`_untime`), so a subtotal rolls up keys like any other
     MIN. Min and Max of one column each call the normalizer, so a US-format
-    column with both costs about 2 s per 300k rows where its text took
-    0.2 s; ISO takes the SQL fast path.
+    column with both costs about 2 s per 300k rows (7 s per 1M) where its
+    text took 0.2 s; ISO takes the SQL fast path. A derived datetime column
+    on a table of its own skips the key (`_is_timed`): timeparse writes it
+    as ISO and NULL where the input did not parse, so plain MIN and MAX are
+    already right, at the old cost. Deriving an ISO copy of a US column is
+    the analyst's fast path. On a merge the name may be a file column in
+    another member, so it keeps the key.
   - **On a merge, match tags per member, not with a row-value IN.**
     `(s.source_id, s.rid) IN (SELECT source_id, rid FROM row_tags …)` is
     correct over `_scope`'s union and fine when it keeps rows, but SQLite

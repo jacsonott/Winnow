@@ -2856,6 +2856,14 @@ def test_pivot_min_and_max_of_a_timestamp_column_are_by_time(pivot_client, store
     # A text column is still compared as text.
     out = _agg(client, sid, values=[{"agg": "max", "column": "Host"}], group_sets=[[]])
     assert out["sets"][0]["rows"] == [["A"]]
+    # A derived datetime column is ISO, NULL where the input did not parse,
+    # so its own text gives the same answer without the key.
+    job = store.add_derived_column(sid, "When ISO", "When", "us_datetime", {})
+    store.wait_for_ingest_job(job["job_id"], timeout=30)
+    out = _agg(client, sid, values=[{"agg": "min", "column": "When ISO"}, {"agg": "max", "column": "When ISO"}],
+               group_sets=[["Host"]])
+    assert [r[1][:19] for r in out["sets"][0]["rows"]] == ["2025-12-30 23:00:00"]
+    assert [r[2][:19] for r in out["sets"][0]["rows"]] == ["2026-01-02 10:05:00"]
 
 
 def test_pivot_aggregates_over_a_merge(pivot_client, store, write_csv):
