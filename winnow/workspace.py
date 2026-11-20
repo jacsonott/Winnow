@@ -1124,10 +1124,11 @@ class AppSettings:
 
     FILE = "app_settings.json"
     DEFAULTS = {"default_ts_format": "iso", "remote_session": False}
-    # Mirrors app.js's TS_FORMATS. A value outside this set would silently
+    # Mirrors tsformat.js's TS_FORMATS (tests/test_timestamp_dmy.py holds
+    # the two together). A value outside this set would silently
     # fall through formatTimestamp's switch and render raw, so it's
     # rejected here rather than stored and quietly ignored.
-    TS_FORMATS = {"raw", "iso", "iso_ms", "iso_us", "date", "time", "us", "us_date"}
+    TS_FORMATS = {"raw", "iso", "iso_ms", "iso_us", "date", "time", "us", "us_date", "dmy"}
 
     def get(self) -> dict:
         with _LOCK:

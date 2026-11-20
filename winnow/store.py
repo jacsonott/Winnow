@@ -670,10 +670,11 @@ NUM_RE = re.compile(r"^\s*[-+]?\d+(\.\d+)?([eE][-+]?\d+)?\s*$")
 # numbers, so _numeric_expr reads them as NULL, which sorts to one edge
 # and matches no comparison, exactly as a blank does.
 NO_VALUE = frozenset({"", "-", "--", "n/a", "na", "null", "(null)", "none", "nil", "nan", "?", "(empty)"})
-# Anything that looks like a leading ISO-ish or US date; used only to pick a
-# default sort column and to hint the UI, never to rewrite the stored value.
+# Anything that looks like a leading ISO-ish, US or day-first dashed
+# (dd-mm-yyyy, timeparse.DMY_DATE) date; used only to pick a default sort
+# column and to hint the UI, never to rewrite the stored value.
 # Month-name timestamps ("JUN 23 2026 00:11:00", "23 Jun 2026", "June 23,
-# 2026 5:11 PM", "Jul 28th 2026 01:02:22") — the third recognized family,
+# 2026 5:11 PM", "Jul 28th 2026 01:02:22") — another recognized family,
 # name-first and day-first both, since exporters disagree, with the day's
 # ordinal suffix optional. The alternation is timeparse.MONTH_NAME, strict
 # (a weekday or a random word never matches), and _TS_MONTHS is the number
@@ -687,7 +688,7 @@ _TS_MONTHS = {
     "november": 11, "december": 12,
 }
 DATE_RE = re.compile(
-    r"^\d{4}-\d{2}-\d{2}[ T]|^\d{1,2}/\d{1,2}/\d{4}"
+    r"^\d{4}-\d{2}-\d{2}[ T]|^\d{1,2}/\d{1,2}/\d{4}|^" + timeparse.DMY_DATE +
     r"|^" + _TS_MONTH_NAME + r"\s+\d{1,2}" + timeparse.ORDINAL + r"\s*,?\s*\d{4}"
     r"|^\d{1,2}" + timeparse.ORDINAL + r"\s+" + _TS_MONTH_NAME + r"\s*,?\s*\d{4}",
     re.IGNORECASE)
@@ -988,9 +989,9 @@ def _compiled_regex(pattern: str) -> re.Pattern:
     return rx
 
 
-# Same two shapes DATE_RE recognizes at ingest, capturing time-of-day too
+# Same shapes DATE_RE recognizes at ingest, capturing time-of-day too
 # (all optional groups — a bare date still matches). Kept in sync with
-# tsformat.js's TS_ISO_RE/TS_US_RE/TS_MONTH_RE (parseTimestamp) by hand —
+# tsformat.js's TS_ISO_RE/TS_US_RE/TS_DMY_RE/TS_MONTH_RE (parseTimestamp) by hand —
 # there's no shared module between the two, just the same format families.
 # The 12-hour marker is timeparse.MERIDIEM, after optional fraction digits
 # (not captured: TS_NORMALIZE is whole seconds) — see MERIDIEM for what
@@ -1004,6 +1005,12 @@ _TS_ISO_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})(?:" + timeparse.DATE_TIME_SEP
 _TS_US_RE = re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{4})(?:" + timeparse.DATE_TIME_SEP
                        + r"(\d{1,2}):(\d{2})(?::(\d{2})(?:[.,]\d+)?)?"
                        r"\s*(?:" + timeparse.MERIDIEM + r")?)?")
+# Day-first with dashes, dd-mm-yyyy ("23-06-2026 13:05:01"): the date is
+# timeparse.DMY_DATE (day 1-31 and month 1-12 held in the pattern), the
+# time is the US shape's. Captures (d, mo, y, h, mi, ss, meridiem).
+_TS_DMY_RE = re.compile(r"^" + timeparse.DMY_DATE + r"(?:" + timeparse.DATE_TIME_SEP
+                        + r"(\d{1,2}):(\d{2})(?::(\d{2})(?:[.,]\d+)?)?"
+                        r"\s*(?:" + timeparse.MERIDIEM + r")?)?")
 _TS_MONTH_RE = re.compile(
     r"^(?:(" + _TS_MONTH_NAME + r")\s+(\d{1,2})" + timeparse.ORDINAL
     + r"|(\d{1,2})" + timeparse.ORDINAL + r"\s+(" + _TS_MONTH_NAME + r"))"
@@ -1040,6 +1047,9 @@ def _day_bucket(raw: Any) -> str | None:
     m = _TS_US_RE.match(s)
     if m:
         return f"{int(m.group(3)):04d}-{int(m.group(1)):02d}-{int(m.group(2)):02d}"
+    m = _TS_DMY_RE.match(s)
+    if m:
+        return f"{int(m.group(3)):04d}-{int(m.group(2)):02d}-{int(m.group(1)):02d}"
     m = _TS_MONTH_RE.match(s)
     if m:
         y, mo, d, _, _, _ = _month_parts(m)
@@ -1049,8 +1059,8 @@ def _day_bucket(raw: Any) -> str | None:
 
 def _ts_normalize(raw: Any) -> str | None:
     """Registered as the SQL function TS_NORMALIZE(x) — a zero-padded,
-    lexicographically-sortable "YYYY-MM-DD HH:MM:SS" for a value in either
-    shape _TS_ISO_RE/_TS_US_RE recognize, missing time-of-day treated as
+    lexicographically-sortable "YYYY-MM-DD HH:MM:SS" for a value in any
+    shape _TS_ISO_RE/_TS_US_RE/_TS_DMY_RE/_TS_MONTH_RE recognize, missing time-of-day treated as
     midnight. Powers the timeframe filter's range check (TS_NORMALIZE(col)
     BETWEEN ? AND ?, both bounds run through this same function) — a bare
     text/numeric comparison on the raw stored value would sort the US
@@ -1071,6 +1081,11 @@ def _ts_normalize(raw: Any) -> str | None:
     m = _TS_US_RE.match(s)
     if m:
         mo, d, y, h, mi, sec, ampm = m.groups()
+        hh = timeparse.hour24(int(h) if h else 0, ampm)
+        return f"{int(y):04d}-{int(mo):02d}-{int(d):02d} {hh:02d}:{int(mi or 0):02d}:{int(sec or 0):02d}"
+    m = _TS_DMY_RE.match(s)
+    if m:
+        d, mo, y, h, mi, sec, ampm = m.groups()
         hh = timeparse.hour24(int(h) if h else 0, ampm)
         return f"{int(y):04d}-{int(mo):02d}-{int(d):02d} {hh:02d}:{int(mi or 0):02d}:{int(sec or 0):02d}"
     m = _TS_MONTH_RE.match(s)

@@ -465,6 +465,23 @@ see [docs/notes/README.md](README.md) for the whole set.
     they miss is NULL and counted as unparsed, never a silent midnight.
     `tests/test_timestamp_separators.py`,
     `tests/ui/test_timestamp_time_of_day.py`.
+    The day-first dashed shape, dd-mm-yyyy, is shared the same way:
+    `timeparse.DMY_DATE` builds `_DMY_RE` (the `dmy_datetime` op and
+    `parse_datetime_lenient`) and store.py's `DATE_RE`/`_TS_DMY_RE`, and
+    tsformat.js's `TS_DMY_RE` mirrors it. Dashes read day first and
+    slashes month first, so no value is read by two shapes. The day
+    (1–31) and month (1–12) ranges live in the pattern, not in a check
+    after the match. That is what keeps a month-first column written with
+    dashes ("12-25-2026") from being typed day-first at import: most of
+    its values have 13–31 in the month slot, short of `DATE_RE`'s 80%.
+    TS_NORMALIZE still doesn't check the calendar ("31-04-2026" becomes
+    2026-04-31, as "4/31/2026" does); the derived op does, through
+    `datetime()`. The op reads `DATE_TIME_SEP` between date and time,
+    unlike `_US_RE`, but still requires the time, so a value without one
+    is NULL and counted, never a silent midnight. Its display twin is the
+    `dmy` format (DD-MM-YYYY HH:MM:SS), which must be in both tsformat.js's
+    `TS_FORMATS` and `workspace.AppSettings.TS_FORMATS`.
+    `tests/test_timestamp_dmy.py`, `tests/ui/test_timestamp_dmy_ui.py`.
     Unparseable input is NULL, not `''`: it drops out of
     comparisons and the timeframe filter instead of pretending to be data,
     and the count of non-empty inputs that produced NULL is surfaced per

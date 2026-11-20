@@ -188,6 +188,7 @@ time is UTC and the sender's own zone is unknown, so it is kept as UTC and
 | **Apache access log** | `dd/Mmm/yyyy:hh:mm:ss +zzzz`, brackets optional | `[05/Jan/2024:13:22:01 +0100]` → `2024-01-05 12:22:01` |
 | **RFC 2822 (email date)** | Email and HTTP dates; two-digit years 50–99 are 19xx, 00–49 are 20xx; a zone RFC 2822 doesn't define (`CET`, `IST`…) counts as unparsed | `Fri, 05 Jan 2024 13:22:01 -0500` → `2024-01-05 18:22:01` |
 | **US MM/DD/YYYY hh:mm:ss** | US dates, seconds optional, optional AM/PM in any common spelling (`PM`, `pm`, `p.m.`) and optional zone | `1/5/2024 1:22:01 PM` → `2024-01-05 13:22:01` |
+| **dd-mm-yyyy hh:mm:ss** | Day-first dates with dashes, the day and month one or two digits, seconds and fraction optional, optional AM/PM and optional zone. Dashes are read day first and slashes month first (the US operation above) | `23-06-2026 13:05:01` → `2026-06-23 13:05:01`<br>`5-1-2026 1:05 PM` → `2026-01-05 13:05:00` |
 | **Custom pattern** | Any layout you write as a pattern (see [Custom patterns](#custom-patterns)), with optional zone | `14.03.2026 13:22:01,482` with `dd.MM.yyyy HH:mm:ss,fff` → `2026-03-14 13:22:01.482000` |
 
 The text formats, custom patterns, BSD syslog and Excel serial dates also take **Source UTC
@@ -199,9 +200,9 @@ don't. With it set to `-05:00`, the ISO value `2024-01-05 13:22:01` becomes
 
 When no built-in format reads a column, choose **Custom pattern** at the
 bottom of the **Format** list and write the layout in **Pattern**, the way
-Timeline Explorer and the EZ Tools take one: `dd-MM-yyyy HH:mm:ss` reads
-`14-03-2026 13:22:01`. The line under the box says what the pattern reads,
-written for 14 March 2026 at 13:22:01 (*Reads values like 14-03-2026
+Timeline Explorer and the EZ Tools take one: `dd.MM.yyyy HH:mm:ss` reads
+`14.03.2026 13:22:01`. The line under the box says what the pattern reads,
+written for 14 March 2026 at 13:22:01 (*Reads values like 14.03.2026
 13:22:01*), so you can see which number is the day and which the month,
 or says what is wrong with it. The preview shows what it makes of the
 column.

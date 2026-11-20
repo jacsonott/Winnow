@@ -381,7 +381,7 @@ that no built-in format reads.
 **Every case on this machine** sets how datetime columns are displayed by
 default. The choices are **As stored**, `YYYY-MM-DD HH:MM:SS` (the default),
 `YYYY-MM-DD HH:MM:SS.mmm`, `YYYY-MM-DD HH:MM:SS.ffffff`, `YYYY-MM-DD`,
-`HH:MM:SS`, `MM/DD/YYYY HH:MM:SS` and `MM/DD/YYYY`.
+`HH:MM:SS`, `MM/DD/YYYY HH:MM:SS`, `MM/DD/YYYY` and `DD-MM-YYYY HH:MM:SS`.
 
 This is display only: the stored and exported value is always the text the
 file came with. A format picked on one column (right-click its header) beats
