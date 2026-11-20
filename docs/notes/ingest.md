@@ -303,6 +303,17 @@ see [docs/notes/README.md](README.md) for the whole set.
   rides through the jobs routes and the ingest record (`column_types`,
   with the picked `log_format`), so a session re-import types the same.
   tests/test_iis_logs.py.
+- **The import preview sends only the types the analyst picked**
+  (importer.js: `picked`; a `{column: type}` map for IIS and key=value,
+  a positional list with `null` for every untouched column for delimited
+  text, which `_given_types` reads as "infer"). It used to send its own
+  reading of its first 50 rows for EVERY column the moment one heading
+  was changed, and an explicit type overrides the import's inference, so
+  setting the timestamp column's type made every byte count the preview
+  happened to see as empty a text column for good: no 500-row sample, no
+  look past it (`_type_past_sample`, docs/notes/store.md). `IngestPath`
+  and `IngestJsonPath` take `list[str | None]` for it.
+  tests/test_number_columns.py.
 - **Key=value logs (FortiGate, the other Fortinet products) are
   recognised by their first line** (`kvread.looks_like`,
   `store.looks_like_kv_log`, `Store.ingest_kv`, kind `kv`). They have no
@@ -347,7 +358,10 @@ see [docs/notes/README.md](README.md) for the whole set.
   `Timestamp (local)` — the device clock, unconverted — when any line
   lacks one, because a column that is UTC on some rows and local on
   others can't be ordered. `tz` is pinned to text (it infers as a
-  number). NUL runs, the live-file second pass (`FileChanged`) and the
+  number; `kvread.TEXT_KEYS`, which the open-time number typing pass
+  skips by name too). A key only traffic lines carry (`sentbyte`,
+  `rcvdbyte`) is empty for every event line before them, so it is typed
+  past the sample (docs/notes/store.md). NUL runs, the live-file second pass (`FileChanged`) and the
   `{column: type}` map are IIS's, for the same reasons. Folder imports
   and session re-import (`_SESSION_READERS`, the ingest record's
   `column_types`) carry kind `kv`. tests/test_kv_logs.py,

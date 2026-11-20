@@ -1307,7 +1307,14 @@ def register(api):
 
 `api.NUM_RE` is there too — the same "does this look numeric" test the
 grid uses for right-alignment and numeric sorting, so a plugin's tables
-agree with the rest of the app.
+agree with the rest of the app. It accepts exactly the text SQLite's
+`CAST(x AS REAL)` reads in full (a sign, a decimal point, an exponent such
+as `1.5E+09`, spaces either side; never `1,024`), so gate every cast on it,
+`CASE WHEN x REGEXP '<NUM_RE.pattern>' THEN CAST(x AS REAL) END`, and use
+the pattern itself rather than a copy: a column the import typed as a
+number then has no value your cast reads as NULL. A number column can
+also hold placeholders such as `-` and `N/A` where a value is missing;
+the gated cast reads those as NULL, as it does a blank.
 
 Module-level helpers that never see `api` can import them directly
 instead; the three bundled examples that build SQL this way do exactly

@@ -169,7 +169,7 @@ A table opens sorted by its first datetime column, ascending, if it has one. Cli
 
 How a column sorts depends on its type:
 
-- Number columns sort by value. Cells that aren't numbers sort before every number in ascending order.
+- Number columns sort by value, so `9` comes before `10` and `1048576`. Cells that aren't numbers (`-`, `N/A`, blank) sort before every number in ascending order. Which columns are number columns is decided at import; see [Numbers, dates and text](Filtering-and-searching.md#numbers-dates-and-text).
 - Text columns sort alphabetically, ignoring case for A–Z only.
 - Datetime columns sort chronologically, whichever way the file wrote the time: `2024-01-05 13:22:01`, US-style `1/5/2024 1:22:01 PM`, or with a month name, `Jan 5 2024 13:22:01`. Changing a column's display format changes how it looks, not how it sorts. Rows in the same second are ordered by their fraction of a second. Cells that aren't timestamps (`N/A`, blank) sort before every timestamp in ascending order, as non-numbers do in a number column.
 

@@ -103,13 +103,9 @@ def test_numeric_filter_and_sort_null_not_zero(store, write_csv):
     # non-numeric values (blank/"N/A") must come out NULL in a numeric
     # sort/compare, never silently coerced to 0 like a bare CAST would.
     #
-    # infer_type requires *every* sampled value to look numeric (no
-    # threshold, unlike datetime) — a stray "N/A" in the sample would
-    # infer the whole column as "text" and this test would no longer be
-    # exercising _numeric_expr at all. column_types forces "number" here,
-    # standing in for the realistic case: a column that inferred as
-    # numeric from its (separately sampled) first 500 rows, then hits a
-    # stray non-numeric value later in a much larger file.
+    # "N/A" is a NO_VALUE placeholder, so infer_type types this column a
+    # number on its own (it used to need column_types to force it, since
+    # one "N/A" in the sample made the whole column text).
     path = write_csv([
         ["Bytes"],
         ["100"],
@@ -118,7 +114,7 @@ def test_numeric_filter_and_sort_null_not_zero(store, write_csv):
         [""],
         ["0"],
     ])
-    rec = store.ingest_csv(path, name="nums.csv", column_types=["number"])
+    rec = store.ingest_csv(path, name="nums.csv")
     assert rec["columns"][0]["type"] == "number"
 
     # ">-10" should include -5, 0 and 100 but not the non-numeric rows —
@@ -140,14 +136,15 @@ def test_numeric_filter_and_sort_null_not_zero(store, write_csv):
 
 
 def test_a_number_compares_as_a_number_on_a_column_typed_text(store, write_csv):
-    """The builder labels > and < "(numeric)". A column is typed text when
-    one sampled cell is "-" or "n/a", and these compared text there:
-    `Bytes > 60` dropped 100 and 200 ("1" < "6") and kept "n/a". A value
-    that isn't a number still compares as text, and a datetime column
-    compares its ISO text whatever the value."""
+    """The builder labels > and < "(numeric)". A column of numbers is typed
+    text when one sampled cell is a word ("-" and "n/a" no longer do it:
+    NO_VALUE), and these compared text there: `Bytes > 60` dropped 100
+    and 200 ("1" < "6") and kept "unknown". A value that isn't a number
+    still compares as text, and a datetime column compares its ISO text
+    whatever the value."""
     path = write_csv([["Bytes", "Name", "When"],
                       ["100", "alpha", "2026-03-14 08:00:00"],
-                      ["n/a", "bravo", "2026-03-15 08:00:00"],
+                      ["unknown", "bravo", "2026-03-15 08:00:00"],
                       ["70", "charlie", "2026-03-16 08:00:00"],
                       ["-", "delta", "2026-03-17 08:00:00"],
                       ["200", "echo", "2026-03-18 08:00:00"],

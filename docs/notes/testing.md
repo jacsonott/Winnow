@@ -41,6 +41,18 @@ filter and the histogram on such a column. Its browser half,
 `tests/ui/test_timestamp_time_of_day.py`, reads the painted cells
 (00:00:00 on every row was the report) and runs one corpus through
 `parseTimestamp` and `_ts_normalize` side by side.
+`test_number_columns.py` holds each shape of "imported numbers sort as
+text" to a number column that sorts by value, through the reader it came
+in by: a "-" or "N/A" among the numbers, a column empty for the first 500
+rows (a FortiGate log's traffic keys, an IIS log's second `#Fields:`
+line, a late JSON key), padded, signed and exponent numbers. Its
+load-bearing tests are the ones that keep the fix from overreaching: a
+column found to hold timestamps further in is NOT made a datetime column,
+and the open-time pass over older tables leaves alone everything that was
+declared text rather than inferred (the analyst's preview choice, a
+key=value `tz`, a plugin's table, a column the old rule itself called a
+number). Plus that every cell NUM_RE accepts is worth what CAST reads it
+as, since `_numeric_expr` gates on it.
 `test_maintenance.py` covers the things that only exist because everything
 else only ever grows: the auto-created column indexes (listing/dropping),
 `compact()`, and `sweep_orphan_views()` — whose load-bearing test is that a

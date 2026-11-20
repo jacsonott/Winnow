@@ -539,7 +539,9 @@ class PluginAPI:
     q = staticmethod(_store_q)
     #: "Does this text look numeric" — the same test the grid's own
     #: right-alignment and numeric sorting use, so a plugin's tables agree
-    #: with the rest of the app.
+    #: with the rest of the app. Exactly what CAST(x AS REAL) reads in full
+    #: (sign, decimals, exponent, surrounding spaces; no digit grouping):
+    #: gate a cast on its pattern rather than on a copy of it.
     NUM_RE = _store_num_re
 
     def __init__(self, registry: "PluginRegistry | _Loaded", plugin_name: str,
