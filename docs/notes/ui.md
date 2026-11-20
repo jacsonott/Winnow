@@ -2866,6 +2866,14 @@ see [docs/notes/README.md](README.md) for the whole set.
     `flex-wrap: wrap`, and the switches are one group
     (`.timeline-head-acts`, `margin-left: auto`) so they wrap together.
   `tests/ui/test_timeline_timeframe.py`.
+- **The Pivot's timeframe is a third range** (per pivot, in its tab's
+  Filters well; examples/plugins/pivot). It copies the tables' dialog
+  through the plugin context — `winnow.timestampField` is the
+  `timestampField` above, and the bounds are checked by the plugin's own
+  `/timeframe` route rather than parseTimestamp — and reaches `S.timeRange`
+  only through `openFiltered`'s `timeRange`, which SETS the tables' range
+  after `openSource` (before it, a per-table stash would put the arriving
+  table's own range back over it). docs/notes/plugins.md has the rest.
   - **The bars come from the server, the marks from the client.**
     `GET /api/timeline_overview` after each build (and on Tags/Tables);
     the band, the thumb and the selected line's mark are worked out from

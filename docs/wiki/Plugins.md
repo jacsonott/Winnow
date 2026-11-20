@@ -254,6 +254,22 @@ many rows of the pivot's table carry that tag. When you come back to the
 Pivot tab from the grid, a pivot filtered on tags runs again, so rows you
 tagged in the meantime are counted.
 
+**⏱ Timeframe**, in the heading of **Filters**, counts only the rows from
+a stretch of time. Its dialog is the table toolbar's **Timeframe filter**
+for this pivot: pick **All datetime columns (catches a match on any of
+them)** or one column, type a **Start** and an **End** (or pick them with
+📅), and click **Apply**. The same timestamp spellings work as in the
+tables' timeframe, both ends are included, and an end left empty is open.
+**Fill range** copies in the tables' timeframe, or the earliest and latest
+moment among the tagged rows (all tags, or the ones you click). Text that
+isn't a time is refused with the dialog still open, and an **End** before
+the **Start** is too. Once set, the range sits at the top of **Filters**:
+click it to change it, ✕ to clear it, or right-click it for **Turn it off**,
+which counts every row again but keeps the range to turn back on (the
+dialog's **Turn off** does the same). The timeframe belongs to the pivot:
+the tables' timeframe doesn't narrow it, it doesn't narrow the tables, and
+each pivot has its own. It is greyed out on a table with no datetime column.
+
 - **Subtotals** and **Grand totals** toggle the total rows and columns.
 - While a change is being worked out, the status line says
   **Aggregating…** and the table already on screen stays, dimmed, until the
@@ -265,8 +281,10 @@ tagged in the meantime are counted.
   right-click menu, opens the table in the grid on all of them: the
   cell's values in the column filters, the pivot's **Filters** as
   conditions in the filter builder, and its tag chips on the tag ribbon,
-  ready to read, tag and export. The timeframe filter is turned off on the
-  way, because the pivot counts the whole table. A `> (numeric)` or
+  ready to read, tag and export. The pivot's timeframe becomes the tables'
+  timeframe on the way; with none set on the pivot, the tables' timeframe
+  is turned off instead, because the pivot counted the whole table. A
+  `> (numeric)` or
   `< (numeric)` filter on a column the grid holds as text can't be carried
   over, since the grid would compare it as text; the button says so
   instead. With the Pivot in a window of its own (see
@@ -274,12 +292,12 @@ tagged in the meantime are counted.
   the rows open in the main window.
 - Several pivots can be open as sub-tabs (`+` at the end of the sub-tabs
   adds one; double-click one to rename it). They are saved in the case,
-  tag filter included, and restored when you come back; **Start fresh** on
-  the restore banner forgets them.
+  tag filter and timeframe included, and restored when you come back;
+  **Start fresh** on the restore banner forgets them.
 
 A pivot reads the whole table, not the grid's current filtered view: the
 grid's filters, search and timeframe don't apply to it, and its tag chips
-are its own. It stops at 16 grouping levels and 20,000 groups per level,
+and timeframe are its own. It stops at 16 grouping levels and 20,000 groups per level,
 and draws at most 60 column groups.
 
 ### first_last

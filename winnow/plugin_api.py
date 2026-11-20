@@ -134,13 +134,18 @@ A tab plus its backend route, the full custom-UI shape:
     # be gone. get() answers {error: true} rather than null when the read
     # itself failed, so a mount can refuse to save over state it could not
     # see.
-    # winnow.openFiltered(sourceId, pairs, {where, tags, clearTimeframe})
-    # opens a table in the grid on the rows behind a mark: `pairs` exact
-    # values ([{column, value}], into the column filter boxes), `where`
-    # filter-builder conditions ([{column, op, value}]) ANDed on, `tags`
-    # the tag filter in the ribbon's spelling, and `clearTimeframe` for a
-    # count that ignored the case timeframe. It replaces whatever filters
-    # the table had: a navigation, not a refinement.
+    # winnow.openFiltered(sourceId, pairs, {where, tags, clearTimeframe,
+    # timeRange}) opens a table in the grid on the rows behind a mark:
+    # `pairs` exact values ([{column, value}], into the column filter
+    # boxes), `where` filter-builder conditions ([{column, op, value}])
+    # ANDed on, `tags` the tag filter in the ribbon's spelling,
+    # `clearTimeframe` for a count that ignored the case timeframe, and
+    # `timeRange` ({column, start, end}) for a count over a stretch of time
+    # of its own, which the case timeframe is set to. It replaces whatever
+    # filters the table had: a navigation, not a refinement.
+    # winnow.timestampField(label, input) is the Timeframe dialog's
+    # timestamp box — label above, 📅 calendar beside — for a plugin's own
+    # range dialog.
     # Optional exports: onShow/onHide, called on every tab switch.
     # A tab can be popped out into a window of its own (static/js/popout.js),
     # which is a second copy of the app showing only that tab: there,
@@ -259,7 +264,7 @@ PAGE_PANEL_PAGES = ("sql", "notes")
 # provides, with a message that says to update Winnow — the failure mode
 # is otherwise an AttributeError deep inside register() that reads like a
 # plugin bug.
-PLUGIN_API_VERSION = 15
+PLUGIN_API_VERSION = 16
 
 FORMAT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 # API routes may nest ("chat/stream") but each segment keeps the same shape.

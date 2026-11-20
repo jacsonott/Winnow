@@ -322,10 +322,11 @@ see [docs/notes/README.md](README.md) for the whole set.
     spelling (`_tag_clauses`).
   - **"Show these rows in the grid" is a translation, and it has to be
     exact.** The cell's rows reach the grid through
-    `winnow.openFiltered(id, pairs, {where, tags, clearTimeframe})`:
+    `winnow.openFiltered(id, pairs, {where, tags, timeRange | clearTimeframe})`:
     the cell's values as box filters, the Filters area as filter-tree
     conditions (`gridFilterFor` in ui/tab.js), the chips as `S.tagFilter`
-    verbatim. Each pivot operator maps to the grid operator whose SQL is
+    verbatim, and the pivot's own timeframe as `S.timeRange` (or the
+    tables' turned off when the pivot has none; next entry). Each pivot operator maps to the grid operator whose SQL is
     the same — `not_in` is an AND of `not_equals`, each already
     `(c <> ? OR c IS NULL)` — and tests/test_plugins.py
     (`test_pivot_filters_open_the_rows_the_grid_finds`) runs every one
@@ -338,6 +339,28 @@ see [docs/notes/README.md](README.md) for the whole set.
     UI rather than translated. A new operator needs a twin in
     `_compile_condition` and a line in that test, or the grid opens other
     rows than the cell counted, under a filter that looks right.
+  - **The pivot's timeframe is its own, and compiles as the grid's does.**
+    Each pivot carries `{enabled, column, start, end}` — `S.timeRange`'s
+    shape and meanings — saved with its definition, and `_time_clauses`
+    builds the range: values through `ts_normalize_sql`, bounds through
+    `TS_NORMALIZE` (inlined as quoted literals, so the clause has no
+    placeholders and `_where`'s parameter order is untouched). It is not
+    the tables' range for the reason the Filters area is not the grid's
+    filters, and it can't be read from the view either. What has to stay
+    true is that it selects what `_compile_where`'s timeframe selects,
+    because "Show these rows in the grid" sets the tables' timeframe to it
+    (`openFiltered`'s `timeRange`, API 16). Two places that is not free:
+    **a merge** — the union pads a column a member lacks with NULL, but the
+    grid reads such a member through every datetime column it does have,
+    and a member with none at all is not narrowed; `_time_clauses` writes
+    one arm per member with `_member_has`, a copy of store's
+    `_member_column` rule (fold A-Z, the first column of a name wins, a
+    derived column never stands in for a file one). And **what the grid
+    forgives**: a bound it can't read, or a table with no datetime column,
+    narrows nothing there; the pivot refuses both by name instead, and
+    `/timeframe` normalises the bounds while the dialog is open, so the
+    refusal lands where the text was typed. tests/test_pivot_timeframe.py
+    counts every case through both compilers, merges included.
   - **One statement for every grouping level, or the pivot is a table
     scan per level.** It used to run one `GROUP BY` per level, each a full
     scan of the source, and on a wide table the scan is most of the cost:
