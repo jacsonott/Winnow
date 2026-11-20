@@ -160,7 +160,10 @@ timeparse.py       Timestamp-parsing operations for derived datetime columns —
                     derived-column operations generally. `family` splits
                     them ("datetime", "extract", "decode", "combine",
                     "lookup") so each picker offers
-                    only the ops that answer its question. Stdlib only, imports
+                    only the ops that answer its question. Also the reader for
+                    the analyst's own timestamp patterns (compile_pattern, op
+                    custom_pattern; the saved ones are workspace.py's
+                    timestamp_formats.json). Stdlib only, imports
                     nothing from the app.
 structparse.py     JSON/XML field-extraction operations, registered into
                     timeparse.OPERATIONS via register_op (its documented
