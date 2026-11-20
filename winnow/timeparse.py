@@ -159,6 +159,21 @@ def _fmt(dt: datetime | None, subsecond: bool) -> str | None:
 # unmatched and the time read as morning — 12 hours early, silently.
 MERIDIEM = r"([AaPp])\.?[Mm]\.?(?![A-Za-z])"
 
+# What may stand between a date and its time of day: a T (either case),
+# whitespace of any kind (a tab, a non-breaking space), a comma or "@",
+# or "-" or "at" followed by a space — "2026-06-23T01:02:03",
+# "6/23/2026, 1:02:03 PM", "June 23, 2026 at 5:11:22 PM",
+# "2026-06-23 @ 01:02:03", "23 Jun 2026 - 12:34". The space after "-" is
+# what keeps "2026-06-23 -05:00" a date and an offset rather than five
+# o'clock. Shared by store.py's _TS_ISO_RE/_TS_US_RE/
+# _TS_MONTH_RE and parse_datetime_lenient here, and mirrored in
+# tsformat.js's DATE_TIME_SEP. DATE_RE types a column as datetime on its
+# date alone, whatever follows it, and the old `[ T]` and `[ ,]+` read
+# every other separator as "no time given": the whole column showed
+# 00:00:00 in every timestamp format, and sorted and filtered as
+# midnight, while As stored showed the real time.
+DATE_TIME_SEP = r"(?:\s*(?:[Tt]|[,@]|(?:-|[Aa][Tt])(?=\s))\s*|\s+)"
+
 
 def hour24(h: int, meridiem: str | None) -> int:
     """12-hour clock to 24 from MERIDIEM's captured letter."""
@@ -1125,7 +1140,7 @@ register_op({
 # ----------------------------------------------------------- duration delta
 
 _LENIENT_ISO_RE = re.compile(
-    r"^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2})(?:[.,](\d{1,9}))?)?)?"
+    r"^(\d{4})-(\d{2})-(\d{2})(?:" + DATE_TIME_SEP + r"(\d{1,2}):(\d{2})(?::(\d{2})(?:[.,](\d{1,9}))?)?)?"
 )
 
 

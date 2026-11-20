@@ -971,15 +971,22 @@ def _compiled_regex(pattern: str) -> re.Pattern:
 # there's no shared module between the two, just the same format families.
 # The 12-hour marker is timeparse.MERIDIEM, after optional fraction digits
 # (not captured: TS_NORMALIZE is whole seconds) — see MERIDIEM for what
-# `\s*(AM|PM|am|pm)?` straight after the seconds got wrong.
-_TS_ISO_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?")
-_TS_US_RE = re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{4})(?:[ ,]+(\d{1,2}):(\d{2})(?::(\d{2})(?:[.,]\d+)?)?"
+# `\s*(AM|PM|am|pm)?` straight after the seconds got wrong. Between the
+# date and the time is timeparse.DATE_TIME_SEP, and the hour may be one
+# digit in every shape: DATE_RE types a column on its date alone, so a
+# separator or an hour these did not read turned every time in it into
+# midnight (see DATE_TIME_SEP).
+_TS_ISO_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})(?:" + timeparse.DATE_TIME_SEP
+                        + r"(\d{1,2}):(\d{2})(?::(\d{2}))?)?")
+_TS_US_RE = re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{4})(?:" + timeparse.DATE_TIME_SEP
+                       + r"(\d{1,2}):(\d{2})(?::(\d{2})(?:[.,]\d+)?)?"
                        r"\s*(?:" + timeparse.MERIDIEM + r")?)?")
 _TS_MONTH_RE = re.compile(
     r"^(?:(" + _TS_MONTH_NAME + r")\s+(\d{1,2})" + timeparse.ORDINAL
     + r"|(\d{1,2})" + timeparse.ORDINAL + r"\s+(" + _TS_MONTH_NAME + r"))"
     r"\s*,?\s*(\d{4})"
-    r"(?:[ ,]+(\d{1,2}):(\d{2})(?::(\d{2})(?:[.,]\d+)?)?\s*(?:" + timeparse.MERIDIEM + r")?)?",
+    r"(?:" + timeparse.DATE_TIME_SEP
+    + r"(\d{1,2}):(\d{2})(?::(\d{2})(?:[.,]\d+)?)?\s*(?:" + timeparse.MERIDIEM + r")?)?",
     re.IGNORECASE)
 
 
@@ -1035,7 +1042,9 @@ def _ts_normalize(raw: Any) -> str | None:
     m = _TS_ISO_RE.match(s)
     if m:
         y, mo, d, h, mi, sec = m.groups()
-        return f"{y}-{mo}-{d} {h or '00'}:{mi or '00'}:{sec or '00'}"
+        # The hour may be one digit ("2026-06-23 1:02:03"); padded, so the
+        # result still sorts as text.
+        return f"{y}-{mo}-{d} {int(h) if h else 0:02d}:{mi or '00'}:{sec or '00'}"
     m = _TS_US_RE.match(s)
     if m:
         mo, d, y, h, mi, sec, ampm = m.groups()
@@ -11480,6 +11489,10 @@ class Store:
 
     # Rows read from each end of a table by _text_sorts_by_time.
     _TIME_SORT_SAMPLE = 256
+    # A one-digit hour after the date ("2026-06-23 9:05:00"): a digit with
+    # a non-digit before it and a colon after. As text, "9:05" sorts after
+    # "10:00" of the same day.
+    _ONE_DIGIT_HOUR_GLOB = "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*[^0-9][0-9]:[0-9][0-9]*"
 
     def _time_sort_columns(self, src: dict, spec: dict, colnames: dict) -> frozenset[str]:
         """The datetime columns in `spec`'s sort that must sort by time
@@ -11518,7 +11531,9 @@ class Store:
         (_DATE_LED_GLOB), the ISO shape EvtxECmd, MFTECmd and most tools
         write. Those keep sorting as text, which the COLLATE NOCASE index
         the first datetime column gets at import serves, so the common
-        case costs nothing new.
+        case costs nothing new. A date-led value with a one-digit hour
+        (_ONE_DIGIT_HOUR_GLOB) does not count: its text order puts 9 AM
+        after 10 AM.
 
         Judged on the first and last _TIME_SORT_SAMPLE rows rather than
         every row, so the answer costs two short reads by rid instead of a
@@ -11537,8 +11552,8 @@ class Store:
                 odd = ro.execute(
                     f"SELECT 1 FROM (SELECT * FROM (SELECT {ref} AS v FROM {table} ORDER BY rid LIMIT {n}) "
                     f"UNION ALL SELECT * FROM (SELECT {ref} AS v FROM {table} ORDER BY rid DESC LIMIT {n})) "
-                    f"WHERE v IS NOT NULL AND v != '' AND NOT (v GLOB ?) LIMIT 1",
-                    (self._DATE_LED_GLOB,)).fetchone()
+                    f"WHERE v IS NOT NULL AND v != '' AND (NOT (v GLOB ?) OR v GLOB ?) LIMIT 1",
+                    (self._DATE_LED_GLOB, self._ONE_DIGIT_HOUR_GLOB)).fetchone()
             cache[key] = odd is None
         return cache[key]
 

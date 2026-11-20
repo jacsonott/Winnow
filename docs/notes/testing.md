@@ -32,6 +32,15 @@ and a US one, filtered and not and in the merge's SQL pane query; and
 holds an ISO column to the plain text
 sort its import index serves, since that is the fast path the change
 must not cost.
+`test_timestamp_separators.py` holds TS_NORMALIZE, DAY_BUCKET and
+`parse_datetime_lenient` to the time after every separator a tool writes
+between date and time ("@", "at", " - ", a comma, extra spaces, a
+non-breaking space, a one-digit hour), and the near misses
+("2026-06-23 -05:00") to their date alone; then sort, the timeframe
+filter and the histogram on such a column. Its browser half,
+`tests/ui/test_timestamp_time_of_day.py`, reads the painted cells
+(00:00:00 on every row was the report) and runs one corpus through
+`parseTimestamp` and `_ts_normalize` side by side.
 `test_maintenance.py` covers the things that only exist because everything
 else only ever grows: the auto-created column indexes (listing/dropping),
 `compact()`, and `sweep_orphan_views()` — whose load-bearing test is that a
