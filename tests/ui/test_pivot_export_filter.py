@@ -213,3 +213,39 @@ def test_a_field_filter_with_a_typed_operand(pv):
     _apply(pv)
     _total_is(pv, 7)
     assert "is not empty" in chip.inner_text()
+
+
+def test_a_late_value_list_does_not_replace_the_operand_box(pv):
+    """Opening a field filter starts reading the column's values for "is
+    any of". Switch to "contains" before they arrive and the Value box is
+    painted, then the list lands on top of it: four checkboxes and nowhere
+    to type. CI met it on a busy shard, as a strict-mode failure in
+    test_a_field_filter_with_a_typed_operand. Held here, so it is not left
+    to the shard's timing."""
+    import re
+
+    _clear(pv)
+    _count_of_host_by_host(pv)
+    chip = _filter_on_user(pv)
+    held = []
+    pattern = re.compile(r".*/api/plugin/pivot/values$")
+    pv.route(pattern, lambda route: held.append(route) if not held else route.continue_())
+    try:
+        _open_filter(pv, chip)
+        pv.wait_for_selector("#modalBody .note-status:has-text('Reading values…')")
+        assert held, "the value list was not intercepted"
+        pv.locator("#modalBody select").select_option("contains")
+        pv.wait_for_selector("#modalBody input:not([type=search])")
+
+        with pv.expect_response(pattern):
+            held[0].continue_()
+        pv.wait_for_timeout(300)   # long enough for the late list to land if it is going to
+        assert pv.locator("#modalBody input[type=checkbox]").count() == 0
+        box = pv.locator("#modalBody input:not([type=search])")
+        assert box.count() == 1
+        box.fill("o")   # bob, carol, mallory: not alice
+        _apply(pv)
+        _total_is(pv, 4)
+        assert "contains o" in chip.inner_text()
+    finally:
+        pv.unroute(pattern)

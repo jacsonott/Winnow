@@ -540,8 +540,15 @@ def test_the_module_docstring_lists_every_store():
         f"workspace.py's docstring and its stores disagree — "
         f"undocumented: {sorted(actual - documented)}, "
         f"documented but gone: {sorted(documented - actual)}")
-    # And the count in the prose has to agree with the list under it.
-    assert f"{len(actual)}" in WS.__doc__ or "Eleven" in WS.__doc__
+    # And the count in the prose has to agree with the list under it —
+    # as a number or spelled out. (This used to accept "Eleven" whatever
+    # the count was, which is how the prose fell a store behind.)
+    words = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+             "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen",
+             "eighteen", "nineteen", "twenty"]
+    said = re.search(r"^(\w+) small stores", WS.__doc__, re.M)
+    assert said and said.group(1).lower() in (str(len(actual)), words[len(actual)]), (
+        f"the docstring says {said.group(1) if said else 'nothing'} stores; there are {len(actual)}")
 
 
 def test_plugin_data_roundtrips_and_is_traversal_safe(tmp_path, monkeypatch):

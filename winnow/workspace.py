@@ -4,7 +4,7 @@ any single case.db, so it survives switching between cases and travels
 with the app folder (airgapped/portable, same spirit as CLAUDE.md's
 no-CDN rule).
 
-Eleven small stores, each backed by its own JSON file under workspace/.
+Thirteen small stores, each backed by its own JSON file under workspace/.
 Adding one means adding it here too — this list read "eight" for three
 stores longer than it was true:
   cases.json              the home screen's case registry
@@ -46,6 +46,12 @@ stores longer than it was true:
   dashboards.json         the dashboard library — boards saved machine-wide
                            from a board's "Save to library…" and added to any
                            case from the sidebar's Dashboards → Library rows
+  timestamp_formats.json  the analyst's own timestamp parsing patterns
+                           (dd-MM-yyyy HH:mm:ss and the like), offered in the
+                           derived-column dialog's Format list beside the
+                           built-in ones and tried by format detection. A
+                           column made with one stores the pattern itself, so
+                           the case never depends on this file
   app_settings.json       app-wide display preferences, e.g. the default
                            timestamp format for cases that don't set their
                            own — a case's own choice lives in the case
@@ -76,7 +82,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import paths
+from . import paths, timeparse
 from .store import DEFAULT_TAGS
 
 # WINNOW_WORKSPACE_DIR relocates the registry/prefs/lock directory for one
@@ -1019,6 +1025,92 @@ class PluginPrefs:
         return self.disabled()
 
 
+class TimestampFormats:
+    """The analyst's own timestamp parsing patterns ("Firewall logs":
+    dd-MM-yyyy HH:mm:ss), kept beside the built-in formats in the derived
+    column dialog and tried by detection — timeparse.detect's
+    `custom_formats`, so the post-import "looks like…" hint finds them too.
+
+    Machine-wide rather than per case, for the reason import profiles are:
+    one vendor's layout turns up case after case. And the case never needs
+    this file: a column made from a saved format stores the pattern itself
+    in its params (op `custom_pattern`), so it re-derives, exports and
+    travels in a session on a machine that has never heard of the format,
+    and deleting or editing one here changes no column (invariant #8).
+
+    Named records with an explicit id, like import profiles. A name is
+    unique without regard to case, and a pattern has to compile — it is
+    refused here, with timeparse's message, rather than saved and then
+    failing in a dialog later. A record a hand edit broke is listed (the
+    route says what is wrong with it) and never tried by detection."""
+
+    FILE = "timestamp_formats.json"
+    NAME_MAX = 80
+
+    # A record a hand edit left without an id, a name or a pattern is
+    # skipped, not dropped: it stays in the file for whoever made it, and
+    # each write carries it through untouched.
+    @staticmethod
+    def _usable(r: Any) -> bool:
+        return (isinstance(r, dict) and isinstance(r.get("id"), int) and not isinstance(r.get("id"), bool)
+                and isinstance(r.get("name"), str) and isinstance(r.get("pattern"), str))
+
+    def _raw(self) -> list:
+        return _read(self.FILE, {"formats": []})["formats"]
+
+    def _load(self) -> list[dict]:
+        return [r for r in self._raw() if self._usable(r)]
+
+    def _save(self, items: list) -> None:
+        _write(self.FILE, {"formats": items})
+
+    def list(self) -> list[dict]:
+        with _LOCK:
+            return self._load()
+
+    def _clean(self, items: list[dict], name: str, pattern: str, own_id: int | None) -> tuple[str, str]:
+        name = str(name or "").strip()
+        pattern = str(pattern or "").strip()
+        if not name:
+            raise ValueError("Give the format a name.")
+        if len(name) > self.NAME_MAX:
+            raise ValueError(f"A format's name can be at most {self.NAME_MAX} characters.")
+        timeparse.compile_pattern(pattern)   # PatternError is a ValueError, worded for the analyst
+        if any(r["name"].lower() == name.lower() and r["id"] != own_id for r in items):
+            raise ValueError(f"There is already a format called \u201c{name}\u201d.")
+        return name, pattern
+
+    def create(self, name: str, pattern: str) -> dict:
+        with _LOCK:
+            raw = self._raw()
+            items = [r for r in raw if self._usable(r)]
+            name, pattern = self._clean(items, name, pattern, None)
+            ids = [r["id"] for r in raw if isinstance(r, dict) and type(r.get("id")) is int]
+            rec = {"id": max(ids, default=0) + 1, "name": name, "pattern": pattern, "created_at": _now()}
+            raw.append(rec)
+            self._save(raw)
+            return rec
+
+    def update(self, format_id: int, name: str, pattern: str) -> dict:
+        with _LOCK:
+            raw = self._raw()
+            items = [r for r in raw if self._usable(r)]
+            rec = next((r for r in items if r["id"] == format_id), None)
+            if rec is None:
+                raise KeyError(format_id)
+            rec["name"], rec["pattern"] = self._clean(items, name, pattern, format_id)
+            self._save(raw)
+            return rec
+
+    def delete(self, format_id: int) -> None:
+        with _LOCK:
+            raw = self._raw()
+            kept = [r for r in raw if not (self._usable(r) and r["id"] == format_id)]
+            if len(kept) == len(raw):
+                raise KeyError(format_id)
+            self._save(kept)
+
+
 class AppSettings:
     """System-wide UI preferences that belong on the machine rather than in
     any one case file — currently just the default timestamp display
@@ -1557,6 +1649,7 @@ timeline_templates = TimelineTemplates()
 tags = TagTemplate()
 column_layouts = ColumnLayouts()
 import_profiles = ImportProfiles()
+timestamp_formats = TimestampFormats()
 plugin_prefs = PluginPrefs()
 plugin_bundles = PluginBundles()
 dashboard_library = DashboardLibrary()

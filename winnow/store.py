@@ -10278,13 +10278,19 @@ class Store:
                     raise ValueError(f"Member table {m['src']['name']!r} has no column {col!r}")
         return members[0]["source_id"]
 
-    def detect_timestamp_format(self, source_id: int, column: str) -> list[dict]:
+    def detect_timestamp_format(self, source_id: int, column: str,
+                                custom_formats: list[dict] | None = None) -> list[dict]:
         """Which operations can read this column, best first. Same
         sample-and-round-trip shape preview_sqlite_tables uses to pre-check
         likely WebKit columns: try every parser against real values and
         rank by how many it reads. Ambiguous numeric ranges (Mac absolute
         vs unix seconds) legitimately return several — the caller's preview
-        of actual converted values is what settles it."""
+        of actual converted values is what settles it.
+
+        `custom_formats` are the analyst's saved patterns
+        (workspace.TimestampFormats, passed in by the route: the store
+        does not read workspace/), ranked with the rest by
+        timeparse.detect."""
         if source_id < 0:  # a merge samples its first (canonical) member
             source_id = self._derive_preview_member(source_id, [column])
         src = self._source_lite(source_id)
@@ -10292,11 +10298,12 @@ class Store:
             raise KeyError(column)
         samples = self._sample_column(src, column)
         out = []
-        for r in timeparse.detect(samples):
+        for r in timeparse.detect(samples, custom_formats):
             out.append({**r, "preview": self._preview_rows(samples[:10], r["op_id"], r["params"])})
         return out
 
-    def detect_source_suggestions(self, source_id: int, min_confidence: float = 0.9) -> list[dict]:
+    def detect_source_suggestions(self, source_id: int, min_confidence: float = 0.9,
+                                  custom_formats: list[dict] | None = None) -> list[dict]:
         """Columns that look like timestamps the app can't already read —
         the basis for the post-import "this looks like a Unix epoch, want a
         datetime column?" hint. Columns already typed `datetime` at ingest
@@ -10325,13 +10332,14 @@ class Store:
             samples = self._sample_column(src, c["name"])
             if not samples:
                 continue
-            ranked = timeparse.detect(samples)
+            ranked = timeparse.detect(samples, custom_formats)
             if ranked and ranked[0]["confidence"] >= min_confidence:
                 best = ranked[0]
                 out.append({
                     "column": c["name"], "op_id": best["op_id"], "label": best["label"],
                     "confidence": best["confidence"], "params": best["params"],
                     "preview": self._preview_rows(samples[:5], best["op_id"], best["params"]),
+                    **({"format_id": best["format_id"]} if "format_id" in best else {}),
                 })
         return out
 
