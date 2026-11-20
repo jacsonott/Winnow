@@ -9,7 +9,7 @@ import { renderGroupStrip } from './grouping.js';
 import { histogramFollowColumns } from './histogram.js';
 import { syncColumnDock } from './columndock.js';
 import { S, clearCellSelection, gridRowCount, selClear, selSetAll, selSnapshot } from './state.js';
-import { baseColumns, columnMeta } from './tsformat.js';
+import { baseColumns, columnMeta, shownTsLength } from './tsformat.js';
 import { anchoredPanel, contextMenu } from './ui.js';
 import { rebuildSoon, rebuildView, syncDuplicateRows } from './view.js';
 
@@ -20,7 +20,9 @@ export function colWidth(name) {
   if (l.w) return l.w;
   const c = S.columns.find((x) => x.name === name);
   if (!c) return 140;
-  if (c.type === 'datetime') return 190;
+  // Room for the whole value in the format it is shown in: 190 holds the
+  // 19 characters of YYYY-MM-DD HH:MM:SS, not the 26 of the microsecond one.
+  if (c.type === 'datetime') return Math.max(190, dataWidthForLen(shownTsLength(name)));
   if (c.type === 'number') return 100;
   if (fillsGrid(c)) return fillWidth();
   return Math.min(360, Math.max(90, name.length * 9 + 30));
@@ -938,14 +940,30 @@ export function copiedColumns(fromColumns, shared) {
 
 /* ------------------------------------------------------- column autosize */
 
-/* The longest value in each of `names`, which is all the server measures:
-   a table's every column cost seconds on a big table to fit one. */
+/* The longest value each of `names` SHOWS, in characters, measuring only
+   those columns: a table's every column cost seconds on a big table to fit
+   one. A datetime column shown in a timestamp format (shownTsLength) is
+   not as long as its stored text: every value that reads as a timestamp
+   is written at the format's own length, and only the rest are shown as
+   stored, so the server is asked for the longest of those (`reformatted`)
+   and the format's length is added here. Measured as stored, a column of
+   "6/3/2026 1:02:03" was fitted to 16 characters and its 19-character ISO
+   form was cut off at the seconds (docs/notes/ui.md). */
 export async function fetchColumnMaxLens(names) {
   if (!S.sourceId) return null;
   const qs = new URLSearchParams({ source_id: S.sourceId });
   for (const n of names) qs.append('columns', n);
-  try { return nameMap(await api(`/api/column_maxlen?${qs}`)); }
+  const formatted = names.filter((n) => shownTsLength(n) != null);
+  for (const n of formatted) qs.append('reformatted', n);
+  let lens;
+  try { lens = nameMap(await api(`/api/column_maxlen?${qs}`)); }
   catch (e) { toast('Could not measure column widths: ' + e.message); return null; }
+  // Read again rather than reused: a format picked while the request was
+  // out is the one the width is for.
+  for (const n of formatted) {
+    if (n in lens) lens[n] = Math.max(lens[n] || 0, shownTsLength(n) || 0);
+  }
+  return lens;
 }
 
 /* 0/null means "no cap". Stored with the other per-browser look-and-feel
@@ -993,8 +1011,13 @@ export function headerWidthFor(name) {
   return Math.ceil(label.scrollWidth + extras + gap * siblings + pad) + 1;
 }
 
+/* What `len` characters of cell text take, padding included. */
+export function dataWidthForLen(len) {
+  return Math.max(60, (len || 0) * 7 + 24);
+}
+
 export function widthForLen(name, len) {
-  const dataPx = Math.max(60, (len || 0) * 7 + 24);
+  const dataPx = dataWidthForLen(len);
   const headPx = headerWidthFor(name) || (name.length * 7 + 24);
   const px = Math.max(dataPx, headPx);
   const cap = autofitMaxWidth();
@@ -1026,6 +1049,24 @@ export async function autofitAllColumnWidths() {
   }
   renderHead(); render(); saveLayout();
   toast('Columns autofit to content');
+}
+
+/* After the analyst picks how a column's timestamps are shown: a column
+   with a width of its own (dragged or fitted) that is now too narrow for
+   what it shows is widened to fit, the way a fit would. Never narrowed —
+   a width the analyst chose that still holds the values is theirs — and
+   a column with no width of its own needs nothing, since colWidth's
+   default follows the format already. */
+export async function widenToShow(name) {
+  if (!(S.layout[name] || {}).w) return;
+  const sourceId = S.sourceId;
+  const maxlens = await fetchColumnMaxLens([name]);
+  if (!maxlens || sourceId !== S.sourceId) return;
+  const l = S.layout[name];
+  const need = widthForLen(name, maxlens[name]);
+  if (!l || !l.w || l.w >= need) return;
+  S.layout[name] = { ...l, w: need };
+  renderHead(); render(); saveLayout();
 }
 
 export async function autofitOneColumn(name) {

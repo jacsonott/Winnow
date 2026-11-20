@@ -143,6 +143,8 @@ A pinned column stays visible while you scroll sideways. Alt-click a header to p
 
 Drag the right edge of a header to resize a column, and double-click the edge to fit the column to its contents. Press `=` to fit every column, and `0` to reset every width to its default.
 
+A datetime column is fitted to its values as they are shown, in its [timestamp display](#timestamp-display) format, not as the file stores them, so a value that a format makes longer (`6/3/2026 1:02:03` shown as `2026-06-03 01:02:03`) still fits with its seconds.
+
 Fitting is capped so that a single long value, such as a base64 command line, can't make a column enormous. The cap is set in **Settings → Grid & layout → Autofit column width limit** (900 pixels by default, or no limit). A column whose header needs more room than the cap still gets room for its name. A table with only one column, such as a log imported one line per row, fills the grid's width.
 
 ### Timestamp display
@@ -150,6 +152,8 @@ Fitting is capped so that a single long value, such as a base64 command line, ca
 Right-click a datetime column's header to choose how its values are shown, for example **As stored**, **YYYY-MM-DD HH:MM:SS** or **MM/DD/YYYY HH:MM:SS**. This is display only: filters and exports always use the text the file came with, although copying from the grid gives the value as displayed. A format picked on a column beats the case's default in **Case ▾ → Case settings…**, which beats the machine-wide one in **Settings → Timestamps**.
 
 The time of day is read whatever separates it from the date: a space or a `T`, several spaces, `@`, `at`, a dash with spaces around it (`2026-06-23 - 13:05:01`) or a comma, as in `June 23, 2026 at 5:11:22 PM`. A one-digit hour (`2026-06-23 9:05:01`) is read too. A value with a date and no time, such as `2026-06-23`, shows `00:00:00` in a format with a time.
+
+Picking a format that needs more room than the column has widens the column so the whole value shows. Picking one never makes a column narrower, so a width you set that still fits stays as it is. After changing the case or machine-wide format, press `=` to refit columns you've already sized.
 
 The same right-click menu has **Stack values (rarest first)…** (see [Filtering and searching](Filtering-and-searching.md#stacking-a-column)), **Copy unique values** (see [Copying](#copying)) and **Derive a column from this…**.
 

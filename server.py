@@ -4870,9 +4870,10 @@ def api_search_index_start(source_id: int):
 
 
 @app.get("/api/column_maxlen")
-def api_column_maxlen(source_id: int, columns: list[str] | None = Query(None)):
+def api_column_maxlen(source_id: int, columns: list[str] | None = Query(None),
+                      reformatted: list[str] | None = Query(None)):
     try:
-        return store().column_max_lengths(source_id, columns)
+        return store().column_max_lengths(source_id, columns, reformatted)
     except ValueError as e:   # still importing (Store._require_columns)
         raise HTTPException(400, str(e))
     except KeyError as e:

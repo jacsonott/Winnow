@@ -200,6 +200,43 @@ def test_the_sql_day_agrees_with_day_bucket():
     assert got == want
 
 
+def test_untimed_length_is_the_length_of_what_ts_normalize_cannot_read():
+    """Autofit of a reformatted datetime column measures the values it
+    still shows as stored with untimed_length_sql (column_max_lengths'
+    `reformatted`), whose GLOBs take the ISO and US dates out of Python.
+    A value the GLOBs counted as a timestamp that TS_NORMALIZE does not
+    read would be left out of the width and cut off on screen; one they
+    missed costs only a trip through Python. Either way the two must give
+    the same answer: LENGTH of the value when it is not a timestamp, NULL
+    when it is."""
+    import random
+    import sqlite3
+
+    from winnow.store import _ts_normalize, untimed_length_sql
+
+    rng = random.Random(20261119)
+    alphabet = "0123456789-/: T./Z+APM"
+    values = NORMALIZE_CORPUS + [b"2026-03-14 08:00:00", 1773475200, 1773475200.5, None,
+                                 "6/3/2026 1:02:03", "12/31/2026 23:59:59", "123/1/2026", "1/2/26 3:04",
+                                 "1//2026", "1/2/2026x", " 6/3/2026 1:02:03"]
+    for base in ("2026-03-14 08:00:00.123Z", "6/3/2026 1:02:03.5 PM"):
+        for _ in range(2000):
+            chars = list(base)
+            for _ in range(rng.randint(1, 3)):
+                chars[rng.randrange(len(chars))] = rng.choice(alphabet)
+            values.append("".join(chars)[: rng.randint(4, len(chars))])
+    db = sqlite3.connect(":memory:")
+    db.create_function("TS_NORMALIZE", 1, _ts_normalize, deterministic=True)
+    db.execute("CREATE TABLE t (i INTEGER PRIMARY KEY, v)")
+    db.executemany("INSERT INTO t (v) VALUES (?)", [(v,) for v in values])
+    got = [r[0] for r in db.execute(f"SELECT {untimed_length_sql('v')} FROM t ORDER BY i")]
+    want = [r[0] for r in db.execute(
+        "SELECT CASE WHEN TS_NORMALIZE(v) IS NULL THEN LENGTH(v) END FROM t ORDER BY i")]
+    db.close()
+    assert got == want
+    assert want.count(None) not in (0, len(want)), "the corpus should hold both kinds"
+
+
 def test_unixepoch_reads_a_normalized_timestamp_as_strftime_does():
     """epoch_sql uses unixepoch() where SQLite has it (3.38+), strftime('%s')
     cast where it does not. The two must agree on everything TS_NORMALIZE
