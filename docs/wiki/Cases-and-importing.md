@@ -363,9 +363,16 @@ its values look like `2024-01-05 13:22:01`, `1/5/2024 1:22:01 PM`,
 `05-01-2024 13:22:01` or `Jan 5 2024 13:22:01`. Slashes are read month first
 and dashes day first, so `05-01-2024` is the 5th of January. A column of
 month-first dates written with dashes (`12-25-2024`) is left as text rather
-than misread, unless nearly every day in it is 12 or lower. The type is fixed at import (the delimited-text preview can
-change it); to get a real datetime out of an epoch or other encoded value,
-add a [derived column](Derived-columns.md).
+than misread, unless nearly every day in it is 12 or lower. A column of numbers stays a number column when some
+of its cells say `-`, `N/A` or `null` instead, and one that is empty for
+all of the first 500 rows (a byte count only later lines of a firewall or
+web log carry) is typed from rows further into the file
+([Numbers, dates and text](Filtering-and-searching.md#numbers-dates-and-text)
+has the details). The type is fixed at import (the delimited-text, IIS and
+key=value previews can change it: set a column's type in its heading, and
+the columns you leave alone keep the import's own guess); to get a real
+datetime out of an epoch or other encoded value, add a
+[derived column](Derived-columns.md).
 
 ### CSV, TSV and other delimited text
 

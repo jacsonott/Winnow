@@ -5,7 +5,8 @@ whatever they hold — the op says so. A text-valued op (regex capture, a
 JSON or XML field, a lookup, a decode) can't: the same regex capture is a
 host name in one column and a byte count in the next. Those are typed by
 their values, by the rule an imported column is typed by (infer_type):
-every non-empty value a number makes a number column. Before that they
+every value that isn't blank or a placeholder such as "-" a number, and
+at least one, makes a number column. Before that they
 were all text, so sizes and counts pulled out with a regex sorted 10
 before 9 and `> 1000` compared strings.
 """
@@ -101,7 +102,7 @@ def test_one_value_that_is_not_a_number_keeps_it_text(store, write_csv):
     assert _col(store, sid, "Status")["type"] == "text"
 
 
-@pytest.mark.parametrize("value", ["1,024", "0x1F", "12 ", "+5", "1.", ".5", "1e3"])
+@pytest.mark.parametrize("value", ["1,024", "0x1F", "1.", ".5", "12 KB"])
 def test_what_an_import_would_not_call_a_number_isnt_one_here(store, write_csv, value):
     """The same rule as infer_type, which is also what _numeric_expr sorts
     by — a looser one would type a column whose values then sort as NULL."""
@@ -109,6 +110,27 @@ def test_what_an_import_would_not_call_a_number_isnt_one_here(store, write_csv, 
     sid = _ingest(store, write_csv, rows, "odd.csv")
     _derive(store, sid, "N", "Line", "regex_extract", {"pattern": r"n=(.*)"})
     assert _col(store, sid, "N")["type"] == "text"
+
+
+@pytest.mark.parametrize("value", ["12 ", "+5", "1e3", "-"])
+def test_what_an_import_would_call_a_number_is_one_here(store, write_csv, value):
+    """The other half: a padded number, a signed one and one with an
+    exponent are numbers to an import (NUM_RE, which _numeric_expr reads
+    them by), and a "-" among numbers is no value there (NO_VALUE)."""
+    rows = [["Line"], ["n=700"], [f"n={value}"], ["n=90"]]
+    sid = _ingest(store, write_csv, rows, "odd.csv")
+    _derive(store, sid, "N", "Line", "regex_extract", {"pattern": r"n=(.*)"})
+    assert _col(store, sid, "N")["type"] == "number"
+    ordered = _sorted(store, sid, "N")
+    assert ordered.index("90") < ordered.index("700")
+
+
+def test_a_column_of_nothing_but_placeholders_is_text(store, write_csv):
+    rows = [["Line"], ["n=-"], ["n=N/A"]]
+    sid = _ingest(store, write_csv, rows, "dash.csv")
+    _derive(store, sid, "N", "Line", "regex_extract", {"pattern": r"n=(.*)"})
+    col = _col(store, sid, "N")
+    assert (col["type"], col["inferred_type"]) == ("text", "text")
 
 
 def test_a_column_with_nothing_in_it_is_text(store, write_csv):

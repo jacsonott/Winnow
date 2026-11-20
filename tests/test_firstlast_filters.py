@@ -32,7 +32,7 @@ ROWS = [["When", "Host", "Note", "Bytes"],
         ["2026-03-14 08:02:00", "SRV1", "", "40"],
         ["2026-03-14 08:03:00", "SRV2", "ok", ""],
         ["2026-03-14 08:04:00", "SRV2", "x", "70"],
-        ["2026-03-14 08:05:00", "SRV2", "x_1", "n/a"],
+        ["2026-03-14 08:05:00", "SRV2", "x_1", "unknown"],
         ["2026-03-14 08:06:00", "SRV2", "", "90"],
         ["2026-03-14 08:07:00", "SRV3", "NULL", "300"],
         ["2026-03-14 08:08:00", "SRV3", "NULL", "-10"],
@@ -87,7 +87,8 @@ def table(request, client, store, write_csv, example_registry, monkeypatch):
     monkeypatch.setattr(server, "PLUGINS", example_registry)
     if request.param == "table":
         sid = _ingest(store, write_csv, ROWS, "fl_filters")
-        # One "n/a" in the sample makes Bytes a text column: the shape on
+        # One "unknown" in the sample makes Bytes a text column (an "n/a"
+        # no longer does: store.NO_VALUE): the shape on
         # which the grid's `>` compared text while First/Last compared
         # numbers. The merge below has one member of each type.
         assert {c["name"]: c["type"] for c in store.get_source(sid)["columns"]}["Bytes"] == "text"

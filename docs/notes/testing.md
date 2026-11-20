@@ -49,6 +49,18 @@ timeframe, histogram, the `dmy_datetime` derived op, and that tsformat.js's
 formats. `tests/ui/test_timestamp_dmy_ui.py` is its browser half: the grid's
 first row, `parseTimestamp` against `_ts_normalize`, and the case set to
 DD-MM-YYYY HH:MM:SS.
+`test_number_columns.py` holds each shape of "imported numbers sort as
+text" to a number column that sorts by value, through the reader it came
+in by: a "-" or "N/A" among the numbers, a column empty for the first 500
+rows (a FortiGate log's traffic keys, an IIS log's second `#Fields:`
+line, a late JSON key), padded, signed and exponent numbers. Its
+load-bearing tests are the ones that keep the fix from overreaching: a
+column found to hold timestamps further in is NOT made a datetime column,
+and the open-time pass over older tables leaves alone everything that was
+declared text rather than inferred (the analyst's preview choice, a
+key=value `tz`, a plugin's table, a column the old rule itself called a
+number). Plus that every cell NUM_RE accepts is worth what CAST reads it
+as, since `_numeric_expr` gates on it.
 `test_maintenance.py` covers the things that only exist because everything
 else only ever grows: the auto-created column indexes (listing/dropping),
 `compact()`, and `sweep_orphan_views()` — whose load-bearing test is that a
@@ -290,7 +302,13 @@ path on every Python and, on 3.11+, checks it against what `csv` writes.
 the grid's equivalent condition on the same table and on a merge, and
 compares the counts per group, because the plugin compiles its own WHERE.
 Its table has both '' and NULL, and a number column with a blank and a
-non-number in it. `test_session_reimport.py` re-imports a table from a
+non-number in it. `test_pivot_timeframe.py` does the same for the
+Pivot's own timeframe: every range through the pivot and through
+`build_view`'s `time_range`, on a table with two datetime columns (one
+timestomped), the US shape, a 'T' with a zone, an empty cell and a bound
+on a value, and on a merge with a member lacking the chosen column and one
+with no datetime column at all; plus what it refuses and the dialog's
+`/timeframe` route. `test_session_reimport.py` re-imports a table from a
 session for every reader the session can name (IIS, key=value, login
 records and body files are in their own files), with and without the reader recorded, and covers a
 session with no path, a file gone from its path, and a file replaced while
@@ -318,7 +336,16 @@ start a quick look; each on its own server, since both switch the case.
 included) and its field filter. `test_pivot_reorder.py`: reordering the
 pivot's areas with a real pointer drag (the slot line, drops between
 chips), the ⠿ handle's menu and Alt+↑/↓; its drags end on two small moves
-because the emulated drag sends dragover a move behind the pointer. `test_firstlast_copy.py`: Copy result,
+because the emulated drag sends dragover a move behind the pointer.
+`test_pivot_timeframe_dialog.py`: the pivot's own timeframe — the dialog sends
+the range as TS_NORMALIZE writes it, refuses text that is not a time with
+the dialog still open, the chip turns off and back on and clears, the
+drill-down carries the range, and it is saved and restored with the pivot
+(its backend twin, tests/test_pivot_timeframe.py, counts every range
+through the pivot and through build_view, merges included).
+`test_pivot_to_grid.py` adds the hand-over: a cell counted under the
+pivot's timeframe opens the grid with the tables' timeframe set to it.
+`test_firstlast_copy.py`: Copy result,
 including the card it waits on when the analyst has left the tab, held
 at `job/start` so the answer lands while the tab is hidden.
 

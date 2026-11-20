@@ -462,7 +462,7 @@ Prefer it to reaching into the app's globals — this is what's supported.
 
 | Field | What it is |
 | --- | --- |
-| `apiVersion` | Contract version of this object (currently `9`) |
+| `apiVersion` | Contract version of this object (currently `10`) |
 | `plugin` | Your plugin's display name |
 | `base` | `/api/plugin/<fs_name>` — prefix for your own routes |
 | `assets` | `/plugin_assets/<fs_name>` — prefix for your own files |
@@ -476,6 +476,7 @@ Prefer it to reaching into the app's globals — this is what's supported.
 | `modal(title, build, opts)` / `closeModal()` | Winnow's modal singleton and its close |
 | `alertDialog(msg, opts)` / `confirmDialog(msg, opts)` / `promptDialog(msg, initial, opts)` | Themed replacements for `window.alert` / `confirm` / `prompt` — all async |
 | `dropdownMenu(anchor, items)` | The app's own small menu, opened under `anchor` — for a choice among a few things; see [Menus](#menus) |
+| `timestampField(label, input)` | The Timeframe dialog's timestamp box: hand it a text `<input>` and it returns the field to append — `label` above, the 📅 calendar beside it — so a range dialog of your own looks and picks dates as the app's do (API 16) |
 | `sectionPanes({sections, label, cls, paneCls})` | The app's two-pane dialog frame, the Tables manager's: sections down a side list by group, the chosen one's pane on the right; see [Dialogs with sections](#dialogs-with-sections) |
 | `showTab(localId?)` | Bring the analyst to one of **your** tabs (reopens it if closed); no argument when you register exactly one |
 | `showPage(name)` | Switch to a built-in page: `'grid'`, `'sql'`, `'notes'`, `'timeline'`, `'watchlist'` (reopens it if closed) |
@@ -507,16 +508,18 @@ it, in the grid, where they can be read, tagged and exported.
 `winnow.openFiltered(sourceId, pairs, opts)` does that. `pairs` are exact
 values, written into the columns' filter boxes, where the filter bar shows
 them. When the count also depended on something exact values can't say,
-pass it in `opts` (API 15):
+pass it in `opts` (API 15; `timeRange` API 16):
 
 | Option | What it is |
 | --- | --- |
 | `where` | Conditions in the filter builder's vocabulary, ANDed into the filter tree: `[{column, op, value}, …]`, `op` one of `equals`, `not_equals`, `contains`, `not_contains`, `starts`, `in` (`value` a list, where `''` is the empty cell, NULL included), `empty`, `not_empty`, `>`, `<`, `>=`, `<=` (numeric on a column the grid types as a number, text comparison otherwise), `regex` |
 | `tags` | The tag filter, in the ribbon's spelling: a tag id, `'!<id>'` to exclude one, `'__any__'`, `'__none__'` |
 | `clearTimeframe` | `true` when your count ignored the tables' timeframe filter (the table toolbar's ⏱). The grid turns it off and says so, or it would show fewer rows than your number |
+| `timeRange` | `{column, start, end}` when your count was over a stretch of time of its own. The tables' timeframe is set to it, on, and the grid says so. Compile your range as the grid does — every value and both bounds through `TS_NORMALIZE`, `column` null for every datetime column OR'd together, both ends included — or the grid shows other rows than you counted; the Pivot's `_time_clauses` is the reference. Takes the place of `clearTimeframe` |
 
 Whatever the table had before is replaced. Make the conditions compile to
-the SQL your count ran: the Pivot's cell does (its `gridFilterFor`), and
+the SQL your count ran: the Pivot's cell does (its `gridFilterFor`, its
+timeframe as `timeRange`), and
 where it can't — a `>` on a column the grid holds as text — it refuses by
 name rather than open other rows under the same filter. A value a filter
 box can't spell (one with a line break) still filters: it goes into the
@@ -1307,7 +1310,14 @@ def register(api):
 
 `api.NUM_RE` is there too — the same "does this look numeric" test the
 grid uses for right-alignment and numeric sorting, so a plugin's tables
-agree with the rest of the app.
+agree with the rest of the app. It accepts exactly the text SQLite's
+`CAST(x AS REAL)` reads in full (a sign, a decimal point, an exponent such
+as `1.5E+09`, spaces either side; never `1,024`), so gate every cast on it,
+`CASE WHEN x REGEXP '<NUM_RE.pattern>' THEN CAST(x AS REAL) END`, and use
+the pattern itself rather than a copy: a column the import typed as a
+number then has no value your cast reads as NULL. A number column can
+also hold placeholders such as `-` and `N/A` where a value is missing;
+the gated cast reads those as NULL, as it does a blank.
 
 Module-level helpers that never see `api` can import them directly
 instead; the three bundled examples that build SQL this way do exactly
@@ -1631,8 +1641,10 @@ python server.py --plugins-dir ~/src/my-winnow-plugins
 
 Installs from the UI always land in the first directory (`plugins/`).
 
-**Versioning:** the current plugin API version is **15** (the tab
-context's `openFiltered` options — `where`, `tags`, `clearTimeframe` —
+**Versioning:** the current plugin API version is **16** (the tab
+context's `timestampField` and `openFiltered`'s `timeRange` option arrived
+in 16, which took the context's own `apiVersion` to 10; its
+`openFiltered` options — `where`, `tags`, `clearTimeframe` —
 arrived in 15, which took the context's own `apiVersion` to 9;
 `sectionPanes` arrived in 14, which took it to 8; its `dropdownMenu` arrived in 13, which took it to 7;
 in 12 the SQL
