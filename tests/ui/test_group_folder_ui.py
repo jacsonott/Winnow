@@ -1,18 +1,17 @@
-"""A case group's folder, in the three places it shows (a demo of two ways
-for a group to get one; see tests/test_case_group_folders.py for the
-registry side):
+"""A case group's folders, in the three places they show (see
+tests/test_case_group_folders.py for the registry side):
 
-- + New case: picking a group with a folder puts the case file there, and
-  leaving the group puts the cases folder back;
+- + New case: picking a group puts the case file in its first folder,
+  leaving the group puts the cases folder back, and the note under the
+  path offers the group's other folders, or to add the one typed;
 - the folder browser, from Import → Add from this machine…: the open
-  case's group folder is pinned on top, with no ✕, and the browser opens
-  there;
-- the group's own list on the home screen: under first_case it names the
-  case that set the folder; under settings it is where the folder is
-  chosen and cleared.
+  case's group folders are pinned on top, with no ✕, and the browser
+  opens in the first;
+- the group's own list on the home screen: it names the case that set
+  the first folder, and is where more are added, put first and removed.
 
-Each test files its cases under a group name of its own and takes them,
-and any mode it switched, back out in a `finally`.
+Each test files its cases under a group name of its own and takes them
+back out in a `finally`.
 """
 
 from __future__ import annotations
@@ -75,37 +74,73 @@ def test_a_new_group_says_this_folder_becomes_its_folder(page, api):
         _close(page)
 
 
-def test_importing_has_the_groups_folder_pinned(page, api):
+def _folders(api, group):
+    return [f["path"] for f in api("/api/case_groups")["groups"][group]["folders"]]
+
+
+def test_the_note_offers_the_groups_other_folders_and_adds_a_new_one(page, api, tmp_path):
+    group = "UI Group Folder D"
+    share, third = tmp_path / "evidence share", tmp_path / "third"
+    share.mkdir()
+    third.mkdir()
+    first = api("/api/cases", "POST", {"path": str(tmp_path / "acme" / "ws01.db-winnow"), "name": "UI GF D1",
+                                       "group": group})
+    api("/api/case_groups/folders", "POST", {"group": group, "add": str(share)})
+    try:
+        _new_case(page, "UI GF D2", group)
+        path = page.locator("#modalBody .nc-path")
+        note = page.locator("#modalBody .nc-group-note")
+        assert path.input_value() == f"{tmp_path}/acme/ui-gf-d2.db-winnow"
+        assert note.inner_text().startswith(f"One of {group}’s 2 folders, set by its first case, UI GF D1."), note.inner_text()
+        note.locator(".nc-use-group", has_text="evidence share").click()
+        assert path.input_value() == f"{share}/ui-gf-d2.db-winnow"
+        assert note.inner_text().startswith(f"One of {group}’s 2 folders. Its other folder:"), note.inner_text()
+
+        # Somewhere the group doesn't use yet: one click adds it.
+        path.fill(f"{third}/ui-gf-d2.db-winnow")
+        assert f"Not in any of {group}’s 2 folders" in note.inner_text()
+        note.locator(".nc-add-group-folder").click()
+        page.wait_for_function("(g) => document.querySelector('#modalBody .nc-group-note')?.textContent"
+                               ".startsWith(`One of ${g}’s 3 folders`)", arg=group)
+        assert _folders(api, group) == [f"{tmp_path}/acme", str(share), str(third)]
+    finally:
+        _close(page)
+        _forget(api, first)
+
+
+def test_importing_has_the_groups_folders_pinned(page, api, tmp_path):
     """The open case put in a group: Add from this machine… lists the
-    group's folder first, under Pinned, as the group's (no ✕ to unpin it),
-    and opens in it."""
+    group's folders first, under Pinned, by their own names and marked as
+    the group's (no ✕ to unpin them), and opens in the first."""
     cur = api("/api/case/current")
     me = next(c for c in api("/api/cases") if c["path"] == cur["path"])
     group = "UI Group Folder B"
     folder = cur["path"].rsplit("/", 1)[0]
     api(f"/api/cases/{me['id']}", "PUT", {"group": group})
+    api("/api/case_groups/folders", "POST", {"group": group, "add": str(tmp_path)})
     try:
         page.evaluate("() => { __winnow.S.importQueue = []; __winnow.openImportModal(); }")
         page.locator("#modal .import-foot .btn", has_text="Add from this machine").click()
-        row = page.locator("#modal .browse-panes .side-rail-row:has(.side-rail-fixed)")
-        row.wait_for()
+        rows = page.locator("#modal .browse-panes .side-rail-row:has(.side-rail-fixed)")
+        rows.nth(1).wait_for()
         page.wait_for_function("(p) => document.querySelector('#modal .browse-path')?.value === p", arg=folder)
-        first = page.evaluate("""() => [...document.querySelectorAll('#modal .side-rail-list > *')].slice(0, 2)
+        first = page.evaluate("""() => [...document.querySelectorAll('#modal .side-rail-list > *')].slice(0, 3)
           .map((n) => n.classList.contains('side-rail-group') ? '# ' + n.textContent
             : n.querySelector('.side-rail-label').textContent + ' | ' + n.querySelector('.side-rail-hint').textContent)""")
-        assert first == ["# Pinned", f"{group} | ‎{folder}‎"], first
-        assert row.locator(".side-rail-pin").count() == 0, "the group pinned it; there is nothing to unpin"
-        assert row.locator(".side-rail-fixed").inner_text() == "group"
+        leaf = lambda p: str(p).rstrip("/").rsplit("/", 1)[-1]  # noqa: E731
+        assert first == ["# Pinned", f"{leaf(folder)} | \u200e{folder}\u200e",
+                         f"{leaf(tmp_path)} | \u200e{tmp_path}\u200e"], first
+        assert rows.locator(".side-rail-pin").count() == 0, "the group pinned them; there is nothing to unpin"
+        assert rows.locator(".side-rail-fixed").all_inner_texts() == ["group", "group"]
     finally:
         page.keyboard.press("Escape")
         api(f"/api/cases/{me['id']}", "PUT", {"group": me.get("group") or ""})
 
 
-def test_settings_the_folder_is_chosen_in_the_groups_list(page, api, tmp_path):
+def test_the_groups_list_adds_reorders_and_removes_folders(page, api, tmp_path):
     group = "UIGroupFolderC"
     chosen = tmp_path / "chosen"
     chosen.mkdir()
-    api("/api/prefs", "POST", {"group_folder_mode": "settings"})
     rec = api("/api/cases", "POST", {"path": str(tmp_path / "c" / "c.db-winnow"), "name": "UI GF C",
                                      "group": group})
     try:
@@ -113,26 +148,34 @@ def test_settings_the_folder_is_chosen_in_the_groups_list(page, api, tmp_path):
         page.locator(f".home-panes .side-rail-item:has(.side-rail-label:text-is('{group}'))").click()
         strip = page.locator(f".home-group-folder[data-group='{group}']")
         strip.wait_for()
-        assert "None" in strip.locator(".hgf-path").inner_text()
-        strip.locator(".hgf-choose").click()
+        rows = strip.locator(".hgf-row")
+        assert rows.count() == 1
+        assert rows.first.locator(".hgf-how").inner_text() == "set by its first case, UI GF C"
+        assert rows.first.locator(".hgf-first, .hgf-make-first").count() == 0, "one folder has no order to pick"
+
+        strip.locator(".hgf-add").click()
         page.wait_for_selector("#modal:not([hidden]) .browse-panes")
         page.locator("#modal .browse-path").fill(str(chosen))
         page.locator("#modal .browse-path").press("Enter")
         page.wait_for_function("(p) => document.querySelector('#modal .browse-path')?.value === p", arg=str(chosen))
         page.locator("#modal .table-menu-foot .btn.primary").click()
-        strip.locator(".hgf-clear").wait_for()
-        assert strip.locator(".hgf-path").inner_text().strip("‎") == str(chosen)
+        rows.nth(1).wait_for()
+        assert strip.locator(".hgf-label").inner_text().lower() == "group folders"
+        assert rows.first.locator(".hgf-first").inner_text() == "New cases start here"
 
+        rows.nth(1).locator(".hgf-make-first").click()
+        page.wait_for_function("(p) => document.querySelector('.home-group-folder .hgf-row')?.dataset.path === p",
+                               arg=str(chosen))
         _new_case(page, "UI GF C2", group)
         assert page.locator("#modalBody .nc-path").input_value() == f"{chosen}/ui-gf-c2.db-winnow"
-        assert "from the group’s settings" in page.locator("#modalBody .nc-group-note").inner_text()
         _close(page)
 
-        strip.locator(".hgf-clear").click()
-        page.wait_for_function("(g) => !document.querySelector(`.home-group-folder[data-group='${g}'] .hgf-clear`)",
-                               arg=group)
-        assert "None" in strip.locator(".hgf-path").inner_text()
+        for _ in range(2):
+            n = rows.count()
+            rows.first.locator(".hgf-remove").click()
+            page.wait_for_function("([g, n]) => document.querySelectorAll(`.home-group-folder[data-group='${g}'] .hgf-row`)"
+                                   ".length === n - 1", arg=[group, n])
+        assert strip.locator(".hgf-none").inner_text() == f"None — the next case filed in {group} sets it"
+        assert _folders(api, group) == []
     finally:
-        api("/api/case_groups/folder", "POST", {"group": group, "folder": None})
-        api("/api/prefs", "POST", {"group_folder_mode": "first_case"})
         _forget(api, rec)

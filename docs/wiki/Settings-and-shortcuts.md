@@ -31,7 +31,7 @@ open Winnow in another browser, another browser profile, or on another port
 | --- | --- |
 | This browser, and copied to the machine for any new browser or port to start from | Skin, theme, accent color, row density, launch animation, Pages as a dropdown, Open new tables when an import finishes, Keep the timeframe applied when switching tables |
 | This browser only (per browser profile and address) | Keyboard shortcuts, striped rows, autofit width limit, always-on filter row |
-| This machine (the `workspace/` folder) | Remote session mode, how case groups get their folder, the default timestamp format, parsing formats, default tags for new cases, saved filters, plugins, profiles, the Windows hidden-start option |
+| This machine (the `workspace/` folder) | Remote session mode, the default timestamp format, parsing formats, default tags for new cases, saved filters, plugins, profiles, the Windows hidden-start option |
 | Your user account on this machine | File associations, environment variables |
 
 ## Appearance
@@ -147,21 +147,6 @@ is a machine setting, so it holds for every browser and port.
 import adds its tabs and leaves you where you are. On, the first table of a
 batch to finish opens, and the rest arrive without moving you again. Import
 itself is covered in [Cases and importing](Cases-and-importing.md).
-
-## Case groups
-
-*A demo: one of these will be kept, and this section goes.*
-
-How a case group gets its folder, the folder **+ New case** files the
-group's cases in and the one pinned in the folder browser when importing
-into any of them:
-
-- **Set by the first case in the group** (the default): the folder the
-  group's first case is saved in.
-- **Chosen in the group's settings**: none until one is chosen with
-  **Choose…** on the group's section of the home screen.
-
-[Group folders](Cases-and-importing.md#group-folders) has the details.
 
 ## Keyboard shortcuts
 

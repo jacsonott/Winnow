@@ -3288,25 +3288,24 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .home-pane .tm-cols-top .side-search { flex: 1 1 auto; min-width: 0; font-size: 12.5px; padding: 6px 9px; }
 .home-pane .tm-cols-top .tm-cols-count { white-space: nowrap; }
 .home-pane .home-box { flex: 1 1 0; min-height: 0; margin-top: 8px; }
-/* A group's own list opens with its folder (groupFolderStrip): where its
-   new cases are filed and what imports into them have pinned. */
+/* A group's own list opens with its folders (groupFolderStrip): where its
+   new cases are filed and what imports into them have pinned. A head
+   line (label, Add folder…), then a line per folder, the first one
+   marked as where new cases start. */
 .home-group-folder {
-  display: flex; align-items: center; gap: 8px; min-width: 0; margin-bottom: 8px;
+  display: flex; flex-direction: column; gap: 4px; min-width: 0; margin-bottom: 8px;
   padding: 6px 10px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--ink);
   font-size: 12px;
 }
+.hgf-head, .hgf-row { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 24px; }
 .hgf-label { flex: 0 0 auto; font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--dim); }
 .hgf-path { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
 .hgf-path.mono { font-family: var(--mono); font-size: 11.5px; direction: rtl; text-align: left; }
 .hgf-none { color: var(--dim); }
 .hgf-how { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dim); }
-.home-group-folder .hgf-choose { margin-left: auto; }
-/* Settings → Case groups: the demo's two ways, one radio each. */
-.hgf-modes { display: grid; gap: 8px; margin-top: 4px; }
-.check-row.hgf-mode { align-items: flex-start; gap: 8px; cursor: pointer; }
-.hgf-mode input { margin: 2px 0 0; accent-color: var(--accent); }
-.hgf-mode-text { display: grid; gap: 2px; }
-.hgf-mode-text .fb-help { margin: 0; }
+.hgf-head .hgf-add { margin-left: auto; }
+.hgf-first { flex: 0 0 auto; font-size: 11px; color: var(--accent); }
+.hgf-row .btn { flex: 0 0 auto; }
 .home-box .side-preview-foot { height: 30px; }
 .home-foot { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; margin-top: 12px; flex-wrap: wrap; }
 .home-foot-spacer { flex: 1; }
@@ -3860,7 +3859,7 @@ textarea:focus { border-color: var(--accent); outline: none; }
 /* What the group does with the file, under its path. */
 .nc-group-note { margin: 0; font-size: 11.5px; line-height: 1.45; }
 .nc-group-note[hidden] { display: none; }
-.nc-group-note .nc-use-group { margin-left: 4px; }
+.nc-group-note .btn { margin-left: 4px; }
 .nc-profile { border-top: 1px solid var(--line); padding-top: 12px; }
 /* A profile's own description, two lines at most; the rest is on hover. */
 .nc-about {
