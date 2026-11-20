@@ -35,6 +35,18 @@ Then pick the **Pivot** page tab.
   "Distinct count of Host" is a normal thing to want.
 - **Filters** with the same vocabulary as the grid's header filter box
   (is any of / is none of / contains / starts with / >, < / is empty).
+- **A timeframe of its own.** **⏱ Timeframe** in the Filters area's
+  heading counts only the rows from a stretch of time — the table
+  toolbar's Timeframe dialog for this pivot: every datetime column OR'd
+  together (a timestomped Created date doesn't hide a row whose Modified
+  date is in range) or one you pick, Start and End in any spelling the
+  tables' timeframe takes, both ends included, and **Fill range** from the
+  tables' timeframe or from tagged rows. The range sits at the top of
+  Filters, with ✕ to clear it; right-click it to **Turn it off** and keep it
+  for later, as `r` does for the tables'. It is this pivot's alone: the
+  tables' timeframe doesn't narrow the pivot, and the pivot's doesn't
+  narrow the tables. A table with no datetime column has nothing for it to
+  read, so ⏱ is greyed out there.
 - **Tag chips** at the top of the Filters area — the grid's tag ribbon, with
   the same clicks: click a tag to count only rows carrying it (two tags mean
   rows carrying either), right-click it for **Exclude**, and **Any tag** /
@@ -46,7 +58,8 @@ Then pick the **Pivot** page tab.
   grid** (there, or on the cell's right-click menu) to open them in the
   grid: the cell's values as column filters, the Filters area as
   filter-builder conditions, the tag chips as the ribbon's tag filter, and
-  the timeframe turned off, since the pivot counts the whole table. Each
+  the pivot's timeframe as the tables' timeframe — or, when the pivot has
+  none, the tables' turned off, since it then counted the whole table. Each
   Filters operator is handed over as the grid operator that compiles to
   the same SQL, so the grid lands on exactly the rows the cell counted;
   `>`/`<` on a column the grid holds as text has no such twin and is
@@ -58,12 +71,13 @@ Then pick the **Pivot** page tab.
 - Sort the rows by any value column: click its header, again to reverse,
   a third time for key order.
 - **The pivots come back when the case is reopened.** Their DEFINITIONS
-  (table, field areas, filters and tag filter, subtotal switches, which pivot was on top)
+  (table, field areas, filters, tag filter and timeframe, subtotal switches, which pivot was on top)
   are kept in the case file through `winnow.tabState`; the cross-tab itself
   is re-queried against the case as it is then. A line at the top says they
   were restored, when they were saved, and offers **Start fresh** — and a
   pivot whose table or columns are gone restores without them and names
-  what it dropped.
+  what it dropped (a timeframe whose column is gone reads every datetime
+  column instead, and says so).
 
 ## Three things it does deliberately
 
@@ -75,6 +89,12 @@ Tags are the exception that isn't one: they live in the case file
 (`row_tags`), so the tag chips compile into the same query as everything
 else, in the grid's own spelling — a tag id, `"!<id>"` for an exclusion,
 `"__any__"` and `"__none__"` — and select the rows the grid's ribbon would.
+Its timeframe is its own for the same reason, and is compiled the way the
+grid compiles the tables' timeframe — every value and both bounds through
+`TS_NORMALIZE`, and on a merge each member read on its own terms (the
+chosen column where it has it, else every datetime column it does have) —
+so **Show these rows in the grid** can hand the range over and land on the
+rows the cell counted.
 
 **Subtotals are worked out, not summed from the cells above them.** Add up
 the per-host distinct user counts and you'll double-count anyone who appears
@@ -127,8 +147,12 @@ pivot/
 ```
 
 Backend tests live with Winnow's own suite, in `tests/test_plugins.py`
-(`-k pivot`); the tab itself is driven by `tests/ui/test_pivot_tags.py`
-(the tag chips), `tests/ui/test_pivot_state.py` (the saved pivots),
+(`-k pivot`) and `tests/test_pivot_timeframe.py` (the timeframe, case by
+case against the grid's); the tab itself is driven by
+`tests/ui/test_pivot_tags.py` (the tag chips),
+`tests/ui/test_pivot_timeframe_dialog.py` (the timeframe's dialog and chip),
+`tests/ui/test_pivot_to_grid.py` (Show these rows in the grid),
+`tests/ui/test_pivot_state.py` (the saved pivots),
 `tests/ui/test_pivot_refresh.py` (the table kept, dimmed, while the next
 one is worked out), `tests/ui/test_pivot_reorder.py` (reordering the
 areas: drop slots, the handle's menu, Alt+↑/↓) and

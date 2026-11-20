@@ -178,6 +178,8 @@ What happens when you switch tables depends on **Keep applied when switching tab
 
 The same switch is in Settings, under **Filter & search syntax**.
 
+The Pivot plugin keeps a timeframe of its own for each pivot, set from **⏱ Timeframe** in its **Filters** area. It works the same way, but it narrows only that pivot, and the tables' timeframe doesn't narrow the pivot. See [Plugins](Plugins.md#pivot).
+
 **Jump to timestamp…** in the same dialog (or `J`) scrolls to the row closest to a moment instead of filtering. Press `.` in any table to jump to the same moment again.
 
 ## The histogram
