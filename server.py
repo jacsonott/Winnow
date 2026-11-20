@@ -881,7 +881,9 @@ class IngestPath(BaseModel):
     delimiter: str | None = None
     build_fts: bool = True
     has_header: bool = True
-    column_types: list[str] | None = None
+    # One per column, in order; None leaves that column to the import's own
+    # inference (the preview sends only the types the analyst picked)
+    column_types: list[str | None] | None = None
     folder_id: int | None = None   # the table folder to file the new table in (GET /api/folders); None = top level
 
 
@@ -3355,10 +3357,10 @@ class IngestJobPath(BaseModel):
     # csv options
     delimiter: str | None = None
     has_header: bool = True
-    # csv: one type per column, in order. iis, kv: {column name: type},
-    # since the preview sees only the start of a log a later #Fields: line
-    # (or key) adds to
-    column_types: list[str] | dict[str, str] | None = None
+    # csv: one type per column, in order, None for a column the analyst
+    # left to the import. iis, kv: {column name: type}, since the preview
+    # sees only the start of a log a later #Fields: line (or key) adds to
+    column_types: list[str | None] | dict[str, str] | None = None
     # iis: w3c, ncsa or native; None reads the file's name
     log_format: str | None = None
     # secure: the year of the first line; None works it out from the file's modified time
@@ -4868,9 +4870,10 @@ def api_search_index_start(source_id: int):
 
 
 @app.get("/api/column_maxlen")
-def api_column_maxlen(source_id: int, columns: list[str] | None = Query(None)):
+def api_column_maxlen(source_id: int, columns: list[str] | None = Query(None),
+                      reformatted: list[str] | None = Query(None)):
     try:
-        return store().column_max_lengths(source_id, columns)
+        return store().column_max_lengths(source_id, columns, reformatted)
     except ValueError as e:   # still importing (Store._require_columns)
         raise HTTPException(400, str(e))
     except KeyError as e:

@@ -605,7 +605,9 @@ see [docs/notes/README.md](README.md) for the whole set.
   in the next, so `value_type: "text"` used to make every regex, JSON,
   XML, decode, lookup and combine column text — and a size pulled out
   with a regex sorted 10 before 9 and compared `> 1000` as strings. The
-  rule is infer_type's (every non-empty value matches NUM_RE), run in
+  rule is infer_type's (every value that isn't blank or a NO_VALUE
+  placeholder such as "-" matches NUM_RE, and there is one;
+  `_sql_has_value`), run in
   SQL with REGEXP over the whole `drv_` column rather than a 500-row
   sample, and NUM_RE exactly rather than a cheaper GLOB: `_numeric_expr`
   gates the sort and the comparisons on the same pattern, so a column

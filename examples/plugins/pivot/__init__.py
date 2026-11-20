@@ -32,6 +32,16 @@ the cost of one table scan rather than one per level — which on a wide table
 is most of the time spent, and made a pivot several times slower than the
 same GROUP BY typed into the SQL pane.
 
+**Its timeframe is its own, and reads time the way the grid's does.** Each
+pivot can count only the rows from a stretch of time (_time_clauses): every
+datetime column OR'd together, or one chosen column, each value and both
+bounds put through TS_NORMALIZE — the same comparison the table toolbar's ⏱
+Timeframe compiles (Store._compile_where), member by member on a merge, so
+"Show these rows in the grid" can hand the range over and land on the rows
+the cell counted. It is not the tables' timeframe, for the same reason the
+Filters area is not the grid's filters: the pivot reads the table, not the
+view.
+
 **Sum/Average/numeric Min/Max go through the same guarded cast the rest of
 Winnow uses.** Columns are stored as TEXT (evidence fidelity), and SQLite's
 bare `CAST(text AS REAL)` turns "N/A" into 0.0 — indistinguishable from a
@@ -55,7 +65,7 @@ PLUGIN = {
     "description": "Excel-style pivot tables: drag fields into rows, columns and values for cross-tabs with subtotals.",
 }
 
-WINNOW_API_VERSION = 15   # winnow.openFiltered options: "Show these rows in the grid"
+WINNOW_API_VERSION = 16   # openFiltered's timeRange, timestampField: the pivot's own timeframe
 
 # Grouping levels per refresh: one UNION ALL arm each over the base. Rows ×
 # columns levels stay small in practice (Excel's own field wells get
@@ -117,6 +127,7 @@ def register(api):
     api.register_api("aggregate", aggregate, methods=["POST"])
     api.register_api("values", values, methods=["POST"])
     api.register_api("detail", detail, methods=["POST"])
+    api.register_api("timeframe", timeframe, methods=["POST"])
 
 
 # --------------------------------------------------------------- helpers
@@ -360,14 +371,15 @@ def _esc_like(value):
     return str(value).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-def _where(src, filters, coltypes, tag_clauses=()):
+def _where(src, filters, coltypes, extra_clauses=()):
     """Compiles the Filters area into a WHERE clause plus its parameters.
 
     Values are bound, never interpolated — the identifiers are the only thing
     that goes into the SQL text, and those are validated against the source's
-    real column list first. `tag_clauses` is _tag_clauses' output, ANDed on
-    after the field filters; it carries no placeholders, so the parameter
-    order _inline relies on is the field filters' alone.
+    real column list first. `extra_clauses` is _tag_clauses' and
+    _time_clauses' output, ANDed on after the field filters; neither carries
+    a placeholder, so the parameter order _inline relies on is the field
+    filters' alone.
     """
     clauses, params = [], []
     for f in filters or []:
@@ -423,7 +435,7 @@ def _where(src, filters, coltypes, tag_clauses=()):
         else:
             clauses.append(f"({ident} IS NULL OR {ident} = '')" if op == "empty"
                            else f"({ident} IS NOT NULL AND {ident} != '')")
-    clauses.extend(tag_clauses)
+    clauses.extend(extra_clauses)
     return (" WHERE " + " AND ".join(clauses)) if clauses else "", params
 
 
@@ -493,6 +505,114 @@ def _tag_clauses(req, src, tags):
     return clauses
 
 
+def _text(value):
+    """A string literal, SQLite's ''-doubling. Only ever handed a bound
+    TS_NORMALIZE has already rewritten into "YYYY-MM-DD HH:MM:SS", so there
+    is nothing to escape in practice — but a literal is spelled safely or
+    not at all."""
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _normalized(req, start, end):
+    """Each bound as TS_NORMALIZE reads it — the same function the range
+    check runs every value through, so "1/5/2024 8:00" and "2024-01-05
+    08:00:00" are one moment here as they are in the grid. '' stays None
+    (that end is open). Text it can't read is refused by name: the grid
+    drops such a bound silently, but the pivot's dialog has already said it
+    takes timestamps only, and a range with one end quietly gone counts
+    rows nobody asked about."""
+    row = req.store.run_sql(_inline("SELECT TS_NORMALIZE(?), TS_NORMALIZE(?)", [start, end]), limit=1)["rows"][0]
+    out = []
+    for label, raw, norm in (("Start", start, row[0]), ("End", end, row[1])):
+        if raw and norm is None:
+            raise ValueError(f"{label}: {raw!r} is not a recognized timestamp — try YYYY-MM-DD HH:MM:SS")
+        out.append(norm if raw else None)
+    return out
+
+
+def _fold(name):
+    """A column's identity across a merge's members, as the store matches
+    it (store._col_key): the name stripped, A-Z folded and nothing else —
+    the folding SQLite applies to identifiers."""
+    return "".join(chr(ord(ch) + 32) if "A" <= ch <= "Z" else ch for ch in str(name).strip())
+
+
+def _member_has(member, merge_columns):
+    """The merge's column names this member carries a copy of: matched by
+    _fold, the member's first column of a name winning, and a derived
+    column never standing in for a file column (or the reverse) — the
+    store's _member_column, which is what decides whether the union reads
+    the member's value or pads it with NULL."""
+    keys = {}
+    for c in member["columns"]:
+        keys.setdefault(_fold(c["name"]), bool(c.get("derived")))
+    return {c["name"] for c in merge_columns
+            if keys.get(_fold(c["name"])) is not None
+            and keys[_fold(c["name"])] == bool(c.get("derived"))}
+
+
+def _time_clauses(req, src, frame):
+    """The pivot's timeframe as WHERE clauses: [] for none, else one clause
+    keeping a row whose timestamp falls between the bounds, both included.
+
+    `frame` is {column, start, end} — `column` null for every datetime
+    column OR'd together, so a timestomped Created date doesn't hide a row
+    whose Modified date is in range. This is Store._compile_where's
+    timeframe, clause for clause: values through ts_normalize_sql (the
+    TS_NORMALIZE fast path), bounds through TS_NORMALIZE, and on a merge
+    each member read on its own terms — the chosen column where the member
+    has it, else every datetime column it does have, and a member with
+    none not narrowed at all. That is what makes the range something
+    "Show these rows in the grid" can hand to the tables' timeframe and
+    land on the rows the cell counted.
+
+    Refused rather than ignored: a column that isn't one of the table's
+    datetime columns, and a table with none. The grid's timeframe hides
+    nothing on a table like that; a pivot that did the same would put a
+    full count under a chip that says it is narrowed. Every value is
+    inlined (TS_NORMALIZE output, quoted), so there are no placeholders to
+    disturb _where's parameter order."""
+    if not frame:
+        return []
+    if not isinstance(frame, dict):
+        raise ValueError("timeframe must be {column, start, end}")
+    start = str(frame.get("start") or "").strip()
+    end = str(frame.get("end") or "").strip()
+    if not (start or end):
+        return []
+    lo, hi = _normalized(req, start, end)
+    dt = [c["name"] for c in src["columns"] if c.get("type") == "datetime"]
+    column = frame.get("column") or None
+    if column is not None:
+        _check_columns(src, [column])
+        if column not in dt:
+            raise ValueError(f"{column} is not one of {src['name']}'s datetime columns, so the timeframe can't read it")
+    if not dt:
+        raise ValueError(f"{src['name']} has no datetime columns, so a timeframe can't narrow it")
+
+    def in_range(cols):
+        parts = []
+        for name in cols:
+            expr = ts_normalize_sql(_col(src, name))
+            if lo is not None and hi is not None:
+                parts.append(f"{expr} BETWEEN {_text(lo)} AND {_text(hi)}")
+            elif lo is not None:
+                parts.append(f"{expr} >= {_text(lo)}")
+            else:
+                parts.append(f"{expr} <= {_text(hi)}")
+        return "(" + " OR ".join(parts) + ")"
+
+    if not src.get("is_merge"):
+        return [in_range([column] if column else dt)]
+    arms = []
+    for mid in src["member_source_ids"]:
+        has = _member_has(req.store.get_source(mid), src["columns"])
+        cols = [column] if column in has else [c for c in dt if c in has]
+        arms.append(f"(s.source_id = {int(mid)} AND {in_range(cols)})" if cols
+                    else f"s.source_id = {int(mid)}")
+    return ["(" + " OR ".join(arms) + ")"]
+
+
 def _inline(sql, params):
     """run_sql takes no parameters, so the bound values are inlined here —
     through SQLite's own ''-doubling for strings, and as plain literals for
@@ -556,7 +676,7 @@ def meta(req):
 def aggregate(req):
     """POST /api/plugin/pivot/aggregate
     body: {source_id, values: [{column?, agg}], group_sets: [[col, ...], ...],
-           filters: [...], tags?: [...]}
+           filters: [...], tags?: [...], timeframe?: {column?, start?, end?}}
     -> {sets: [{keys: [col, ...], rows: [[k1, .., m1, ..], ...], truncated}], ...}
 
     One entry per requested grouping level, in the order asked for. `[]` is
@@ -584,7 +704,8 @@ def aggregate(req):
 
     for f in body.get("filters") or []:
         _check_columns(src, [f.get("column")])
-    where, params = _where(src, body.get("filters"), coltypes, _tag_clauses(req, src, body.get("tags")))
+    where, params = _where(src, body.get("filters"), coltypes,
+                           _tag_clauses(req, src, body.get("tags")) + _time_clauses(req, src, body.get("timeframe")))
     frm = _scope(req, src)
 
     sql, width = _rollup_sql(src, measures, coltypes, group_sets, frm, where)
@@ -619,8 +740,9 @@ def detail(req):
 
     Excel's "Show Details". `cell` is the row/column field values that
     identify the cell; they're turned into equality filters and AND'ed onto
-    whatever the Filters area already says — its tag filter included, or a
-    cell counted over Suspicious rows would open on every row behind it.
+    whatever the Filters area already says — its tag filter and timeframe
+    included, or a cell counted over Suspicious rows would open on every
+    row behind it.
     """
     body = req.body or {}
     src = _source(req, body)
@@ -640,7 +762,8 @@ def detail(req):
         filters.append({"column": pair["column"], "op": "empty"} if value in (None, "")
                        else {"column": pair["column"], "op": "in", "values": [value]})
 
-    where, params = _where(src, filters, coltypes, _tag_clauses(req, src, body.get("tags")))
+    where, params = _where(src, filters, coltypes,
+                           _tag_clauses(req, src, body.get("tags")) + _time_clauses(req, src, body.get("timeframe")))
     cols = [c["name"] for c in src["columns"]]
     # s.rid, not a bare rid: with the sidecar joined, an unqualified rid is
     # ambiguous. Derived columns come from `d`, which is also why they show
@@ -651,3 +774,30 @@ def detail(req):
     sql = f"SELECT {select} FROM {_scope(req, src)}{where} ORDER BY {order}"
     res = req.store.run_sql(_inline(sql, params), limit=MAX_DETAIL_ROWS)
     return {"columns": ["Line"] + cols, "rows": res["rows"], "truncated": res["truncated"]}
+
+
+def timeframe(req):
+    """POST /api/plugin/pivot/timeframe  body: {start?, end?}
+    -> {start, end}, each as TS_NORMALIZE writes it ("YYYY-MM-DD HH:MM:SS"),
+    or null for an end left open.
+
+    The dialog's Apply asks this before it closes, so text the filter
+    can't place in time is refused there, with the dialog still open,
+    rather than as an error under the table after it shut — and so the
+    range is kept, shown and handed to the grid in the one shape both
+    compare through: "7/9/2026 9:30 AM" comes back as 2026-07-09 09:30:00,
+    and a date alone as its midnight, which is where an End of it stops."""
+    if req.store is None:
+        raise ValueError("Open a case first")
+    body = req.body or {}
+    start = str(body.get("start") or "").strip()
+    end = str(body.get("end") or "").strip()
+    if not (start or end):
+        raise ValueError("Set a start and/or end")
+    lo, hi = _normalized(req, start, end)
+    if lo is not None and hi is not None and lo > hi:
+        # Not a typo the filter would forgive: BETWEEN with its ends the
+        # wrong way round matches nothing, and a pivot of nothing reads as
+        # "none of this happened".
+        raise ValueError(f"End ({hi}) is before Start ({lo})")
+    return {"start": lo, "end": hi}

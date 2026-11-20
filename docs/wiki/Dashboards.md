@@ -324,8 +324,10 @@ Some plugins offer a board of their own, listed in the same place with only
 its board in a case; it is copied in only when you add it. If the case
 already has a board of that name that you built or edited, you are asked
 first (**Replace it** / **Keep mine**); adding it again over its own untouched
-copy just refreshes it. The bundled **esxi_logs** plugin offers
-**ESXi / Linux host overview** this way (see [Plugins](Plugins.md#esxi_logs)).
+copy just refreshes it. Two bundled plugins offer one this way:
+**esxi_logs** offers **ESXi / Linux host overview** (see
+[Plugins](Plugins.md#esxi_logs)) and **systemd_journal** offers **Linux
+journal overview** (see [Plugins](Plugins.md#systemd_journal)).
 
 ## Profiles
 

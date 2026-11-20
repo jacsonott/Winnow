@@ -13,9 +13,9 @@ rewrite kept every position where it was, ties between members included."""
 
 from __future__ import annotations
 
-import re
-
 import pytest
+
+from winnow.store import NUM_RE
 
 
 def _ingest(store, write_csv, rows, name, column_types=None):
@@ -72,9 +72,10 @@ B = [["User", "Count", "Msg"],
      ["Bob", "10", "b1"], ["alice", "9", "b2"], ["dave", "1e3", "b3"], ["bob", "-2", "b4"]]
 
 
-# Count is forced numeric (the stray "x", "" and "1e3" would infer it as
-# text), standing in for a column whose sampled rows all looked like
-# numbers: _numeric_expr reads those three as NULL.
+# Count is forced numeric (the stray "x" would infer it as text), standing
+# in for a column whose sampled rows all looked like numbers: _numeric_expr
+# reads "x" and "" as NULL, and "1e3" as 1000 (store.NUM_RE takes an
+# exponent).
 TYPES = ["text", "number", "text"]
 
 
@@ -84,7 +85,7 @@ def _ascii_lower(s):
 
 
 def _num(s):
-    return float(s) if re.fullmatch(r"-?\d+(\.\d+)?", s) else None
+    return float(s) if NUM_RE.match(s) else None
 
 
 def _expected(members, sort):

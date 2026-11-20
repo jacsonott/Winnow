@@ -98,6 +98,11 @@ def test_a_setting_is_kept_when_another_file_is_chosen_and_reaches_the_import(pa
         page.locator("#modalBody .import-foot .btn.primary", has_text="Import 2 files").click()
     semi, comma = semi.value.post_data_json, comma.value.post_data_json
     assert semi["delimiter"] == ";" and semi["column_types"][1] == "datetime"
+    # Only the type the analyst picked. The preview's own reading of its
+    # first rows used to go for every column the moment one was set, and
+    # overrode the import's typing of all of them (a column those rows
+    # left empty stayed text however full of numbers the file was).
+    assert semi["column_types"] == [None, "datetime", None]
     assert comma["delimiter"] is None and comma["column_types"] is None
     assert page.evaluate("() => document.getElementById('modal').hidden")
 

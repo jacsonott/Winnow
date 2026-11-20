@@ -41,6 +41,18 @@ filter and the histogram on such a column. Its browser half,
 `tests/ui/test_timestamp_time_of_day.py`, reads the painted cells
 (00:00:00 on every row was the report) and runs one corpus through
 `parseTimestamp` and `_ts_normalize` side by side.
+`test_number_columns.py` holds each shape of "imported numbers sort as
+text" to a number column that sorts by value, through the reader it came
+in by: a "-" or "N/A" among the numbers, a column empty for the first 500
+rows (a FortiGate log's traffic keys, an IIS log's second `#Fields:`
+line, a late JSON key), padded, signed and exponent numbers. Its
+load-bearing tests are the ones that keep the fix from overreaching: a
+column found to hold timestamps further in is NOT made a datetime column,
+and the open-time pass over older tables leaves alone everything that was
+declared text rather than inferred (the analyst's preview choice, a
+key=value `tz`, a plugin's table, a column the old rule itself called a
+number). Plus that every cell NUM_RE accepts is worth what CAST reads it
+as, since `_numeric_expr` gates on it.
 `test_maintenance.py` covers the things that only exist because everything
 else only ever grows: the auto-created column indexes (listing/dropping),
 `compact()`, and `sweep_orphan_views()` — whose load-bearing test is that a
@@ -224,6 +236,21 @@ over one list, then drives the queue: a path item and an upload previewed
 and imported in the year the pane shows (the upload dated from the
 browser's `lastModified`, not the spool), and **Read as** → **Secure log**
 on other text.
+`test_systemd_journal.py` covers the systemd_journal plugin. Its fixtures
+in `tests/data/journal/` were written by systemd's own tools, not by the
+reader under test: `make_fixtures.py` feeds a fixed set of entries to
+`systemd-journal-remote` in three file shapes (compact + zstd, regular +
+LZ4, regular + XZ) and has `journalctl` print each one in every lossless
+form, so the load-bearing tests compare the reader's rows for a journal
+file against journalctl's own `-o export` of that file, and every output
+form against the file. Regenerate them on a Linux box with systemd 252 or
+later (compact files need it) and the `zstd` CLI; they are committed
+xz-compressed, trimmed to their last object. The damage tests cut, punch
+holes in and corrupt copies of those files in `tmp_path` and assert both
+the rows that survive and the exact case-log sentence. The zstd tests run
+the pure-Python decoder over streams the reference encoder wrote at
+several levels, and against the standard library's on Python 3.14, which
+is the only interpreter where that test runs rather than skips.
 `test_site_palette.py` holds the Pages site and Harvest to the same
 colors: every value docs/site/assets/site.css copies from a Harvest token
 (the ones commented `/* dark --panel */` and so on) must still equal that
@@ -285,7 +312,13 @@ path on every Python and, on 3.11+, checks it against what `csv` writes.
 the grid's equivalent condition on the same table and on a merge, and
 compares the counts per group, because the plugin compiles its own WHERE.
 Its table has both '' and NULL, and a number column with a blank and a
-non-number in it. `test_session_reimport.py` re-imports a table from a
+non-number in it. `test_pivot_timeframe.py` does the same for the
+Pivot's own timeframe: every range through the pivot and through
+`build_view`'s `time_range`, on a table with two datetime columns (one
+timestomped), the US shape, a 'T' with a zone, an empty cell and a bound
+on a value, and on a merge with a member lacking the chosen column and one
+with no datetime column at all; plus what it refuses and the dialog's
+`/timeframe` route. `test_session_reimport.py` re-imports a table from a
 session for every reader the session can name (IIS, key=value, login
 records and body files are in their own files), with and without the reader recorded, and covers a
 session with no path, a file gone from its path, and a file replaced while
@@ -313,7 +346,16 @@ start a quick look; each on its own server, since both switch the case.
 included) and its field filter. `test_pivot_reorder.py`: reordering the
 pivot's areas with a real pointer drag (the slot line, drops between
 chips), the ⠿ handle's menu and Alt+↑/↓; its drags end on two small moves
-because the emulated drag sends dragover a move behind the pointer. `test_firstlast_copy.py`: Copy result,
+because the emulated drag sends dragover a move behind the pointer.
+`test_pivot_timeframe_dialog.py`: the pivot's own timeframe — the dialog sends
+the range as TS_NORMALIZE writes it, refuses text that is not a time with
+the dialog still open, the chip turns off and back on and clears, the
+drill-down carries the range, and it is saved and restored with the pivot
+(its backend twin, tests/test_pivot_timeframe.py, counts every range
+through the pivot and through build_view, merges included).
+`test_pivot_to_grid.py` adds the hand-over: a cell counted under the
+pivot's timeframe opens the grid with the tables' timeframe set to it.
+`test_firstlast_copy.py`: Copy result,
 including the card it waits on when the analyst has left the tab, held
 at `job/start` so the answer lands while the tab is hidden.
 

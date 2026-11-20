@@ -360,9 +360,16 @@ first 500 rows — text, number or datetime: number columns sort numerically,
 datetime columns sort chronologically and are the ones the Timeframe
 filter, Histogram and Timeline use. A column is recognized as datetime when
 its values look like `2024-01-05 13:22:01`, `1/5/2024 1:22:01 PM` or
-`Jan 5 2024 13:22:01`. The type is fixed at import (the delimited-text preview can
-change it); to get a real datetime out of an epoch or other encoded value,
-add a [derived column](Derived-columns.md).
+`Jan 5 2024 13:22:01`. A column of numbers stays a number column when some
+of its cells say `-`, `N/A` or `null` instead, and one that is empty for
+all of the first 500 rows (a byte count only later lines of a firewall or
+web log carry) is typed from rows further into the file
+([Numbers, dates and text](Filtering-and-searching.md#numbers-dates-and-text)
+has the details). The type is fixed at import (the delimited-text, IIS and
+key=value previews can change it: set a column's type in its heading, and
+the columns you leave alone keep the import's own guess); to get a real
+datetime out of an epoch or other encoded value, add a
+[derived column](Derived-columns.md).
 
 ### CSV, TSV and other delimited text
 
@@ -1043,10 +1050,14 @@ back. Pins stay in this browser, like the ones in the
 
 ### Plugin formats
 
-Two bundled plugins add formats; both ship switched off (**Settings →
+Three bundled plugins add formats; all three ship switched off (**Settings →
 Plugins**). **mft_usn** reads a raw NTFS `$MFT` and `$UsnJrnl:$J`, recognised
 by name (`$MFT`, `$J`, `*$UsnJrnl*`…), without EZTools. **esxi_logs** reads
-ESXi support-bundle and UAC Linux host logs. A claimed file shows the
+ESXi support-bundle and UAC Linux host logs. **systemd_journal** reads Linux
+journal files (`.journal`, `.journal~`) and `journalctl -o export` or
+`-o json` output, without `journalctl`; see
+[Plugins](Plugins.md#systemd_journal) for journalctl output saved as `.json`
+or `.txt`, which Winnow's own imports claim. A claimed file shows the
 format's name in the queue, and its options, if it has any, in the file's
 pane. Built-in extensions always win, so no plugin can take over `.csv` or
 `.json`, and neither do built-in names: **esxi_logs** claims `.log`, but an
@@ -1081,6 +1092,7 @@ case don't matter):
 | RECmd (batch) | Registry (RECmd batch) |
 | SrumECmd | SRUM — app resource use, network usage |
 | esxi_logs plugin | ESXi / Linux host logs |
+| systemd_journal plugin | systemd journal |
 | Winnow's own readers | IIS web logs (W3C, NCSA, IIS native), Linux login records (wtmp/btmp/utmp), Body files (TSK / mactime), Linux secure / auth.log |
 
 Recognition gets you:

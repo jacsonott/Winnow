@@ -232,6 +232,11 @@ def test_value_list_and_widths_ignore_missing_columns(store, abc):
     assert values == {None: 3, "x": 2, "y": 1}
     widths = store.column_max_lengths(mid)
     assert widths["Extra"] == 1 and widths["Other"] == len("needle")
+    # A reformatted Time measures what each member shows as stored —
+    # nothing, every value being a timestamp — through B's "TIME" as well.
+    assert store.column_max_lengths(mid, ["Time", "Msg"], reformatted=["Time"]) == {
+        "Time": 0, "Msg": len("epsilon logon")}
+    assert widths["Time"] == len("2024-01-01 10:00:00")
 
 
 def test_jump_to_timestamp_finds_a_member_with_respelled_column(store, abc):

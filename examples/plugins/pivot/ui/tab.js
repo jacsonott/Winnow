@@ -39,6 +39,21 @@ const tagExcludeKey = (id) => `!${id}`;
 const isTagExclusion = (key) => typeof key === 'string' && key.startsWith('!');
 const tagIdOf = (key) => (isTagExclusion(key) ? Number(key.slice(1)) : key);
 
+/* The pivot's own timeframe: {enabled, column, start, end}, the shape the
+   tables' timeframe has (S.timeRange), with the same meanings — `column`
+   null for every datetime column OR'd together, a bound '' for that end
+   left open, and `enabled` false for a range kept but not applied. Its
+   own, not the tables': the pivot reads the table rather than the grid's
+   view, so the grid's filters never applied to it, and a range set to
+   read one table should not quietly thin out a cross-tab of another.
+   Bounds are kept as the backend's /timeframe wrote them, the
+   "YYYY-MM-DD HH:MM:SS" TS_NORMALIZE compares in, so the chip says which
+   moment each end is and the grid can be handed the same range. */
+const noFrame = () => ({ enabled: false, column: null, start: '', end: '' });
+const frameSet = (f) => !!(f && (f.start || f.end));
+const frameOn = (f) => !!(f && f.enabled && frameSet(f));
+const datetimeColumnsOf = (src) => (src ? (src.columns || []).filter((c) => c.type === 'datetime').map((c) => c.name) : []);
+
 /* ------------------------------------------------ saved pivots */
 
 /* The pivots survive the case being closed, because they live in the case
@@ -59,7 +74,7 @@ const MAX_SAVED_PIVOTS = 24;
 
 const emptySpec = (name) => ({
   name, sourceId: null, rows: [], cols: [], values: [], filters: [], tags: [],
-  subtotals: true, grandTotals: true,
+  timeframe: noFrame(), subtotals: true, grandTotals: true,
 });
 
 /* How a pivot names its table, in two shapes because tables come in two
@@ -86,6 +101,7 @@ export function pivotSpec(p, sources) {
     name: p.name,
     source: savedSource(src),
     rows: p.rows, cols: p.cols, values: p.values, filters: p.filters, tags: p.tags,
+    timeframe: frameSet(p.timeframe) ? { ...p.timeframe } : null,
     subtotals: p.subtotals, grandTotals: p.grandTotals,
   };
 }
@@ -131,6 +147,34 @@ function restoreTags(keys, tags, gone) {
       else gone.push(key);
     }
     if (kept !== null && !out.includes(kept)) out.push(kept);
+  }
+  return out;
+}
+
+/* A saved timeframe, against the table as it is now. The range itself is
+   kept as saved (the backend refuses a bound it can't read, by name). The
+   column is the part that can be gone: one the table no longer has as a
+   datetime column falls back to every datetime column, as the grid's
+   timeframe does with a column the open table lacks, and says so; a table
+   with no datetime columns left loses the timeframe, since there is no
+   time in it to filter on. */
+function restoreTimeframe(saved, src, name, notes) {
+  if (!saved || typeof saved !== 'object') return noFrame();
+  const out = {
+    enabled: saved.enabled !== false,
+    column: saved.column == null ? null : String(saved.column),
+    start: typeof saved.start === 'string' ? saved.start : '',
+    end: typeof saved.end === 'string' ? saved.end : '',
+  };
+  if (!frameSet(out)) return noFrame();
+  const dt = datetimeColumnsOf(src);
+  if (!dt.length) {
+    notes.push(`${name}: dropped its timeframe — ${src.name} has no datetime columns any more`);
+    return noFrame();
+  }
+  if (out.column !== null && !dt.includes(out.column)) {
+    notes.push(`${name}: its timeframe read ${out.column}, which is not a datetime column of ${src.name} any more — it reads every datetime column now`);
+    out.column = null;
   }
   return out;
 }
@@ -192,6 +236,7 @@ export function planRestore(payload, sources, tags = null) {
       notes.push(`${name}: dropped ${goneTags.length === 1 ? 'a tag' : `${goneTags.length} tags`}`
         + ' from its tag filter — not in this case any more');
     }
+    spec.timeframe = restoreTimeframe(p.timeframe, src, name, notes);
     pivots.push(spec);
   }
   if (!pivots.length) return null;
@@ -215,7 +260,7 @@ export default function mount(container, winnow) {
   const newPivotState = (name) => ({
     name,
     sourceId: null,
-    rows: [], cols: [], values: [], filters: [], tags: [],
+    rows: [], cols: [], values: [], filters: [], tags: [], timeframe: noFrame(),
     meta: sharedMeta, data: null, index: null,
     sort: null,               // {measure: idx, dir: 1|-1} — null = by key
     subtotals: true, grandTotals: true,
@@ -235,7 +280,7 @@ export default function mount(container, winnow) {
      that reaches the case file. */
   const worthKeeping = () => pivots.length > 1 || pivots.some((p) => (
     p.rows.length || p.cols.length || p.values.length || p.filters.length || p.tags.length
-    || !p.subtotals || !p.grandTotals));
+    || frameSet(p.timeframe) || !p.subtotals || !p.grandTotals));
   function saveState() {
     if (!saveOn || !winnow.tabState) return;   // an older Winnow has no tabState
     winnow.tabState.set(worthKeeping() ? {
@@ -345,9 +390,10 @@ export default function mount(container, winnow) {
   csvBtn.title = 'Download the pivot as a CSV file';
   csvBtn.onclick = () => downloadCsv();
   const clearBtn = el('button', 'btn ghost', 'Clear');
-  clearBtn.title = 'Empty every field area, and turn the tag filter off';
+  clearBtn.title = 'Empty every field area, and turn the tag filter and the timeframe off';
   clearBtn.onclick = () => {
     state.rows = []; state.cols = []; state.values = []; state.filters = []; state.tags = [];
+    state.timeframe = noFrame();
     state.sort = null; renderFields(); renderTagRibbon(); scheduleRefresh();
   };
   const status = el('span', 'note-status', '');
@@ -465,6 +511,15 @@ export default function mount(container, winnow) {
   // they do on the ribbon in every skin and theme with no CSS of ours.
   const tagRibbon = el('div', 'tag-ribbon');
   tagRibbon.style.cssText = 'margin-bottom:2px';
+  // The pivot's timeframe: ⏱ in the Filters well's heading opens its
+  // dialog, and the range, once set, sits above the tag chips (see
+  // "timeframe" below).
+  const tfBtn = el('button', 'btn ghost pv-tf-btn', '⏱ Timeframe');
+  tfBtn.type = 'button';
+  tfBtn.style.cssText = 'padding:0 6px;font-size:11px;letter-spacing:0;text-transform:none;line-height:1.6';
+  tfBtn.onclick = () => openTimeframeEditor();
+  const tfRow = el('div', 'pv-timeframe');
+  tfRow.hidden = true;
   for (const [id, label, hint] of ZONES) {
     const box = el('div');
     box.style.cssText = 'border:1px dashed var(--line-2);border-radius:var(--radius-sm);'
@@ -476,10 +531,15 @@ export default function mount(container, winnow) {
     const list = el('div');
     list.style.cssText = 'display:flex;flex-direction:column;gap:4px';
     box.append(head);
-    // The tag chips head the Filters well: they decide which rows the
-    // pivot counts, as the field filters below them do, and a pivot that
-    // is only counting Suspicious rows should say so where its filters are.
-    if (id === 'filters') box.append(tagRibbon);
+    // The timeframe and the tag chips head the Filters well: they decide
+    // which rows the pivot counts, as the field filters below them do, and
+    // a pivot that is only counting Suspicious rows, or one night's, should
+    // say so where its filters are.
+    if (id === 'filters') {
+      head.style.cssText += ';display:flex;align-items:center;justify-content:space-between;gap:6px';
+      head.append(tfBtn);
+      box.append(tfRow, tagRibbon);
+    }
     box.append(list);
     zoneBodies[id] = list;
     wireDropTarget(box, id);
@@ -741,6 +801,7 @@ export default function mount(container, winnow) {
         list.append(hint);
       }
     }
+    renderTimeframe();
   }
 
   /* Every chip in an area carries a handle: ⠿, the grip the dashboard
@@ -1162,6 +1223,266 @@ export default function mount(container, winnow) {
     return changed;
   }
 
+  /* ------------------------------------------------------ timeframe */
+
+  /* The tables' Timeframe filter, for this pivot: the same dialog shape
+     (Column, Start and End with the 📅 calendar, Fill range from the
+     tables' timeframe or from tagged rows), the same rules (Apply always
+     turns it on, Clear forgets it, a range can be kept but off), and the
+     same comparison server-side, so a cell's rows open in the grid under
+     the very range they were counted in. What it doesn't have is the
+     toggle key — the keys belong to the grid — so turning it off without
+     clearing it is on the chip's right-click menu and in the dialog. */
+
+  // What a request carries: the range when it is on, else nothing.
+  const frameBody = (p) => (frameOn(p.timeframe)
+    ? { column: p.timeframe.column || null, start: p.timeframe.start, end: p.timeframe.end } : null);
+
+  function setTimeframe(next) {
+    state.timeframe = next;
+    renderTimeframe();
+    scheduleRefresh();
+  }
+
+  function timeframeMenuItems() {
+    const f = state.timeframe;
+    return [
+      { header: 'Timeframe', literal: true },
+      { label: 'Change the timeframe…', onclick: () => openTimeframeEditor() },
+      f.enabled
+        ? { label: 'Turn it off', title: 'Count every row again, and keep the range to turn back on', onclick: () => setTimeframe({ ...f, enabled: false }) }
+        : { label: 'Turn it on', title: 'Count only the rows in this range again', onclick: () => setTimeframe({ ...f, enabled: true }) },
+      '-',
+      { label: 'Clear the timeframe', onclick: () => setTimeframe(noFrame()) },
+    ];
+  }
+
+  /* The ⏱ in the heading — pressed while the range narrows the pivot, as
+     the table toolbar's is — and, once a range is set, the range itself,
+     on two lines (a 268px rail has no room for both ends on one), with
+     the column it reads under them and ✕ to forget it. Off, it stays on
+     screen dimmed and says so: a pivot whose range is off counts the
+     whole table, and the range is still there to turn back on. */
+  function renderTimeframe() {
+    const f = state.timeframe || noFrame();
+    const src = currentSource();
+    const dt = datetimeColumnsOf(src);
+    tfBtn.setAttribute('aria-pressed', String(frameOn(f)));
+    tfBtn.disabled = !src || (!dt.length && !frameSet(f));
+    tfBtn.title = !src ? 'Pick a table first'
+      : !dt.length ? `${src.name} has no datetime columns, so there is no time to filter it on`
+        : frameOn(f) ? `Counting only the rows from ${f.start || 'the first'} to ${f.end || 'the last'} — click to change it`
+          : frameSet(f) ? 'Timeframe set but off — click to change it or turn it back on'
+            : 'Count only the rows from a stretch of time';
+    tfRow.replaceChildren();
+    tfRow.hidden = !frameSet(f);
+    if (!frameSet(f)) return;
+    const chip = el('div', 'tl-range-chip pv-tf-chip');
+    chip.tabIndex = 0;
+    chip.setAttribute('role', 'button');
+    chip.dataset.on = String(f.enabled);
+    chip.style.cssText = 'display:grid;grid-template-columns:auto minmax(0,1fr) auto;column-gap:6px;row-gap:1px;'
+      + 'align-items:baseline;white-space:normal;padding:4px 2px 4px 7px;margin-bottom:4px;cursor:pointer'
+      + (f.enabled ? '' : ';border-style:dashed;border-color:var(--line-2);background:none;color:var(--dim)');
+    const dim = (text) => {
+      const n = el('span', null, text);
+      n.style.cssText = 'color:var(--dim);font-family:var(--ui);font-size:10.5px';
+      return n;
+    };
+    const x = el('button', 'tl-range-x', '✕');
+    x.type = 'button';
+    x.title = 'Clear the timeframe: count every row again';
+    x.setAttribute('aria-label', 'Clear the timeframe');
+    x.onclick = (e) => { e.stopPropagation(); setTimeframe(noFrame()); };
+    const where = f.column ? `on ${f.column}` : 'on any datetime column';
+    chip.append(
+      dim('From'), el('span', null, f.start || 'the first row'), x,
+      dim('to'), el('span', null, f.end || 'the last row'), el('span'),
+    );
+    const below = [where, ...(f.enabled ? [] : ['Off — every row is counted'])];
+    for (const text of below) {
+      const line = dim(text);
+      line.style.gridColumn = '2 / 4';
+      chip.append(el('span'), line);
+    }
+    chip.title = f.enabled
+      ? `Only rows whose ${f.column || 'datetime columns (any one of them)'} fall in this range, both ends included, are counted.`
+        + ' Click to change it, right-click to turn it off without clearing it.'
+      : 'Off: the pivot counts every row. Click to change it or turn it back on, right-click for the menu.';
+    chip.onclick = () => openTimeframeEditor();
+    chip.onkeydown = (e) => {
+      if (e.target !== chip || (e.key !== 'Enter' && e.key !== ' ')) return;
+      e.preventDefault();
+      openTimeframeEditor();
+    };
+    chip.oncontextmenu = (e) => {
+      e.preventDefault();
+      winnow.dropdownMenu(chip, timeframeMenuItems());
+    };
+    tfRow.append(chip);
+  }
+
+  /* The dialog: openTimeRangeModal's, for this pivot's table. The bounds
+     are read by the backend's /timeframe — TS_NORMALIZE, what the filter
+     compares through — before the dialog closes, so text it can't place
+     in time is refused here rather than as an error under the table, and
+     the range is kept in the one shape every reader shares. */
+  function openTimeframeEditor() {
+    const src = currentSource();
+    if (!src) { toast('Pick a table first'); return; }
+    const pivot = state;
+    const f = pivot.timeframe || noFrame();
+    const dt = datetimeColumnsOf(src);
+    if (!dt.length) { toast(`${src.name} has no datetime columns, so there is no time to filter it on`, 5000); return; }
+    modal('Timeframe filter', (b) => {
+      b.append(el('p', null, 'Counts only this table\'s rows from a stretch of time. It is this pivot\'s own: '
+        + 'the tables\' timeframe doesn\'t change it, and it doesn\'t change theirs.'));
+      if (!f.enabled && frameSet(f)) b.append(el('p', 'fb-help tf-off', 'Off right now — Apply turns it back on.'));
+
+      const colField = el('div', 'dlg-field');
+      colField.append(el('label', null, 'Column'));
+      const colSel = el('select', 'pv-tf-column');
+      const allOpt = el('option', null, 'All datetime columns (catches a match on any of them)');
+      allOpt.value = '';
+      colSel.append(allOpt);
+      for (const name of dt) {
+        const o = el('option', null, name);
+        o.value = name;
+        colSel.append(o);
+      }
+      colSel.value = dt.includes(f.column) ? f.column : '';
+      colField.append(colSel);
+      b.append(colField);
+
+      const box = (value, cls) => {
+        const input = el('input', `confirm-input mono ${cls}`);
+        input.type = 'text';
+        input.placeholder = 'YYYY-MM-DD HH:MM:SS';
+        input.value = value || '';
+        input.onkeydown = (e) => { if (e.key === 'Enter') apply.click(); };
+        return input;
+      };
+      // The app's own field when this Winnow has one (API 16); a plain
+      // labelled box, without the calendar, before that.
+      const field = (label, input) => {
+        if (winnow.timestampField) return winnow.timestampField(label, input);
+        const wrap = el('div', 'dlg-field');
+        wrap.append(el('label', null, label), input);
+        return wrap;
+      };
+      const startInput = box(f.start, 'pv-tf-start');
+      const endInput = box(f.end, 'pv-tf-end');
+      const range = el('div', 'dlg-pair');
+      range.append(field('Start', startInput), field('End', endInput));
+      b.append(range);
+      b.append(el('p', 'fb-help', '24-hour time, e.g. 2024-01-05 13:22:01 — the date alone, or date plus HH:MM, '
+        + 'also work. Both ends are included; on all datetime columns, a row counts when any one of them is in range.'));
+
+      // The tables' timeframe, to copy in — as the Timeline's dialog offers
+      // it. Its column comes too when this table has it.
+      const t = winnow.state.timeRange;
+      if (t && (t.start || t.end)) {
+        const fill = el('div', 'dlg-field');
+        fill.append(el('label', null, 'From the tables\' timeframe'));
+        const row = el('div', 'dlg-chips');
+        const text = el('span', 'mono', `${t.start || '…'} → ${t.end || '…'}${t.column ? ` · ${t.column}` : ''}`);
+        text.style.cssText = 'font-size:12px;color:var(--dim)';
+        const btn = el('button', 'btn ghost pv-tf-from-tables', 'Fill range');
+        btn.type = 'button';
+        btn.title = 'Set Start and End to the timeframe set on the table pages';
+        btn.onclick = () => {
+          startInput.value = t.start || '';
+          endInput.value = t.end || '';
+          if (t.column && dt.includes(t.column)) colSel.value = t.column;
+          toast('Range set from the tables\' timeframe — Apply to use it');
+        };
+        row.append(text, btn);
+        fill.append(row);
+        b.append(fill);
+      }
+
+      // The earliest and latest moment among this table's tagged rows, the
+      // tables' dialog's "From tagged rows": what to narrow a pivot to once
+      // the findings say when it happened.
+      if (caseTags().length) {
+        const tagField = el('div', 'dlg-field');
+        tagField.append(el('label', null, 'From tagged rows'));
+        const row = el('div', 'dlg-chips tr-tag-row');
+        const picked = new Set();
+        for (const tg of caseTags()) {
+          const c = el('button', 'tag-chip');
+          c.type = 'button';
+          c.setAttribute('aria-pressed', 'false');
+          const sw = el('span', 'swatch');
+          sw.style.background = tg.color;
+          c.append(sw, el('span', null, tg.name));
+          c.title = 'Toggle — no tags toggled means any tag counts';
+          c.onclick = () => {
+            if (picked.has(tg.id)) picked.delete(tg.id); else picked.add(tg.id);
+            c.setAttribute('aria-pressed', String(picked.has(tg.id)));
+            c.style.color = picked.has(tg.id) ? tg.color : '';
+          };
+          row.append(c);
+        }
+        const btn = el('button', 'btn ghost pv-tf-from-tags', 'Fill range');
+        btn.type = 'button';
+        btn.title = 'Set Start and End to the earliest and latest timestamps among tagged rows (respects the column chosen above)';
+        btn.onclick = async () => {
+          try {
+            const res = await post('/api/tag_time_bounds', {
+              source_id: pivot.sourceId, tag_ids: [...picked], column: colSel.value || null,
+            });
+            if (!res.start && !res.end) { toast('No tagged rows with a usable timestamp'); return; }
+            startInput.value = res.start || '';
+            endInput.value = res.end || '';
+            toast('Range set from tagged rows — Apply to use it');
+          } catch (e) {
+            toast('Could not read the tagged range: ' + e.message, 4000);
+          }
+        };
+        row.append(btn);
+        tagField.append(row);
+        b.append(tagField);
+      }
+
+      const done = (next) => {
+        winnow.closeModal();
+        if (pivot !== state) { pivot.timeframe = next; pivot.data = null; saveEdit(); return; }
+        setTimeframe(next);
+      };
+      const actions = el('div', 'row-actions');
+      const apply = el('button', 'btn primary pv-tf-apply', 'Apply');
+      apply.onclick = async () => {
+        const start = startInput.value.trim();
+        const end = endInput.value.trim();
+        if (!start && !end) { toast('Set a start and/or end'); return; }
+        let res;
+        try {
+          res = await post(`${winnow.base}/timeframe`, { start, end });
+        } catch (e) {
+          toast(e.message, 5000);   // the dialog stays open on what was typed
+          return;
+        }
+        done({ enabled: true, column: colSel.value || null, start: res.start || '', end: res.end || '' });
+      };
+      actions.append(apply);
+      if (frameOn(f)) {
+        const off = el('button', 'btn ghost pv-tf-off', 'Turn off');
+        off.title = 'Count every row again, and keep this range to turn back on';
+        off.onclick = () => done({ ...f, enabled: false });
+        actions.append(off);
+      }
+      const clear = el('button', 'btn ghost pv-tf-clear', 'Clear');
+      clear.title = 'Forget the range: count every row again';
+      clear.onclick = () => done(noFrame());
+      const cancel = el('button', 'btn ghost', 'Cancel');
+      cancel.onclick = () => winnow.closeModal();
+      actions.append(clear, cancel);
+      b.append(actions);
+      setTimeout(() => startInput.focus(), 0);
+    });
+  }
+
   const aggLabel = (id) => (state.meta.aggregations.find((a) => a.id === id) || {}).label || id;
   /* Excel's naming, and for the same reason: three Count measures over three
      different fields are three different columns, and labelling them all
@@ -1248,6 +1569,7 @@ export default function mount(container, winnow) {
         group_sets: sets,
         filters: state.filters,
         tags: state.tags,
+        timeframe: frameBody(state),
       });
       if (seq !== querySeq) return;   // a newer request already answered
       state.data = res;
@@ -1609,8 +1931,10 @@ export default function mount(container, winnow) {
      The one the grid can't say the same way is > / < on a column it holds
      as text: the pivot compares numbers there, the grid would compare
      strings. That is refused, by name, rather than showing other rows under
-     the same filter. The pivot counts the whole table, so the timeframe is
-     turned off on the way (openFiltered says so when it does). */
+     the same filter. The pivot's timeframe becomes the tables' timeframe on
+     the way, since the two compile alike (the backend's _time_clauses);
+     with none, the tables' is turned off, since then the pivot counted the
+     whole table. openFiltered says which it did. */
   function gridFilterFor(rowPath, colVals) {
     const src = currentSource();
     if (!src) return { refused: 'Pick a table first' };
@@ -1648,19 +1972,24 @@ export default function mount(container, winnow) {
         where.push({ column: f.column, op: f.op });               // empty, not_empty
       }
     }
-    return { pairs, where, tags: [...state.tags] };
+    return { pairs, where, tags: [...state.tags], timeRange: frameBody(state) };
   }
 
   function showInGrid(plan) {
     if (plan.refused) { toast(plan.refused, 6000); return; }
-    winnow.openFiltered(state.sourceId, plan.pairs, { where: plan.where, tags: plan.tags, clearTimeframe: true });
+    winnow.openFiltered(state.sourceId, plan.pairs, {
+      where: plan.where, tags: plan.tags,
+      ...(plan.timeRange ? { timeRange: plan.timeRange } : { clearTimeframe: true }),
+    });
   }
+
+  const gridTitle = 'Open the table filtered to this cell, the Filters area, the tag chips and the timeframe';
 
   function gridMenuItem(plan) {
     return {
       label: 'Show these rows in the grid',
       disabled: !!plan.refused,
-      title: plan.refused || 'Open the table filtered to this cell, the Filters area and the tag chips',
+      title: plan.refused || gridTitle,
       onclick: () => showInGrid(plan),
     };
   }
@@ -1679,14 +2008,16 @@ export default function mount(container, winnow) {
       bar.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:8px';
       const toGrid = el('button', 'btn', 'Show these rows in the grid');
       toGrid.disabled = !!plan.refused;
-      toGrid.title = plan.refused || 'Open the table filtered to this cell, the Filters area and the tag chips';
+      toGrid.title = plan.refused || gridTitle;
       toGrid.onclick = () => { winnow.closeModal(); showInGrid(plan); };
       bar.append(toGrid);
       if (plan.refused) bar.append(el('span', 'note-status', plan.refused));
       const body = el('div');
       b.append(bar, body);
       body.append(el('p', 'note-status', 'Reading…'));
-      post(`${winnow.base}/detail`, { source_id: state.sourceId, cell, filters: state.filters, tags: state.tags })
+      post(`${winnow.base}/detail`, {
+        source_id: state.sourceId, cell, filters: state.filters, tags: state.tags, timeframe: frameBody(state),
+      })
         .then((res) => {
           body.replaceChildren();
           if (!res.rows.length) { body.append(el('p', 'note-status', 'No rows.')); return; }
@@ -1803,6 +2134,7 @@ export default function mount(container, winnow) {
     // The tag filter goes with them, though tags are case-wide: a switch
     // starts the pivot over, as the grid starts each table on its own filter.
     state.rows = []; state.cols = []; state.values = []; state.filters = []; state.tags = [];
+    state.timeframe = noFrame();   // its column is this table's
     state.sort = null; state.data = null;
     renderFields();
     renderTagRibbon();
