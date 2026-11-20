@@ -7,7 +7,7 @@ histogram and the Timeline could not place it, no display format applied,
 and Add datetime column had no operation for it. The shape is now read
 everywhere the US and ISO shapes are: DATE_RE types the column at import,
 TS_NORMALIZE and DAY_BUCKET read it on the server, parseTimestamp in the
-browser (tests/ui/test_timestamp_dmy.py), the "dd-mm-yyyy hh:mm:ss"
+browser (tests/ui/test_timestamp_dmy_ui.py), the "dd-mm-yyyy hh:mm:ss"
 derived-column operation, and the duration columns' reader. Dashes read
 day first and slashes month first, so the two never compete for a value.
 """

@@ -46,7 +46,7 @@ filter and the histogram on such a column. Its browser half,
 (day 32, month 13, a month-first column written with dashes), sort,
 timeframe, histogram, the `dmy_datetime` derived op, and that tsformat.js's
 `TS_FORMATS` and `workspace.AppSettings.TS_FORMATS` list the same display
-formats. `tests/ui/test_timestamp_dmy.py` is its browser half: the grid's
+formats. `tests/ui/test_timestamp_dmy_ui.py` is its browser half: the grid's
 first row, `parseTimestamp` against `_ts_normalize`, and the case set to
 DD-MM-YYYY HH:MM:SS.
 `test_maintenance.py` covers the things that only exist because everything

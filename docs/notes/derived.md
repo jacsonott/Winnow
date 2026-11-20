@@ -481,7 +481,7 @@ see [docs/notes/README.md](README.md) for the whole set.
     is NULL and counted, never a silent midnight. Its display twin is the
     `dmy` format (DD-MM-YYYY HH:MM:SS), which must be in both tsformat.js's
     `TS_FORMATS` and `workspace.AppSettings.TS_FORMATS`.
-    `tests/test_timestamp_dmy.py`, `tests/ui/test_timestamp_dmy.py`.
+    `tests/test_timestamp_dmy.py`, `tests/ui/test_timestamp_dmy_ui.py`.
     Unparseable input is NULL, not `''`: it drops out of
     comparisons and the timeframe filter instead of pretending to be data,
     and the count of non-empty inputs that produced NULL is surfaced per
