@@ -1,7 +1,7 @@
 # Plugins: the extension host and the example plugins
 
 `plugin_api.py`, `plugins/`, `examples/plugins/` (mft_usn, lateral_movement,
-pivot, claude_assistant, top_values, …). The authoring contract
+pivot, claude_assistant, top_values, esxi_logs, systemd_journal, …). The authoring contract
 lives in `plugin_api.py`'s module docstring and
 [docs/writing-plugins.md](../writing-plugins.md); this is what bites the
 *host*.
@@ -787,6 +787,54 @@ see [docs/notes/README.md](README.md) for the whole set.
   ~10 µs a call, so a dotted quad is checked by hand and only IPv6 goes
   through it; a key's column is cached by its spelling; the canonical
   stamp is built in pass two only.
+
+- **systemd_journal finds entries by walking the file, not its entry
+  arrays.** journalctl, and everything built on sd-journal, reaches an
+  entry through the chain of ENTRY_ARRAY objects the header points at. On
+  a healthy file that is the same set; on a file a crash, a full disk or a
+  short copy left behind, the chain stops short of what is on disk and
+  journalctl stops with it. journald only ever appends objects, so file
+  order is write order and an entry's DATA objects always come before it:
+  a walk from `header_size` reads every entry still there, including ones
+  never linked into the arrays or counted in the header. Checked against
+  journalctl on all 16 combinations of layout, compression and keyed hash
+  (identical rows), and on copies cut short, holed and killed mid-write,
+  where it reads the entries on both sides of the damage. Don't
+  "simplify" it into following the
+  arrays. Three details hold it up. **The end** is the smaller of the file
+  and `header_size + arena_size`, and an all-zero object header past the
+  header's `tail_object_offset` is the arena's unused, preallocated tail
+  (journald grows files in 8 MiB steps), while zeros before it are damage.
+  **Resync** after damage moves 8 bytes at a time to an object header that
+  validates AND is followed by one that does (or by zeros, or the end): a
+  lone plausible header is easy to hit inside a payload. **An
+  online file's header is stale by design** (journald updates `n_entries`
+  and the tail lazily), so "more entries than the header counts" is an
+  info line in the case log, and only fewer is a warning. One consequence
+  of reading by walk: columns come from every DATA object in the file, so
+  a DATA object whose ENTRY a crash never wrote can add a column no row
+  fills.
+  **The two layouts differ in two places**: compact (systemd 252+, flag
+  0x10) puts a DATA payload at 72 rather than 64 and makes an entry item a
+  4-byte offset rather than offset + hash (16 bytes). `_BOOT_ID` comes from
+  the ENTRY header and a DATA `_BOOT_ID=` item is skipped, as `journalctl
+  -o export` does; the export and JSON forms carry it as a field. **zstd**
+  is `compression.zstd` on 3.14 and `zstd.py` (RFC 8878, pure Python)
+  before it, about 30x slower (5 to 10 MB/s), which is tolerable only
+  because journald compresses just the fields over its threshold (512
+  bytes by default): long command lines, kernel dumps, core dumps. A
+  compressed field is decompressed only as far as a cell keeps
+  (`FIELD_MAX`, 1 MiB): a `COREDUMP=` field can be hundreds of MB.
+  **The header set is only the columns every table has** (the six lead
+  columns and `_BOOT_ID`), because `{{all:header_set:…}}` selects the
+  set's columns and the rest depend on what each file's entries carry; so
+  the overview board can't count `_SYSTEMD_UNIT` across tables, and
+  `indexes: ["Identifier"]` is there because most of its queries filter
+  on it. **Routing**: `.json` and `.txt` are built-in extensions, which
+  `pluginFormatFor` lets win, so journalctl output saved under either
+  reaches the plugin only through the manager's **Import files…**; the
+  format reads by content, so any name works that way, and `.export`
+  is only a convention the format claims.
 
 - **A plugin's dashboard is offered, not applied** (`register_dashboard`,
   API 8). It appears under Dashboards ▸ Library beside the machine-wide

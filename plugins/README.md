@@ -26,16 +26,18 @@ Winnow picks it up the next time it starts, a case is opened or switched,
 or any plugin is switched on or off. Just opening the manager doesn't
 rescan.
 
-Seven ready-made examples ship in [`examples/plugins/`](../examples/plugins/):
+Eight ready-made examples ship in [`examples/plugins/`](../examples/plugins/):
 `mft_usn` (raw NTFS `$MFT`/`$J` parsing — an ingest-format plugin),
 `lateral_movement` (a pinned graph tab — a custom-UI plugin),
 `top_values` (a toolbar panel that follows the grid — the most common
 values of a column),
+`systemd_journal` (Linux journal files and `journalctl` export/JSON
+output — an ingest format that reads a binary format by content),
 `first_last`, `pivot`, `esxi_logs`, and `claude_assistant` (a Claude chat
 tab — an external-integration plugin; needs network + API key).
 
 They are already loaded: `examples/plugins/` is a bundled plugin
-directory, so all seven are listed in the manager with no install
+directory, so all eight are listed in the manager with no install
 step, switched **off** by default. Turn one on there rather than copying
 it here — a copy in this folder shadows the bundled one and you end up
 maintaining two.

@@ -380,6 +380,16 @@ examples/plugins/  Committed example plugins covering every extension point
                     Dashboards ▸ Library. The shipped "ESXi / UAC triage"
                     profile is a separate thing in defaults/profiles.json:
                     it carries its own wider board and turns this plugin on.
+                    systemd_journal: Linux journal files (regular and
+                    compact, XZ/LZ4/zstd fields, damaged .journal~) and
+                    journalctl -o export / -o json output, recognized by
+                    content, into one column layout (register_ingest_format,
+                    stdlib-only — zstd.py decodes zstd where Python < 3.14
+                    has no compression.zstd). Finds entries by walking the
+                    file's objects, not its entry arrays, so a damaged file
+                    still reads; docs/notes/plugins.md says why. Plus a
+                    register_dashboard board over the "systemd journal"
+                    header set.
                     lateral_movement: a pinned tab following movement
                     between hosts — chain over time, host matrix, by
                     account, pivot, path — from one feed route

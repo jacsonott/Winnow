@@ -233,6 +233,21 @@ over one list, then drives the queue: a path item and an upload previewed
 and imported in the year the pane shows (the upload dated from the
 browser's `lastModified`, not the spool), and **Read as** → **Secure log**
 on other text.
+`test_systemd_journal.py` covers the systemd_journal plugin. Its fixtures
+in `tests/data/journal/` were written by systemd's own tools, not by the
+reader under test: `make_fixtures.py` feeds a fixed set of entries to
+`systemd-journal-remote` in three file shapes (compact + zstd, regular +
+LZ4, regular + XZ) and has `journalctl` print each one in every lossless
+form, so the load-bearing tests compare the reader's rows for a journal
+file against journalctl's own `-o export` of that file, and every output
+form against the file. Regenerate them on a Linux box with systemd 252 or
+later (compact files need it) and the `zstd` CLI; they are committed
+xz-compressed, trimmed to their last object. The damage tests cut, punch
+holes in and corrupt copies of those files in `tmp_path` and assert both
+the rows that survive and the exact case-log sentence. The zstd tests run
+the pure-Python decoder over streams the reference encoder wrote at
+several levels, and against the standard library's on Python 3.14, which
+is the only interpreter where that test runs rather than skips.
 `test_site_palette.py` holds the Pages site and Harvest to the same
 colors: every value docs/site/assets/site.css copies from a Harvest token
 (the ones commented `/* dark --panel */` and so on) must still equal that
