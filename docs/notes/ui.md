@@ -2110,6 +2110,40 @@ see [docs/notes/README.md](README.md) for the whole set.
     was a datalist, see the theming rules at the top).
   tests/ui/test_new_case_dialog.py, test_case_variables_ui.py,
   test_home_fixes.py, test_quicklook_banner.py.
+- **A case group's folder (a demo of two ways to get one)** — home.js
+  `groupFolderOf`/`loadCaseGroups`, `groupFolderStrip`,
+  `buildGroupFolderModePanel`; workspace.py `CaseRegistry`'s group folder
+  section; `GET /api/case_groups`, `POST /api/case_groups/folder`, and
+  `group`/`group_folder` on `/api/case/current`. Settings → Case groups
+  switches `group_folder_mode` between `first_case` and `settings`; the
+  one that is kept stops being a choice and that section goes.
+  - **Each way keeps its own record** (`cases.json` → `group_folders` →
+    `first_case` / `settings`), so switching shows each as it would ship
+    on its own rather than one inheriting the other's folders. `_save`
+    carries the record through every other registry write; a write that
+    rebuilt the file from the case list alone dropped it.
+  - **first_case is taken once and kept**: `claim_group_folder` runs after
+    a create, an edit and a quick look's Save as a case
+    (`server._file_in_group`), and does nothing when the group already has
+    one. A group from before the record takes its oldest case's folder
+    (lowest id) on read, so every group has one from the start.
+  - **+ New case follows the group until the analyst says otherwise.**
+    `dirFrom` is `base` (the cases folder, or the quick look's), `group`
+    or `browse`; a group with a folder moves the path while it isn't
+    `browse` and the path wasn't typed, and leaving the group puts `base`
+    back. The line under the path (`.nc-group-note`) is the one sentence
+    the dialog adds: it says what the group does with the file, which is
+    nowhere else on screen, and offers the group's folder back when the
+    path left it.
+  - **The folder browser pins the group's folder as `fixed`** (sideRail:
+    first in Pinned, no ☆/✕, its `fixed` word where the pin goes),
+    listed before the places so a group folder that is also the case's
+    folder shows once, as the group's. With no start path it asks
+    `/api/case/current` first and opens there; `S.lastBrowsePath` still
+    wins once something was picked. `group: null` turns it off (choosing
+    the group's own folder), and + New case's Browse… passes the dialog's
+    group rather than the open case's.
+  tests/test_case_group_folders.py, tests/ui/test_group_folder_ui.py.
 - **A header set's default layout seeds a table once, so it needs its
   own way onto the rest** (the table menu's Layout section with the
   default chosen; columns.js `applyDefaultLayout` is the same as a

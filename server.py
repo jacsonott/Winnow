@@ -648,7 +648,7 @@ CASE_HEADER = "X-Winnow-Case"
 # What a window may still ask while its case isn't the one open here: the
 # switch itself, the home screen's list, and the plumbing that has no case.
 _CASE_FREE_PATHS = ("/api/case/open", "/api/case/current", "/api/case/quicklook/new",
-                    "/api/cases", "/api/presence", "/api/goodbye", "/api/version",
+                    "/api/cases", "/api/case_groups", "/api/presence", "/api/goodbye", "/api/version",
                     "/api/shutdown", "/api/restart", "/api/log")
 
 
@@ -964,8 +964,67 @@ def api_case_current():
         return {"open": False, "case_token": None}
     # case_token is what the page sends back on every request from here on
     # (see the case guard): the case its state belongs to.
+    rec = WS.cases.find_by_path(STORE.path) or {}
+    group = rec.get("group") or ""
     return {"open": True, "path": STORE.path, "name": _case_display_name(STORE.path),
-            "temp": _is_temp_case(STORE.path), "case_token": _case_token()}
+            "temp": _is_temp_case(STORE.path), "case_token": _case_token(),
+            # The folder browser pins the group's folder for every case in
+            # the group (Import → Add from this machine…, Import a folder).
+            "group": group, "group_folder": WS.cases.group_folder(group, _group_folder_mode())}
+
+
+# ------------------------------------------------------------ group folders
+#
+# A demo of two ways a case group could get the folder it files under —
+# see CaseRegistry's group folder section in winnow/workspace.py. The mode
+# is a machine preference so the two can be tried side by side; the one
+# that is kept stops being a choice.
+
+def _group_folder_mode() -> str:
+    mode = WS.machine_prefs.get("group_folder_mode")
+    return mode if mode in WS.GROUP_FOLDER_MODES else WS.GROUP_FOLDER_MODES[0]
+
+
+def _file_in_group(rec: dict) -> dict:
+    """After a case is created in a group or moved into one: under
+    first_case, a group with no folder yet takes this case's."""
+    if rec.get("group") and _group_folder_mode() == "first_case":
+        WS.cases.claim_group_folder(rec["id"])
+    return rec
+
+
+class GroupFolderBody(BaseModel):
+    group: str
+    folder: str | None = None
+
+
+@app.get("/api/case_groups")
+def api_case_groups():
+    mode = _group_folder_mode()
+    return {"mode": mode, "modes": list(WS.GROUP_FOLDER_MODES),
+            "folders": WS.cases.group_folders(mode)}
+
+
+@app.post("/api/case_groups/folder")
+def api_case_group_folder(body: GroupFolderBody):
+    """Set (or, with no folder, clear) a group's folder from its settings.
+    Only under the settings mode: under first_case the folder is the first
+    case's, and a second way to change it would be a third design."""
+    if _group_folder_mode() != "settings":
+        raise HTTPException(400, "Group folders are set by each group's first case — "
+                                 "switch Settings → Case groups to choose them instead")
+    group = (body.group or "").strip()
+    if not group:
+        raise HTTPException(400, "Name the group")
+    if not any(c.get("group") == group for c in WS.cases.list()):
+        raise HTTPException(404, f"No case is in a group named {group}")
+    folder = (body.folder or "").strip()
+    if folder:
+        folder = os.path.abspath(os.path.expanduser(folder))
+        if not os.path.isdir(folder):
+            raise HTTPException(400, f"No folder at {folder}")
+    WS.cases.set_group_folder(group, folder or None)
+    return api_case_groups()
 
 
 # ------------------------------------------------------------ quick-look cases
@@ -2299,6 +2358,7 @@ def _case_save_as(request: Request, body: CaseSaveAsBody):
         # whose file was deleted outside Winnow) as it was; the dialog's
         # name and group are what the analyst just typed.
         rec = WS.cases.update(rec["id"], name=name, group=group)
+    _file_in_group(rec)
     WS.cases.touch_opened(rec["id"])
     with contextlib.suppress(Exception):
         instances.set_case(dest)
@@ -2575,6 +2635,7 @@ def api_browse_dir(request: Request, path: str = "", files: bool = False,
 
 class PrefsBody(BaseModel):
     cases_dir: str | None = None
+    group_folder_mode: str | None = None
 
 
 @app.get("/api/elevation")
@@ -2598,7 +2659,8 @@ def api_prefs():
             "default_cases_dir": _default_cases_dir(),
             # first run of this INSTANCE: nothing configured and no cases yet
             "first_run": (WS.machine_prefs.get("cases_dir") is None
-                          and not WS.cases.list() and not quicklook)}
+                          and not WS.cases.list() and not quicklook),
+            "group_folder_mode": _group_folder_mode()}
 
 
 @app.post("/api/prefs")
@@ -2616,6 +2678,10 @@ def api_prefs_set(request: Request, body: PrefsBody):
         except OSError as e:
             raise HTTPException(400, f"Can't use that folder: {e}")
         WS.machine_prefs.set("cases_dir", path)
+    if body.group_folder_mode is not None:
+        if body.group_folder_mode not in WS.GROUP_FOLDER_MODES:
+            raise HTTPException(400, f"Unknown group folder mode: {body.group_folder_mode}")
+        WS.machine_prefs.set("group_folder_mode", body.group_folder_mode)
     return api_prefs()
 
 
@@ -2692,13 +2758,13 @@ def api_cases_create(request: Request, body: CaseCreate):
             _open_store(body.path).close()
         except Exception as e:
             raise HTTPException(400, f"Could not create case file: {e}")
-    return WS.cases.create(body.path, body.name, body.group, body.notes)
+    return _file_in_group(WS.cases.create(body.path, body.name, body.group, body.notes))
 
 
 @app.put("/api/cases/{case_id}")
 def api_cases_update(case_id: int, body: CaseUpdate):
     try:
-        return WS.cases.update(case_id, name=body.name, group=body.group, notes=body.notes)
+        return _file_in_group(WS.cases.update(case_id, name=body.name, group=body.group, notes=body.notes))
     except KeyError as e:
         raise HTTPException(404, str(e))
 

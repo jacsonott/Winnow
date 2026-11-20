@@ -18,7 +18,7 @@ sections down the left, the chosen one on the right. Along the bottom are
 | --- | --- |
 | **Recent** | Cases opened in the last 30 days, and cases never opened yet, most recently opened first. Each row shows its group as a badge. |
 | **All cases** | Every case, under a heading for each group with its case count, total rows and when it was last opened. Its side entry says how many case files are missing. |
-| *each group* | That group's cases. Groups are listed by when one of their cases was last opened. |
+| *each group* | That group's cases, under the group's folder (see [Group folders](#group-folders)). Groups are listed by when one of their cases was last opened. |
 | **No group** | Cases with no group (shown once there is at least one group). |
 
 Each row is one case: its name, with its notes (or *file not found*)
@@ -51,7 +51,9 @@ take one, and Escape closes the list without closing the dialog. A name
 that isn't in the list starts a new group. The path is filled in
 from the name — `ACME Breach` becomes
 `<cases folder>/acme-breach.db-winnow` — until you edit it; **Browse…**
-picks another folder and **New folder…** makes one.
+picks another folder and **New folder…** makes one. Picking a group that
+has a folder moves the path into the group's folder, and the line under
+the path says so (see [Group folders](#group-folders)).
 
 The list on the left is the profile the case starts with. **None** (chosen
 to begin with) keeps this machine's plugins and adds no boards. Below it
@@ -66,6 +68,38 @@ own plugins on for the case and every other plugin off; see
 **Create case**, or Enter in the **Name**, **Case file path** or a
 variable's box, writes the file, opens the case and applies the profile. A
 required variable left empty is outlined and the case isn't created.
+
+### Group folders
+
+*A demo: two ways for a group to get its folder are in this build, to
+compare. The one that is kept stops being a choice.*
+
+Each case group has a folder, usually the engagement's folder, with the
+case files at the top and the evidence under it. It is used in two places:
+
+- **+ New case.** Picking the group in **Group** moves **Case file path**
+  into the group's folder (`ACME DC01` in ACME becomes
+  `<ACME's folder>/acme-dc01.db-winnow`). The line under the path says
+  where the folder came from. If you **Browse…** somewhere else or type a
+  path, yours stays, and the line offers **Use** *group*’s **folder** to
+  put it back. Leaving the group puts the cases folder back.
+- **Importing.** For every case in the group, the folder browser (Import →
+  **Add from this machine…**, and **Browse…** in **Import a folder**) lists
+  the group's folder at the top under **Pinned**, marked *group*, and opens
+  there until you have used another folder. It has no ✕: the group pinned
+  it, not you.
+
+The group's own section on the home screen shows its folder at the top,
+under **Group folder**. How a group gets one is set in **Settings → Case
+groups**:
+
+| Choice | How a group gets its folder |
+| --- | --- |
+| **Set by the first case in the group** (the default) | The folder the group's first case is saved in, taken when that case is created in the group or moved into it. It stays put after that: later cases saved elsewhere, or the first case leaving the group, don't move it. A group from before this setting takes its oldest case's folder. The group's section says which case set it, and there is nothing to change. Creating a case in a new group says *this folder becomes its folder* under the path. |
+| **Chosen in the group's settings** | None until you choose one: **Choose…** on the group's section of the home screen, then **Change…** or **Clear**. Until then new cases in the group go in the cases folder, and **+ New case** says where to set one. |
+
+The folders are kept on this machine (the `workspace/` folder), like the
+list of cases and their groups, not in the case files.
 
 **Open existing case file…** takes a path (typed, or **Browse…**) and adds
 the case to this machine's list as it opens it — for a case someone handed
@@ -234,7 +268,9 @@ and the imports run in the background while you work (see
   **Name**, **Modified** and **Size** headings sort it (click one again to
   turn it round). Down the left are places to start from: **Home**, the
   **Cases folder**, **This case’s folder** and the folder you **Last used**,
-  with ☆ to pin any folder you keep going back to. Tick the files, then
+  with ☆ to pin any folder you keep going back to. A case in a group also
+  has its [group's folder](#group-folders) pinned at the top, where the
+  browser opens. Tick the files, then
   **Add N files**. It only works when the browser runs on the same machine
   as Winnow.
 - **Upload from browser…** is the browser's own picker. The file is copied

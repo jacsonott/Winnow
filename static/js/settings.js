@@ -9,7 +9,7 @@ import { VALUE_FILTER_AUTO_MAX, syncSearchKeyCopy } from './filters.js';
 import { headH, rScroll, render, syncSpacer, vScroll } from './grid.js';
 import { drawRail, rebuildGroupPrefix, renderGrouped, writeClipboardText } from './grouping.js';
 import { syncHistogramPanel } from './histogram.js';
-import { restartWinnow, shutdownWinnow } from './home.js';
+import { buildGroupFolderModePanel, restartWinnow, shutdownWinnow } from './home.js';
 import { ACTION_LABELS, FIXED_KEYS, defaultKeymap, findKeyConflict, keyLabel, keySpecFromEvent, saveKeymap } from './keymap.js';
 import { buildPluginsPanel } from './pluginmanager.js';
 import { listBundles, openPluginBundlesModal } from './bundles.js';
@@ -1189,6 +1189,9 @@ export function openSettings(where) {
     secImports.append(el('p', 'fb-help',
       'Off: a finished import updates the tab strip and leaves you where you are. '
       + 'On: the first table of a batch to finish opens; the rest of that batch land without moving you again.'));
+
+    const secGroups = section('groups', 'Case groups');
+    buildGroupFolderModePanel(secGroups);
 
     const secKeys = section('keys', 'Keyboard shortcuts');
     secKeys.append(el('p', null, 'Tag hotkeys (1–9) are set per-tag in Edit tags. The keys under Fixed keys, below the list, are not rebindable. '

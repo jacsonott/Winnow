@@ -7,7 +7,8 @@ no-CDN rule).
 Eleven small stores, each backed by its own JSON file under workspace/.
 Adding one means adding it here too — this list read "eight" for three
 stores longer than it was true:
-  cases.json              the home screen's case registry
+  cases.json              the home screen's case registry, and the folder
+                           each case group files under (group_folders)
   filters.json            saved/cyclable filters ([ and ] in the grid) — also
                            the one mechanism behind the "suggested filter"
                            banner a matching header set gets on open; there's
@@ -50,9 +51,10 @@ stores longer than it was true:
                            timestamp format for cases that don't set their
                            own — a case's own choice lives in the case
                            file's case_settings, so it travels with the case
-  prefs.json              per-INSTALL machine preferences, today just
-                           cases_dir: where new case files go, asked once on
-                           first run rather than silently defaulting
+  prefs.json              per-INSTALL machine preferences: cases_dir, where
+                           new case files go, asked once on first run rather
+                           than silently defaulting; and group_folder_mode,
+                           how a case group gets its folder (a demo choice)
 
 Never holds evidence data — only UI/workflow bookkeeping. Analyst work
 (tags, notes, layouts) lives in the case file instead, so it
@@ -287,6 +289,11 @@ def _now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S")
 
 
+# How a case group gets the folder it files under — two ways on trial in
+# a demo, picked in Settings → Case groups. The first is the default.
+GROUP_FOLDER_MODES = ("first_case", "settings")
+
+
 class CaseRegistry:
     """The home screen's list of known case.db files — name/group/notes are
     display metadata only, never mutate the underlying case file.
@@ -304,10 +311,96 @@ class CaseRegistry:
     def _load(self) -> list[dict]:
         return _read(self.FILE, {"cases": []})["cases"]
 
-    def _save(self, items: list[dict], next_id: int | None = None) -> None:
+    def _save(self, items: list[dict], next_id: int | None = None,
+              group_folders: dict | None = None) -> None:
         data = _read(self.FILE, {"cases": []})
         floor = max(_next_id(items), int(data.get("next_id") or 0), next_id or 0)
-        _write(self.FILE, {"cases": items, "next_id": floor})
+        out = {"cases": items, "next_id": floor}
+        # The groups' folders ride along on every save; a write about the
+        # cases must not drop them.
+        folders = group_folders if group_folders is not None else data.get("group_folders")
+        if folders:
+            out["group_folders"] = folders
+        _write(self.FILE, out)
+
+    # ------------------------------------------------ group folders (demo)
+    #
+    # A case group is free text on each case, not a record of its own, so
+    # the folder a group files under is kept beside the list, by the
+    # group's name. Two ways to get one are on trial (GROUP_FOLDER_MODES),
+    # and each keeps its own record so switching between them in the demo
+    # shows each one as it would be on its own:
+    #
+    # - first_case: the folder of the first case put in the group, taken
+    #   when that case is filed there. A group from before this record
+    #   takes its oldest case's folder (lowest id) until a case is filed.
+    # - settings: only what the analyst set in the group's settings.
+
+    def _folder_records(self, mode: str) -> dict:
+        data = _read(self.FILE, {"cases": []})
+        return dict((data.get("group_folders") or {}).get(mode) or {})
+
+    def _store_folder_records(self, mode: str, records: dict) -> None:
+        data = _read(self.FILE, {"cases": []})
+        folders = dict(data.get("group_folders") or {})
+        folders[mode] = records
+        self._save(self._load(), group_folders=folders)
+
+    def group_folders(self, mode: str) -> dict:
+        """{group name: {folder, set_by: {id, name} | None, set_at}} for
+        every group that has a folder under `mode`. A group with no case
+        left in it is not listed: it isn't anywhere on screen to have one."""
+        with _LOCK:
+            items = self._load()
+            records = self._folder_records(mode)
+        by_id = {c["id"]: c for c in items}
+        out = {}
+        for group in sorted({c.get("group") for c in items if c.get("group")}):
+            rec = records.get(group)
+            if rec is None and mode == "first_case":
+                first = min((c for c in items if c.get("group") == group), key=lambda c: c["id"])
+                rec = {"folder": os.path.dirname(first["path"]), "set_by": first["id"], "set_at": None}
+            if not rec or not rec.get("folder"):
+                continue
+            who = by_id.get(rec.get("set_by"))
+            out[group] = {"folder": rec["folder"], "set_at": rec.get("set_at"),
+                          "set_by": {"id": who["id"], "name": who["name"]} if who else None}
+        return out
+
+    def group_folder(self, group: str, mode: str) -> str | None:
+        if not group:
+            return None
+        return (self.group_folders(mode).get(group) or {}).get("folder")
+
+    def claim_group_folder(self, case_id: int) -> None:
+        """first_case: a case filed in a group that has no folder yet gives
+        the group its own folder. Called whenever a case is created in a
+        group or moved into one; a group that already has a folder keeps
+        it, wherever this case was filed."""
+        with _LOCK:
+            items = self._load()
+            rec = next((c for c in items if c["id"] == case_id), None)
+            group = (rec or {}).get("group")
+            if not group:
+                return
+            records = self._folder_records("first_case")
+            if group in records:
+                return
+            first = min((c for c in items if c.get("group") == group), key=lambda c: c["id"])
+            records[group] = {"folder": os.path.dirname(first["path"]), "set_by": first["id"],
+                              "set_at": _now()}
+            self._store_folder_records("first_case", records)
+
+    def set_group_folder(self, group: str, folder: str | None) -> None:
+        """settings: the folder the analyst chose for the group, or None to
+        clear it."""
+        with _LOCK:
+            records = self._folder_records("settings")
+            if folder:
+                records[group] = {"folder": os.path.abspath(folder), "set_by": None, "set_at": _now()}
+            else:
+                records.pop(group, None)
+            self._store_folder_records("settings", records)
 
     def _allocate_id(self, items: list[dict]) -> int:
         data = _read(self.FILE, {"cases": []})

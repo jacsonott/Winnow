@@ -295,7 +295,8 @@ defaults/          The defaults Winnow ships, as JSON rather than Python:
                     Add entries and bump the file's `version`; never edit an
                     existing header set in place, since files from older tool
                     releases still have to match it.
-workspace.py       Cross-case JSON state (case registry, saved filters, default
+workspace.py       Cross-case JSON state (case registry and each case group's
+                    folder, saved filters, default
                     tag template) — human-readable files in workspace/, outside
                     any single case.db so they survive switching cases.
 plugin_api.py      Plugin host: discovery/loading from plugins/, PluginAPI

@@ -506,7 +506,12 @@ export function sideRailMatch(entry, query) {
    `action` instead — {glyph, title, label(entry), run(entry)} — and that
    button takes the pin's place on every row. An entry's own `hint` is its
    second line when a search found it by name (what is set on it now, as
-   the section lists say); `warn` marks that line as needing attention. */
+   the section lists say); `warn` marks that line as needing attention.
+
+   An entry with `fixed` set is pinned by something other than the
+   analyst — the folder browser's case group folder, pinned for every case
+   in the group — so it sits at the top of Pinned with no ☆/✕ to change
+   that, and `fixed` is the word shown where the pin would be. */
 export function sideRail({ entries, groups, selected, onPick, pinsKey, match = sideRailMatch,
                            notes = {}, locked = false, label = 'What to choose', action = null }) {
   const pins = menuPins(action ? null : pinsKey);
@@ -547,6 +552,12 @@ export function sideRail({ entries, groups, selected, onPick, pinsKey, match = s
     if (hint) item.append(el('span', 'side-rail-hint' + (entry.warn && !hit.hint ? ' warn' : ''), hint));
     item.title = entry.title || '';
     item.onclick = () => onPick(entry, hit);
+    if (entry.fixed) {
+      const tag = el('span', 'side-rail-fixed', entry.fixed);
+      tag.title = entry.fixedTitle || '';
+      r.append(item, tag);
+      return r;
+    }
     if (action) {
       const act = el('button', 'side-rail-pin', action.glyph);
       act.type = 'button';
@@ -582,9 +593,10 @@ export function sideRail({ entries, groups, selected, onPick, pinsKey, match = s
     const hadPin = !!had && had.classList.contains('side-rail-pin');
     const all = entries();
     const q = search.value;
-    const pinned = pins.ids.map((k) => all.find((e) => e.key === k)).filter(Boolean);
+    const fixed = all.filter((e) => e.fixed);
+    const pinned = [...fixed, ...pins.ids.map((k) => all.find((e) => e.key === k && !e.fixed)).filter(Boolean)];
     const sections = [['Pinned', pinned, true]];
-    for (const g of groups) sections.push([g, all.filter((e) => e.group === g && !pins.has(e.key)), false]);
+    for (const g of groups) sections.push([g, all.filter((e) => e.group === g && !e.fixed && !pins.has(e.key)), false]);
     const nodes = [];
     for (const [title, members, isPinned] of sections) {
       const rows = [];
