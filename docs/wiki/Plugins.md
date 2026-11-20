@@ -238,7 +238,10 @@ on is no longer the same column.
 
 Values can be **Count**, **Distinct count**, **Sum**,
 **Average**, **Min** or **Max**; Count counts non-empty cells, and Sum and
-Average ignore text that isn't a number. Filters use `is any of`,
+Average ignore text that isn't a number. Min and Max of a datetime column
+are the earliest and latest by time, however the file wrote it
+(`1/2/2026 9:01:00 AM` is later than `12/30/2025 11:00:00 PM`), and skip
+cells that aren't a time, such as a blank. Filters use `is any of`,
 `is none of`, `contains`, `does not contain`, `starts with`,
 `> (numeric)`, `< (numeric)`, `is empty` and `is not empty`. In
 `is any of` and `is none of`, **(blank)** is an empty cell, whether the
@@ -300,7 +303,7 @@ replaces ("Replaces Timestamp").
 | Zone | What goes in it |
 | --- | --- |
 | **Group rows on** | Up to 6 columns |
-| **Ordered by** | The column that decides first and last; defaults to the table's first datetime column |
+| **Ordered by** | The column that decides first and last; defaults to the table's first datetime column. A datetime column orders by time and a number column by value, as the grid sorts them, and a cell that is neither (blank, `-`) is never first or last unless its group has nothing else |
 | **Include columns** | Columns carried onto each result row |
 | **Total up** | Numeric columns to total per group |
 | **Count unique** | Columns whose distinct values each group counts, blanks left out, as a `Unique count of <column>` column |

@@ -37,9 +37,17 @@ Winnow uses.** Columns are stored as TEXT (evidence fidelity), and SQLite's
 bare `CAST(text AS REAL)` turns "N/A" into 0.0 — indistinguishable from a
 real zero in a total. NUM_RE gates the cast so junk becomes NULL and drops
 out of the aggregate instead of quietly dragging an average down.
+
+**Min/Max of a timestamp column are by time, not by text.** "1/2/2026"
+is before "12/30/2025" as text and "9:01 AM" after "10:05 AM", so the
+earliest and latest of a US-format column came back as neither, and a
+single blank cell made the blank its Min. _time_key orders by the value's
+TS_NORMALIZE form, as the grid's time sort does, and still hands back the
+value as the file wrote it; a cell that isn't a time drops out, as a
+number column's junk does.
 """
 
-from winnow.store import NUM_RE, q, union_all
+from winnow.store import NUM_RE, q, ts_normalize_sql, union_all
 
 PLUGIN = {
     "name": "pivot-table",
@@ -191,11 +199,36 @@ def _numeric(src, col):
     return f"(CASE WHEN {ident} REGEXP '{NUM_RE.pattern}' THEN CAST({ident} AS REAL) ELSE NULL END)"
 
 
+# Characters _time_key puts ahead of the value: TS_NORMALIZE's
+# "YYYY-MM-DD HH:MM:SS", which is always this long.
+_TIME_KEY_WIDTH = 19
+
+
+def _time_key(ident):
+    """A text that sorts by time and ends with the value itself, for MIN and
+    MAX of a timestamp column: the time as TS_NORMALIZE spells it, fixed
+    width, then the value, whose own text orders the values that share a
+    second, as the grid's time sort does (Store._sort_keys). _untime takes
+    the value back off the end. NULL for a cell that isn't a time (blank,
+    "-"), so MIN and MAX pass over it the way they pass over a number
+    column's junk."""
+    return f"(({ts_normalize_sql(ident)}) || {ident})"
+
+
+def _untime(key):
+    return f"substr({key}, {_TIME_KEY_WIDTH + 1})"
+
+
+def _is_timed(measure, coltypes):
+    return measure.get("agg") in ("min", "max") and coltypes.get(measure.get("column")) == "datetime"
+
+
 def _agg_expr(src, measure, coltypes):
-    """SQL for one Values field. Min/Max stay textual for non-numeric columns
-    on purpose: the earliest and latest value of an ISO timestamp column is
-    exactly what MIN()/MAX() over its text gives you, and casting it to a
-    number would throw the whole column away."""
+    """SQL for one Values field. Min/Max stay textual for text columns, and
+    a timestamp column's take the earliest and latest by time (_time_key,
+    still a key here: _rollup_measure takes the value back off it), since
+    neither a US date nor a month name sorts by time as text. Casting
+    either to a number would throw the whole column away."""
     agg = measure.get("agg", "count")
     if agg not in AGGREGATIONS:
         raise ValueError(f"Unknown aggregation {agg!r}")
@@ -221,6 +254,8 @@ def _agg_expr(src, measure, coltypes):
         # "Distinct count of User" exceed "Count of User" on a column with
         # any padding in it, which reads as a bug because it is one.
         return f"COUNT(DISTINCT CASE WHEN {ident} IS NOT NULL AND {ident} != '' THEN {ident} END)"
+    if _is_timed(measure, coltypes):
+        return f"{agg.upper()}({_time_key(ident)})"
     if agg in ("min", "max") and coltypes.get(column) != "number":
         return f"{agg.upper()}({ident})"
     return f"{agg.upper()}({_numeric(src, column)})"
@@ -254,6 +289,10 @@ def _rollup_measure(src, measure, coltypes, j, base_alias):
                 f"SUM({p}s) / SUM({p}n)", f"{p}s / {p}n")
     roll = {"count": "SUM", "sum": "SUM", "min": "MIN", "max": "MAX"}[agg]
     rolled = f"{roll}({p})"
+    if _is_timed(measure, coltypes):
+        # The partial is a _time_key, rolled up as one, so the value comes
+        # off it only in the answer.
+        return [(p, _agg_expr(src, measure, coltypes))], _untime(rolled), _untime(p)
     if agg == "count" and not measure.get("column"):
         # COUNT(*) over no rows is 0, and the grand total of a pivot
         # filtered down to nothing has to keep saying so — SUM over an

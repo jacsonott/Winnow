@@ -79,7 +79,10 @@ validation, asset containment, the gen cache-buster changing per reload,
 405/404/400 splits, disabled = no assets + no routes + no tabs), the
 mft_usn example parsed against synthetic NTFS fixtures built byte-by-byte
 in the test file (both fixup states; no real evidence files in the repo),
-lateral_movement's edge aggregation, and claude_assistant against a fake
+lateral_movement's edge aggregation, First/Last and Pivot ordering a
+US-format timestamp column by time (`US_TIMES`: text order puts
+`1/2/2026` before `12/30/2025` and `9:01 AM` after `10:05 AM`, with a
+blank and a `-` that must win neither end), and claude_assistant against a fake
 `anthropic` module injected into sys.modules (asserts the request shape —
 model, fallbacks, the schema cache breakpoint — with no network). `test_sql_tabs.py` covers the SQL
 pane's sub-tabs, including that they actually survive closing and

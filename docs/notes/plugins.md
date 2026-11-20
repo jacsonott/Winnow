@@ -353,6 +353,15 @@ see [docs/notes/README.md](README.md) for the whole set.
     `_agg_expr`'s own SQL, so a rolled-up cell is the same expression over
     the same rows; and Distinct count can't be rolled up, so its column
     joins the base's keys instead.
+  - **Min/Max of a timestamp column roll up a key, not the value.** MIN
+    and MAX over the text are time order only for ISO, and a blank cell is
+    every group's Min. `_time_key` is `ts_normalize_sql`'s fixed 19
+    characters followed by the value, NULL for a cell that isn't a time,
+    and the base keeps that key as the partial; only the answer takes the
+    value back off (`_untime`), so a subtotal rolls up keys like any other
+    MIN. Min and Max of one column each call the normalizer, so a US-format
+    column with both costs about 2 s per 300k rows where its text took
+    0.2 s; ISO takes the SQL fast path.
   - **On a merge, match tags per member, not with a row-value IN.**
     `(s.source_id, s.rid) IN (SELECT source_id, rid FROM row_tags …)` is
     correct over `_scope`'s union and fine when it keeps rows, but SQLite
@@ -411,6 +420,21 @@ see [docs/notes/README.md](README.md) for the whole set.
     ends, so it is a bookend only in a group with no number at all, and
     the Last row's `{which:number}` is the count of numbers, not the
     group size, whenever there is one.
+  - **A datetime-sorted column keys on its time, not its text.** Text
+    order is time order only for ISO: a US-format group ("1/2/2026" <
+    "12/30/2025", "9:01 AM" after "10:05 AM") came back with First and
+    Last picked from the wrong places, and a blank cell was every group's
+    First. `_time_key` puts `ts_normalize_sql`'s 19-character
+    `YYYY-MM-DD HH:MM:SS` behind the `T`, then the hexed text (the
+    fraction of a second, as the grid's time sort breaks ties), then the
+    tie. A cell with no time has no normalized form; `'T' || NULL` is
+    NULL, so `COALESCE` falls through to a `U` key, after every time, and
+    the normalizer runs once a row. For MAX that cell is re-lettered `A`,
+    so it wins neither end, as a number column's non-numbers don't; `pos`
+    counts the times, and the last bookend's `ord` gets its `U` back so
+    the result lists it after the times both ways. Each non-ISO cell is a
+    trip into Python, as the grid's time sort is: about 1 s more per
+    300k US-format rows, and ISO stays close to what it was.
   - **Put the bookends in order and cut them to the limit before reading
     any row.** Fetching every bookend by rid and sorting afterwards made
     Host + User (486k groups on the 693k-row table) slower than the
