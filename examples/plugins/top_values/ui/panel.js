@@ -5,7 +5,13 @@
    tokens (btn ghost, note-status, --dim, --mono), data from the app's
    /api/group_summary through winnow.api (the header value picker's own
    query, scoped to the view), and winnow.onViewChange to follow the
-   grid. Clicking a value copies it. */
+   grid. Clicking a value copies it.
+
+   A value reads as the grid paints it (winnow.displayCell): a timestamp
+   in the case's format, or in the one set on that column, rather than as
+   the file wrote it — the panel sits right above the column, and two
+   spellings of one time would read as two times. What is copied is what
+   is shown, as a cell copied from the grid is. */
 
 const LIMIT = 10;
 const REFRESH_MS = 150;
@@ -77,7 +83,8 @@ export default function mount(container, winnow) {
     list.hidden = false;
     list.replaceChildren();
     for (const g of groups) {
-      const value = g.value == null ? '' : String(g.value);
+      const stored = g.value == null ? '' : String(g.value);
+      const value = stored === '' ? stored : String(winnow.displayCell(column, stored));
       const b = el('button', 'btn ghost tv-value');
       b.style.cssText = 'font-size:11px;padding:1px 7px;max-width:280px;overflow:hidden;text-overflow:ellipsis';
       b.dataset.value = value;
@@ -114,6 +121,11 @@ export default function mount(container, winnow) {
   function schedule() { clearTimeout(timer); timer = setTimeout(load, REFRESH_MS); }
 
   winnow.onViewChange(() => schedule());
+  // A timestamp format changed — the case's, or one set on a column — so
+  // what the values read as did too. Counted again rather than re-drawn
+  // from the last answer, which is a few hundred bytes and already this
+  // panel's one way to paint.
+  winnow.onTimestampFormatChange(() => schedule());
   refresh = load;
   load();
 }

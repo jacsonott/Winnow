@@ -149,6 +149,8 @@ Fitting is capped so that a single long value, such as a base64 command line, ca
 
 Right-click a datetime column's header to choose how its values are shown, for example **As stored**, **YYYY-MM-DD HH:MM:SS** or **MM/DD/YYYY HH:MM:SS**. This is display only: filters and exports always use the text the file came with, although copying from the grid gives the value as displayed. A format picked on a column beats the case's default in **Case ▾ → Case settings…**, which beats the machine-wide one in **Settings → Timestamps**.
 
+Plugins show timestamps in the case's format too, rather than the way the file wrote them: the Pivot's row and column labels, its **Min** and **Max**, the First/Last preview, and the Top values panel, which also follows a format picked on its column (see [Plugins](Plugins.md)). Changing the format redraws them.
+
 The time of day is read whatever separates it from the date: a space or a `T`, several spaces, `@`, `at`, a dash with spaces around it (`2026-06-23 - 13:05:01`) or a comma, as in `June 23, 2026 at 5:11:22 PM`. A one-digit hour (`2026-06-23 9:05:01`) is read too. A value with a date and no time, such as `2026-06-23`, shows `00:00:00` in a format with a time.
 
 The same right-click menu has **Stack values (rarest first)…** (see [Filtering and searching](Filtering-and-searching.md#stacking-a-column)), **Copy unique values** (see [Copying](#copying)) and **Derive a column from this…**.

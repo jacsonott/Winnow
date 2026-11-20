@@ -578,6 +578,41 @@ see [docs/notes/README.md](README.md) for the whole set.
     (First/Last's `fl-ac` owns its keys on purpose); not for a menu.
   `tests/ui/test_field_place_menu.py` pins all of it against both tabs.
 
+- **A plugin shows timestamps in the case's format, and sends the stored
+  text** (`winnow.formatTimestamp` / `displayCell` / `state.tsFormat` /
+  `onTimestampFormatChange`, plugin API 16 / context `apiVersion` 10).
+  Before it, every plugin painted what the file held: the grid said
+  `2026-06-03 13:02:03` and the Pivot beside it `6/3/2026 1:02:03 PM`.
+  The formatter is tsformat.js's own, so a shape the grid learns to read,
+  a plugin reads too; there is no copy to keep in step. Four things bite:
+  - **Format at the label, never at the key.** Pivot groups, filters
+    and builds `openFiltered` from the stored values; two spellings of
+    one instant are two groups in the table and stay two rows that read
+    the same. A formatted value sent back matches nothing.
+  - **The case's format, not a column's.** `formatTimestamp` is the case
+    setting over the machine default (`caseTsFormat`), because a tab's
+    table is often not the grid's and a column's format lives in the
+    grid's table's layout. `displayCell` is the grid's own rule
+    (column format first) and only means anything for the table the grid
+    has open, which is why only Top values, a panel over the grid,
+    uses it.
+  - **Shown formatted, the stored text's order reads as shuffled**
+    (`6/10/2026` before `6/3/2026`, month names alphabetical), so the
+    Pivot orders a datetime field's keys by `formatTimestamp(v, 'iso_us')`
+    (`keyOrder`): blank first as before, timestamps in time order, then
+    anything that is not one.
+  - **A format change has to reach the plugin.** Settings and the column
+    menu call `announceTsFormat` (`winnow:tsformat`), and popout.js
+    reloads the settings in the other windows on a `/api/case_settings`
+    or `/api/settings/app` write and announces there, or a pivot popped
+    out kept the old format until it was reloaded. First/Last's preview
+    knows which result columns are timestamps from the REQUEST that made
+    it (`timedColumns`), not the sheet: with Auto-update off the sheet
+    may have moved on under the preview on screen. Its description is
+    rendered server-side and stays stored text, like the table Create
+    writes.
+  `tests/ui/test_plugin_timestamp_format.py` pins all of it.
+
 - **Pivot's areas reorder, and the drop slot is read from the pointer.**
   `addField` used to open with `if (from === zone) return` and always
   `push`, so a chip let go in its own area did nothing and a field

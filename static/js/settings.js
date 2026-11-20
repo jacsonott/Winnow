@@ -23,7 +23,7 @@ import { keepingFocus } from './tables.js';
 import { buildDefaultTagsEditor } from './tags.js';
 import { openSavedFiltersModal, setTimeframeAcrossTables, timeframeAcrossTables, updateFiltersButton, updateTimeRangeButton } from './timeframe.js';
 import { renderTimelineTimeRange } from './timeline.js';
-import { TS_FORMATS, formatTimestamp } from './tsformat.js';
+import { TS_FORMATS, announceTsFormat, formatTimestamp } from './tsformat.js';
 import { markModalAction, confirmDialog, dropdownMenu, modal, promptDialog, sectionPanes } from './ui.js';
 
 /* ------------------------------------------------------------ appearance */
@@ -658,6 +658,7 @@ function buildCaseTsPane(pane) {
     try {
       S.caseSettings = await post('/api/case_settings', { ts_format: value });
       render();
+      announceTsFormat();
       toast('Case timestamp format saved');
     } catch (e) { toast('Could not save: ' + e.message, 5000); }
     paint();
@@ -1357,6 +1358,7 @@ export function openSettings(where) {
       try {
         S.appSettings = await post('/api/settings/app', { default_ts_format: tsSystemSel.value });
         render();
+        announceTsFormat();
         toast('Default timestamp format saved');
       } catch (e) {
         toast('Could not save: ' + e.message, 5000);

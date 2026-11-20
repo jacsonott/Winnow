@@ -980,8 +980,10 @@ export default function mount(container, winnow) {
           const needle = search.value.trim().toLowerCase();
           list.replaceChildren();
           for (const v of res.values) {
-            const text = v.value == null || v.value === '' ? BLANK : String(v.value);
-            if (needle && !text.toLowerCase().includes(needle)) continue;
+            const text = keyText(filter.column, v.value);
+            // Found by what it shows or by what is stored.
+            if (needle && !text.toLowerCase().includes(needle)
+                && !String(v.value ?? '').toLowerCase().includes(needle)) continue;
             const row = el('label');
             row.style.cssText = 'display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:11px';
             const cb = el('input');
@@ -1274,6 +1276,52 @@ export default function mount(container, winnow) {
 
   const norm = (v) => (v == null ? '' : String(v));
 
+  /* ---------------------------------------------------- timestamps */
+
+  /* A timestamp reads the way the case says timestamps read — the grid's
+     own format (winnow.formatTimestamp), not whatever the file held — in
+     every place this tab shows one: a row or column label, a Min/Max, a
+     filter's value list, the rows behind a cell. What is SENT is still
+     the stored value: the groups, the filters and the drill-down all
+     match on it, so two spellings of one instant stay two groups, as
+     they are in the table. An older Winnow without the formatter shows
+     the stored text, as before. */
+  const formatTs = winnow.formatTimestamp || ((v) => v);
+  const columnType = (name) => {
+    const src = winnow.state.sources.find((s) => s.id === state.sourceId);
+    return ((src && src.columns) || []).find((c) => c.name === name)?.type;
+  };
+  const isTime = (name) => columnType(name) === 'datetime';
+  // One field's value, as a label: (blank), a timestamp in the case's
+  // format, or the value itself.
+  const keyText = (field, v) => (v == null || v === '' ? BLANK : isTime(field) ? formatTs(String(v)) : String(v));
+
+  /* Key order for a timestamp field is time order. Shown in the case's
+     format, the stored text's order reads as shuffled: "6/10/2026" sorts
+     before "6/3/2026", and month names alphabetically. 'iso_us' is a
+     text that sorts in time order; a blank stays first, as it is for any
+     field, and a value that is not a timestamp goes after the ones that
+     are, in the usual order. */
+  const SORTABLE = /^\d+-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{6}$/;
+  function keyOrder(field) {
+    if (!isTime(field) || !winnow.formatTimestamp) return byKey;
+    const memo = new Map();
+    const at = (v) => {
+      if (!memo.has(v)) {
+        const iso = v === '' ? '' : formatTs(v, 'iso_us');
+        memo.set(v, SORTABLE.test(iso) ? iso : null);
+      }
+      return memo.get(v);
+    };
+    return (a, b) => {
+      if (a === '' || b === '') return (a !== '') - (b !== '');
+      const x = at(a), y = at(b);
+      if (x !== null && y !== null) return (x < y ? -1 : x > y ? 1 : 0) || byKey(a, b);
+      if (x !== null || y !== null) return x === null ? 1 : -1;
+      return byKey(a, b);
+    };
+  }
+
   /* The single accessor over every grouping set: the measures for a row
      prefix crossed with a column tuple, or undefined when that combination
      has no rows. */
@@ -1323,9 +1371,10 @@ export default function mount(container, winnow) {
     // value can contain any separator you'd pick (paths and command lines
     // contain most of them), and joining would order two different tuples
     // as if they were one.
+    const orders = state.cols.map(keyOrder);
     return [...seen.values()].sort((a, b) => {
       for (let i = 0; i < Math.max(a.length, b.length); i++) {
-        const c = byKey(String(a[i] ?? ''), String(b[i] ?? ''));
+        const c = (orders[i] || byKey)(String(a[i] ?? ''), String(b[i] ?? ''));
         if (c) return c;
       }
       return 0;
@@ -1344,7 +1393,8 @@ export default function mount(container, winnow) {
         return an === bn ? byText(String(a.key), String(b.key)) : (an - bn) * dir;
       });
     } else {
-      kids.sort((a, b) => byKey(String(a.key), String(b.key)));
+      const order = keyOrder(state.rows[node.path.length]);
+      kids.sort((a, b) => order(String(a.key), String(b.key)));
     }
     return kids;
   }
@@ -1430,10 +1480,10 @@ export default function mount(container, winnow) {
         const prefix = JSON.stringify(cols[i].slice(0, level + 1));
         while (i + span < cols.length
                && JSON.stringify(cols[i + span].slice(0, level + 1)) === prefix) span++;
-        const th = el('th', null, value === '' ? BLANK : value);
+        const th = el('th', null, keyText(field, value));
         th.colSpan = span * (multi ? measures.length : 1);
         th.style.cssText = headCss();
-        th.title = `${field}: ${value === '' ? BLANK : value}`;
+        th.title = `${field}: ${keyText(field, value)}`;
         if (!multi && level === state.cols.length - 1) attachSort(th, 0, cols[i]);
         tr.append(th);
         i += span;
@@ -1490,7 +1540,7 @@ export default function mount(container, winnow) {
         tbody.append(dataRow(child, depth, cols, measures, true));
         emitRows(tbody, child, depth + 1, cols, measures);
         if (state.subtotals) {
-          tbody.append(totalRow(`${child.key === '' ? BLANK : child.key} total`, child.path, cols, measures, false, depth));
+          tbody.append(totalRow(`${keyText(state.rows[depth], child.key)} total`, child.path, cols, measures, false, depth));
         }
       }
     }
@@ -1499,10 +1549,10 @@ export default function mount(container, winnow) {
   function dataRow(node, depth, cols, measures, isGroupHeader) {
     const tr = el('tr');
     state.rows.forEach((_, i) => {
-      const td = el('td', null, i === depth ? (node.key === '' ? BLANK : node.key) : '');
+      const td = el('td', null, i === depth ? keyText(state.rows[i], node.key) : '');
       td.style.cssText = cellCss() + 'text-align:left;font-family:var(--mono)'
         + (i === depth && isGroupHeader ? ';font-weight:600' : '');
-      if (i === depth) td.title = String(node.key);
+      if (i === depth) td.title = node.key === '' ? '' : keyText(state.rows[i], node.key);
       tr.append(td);
     });
     if (isGroupHeader) {
@@ -1563,6 +1613,10 @@ export default function mount(container, winnow) {
       // Averages keep two decimals; counts and sums of integers shouldn't
       // grow a ".00" they never had.
       return Number.isInteger(v) ? wholeNumber.format(v) : twoDecimals.format(v);
+    }
+    // Min/Max of a timestamp column: the earliest and latest, as text.
+    if (measure && (measure.agg === 'min' || measure.agg === 'max') && isTime(measure.column)) {
+      return formatTs(String(v));
     }
     return String(v);
   }
@@ -1663,7 +1717,7 @@ export default function mount(container, winnow) {
       ...rowPath.map((v, i) => ({ column: state.rows[i], value: v })),
       ...colVals.map((v, i) => ({ column: state.cols[i], value: v })),
     ];
-    const label = cell.map((c) => `${c.column}=${c.value === '' ? BLANK : c.value}`).join(' · ');
+    const label = cell.map((c) => `${c.column}=${keyText(c.column, c.value)}`).join(' · ');
     const plan = gridFilterFor(rowPath, colVals);
     modal(`Rows behind ${label}`, (b) => {
       // Above the rows, so it is there before they load — and when there
@@ -1697,12 +1751,14 @@ export default function mount(container, winnow) {
           thead.append(hr);
           t.append(thead);
           const tb = el('tbody');
+          const timed = res.columns.map(isTime);
           for (const row of res.rows) {
             const tr = el('tr');
-            row.forEach((v) => {
-              const td = el('td', null, v == null ? '' : String(v));
+            row.forEach((v, ci) => {
+              const text = v == null ? '' : timed[ci] ? formatTs(String(v)) : String(v);
+              const td = el('td', null, text);
               td.style.cssText = cellCss() + 'max-width:340px;overflow:hidden;text-overflow:ellipsis';
-              td.title = v == null ? '' : String(v);
+              td.title = text;
               tr.append(td);
             });
             tb.append(tr);
@@ -1882,6 +1938,14 @@ export default function mount(container, winnow) {
     for (const p of pivots) if (p !== state && p.tags.length) p.data = null;
     if (dropped.has(state) || state.tags.length) queueQuery();
   };
+
+  // The case's timestamp format changed: the labels are re-drawn from the
+  // answer already here — nothing about the pivot changed, so nothing is
+  // re-run. A query in flight draws in the new format when it lands. A
+  // format set on one of the grid's columns (`column`) is the grid's.
+  if (winnow.onTimestampFormatChange) {
+    winnow.onTimestampFormatChange(({ column }) => { if (!column && readBack && !state.loading) render(); });
+  }
 
   (async () => {
     try {

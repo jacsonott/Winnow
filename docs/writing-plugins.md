@@ -462,7 +462,7 @@ Prefer it to reaching into the app's globals — this is what's supported.
 
 | Field | What it is |
 | --- | --- |
-| `apiVersion` | Contract version of this object (currently `9`) |
+| `apiVersion` | Contract version of this object (currently `10`) |
 | `plugin` | Your plugin's display name |
 | `base` | `/api/plugin/<fs_name>` — prefix for your own routes |
 | `assets` | `/plugin_assets/<fs_name>` — prefix for your own files |
@@ -490,9 +490,13 @@ Prefer it to reaching into the app's globals — this is what's supported.
 | `state.variables` | The case's variables as `{name: value}` — see [Case variables](#case-variables) |
 | `state.timeRange` | The tables' timeframe filter verbatim — `{enabled, column, start, end}`, the one the table toolbar's ⏱ sets for whichever table the grid shows. Honour it and your tab follows it too. The Timeline page keeps a range of its own and does not follow this one |
 | `state.view` | What the grid is showing right now — `{view_id, row_count}`, filters/search/timeframe applied, or `null` before a table is open. Hand `view_id` to a route that reads THROUGH the view |
+| `state.tsFormat` | The case's timestamp format, as a key: `'raw'` (As stored), `'iso'`, `'iso_ms'`, `'iso_us'`, `'date'`, `'time'`, `'us'`, `'us_date'`. The case's own setting, else this machine's default, else `'iso'` — see [Showing timestamps](#showing-timestamps) |
+| `formatTimestamp(value, format?)` | A stored timestamp as the case says timestamps read — the grid's own formatter, `state.tsFormat` unless you name another key. A value it can't read as a timestamp comes back unchanged |
+| `displayCell(column, value)` | One cell of the table open in the grid, exactly as the grid paints it: a format the analyst set on that column beats the case's, a duration reads `1h 23m 45s`. For a panel that follows the grid |
 | `setVariable(name, value)` | Set one case variable (creates it if new) |
 | `onViewChange(cb)` | Fires after every grid rebuild that installs a view — filter, sort, search, timeframe, table switch — with `{sourceId, viewId, rowCount}`. A search left running in the background fires when it is applied, not when it finishes. Returns an unsubscribe |
 | `onAppearanceChange(cb)` | Fires after every skin / theme / accent change with `{style, themeMode, accent}`. A canvas doesn't inherit CSS, so redraw here. Returns an unsubscribe |
+| `onTimestampFormatChange(cb)` | Fires when a timestamp format changes with `{tsFormat, column}`: the case's or the machine default's (`column` is `null`), or one the analyst set on a column of the grid's table (`column` names it). Re-draw what you formatted. Returns an unsubscribe |
 | `setTimeRange({column, start, end, enabled})` / `clearTimeRange()` | Drive the tables' timeframe filter (the table toolbar's ⏱) — the same object its Timeframe dialog writes, so every other consumer sees it as if typed there. The Timeline's own range is not reachable from a plugin |
 | `openFiltered(sourceId, pairs, opts)` | Jump from your visualization to the EVIDENCE: opens the source and exact-filters it to `[{column, value}, …]`. Clears existing filters — it is a navigation, not a refinement. `opts` carries the rest of a count's question; see [Opening the rows behind a number](#opening-the-rows-behind-a-number) |
 
@@ -521,6 +525,39 @@ where it can't — a `>` on a column the grid holds as text — it refuses by
 name rather than open other rows under the same filter. A value a filter
 box can't spell (one with a line break) still filters: it goes into the
 tree as an `equals` instead of being dropped.
+
+### Showing timestamps
+
+The analyst picks how timestamps read — per case (Case ▾ → Case
+settings → Timestamps), with a machine default under it — and the grid
+shows every datetime column that way, whatever shape the file wrote.
+A value your tab shows straight from the case is the stored text: a
+pivot label of `6/3/2026 1:02:03 PM` beside a grid that says
+`2026-06-03 13:02:03`. Run it through the context instead (API 16):
+
+```js
+const shown = col.type === 'datetime' ? winnow.formatTimestamp(value) : value;
+winnow.onTimestampFormatChange(({ column }) => { if (!column) redraw(); });
+```
+
+- **Format what you show, never what you send.** Group, filter, match
+  and `openFiltered` on the stored value: two spellings of one instant
+  are two values in the table, and a formatted one matches nothing.
+- **Only datetime columns.** `columns` in `state.sources` carries each
+  column's `type`; format the ones typed `datetime`. A value that does
+  not read as a timestamp comes back unchanged, so a stray note in a
+  timestamp column shows as written.
+- **Order by time, not by the stored text.** Shown formatted,
+  `6/10/2026` sorting before `6/3/2026` reads as shuffled.
+  `winnow.formatTimestamp(value, 'iso_us')` is a text that sorts in time
+  order (the Pivot's `keyOrder`).
+- **A panel that follows the grid** uses `winnow.displayCell(column,
+  value)` instead, so a format the analyst set on that one column holds
+  in your panel too (`top_values/`).
+- What you write into a table — `ingest_rows`, a description you render
+  — stays stored text, as every table's does; the grid formats it there.
+
+The Pivot, First/Last and Top values examples all do this.
 
 ### Keeping a tab's state across a case close
 
@@ -884,7 +921,7 @@ evidence.
 ### Following the grid
 
 The `winnow` context here is the same object a tab gets — one builder
-makes both — but four of its members are the ones a panel lives on:
+makes both — but five of its members are the ones a panel lives on:
 
 ```js
 export default function mount(container, winnow) {
@@ -920,6 +957,10 @@ export default function mount(container, winnow) {
   (`getComputedStyle(document.documentElement).getPropertyValue('--accent')`
   and friends) at draw time and redraw here, and your panel follows the
   analyst's look — including a custom accent — like the rest of the app.
+- `winnow.displayCell(column, value)` is a value as the grid under your
+  panel paints it — a timestamp in the case's format, or the one set on
+  that column — and `winnow.onTimestampFormatChange(cb)` says when that
+  changed. See [Showing timestamps](#showing-timestamps).
 
 `top_values/` is the worked example: the ten most common values of a
 column for the current view, listed from the app's own
@@ -1631,9 +1672,11 @@ python server.py --plugins-dir ~/src/my-winnow-plugins
 
 Installs from the UI always land in the first directory (`plugins/`).
 
-**Versioning:** the current plugin API version is **15** (the tab
-context's `openFiltered` options — `where`, `tags`, `clearTimeframe` —
-arrived in 15, which took the context's own `apiVersion` to 9;
+**Versioning:** the current plugin API version is **16** (the tab
+context's `formatTimestamp`, `displayCell`, `state.tsFormat` and
+`onTimestampFormatChange` arrived in 16, which took the context's own
+`apiVersion` to 10; its `openFiltered` options — `where`, `tags`,
+`clearTimeframe` — arrived in 15, which took it to 9;
 `sectionPanes` arrived in 14, which took it to 8; its `dropdownMenu` arrived in 13, which took it to 7;
 in 12 the SQL
 pane started holding results on the server: `sqlPage` results gained

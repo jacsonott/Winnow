@@ -50,7 +50,7 @@
    returns is still kept where there is one: it is what can bring a pop-out
    to the front, and `.closed` is how a window that went without saying
    goodbye is noticed. */
-import { $, el, onMutation, toast } from './core.js';
+import { $, api, el, onMutation, toast } from './core.js';
 import { drillInto, markDashboardStale, showDashboard } from './dashboard.js';
 import { render } from './grid.js';
 import { drawRail, regroupIfGroupedByTag } from './grouping.js';
@@ -63,6 +63,7 @@ import { S } from './state.js';
 import { recordTabVisit } from './tabhistory.js';
 import { clearRowCaches, loadCaseTags, loadTags } from './tags.js';
 import { buildTimeline, jumpToTimelineRow } from './timeline.js';
+import { announceTsFormat, caseTsFormat } from './tsformat.js';
 import { contextMenu } from './ui.js';
 import { refreshWatchlistBadge, showWatchlistTab } from './watchlist.js';
 
@@ -98,6 +99,10 @@ const MUTATION_KINDS = [
   [/^\/api\/watchlist(?!\/(scan|seen))/, 'watchlist'],
   [/^\/api\/(dashboards(?!\/\d+\/refresh)|dashboard_library\/\d+\/add|plugin_dashboards\/)/, 'dashboards'],
   [/^\/api\/case\/variables/, 'variables'],
+  // The case's timestamp format, and the machine default under it: a
+  // plugin tab out in a pop-out formats with them (winnow.formatTimestamp)
+  // and would keep the old format until it was reloaded.
+  [/^\/api\/(case_settings|settings\/app)(\?|$)/, 'settings'],
 ];
 
 let channel = null;
@@ -560,6 +565,7 @@ async function runRefresh() {
     if (any('tags')) await (!inPopout() && S.sourceId != null ? loadTags() : loadCaseTags());
     if (any('sources', 'dashboards')) await loadSources(undefined, { navigate: false });
     if (any('variables')) await loadCaseVariables();
+    if (any('settings')) await reloadTsSettings();
     if (!inPopout()) {
       if (any('watchlist', 'tags')) refreshWatchlistBadge();
       if (any('tags', 'notes') && S.view) {
@@ -571,6 +577,26 @@ async function runRefresh() {
   } catch (e) {
     if (!e || !e.aborted) console.error('popout: refresh after another window wrote', e);
   }
+}
+
+/* Another window saved a setting. Only a changed timestamp format has
+   anything here to repaint: the grid's rows, where this window has a grid,
+   and whatever listens for the format (a plugin tab, through
+   winnow.onTimestampFormatChange). The same routes carry the look on
+   every skin change, which leaves the format as it was: nothing to do. */
+async function reloadTsSettings() {
+  const was = caseTsFormat();
+  const [app, kase] = await Promise.all([
+    api('/api/settings/app').catch(() => null),
+    api('/api/case_settings').catch(() => null),
+  ]);
+  if (app) S.appSettings = app;
+  if (kase) S.caseSettings = kase;
+  if (caseTsFormat() === was) return;
+  if (!inPopout() && S.view) {
+    if (gridIsShowing()) render(); else S.gridRepaintPending = true;
+  }
+  announceTsFormat();
 }
 
 async function refreshShownPage(any) {

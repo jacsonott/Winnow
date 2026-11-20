@@ -1539,6 +1539,29 @@ export default function mount(container, winnow) {
 
   const ready = () => state.sourceId != null && state.groupBy.length > 0 && !!state.sortColumn;
 
+  /* Timestamps read the way the case says they read (the grid's format,
+     winnow.formatTimestamp), in the preview and in what is copied from
+     it — not in whatever shape the file wrote them. The table Create
+     makes keeps the stored text, as every table does, and the grid
+     formats it there. The description is text this plugin wrote, and
+     stays as written. An older Winnow without the formatter shows the
+     stored text, as before. */
+  const formatTs = winnow.formatTimestamp || ((v) => v);
+  /* Which of a result's columns hold a timestamp: the ordering column and
+     the included ones (the result's first 1 + carry.length columns, as
+     the backend's _header lays them out) that the table types datetime.
+     Worked out from the request that made the result, not from the sheet,
+     which may have changed since (Auto-update off leaves the old preview
+     up). */
+  function timedColumns(body) {
+    const src = winnow.state.sources.find((s) => s.id === body.source_id);
+    const types = new Map(((src && src.columns) || []).map((c) => [c.name, c.type]));
+    return [body.sort_column, ...body.columns].map((c) => types.get(c) === 'datetime');
+  }
+  // One result cell as text: a timestamp in the case's format, anything
+  // else as it came.
+  const cellText = (v, timed) => (v == null ? '' : timed ? formatTs(String(v)) : String(v));
+
   /* One preview job per sheet. An edit's run cancels the one it supersedes
      — on the server, not just here: left to finish, they were what piled
      up (startJob). It takes over that run's card too, so a sheet edited
@@ -1563,8 +1586,9 @@ export default function mount(container, winnow) {
     mine.loading = true;
     mine.stale = false;
     renderPreview();
+    const body = requestBody();
     const run = {
-      job: startJob('preview', requestBody()),
+      job: startJob('preview', body),
       rec: background(`First/Last · ${mine.name}`, `Previewing ${labelOf(currentSource())}…`,
         () => showSheet(mine), prev ? prev.rec.notice : null),
     };
@@ -1577,7 +1601,7 @@ export default function mount(container, winnow) {
     }
     if (mine.run !== run || !container.isConnected) return;
     mine.run = null;
-    mine.preview = preview;
+    mine.preview = preview && Object.assign(preview, { timed: timedColumns(body) });
     mine.error = error ? error.message : null;
     mine.loading = false;
     mine.selRows = new Set();
@@ -1740,12 +1764,14 @@ export default function mount(container, winnow) {
     t.append(thead);
 
     const tb = el('tbody');
+    const timed = state.preview.timed || [];
     state.preview.rows.forEach((row, ri) => {
       const tr = el('tr');
       row.forEach((v, ci) => {
-        const td = el('td', null, v == null ? '' : String(v));
+        const text = cellText(v, timed[ci]);
+        const td = el('td', null, text);
         td.style.cssText = cellCss;
-        td.title = v == null ? '' : String(v);
+        td.title = text;
         applyWidth(td, state.preview.columns[ci]);
         tr.append(td);
       });
@@ -1775,7 +1801,7 @@ export default function mount(container, winnow) {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c' && state.selRows.size) {
         e.preventDefault();
         const lines = [...state.selRows].sort((a, b2) => a - b2)
-          .map((i) => state.preview.rows[i].map((v) => (v == null ? '' : String(v))).join('\t'));
+          .map((i) => state.preview.rows[i].map((v, ci) => cellText(v, timed[ci])).join('\t'));
         navigator.clipboard.writeText(lines.join('\n')).then(
           () => toast(`Copied ${lines.length} row${lines.length === 1 ? '' : 's'}`),
           () => toast('Copy failed — the browser blocked clipboard access', 4000));
@@ -1803,7 +1829,8 @@ export default function mount(container, winnow) {
     copying = true;
     copyBtn.disabled = true;
     copyBtn.textContent = 'Copying…';
-    const job = startJob('rows', requestBody());
+    const body = requestBody();
+    const job = startJob('rows', body);
     const rec = background('First/Last result', `Working out ${state.name} to copy…`, () => winnow.showTab());
     let res = null, error = null;
     try {
@@ -1819,8 +1846,9 @@ export default function mount(container, winnow) {
       if (!settle(rec, () => {}, error)) toast('Could not compute the result: ' + error.message, 5000);
       return;
     }
+    const timed = timedColumns(body);
     const text = [res.columns.join('\t'),
-      ...res.rows.map((r) => r.map((v) => (v == null ? '' : String(v))).join('\t'))].join('\n');
+      ...res.rows.map((r) => r.map((v, ci) => cellText(v, timed[ci])).join('\t'))].join('\n');
     const what = `${res.rows.length.toLocaleString()} row${res.rows.length === 1 ? '' : 's'}`
       + (res.truncated ? ' (truncated — Create a table for the full result)' : '');
     const offer = (c) => c.done({ phase: 'ready', progress: false, detail: `${what} ready to copy`,
@@ -1995,6 +2023,12 @@ export default function mount(container, winnow) {
      show, the first one included; the tag half waits for the saved sheets
      to be read back, since until then there is nothing filtered to re-run. */
   let readBack = false;
+  // The case's timestamp format changed: the preview is drawn again from
+  // the rows already here, in the new format — nothing is re-run. A format
+  // set on one of the grid's columns (`column`) is the grid's.
+  if (winnow.onTimestampFormatChange) {
+    winnow.onTimestampFormatChange(({ column }) => { if (!column && readBack && !state.loading) renderPreview(); });
+  }
   refresh = () => {
     const dropped = readBack ? dropDeletedTags() : new Set();
     fillSources();

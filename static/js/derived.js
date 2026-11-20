@@ -16,7 +16,7 @@ import { gridIsShowing } from './sql.js';
 import { S, dashboardCreatorMode } from './state.js';
 import { clearRowCaches } from './tags.js';
 import { updateFiltersButton, updateTimeRangeButton } from './timeframe.js';
-import { TS_FORMATS, baseColumns, columnMeta, parseTimestamp, tsFormatFor } from './tsformat.js';
+import { TS_FORMATS, announceTsFormat, baseColumns, columnMeta, parseTimestamp, tsFormatFor } from './tsformat.js';
 import { confirmDialog, modal, promptDialog, sideRail } from './ui.js';
 import { rebuildView } from './view.js';
 
@@ -92,6 +92,7 @@ export function columnMenuItems(name) {
           S.layout[name] = Object.assign({}, S.layout[name] || {}, { tsFormat: key });
           render();
           saveLayout();
+          announceTsFormat(name);
         },
       });
     }

@@ -255,6 +255,13 @@ Pivot tab from the grid, a pivot filtered on tags runs again, so rows you
 tagged in the meantime are counted.
 
 - **Subtotals** and **Grand totals** toggle the total rows and columns.
+- A datetime field's values are shown in the case's timestamp format
+  (**Case ▾ → Case settings… → Timestamps**), in the row and column
+  labels, a **Min** or **Max** of it, the **Filters** value list and the
+  rows behind a number, and its rows and columns are in time order. The
+  pivot still groups on the text the file holds, so two spellings of
+  the same moment (`6/3/2026 1:02:03 PM` and `2026-06-03 13:02:03`) stay
+  two rows that read the same.
 - While a change is being worked out, the status line says
   **Aggregating…** and the table already on screen stays, dimmed, until the
   new one replaces it. Its numbers can't be clicked in the meantime.
@@ -343,7 +350,9 @@ The result's columns are the ordering column, the included columns, any
 picker shows a table's nickname when it has one.
 
 The preview shows 8 groups and follows your changes (**Auto-update**, or
-**Refresh**). **Copy result** copies the whole result as tab-separated text
+**Refresh**). A datetime ordering or included column is shown in the
+case's timestamp format, and copied that way; the description is text and
+reads as written. **Copy result** copies the whole result as tab-separated text
 (up to 20,000 rows). **Create table…** writes it into the case as a new
 table, named `First-Last of <table>` by default (the nickname, if it has one), which you can tag, put on
 the Timeline and export like any other; tick **Add these rows to the
@@ -586,7 +595,9 @@ see [Dashboards](Dashboards.md#esxi--uac-triage).
 A **Top values** button on the grid's toolbar opens a panel between the
 toolbar and the grid listing the ten most common values of a column you
 choose, counted over the rows in the current view, so it follows your
-filters and search. Click a value to copy it. Whether the panel is open is
+filters and search. A timestamp reads as the grid shows it: in the case's
+format, or in the one picked on that column. Click a value to copy it as
+shown. Whether the panel is open is
 remembered in this browser.
 
 ### claude_assistant
