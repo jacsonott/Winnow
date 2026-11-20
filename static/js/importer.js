@@ -834,11 +834,15 @@ export function buildDelimitedSettings(ctx) {
 
   const reload = previewRunner(ctx, () => fetchPreview(item, { kind: 'csv', delimiter: item.delimiter || null, has_header: item.has_header !== false }), (res) => {
     detected = res.delimiter;
+    // Only the types the analyst picks are sent (null: the import decides).
+    // Sending the preview's reading of its first rows for every column
+    // overrode the import's own, which reads 500 rows and looks further
+    // into the file for a column those leave empty (store._type_past_sample).
     if (!item.column_types || item.column_types.length !== res.columns.length) item.column_types = null;
-    const types = item.column_types || res.inferred_types.slice();
-    ctx.rows.replaceChildren(previewTable(res.columns, res.sample_rows, (i) => typeSelect(types[i], (ty) => {
-      types[i] = ty;
-      item.column_types = types.slice();
+    const picked = item.column_types ? item.column_types.slice() : res.columns.map(() => null);
+    ctx.rows.replaceChildren(previewTable(res.columns, res.sample_rows, (i) => typeSelect(picked[i] || res.inferred_types[i], (ty) => {
+      picked[i] = ty;
+      item.column_types = picked.slice();
       item.configured = true;
       ctx.changed();
     })));
@@ -903,11 +907,11 @@ export function buildIisSettings(ctx) {
   ctx.previewHead.append(el('span', 'import-preview-aside', 'Set a column’s type in its heading'));
 
   const reload = previewRunner(ctx, () => fetchPreview(item, { kind: 'iis', log_format: format() }), (res) => {
-    const given = item.column_types && !Array.isArray(item.column_types) ? item.column_types : {};
-    const types = res.columns.map((c, i) => given[c] || res.inferred_types[i]);
-    ctx.rows.replaceChildren(previewTable(res.columns, res.sample_rows, (i) => typeSelect(types[i], (ty) => {
-      types[i] = ty;
-      item.column_types = { ...given, ...Object.fromEntries(res.columns.map((c, j) => [c, types[j]])) };
+    // Only the columns the analyst sets, as the delimited preview sends them.
+    const picked = { ...(item.column_types && !Array.isArray(item.column_types) ? item.column_types : {}) };
+    ctx.rows.replaceChildren(previewTable(res.columns, res.sample_rows, (i) => typeSelect(picked[res.columns[i]] || res.inferred_types[i], (ty) => {
+      picked[res.columns[i]] = ty;
+      item.column_types = { ...picked };
       item.configured = true;
       ctx.changed();
     })));
@@ -927,11 +931,11 @@ export function buildKvSettings(ctx) {
   ctx.note('Each key becomes a column, in the order keys first appear; a value’s quotes come off. date and time are joined into a Timestamp column: UTC when every line carries a tz offset, the device’s own clock when not. Text before the first pair is kept in Line prefix, and anything else that isn’t a pair in Unparsed text.');
   ctx.previewHead.append(el('span', 'import-preview-aside', 'Set a column’s type in its heading'));
   previewRunner(ctx, () => fetchPreview(item, { kind: 'kv' }), (res) => {
-    const given = item.column_types && !Array.isArray(item.column_types) ? item.column_types : {};
-    const types = res.columns.map((c, i) => given[c] || res.inferred_types[i]);
-    ctx.rows.replaceChildren(previewTable(res.columns, res.sample_rows, (i) => typeSelect(types[i], (ty) => {
-      types[i] = ty;
-      item.column_types = { ...given, ...Object.fromEntries(res.columns.map((c, j) => [c, types[j]])) };
+    // Only the columns the analyst sets, as the delimited preview sends them.
+    const picked = { ...(item.column_types && !Array.isArray(item.column_types) ? item.column_types : {}) };
+    ctx.rows.replaceChildren(previewTable(res.columns, res.sample_rows, (i) => typeSelect(picked[res.columns[i]] || res.inferred_types[i], (ty) => {
+      picked[res.columns[i]] = ty;
+      item.column_types = { ...picked };
       item.configured = true;
       ctx.changed();
     })));

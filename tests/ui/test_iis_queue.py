@@ -105,7 +105,7 @@ def test_an_iis_log_previews_configures_and_imports(page, ui_csv):
 
         item = page.evaluate("() => __winnow.S.importQueue[0]")
         assert item["kind"] == "iis"
-        assert item["column_types"]["sc-status"] == "text"
+        assert item["column_types"] == {"sc-status": "text"}   # only what was set
         # Shown again, the pane shows what was set rather than starting over.
         page.evaluate("() => __winnow.openImportModal()")
         page.wait_for_selector("#modalBody .import-pane .preview-tbl")

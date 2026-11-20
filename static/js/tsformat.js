@@ -13,20 +13,33 @@ import { S } from './state.js';
    families store.py's DATE_RE already recognizes as "datetime" at ingest,
    then formatting is pure string padding — no Date object, no TZ math. A
    value that doesn't match either shape is left exactly as it was. */
-export const TS_ISO_RE = /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2})(?:[.,](\d{1,9}))?)?)?/;
+
+/* What may stand between a date and its time of day, in all three shapes:
+   timeparse.DATE_TIME_SEP, character for character — a T (either case),
+   whitespace of any kind (a tab, a non-breaking space), a comma or "@",
+   or "-" or "at" followed by a space. DATE_RE types a column as datetime
+   on its date alone, and the old `[ T]` and `[ ,]+` read any other
+   separator as "no time given": every value in the column was shown at
+   00:00:00 in every format but As stored. The hour may be one digit in
+   every shape for the same reason ("2026-06-23 1:02:03"). */
+const DATE_TIME_SEP = String.raw`(?:\s*(?:[Tt]|[,@]|(?:-|[Aa][Tt])(?=\s))\s*|\s+)`;
+
+export const TS_ISO_RE = new RegExp(String.raw`^(\d{4})-(\d{2})-(\d{2})(?:${DATE_TIME_SEP}(\d{1,2}):(\d{2})(?::(\d{2})(?:[.,](\d{1,9}))?)?)?`);
 
 /* The 12-hour marker is timeparse.MERIDIEM's: any of PM / pm / Pm / p.m. /
    P.M., after optional fraction digits, not followed by a letter. The
    old `\s*(AM|PM|am|pm)?` straight after the seconds missed it whenever a
    fraction came between ("1:22:01.123 PM") and read the time as morning. */
-export const TS_US_RE = /^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:[ ,]+(\d{1,2}):(\d{2})(?::(\d{2})(?:[.,](\d+))?)?\s*(?:([AaPp])\.?[Mm]\.?(?![A-Za-z]))?)?/;
+export const TS_US_RE = new RegExp(String.raw`^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:${DATE_TIME_SEP}(\d{1,2}):(\d{2})(?::(\d{2})(?:[.,](\d+))?)?\s*(?:([AaPp])\.?[Mm]\.?(?![A-Za-z]))?)?`);
 
 /* Month-name family ("JUN 23 2026 00:11:00", "23 Jun 2026", "June 23,
    2026 5:11 PM", "Jul 28th 2026 01:02:22") — the word is captured loose
    and validated against MONTH_NO below, mirroring store.py's third
    recognized shape; the day's ordinal suffix (timeparse.ORDINAL) is
-   optional and, as there, not checked against the number. */
-export const TS_MONTH_RE = /^(?:([A-Za-z]{3,9}) +(\d{1,2})(?:[Ss][Tt]|[Nn][Dd]|[Rr][Dd]|[Tt][Hh])?|(\d{1,2})(?:[Ss][Tt]|[Nn][Dd]|[Rr][Dd]|[Tt][Hh])? +([A-Za-z]{3,9})) *,? *(\d{4})(?:[ ,]+(\d{1,2}):(\d{2})(?::(\d{2})(?:[.,](\d+))?)?\s*(?:([AaPp])\.?[Mm]\.?(?![A-Za-z]))?)?/;
+   optional and, as there, not checked against the number. The spaces in
+   the date are \s, as store.py's are, so a tab or a non-breaking space
+   between "Jun" and "23" is read there and here alike. */
+export const TS_MONTH_RE = new RegExp(String.raw`^(?:([A-Za-z]{3,9})\s+(\d{1,2})(?:[Ss][Tt]|[Nn][Dd]|[Rr][Dd]|[Tt][Hh])?|(\d{1,2})(?:[Ss][Tt]|[Nn][Dd]|[Rr][Dd]|[Tt][Hh])?\s+([A-Za-z]{3,9}))\s*,?\s*(\d{4})(?:${DATE_TIME_SEP}(\d{1,2}):(\d{2})(?::(\d{2})(?:[.,](\d+))?)?\s*(?:([AaPp])\.?[Mm]\.?(?![A-Za-z]))?)?`);
 
 const MONTH_NO = {
   jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,

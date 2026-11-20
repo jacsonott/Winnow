@@ -281,10 +281,11 @@ drive the import writes to, with the folders on each. Then:
 
 1. Free some space on the drive it names: empty the Recycle Bin, move old
    case files or exports elsewhere, or clear the temp folder.
-2. If the message says rows *were kept as a partial table*, remove that
-   table (**Remove…** in its menu). It holds only the rows read before the
-   disk filled.
-3. Import the file again. For a big file, **Add from this machine…** in
+2. Import the file again. Nothing of it was kept, so there is no partial
+   table to remove first: the rows read before the disk filled were taken
+   out again. (If even that failed for lack of room, the message says rows
+   *were left in a partial table*: remove it with **Remove…** in its menu
+   once there is space.) For a big file, **Add from this machine…** in
    the Import window reads it in place, where **Upload from browser…**
    first copies it to the temp folder (and needs about twice its size
    there for a moment).
@@ -293,6 +294,23 @@ A search index the disk stopped is reported the same way in **Case ▾ →
 Log…**: the table still works, and searches of it scan the table until
 there is room for the index. See
 [Cases and importing](Cases-and-importing.md#the-disk-is-full).
+
+### A column of numbers sorts as text
+
+A column sorts as numbers only when it is a number column; the table menu
+(`C`) shows each column's type. A column of sizes or byte counts is text
+when the first 500 rows hold a cell that is neither a number nor a
+placeholder such as `-` or `N/A`: a word, a number with digit grouping
+(`1,024`) or a unit (`12 KB`).
+[Numbers, dates and text](Filtering-and-searching.md#numbers-dates-and-text)
+has the whole rule. When it is a stray word, import the file again and set
+the column to **number** in its heading in the import preview: the cells
+that aren't numbers then sort before every number. For values with a unit,
+add a [Regex capture](Derived-columns.md#regex-capture) derived column that
+takes the number out, such as `^([\d.]+)` for `12 KB`; it is a number
+column when every value it captures is a number. Digit grouping can't be
+read as a number either way, since `1,024` is as often a list of two
+numbers as it is a thousand.
 
 ### Scrolling is slow over Remote Desktop
 

@@ -905,6 +905,69 @@ see [docs/notes/README.md](README.md) for the whole set.
   out `NULL` instead — it sorts to one edge and drops out of `>`/`<` filters
   instead of quietly blending in as real data. Any new numeric comparison/sort
   should go through this helper, not a raw CAST.
+- **A column of numbers is a number column even with "-" in it, and even
+  when its first 500 rows are empty.** Reported as "integers treated as
+  strings": file sizes and requests' bytes in and out sorting 10 before
+  9, and it was three things, all at import.
+  - **Placeholders** (`NO_VALUE`: `-`, `N/A`, `null`, `None`, `(empty)`…,
+    after strip/lower; `_has_value`). `infer_type` used to need every
+    non-blank cell to match NUM_RE, so one `-` in the sample (W3C and
+    NCSA logs write it for a byte count when nothing was sent, Zeek for
+    any unset field) made the whole column text. Now it needs every cell
+    *with a value* to, and at least one. Safe because `_numeric_expr`
+    already reads those cells as NULL, which is where a non-number in a
+    number column has always gone. A column of nothing but placeholders
+    stays text (IIS's `cs-username`, NCSA's `Remote log name`).
+    `_infer_derived_type` follows the same rule in SQL
+    (`_sql_has_value`), as it follows infer_type's.
+  - **Nothing in the sample** (`_type_past_sample`). A column empty for
+    all of the first SAMPLE_ROWS rows was text however full of numbers
+    it was after them: a FortiGate log's traffic keys behind its event
+    lines, an IIS log's second `#Fields:` line, a late JSON key. Such a
+    column is typed from TYPE_PROBES (32) runs of TYPE_PROBE_ROWS (256)
+    rows spread evenly over the rest of the table, the last ending at its
+    last row: each run an O(log n) rid range, so ~8,000 rows whatever the
+    table's size. A scan of the column instead is a pass over a 25 GB
+    case file for every always-empty column, and a sample a few hundred
+    rows deep still misses the traffic lines. **Only ever to number**: a
+    datetime found this way stays text, because the first datetime column
+    is the one the Timeline, the histogram and the import's sort index
+    read a table by, and a column first filled thousands of rows down
+    must not take that from the one the sample found. It runs after the
+    last batch commits, on a reader (no writer transaction is open
+    there), in every inferring path: ingest_csv, the two-pass line
+    readers (IIS, key=value), ingest_sqlite_table, ingest_xlsx_sheet,
+    ingest_json and ingest_rows. A reader's declared type and the
+    analyst's preview choice are `fixed` and never looked at.
+  - **NUM_RE's shape.** It took `-12` and `3.5` only; now also spaces
+    either side, a leading `+` and an exponent (`1.5E+09`, which Excel and
+    `str(float)` write for a big value): exactly the text SQLite's CAST
+    reads in full, so every CAST gated on it — `_numeric_expr`, pivot's
+    `_numeric`, first_last's (which now imports it instead of keeping a
+    copy) — still agrees with inference on what each cell is worth.
+    **No digit grouping**: CAST reads `1,024` as 1.0, so it would need a
+    REPLACE in every gated CAST, the plugins' included, and in a log
+    `80,443` is a list of ports as often as it is a number.
+  - **Tables imported before all this** are typed once more when their
+    case opens (`_retype_number_columns`, a thread like the derived typing
+    pass, joined by close()). Only text -> number, only kinds whose
+    columns are inferred (`NUMBER_RETYPE_KINDS`: csv, json, sqlite, xlsx,
+    iis, kv — bodyfile, secure, plaso and utmp declare every type, and a
+    plugin's or the SQL pane's `rows` table may have declared some with
+    nothing recorded to say which), and only a column typed by inference:
+    not one the ingest record's `column_types` names, not a TEXT_KEYS key,
+    and not one the OLD rule would itself have typed a number or a
+    datetime (`_said_text`, which keeps `_OLD_NUM_RE` for exactly this):
+    a column stored text that the old rule calls a number was declared
+    text by something. Merges compute their types from their members, so
+    they follow; a table saved from a view or the SQL pane (`origin` set)
+    keeps the types it was saved with. The case records `NUMBER_TYPING_UPGRADE` in
+    `case_upgrades` when every table has been looked at; a table that
+    fails to read leaves it unrecorded, so the next open tries again. A
+    table of its own, not a `case_settings` key: those are the analyst's
+    settings, `/api/case_settings` hands every one to the page, and a fresh
+    case is supposed to answer `{}`. A new name if the rule changes again
+    runs the pass again. tests/test_number_columns.py.
 - **A datetime column whose text is not time order sorts by time, not by
   its text** (`_time_sort_columns` → `_sort_keys`). It used to sort as
   `col COLLATE NOCASE` whatever it held, so a US-dated table, which opens
@@ -931,7 +994,9 @@ see [docs/notes/README.md](README.md) for the whole set.
     (2.0 s of it TS_NORMALIZE, a Python call per row, so it is the same
     cost for every non-ISO shape). The test is `_text_sorts_by_time`:
     every value at both ends of the table (`_TIME_SORT_SAMPLE` rows by
-    rid each way) starts with a `YYYY-MM-DD` date. A sample, not
+    rid each way) starts with a `YYYY-MM-DD` date and none has a
+    one-digit hour (`_ONE_DIGIT_HOUR_GLOB`: "2026-06-23 9:05:00" sorts
+    after "2026-06-23 10:00:00" as text). A sample, not
     `_column_is_date_led`'s exact scan: that is a full read of a column
     no index may cover yet, ahead of the first sort, when the column's
     type was itself guessed from 500 rows. Both ends, so two exports
