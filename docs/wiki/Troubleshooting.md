@@ -263,13 +263,38 @@ can.
 Winnow parses two imports at a time; the rest wait as **queued** in the
 jobs panel at the bottom right, where each can be cancelled. A cancelled
 import removes its partial table. An import that fails part-way keeps the
-rows before the failure, and the message says how many.
+rows before the failure, and the message says how many, unless the disk
+filled: then it keeps nothing (see below).
 
 The message when an import finishes flags the usual causes of odd results:
 rows padded or trimmed to fit, a row "with very long multi-line fields —
 check for a stray quote if the row count looks low", or a file that was
 "not UTF-8 — read as Windows-1252". [Cases and
 importing](Cases-and-importing.md) explains each.
+
+### An import fails: "Out of disk space"
+
+The drive the case is on, or the one holding the temp folder, filled up
+while the import was running. The jobs panel's row says **out of space**,
+and the line under it names the drive with the least room and how much is
+free on it, so you know which one to clear. **Case ▾ → Log…** lists every
+drive the import writes to, with the folders on each. Then:
+
+1. Free some space on the drive it names: empty the Recycle Bin, move old
+   case files or exports elsewhere, or clear the temp folder.
+2. Import the file again. Nothing of it was kept, so there is no partial
+   table to remove first: the rows read before the disk filled were taken
+   out again. (If even that failed for lack of room, the message says rows
+   *were left in a partial table*: remove it with **Remove…** in its menu
+   once there is space.) For a big file, **Add from this machine…** in
+   the Import window reads it in place, where **Upload from browser…**
+   first copies it to the temp folder (and needs about twice its size
+   there for a moment).
+
+A search index the disk stopped is reported the same way in **Case ▾ →
+Log…**: the table still works, and searches of it scan the table until
+there is room for the index. See
+[Cases and importing](Cases-and-importing.md#the-disk-is-full).
 
 ### A column of numbers sorts as text
 

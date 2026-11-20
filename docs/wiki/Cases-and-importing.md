@@ -1123,9 +1123,11 @@ right — the same panel that shows search-index builds.
 | Row | Shows | ✕ |
 | --- | --- | --- |
 | uploading | A browser upload's transfer, in MB. | Cancels the upload. |
+| upload failed | An upload the server could not take, and why. It stays until you dismiss it. | Dismisses the row. |
 | importing | Progress and rows so far; a multi-table job reads `name — 2/5: table`. | Cancels the import. |
 | *N* queued | Imports waiting. Two run at once. | Cancels all of them. |
 | done, error, cancelled | The result. Finished rows clear after a few seconds; errors stay. | Dismisses the row. |
+| out of space | An upload or import the disk filling up stopped. See [The disk is full](#the-disk-is-full). It stays until you dismiss it. | Dismisses the row. |
 | indexing | A search index being built. | — |
 
 **Clear all** dismisses every finished row and leaves running work alone.
@@ -1136,8 +1138,36 @@ SQLite, Excel and Plaso.
 **Cancelling drops the table entirely**, so a half-imported table never sits
 in the list looking complete; a SQLite or Excel job keeps the tables it had
 finished. An import that fails with an error keeps what it read before the
-problem. Opening another case or shutting Winnow down cancels running
-imports.
+problem, and its table appears in the list with the rows it got, except when
+the disk is full (below). Opening
+another case or shutting Winnow down cancels running imports.
+
+### The disk is full
+
+An import needs room in two places: the drive the case file is on, which
+grows by about as much as the file you import (more with its search index),
+and the temp folder. **Upload from browser…** needs about twice the file's
+size in the temp folder while the file arrives, for the moment it is copied;
+**Add from this machine…** reads the file in place and needs none.
+
+When either fills up, the import stops and keeps nothing: the rows it had
+read are taken out again, so no partial table is left in the list looking
+complete. A toast says *out of disk space*, and the import's row in the jobs
+panel says **out of space**, with one line under it naming the drive with
+the least room:
+
+> Out of disk space on D: (0 B free). Nothing was imported.
+
+An upload that could not be received at all says *The 2.1 GB file was not
+received*, with the temp folder's drive. A SQLite or Excel import keeps the
+tables it had finished (*Only the first 2 tables were imported*). The row
+stays until you dismiss it and the red badge on **Case ▾** lights. **Case ▾
+→ Log…** has the rest: every drive the import writes to, the folders on
+each and how much is free, and what to do. Once there is room, import the
+file again. In the rare case that the disk is too full even to take the
+rows out, the line says they *were left in a partial table that could not
+be removed*: delete it (**Remove…** in the table's menu) once there is
+room. See [Troubleshooting](Troubleshooting.md#an-import-fails-out-of-disk-space).
 
 A finished import's toast says *name: N rows imported*, plus any of:
 

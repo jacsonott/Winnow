@@ -34,6 +34,8 @@ from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form, Query
+from fastapi.exception_handlers import http_exception_handler
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse, FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -52,6 +54,7 @@ from winnow import userenv
 from winnow import version
 from winnow import archive
 from winnow import bodyread
+from winnow import diskspace
 from winnow import iisread
 from winnow import secureread
 from winnow import timeparse
@@ -524,11 +527,100 @@ def api_log_client(body: ClientLogBody):
     return {"seq": wlog.seq()}
 
 
+# ------------------------------------------------------------ full disk
+#
+# A full disk, said as one, from any route (winnow/diskspace.py for the
+# why). Three ways one reaches a route's caller, and all three end here:
+#
+# - An upload whose temp folder filled while it was still ARRIVING. The
+#   form parse writes it to a temp file before the route runs, and FastAPI
+#   answers a failed parse with a bare 400 "There was an error parsing the
+#   body", the OSError only in its __cause__ — and logs nothing. An
+#   analyst dragging a file onto a full C: drive got that in a toast.
+# - A route that caught the error itself and re-raised it as an
+#   HTTPException(400, str(e)) — the upload routes' own copy of the file
+#   into the spool ("[Errno 28] No space left on device"), a synchronous
+#   import's "database or disk is full".
+# - Anything else that got as far as the catch-all.
+#
+# 507 Insufficient Storage, logged as an error so Case ▾ lights up: the
+# toast is gone in seconds and the disk is still full.
+
+def _disk_full_account(request: Request, exc: BaseException) -> tuple[str | None, str, list[tuple[str, str]]]:
+    """(what happened, what to do, where it writes) for diskspace.brief
+    and .message."""
+    found = diskspace.find_disk_full_error(exc)
+    path = request.url.path
+    importing = path.startswith("/api/ingest/")
+    if found is None and importing and path.endswith("/upload") and isinstance(diskspace.root_cause(exc), OSError):
+        # The file itself did not fit — an OSError, where a synchronous
+        # import's own writes fail in SQLite. The size, because the free space is measured after the partial
+        # copy was thrown away: "6.0 MB free" reads as plenty until it sits
+        # beside the file that did not fit. (Content-Length counts the
+        # form's few hundred bytes of framing too, which no size this
+        # rounds to shows.) Only the temp folder: the upload, and the spool
+        # it is copied to, are written nowhere else.
+        try:
+            size = int(request.headers.get("content-length") or 0)
+        except ValueError:
+            size = 0
+        what = f"The {diskspace.format_size(size)} file" if size else "The file"
+        return f"{what} was not received", "import it again", [("the temp folder", tempfile.gettempdir())]
+    if found is not None:                      # a reader that stopped, and knows what it kept
+        outcome, advice = found.outcome, found.advice
+    elif importing:
+        outcome, advice = "The import did not finish", "import the file again"
+    else:
+        outcome, advice = None, "try again"
+    # An import writes to the case and the temp folder; anything else may
+    # have been building a view, in the views database's folder too.
+    places = (STORE.storage_places(views=not importing) if STORE is not None
+              else [("the temp folder", tempfile.gettempdir())])
+    return outcome, advice, places
+
+
+def _disk_full_response(request: Request, exc: BaseException) -> JSONResponse:
+    # One line for the caller (the jobs panel's row, a toast); the drives
+    # and what to do go to the log.
+    outcome, advice, places = _disk_full_account(request, exc)
+    cause = diskspace.root_cause(exc)
+    record_log("error", f"{request.method} {request.url.path} — {diskspace.message(outcome, advice, places)} "
+                        f"[{type(cause).__name__}: {cause}]")
+    return JSONResponse({"detail": diskspace.brief(outcome, places)}, status_code=507)
+
+
+# FastAPI's answer to a form it could not parse, whatever the reason.
+_BODY_PARSE_FAILED = "There was an error parsing the body"
+
+
+def _passes_error_through(exc: StarletteHTTPException) -> bool:
+    """Whether an HTTPException's detail is nothing but an error it was
+    raised over — `raise HTTPException(400, str(e))` — or FastAPI's parse
+    failure, which says less than that. Those are the ones rewritten when
+    the disk is full. A route that wrote its own message ("Could not move
+    the case file: …") keeps it: it knows what was being done."""
+    if exc.detail == _BODY_PARSE_FAILED:
+        return True
+    return any(exc.detail == str(e) for e in diskspace.chain(exc) if e is not exc)
+
+
+@app.exception_handler(StarletteHTTPException)
+async def _http_error_handler(request: Request, exc: StarletteHTTPException):
+    # Only a full disk is rewritten, and only where the route passed the
+    # error's own text through — every other HTTPException goes out
+    # exactly as FastAPI's own handler sends it.
+    if exc.status_code < 500 and diskspace.is_disk_full(exc) and _passes_error_through(exc):
+        return _disk_full_response(request, exc)
+    return await http_exception_handler(request, exc)
+
+
 @app.exception_handler(Exception)
 async def _unhandled_error_handler(request: Request, exc: Exception):
     # Any route error that isn't an HTTPException / the two specific handlers
     # below lands here: record it (so it's visible in the app, not just the
     # terminal) and answer a clean 500 rather than a raw traceback.
+    if diskspace.is_disk_full(exc):
+        return _disk_full_response(request, exc)
     record_log("error", f"{request.method} {request.url.path} — {type(exc).__name__}: {exc}")
     return JSONResponse({"detail": f"Internal error: {exc}"}, status_code=500)
 

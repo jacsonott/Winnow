@@ -5,7 +5,7 @@ SQLite table picker, folder import, and OS drag-and-drop.
 import { $, api, debounce, dragHas, el, post, toast } from './core.js';
 import { maybeOfferAssociation } from './assoc.js';
 import { openFolderBrowser } from './home.js';
-import { startJobsPoll, uploadWithProgress } from './jobs.js';
+import { DISK_FULL_STATUS, failureReason, startJobsPoll, uploadWithProgress } from './jobs.js';
 import { ARCHIVE_IMPORT_EXTENSIONS, BODYFILE_IMPORT_TYPE, IIS_FORMAT_LABELS, IIS_IMPORT_TYPE, KV_PROBE_BYTES, PLASO_IMPORT_EXTENSIONS, RECOGNIZED_IMPORT_EXTENSIONS, SECURE_IMPORT_TYPE, SQLITE_IMPORT_EXTENSIONS, UTMP_IMPORT_TYPE, XLSX_IMPORT_EXTENSIONS, bodyfileNamed, extOf, iisLogFormat, importKindFor, kvCandidate, looksLikeBodyfile, looksLikeKvLog, looksLikeUtmp, secureLogNamed, utmpFileKind } from './merge.js';
 import { renderPluginTabs, renderPluginPanelButtons } from './plugins.js';
 import { fmtBytes } from './tables.js';
@@ -1327,7 +1327,7 @@ export async function importQueued(queue, folderId = null) {
         await uploadWithProgress('/api/ingest/plugin/upload', fd, item.name);
         pluginOk++;
       } catch (e) {
-        if (!e.cancelled) toast(`Upload failed for ${item.name}: ` + e.message, 6000);
+        if (!e.cancelled) toast(`Upload failed for ${item.name}: ` + failureReason(e.message, e.status === DISK_FULL_STATUS), 6000);
       }
       continue;
     }
@@ -1347,7 +1347,7 @@ export async function importQueued(queue, folderId = null) {
     try {
       await uploadWithProgress('/api/ingest/jobs/upload', fd, item.name);
     } catch (e) {
-      if (!e.cancelled) toast(`Upload failed for ${item.name}: ` + e.message, 6000);
+      if (!e.cancelled) toast(`Upload failed for ${item.name}: ` + failureReason(e.message, e.status === DISK_FULL_STATUS), 6000);
     }
   }
   // Same reason as the directory-import loop's identical line: a

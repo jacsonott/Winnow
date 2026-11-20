@@ -865,6 +865,67 @@ see [docs/notes/README.md](README.md) for the whole set.
   in the table list reads as a real empty import. Pinned by
   tests/test_ingest_broken.py.
 
+- **A full disk is said as one, and it reaches the import as half a
+  dozen other errors** (`winnow/diskspace.py`). Reported from the field as
+  an import that "failed silently", and reproduced on a small tmpfs both
+  ways a full disk stops one:
+  - **The temp folder fills while a browser upload is still arriving.**
+    Starlette writes the form's file to a temp file *before the route
+    runs*, and FastAPI answers any failure there with a bare 400 "There
+    was an error parsing the body", the `OSError` only in `__cause__`,
+    and nothing logged. The page showed that in a six-second toast and
+    took the upload's row out of the jobs panel. An upload needs about
+    **twice** the file's size in the temp folder for a moment: Starlette's
+    copy, then the route's own copy into its spool (`_upload_spool`).
+  - **The case's drive fills mid-import.** The commit raises SQLite's
+    "database or disk is full", and the reader's wrapper prefixed it with
+    the line it had got to ("Line 40,001: …"), which is a batch past the
+    commit that failed and reads as if that line were the problem. The
+    partial table it kept was not even listed until something refreshed
+    the sidebar: the jobs poll only reloaded the list for a `done` job
+    (it reloads after a failed one too now, which still matters for the
+    tables a multi-table job finished).
+
+  So every reader's error wrapper (`ingest_csv`, `ingest_text`,
+  `_ingest_planned_lines`, `ingest_json`, `ingest_rows` and `_kept_error`
+  for the rest) asks `diskspace.stopped_error(e, total)` first, which
+  returns a `DiskFullError` or None for any other error, so their own
+  messages are untouched. **A full disk keeps nothing**, unlike every
+  other mid-file failure (the keep-what-committed entry above): each
+  reader ends in `Store._settle_failed_ingest`, which drops the table it
+  was writing and sets the error's `kept` to 0. Kept, the partial table
+  sat in the list looking like a complete import, and the analyst had to
+  find and delete it before importing the file again in full, which they
+  must do anyway; the analyst who reported this asked for it gone. The
+  drop writes to the full disk too (WAL pages for sqlite_master and the
+  freelist), so it can fail: then the rows stay, `kept` still counts
+  them, the message says they "were left in a partial table that could
+  not be removed", and the failed drop is logged as a warning. On a full
+  tmpfs it went through. A multi-table job keeps the tables it finished,
+  which are whole. The job worker says it at two lengths. `job.error` is
+  **one line**, `diskspace.brief`: the drive with the least room of those
+  the import writes to (`Store.storage_places`: the case's folder and the
+  temp folder; a drive letter on Windows, the mount point elsewhere) and
+  what became of the import — "Out of disk space on D: (0 B free).
+  Nothing was imported." The log gets `diskspace.message`: every
+  drive with the folders on it, what to do, and the raw error. The first
+  version put the log's account in the panel row and the toast, and the
+  analyst who asked for it found it too chatty to read there; the toast
+  for a row that stays in the panel now says only "out of disk space"
+  (`failureReason` in jobs.js). The worker also sets `job.error_kind =
+  "disk_full"`, which the jobs panel's badge reads ("out of space").
+  `is_disk_full` walks the exception chain (`__cause__`,
+  else `__context__` unless suppressed) and believes only ENOSPC/EDQUOT,
+  Windows' two disk-full codes and SQLITE_FULL — never "disk I/O error",
+  since telling an analyst to free space on a failing drive sends them
+  the wrong way. The search index and the import's own indexes fail the
+  same way after the rows are in: those log one **error** (the Case ▾
+  badge) rather than a warning per column. The HTTP half (the 507, and
+  which HTTPExceptions get rewritten) is in [server.md](server.md); a
+  failed upload keeping its row is `failedUploadRow` in jobs.js. Pinned by
+  tests/test_disk_full.py and tests/ui/test_disk_full_ui.py, against a
+  faked disk: CI cannot mount a filesystem small enough to fill.
+
 - **A source's row count is final before its columns are.** Each batch
   commits `sources.row_count` with its rows, so the count a source list
   reads grows while the file is read. The typed column list is the import's last write
