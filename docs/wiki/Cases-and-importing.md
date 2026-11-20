@@ -1130,7 +1130,8 @@ SQLite, Excel and Plaso.
 **Cancelling drops the table entirely**, so a half-imported table never sits
 in the list looking complete; a SQLite or Excel job keeps the tables it had
 finished. An import that fails with an error keeps what it read before the
-problem, and its table appears in the list with the rows it got. Opening
+problem, and its table appears in the list with the rows it got, except when
+the disk is full (below). Opening
 another case or shutting Winnow down cancels running imports.
 
 ### The disk is full
@@ -1141,19 +1142,24 @@ and the temp folder. **Upload from browser…** needs about twice the file's
 size in the temp folder while the file arrives, for the moment it is copied;
 **Add from this machine…** reads the file in place and needs none.
 
-When either fills up, the import stops, a toast says *out of disk space*,
-and its row in the jobs panel says **out of space**, with one line under it
-naming the drive with the least room and what the import kept:
+When either fills up, the import stops and keeps nothing: the rows it had
+read are taken out again, so no partial table is left in the list looking
+complete. A toast says *out of disk space*, and the import's row in the jobs
+panel says **out of space**, with one line under it naming the drive with
+the least room:
 
-> Out of disk space on D: (0 B free). 40,000 rows were kept as a partial table.
+> Out of disk space on D: (0 B free). Nothing was imported.
 
 An upload that could not be received at all says *The 2.1 GB file was not
-received*, with the temp folder's drive. The row stays until you dismiss it
-and the red badge on **Case ▾** lights. **Case ▾ → Log…** has the rest:
-every drive the import writes to, the folders on each and how much is free,
-and what to do. A table the import kept holds only the rows before the disk
-filled: delete it (**Remove…** in the table's menu) once there is room, and
-import the file again. See [Troubleshooting](Troubleshooting.md#an-import-fails-out-of-disk-space).
+received*, with the temp folder's drive. A SQLite or Excel import keeps the
+tables it had finished (*Only the first 2 tables were imported*). The row
+stays until you dismiss it and the red badge on **Case ▾** lights. **Case ▾
+→ Log…** has the rest: every drive the import writes to, the folders on
+each and how much is free, and what to do. Once there is room, import the
+file again. In the rare case that the disk is too full even to take the
+rows out, the line says they *were left in a partial table that could not
+be removed*: delete it (**Remove…** in the table's menu) once there is
+room. See [Troubleshooting](Troubleshooting.md#an-import-fails-out-of-disk-space).
 
 A finished import's toast says *name: N rows imported*, plus any of:
 

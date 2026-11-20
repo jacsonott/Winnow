@@ -155,7 +155,9 @@ diskspace.py       A full disk, said as one. Recognizes it anywhere in an
                     507 carry (the emptiest drive, what the import kept),
                     and message(), the log's (every drive it writes to,
                     what to do). Every reader's error wrapper asks
-                    stopped_error() first. Stdlib only, imports nothing from
+                    stopped_error() first, and a full disk keeps no
+                    partial table (Store._settle_failed_ingest drops it).
+                    Stdlib only, imports nothing from
                     the app. See docs/notes/ingest.md and server.md.
 sqlresults.py      The SQL pane's results, held server-side: a run's rows
                     copied in batches into a scratch SQLite file in the

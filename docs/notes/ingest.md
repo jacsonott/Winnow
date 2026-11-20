@@ -882,19 +882,32 @@ see [docs/notes/README.md](README.md) for the whole set.
     the line it had got to ("Line 40,001: …"), which is a batch past the
     commit that failed and reads as if that line were the problem. The
     partial table it kept was not even listed until something refreshed
-    the sidebar: the jobs poll only reloaded the list for a `done` job.
+    the sidebar: the jobs poll only reloaded the list for a `done` job
+    (it reloads after a failed one too now, which still matters for the
+    tables a multi-table job finished).
 
   So every reader's error wrapper (`ingest_csv`, `ingest_text`,
   `_ingest_planned_lines`, `ingest_json`, `ingest_rows` and `_kept_error`
   for the rest) asks `diskspace.stopped_error(e, total)` first, which
-  returns a `DiskFullError` saying what was kept ("40,000 rows were kept
-  as a partial table") or None for any other error, so their own messages
-  are untouched. The job worker says it at two lengths. `job.error` is
+  returns a `DiskFullError` or None for any other error, so their own
+  messages are untouched. **A full disk keeps nothing**, unlike every
+  other mid-file failure (the keep-what-committed entry above): each
+  reader ends in `Store._settle_failed_ingest`, which drops the table it
+  was writing and sets the error's `kept` to 0. Kept, the partial table
+  sat in the list looking like a complete import, and the analyst had to
+  find and delete it before importing the file again in full, which they
+  must do anyway; the analyst who reported this asked for it gone. The
+  drop writes to the full disk too (WAL pages for sqlite_master and the
+  freelist), so it can fail: then the rows stay, `kept` still counts
+  them, the message says they "were left in a partial table that could
+  not be removed", and the failed drop is logged as a warning. On a full
+  tmpfs it went through. A multi-table job keeps the tables it finished,
+  which are whole. The job worker says it at two lengths. `job.error` is
   **one line**, `diskspace.brief`: the drive with the least room of those
   the import writes to (`Store.storage_places`: the case's folder and the
   temp folder; a drive letter on Windows, the mount point elsewhere) and
-  what was kept — "Out of disk space on D: (0 B free). 40,000 rows were
-  kept as a partial table." The log gets `diskspace.message`: every
+  what became of the import — "Out of disk space on D: (0 B free).
+  Nothing was imported." The log gets `diskspace.message`: every
   drive with the folders on it, what to do, and the raw error. The first
   version put the log's account in the panel row and the toast, and the
   analyst who asked for it found it too chatty to read there; the toast

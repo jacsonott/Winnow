@@ -263,7 +263,8 @@ can.
 Winnow parses two imports at a time; the rest wait as **queued** in the
 jobs panel at the bottom right, where each can be cancelled. A cancelled
 import removes its partial table. An import that fails part-way keeps the
-rows before the failure, and the message says how many.
+rows before the failure, and the message says how many, unless the disk
+filled: then it keeps nothing (see below).
 
 The message when an import finishes flags the usual causes of odd results:
 rows padded or trimmed to fit, a row "with very long multi-line fields —

@@ -14,12 +14,18 @@ written, both ways a full disk stops an import:
 
 These pin what each now says: one line where the analyst is looking (the
 job's row, the 507 a toast and a row come from), naming the drive with the
-least room and what was kept, and the whole account in the log. The first
-version put the whole account in the row and the toast, and the analyst
-who asked for it found it too much to read there. The disk is faked — a commit that raises
-SQLite's own SQLITE_FULL message, a write that raises ENOSPC — because a
-filesystem small enough to fill in a test is not something CI can mount;
-the messages are the ones a real full tmpfs produced."""
+least room, and the whole account in the log. The first version put the
+whole account in the row and the toast, and the analyst who asked for it
+found it too much to read there. They also pin what is left: nothing. A
+full disk takes the partial table away with it
+(Store._settle_failed_ingest), where it used to stay and look like a
+complete import; only when the full disk stops that too is it left, and
+said to be.
+
+The disk is faked — a commit that raises SQLite's own SQLITE_FULL message,
+a write that raises ENOSPC — because a filesystem small enough to fill in
+a test is not something CI can mount; the messages are the ones a real
+full tmpfs produced."""
 
 from __future__ import annotations
 
@@ -225,7 +231,12 @@ def test_sizes_read_the_way_an_analyst_reads_them(n, text):
 # ------------------------------------------------------------- import jobs
 
 
-def test_a_csv_job_the_disk_stops_says_so_and_what_it_kept(store, tmp_path, small_batches, disk_fills, fresh_log):
+def _src_tables(store):
+    return [r[0] for r in store.db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'src!_%' ESCAPE '!'")]
+
+
+def test_a_csv_job_the_disk_stops_says_so_and_keeps_nothing(store, tmp_path, small_batches, disk_fills, fresh_log):
     path = _rows_csv(tmp_path / "big.csv", 35)
     disk_fills(after=2)
     job = store.start_ingest_job("csv", path, name="big.csv")
@@ -234,25 +245,46 @@ def test_a_csv_job_the_disk_stops_says_so_and_what_it_kept(store, tmp_path, smal
     assert done["status"] == "error"
     assert done["error_kind"] == "disk_full"
     msg = done["error"]
-    # One line for the row: a drive, and what was kept.
+    # One line for the row: a drive, and what became of the import.
     assert msg.startswith("Out of disk space on ")
-    assert msg.endswith(" free). 20 rows were kept as a partial table.")
+    assert msg.endswith(" free). Nothing was imported.")
     # Not blamed on a line of the file: the reader was a batch past the
     # commit that failed.
     assert "Line " not in msg
     assert "Free up space" not in msg and "the temp folder" not in msg
 
-    src = store.list_sources()
-    assert [s["row_count"] for s in src] == [20]
+    # The 20 rows that committed went with their table: kept, it looked
+    # like a complete import of a file that had stopped part way.
+    assert store.list_sources() == []
+    assert _src_tables(store) == []
     # The record has the rest: every folder and its drive, what to do, and
     # SQLite's own words for whoever reads the log next.
     case_dir = os.path.dirname(os.path.abspath(store.path))
     logged = [m for m in _errors() if m.startswith(
-        "Import failed: big.csv (csv) — Out of disk space. 20 rows were kept as a partial table. ")]
+        "Import failed: big.csv (csv) — Out of disk space. Nothing was imported. ")]
     assert len(logged) == 1
     assert f"the case ({case_dir})" in logged[0]
-    assert logged[0].endswith("Free up space, then delete that table and import the file again. "
-                              f"[OperationalError: {FULL}]")
+    assert logged[0].endswith(f"Free up space, then import the file again. [OperationalError: {FULL}]")
+
+
+def test_a_partial_table_the_full_disk_will_not_let_go_is_said(store, tmp_path, small_batches, disk_fills,
+                                                               monkeypatch, fresh_log):
+    """Removing the table writes to the disk too. When that fails as well
+    the rows stay, and the message says a partial table was left rather
+    than that nothing was imported."""
+    def full(source_id):
+        raise sqlite3.OperationalError(FULL)
+
+    monkeypatch.setattr(store, "drop_source", full)
+    disk_fills(after=2)
+    done = store.wait_for_ingest_job(store.start_ingest_job("csv", _rows_csv(tmp_path / "big.csv", 35),
+                                                            name="big.csv")["job_id"], timeout=30)
+    assert done["error_kind"] == "disk_full"
+    assert done["error"].endswith(" free). 20 rows were left in a partial table that could not be removed.")
+    assert [s["row_count"] for s in store.list_sources()] == [20]
+    assert any(m.endswith("Free up space, then delete that table and import the file again. "
+                          f"[OperationalError: {FULL}]") for m in _errors())
+    assert any("could not be removed" in e["message"] for e in wlog.entries() if e["level"] == "warn")
 
 
 def test_a_job_that_kept_nothing_leaves_no_table(store, tmp_path, small_batches, disk_fills):
@@ -265,18 +297,19 @@ def test_a_job_that_kept_nothing_leaves_no_table(store, tmp_path, small_batches,
     assert store.list_sources() == []
 
 
-def test_a_json_job_counts_records(store, tmp_path, small_batches, disk_fills):
+def test_a_json_job_keeps_nothing_either(store, tmp_path, small_batches, disk_fills):
     p = tmp_path / "events.jsonl"
     p.write_text("".join(json.dumps({"id": i, "who": f"u{i}"}) + "\n" for i in range(25)), encoding="utf-8")
     disk_fills(after=1)
     done = store.wait_for_ingest_job(store.start_ingest_job("json", str(p))["job_id"], timeout=30)
     assert done["error_kind"] == "disk_full"
-    assert done["error"].endswith(" free). 10 records were kept as a partial table.")
+    assert done["error"].endswith(" free). Nothing was imported.")
+    assert store.list_sources() == []
 
 
 def test_a_sqlite_job_says_which_tables_it_finished(store, tmp_path, small_batches, monkeypatch):
     """A multi-table job: the first table lands, the disk fills on the
-    second. The message says both."""
+    second. The first is whole and stays; the second goes."""
     db = tmp_path / "evidence.sqlite"
     con = sqlite3.connect(db)
     for t in ("first", "second"):
@@ -298,9 +331,8 @@ def test_a_sqlite_job_says_which_tables_it_finished(store, tmp_path, small_batch
     job = store.start_ingest_job("sqlite", str(db), options={"tables": [{"table": "first"}, {"table": "second"}]})
     done = store.wait_for_ingest_job(job["job_id"], timeout=30)
     assert done["error_kind"] == "disk_full"
-    assert done["error"].endswith(
-        " free). The first table was imported, and 10 rows of the next were kept as a partial table.")
-    assert sorted(s["row_count"] for s in store.list_sources()) == [10, 25]
+    assert done["error"].endswith(" free). Only the first table was imported.")
+    assert [(s["name"], s["row_count"]) for s in store.list_sources()] == [("evidence.first", 25)]
 
 
 def test_any_other_failure_is_reported_as_it_was(store, tmp_path, small_batches, monkeypatch):
@@ -318,6 +350,8 @@ def test_any_other_failure_is_reported_as_it_was(store, tmp_path, small_batches,
     done = store.wait_for_ingest_job(store.start_ingest_job("csv", path)["job_id"], timeout=30)
     assert done["error_kind"] is None
     assert "disk I/O error" in done["error"] and "Out of disk space" not in done["error"]
+    # And keeps what committed, as any failure but a full disk does.
+    assert [s["row_count"] for s in store.list_sources()] == [10]
 
 
 def test_a_search_index_the_disk_stops_is_an_error_not_a_warning(store, write_csv, monkeypatch, fresh_log):
@@ -419,12 +453,13 @@ def test_an_upload_whose_spool_copy_fills_the_disk(client, monkeypatch):
 
 def test_a_synchronous_import_keeps_the_readers_account(client, store, small_batches, disk_fills):
     """A route that turned the reader's error into a 400 itself: the
-    message is the reader's, what it kept and all."""
+    message is the reader's, and the table is gone there too."""
     disk_fills(after=1)
     body = "".join(f"r{i},x\n" for i in range(25))
     r = client.post("/api/ingest/upload", files={"file": ("big.csv", io.BytesIO(("a,b\n" + body).encode()), "text/csv")})
     assert r.status_code == 507
-    assert r.json()["detail"].endswith(" free). 10 rows were kept as a partial table.")
+    assert r.json()["detail"].endswith(" free). Nothing was imported.")
+    assert store.list_sources() == []
 
 
 def test_any_route_that_hits_a_full_disk(client, store, monkeypatch):

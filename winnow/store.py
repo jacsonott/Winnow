@@ -2314,7 +2314,7 @@ def _kept_error(e: Exception, total: int) -> Exception:
     (ingest_csv's message), so the analyst can tell the table in the list
     is partial. With nothing kept the error is the reader's own: the table
     is dropped, and there is nothing to add. A full disk says so instead
-    (diskspace.stopped_error), kept rows and all."""
+    (diskspace.stopped_error), and _settle_failed_ingest removes the rows."""
     full = diskspace.stopped_error(e, total)
     if full is not None:
         return full
@@ -5629,7 +5629,8 @@ class Store:
                         batch.clear()
                 # A full disk is not the line's fault: the reader is up to
                 # a batch past the commit that failed. Said as what it is
-                # (diskspace.stopped_error), with what was kept.
+                # (diskspace.stopped_error); _settle_failed_ingest then
+                # removes what committed.
                 error = diskspace.stopped_error(e, total)
                 if error is None:
                     line = getattr(reader, "line_num", 0)
@@ -5655,11 +5656,7 @@ class Store:
         self._finish_source_columns(source_id, colmeta, decoded, name)
 
         if error is not None:
-            if total == 0:
-                # Nothing ever committed: a zero-row source in the table
-                # list is pure noise that looks like a real (empty) import.
-                self.drop_source(source_id)
-            raise error
+            raise self._settle_failed_ingest(source_id, total, error)
 
         if total:
             self._build_import_indexes(source_id)
@@ -5776,9 +5773,7 @@ class Store:
         decoded = _encoding_report(encoding, _cp1252_fallback_count() - fallback0)
         self._finish_source_columns(source_id, colmeta, decoded, name)
         if error is not None:
-            if total == 0:
-                self.drop_source(source_id)
-            raise error
+            raise self._settle_failed_ingest(source_id, total, error)
         if total:
             self._build_import_indexes(source_id)
         if build_fts and total:
@@ -6054,9 +6049,7 @@ class Store:
                                 "server leaves in its log when it stops without closing it (a crash or "
                                 "power loss). The text either side of each run was imported.")
         if error is not None:
-            if total == 0:
-                self.drop_source(source_id)
-            raise error
+            raise self._settle_failed_ingest(source_id, total, error)
         if total:
             self._build_import_indexes(source_id)
         if build_fts and total:
@@ -6484,12 +6477,7 @@ class Store:
             self.db.execute("UPDATE sources SET columns=? WHERE id=?", (json.dumps(colmeta), source_id))
 
         if error is not None:
-            # Rows that committed before the failure stay, with an accurate
-            # row_count (ingest_csv's partial-import contract). None did:
-            # an empty table would look exactly like a real empty import.
-            if not total:
-                self.drop_source(source_id)
-            raise error
+            raise self._settle_failed_ingest(source_id, total, error)
 
         if total:
             self._build_import_indexes(source_id)
@@ -6581,9 +6569,7 @@ class Store:
             self.db.execute("UPDATE sources SET columns=? WHERE id=?", (json.dumps(colmeta), source_id))
 
         if error is not None:
-            if total == 0:
-                self.drop_source(source_id)   # same no-husk rule as ingest_csv
-            raise error
+            raise self._settle_failed_ingest(source_id, total, error)
 
         if total:
             self._build_import_indexes(source_id)
@@ -6671,9 +6657,7 @@ class Store:
                             (json.dumps(colmeta), json.dumps(meta), source_id))
 
         if error is not None:
-            if total == 0:
-                self.drop_source(source_id)
-            raise error
+            raise self._settle_failed_ingest(source_id, total, error)
         if torn:
             wlog.record("warn", f"{name}: the last {torn:,} byte{'s' if torn != 1 else ''} are not a whole "
                                 f"{lay.size}-byte login record (a write cut short) — left out")
@@ -6840,9 +6824,7 @@ class Store:
             self.db.execute("UPDATE sources SET columns=? WHERE id=?", (json.dumps(colmeta), source_id))
 
         if error is not None:
-            if total == 0:
-                self.drop_source(source_id)   # same no-husk rule as ingest_csv
-            raise error
+            raise self._settle_failed_ingest(source_id, total, error)
 
         if total:
             self._build_import_indexes(source_id)
@@ -7033,9 +7015,7 @@ class Store:
         self._finish_source_columns(source_id, colmeta, decoded, name)
 
         if error is not None:
-            if total == 0:
-                self.drop_source(source_id)   # same no-husk rule as ingest_csv
-            raise error
+            raise self._settle_failed_ingest(source_id, total, error)
 
         if total:
             self._build_import_indexes(source_id)
@@ -7153,7 +7133,7 @@ class Store:
                     batch.clear()
             except Exception as e:
                 # The parser's own error stays the parser's; a full disk
-                # says so, with what was kept (diskspace.stopped_error).
+                # says so (diskspace.stopped_error).
                 error = diskspace.stopped_error(e, total) or e
 
         types = [infer_type([r[i] for r in sample]) for i in range(ncols)] if sample else ["text"] * ncols
@@ -7165,7 +7145,9 @@ class Store:
             self.db.execute("UPDATE sources SET columns=? WHERE id=?", (json.dumps(colmeta), source_id))
 
         if error is not None:
-            raise error
+            # An empty one stays, as it always has here (ingest_rows never
+            # had the no-husk rule); a full disk still takes the table.
+            raise self._settle_failed_ingest(source_id, total, error, drop_empty=False)
 
         if total:
             self._build_import_indexes(source_id)
@@ -7796,9 +7778,11 @@ class Store:
         n = len(results)
         first = f"the first {n} tables were" if n != 1 else "the first table was"
         if found is not None and found.kept:
+            # The next table's rows, when the full disk stopped their removal.
             outcome = (f"{first[0].upper()}{first[1:]} imported, and {found.kept:,} "
                        f"{found.unit if found.kept != 1 else found.unit[:-1]} of the next "
-                       f"{'were' if found.kept != 1 else 'was'} kept as a partial table")
+                       f"{'were' if found.kept != 1 else 'was'} left in a partial table that "
+                       "could not be removed")
         else:
             outcome = f"Only {first} imported"
         return outcome, "delete the tables it kept and import the file again"
@@ -9043,6 +9027,35 @@ class Store:
                 if source_id in ids:
                     out.append({"id": r["id"], "name": r["name"]})
         return out
+
+    def _settle_failed_ingest(self, source_id: int, total: int, error: Exception, *,
+                              drop_empty: bool = True) -> Exception:
+        """What becomes of the table an import reader was writing when it
+        failed, and the error it then raises.
+
+        A full disk takes the table with it, rows and all. Kept, it was a
+        partial table that looked complete in every list, and the analyst
+        had to find it and delete it before importing the file again —
+        which they have to do in full anyway. If the full disk stops the
+        removal too, the rows stay where they are and the DiskFullError
+        still counts them, so the message says a partial table was left.
+
+        Any other failure keeps what committed, with an accurate row_count
+        (ingest_csv's partial-import contract), unless nothing did: an
+        empty table would look exactly like a real empty import
+        (`drop_empty`)."""
+        full = diskspace.find_disk_full_error(error)
+        if full is not None:
+            try:
+                self.drop_source(source_id)
+            except Exception as e:  # noqa: BLE001 — the import's own error is the one to raise
+                wlog.record("warn", f"Table {source_id} ({total:,} rows) was left behind by an import "
+                                    f"the disk stopped, and could not be removed: {e}")
+            else:
+                full.kept = 0
+        elif not total and drop_empty:
+            self.drop_source(source_id)
+        return error
 
     def drop_source(self, source_id: int) -> None:
         """Delete a table and every sidecar keyed by its id.

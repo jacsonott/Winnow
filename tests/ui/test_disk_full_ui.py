@@ -8,7 +8,7 @@ analyst who had looked away for those six seconds saw nothing at all.
 
 So a failed upload now leaves an error row behind, as a failed import job
 always has, and a full disk is named on the badge, with one line under it
-(the drive, and what was kept) and a four-word toast — the first version
+(the drive, and what became of the import) and a four-word toast — the first version
 put every drive and what to do in both, and that was too much to read in
 a corner. The server's half (the 507, its line, the log) is
 tests/test_disk_full.py; here the upload is
@@ -109,7 +109,7 @@ def test_any_failed_upload_leaves_a_row(page, tmp_path, quiet_panel):
 def test_an_import_job_the_disk_stopped_says_out_of_space(page, quiet_panel):
     """The job's own row, from the poll's record: error_kind names the
     cause, and the badge says it instead of a bare ERROR."""
-    msg = "Out of disk space on D: (0 B free). 40,000 rows were kept as a partial table."
+    msg = "Out of disk space on D: (0 B free). Nothing was imported."
     page.evaluate("""(msg) => {
       __winnow.ingestJobs.push(
         { job_id: 991, name: 'evtx.csv', kind: 'csv', status: 'error', error: msg, error_kind: 'disk_full' },
@@ -124,12 +124,15 @@ def test_an_import_job_the_disk_stopped_says_out_of_space(page, quiet_panel):
     assert other.locator(".job-phase").inner_text().lower() == "error"
 
 
-def test_the_partial_table_a_failed_import_kept_appears(page, api, until, tmp_path, quiet_panel):
-    """"Kept as a partial table", says the message — and the table did not
-    show up in the list until something else happened to refresh it, long
-    after the message had gone. A real import is reported to the page as
-    failed (the way the server reports one the disk stopped: status error,
-    no source_ids), and the list has to pick its table up anyway."""
+def test_the_tables_a_failed_import_kept_appear(page, api, until, tmp_path, quiet_panel):
+    """A failed import can still have changed the list: a SQLite or Excel
+    one keeps the tables it finished ("Only the first table was
+    imported"), and a bad line keeps the rows before it. The partial table
+    a full disk used to leave did not show up until something else
+    happened to refresh the list, long after the message had gone. A real
+    import is reported to the page as failed (status error, no
+    source_ids, as the server reports one), and the list has to pick its
+    table up anyway."""
     name = "kept-partial.csv"
     path = tmp_path / name
     path.write_text("a,b\n1,2\n3,4\n", encoding="utf-8")
@@ -140,7 +143,7 @@ def test_the_partial_table_a_failed_import_kept_appears(page, api, until, tmp_pa
         for j in body["jobs"]:
             if j["name"] == name:
                 j.update(status="error", error_kind="disk_full", source_ids=[], result=None,
-                         error="Out of disk space on D: (0 B free). 2 rows were kept as a partial table.")
+                         error="Out of disk space on D: (0 B free). Only the first table was imported.")
         route.fulfill(response=resp, json=body)
 
     page.route("**/api/ingest/jobs", as_failed)

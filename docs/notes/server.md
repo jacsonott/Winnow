@@ -280,9 +280,9 @@ see [docs/notes/README.md](README.md) for the whole set.
   case file: …" (tests/test_quicklook.py) was being replaced with a
   generic one until that rule went in. Everything else goes to FastAPI's
   own `http_exception_handler` untouched. The 507's `detail` is one line
-  (`diskspace.brief`): the emptiest drive and its free space, and what was
-  kept when a reader stopped part way (a `DiskFullError` in the chain),
-  or an upload's size from its Content-Length, because the free space is
+  (`diskspace.brief`): the emptiest drive and its free space, and what
+  became of the import when a reader stopped part way (a `DiskFullError`
+  in the chain; normally nothing, see ingest.md), or an upload's size from its Content-Length, because the free space is
   measured after the partial copy was thrown away. An upload that did not
   fit (an `OSError`, not SQLite's) names the temp folder's drive only:
   the upload and its spool are written nowhere else. Every drive

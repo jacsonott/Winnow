@@ -68,8 +68,9 @@ cancel-drops-the-partial-source — driven through `ingest_csv`'s own
 multi-table sqlite jobs, spool deletion, close-with-running-job).
 `test_disk_full.py` covers a full disk (winnow/diskspace.py): each
 reader's job saying "Out of disk space" in one line (the emptiest drive
-and what it kept, rather than a line number) and logging the whole account
-(every drive, what to do, the raw error); the 507 for an upload whose
+and what became of the import, rather than a line number), logging the
+whole account (every drive, what to do, the raw error), and leaving no
+partial table unless removing it failed too, which it then says; the 507 for an upload whose
 temp folder filled while FastAPI was still parsing it (its load-bearing
 test: that one used to be a bare "There was an error parsing the body",
 logged nowhere); and that an HTTPException a route worded itself is left
@@ -78,7 +79,7 @@ message, a write raising ENOSPC — because CI cannot mount a filesystem
 small enough to fill; the messages asserted are the ones a real full
 tmpfs produced. tests/ui/test_disk_full_ui.py holds the panel to keeping
 a failed upload's row, the "out of space" badge, and the sidebar listing
-the partial table a failed import kept.
+the tables a failed import kept.
 `test_import_into_folder.py` covers choosing a table folder at import
 (`folder_id` on every route, `--folder`): its load-bearing tests are the
 stale id refused before anything is read (no job, no table), and the

@@ -352,9 +352,10 @@ export async function pollJobs() {
         // its column was removed, put back as it was, or marked failed
         // with its values cleared (Store._fail_derive_backfill).
         || j.kind === 'derive'
-        // And an import that failed part way keeps the rows it committed
-        // as a table its message points at ("kept as a partial table") —
-        // which then did not appear until something else refreshed the
+        // And an import that failed part way has changed the list too: a
+        // multi-table one keeps the tables it finished, a bad line keeps
+        // the rows before it, and a full disk takes away the table it was
+        // writing. None of it showed until something else refreshed the
         // list, long after the message had gone.
         || j.status === 'error')) {
       // navigate:false — a finished import refreshes the tab strip, the

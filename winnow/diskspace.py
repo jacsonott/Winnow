@@ -15,7 +15,7 @@ So every place an import can fail asks is_disk_full() about the exception
 it caught, chain and all, and when the answer is yes says so in two
 lengths. brief() is the one line the jobs panel and the 507 carry: the
 drive with the least room and what happened to the import ("Out of disk
-space on D: (0 B free). 40,000 rows were kept as a partial table.").
+space on D: (0 B free). Nothing was imported.").
 message() is the log's: every drive Winnow writes to with the folders on
 it, and what to do once there is room. The first version put all of that
 in the panel and the toast, and it was too much to read in a corner.
@@ -45,23 +45,31 @@ _FULL_WINERRORS = frozenset({39, 112})
 
 
 class DiskFullError(ValueError):
-    """An import reader that stopped because the disk filled, and how many
-    `unit`s (rows, lines, records) it had committed — which it keeps, as a
-    partial table. A ValueError, like every other import failure a reader
-    raises, so the routes that turn those into a 400 still do; the
-    handlers in server.py then find this in the chain and answer with
-    what it knows instead."""
+    """An import reader that stopped because the disk filled. `kept` is
+    how many `unit`s (rows, lines, records) are left in the case: none,
+    once the reader has removed what it committed
+    (Store._settle_failed_ingest) — a partial table looks complete in
+    every list, and the file has to be imported again in full anyway — or
+    what it had committed, when the full disk stopped the removal too. A ValueError, like every
+    other import failure a reader raises, so the routes that turn those
+    into a 400 still do; the handlers in server.py then find this in the
+    chain and answer with what it knows instead."""
 
     def __init__(self, kept: int = 0, unit: str = "rows"):
         self.kept = kept
         self.unit = unit
-        super().__init__(f"Out of disk space. {self.outcome}.")
+        super().__init__()
+
+    def __str__(self) -> str:
+        # Not fixed at construction: the reader settles `kept` after.
+        return f"Out of disk space. {self.outcome}."
 
     @property
     def outcome(self) -> str:
         if not self.kept:
             return "Nothing was imported"
-        return f"{_count(self.kept, self.unit)} {_were(self.kept)} kept as a partial table"
+        return (f"{_count(self.kept, self.unit)} {_were(self.kept)} left in a partial table "
+                "that could not be removed")
 
     @property
     def advice(self) -> str:
@@ -137,8 +145,8 @@ def find_disk_full_error(exc: BaseException | None) -> DiskFullError | None:
 
 def stopped_error(e: BaseException, total: int, unit: str = "rows") -> DiskFullError | None:
     """What an import reader raises when it stops part way because the
-    disk filled: a DiskFullError saying how many `unit`s it kept, with `e`
-    as its cause. None when `e` is anything else, so the reader raises its
+    disk filled: a DiskFullError counting the `total` `unit`s it had
+    committed (until it removes them), with `e` as its cause. None when `e` is anything else, so the reader raises its
     usual error. "Line 60,001: database or disk is full" read as if that
     line were the problem, and the line is only how far the reader had got
     when a commit, up to a batch behind it, failed."""
@@ -248,7 +256,7 @@ def brief(outcome: str | None, places: list[tuple[str, str]]) -> str:
     with the least room of those `places` are on, and `outcome` (a
     sentence, without its full stop) when there is one to tell.
 
-    Out of disk space on D: (0 B free). 40,000 rows were kept as a partial table.
+    Out of disk space on D: (0 B free). Nothing was imported.
 
     One drive, the emptiest, because that is the one to clear; the others
     and what to do once there is room are in the log (message())."""
@@ -264,10 +272,10 @@ def message(outcome: str | None, advice: str, places: list[tuple[str, str]]) -> 
     time: what happened, the free space on every drive with the folders on
     it, and what to do.
 
-    Out of disk space. 40,000 rows were kept as a partial table. The drive
-    holding the case (D:\\Cases) has 0 B free; the one holding the temp
-    folder (C:\\...\\Temp) has 12.4 GB. Free up space, then delete that
-    table and import the file again."""
+    Out of disk space. Nothing was imported. The drive holding the case
+    (D:\\Cases) has 0 B free; the one holding the temp folder
+    (C:\\...\\Temp) has 12.4 GB. Free up space, then import the file
+    again."""
     where = free_space(places)
     return ("Out of disk space." + (f" {outcome}." if outcome else "")
             + (f" {where}" if where else "") + f" Free up space, then {advice}.")
