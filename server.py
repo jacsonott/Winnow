@@ -741,7 +741,7 @@ CASE_HEADER = "X-Winnow-Case"
 # What a window may still ask while its case isn't the one open here: the
 # switch itself, the home screen's list, and the plumbing that has no case.
 _CASE_FREE_PATHS = ("/api/case/open", "/api/case/current", "/api/case/quicklook/new",
-                    "/api/cases", "/api/presence", "/api/goodbye", "/api/version",
+                    "/api/cases", "/api/case_groups", "/api/presence", "/api/goodbye", "/api/version",
                     "/api/shutdown", "/api/restart", "/api/log")
 
 
@@ -1059,8 +1059,64 @@ def api_case_current():
         return {"open": False, "case_token": None}
     # case_token is what the page sends back on every request from here on
     # (see the case guard): the case its state belongs to.
+    rec = WS.cases.find_by_path(STORE.path) or {}
+    group = rec.get("group") or ""
     return {"open": True, "path": STORE.path, "name": _case_display_name(STORE.path),
-            "temp": _is_temp_case(STORE.path), "case_token": _case_token()}
+            "temp": _is_temp_case(STORE.path), "case_token": _case_token(),
+            # The folder browser pins the group's folders for every case in
+            # the group (Import → Add from this machine…, Import a folder).
+            "group": group, "group_folders": WS.cases.group_folder_paths(group)}
+
+
+# ------------------------------------------------------------ group folders
+#
+# The folders a case group files under — see CaseRegistry's group folder
+# section in winnow/workspace.py. The first comes from the group's first
+# case; more are added, removed and reordered from the group's list on the
+# home screen.
+
+def _file_in_group(rec: dict) -> dict:
+    """After a case is created in a group or moved into one: a group with
+    no folder takes this case's."""
+    if rec.get("group"):
+        WS.cases.claim_group_folder(rec["id"])
+    return rec
+
+
+class GroupFoldersBody(BaseModel):
+    group: str
+    add: str | None = None
+    remove: str | None = None
+    make_first: str | None = None
+
+
+@app.get("/api/case_groups")
+def api_case_groups():
+    return {"groups": WS.cases.group_folders()}
+
+
+@app.post("/api/case_groups/folders")
+def api_case_group_folders(body: GroupFoldersBody):
+    """One change to a group's folders: add one, remove one, or make one
+    the first, where new cases in the group start."""
+    group = (body.group or "").strip()
+    if not group:
+        raise HTTPException(400, "Name the group")
+    ops = [k for k in ("add", "remove", "make_first") if (getattr(body, k) or "").strip()]
+    if len(ops) != 1:
+        raise HTTPException(400, "Say one change: add, remove or make_first")
+    if not any(c.get("group") == group for c in WS.cases.list()):
+        raise HTTPException(404, f"No case is in a group named {group}")
+    folder = getattr(body, ops[0]).strip()
+    if ops[0] == "add":
+        folder = os.path.abspath(os.path.expanduser(folder))
+        if not os.path.isdir(folder):
+            raise HTTPException(400, f"No folder at {folder}")
+    elif not any(os.path.normcase(p) == os.path.normcase(os.path.abspath(folder))
+                 for p in WS.cases.group_folder_paths(group)):
+        raise HTTPException(404, f"{folder} is not one of {group}’s folders")
+    WS.cases.edit_group_folders(group, **{ops[0]: folder})
+    return api_case_groups()
 
 
 # ------------------------------------------------------------ quick-look cases
@@ -2394,6 +2450,7 @@ def _case_save_as(request: Request, body: CaseSaveAsBody):
         # whose file was deleted outside Winnow) as it was; the dialog's
         # name and group are what the analyst just typed.
         rec = WS.cases.update(rec["id"], name=name, group=group)
+    _file_in_group(rec)
     WS.cases.touch_opened(rec["id"])
     with contextlib.suppress(Exception):
         instances.set_case(dest)
@@ -2787,13 +2844,13 @@ def api_cases_create(request: Request, body: CaseCreate):
             _open_store(body.path).close()
         except Exception as e:
             raise HTTPException(400, f"Could not create case file: {e}")
-    return WS.cases.create(body.path, body.name, body.group, body.notes)
+    return _file_in_group(WS.cases.create(body.path, body.name, body.group, body.notes))
 
 
 @app.put("/api/cases/{case_id}")
 def api_cases_update(case_id: int, body: CaseUpdate):
     try:
-        return WS.cases.update(case_id, name=body.name, group=body.group, notes=body.notes)
+        return _file_in_group(WS.cases.update(case_id, name=body.name, group=body.group, notes=body.notes))
     except KeyError as e:
         raise HTTPException(404, str(e))
 

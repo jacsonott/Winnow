@@ -416,13 +416,19 @@ export function groupCombo(input) {
    the open case's folder, the last folder used, and any the analyst has
    pinned — an evidence share is usually the same folder all week), the
    folder on the right as a list with the Tables manager's column heads,
-   which are also the sort. */
-export function openFolderBrowser(startPath, onSelect, onCancel, { mode = 'folder' } = {}) {
+   which are also the sort.
+
+   A case group's folders are pinned on top for every case in the group,
+   with no ✕: the group pinned them, not the analyst. `group` names them
+   — {name, folders: [path, …]} — or null for none; left out, it is the
+   open case's group, and the browser opens in its first folder when no
+   start path is given. */
+export function openFolderBrowser(startPath, onSelect, onCancel, { mode = 'folder', group, title } = {}) {
   const filesMode = mode === 'files';
   let listing = null;
   const picked = new Map(); // path -> {path, name, size}, insertion-ordered
-  const places = { home: null, caseDir: null };
-  modal(filesMode ? 'Add files from this machine' : 'Choose a folder', (b) => {
+  const places = { home: null, caseDir: null, group: group === undefined ? null : group };
+  modal(title || (filesMode ? 'Add files from this machine' : 'Choose a folder'), (b) => {
     const SORT_KEY = 'winnow.browse.sort';
     let sort = { by: 'name', dir: 'asc' };
     try { sort = { ...sort, ...JSON.parse(localStorage.getItem(SORT_KEY) || '{}') }; } catch { /* default */ }
@@ -433,13 +439,24 @@ export function openFolderBrowser(startPath, onSelect, onCancel, { mode = 'folde
     const entries = () => {
       const out = [];
       const seen = new Set();
-      const add = (path, label, group, title) => {
+      const add = (path, label, group, title, extra) => {
         if (!path || seen.has(path)) return;
         seen.add(path);
         // Marks around the path keep its leading / where it belongs in the
         // rtl line that shows the path's end (.browse-panes .side-rail-hint).
-        out.push({ key: path, label, group, hint: `\u200e${path}\u200e`, title: title || path });
+        out.push({ key: path, label, group, hint: `\u200e${path}\u200e`, title: title || path, ...extra });
       };
+      // First, so a group folder that is also one of the places below is
+      // listed once, as the group's.
+      if (places.group) {
+        const g = places.group.name;
+        // By the folder's own name, as pins are: with two or more, the
+        // group's name on each would not say which is which.
+        for (const path of places.group.folders || []) {
+          add(path, leaf(path), 'Places', `${g}’s folder — pinned for every case in ${g}\n${path}`,
+            { fixed: 'group', fixedTitle: `Pinned for every case in ${g}` });
+        }
+      }
       add(places.home, 'Home', 'Places');
       add(S.casesDir || S.defaultCasesDir, 'Cases folder', 'Places', 'Where new case files go (Settings → Cases)');
       add(places.caseDir, 'This case’s folder', 'Places');
@@ -720,13 +737,27 @@ export function openFolderBrowser(startPath, onSelect, onCancel, { mode = 'folde
 
     // Where home and the open case's folder are, for the side list. Home is
     // the server's default listing; asked for once, quietly.
-    if (startPath) api('/api/browse_dir?path=').then((r) => { places.home = r.path; rail.paint(); }).catch(() => {});
-    api('/api/case/current').then((c) => {
+    const askHome = () => api('/api/browse_dir?path=').then((r) => { places.home = r.path; rail.paint(); }).catch(() => {});
+    if (startPath) askHome();
+    const current = api('/api/case/current').then((c) => {
       const p = c && c.path;
-      if (p) { places.caseDir = p.replace(/[\\/][^\\/]*$/, ''); rail.paint(); }
+      if (p) places.caseDir = p.replace(/[\\/][^\\/]*$/, '');
+      if (group === undefined && c && c.group && (c.group_folders || []).length) {
+        places.group = { name: c.group, folders: c.group_folders };
+      }
+      rail.paint();
     }).catch(() => {});
     rail.paint();
-    load(startPath, { fallback: true });
+    // With nowhere to start, the group's first folder is where this
+    // case's files usually are — asked first, then listed.
+    if (startPath) load(startPath, { fallback: true });
+    else {
+      current.then(() => {
+        const there = places.group && (places.group.folders || [])[0];
+        if (there) askHome();
+        load(there || startPath, { fallback: true });
+      });
+    }
     paintUse();
   }, { wide: true, tall: true, focus: '.browse-path' });
 }
@@ -755,7 +786,7 @@ export async function openNewCaseModal(state = {}) {
   // Read before the dialog draws, so the side list is whole on its first
   // frame. A failed read still leaves None, which makes a case like any
   // other.
-  const bundles = await listBundles().catch(() => []);
+  const [bundles] = await Promise.all([listBundles().catch(() => []), loadCaseGroups()]);
   const byId = new Map(bundles.map((bd) => [String(bd.id), bd]));
   // What was typed into a profile's values, by variable name: switching
   // to another profile and back, or to one asking for the same
@@ -767,7 +798,14 @@ export async function openNewCaseModal(state = {}) {
     const caseBox = el('div', 'nc-case');
     const nameInput = ncInput(state.name || '', 'e.g. ACME intrusion', 'nc-name');
     const groupInput = ncInput(state.group || '', 'Optional');
-    let chosenDir = state.chosenDir || S.casesDir || S.defaultCasesDir || 'cases';
+    // Where the file goes: the cases folder (saving a quick look, the
+    // folder it already sits in), unless the group has folders of its
+    // own, when it is the group's first. The group's wins until the
+    // analyst browses somewhere else ('browse') or types a path; leaving
+    // the group puts the base back.
+    const baseDir = state.baseDir || state.chosenDir || S.casesDir || S.defaultCasesDir || 'cases';
+    let chosenDir = state.chosenDir || baseDir;
+    let dirFrom = state.dirFrom || 'base';   // 'base' | 'group' | 'browse'
     const pathInput = ncInput(state.path || joinPath(chosenDir, slugify(state.name || '') + CASE_EXT), '', 'mono nc-path');
     let pathTouched = state.pathTouched || false;
     const browseBtn = el('button', 'btn ghost', 'Browse…');
@@ -776,15 +814,19 @@ export async function openNewCaseModal(state = {}) {
       for (const [k, inp] of varInputs) typed.set(k, inp.value);
       const snapshot = {
         name: nameInput.value, group: groupInput.value, path: pathInput.value,
-        chosenDir, pathTouched, saveQuickLook: state.saveQuickLook,
+        chosenDir, dirFrom, baseDir, pathTouched, saveQuickLook: state.saveQuickLook,
         profile: frame.current(), vars: Object.fromEntries(typed),
       };
+      const g = groupInput.value.trim();
+      const folders = groupFoldersOf(g).map((f) => f.path);
       openFolderBrowser(
         chosenDir,
         (dir) => openNewCaseModal({
-          ...snapshot, chosenDir: dir, pathTouched: false, path: joinPath(dir, slugify(snapshot.name) + CASE_EXT),
+          ...snapshot, chosenDir: dir, dirFrom: folders.some((p) => sameDir(dir, p)) ? 'group' : 'browse',
+          pathTouched: false, path: joinPath(dir, slugify(snapshot.name) + CASE_EXT),
         }),
         () => openNewCaseModal(snapshot),
+        { group: folders.length ? { name: g, folders } : null },
       );
     };
     const pathBox = el('div', 'dlg-input');
@@ -792,7 +834,87 @@ export async function openNewCaseModal(state = {}) {
     const pair = el('div', 'dlg-pair');
     pair.append(captioned('Name', nameInput),
       captioned('Group', groupCombo(groupInput)));
-    caseBox.append(pair, captioned('Case file path', pathBox));
+    // What the group does with the file, said under its path.
+    const groupNote = el('p', 'fb-help nc-group-note');
+    groupNote.setAttribute('aria-live', 'polite');
+    caseBox.append(pair, captioned('Case file path', pathBox, groupNote));
+
+    const fitPath = () => {
+      if (!pathTouched) pathInput.value = joinPath(chosenDir, slugify(nameInput.value) + CASE_EXT);
+    };
+    function followGroup() {
+      if (dirFrom !== 'browse') {
+        const first = groupFoldersOf(groupInput.value)[0];
+        chosenDir = first ? first.path : baseDir;
+        dirFrom = first ? 'group' : 'base';
+        fitPath();
+      }
+      paintGroupNote();
+    }
+    const useFolder = (path, label) => {
+      const use = el('button', 'btn ghost mb-small nc-use-group', label);
+      use.type = 'button';
+      use.title = path;
+      use.onclick = () => {
+        dirFrom = 'group';
+        chosenDir = path;
+        pathTouched = false;
+        fitPath();
+        paintGroupNote();
+      };
+      return use;
+    };
+    function paintGroupNote() {
+      const g = groupInput.value.trim();
+      const folders = groupFoldersOf(g);
+      groupNote.replaceChildren();
+      groupNote.hidden = !g;
+      if (!g) return;
+      const dir = dirOf(pathInput.value.trim());
+      const here = folders.find((f) => sameDir(dir, f.path));
+      const names = folderLabels(folders.map((f) => f.path));
+      const labels = new Map(folders.map((f, i) => [f, names[i]]));
+      if (here) {
+        const by = here.from_case ? `, set by its first case, ${here.from_case.name}` : '';
+        const others = folders.filter((f) => f !== here);
+        if (!others.length) {
+          groupNote.append(`${g}’s folder${by}.`);
+          return;
+        }
+        groupNote.append(`One of ${g}’s ${folders.length} folders${by}. `
+          + (others.length === 1 ? 'Its other folder:' : 'Its other folders:'));
+        for (const f of others) groupNote.append(useFolder(f.path, labels.get(f)));
+        return;
+      }
+      if (folders.length) {
+        if (folders.length === 1) {
+          groupNote.append(`Not in ${g}’s folder, ${folders[0].path}. `, useFolder(folders[0].path, `Use ${g}’s folder`));
+        } else {
+          groupNote.append(`Not in any of ${g}’s ${folders.length} folders. Use:`);
+          for (const f of folders) groupNote.append(useFolder(f.path, labels.get(f)));
+        }
+        // Somewhere new for this group: one click makes it one of its
+        // folders, pinned for every case in it from then on.
+        const add = el('button', 'btn ghost mb-small nc-add-group-folder', `Add this folder to ${g}`);
+        add.type = 'button';
+        add.title = `${dir}: pinned when importing into any case in ${g}`;
+        add.onclick = async () => {
+          try {
+            S.caseGroups = await post('/api/case_groups/folders', { group: g, add: dir });
+          } catch (e) {
+            toast('Could not add the folder: ' + e.message, 6000);
+            return;
+          }
+          dirFrom = 'group';
+          paintGroupNote();
+        };
+        groupNote.append(add);
+        return;
+      }
+      groupNote.append(`${g} ${groupListed(g) ? 'has no folder yet' : 'is a new group'}, so this folder becomes its folder: `
+        + `new cases in ${g} start here, and importing into them has it pinned.`);
+    }
+    groupInput.addEventListener('input', followGroup);
 
     const varInputs = new Map();     // variable name -> input, for the chosen profile
     const chosen = () => byId.get(frame.current()) || null;    // null is None
@@ -852,10 +974,9 @@ export async function openNewCaseModal(state = {}) {
     foot.append(cancel, go);
     b.append(foot);
 
-    nameInput.oninput = () => {
-      if (!pathTouched) pathInput.value = joinPath(chosenDir, slugify(nameInput.value) + CASE_EXT);
-    };
-    pathInput.oninput = () => { pathTouched = true; };
+    nameInput.oninput = fitPath;
+    pathInput.oninput = () => { pathTouched = true; paintGroupNote(); };
+    followGroup();
     // Enter in a box makes the case, as the main button would. Not in
     // Group: Enter there picks one of the groups it offers.
     b.addEventListener('keydown', (e) => {
@@ -1316,7 +1437,76 @@ function caseGroupHead(label, cases, { code }) {
   const latest = latestOpened(cases);
   h.append(el('span', 'tables-group-meta',
     `${plural(cases.length, 'case')} · ${rows.toLocaleString()} rows` + (latest ? ` · opened ${openedAgo(latest)}` : '')));
+  const folders = code ? groupFoldersOf(label) : [];
+  if (folders.length) h.title = `${label}’s folder${folders.length > 1 ? 's' : ''}:\n${folders.map((f) => f.path).join('\n')}`;
   return h;
+}
+
+/* A group's own list opens with its folders: where + New case files the
+   group's cases, and the folders pinned in the folder browser when
+   importing into any of them. The first is where new cases start; it
+   came from the group's first case, which is named beside it. More are
+   added here, any one can be made the first, and any can be removed —
+   nothing on disk changes, the group just stops using it. With none
+   left, the next case filed in the group gives it one again. */
+export function groupFolderStrip(group) {
+  const strip = el('div', 'home-group-folder');
+  strip.dataset.group = group;
+  const folders = groupFoldersOf(group);
+  const change = async (body, what) => {
+    try {
+      S.caseGroups = await post('/api/case_groups/folders', { group, ...body });
+    } catch (e) {
+      toast(`Could not ${what}: ${e.message}`, 6000);
+      return false;
+    }
+    renderHome();
+    return true;
+  };
+
+  const head = el('div', 'hgf-head');
+  head.append(el('span', 'hgf-label', folders.length > 1 ? 'Group folders' : 'Group folder'));
+  if (!folders.length) head.append(el('span', 'hgf-path hgf-none', `None — the next case filed in ${group} sets it`));
+  const add = el('button', 'btn ghost mb-small hgf-add', 'Add folder…');
+  add.type = 'button';
+  add.title = `Another folder for ${group}, pinned when importing into any case in it`;
+  add.onclick = () => openFolderBrowser((folders[0] && folders[0].path) || S.casesDir || S.defaultCasesDir || undefined,
+    async (dir) => {
+      if (!(await change({ add: dir }, 'add the folder'))) return;
+      $('modal').hidden = true;
+      toast(`Added ${dir} to ${group}`);
+    }, () => { $('modal').hidden = true; }, { group: null, title: `Add a folder to ${group}` });
+  head.append(add);
+  strip.append(head);
+
+  const many = folders.length > 1;
+  folders.forEach((f, i) => {
+    const row = el('div', 'hgf-row');
+    row.dataset.path = f.path;
+    // Shown from its end (rtl, as the folder browser's places are); the
+    // marks keep the leading / at the front.
+    const path = el('span', 'hgf-path mono', `\u200e${f.path}\u200e`);
+    path.title = f.path;
+    row.append(path, el('span', 'hgf-how', f.from_case ? `set by its first case, ${f.from_case.name}` : ''));
+    if (many && i === 0) {
+      const first = el('span', 'hgf-first', 'New cases start here');
+      first.title = `+ New case files a case in ${group} here`;
+      row.append(first);
+    } else if (many) {
+      const mk = el('button', 'btn ghost mb-small hgf-make-first', 'Start new cases here');
+      mk.type = 'button';
+      mk.title = `+ New case files a case in ${group} here from now on`;
+      mk.onclick = () => change({ make_first: f.path }, 'move the folder');
+      row.append(mk);
+    }
+    const rm = el('button', 'btn ghost mb-small hgf-remove', 'Remove');
+    rm.type = 'button';
+    rm.title = `${group} stops using this folder. Nothing on disk changes.`;
+    rm.onclick = () => change({ remove: f.path }, 'remove the folder');
+    row.append(rm);
+    strip.append(row);
+  });
+  return strip;
 }
 
 /* A section's pane: the Tables manager's Every table, for cases. A filter
@@ -1358,6 +1548,7 @@ function buildCasesPane(section, sections, frame) {
     const foot = el('div', 'side-preview-foot');
     foot.append(el('p', 'fb-help', 'Click a case to open it. Drop files on a case to import them into it, or anywhere else for a quick look.'));
     box.append(head, scroller, foot);
+    if (section.id.startsWith('group:')) pane.append(groupFolderStrip(section.title));
     pane.append(top, box);
 
     function paint() {
@@ -1495,9 +1686,44 @@ export function renderHome() {
 }
 
 export async function refreshCases() {
-  try { S.cases = await api('/api/cases'); } catch { S.cases = []; }
+  const [cases] = await Promise.all([api('/api/cases').catch(() => []), loadCaseGroups()]);
+  S.cases = cases;
   renderHome();
 }
+
+/* Each case group's folders. A failed read leaves what was there: no
+   folder is a working answer everywhere. */
+export async function loadCaseGroups() {
+  try { S.caseGroups = await api('/api/case_groups'); } catch { /* keep the last answer */ }
+  return S.caseGroups;
+}
+
+/* A group's folders, first one first: [{path, added_at, from_case}], or
+   [] for none (and for a group no case is in yet). */
+export function groupFoldersOf(name) {
+  const g = (name || '').trim();
+  const rec = g && S.caseGroups.groups && S.caseGroups.groups[g];
+  return (rec && rec.folders) || [];
+}
+
+// Whether a case is in the group already, folders or not.
+const groupListed = (name) => !!(S.caseGroups.groups && S.caseGroups.groups[(name || '').trim()]);
+
+/* Short names for a group's folders, for buttons: each folder's own name,
+   or its last two parts where two of them share one. */
+function folderLabels(paths) {
+  const parts = (p) => String(p).replace(/[\\/]+$/, '').split(/[\\/]/);
+  const leaf = (p) => parts(p).slice(-1)[0] || p;
+  const seen = new Map();
+  for (const p of paths) seen.set(leaf(p), (seen.get(leaf(p)) || 0) + 1);
+  return paths.map((p) => (seen.get(leaf(p)) > 1 ? parts(p).slice(-2).join('/') : leaf(p)));
+}
+
+const sameDir = (a, b) => {
+  const norm = (p) => String(p || '').replace(/[\\/]+$/, '').replace(/\\/g, '/');
+  return !!a && !!b && norm(a) === norm(b);
+};
+const dirOf = (p) => String(p || '').replace(/[\\/][^\\/]*$/, '');
 
 /* The quick-look banner and its three exits. Save promotes the temp case
    to a real one (the file moves out of quicklook/ and lands on the home

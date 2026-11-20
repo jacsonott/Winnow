@@ -2138,6 +2138,48 @@ see [docs/notes/README.md](README.md) for the whole set.
     was a datalist, see the theming rules at the top).
   tests/ui/test_new_case_dialog.py, test_case_variables_ui.py,
   test_home_fixes.py, test_quicklook_banner.py.
+- **A case group's folders** — home.js `groupFoldersOf`/`loadCaseGroups`,
+  `groupFolderStrip`; workspace.py `CaseRegistry`'s group folder section;
+  `GET /api/case_groups`, `POST /api/case_groups/folders` (one of `add`,
+  `remove`, `make_first`), and `group`/`group_folders` on
+  `/api/case/current`. A group has a list; the first is where + New case
+  starts a case in the group, and the folder browser pins them all.
+  - **The record lives under `cases.json` → `groups`**, keyed by group
+    name (a group is free text on each case, not a record of its own),
+    so later per-group settings have somewhere to go. `_save` carries it
+    through every other registry write; a write that rebuilt the file
+    from the case list alone dropped it.
+  - **The first case's folder is taken once and kept**:
+    `claim_group_folder` runs after a create, an edit and a quick look's
+    Save as a case (`server._file_in_group`), and does nothing when the
+    group has a folder. A group from before the record reads as its
+    oldest case's folder (lowest id), so every group has one from the
+    start; the first edit writes that down before changing it, so
+    removing it leaves none instead of bringing it back. A record with
+    every folder removed (`folders: []`) is listed, with none, and the
+    next case filed in the group fills it with its own folder. The new
+    case note says so in that state, as it does for a new group.
+  - **+ New case follows the group until the analyst says otherwise.**
+    `dirFrom` is `base` (the cases folder, or the quick look's), `group`
+    or `browse`; a group with a folder moves the path to its first while
+    it isn't `browse` and the path wasn't typed, and leaving the group
+    puts `base` back. The line under the path (`.nc-group-note`) is the
+    one sentence the dialog adds: it says what the group does with the
+    file, which is nowhere else on screen, offers the group's other
+    folders by name (`folderLabels`: the last two parts where two share a
+    name), and, for a path in none of them, **Add this folder to**
+    *group*. That add goes straight to the server, so it needs the folder
+    to exist already, and says so in a toast when it doesn't.
+  - **The folder browser pins the group's folders as `fixed`** (sideRail:
+    first in Pinned, no ☆/✕, its `fixed` word where the pin goes, each
+    by its own name since the group's would say the same on all of them),
+    listed before the places so a group folder that is also the case's
+    folder shows once, as the group's. With no start path it asks
+    `/api/case/current` first and opens in the first folder;
+    `S.lastBrowsePath` still wins once something was picked. `group:
+    null` turns it off (Add folder… on the group's list), and + New
+    case's Browse… passes the dialog's group rather than the open case's.
+  tests/test_case_group_folders.py, tests/ui/test_group_folder_ui.py.
 - **A header set's default layout seeds a table once, so it needs its
   own way onto the rest** (the table menu's Layout section with the
   default chosen; columns.js `applyDefaultLayout` is the same as a

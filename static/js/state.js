@@ -126,6 +126,7 @@ export const S = {
   },
   savedFilterCursor: -1,   // index into filtersForCurrentSource(), for [ and ] cycling
   cases: [],               // home screen's case registry, from workspace/cases.json
+  caseGroups: { groups: {} }, // each case group's folders, first one first: {name: {folders: [{path, added_at, from_case}]}} — GET /api/case_groups, see loadCaseGroups
   homeSearch: '',          // home screen's filter over case names, groups and notes, persisted across re-renders
   homeSection: 'recent',   // the home screen's side-list section: 'recent' | 'all' | 'group:<name>' | 'nogroup'
   homeSort: 'opened',      // the home screen's sort column: 'opened' | 'name' | 'source_count' | 'row_count' | 'tagged_row_count'

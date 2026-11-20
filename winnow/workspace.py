@@ -7,7 +7,8 @@ no-CDN rule).
 Thirteen small stores, each backed by its own JSON file under workspace/.
 Adding one means adding it here too — this list read "eight" for three
 stores longer than it was true:
-  cases.json              the home screen's case registry
+  cases.json              the home screen's case registry, and the folders
+                           each case group files under (groups)
   filters.json            saved/cyclable filters ([ and ] in the grid) — also
                            the one mechanism behind the "suggested filter"
                            banner a matching header set gets on open; there's
@@ -310,10 +311,130 @@ class CaseRegistry:
     def _load(self) -> list[dict]:
         return _read(self.FILE, {"cases": []})["cases"]
 
-    def _save(self, items: list[dict], next_id: int | None = None) -> None:
+    def _save(self, items: list[dict], next_id: int | None = None,
+              groups: dict | None = None) -> None:
         data = _read(self.FILE, {"cases": []})
         floor = max(_next_id(items), int(data.get("next_id") or 0), next_id or 0)
-        _write(self.FILE, {"cases": items, "next_id": floor})
+        out = {"cases": items, "next_id": floor}
+        # The groups' folders ride along on every save; a write about the
+        # cases must not drop them.
+        kept = groups if groups is not None else data.get("groups")
+        if kept:
+            out["groups"] = kept
+        _write(self.FILE, out)
+
+    # ------------------------------------------------ group folders
+    #
+    # A case group is free text on each case, not a record of its own, so
+    # what belongs to a group is kept beside the list, under "groups", by
+    # the group's name: {name: {"folders": [{path, added_at, from_case}]}}.
+    # A group can have several folders. The first is where + New case
+    # starts a case in the group; the folder browser pins them all for
+    # every case in it.
+    #
+    # The first folder comes from the group's first case: filing a case
+    # in a group with no record (or with every folder removed) records
+    # that case's folder, with the case's id as from_case. More are added,
+    # removed and reordered from the group's list on the home screen. A
+    # group from before this record has none on file; until one is
+    # written it reads as its oldest case's folder (lowest id), so every
+    # group has a folder from the start.
+
+    def _group_records(self) -> dict:
+        data = _read(self.FILE, {"cases": []})
+        groups = data.get("groups")
+        return {k: dict(v) for k, v in groups.items() if isinstance(v, dict)} if isinstance(groups, dict) else {}
+
+    def _store_group_records(self, records: dict) -> None:
+        self._save(self._load(), groups=records)
+
+    @staticmethod
+    def _oldest_folder(items: list[dict], group: str) -> list[dict]:
+        first = min((c for c in items if c.get("group") == group), key=lambda c: c["id"], default=None)
+        if first is None:
+            return []
+        return [{"path": os.path.dirname(first["path"]), "added_at": None, "from_case": first["id"]}]
+
+    def group_folders(self) -> dict:
+        """{group name: {"folders": [{path, added_at, from_case: {id, name}
+        | None}]}} for every group that has a case in it, its first folder
+        first. A group with no case left is not listed: it isn't anywhere
+        on screen to have one."""
+        with _LOCK:
+            items = self._load()
+            records = self._group_records()
+        by_id = {c["id"]: c for c in items}
+        out = {}
+        for group in sorted({c.get("group") for c in items if c.get("group")}):
+            rec = records.get(group)
+            folders = rec.get("folders") if rec is not None else self._oldest_folder(items, group)
+            listed = []
+            for f in folders or []:
+                if not isinstance(f, dict) or not f.get("path"):
+                    continue
+                who = by_id.get(f.get("from_case"))
+                listed.append({"path": f["path"], "added_at": f.get("added_at"),
+                               "from_case": {"id": who["id"], "name": who["name"]} if who else None})
+            out[group] = {"folders": listed}
+        return out
+
+    def group_folder_paths(self, group: str) -> list[str]:
+        """The group's folders, first one first; [] for no group."""
+        if not group:
+            return []
+        return [f["path"] for f in (self.group_folders().get(group) or {}).get("folders", [])]
+
+    def claim_group_folder(self, case_id: int) -> None:
+        """A case filed in a group with no folder gives the group one.
+        Called whenever a case is created in a group or moved into one.
+        A group never written down takes its oldest case's folder, which
+        is this case's when the group is new; one whose folders were all
+        removed takes this case's. A group that has a folder keeps what it
+        has, wherever this case was filed."""
+        with _LOCK:
+            items = self._load()
+            rec = next((c for c in items if c["id"] == case_id), None)
+            group = (rec or {}).get("group")
+            if not group:
+                return
+            records = self._group_records()
+            if group not in records:
+                folders = self._oldest_folder(items, group)
+            elif not records[group].get("folders"):
+                folders = [{"path": os.path.dirname(rec["path"]), "added_at": None, "from_case": rec["id"]}]
+            else:
+                return
+            folders[0]["added_at"] = _now()
+            records[group] = {**records.get(group, {}), "folders": folders}
+            self._store_group_records(records)
+
+    def edit_group_folders(self, group: str, *, add: str | None = None, remove: str | None = None,
+                           make_first: str | None = None) -> None:
+        """Add a folder to the group (at the end), take one off, or move
+        one to the front, where new cases in the group start. A group still reading its oldest case's folder
+        has that written down first, so taking it off leaves none rather
+        than bringing it back."""
+        with _LOCK:
+            items = self._load()
+            records = self._group_records()
+            rec = records.get(group)
+            folders = list(rec.get("folders") or []) if rec is not None else self._oldest_folder(items, group)
+            if rec is None and folders:
+                folders[0]["added_at"] = _now()
+
+            def same(f: dict, p: str) -> bool:
+                return os.path.normcase(os.path.abspath(f["path"])) == os.path.normcase(os.path.abspath(p))
+
+            if add:
+                add = os.path.abspath(add)
+                if not any(same(f, add) for f in folders):
+                    folders.append({"path": add, "added_at": _now(), "from_case": None})
+            if remove:
+                folders = [f for f in folders if not same(f, remove)]
+            if make_first:
+                folders.sort(key=lambda f: not same(f, make_first))
+            records[group] = {**(rec or {}), "folders": folders}
+            self._store_group_records(records)
 
     def _allocate_id(self, items: list[dict]) -> int:
         data = _read(self.FILE, {"cases": []})

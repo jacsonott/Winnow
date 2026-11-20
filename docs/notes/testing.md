@@ -94,6 +94,15 @@ stale id refused before anything is read (no job, no table), and the
 folder deleted mid-import leaving the import done and the mirrored
 subfolder at the top level rather than under a parent nothing lists;
 tests/ui/test_import_into_folder_ui.py drives both import windows.
+`test_case_group_folders.py` covers a case group's folders: its
+load-bearing tests are that a later case, or the first case leaving,
+doesn't move the first case's folder, that removing every folder lets the
+next case set one while removing the oldest case's derived one doesn't
+bring it back, and that the registry's other writes keep the folders;
+tests/ui/test_group_folder_ui.py drives + New case (the group's folders
+offered under the path, and Add this folder to), the pinned folders in
+Add from this machine…, and Add folder…/Start new cases here/Remove on
+the home screen.
 `test_cancel_op.py` covers cancellable builds, using a
 catastrophic-backtracking regex filter as a reliably-slow build to
 interrupt; its key regression assert is that the *previous* view still
