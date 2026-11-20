@@ -73,7 +73,9 @@ while you try different options.
 1. Pick what to make from the list. Every operation in the tables below
    has its own entry, except the timestamp formats: they share one entry,
    **Parse a timestamp**, and you choose the format from its **Format**
-   list.
+   list: the built-in formats, then **Your formats** (the ones you saved,
+   and **Custom pattern** for writing a new one; see
+   [Custom patterns](#custom-patterns)).
 2. **Parse column** — the column to read. Opened from a header it is that
    column. Opened from the table menu it starts on the first column that
    looks like a timestamp: a datetime column, else one whose values or
@@ -102,7 +104,8 @@ a format yourself, changing to a different entry and back keeps it; a new
 where the cursor starts, to narrow it: `json`, `base64`, `lookup`. A
 timestamp format is found through **Parse a timestamp**, which then shows
 the format that matched (`filetime` shows *Windows FILETIME*); click it
-and that format is picked. The arrow keys move through the list, and
+and that format is picked. Your saved formats are found by name the same
+way. The arrow keys move through the list, and
 `Enter` in the search box picks the first match. `Esc` clears the
 search; with the search empty, it closes the dialog.
 
@@ -159,7 +162,7 @@ UTC by definition. A value that carries its own offset (`Z`, `UTC`, `GMT`,
 exactly as written, unless you fill in **Source UTC offset** (`-05:00`,
 `+0530`, `+5`), a fixed offset Winnow subtracts to reach UTC. An offset in
 the value wins over the setting. Winnow never guesses daylight saving: in
-the ISO 8601, dd Mmm yyyy, Mmm dd yyyy and US formats, a value ending in a zone it
+the ISO 8601, dd Mmm yyyy, Mmm dd yyyy and US formats and in custom patterns, a value ending in a zone it
 can't convert, such as `EST` or `Europe/Paris`, counts as unparsed rather
 than being read as if it were UTC. RFC 2822 dates convert the zones that
 standard defines (`UT`, `GMT`, `Z`, `EST`/`EDT`, `CST`/`CDT`, `MST`/`MDT`,
@@ -184,11 +187,99 @@ time is UTC and the sender's own zone is unknown, so it is kept as UTC and
 | **Apache access log** | `dd/Mmm/yyyy:hh:mm:ss +zzzz`, brackets optional | `[05/Jan/2024:13:22:01 +0100]` → `2024-01-05 12:22:01` |
 | **RFC 2822 (email date)** | Email and HTTP dates; two-digit years 50–99 are 19xx, 00–49 are 20xx; a zone RFC 2822 doesn't define (`CET`, `IST`…) counts as unparsed | `Fri, 05 Jan 2024 13:22:01 -0500` → `2024-01-05 18:22:01` |
 | **US MM/DD/YYYY hh:mm:ss** | US dates, seconds optional, optional AM/PM in any common spelling (`PM`, `pm`, `p.m.`) and optional zone | `1/5/2024 1:22:01 PM` → `2024-01-05 13:22:01` |
+| **Custom pattern** | Any layout you write as a pattern (see [Custom patterns](#custom-patterns)), with optional zone | `14.03.2026 13:22:01,482` with `dd.MM.yyyy HH:mm:ss,fff` → `2026-03-14 13:22:01.482000` |
 
-The text formats, BSD syslog and Excel serial dates also take **Source UTC
+The text formats, custom patterns, BSD syslog and Excel serial dates also take **Source UTC
 offset**; Unix, FILETIME, WebKit, Mac and .NET values are UTC already and
 don't. With it set to `-05:00`, the ISO value `2024-01-05 13:22:01` becomes
 `2024-01-05 18:22:01`.
+
+### Custom patterns
+
+When no built-in format reads a column, choose **Custom pattern** at the
+bottom of the **Format** list and write the layout in **Pattern**, the way
+Timeline Explorer and the EZ Tools take one: `dd-MM-yyyy HH:mm:ss` reads
+`14-03-2026 13:22:01`. The line under the box says what the pattern reads,
+written for 14 March 2026 at 13:22:01 (*Reads values like 14-03-2026
+13:22:01*), so you can see which number is the day and which the month,
+or says what is wrong with it. The preview shows what it makes of the
+column.
+
+| Letters | Read as | Example |
+| --- | --- | --- |
+| `yyyy`, `yy` | Year: four digits, or two (`50`–`99` are 19xx, `00`–`49` are 20xx) | `2026`, `26` |
+| `MM`, `M` | Month as a number | `03`, `3` |
+| `MMM`, `MMMM` | Month name in English, abbreviated or in full (either is read for either) | `Mar`, `March` |
+| `dd`, `d` | Day of the month | `14` |
+| `ddd`, `dddd` | Weekday name, read and skipped | `Sat`, `Saturday` |
+| `HH`, `hh`, `H`, `h` | Hour | `13`, or `01` with `tt` |
+| `mm`, `m` | Minute | `22` |
+| `ss`, `s` | Second | `01` |
+| `fff` (any number of `f`) | Fraction of a second, any number of digits | `482` |
+| `tt` | AM or PM, in any common spelling (`PM`, `pm`, `p.m.`) | `PM` |
+| `zzz`, `Z`, `K` | Time zone: `Z`, `UTC`, `GMT` or an offset (`+02:00`, `+0200`, `+02`, `GMT+2`) | `+01:00` |
+| `'text'` | Text the values carry, as written; `\` before one character does the same | `'at'` |
+| `T` | A literal `T`, as in `yyyy-MM-ddTHH:mm:ss` | `T` |
+| a space | One or more spaces or tabs | |
+| anything else | Itself: `-`, `/`, `.`, `:`, `,`, `[` and so on | |
+
+The letters are read the way people write a layout, not only the way .NET
+reads them:
+
+- **`mm` is the minute next to an hour or a second, and the month
+  anywhere else**, in either case. `dd-mm-yyyy hh:mm:ss` and
+  `dd-MM-yyyy HH:mm:ss` mean the same thing, and so does
+  `YYYY-MM-DD HH:MM:SS`, the way Winnow's display formats are labelled.
+- **`hh` and `HH` are the same.** An hour is read from 0 to 23, and made
+  12-hour only by an AM/PM in the value, which the pattern reads with `tt`.
+- **A number next to another number is its full width.** In
+  `yyyyMMddHHmmss`, `MM` is always two digits. Elsewhere `dd` also reads
+  `5`, and `d` also reads `14`.
+- **A fraction may be missing.** In `ss.fff`, a value without the dot and
+  the digits still reads, and either `.` or `,` may come before them.
+- **Upper case `YYYY`, `DD` and `SS` work too.** Three or more `S` are a
+  fraction, as in Java's `HH:mm:ss.SSS`.
+
+A pattern written with `%` signs is read as strftime instead (Python, C,
+plaso): `%d-%m-%Y %H:%M:%S`. Winnow reads `%Y %y %m %b %B %d %e %a %A %H
+%I %M %S %f %p %z %Z`, the shorthands `%T` (`%H:%M:%S`), `%R`, `%F`
+(`%Y-%m-%d`) and `%D`, and `%%`. Other letters in a strftime pattern are
+literal text.
+
+A pattern needs a year, a month and a day. Text that isn't one of the
+letters above has to be quoted: `dd MMM yyyy 'at' HH:mm` reads
+`14 Mar 2026 at 13:22`, and an unquoted word is refused with a message
+saying to quote it. A year-less syslog stamp is read by **BSD syslog**
+instead.
+
+The pattern has to cover the whole timestamp, so a value that goes on
+past it counts as unparsed rather than losing part of its time:
+
+- A date-only pattern such as `dd-MM-yyyy` doesn't read
+  `14-03-2026 13:22:01`. Reading it would put every row at midnight.
+- A pattern without `tt` doesn't read `1:22:01 PM`, which would come out
+  twelve hours early.
+- A pattern that stops at the minutes or the seconds doesn't read a value
+  with seconds or a fraction after them. Add `:ss` or `.fff`.
+
+Anything else after the timestamp is left alone, so a pattern can read the
+start of a whole log line. A zone after it is converted to UTC, as with
+the built-in formats, and **Source UTC offset** shifts a value that has no
+zone.
+
+**Save as a format…** beside the pattern keeps it: name it, and it joins
+the **Format** list under **Your formats** for every case on this machine,
+and Winnow tries it when it suggests a format. A saved format wins a tie
+with a built-in one, so `dd/MM/yyyy` is suggested over the US format for a
+column where every day is 12 or under, which both read. Saved formats are
+listed, edited and deleted in
+[Settings → Timestamps](Settings-and-shortcuts.md#parsing-formats).
+
+A column made with a pattern keeps the pattern, not a link to the saved
+format: its ƒ tooltip shows it (*Custom pattern dd.MM.yyyy HH:mm:ss,fff*),
+**Re-derive…** lets you correct it, and it travels in a session to a
+machine that has never seen the format. Editing or deleting the saved
+format changes no column.
 
 ### Auto-ranging epochs
 

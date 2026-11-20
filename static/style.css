@@ -3434,6 +3434,30 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .derived-out { flex: 1 1 auto; min-width: 0; }
 .derived-out.bad, .fb-help.bad { color: var(--danger, #c0392b); }
 .derived-name { font-family: var(--mono); }
+/* A custom timestamp pattern: wide and in the grid's monospace, since
+   every character of it is meant literally; what it reads, and "Save as
+   a format…", on the line under it, lined up with the input. */
+.derived-param input.derived-pattern { flex: 1 1 auto; min-width: 0; font-family: var(--mono); }
+.derived-pattern-line { display: flex; align-items: center; gap: 10px; margin: -2px 0 8px 160px; min-height: 26px; }
+.derived-pattern-example { flex: 1; min-width: 0; margin: 0; overflow-wrap: anywhere; }
+.derived-save-format { flex: 0 0 auto; }
+
+/* Settings → Timestamps → Parsing formats (buildParseFormatsEditor). */
+.tsf-list { margin: 6px 0 10px; border: var(--border-w) solid var(--line); border-radius: var(--radius-sm); }
+.tsf-empty { margin: 8px 10px; }
+.tsf-row { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-top: 1px solid var(--line); }
+.tsf-row:first-child { border-top: 0; }
+.tsf-text { flex: 1; min-width: 0; }
+.tsf-top { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.tsf-name { font-weight: 600; }
+.tsf-pattern { font-family: var(--mono); font-size: 12px; color: var(--text); }
+.tsf-example { margin: 2px 0 0; overflow-wrap: anywhere; }
+.tsf-acts { flex: 0 0 auto; display: flex; gap: 6px; }
+.tsf-editor { margin: 6px 0 4px; padding: 8px 10px; border: var(--border-w) solid var(--line); border-radius: var(--radius-sm); }
+.tsf-editor .derived-row input.derived-pattern { font-family: var(--mono); }
+.tsf-meaning, .tsf-result { margin: -4px 0 6px 160px; min-height: 16px; overflow-wrap: anywhere; }
+.tsf-result { font-family: var(--mono); }
+.tsf-key { margin-top: 10px; grid-template-columns: max-content 1fr; }
 
 /* A dialog in two panes (sideRail in ui.js): what to choose listed down
    the left, everything about it on the right. The Add derived column

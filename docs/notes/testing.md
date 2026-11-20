@@ -32,6 +32,15 @@ and a US one, filtered and not and in the merge's SQL pane query; and
 holds an ISO column to the plain text
 sort its import index serves, since that is the fast path the change
 must not cost.
+`test_timestamp_separators.py` holds TS_NORMALIZE, DAY_BUCKET and
+`parse_datetime_lenient` to the time after every separator a tool writes
+between date and time ("@", "at", " - ", a comma, extra spaces, a
+non-breaking space, a one-digit hour), and the near misses
+("2026-06-23 -05:00") to their date alone; then sort, the timeframe
+filter and the histogram on such a column. Its browser half,
+`tests/ui/test_timestamp_time_of_day.py`, reads the painted cells
+(00:00:00 on every row was the report) and runs one corpus through
+`parseTimestamp` and `_ts_normalize` side by side.
 `test_maintenance.py` covers the things that only exist because everything
 else only ever grows: the auto-created column indexes (listing/dropping),
 `compact()`, and `sweep_orphan_views()` — whose load-bearing test is that a
@@ -104,6 +113,22 @@ have said any number), the parts a value leaves out (seconds, a fraction
 shorter than six digits, a bare date for the delta reader) are read as
 zero, and `detect()` is checked against registry order with samples where
 the two disagree.
+`test_custom_timestamp_formats.py` covers custom timestamp patterns end
+to end: how each letter is read (the casual "dd-mm-yyyy hh:mm:ss" as
+day-month-year 24-hour, strftime, run-together digits, optional
+fractions, zones), the values a pattern must refuse rather than read
+wrong (a time after a date-only pattern, an AM/PM it doesn't read, digits
+past its end), each compile error's message, saved formats in
+`workspace/` (unique names, a hand-broken record skipped and kept),
+detection ranking a saved format ahead of a built-in on a tie and
+holding a digits-only pattern to plausible years, the column on a table,
+a merge and through a session round trip, and the routes. Its browser
+half, `tests/ui/test_custom_timestamp_formats_ui.py`, writes a pattern in
+the dialog and saves it, sees detection pick the saved format on the
+next open, and adds, edits and deletes one in Settings → Timestamps; it
+deletes every saved format in a `finally`, because they live in the
+shared server's workspace where `case_left_as_found` doesn't look, and a
+leftover one would change every later module's format detection.
 `test_tag_undo.py` covers the undo stack, and its load-bearing test is the
 one that tags an overlapping selection and asserts the *pre-existing*
 assignments survive the undo — a naive re-send-inverted implementation

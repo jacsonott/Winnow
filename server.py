@@ -54,6 +54,7 @@ from winnow import archive
 from winnow import bodyread
 from winnow import iisread
 from winnow import secureread
+from winnow import timeparse
 from winnow import utmpread
 from winnow import workspace as WS
 from winnow.sqlresults import ResultExpired, TooBig
@@ -5748,7 +5749,8 @@ def api_derived_paths(body: StructProbe):
 @app.post("/api/derived/detect")
 def api_derived_detect(body: DerivedProbe):
     try:
-        return store().detect_timestamp_format(body.source_id, body.column)
+        return store().detect_timestamp_format(body.source_id, body.column,
+                                               custom_formats=WS.timestamp_formats.list())
     except KeyError as e:
         raise HTTPException(404, str(e))
 
@@ -5756,9 +5758,87 @@ def api_derived_detect(body: DerivedProbe):
 @app.get("/api/derived/suggestions")
 def api_derived_suggestions(source_id: int):
     try:
-        return store().detect_source_suggestions(source_id)
+        return store().detect_source_suggestions(source_id, custom_formats=WS.timestamp_formats.list())
     except KeyError as e:
         raise HTTPException(404, str(e))
+
+
+# ---------------------------------------------- custom timestamp formats
+#
+# The analyst's own parsing patterns (workspace.TimestampFormats): listed
+# in the derived-column dialog's Format list and in Settings → Timestamps,
+# and tried by the two detection routes above. Each record goes out with
+# what the pattern reads — an example value for one fixed moment — or
+# what is wrong with it, so neither screen has to compile a pattern.
+
+class TimestampFormatWrite(BaseModel):
+    name: str
+    pattern: str
+
+
+class TimestampPatternTry(BaseModel):
+    pattern: str
+    values: list[str] = []
+    utc_offset: str | None = None
+
+
+def _timestamp_format_view(rec: dict) -> dict:
+    try:
+        return {**rec, "example": timeparse.compile_pattern(rec["pattern"]).example(), "error": None}
+    except timeparse.PatternError as e:
+        return {**rec, "example": None, "error": str(e)}
+
+
+@app.get("/api/timestamp_formats")
+def api_timestamp_formats_list():
+    return [_timestamp_format_view(r) for r in WS.timestamp_formats.list()]
+
+
+@app.post("/api/timestamp_formats")
+def api_timestamp_formats_create(body: TimestampFormatWrite):
+    try:
+        return _timestamp_format_view(WS.timestamp_formats.create(body.name, body.pattern))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.put("/api/timestamp_formats/{format_id}")
+def api_timestamp_formats_update(format_id: int, body: TimestampFormatWrite):
+    try:
+        return _timestamp_format_view(WS.timestamp_formats.update(format_id, body.name, body.pattern))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except KeyError:
+        raise HTTPException(404, f"No timestamp format {format_id}")
+
+
+@app.delete("/api/timestamp_formats/{format_id}")
+def api_timestamp_formats_delete(format_id: int):
+    try:
+        WS.timestamp_formats.delete(format_id)
+    except KeyError:
+        raise HTTPException(404, f"No timestamp format {format_id}")
+    return {"ok": True}
+
+
+@app.post("/api/timestamp_formats/try")
+def api_timestamp_formats_try(body: TimestampPatternTry):
+    """A pattern against values typed in by hand — Settings' "Try it"
+    box, where there is no table to sample. What the pattern means (its
+    example) comes back with each value's reading; a pattern that does not
+    compile is a 400 carrying timeparse's message. Needs no case open."""
+    params = {"pattern": body.pattern, "utc_offset": body.utc_offset}
+    try:
+        params = timeparse.validate_params("custom_pattern", params)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    cp = timeparse.compile_pattern(params["pattern"])
+    op = timeparse.OPERATIONS["custom_pattern"]
+    return {
+        "example": cp.example(),
+        "results": [{"input": v, "output": timeparse.parse_or_none(op, v, params, {})}
+                    for v in body.values[:50]],
+    }
 
 
 @app.post("/api/derived/preview")

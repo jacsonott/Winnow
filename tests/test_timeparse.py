@@ -745,6 +745,7 @@ def _params_for(op):
         "json_field": {"path": "$.a"}, "xml_field": {"path": "a"},
         "regex_extract": {"pattern": r"(\d+)"}, "duration_delta": {"other_column": "b"},
         "coalesce": {"extra_columns": ["b"]}, "row_json": {"extra_columns": ["b"]},
+        "custom_pattern": {"pattern": "dd-MM-yyyy HH:mm:ss.fff zzz"},
     }.get(op["id"], {}))
     out = [params]
     if any(p["name"] == "utc_offset" for p in op["params"]):

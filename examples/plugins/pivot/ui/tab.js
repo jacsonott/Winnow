@@ -944,7 +944,12 @@ export default function mount(container, winnow) {
       };
       b.append(apply);
 
+      // The value list is read over the network, and the operator can
+      // change while it is on its way: only the latest paint may fill the
+      // area, or a late list lands on top of the Value box.
+      let painting = 0;
       const paint = async () => {
+        const mine = ++painting;
         filter.op = opSel.value;
         const kind = state.meta.operators.find((o) => o.id === filter.op).value_kind;
         area.replaceChildren();
@@ -965,9 +970,11 @@ export default function mount(container, winnow) {
         try {
           res = await post(`${winnow.base}/values`, { source_id: state.sourceId, column: filter.column });
         } catch (e) {
+          if (mine !== painting) return;
           area.replaceChildren(el('p', 'note-status', 'Could not read values: ' + e.message));
           return;
         }
+        if (mine !== painting) return;
         area.replaceChildren();
         const search = el('input');
         search.type = 'search';

@@ -476,7 +476,9 @@ export function renderHead() {
       // something that came out of the evidence file.
       const mark = el('span', 'hcell-derived', 'ƒ');
       const dstatus = colMetaEntry.derived_status;
+      const pattern = colMetaEntry.derived_op === 'custom_pattern' && (colMetaEntry.derived_params || {}).pattern;
       mark.title = `Derived from "${colMetaEntry.derived_from}" — ${opLabel(colMetaEntry.derived_op)}`
+        + (pattern ? ` ${pattern}` : '')
         + (dstatus === 'building' ? ' (building…)' : '')
         + (dstatus === 'partial' ? ' (incomplete — re-derive to finish)' : '')
         // A re-derive that stopped part-way clears what it wrote rather
