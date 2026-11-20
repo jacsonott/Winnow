@@ -184,6 +184,7 @@ time is UTC and the sender's own zone is unknown, so it is kept as UTC and
 | **Apache access log** | `dd/Mmm/yyyy:hh:mm:ss +zzzz`, brackets optional | `[05/Jan/2024:13:22:01 +0100]` → `2024-01-05 12:22:01` |
 | **RFC 2822 (email date)** | Email and HTTP dates; two-digit years 50–99 are 19xx, 00–49 are 20xx; a zone RFC 2822 doesn't define (`CET`, `IST`…) counts as unparsed | `Fri, 05 Jan 2024 13:22:01 -0500` → `2024-01-05 18:22:01` |
 | **US MM/DD/YYYY hh:mm:ss** | US dates, seconds optional, optional AM/PM in any common spelling (`PM`, `pm`, `p.m.`) and optional zone | `1/5/2024 1:22:01 PM` → `2024-01-05 13:22:01` |
+| **dd-mm-yyyy hh:mm:ss** | Day-first dates with dashes, the day and month one or two digits, seconds and fraction optional, optional AM/PM and optional zone. Dashes are read day first and slashes month first (the US operation above) | `23-06-2026 13:05:01` → `2026-06-23 13:05:01`<br>`5-1-2026 1:05 PM` → `2026-01-05 13:05:00` |
 
 The text formats, BSD syslog and Excel serial dates also take **Source UTC
 offset**; Unix, FILETIME, WebKit, Mac and .NET values are UTC already and

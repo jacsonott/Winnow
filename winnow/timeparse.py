@@ -67,6 +67,20 @@ MONTH_NAME = (r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|ju
 # refusing it would turn a typo into a missing timestamp.
 ORDINAL = r"(?:st|nd|rd|th)?"
 
+# A day-first numeric date written with dashes, dd-mm-yyyy: "23-06-2026",
+# "5-1-2026". Captures (day, month, year). A dashed numeric date is read
+# day first because that is how the tools and locales that write one
+# write it. The US writes month first with SLASHES, which _US_RE and
+# store.py's _TS_US_RE read, so the two never compete for a value. The
+# day and month are held to 1-31 and 1-12 in the pattern itself, and the
+# year may not run on into a fifth digit. That keeps IDs and phone-shaped
+# runs out, and it keeps a month-first column written with dashes
+# ("12-25-2026") from being typed as day-first at import: most of its
+# values put 13-31 where the month goes, short of DATE_RE's 80% bar.
+# store.py's DATE_RE and _TS_DMY_RE are built on this, and tsformat.js's
+# TS_DMY_RE mirrors it character for character.
+DMY_DATE = r"(0?[1-9]|[12]\d|3[01])-(0?[1-9]|1[0-2])-(\d{4})(?!\d)"
+
 # Same plausibility window store.py's _webkit_to_iso uses: a numeric value
 # only counts as a timestamp in some unit if the resulting date is one an
 # analyst could plausibly be looking at. This is also what makes epoch
@@ -1137,6 +1151,38 @@ register_op({
 })
 
 
+# DMY_DATE, then the time: seconds, a fraction and AM/PM optional, after
+# any separator DATE_TIME_SEP allows. A zone after it is _zoned's.
+_DMY_RE = re.compile(r"^" + DMY_DATE + DATE_TIME_SEP
+                     + r"(\d{1,2}):(\d{2})(?::(\d{2})(?:[.,](\d+))?)?\s*(?:" + MERIDIEM + r")?")
+
+
+def _parse_dmy(value: Any, params: dict, state: dict) -> str | None:
+    s = str(value).strip()
+    m = _DMY_RE.match(s)
+    if not m:
+        return None
+    d, mo, y, h, mi, sec, frac, ampm = m.groups()
+    try:
+        dt = datetime(int(y), int(mo), int(d), hour24(int(h), ampm), int(mi), int(sec or 0),
+                      int(frac[:6].ljust(6, "0")) if frac else 0)
+    except ValueError:
+        # 31-04-2026: a day the month does not have.
+        return None
+    dt = _zoned(dt, s[m.end():], params)
+    return None if dt is None else _fmt(dt, subsecond=bool(frac))
+
+
+register_op({
+    "id": "dmy_datetime",
+    "label": "dd-mm-yyyy hh:mm:ss",
+    "description": "Day-first dates with dashes, e.g. \"23-06-2026 13:05:01\" (also 5-1-2026 1:05 PM). Seconds, "
+                   "a fraction and AM/PM are optional. A trailing offset (+0200, UTC) is converted to UTC.",
+    "params": [_UTC_OFFSET_PARAM],
+    "parse": _parse_dmy,
+})
+
+
 # ----------------------------------------------------------- duration delta
 
 _LENIENT_ISO_RE = re.compile(
@@ -1145,11 +1191,12 @@ _LENIENT_ISO_RE = re.compile(
 
 
 def parse_datetime_lenient(value: Any) -> datetime | None:
-    """A naive datetime from either shape the app already treats as a
+    """A naive datetime from the numeric shapes the app treats as a
     datetime — the canonical/ISO one (which every derived datetime column
-    holds) or the US one — for computing deltas. Offsets are deliberately
-    not handled here: delta inputs should be datetime-typed columns, which
-    are canonical or were typed at ingest by the same two regexes."""
+    holds), the US one, or the day-first dashed one — for computing
+    deltas. Offsets are deliberately not handled here: delta inputs should
+    be datetime-typed columns, which are canonical or were typed at ingest
+    by the same regexes."""
     if value is None:
         return None
     s = str(value).strip()
@@ -1167,6 +1214,14 @@ def parse_datetime_lenient(value: Any) -> datetime | None:
         hh = hour24(int(h), ampm)
         try:
             return datetime(int(y), int(mo), int(d), hh, int(mi), int(sec or 0))
+        except ValueError:
+            return None
+    m = _DMY_RE.match(s)
+    if m:
+        d, mo, y, h, mi, sec, frac, ampm = m.groups()
+        try:
+            return datetime(int(y), int(mo), int(d), hour24(int(h), ampm), int(mi), int(sec or 0),
+                            int(frac[:6].ljust(6, "0")) if frac else 0)
         except ValueError:
             return None
     return None

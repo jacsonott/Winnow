@@ -41,6 +41,14 @@ filter and the histogram on such a column. Its browser half,
 `tests/ui/test_timestamp_time_of_day.py`, reads the painted cells
 (00:00:00 on every row was the report) and runs one corpus through
 `parseTimestamp` and `_ts_normalize` side by side.
+`test_timestamp_dmy.py` does the same for the day-first dashed shape
+(dd-mm-yyyy): import typing, TS_NORMALIZE and DAY_BUCKET, the near misses
+(day 32, month 13, a month-first column written with dashes), sort,
+timeframe, histogram, the `dmy_datetime` derived op, and that tsformat.js's
+`TS_FORMATS` and `workspace.AppSettings.TS_FORMATS` list the same display
+formats. `tests/ui/test_timestamp_dmy.py` is its browser half: the grid's
+first row, `parseTimestamp` against `_ts_normalize`, and the case set to
+DD-MM-YYYY HH:MM:SS.
 `test_maintenance.py` covers the things that only exist because everything
 else only ever grows: the auto-created column indexes (listing/dropping),
 `compact()`, and `sweep_orphan_views()` — whose load-bearing test is that a

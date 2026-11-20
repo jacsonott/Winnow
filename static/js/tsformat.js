@@ -9,10 +9,10 @@ import { S } from './state.js';
    CSV came with (invariant: source data is never mutated). Deliberately
    NOT `new Date(string)`: that applies the browser's local timezone to
    whatever gets parsed, which can silently shift an evidentiary timestamp.
-   Instead this pulls numeric components straight out of the same two
+   Instead this pulls numeric components straight out of the same
    families store.py's DATE_RE already recognizes as "datetime" at ingest,
    then formatting is pure string padding — no Date object, no TZ math. A
-   value that doesn't match either shape is left exactly as it was. */
+   value that doesn't match any of those shapes is left exactly as it was. */
 
 /* What may stand between a date and its time of day, in all three shapes:
    timeparse.DATE_TIME_SEP, character for character — a T (either case),
@@ -31,6 +31,13 @@ export const TS_ISO_RE = new RegExp(String.raw`^(\d{4})-(\d{2})-(\d{2})(?:${DATE
    old `\s*(AM|PM|am|pm)?` straight after the seconds missed it whenever a
    fraction came between ("1:22:01.123 PM") and read the time as morning. */
 export const TS_US_RE = new RegExp(String.raw`^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:${DATE_TIME_SEP}(\d{1,2}):(\d{2})(?::(\d{2})(?:[.,](\d+))?)?\s*(?:([AaPp])\.?[Mm]\.?(?![A-Za-z]))?)?`);
+
+/* Day-first numeric dates with dashes, dd-mm-yyyy ("23-06-2026 13:05:01",
+   "5-1-2026 1:05 PM"): the date is timeparse.DMY_DATE character for
+   character (day 1-31 and month 1-12 held in the pattern, no fifth digit
+   after the year), the time the US shape's. Slashes are month first
+   (TS_US_RE), dashes day first, so the two never compete for a value. */
+export const TS_DMY_RE = new RegExp(String.raw`^(0?[1-9]|[12]\d|3[01])-(0?[1-9]|1[0-2])-(\d{4})(?!\d)(?:${DATE_TIME_SEP}(\d{1,2}):(\d{2})(?::(\d{2})(?:[.,](\d+))?)?\s*(?:([AaPp])\.?[Mm]\.?(?![A-Za-z]))?)?`);
 
 /* Month-name family ("JUN 23 2026 00:11:00", "23 Jun 2026", "June 23,
    2026 5:11 PM", "Jul 28th 2026 01:02:22") — the word is captured loose
@@ -74,6 +81,11 @@ export function parseTimestamp(raw) {
     const h = hour24(+(m[4] || 0), m[8]);
     return { y: +m[3], mo: +m[1], d: +m[2], h, mi: +(m[5] || 0), s: +(m[6] || 0), frac: m[7] || '' };
   }
+  m = TS_DMY_RE.exec(s);
+  if (m) {
+    const h = hour24(+(m[4] || 0), m[8]);
+    return { y: +m[3], mo: +m[2], d: +m[1], h, mi: +(m[5] || 0), s: +(m[6] || 0), frac: m[7] || '' };
+  }
   m = TS_MONTH_RE.exec(s);
   if (m) {
     const mo = MONTH_NO[(m[1] || m[4]).toLowerCase()];
@@ -95,6 +107,7 @@ export const TS_FORMATS = {
   time: 'HH:MM:SS',
   us: 'MM/DD/YYYY HH:MM:SS',
   us_date: 'MM/DD/YYYY',
+  dmy: 'DD-MM-YYYY HH:MM:SS',
 };
 
 /* Sub-second digits to exactly `n` places. A value with no fraction shows
@@ -116,6 +129,7 @@ export function formatTimestamp(raw, fmt) {
     case 'time': return hms;
     case 'us': return `${pad2(t.mo)}/${pad2(t.d)}/${t.y} ${hms}`;
     case 'us_date': return `${pad2(t.mo)}/${pad2(t.d)}/${t.y}`;
+    case 'dmy': return `${pad2(t.d)}-${pad2(t.mo)}-${t.y} ${hms}`;
     default: return raw;
   }
 }

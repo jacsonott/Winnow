@@ -359,8 +359,11 @@ Every column is stored as text. Winnow guesses a type for each from its
 first 500 rows — text, number or datetime: number columns sort numerically,
 datetime columns sort chronologically and are the ones the Timeframe
 filter, Histogram and Timeline use. A column is recognized as datetime when
-its values look like `2024-01-05 13:22:01`, `1/5/2024 1:22:01 PM` or
-`Jan 5 2024 13:22:01`. The type is fixed at import (the delimited-text preview can
+its values look like `2024-01-05 13:22:01`, `1/5/2024 1:22:01 PM`,
+`05-01-2024 13:22:01` or `Jan 5 2024 13:22:01`. Slashes are read month first
+and dashes day first, so `05-01-2024` is the 5th of January. A column of
+month-first dates written with dashes (`12-25-2024`) is left as text rather
+than misread, unless nearly every day in it is 12 or lower. The type is fixed at import (the delimited-text preview can
 change it); to get a real datetime out of an epoch or other encoded value,
 add a [derived column](Derived-columns.md).
 
