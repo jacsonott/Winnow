@@ -41,6 +41,7 @@ still timestamps only.
 
 from __future__ import annotations
 
+import functools
 import math
 import re
 from datetime import datetime, timedelta, timezone
@@ -352,14 +353,28 @@ def detect_defaults(op: dict) -> dict:
     return out
 
 
-def detect(samples: Iterable) -> list[dict]:
+def detect(samples: Iterable, custom_formats: Iterable[dict] | None = None) -> list[dict]:
     """Rank every visible operation by the fraction of non-empty samples it
     parses. Stable sort ⇒ registry order breaks confidence ties (the same
     sample-and-round-trip spirit as store.py's preview_sqlite_tables
     heuristic for WebKit columns). Genuinely ambiguous inputs (a number in
     both the unix-seconds and Mac-absolute windows) legitimately return two
-    high-confidence rows — the caller's live preview is the disambiguator."""
+    high-confidence rows — the caller's live preview is the disambiguator.
+
+    `custom_formats` are the patterns the analyst saved ({id, name,
+    pattern}, workspace.TimestampFormats), each ranked as a
+    `custom_pattern` row carrying its `format_id`. They go ahead of the
+    built-in formats, so they win a tie: a day-first pattern someone saved
+    is a statement about their evidence, and "05/01/2026" reads 100% both
+    day-first and as US month-first."""
+    samples = list(samples)
     results = []
+    for fmt in custom_formats or ():
+        conf = detect_pattern(samples, fmt.get("pattern") or "")
+        if conf > 0:
+            results.append({"op_id": "custom_pattern", "label": fmt.get("name") or fmt.get("pattern"),
+                            "confidence": conf, "params": {"pattern": fmt.get("pattern")},
+                            "format_id": fmt.get("id")})
     for op in OPERATIONS.values():
         if op["hidden_from_detect"]:
             continue
@@ -1193,4 +1208,480 @@ register_op({
     "hidden_from_detect": True,
     "parse": None,
     "parse_pair": _parse_delta_pair,
+})
+
+
+# ----------------------------------------------------------- custom patterns
+#
+# The analyst's own layout, for timestamps none of the formats above read.
+# Written the way Timeline Explorer and the EZ Tools take one
+# (`dd-MM-yyyy HH:mm:ss`, .NET's letters), or as strftime (`%d-%m-%Y
+# %H:%M:%S`) when it holds a %-directive. Both compile to the same list of
+# parts and from that to one anchored regex — the shape every built-in
+# text format already has, so a value the pattern does not read is NULL
+# and counted with the failures, never a guess.
+#
+# The letters are read the way people write them, not only the way .NET
+# does. "dd-mm-yyyy hh:mm:ss" is how a vendor's manual or a ticket
+# describes a timestamp, and to .NET that is day-MINUTE-year on a 12-hour
+# clock, with no month at all. So: an m-run is a minute when an hour comes
+# right before it or a second right after it (`HH:mm`, `mm:ss`, `HHmmss`)
+# and a month anywhere else, whatever its case; an hour is read 0–23 and
+# made 12-hour only by an AM/PM the pattern reads (`tt`), so `hh` and `HH`
+# are the same; and y, d and s may be upper case (`YYYY-MM-DD`, how
+# Winnow's own display formats are labelled).
+#
+# Not on the registry's detection path (hidden_from_detect): with no
+# pattern it reads nothing. The patterns an analyst saved
+# (workspace.TimestampFormats) are what detection tries, through
+# detect(samples, custom_formats).
+
+PATTERN_MAX_LEN = 200
+
+
+class PatternError(ValueError):
+    """A pattern that does not compile; the message is for the analyst."""
+
+
+# A weekday name, abbreviated or in full, read and dropped — the date
+# already says which day it was.
+WEEKDAY_NAME = (r"(?:mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?"
+                r"|fri(?:day)?|sat(?:urday)?|sun(?:day)?)")
+
+# A zone where the pattern puts one: Z, UTC, GMT, UT, or an offset
+# (+05:00, +0500, +05, GMT+2, with U+2212 as a minus).
+_PATTERN_ZONE = r"(?:(?:UTC|GMT|UT)?[+\-−]\d{1,2}(?::?\d{2})?|Z|UTC|GMT|UT)(?![A-Za-z])"
+_PATTERN_OFFSET_RE = re.compile(r"^(?:UTC|GMT|UT)?([+\-])(\d{1,2})(?::?(\d{2}))?$")
+
+# A date-only pattern over "14-03-2026 13:22:01" would read every value
+# as midnight — the silent wrong answer docs/notes/derived.md warns about
+# for the ingest readers. A time of day after a date-only match is a
+# value that does not parse, so the preview says "can't parse" and the
+# analyst adds the time to the pattern.
+_TIME_FOLLOWS_RE = re.compile(r"^" + DATE_TIME_SEP + r"\d{1,2}[:.]\d{2}")
+# Likewise an AM/PM the pattern does not read: "1:22:01 PM" through
+# `HH:mm:ss` would be 01:22, twelve hours early.
+_MERIDIEM_FOLLOWS_RE = re.compile(r"^\s*" + MERIDIEM)
+
+_NUMERIC_KINDS = frozenset(("year4", "year2", "month", "day", "hour", "minute", "second", "fraction"))
+# Fields that may appear once: the kind, or the group two kinds share.
+_FIELD_GROUP = {"year4": "year", "year2": "year", "month_name": "month"}
+_FIELD_WORD = {
+    "year": "year", "month": "month", "day": "day", "weekday": "weekday", "hour": "hour",
+    "minute": "minute", "second": "second", "fraction": "fraction of a second",
+    "meridiem": "AM/PM", "zone": "time zone",
+}
+
+# The one moment examples are written for: the day above 12 so a
+# day-first pattern can't be mistaken for a month-first one, an afternoon
+# hour so a 24-hour clock shows as one, and minute, second and month all
+# different. A Saturday.
+_EXAMPLE = datetime(2026, 3, 14, 13, 22, 1, 482391)
+
+# strftime directives, each one part or (%T, %F, …) a run of them. %j
+# and %s are not here: neither is a layout of a calendar date.
+_STRFTIME = {
+    "Y": [("year4", 4)], "G": [("year4", 4)], "y": [("year2", 2)],
+    "m": [("month", 2)], "b": [("month_name", 3)], "h": [("month_name", 3)], "B": [("month_name", 4)],
+    "d": [("day", 2)], "e": [("day", 1)], "a": [("weekday", 3)], "A": [("weekday", 4)],
+    "H": [("hour", 2)], "I": [("hour", 2)], "k": [("hour", 1)], "l": [("hour", 1)],
+    "M": [("minute", 2)], "S": [("second", 2)], "f": [("fraction", 6)],
+    "p": [("meridiem", 2)], "P": [("meridiem", 2)], "z": [("zone", 3)], "Z": [("zone", 3)],
+    "T": [("hour", 2), ":", ("minute", 2), ":", ("second", 2)],
+    "R": [("hour", 2), ":", ("minute", 2)],
+    "F": [("year4", 4), "-", ("month", 2), "-", ("day", 2)],
+    "D": [("month", 2), "/", ("day", 2), "/", ("year2", 2)],
+}
+_STRFTIME_RE = re.compile(r"%[-#_0^]?[A-Za-z%]")
+
+
+class CompiledPattern:
+    """A pattern as the parts a value is read as, in order — ("lit",
+    text), ("ws",), ("field", kind, letters, letter) — and the regex they
+    make. `kinds` is the set of fields it reads."""
+
+    __slots__ = ("pattern", "parts", "kinds", "regex")
+
+    def __init__(self, pattern: str, parts: list):
+        self.pattern = pattern
+        self.parts = parts
+        self.kinds = {p[1] for p in parts if p[0] == "field"}
+        self.regex = re.compile(_pattern_regex(parts), re.IGNORECASE)
+
+    def example(self) -> str:
+        """A value this pattern reads, written for _EXAMPLE — so the
+        analyst can see "dd-mm-yyyy" means the 14th of March, not the 3rd
+        of something."""
+        twelve = "meridiem" in self.kinds
+        out = []
+        for p in self.parts:
+            if p[0] == "lit":
+                out.append(p[1])
+            elif p[0] == "ws":
+                out.append(" ")
+            else:
+                out.append(_example_field(p[1], p[2], twelve, p[3]))
+        return "".join(out)
+
+
+def _example_field(kind: str, letters: int, twelve: bool, letter: str = "") -> str:
+    e = _EXAMPLE
+    if kind == "year4":
+        return f"{e.year:04d}"
+    if kind == "year2":
+        return f"{e.year % 100:02d}"
+    if kind == "month_name":
+        return "March" if letters >= 4 else "Mar"
+    if kind == "weekday":
+        return "Saturday" if letters >= 4 else "Sat"
+    if kind == "fraction":
+        return f"{e.microsecond:06d}000"[:letters]
+    if kind == "meridiem":
+        return "PM"
+    if kind == "zone":
+        return "Z" if letter in ("Z", "K") and letters == 1 else "+00:00"
+    n = {"month": e.month, "day": e.day, "minute": e.minute, "second": e.second,
+         "hour": (e.hour % 12 or 12) if twelve else e.hour}[kind]
+    return f"{n:02d}" if letters >= 2 else str(n)
+
+
+def _token_kind(c: str, run: int) -> str | None:
+    """What a run of one letter stands for in the .NET-letter syntax;
+    "m?" until _settle_minutes knows its neighbours, "lit" for a T."""
+    if c in "yY":
+        return "year2" if run <= 2 else ("year4" if run <= 4 else None)
+    if c in "Mm":
+        return "m?" if run <= 2 else ("month_name" if run <= 4 else None)
+    if c == "d":
+        return "day" if run <= 2 else ("weekday" if run <= 4 else None)
+    if c == "D":
+        return "day" if run <= 2 else None
+    if c in "Hh":
+        return "hour" if run <= 2 else None
+    if c in "sS":
+        return "second" if run <= 2 else ("fraction" if run <= 9 else None)
+    if c in "fF":
+        return "fraction" if run <= 9 else None
+    if c == "t":
+        return "meridiem" if run <= 2 else None
+    if c == "T":
+        return "lit" if run == 1 else ("meridiem" if run == 2 else None)
+    if c in "aA":
+        return "meridiem" if run == 1 else None
+    if c in "zZX":
+        return "zone" if run <= 3 else None
+    if c == "K":
+        return "zone" if run == 1 else None
+    return None
+
+
+def _word_around(text: str, i: int) -> str:
+    a = b = i
+    while a > 0 and text[a - 1].isalpha():
+        a -= 1
+    while b < len(text) and text[b].isalpha():
+        b += 1
+    return text[a:b]
+
+
+def _read_letter_pattern(pattern: str) -> list:
+    parts: list = []
+    i, n = 0, len(pattern)
+    while i < n:
+        c = pattern[i]
+        if c in "'\"":
+            j = pattern.find(c, i + 1)
+            if j == -1:
+                raise PatternError(f"The {c} at position {i + 1} is never closed. Text in quotes needs a closing {c}.")
+            parts.append(("lit", pattern[i + 1:j] or c))   # '' is a quote mark itself, as in .NET
+            i = j + 1
+        elif c == "\\":
+            if i + 1 >= n:
+                raise PatternError("A pattern can't end with a backslash.")
+            parts.append(("lit", pattern[i + 1]))
+            i += 2
+        elif c.isspace():
+            while i < n and pattern[i].isspace():
+                i += 1
+            parts.append(("ws",))
+        elif c.isascii() and c.isalpha():
+            j = i
+            while j < n and pattern[j] == c:
+                j += 1
+            kind = _token_kind(c, j - i)
+            if kind is None:
+                word = _word_around(pattern, i)
+                if len(word) > j - i:
+                    raise PatternError(f"“{word}” isn't part of a date or time. "
+                                       f"Put text the values carry in quotes, like '{word}'.")
+                raise PatternError(f"“{pattern[i:j]}” isn't part of a date or time.")
+            parts.append(("lit", "T") if kind == "lit" else ("field", kind, j - i, c))
+            i = j
+        else:
+            parts.append(("lit", c))
+            i += 1
+    return _settle_minutes(parts)
+
+
+def _settle_minutes(parts: list) -> list:
+    """Each m-run a minute or a month, by what is beside it: a minute when
+    the nearest field before it is an hour or the nearest after it is a
+    second, with only punctuation between (`HH:mm`, `HH.mm`, `mm:ss`,
+    `HHmm`); a month otherwise. When that leaves two months and no
+    minute, the lower-case one is the minute, as .NET would read
+    `yyyy-MM-dd HH mm`."""
+    def near(k: int, step: int) -> str | None:
+        j = k + step
+        while 0 <= j < len(parts):
+            if parts[j][0] == "field":
+                return parts[j][1]
+            if parts[j][0] == "ws":
+                return None
+            j += step
+        return None
+
+    out = list(parts)
+    runs = [k for k, p in enumerate(parts) if p[0] == "field" and p[1] == "m?"]
+    for k in runs:
+        minute = near(k, -1) == "hour" or near(k, +1) == "second"
+        out[k] = ("field", "minute" if minute else "month", parts[k][2], parts[k][3])
+    months = [k for k in runs if out[k][1] == "month"]
+    if len(months) == 2 and not any(out[k][1] == "minute" for k in runs):
+        lower = [k for k in months if parts[k][3] == "m"]
+        if len(lower) == 1:
+            out[lower[0]] = ("field", "minute", parts[lower[0]][2], "m")
+    return out
+
+
+def _read_strftime_pattern(pattern: str) -> list:
+    parts: list = []
+    i, n = 0, len(pattern)
+    while i < n:
+        c = pattern[i]
+        if c == "%":
+            j = i + 1
+            if j < n and pattern[j] in "-#_0^":   # glibc/Windows padding flags; reading is lenient anyway
+                j += 1
+            if j >= n:
+                raise PatternError("A pattern can't end with %.")
+            d = pattern[j]
+            if d == "%":
+                parts.append(("lit", "%"))
+            elif d in "nt":
+                parts.append(("ws",))
+            elif d in _STRFTIME:
+                for item in _STRFTIME[d]:
+                    parts.append(("lit", item) if isinstance(item, str) else ("field", item[0], item[1], "%"))
+            else:
+                raise PatternError(f"%{d} isn't one Winnow reads. It reads %Y %y %m %b %B %d %e %a %A "
+                                   f"%H %I %M %S %f %p %z %Z %T %R %F %D and %%.")
+            i = j + 1
+        elif c.isspace():
+            while i < n and pattern[i].isspace():
+                i += 1
+            parts.append(("ws",))
+        else:
+            parts.append(("lit", c))
+            i += 1
+    return parts
+
+
+def _check_parts(parts: list) -> None:
+    seen: set[str] = set()
+    for p in parts:
+        if p[0] != "field":
+            continue
+        group = _FIELD_GROUP.get(p[1], p[1])
+        if group in seen:
+            if group == "month":
+                raise PatternError("This pattern has two months. mm right after an hour (HH:mm) or "
+                                   "right before a second (mm:ss) is minutes; anywhere else it is a month.")
+            raise PatternError(f"This pattern has the {_FIELD_WORD[group]} twice.")
+        seen.add(group)
+    missing = [w for w in ("year", "month", "day") if w not in seen]
+    if missing:
+        listed = missing[0] if len(missing) == 1 else ", ".join(missing[:-1]) + " or " + missing[-1]
+        raise PatternError("A pattern needs a year (yyyy), a month (MM or MMM) and a day (dd). "
+                           f"This one has no {listed}.")
+    for part, needs, how in (("minute", "an hour", "HH:mm"), ("second", "a minute", "mm:ss"),
+                             ("fraction", "a second", "ss.fff"), ("meridiem", "an hour", "hh:mm tt")):
+        if part in seen and needs.split()[1] not in seen:
+            what = "AM/PM" if part == "meridiem" else f"A {_FIELD_WORD[part]}"
+            raise PatternError(f"{what} needs {needs} with it ({how}).")
+
+
+def _pattern_regex(parts: list) -> str:
+    n = len(parts)
+
+    def numeric(j: int) -> bool:
+        return 0 <= j < n and parts[j][0] == "field" and parts[j][1] in _NUMERIC_KINDS
+
+    def fraction_at(j: int) -> bool:
+        return 0 <= j < n and parts[j][0] == "field" and parts[j][1] == "fraction"
+
+    out = []
+    for k, p in enumerate(parts):
+        if p[0] == "lit":
+            # A . or , before the fraction is the fraction's own, and goes
+            # with it: either may be written, and both may be missing.
+            if p[1] in (".", ",") and fraction_at(k + 1):
+                continue
+            out.append(re.escape(p[1]))
+        elif p[0] == "ws":
+            # An AM/PM or a zone may sit against the time or apart from it.
+            nxt = parts[k + 1] if k + 1 < n else None
+            out.append(r"\s*" if nxt and nxt[0] == "field" and nxt[1] in ("meridiem", "zone") else r"\s+")
+        else:
+            kind, letters = p[1], p[2]
+            # A number run up against another (yyyyMMdd, HHmmss) has to be
+            # its full width, or "2026314" could be March 14 or Dec 3...
+            tight = numeric(k - 1) or numeric(k + 1)
+            if kind == "year4":
+                out.append(r"(?P<year>\d{4})")
+            elif kind == "year2":
+                out.append(r"(?P<year2>\d{2})")
+            elif kind in ("month", "day", "hour", "minute", "second"):
+                out.append(rf"(?P<{kind}>\d{{2}})" if tight else rf"(?P<{kind}>\d{{1,2}})")
+            elif kind == "month_name":
+                out.append(r"(?P<month_name>" + MONTH_NAME + r")\.?")
+            elif kind == "weekday":
+                out.append(WEEKDAY_NAME + r"\.?")
+            elif kind == "fraction":
+                digits = rf"\d{{{letters}}}" if numeric(k + 1) else r"\d+"
+                sep = k > 0 and parts[k - 1][0] == "lit" and parts[k - 1][1] in (".", ",")
+                out.append(rf"(?:[.,](?P<fraction>{digits}))?" if sep else rf"(?P<fraction>{digits})")
+            elif kind == "meridiem":
+                out.append(r"(?P<meridiem>[AaPp])\.?[Mm]\.?(?![A-Za-z])")
+            elif kind == "zone":
+                out.append(r"(?P<zone>" + _PATTERN_ZONE + r")")
+    # The pattern has to account for every digit of the time it reads: a
+    # value that goes on with ":01" or ".5" is not this layout, and reading
+    # it as if it were would drop the seconds or the fraction unseen.
+    return "".join(out) + r"(?![:.,]?\d)"
+
+
+@functools.lru_cache(maxsize=256)
+def compile_pattern(pattern: str) -> CompiledPattern:
+    """A pattern compiled, or PatternError saying what is wrong with it.
+    Cached: the backfill asks once per value."""
+    p = str(pattern or "").strip()
+    if not p:
+        raise PatternError("Write a pattern, like dd-MM-yyyy HH:mm:ss.")
+    if len(p) > PATTERN_MAX_LEN:
+        raise PatternError(f"A pattern can be at most {PATTERN_MAX_LEN} characters.")
+    parts = _read_strftime_pattern(p) if _STRFTIME_RE.search(p) else _read_letter_pattern(p)
+    _check_parts(parts)
+    return CompiledPattern(p, parts)
+
+
+def _pattern_zone_offset(text: str) -> timedelta | None:
+    t = text.strip().upper().replace("−", "-")
+    if t in ("Z", "UTC", "GMT", "UT"):
+        return timedelta(0)
+    m = _PATTERN_OFFSET_RE.match(t)
+    if not m:
+        return None
+    try:
+        return _parse_utc_offset(f"{m.group(1)}{m.group(2)}:{m.group(3) or '00'}")
+    except ValueError:
+        return None
+
+
+def parse_with_pattern(cp: CompiledPattern, value: Any, params: dict) -> str | None:
+    s = str(value).strip()
+    m = cp.regex.match(s)
+    if not m:
+        return None
+    rest = s[m.end():]
+    if "hour" not in cp.kinds and _TIME_FOLLOWS_RE.match(rest):
+        return None
+    if "meridiem" not in cp.kinds and _MERIDIEM_FOLLOWS_RE.match(rest):
+        return None
+    g = m.groupdict()
+    if g.get("year") is not None:
+        year = int(g["year"])
+    else:
+        # Two-digit years as RFC 2822 widens them (and _parse_rfc2822
+        # here): 50–99 are 19xx, 00–49 are 20xx.
+        yy = int(g["year2"])
+        year = yy + (1900 if yy >= 50 else 2000)
+    month = int(g["month"]) if g.get("month") is not None else MONTHS[g["month_name"][:3].lower()]
+    frac = g.get("fraction")
+    try:
+        dt = datetime(year, month, int(g["day"]), hour24(int(g.get("hour") or 0), g.get("meridiem")),
+                      int(g.get("minute") or 0), int(g.get("second") or 0),
+                      int(frac[:6].ljust(6, "0")) if frac else 0)
+    except ValueError:
+        return None
+    if "zone" in cp.kinds:
+        off = _pattern_zone_offset(g["zone"])
+        if off is None:
+            return None
+        dt = dt.replace(tzinfo=timezone(off))
+    else:
+        # A zone after the match is read as every text format reads one;
+        # anything else after it (the rest of a log line) is left alone.
+        dt = _zoned(dt, rest, params)
+        if dt is None:
+            return None
+    return _fmt(dt, subsecond=frac is not None)
+
+
+def _parse_custom(value: Any, params: dict, state: dict) -> str | None:
+    cp = state.get("pattern")
+    if cp is None:
+        try:
+            cp = state["pattern"] = compile_pattern(params.get("pattern") or "")
+        except PatternError:
+            # Total, like every parser here: validate_params refuses a bad
+            # pattern before a column exists, so this is a caller that
+            # skipped it (a plugin, a hand-built probe) — nothing reads.
+            return None
+    return parse_with_pattern(cp, value, params)
+
+
+def _validate_custom(params: dict) -> None:
+    compile_pattern(params.get("pattern") or "")   # raises PatternError, a ValueError
+
+
+def detect_pattern(samples: list, pattern: str) -> float:
+    """The fraction of non-empty samples a saved pattern reads to a date
+    in the plausible window — the window the numeric formats are held to,
+    applied here for detection only: a pattern of bare digits
+    (yyyyMMdd) reads a column of record numbers as dates too."""
+    vals = [v for v in samples if v is not None and str(v).strip()]
+    if not vals:
+        return 0.0
+    try:
+        cp = compile_pattern(pattern)
+    except PatternError:
+        return 0.0
+    ok = 0
+    for v in vals:
+        try:
+            out = parse_with_pattern(cp, v, {})
+        except Exception:  # noqa: BLE001 — as parse_or_none: one value, not the column
+            out = None
+        if out is not None and PLAUSIBLE_MIN_YEAR <= int(out[:4]) <= PLAUSIBLE_MAX_YEAR:
+            ok += 1
+    return ok / len(vals)
+
+
+PATTERN_HELP = ("yyyy year · MM month · MMM Jan · dd day · HH hour · mm minute · ss second · "
+                "fff fraction · tt AM/PM · zzz offset · 'text' as written. %Y-%m-%d strftime works too.")
+
+register_op({
+    "id": "custom_pattern",
+    "label": "Custom pattern",
+    "description": "Your own layout, for timestamps no other format reads: dd-MM-yyyy HH:mm:ss reads "
+                   "14-03-2026 13:22:01. mm beside an hour or a second is minutes, anywhere else the month. "
+                   "A trailing offset (+0200, UTC) is converted to UTC.",
+    "params": [
+        {"name": "pattern", "label": "Pattern", "type": "text", "required": True,
+         "placeholder": "dd-MM-yyyy HH:mm:ss", "help": PATTERN_HELP},
+        _UTC_OFFSET_PARAM,
+    ],
+    "parse": _parse_custom,
+    "validate": _validate_custom,
+    "hidden_from_detect": True,
 })
