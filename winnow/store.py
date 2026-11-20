@@ -59,6 +59,7 @@ from . import timeparse
 from . import iisread
 from . import kvread
 from . import bodyread
+from . import secureread
 from . import plasoread
 from . import rxguard
 from . import utmpread
@@ -238,6 +239,11 @@ UTMP_IMPORT_TYPE = "utmp"
 # their chip, on by default. One under another name is recognized by its
 # first line (looks_like_bodyfile), as a key=value log is.
 BODYFILE_IMPORT_TYPE = "bodyfile"
+# Linux authentication logs (secure, auth.log and their rotations —
+# secureread.name_says), by name as well; this token is their chip, on by
+# default. Unlike the names above, a plugin that claims the file by its
+# extension or a pattern (esxi_logs) still gets it: see secureread.py.
+SECURE_IMPORT_TYPE = "secure"
 # scan_import_directory stops walking once matched+excluded together hit
 # this many entries — same "cap and say so" reasoning as
 # SEARCH_ALL_COUNT_CAP, guarding against an analyst accidentally pointing
@@ -965,15 +971,22 @@ def _compiled_regex(pattern: str) -> re.Pattern:
 # there's no shared module between the two, just the same format families.
 # The 12-hour marker is timeparse.MERIDIEM, after optional fraction digits
 # (not captured: TS_NORMALIZE is whole seconds) — see MERIDIEM for what
-# `\s*(AM|PM|am|pm)?` straight after the seconds got wrong.
-_TS_ISO_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?")
-_TS_US_RE = re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{4})(?:[ ,]+(\d{1,2}):(\d{2})(?::(\d{2})(?:[.,]\d+)?)?"
+# `\s*(AM|PM|am|pm)?` straight after the seconds got wrong. Between the
+# date and the time is timeparse.DATE_TIME_SEP, and the hour may be one
+# digit in every shape: DATE_RE types a column on its date alone, so a
+# separator or an hour these did not read turned every time in it into
+# midnight (see DATE_TIME_SEP).
+_TS_ISO_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})(?:" + timeparse.DATE_TIME_SEP
+                        + r"(\d{1,2}):(\d{2})(?::(\d{2}))?)?")
+_TS_US_RE = re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{4})(?:" + timeparse.DATE_TIME_SEP
+                       + r"(\d{1,2}):(\d{2})(?::(\d{2})(?:[.,]\d+)?)?"
                        r"\s*(?:" + timeparse.MERIDIEM + r")?)?")
 _TS_MONTH_RE = re.compile(
     r"^(?:(" + _TS_MONTH_NAME + r")\s+(\d{1,2})" + timeparse.ORDINAL
     + r"|(\d{1,2})" + timeparse.ORDINAL + r"\s+(" + _TS_MONTH_NAME + r"))"
     r"\s*,?\s*(\d{4})"
-    r"(?:[ ,]+(\d{1,2}):(\d{2})(?::(\d{2})(?:[.,]\d+)?)?\s*(?:" + timeparse.MERIDIEM + r")?)?",
+    r"(?:" + timeparse.DATE_TIME_SEP
+    + r"(\d{1,2}):(\d{2})(?::(\d{2})(?:[.,]\d+)?)?\s*(?:" + timeparse.MERIDIEM + r")?)?",
     re.IGNORECASE)
 
 
@@ -1029,7 +1042,9 @@ def _ts_normalize(raw: Any) -> str | None:
     m = _TS_ISO_RE.match(s)
     if m:
         y, mo, d, h, mi, sec = m.groups()
-        return f"{y}-{mo}-{d} {h or '00'}:{mi or '00'}:{sec or '00'}"
+        # The hour may be one digit ("2026-06-23 1:02:03"); padded, so the
+        # result still sorts as text.
+        return f"{y}-{mo}-{d} {int(h) if h else 0:02d}:{mi or '00'}:{sec or '00'}"
     m = _TS_US_RE.match(s)
     if m:
         mo, d, y, h, mi, sec, ampm = m.groups()
@@ -1720,7 +1735,7 @@ def _ingest_record(kind: str, **options) -> str:
     a session names rows by rid, so the re-import has to produce the same
     rows in the same order, and the defaults do not (a headerless CSV
     gains a header and every rid slides by one). `kind` names a Store
-    reader: csv, text, json, sqlite, xlsx, plaso, iis, kv, utmp, bodyfile — or rows, for a table
+    reader: csv, text, json, sqlite, xlsx, plaso, iis, kv, utmp, bodyfile, secure — or rows, for a table
     produced in-process (a plugin's parser, a SQL save), which nothing
     here can re-run."""
     return json.dumps({"kind": kind, **{k: v for k, v in options.items() if v is not None}})
@@ -5669,8 +5684,58 @@ class Store:
                                 f"{'were' if n != 1 else 'was'} kept whole in the {bodyread.UNPARSED} column")
         return rec
 
+    def ingest_secure(self, path: str, name: str | None = None, build_fts: bool = True,
+                      progress=None, cancel=None, year: int | None = None) -> dict:
+        """Import a Linux authentication log (/var/log/secure, auth.log) as
+        one table, a row per line under secureread.COLUMNS; secureread.py
+        has the format, the events read out of each message and how a
+        year-less stamp gets its year. Like ingest_bodyfile, nothing is
+        checked first, and a file with no syslog line in it is refused.
+
+        `year` is the year of the file's first traditional stamp, when the
+        analyst gave it; otherwise it is worked out from the file's
+        modified time. Either way the year used is what the ingest record
+        keeps, so a session re-import dates the lines the same way later,
+        whatever the file's modified time is by then. The result carries
+        it as `syslog_year`, and `year_from` says where it came from
+        ("set", "modified", or None for a file whose stamps all carry
+        one); the log says it too, since it is an inference."""
+        name = name or os.path.basename(path)
+        if year is not None and not 1970 <= int(year) <= 2100:
+            raise ValueError("The year of the first line must be between 1970 and 2100")
+        try:
+            modified = os.path.getmtime(path)
+        except OSError:
+            modified = None
+        planned: dict = {}
+
+        def plan_of(lines):
+            planned.update(secureread.plan(lines, year=year, modified=modified))
+            return planned
+
+        rec = self._ingest_planned_lines(
+            path, name, plan_of, secureread.rows,
+            nothing=f"{name} has no syslog lines in it (Mmm dd hh:mm:ss host process[pid]: message)",
+            ingest=lambda plan: _ingest_record("secure", year=plan["first_year"]),
+            column_types=None, build_fts=build_fts, progress=progress, cancel=cancel)
+        rec["syslog_year"] = planned.get("first_year")
+        rec["year_from"] = planned.get("year_from")
+        if rec["year_from"] == "modified":
+            when = (time.strftime("%Y-%m-%d", time.gmtime(modified)) if modified is not None
+                    else "unknown, so today's date was used")
+            wlog.record("info", f"{name}: its timestamps carry no year, so the first line was dated "
+                                f"{rec['syslog_year']} from the file's modified date ({when}), going up "
+                                "a year at each Dec → Jan. If that is wrong, import it again with the "
+                                "year set; Timestamp (as logged) keeps every stamp as written.")
+        if rec["unparsed_lines"]:
+            n = rec["unparsed_lines"]
+            wlog.record("warn", f"{name}: {n:,} line{'s were' if n != 1 else ' was'} not a syslog line "
+                                f"(Mmm dd hh:mm:ss host process[pid]: message) and "
+                                f"{'were' if n != 1 else 'was'} kept whole in the Message column")
+        return rec
+
     def _ingest_planned_lines(self, path: str, name: str, plan_of, rows_of, *, nothing: str,
-                              ingest: str, column_types: dict[str, str] | None,
+                              ingest, column_types: dict[str, str] | None,
                               build_fts: bool, progress, cancel) -> dict:
         """The two-pass import of a line-shaped log whose columns aren't
         known until the whole file has been read (an IIS W3C log's #Fields:
@@ -5692,7 +5757,11 @@ class Store:
         `column_types` ({column: type}) is applied by name, not position as
         ingest_csv's list is: the preview reads the start of the file, and
         a line further in can add columns ahead of ones it saw. A column
-        it does not name keeps the inferred type."""
+        it does not name keeps the inferred type.
+
+        `ingest` is the record of how the table was read, or a function
+        of the plan that returns it, for a reader whose options are only
+        settled by pass one (secure: the year it worked out)."""
         size = os.path.getsize(path)
         file_hash = self._quick_hash(path)
         encoding = sniff_text_encoding(path)
@@ -5721,6 +5790,8 @@ class Store:
 
         cols = sanitize_columns(plan["columns"])
         ncols = len(cols)
+        if callable(ingest):
+            ingest = ingest(plan)
         source_id, table = self._create_source_shell(name, cols, path=path, file_hash=file_hash, ingest=ingest)
         insert = f"INSERT INTO {q(table)} ({','.join(q(c) for c in cols)}) VALUES ({','.join('?' * ncols)})"
 
@@ -5859,6 +5930,33 @@ class Store:
         return {"delimiter": None, "columns": sanitize_columns(plan["columns"]),
                 "sample_rows": sample, "inferred_types": list(plan["types"]),
                 "unparsed_lines": plan["unparsed"], "complete": complete}
+
+    @staticmethod
+    def preview_secure_text(text: str, complete: bool = True, max_rows: int = 50, *,
+                            year: int | None = None, modified: float | None = None) -> dict:
+        """The first rows of a secure log as ingest_secure would make them,
+        in preview_csv_text's shape. `complete` as preview_iis_text's. The
+        year is the analyst's when given; otherwise it is worked out from
+        `modified` as the import would, but from the sample alone, so for a
+        file longer than the sample it is a guess the import may improve
+        on (the import window says so)."""
+        if not text:
+            raise ValueError("File is empty")
+        physical = text.split("\n")
+        if not complete and len(physical) > 1:
+            physical.pop()
+        lines = list(iisread.logical_lines(physical, {}))
+        plan = secureread.plan(lines, year=year, modified=modified)
+        if not plan["columns"]:
+            raise ValueError("No syslog lines (Mmm dd hh:mm:ss host process[pid]: message) "
+                             "in the start of this file")
+        stats: dict = {}
+        sample = list(itertools.islice(secureread.rows(lines, plan, stats), max_rows))
+        return {"delimiter": None, "columns": sanitize_columns(plan["columns"]),
+                "sample_rows": sample, "inferred_types": list(plan["types"]),
+                "unparsed_lines": plan["unparsed"], "complete": complete,
+                "syslog_year": plan["first_year"], "year_from": plan["year_from"],
+                "modified": modified}
 
     def _finish_source_columns(self, source_id: int, colmeta: list[dict], decoded: dict,
                                name: str) -> None:
@@ -6837,8 +6935,9 @@ class Store:
         A file is excluded for exactly one of: its extension isn't
         recognized ("extension"; "IIS logs not selected" for a file named
         like an IIS log when `extensions` leaves out IIS_IMPORT_TYPE, and
-        "wtmp/btmp/utmp not selected" likewise for UTMP_IMPORT_TYPE and
-        "body files not selected" for BODYFILE_IMPORT_TYPE),
+        "wtmp/btmp/utmp not selected" likewise for UTMP_IMPORT_TYPE,
+        "body files not selected" for BODYFILE_IMPORT_TYPE and "secure logs
+        not selected" for SECURE_IMPORT_TYPE),
         include_patterns is non-empty and nothing
         in it matched ("no include pattern matched"), a pattern in
         exclude_patterns matched ("excluded by pattern: <pattern>"), it
@@ -6879,13 +6978,16 @@ class Store:
         utmp_logs = extensions is None or UTMP_IMPORT_TYPE in (e.lower() for e in extensions)
         # Body files named as one (bodyfile, bodyfile.txt, *.body): the same.
         body_files = extensions is None or BODYFILE_IMPORT_TYPE in (e.lower() for e in extensions)
+        # Secure logs and auth.logs named as one: the same.
+        secure_logs = extensions is None or SECURE_IMPORT_TYPE in (e.lower() for e in extensions)
         # None means "the defaults"; an empty list means exactly that — the
         # analyst turned every chip off. `or` conflated the two, so a scan
         # with nothing selected matched the default set.
         exts = {
             (e if e.startswith(".") else "." + e).lower()
             for e in (DEFAULT_IMPORT_EXTENSIONS if extensions is None else extensions)
-            if e not in ("*", ".*") and e.lower() not in (IIS_IMPORT_TYPE, UTMP_IMPORT_TYPE, BODYFILE_IMPORT_TYPE)
+            if e not in ("*", ".*") and e.lower() not in (IIS_IMPORT_TYPE, UTMP_IMPORT_TYPE, BODYFILE_IMPORT_TYPE,
+                                                           SECURE_IMPORT_TYPE)
         }
         includes = [p for p in (include_patterns or []) if p.strip()]
         excludes = [p for p in (exclude_patterns or []) if p.strip()]
@@ -6929,14 +7031,17 @@ class Store:
                 is_iis = iisread.log_format(fname) is not None
                 is_utmp = utmpread.log_kind(fname) is not None
                 is_body = bodyread.name_says(fname)
+                is_secure = secureread.name_says(fname)
                 by_filename_pattern = any(fnmatch.fnmatch(fname.lower(), p.lower()) for p in fname_pats)
                 by_ext = ext in exts
                 unclaimed = (not by_ext and not by_filename_pattern and not (is_iis and iis_logs)
-                             and not (is_utmp and utmp_logs) and not (is_body and body_files))
+                             and not (is_utmp and utmp_logs) and not (is_body and body_files)
+                             and not (is_secure and secure_logs))
                 if unclaimed and not other_text:
                     reason = ("IIS logs not selected" if is_iis
                               else "wtmp/btmp/utmp not selected" if is_utmp
-                              else "body files not selected" if is_body else "extension")
+                              else "body files not selected" if is_body
+                              else "secure logs not selected" if is_secure else "extension")
                     excluded.append({**entry, "reason": reason})
                     continue
                 if includes and not any(self._import_pattern_matches(p, fname, rel) for p in includes):
@@ -6952,7 +7057,7 @@ class Store:
                 # A binary that got in as "other text" may be login records
                 # under another name (wtmp copied out as evidence.bin): its
                 # bytes are asked before it is turned away.
-                if unclaimed and not is_iis and not is_utmp and not is_body and looks_binary(fpath):
+                if unclaimed and not is_iis and not is_utmp and not is_body and not is_secure and looks_binary(fpath):
                     if not looks_like_utmp(fpath):
                         excluded.append({**entry, "reason": "binary"})
                         continue
@@ -6979,6 +7084,10 @@ class Store:
                     kind = "csv"
                 elif by_ext or by_filename_pattern:
                     kind = "plugin"
+                elif is_secure:
+                    # Below a plugin's claim, unlike the names above: with
+                    # esxi_logs on, secure and auth.log stay its (secureread.py).
+                    kind = "secure"
                 else:
                     kind = "text"
                 # A key=value log has no name of its own, so the file's
@@ -7018,7 +7127,7 @@ class Store:
         sat behind with no progress, no way to tell "working" from
         "crashed", and a browser tab they couldn't use meanwhile.
 
-        `kind` is 'csv' | 'text' | 'json' | 'sqlite' | 'xlsx' | 'plaso' | 'iis' | 'kv' | 'utmp' | 'bodyfile'. For 'sqlite',
+        `kind` is 'csv' | 'text' | 'json' | 'sqlite' | 'xlsx' | 'plaso' | 'iis' | 'kv' | 'utmp' | 'bodyfile' | 'secure'. For 'sqlite',
         options['tables'] is [{table, name?, timestamp_columns?}, ...] —
         one uploaded file, one job, N sources, so the file is spooled and
         read once rather than re-uploaded per table. `delete_after` removes
@@ -7060,7 +7169,8 @@ class Store:
         (add_derived_column, add_derived_columns, rederive_column) undo
         that definition on the refusal — a column whose only job was never
         started would otherwise be 'building' for good."""
-        if kind not in ("csv", "text", "json", "sqlite", "xlsx", "plaso", "iis", "kv", "utmp", "bodyfile", "derive"):
+        if kind not in ("csv", "text", "json", "sqlite", "xlsx", "plaso", "iis", "kv", "utmp", "bodyfile",
+                        "secure", "derive"):
             raise ValueError(f"Unknown ingest kind: {kind}")
         try:
             size = os.path.getsize(path)
@@ -7220,6 +7330,11 @@ class Store:
                     job["path"], name=job["name"], build_fts=opts.get("build_fts", True),
                     progress=progress, cancel=cancel,
                 )]
+            elif job["kind"] == "secure":
+                results = [self.ingest_secure(
+                    job["path"], name=job["name"], build_fts=opts.get("build_fts", True),
+                    progress=progress, cancel=cancel, year=opts.get("year"),
+                )]
             elif job["kind"] == "json":
                 results = [self.ingest_json(
                     job["path"], name=job["name"],
@@ -7278,7 +7393,8 @@ class Store:
                                            "ragged_rows", "suspect_quote_rows", "bad_records",
                                            "first_bad_line", "key_collisions", "encoding",
                                            "cp1252_bytes", "undecodable_values",
-                                           "record_layout", "torn_bytes", "unparsed_lines")}
+                                           "record_layout", "torn_bytes", "unparsed_lines",
+                                           "syslog_year", "year_from")}
                     for r in results
                 ]
             wlog.record("info", f"Import finished: {job['name']} ({job['kind']}) — "
@@ -10208,9 +10324,17 @@ class Store:
             return []
         # Nothing to suggest for a column the analyst has already converted.
         converted = {d["input_column"].lower() for d in self.list_derived_columns(source_id)}
+        cols = self._base_cols(src)
+        # Nor for the stamp a reader kept "as logged" beside the datetime it
+        # already made of it (a secure log's, esxi_logs', IIS NCSA's): the
+        # hint would offer a second Timestamp, dated by the derived op's own
+        # year rule rather than the one the reader recorded.
+        typed = any(c["type"] == "datetime" for c in cols)
         out = []
-        for c in self._base_cols(src):
+        for c in cols:
             if c["type"] == "datetime" or c["name"].lower() in converted:
+                continue
+            if typed and c["name"].lower().endswith("(as logged)"):
                 continue
             samples = self._sample_column(src, c["name"])
             if not samples:
@@ -11394,6 +11518,10 @@ class Store:
 
     # Rows read from each end of a table by _text_sorts_by_time.
     _TIME_SORT_SAMPLE = 256
+    # A one-digit hour after the date ("2026-06-23 9:05:00"): a digit with
+    # a non-digit before it and a colon after. As text, "9:05" sorts after
+    # "10:00" of the same day.
+    _ONE_DIGIT_HOUR_GLOB = "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*[^0-9][0-9]:[0-9][0-9]*"
 
     def _time_sort_columns(self, src: dict, spec: dict, colnames: dict) -> frozenset[str]:
         """The datetime columns in `spec`'s sort that must sort by time
@@ -11432,7 +11560,9 @@ class Store:
         (_DATE_LED_GLOB), the ISO shape EvtxECmd, MFTECmd and most tools
         write. Those keep sorting as text, which the COLLATE NOCASE index
         the first datetime column gets at import serves, so the common
-        case costs nothing new.
+        case costs nothing new. A date-led value with a one-digit hour
+        (_ONE_DIGIT_HOUR_GLOB) does not count: its text order puts 9 AM
+        after 10 AM.
 
         Judged on the first and last _TIME_SORT_SAMPLE rows rather than
         every row, so the answer costs two short reads by rid instead of a
@@ -11451,8 +11581,8 @@ class Store:
                 odd = ro.execute(
                     f"SELECT 1 FROM (SELECT * FROM (SELECT {ref} AS v FROM {table} ORDER BY rid LIMIT {n}) "
                     f"UNION ALL SELECT * FROM (SELECT {ref} AS v FROM {table} ORDER BY rid DESC LIMIT {n})) "
-                    f"WHERE v IS NOT NULL AND v != '' AND NOT (v GLOB ?) LIMIT 1",
-                    (self._DATE_LED_GLOB,)).fetchone()
+                    f"WHERE v IS NOT NULL AND v != '' AND (NOT (v GLOB ?) OR v GLOB ?) LIMIT 1",
+                    (self._DATE_LED_GLOB, self._ONE_DIGIT_HOUR_GLOB)).fetchone()
             cache[key] = odd is None
         return cache[key]
 
@@ -17953,7 +18083,8 @@ class Store:
                 "so there is no file to re-import it from, and this case does not have it or a "
                 "copy of it")
 
-    _SESSION_READERS = ("csv", "text", "json", "sqlite", "xlsx", "plaso", "iis", "kv", "utmp", "bodyfile")
+    _SESSION_READERS = ("csv", "text", "json", "sqlite", "xlsx", "plaso", "iis", "kv", "utmp", "bodyfile",
+                        "secure")
 
     def _reimport_session_source(self, s_meta: dict) -> tuple[int | None, str | None]:
         """(source_id, None) after re-importing a session source from its
@@ -18026,6 +18157,8 @@ class Store:
                 rec = self.ingest_utmp(path, name=name, layout=how.get("layout"))
             elif kind == "bodyfile":
                 rec = self.ingest_bodyfile(path, name=name)
+            elif kind == "secure":
+                rec = self.ingest_secure(path, name=name, year=how.get("year"))
             else:
                 rec = self.ingest_plaso(path, name=name)
         except Exception as e:
@@ -18054,6 +18187,9 @@ class Store:
             return {"kind": "utmp"}
         if bodyread.name_says(path):
             return {"kind": "bodyfile"}
+        # Not secureread.name_says: a session that predates sources.ingest
+        # predates the secure log reader too, so its secure or auth.log
+        # was read as text, and text is what reproduces its rows.
         if ext in (".json", ".jsonl", ".ndjson"):
             return {"kind": "json"}
         return {"kind": "csv" if ext in DEFAULT_IMPORT_EXTENSIONS else "text"}

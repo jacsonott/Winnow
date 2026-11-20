@@ -86,6 +86,16 @@ see [docs/notes/README.md](README.md) for the whole set.
   report was client-side: the add dialog opened from the Table dialog
   started on the first column whatever it was, and now starts on the
   first that looks like a timestamp (`defaultParseColumn` in derived.js).
+- **A stamp a reader kept "as logged" is not a hint.** A secure log,
+  esxi_logs and IIS NCSA all write the datetime they made of a line's
+  stamp AND the stamp exactly as written, as `Timestamp (as logged)`.
+  The raw one is text, and a year-less syslog stamp detects as BSD
+  syslog, so every such import ended on "looks like BSD syslog · Add
+  datetime column": an offer of a second Timestamp, dated by the derived
+  op's own year rule rather than the one the reader recorded.
+  `detect_source_suggestions` skips a column whose name ends
+  `(as logged)` when the table already has a datetime column; without
+  one beside it, it is still offered. tests/test_secure_log.py.
 
 - **The add dialog is a fixed frame; its content never sizes it**
   (`openDerivedColumnModal`, `.side-panes`). It was a column of rows
@@ -441,6 +451,20 @@ see [docs/notes/README.md](README.md) for the whole set.
     `_TS_MONTH_RE`, and tsformat.js's `TS_MONTH_RE` mirrors both by hand.
     The suffix isn't checked against the number — "21th" is still the
     21st, and refusing it would turn a typo into a missing timestamp.
+    What may stand between the date and the time is shared too:
+    `timeparse.DATE_TIME_SEP` (a T in either case, any whitespace, a
+    comma or "@", or "-" or "at" followed by a space) in store.py's three
+    `_TS_*_RE` and `parse_datetime_lenient`, mirrored by hand in
+    tsformat.js, and the hour may be one digit in all of them. `DATE_RE`
+    types a column datetime on its date alone, so a separator the readers
+    missed read every value as midnight: shown at 00:00:00 in every format
+    but As stored, and filtered, bucketed and placed on the Timeline as
+    midnight. The space after "-" is what keeps "2026-06-23 -05:00" a
+    date and a UTC offset rather than a time. The derived-column parse
+    ops (`_US_RE`, `_DD_MMM_RE`) keep their narrower separators: a value
+    they miss is NULL and counted as unparsed, never a silent midnight.
+    `tests/test_timestamp_separators.py`,
+    `tests/ui/test_timestamp_time_of_day.py`.
     Unparseable input is NULL, not `''`: it drops out of
     comparisons and the timeframe filter instead of pretending to be data,
     and the count of non-empty inputs that produced NULL is surfaced per

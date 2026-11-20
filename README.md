@@ -123,7 +123,9 @@ Notes and dashboards.
   and JSON Lines, SQLite databases (a browser `History`, say), Excel
   `.xlsx`/`.xlsm`, `.plaso` timelines, Linux `wtmp`/`btmp`/`utmp` login
   records (either record size and byte order), TSK/mactime body files
-  (`fls -m`, UAC's `bodyfile.txt`) with their times in UTC, and any log
+  (`fls -m`, UAC's `bodyfile.txt`) with their times in UTC, Linux
+  `secure` and `auth.log` with each SSH login, sudo command and account
+  change read out into its own columns, and any log
   file as raw text, one line per row, or split into columns on a delimiter
   you type (two colons, a pipe with spaces around it, a single space). Archives (`.zip`, `.tar`, `.tgz` and friends,
   nested ones included) expand into a new folder, leaving the archive

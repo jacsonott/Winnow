@@ -26,7 +26,7 @@ import sqlite3
 import pytest
 from openpyxl import Workbook
 
-from winnow import bodyread, iisread, kvread, plasoread, store as store_mod, xlsxread
+from winnow import bodyread, iisread, kvread, plasoread, secureread, store as store_mod, xlsxread
 from winnow.store import IngestCancelled
 
 BATCH = 7
@@ -156,6 +156,13 @@ def _bodyfile_make(tmp_path):
     return str(p)
 
 
+def _secure_make(tmp_path):
+    p = tmp_path / "secure"
+    p.write_text("".join(f"Jan  2 03:14:{i % 60:02d} web01 sshd[{1000 + i}]: Invalid user {mark(i)} "
+                         f"from 198.51.100.4 port {40000 + i}\n" for i in range(1, N + 1)), encoding="utf-8")
+    return str(p)
+
+
 def _xlsx_make(tmp_path):
     wb = Workbook()
     ws = wb.active
@@ -231,6 +238,8 @@ READERS = {
                poison=lambda mp, k: _poison_rows(mp, kvread, "rows", k), keeps="parsed"),
     "bodyfile": dict(make=_bodyfile_make, ingest=lambda s, p, **kw: s.ingest_bodyfile(p, **kw),
                      poison=lambda mp, k: _poison_rows(mp, bodyread, "rows", k), keeps="parsed"),
+    "secure": dict(make=_secure_make, ingest=lambda s, p, **kw: s.ingest_secure(p, **kw),
+                   poison=lambda mp, k: _poison_rows(mp, secureread, "rows", k), keeps="parsed"),
     "xlsx": dict(make=_xlsx_make, ingest=lambda s, p, **kw: s.ingest_xlsx_sheet(p, "Events", **kw),
                  poison=lambda mp, k: _poison_rows(mp, xlsxread, "sheet_reader", k), keeps="parsed"),
     "plaso": dict(make=_plaso_make, ingest=lambda s, p, **kw: s.ingest_plaso(p, **kw),

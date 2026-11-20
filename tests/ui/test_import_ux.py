@@ -112,7 +112,7 @@ def test_the_file_picker_filters_and_sorts(page, tmp_path):
 # analyst holding that file would look for on the screen.
 IMPORT_KINDS = {"logons.csv": "CSV", "events.jsonl": "JSON", "History.db": "SQLite",
                 "Book1.xlsx": "Excel", "run.plaso": "Plaso", "bundle.tgz": "archive",
-                "auth.log.1": "text"}
+                "auth.log.1": "secure", "messages.1": "text"}
 
 
 def test_the_drop_overlay_and_import_intro_name_everything_that_imports(page):
@@ -122,7 +122,7 @@ def test_the_drop_overlay_and_import_intro_name_everything_that_imports(page):
     take one. Both list every kind the queue routes a file to: the
     Import window where its empty queue's pane says what to drop."""
     kinds = page.evaluate("(names) => names.map((n) => __winnow.importKindFor(n))", list(IMPORT_KINDS))
-    assert kinds == ["csv", "json", "sqlite", "xlsx", "plaso", "archive", "text"]
+    assert kinds == ["csv", "json", "sqlite", "xlsx", "plaso", "archive", "secure", "text"]
     drag = """(type) => {
       const dt = new DataTransfer();
       dt.items.add(new File(['x'], 'run.plaso'));

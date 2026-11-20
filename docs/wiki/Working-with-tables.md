@@ -151,6 +151,8 @@ Fitting is capped so that a single long value, such as a base64 command line, ca
 
 Right-click a datetime column's header to choose how its values are shown, for example **As stored**, **YYYY-MM-DD HH:MM:SS** or **MM/DD/YYYY HH:MM:SS**. This is display only: filters and exports always use the text the file came with, although copying from the grid gives the value as displayed. A format picked on a column beats the case's default in **Case ▾ → Case settings…**, which beats the machine-wide one in **Settings → Timestamps**.
 
+The time of day is read whatever separates it from the date: a space or a `T`, several spaces, `@`, `at`, a dash with spaces around it (`2026-06-23 - 13:05:01`) or a comma, as in `June 23, 2026 at 5:11:22 PM`. A one-digit hour (`2026-06-23 9:05:01`) is read too. A value with a date and no time, such as `2026-06-23`, shows `00:00:00` in a format with a time.
+
 Picking a format that needs more room than the column has widens the column so the whole value shows. Picking one never makes a column narrower, so a width you set that still fits stays as it is. After changing the case or machine-wide format, press `=` to refit columns you've already sized.
 
 The same right-click menu has **Stack values (rarest first)…** (see [Filtering and searching](Filtering-and-searching.md#stacking-a-column)), **Copy unique values** (see [Copying](#copying)) and **Derive a column from this…**.
@@ -175,7 +177,7 @@ How a column sorts depends on its type:
 - Text columns sort alphabetically, ignoring case for A–Z only.
 - Datetime columns sort chronologically, whichever way the file wrote the time: `2024-01-05 13:22:01`, US-style `1/5/2024 1:22:01 PM`, or with a month name, `Jan 5 2024 13:22:01`. Changing a column's display format changes how it looks, not how it sorts. Rows in the same second are ordered by their fraction of a second. Cells that aren't timestamps (`N/A`, blank) sort before every timestamp in ascending order, as non-numbers do in a number column.
 
-    An ISO-style column (`2024-01-05 …`) sorts from an index, which stays fast on millions of rows. Any other shape is read and put in time order on every sort, which takes a couple of seconds per million rows; a filtered view only pays for the rows it shows. If you sort a very large US-dated table often, a [derived datetime column](Derived-columns.md) made from it sorts as fast as an ISO one.
+    An ISO-style column (`2024-01-05 …`) sorts from an index, which stays fast on millions of rows, unless some of its hours are written with one digit (`2024-01-05 9:05:01`). Any other shape is read and put in time order on every sort, which takes a couple of seconds per million rows; a filtered view only pays for the rows it shows. If you sort a very large US-dated table often, a [derived datetime column](Derived-columns.md) made from it sorts as fast as an ISO one.
 
 ## The detail pane
 

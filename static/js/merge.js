@@ -724,12 +724,28 @@ export function looksLikeBodyfile(text) {
   return false;
 }
 
+/* Linux authentication logs by name: mirrors winnow/secureread.py's
+   name_says. secure and auth.log, what logrotate leaves (secure-20240505,
+   secure.1, auth.log.1, auth.log.2.old) and an archive expansion's " (N)",
+   before the extension or the rotation suffix (auth (2).log). Unlike the
+   other names here, a plugin's claim outranks this one (queueItem asks
+   pluginFormatFor first, and pluginFormatFor does not stop for it), so
+   with esxi_logs on these stay the plugin's. */
+const SECURE_LOG_NAME = /^(?:secure(?: \(\d+\))?|auth(?: \(\d+\))?\.log(?: \(\d+\))?)(?:[.-](?:\d+|old))*(?: \(\d+\))?$/i;
+/* The folder-import chip that stands for them (store.SECURE_IMPORT_TYPE). */
+export const SECURE_IMPORT_TYPE = 'secure';
+
+export function secureLogNamed(filename) {
+  return SECURE_LOG_NAME.test(filename.split(/[\\/]/).pop());
+}
+
 export function importKindFor(filename) {
   // Before the extension checks: an IIS log's .log says nothing, and a
-  // wtmp or a bodyfile has no extension at all.
+  // wtmp, a bodyfile or a secure log has no extension at all.
   if (iisLogFormat(filename)) return 'iis';
   if (utmpFileKind(filename)) return 'utmp';
   if (bodyfileNamed(filename)) return 'bodyfile';
+  if (secureLogNamed(filename)) return 'secure';
   if (SQLITE_IMPORT_EXTENSIONS.includes(extOf(filename))) return 'sqlite';
   if (XLSX_IMPORT_EXTENSIONS.includes(extOf(filename))) return 'xlsx';
   if (PLASO_IMPORT_EXTENSIONS.includes(extOf(filename))) return 'plaso';

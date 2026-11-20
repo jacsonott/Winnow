@@ -98,6 +98,7 @@ def test_an_uploaded_workbook_names_its_sheets_like_a_path_import(client, store,
 @pytest.mark.parametrize("name,kind,data", [
     ("logons.csv", "csv", b"Host,User\nh1,alice\nh2,bob\n"),
     ("auth.log.1", "text", b"Jan  1 00:00:01 h sshd[1]: Accepted\nJan  1 00:00:02 h sshd[1]: Closed\n"),
+    ("secure-20240101", "secure", b"Jan  1 00:00:01 h sshd[1]: Accepted\nJan  1 00:00:02 h sshd[1]: Closed\n"),
     ("events.jsonl", "json", b'{"a": 1}\n{"a": 2}\n'),
 ])
 def test_every_upload_records_the_file_it_came_from(client, store, systmp, name, kind, data):
