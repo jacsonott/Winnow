@@ -1,5 +1,5 @@
 {
-  "version": 7,
+  "version": 8,
   "nicknames": [
     {
       "name": "Event logs (EvtxECmd)",
@@ -1198,6 +1198,34 @@
           "Process": "via"
         }
       }
+    },
+    {
+      "name": "systemd journal",
+      "columns": [
+        "Timestamp (UTC)",
+        "Hostname",
+        "Identifier",
+        "PID",
+        "Priority",
+        "Message",
+        "_BOOT_ID"
+      ],
+      "summary": {
+        "lead": [
+          "Message"
+        ],
+        "details": [
+          "Identifier",
+          "Priority",
+          "Hostname"
+        ],
+        "labels": {
+          "Hostname": "on"
+        }
+      },
+      "indexes": [
+        "Identifier"
+      ]
     }
   ]
 }

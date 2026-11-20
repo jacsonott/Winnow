@@ -16,7 +16,7 @@ import { loadCaseVariables } from './savedfilters.js';
 import { recordSqlRun } from './sqlhistory.js';
 import { S } from './state.js';
 import { alertDialog, closeModal, confirmDialog, dropdownMenu, modal, promptDialog, sectionPanes } from './ui.js';
-import { updateFiltersButton, updateTimeRangeButton } from './timeframe.js';
+import { timestampField, updateFiltersButton, updateTimeRangeButton } from './timeframe.js';
 import { renderTagRibbon } from './tags.js';
 import { histogramOpen } from './histogram.js';
 import { announceChange, inPopout, pageElsewhere, popoutPage, sendToMain } from './popout.js';
@@ -466,7 +466,7 @@ export async function showPage(name) {
 
 export function buildPluginTabContext(tab, kind = 'tab') {
   return {
-    apiVersion: 10,
+    apiVersion: 11,
     plugin: tab.plugin,
     base: `/api/plugin/${tab.plugin_fs}`,      // the plugin's own register_api routes
     assets: `/plugin_assets/${tab.plugin_fs}`, // the plugin's own files (css, workers, data)
@@ -477,6 +477,11 @@ export function buildPluginTabContext(tab, kind = 'tab') {
     // A choice of three or four things is a menu, not a modal over the
     // board the analyst is arranging. (API 13 / apiVersion 7.)
     dropdownMenu,
+    // A timestamp box with its label above and the 📅 calendar beside it —
+    // the field the Timeframe and Jump dialogs build from, so a plugin's
+    // own range dialog looks and picks dates as theirs do. Hand it an
+    // <input>; it returns the field to append. (API 16 / apiVersion 10.)
+    timestampField,
     // The app's two-pane dialog frame (ui.js sectionPanes): sections down a
     // side list, each with a line saying what is set there, the chosen one
     // built into the pane on the right — so a plugin's manager dialog
@@ -534,7 +539,7 @@ export function buildPluginTabContext(tab, kind = 'tab') {
       get variables() { return Object.fromEntries((S.caseVariables || []).map((v) => [v.name, v.value])); },
       // The case's timestamp format, as a key of the app's TS_FORMATS
       // ('iso', 'us', 'raw', …): the case's own setting, else this
-      // machine's default, else 'iso'. (API 16 / apiVersion 10.)
+      // machine's default, else 'iso'. (API 17 / apiVersion 11.)
       get tsFormat() { return caseTsFormat(); },
     },
     // A stored timestamp as the case says timestamps read — the grid's own
@@ -543,12 +548,12 @@ export function buildPluginTabContext(tab, kind = 'tab') {
     // 1:02:03 PM" the file happened to hold. A value it can't read as a
     // timestamp comes back unchanged, never guessed at. `format` picks
     // another of the keys (state.tsFormat's); 'iso_us' is a text that
-    // sorts in time order. (API 16 / apiVersion 10.)
+    // sorts in time order. (API 17 / apiVersion 11.)
     formatTimestamp: (value, format) => formatTimestamp(value, format || caseTsFormat()),
     // One cell of the table open in the grid, as the grid paints it: a
     // format the analyst set on that column beats the case's, a duration
     // reads "1h 23m 45s". For a panel that follows the grid; a tab over
-    // a table of its own wants formatTimestamp. (API 16 / apiVersion 10.)
+    // a table of its own wants formatTimestamp. (API 17 / apiVersion 11.)
     displayCell: (column, value) => displayCell(column, value),
     // Write a case variable (upsert) and refresh the local copy.
     setVariable: async (name, value) => {
@@ -576,7 +581,7 @@ export function buildPluginTabContext(tab, kind = 'tab') {
     // default under it, or (`column` set) one column of the table open in
     // the grid — with {tsFormat, column}. Re-render what you formatted, or
     // it keeps the old format until something else redraws it. Returns an
-    // unsubscribe. (API 16 / apiVersion 10.)
+    // unsubscribe. (API 17 / apiVersion 11.)
     onTimestampFormatChange: (cb) => {
       const h = (e) => cb(e.detail);
       document.addEventListener('winnow:tsformat', h);
@@ -593,7 +598,8 @@ export function buildPluginTabContext(tab, kind = 'tab') {
     // filters were there — this is a navigation, not a refinement). The
     // options carry the rest of a count's question — conditions, a tag
     // filter, and whether the count ignored the timeframe (API 15 /
-    // apiVersion 9).
+    // apiVersion 9) or was over a stretch of time of its own (timeRange,
+    // API 16 / apiVersion 10).
     openFiltered: (sourceId, pairs, opts) => openFilteredRows(sourceId, pairs, opts),
   };
 }
@@ -626,14 +632,25 @@ export function setCaseTimeRange(range) {
    - `clearTimeframe`: the count ignored the case timeframe, so it is turned
      off — said out loud, since it is global — or the grid would show fewer
      rows than the number promised (session.js openDiffRows, the same).
+   - `timeRange`: {column, start, end} — the count was over a stretch of
+     time of its own (the Pivot's timeframe), so the case timeframe is SET
+     to it, and said, since that is global too. It wins over
+     clearTimeframe: the range is replaced either way, and replaced with
+     the one the count used is the only way the grid shows those rows.
+     Set after openSource, never before: with the timeframe kept per table
+     (timeframeAcrossTables off), opening the table puts back that table's
+     own range and would undo one set first.
    Every part is applied or the call says why: a pair the box can't spell
    (a value with a line break) goes into the tree as an equals rather than
    being dropped, which used to show the whole table under a chip that
    claimed otherwise. */
-export async function openFilteredRows(sourceId, pairs, { where = [], tags = [], clearTimeframe = false } = {}) {
-  if (inPopout()) { sendToMain('openFiltered', sourceId, pairs, { where, tags, clearTimeframe }); return; }
+export async function openFilteredRows(sourceId, pairs, { where = [], tags = [], clearTimeframe = false, timeRange = null } = {}) {
+  if (inPopout()) { sendToMain('openFiltered', sourceId, pairs, { where, tags, clearTimeframe, timeRange }); return; }
   await openSource(sourceId);
-  const hadTimeframe = !!(clearTimeframe && S.timeRange && S.timeRange.enabled);
+  const range = timeRange && (timeRange.start || timeRange.end)
+    ? { enabled: true, column: timeRange.column || null, start: String(timeRange.start || ''), end: String(timeRange.end || '') }
+    : null;
+  const hadTimeframe = !range && !!(clearTimeframe && S.timeRange && S.timeRange.enabled);
   await clearAllFilters();
   let applied = 0;
   const conds = [];
@@ -661,8 +678,14 @@ export async function openFilteredRows(sourceId, pairs, { where = [], tags = [],
     updateTimeRangeButton();
     applied++;
   }
+  if (range) {
+    S.timeRange = range;
+    updateTimeRangeButton();
+    applied++;
+  }
   if (applied) await rebuildView({ keepScroll: false });
   if (hadTimeframe) toast('Timeframe filter turned off — these are the rows that were counted', 4000);
+  if (range) toast(`Timeframe filter set to ${range.start || '…'} → ${range.end || '…'} — the stretch these rows were counted over`, 5000);
 }
 
 export async function showPluginTab(tabId) {

@@ -605,7 +605,9 @@ see [docs/notes/README.md](README.md) for the whole set.
   in the next, so `value_type: "text"` used to make every regex, JSON,
   XML, decode, lookup and combine column text — and a size pulled out
   with a regex sorted 10 before 9 and compared `> 1000` as strings. The
-  rule is infer_type's (every non-empty value matches NUM_RE), run in
+  rule is infer_type's (every value that isn't blank or a NO_VALUE
+  placeholder such as "-" matches NUM_RE, and there is one;
+  `_sql_has_value`), run in
   SQL with REGEXP over the whole `drv_` column rather than a 500-row
   sample, and NUM_RE exactly rather than a cheaper GLOB: `_numeric_expr`
   gates the sort and the comparisons on the same pattern, so a column
@@ -644,3 +646,46 @@ see [docs/notes/README.md](README.md) for the whole set.
   own type, which is what every derived column read before any of this
   (tests/test_derived_types.py holds `Store()` and /api/case/open to
   returning while it is held).
+- **A custom pattern is one op, `custom_pattern`, and a saved format is
+  that op with its pattern filled in** (`timeparse.compile_pattern`,
+  `workspace.TimestampFormats`, `/api/timestamp_formats`). The column's
+  definition stores the pattern, never the saved format's id: a session
+  carries it to a machine with no such format, Re-derive edits it, and
+  editing or deleting the saved format changes no column — the case
+  never reads `workspace/` (invariant #8). The op is
+  `hidden_from_detect` (with no pattern it reads nothing); detection
+  tries the SAVED patterns instead, which the two detect routes pass in
+  as `custom_formats` because the store does not read the workspace.
+  They rank ahead of the built-ins and so win a tie, on purpose: a saved
+  `dd/MM/yyyy` reads every column of days ≤ 12 exactly as fully as the
+  US format does, and someone who saved it was telling us which one
+  their evidence is. Detection holds a saved pattern to the 1990–2100
+  window (`detect_pattern`), as the numeric formats are held — a
+  `yyyyMMdd` pattern reads eight-digit record numbers as dates — and
+  the parser itself does not, as ISO 8601's does not.
+- **The pattern letters are read the way people write them, not as
+  .NET reads them.** "dd-mm-yyyy hh:mm:ss" is how a ticket or a vendor
+  manual describes a stamp, and to .NET that is day-MINUTE-year on a
+  12-hour clock. So an m-run is a minute when the nearest field before it
+  is an hour or the nearest after it is a second (punctuation between
+  is fine, whitespace is not), else a month; only when that leaves two
+  months does case decide (`_settle_minutes`). `hh` and `HH` are the
+  same hour, made 12-hour only by a `tt` the pattern reads. A run of
+  numbers with nothing between them (`yyyyMMddHHmmss`) is read at full
+  width, or `2026314` would be March 14 or December 3 depending on
+  backtracking. Change any of this and `test_custom_timestamp_formats.py`
+  says which reading moved.
+- **A pattern has to account for the whole timestamp, or the value is
+  NULL.** The regex ends `(?![:.,]?\d)`, so a value that goes on with
+  seconds or a fraction the pattern stops short of is unparsed rather
+  than truncated; a date-only pattern refuses a value with a time after
+  it (`_TIME_FOLLOWS_RE`, built on `DATE_TIME_SEP`), which would
+  otherwise be the silent midnight the ingest readers had (above); and
+  a pattern with no `tt` refuses a value whose time is followed by an
+  AM/PM (`_MERIDIEM_FOLLOWS_RE`) — twelve hours early otherwise. Any
+  other trailing text is left alone, exactly as the built-in text
+  formats leave it, and a zone there goes through `_zoned`. The
+  example a pattern is shown with (`CompiledPattern.example()`) is
+  written for 2026-03-14 13:22:01.482391: a day above 12, an afternoon
+  hour, and month/minute/second all different, so what each letter
+  means is visible in one value.

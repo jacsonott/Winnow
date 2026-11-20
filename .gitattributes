@@ -40,3 +40,8 @@ tests/test_release_script.py export-ignore
 *.png binary
 *.gif binary
 *.ico binary
+# Test fixtures that are compressed data (tests/data/journal/). A small one
+# can hold no NUL byte, which is how git guesses "binary", and a Windows
+# checkout with core.autocrlf would then rewrite its newline bytes.
+*.xz binary
+*.zst binary

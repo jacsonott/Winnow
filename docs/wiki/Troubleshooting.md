@@ -271,6 +271,23 @@ check for a stray quote if the row count looks low", or a file that was
 "not UTF-8 — read as Windows-1252". [Cases and
 importing](Cases-and-importing.md) explains each.
 
+### A column of numbers sorts as text
+
+A column sorts as numbers only when it is a number column; the table menu
+(`C`) shows each column's type. A column of sizes or byte counts is text
+when the first 500 rows hold a cell that is neither a number nor a
+placeholder such as `-` or `N/A`: a word, a number with digit grouping
+(`1,024`) or a unit (`12 KB`).
+[Numbers, dates and text](Filtering-and-searching.md#numbers-dates-and-text)
+has the whole rule. When it is a stray word, import the file again and set
+the column to **number** in its heading in the import preview: the cells
+that aren't numbers then sort before every number. For values with a unit,
+add a [Regex capture](Derived-columns.md#regex-capture) derived column that
+takes the number out, such as `^([\d.]+)` for `12 KB`; it is a number
+column when every value it captures is a number. Digit grouping can't be
+read as a number either way, since `1,024` is as often a list of two
+numbers as it is a thousand.
+
 ### Scrolling is slow over Remote Desktop
 
 Turn on **Settings → Remote session → Remote session mode**. It scrolls the

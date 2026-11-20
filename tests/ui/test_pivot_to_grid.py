@@ -15,7 +15,10 @@ u{i%3}, Timestamp 08:mm:ss counting seconds from 08:00:00), the cell
 H1 × 4625 is i = 1, 21, 41, ..., 181. Tagged Suspicious on rows 1-120
 (i < 120) that is 1, 21, 41, 61, 81, 101; without user u2, 1, 21, 61, 81:
 four rows. A timeframe of the first minute keeps 1 and 21 of those, so a
-grid that kept it would show two rows under a cell that said four.
+grid that kept it would show two rows under a cell that said four — and a
+pivot counting under a first-minute timeframe of its OWN says two, so a
+grid that dropped that range, or kept a different one, would show other
+rows than it counted.
 """
 
 from __future__ import annotations
@@ -57,11 +60,11 @@ def _get(server, route):
         return json.loads(r.read())
 
 
-def _pivot(source_id, filters):
+def _pivot(source_id, filters, timeframe=None):
     return {"v": 1, "active": 0, "pivots": [{
         "name": "Pivot 1", "source": {"id": source_id, "name": "ui.csv"},
         "rows": ["Host"], "cols": ["EventId"], "values": [{"agg": "count"}],
-        "filters": filters, "tags": [], "subtotals": True, "grandTotals": True,
+        "filters": filters, "tags": [], "timeframe": timeframe, "subtotals": True, "grandTotals": True,
     }]}
 
 
@@ -75,8 +78,8 @@ def seeded(page, server, server_post):
     server_post("/api/plugins/toggle", {"fs_name": "pivot", "scope": "on_all"})
     server_post("/api/row_tags", {"source_id": sid, "rids": SUSPICIOUS_RIDS, "tag_id": sus, "on": True})
 
-    def _open(filters, tag_filter):
-        state = _pivot(sid, filters)
+    def _open(filters, tag_filter, timeframe=None):
+        state = _pivot(sid, filters, timeframe)
         state["pivots"][0]["tags"] = tag_filter
         server_post("/api/plugin_state", {"key": KEY, "payload": state})
         page.evaluate("() => __winnow.loadTags()")
@@ -104,8 +107,8 @@ FILTERS = [
 ]
 
 
-def _set_timeframe(page):
-    page.evaluate("(r) => __winnow.setCaseTimeRange(r)", FIRST_MINUTE)
+def _set_timeframe(page, range_=FIRST_MINUTE):
+    page.evaluate("(r) => __winnow.setCaseTimeRange(r)", range_)
     page.wait_for_function("() => __winnow.S.timeRange.enabled && __winnow.busyCount === 0")
 
 
@@ -135,6 +138,28 @@ def test_a_cell_opens_the_grid_on_the_rows_it_counted(page, seeded):
     assert got["tags"] == [seeded["sus"]]
     assert got["timeframe"] is False
     page.wait_for_function("() => /Timeframe filter turned off/.test(document.querySelector('#toast').textContent)")
+
+
+def test_a_cell_counted_over_the_pivots_own_timeframe_opens_the_grid_under_it(page, seeded):
+    """The pivot's timeframe is its own, not the tables'. A cell counted
+    under it opens the grid with the tables' timeframe SET to it, replacing
+    the range the tables had — any other range, or none, shows rows the
+    cell never counted."""
+    page.wait_for_selector("#grid .row")
+    _set_timeframe(page, {**FIRST_MINUTE, "start": "2026-03-14 08:02:00", "end": "2026-03-14 08:02:59"})
+    seeded["open"](FILTERS, [seeded["sus"]], timeframe=FIRST_MINUTE)
+    cell = page.locator("[data-test-cell]")
+    assert int(cell.inner_text()) == 2
+
+    cell.click(button="right")
+    page.wait_for_selector(".menu:not(.menu-sub)")
+    page.locator(".menu .menu-item", has_text="Show these rows in the grid").click()
+
+    _grid_shows(page, seeded["source_id"], 2)
+    assert page.evaluate("() => ({ ...__winnow.S.timeRange })") == FIRST_MINUTE
+    assert page.evaluate("() => __winnow.S.tagFilter") == [seeded["sus"]]
+    page.wait_for_function("() => /Timeframe filter set to 2026-03-14 08:00:00/"
+                           ".test(document.querySelector('#toast').textContent)")
 
 
 @contextlib.contextmanager

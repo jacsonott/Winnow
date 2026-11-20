@@ -1,7 +1,7 @@
 # Plugins: the extension host and the example plugins
 
 `plugin_api.py`, `plugins/`, `examples/plugins/` (mft_usn, lateral_movement,
-pivot, claude_assistant, top_values, …). The authoring contract
+pivot, claude_assistant, top_values, esxi_logs, systemd_journal, …). The authoring contract
 lives in `plugin_api.py`'s module docstring and
 [docs/writing-plugins.md](../writing-plugins.md); this is what bites the
 *host*.
@@ -322,10 +322,11 @@ see [docs/notes/README.md](README.md) for the whole set.
     spelling (`_tag_clauses`).
   - **"Show these rows in the grid" is a translation, and it has to be
     exact.** The cell's rows reach the grid through
-    `winnow.openFiltered(id, pairs, {where, tags, clearTimeframe})`:
+    `winnow.openFiltered(id, pairs, {where, tags, timeRange | clearTimeframe})`:
     the cell's values as box filters, the Filters area as filter-tree
     conditions (`gridFilterFor` in ui/tab.js), the chips as `S.tagFilter`
-    verbatim. Each pivot operator maps to the grid operator whose SQL is
+    verbatim, and the pivot's own timeframe as `S.timeRange` (or the
+    tables' turned off when the pivot has none; next entry). Each pivot operator maps to the grid operator whose SQL is
     the same — `not_in` is an AND of `not_equals`, each already
     `(c <> ? OR c IS NULL)` — and tests/test_plugins.py
     (`test_pivot_filters_open_the_rows_the_grid_finds`) runs every one
@@ -338,6 +339,28 @@ see [docs/notes/README.md](README.md) for the whole set.
     UI rather than translated. A new operator needs a twin in
     `_compile_condition` and a line in that test, or the grid opens other
     rows than the cell counted, under a filter that looks right.
+  - **The pivot's timeframe is its own, and compiles as the grid's does.**
+    Each pivot carries `{enabled, column, start, end}` — `S.timeRange`'s
+    shape and meanings — saved with its definition, and `_time_clauses`
+    builds the range: values through `ts_normalize_sql`, bounds through
+    `TS_NORMALIZE` (inlined as quoted literals, so the clause has no
+    placeholders and `_where`'s parameter order is untouched). It is not
+    the tables' range for the reason the Filters area is not the grid's
+    filters, and it can't be read from the view either. What has to stay
+    true is that it selects what `_compile_where`'s timeframe selects,
+    because "Show these rows in the grid" sets the tables' timeframe to it
+    (`openFiltered`'s `timeRange`, API 16). Two places that is not free:
+    **a merge** — the union pads a column a member lacks with NULL, but the
+    grid reads such a member through every datetime column it does have,
+    and a member with none at all is not narrowed; `_time_clauses` writes
+    one arm per member with `_member_has`, a copy of store's
+    `_member_column` rule (fold A-Z, the first column of a name wins, a
+    derived column never stands in for a file one). And **what the grid
+    forgives**: a bound it can't read, or a table with no datetime column,
+    narrows nothing there; the pivot refuses both by name instead, and
+    `/timeframe` normalises the bounds while the dialog is open, so the
+    refusal lands where the text was typed. tests/test_pivot_timeframe.py
+    counts every case through both compilers, merges included.
   - **One statement for every grouping level, or the pivot is a table
     scan per level.** It used to run one `GROUP BY` per level, each a full
     scan of the source, and on a wide table the scan is most of the cost:
@@ -580,7 +603,7 @@ see [docs/notes/README.md](README.md) for the whole set.
 
 - **A plugin shows timestamps in the case's format, and sends the stored
   text** (`winnow.formatTimestamp` / `displayCell` / `state.tsFormat` /
-  `onTimestampFormatChange`, plugin API 16 / context `apiVersion` 10).
+  `onTimestampFormatChange`, plugin API 17 / context `apiVersion` 11).
   Before it, every plugin painted what the file held: the grid said
   `2026-06-03 13:02:03` and the Pivot beside it `6/3/2026 1:02:03 PM`.
   The formatter is tsformat.js's own, so a shape the grid learns to read,
@@ -799,6 +822,54 @@ see [docs/notes/README.md](README.md) for the whole set.
   ~10 µs a call, so a dotted quad is checked by hand and only IPv6 goes
   through it; a key's column is cached by its spelling; the canonical
   stamp is built in pass two only.
+
+- **systemd_journal finds entries by walking the file, not its entry
+  arrays.** journalctl, and everything built on sd-journal, reaches an
+  entry through the chain of ENTRY_ARRAY objects the header points at. On
+  a healthy file that is the same set; on a file a crash, a full disk or a
+  short copy left behind, the chain stops short of what is on disk and
+  journalctl stops with it. journald only ever appends objects, so file
+  order is write order and an entry's DATA objects always come before it:
+  a walk from `header_size` reads every entry still there, including ones
+  never linked into the arrays or counted in the header. Checked against
+  journalctl on all 16 combinations of layout, compression and keyed hash
+  (identical rows), and on copies cut short, holed and killed mid-write,
+  where it reads the entries on both sides of the damage. Don't
+  "simplify" it into following the
+  arrays. Three details hold it up. **The end** is the smaller of the file
+  and `header_size + arena_size`, and an all-zero object header past the
+  header's `tail_object_offset` is the arena's unused, preallocated tail
+  (journald grows files in 8 MiB steps), while zeros before it are damage.
+  **Resync** after damage moves 8 bytes at a time to an object header that
+  validates AND is followed by one that does (or by zeros, or the end): a
+  lone plausible header is easy to hit inside a payload. **An
+  online file's header is stale by design** (journald updates `n_entries`
+  and the tail lazily), so "more entries than the header counts" is an
+  info line in the case log, and only fewer is a warning. One consequence
+  of reading by walk: columns come from every DATA object in the file, so
+  a DATA object whose ENTRY a crash never wrote can add a column no row
+  fills.
+  **The two layouts differ in two places**: compact (systemd 252+, flag
+  0x10) puts a DATA payload at 72 rather than 64 and makes an entry item a
+  4-byte offset rather than offset + hash (16 bytes). `_BOOT_ID` comes from
+  the ENTRY header and a DATA `_BOOT_ID=` item is skipped, as `journalctl
+  -o export` does; the export and JSON forms carry it as a field. **zstd**
+  is `compression.zstd` on 3.14 and `zstd.py` (RFC 8878, pure Python)
+  before it, about 30x slower (5 to 10 MB/s), which is tolerable only
+  because journald compresses just the fields over its threshold (512
+  bytes by default): long command lines, kernel dumps, core dumps. A
+  compressed field is decompressed only as far as a cell keeps
+  (`FIELD_MAX`, 1 MiB): a `COREDUMP=` field can be hundreds of MB.
+  **The header set is only the columns every table has** (the six lead
+  columns and `_BOOT_ID`), because `{{all:header_set:…}}` selects the
+  set's columns and the rest depend on what each file's entries carry; so
+  the overview board can't count `_SYSTEMD_UNIT` across tables, and
+  `indexes: ["Identifier"]` is there because most of its queries filter
+  on it. **Routing**: `.json` and `.txt` are built-in extensions, which
+  `pluginFormatFor` lets win, so journalctl output saved under either
+  reaches the plugin only through the manager's **Import files…**; the
+  format reads by content, so any name works that way, and `.export`
+  is only a convention the format claims.
 
 - **A plugin's dashboard is offered, not applied** (`register_dashboard`,
   API 8). It appears under Dashboards ▸ Library beside the machine-wide

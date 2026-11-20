@@ -496,6 +496,14 @@ CREATE TABLE IF NOT EXISTS case_settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+-- The one-time passes over what an older Winnow stored that have run to
+-- the end on this case, by name (Store._retype_number_columns), so the next
+-- open skips them. Not settings: nothing reads a row but the pass that
+-- wrote it, and nothing shows them.
+CREATE TABLE IF NOT EXISTS case_upgrades (
+    name    TEXT PRIMARY KEY,
+    done_at TEXT NOT NULL
+);
 
 -- How far a search index build (build_fts) has got: the first rid not yet
 -- in fts_<source_id>, written in the same transaction as each chunk, and
@@ -646,7 +654,22 @@ CREATE TABLE IF NOT EXISTS dashboard_widget_cache (
 """
 
 IDENT_OK = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-NUM_RE = re.compile(r"^-?\d+(\.\d+)?$")
+# A cell that reads as a number: an integer or a decimal, with a sign, an
+# exponent ("1.5E+09", which Excel and Python write for a big one) and
+# spaces either side (a ", "-delimited export) all allowed. Exactly the
+# text SQLite's CAST(... AS REAL) reads in full, so every CAST gated on
+# this pattern (_numeric_expr, and the plugins that copy it) agrees with
+# type inference on which cells are numbers and what each is worth. No
+# digit grouping: CAST reads "1,234" as 1.0, and in a log it is a list of
+# two numbers ("80,443") as often as it is a thousand.
+NUM_RE = re.compile(r"^\s*[-+]?\d+(\.\d+)?([eE][-+]?\d+)?\s*$")
+# What logs and exporters write in a cell that has no value: W3C and NCSA
+# logs (an IIS or Apache byte count when nothing was sent) and Zeek write
+# "-", exporters "N/A", "null" or "None". Matched after strip() and
+# lower(). A number column may hold them (infer_type): they are not
+# numbers, so _numeric_expr reads them as NULL, which sorts to one edge
+# and matches no comparison, exactly as a blank does.
+NO_VALUE = frozenset({"", "-", "--", "n/a", "na", "null", "(null)", "none", "nil", "nan", "?", "(empty)"})
 # Anything that looks like a leading ISO-ish or US date; used only to pick a
 # default sort column and to hint the UI, never to rewrite the stored value.
 # Month-name timestamps ("JUN 23 2026 00:11:00", "23 Jun 2026", "June 23,
@@ -1119,6 +1142,35 @@ def ts_normalize_sql(expr: str) -> str:
     return (f"CASE WHEN typeof({expr}) = 'text' AND {expr} GLOB '{_TS_ISO_GLOB}' "
             f"THEN substr({expr}, 1, 10) || ' ' || substr({expr}, 12, 8) "
             f"ELSE TS_NORMALIZE({expr}) END")
+
+
+# The value starts _TS_ISO_RE and _TS_US_RE read, as GLOBs: the ISO date
+# (the time after it is optional to the regex) and the US date with a one-
+# or two-digit month and day. A TEXT value one of these matches is one
+# TS_NORMALIZE reads, so SQLite can say so without a trip through Python
+# per row; anything else (a month name, padding, no timestamp at all)
+# still asks TS_NORMALIZE, so the two cannot disagree.
+_TS_READ_GLOBS = (
+    "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*",
+    *(f"{mo}/{d}/[0-9][0-9][0-9][0-9]*"
+      for mo in ("[0-9]", "[0-9][0-9]") for d in ("[0-9]", "[0-9][0-9]")),
+)
+
+
+def untimed_length_sql(expr: str) -> str:
+    """LENGTH(expr) for a value TS_NORMALIZE cannot read, NULL for one it
+    can. MAX() of it is the longest value a REFORMATTED datetime column
+    still shows as stored: tsformat.js's formatTimestamp writes every
+    value parseTimestamp (TS_NORMALIZE's client twin) reads at the
+    format's own fixed length, which the client knows, and leaves the
+    rest exactly as they are. Autofit needs the larger of the two; the
+    plain MAX(LENGTH()) measured the stored text instead, so a column of
+    "6/3/2026 1:02:03" was fitted to 16 characters and shown as
+    "2026-06-03 01:0…" (docs/notes/ui.md). `expr` appears several times;
+    pass a column reference."""
+    globs = " OR ".join(f"{expr} GLOB '{g}'" for g in _TS_READ_GLOBS)
+    return (f"CASE WHEN typeof({expr}) = 'text' AND ({globs}) THEN NULL "
+            f"WHEN TS_NORMALIZE({expr}) IS NULL THEN LENGTH({expr}) END")
 
 
 # The Timeline's summary line (see build_timeline). Both caps are about a
@@ -1712,6 +1764,14 @@ def _ingest_record(kind: str, **options) -> str:
     return json.dumps({"kind": kind, **{k: v for k, v in options.items() if v is not None}})
 
 
+def _given_types(column_types, ncols: int) -> dict[int, str]:
+    """The types a positional `column_types` list sets ({index: type}): the
+    ones the import preview or a plugin's parser named. Any other entry
+    (None, a word that is no type, a position past the last column) leaves
+    that column's type to inference, as it always did."""
+    return {i: t for i, t in enumerate((column_types or [])[:ncols]) if t in ("text", "number", "datetime")}
+
+
 def _valid_column_type_map(column_types) -> bool:
     """A {column name: type} map, as the IIS and key=value previews set
     types: by name, since a later line can add columns ahead of the ones
@@ -1977,17 +2037,58 @@ def _sql_text_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+def _sql_has_value(expr: str) -> str:
+    """_has_value in SQL: `expr` is not NULL, blank or a NO_VALUE
+    placeholder. TRIM names the whitespace str.strip() takes off; LOWER
+    folds ASCII only, which is all NO_VALUE holds."""
+    words = ", ".join(_sql_text_literal(w) for w in sorted(NO_VALUE))
+    return f"(LOWER(TRIM({expr}, ' \t\r\n')) NOT IN ({words}))"
+
+
 # The merged view's optional "which table did this row come from" column.
 # Not stored anywhere: every member projects its own label as a constant.
 MERGE_SOURCE_COLUMN = "From table"
 MERGE_COLUMN_MODES = ("all", "shared")
 
 
+def _has_value(v) -> bool:
+    """Whether a cell says something: not NULL, blank or a NO_VALUE
+    placeholder such as "-". Text only: a BLOB a SQLite import carried
+    over is not a cell any number rule applies to."""
+    return isinstance(v, str) and v.strip().lower() not in NO_VALUE
+
+
+# infer_type's number test before NO_VALUE and the wider NUM_RE: what an
+# import typed a column by until then. Only _said_text uses it.
+_OLD_NUM_RE = re.compile(r"^-?\d+(\.\d+)?$")
+
+
+def _said_text(values: list) -> bool:
+    """Whether infer_type as it was before NO_VALUE typed these cells text.
+    A column stored as text that it would have called a number or a
+    datetime was declared text (by the analyst, or by the reader that
+    made it), not inferred, so Store._retype_number_columns leaves it."""
+    vals = [v for v in values if v not in (None, "")]
+    if vals and all(isinstance(v, str) and _OLD_NUM_RE.match(v) for v in vals):
+        return False
+    return infer_type(vals) != "datetime"
+
+
 def infer_type(values: Iterable[str]) -> str:
+    """A column's type from a sample of its cells. A number column is one
+    whose every cell that has a value (_has_value) is a number, and that
+    has at least one: an IIS byte count with "-" where nothing was sent,
+    or a size column with an "N/A" in it, is still a number column. It
+    used to need every non-blank cell to be a number, so one "-" in the
+    sample made the column text, and it sorted 10 before 9. A datetime
+    column is one where at least 80% of the non-blank cells look like
+    timestamps. Anything else is text, including a sample with nothing in
+    it (Store._type_past_sample looks further for those)."""
     vals = [v for v in values if v not in (None, "")]
     if not vals:
         return "text"
-    if all(NUM_RE.match(v) for v in vals):
+    said = [v for v in vals if _has_value(v)]
+    if said and all(NUM_RE.match(v) for v in said):
         return "number"
     if sum(1 for v in vals if DATE_RE.match(v)) >= max(1, int(len(vals) * 0.8)):
         return "datetime"
@@ -3607,7 +3708,7 @@ class Store:
         # changed. Scratch, not evidence — it lives in the views database
         # (invariant #3) and dies with the process, same as a view.
         self._undo: list[dict] = []
-        self._maxlen_cache: dict[int, tuple[tuple, dict[str, int]]] = {}
+        self._maxlen_cache: dict[int, tuple[tuple, dict[tuple[str, bool], int]]] = {}
         self._fts_threads: dict[int, _QueuedBuild] = {}
         self._fts_failures: set[tuple[int, str]] = set()   # logged once each (_build_fts_worker)
         self._index_threads: dict[tuple[int, str, str], _QueuedBuild] = {}
@@ -3632,6 +3733,9 @@ class Store:
         # The open-time typing pass over derived columns nothing has
         # typed yet (_type_unlooked_derived_columns). Joined by close().
         self._derived_typer: threading.Thread | None = None
+        # The open-time pass that types the number columns an older import
+        # typed text (_retype_number_columns). Joined by close().
+        self._number_typer: threading.Thread | None = None
         # Search-all job state. Its own lock, not self.lock: the worker
         # mutates the job record between per-source counts, and making that
         # wait on the connection lock would reintroduce exactly the
@@ -3718,6 +3822,7 @@ class Store:
         self._build_waiting = 0   # builds for the open table queued on the writer
         self._downgrade_legacy_fts()
         self._type_unlooked_derived_columns()
+        self._retype_number_columns()
 
     def _downgrade_legacy_fts(self) -> None:
         """Sources whose fts_<id> predates the current index shape still
@@ -3825,6 +3930,125 @@ class Store:
         """Blocks until the open-time typing pass finishes (or `timeout`
         elapses). Used by tests."""
         t = self._derived_typer
+        if t:
+            t.join(timeout)
+
+    # case_upgrades: this case's imported tables have been typed by the
+    # number rule as it is now (infer_type with NO_VALUE, _type_past_sample).
+    # A new name, if the rule changes again, runs the pass again.
+    NUMBER_TYPING_UPGRADE = "number_typing_2"
+    # The readers whose columns are typed by inference, so a text column of
+    # theirs may be one the old rule got wrong. The others (bodyfile,
+    # secure, plaso, utmp, text) declare every column's type, and a table
+    # a plugin or the SQL pane made ("rows") may have declared some, with
+    # nothing recorded to say which.
+    NUMBER_RETYPE_KINDS = ("csv", "json", "sqlite", "xlsx", "iis", "kv")
+
+    def _retype_number_columns(self) -> None:
+        """Type the number columns of the tables imported before the current
+        rule, once per case, on a thread of its own.
+
+        An import before it typed a byte count text when one sampled cell
+        was "-" or "N/A", or when the first 500 rows had nothing in it, and
+        the column sorted 10 before 9. The fix is at import, and a case
+        full of tables already tagged can't be asked to import them again,
+        so each such column is looked at once more, by the same rule a new
+        import uses, and becomes a number column when that rule says so.
+        Only text -> number, and only a column typed by inference: not one
+        the analyst set in the import preview (the table's ingest record
+        names those), not a key=value log's TEXT_KEYS, and not one the old
+        rule would itself have called a number or a datetime (_said_text),
+        which is text only because something declared it. Nothing else
+        about the table changes; the values never do.
+
+        On a thread, as _type_unlooked_derived_columns is, and for the same
+        reason: this runs as the case opens. A table that fails to read is
+        left as it was, and the case is looked at again at its next open;
+        otherwise case_upgrades records NUMBER_TYPING_UPGRADE as done."""
+        with self.lock:
+            if self.db.execute("SELECT 1 FROM case_upgrades WHERE name=?",
+                               (self.NUMBER_TYPING_UPGRADE,)).fetchone():
+                return
+            rows = self.db.execute(
+                "SELECT id, COALESCE(nickname, name) AS name, table_name, columns, ingest FROM sources "
+                "WHERE origin IS NULL AND columns <> '[]' ORDER BY id").fetchall()
+        todo = [dict(r) for r in rows]
+        t = threading.Thread(target=self._retype_number_worker, args=(todo,),
+                             name="winnow-number-types", daemon=True)
+        self._number_typer = t
+        t.start()
+
+    def _retype_number_worker(self, todo: list[dict]) -> None:
+        failed = False
+        for src in todo:
+            if self._closing:
+                return
+            try:
+                names = self._numbers_typed_as_text(src)
+            except Exception:
+                failed = True   # a damaged table is that table's problem, not the case's
+                continue
+            if names:
+                with self.lock:
+                    if self._closing:
+                        return
+                    with self.db:
+                        row = self.db.execute("SELECT columns FROM sources WHERE id=?", (src["id"],)).fetchone()
+                        if row is None:
+                            continue   # dropped meanwhile
+                        cols = json.loads(row["columns"])
+                        for c in cols:
+                            if c["name"] in names and c.get("type") == "text":
+                                c["type"] = "number"
+                        self.db.execute("UPDATE sources SET columns=? WHERE id=?", (json.dumps(cols), src["id"]))
+                wlog.record("info", f"{src['name']}: {', '.join(sorted(names))} "
+                                    f"{'is a number column' if len(names) == 1 else 'are number columns'} "
+                                    "now, sorted by value")
+            time.sleep(0.02)  # same anti-starvation yield build_fts uses
+        if failed:
+            return
+        with self.lock:
+            if self._closing:
+                return
+            with self.db:
+                self.db.execute("INSERT OR IGNORE INTO case_upgrades(name, done_at) VALUES (?, ?)",
+                                (self.NUMBER_TYPING_UPGRADE, time.strftime("%Y-%m-%dT%H:%M:%S")))
+
+    def _numbers_typed_as_text(self, src: dict) -> set[str]:
+        """The names of the text columns of one imported table that the
+        current rule makes number columns (_retype_number_columns)."""
+        how = json.loads(src["ingest"]) if src.get("ingest") else {}
+        kind = how.get("kind")
+        if kind is not None and kind not in self.NUMBER_RETYPE_KINDS:
+            return set()
+        cols = json.loads(src["columns"])
+        given = how.get("column_types")
+        if isinstance(given, list):
+            chosen = {cols[i]["name"] for i in _given_types(given, len(cols))}
+        elif isinstance(given, dict):
+            chosen = set(given)
+        else:
+            chosen = set()
+        if kind == "kv":
+            chosen |= kvread.TEXT_KEYS
+        names = [c["name"] for c in cols if c.get("type") == "text" and c["name"] not in chosen]
+        if not names:
+            return set()
+        table = src["table_name"]
+        with self._reader() as ro:
+            sample = [list(r) for r in ro.execute(
+                f"SELECT {', '.join(q(n) for n in names)} FROM {q(table)} WHERE rid <= ? ORDER BY rid",
+                (SAMPLE_ROWS,))]
+        columns = [[r[j] for r in sample] for j in range(len(names))]
+        inferred = [infer_type(v) if _said_text(v) else "declared" for v in columns]
+        types = self._type_past_sample(table, names, inferred, sample,
+                                       fixed={j for j, t in enumerate(inferred) if t == "declared"})
+        return {n for n, t in zip(names, types) if t == "number"}
+
+    def wait_for_number_types(self, timeout: float | None = None) -> None:
+        """Blocks until the open-time number typing pass finishes (or
+        `timeout` elapses). Used by tests."""
+        t = self._number_typer
         if t:
             t.join(timeout)
 
@@ -4733,6 +4957,11 @@ class Store:
         t = self._derived_typer
         if t and t is not threading.current_thread() and t.is_alive():
             t.join(15)
+        # The number typing pass the same way: it stops between tables, and
+        # a write re-checks `_closing` under the lock.
+        t = self._number_typer
+        if t and t is not threading.current_thread() and t.is_alive():
+            t.join(15)
         # Same for view builds running in the background: a worker queued
         # on self.lock at this point would otherwise take it after the
         # close below and run its INSERT on a closed connection. `closing`
@@ -5241,7 +5470,7 @@ class Store:
         delimiter: str | None = None,
         build_fts: bool = True,
         has_header: bool = True,
-        column_types: list[str] | None = None,
+        column_types: list[str | None] | None = None,
         progress=None,
         cancel=None,
     ) -> dict:
@@ -5420,9 +5649,9 @@ class Store:
         # partial import is still typed/browsable rather than left with the
         # placeholder columns=[] forever.
         types = [infer_type([r[i] for r in sample]) for i in range(ncols)] if sample else ["text"] * ncols
-        if column_types:
-            types = [(column_types[i] if i < len(column_types) and column_types[i] in ("text", "number", "datetime") else t)
-                     for i, t in enumerate(types)]
+        given = _given_types(column_types, ncols)
+        types = self._type_past_sample(table, cols, types, sample, fixed=given)
+        types = [given.get(i, t) for i, t in enumerate(types)]
         colmeta = [{"name": c, "type": t} for c, t in zip(cols, types)]
         decoded = _encoding_report(encoding, _cp1252_fallback_count() - fallback0)
         self._finish_source_columns(source_id, colmeta, decoded, name)
@@ -5811,8 +6040,10 @@ class Store:
 
         types = [t or (infer_type([r[i] for r in sample]) if sample else "text")
                  for i, t in enumerate(plan["types"])]
-        if column_types:
-            types = [column_types.get(c, t) for c, t in zip(cols, types)]
+        given = {i: column_types[c] for i, c in enumerate(cols) if c in (column_types or {})}
+        types = self._type_past_sample(table, cols, types, sample,
+                                       fixed={i for i, t in enumerate(plan["types"]) if t} | set(given))
+        types = [given.get(i, t) for i, t in enumerate(types)]
         colmeta = [{"name": c, "type": t} for c, t in zip(cols, types)]
         decoded = _encoding_report(encoding, _cp1252_fallback_count() - fallback0)
         self._finish_source_columns(source_id, colmeta, decoded, name)
@@ -5928,6 +6159,70 @@ class Store:
                 "unparsed_lines": plan["unparsed"], "complete": complete,
                 "syslog_year": plan["first_year"], "year_from": plan["year_from"],
                 "modified": modified}
+
+    # How far past its first SAMPLE_ROWS rows an import looks for a column
+    # that had nothing in them: this many runs of this many rows, spread
+    # evenly over the rest of the table, the last ending at its last row.
+    TYPE_PROBES = 32
+    TYPE_PROBE_ROWS = 256
+
+    def _type_past_sample(self, table: str, cols: list[str], types: list[str],
+                          sample: list[list[str]], fixed: Iterable[int] = ()) -> list[str]:
+        """`types`, with each column the sample had nothing in (no cell
+        with a value, _has_value) made a number column when the rows
+        further in say it is one.
+
+        A column can be empty for the whole of the first SAMPLE_ROWS rows
+        and full of numbers after them: a FortiGate log whose traffic lines
+        (sentbyte, rcvdbyte) come after a few thousand event lines, an IIS
+        log whose second #Fields: line adds sc-bytes, a JSON key the first
+        records don't carry. infer_type calls such a column text, and its
+        byte counts sorted 10 before 9. So it is typed from rows spread
+        over the whole table instead: TYPE_PROBES runs of TYPE_PROBE_ROWS
+        rows, each an O(log n) rid range (rids run 1..row_count on every
+        ingest path), about 8,000 rows whatever the table's size, so this
+        costs milliseconds where a scan of a big table's column would cost
+        a pass over the case file. A column that is still empty there stays
+        text.
+
+        Only ever to number. A datetime found this way stays text, because
+        the first datetime column is the one the Timeline, the histogram
+        and the import's sort index read a table by, and a column first
+        filled in 10,000 rows down taking that over from the Timestamp
+        column would be a different change from this one. `fixed` are the
+        indexes of columns whose type was given rather than inferred (a
+        reader's declared type, the analyst's choice in the import
+        preview); they are never looked at."""
+        fixed = set(fixed)
+        empty = [i for i in range(len(cols))
+                 if i not in fixed and types[i] == "text"
+                 and not any(i < len(r) and _has_value(r[i]) for r in sample)]
+        if not empty or len(sample) < SAMPLE_ROWS:
+            return types   # nothing to look for, or the sample was the whole table
+        with self._reader() as ro:
+            last = ro.execute(f"SELECT MAX(rid) FROM {q(table)}").fetchone()[0] or 0
+            span = last - SAMPLE_ROWS
+            if span <= 0:
+                return types
+            if span <= self.TYPE_PROBES * self.TYPE_PROBE_ROWS:
+                runs = [(SAMPLE_ROWS + 1, last)]
+            else:
+                step = (span - self.TYPE_PROBE_ROWS) / (self.TYPE_PROBES - 1)
+                runs = [(start, start + self.TYPE_PROBE_ROWS - 1)
+                        for start in (SAMPLE_ROWS + 1 + round(k * step) for k in range(self.TYPE_PROBES))]
+            sql = (f"SELECT {', '.join(q(cols[i]) for i in empty)} FROM {q(table)} "
+                   "WHERE rid BETWEEN ? AND ?")
+            seen: list[list[str]] = [[] for _ in empty]
+            for lo, hi in runs:
+                for row in ro.execute(sql, (lo, hi)):
+                    for j, v in enumerate(row):
+                        if _has_value(v):
+                            seen[j].append(v)
+        out = list(types)
+        for i, values in zip(empty, seen):
+            if values and infer_type(values) == "number":
+                out[i] = "number"
+        return out
 
     def _finish_source_columns(self, source_id: int, colmeta: list[dict], decoded: dict,
                                name: str) -> None:
@@ -6181,6 +6476,7 @@ class Store:
             cleanup()
 
         types = [infer_type([r[i] for r in sample]) for i in range(ncols)] if sample else ["text"] * ncols
+        types = self._type_past_sample(dest_table, cols, types, sample)
         colmeta = [{"name": c, "type": t} for c, t in zip(cols, types)]
         with self.lock, self.db:
             self.db.execute("UPDATE sources SET columns=? WHERE id=?", (json.dumps(colmeta), source_id))
@@ -6536,6 +6832,7 @@ class Store:
             rows_iter.close()
 
         types = [infer_type([r[i] for r in sample]) for i in range(ncols)] if sample else ["text"] * ncols
+        types = self._type_past_sample(dest_table, cols, types, sample)
         colmeta = [{"name": c, "type": t} for c, t in zip(cols, types)]
         with self.lock, self.db:
             self.db.execute("UPDATE sources SET columns=? WHERE id=?", (json.dumps(colmeta), source_id))
@@ -6726,6 +7023,7 @@ class Store:
                 error.__cause__ = e
 
         types = [infer_type([r[i] for r in sample]) for i in range(ncols)] if sample else ["text"] * ncols
+        types = self._type_past_sample(table, cols, types, sample)
         colmeta = [{"name": c, "type": t} for c, t in zip(cols, types)]
         decoded = _encoding_report(sniff_text_encoding(path), _cp1252_fallback_count() - fallback0)
         self._finish_source_columns(source_id, colmeta, decoded, name)
@@ -6853,9 +7151,9 @@ class Store:
                 error = e
 
         types = [infer_type([r[i] for r in sample]) for i in range(ncols)] if sample else ["text"] * ncols
-        if column_types:
-            types = [(column_types[i] if i < len(column_types) and column_types[i] in ("text", "number", "datetime") else t)
-                     for i, t in enumerate(types)]
+        given = _given_types(column_types, ncols)
+        types = self._type_past_sample(table, cols, types, sample, fixed=given)
+        types = [given.get(i, t) for i, t in enumerate(types)]
         colmeta = [{"name": c, "type": t} for c, t in zip(cols, types)]
         with self.lock, self.db:
             self.db.execute("UPDATE sources SET columns=? WHERE id=?", (json.dumps(colmeta), source_id))
@@ -10076,9 +10374,10 @@ class Store:
 
     def _infer_derived_type(self, d: dict, conn: sqlite3.Connection | None = None) -> str | None:
         """What a text-valued derived column holds, by the rule an imported
-        column is typed by (infer_type): 'number' when every non-empty
-        value matches NUM_RE, 'text' when one doesn't, 'empty' when there
-        are none. None for an op that has a type of its own (a timestamp
+        column is typed by (infer_type): 'number' when every value that
+        isn't blank or a NO_VALUE placeholder ("-", "N/A") matches NUM_RE
+        and there is one, 'text' when one doesn't, 'empty' when there are
+        none at all. None for an op that has a type of its own (a timestamp
         parse, a duration), which never needs looking at.
 
         Read off the drv_ column as stored rather than tallied by the pass
@@ -10096,11 +10395,16 @@ class Store:
             return None
         drv, col = q(self._derived_table(d["source_id"])), q(d["name"])
 
+        said = _sql_has_value(col)
+
         def ask(c: sqlite3.Connection) -> str:
-            if c.execute(f"SELECT 1 FROM {drv} WHERE {col} <> '' AND NOT ({col} REGEXP ?) LIMIT 1",
+            if c.execute(f"SELECT 1 FROM {drv} WHERE {said} AND NOT ({col} REGEXP ?) LIMIT 1",
                          (NUM_RE.pattern,)).fetchone():
                 return "text"
-            return "number" if c.execute(f"SELECT 1 FROM {drv} WHERE {col} <> '' LIMIT 1").fetchone() else "empty"
+            if c.execute(f"SELECT 1 FROM {drv} WHERE {said} LIMIT 1").fetchone():
+                return "number"
+            # Nothing but "-" and the like is text, as infer_type has it.
+            return "text" if c.execute(f"SELECT 1 FROM {drv} WHERE {col} <> '' LIMIT 1").fetchone() else "empty"
 
         if conn is not None:
             return ask(conn)
@@ -10263,13 +10567,19 @@ class Store:
                     raise ValueError(f"Member table {m['src']['name']!r} has no column {col!r}")
         return members[0]["source_id"]
 
-    def detect_timestamp_format(self, source_id: int, column: str) -> list[dict]:
+    def detect_timestamp_format(self, source_id: int, column: str,
+                                custom_formats: list[dict] | None = None) -> list[dict]:
         """Which operations can read this column, best first. Same
         sample-and-round-trip shape preview_sqlite_tables uses to pre-check
         likely WebKit columns: try every parser against real values and
         rank by how many it reads. Ambiguous numeric ranges (Mac absolute
         vs unix seconds) legitimately return several — the caller's preview
-        of actual converted values is what settles it."""
+        of actual converted values is what settles it.
+
+        `custom_formats` are the analyst's saved patterns
+        (workspace.TimestampFormats, passed in by the route: the store
+        does not read workspace/), ranked with the rest by
+        timeparse.detect."""
         if source_id < 0:  # a merge samples its first (canonical) member
             source_id = self._derive_preview_member(source_id, [column])
         src = self._source_lite(source_id)
@@ -10277,11 +10587,12 @@ class Store:
             raise KeyError(column)
         samples = self._sample_column(src, column)
         out = []
-        for r in timeparse.detect(samples):
+        for r in timeparse.detect(samples, custom_formats):
             out.append({**r, "preview": self._preview_rows(samples[:10], r["op_id"], r["params"])})
         return out
 
-    def detect_source_suggestions(self, source_id: int, min_confidence: float = 0.9) -> list[dict]:
+    def detect_source_suggestions(self, source_id: int, min_confidence: float = 0.9,
+                                  custom_formats: list[dict] | None = None) -> list[dict]:
         """Columns that look like timestamps the app can't already read —
         the basis for the post-import "this looks like a Unix epoch, want a
         datetime column?" hint. Columns already typed `datetime` at ingest
@@ -10310,13 +10621,14 @@ class Store:
             samples = self._sample_column(src, c["name"])
             if not samples:
                 continue
-            ranked = timeparse.detect(samples)
+            ranked = timeparse.detect(samples, custom_formats)
             if ranked and ranked[0]["confidence"] >= min_confidence:
                 best = ranked[0]
                 out.append({
                     "column": c["name"], "op_id": best["op_id"], "label": best["label"],
                     "confidence": best["confidence"], "params": best["params"],
                     "preview": self._preview_rows(samples[:5], best["op_id"], best["params"]),
+                    **({"format_id": best["format_id"]} if "format_id" in best else {}),
                 })
         return out
 
@@ -14468,10 +14780,20 @@ class Store:
             rows = ro.execute(sql, (limit,)).fetchall()
         return [{"value": r["val"], "count": r["n"]} for r in rows]
 
-    def column_max_lengths(self, source_id: int, columns: list[str] | None = None) -> dict[str, int]:
+    def column_max_lengths(self, source_id: int, columns: list[str] | None = None,
+                           reformatted: list[str] | None = None) -> dict[str, int]:
         """MAX(LENGTH(col)) per column, across all member tables — backs the
         UI's autofit-column-width shortcut. One sequential scan per member
         table, every asked column computed in a single pass.
+
+        `reformatted` names the datetime columns the grid shows in a
+        timestamp format rather than as stored. Each of those reports the
+        longest value that is NOT a timestamp instead (untimed_length_sql;
+        0 when every value is one), since those are the only values such a
+        column still shows as stored — the rest come out at the format's
+        fixed length, and the client adds that. Measured as stored, a
+        column of "6/3/2026 1:02:03" was fitted to 16 characters and the
+        19 of "2026-06-03 01:02:03" lost their seconds to the ellipsis.
 
         `columns` narrows it to the ones being fitted: double-clicking one
         column's edge used to measure every column of the table to answer
@@ -14501,10 +14823,15 @@ class Store:
             if columns is not None:
                 asked = set(columns)
                 cols = [c for c in cols if c in asked]
-            missing = [c for c in cols if c not in known]
+            # Cached per (column, how it was measured): one column can be
+            # asked both ways as the analyst switches its format.
+            untimed = set(reformatted or ())
+            wanted = [(c, c in untimed) for c in cols]
+            missing = [w for w in wanted if w not in known]
             if missing:
                 members = self._resolve_members_on(ro, source_id)
-                sel = ", ".join(f"MAX(LENGTH({q(c)}))" for c in missing)
+                sel = ", ".join(f"MAX({untimed_length_sql(q(c))})" if u else f"MAX(LENGTH({q(c)}))"
+                                for c, u in missing)
                 maxes = [0] * len(missing)
                 for m in members:
                     row = ro.execute(f"SELECT {sel} FROM {self._member_from(src, m)}").fetchone()
@@ -14513,7 +14840,7 @@ class Store:
                             maxes[i] = v
                 known.update(zip(missing, maxes))
                 self._maxlen_cache[source_id] = (key, known)
-        return {c: known[c] for c in cols}
+        return {c: known[w] for c, w in zip(cols, wanted)}
 
     # -------------------------------------------------------------------- tags
 

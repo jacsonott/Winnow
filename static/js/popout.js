@@ -51,6 +51,7 @@
    to the front, and `.closed` is how a window that went without saying
    goodbye is noticed. */
 import { $, api, el, onMutation, toast } from './core.js';
+import { renderHeadResized } from './columns.js';
 import { drillInto, markDashboardStale, showDashboard } from './dashboard.js';
 import { render } from './grid.js';
 import { drawRail, regroupIfGroupedByTag } from './grouping.js';
@@ -594,7 +595,9 @@ async function reloadTsSettings() {
   if (kase) S.caseSettings = kase;
   if (caseTsFormat() === was) return;
   if (!inPopout() && S.view) {
-    if (gridIsShowing()) render(); else S.gridRepaintPending = true;
+    // The header too, as Settings' own pick does: a datetime column's
+    // default width follows its format (colWidth).
+    if (gridIsShowing()) renderHeadResized(); else S.gridRepaintPending = true;
   }
   announceTsFormat();
 }

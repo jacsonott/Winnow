@@ -4,7 +4,7 @@
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { autofitMaxWidth, fillsGrid, renderHead, renderHeadResized } from './columns.js';
 import { $, AUTOFIT_MAX_W_DEFAULT, ROW_H, ROW_H_COMFORTABLE, ROW_H_COMPACT, api, debounce, el, post, setRowH, toast } from './core.js';
-import { labeledRow } from './derived.js';
+import { buildParseFormatsEditor, labeledRow } from './derived.js';
 import { VALUE_FILTER_AUTO_MAX, syncSearchKeyCopy } from './filters.js';
 import { headH, rScroll, render, syncSpacer, vScroll } from './grid.js';
 import { drawRail, rebuildGroupPrefix, renderGrouped, writeClipboardText } from './grouping.js';
@@ -657,7 +657,9 @@ function buildCaseTsPane(pane) {
   async function pick(value) {
     try {
       S.caseSettings = await post('/api/case_settings', { ts_format: value });
-      render();
+      // The header too: a datetime column's default width follows its
+      // format (colWidth), and the header row is sized separately.
+      if (S.sourceId) renderHeadResized(); else render();
       announceTsFormat();
       toast('Case timestamp format saved');
     } catch (e) { toast('Could not save: ' + e.message, 5000); }
@@ -1342,6 +1344,7 @@ export function openSettings(where) {
       + 'Off: each table keeps its own, the way it keeps its own filters, and a table you have not set one on opens without one.'));
 
     const secTs = section('timestamps', 'Timestamps');
+    secTs.append(el('div', 'settings-sub-label', 'Display format'));
     secTs.append(el('p', null,
       'How datetime columns are displayed. This is presentation only — the stored and exported '
       + 'value is always the text the file came with. A format picked on an individual column '
@@ -1357,7 +1360,7 @@ export function openSettings(where) {
     tsSystemSel.onchange = async () => {
       try {
         S.appSettings = await post('/api/settings/app', { default_ts_format: tsSystemSel.value });
-        render();
+        if (S.sourceId) renderHeadResized(); else render();   // see the case format's pick
         announceTsFormat();
         toast('Default timestamp format saved');
       } catch (e) {
@@ -1371,6 +1374,9 @@ export function openSettings(where) {
     // "this case" control to mean anything about.
     secTs.append(el('p', 'fb-help',
       'This case can override it — Case menu → Case settings.'));
+    // How timestamps are READ, beside how they are shown: the analyst's
+    // own patterns for the derived-column Format list.
+    buildParseFormatsEditor(secTs);
 
     const secTags = section('tags', 'Default tags for new cases');
     secTags.append(el('p', null,

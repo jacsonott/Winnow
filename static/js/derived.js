@@ -3,10 +3,10 @@ own additions to a source's column set.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { openStack } from './stack.js';
-import { renderHead, saveLayout, saveLayoutNow } from './columns.js';
+import { renderHead, renderHeadResized, saveLayout, saveLayoutNow, widenToShow } from './columns.js';
 import { quickAddWidget } from './dashboard.js';
 import { tableOf, widgetFrom } from './dashwidgets.js';
-import { $, api, el, nameMap, post, setBusy, toast, toastAction } from './core.js';
+import { $, api, debounce, el, nameMap, post, setBusy, toast, toastAction } from './core.js';
 import { currentSpec, ellipsize } from './filters.js';
 import { render } from './grid.js';
 import { copyUniqueValues } from './grouping.js';
@@ -90,8 +90,12 @@ export function columnMenuItems(name) {
              fallback was 'raw' — with a configurable default underneath,
              that would silently mean "inherit" instead of "as stored". */
           S.layout[name] = Object.assign({}, S.layout[name] || {}, { tsFormat: key });
-          render();
+          renderHeadResized();   // a default width follows the format (colWidth)
           saveLayout();
+          // A width fitted to the old format can be too narrow for the
+          // new one: "As stored" fitted, then YYYY-MM-DD HH:MM:SS, cut
+          // the seconds off a column of "6/3/2026 1:02:03".
+          widenToShow(name);
           announceTsFormat(name);
         },
       });
@@ -734,6 +738,53 @@ export function deriveEntries(ops) {
   return entries.sort((a, b) => order.indexOf(a.group) - order.indexOf(b.group));   // stable: registry order within a group
 }
 
+/* ------------------------------------------- saved timestamp formats
+
+   The analyst's own patterns (Settings → Timestamps, or "Save as a
+   format…" in the dialog), listed in the Format picker after the
+   built-in formats as `saved:<id>`. Each is the custom_pattern operation
+   with its pattern filled in — nothing else about it is new — so a
+   column made from one stores the pattern and never the id: deleting
+   the format later changes no column. One whose pattern a hand edit
+   broke (the route reports `error`) is not offered. */
+export async function savedTimestampFormats() {
+  return (await api('/api/timestamp_formats')).filter((f) => !f.error);
+}
+
+export function formatOpId(fmt) {
+  return String(fmt || '').startsWith('saved:') ? 'custom_pattern' : fmt;
+}
+
+export function addSavedFormat(tsEntry, rec) {
+  const f = { id: `saved:${rec.id}`, label: rec.name, description: `Your format: ${rec.pattern}`, saved: rec };
+  const i = tsEntry.formats.findIndex((x) => x.id === f.id);
+  if (i >= 0) tsEntry.formats[i] = f;
+  else tsEntry.formats.push(f);
+  return f;
+}
+
+/* The Format picker's options: the built-in formats, then "Your formats" —
+   every saved one with its pattern beside its name, and Custom pattern
+   for writing a new one. */
+export function paintFormatOptions(select, tsEntry) {
+  const keep = select.value;
+  select.replaceChildren();
+  if (!tsEntry) return;
+  const builtIn = el('optgroup');
+  builtIn.label = 'Built in';
+  const yours = el('optgroup');
+  yours.label = 'Your formats';
+  let custom = null;
+  for (const f of tsEntry.formats) {
+    if (f.saved) yours.append(new Option(`${f.label} — ${f.saved.pattern}`, f.id));
+    else if (f.id === 'custom_pattern') custom = f;
+    else builtIn.append(new Option(f.label, f.id));
+  }
+  if (custom) yours.append(new Option(custom.label, custom.id));
+  select.append(builtIn, yours);
+  if (keep) select.value = keep;
+}
+
 /* Does the search box's text find this entry? Every word has to appear
    somewhere in its name, group, id or description. The timestamp entry
    also answers for its formats — "filetime" finds it — and says which
@@ -771,8 +822,9 @@ export function matchesDeriveSearch(entry, query) {
    header up or down. */
 export async function openDerivedColumnModal(prefill, editing) {
   let ops;
+  let saved;
   try {
-    ops = await derivedOps();
+    [ops, saved] = await Promise.all([derivedOps(), savedTimestampFormats().catch(() => [])]);
   } catch (e) {
     toast('Could not load derived-column formats: ' + e.message, 6000);
     return;
@@ -784,6 +836,7 @@ export async function openDerivedColumnModal(prefill, editing) {
   if (!textCols.length) return;
   const entries = deriveEntries(ops);
   const tsEntry = entries.find((e) => e.key === TIMESTAMP_ENTRY);
+  if (tsEntry) for (const f of saved) addSavedFormat(tsEntry, f);
   const entryOf = (opId) => {
     const op = ops.find((o) => o.id === opId);
     return op && isTimestampOp(op) ? TIMESTAMP_ENTRY : opId;
@@ -838,14 +891,20 @@ export async function openDerivedColumnModal(prefill, editing) {
     }
     colSelect.value = state.column;
     colSelect.disabled = !!editing;
-    for (const f of (tsEntry ? tsEntry.formats : [])) formatSelect.append(new Option(f.label, f.id));
+    paintFormatOptions(formatSelect, tsEntry);
     formatSelect.disabled = !!editing;
     // Tests address these by role rather than by position.
     colSelect.dataset.role = 'column';
     formatSelect.dataset.role = 'format';
     const formatRow = labeledRow('Format', formatSelect);
 
-    function currentOpId() { return state.entry === TIMESTAMP_ENTRY ? state.format : state.entry; }
+    function currentOpId() { return state.entry === TIMESTAMP_ENTRY ? formatOpId(state.format) : state.entry; }
+    // A saved format is the custom-pattern operation with its pattern
+    // filled in; anything else starts with no parameters set.
+    function formatParams(fmt) {
+      const f = tsEntry && tsEntry.formats.find((x) => x.id === fmt);
+      return f && f.saved ? { pattern: f.saved.pattern } : {};
+    }
     function currentOp() { return ops.find((o) => o.id === currentOpId()); }
 
     function defaultName() {
@@ -981,8 +1040,17 @@ export async function openDerivedColumnModal(prefill, editing) {
         } else {
           input = el('input');
           if (spec.type === 'int') input.type = 'number';
-          input.placeholder = spec.type === 'offset' ? '+00:00' : '';
+          input.placeholder = spec.placeholder || (spec.type === 'offset' ? '+00:00' : '');
+          if (op.id === 'custom_pattern' && spec.name === 'pattern') {
+            // Wide, in the grid's monospace, with the letter key on a line
+            // of its own under it — beside it, the key was a word a line.
+            input.classList.add('derived-pattern');
+            input.spellcheck = false;
+            input.autocomplete = 'off';
+            row.classList.add('derived-param-wrap');
+          }
         }
+        input.dataset.param = spec.name;
         const existing = state.params[spec.name];
         if (existing != null && existing !== '') input.value = existing;
         else if (spec.default != null) input.value = spec.default;
@@ -994,8 +1062,76 @@ export async function openDerivedColumnModal(prefill, editing) {
         row.append(input);
         if (spec.help) row.append(el('span', 'fb-help derived-param-help', spec.help));
         paramBox.append(row);
+        // What the pattern reads, right under it.
+        if (input.classList.contains('derived-pattern')) paramBox.append(patternLine);
       }
+      syncPatternLine();
     }
+
+    /* -------------------------------------------- a custom pattern
+
+       What the pattern means, as a value written in it for one moment
+       (the server's example: 14 March 2026, 13:22:01, so day-first and
+       month-first can't be mistaken for each other), and a way to keep
+       it: "Save as a format…" puts it in the Format list for every case
+       on this machine. Inside the settings box, like every control the
+       dialog grows (the fixed-frame rule, docs/notes/derived.md). */
+    const patternLine = el('div', 'derived-pattern-line');
+    const patternMeaning = el('span', 'fb-help derived-pattern-example');
+    const saveFormat = el('button', 'btn ghost derived-save-format', 'Save as a format…');
+    saveFormat.type = 'button';
+    saveFormat.title = 'Add this pattern to the Format list, for every case on this machine';
+    patternLine.append(patternMeaning, saveFormat);
+    let patternSeq = 0;
+    const askPattern = debounce(async () => {
+      const seq = ++patternSeq;
+      const pattern = (state.params.pattern || '').trim();
+      if (!pattern) { patternMeaning.textContent = ''; return; }
+      try {
+        const res = await post('/api/timestamp_formats/try', { pattern, values: [] });
+        if (seq !== patternSeq) return;
+        patternMeaning.textContent = `Reads values like ${res.example}`;
+        patternMeaning.classList.remove('bad');
+      } catch (e) {
+        if (seq !== patternSeq) return;
+        patternMeaning.textContent = e.message;
+        patternMeaning.classList.add('bad');
+      }
+    }, 150);
+    function syncPatternLine() {
+      const on = currentOpId() === 'custom_pattern';
+      patternLine.hidden = !on;
+      if (!on) return;
+      const pattern = (state.params.pattern || '').trim();
+      // Nothing new to keep when the pattern is a saved format's, as is.
+      const same = tsEntry.formats.some((f) => f.saved && f.saved.pattern === pattern);
+      saveFormat.hidden = !pattern || same;
+      askPattern();
+    }
+    saveFormat.onclick = async () => {
+      const pattern = (state.params.pattern || '').trim();
+      const name = await promptDialog(
+        'Name this format. It joins the Format list for every case on this machine, and Winnow tries it '
+        + 'when it suggests a format.', state.column ? `${state.column} format` : pattern, { okLabel: 'Save format' });
+      if (name == null || !name.trim()) return;
+      let rec;
+      try {
+        rec = await post('/api/timestamp_formats', { name: name.trim(), pattern });
+      } catch (e) {
+        toast('Could not save the format: ' + e.message, 6000);
+        return;
+      }
+      const f = addSavedFormat(tsEntry, rec);
+      paintFormatOptions(formatSelect, tsEntry);
+      if (!editing) {
+        state.format = f.id;
+        state.formatTouched = true;
+        formatSelect.value = f.id;
+      }
+      side.paint();
+      syncPatternLine();
+      toast(`Saved “${rec.name}” — it's in the Format list now (Settings → Timestamps to edit it)`);
+    };
 
     /* The settings box's bottom edge shades while more of it is out of
        sight below — a fixed box that scrolls has to say that it does. */
@@ -1245,7 +1381,7 @@ export async function openDerivedColumnModal(prefill, editing) {
     /* The preview and the named-group offer answer the same edits — the
        pattern, the column, the operation — so they refresh together. The
        group probe no-ops unless the operation is the regex one. */
-    function refreshBoth() { refreshPreview(); refreshGroups(); syncMore(); }
+    function refreshBoth() { refreshPreview(); refreshGroups(); syncPatternLine(); syncMore(); }
 
     /* ----------------------------------------- the format suggestion
 
@@ -1271,8 +1407,9 @@ export async function openDerivedColumnModal(prefill, editing) {
     function applyDetection() {
       if (state.entry !== TIMESTAMP_ENTRY || state.formatTouched || rankedFor !== state.column || !ranked.length) return;
       const best = ranked[0];
-      if (!tsEntry.formats.some((f) => f.id === best.op_id)) return;
-      state.format = best.op_id;
+      const fmt = best.format_id != null ? `saved:${best.format_id}` : best.op_id;
+      if (!tsEntry.formats.some((f) => f.id === fmt)) return;
+      state.format = fmt;
       state.params = Object.assign({}, best.params);
     }
 
@@ -1326,6 +1463,7 @@ export async function openDerivedColumnModal(prefill, editing) {
       if (key === TIMESTAMP_ENTRY) {
         if (format) { state.format = format; state.formatTouched = true; }
         applyDetection();
+        if (!Object.keys(state.params).length) state.params = formatParams(state.format);
       }
       suggestName();
       side.sync();
@@ -1356,7 +1494,7 @@ export async function openDerivedColumnModal(prefill, editing) {
     formatSelect.onchange = () => {
       state.format = formatSelect.value;
       state.formatTouched = true;
-      state.params = {};
+      state.params = formatParams(state.format);
       suggestName();
       renderSettings();
       refreshBoth();
@@ -1520,4 +1658,177 @@ export function labeledRow(label, control) {
   row.append(el('span', 'derived-row-label', label));
   row.append(control);
   return row;
+}
+
+/* Settings → Timestamps → Parsing formats: the saved patterns, each with
+   a value it reads, and one editor for adding or changing them — a name,
+   the pattern, and a box to try it on a value pasted from the evidence.
+   The key to the letters is shown with the editor, where it is needed. */
+export const PATTERN_KEY = [
+  ['yyyy  yy', 'year: 2026, or 26 (50–99 are 19xx)'],
+  ['MM  M', 'month as a number: 03 or 3'],
+  ['MMM  MMMM', 'month name: Mar or March'],
+  ['dd  d', 'day of the month: 14'],
+  ['ddd  dddd', 'weekday name, read and skipped: Sat or Saturday'],
+  ['HH  hh', 'hour: 13, or 01 with tt'],
+  ['mm', 'minute — mm beside an hour or a second is minutes, anywhere else the month'],
+  ['ss', 'second'],
+  ['fff', 'fraction of a second, any number of digits; it and the dot before it may be missing'],
+  ['tt', 'AM or PM (also am, a.m.)'],
+  ['zzz', 'zone: Z, UTC or an offset like +02:00'],
+  ["'text'", 'text the values carry, as written'],
+  ['%Y-%m-%d %H:%M:%S', 'strftime works too'],
+];
+
+export function buildParseFormatsEditor(sec) {
+  sec.append(el('div', 'settings-sub-label', 'Parsing formats'));
+  sec.append(el('p', null,
+    'Your own layouts for reading timestamps into a datetime column, for logs no built-in format reads. '
+    + 'They are listed under Format in Add derived column, after the built-in formats, and Winnow tries them '
+    + 'when it suggests a format. Kept on this machine for every case; a column made with one keeps its own '
+    + 'copy of the pattern, so changing or deleting a format here changes no column.'));
+  const list = el('div', 'tsf-list');
+  list.dataset.role = 'parse-formats';
+  const addBtn = el('button', 'btn', 'Add a format…');
+  addBtn.type = 'button';
+  const editor = el('div', 'tsf-editor');
+  editor.hidden = true;
+  sec.append(list, addBtn, editor);
+
+  let formats = [];
+  async function load() {
+    try {
+      formats = await api('/api/timestamp_formats');
+    } catch (e) {
+      list.replaceChildren(el('div', 'fb-help bad', 'Could not load the formats: ' + e.message));
+      return;
+    }
+    paint();
+  }
+  function paint() {
+    list.replaceChildren();
+    if (!formats.length) {
+      list.append(el('div', 'fb-help tsf-empty', 'None yet.'));
+      return;
+    }
+    for (const f of formats) {
+      const r = el('div', 'tsf-row');
+      r.dataset.id = String(f.id);
+      const text = el('div', 'tsf-text');
+      const top = el('div', 'tsf-top');
+      top.append(el('span', 'tsf-name', f.name), el('code', 'tsf-pattern', f.pattern));
+      text.append(top, f.error
+        ? el('div', 'fb-help bad tsf-example', f.error)
+        : el('div', 'fb-help tsf-example', `Reads values like ${f.example}`));
+      const acts = el('div', 'tsf-acts');
+      const edit = el('button', 'btn ghost', 'Edit');
+      edit.type = 'button';
+      edit.onclick = () => open(f);
+      const del = el('button', 'btn ghost', 'Delete');
+      del.type = 'button';
+      del.onclick = async () => {
+        const ok = await confirmDialog(
+          `Delete the format “${f.name}”? Columns already made with it keep their values and their pattern.`,
+          { okLabel: 'Delete', danger: true });
+        if (!ok) return;
+        try {
+          await api(`/api/timestamp_formats/${f.id}`, { method: 'DELETE' });
+        } catch (e) { toast('Could not delete: ' + e.message, 5000); return; }
+        if (editing && editing.id === f.id) close();
+        await load();
+      };
+      acts.append(edit, del);
+      r.append(text, acts);
+      list.append(r);
+    }
+  }
+
+  let editing = null;   // the record being changed, or null for a new one
+  const nameIn = el('input');
+  nameIn.dataset.role = 'format-name';
+  nameIn.placeholder = 'Firewall logs';
+  const patternIn = el('input', 'derived-pattern');
+  patternIn.dataset.role = 'format-pattern';
+  patternIn.placeholder = 'dd-MM-yyyy HH:mm:ss';
+  patternIn.spellcheck = false;
+  patternIn.autocomplete = 'off';
+  const sampleIn = el('input', 'derived-pattern');
+  sampleIn.dataset.role = 'format-sample';
+  sampleIn.placeholder = 'Paste a value from the evidence';
+  sampleIn.spellcheck = false;
+  const meaning = el('div', 'fb-help tsf-meaning');
+  const result = el('div', 'fb-help tsf-result');
+  result.dataset.role = 'format-result';
+  const save = el('button', 'btn primary', 'Save format');
+  save.type = 'button';
+  const cancel = el('button', 'btn ghost', 'Cancel');
+  cancel.type = 'button';
+  const key = el('div', 'kv tsf-key');
+  for (const [a, b] of PATTERN_KEY) key.append(el('kbd', null, a), el('span', null, b));
+  const acts = el('div', 'row-actions');
+  acts.append(save, cancel);
+  editor.append(labeledRow('Name', nameIn), labeledRow('Pattern', patternIn), meaning,
+                labeledRow('Try it on', sampleIn), result, acts, key);
+
+  let trySeq = 0;
+  const tryIt = debounce(async () => {
+    const seq = ++trySeq;
+    const pattern = patternIn.value.trim();
+    const sample = sampleIn.value.trim();
+    if (!pattern) {
+      meaning.textContent = '';
+      result.textContent = '';
+      return;
+    }
+    try {
+      const res = await post('/api/timestamp_formats/try', { pattern, values: sample ? [sample] : [] });
+      if (seq !== trySeq) return;
+      meaning.textContent = `Reads values like ${res.example}`;
+      meaning.classList.remove('bad');
+      const out = res.results.length ? res.results[0].output : undefined;
+      result.textContent = out === undefined ? '' : (out == null ? "→ can't parse" : `→ ${out}`);
+      result.classList.toggle('bad', out === null);
+    } catch (e) {
+      if (seq !== trySeq) return;
+      meaning.textContent = e.message;
+      meaning.classList.add('bad');
+      result.textContent = '';
+    }
+  }, 150);
+  patternIn.oninput = tryIt;
+  sampleIn.oninput = tryIt;
+
+  function open(f) {
+    editing = f || null;
+    nameIn.value = f ? f.name : '';
+    patternIn.value = f ? f.pattern : '';
+    sampleIn.value = '';
+    save.textContent = f ? 'Save changes' : 'Save format';
+    editor.hidden = false;
+    addBtn.hidden = true;
+    tryIt();
+    (f ? patternIn : nameIn).focus();
+  }
+  function close() {
+    editing = null;
+    editor.hidden = true;
+    addBtn.hidden = false;
+  }
+  addBtn.onclick = () => open(null);
+  cancel.onclick = close;
+  save.onclick = async () => {
+    const body = { name: nameIn.value.trim(), pattern: patternIn.value.trim() };
+    try {
+      if (editing) await api(`/api/timestamp_formats/${editing.id}`, { method: 'PUT', body: JSON.stringify(body),
+        headers: { 'Content-Type': 'application/json' } });
+      else await post('/api/timestamp_formats', body);
+    } catch (e) {
+      toast('Could not save the format: ' + e.message, 6000);
+      return;
+    }
+    toast(editing ? `Saved “${body.name}”` : `Added “${body.name}” to the Format list`);
+    close();
+    await load();
+  };
+  load();
 }

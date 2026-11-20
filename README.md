@@ -197,12 +197,14 @@ search scans.
 **Settings → Plugins → Manage plugins…** turns plugins on and off per
 machine or per case, with no restart, and says what each one adds before
 you switch it on (a plugin that is off is never imported, so its
-description is read from its source, not by running it). Seven examples
+description is read from its source, not by running it). Eight examples
 ship switched off: **pivot** (Excel's PivotTable over any table),
 **first_last** (collapse events into per-group session bookends),
 **mft_usn** (raw NTFS `$MFT`/`$J` in pure Python, no EZTools),
 **lateral_movement** (logons, RDP and share access followed host to
 host in time order, by account, with credential switches and paths), **esxi_logs** (ESXi and UAC host logs into one schema),
+**systemd_journal** (Linux journal files and `journalctl` export or JSON
+output, compressed or damaged, with no `journalctl` needed),
 **top_values** (a toolbar panel of a column's commonest values), and
 **claude_assistant** (a Claude chat tab and a SQL Copilot that see the
 case's *schema* — table and column names, row counts — never row data; it

@@ -18,7 +18,7 @@ PLUGIN = {
     "description": "The ten most common values of a column for the rows in the current view, between the toolbar and the grid.",
 }
 
-WINNOW_API_VERSION = 16
+WINNOW_API_VERSION = 17
 
 
 def register(api):

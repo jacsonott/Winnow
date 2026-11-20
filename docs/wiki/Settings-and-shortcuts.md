@@ -31,7 +31,7 @@ open Winnow in another browser, another browser profile, or on another port
 | --- | --- |
 | This browser, and copied to the machine for any new browser or port to start from | Skin, theme, accent color, row density, launch animation, Pages as a dropdown, Open new tables when an import finishes, Keep the timeframe applied when switching tables |
 | This browser only (per browser profile and address) | Keyboard shortcuts, striped rows, autofit width limit, always-on filter row |
-| This machine (the `workspace/` folder) | Remote session mode, the default timestamp format, default tags for new cases, saved filters, plugins, profiles, the Windows hidden-start option |
+| This machine (the `workspace/` folder) | Remote session mode, the default timestamp format, parsing formats, default tags for new cases, saved filters, plugins, profiles, the Windows hidden-start option |
 | Your user account on this machine | File associations, environment variables |
 
 ## Appearance
@@ -372,6 +372,12 @@ timeframe dialog.
 
 ## Timestamps
 
+The section has two parts: **Display format**, how datetime columns are
+shown, and **Parsing formats**, your own layouts for reading timestamps
+that no built-in format reads.
+
+### Display format
+
 **Every case on this machine** sets how datetime columns are displayed by
 default. The choices are **As stored**, `YYYY-MM-DD HH:MM:SS` (the default),
 `YYYY-MM-DD HH:MM:SS.mmm`, `YYYY-MM-DD HH:MM:SS.ffffff`, `YYYY-MM-DD`,
@@ -382,6 +388,36 @@ file came with. A format picked on one column (right-click its header) beats
 the case's setting, which beats this one. Plugin tabs and panels, such as the
 Pivot and First/Last, show timestamps in the case's setting too. A case sets its own under
 **Case ▾ → Case settings… → Timestamps**.
+
+### Parsing formats
+
+Your own timestamp layouts, such as `dd.MM.yyyy HH:mm:ss,fff` for a
+firewall that writes `14.03.2026 13:22:01,482`. Each one is listed under
+**Format** in the Add derived column dialog, in **Your formats** after the
+built-in formats, and Winnow tries them when it suggests a format for a
+column, including in the notice after an import. How to write a pattern is
+in [Custom patterns](Derived-columns.md#custom-patterns).
+
+Each saved format shows its name, its pattern and a value it reads, written
+for 14 March 2026 at 13:22:01 so you can see which number is the day and
+which the month. **Edit** and **Delete** change or remove it; deleting one
+leaves the columns already made with it as they are, because a column keeps
+its own copy of the pattern.
+
+**Add a format…** opens the editor:
+
+1. **Name**: how it reads in the Format list. Two formats can't share a
+   name, in any capitalization.
+2. **Pattern**: the layout. The line under it says what it reads, or what
+   is wrong with it.
+3. **Try it on**: paste a value from the evidence to see what it becomes,
+   or *can't parse*.
+4. **Save format**.
+
+A key to the pattern letters sits under the editor. You can also save a
+pattern straight from the Add derived column dialog with **Save as a
+format…**. Parsing formats are kept on this machine, in
+`workspace/timestamp_formats.json`, for every case.
 
 ## Default tags for new cases
 

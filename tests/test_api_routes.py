@@ -1180,6 +1180,40 @@ def test_column_maxlen_measures_only_the_asked_columns(client, ingested):
     assert two == {names[0]: whole[names[0]], names[-1]: whole[names[-1]]}
 
 
+def test_column_maxlen_reformatted_measures_what_the_format_leaves_as_stored(client, store, write_csv):
+    """A datetime column shown in a timestamp format writes every value
+    that reads as a timestamp at the format's own length, which the client
+    adds; the server reports the longest value that does NOT, the only ones
+    still shown as stored. Measured as stored, a column of
+    "6/3/2026 1:02:03" was fitted to 16 characters and its 19-character
+    ISO form lost its seconds to the ellipsis. A column not named in
+    `reformatted` is measured as before, and one column can be asked both
+    ways without either answer standing in for the other (the cache is per
+    way of measuring)."""
+    path = write_csv([["When", "Note"],
+                      ["6/3/2026 1:02:03", "a"],
+                      ["Jun 3 2026 1:02:04 PM", "bb"],
+                      ["2026-06-03T01:02:05.1234567Z", "c"],
+                      ["2026-06-03 01:02:06", "d"],
+                      ["clock not set", "e"],
+                      ["", "f"]], name="when.csv")
+    sid = store.ingest_csv(path, name="when.csv")["id"]
+    assert {c["name"]: c["type"] for c in store.get_source(sid)["columns"]}["When"] == "datetime"
+
+    def lens(*reformatted):
+        return client.get("/api/column_maxlen", params=[("source_id", sid)]
+                          + [("reformatted", n) for n in reformatted]).json()
+
+    stored = lens()
+    assert stored == {"When": len("2026-06-03T01:02:05.1234567Z"), "Note": 2}
+    assert lens("When") == {"When": len("clock not set"), "Note": 2}
+    assert lens() == stored, "the reformatted answer was served for the stored one"
+    # Every value a timestamp: nothing is shown as stored.
+    path = write_csv([["When"], ["6/3/2026 1:02:03"], ["2026-06-03 01:02:03"]], name="all.csv")
+    sid = store.ingest_csv(path, name="all.csv")["id"]
+    assert lens("When") == {"When": 0}
+
+
 def test_column_max_lengths_measures_a_column_once(store, ingested):
     """The cache is per column: a column already measured is not scanned
     again when it is asked for with others, and the whole-table answer
