@@ -777,12 +777,38 @@ export function saveLayoutNow() {
   }).catch(() => {});
 }
 
-const saveLayoutSoon = debounce(saveLayoutNow, 400);
+/* saveLayout's wait remembers which table it is for. saveLayoutNow reads
+   S when it runs, and openSource moves S.sourceId to the next table first
+   and its layout in only after a fetch: a wait that ran out in between
+   posted the table just left's columns under the next table's id, and
+   the change it was waiting to save was never saved at all. So a table
+   switch sends a wait still running before it moves (flushLayoutSave),
+   and a wait that finds another table open when it runs out, or its own
+   table removed (SQLite reuses a removed table's id), writes nothing
+   rather than write onto it. */
+let layoutSaveFor = null;
+const stillOpen = (id) => id != null && id === S.sourceId && S.sources.some((s) => s.id === id);
+const saveLayoutSoon = debounce(() => {
+  const id = layoutSaveFor;
+  layoutSaveFor = null;
+  if (stillOpen(id)) saveLayoutNow();
+}, 400);
+
+/* Save now what saveLayout is still waiting to, if it is for the table
+   open. For a caller about to move S to another table, before it does. */
+export function flushLayoutSave() {
+  if (layoutSaveFor == null) return Promise.resolve();
+  saveLayoutSoon.cancel();
+  const id = layoutSaveFor;
+  layoutSaveFor = null;
+  return stillOpen(id) ? saveLayoutNow() : Promise.resolve();
+}
 
 /* Every layout change ends here, which makes it the one place a hidden or
    shown column can reach "Hide duplicate rows" (it compares the visible
    columns — syncDuplicateRows decides whether that changed). */
 export function saveLayout() {
+  layoutSaveFor = S.sourceId;
   saveLayoutSoon();
   syncDuplicateRows();
 }

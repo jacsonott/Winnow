@@ -144,6 +144,107 @@ def test_the_slash_basename_check_sees_what_it_is_for():
     assert _slash_basenames("rel.split('/'); s.split(',').pop()") == []
 
 
+def _slash_paths(src: str) -> list[int]:
+    """Lines where a test's Python joins a filesystem path to more with
+    "/" in a string (`f"{tmp_path}/acme"`), or takes one apart on "/"
+    (`cur["path"].rsplit("/", 1)`).
+
+    A path is `tmp_path`, `Path(...)`, `tmp_path_factory.mktemp(...)`,
+    one of those `/ "more"` or `.parent`, `str()` of one, or a name
+    assigned any of them. A split counts when the thing split says "path"
+    and not "url", since a URL is split on "/" everywhere."""
+    tree = ast.parse(src)
+    paths = {"tmp_path"}
+
+    def is_path(node) -> bool:
+        if isinstance(node, ast.Name):
+            return node.id in paths
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+            return is_path(node.left)
+        if isinstance(node, ast.Attribute) and node.attr == "parent":
+            return is_path(node.value)
+        if isinstance(node, ast.Call):
+            f = node.func
+            name = f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else ""
+            if name in ("Path", "mktemp"):
+                return True
+            return name in ("str", "fspath") and len(node.args) == 1 and is_path(node.args[0])
+        return False
+
+    pairs = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Tuple) and isinstance(node.value, ast.Tuple):
+                    pairs += zip(t.elts, node.value.elts)
+                else:
+                    pairs.append((t, node.value))
+    grew = True
+    while grew:
+        grew = False
+        for target, value in pairs:
+            if isinstance(target, ast.Name) and target.id not in paths and is_path(value):
+                paths.add(target.id)
+                grew = True
+
+    hits = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.JoinedStr):
+            for a, b in zip(node.values, node.values[1:]):
+                if (isinstance(a, ast.FormattedValue) and is_path(a.value)
+                        and isinstance(b, ast.Constant) and str(b.value).startswith("/")):
+                    hits.add(node.lineno)
+        elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+              and node.func.attr in ("split", "rsplit") and node.args
+              and isinstance(node.args[0], ast.Constant) and node.args[0].value == "/"):
+            said = (ast.get_source_segment(src, node.func.value) or "").lower()
+            if is_path(node.func.value) or ("path" in said and "url" not in said):
+                hits.add(node.lineno)
+    return sorted(hits)
+
+
+@pytest.mark.parametrize("path", FILES, ids=lambda p: p.name)
+def test_no_path_joined_or_split_on_slash(path):
+    """The page writes a path with the separator its folder uses
+    (home.js joinPath), and the server answers in the OS's own shape, so
+    on Windows both are backslashes. test_group_folder_ui.py expected
+    `f"{folder}/ui-gf-dc01.db-winnow"` and found the folder of a case with
+    `rsplit("/", 1)`: four of its tests passed on every Linux job and
+    failed the night the nightly's Windows browser job drew their shard
+    (2026-11-20). Build and take apart paths with pathlib or os.path."""
+    hits = _slash_paths(path.read_text(encoding="utf-8"))
+    assert not hits, (
+        f"{path.name}: joins or splits a filesystem path on '/' at line(s) {hits}, "
+        "which Windows writes with backslashes. Use pathlib (folder / name, .name, .parent) "
+        "or os.path (join, dirname, basename)."
+    )
+
+
+def test_the_slash_path_check_sees_what_it_is_for():
+    # What test_group_folder_ui.py did before 2026-11-21.
+    assert _slash_paths(
+        "def t(page, tmp_path, cur):\n"
+        "    folder = tmp_path / 'acme engagement'\n"
+        "    share, third = tmp_path / 'share', tmp_path / 'third'\n"
+        "    assert v == f'{folder}/ui-gf-dc01.db-winnow'\n"
+        "    page.fill(f'{third}/x.db-winnow')\n"
+        "    assert v == f'{tmp_path}/acme/x'\n"
+        "    d = page.locator('.nc-path').input_value().rsplit('/', 1)[0]\n"
+        "    d = cur['path'].rsplit('/', 1)[0]\n"
+        "    leaf = str(share).split('/')[-1]\n"
+    ) == [4, 5, 6, 7, 8, 9]
+    # Not paths: a URL, a label with a slash in it, a path written the right way.
+    assert _slash_paths(
+        "def t(page, tmp_path, r, style, theme):\n"
+        "    folder = tmp_path / 'acme'\n"
+        "    name = r.url.rsplit('/', 1)[1]\n"
+        "    seg = urlparse(r.url).path.split('/')\n"
+        "    msg = f'{style}/{theme} still stripes'\n"
+        "    api(f'/api/cases/{rec}/x')\n"
+        "    assert v == os.path.join(str(folder), 'x') and v == str(folder / 'x')\n"
+    ) == []
+
+
 def test_module_basenames_are_unique_across_tests_and_ui():
     """pytest imports test modules by basename (no __init__.py here), so
     tests/test_x.py and tests/ui/test_x.py collide: the second one to be

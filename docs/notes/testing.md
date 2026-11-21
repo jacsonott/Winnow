@@ -403,7 +403,14 @@ start writes), runs that install's own `update.py --from` on a zip of
 develop laid out like GitHub's, and checks every shipped file and every
 byte of that state, then does the same after `update.py --rollback`. Run it
 with `--from-ref v0.4.1` (any release tag); set `TMPDIR` to keep its
-folders out of a shared `/tmp`.
+folders out of a shared `/tmp`. The state is what sits under `workspace/`,
+`plugins/`, `sessions/` and `cases/` that neither release ships:
+`plugins/README.md` lives under `plugins/` but ships
+(`updater.PROTECTED_EXCEPTIONS`), so the updater rewriting it is held to
+the shipped-file check, not the state one. Counting it as state failed
+the nightly the first night develop's copy differed from the release's
+(2026-11-20, the systemd_journal example's line in it), though the update
+did exactly what it should.
 
 ## Things that bite
 
@@ -586,6 +593,18 @@ folders out of a shared `/tmp`.
   Python (`p.name`) and hand the page `{ path, name }`, as the other
   import tests do; tests/test_ui_test_hygiene.py fails on
   `split('/').pop()` in tests/ui.
+  The same backslash goes the other way: the page joins a folder and a
+  file name with the separator the folder uses (home.js `joinPath`), and
+  the server answers with `os.path` in the OS's shape. So a test that
+  expects `f"{folder}/x.db-winnow"`, or takes a case's folder with
+  `rsplit("/", 1)`, passes on Linux and fails on Windows.
+  test_group_folder_ui.py did both and failed four tests the first night
+  its shard ran there (2026-11-20). Build expected paths with pathlib
+  (`folder / name`) or `os.path.join`, and take them apart with
+  `os.path.dirname`/`basename` or `.parent`/`.name`;
+  test_ui_test_hygiene.py's `test_no_path_joined_or_split_on_slash` fails
+  an f-string that puts `/` after a `tmp_path`-derived path, and a
+  `split("/")` of anything that says "path" and not "url".
 - **An import lists its table before the table has columns.** The
   background import inserts the `sources` row as it starts, with
   `columns` = `[]`, and writes the typed columns as it ends

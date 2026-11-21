@@ -12,7 +12,10 @@ What an analyst does, end to end, with the updater they already have:
    the way GitHub's archives are (one top-level folder).
 3. Checks that every file the new version ships is there as shipped, that
    none of the analyst's state changed by a byte, and that the upgraded
-   install starts.
+   install starts. The state is what sits in workspace/, plugins/,
+   sessions/ and cases/ that no release ships: plugins/README.md is under
+   plugins/ but ships (updater.PROTECTED_EXCEPTIONS), so the updater
+   rewriting it is the shipped-file check's business, not this one's.
 4. Runs `update.py --rollback` and checks the old version's files are back,
    the new version's additions are gone, and the state is still untouched.
 
@@ -57,11 +60,15 @@ def _files(root: Path) -> dict[str, str]:
     return out
 
 
-def _state(install: Path) -> dict[str, str]:
+def _state(install: Path, shipped: set[str]) -> dict[str, str]:
+    """The analyst's files: everything under STATE_DIRS that isn't one of
+    the `shipped` files. Those are the release's, held to the tree they
+    came from by `_matches`; counting them here too fails the run whenever
+    a release changes one, though writing it back is the updater's job."""
     out = {}
     for d in STATE_DIRS:
         if (install / d).is_dir():
-            out.update({f"{d}/{k}": v for k, v in _files(install / d).items()})
+            out.update({f"{d}/{k}": v for k, v in _files(install / d).items() if f"{d}/{k}" not in shipped})
     return out
 
 
@@ -91,6 +98,7 @@ def main() -> int:
     _unpack(args.from_ref, old)
     _unpack(args.to_ref, new)
     old_tree, new_tree = _files(old), _files(new)
+    shipped = set(old_tree) | set(new_tree)
     shutil.copytree(old, install)
 
     # A zip laid out like GitHub's: everything under one top-level folder.
@@ -111,30 +119,30 @@ def main() -> int:
     (install / "cases" / "intrusion.db-winnow").write_bytes(b"SQLite format 3\x00" + os.urandom(4096))
     (install / "sessions").mkdir(exist_ok=True)
     (install / "sessions" / "qc-pass.json").write_text('{"format": "winnow-case-session/1"}\n')
-    state = _state(install)
+    state = _state(install, shipped)
     assert any(k.startswith("workspace/") for k in state), "starting the old install wrote no workspace"
 
     problems: list[str] = []
     _run(py, "update.py", "--from", archive, "-y", cwd=install)
     if missing := _matches(install, new_tree):
         problems.append(f"after the update, {len(missing)} shipped files are not as shipped: {missing[:10]}")
-    if _state(install) != state:
+    if _state(install, shipped) != state:
         problems.append("the update changed the analyst's state: "
-                        f"{sorted(set(_state(install).items()) ^ set(state.items()))[:10]}")
+                        f"{sorted(set(_state(install, shipped).items()) ^ set(state.items()))[:10]}")
     _run(py, "-m", "pip", "install", "-q", "-r", "requirements.txt", cwd=install)
     _run(*smoke, cwd=install)
 
     # Starting it again registered another case in workspace/: that is
     # the server's write, not the updater's, so the rollback is held to
     # the state as it is now.
-    state = _state(install)
+    state = _state(install, shipped)
     _run(py, "update.py", "--rollback", cwd=install)
     if missing := _matches(install, old_tree):
         problems.append(f"after the rollback, {len(missing)} files of the old version are not back: {missing[:10]}")
     added = sorted(set(new_tree) - set(old_tree))
     if left := [rel for rel in added if (install / rel).exists()]:
         problems.append(f"after the rollback, files only the new version ships are still there: {left[:10]}")
-    if _state(install) != state:
+    if _state(install, shipped) != state:
         problems.append("the rollback changed the analyst's state")
     _run(*smoke, cwd=install)
 
