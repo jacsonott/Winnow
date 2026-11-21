@@ -20,6 +20,7 @@ import { timestampField, updateFiltersButton, updateTimeRangeButton } from './ti
 import { renderTagRibbon } from './tags.js';
 import { histogramOpen } from './histogram.js';
 import { announceChange, inPopout, pageElsewhere, popoutPage, sendToMain } from './popout.js';
+import { caseTsFormat, displayCell, formatTimestamp } from './tsformat.js';
 
 /* Installing a plugin: copying a picked .py file or plugin folder from
    anywhere on disk into the plugins directory — the same consent model as
@@ -465,7 +466,7 @@ export async function showPage(name) {
 
 export function buildPluginTabContext(tab, kind = 'tab') {
   return {
-    apiVersion: 10,
+    apiVersion: 11,
     plugin: tab.plugin,
     base: `/api/plugin/${tab.plugin_fs}`,      // the plugin's own register_api routes
     assets: `/plugin_assets/${tab.plugin_fs}`, // the plugin's own files (css, workers, data)
@@ -536,7 +537,24 @@ export function buildPluginTabContext(tab, kind = 'tab') {
       // The case's variables as {name: value} — engagement name, API base
       // URL, a document link. Case data, never secrets.
       get variables() { return Object.fromEntries((S.caseVariables || []).map((v) => [v.name, v.value])); },
+      // The case's timestamp format, as a key of the app's TS_FORMATS
+      // ('iso', 'us', 'raw', …): the case's own setting, else this
+      // machine's default, else 'iso'. (API 17 / apiVersion 11.)
+      get tsFormat() { return caseTsFormat(); },
     },
+    // A stored timestamp as the case says timestamps read — the grid's own
+    // formatter, so a plugin's pivot, preview table or label shows
+    // "2026-06-03 13:02:03" where the grid does, not the "6/3/2026
+    // 1:02:03 PM" the file happened to hold. A value it can't read as a
+    // timestamp comes back unchanged, never guessed at. `format` picks
+    // another of the keys (state.tsFormat's); 'iso_us' is a text that
+    // sorts in time order. (API 17 / apiVersion 11.)
+    formatTimestamp: (value, format) => formatTimestamp(value, format || caseTsFormat()),
+    // One cell of the table open in the grid, as the grid paints it: a
+    // format the analyst set on that column beats the case's, a duration
+    // reads "1h 23m 45s". For a panel that follows the grid; a tab over
+    // a table of its own wants formatTimestamp. (API 17 / apiVersion 11.)
+    displayCell: (column, value) => displayCell(column, value),
     // Write a case variable (upsert) and refresh the local copy.
     setVariable: async (name, value) => {
       await post('/api/case/variables', { name, value: String(value ?? '') });
@@ -558,6 +576,16 @@ export function buildPluginTabContext(tab, kind = 'tab') {
       const h = (e) => cb(e.detail);
       document.addEventListener('winnow:appearance', h);
       return trackMountListener(mountKey(kind, tab.id), () => document.removeEventListener('winnow:appearance', h));
+    },
+    // Fires when a timestamp format changes — the case's, the machine
+    // default under it, or (`column` set) one column of the table open in
+    // the grid — with {tsFormat, column}. Re-render what you formatted, or
+    // it keeps the old format until something else redraws it. Returns an
+    // unsubscribe. (API 17 / apiVersion 11.)
+    onTimestampFormatChange: (cb) => {
+      const h = (e) => cb(e.detail);
+      document.addEventListener('winnow:tsformat', h);
+      return trackMountListener(mountKey(kind, tab.id), () => document.removeEventListener('winnow:tsformat', h));
     },
     // Drive the case timeframe filter (the toolbar's ⏱) from a plugin —
     // the same object the Timeframe dialog writes, so the button, the

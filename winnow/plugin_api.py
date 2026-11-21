@@ -124,7 +124,18 @@ A tab plus its backend route, the full custom-UI shape:
     # ("/api/plugin/<fs_name>") for the plugin's own routes, winnow.assets
     # for its other files, winnow.sql() for read-only case queries,
     # winnow.schemaText() for an LLM-ready schema dump, and winnow.state
-    # (live getters: sources, sourceId, tags, variables, timeRange, view).
+    # (live getters: sources, sourceId, tags, variables, timeRange, view,
+    # tsFormat).
+    # winnow.formatTimestamp(value, format?) shows a stored timestamp the
+    # way the case says timestamps read (state.tsFormat: the case's own
+    # format, else the machine default, else ISO) — the grid's formatter,
+    # so a plugin's labels match the grid rather than the shape the file
+    # wrote; a value it cannot read comes back unchanged. displayCell(
+    # column, value) is a cell of the table open in the grid exactly as the
+    # grid paints it (a column's own format beats the case's), for a panel
+    # that follows the grid. onTimestampFormatChange(cb) fires with
+    # {tsFormat, column} when either changes, so what was formatted can be
+    # re-drawn. Display only: send and match the stored value.
     # winnow.tabState (get/set/clear) is this mount's own row in the CASE
     # file, for state that should survive the case being closed — a mount
     # is torn down with no callback, so it is written as the analyst works
@@ -264,7 +275,7 @@ PAGE_PANEL_PAGES = ("sql", "notes")
 # provides, with a message that says to update Winnow — the failure mode
 # is otherwise an AttributeError deep inside register() that reads like a
 # plugin bug.
-PLUGIN_API_VERSION = 16
+PLUGIN_API_VERSION = 17
 
 FORMAT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 # API routes may nest ("chat/stream") but each segment keeps the same shape.
@@ -681,9 +692,11 @@ class PluginAPI:
         every grid rebuild — filter, sort, search, timeframe, table
         switch; returns an unsubscribe), `state.view` (the current view's
         {view_id, row_count}), `setTimeRange({column, start, end})` /
-        `clearTimeRange()` to drive the case timeframe filter, and
+        `clearTimeRange()` to drive the case timeframe filter,
         `onAppearanceChange(cb)` so a canvas painted with the accent can
-        redraw when the look changes. The toggle
+        redraw when the look changes, and `displayCell(column, value)` /
+        `onTimestampFormatChange(cb)` to show a value as the grid under it
+        does — a timestamp in its column's format. The toggle
         state persists per browser; the strip hides with the toolbar on
         page tabs."""
         if not FORMAT_ID_RE.match(id or ""):

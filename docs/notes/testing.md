@@ -399,6 +399,14 @@ pivot's timeframe opens the grid with the tables' timeframe set to it.
 `test_firstlast_copy.py`: Copy result,
 including the card it waits on when the analyst has left the tab, held
 at `job/start` so the answer lands while the tab is hidden.
+`test_plugin_timestamp_format.py`: plugins show timestamps in the case's
+format (the Pivot's labels in time order, its Min/Max, the First/Last
+preview and copy, Top values under a column format of its own), a case
+format change redraws a pivot without re-running it, in its own window
+and in a pop-out, and the context's formatter is the grid's. Its table is
+US-format with a year end in it, so stored text is neither the case's
+format nor in time order; seeded through `/api/plugin_state`, so no drag
+is in the way of what is asserted.
 
 `tests/smoke_server.py` is not a test module (no `test_` prefix, so pytest
 never collects it); CI runs it as a script. It starts `server.py --case

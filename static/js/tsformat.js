@@ -134,6 +134,16 @@ export function formatTimestamp(raw, fmt) {
   }
 }
 
+/* The case's format: the case's own setting, then the system-wide
+   default, then 'iso'. What a timestamp looks like anywhere that is not
+   one column of the table open in the grid — a plugin's pivot, its
+   preview table, its labels (plugins.js: winnow.formatTimestamp). */
+export function caseTsFormat() {
+  return S.caseSettings.ts_format
+    || S.appSettings.default_ts_format
+    || 'iso';
+}
+
 /* How many characters `fmt` writes for a value parseTimestamp reads. The
    same for every value: each part is zero-padded to a fixed width and the
    year is always the four digits all three shapes capture. null for 'raw'
@@ -161,10 +171,18 @@ export function shownTsLength(name) {
    their system default (Settings > Timestamps); an explicitly-chosen
    per-column format still wins, so existing saved layouts are unaffected. */
 export function tsFormatFor(name) {
-  return (S.layout[name] || {}).tsFormat
-    || S.caseSettings.ts_format
-    || S.appSettings.default_ts_format
-    || 'iso';
+  return (S.layout[name] || {}).tsFormat || caseTsFormat();
+}
+
+/* Says a timestamp format changed — the case's, the machine's, or (with
+   `column`) one column of the table open in the grid. The grid repaints
+   itself; this is for everything that formats timestamps outside it, a
+   plugin tab above all (winnow.onTimestampFormatChange), which would
+   otherwise go on showing the old format until it next re-rendered. */
+export function announceTsFormat(column = null) {
+  document.dispatchEvent(new CustomEvent('winnow:tsformat', {
+    detail: { tsFormat: caseTsFormat(), column },
+  }));
 }
 
 /* A duration column holds seconds (see timeparse's duration_delta). Shown

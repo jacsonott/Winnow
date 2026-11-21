@@ -2674,7 +2674,11 @@ function openEventBuilder(winnow, { edit = null, template = null, sourceId = nul
     }
     if (r.hops) {
       if (!b.time_col) note('No time column, so the views will not show this event: every one of them is ordered by time.', 'warn');
-      else if (r.first) note(`Hops from ${r.first} to ${r.last}${r.untimed ? `; ${plural(r.untimed, 'row')} with no time the views can place` : ''}.`, 'ok');
+      else if (r.first) {
+        // In the case's timestamp format, as the grid would show them.
+        const at = ctx.formatTimestamp || ((v) => v);
+        note(`Hops from ${at(r.first)} to ${at(r.last)}${r.untimed ? `; ${plural(r.untimed, 'row')} with no time the views can place` : ''}.`, 'ok');
+      }
       else note(`${b.time_col} holds nothing that reads as a time in these rows, so the views will not show this event.`, 'warn');
     }
 
