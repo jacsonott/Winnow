@@ -4,7 +4,10 @@ or showing a column changes what is compared (and so the view), and the
 toggle survives a tab switch and a reload (it lives in the layout) while
 staying off for other tables.
 """
+import json
+import re
 from pathlib import Path
+from urllib.parse import urlparse
 
 import pytest
 
@@ -126,3 +129,42 @@ def test_no_tags_leaves_the_copies_of_a_tagged_row_hidden(page, dupes, api, layo
         api("/api/row_tags", "POST", {"source_id": dupes, "rids": [1], "tag_id": tag["id"], "on": False})
         page.evaluate("() => __winnow.loadTags()")
         layout_saved()
+
+
+def test_a_change_just_before_a_table_switch_is_saved_to_its_own_table(page, dupes, api, until):
+    """saveLayout waits 400 ms for changes to stop before it posts, and the
+    post read the table from S when it went. A switch inside that wait let
+    it go after openSource had moved S.sourceId to the next table and
+    before that table's layout came back: the toggle was never saved, and
+    dupes.csv's columns were saved as ui.csv's layout. The nightly's flake
+    hunt found it, as the first test here timing out in layout_saved under
+    load (2026-11-18 and 11-20). ui.csv's layout is held back here, so a
+    post that waits has that window to land in."""
+    other = page.evaluate("() => __winnow.S.sources.find((s) => s.name === 'ui.csv').id")
+    before = api(f"/api/layout?source_id={other}")
+    _open(page, dupes)
+    posted, held = [], []
+
+    def on_request(req):
+        if req.method == "POST" and urlparse(req.url).path == "/api/layout":
+            posted.append(json.loads(req.post_data)["source_id"])
+
+    pattern = re.compile(rf".*/api/layout\?source_id={other}$")
+    page.route(pattern, lambda route: held.append(route) if not held else route.continue_())
+    page.on("request", on_request)
+    try:
+        page.evaluate("""async (o) => { await __winnow.toggleDuplicateRows(); __winnow.openSource(o); }""", other)
+        until(page, lambda: held, "ui.csv's layout to be asked for")
+        until(page, lambda: posted, "the toggle's layout to be posted")
+        assert posted[0] == dupes, f"dupes.csv's toggle was posted as table {posted[0]}'s layout"
+        held[0].continue_()
+        page.wait_for_function("(id) => __winnow.S.sourceId === id && !!__winnow.S.view", arg=other)
+        until(page, lambda: api(f"/api/layout?source_id={dupes}").get("hide_duplicate_rows") is True,
+              "dupes.csv's layout to carry the toggle")
+        order = api(f"/api/layout?source_id={other}").get("order") or []
+        assert not {"Event", "File"} & set(order), f"ui.csv's layout took dupes.csv's columns: {order}"
+    finally:
+        page.remove_listener("request", on_request)
+        page.unroute(pattern)
+        if api(f"/api/layout?source_id={other}") != before:
+            api("/api/layout", "POST", {"source_id": other, "payload": before})
