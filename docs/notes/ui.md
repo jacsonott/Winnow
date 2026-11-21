@@ -1344,21 +1344,35 @@ see [docs/notes/README.md](README.md) for the whole set.
   cell) is an *author* for the filter the header box already understands —
   it writes `=v` or `a|b|c` into `S.filters` and nothing downstream knows
   it exists. Four things about it are decisions, not accidents:
-  - **Which values it lists.** Unfiltered column: the current view, via
-    `group_summary` — so the list reflects every *other* filter in play,
-    which is Excel's behaviour and the one that answers "which processes
-    survive this timeframe". Already filtered on this column: the whole
-    table, via `column_values` — a view narrowed to three values can only
-    offer those three back, and widening is the main reason to reopen the
-    dropdown. Both are swappable from the panel, because a guess about
-    scope that isn't visible is a lie. Building a *second* view with just
-    this column's filter removed would be the truly Excel-exact answer and
-    is not available: `Store._views` evicts any other view for the same
-    source (backlog item 2). Either list is capped at `VALUE_PICKER_LIMIT`
-    (1,000) most-common values, and the panel's Find filters only those
-    client-side (`pickerRows`) — neither route takes a search term — so
-    the capped-list warning sends the analyst to a text filter on the
-    column instead of promising Find reaches the rest.
+  - **Which values it lists.** It opens on This view: the values among
+    the rows every *other* filter leaves, the column's own picks excepted,
+    which is Excel's rule. A column with no value selection gets the
+    current view itself, via `group_summary`. A column with one gets the
+    view's spec less that selection (`pickerSpecFor`: the box's text when
+    it holds `=v`, `a|b|c` or `""`, else the picker's node in the tree),
+    counted by POST `/api/column_values`, which compiles the spec as
+    build_view does and aggregates without building a view
+    (`Store._column_values_in_spec`). A second view is not an option:
+    `Store._views` evicts any other view for the same source (backlog
+    item 2), which would take the grid's view, or a background search's.
+    This used to open such a column on Whole table so its selection could
+    be widened, and that ignored every other filter: after filtering Host,
+    User still offered every user at whole-table counts, and ticking one
+    Host had ruled out filtered to nothing (the reported bug,
+    tests/ui/test_value_picker_other_filters.py). Lifting only the
+    column's own picks keeps both halves: values the other filters rule
+    out are gone, and values the picks left out are listed, unticked. The
+    spec is the one the view on screen was built from (the cached key),
+    not `currentSpec()`, which differs while a search waits in the
+    background. A contains, regex, comparison or exclusion in the box is
+    not a selection and stays in, so a text filter still narrows its own
+    column's list, which is the way past the cap below. Whole table
+    (`column_values` with no spec) is one click away, because a guess
+    about scope that isn't visible is a lie. Either list is capped at
+    `VALUE_PICKER_LIMIT` (1,000) most-common values, and the panel's Find
+    filters only those client-side (`pickerRows`) — no route takes a
+    search term — so the capped-list warning sends the analyst to a text
+    filter on the column instead of promising Find reaches the rest.
   - **"Everything ticked" is "no filter" only on a list this column's
     filter didn't narrow, and Apply with nothing changed is a no-op.**
     The picker opens on This view for any column whose filter isn't a
@@ -1371,7 +1385,11 @@ see [docs/notes/README.md](README.md) for the whole set.
     (`loadedChecked`) and does nothing when they match; and a changed
     selection that ends up all ticked writes the values out, not a clear,
     when the list is This view and the column has its own filter (box text
-    or the picker's tree node — the two things a clear removes).
+    or the picker's tree node — the two things a clear removes) and that
+    filter is not a value selection. A value selection never narrows This
+    view (it is lifted before counting), so everything ticked on its list
+    is every value the other filters leave, which is no filter at all on
+    the column, and Apply clears it (`state.ownSelectionLifted`).
   - **`bucket_datetime=False`.** `group_summary` day-buckets datetime
     columns, and a `2024-01-05` bucket matches no stored value, so an
     `=`/`in` filter built from one selects nothing. The flag turns the

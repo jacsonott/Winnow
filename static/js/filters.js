@@ -3,7 +3,7 @@ picker behind each ▾, and filtering by a cell's value.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { renderFilterBar, renderHead, renderHeadResized, saveLayout, visibleCols } from './columns.js';
-import { $, api, debounce, el, toast } from './core.js';
+import { $, api, debounce, el, post, toast } from './core.js';
 import { rowAt } from './grid.js';
 import { collapseSearchIfEmpty, syncSearchExpansion } from './search.js';
 import { clearAllFilters } from './sources.js';
@@ -391,19 +391,64 @@ export async function applyValueSelection(column, values, { clearInstead }) {
   await rebuildView({ keepScroll: false });
 }
 
-/* Two sources for the list, and which one is right depends on what the
-   column is already filtered by. Unfiltered: the current view, so the list
-   reflects every other filter in play (Excel's behaviour, and the one that
-   makes "which processes survive this timeframe" answerable). Already
-   filtered on this column: the whole table, because a view narrowed to
-   three values can only ever offer those three back, and widening the
-   selection is the main reason to reopen the dropdown. Either way it's
-   swappable from the panel — the scope is stated, never guessed at. */
+/* The spec the grid's view was built from: what This view counts under.
+   The cached key rather than currentSpec(), because the two differ while a
+   search waits in the background for Apply, and the list has to describe
+   the rows on screen. currentSpec() when the cache doesn't hold this view. */
+function builtViewSpec() {
+  const cached = S.viewCache.get(S.sourceId);
+  if (cached && S.view && cached.view_id === S.view.view_id) {
+    try { return JSON.parse(cached.key); } catch { /* fall through */ }
+  }
+  return currentSpec();
+}
+
+/* What This view counts for a column with a value selection of its own:
+   the view's spec less that selection — every other filter (the other
+   columns, the search box, tags, the timeframe, hidden duplicate and empty
+   rows) still applies, and the column's own picks don't. That's Excel's
+   rule, and the one that keeps the list honest both ways: a value the
+   other filters rule out isn't offered (ticking it alone used to filter
+   to nothing), and a value this column's picks left out still is, so the
+   selection can be widened again.
+
+   Null when the column has no value selection: then the view itself is
+   that answer. Only the selection comes off — the box's text when it holds
+   one, else the picker's node in the filter tree, the two places
+   currentValueSelection reads it from. A contains, regex, comparison or
+   exclusion in the box is not a selection and stays, so narrowing a
+   column with a text filter still narrows its list (the way past the
+   VALUE_PICKER_LIMIT cap). */
+export function pickerSpecFor(column) {
+  if (!currentValueSelection(column)) return null;
+  const spec = builtViewSpec();
+  if (S.filters[column]) {
+    spec.filters = (spec.filters || []).filter((f) => f.column !== column);
+  } else if (spec.filter_tree && spec.filter_tree.type === 'group' && spec.filter_tree.op === 'AND') {
+    const children = (spec.filter_tree.children || []).filter((n) => !isPickerNode(n, column));
+    spec.filter_tree = children.length ? { ...spec.filter_tree, children } : null;
+  }
+  return spec;
+}
+
+/* Two lists. This view: the values among the rows every other filter
+   leaves — the current view itself for a column with no selection of its
+   own, and the view less that selection for one with (pickerSpecFor),
+   counted server-side from the same spec without building a second view.
+   Whole table: every value in the column. The picker opens on This view
+   and either is swappable from the panel — the scope is stated, never
+   guessed at. */
 export async function fetchPickerValues(column, scope) {
   if (scope === 'view' && S.view) {
-    const r = await api(`/api/group_summary?view_id=${encodeURIComponent(S.view.view_id)}`
-      + `&column=${encodeURIComponent(column)}&limit=${VALUE_PICKER_LIMIT}&order=count&bucket_datetime=false`);
-    return { values: r.groups, truncated: !!r.truncated };
+    const spec = pickerSpecFor(column);
+    if (!spec) {
+      const r = await api(`/api/group_summary?view_id=${encodeURIComponent(S.view.view_id)}`
+        + `&column=${encodeURIComponent(column)}&limit=${VALUE_PICKER_LIMIT}&order=count&bucket_datetime=false`);
+      return { values: r.groups, truncated: !!r.truncated };
+    }
+    const rows = await post('/api/column_values',
+      { source_id: S.sourceId, column, limit: VALUE_PICKER_LIMIT + 1, spec });
+    return { values: rows.slice(0, VALUE_PICKER_LIMIT), truncated: rows.length > VALUE_PICKER_LIMIT, lifted: true };
   }
   const rows = await api(`/api/column_values?source_id=${S.sourceId}`
     + `&column=${encodeURIComponent(column)}&limit=${VALUE_PICKER_LIMIT + 1}`);
@@ -423,9 +468,11 @@ export function openValuePickerForColumn(column) {
 export function openValuePicker(column, anchorEl) {
   if (!S.sourceId || S.activeTab !== 'grid') { toast('Open a table first'); return; }
   const state = {
-    // An existing selection on this column means the view can't show what
-    // else is out there — start from the whole table so it can be widened.
-    scope: currentValueSelection(column) ? 'table' : 'view',
+    // This view even when the column has picks of its own: its list leaves
+    // them out (pickerSpecFor), so the values they excluded are there to
+    // widen back to. It used to open on Whole table for such a column,
+    // which ignored every other filter, counts and all.
+    scope: 'view',
     sort: 'count',
     search: '',
     values: null,
@@ -435,6 +482,7 @@ export function openValuePicker(column, anchorEl) {
     loadedChecked: new Set(),
     loading: true,
     error: null,
+    ownSelectionLifted: false,
   };
   let paint = () => {};
   const panel = anchoredPanel(anchorEl, 'value-picker', (p, close) => {
@@ -451,6 +499,9 @@ export function openValuePicker(column, anchorEl) {
       const res = await fetchPickerValues(column, state.scope);
       state.values = res.values;
       state.truncated = res.truncated;
+      // Whether this list was counted with the column's own picks taken
+      // off — then they didn't narrow it, which apply() needs to know.
+      state.ownSelectionLifted = !!res.lifted;
       const selected = currentValueSelection(column);
       // Intersected with what's actually listed, so "apply" can never send
       // back a value the analyst was never shown — a truncated list would
@@ -491,8 +542,11 @@ export function openValuePicker(column, anchorEl) {
     // unless the list is this view's and this column's own filter is what
     // narrowed it. Then everything ticked is "every value that filter
     // leaves", so it is written out as those values rather than dropped.
+    // A value selection never narrows This view (pickerSpecFor takes it
+    // off), so only a filter that isn't one — a contains, a regex, `>`,
+    // `!` — counts here.
     const ownFilter = !!parseFilter(S.filters[column] || '') || !!pickerTreeNode(column);
-    const narrowed = state.scope === 'view' && ownFilter;
+    const narrowed = state.scope === 'view' && ownFilter && !state.ownSelectionLifted;
     const clearInstead = !state.truncated && !narrowed && values.length === listed.length;
     await applyValueSelection(column, values, { clearInstead });
   }
@@ -527,7 +581,7 @@ export function renderValuePicker(panel, column, state, actions) {
   const toggles = el('div', 'vp-toggles');
   const scopeGroup = el('div', 'vp-seg');
   for (const [key, label, title] of [
-    ['view', 'This view', 'Values among the rows the current filters leave — the other filters still apply'],
+    ['view', 'This view', "Values among the rows the other filters leave — this column's own picks don't hide its other values"],
     ['table', 'Whole table', 'Every value in the column, ignoring the current filters'],
   ]) {
     const b = el('button', 'btn ghost', label);

@@ -112,6 +112,19 @@ lock for the *entire duration* of a read and asserts the read completes —
 a deterministic deadlock against a single-connection implementation, not a
 race — plus the dropped-view → KeyError mapping, pool recycling/drain on
 close, and read-your-committed-writes across the connection split.
+`test_column_values_spec.py` covers the value picker's This view list for
+a column that has picks of its own (`column_values(spec=...)`, POST
+/api/column_values). Its load-bearing test holds the counts to
+`group_summary` over a view built from the same spec, for each kind of
+narrowing: column filters, the filter tree and raw SQL in it, each search
+mode, tags (any of, untagged, excluded), the timeframe, Hide empty rows,
+and Hide duplicate rows with and without a tag filter after it, on a
+table and on a merge. Each case also asserts that the list did narrow,
+because a narrowing the store ignored would match the whole table on both
+sides. `tests/ui/test_value_picker_other_filters.py` is its browser half:
+the reported sequence (pick User, then Host, reopen User), the reverse,
+the search box, ticking every value clearing the column's picks, and
+Whole table one click away.
 `test_plugins.py` covers the plugin
 system end to end — loader isolation (a broken plugin never takes the
 rest down; a disabled one is discovered but never imported, proved with a

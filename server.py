@@ -4980,6 +4980,31 @@ def api_column_values(source_id: int, column: str, limit: int = 200):
         raise HTTPException(404, "No such column")
 
 
+class ColumnValuesBody(BaseModel):
+    source_id: int
+    column: str
+    limit: int = 200
+    spec: ViewSpec | None = None
+
+
+@app.post("/api/column_values")
+def api_column_values_in_spec(body: ColumnValuesBody):
+    """The same list as the GET, counted over the rows `spec` leaves rather
+    than the whole table (Store._column_values_in_spec): the value picker's
+    list for a column that already has picks, sent its view's spec less
+    them. A POST because a spec — the filter tree, the search terms — is
+    structured and can be long, which a query string is neither. 400 for
+    what the analyst can fix (a bad regex, a filter fragment), as
+    /api/view answers it; 404 for a column the table doesn't have."""
+    spec = body.spec.model_dump() if body.spec is not None else None
+    try:
+        return JSONResponse(store().column_values(body.source_id, body.column, min(body.limit, 2000), spec=spec))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except KeyError:
+        raise HTTPException(404, "No such column")
+
+
 @app.get("/api/column_indexes")
 def api_column_indexes(source_id: int):
     """The auto-created filter indexes on a source (see
