@@ -14854,7 +14854,8 @@ class Store:
         r = tied[hit["rid"]]
         return {"rid": r["rid"], "pos": hit["pos"], "ts": r["ts"], "d": r["d"]}
 
-    def column_values(self, source_id: int, column: str, limit: int = 200) -> list[dict]:
+    def column_values(self, source_id: int, column: str, limit: int = 200,
+                      spec: dict | None = None) -> list[dict]:
         """Distinct values + counts for one column — the filter box's
         value-picker dropdown.
 
@@ -14868,7 +14869,15 @@ class Store:
         call still runs today's scan, the next open of the dropdown gets the
         index. It's also the same index an equals/in filter on this column
         wants, which is the overwhelmingly likely next action after picking
-        a value out of this list."""
+        a value out of this list.
+
+        `spec` counts only the rows a view spec leaves instead of the whole
+        table — see _column_values_in_spec. A spec that narrows nothing is
+        the whole table, and takes the indexed path below."""
+        if spec is not None:
+            narrowed = self._column_values_in_spec(source_id, column, spec, limit)
+            if narrowed is not None:
+                return narrowed
         with self._reader() as ro, self._dropped_view_is_expired():
             src = self._source_lite_on(ro, source_id)
             names = {c["name"] for c in src["columns"]}
@@ -14899,6 +14908,105 @@ class Store:
                 )
                 sql = f"SELECT val, count(*) AS n FROM ({union_sql}) GROUP BY 1 ORDER BY n DESC LIMIT ?"
             rows = ro.execute(sql, (limit,)).fetchall()
+        return [{"value": r["val"], "count": r["n"]} for r in rows]
+
+    def _column_values_in_spec(self, source_id: int, column: str, spec: dict,
+                               limit: int) -> list[dict] | None:
+        """column_values over the rows `spec` leaves: what the value picker
+        lists for a column that already has a value selection. The client
+        sends its view's spec less that selection, which is Excel's rule:
+        every OTHER filter narrows a column's drop-down, its own picks do
+        not, so the values it unticked stay listed to tick again. Before
+        this the picker listed the whole table for such a column, so after
+        filtering Host it still offered every User with whole-table counts,
+        and ticking one that Host had already ruled out filtered to nothing.
+
+        Compiled from the same pieces build_view uses, in the same shapes,
+        so it counts the rows the grid would show for `spec`: the column
+        filters and the filter tree, the search box, tags, the timeframe,
+        Hide empty rows (all in _compile_where) and Hide duplicate rows,
+        whose dedupe runs over the filtered rows and has the tag filter
+        after it (_compile_tag_filter says why). Merges are counted per
+        member and summed, as column_values counts them.
+
+        An aggregate, not a second view: build_view keeps one live view per
+        source (backlog item 2), so materialising this one would evict the
+        grid's own view, or a search held in the background. Nothing is
+        written, and it runs on a reader like the other value lists.
+        tests/test_column_values_spec.py holds it to group_summary over a
+        view built from the same spec, for each kind of narrowing.
+
+        None when the spec narrows nothing (no WHERE on any member and no
+        dedupe): that is the whole table, which column_values answers from
+        the column's index."""
+        src = self._source_lite(source_id)
+        colnames = {c["name"]: c["type"] for c in src["columns"]}
+        if column not in colnames:
+            raise KeyError(column)
+        dedupe = self._dedupe_columns(spec, colnames)
+        params: list[Any] = []
+        if src.get("is_merge"):
+            for frag in self._raw_fragments(spec.get("filter_tree")):
+                self.validate_where_fragment(source_id, frag)
+            sid_col = q(self._member_id_alias(colnames))
+            parts = []   # (member id, " FROM ... WHERE ...") per member, as build_view builds them
+            filtered = False
+            with self._build_batch():
+                reads = []
+                for m in self._resolve_members(source_id):
+                    read_src = self._member_read_src(src, m["src"])
+                    reads.append((m, read_src, self._member_from(
+                        src, m, uses=[c["name"] for c in self._base_cols(read_src)])))
+                found = self._merge_contains_found(spec, reads)
+                for m, read_src, scan_from in reads:
+                    where, p = self._compile_where(m["source_id"], read_src, spec, colnames,
+                                                   scan_from=scan_from, contains_found=found,
+                                                   tags=not dedupe)
+                    parts.append((int(m["source_id"]),
+                                  f" FROM {self._member_from(src, m)}" + (f" WHERE {where}" if where else "")))
+                    filtered = filtered or bool(where)
+                    params.extend(p)
+            if not filtered and not dedupe:
+                return None
+            if dedupe:
+                # build_view's merge dedupe: a rank per member (member
+                # order, then rid), one GROUP BY over the union keeping the
+                # lowest rank of each set, and the picked column carried
+                # out of that row by SQLite's bare-column-with-MIN() rule.
+                rank = q(self._free_alias(colnames, "dedupe_rank", self._member_id_alias(colnames)))
+                stride = self.DEDUPE_MEMBER_STRIDE
+                cols = "".join(f", {q(c)}" for c in dict.fromkeys([column, *dedupe]))
+                ranked = union_all(f"SELECT {mid} AS {sid_col}, rid, {i * stride} + rid AS {rank}{cols}{rest}"
+                                   for i, (mid, rest) in enumerate(parts))
+                keep = (f"SELECT MIN({rank}) AS {rank}, {sid_col}, rid{cols} "
+                        f"FROM ({ranked}) GROUP BY {self._dedupe_key(dedupe)}")
+                tagged, tag_params = self._compile_tag_filter(spec, row=(f"kept.{sid_col}", "kept.rid"))
+                params.extend(tag_params)
+                counted = (f"SELECT {q(column)} AS val, count(*) AS n FROM ({keep}) AS kept"
+                           + (f" WHERE {tagged}" if tagged else "") + " GROUP BY 1")
+            else:
+                counted = union_all(f"SELECT {q(column)} AS val, count(*) AS n{rest} GROUP BY 1"
+                                    for _, rest in parts)
+            sql = f"SELECT val, sum(n) AS n FROM ({counted}) GROUP BY 1 ORDER BY n DESC LIMIT ?"
+        else:
+            table = src["table_name"]
+            where, params = self._compile_where(source_id, src, spec, colnames, scan_from=q(table),
+                                                tags=not dedupe)
+            if not where and not dedupe:
+                return None
+            frm = self._from_clause(src)
+            if dedupe:
+                keep = (f"SELECT MIN(rid) FROM {frm}" + (f" WHERE {where}" if where else "")
+                        + f" GROUP BY {self._dedupe_key(dedupe)}")
+                tagged, tag_params = self._compile_tag_filter(spec, source_id)
+                params.extend(tag_params)
+                counted = (f"SELECT {q(column)} AS val, count(*) AS n FROM {frm} WHERE rid IN ({keep})"
+                           + (f" AND {tagged}" if tagged else "") + " GROUP BY 1")
+            else:
+                counted = f"SELECT {q(column)} AS val, count(*) AS n FROM {frm} WHERE {where} GROUP BY 1"
+            sql = f"SELECT val, n FROM ({counted}) ORDER BY n DESC LIMIT ?"
+        with self._reader() as ro:
+            rows = ro.execute(sql, (*params, limit)).fetchall()
         return [{"value": r["val"], "count": r["n"]} for r in rows]
 
     def column_max_lengths(self, source_id: int, columns: list[str] | None = None,

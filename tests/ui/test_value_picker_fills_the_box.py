@@ -183,13 +183,17 @@ def test_apply_with_nothing_changed_keeps_the_columns_filter(page, picks, view_r
 
 
 def test_apply_with_nothing_changed_keeps_a_value_selection_on_this_view(page, picks, view_rebuilt):
-    """A value selection opens on Whole table; switched to This view it
-    lists only the one value, ticked."""
+    """A value selection opens on This view, which leaves the column's own
+    picks out of what it counts: every value is listed, the picked one
+    ticked (tests/ui/test_value_picker_other_filters.py has the rest)."""
     with view_rebuilt(page):
         page.locator('.fcell input[data-col="Proc"]').fill("=svchost.exe")
     _open_picker(page, "Proc")
-    page.locator(".value-picker .vp-seg button", has_text="This view").click()
-    page.wait_for_function("() => document.querySelectorAll('.value-picker .vp-row').length === 1")
+    assert page.locator(".value-picker .vp-seg button", has_text="This view").get_attribute("aria-pressed") == "true"
+    page.wait_for_function("() => document.querySelectorAll('.value-picker .vp-row').length === 4")
+    assert page.evaluate("""() => [...document.querySelectorAll('.value-picker .vp-row')]
+      .filter((r) => r.querySelector('input').checked)
+      .map((r) => r.querySelector('.vp-value').textContent)""") == ["svchost.exe"]
     page.locator(".value-picker .vp-actions .btn:not(.ghost)").click()
     page.wait_for_selector(".value-picker", state="detached")
     page.wait_for_timeout(300)  # as above: checking that no rebuild happens
