@@ -23,7 +23,7 @@ import { keepingFocus } from './tables.js';
 import { buildDefaultTagsEditor } from './tags.js';
 import { openSavedFiltersModal, setTimeframeAcrossTables, timeframeAcrossTables, updateFiltersButton, updateTimeRangeButton } from './timeframe.js';
 import { renderTimelineTimeRange } from './timeline.js';
-import { TS_FORMATS, formatTimestamp } from './tsformat.js';
+import { TS_FORMATS, announceTsFormat, formatTimestamp } from './tsformat.js';
 import { markModalAction, confirmDialog, dropdownMenu, modal, promptDialog, sectionPanes } from './ui.js';
 
 /* ------------------------------------------------------------ appearance */
@@ -660,6 +660,7 @@ function buildCaseTsPane(pane) {
       // The header too: a datetime column's default width follows its
       // format (colWidth), and the header row is sized separately.
       if (S.sourceId) renderHeadResized(); else render();
+      announceTsFormat();
       toast('Case timestamp format saved');
     } catch (e) { toast('Could not save: ' + e.message, 5000); }
     paint();
@@ -1360,6 +1361,7 @@ export function openSettings(where) {
       try {
         S.appSettings = await post('/api/settings/app', { default_ts_format: tsSystemSel.value });
         if (S.sourceId) renderHeadResized(); else render();   // see the case format's pick
+        announceTsFormat();
         toast('Default timestamp format saved');
       } catch (e) {
         toast('Could not save: ' + e.message, 5000);

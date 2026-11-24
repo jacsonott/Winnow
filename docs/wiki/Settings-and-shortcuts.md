@@ -385,7 +385,8 @@ default. The choices are **As stored**, `YYYY-MM-DD HH:MM:SS` (the default),
 
 This is display only: the stored and exported value is always the text the
 file came with. A format picked on one column (right-click its header) beats
-the case's setting, which beats this one. A case sets its own under
+the case's setting, which beats this one. Plugin tabs and panels, such as the
+Pivot and First/Last, show timestamps in the case's setting too. A case sets its own under
 **Case ▾ → Case settings… → Timestamps**.
 
 ### Parsing formats
