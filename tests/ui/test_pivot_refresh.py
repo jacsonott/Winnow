@@ -58,6 +58,13 @@ def pv_page(own_page, server_post):
             pg.locator(".tab-plugin", has_text="Pivot").click()
             pg.wait_for_selector(".pluginview [data-zone='rows']", timeout=10_000)
             want = str(pg.evaluate("() => __winnow.S.sources.find((s) => s.name === 'ui.csv').id"))
+            # The field zones draw as the tab mounts; the table list fills,
+            # and saves start, only once its saved state has been read back,
+            # which picks a table itself without saving. Read the select
+            # before that and the choice below changes nothing and posts
+            # nothing (the flake hunt, under load, 2026-11-21).
+            pg.wait_for_function("() => document.querySelector('.pluginview select')?.options.length > 0",
+                                 timeout=10_000)
             if pg.eval_on_selector(".pluginview select", "(s) => s.value") != want:
                 with pg.expect_response(_is_state_post, timeout=15_000):
                     pg.select_option(".pluginview select", want)

@@ -28,6 +28,7 @@ import { loadCaseTags } from './tags.js';
 import { tableMenuStat, updateTimeRangeButton } from './timeframe.js';
 import { loadTimelineTemplates, renderTimelineTimeRange } from './timeline.js';
 import { flushTimelineNote, resetTimelinePane } from './timelinepane.js';
+import { flushLayoutSave } from './columns.js';
 import { comboBox, confirmDialog, contextMenu, dropdownMenu, modal, oneAtATime, promptDialog, sectionPanes, sideRail } from './ui.js';
 import { writeClipboardText } from './grouping.js';
 import { enterPopout, inPopout, ownPopoutCount, popoutWithoutCase } from './popout.js';
@@ -256,6 +257,8 @@ export async function openCaseNow(path, opts = {}, run = null) {
   // dropped: the server still has the case it was typed in, for one more
   // request. resetTimelinePane, once the switch lands, forgets its row.
   await flushTimelineNote();
+  // And a table's layout change still inside saveLayout's 400 ms wait.
+  await flushLayoutSave();
   let res;
   try {
     // switchCase: from here, a request this page made about the case it is

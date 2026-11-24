@@ -3,7 +3,7 @@ in the case.
 
    Split out of the former single static/app.js — see CLAUDE.md. */
 import { recordTabVisit } from './tabhistory.js';
-import { findDefaultLayout, placeUnorderedColumns, renderHead, saveLayout } from './columns.js';
+import { findDefaultLayout, flushLayoutSave, placeUnorderedColumns, renderHead, saveLayout } from './columns.js';
 import { syncColumnDock } from './columndock.js';
 import { $, ROW_H, api, caseUrl, el, nameMap, pageCaseToken, post, toast } from './core.js';
 import { derivedOps, renameColumnIn } from './derived.js';
@@ -180,7 +180,7 @@ export async function closeTab(s) {
   try { await post(`/api/source/${s.id}/open`, { open: false }); }
   catch (e) { toast(`Could not close ${sourceLabel(s)}: ${e.message}`, 6000); return; }
   dropViewStateFor(s.id);
-  if (S.sourceId === s.id) S.sourceId = null;
+  if (S.sourceId === s.id) { flushLayoutSave(); S.sourceId = null; }
   await loadSources();
 }
 
@@ -191,6 +191,7 @@ export async function closeAllTabs() {
   try {
     await post('/api/tabs/close_all', {});
     clearViewStateStash();
+    flushLayoutSave();
     S.sourceId = null;
     await loadSources();
   } catch (e) { toast('Could not close tabs: ' + e.message, 6000); }
@@ -954,6 +955,11 @@ export async function openSource(id, { skipBuild = false } = {}) {
   // the table, so none of them is a reason to take the detail pane away.
   // Decided before S.sourceId is overwritten below.
   const leaving = S.sourceId !== id;
+  // A layout change saveLayout is still waiting to save is the table on
+  // screen's, so it goes now, while S is still that table's (columns.js
+  // says what happened when it went after). Awaited before the layout
+  // fetch below, which on a refresh of this same table reads it back.
+  const layoutSaved = flushLayoutSave();
   recordTabVisit({ kind: 'source', id });
   stashViewState();
   // repaint:false — S.view still belongs to the table being left, and this
@@ -1011,6 +1017,7 @@ export async function openSource(id, { skipBuild = false } = {}) {
   $('empty').hidden = true;
   $('noRows').hidden = true;
 
+  await layoutSaved;
   const saved = await api(`/api/layout?source_id=${id}`).catch(() => ({}));
   // No per-source layout saved yet (a source opened for the first time) —
   // check for a cross-case default saved for this exact set of column

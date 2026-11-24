@@ -2302,6 +2302,23 @@ see [docs/notes/README.md](README.md) for the whole set.
   forgotten filter otherwise. The toggle itself is `toggleDuplicateRows()`
   in timeframe.js, shared by the Columns pane button, Filters ▾ and the
   keymap action (no default key). tests/ui/test_hide_duplicate_rows_ui.py.
+- **saveLayout's 400 ms wait belongs to the table it started on.**
+  `saveLayoutNow` reads `S` when it runs, and `openSource` moves
+  `S.sourceId` to the next table at once but `S.layout`/`S.order` only
+  after `GET /api/layout` answers. A layout change followed by a switch
+  inside the wait (toggle Hide duplicate rows, click another tab) posted
+  the table just left's columns as the next table's layout, and the
+  change itself was never saved: coming back showed it only because the
+  view-state stash carried the toggle, and a reload lost it. So
+  `saveLayout` records `S.sourceId` with the wait, `openSource`,
+  `closeTab`, `closeAllTabs` and `openCaseNow` send a wait still running
+  first (`flushLayoutSave`, which `openSource` awaits before its own
+  layout fetch, so a refresh of the same table reads the change back),
+  and a wait that runs out with another table open, or its own removed,
+  writes nothing. The nightly's flake hunt found it under load, as
+  test_hide_duplicate_rows_ui.py timing out in `layout_saved`;
+  `test_a_change_just_before_a_table_switch_is_saved_to_its_own_table`
+  holds the next table's layout back so the old code fails every run.
 - **`clearAllFilters(seed)`** — Shift+F ("filter to this value and drop the
   rest") is that reset plus one filter, so it goes through the same
   function rather than a second implementation that would forget the

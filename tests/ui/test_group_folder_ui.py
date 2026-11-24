@@ -12,9 +12,15 @@ tests/test_case_group_folders.py for the registry side):
 
 Each test files its cases under a group name of its own and takes them
 back out in a `finally`.
+
+Paths are built and taken apart with os.path, never with "/": the page
+joins a folder and a file name with the separator the folder uses
+(home.js joinPath), which is a backslash on Windows.
 """
 
 from __future__ import annotations
+
+import os
 
 import pytest
 
@@ -35,6 +41,11 @@ def _forget(api, rec):
     api(f"/api/cases/{rec['id']}?delete_file=true", "DELETE")
 
 
+def _in(folder, name):
+    """`name` in `folder`, written the way the page writes it."""
+    return os.path.join(str(folder), name)
+
+
 def _new_case(page, name, group):
     page.evaluate("() => __winnow.openNewCaseModal()")
     page.wait_for_selector("#modal:not([hidden]) .nc-case")
@@ -50,15 +61,15 @@ def test_new_case_goes_in_its_groups_folder(page, api, tmp_path):
     try:
         page.evaluate("() => __winnow.openNewCaseModal()")
         page.wait_for_selector("#modal:not([hidden]) .nc-case")
-        cases_dir = page.locator("#modalBody .nc-path").input_value().rsplit("/", 1)[0]
+        cases_dir = os.path.dirname(page.locator("#modalBody .nc-path").input_value())
         page.locator("#modalBody .nc-name").fill("UI GF DC01")
         page.locator("#modalBody .case-group-input").fill(group)
         path = page.locator("#modalBody .nc-path")
-        assert path.input_value() == f"{folder}/ui-gf-dc01.db-winnow"
+        assert path.input_value() == _in(folder, "ui-gf-dc01.db-winnow")
         assert "set by its first case, UI GF WS01" in page.locator("#modalBody .nc-group-note").inner_text()
         # Out of the group, back where cases go.
         page.locator("#modalBody .case-group-input").fill("")
-        assert path.input_value() == f"{cases_dir}/ui-gf-dc01.db-winnow"
+        assert path.input_value() == _in(cases_dir, "ui-gf-dc01.db-winnow")
         assert page.locator("#modalBody .nc-group-note").is_hidden()
     finally:
         _close(page)
@@ -90,19 +101,19 @@ def test_the_note_offers_the_groups_other_folders_and_adds_a_new_one(page, api, 
         _new_case(page, "UI GF D2", group)
         path = page.locator("#modalBody .nc-path")
         note = page.locator("#modalBody .nc-group-note")
-        assert path.input_value() == f"{tmp_path}/acme/ui-gf-d2.db-winnow"
+        assert path.input_value() == _in(tmp_path / "acme", "ui-gf-d2.db-winnow")
         assert note.inner_text().startswith(f"One of {group}’s 2 folders, set by its first case, UI GF D1."), note.inner_text()
         note.locator(".nc-use-group", has_text="evidence share").click()
-        assert path.input_value() == f"{share}/ui-gf-d2.db-winnow"
+        assert path.input_value() == _in(share, "ui-gf-d2.db-winnow")
         assert note.inner_text().startswith(f"One of {group}’s 2 folders. Its other folder:"), note.inner_text()
 
         # Somewhere the group doesn't use yet: one click adds it.
-        path.fill(f"{third}/ui-gf-d2.db-winnow")
+        path.fill(_in(third, "ui-gf-d2.db-winnow"))
         assert f"Not in any of {group}’s 2 folders" in note.inner_text()
         note.locator(".nc-add-group-folder").click()
         page.wait_for_function("(g) => document.querySelector('#modalBody .nc-group-note')?.textContent"
                                ".startsWith(`One of ${g}’s 3 folders`)", arg=group)
-        assert _folders(api, group) == [f"{tmp_path}/acme", str(share), str(third)]
+        assert _folders(api, group) == [str(tmp_path / "acme"), str(share), str(third)]
     finally:
         _close(page)
         _forget(api, first)
@@ -115,7 +126,7 @@ def test_importing_has_the_groups_folders_pinned(page, api, tmp_path):
     cur = api("/api/case/current")
     me = next(c for c in api("/api/cases") if c["path"] == cur["path"])
     group = "UI Group Folder B"
-    folder = cur["path"].rsplit("/", 1)[0]
+    folder = os.path.dirname(cur["path"])
     api(f"/api/cases/{me['id']}", "PUT", {"group": group})
     api("/api/case_groups/folders", "POST", {"group": group, "add": str(tmp_path)})
     try:
@@ -127,9 +138,8 @@ def test_importing_has_the_groups_folders_pinned(page, api, tmp_path):
         first = page.evaluate("""() => [...document.querySelectorAll('#modal .side-rail-list > *')].slice(0, 3)
           .map((n) => n.classList.contains('side-rail-group') ? '# ' + n.textContent
             : n.querySelector('.side-rail-label').textContent + ' | ' + n.querySelector('.side-rail-hint').textContent)""")
-        leaf = lambda p: str(p).rstrip("/").rsplit("/", 1)[-1]  # noqa: E731
-        assert first == ["# Pinned", f"{leaf(folder)} | \u200e{folder}\u200e",
-                         f"{leaf(tmp_path)} | \u200e{tmp_path}\u200e"], first
+        assert first == ["# Pinned", f"{os.path.basename(folder)} | \u200e{folder}\u200e",
+                         f"{tmp_path.name} | \u200e{tmp_path}\u200e"], first
         assert rows.locator(".side-rail-pin").count() == 0, "the group pinned them; there is nothing to unpin"
         assert rows.locator(".side-rail-fixed").all_inner_texts() == ["group", "group"]
     finally:
@@ -167,7 +177,7 @@ def test_the_groups_list_adds_reorders_and_removes_folders(page, api, tmp_path):
         page.wait_for_function("(p) => document.querySelector('.home-group-folder .hgf-row')?.dataset.path === p",
                                arg=str(chosen))
         _new_case(page, "UI GF C2", group)
-        assert page.locator("#modalBody .nc-path").input_value() == f"{chosen}/ui-gf-c2.db-winnow"
+        assert page.locator("#modalBody .nc-path").input_value() == _in(chosen, "ui-gf-c2.db-winnow")
         _close(page)
 
         for _ in range(2):
