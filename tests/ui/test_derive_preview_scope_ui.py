@@ -159,6 +159,8 @@ def test_a_superseded_409_leaves_the_scope_alone(page):
 
     page.route("**/api/derived/preview", hold_the_first)
     try:
+        # expect_request: the route holds this one, and it is answered by
+        # hand at the bottom, so there is no response to wait for yet.
         with page.expect_request("**/api/derived/preview"):
             _open_derive(page)
         assert _scope(page) == ["view"]

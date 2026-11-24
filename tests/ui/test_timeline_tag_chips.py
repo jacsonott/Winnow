@@ -53,21 +53,30 @@ def _empty_text(page):
 
 
 @pytest.fixture
-def one_tagged_row(page, tag_written):
-    """Tags a row with the first tag, leaves the shared case as found."""
+def one_tagged_row(page, api, tag_written):
+    """Tags a row with the first tag, leaves the shared case as found.
+
+    The tag comes off by the ids its write named, not by pressing 1 on
+    "the second row" again: that is a toggle on whatever row is second
+    when the teardown looks, on whichever table it opened, and a nightly
+    run left ui.csv with a TA row it never took back, which the
+    Timeline's other modules then counted (docs/notes/testing.md)."""
     page.locator(".row").nth(1).locator(".cell").nth(1).click()
-    with tag_written(page):
+    with tag_written(page) as wrote:
         page.keyboard.press("1")
-    page.locator("#tabTimeline").click()
-    page.wait_for_selector("#timelineview:not([hidden])")
-    page.wait_for_selector(".timeline-row", timeout=10_000)
-    yield
-    src = page.evaluate("() => __winnow.S.sources.find((s) => !s.is_merge).id")
-    page.evaluate("(id) => __winnow.openSource(id)", src)
-    page.wait_for_selector(".row")
-    page.locator(".row").nth(1).locator(".cell").nth(1).click()
-    with tag_written(page):
-        page.keyboard.press("1")
+    put = wrote.value.request.post_data_json
+    assert put["on"], f"the row already carried the tag, so 1 took it off: {put}"
+    try:
+        page.locator("#tabTimeline").click()
+        page.wait_for_selector("#timelineview:not([hidden])")
+        page.wait_for_selector(".timeline-row", timeout=10_000)
+        yield
+    finally:
+        api("/api/row_tags", "POST", {**put, "on": False})
+        # The grid's cached rows still carry the tag: reopening the table
+        # reads them again, so the next test's 1 puts it on.
+        page.evaluate("(id) => __winnow.openSource(id)", put["source_id"])
+        page.wait_for_selector(".row")
 
 
 def test_the_filter_is_chips_not_checkboxes(page, one_tagged_row):

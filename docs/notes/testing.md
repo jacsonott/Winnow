@@ -497,7 +497,30 @@ folders out of a shared `/tmp`.
   Clean up in a `finally`, by id or name rather than by repeating the
   gesture under test, and let the `api` fixture raise on a non-2xx
   answer rather than catching it: a cleanup call that 404'd and was
-  swallowed is how that issue went unnoticed.
+  swallowed is how that issue went unnoticed. A tag key is a toggle, so
+  pressing it again on "the second row" untags only if the teardown
+  finds the same row on the same table: `one_tagged_row` in
+  test_timeline_tag_chips.py did that, and one nightly flake hunt it left
+  ui.csv with a TA row, which four test_timeline_timeframe.py tests then
+  counted. It now keeps the body `tag_written`'s response carries and
+  posts it back with `on: false`.
+
+- **A test sees a request before its fake has answered it.**
+  `page.expect_request` and a "request" listener fire as the request
+  leaves; the `page.route` handler that answers it runs after. A test that
+  goes on from there and removes the route (a fixture's `unroute` in its
+  teardown) hands the waiting request to the real server.
+  test_custom_delimiter_ui.py's faked import ran for real that way, and
+  its table was in the case for every later module in a nightly flake
+  hunt. A loop that unrouted straight after `expect_request` leaked 148
+  times in 150; after `expect_response`, none. Wait on the fake's answer
+  with `expect_response` (its `.request.post_data_json` is what was
+  sent), and fake a route from a fixture with `fake_route`
+  (tests/ui/conftest.py), which leaves only once every request it caught
+  has been answered. test_ui_test_hygiene.py fails an `expect_request` on
+  a URL its module fakes. A request a route holds, to answer by hand
+  later, has no response to wait for: a `# expect_request:` comment says
+  so (test_derive_preview_scope_ui.py).
 
 - **A debounced save outlives the test that made it.** A module-scoped
   page lives across tests, so a write the app puts off (tabState's

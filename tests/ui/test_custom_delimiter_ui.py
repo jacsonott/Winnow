@@ -47,7 +47,7 @@ def _heads(page):
 
 
 @pytest.fixture
-def fake_jobs(page):
+def fake_jobs(page, fake_route):
     """Answers the import requests instead of the server, keeping what each
     one asked for, so nothing is left in the case the modules share."""
     sent = []
@@ -55,9 +55,8 @@ def fake_jobs(page):
     def answer(route):
         sent.append(route.request.post_data_json)
         route.fulfill(status=200, content_type="application/json", body="{}")
-    page.route("**/api/ingest/jobs/path", answer)
-    yield sent
-    page.unroute("**/api/ingest/jobs/path")
+    with fake_route(page, "/api/ingest/jobs/path", answer):
+        yield sent
     page.evaluate("() => { __winnow.closeModal(); __winnow.S.importQueue = []; }")
 
 
@@ -124,9 +123,11 @@ def test_custom_starts_from_the_split_in_use_and_keeps_what_was_typed(page, tmp_
     page.locator(CUSTOM).fill('"')
     _foot_says(page, "Preview failed: The double quote")
     page.locator(CUSTOM).fill(" | ")
-    with page.expect_request("**/api/ingest/jobs/path") as req:
+    # The answer, not the request: the request is seen as it leaves, before
+    # the fake has answered it (docs/notes/testing.md).
+    with page.expect_response("**/api/ingest/jobs/path") as answered:
         page.locator("#modalBody .import-foot .btn.primary").click()
-    assert req.value.post_data_json["delimiter"] == " | "
+    assert answered.value.request.post_data_json["delimiter"] == " | "
 
 
 def test_folder_import_splits_other_text_files_and_a_profile_keeps_it(page, tmp_path, api, fake_jobs):
