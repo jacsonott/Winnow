@@ -2822,6 +2822,50 @@ def test_discarding_a_quicklook_drops_the_plugins_it_switched_on(scoped_client, 
     assert scoped_client.get("/api/plugin/looker/ping").status_code == 404
 
 
+# A timestamp column written the US way, where text order is not time
+# order twice over: "1/2/2026" sorts before "12/30/2025", and "9:01 AM"
+# after "10:05 AM". Plus a blank and a "-", which are not times at all.
+US_TIMES = [["A", "1/2/2026 9:01:00 AM"], ["A", "12/30/2025 11:00:00 PM"], ["A", ""],
+            ["A", "1/2/2026 10:05:00 AM"], ["A", "-"],
+            ["B", "1/15/2026 8:00:00 AM"], ["B", "1/9/2026 7:30:00 PM"],
+            ["C", "-"], ["C", ""]]
+
+
+def test_pivot_min_and_max_of_a_timestamp_column_are_by_time(pivot_client, store):
+    """Min/Max of a timestamp column used MIN()/MAX() over its text, which
+    is time order only for ISO: A's Min came back as its blank cell and its
+    Max as 12/30/2025, the earliest of the four. They are by time now, a
+    cell that is not a time drops out (a group with none shows nothing, as
+    a number column's junk does), and the value comes back as the file
+    wrote it. Every level and a merge's (invariant #9) agree."""
+    client, _ = pivot_client
+    sid = store.ingest_rows(["Host", "When"], US_TIMES[:5], name="usmin",
+                            column_types=["text", "datetime"], build_fts=False)["id"]
+    sid2 = store.ingest_rows(["Host", "When"], US_TIMES[5:], name="usmin2",
+                             column_types=["text", "datetime"], build_fts=False)["id"]
+    mid = store.create_merge("usminm", [sid, sid2])["id"]
+    measures = [{"agg": "min", "column": "When"}, {"agg": "max", "column": "When"}]
+    out = _agg(client, sid, values=measures, group_sets=[["Host"], []])
+    assert out["sets"][0]["rows"] == [["A", "12/30/2025 11:00:00 PM", "1/2/2026 10:05:00 AM"]]
+    assert out["sets"][1]["rows"] == [["12/30/2025 11:00:00 PM", "1/2/2026 10:05:00 AM"]]
+    out = _agg(client, mid, values=measures, group_sets=[["Host"], []])
+    assert sorted(out["sets"][0]["rows"]) == [["A", "12/30/2025 11:00:00 PM", "1/2/2026 10:05:00 AM"],
+                                              ["B", "1/9/2026 7:30:00 PM", "1/15/2026 8:00:00 AM"],
+                                              ["C", None, None]]
+    assert out["sets"][1]["rows"] == [["12/30/2025 11:00:00 PM", "1/15/2026 8:00:00 AM"]]
+    # A text column is still compared as text.
+    out = _agg(client, sid, values=[{"agg": "max", "column": "Host"}], group_sets=[[]])
+    assert out["sets"][0]["rows"] == [["A"]]
+    # A derived datetime column is ISO, NULL where the input did not parse,
+    # so its own text gives the same answer without the key.
+    job = store.add_derived_column(sid, "When ISO", "When", "us_datetime", {})
+    store.wait_for_ingest_job(job["job_id"], timeout=30)
+    out = _agg(client, sid, values=[{"agg": "min", "column": "When ISO"}, {"agg": "max", "column": "When ISO"}],
+               group_sets=[["Host"]])
+    assert [r[1][:19] for r in out["sets"][0]["rows"]] == ["2025-12-30 23:00:00"]
+    assert [r[2][:19] for r in out["sets"][0]["rows"]] == ["2026-01-02 10:05:00"]
+
+
 def test_pivot_aggregates_over_a_merge(pivot_client, store, write_csv):
     """Invariant #9: the pivot reads a merge through a UNION ALL of its
     members — counts must cover every member."""
@@ -3363,6 +3407,36 @@ def test_first_last_orders_a_number_column_by_value(fl_client, store):
     out = _fl(client, "preview", source_id=tid, group_by=["Host"], sort_column="Label",
               columns=[], template="{which}")
     assert [(r[0], r[-1]) for r in out["rows"]] == [("10", "First"), ("9", "Last")]
+
+
+def test_first_last_orders_a_timestamp_column_by_time(fl_client, store):
+    """A timestamp column was ordered by its text, which is time order only
+    for ISO: A's First came back as its blank cell and its Last as
+    12/30/2025, its earliest time. It is ordered by time now, as the grid
+    sorts it, and a cell that is not a time (blank, "-") wins neither end
+    unless its group has no time at all, as with a number column. Last's
+    {which:number} counts the times, and the result lists the bookends by
+    time with the cells that are not times after. A merge orders the same
+    way (invariant #9)."""
+    client, _ = fl_client
+    sid = store.ingest_rows(["Host", "When"], US_TIMES[:5], name="usfl",
+                            column_types=["text", "datetime"], build_fts=False)["id"]
+    sid2 = store.ingest_rows(["Host", "When"], US_TIMES[5:], name="usfl2",
+                             column_types=["text", "datetime"], build_fts=False)["id"]
+    mid = store.create_merge("usflm", [sid, sid2])["id"]
+
+    def bookends(source_id):
+        out = _fl(client, "preview", source_id=source_id, group_by=["Host"],
+                  sort_column="When", columns=["Host"], template="{which} {which:number}")
+        return [(r[1], r[2], r[0]) for r in out["rows"]]
+
+    assert bookends(sid) == [("A", "First 1", "12/30/2025 11:00:00 PM"),
+                             ("A", "Last 3", "1/2/2026 10:05:00 AM")]
+    assert bookends(mid) == [("A", "First 1", "12/30/2025 11:00:00 PM"),
+                             ("A", "Last 3", "1/2/2026 10:05:00 AM"),
+                             ("B", "First 1", "1/9/2026 7:30:00 PM"),
+                             ("B", "Last 2", "1/15/2026 8:00:00 AM"),
+                             ("C", "First 1", ""), ("C", "Last 2", "-")]
 
 
 def test_first_last_a_value_sorts_before_the_longer_values_it_begins(fl_client, store):

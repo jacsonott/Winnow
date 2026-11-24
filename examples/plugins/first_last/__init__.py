@@ -32,7 +32,14 @@ the SQL pane reads in 1.5 s, and nearly a minute with the JSON cell on. A
 number-typed sort column is ordered by value, like the grid's numeric
 sort, never as text ("10" < "9"); a cell that isn't a number wins neither
 end (`_order_dir`). No text spells a REAL in order, so that case finds
-each group's smallest and largest value first and their rows second.
+each group's smallest and largest value first and their rows second. A
+datetime sort column is ordered by time, as the grid's sort orders a
+timestamp column, never as text: "1/2/2026" sorts before "12/30/2025" as
+text, and "9:01 AM" after "10:05 AM", so a US-format group came back with
+its First and Last swapped or picked from the middle. _time_key puts the
+value's TS_NORMALIZE form ahead of its text, and a cell that does not read
+as a time (blank, "-") wins neither end, as a number column's non-numbers
+do not.
 
 **The description is rendered server-side, per row.** `{ColumnName}` takes
 that row's value (so the first row shows the first event's user),
@@ -97,7 +104,7 @@ import threading
 import time
 import traceback
 
-from winnow.store import NUM_RE, OpCancelled, q, union_all
+from winnow.store import NUM_RE, OpCancelled, q, ts_normalize_sql, union_all
 
 PLUGIN = {
     "name": "first-last",
@@ -250,6 +257,12 @@ def _is_number_column(src, col):
     return any(c["name"] == col and c.get("type") == "number" for c in src["columns"])
 
 
+def _is_time_column(src, col):
+    """Whether this column is a timestamp (ingest typed it datetime, or it
+    is a derived datetime column), so it orders by time (_time_key)."""
+    return any(c["name"] == col and c.get("type") == "datetime" for c in src["columns"])
+
+
 def _numeric(src, col):
     return _numeric_of(_col(src, col))
 
@@ -268,7 +281,9 @@ def _order_dir(number):
     ascending-NULLs-last is the negated value DESC (negation flips the
     order exactly and leaves NULL NULL); `NULLS LAST` needs SQLite 3.30.
     A text column's `ord` is its _row_key without the tie, which sorts as
-    the value does, ascending."""
+    the value does, ascending, and a datetime column's is its _time_key's,
+    which sorts by time, with a cell that is not a time after every one
+    that is."""
     return "DESC" if number else "ASC"
 
 
@@ -596,6 +611,25 @@ def _row_key(src, ident):
             f" ELSE 'T' || hex({ident}) || ' ' || {tie} END")
 
 
+def _time_key(src, ident):
+    """_row_key for a datetime column: a text key per row that sorts by
+    time, then by the value's own text, then by file order. A US date or a
+    month name does not sort as its text ("1/2/2026" < "12/30/2025"), so
+    the time goes first, as TS_NORMALIZE spells it: "YYYY-MM-DD HH:MM:SS",
+    always 19 characters, so nothing need separate it from the hex that
+    follows. The text then orders the values that share a second ("…:05.25"
+    before "…:05.5"), as the grid's own time sort does (Store._sort_keys).
+
+    A value with no time (blank, "-", or a shape TS_NORMALIZE does not
+    read) has no normalized form, and `'T' || NULL` is NULL, so COALESCE
+    falls through to the 'U' key: after every time, in text order. That is
+    MIN's half of "wins neither end"; _groups_sql gives MAX its half. The
+    normalizer runs once a row, inside COALESCE's first argument."""
+    tie = _tie(src, "s")
+    return (f"COALESCE('T' || ({ts_normalize_sql(ident)}) || hex({ident}) || ' ' || {tie},"
+            f" 'U' || hex({ident}) || ' ' || {tie})")
+
+
 def _groups_sql(req, src, group_cols, sort_col, number, where, aggs, count_groups, uniq=()):
     """The CTEs behind `fl_groups`: one row per group with group_n, the
     first and last row's place (f_[sid,]rid, l_[sid,]rid) and the value
@@ -605,9 +639,14 @@ def _groups_sql(req, src, group_cols, sort_col, number, where, aggs, count_group
     With `count_groups` it is marked to be computed once, because the
     count of groups reads it a second time.
 
-    Text and datetime columns take ONE grouping pass: _row_key folds the
-    tie-break into the value, so the group's MIN and MAX are its first and
-    last rows outright. A number column is ordered by the REAL its text
+    Text and datetime columns take ONE grouping pass: _row_key (or, for a
+    datetime column, _time_key) folds the tie-break into the value, so the
+    group's MIN and MAX are its first and last rows outright. A datetime
+    cell with no time keys after every time, so MIN passes it over; for
+    MAX it is re-lettered 'A', before every time, so MAX passes it over
+    too, and a group with no time at all orders its cells as text. `pos`
+    then counts the times, and the last bookend's `ord` gets its 'U' back,
+    so the result lists such a cell after every time at both ends. A number column is ordered by the REAL its text
     casts to, and no text spells a REAL in order, so it takes two: the
     group's smallest and largest value, then a pass over the rows holding
     them for the one first in file order (`fl_rows` holds the
@@ -634,15 +673,24 @@ def _groups_sql(req, src, group_cols, sort_col, number, where, aggs, count_group
                       for j in range(len(uniq)))
     once = _ONCE if count_groups else ""
     if not number:
-        inner = f"SELECT {keysel}, {_row_key(src, _col(src, sort_col))} AS key{insel} FROM {_scope(req, src)}{where}"
+        timed = _is_time_column(src, sort_col)
+        keyed = (_time_key if timed else _row_key)(src, _col(src, sort_col))
+        inner = f"SELECT {keysel}, {keyed} AS key{insel} FROM {_scope(req, src)}{where}"
         # LIMIT keeps the subquery from being flattened into the GROUP BY
         # (SQLite won't flatten a LIMIT under an aggregate), so the key is
         # built once per row rather than once for MIN and again for MAX.
         tie = 40 if src.get("is_merge") else 20
-        return (f"fl_groups AS {once}(SELECT COUNT(*) AS group_n, COUNT(*) AS pos,"
-                f" {_untie(src, 'MIN(key)', 'f')}, {_untie(src, 'MAX(key)', 'l')},"
+        last, pos = "MAX(key)", "COUNT(*)"
+        last_ord = f"substr({last}, 1, length({last}) - {tie})"
+        if timed:
+            last = "MAX(CASE WHEN key < 'U' THEN key ELSE 'A' || substr(key, 2) END)"
+            pos = "COALESCE(NULLIF(SUM(key < 'U'), 0), COUNT(*))"
+            last_ord = (f"CASE WHEN {last} < 'T' THEN 'U' || substr({last}, 2, length({last}) - {tie} - 1)"
+                        f" ELSE substr({last}, 1, length({last}) - {tie}) END")
+        return (f"fl_groups AS {once}(SELECT COUNT(*) AS group_n, {pos} AS pos,"
+                f" {_untie(src, 'MIN(key)', 'f')}, {_untie(src, last, 'l')},"
                 f" substr(MIN(key), 1, length(MIN(key)) - {tie}) AS f_ord,"
-                f" substr(MAX(key), 1, length(MAX(key)) - {tie}) AS l_ord{aggsel}"
+                f" {last_ord} AS l_ord{aggsel}"
                 f" FROM ({inner} LIMIT -1) GROUP BY {klist})")
     sid = "s.source_id AS source_id, " if src.get("is_merge") else ""
     match = " AND ".join(f"b.{k} IS r.{k}" for k in keys)
