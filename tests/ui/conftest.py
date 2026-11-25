@@ -562,6 +562,58 @@ def until():
 
 
 @pytest.fixture
+def fake_route(until):
+    """Answer one of the server's routes from the test for the length of a
+    with block, and leave it only once every request the route caught has
+    been answered:
+
+        with fake_route(page, "/api/ingest/jobs/path", answer):
+            yield sent
+
+    `answer(route)` fulfills (or continues, or aborts) each request it is
+    handed; the path is matched exactly, query string aside.
+
+    The wait is the point. Playwright tells a test about a request as it
+    leaves (`expect_request`, a "request" listener), before the route's
+    handler has run, and a request still waiting for its handler when the
+    route is removed goes to the real server. An import a fixture faked
+    ran for real that way and left its table in the case every later
+    module shares: 148 of 150 times, in a loop that unrouted straight
+    after expect_request (docs/notes/testing.md)."""
+    @contextlib.contextmanager
+    def _fake(page, path, answer, timeout=10.0):
+        seen, answered = [], []
+
+        def ours(url):
+            return urlparse(url).path == path
+
+        def handle(route):
+            try:
+                answer(route)
+            finally:
+                answered.append(route.request)
+
+        def caught(request):
+            if ours(request.url):
+                seen.append(request)
+
+        # The route before the listener: a request the route catches first
+        # counts as answered without being seen, which the >= below allows.
+        page.route(ours, handle)
+        page.on("request", caught)
+        try:
+            yield
+        finally:
+            try:
+                until(page, lambda: len(answered) >= len(seen),
+                      f"the fake of {path} answering all {len(seen)} request(s) it caught", timeout)
+            finally:
+                page.remove_listener("request", caught)
+                page.unroute(ours, handle)
+    return _fake
+
+
+@pytest.fixture
 def painted():
     """Wait for two animation frames: whatever a change put off to the
     next frame (the grid's repaint on scroll, a chart drawing its bars)

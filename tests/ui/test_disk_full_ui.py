@@ -30,8 +30,12 @@ FAILED_ROW = f"{PANEL} .job-row:has(.job-phase.error)"
 MESSAGE = "Out of disk space on C: (6.0 MB free). The 10.4 MB file was not received."
 
 
-def _upload(req):
-    return req.method == "POST" and req.url.endswith("/api/ingest/jobs/upload")
+def _upload(resp):
+    """The faked answer to the upload, not the upload: a request is seen as
+    it leaves, before the route below has answered it, and the teardown's
+    unroute would hand a request still waiting to the real server
+    (docs/notes/testing.md)."""
+    return resp.request.method == "POST" and resp.url.endswith("/api/ingest/jobs/upload")
 
 
 @pytest.fixture
@@ -73,7 +77,7 @@ def _pick_and_import(page, tmp_path, status, detail):
     page.wait_for_selector("#modal:not([hidden])")
     page.locator("#modal input[type=file]").set_input_files(str(path))
     page.wait_for_selector("#modal .side-rail-item .side-rail-label:text-is('big.csv')")
-    with page.expect_request(_upload):
+    with page.expect_response(_upload):
         page.locator("#modal .import-foot .btn.primary", has_text="Import 1 file").click()
 
 

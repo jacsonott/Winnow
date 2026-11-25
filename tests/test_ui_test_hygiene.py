@@ -9,7 +9,9 @@ page — they read as careful waiting.
 from __future__ import annotations
 
 import ast
+import io
 import re
+import tokenize
 from pathlib import Path
 
 import pytest
@@ -112,6 +114,132 @@ def test_the_fixed_wait_check_sees_what_it_is_for():
         "    assert page.evaluate('1')\n"
     )
     assert explained == []
+
+
+def _waits_on_faked_requests(src: str) -> list[int]:
+    """Lines that `expect_request` a URL the same module answers with a
+    fake (a module that fulfills, routing that URL)."""
+    if ".fulfill(" not in src:
+        return []   # its routes hold or pass requests on: nothing is faked
+    tree = ast.parse(src)
+    lines = src.splitlines()
+    comments = {tok.start[0]: tok.string for tok in tokenize.generate_tokens(io.StringIO(src).readline)
+                if tok.type == tokenize.COMMENT}
+    named = {}
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef):
+            named[node.name] = ast.get_source_segment(src, node)
+        elif isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            named[node.targets[0].id] = ast.get_source_segment(src, node.value)
+
+    def says(arg):
+        """What a URL argument amounts to: a string, or the source of the
+        name or the helper call that stands for one."""
+        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+            return arg.value
+        if isinstance(arg, ast.Name):
+            return named.get(arg.id, "")
+        if isinstance(arg, ast.Call) and isinstance(arg.func, ast.Name):
+            return named.get(arg.func.id, "")
+        return ast.get_source_segment(src, arg) or ""
+
+    calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)]
+    faked = set()
+    for call in calls:
+        if isinstance(call.func, ast.Attribute) and call.func.attr == "route" and call.args:
+            url = call.args[0]
+        elif isinstance(call.func, ast.Name) and call.func.id == "fake_route" and len(call.args) > 1:
+            url = call.args[1]
+        else:
+            continue
+        if isinstance(url, ast.Name) and url.id in named:
+            url = ast.parse(named[url.id], mode="eval").body
+        if isinstance(url, ast.Constant) and isinstance(url.value, str) and url.value.strip("*"):
+            faked.add(url.value.strip("*"))
+    hits = []
+    for call in calls:
+        if not (isinstance(call.func, ast.Attribute) and call.func.attr == "expect_request" and call.args):
+            continue
+        if not any(path in says(call.args[0]) for path in faked):
+            continue
+        # Excused by a comment that names expect_request, on the line or
+        # in the comment block straight above it: a comment that is only
+        # nearby says nothing about the wait.
+        above = call.lineno - 1
+        while above > 1 and lines[above - 2].strip().startswith("#"):
+            above -= 1
+        if not any("expect_request" in comments.get(n, "") for n in range(above, call.lineno + 1)):
+            hits.append(call.lineno)
+    return sorted(set(hits))
+
+
+@pytest.mark.parametrize("path", FILES, ids=lambda p: p.name)
+def test_no_wait_on_a_faked_request_rather_than_its_answer(path):
+    """`page.expect_request` returns as the request leaves, before the
+    route that fakes its answer has run. A test that goes on from there
+    and removes the route (a fixture's teardown) hands the request to the
+    real server: test_custom_delimiter_ui.py's faked import ran for real
+    that way and left its table for every later module in the nightly's
+    flake hunt, and a loop doing the same leaked 148 times in 150. Wait
+    with `expect_response` and read `.request` off it; a fixture that
+    fakes a route uses `fake_route`, whose teardown waits for its
+    answers. A request a route holds, to answer by hand later, has no
+    response to wait for: say so in a comment that starts
+    `# expect_request:`, on the line or straight above it."""
+    hits = _waits_on_faked_requests(path.read_text(encoding="utf-8"))
+    assert not hits, (
+        f"{path.name}: waits for a request the module fakes at line(s) {hits}, which returns "
+        "before the fake has answered it. Wait with expect_response, or comment why not."
+    )
+
+
+def test_the_faked_request_check_sees_what_it_is_for():
+    fixture = (
+        "PATH = '**/api/ingest/jobs/path'\n"
+        "def _posted(name):\n"
+        "    return lambda r: r.url.endswith('/api/ingest/jobs/path') and r.post_data_json['name'] == name\n"
+        "def fake(page):\n"
+        "    page.route(PATH, lambda route: route.fulfill(status=200, body='{}'))\n"
+    )
+    assert _waits_on_faked_requests(fixture + (
+        "def t(page):\n"
+        "    with page.expect_request(PATH):\n"                   # line 7
+        "        pass\n"
+        "    with page.expect_request(_posted('a.csv')):\n"       # line 9
+        "        pass\n"
+        "    with page.expect_request('**/api/ingest/preview'):\n"
+        "        pass\n"
+    )) == [7, 9]
+    assert _waits_on_faked_requests(
+        "def t(page, fake_route):\n"
+        "    with fake_route(page, '/api/upload', lambda r: r.fulfill(status=507)):\n"
+        "        with page.expect_request(lambda r: r.url.endswith('/api/upload')):\n"
+        "            pass\n"
+    ) == [3]
+    assert _waits_on_faked_requests(fixture + (
+        "def t(page):\n"
+        "    with page.expect_response(PATH):\n"
+        "        pass\n"
+        "    # expect_request: held by the route, answered by hand below\n"
+        "    with page.expect_request(PATH):\n"
+        "        pass\n"
+        "    with page.expect_request(PATH):   # expect_request: held too\n"
+        "        pass\n"
+    )) == []
+    # A comment that is only nearby excuses nothing.
+    assert _waits_on_faked_requests(fixture + (
+        "def t(page):\n"
+        "    # Both imports, in queue order.\n"
+        "    with page.expect_request(PATH):\n"                  # line 8
+        "        pass\n"
+    )) == [8]
+    # A module whose routes only hold or pass requests on fakes nothing.
+    assert _waits_on_faked_requests(
+        "def t(page):\n"
+        "    page.route('**/api/x', lambda route: held.append(route))\n"
+        "    with page.expect_request('**/api/x'):\n"
+        "        pass\n"
+    ) == []
 
 
 # A file's name taken in page JS by splitting its path on "/" alone.

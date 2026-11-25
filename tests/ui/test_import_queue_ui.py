@@ -58,12 +58,14 @@ def _heads_are(page, want):
                            ".map((n) => n.textContent)) === JSON.stringify(want)", arg=want, timeout=10_000)
 
 
-def _posted(name):
-    return lambda r: r.url.endswith("/api/ingest/jobs/path") and r.post_data_json["name"] == name
+def _answered(name):
+    """The fake's answer to the import of `name`: waiting on the request
+    instead returns before the fake has answered it (docs/notes/testing.md)."""
+    return lambda r: r.url.endswith("/api/ingest/jobs/path") and r.request.post_data_json["name"] == name
 
 
 @pytest.fixture
-def fake_import(page):
+def fake_import(page, fake_route):
     """Answers the import requests instead of the server, keeping what each
     one asked for."""
     sent = []
@@ -71,9 +73,8 @@ def fake_import(page):
     def answer(route):
         sent.append(route.request.post_data_json)
         route.fulfill(status=200, content_type="application/json", body="{}")
-    page.route("**/api/ingest/jobs/path", answer)
-    yield sent
-    page.unroute("**/api/ingest/jobs/path")
+    with fake_route(page, "/api/ingest/jobs/path", answer):
+        yield sent
     page.evaluate("() => { __winnow.closeModal(); __winnow.S.importQueue = []; }")
 
 
@@ -94,9 +95,9 @@ def test_a_setting_is_kept_when_another_file_is_chosen_and_reaches_the_import(pa
     assert page.locator("#modalBody .preview-tbl th", has_text="User").locator("select").input_value() == "datetime"
 
     # The loop posts one file after the other, in queue order.
-    with page.expect_request(_posted("semi.csv")) as semi, page.expect_request(_posted("comma.csv")) as comma:
+    with page.expect_response(_answered("semi.csv")) as semi, page.expect_response(_answered("comma.csv")) as comma:
         page.locator("#modalBody .import-foot .btn.primary", has_text="Import 2 files").click()
-    semi, comma = semi.value.post_data_json, comma.value.post_data_json
+    semi, comma = semi.value.request.post_data_json, comma.value.request.post_data_json
     assert semi["delimiter"] == ";" and semi["column_types"][1] == "datetime"
     # Only the type the analyst picked. The preview's own reading of its
     # first rows used to go for every column the moment one was set, and
