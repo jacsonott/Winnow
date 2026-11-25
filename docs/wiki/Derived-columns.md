@@ -110,6 +110,17 @@ way. The arrow keys move through the list, and
 `Enter` in the search box picks the first match. `Esc` clears the
 search; with the search empty, it closes the dialog.
 
+**Searching the lists.** **Parse column**, **Format** and an operation's
+own lists (**Lookup table**, **Its key column**, **Value to bring back**,
+**+ column…** and the rest) open with a search box once they hold more
+than five choices. Type any part of a name (`user` finds `UserId` and
+`UserName`), and `Enter` takes the top match. Every word you type
+has to appear, in any order, so `logon type` finds `LogonType`. The
+**Format** list also matches its group names, so `your` lists the
+formats you saved. Typing on a list that has the focus starts the search
+with that letter. `Esc` closes the list and leaves the choice as it was.
+More in [Searching a drop-down list](Settings-and-shortcuts.md#searching-a-drop-down-list).
+
 **Pinning favourites.** Point at an entry and click the ☆ beside it to
 pin it to a **Pinned** section at the top of the list, in the order you
 pin them. A pinned entry leaves its group while it is pinned; click its ✕

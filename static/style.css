@@ -2389,6 +2389,36 @@ textarea:focus { border-color: var(--accent); outline: none; }
 .combo-list { max-height: min(280px, 50vh); }
 .combo-option.current { color: var(--accent); }
 .combo-option.active { background: var(--panel-2); box-shadow: inset 2px 0 0 var(--accent); }
+/* A drop-down list with more than five options (selectsearch.js): the
+   select stays, and its list is this — a search box over the options.
+   Above a confirm overlay (65), since a prompt can hold a select too. The
+   box stays put and the list scrolls under it; selectsearch.js sets the
+   height it may take. The list is positioned so an option's offsetTop is
+   measured from the list's own top, which is what keeping the
+   highlighted option in sight reads. */
+.select-search { z-index: 66; padding: 6px; gap: 4px; overflow: hidden; max-width: min(480px, 92vw); }
+.select-search-list {
+  position: relative; flex: 1 1 auto; min-height: 0; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 1px;
+}
+.select-search-option { padding: 5px 9px; }
+.select-search-option.current { color: var(--accent); }
+.select-search-option.active { background: var(--panel-2); box-shadow: inset 2px 0 0 var(--accent); }
+.select-search-hit {
+  background: color-mix(in srgb, var(--accent) 24%, transparent); color: inherit;
+  border-radius: 2px;
+}
+.vp-note.select-search-note { flex: 0 0 auto; padding: 4px 8px 2px; }
+/* The select whose list is up keeps its focus ring while the caret is in
+   the search box. */
+select.select-search-open { border-color: var(--accent); }
+/* A drop-down menu's search box (ui.js menuFinder): the first row of a
+   menu with more than five things to pick. */
+/* Two classes each: .vp-search and .vp-note come later in this file. */
+/* Sticky, so a long menu scrolls under its search box rather than taking
+   it away. */
+.vp-search.menu-find { position: sticky; top: 0; z-index: 1; flex: 0 0 auto; margin: 0 2px 4px; width: auto; }
+.vp-note.menu-find-none { padding: 6px 10px; }
 /* Pinning: a ☆ on hover in a submenu, ✕ on a pinned row at the top, and a
    drop zone the root shows only while a pin is being dragged. */
 /* Dim at rest rather than hidden: the ☆ is how pinning gets discovered. */

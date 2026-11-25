@@ -310,6 +310,9 @@ More on reading the Timeline is in [Timeline, Search all and the Watchlist](Time
 | `↑` / `↓` | Move through a menu's items. From outside the menu, step in at the first or last. |
 | `→` / `←` | Open a submenu, or close it again. |
 | `Esc` | Close the menu, keeping whatever was selected underneath it. |
+| Typing | In a button menu with more than five items: narrow it to the items that match. `Enter` picks the first one left. |
+| `Alt+↓`, `F4`, `Space` or any letter | On a drop-down list with more than five choices: open it with its search box. A letter starts the search with that letter. |
+| `↑` / `↓`, `PgUp` / `PgDn`, `Enter`, `Esc` | In a drop-down list's search: move, take the highlighted choice, close it without changing anything. |
 | Menu key, `Shift+F10` | On a focused tab or sidebar table: open its menu. |
 | `Enter` | In a dialog's name or value box: its main button (**OK**, **Create**, **Save**…). |
 | `↑` / `↓`, `Home` / `End` | In Settings' section list: show the next or previous section, or the first or last. |
@@ -328,6 +331,33 @@ More on reading the Timeline is in [Timeline, Search all and the Watchlist](Time
 | Right-click a tab | Close it, rename it, merge it or remove it, or **Columns…** for the table menu. |
 | Right-click a page tab | Open that page in its own window beside this one, or close it. See [Opening a page in its own window](Working-with-tables.md#opening-a-page-in-its-own-window). |
 | Right-click a tag chip | Filter to that tag, or exclude the rows carrying it. |
+
+### Searching a drop-down list
+
+Every drop-down list with more than five choices opens with a search box
+at its top instead of the plain list: the **Parse column** and **Format**
+lists in [Add derived column](Derived-columns.md#the-add-derived-column-dialog),
+the column and table lists in the Filter builder, the timeframe, the
+dashboard widget editor, Settings and every other dialog, and the ones
+plugins add. Lists of five or fewer stay as they were.
+
+- Type any part of a choice to narrow the list. Every word has to appear,
+  in any order, so `logon type` finds `LogonType`. Matches are
+  highlighted, and the list keeps its own order and its group headings.
+- The highlight starts on the current choice, and moves to the top match
+  as you type. `↑` and `↓` move it, `PgUp` and `PgDn` move it ten at a
+  time, and `Enter` or a click takes it.
+- `Esc` closes the list and changes nothing. `Tab` closes it and moves on.
+  Clicking the list's box again closes it too.
+- With the list's box focused, `Alt+↓`, `F4` or `Space` opens it, and
+  typing a letter opens it with the search already started.
+
+Button menus that drop down, such as **Filters ▾**, **Pages ▾** and a
+row's **⋯**, work the same way once they hold more than five items: a
+**Search…** box at the top, with the cursor in it. `↓` steps from the box
+into the items, and `Esc` closes the menu and puts you back on its
+button. Right-click menus have no search box, so the tag keys still work
+while one is open.
 
 ### Tag keys
 

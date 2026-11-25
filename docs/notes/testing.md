@@ -436,6 +436,18 @@ the nightly the first night develop's copy differed from the release's
 (2026-11-20, the systemd_journal example's line in it), though the update
 did exactly what it should.
 
+`tests/ui/test_select_search.py` holds the searchable drop-down list
+(static/js/selectsearch.js) and a drop-down menu's search box
+(ui.js menuFinder) to the gestures an analyst makes: a press on the Add
+derived column dialog's Parse column and Format lists, letters typed on a
+focused select, Alt+↓, the arrows, Enter, Escape (which must close the
+list and not the dialog), a second press on the select, a select inside
+an open anchoredPanel (whose panel must survive a press in the list,
+which is outside it), a list of five that keeps the browser's own, and a
+menu of six with headers and a submenu. None of it uses `select_option`:
+that sets the value without opening any list, so it passes whether the
+search works or not.
+
 ## Things that bite
 
 - A note on the lock-scope test in `test_search.py`: it asserts *structurally*

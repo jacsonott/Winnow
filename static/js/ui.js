@@ -375,7 +375,8 @@ export function onMenuOutsideClick(e) {
   closeMenu();
 }
 
-const focusableIn = (node) => [...node.querySelectorAll('.menu-item:not(:disabled)')];
+// Not the items a menu's search box has hidden (menuFinder).
+const focusableIn = (node) => [...node.querySelectorAll('.menu-item:not(:disabled)')].filter((n) => !n.closest('[hidden]'));
 const isTextField = (n) => !!n && (/^(INPUT|TEXTAREA|SELECT)$/.test(n.tagName) || n.isContentEditable);
 
 /* Escape is swallowed rather than left to bubble: the document-level
@@ -395,11 +396,18 @@ export function onMenuKeydown(e) {
   if (e.key === 'Escape') {
     e.preventDefault();
     e.stopPropagation();
+    // A menu with a search box took the focus when it opened (menuFinder);
+    // Escape hands it back to the button, where it was before.
+    const anchor = openMenuAnchor;
+    const hadFind = !!openMenuEl.querySelector(':scope > .menu-find');
     closeMenu();
+    if (hadFind && anchor && anchor.isConnected) anchor.focus({ preventScroll: true });
     return;
   }
   if (!['ArrowDown', 'ArrowUp', 'ArrowRight', 'ArrowLeft'].includes(e.key)) return;
   const active = document.activeElement;
+  // In a menu's search box, Left and Right move the caret.
+  if (active && active.classList.contains('menu-find') && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) return;
   const inSub = openSubs.find((s) => s.el.contains(active));
   if (!inSub && !openMenuEl.contains(active)) {
     if (isTextField(active)) return;
@@ -960,7 +968,11 @@ function pinnableRow(item, node, pins) {
 }
 
 export function fillMenuNode(menu, items, ctx = null, depth = 0) {
-  menu.replaceChildren();
+  // A search box at the top (menuFinder) outlives a repaint: removing it
+  // would take the focus, and what was typed, with it.
+  const find = menu.firstElementChild && menu.firstElementChild.classList.contains('menu-find')
+    ? menu.firstElementChild : null;
+  while (menu.lastChild && menu.lastChild !== find) menu.lastChild.remove();
   const pins = ctx ? ctx.pins : null;
   if (pins && depth === 0) {
     if (pins.ids.length) {
@@ -1056,12 +1068,18 @@ export function showFloating(node, rect, anchorEl) {
 export function showMenu(items, rect, anchorEl, opts = {}) {
   const menu = el('div', 'menu');
   menu.setAttribute('role', 'menu');
+  let finder = null;
   const ctx = {
     pins: opts.pins ? menuPins(opts.pins) : null,
-    repaint: () => { if (openMenuEl === menu) fillMenuNode(menu, itemsOf(items), ctx, 0); },
+    repaint: () => {
+      if (openMenuEl !== menu) return;
+      fillMenuNode(menu, itemsOf(items), ctx, 0);
+      if (finder) finder.refresh();
+    },
   };
   MENU.set(menu, ctx);
   fillMenuNode(menu, itemsOf(items), ctx, 0);
+  if (opts.search) finder = menuFinder(menu);
   if (ctx.pins) {
     menu.addEventListener('dragover', (e) => { if (isPinDrag(e)) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; } });
     menu.addEventListener('drop', (e) => {
@@ -1072,14 +1090,125 @@ export function showMenu(items, rect, anchorEl, opts = {}) {
     });
   }
   showFloating(menu, rect, anchorEl);
+  if (finder) finder.box.focus({ preventScroll: true });
   return menu;
 }
 
+/* A menu dropped down from a button. One with more than five things to
+   pick gets a search box at its top (menuFinder) — the same rule every
+   <select> follows (selectsearch.js). A right-click menu does not: the
+   letters typed with one up are the tag hotkeys. */
 export function dropdownMenu(anchorEl, items) {
   const wasOpenForSameAnchor = openMenuAnchor === anchorEl;
   closeMenu();
   if (wasOpenForSameAnchor) return; // second click on the same anchor just toggles it shut
-  showMenu(items, anchorEl.getBoundingClientRect(), anchorEl);
+  showMenu(items, anchorEl.getBoundingClientRect(), anchorEl, { search: true });
+}
+
+/* ------------------------------------------------- a menu's search box
+
+   More than MENU_SEARCH_ABOVE items at a menu's top level, and a search
+   box goes above them, with the focus in it: typing narrows the menu to
+   the items whose words — label, second line, and the labels inside a
+   submenu, so "base64" keeps the "Decode ▸" that leads to it — contain
+   every word typed. Headers stay over the items they head, separators
+   step aside while a search is on, and Enter takes the first item left.
+   ↓ steps from the box into the items (onMenuKeydown), and a letter typed
+   on an item comes back to the box. Returns null for a shorter menu,
+   which stays as it was. */
+export const MENU_SEARCH_ABOVE = 5;
+
+function menuTopItems(menu) {
+  const out = [];
+  for (const n of menu.children) {
+    if (n.classList.contains('menu-item')) out.push(n);
+    else if (n.classList.contains('menu-item-row')) {
+      const b = n.querySelector('.menu-item');
+      if (b) out.push(b);
+    }
+  }
+  return out;
+}
+
+function submenuLabels(items, out = []) {
+  for (const item of items || []) {
+    if (!item || item === '-' || item.header) continue;
+    out.push(item.label || '');
+    if (Array.isArray(item.submenu)) submenuLabels(item.submenu, out);
+  }
+  return out;
+}
+
+function menuItemWords(btn) {
+  const text = btn.querySelector('.menu-item-text');
+  const desc = btn.querySelector('.menu-item-desc');
+  const parts = [text ? text.textContent : btn.textContent, desc ? desc.textContent : ''];
+  const meta = BTN.get(btn);
+  if (meta && Array.isArray(meta.item.submenu)) parts.push(...submenuLabels(meta.item.submenu));
+  return parts.join(' ').toLowerCase();
+}
+
+export function menuFinder(menu) {
+  if (menuTopItems(menu).length <= MENU_SEARCH_ABOVE) return null;
+  const box = el('input', 'vp-search menu-find');
+  box.type = 'text';
+  box.autocomplete = 'off';
+  box.spellcheck = false;
+  box.placeholder = 'Search…';
+  box.setAttribute('aria-label', 'Search this menu');
+  menu.prepend(box);
+
+  function refresh() {
+    const terms = box.value.toLowerCase().split(/\s+/).filter(Boolean);
+    let header = null;
+    let headerHas = false;
+    let any = false;
+    const closeSection = () => { if (header) header.hidden = terms.length > 0 && !headerHas; };
+    for (const n of [...menu.children]) {
+      if (n === box) continue;
+      if (n.classList.contains('menu-find-none')) { n.remove(); continue; }
+      if (n.classList.contains('menu-header')) {
+        closeSection();
+        header = n;
+        headerHas = false;
+        continue;
+      }
+      if (n.classList.contains('menu-sep')) {
+        closeSection();
+        header = null;
+        n.hidden = terms.length > 0;
+        continue;
+      }
+      const btn = n.classList.contains('menu-item') ? n
+        : n.classList.contains('menu-item-row') ? n.querySelector('.menu-item') : null;
+      if (!btn) continue;   // the pin drop zone
+      const words = menuItemWords(btn);
+      const hit = terms.every((t) => words.includes(t));
+      n.hidden = !hit;
+      if (hit) { headerHas = true; any = true; }
+    }
+    closeSection();
+    if (!any) menu.append(el('div', 'vp-note menu-find-none', `Nothing here matches “${box.value.trim()}”.`));
+  }
+
+  box.addEventListener('input', refresh);
+  box.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' || e.isComposing) return;
+    e.preventDefault();
+    const first = focusableIn(menu)[0];
+    if (first) first.click();
+  });
+  // A letter typed with an item focused goes to the box (and nowhere
+  // else: not to the keymap under the menu). Space and Enter still press
+  // the focused item.
+  menu.addEventListener('keydown', (e) => {
+    if (e.target === box || e.ctrlKey || e.metaKey || e.altKey || e.isComposing) return;
+    if ((e.key.length === 1 && e.key !== ' ') || e.key === 'Backspace') {
+      box.focus();
+      e.stopPropagation();
+    }
+  });
+  return { box, refresh };
 }
 
 /* A text box that offers values to pick from: what <datalist> is for,

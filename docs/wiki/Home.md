@@ -75,3 +75,7 @@ With an EvtxECmd export as the example:
   was started with `--no-idle-shutdown`.
 - **Nothing reaches the network** unless you check for an update or turn on
   a plugin that uses it, such as `claude_assistant`.
+- **Long lists can be searched.** Any drop-down list or button menu with
+  more than five choices opens with a search box: type part of a name to
+  narrow it, then `Enter`. See
+  [Searching a drop-down list](Settings-and-shortcuts.md#searching-a-drop-down-list).
