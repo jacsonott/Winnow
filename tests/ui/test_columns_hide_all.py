@@ -113,7 +113,7 @@ def test_undo_puts_back_the_columns_that_were_shown_not_every_column(page, layou
     page.locator(f"{PANE} .row-actions button", has_text="Hide all").click()
     page.wait_for_function("() => __winnow.visibleCols().length === 0")
     toast = page.locator("#toast")
-    assert toast.inner_text().startswith(f"Hid all {len(order)} columns")
+    assert toast.locator("span").inner_text() == f"Hid all {len(order)} columns"
     toast.locator(".toast-action", has_text="Undo").click()
     page.wait_for_function("(n) => __winnow.visibleCols().length === n", arg=len(was))
     assert page.evaluate("() => __winnow.visibleCols()") == was
@@ -148,7 +148,7 @@ def test_hide_all_leaves_a_grouped_column_to_come_back_on_ungroup(page, layout_r
     page.wait_for_function("() => __winnow.visibleCols().length === 0")
     # Still compared by Hide duplicate rows, which counts a grouped column.
     assert not page.evaluate("() => !!(__winnow.S.layout.Host || {}).hidden")
-    assert page.locator("#toast").inner_text().startswith(f"Hid all {len(order) - 1} columns")
+    assert page.locator("#toast span").inner_text() == f"Hid all {len(order) - 1} columns"
     page.evaluate("() => __winnow.closeModal()")
     page.locator(".group-drop-btn").click()
     page.wait_for_function("() => !__winnow.S.groupByCols.length")

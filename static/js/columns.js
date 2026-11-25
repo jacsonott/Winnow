@@ -139,7 +139,7 @@ export function hideAllColumns({ onUndo = null } = {}) {
   renderHead();
   render();
   saveLayout();
-  toastAction(`Hid all ${plural(listed.length, 'column')}. Tick the ones you want back.`, 'Undo', () => {
+  toastAction(`Hid all ${plural(listed.length, 'column')}`, 'Undo', () => {
     if (S.sourceId !== id) return;
     for (const n of was) if (S.order.includes(n)) S.layout[n] = { ...(S.layout[n] || {}), hidden: false };
     renderHead();
