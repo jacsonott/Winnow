@@ -169,9 +169,27 @@ export function shownTsLength(name) {
    case, then the system-wide default, then 'iso'. Before derived columns
    existed the fallback was 'raw' — analysts who prefer that set it as
    their system default (Settings > Timestamps); an explicitly-chosen
-   per-column format still wins, so existing saved layouts are unaffected. */
+   per-column format still wins, so existing saved layouts are unaffected.
+   What the column inherits shows its fraction of a second when it is
+   'iso' and the column records one (withFraction, below). */
 export function tsFormatFor(name) {
-  return (S.layout[name] || {}).tsFormat || caseTsFormat();
+  return (S.layout[name] || {}).tsFormat || withFraction(caseTsFormat(), columnMeta(name));
+}
+
+/* The format `fmt` becomes for column `c` when the column inherits it.
+   A timestamp Winnow made out of a number (Parse a timestamp, the SQLite
+   import's Chrome-time conversion) records how much of a second its
+   values carry, `subsecond`: 0, 3 or 6. Under the default
+   'YYYY-MM-DD HH:MM:SS' a millisecond epoch converted to a timestamp
+   showed every row in a second as that same second, so that one format
+   is widened to the fraction the column holds: .mmm for milliseconds,
+   .ffffff for anything finer. Every other format is a choice about
+   precision or layout already and stays as it is, and so does a format
+   picked on the column itself (tsFormatFor checks that first): picking
+   'YYYY-MM-DD HH:MM:SS' there is how to see such a column to the second. */
+export function withFraction(fmt, c) {
+  if (fmt !== 'iso' || !c || c.type !== 'datetime' || !c.subsecond) return fmt;
+  return c.subsecond > 3 ? 'iso_us' : 'iso_ms';
 }
 
 /* Says a timestamp format changed — the case's, the machine's, or (with

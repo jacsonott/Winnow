@@ -453,13 +453,20 @@ CREATE TABLE IF NOT EXISTS derived_columns (
     status         TEXT NOT NULL DEFAULT 'building',  -- building | ready | partial | error
     parse_failures INTEGER,            -- non-empty inputs that produced NULL; set at backfill end
     created_at     TEXT,
-    inferred_type  TEXT                -- number | datetime | text | empty, NULL until looked at; see below
+    inferred_type  TEXT,               -- number | datetime | text | empty, NULL until looked at; see below
+    subsecond      INTEGER             -- 0 | 3 | 6, a timestamp op's fraction digits; NULL until looked at
 );
 -- inferred_type is what a text-valued op's values turned out to be, read
 -- off the drv_ column when a backfill ends (_infer_derived_type). 'number'
 -- is what types the column as one (_derived_col_entry), so sizes and
 -- counts captured with a regex sort as numbers rather than as text;
 -- 'datetime' likewise, for values all in the datetime ops' own shape.
+-- subsecond is the timestamp ops' counterpart, read off the values the
+-- same way (_derived_subsecond): how much of a second they carry — 0
+-- (none), 3 (milliseconds) or 6 (finer). The default display format
+-- shows that much of the fraction (tsformat.js's tsFormatFor), so a
+-- millisecond epoch converted to a timestamp isn't shown cut to the
+-- second.
 -- No index on source_id on purpose: this table holds one row per derived
 -- column in the whole case (tens at the very most), so a scan is one page
 -- either way, and at the 64KB page size _tune sets, an index would cost
@@ -1275,6 +1282,9 @@ def _tl_details(lead: Any, *pairs: Any) -> str:
 WEBKIT_EPOCH_OFFSET_US = 11_644_473_600_000_000
 
 
+_UNIX_EPOCH_UTC = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
+
+
 def _webkit_to_iso(value: Any) -> str | None:
     """Chrome/WebKit timestamp -> ISO 8601 UTC string, or None if `value`
     doesn't actually look like one in that format. Used two ways: to
@@ -1283,19 +1293,45 @@ def _webkit_to_iso(value: Any) -> str | None:
     — to screen candidate columns for that option's default-checked state
     in preview_sqlite_tables (a column counts as "likely a WebKit
     timestamp" if most of its sampled values round-trip through here to a
-    plausible date)."""
+    plausible date).
+
+    Every microsecond the value has is kept ("…T13:07:00.123456Z"). It
+    used to be cut to the millisecond, so two visits a few hundred
+    microseconds apart imported as the same time. And in integers: a WebKit
+    value has 17 digits, past what the float `unix_us / 1_000_000` holds,
+    which is the same thing timeparse's webkit_epoch op does."""
     try:
         v = int(value)
     except (TypeError, ValueError):
         return None
     unix_us = v - WEBKIT_EPOCH_OFFSET_US
     try:
-        dt = datetime.datetime.fromtimestamp(unix_us / 1_000_000, tz=datetime.timezone.utc)
+        dt = _UNIX_EPOCH_UTC + datetime.timedelta(microseconds=unix_us)
     except (OverflowError, OSError, ValueError):
         return None
     if dt.year < 1990 or dt.year > 2100:  # in range arithmetically but not a plausible date
         return None
-    return dt.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    return dt.strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
+
+
+def _writes_timestamps(op_id: str) -> bool:
+    """Whether a derive op writes timestamps in the canonical shape — the
+    ones whose fraction of a second Store._derived_subsecond reads. Not a
+    duration (a number of seconds), not a text op (even one whose values
+    turn out to be timestamps: a coalesce shows each row as its own
+    table's column does), and not an op this install doesn't have."""
+    op = timeparse.OPERATIONS.get(op_id)
+    return bool(op) and op.get("value_type") == "datetime" and op.get("derived_kind", "datetime") == "datetime"
+
+
+def _subsecond_digits(iso: str) -> int:
+    """_derived_subsecond's answer for one "…:SS.ffffff…" value: 6 when a
+    digit past the millisecond is set, 3 when only the milliseconds are, 0
+    when there is no fraction or it is all zeros."""
+    _, dot, frac = iso.rstrip("Z").partition(".")
+    if not dot or not frac.strip("0"):
+        return 0
+    return 6 if frac[3:].strip("0") else 3
 
 
 
@@ -3733,8 +3769,13 @@ class Store:
             # ...and derived_columns.inferred_type. NULL on every column a
             # case already has, which _type_unlooked_derived_columns fills
             # in on a thread of its own once the case is open.
-            if not any(r[1] == "inferred_type" for r in self.db.execute("PRAGMA table_info(derived_columns)")):
+            derived_cols = {r[1] for r in self.db.execute("PRAGMA table_info(derived_columns)")}
+            if "inferred_type" not in derived_cols:
                 self.db.execute("ALTER TABLE derived_columns ADD COLUMN inferred_type TEXT")
+            # ...and derived_columns.subsecond, filled in by the same
+            # open-time pass for the timestamp columns a case already has.
+            if "subsecond" not in derived_cols:
+                self.db.execute("ALTER TABLE derived_columns ADD COLUMN subsecond INTEGER")
             # The single-row `dashboard` becomes one named "Dashboard" entry
             # the first time a case with that older shape is opened.
             has_named = self.db.execute("SELECT 1 FROM dashboards LIMIT 1").fetchone()
@@ -3969,13 +4010,24 @@ class Store:
         long, and every click after it was dropped as a second open. Until
         a column's answer lands it reads as the op's own type ('text'),
         which is what every derived column read as before it was typed at
-        all."""
+        all.
+
+        A timestamp column is looked at the same way for how much of a
+        second it carries (subsecond NULL, _derived_subsecond): until its
+        answer lands it is shown in the plain display format, as every
+        timestamp column was before that was recorded."""
         with self.lock:
             rows = self.db.execute(
-                "SELECT id, source_id, name, op_id FROM derived_columns "
-                "WHERE inferred_type IS NULL AND status IN ('ready', 'partial')").fetchall()
-        todo = [dict(r) for r in rows
-                if (timeparse.OPERATIONS.get(r["op_id"]) or {}).get("value_type") == "text"]
+                "SELECT id, source_id, name, op_id, inferred_type, subsecond FROM derived_columns "
+                "WHERE (inferred_type IS NULL OR subsecond IS NULL) "
+                "AND status IN ('ready', 'partial')").fetchall()
+        todo = []
+        for r in rows:
+            op = timeparse.OPERATIONS.get(r["op_id"]) or {}
+            if r["inferred_type"] is None and op.get("value_type") == "text":
+                todo.append({**dict(r), "look": "type"})
+            elif r["subsecond"] is None and _writes_timestamps(r["op_id"]):
+                todo.append({**dict(r), "look": "subsecond"})
         if todo:
             t = threading.Thread(target=self._type_derived_worker, args=(todo,),
                                  name="winnow-derived-types", daemon=True)
@@ -3990,14 +4042,19 @@ class Store:
             # (it reads as text, as it did before), not the case's. So is a
             # scan the case closing interrupts: the column stays NULL, and
             # the next open looks again.
+            # The column it records the answer in: the same guard either way.
+            field = "subsecond" if d.get("look") == "subsecond" else "inferred_type"
             with contextlib.suppress(Exception):
                 with self._reader() as ro:
                     ro.set_progress_handler(lambda: 1 if self._closing else 0, 100_000)
                     try:
-                        inferred = self._infer_derived_type(d, ro)
+                        if field == "subsecond":
+                            answer = self._derived_subsecond(d, ro)
+                        else:
+                            answer = self._infer_derived_type(d, ro)
                     finally:
                         ro.set_progress_handler(None, 0)
-                if not inferred:
+                if answer is None:
                     continue
                 with self.lock:
                     if self._closing:
@@ -4008,9 +4065,9 @@ class Store:
                     # and this one was read off the old.
                     with self.db:
                         self.db.execute(
-                            "UPDATE derived_columns SET inferred_type=? WHERE id=? AND op_id=?"
-                            " AND inferred_type IS NULL AND status IN ('ready', 'partial')",
-                            (inferred, d["id"], d["op_id"]))
+                            f"UPDATE derived_columns SET {field}=? WHERE id=? AND op_id=?"
+                            f" AND {field} IS NULL AND status IN ('ready', 'partial')",
+                            (answer, d["id"], d["op_id"]))
             time.sleep(0.02)  # same anti-starvation yield build_fts uses
 
     def wait_for_derived_types(self, timeout: float | None = None) -> None:
@@ -6546,12 +6603,19 @@ class Store:
             placeholders = ",".join("?" * ncols)
             insert = f"INSERT INTO {q(dest_table)} ({','.join(q(c) for c in cols)}) VALUES ({placeholders})"
 
+            # How much of a second each converted column carries, as a
+            # derived timestamp column records it (_derived_subsecond), so
+            # the default display shows it rather than cutting it off.
+            subsecond = {i: 0 for i in ts_idx}
+
             def to_text(i, v):
                 if v is None:
                     return ""
                 if i in ts_idx:
                     iso = _webkit_to_iso(v)
                     if iso:
+                        if subsecond[i] < 6:
+                            subsecond[i] = max(subsecond[i], _subsecond_digits(iso))
                         return iso
                 if isinstance(v, (bytes, bytearray)):
                     return f"<{len(v)} bytes>"
@@ -6599,6 +6663,9 @@ class Store:
         types = [infer_type([r[i] for r in sample]) for i in range(ncols)] if sample else ["text"] * ncols
         types = self._type_past_sample(dest_table, cols, types, sample)
         colmeta = [{"name": c, "type": t} for c, t in zip(cols, types)]
+        for i, digits in subsecond.items():
+            if digits and colmeta[i]["type"] == "datetime":
+                colmeta[i]["subsecond"] = digits
         with self.lock, self.db:
             self.db.execute("UPDATE sources SET columns=? WHERE id=?", (json.dumps(colmeta), source_id))
 
@@ -8731,6 +8798,10 @@ class Store:
             "derived_kind": op.get("derived_kind", "datetime"),
             "derived_status": r["status"],
             "parse_failures": r["parse_failures"],
+            # How much of a second a timestamp column carries (0, 3, 6;
+            # None until looked at): what the default display format
+            # widens to show (_derived_subsecond).
+            "subsecond": r["subsecond"],
             # The params come along so the UI can show what the column is
             # defined by without a second round trip — for an extracted
             # column that's the field path, which is the whole definition.
@@ -8914,11 +8985,16 @@ class Store:
             if held and all(timeparse.OPERATIONS.get(x.get("derived_op"), {}).get("value_type") == "text"
                             for x in every):
                 typ = next(iter(held)) if held in ({"number"}, {"datetime"}) else "text"
+            # And as much of a second as any member's copy carries, so a
+            # member whose times are milliseconds is not shown cut to the
+            # second because the first member's are whole seconds.
+            subs = [x.get("subsecond") for x in every if x.get("subsecond") is not None]
             cols.append({**c,
                          "type": typ,
                          "derived_status": max((x.get("derived_status") for x in every),
                                                key=lambda s: _DERIVED_STATUS_RANK.get(s, 4)),
-                         "parse_failures": None if None in failures else sum(failures)})
+                         "parse_failures": None if None in failures else sum(failures),
+                         "subsecond": max(subs) if subs else None})
         if row["source_column"]:
             name = MERGE_SOURCE_COLUMN
             n = 2
@@ -10629,7 +10705,8 @@ class Store:
             else:
                 with self.lock, self.db:
                     self.db.executemany(
-                        "UPDATE derived_columns SET status='partial', inferred_type=NULL WHERE id=?",
+                        "UPDATE derived_columns SET status='partial', inferred_type=NULL, subsecond=NULL "
+                        "WHERE id=?",
                         [(d["id"],) for d in defs],
                     )
                 # Half this pass's values and half the last one's, so its
@@ -10639,10 +10716,11 @@ class Store:
                     for d in defs:
                         with contextlib.suppress(Exception):
                             inferred = self._infer_derived_type(d)
+                            subsecond = self._derived_subsecond(d)
                             with self.lock, self.db:
                                 self.db.execute(
-                                    "UPDATE derived_columns SET inferred_type=? WHERE id=?",
-                                    (inferred, d["id"]))
+                                    "UPDATE derived_columns SET inferred_type=?, subsecond=? WHERE id=?",
+                                    (inferred, subsecond, d["id"]))
             raise
         except Exception:
             self._fail_derive_backfill(defs, wrote=rows_done > 0, drop=drop_on_cancel,
@@ -10660,16 +10738,23 @@ class Store:
                 failures = self._count_parse_failures(src, d)
             except Exception:  # noqa: BLE001 — see above
                 failures = None
-            # The same for its type: unknown (NULL) keeps the op's own until
-            # the next open looks again (_type_unlooked_derived_columns).
+            # The same for its type, and for how much of a second it
+            # carries: unknown (NULL) keeps the op's own type and the plain
+            # display format until the next open looks again
+            # (_type_unlooked_derived_columns).
             try:
                 inferred = self._infer_derived_type(d)
             except Exception:  # noqa: BLE001 — see above
                 inferred = None
+            try:
+                subsecond = self._derived_subsecond(d)
+            except Exception:  # noqa: BLE001 — see above
+                subsecond = None
             with self.lock, self.db:
                 self.db.execute(
-                    "UPDATE derived_columns SET status='ready', parse_failures=?, inferred_type=? WHERE id=?",
-                    (failures, inferred, d["id"]),
+                    "UPDATE derived_columns SET status='ready', parse_failures=?, inferred_type=?, "
+                    "subsecond=? WHERE id=?",
+                    (failures, inferred, subsecond, d["id"]),
                 )
             out_cols.append({"def_id": d["id"], "source_id": source_id, "name": d["name"],
                              "parse_failures": failures})
@@ -10742,7 +10827,8 @@ class Store:
         with contextlib.suppress(Exception):
             with self.lock, self.db:
                 self.db.executemany(
-                    "UPDATE derived_columns SET status='error', parse_failures=NULL, inferred_type=NULL WHERE id=?",
+                    "UPDATE derived_columns SET status='error', parse_failures=NULL, inferred_type=NULL, "
+                    "subsecond=NULL WHERE id=?",
                     [(d["id"],) for d in defs],
                 )
         source_id = defs[0]["source_id"]
@@ -10837,6 +10923,48 @@ class Store:
                 return "number"
             # Nothing but "-" and the like is text, as infer_type has it.
             return "text" if c.execute(f"SELECT 1 FROM {drv} WHERE {col} <> '' LIMIT 1").fetchone() else "empty"
+
+        if conn is not None:
+            return ask(conn)
+        with self._reader() as ro:
+            return ask(ro)
+
+    def _derived_subsecond(self, d: dict, conn: sqlite3.Connection | None = None) -> int | None:
+        """How much of a second a timestamp column's values carry: 6 when
+        any has a digit past the millisecond, else 3 when any has a
+        millisecond, else 0. None for an op that doesn't write timestamps.
+
+        The default display format is "YYYY-MM-DD HH:MM:SS", and a Unix
+        epoch in milliseconds converted to a timestamp was shown cut to the
+        second under it: the column held "…:40.087000" and the grid said
+        "…:40", the same as for every other row in that second. The client
+        widens that one format to .mmm or .ffffff for a column this says
+        carries a fraction (tsformat.js's tsFormatFor). Asked of the values
+        rather than of the op and its unit, because "auto" picks the unit
+        per value, a seconds column may carry a fraction on some rows, and
+        FILETIME writes .000000 for a whole second: a column whose
+        fractions are all zero carries none.
+
+        Read off the drv_ column as stored, for _infer_derived_type's
+        reason (a cancelled pass, a copy from another case, a case from
+        before this was recorded all say the same thing). In C, and
+        ordered so the usual columns stop early: one with no fraction is
+        one scan of short values, a microsecond one stops at its first
+        value. A millisecond one is the full scan."""
+        if not _writes_timestamps(d["op_id"]):
+            return None
+        drv, col = q(self._derived_table(d["source_id"])), q(d["name"])
+
+        def ask(c: sqlite3.Connection) -> int:
+            # Characters 21-23 are the milliseconds of "YYYY-MM-DD
+            # HH:MM:SS.ffffff", 24 on the rest of the fraction.
+            if not c.execute(f"SELECT 1 FROM {drv} WHERE length({col}) > 20 "
+                             f"AND substr({col}, 21) GLOB '*[1-9]*' LIMIT 1").fetchone():
+                return 0
+            if c.execute(f"SELECT 1 FROM {drv} WHERE length({col}) > 23 "
+                         f"AND substr({col}, 24) GLOB '*[1-9]*' LIMIT 1").fetchone():
+                return 6
+            return 3
 
         if conn is not None:
             return ask(conn)
@@ -19316,11 +19444,11 @@ class Store:
                         dd = dict(d)
                         t.db.execute(
                             "INSERT INTO derived_columns(source_id, name, input_column, op_id, "
-                            " params, status, parse_failures, created_at, inferred_type) "
-                            "VALUES (?,?,?,?,?,?,?,?,?)",
+                            " params, status, parse_failures, created_at, inferred_type, subsecond) "
+                            "VALUES (?,?,?,?,?,?,?,?,?,?)",
                             (new_id, dd["name"], dd["input_column"], dd["op_id"], dd["params"],
                              dd["status"], dd.get("parse_failures"), dd.get("created_at"),
-                             dd.get("inferred_type")))
+                             dd.get("inferred_type"), dd.get("subsecond")))
                     stats["derived"] = len(dcols)
 
                     t.db.execute("INSERT OR IGNORE INTO open_tabs(source_id) VALUES (?)", (new_id,))

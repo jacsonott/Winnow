@@ -49,6 +49,17 @@ timeframe, histogram, the `dmy_datetime` derived op, and that tsformat.js's
 formats. `tests/ui/test_timestamp_dmy_ui.py` is its browser half: the grid's
 first row, `parseTimestamp` against `_ts_normalize`, and the case set to
 DD-MM-YYYY HH:MM:SS.
+`test_derived_subsecond.py` holds what a converted timestamp column says
+about its fraction of a second (`subsecond`): epochs in each unit, a
+seconds column with a fraction on some rows, FILETIME's `.000000`, a text
+op (none), a re-derive, a merge of a seconds member and a milliseconds
+one, the open-time pass over a case from before the column existed, a
+copy to another case, and the SQLite import's Chrome-time conversion
+keeping its microseconds. `tests/ui/test_epoch_subsecond_ui.py` is the
+symptom: a millisecond epoch converted under the default format shows
+`.087` in the grid (it showed `…:40`), the header menu ticks the widened
+format and picking the plain one wins, and a format the case chose
+(US, milliseconds, As stored) is shown as chosen.
 `test_number_columns.py` holds each shape of "imported numbers sort as
 text" to a number column that sorts by value, through the reader it came
 in by: a "-" or "N/A" among the numbers, a column empty for the first 500
